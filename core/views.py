@@ -529,11 +529,12 @@ class ClaimEvidenceViewSet(viewsets.ModelViewSet):
     """
     ViewSet for ClaimEvidence CRUD operations.
 
-    Links claims to their supporting evidence (panels, analyses, datasets).
+    Links claims to their supporting evidence (panels or analyses).
+    Dataset provenance is derived through the evidence chain.
     """
     queryset = ClaimEvidence.objects.all()
     filter_backends = [DjangoFilterBackend, filters.SearchFilter, filters.OrderingFilter]
-    filterset_fields = ['claim', 'panel', 'analysis', 'dataset', 'evidence_type']
+    filterset_fields = ['claim', 'panel', 'analysis', 'evidence_type']
     search_fields = ['description', 'evidence_type']
     ordering_fields = ['created_at', 'updated_at']
     ordering = ['-created_at']

@@ -471,7 +471,7 @@ class ClaimEvidenceListSerializer(serializers.ModelSerializer):
         model = ClaimEvidence
         fields = [
             'id', 'claim', 'claim_title',
-            'panel', 'analysis', 'dataset', 'evidence_target',
+            'panel', 'analysis', 'evidence_target',
             'evidence_type', 'created_at', 'updated_at'
         ]
 
@@ -480,8 +480,6 @@ class ClaimEvidenceListSerializer(serializers.ModelSerializer):
             return {'type': 'panel', 'id': str(obj.panel.id), 'name': str(obj.panel)}
         if obj.analysis:
             return {'type': 'analysis', 'id': str(obj.analysis.id), 'name': obj.analysis.name}
-        if obj.dataset:
-            return {'type': 'dataset', 'id': str(obj.dataset.id), 'name': str(obj.dataset)}
         return None
 
 
@@ -490,7 +488,6 @@ class ClaimEvidenceSerializer(serializers.ModelSerializer):
     claim_detail = ClaimListSerializer(source='claim', read_only=True)
     panel_detail = PanelListSerializer(source='panel', read_only=True)
     analysis_detail = AnalysisListSerializer(source='analysis', read_only=True)
-    dataset_detail = DatasetListSerializer(source='dataset', read_only=True)
 
     class Meta:
         model = ClaimEvidence
@@ -498,7 +495,6 @@ class ClaimEvidenceSerializer(serializers.ModelSerializer):
             'id', 'claim', 'claim_detail',
             'panel', 'panel_detail',
             'analysis', 'analysis_detail',
-            'dataset', 'dataset_detail',
             'evidence_type', 'description',
             'created_at', 'updated_at'
         ]
@@ -508,11 +504,10 @@ class ClaimEvidenceSerializer(serializers.ModelSerializer):
         """Ensure exactly one evidence type is specified."""
         panel = data.get('panel')
         analysis = data.get('analysis')
-        dataset = data.get('dataset')
-        links = [panel, analysis, dataset]
+        links = [panel, analysis]
         linked_count = sum(1 for link in links if link is not None)
         if linked_count != 1:
             raise serializers.ValidationError(
-                "Exactly one of panel, analysis, or dataset must be specified."
+                "Exactly one of panel or analysis must be specified."
             )
         return data

@@ -512,20 +512,20 @@ class PanelAdmin(admin.ModelAdmin):
 class ClaimEvidenceAdmin(admin.ModelAdmin):
     """Admin for ClaimEvidence model."""
     list_display = [
-        'claim', 'evidence_type', 'panel', 'analysis', 'dataset', 'created_at'
+        'claim', 'evidence_type', 'panel', 'analysis', 'created_at'
     ]
     list_filter = ['evidence_type', 'created_at']
     search_fields = ['description', 'claim__title']
     readonly_fields = ['id', 'created_at', 'updated_at']
-    raw_id_fields = ['claim', 'panel', 'analysis', 'dataset']
+    raw_id_fields = ['claim', 'panel', 'analysis']
 
     fieldsets = (
         (None, {
             'fields': ('id', 'claim')
         }),
         ('Evidence Link', {
-            'fields': ('panel', 'analysis', 'dataset'),
-            'description': 'Select exactly one of: Panel, Analysis, or Dataset'
+            'fields': ('panel', 'analysis'),
+            'description': 'Select exactly one of: Panel or Analysis. Dataset provenance is derived through the evidence chain.'
         }),
         ('Evidence Details', {
             'fields': ('evidence_type', 'description')

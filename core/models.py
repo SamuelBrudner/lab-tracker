@@ -240,7 +240,8 @@ class Claim(TimestampedModel, ELNLinkMixin):
 
     Claims form a hierarchy and progress through statuses from sketchy ideas
     to fully assessed claims. They maintain explicit links to evidence:
-    Panels, Analyses, and Datasets.
+    Panels and Analyses. Dataset provenance is derived through the evidence
+    chain via get_source_datasets().
     """
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
 
@@ -282,6 +283,31 @@ class Claim(TimestampedModel, ELNLinkMixin):
 
     def __str__(self):
         return self.title
+
+    def get_source_datasets(self):
+        """
+        Return all datasets underlying this claim's evidence.
+
+        Traces provenance through:
+        - Panel -> Visualization -> datasets (direct M2M)
+        - Panel -> Visualization -> Analysis -> Dataset
+        - Analysis -> Dataset
+        """
+        datasets = set()
+        for evidence in self.evidence_links.all():
+            # Direct analysis evidence
+            if evidence.analysis and evidence.analysis.dataset:
+                datasets.add(evidence.analysis.dataset)
+            # Panel evidence - trace through visualization
+            if evidence.panel and evidence.panel.visualization:
+                viz = evidence.panel.visualization
+                # Visualization can link directly to datasets
+                for ds in viz.datasets.all():
+                    datasets.add(ds)
+                # Or through its analysis
+                if viz.analysis and viz.analysis.dataset:
+                    datasets.add(viz.analysis.dataset)
+        return datasets
 
 
 class Cohort(TimestampedModel):
@@ -923,10 +949,12 @@ class Panel(TimestampedModel, ELNLinkMixin):
 
 class ClaimEvidence(TimestampedModel):
     """
-    Links Claims to their evidence (Panels, Analyses, Datasets).
+    Links Claims to their evidence (Panels or Analyses).
 
     This explicit junction table allows for tracking the type and strength
-    of evidence relationships.
+    of evidence relationships. Dataset provenance is derived through the
+    evidence chain: Panel -> Visualization -> Analysis -> Dataset, or
+    directly Analysis -> Dataset.
     """
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
 
@@ -936,7 +964,8 @@ class ClaimEvidence(TimestampedModel):
         related_name="evidence_links"
     )
 
-    # Evidence can be a Panel, Analysis, or Dataset
+    # Evidence can be a Panel or Analysis
+    # Datasets are accessed via get_source_datasets() on Claim
     panel = models.ForeignKey(
         Panel,
         on_delete=models.CASCADE,
@@ -946,13 +975,6 @@ class ClaimEvidence(TimestampedModel):
     )
     analysis = models.ForeignKey(
         Analysis,
-        on_delete=models.CASCADE,
-        null=True,
-        blank=True,
-        related_name="claim_evidence_links"
-    )
-    dataset = models.ForeignKey(
-        Dataset,
         on_delete=models.CASCADE,
         null=True,
         blank=True,
@@ -975,14 +997,14 @@ class ClaimEvidence(TimestampedModel):
         verbose_name_plural = "Claim Evidence"
 
     def __str__(self):
-        evidence_target = self.panel or self.analysis or self.dataset
+        evidence_target = self.panel or self.analysis
         return f"{self.claim.title} <- {evidence_target}"
 
     def clean(self):
         # Ensure exactly one evidence type is linked
-        links = [self.panel, self.analysis, self.dataset]
+        links = [self.panel, self.analysis]
         linked_count = sum(1 for link in links if link is not None)
         if linked_count != 1:
             raise ValidationError(
-                "Exactly one of panel, analysis, or dataset must be specified."
+                "Exactly one of panel or analysis must be specified."
             )

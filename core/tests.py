@@ -86,7 +86,6 @@ class ClaimEvidenceValidationTests(TestCase):
             name="Test Analysis",
             recipe_identifier="test-recipe"
         )
-        self.dataset = Dataset.objects.create(name="Test Dataset")
 
     def test_exactly_one_evidence_type_required(self):
         """ClaimEvidence must link to exactly one evidence type."""
@@ -96,7 +95,7 @@ class ClaimEvidenceValidationTests(TestCase):
             evidence.full_clean()
 
     def test_cannot_link_multiple_evidence_types(self):
-        """ClaimEvidence cannot link to multiple evidence types."""
+        """ClaimEvidence cannot link to panel AND analysis."""
         evidence = ClaimEvidence(
             claim=self.claim,
             panel=self.panel,
@@ -118,14 +117,6 @@ class ClaimEvidenceValidationTests(TestCase):
         evidence = ClaimEvidence(
             claim=self.claim,
             analysis=self.analysis
-        )
-        evidence.full_clean()  # Should not raise
-
-    def test_valid_dataset_evidence(self):
-        """ClaimEvidence with only dataset should be valid."""
-        evidence = ClaimEvidence(
-            claim=self.claim,
-            dataset=self.dataset
         )
         evidence.full_clean()  # Should not raise
 
@@ -522,7 +513,7 @@ class EvidenceGraphTests(TestCase):
         self.assertEqual(self.claim.evidence_links.first().panel, self.panel)
 
     def test_claim_can_have_multiple_evidence_links(self):
-        """Claim can have multiple evidence links of different types."""
+        """Claim can have multiple evidence links (panel and analysis)."""
         ClaimEvidence.objects.create(
             claim=self.claim,
             panel=self.panel,
@@ -533,12 +524,7 @@ class EvidenceGraphTests(TestCase):
             analysis=self.analysis,
             evidence_type="supporting"
         )
-        ClaimEvidence.objects.create(
-            claim=self.claim,
-            dataset=self.dataset,
-            evidence_type="contextual"
-        )
-        self.assertEqual(self.claim.evidence_links.count(), 3)
+        self.assertEqual(self.claim.evidence_links.count(), 2)
 
     def test_evidence_chain_from_claim_to_raw_data(self):
         """Can trace from claim through panel, viz, analysis to dataset."""
@@ -555,6 +541,31 @@ class EvidenceGraphTests(TestCase):
         self.assertEqual(viz.name, "Raster Plot")
         self.assertEqual(analysis.name, "Spike Analysis")
         self.assertEqual(dataset.name, "Neural Dataset")
+
+    def test_get_source_datasets_from_panel_evidence(self):
+        """get_source_datasets traces through panel -> viz -> analysis -> dataset."""
+        ClaimEvidence.objects.create(claim=self.claim, panel=self.panel)
+
+        datasets = self.claim.get_source_datasets()
+        self.assertEqual(len(datasets), 1)
+        self.assertIn(self.dataset, datasets)
+
+    def test_get_source_datasets_from_analysis_evidence(self):
+        """get_source_datasets traces through analysis -> dataset."""
+        ClaimEvidence.objects.create(claim=self.claim, analysis=self.analysis)
+
+        datasets = self.claim.get_source_datasets()
+        self.assertEqual(len(datasets), 1)
+        self.assertIn(self.dataset, datasets)
+
+    def test_get_source_datasets_from_visualization_direct_link(self):
+        """get_source_datasets includes datasets linked directly to visualization."""
+        # Add a direct dataset link to visualization
+        self.viz.datasets.add(self.dataset)
+        ClaimEvidence.objects.create(claim=self.claim, panel=self.panel)
+
+        datasets = self.claim.get_source_datasets()
+        self.assertIn(self.dataset, datasets)
 
 
 class EvidenceGraphAPITests(APITestCase):
