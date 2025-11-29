@@ -1,0 +1,131 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "lab-tracker"
+version = "0.1.0"
+description = "Neuroscience Experiment Orchestration App - Domain-specific orchestration and provenance layer for lab experiments"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.10"
+authors = [
+    { name = "Lab Tracker Team" }
+]
+keywords = [
+    "neuroscience",
+    "experiment",
+    "orchestration",
+    "lab",
+    "science",
+    "django",
+    "rest-api"
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Web Environment",
+    "Framework :: Django :: 4.2",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering",
+]
+dependencies = [
+    "django>=4.2,<5.0",
+    "djangorestframework>=3.14,<4.0",
+    "django-filter>=23.0,<24.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "pytest-django>=4.5",
+    "pytest-cov>=4.0",
+    "ruff>=0.1.0",
+    "mypy>=1.0",
+    "django-stubs>=4.2",
+    "djangorestframework-stubs>=3.14",
+]
+prod = [
+    "gunicorn>=21.0",
+    "psycopg2-binary>=2.9",
+]
+
+[project.urls]
+Homepage = "https://github.com/SamuelBrudner/lab-tracker"
+Repository = "https://github.com/SamuelBrudner/lab-tracker"
+Documentation = "https://github.com/SamuelBrudner/lab-tracker#readme"
+Issues = "https://github.com/SamuelBrudner/lab-tracker/issues"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/lab_tracker"]
+
+[tool.pytest.ini_options]
+DJANGO_SETTINGS_MODULE = "lab_tracker.settings"
+python_files = ["test_*.py", "*_test.py"]
+pythonpath = ["src"]
+addopts = [
+    "--strict-markers",
+    "-ra",
+]
+
+[tool.ruff]
+src = ["src"]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = [
+    "E",      # pycodestyle errors
+    "W",      # pycodestyle warnings
+    "F",      # Pyflakes
+    "I",      # isort
+    "B",      # flake8-bugbear
+    "C4",     # flake8-comprehensions
+    "UP",     # pyupgrade
+    "DJ",     # flake8-django
+]
+ignore = [
+    "E501",   # line too long (handled by formatter)
+]
+
+[tool.ruff.lint.isort]
+known-first-party = ["lab_tracker"]
+section-order = ["future", "standard-library", "third-party", "first-party", "local-folder"]
+
+[tool.mypy]
+python_version = "3.10"
+plugins = [
+    "mypy_django_plugin.main",
+    "mypy_drf_plugin.main",
+]
+strict = true
+warn_return_any = true
+warn_unused_configs = true
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = "lab_tracker.core.migrations.*"
+ignore_errors = true
+
+[tool.django-stubs]
+django_settings_module = "lab_tracker.settings"
+
+[tool.coverage.run]
+source = ["src/lab_tracker"]
+omit = [
+    "*/migrations/*",
+    "*/__pycache__/*",
+]
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "def __repr__",
+    "raise NotImplementedError",
+    "if TYPE_CHECKING:",
+]
