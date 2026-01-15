@@ -11,3 +11,7 @@ requires-python = ">=3.10"
 [tool.setuptools]
 package-dir = {"" = "src"}
 packages = ["lab_tracker"]
+
+[tool.codex_orchestrator]
+env = "lab_tracker"
+allow_env_creation = true
