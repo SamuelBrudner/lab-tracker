@@ -16,7 +16,7 @@ Workflow: Capture → Stage → Commit pipeline with quality gates.
 
 Integration: Hooks into acquisition software and analysis pipelines.
 
-Hardware: Optional low-cost digital notepads or mobile photo upload for frictionless context capture.
+Hardware: Mobile photo upload for the MVP; optional low-cost digital notepads later.
 
 The Outcome: A self-documenting lab where the reasoning behind every experiment persists beyond individual researchers, enabling AI-powered meta-analysis and institutional memory.
 
@@ -92,13 +92,15 @@ The central architectural constraint is the Birth Requirement:
 
 A Dataset cannot be committed without a primary_question_id that references an active Question.
 
+Datasets can address multiple questions; one is designated primary and the rest are secondary links. Outcomes are recorded per question link.
+
 This is enforced at the API level. If you cannot articulate what question your experiment addresses, this system cannot ingest the dataset.
 
 Rationale: Doing is expensive. Struggling for several minutes to formulate your question first is better than collecting data for an hour without any reason.
 
 Operational Sessions (Bypass)
 
-Troubleshooting and rig verification are categorically different from scientific inquiry—they are engineering, not science. The platform supports Operational Sessions that bypass the Birth Requirement. These sessions are logged for provenance (“rig was verified working on date X”) but do not enter the scientific knowledge graph as evidence. They are maintenance records, not datasets.
+Troubleshooting and rig verification are categorically different from scientific inquiry—they are engineering, not science. The platform supports Operational Sessions that bypass the Birth Requirement. These sessions are logged for provenance (“rig was verified working on date X”) but do not enter the scientific knowledge graph as evidence. They are maintenance records, not datasets. In principle, an Operational Session can be promoted to a Dataset later, preserving provenance.
 
 1.5 Question-First Workflow Requirement
 
@@ -106,7 +108,7 @@ It must be possible—and ideally common—to ingest Questions before any datase
 
 Example: If a PI and trainee sketch ideas on a whiteboard in a meeting, they should be able to take a photo, have information extracted, and use that as metadata for creating one or more Question entries. Those Questions then become selectable/active for later data collection.
 
-Key design implication: Question capture is not downstream of data capture. It is a peer workflow with its own capture → stage → activate lifecycle.
+Key design implication: Question capture is not downstream of data capture. It is a peer workflow with its own capture → stage → commit (activate) lifecycle.
 
 2. Data Model Specification
 
@@ -128,7 +130,7 @@ The atomic unit of scientific reasoning. Persists regardless of experimental out
 
 Rationale: Existing ontologies (OBI, PROV-O) model experimental designs, activities, and artifacts, but do not treat research questions as first-class, hierarchically structured entities with independent lifecycle. OBI's “objective specification” captures intent, but not an evolving, queryable tree/DAG of inquiry.
 
-Structure: Questions form a directed acyclic graph (DAG), allowing a question to have multiple parent inquiries. Datasets linked to leaf questions automatically inherit the semantic context of the entire lineage.
+Structure: Questions form a directed acyclic graph (DAG), allowing a question to have multiple parent inquiries. Datasets linked to leaf questions automatically inherit the semantic context of the entire lineage. Questions can be committed before any datasets exist and can link to multiple datasets; datasets can link to multiple questions.
 
 Minimal Question Typing (v1.2):
 We intentionally avoid an overengineered taxonomy of question types. A small, pragmatic set is sufficient:
@@ -153,7 +155,7 @@ question_type (descriptive | hypothesis_driven | method_dev | other)
 
 hypothesis (optional) (predicted answer, where applicable)
 
-status (active | answered | abandoned)
+status (staged | active | answered | abandoned)
 
 parent_question_ids (links to broader parent inquiries)
 
@@ -163,7 +165,7 @@ created_at, created_by
 
 2.3 Dataset
 
-Immutable evidence born from a question.
+Immutable evidence linked to one or more questions.
 
 Alignment: Modeled using DCAT (Data Catalog Vocabulary) for discoverability and PROV-O for provenance. Domain-specific structure follows NWB (neurophysiology) or BIDS (imaging) standards.
 
@@ -173,11 +175,11 @@ Attributes:
 
 dataset_id
 
-commit_hash
+commit_hash (content-addressed hash of the dataset commit manifest: file checksums, metadata, question links, note refs, extraction provenance; not a Git commit)
 
 primary_question_id (REQUIRED)
 
-outcome_status (supports | refutes | inconclusive | not_evaluated)
+question_links (list of {question_id, role=primary|secondary, outcome_status})
 
 2.4 Note
 
@@ -290,7 +292,7 @@ Important: In v1.2 these vocabularies are used via assistive suggestion + review
 
 The platform implements a Capture → Stage → Commit workflow inspired by version control systems. This provides both flexibility during work and rigor at the moment of commitment.
 
-3.1 Workflow A: Questions (Capture → Stage → Activate)
+3.1 Workflow A: Questions (Capture → Stage → Commit (Activate))
 
 Questions are intended to be captured early (often before data exists).
 
@@ -322,9 +324,9 @@ tags (optional; suggested)
 
 The original source photo/note remains linked.
 
-Phase Q3: Activate
+Phase Q3: Commit (Activate)
 
-Once activated, a Question:
+Once committed, a Question:
 
 receives a stable question_id
 
@@ -332,16 +334,18 @@ becomes selectable as an “active question” for data collection
 
 can be referenced by datasets via the Birth Requirement
 
+Questions can be committed before any datasets exist.
+
 3.2 Workflow B: Data (Capture → Stage → Commit → Knowledge Graph)
 Phase 1: Context Capture
 
 Capture must be frictionless. Two primary modes:
 
-Mode A: The Lab-Pad (Dedicated Hardware)
-A low-cost ($50) digital notepad at every bench allowing real-time handwriting and sketching with zero latency. See Appendix A for hardware details.
+Mode A: Photo Upload (Mobile) (MVP)
+A mobile web app supports photographing pages, linking to an active question, and uploading for extraction.
 
-Mode B: Photo Upload (Mobile)
-For scientists who prefer paper notebooks, a mobile web app supports photographing pages, linking to an active question, and uploading for extraction.
+Mode B: Optional Lab-Pad (Future Hardware)
+A low-cost ($50) digital notepad at every bench allowing real-time handwriting and sketching with zero latency. See Appendix A for future hardware details.
 
 Capture: Scientist writes in physical notebook.
 
@@ -369,9 +373,9 @@ The Commit bundles:
 
 The Data Files (from the rig)
 
-The Context Notes (from Lab-Pad or Phone)
+The Context Notes (from photo uploads; optional Lab-Pad in future)
 
-The Scientific Question (the semantic link; required)
+The Scientific Question link(s) (primary required)
 
 Birth Requirement enforcement: dataset commit fails without primary_question_id unless it is explicitly an Operational Session.
 
@@ -404,7 +408,7 @@ Data acquisition happens on specialized systems (SpikeGLX, ScanImage). The platf
 
 4.1 Integration Patterns
 
-QR Code Linking: Lab-Pad displays code; rig camera snaps it. Zero software changes required.
+QR Code Linking: Mobile app (and optional Lab-Pad) displays code; rig camera snaps it. Zero software changes required.
 
 Wrapper Script: Thin script runs before/after acquisition to register session.
 
@@ -464,7 +468,7 @@ Scientists don’t capture notes	Frictionless hardware or seamless photo upload	
 Commit feels like extra work	Configurable PI review loop + visible value in retrieval/search	Incentivize quality and reuse
 Questions are low quality	Mentorship + lightweight review norms	Make question articulation a skill
 Exploratory work blocked	Descriptive questions + minimal question types	Exploratory is supported; “question-less” is not
-Meeting-generated questions don’t get used	Promote question-first workflow and “activate” step	Make active questions easy to select at rig time
+Meeting-generated questions don’t get used	Promote question-first workflow and “commit (activate)” step	Make active questions easy to select at rig time
 7.2 Technical Risks
 Risk	Mitigation	Notes
 Extraction accuracy too low	Fall back to image-only notes; human correction in staging	Graceful degradation
@@ -510,7 +514,7 @@ How do we preserve the original meeting context while still producing clean Ques
 
 Appendix A: Edge Hardware (Lab-Pad)
 
-For labs desiring a dedicated capture device, the Lab-Pad V1 specification follows. Note: this hardware is optional; mobile photo upload may be sufficient for most users.
+For labs desiring a dedicated capture device, the Lab-Pad V1 specification follows. Note: this hardware is optional and not part of the current MVP (photo upload only).
 
 A.1 Design Philosophy
 
@@ -554,17 +558,17 @@ Trainee takes a photo via the mobile app.
 
 System extracts candidate questions into Question Staging.
 
-Trainee confirms text, sets minimal types, and activates two questions.
+Trainee confirms text, sets minimal types, and commits (activates) two questions.
 
 Those questions become selectable at the rig the next day.
 
 Scenario 1: Standard Experiment Day
 
-8:00 AM: Scientist selects “Does PV inhibition broaden tuning?” on Lab-Pad.
+8:00 AM: Scientist selects “Does PV inhibition broaden tuning?” in the mobile app (or web UI).
 
-Acquisition: Records data. Jots notes on Lab-Pad.
+Acquisition: Records data. Jots notes in a physical notebook.
 
-5:00 PM: Reviews notes in Staging. Commits “Dataset + Notes + Question”.
+5:00 PM: Uploads photos, reviews notes in Staging. Commits “Dataset + Notes + Question”.
 
 Scenario 2: The Paper Notebook User
 
