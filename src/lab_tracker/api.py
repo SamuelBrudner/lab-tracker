@@ -1,0 +1,528 @@
+"""API scaffolding for lab tracker."""
+
+from __future__ import annotations
+
+from datetime import datetime
+from typing import Iterable
+from uuid import UUID, uuid4
+
+from lab_tracker.auth import AuthContext, Role, require_role
+from lab_tracker.errors import NotFoundError, ValidationError
+from lab_tracker.models import (
+    Analysis,
+    AnalysisStatus,
+    Dataset,
+    DatasetStatus,
+    EntityRef,
+    ExtractedEntity,
+    EntityType,
+    Note,
+    NoteStatus,
+    Project,
+    ProjectStatus,
+    Question,
+    QuestionLink,
+    QuestionLinkRole,
+    QuestionSource,
+    QuestionStatus,
+    QuestionType,
+    Session,
+    SessionStatus,
+    SessionType,
+    utc_now,
+)
+
+WRITE_ROLES = {Role.ADMIN, Role.EDITOR}
+
+
+class InMemoryStore:
+    def __init__(self) -> None:
+        self.projects: dict[UUID, Project] = {}
+        self.questions: dict[UUID, Question] = {}
+        self.datasets: dict[UUID, Dataset] = {}
+        self.notes: dict[UUID, Note] = {}
+        self.sessions: dict[UUID, Session] = {}
+        self.analyses: dict[UUID, Analysis] = {}
+
+
+class LabTrackerAPI:
+    def __init__(self, store: InMemoryStore | None = None) -> None:
+        self._store = store or InMemoryStore()
+
+    def create_project(
+        self,
+        name: str,
+        description: str = "",
+        status: ProjectStatus = ProjectStatus.ACTIVE,
+        *,
+        actor: AuthContext | None = None,
+        created_by: str | None = None,
+    ) -> Project:
+        require_role(actor, WRITE_ROLES)
+        _ensure_non_empty(name, "name")
+        project = Project(
+            project_id=uuid4(),
+            name=name.strip(),
+            description=description.strip(),
+            status=status,
+            created_by=created_by,
+        )
+        self._store.projects[project.project_id] = project
+        return project
+
+    def get_project(self, project_id: UUID) -> Project:
+        return _get_or_raise(self._store.projects, project_id, "Project")
+
+    def list_projects(self) -> list[Project]:
+        return list(self._store.projects.values())
+
+    def update_project(
+        self,
+        project_id: UUID,
+        *,
+        name: str | None = None,
+        description: str | None = None,
+        status: ProjectStatus | None = None,
+        actor: AuthContext | None = None,
+    ) -> Project:
+        require_role(actor, WRITE_ROLES)
+        project = self.get_project(project_id)
+        if name is not None:
+            _ensure_non_empty(name, "name")
+            project.name = name.strip()
+        if description is not None:
+            project.description = description.strip()
+        if status is not None:
+            project.status = status
+        project.updated_at = utc_now()
+        return project
+
+    def delete_project(self, project_id: UUID, *, actor: AuthContext | None = None) -> Project:
+        require_role(actor, WRITE_ROLES)
+        project = self.get_project(project_id)
+        del self._store.projects[project_id]
+        return project
+
+    def create_question(
+        self,
+        project_id: UUID,
+        text: str,
+        question_type: QuestionType,
+        *,
+        hypothesis: str | None = None,
+        status: QuestionStatus = QuestionStatus.STAGED,
+        parent_question_ids: Iterable[UUID] | None = None,
+        created_from: QuestionSource = QuestionSource.MANUAL,
+        actor: AuthContext | None = None,
+        created_by: str | None = None,
+    ) -> Question:
+        require_role(actor, WRITE_ROLES)
+        self.get_project(project_id)
+        _ensure_non_empty(text, "text")
+        parent_ids = _unique_ids(parent_question_ids)
+        for parent_id in parent_ids:
+            parent = self.get_question(parent_id)
+            if parent.project_id != project_id:
+                raise ValidationError("Parent question must belong to the same project.")
+        question = Question(
+            question_id=uuid4(),
+            project_id=project_id,
+            text=text.strip(),
+            question_type=question_type,
+            hypothesis=hypothesis.strip() if hypothesis else None,
+            status=status,
+            parent_question_ids=parent_ids,
+            created_from=created_from,
+            created_by=created_by,
+        )
+        self._store.questions[question.question_id] = question
+        return question
+
+    def get_question(self, question_id: UUID) -> Question:
+        return _get_or_raise(self._store.questions, question_id, "Question")
+
+    def list_questions(self, *, project_id: UUID | None = None) -> list[Question]:
+        if project_id is None:
+            return list(self._store.questions.values())
+        return [q for q in self._store.questions.values() if q.project_id == project_id]
+
+    def update_question(
+        self,
+        question_id: UUID,
+        *,
+        text: str | None = None,
+        question_type: QuestionType | None = None,
+        hypothesis: str | None = None,
+        status: QuestionStatus | None = None,
+        parent_question_ids: Iterable[UUID] | None = None,
+        actor: AuthContext | None = None,
+    ) -> Question:
+        require_role(actor, WRITE_ROLES)
+        question = self.get_question(question_id)
+        if text is not None:
+            _ensure_non_empty(text, "text")
+            question.text = text.strip()
+        if question_type is not None:
+            question.question_type = question_type
+        if hypothesis is not None:
+            question.hypothesis = hypothesis.strip() if hypothesis else None
+        if status is not None:
+            question.status = status
+        if parent_question_ids is not None:
+            parent_ids = _unique_ids(parent_question_ids)
+            for parent_id in parent_ids:
+                parent = self.get_question(parent_id)
+                if parent.project_id != question.project_id:
+                    raise ValidationError("Parent question must belong to the same project.")
+            question.parent_question_ids = parent_ids
+        question.updated_at = utc_now()
+        return question
+
+    def delete_question(self, question_id: UUID, *, actor: AuthContext | None = None) -> Question:
+        require_role(actor, WRITE_ROLES)
+        question = self.get_question(question_id)
+        del self._store.questions[question_id]
+        return question
+
+    def create_dataset(
+        self,
+        project_id: UUID,
+        commit_hash: str,
+        primary_question_id: UUID,
+        *,
+        secondary_question_ids: Iterable[UUID] | None = None,
+        status: DatasetStatus = DatasetStatus.STAGED,
+        actor: AuthContext | None = None,
+        created_by: str | None = None,
+    ) -> Dataset:
+        require_role(actor, WRITE_ROLES)
+        self.get_project(project_id)
+        _ensure_non_empty(commit_hash, "commit_hash")
+        if primary_question_id is None:
+            raise ValidationError("primary_question_id is required.")
+        primary_question = self.get_question(primary_question_id)
+        if primary_question.project_id != project_id:
+            raise ValidationError("Primary question must belong to the same project.")
+        secondary_ids = _unique_ids(secondary_question_ids)
+        if primary_question_id in secondary_ids:
+            raise ValidationError("Primary question cannot be secondary.")
+        for question_id in secondary_ids:
+            question = self.get_question(question_id)
+            if question.project_id != project_id:
+                raise ValidationError("Secondary questions must belong to the same project.")
+        question_links = [
+            QuestionLink(question_id=primary_question_id, role=QuestionLinkRole.PRIMARY),
+            *[
+                QuestionLink(question_id=question_id, role=QuestionLinkRole.SECONDARY)
+                for question_id in secondary_ids
+            ],
+        ]
+        dataset = Dataset(
+            dataset_id=uuid4(),
+            project_id=project_id,
+            commit_hash=commit_hash.strip(),
+            primary_question_id=primary_question_id,
+            question_links=question_links,
+            status=status,
+            created_by=created_by,
+        )
+        self._store.datasets[dataset.dataset_id] = dataset
+        return dataset
+
+    def get_dataset(self, dataset_id: UUID) -> Dataset:
+        return _get_or_raise(self._store.datasets, dataset_id, "Dataset")
+
+    def list_datasets(self, *, project_id: UUID | None = None) -> list[Dataset]:
+        if project_id is None:
+            return list(self._store.datasets.values())
+        return [d for d in self._store.datasets.values() if d.project_id == project_id]
+
+    def update_dataset(
+        self,
+        dataset_id: UUID,
+        *,
+        commit_hash: str | None = None,
+        status: DatasetStatus | None = None,
+        question_links: Iterable[QuestionLink] | None = None,
+        actor: AuthContext | None = None,
+    ) -> Dataset:
+        require_role(actor, WRITE_ROLES)
+        dataset = self.get_dataset(dataset_id)
+        if commit_hash is not None:
+            _ensure_non_empty(commit_hash, "commit_hash")
+            dataset.commit_hash = commit_hash.strip()
+        if status is not None:
+            dataset.status = status
+        if question_links is not None:
+            links = list(question_links)
+            primary_links = [link for link in links if link.role == QuestionLinkRole.PRIMARY]
+            if len(primary_links) != 1:
+                raise ValidationError("Dataset must have exactly one primary question link.")
+            seen: set[UUID] = set()
+            for link in links:
+                if link.question_id in seen:
+                    raise ValidationError("Duplicate question link.")
+                seen.add(link.question_id)
+                question = self.get_question(link.question_id)
+                if question.project_id != dataset.project_id:
+                    raise ValidationError("Question links must belong to the same project.")
+            dataset.question_links = links
+            dataset.primary_question_id = primary_links[0].question_id
+        dataset.updated_at = utc_now()
+        return dataset
+
+    def delete_dataset(self, dataset_id: UUID, *, actor: AuthContext | None = None) -> Dataset:
+        require_role(actor, WRITE_ROLES)
+        dataset = self.get_dataset(dataset_id)
+        del self._store.datasets[dataset_id]
+        return dataset
+
+    def create_note(
+        self,
+        project_id: UUID,
+        raw_content: str,
+        *,
+        transcribed_text: str | None = None,
+        extracted_entities: Iterable[tuple[str, float, str]] | None = None,
+        targets: Iterable[EntityRef] | None = None,
+        status: NoteStatus = NoteStatus.STAGED,
+        actor: AuthContext | None = None,
+        created_by: str | None = None,
+    ) -> Note:
+        require_role(actor, WRITE_ROLES)
+        self.get_project(project_id)
+        _ensure_non_empty(raw_content, "raw_content")
+        resolved_targets = list(targets or [])
+        for target in resolved_targets:
+            self._ensure_target_exists(target, project_id)
+        resolved_entities = [
+            _build_extracted_entity(label, confidence, provenance)
+            for label, confidence, provenance in (extracted_entities or [])
+        ]
+        note = Note(
+            note_id=uuid4(),
+            project_id=project_id,
+            raw_content=raw_content.strip(),
+            transcribed_text=transcribed_text.strip() if transcribed_text else None,
+            extracted_entities=resolved_entities,
+            targets=resolved_targets,
+            status=status,
+            created_by=created_by,
+        )
+        self._store.notes[note.note_id] = note
+        return note
+
+    def get_note(self, note_id: UUID) -> Note:
+        return _get_or_raise(self._store.notes, note_id, "Note")
+
+    def list_notes(self, *, project_id: UUID | None = None) -> list[Note]:
+        if project_id is None:
+            return list(self._store.notes.values())
+        return [n for n in self._store.notes.values() if n.project_id == project_id]
+
+    def update_note(
+        self,
+        note_id: UUID,
+        *,
+        transcribed_text: str | None = None,
+        targets: Iterable[EntityRef] | None = None,
+        status: NoteStatus | None = None,
+        actor: AuthContext | None = None,
+    ) -> Note:
+        require_role(actor, WRITE_ROLES)
+        note = self.get_note(note_id)
+        if transcribed_text is not None:
+            note.transcribed_text = transcribed_text.strip() if transcribed_text else None
+        if targets is not None:
+            resolved_targets = list(targets)
+            for target in resolved_targets:
+                self._ensure_target_exists(target, note.project_id)
+            note.targets = resolved_targets
+        if status is not None:
+            note.status = status
+        note.updated_at = utc_now()
+        return note
+
+    def delete_note(self, note_id: UUID, *, actor: AuthContext | None = None) -> Note:
+        require_role(actor, WRITE_ROLES)
+        note = self.get_note(note_id)
+        del self._store.notes[note_id]
+        return note
+
+    def create_session(
+        self,
+        project_id: UUID,
+        session_type: SessionType,
+        *,
+        primary_question_id: UUID | None = None,
+        status: SessionStatus = SessionStatus.ACTIVE,
+        actor: AuthContext | None = None,
+        created_by: str | None = None,
+    ) -> Session:
+        require_role(actor, WRITE_ROLES)
+        self.get_project(project_id)
+        if session_type == SessionType.SCIENTIFIC and primary_question_id is None:
+            raise ValidationError("Scientific sessions require a primary question.")
+        if primary_question_id is not None:
+            question = self.get_question(primary_question_id)
+            if question.project_id != project_id:
+                raise ValidationError("Primary question must belong to the same project.")
+        session = Session(
+            session_id=uuid4(),
+            project_id=project_id,
+            session_type=session_type,
+            status=status,
+            primary_question_id=primary_question_id,
+            created_by=created_by,
+        )
+        self._store.sessions[session.session_id] = session
+        return session
+
+    def get_session(self, session_id: UUID) -> Session:
+        return _get_or_raise(self._store.sessions, session_id, "Session")
+
+    def list_sessions(self, *, project_id: UUID | None = None) -> list[Session]:
+        if project_id is None:
+            return list(self._store.sessions.values())
+        return [s for s in self._store.sessions.values() if s.project_id == project_id]
+
+    def update_session(
+        self,
+        session_id: UUID,
+        *,
+        status: SessionStatus | None = None,
+        ended_at: datetime | None = None,
+        actor: AuthContext | None = None,
+    ) -> Session:
+        require_role(actor, WRITE_ROLES)
+        session = self.get_session(session_id)
+        if status is not None:
+            session.status = status
+        if ended_at is not None:
+            session.ended_at = ended_at
+        session.updated_at = utc_now()
+        return session
+
+    def delete_session(self, session_id: UUID, *, actor: AuthContext | None = None) -> Session:
+        require_role(actor, WRITE_ROLES)
+        session = self.get_session(session_id)
+        del self._store.sessions[session_id]
+        return session
+
+    def create_analysis(
+        self,
+        project_id: UUID,
+        dataset_ids: Iterable[UUID],
+        method_hash: str,
+        code_version: str,
+        *,
+        environment_hash: str | None = None,
+        status: AnalysisStatus = AnalysisStatus.STAGED,
+        actor: AuthContext | None = None,
+        executed_by: str | None = None,
+    ) -> Analysis:
+        require_role(actor, WRITE_ROLES)
+        self.get_project(project_id)
+        dataset_id_list = _unique_ids(dataset_ids)
+        if not dataset_id_list:
+            raise ValidationError("Analysis must reference at least one dataset.")
+        for dataset_id in dataset_id_list:
+            dataset = self.get_dataset(dataset_id)
+            if dataset.project_id != project_id:
+                raise ValidationError("Datasets must belong to the same project.")
+        _ensure_non_empty(method_hash, "method_hash")
+        _ensure_non_empty(code_version, "code_version")
+        analysis = Analysis(
+            analysis_id=uuid4(),
+            project_id=project_id,
+            dataset_ids=dataset_id_list,
+            method_hash=method_hash.strip(),
+            code_version=code_version.strip(),
+            environment_hash=environment_hash.strip() if environment_hash else None,
+            status=status,
+            executed_by=executed_by,
+        )
+        self._store.analyses[analysis.analysis_id] = analysis
+        return analysis
+
+    def get_analysis(self, analysis_id: UUID) -> Analysis:
+        return _get_or_raise(self._store.analyses, analysis_id, "Analysis")
+
+    def list_analyses(self, *, project_id: UUID | None = None) -> list[Analysis]:
+        if project_id is None:
+            return list(self._store.analyses.values())
+        return [a for a in self._store.analyses.values() if a.project_id == project_id]
+
+    def update_analysis(
+        self,
+        analysis_id: UUID,
+        *,
+        status: AnalysisStatus | None = None,
+        environment_hash: str | None = None,
+        actor: AuthContext | None = None,
+    ) -> Analysis:
+        require_role(actor, WRITE_ROLES)
+        analysis = self.get_analysis(analysis_id)
+        if status is not None:
+            analysis.status = status
+        if environment_hash is not None:
+            analysis.environment_hash = environment_hash.strip() if environment_hash else None
+        analysis.updated_at = utc_now()
+        return analysis
+
+    def delete_analysis(self, analysis_id: UUID, *, actor: AuthContext | None = None) -> Analysis:
+        require_role(actor, WRITE_ROLES)
+        analysis = self.get_analysis(analysis_id)
+        del self._store.analyses[analysis_id]
+        return analysis
+
+    def _ensure_target_exists(self, target: EntityRef, project_id: UUID) -> None:
+        entity_map = {
+            EntityType.PROJECT: self._store.projects,
+            EntityType.QUESTION: self._store.questions,
+            EntityType.DATASET: self._store.datasets,
+            EntityType.NOTE: self._store.notes,
+            EntityType.SESSION: self._store.sessions,
+            EntityType.ANALYSIS: self._store.analyses,
+        }
+        store = entity_map.get(target.entity_type)
+        if store is None:
+            raise ValidationError("Unsupported target entity type.")
+        entity = store.get(target.entity_id)
+        if entity is None:
+            raise NotFoundError(f"{target.entity_type.value.capitalize()} does not exist.")
+        if hasattr(entity, "project_id") and entity.project_id != project_id:
+            raise ValidationError("Target must belong to the same project.")
+
+
+def _ensure_non_empty(value: str, field_name: str) -> None:
+    if not value or not str(value).strip():
+        raise ValidationError(f"{field_name} must not be empty.")
+
+
+def _get_or_raise(store: dict[UUID, object], entity_id: UUID, label: str):
+    try:
+        return store[entity_id]
+    except KeyError as exc:
+        raise NotFoundError(f"{label} does not exist.") from exc
+
+
+def _unique_ids(values: Iterable[UUID] | None) -> list[UUID]:
+    if not values:
+        return []
+    seen: set[UUID] = set()
+    unique: list[UUID] = []
+    for value in values:
+        if value in seen:
+            raise ValidationError("Duplicate id in list.")
+        seen.add(value)
+        unique.append(value)
+    return unique
+
+
+def _build_extracted_entity(label: str, confidence: float, provenance: str) -> ExtractedEntity:
+    _ensure_non_empty(label, "label")
+    if not 0.0 <= confidence <= 1.0:
+        raise ValidationError("confidence must be between 0 and 1.")
+    _ensure_non_empty(provenance, "provenance")
+    return ExtractedEntity(label=label.strip(), confidence=confidence, provenance=provenance.strip())
