@@ -2,7 +2,13 @@
 
 from lab_tracker.api import InMemoryStore, LabTrackerAPI
 from lab_tracker.auth import AuthContext, AuthService, Role, require_role
-from lab_tracker.errors import AuthError, ConflictError, LabTrackerError, NotFoundError, ValidationError
+from lab_tracker.errors import (
+    AuthError,
+    ConflictError,
+    LabTrackerError,
+    NotFoundError,
+    ValidationError,
+)
 from lab_tracker.models import (
     Analysis,
     AnalysisStatus,

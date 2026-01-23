@@ -525,4 +525,8 @@ def _build_extracted_entity(label: str, confidence: float, provenance: str) -> E
     if not 0.0 <= confidence <= 1.0:
         raise ValidationError("confidence must be between 0 and 1.")
     _ensure_non_empty(provenance, "provenance")
-    return ExtractedEntity(label=label.strip(), confidence=confidence, provenance=provenance.strip())
+    return ExtractedEntity(
+        label=label.strip(),
+        confidence=confidence,
+        provenance=provenance.strip(),
+    )

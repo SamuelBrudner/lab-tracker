@@ -18,7 +18,11 @@ def _utc_now() -> datetime:
 class ProjectModel(Base):
     __tablename__ = "projects"
 
-    project_id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid4()))
+    project_id: Mapped[str] = mapped_column(
+        String(36),
+        primary_key=True,
+        default=lambda: str(uuid4()),
+    )
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     description: Mapped[str] = mapped_column(String(1000), default="")
     status: Mapped[str] = mapped_column(String(20), default="active")
