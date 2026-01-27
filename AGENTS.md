@@ -12,6 +12,20 @@ bd close <id>         # Complete work
 bd sync               # Sync with git
 ```
 
+## Commit Messages
+
+Use this exact subject format:
+
+```
+(feat): <description of the work that was done> (prescribed by bead <ID>)
+```
+
+Example:
+
+```
+(feat): add core entity migrations (prescribed by bead lab-tracker-0sy)
+```
+
 ## Landing the Plane (Session Completion)
 
 **When ending a work session**, you MUST complete ALL steps below. Work is NOT complete until `git push` succeeds.
@@ -37,4 +51,3 @@ bd sync               # Sync with git
 - NEVER stop before pushing - that leaves work stranded locally
 - NEVER say "ready to push when you are" - YOU must push
 - If push fails, resolve and retry until it succeeds
-
