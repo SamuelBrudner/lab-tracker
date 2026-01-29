@@ -88,6 +88,10 @@ try:  # pragma: no cover - exercised when FastAPI is installed.
     from fastapi.exceptions import RequestValidationError
 except Exception:  # pragma: no cover - fallback for shim environments.
     RequestValidationError = None
+try:  # pragma: no cover - exercised when Pydantic is available.
+    from pydantic import ValidationError as PydanticValidationError
+except Exception:  # pragma: no cover - fallback for shim environments.
+    PydanticValidationError = None
 
 SYSTEM_ACTOR = AuthContext(
     user_id=UUID("00000000-0000-0000-0000-000000000000"),
@@ -580,26 +584,41 @@ def _register_exception_handlers(app: Any) -> None:
     def _handle_lab_tracker_error(request: Request, exc: LabTrackerError):
         return _error_response(http_status.HTTP_400_BAD_REQUEST, "lab_tracker_error", str(exc))
 
-    if RequestValidationError is None:
+    if RequestValidationError is not None:
+        @app.exception_handler(RequestValidationError)
+        def _handle_request_validation_error(request: Request, exc: RequestValidationError):
+            return _error_response(
+                http_status.HTTP_422_UNPROCESSABLE_ENTITY,
+                "request_validation_error",
+                "Request validation failed.",
+                issues=_issues_from_validation_errors(exc.errors()),
+            )
         return
 
-    @app.exception_handler(RequestValidationError)
-    def _handle_request_validation_error(request: Request, exc: RequestValidationError):
-        issues = []
-        for error in exc.errors():
-            loc_parts = [str(part) for part in error.get("loc", []) if part != "body"]
-            field = ".".join(loc_parts) if loc_parts else None
-            issues.append(
-                ErrorIssue(
-                    field=field,
-                    message=error.get("msg", "Invalid value"),
-                )
+    if PydanticValidationError is not None:
+        @app.exception_handler(PydanticValidationError)
+        def _handle_pydantic_validation_error(request: Request, exc: PydanticValidationError):
+            return _error_response(
+                http_status.HTTP_422_UNPROCESSABLE_ENTITY,
+                "request_validation_error",
+                "Request validation failed.",
+                issues=_issues_from_validation_errors(exc.errors()),
             )
+
+    @app.exception_handler(ValueError)
+    def _handle_value_error(request: Request, exc: ValueError):
         return _error_response(
             http_status.HTTP_422_UNPROCESSABLE_ENTITY,
             "request_validation_error",
             "Request validation failed.",
-            issues=issues,
+        )
+
+    @app.exception_handler(TypeError)
+    def _handle_type_error(request: Request, exc: TypeError):
+        return _error_response(
+            http_status.HTTP_422_UNPROCESSABLE_ENTITY,
+            "request_validation_error",
+            "Request validation failed.",
         )
 
 
@@ -612,6 +631,15 @@ def _error_response(
 ) -> JSONResponse:
     payload = ErrorEnvelope(error=ErrorInfo(code=code, message=message, issues=issues))
     return JSONResponse(status_code=status_code, content=payload.model_dump())
+
+
+def _issues_from_validation_errors(errors: list[dict[str, Any]]) -> list[ErrorIssue]:
+    issues: list[ErrorIssue] = []
+    for error in errors:
+        loc_parts = [str(part) for part in error.get("loc", []) if part != "body"]
+        field = ".".join(loc_parts) if loc_parts else None
+        issues.append(ErrorIssue(field=field, message=error.get("msg", "Invalid value")))
+    return issues
 
 
 def _actor_from_request(request: Request | None) -> AuthContext:
