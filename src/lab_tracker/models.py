@@ -66,6 +66,12 @@ class AnalysisStatus(str, Enum):
     ARCHIVED = "archived"
 
 
+class ClaimStatus(str, Enum):
+    PROPOSED = "proposed"
+    SUPPORTED = "supported"
+    REJECTED = "rejected"
+
+
 class QuestionLinkRole(str, Enum):
     PRIMARY = "primary"
     SECONDARY = "secondary"
@@ -91,6 +97,8 @@ class EntityType(str, Enum):
     NOTE = "note"
     SESSION = "session"
     ANALYSIS = "analysis"
+    CLAIM = "claim"
+    VISUALIZATION = "visualization"
 
 
 @dataclass(frozen=True)
@@ -205,5 +213,30 @@ class Analysis:
     executed_by: str | None = None
     executed_at: datetime = field(default_factory=utc_now)
     status: AnalysisStatus = AnalysisStatus.STAGED
+    created_at: datetime = field(default_factory=utc_now)
+    updated_at: datetime = field(default_factory=utc_now)
+
+
+@dataclass
+class Claim:
+    claim_id: UUID
+    project_id: UUID
+    statement: str
+    confidence: float
+    status: ClaimStatus = ClaimStatus.PROPOSED
+    supported_by_dataset_ids: list[UUID] = field(default_factory=list)
+    supported_by_analysis_ids: list[UUID] = field(default_factory=list)
+    created_at: datetime = field(default_factory=utc_now)
+    updated_at: datetime = field(default_factory=utc_now)
+
+
+@dataclass
+class Visualization:
+    viz_id: UUID
+    analysis_id: UUID
+    viz_type: str
+    file_path: str
+    caption: str | None = None
+    related_claim_ids: list[UUID] = field(default_factory=list)
     created_at: datetime = field(default_factory=utc_now)
     updated_at: datetime = field(default_factory=utc_now)

@@ -12,6 +12,8 @@ from lab_tracker.errors import (
 from lab_tracker.models import (
     Analysis,
     AnalysisStatus,
+    Claim,
+    ClaimStatus,
     Dataset,
     DatasetStatus,
     EntityRef,
@@ -33,6 +35,7 @@ from lab_tracker.models import (
     SessionStatus,
     SessionType,
     TagSuggestionStatus,
+    Visualization,
 )
 from lab_tracker.review_ui import render_extraction_review
 
@@ -42,6 +45,8 @@ __all__ = [
     "AuthContext",
     "AuthError",
     "AuthService",
+    "Claim",
+    "ClaimStatus",
     "ConflictError",
     "Dataset",
     "DatasetStatus",
@@ -70,6 +75,7 @@ __all__ = [
     "SessionType",
     "TagSuggestionStatus",
     "ValidationError",
+    "Visualization",
     "require_role",
     "render_extraction_review",
 ]

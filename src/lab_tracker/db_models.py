@@ -278,6 +278,99 @@ class AnalysisDatasetModel(Base):
     )
 
 
+class ClaimModel(Base):
+    __tablename__ = "claims"
+
+    claim_id: Mapped[str] = mapped_column(
+        String(36),
+        primary_key=True,
+        default=lambda: str(uuid4()),
+    )
+    project_id: Mapped[str] = mapped_column(
+        String(36),
+        ForeignKey("projects.project_id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    statement: Mapped[str] = mapped_column(Text, nullable=False)
+    confidence: Mapped[float] = mapped_column(Float, nullable=False)
+    status: Mapped[str] = mapped_column(String(20), default="proposed")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utc_now)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=_utc_now,
+        onupdate=_utc_now,
+    )
+
+
+class ClaimDatasetModel(Base):
+    __tablename__ = "claim_datasets"
+
+    claim_id: Mapped[str] = mapped_column(
+        String(36),
+        ForeignKey("claims.claim_id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    dataset_id: Mapped[str] = mapped_column(
+        String(36),
+        ForeignKey("datasets.dataset_id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+
+
+class ClaimAnalysisModel(Base):
+    __tablename__ = "claim_analyses"
+
+    claim_id: Mapped[str] = mapped_column(
+        String(36),
+        ForeignKey("claims.claim_id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    analysis_id: Mapped[str] = mapped_column(
+        String(36),
+        ForeignKey("analyses.analysis_id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+
+
+class VisualizationModel(Base):
+    __tablename__ = "visualizations"
+
+    viz_id: Mapped[str] = mapped_column(
+        String(36),
+        primary_key=True,
+        default=lambda: str(uuid4()),
+    )
+    analysis_id: Mapped[str] = mapped_column(
+        String(36),
+        ForeignKey("analyses.analysis_id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    viz_type: Mapped[str] = mapped_column(String(40), nullable=False)
+    file_path: Mapped[str] = mapped_column(String(1000), nullable=False)
+    caption: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utc_now)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=_utc_now,
+        onupdate=_utc_now,
+    )
+
+
+class VisualizationClaimModel(Base):
+    __tablename__ = "visualization_claims"
+
+    viz_id: Mapped[str] = mapped_column(
+        String(36),
+        ForeignKey("visualizations.viz_id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    claim_id: Mapped[str] = mapped_column(
+        String(36),
+        ForeignKey("claims.claim_id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+
+
 class UserModel(Base):
     __tablename__ = "users"
     __table_args__ = (UniqueConstraint("username", name="uq_users_username"),)
