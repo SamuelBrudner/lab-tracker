@@ -188,17 +188,24 @@ def register_routes(app: Any, api: LabTrackerAPI) -> None:
         status: QuestionStatus | None = None,
         question_type: QuestionType | None = None,
         created_from: QuestionSource | None = None,
+        search: str | None = None,
+        q: str | None = None,
+        parent_question_id: UUID | None = None,
+        ancestor_question_id: UUID | None = None,
         limit: int = 50,
         offset: int = 0,
     ):
         _validate_pagination(limit, offset)
-        questions = api.list_questions(project_id=project_id)
-        if status is not None:
-            questions = [question for question in questions if question.status == status]
-        if question_type is not None:
-            questions = [question for question in questions if question.question_type == question_type]
-        if created_from is not None:
-            questions = [question for question in questions if question.created_from == created_from]
+        resolved_search = search or q
+        questions = api.list_questions(
+            project_id=project_id,
+            status=status,
+            question_type=question_type,
+            created_from=created_from,
+            search=resolved_search,
+            parent_question_id=parent_question_id,
+            ancestor_question_id=ancestor_question_id,
+        )
         page, total = _paginate(questions, limit, offset)
         payload = [QuestionRead.model_validate(question) for question in page]
         return ListEnvelope(

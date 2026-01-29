@@ -128,13 +128,15 @@ class LabTrackerAPI:
         require_role(actor, WRITE_ROLES)
         self.get_project(project_id)
         _ensure_non_empty(text, "text")
+        question_id = uuid4()
         parent_ids = _unique_ids(parent_question_ids)
         for parent_id in parent_ids:
             parent = self.get_question(parent_id)
             if parent.project_id != project_id:
                 raise ValidationError("Parent question must belong to the same project.")
+        _ensure_question_parents_dag(question_id, parent_ids, self._store.questions)
         question = Question(
-            question_id=uuid4(),
+            question_id=question_id,
             project_id=project_id,
             text=text.strip(),
             question_type=question_type,
@@ -150,10 +152,74 @@ class LabTrackerAPI:
     def get_question(self, question_id: UUID) -> Question:
         return _get_or_raise(self._store.questions, question_id, "Question")
 
-    def list_questions(self, *, project_id: UUID | None = None) -> list[Question]:
+    def list_questions(
+        self,
+        *,
+        project_id: UUID | None = None,
+        status: QuestionStatus | None = None,
+        question_type: QuestionType | None = None,
+        created_from: QuestionSource | None = None,
+        search: str | None = None,
+        parent_question_id: UUID | None = None,
+        ancestor_question_id: UUID | None = None,
+    ) -> list[Question]:
+        return self.list_questions_filtered(
+            project_id=project_id,
+            status=status,
+            question_type=question_type,
+            created_from=created_from,
+            search=search,
+            parent_question_id=parent_question_id,
+            ancestor_question_id=ancestor_question_id,
+        )
+
+    def list_questions_filtered(
+        self,
+        *,
+        project_id: UUID | None = None,
+        status: QuestionStatus | None = None,
+        question_type: QuestionType | None = None,
+        created_from: QuestionSource | None = None,
+        search: str | None = None,
+        parent_question_id: UUID | None = None,
+        ancestor_question_id: UUID | None = None,
+    ) -> list[Question]:
         if project_id is None:
-            return list(self._store.questions.values())
-        return [q for q in self._store.questions.values() if q.project_id == project_id]
+            questions = list(self._store.questions.values())
+        else:
+            questions = [q for q in self._store.questions.values() if q.project_id == project_id]
+        if status is not None:
+            questions = [question for question in questions if question.status == status]
+        if question_type is not None:
+            questions = [question for question in questions if question.question_type == question_type]
+        if created_from is not None:
+            questions = [question for question in questions if question.created_from == created_from]
+        if parent_question_id is not None:
+            questions = [
+                question
+                for question in questions
+                if parent_question_id in question.parent_question_ids
+            ]
+        if ancestor_question_id is not None:
+            questions = [
+                question
+                for question in questions
+                if question.question_id != ancestor_question_id
+                and _is_question_ancestor(
+                    question.question_id,
+                    ancestor_question_id,
+                    self._store.questions,
+                )
+            ]
+        if search is not None and search.strip():
+            needle = search.casefold()
+            questions = [
+                question
+                for question in questions
+                if needle in question.text.casefold()
+                or (question.hypothesis and needle in question.hypothesis.casefold())
+            ]
+        return questions
 
     def update_question(
         self,
@@ -176,6 +242,7 @@ class LabTrackerAPI:
         if hypothesis is not None:
             question.hypothesis = hypothesis.strip() if hypothesis else None
         if status is not None:
+            _ensure_question_status_transition(question.status, status)
             question.status = status
         if parent_question_ids is not None:
             parent_ids = _unique_ids(parent_question_ids)
@@ -183,6 +250,7 @@ class LabTrackerAPI:
                 parent = self.get_question(parent_id)
                 if parent.project_id != question.project_id:
                     raise ValidationError("Parent question must belong to the same project.")
+            _ensure_question_parents_dag(question.question_id, parent_ids, self._store.questions)
             question.parent_question_ids = parent_ids
         question.updated_at = utc_now()
         return question
@@ -706,6 +774,59 @@ def _unique_ids(values: Iterable[UUID] | None) -> list[UUID]:
         seen.add(value)
         unique.append(value)
     return unique
+
+
+_QUESTION_STATUS_TRANSITIONS: dict[QuestionStatus, set[QuestionStatus]] = {
+    QuestionStatus.STAGED: {QuestionStatus.STAGED, QuestionStatus.ACTIVE, QuestionStatus.ABANDONED},
+    QuestionStatus.ACTIVE: {QuestionStatus.ACTIVE, QuestionStatus.ANSWERED, QuestionStatus.ABANDONED},
+    QuestionStatus.ANSWERED: {QuestionStatus.ANSWERED},
+    QuestionStatus.ABANDONED: {QuestionStatus.ABANDONED},
+}
+
+
+def _ensure_question_status_transition(
+    current_status: QuestionStatus,
+    next_status: QuestionStatus,
+) -> None:
+    allowed = _QUESTION_STATUS_TRANSITIONS.get(current_status, {current_status})
+    if next_status not in allowed:
+        raise ValidationError(
+            "Question status cannot transition from "
+            f"{current_status.value} to {next_status.value}."
+        )
+
+
+def _ensure_question_parents_dag(
+    question_id: UUID,
+    parent_ids: list[UUID],
+    store: dict[UUID, Question],
+) -> None:
+    if question_id in parent_ids:
+        raise ValidationError("Question cannot be its own parent.")
+    for parent_id in parent_ids:
+        if _is_question_ancestor(parent_id, question_id, store):
+            raise ValidationError("Question parent graph must be acyclic.")
+
+
+def _is_question_ancestor(
+    start_id: UUID,
+    target_id: UUID,
+    store: dict[UUID, Question],
+) -> bool:
+    stack = [start_id]
+    visited: set[UUID] = set()
+    while stack:
+        current = stack.pop()
+        if current == target_id:
+            return True
+        if current in visited:
+            continue
+        visited.add(current)
+        question = store.get(current)
+        if question is None:
+            continue
+        stack.extend(question.parent_question_ids)
+    return False
 
 
 def _ensure_primary_question_active(question: Question) -> None:
