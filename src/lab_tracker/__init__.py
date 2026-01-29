@@ -15,6 +15,7 @@ from lab_tracker.models import (
     Dataset,
     DatasetStatus,
     EntityRef,
+    EntityTagSuggestion,
     EntityType,
     ExtractedEntity,
     Note,
@@ -31,6 +32,7 @@ from lab_tracker.models import (
     Session,
     SessionStatus,
     SessionType,
+    TagSuggestionStatus,
 )
 from lab_tracker.review_ui import render_extraction_review
 
@@ -44,6 +46,7 @@ __all__ = [
     "Dataset",
     "DatasetStatus",
     "EntityRef",
+    "EntityTagSuggestion",
     "EntityType",
     "ExtractedEntity",
     "InMemoryStore",
@@ -65,6 +68,7 @@ __all__ = [
     "Session",
     "SessionStatus",
     "SessionType",
+    "TagSuggestionStatus",
     "ValidationError",
     "require_role",
     "render_extraction_review",

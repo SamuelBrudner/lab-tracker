@@ -162,6 +162,39 @@ class NoteExtractedEntityModel(Base):
     provenance: Mapped[str] = mapped_column(String(255), nullable=False)
 
 
+class NoteTagSuggestionModel(Base):
+    __tablename__ = "note_tag_suggestions"
+    __table_args__ = (
+        UniqueConstraint(
+            "note_id",
+            "entity_label",
+            "vocabulary",
+            "term_id",
+            name="uq_note_tag_suggestion",
+        ),
+    )
+
+    suggestion_id: Mapped[str] = mapped_column(
+        String(36),
+        primary_key=True,
+        default=lambda: str(uuid4()),
+    )
+    note_id: Mapped[str] = mapped_column(
+        String(36),
+        ForeignKey("notes.note_id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    entity_label: Mapped[str] = mapped_column(String(255), nullable=False)
+    vocabulary: Mapped[str] = mapped_column(String(40), nullable=False)
+    term_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    term_label: Mapped[str] = mapped_column(String(255), nullable=False)
+    confidence: Mapped[float] = mapped_column(Float, nullable=False)
+    provenance: Mapped[str] = mapped_column(String(255), nullable=False)
+    status: Mapped[str] = mapped_column(String(20), default="staged")
+    reviewed_by: Mapped[str | None] = mapped_column(String(255))
+    reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
 class NoteTargetModel(Base):
     __tablename__ = "note_targets"
 

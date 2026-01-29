@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass, replace
 from datetime import datetime
 from typing import Iterable
 from uuid import UUID, uuid4
@@ -15,6 +16,7 @@ from lab_tracker.models import (
     Dataset,
     DatasetStatus,
     EntityRef,
+    EntityTagSuggestion,
     ExtractedEntity,
     EntityType,
     Note,
@@ -30,6 +32,7 @@ from lab_tracker.models import (
     Session,
     SessionStatus,
     SessionType,
+    TagSuggestionStatus,
     utc_now,
 )
 
@@ -285,6 +288,7 @@ class LabTrackerAPI:
         *,
         transcribed_text: str | None = None,
         extracted_entities: Iterable[tuple[str, float, str]] | None = None,
+        tag_suggestions: Iterable[EntityTagSuggestion] | None = None,
         targets: Iterable[EntityRef] | None = None,
         status: NoteStatus = NoteStatus.STAGED,
         actor: AuthContext | None = None,
@@ -300,12 +304,14 @@ class LabTrackerAPI:
             _build_extracted_entity(label, confidence, provenance)
             for label, confidence, provenance in (extracted_entities or [])
         ]
+        resolved_tag_suggestions = list(tag_suggestions or [])
         note = Note(
             note_id=uuid4(),
             project_id=project_id,
             raw_content=raw_content.strip(),
             transcribed_text=transcribed_text.strip() if transcribed_text else None,
             extracted_entities=resolved_entities,
+            tag_suggestions=resolved_tag_suggestions,
             targets=resolved_targets,
             status=status,
             created_by=created_by,
@@ -343,6 +349,81 @@ class LabTrackerAPI:
             note.status = status
         note.updated_at = utc_now()
         return note
+
+    def suggest_entity_tags(
+        self,
+        note_id: UUID,
+        *,
+        mapping: dict[str, list["_TagMapping"]] | None = None,
+        provenance: str | None = None,
+        actor: AuthContext | None = None,
+    ) -> list[EntityTagSuggestion]:
+        require_role(actor, WRITE_ROLES)
+        note = self.get_note(note_id)
+        if not note.extracted_entities:
+            return []
+        resolved_mapping = mapping or _DEFAULT_TAG_MAP
+        if not resolved_mapping:
+            return []
+        provenance_tag = provenance or _build_note_tag_provenance(note.note_id)
+        existing = {_tag_suggestion_key(suggestion) for suggestion in note.tag_suggestions}
+        new_suggestions: list[EntityTagSuggestion] = []
+        for entity in note.extracted_entities:
+            for term in _resolve_tag_mappings(entity.label, resolved_mapping):
+                suggestion = _build_entity_tag_suggestion(
+                    entity_label=entity.label,
+                    term=term,
+                    extracted_confidence=entity.confidence,
+                    provenance=provenance_tag,
+                )
+                key = _tag_suggestion_key(suggestion)
+                if key in existing:
+                    continue
+                note.tag_suggestions.append(suggestion)
+                new_suggestions.append(suggestion)
+                existing.add(key)
+        return new_suggestions
+
+    def list_entity_tag_suggestions(
+        self,
+        note_id: UUID,
+        *,
+        status: TagSuggestionStatus | None = None,
+    ) -> list[EntityTagSuggestion]:
+        note = self.get_note(note_id)
+        if status is None:
+            return list(note.tag_suggestions)
+        return [suggestion for suggestion in note.tag_suggestions if suggestion.status == status]
+
+    def review_entity_tag_suggestion(
+        self,
+        note_id: UUID,
+        suggestion_id: UUID,
+        *,
+        status: TagSuggestionStatus,
+        reviewed_by: str | None = None,
+        actor: AuthContext | None = None,
+    ) -> EntityTagSuggestion:
+        require_role(actor, WRITE_ROLES)
+        note = self.get_note(note_id)
+        for index, suggestion in enumerate(note.tag_suggestions):
+            if suggestion.suggestion_id == suggestion_id:
+                if status in {TagSuggestionStatus.ACCEPTED, TagSuggestionStatus.REJECTED}:
+                    resolved_reviewed_at = utc_now()
+                    resolved_reviewed_by = reviewed_by or (str(actor.user_id) if actor else None)
+                else:
+                    resolved_reviewed_at = None
+                    resolved_reviewed_by = None
+                updated = replace(
+                    suggestion,
+                    status=status,
+                    reviewed_by=resolved_reviewed_by,
+                    reviewed_at=resolved_reviewed_at,
+                )
+                note.tag_suggestions[index] = updated
+                note.updated_at = utc_now()
+                return updated
+        raise NotFoundError("Tag suggestion does not exist.")
 
     def delete_note(self, note_id: UUID, *, actor: AuthContext | None = None) -> Note:
         require_role(actor, WRITE_ROLES)
@@ -566,6 +647,108 @@ def _build_extracted_entity(label: str, confidence: float, provenance: str) -> E
         label=label.strip(),
         confidence=confidence,
         provenance=provenance.strip(),
+    )
+
+
+@dataclass(frozen=True)
+class _TagMapping:
+    vocabulary: str
+    term_label: str
+    match_confidence: float = 1.0
+    term_id: str | None = None
+
+
+_DEFAULT_TAG_MAP: dict[str, list[_TagMapping]] = {
+    "neuron": [
+        _TagMapping(vocabulary="NIFSTD", term_label="Neuron", match_confidence=0.95),
+        _TagMapping(vocabulary="NCIT", term_label="Neuron", match_confidence=0.9),
+    ],
+    "astrocyte": [_TagMapping(vocabulary="NIFSTD", term_label="Astrocyte", match_confidence=0.93)],
+    "hippocampus": [_TagMapping(vocabulary="UBERON", term_label="Hippocampus", match_confidence=0.92)],
+    "patch clamp": [_TagMapping(vocabulary="OBI", term_label="Patch clamp", match_confidence=0.88)],
+}
+
+
+def _build_entity_tag_suggestion(
+    *,
+    entity_label: str,
+    term: _TagMapping,
+    extracted_confidence: float,
+    provenance: str,
+) -> EntityTagSuggestion:
+    _ensure_non_empty(entity_label, "entity_label")
+    _ensure_non_empty(term.vocabulary, "vocabulary")
+    _ensure_non_empty(term.term_label, "term_label")
+    _ensure_non_empty(provenance, "provenance")
+    if not 0.0 <= extracted_confidence <= 1.0:
+        raise ValidationError("extracted_confidence must be between 0 and 1.")
+    if not 0.0 <= term.match_confidence <= 1.0:
+        raise ValidationError("match_confidence must be between 0 and 1.")
+    term_id = term.term_id or f"{term.vocabulary}:{_slugify_label(term.term_label)}"
+    confidence = min(1.0, extracted_confidence * term.match_confidence)
+    return EntityTagSuggestion(
+        suggestion_id=uuid4(),
+        entity_label=entity_label.strip(),
+        vocabulary=term.vocabulary.strip(),
+        term_id=term_id,
+        term_label=term.term_label.strip(),
+        confidence=confidence,
+        provenance=provenance.strip(),
+    )
+
+
+def _build_note_tag_provenance(note_id: UUID) -> str:
+    return f"note:{note_id}|tag-mapper:v1"
+
+
+def _normalize_entity_label(label: str) -> str:
+    cleaned = label.strip().casefold()
+    cleaned = re.sub(r"\s+", " ", cleaned)
+    cleaned = re.sub(r"[_\-]+", " ", cleaned)
+    return cleaned.strip()
+
+
+def _slugify_label(label: str) -> str:
+    cleaned = _normalize_entity_label(label)
+    slug = re.sub(r"[^a-z0-9]+", "-", cleaned).strip("-")
+    return slug or "term"
+
+
+def _resolve_tag_mappings(
+    label: str, mapping: dict[str, list[_TagMapping]]
+) -> list[_TagMapping]:
+    normalized = _normalize_entity_label(label)
+    keys_to_try = [normalized]
+    if normalized.endswith("s") and len(normalized) > 1:
+        keys_to_try.append(normalized[:-1])
+    resolved: list[_TagMapping] = []
+    for key in keys_to_try:
+        resolved.extend(mapping.get(key, []))
+    if not resolved:
+        for key, terms in mapping.items():
+            if key and key in normalized:
+                resolved.extend(terms)
+    return _dedupe_tag_mappings(resolved)
+
+
+def _dedupe_tag_mappings(terms: Iterable[_TagMapping]) -> list[_TagMapping]:
+    seen: set[tuple[str, str, str | None]] = set()
+    unique: list[_TagMapping] = []
+    for term in terms:
+        key = (term.vocabulary.casefold(), term.term_label.casefold(), term.term_id)
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(term)
+    return unique
+
+
+def _tag_suggestion_key(suggestion: EntityTagSuggestion) -> tuple[str, str, str, str]:
+    return (
+        suggestion.entity_label.casefold(),
+        suggestion.vocabulary.casefold(),
+        suggestion.term_id.casefold(),
+        suggestion.term_label.casefold(),
     )
 
 

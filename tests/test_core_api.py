@@ -5,7 +5,14 @@ import pytest
 from lab_tracker.api import LabTrackerAPI
 from lab_tracker.auth import AuthContext, AuthService, Role
 from lab_tracker.errors import AuthError, ValidationError
-from lab_tracker.models import QuestionLinkRole, QuestionSource, QuestionStatus, QuestionType, SessionType
+from lab_tracker.models import (
+    QuestionLinkRole,
+    QuestionSource,
+    QuestionStatus,
+    QuestionType,
+    SessionType,
+    TagSuggestionStatus,
+)
 
 
 def _actor(role: Role = Role.ADMIN) -> AuthContext:
@@ -97,3 +104,47 @@ def test_extract_questions_from_note_stages_questions():
     assert all(question.created_from == QuestionSource.API for question in questions)
     assert all(question.created_by and str(note.note_id) in question.created_by for question in questions)
     assert api.extract_questions_from_note(note.note_id, actor=actor) == []
+
+
+def test_suggest_entity_tags_creates_suggestions_and_dedupes():
+    api = LabTrackerAPI()
+    actor = _actor()
+    project = api.create_project("Neuro Project", actor=actor)
+    note = api.create_note(
+        project_id=project.project_id,
+        raw_content="Neuron note",
+        extracted_entities=[("Neuron", 0.8, "ocr:model-1")],
+        actor=actor,
+    )
+
+    suggestions = api.suggest_entity_tags(note.note_id, actor=actor)
+
+    assert suggestions
+    assert all(suggestion.entity_label == "Neuron" for suggestion in suggestions)
+    assert all(suggestion.status == TagSuggestionStatus.STAGED for suggestion in suggestions)
+    assert api.suggest_entity_tags(note.note_id, actor=actor) == []
+
+
+def test_review_entity_tag_suggestion_updates_status():
+    api = LabTrackerAPI()
+    actor = _actor()
+    project = api.create_project("Neuro Project", actor=actor)
+    note = api.create_note(
+        project_id=project.project_id,
+        raw_content="Neuron note",
+        extracted_entities=[("Neuron", 0.8, "ocr:model-1")],
+        actor=actor,
+    )
+
+    suggestion = api.suggest_entity_tags(note.note_id, actor=actor)[0]
+    reviewed = api.review_entity_tag_suggestion(
+        note.note_id,
+        suggestion.suggestion_id,
+        status=TagSuggestionStatus.ACCEPTED,
+        reviewed_by="reviewer",
+        actor=actor,
+    )
+
+    assert reviewed.status == TagSuggestionStatus.ACCEPTED
+    assert reviewed.reviewed_by == "reviewer"
+    assert reviewed.reviewed_at is not None

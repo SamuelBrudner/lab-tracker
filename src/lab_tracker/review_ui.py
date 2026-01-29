@@ -4,13 +4,13 @@ from __future__ import annotations
 
 from html import escape
 
-from lab_tracker.models import ExtractedEntity, Note
+from lab_tracker.models import EntityTagSuggestion, ExtractedEntity, Note
 
 
 def render_extraction_review(note: Note) -> str:
     """Return a simple HTML review page for OCR text and extracted entities."""
     text, text_label, text_hint = _select_text(note)
-    entities_html = _render_entities(note.extracted_entities)
+    entities_html = _render_entities(note.extracted_entities, note.tag_suggestions)
 
     return "\n".join(
         [
@@ -36,6 +36,13 @@ def render_extraction_review(note: Note) -> str:
             "    .entity-label { font-weight: 600; color: #1a1a1a; }",
             "    .entity-meta { font-size: 13px; color: #4a4a4a; margin-top: 6px; }",
             "    .entity-actions { display: flex; gap: 8px; margin-top: 10px; }",
+            "    .tag-section { margin-top: 10px; border-top: 1px solid #eeeeee; padding-top: 10px; }",
+            "    .tag-list { display: grid; gap: 8px; }",
+            "    .tag-item { border: 1px solid #ededed; border-radius: 4px; padding: 8px;",
+            "               background: #fafafa; }",
+            "    .tag-title { font-weight: 600; font-size: 13px; color: #2f2f2f; }",
+            "    .tag-meta { font-size: 12px; color: #5a5a5a; margin-top: 4px; }",
+            "    .tag-actions { display: flex; gap: 6px; margin-top: 6px; }",
             "    .btn { border: 1px solid #cccccc; background: #ffffff; padding: 6px 12px;",
             "           border-radius: 4px; cursor: pointer; font-size: 13px; }",
             "    .btn-accept { border-color: #3f8f4a; color: #2f6f39; }",
@@ -78,21 +85,33 @@ def _select_text(note: Note) -> tuple[str, str, str]:
     return "", "OCR text", "No OCR text available."
 
 
-def _render_entities(entities: list[ExtractedEntity]) -> str:
+def _render_entities(
+    entities: list[ExtractedEntity],
+    tag_suggestions: list[EntityTagSuggestion] | None = None,
+) -> str:
     if not entities:
         return "<div class=\"empty\">No extracted entities.</div>"
 
-    items = [_render_entity(entity, index) for index, entity in enumerate(entities, start=1)]
+    resolved_suggestions = tag_suggestions or []
+    items = [
+        _render_entity(entity, index, resolved_suggestions)
+        for index, entity in enumerate(entities, start=1)
+    ]
     return "<div class=\"entity-list\">" + "".join(items) + "</div>"
 
 
-def _render_entity(entity: ExtractedEntity, index: int) -> str:
+def _render_entity(
+    entity: ExtractedEntity,
+    index: int,
+    tag_suggestions: list[EntityTagSuggestion],
+) -> str:
     label = escape(entity.label)
     provenance = escape(entity.provenance)
     confidence = _format_confidence(entity.confidence)
     label_attr = _escape_attr(entity.label)
     provenance_attr = _escape_attr(entity.provenance)
     confidence_attr = _escape_attr(confidence)
+    tags_html = _render_tag_suggestions(entity.label, tag_suggestions)
 
     return "".join(
         [
@@ -106,6 +125,7 @@ def _render_entity(entity: ExtractedEntity, index: int) -> str:
             f"    <div class=\"entity-meta\">Confidence: {confidence}</div>",
             "  </div>",
             f"  <div class=\"entity-meta\">Provenance: {provenance}</div>",
+            tags_html,
             "  <div class=\"entity-actions\">",
             "    <button type=\"button\" class=\"btn btn-accept\" ",
             f"data-action=\"accept\" data-entity-label=\"{label_attr}\" ",
@@ -113,6 +133,57 @@ def _render_entity(entity: ExtractedEntity, index: int) -> str:
             "    <button type=\"button\" class=\"btn btn-reject\" ",
             f"data-action=\"reject\" data-entity-label=\"{label_attr}\" ",
             f"aria-label=\"Reject {label_attr}\">Reject</button>",
+            "  </div>",
+            "</div>",
+        ]
+    )
+
+
+def _render_tag_suggestions(entity_label: str, suggestions: list[EntityTagSuggestion]) -> str:
+    if not suggestions:
+        return ""
+    normalized = entity_label.casefold().strip()
+    matches = [
+        suggestion
+        for suggestion in suggestions
+        if suggestion.entity_label.casefold().strip() == normalized
+    ]
+    if not matches:
+        return ""
+    items = [_render_tag_suggestion(suggestion) for suggestion in matches]
+    return "".join(
+        [
+            "<div class=\"tag-section\">",
+            "  <div class=\"tag-list\">",
+            "".join(items),
+            "  </div>",
+            "</div>",
+        ]
+    )
+
+
+def _render_tag_suggestion(suggestion: EntityTagSuggestion) -> str:
+    vocab = escape(suggestion.vocabulary)
+    term_label = escape(suggestion.term_label)
+    term_id = escape(suggestion.term_id)
+    confidence = _format_confidence(suggestion.confidence)
+    suggestion_id_attr = _escape_attr(str(suggestion.suggestion_id))
+    label_attr = _escape_attr(suggestion.entity_label)
+
+    return "".join(
+        [
+            "<div class=\"tag-item\" ",
+            f"data-suggestion-id=\"{suggestion_id_attr}\" ",
+            f"data-entity-label=\"{label_attr}\">",
+            f"  <div class=\"tag-title\">{vocab} - {term_label} ({term_id})</div>",
+            f"  <div class=\"tag-meta\">Confidence: {confidence}</div>",
+            "  <div class=\"tag-actions\">",
+            "    <button type=\"button\" class=\"btn btn-accept\" ",
+            f"data-action=\"accept-tag\" data-suggestion-id=\"{suggestion_id_attr}\">",
+            "Accept</button>",
+            "    <button type=\"button\" class=\"btn btn-reject\" ",
+            f"data-action=\"reject-tag\" data-suggestion-id=\"{suggestion_id_attr}\">",
+            "Reject</button>",
             "  </div>",
             "</div>",
         ]

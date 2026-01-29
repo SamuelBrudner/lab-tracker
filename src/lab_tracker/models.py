@@ -78,6 +78,12 @@ class OutcomeStatus(str, Enum):
     INCONCLUSIVE = "inconclusive"
 
 
+class TagSuggestionStatus(str, Enum):
+    STAGED = "staged"
+    ACCEPTED = "accepted"
+    REJECTED = "rejected"
+
+
 class EntityType(str, Enum):
     PROJECT = "project"
     QUESTION = "question"
@@ -98,6 +104,20 @@ class ExtractedEntity:
     label: str
     confidence: float
     provenance: str
+
+
+@dataclass(frozen=True)
+class EntityTagSuggestion:
+    suggestion_id: UUID
+    entity_label: str
+    vocabulary: str
+    term_id: str
+    term_label: str
+    confidence: float
+    provenance: str
+    status: TagSuggestionStatus = TagSuggestionStatus.STAGED
+    reviewed_by: str | None = None
+    reviewed_at: datetime | None = None
 
 
 @dataclass(frozen=True)
@@ -153,6 +173,7 @@ class Note:
     raw_content: str
     transcribed_text: str | None = None
     extracted_entities: list[ExtractedEntity] = field(default_factory=list)
+    tag_suggestions: list[EntityTagSuggestion] = field(default_factory=list)
     targets: list[EntityRef] = field(default_factory=list)
     status: NoteStatus = NoteStatus.STAGED
     created_at: datetime = field(default_factory=utc_now)
