@@ -34,5 +34,17 @@ else:
         def __init__(self, app: FastAPI) -> None:
             self._app = app
 
-        def get(self, path: str):
-            return self._app._handle("GET", path)
+        def _request(self, method: str, path: str, *, json: object | None = None, headers: dict[str, str] | None = None):
+            return self._app._handle(method, path, json=json, headers=headers)
+
+        def get(self, path: str, *, headers: dict[str, str] | None = None):
+            return self._request("GET", path, headers=headers)
+
+        def post(self, path: str, *, json: object | None = None, headers: dict[str, str] | None = None):
+            return self._request("POST", path, json=json, headers=headers)
+
+        def patch(self, path: str, *, json: object | None = None, headers: dict[str, str] | None = None):
+            return self._request("PATCH", path, json=json, headers=headers)
+
+        def delete(self, path: str, *, headers: dict[str, str] | None = None):
+            return self._request("DELETE", path, headers=headers)
