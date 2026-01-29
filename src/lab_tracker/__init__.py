@@ -32,6 +32,7 @@ from lab_tracker.models import (
     SessionStatus,
     SessionType,
 )
+from lab_tracker.review_ui import render_extraction_review
 
 __all__ = [
     "Analysis",
@@ -66,4 +67,5 @@ __all__ = [
     "SessionType",
     "ValidationError",
     "require_role",
+    "render_extraction_review",
 ]
