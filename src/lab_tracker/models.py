@@ -135,6 +135,31 @@ class QuestionLink:
     outcome_status: OutcomeStatus = OutcomeStatus.UNKNOWN
 
 
+@dataclass(frozen=True)
+class DatasetFile:
+    path: str
+    checksum: str
+
+
+@dataclass(frozen=True)
+class DatasetCommitManifestInput:
+    files: list[DatasetFile] = field(default_factory=list)
+    metadata: dict[str, str] = field(default_factory=dict)
+    note_ids: list[UUID] = field(default_factory=list)
+    extraction_provenance: list[str] = field(default_factory=list)
+    source_session_id: UUID | None = None
+
+
+@dataclass(frozen=True)
+class DatasetCommitManifest:
+    files: list[DatasetFile] = field(default_factory=list)
+    metadata: dict[str, str] = field(default_factory=dict)
+    note_ids: list[UUID] = field(default_factory=list)
+    extraction_provenance: list[str] = field(default_factory=list)
+    question_links: list[QuestionLink] = field(default_factory=list)
+    source_session_id: UUID | None = None
+
+
 @dataclass
 class Project:
     project_id: UUID
@@ -168,6 +193,7 @@ class Dataset:
     commit_hash: str
     primary_question_id: UUID
     question_links: list[QuestionLink]
+    commit_manifest: DatasetCommitManifest
     status: DatasetStatus = DatasetStatus.STAGED
     created_at: datetime = field(default_factory=utc_now)
     created_by: str | None = None

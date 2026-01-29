@@ -38,6 +38,8 @@ from lab_tracker.auth import AuthContext, Role
 from lab_tracker.errors import AuthError, ConflictError, LabTrackerError, NotFoundError, ValidationError
 from lab_tracker.models import (
     AnalysisStatus,
+    DatasetCommitManifestInput as DatasetCommitManifestInputModel,
+    DatasetFile,
     DatasetStatus,
     EntityRef,
     NoteStatus,
@@ -54,6 +56,7 @@ from lab_tracker.schemas import (
     AnalysisCreate,
     AnalysisRead,
     AnalysisUpdate,
+    DatasetCommitManifestInput as DatasetCommitManifestInputSchema,
     DatasetCreate,
     DatasetRead,
     DatasetUpdate,
@@ -78,6 +81,7 @@ from lab_tracker.schemas import (
     QuestionRead,
     QuestionUpdate,
     SessionCreate,
+    SessionPromotionRequest,
     SessionRead,
     SessionUpdate,
     TagSuggestionRequest,
@@ -236,10 +240,11 @@ def register_routes(app: Any, api: LabTrackerAPI) -> None:
         actor = _actor_from_request(request)
         dataset = api.create_dataset(
             project_id=payload.project_id,
-            commit_hash=payload.commit_hash,
             primary_question_id=payload.primary_question_id,
             secondary_question_ids=payload.secondary_question_ids,
             status=payload.status or dataset_default_status(),
+            commit_manifest=_manifest_from_payload(payload.commit_manifest),
+            commit_hash=payload.commit_hash,
             actor=actor,
             created_by=_resolve_created_by(payload.created_by, actor),
         )
@@ -274,9 +279,10 @@ def register_routes(app: Any, api: LabTrackerAPI) -> None:
         question_links = _links_from_payload(payload.question_links)
         dataset = api.update_dataset(
             dataset_id,
-            commit_hash=payload.commit_hash,
             status=payload.status,
             question_links=question_links,
+            commit_manifest=_manifest_from_payload(payload.commit_manifest),
+            commit_hash=payload.commit_hash,
             actor=actor,
         )
         return Envelope(data=DatasetRead.model_validate(dataset))
@@ -497,6 +503,24 @@ def register_routes(app: Any, api: LabTrackerAPI) -> None:
         return Envelope(data=SessionRead.model_validate(session))
 
     @app.post(
+        "/sessions/{session_id}/promote",
+        response_model=Envelope[DatasetRead],
+        status_code=http_status.HTTP_201_CREATED,
+    )
+    def promote_operational_session(session_id: UUID, payload: SessionPromotionRequest, request: Request):
+        actor = _actor_from_request(request)
+        dataset = api.promote_operational_session(
+            session_id,
+            primary_question_id=payload.primary_question_id,
+            secondary_question_ids=payload.secondary_question_ids,
+            status=payload.status or DatasetStatus.COMMITTED,
+            commit_manifest=_manifest_from_payload(payload.commit_manifest),
+            actor=actor,
+            created_by=_resolve_created_by(payload.created_by, actor),
+        )
+        return Envelope(data=DatasetRead.model_validate(dataset))
+
+    @app.post(
         "/analyses",
         response_model=Envelope[AnalysisRead],
         status_code=http_status.HTTP_201_CREATED,
@@ -712,6 +736,24 @@ def _links_from_payload(
         )
         for item in payload
     ]
+
+
+def _manifest_from_payload(
+    payload: DatasetCommitManifestInputSchema | None,
+) -> DatasetCommitManifestInputModel | None:
+    if payload is None:
+        return None
+    files = [
+        DatasetFile(path=file_item.path, checksum=file_item.checksum)
+        for file_item in payload.files
+    ]
+    return DatasetCommitManifestInputModel(
+        files=files,
+        metadata=payload.metadata,
+        note_ids=payload.note_ids,
+        extraction_provenance=payload.extraction_provenance,
+        source_session_id=payload.source_session_id,
+    )
 
 
 def project_default_status() -> ProjectStatus:

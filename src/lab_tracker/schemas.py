@@ -92,6 +92,20 @@ class QuestionLinkRead(_BaseReadModel):
     outcome_status: OutcomeStatus
 
 
+class DatasetFileRead(_BaseReadModel):
+    path: str
+    checksum: str
+
+
+class DatasetCommitManifestRead(_BaseReadModel):
+    files: list[DatasetFileRead]
+    metadata: dict[str, str]
+    note_ids: list[UUID]
+    extraction_provenance: list[str]
+    question_links: list[QuestionLinkRead]
+    source_session_id: UUID | None = None
+
+
 class ProjectRead(_BaseReadModel):
     project_id: UUID
     name: str
@@ -122,6 +136,7 @@ class DatasetRead(_BaseReadModel):
     commit_hash: str
     primary_question_id: UUID
     question_links: list[QuestionLinkRead]
+    commit_manifest: DatasetCommitManifestRead
     status: DatasetStatus
     created_at: datetime
     created_by: str | None = None
@@ -185,6 +200,19 @@ class QuestionLinkInput(BaseModel):
     outcome_status: OutcomeStatus = OutcomeStatus.UNKNOWN
 
 
+class DatasetFileInput(BaseModel):
+    path: str = Field(..., min_length=1)
+    checksum: str = Field(..., min_length=1)
+
+
+class DatasetCommitManifestInput(BaseModel):
+    files: list[DatasetFileInput] = Field(default_factory=list)
+    metadata: dict[str, str] = Field(default_factory=dict)
+    note_ids: list[UUID] = Field(default_factory=list)
+    extraction_provenance: list[str] = Field(default_factory=list)
+    source_session_id: UUID | None = None
+
+
 class ProjectCreate(BaseModel):
     name: str = Field(..., min_length=1)
     description: str | None = None
@@ -219,7 +247,8 @@ class QuestionUpdate(BaseModel):
 
 class DatasetCreate(BaseModel):
     project_id: UUID
-    commit_hash: str = Field(..., min_length=1)
+    commit_manifest: DatasetCommitManifestInput | None = None
+    commit_hash: str | None = None
     primary_question_id: UUID
     secondary_question_ids: list[UUID] | None = None
     status: DatasetStatus | None = None
@@ -227,6 +256,7 @@ class DatasetCreate(BaseModel):
 
 
 class DatasetUpdate(BaseModel):
+    commit_manifest: DatasetCommitManifestInput | None = None
     commit_hash: str | None = None
     status: DatasetStatus | None = None
     question_links: list[QuestionLinkInput] | None = None
@@ -259,6 +289,14 @@ class SessionCreate(BaseModel):
 class SessionUpdate(BaseModel):
     status: SessionStatus | None = None
     ended_at: datetime | None = None
+
+
+class SessionPromotionRequest(BaseModel):
+    primary_question_id: UUID
+    secondary_question_ids: list[UUID] | None = None
+    commit_manifest: DatasetCommitManifestInput | None = None
+    status: DatasetStatus | None = None
+    created_by: str | None = None
 
 
 class AnalysisCreate(BaseModel):

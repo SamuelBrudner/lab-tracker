@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import re
 from dataclasses import dataclass, replace
 from datetime import datetime
@@ -14,7 +16,10 @@ from lab_tracker.models import (
     Analysis,
     AnalysisStatus,
     Dataset,
+    DatasetCommitManifest,
+    DatasetCommitManifestInput,
     DatasetStatus,
+    DatasetFile,
     EntityRef,
     EntityTagSuggestion,
     ExtractedEntity,
@@ -191,17 +196,17 @@ class LabTrackerAPI:
     def create_dataset(
         self,
         project_id: UUID,
-        commit_hash: str,
         primary_question_id: UUID,
         *,
         secondary_question_ids: Iterable[UUID] | None = None,
         status: DatasetStatus = DatasetStatus.STAGED,
+        commit_manifest: DatasetCommitManifestInput | DatasetCommitManifest | None = None,
+        commit_hash: str | None = None,
         actor: AuthContext | None = None,
         created_by: str | None = None,
     ) -> Dataset:
         require_role(actor, WRITE_ROLES)
         self.get_project(project_id)
-        _ensure_non_empty(commit_hash, "commit_hash")
         if primary_question_id is None:
             raise ValidationError("primary_question_id is required.")
         primary_question = self.get_question(primary_question_id)
@@ -221,15 +226,25 @@ class LabTrackerAPI:
                 for question_id in secondary_ids
             ],
         ]
+        resolved_manifest = _build_commit_manifest(
+            commit_manifest,
+            question_links,
+        )
+        self._ensure_source_session_valid(resolved_manifest.source_session_id, project_id)
+        resolved_commit_hash = _compute_commit_hash(resolved_manifest)
+        _validate_commit_hash(commit_hash, resolved_commit_hash)
         dataset = Dataset(
             dataset_id=uuid4(),
             project_id=project_id,
-            commit_hash=commit_hash.strip(),
+            commit_hash=resolved_commit_hash,
             primary_question_id=primary_question_id,
             question_links=question_links,
+            commit_manifest=resolved_manifest,
             status=status,
             created_by=created_by,
         )
+        if status == DatasetStatus.COMMITTED:
+            _ensure_primary_question_active(primary_question)
         self._store.datasets[dataset.dataset_id] = dataset
         return dataset
 
@@ -245,18 +260,20 @@ class LabTrackerAPI:
         self,
         dataset_id: UUID,
         *,
-        commit_hash: str | None = None,
         status: DatasetStatus | None = None,
         question_links: Iterable[QuestionLink] | None = None,
+        commit_manifest: DatasetCommitManifestInput | DatasetCommitManifest | None = None,
+        commit_hash: str | None = None,
         actor: AuthContext | None = None,
     ) -> Dataset:
         require_role(actor, WRITE_ROLES)
         dataset = self.get_dataset(dataset_id)
-        if commit_hash is not None:
-            _ensure_non_empty(commit_hash, "commit_hash")
-            dataset.commit_hash = commit_hash.strip()
-        if status is not None:
-            dataset.status = status
+        was_committed = dataset.status == DatasetStatus.COMMITTED
+        if was_committed:
+            if commit_hash is not None or question_links is not None or commit_manifest is not None:
+                raise ValidationError("Committed datasets are immutable.")
+            if status == DatasetStatus.STAGED:
+                raise ValidationError("Committed datasets cannot return to staged.")
         if question_links is not None:
             links = list(question_links)
             primary_links = [link for link in links if link.role == QuestionLinkRole.PRIMARY]
@@ -272,6 +289,24 @@ class LabTrackerAPI:
                     raise ValidationError("Question links must belong to the same project.")
             dataset.question_links = links
             dataset.primary_question_id = primary_links[0].question_id
+        if commit_manifest is not None or question_links is not None:
+            base_manifest = commit_manifest or _manifest_input_from_commit(dataset.commit_manifest)
+            resolved_manifest = _build_commit_manifest(
+                base_manifest,
+                dataset.question_links,
+            )
+            self._ensure_source_session_valid(resolved_manifest.source_session_id, dataset.project_id)
+            resolved_commit_hash = _compute_commit_hash(resolved_manifest)
+            _validate_commit_hash(commit_hash, resolved_commit_hash)
+            dataset.commit_manifest = resolved_manifest
+            dataset.commit_hash = resolved_commit_hash
+        else:
+            _validate_commit_hash(commit_hash, _compute_commit_hash(dataset.commit_manifest))
+        if status is not None:
+            if status == DatasetStatus.COMMITTED and dataset.status != DatasetStatus.COMMITTED:
+                primary_question = self.get_question(dataset.primary_question_id)
+                _ensure_primary_question_active(primary_question)
+            dataset.status = status
         dataset.updated_at = utc_now()
         return dataset
 
@@ -527,6 +562,32 @@ class LabTrackerAPI:
         del self._store.sessions[session_id]
         return session
 
+    def promote_operational_session(
+        self,
+        session_id: UUID,
+        primary_question_id: UUID,
+        *,
+        secondary_question_ids: Iterable[UUID] | None = None,
+        status: DatasetStatus = DatasetStatus.COMMITTED,
+        commit_manifest: DatasetCommitManifestInput | DatasetCommitManifest | None = None,
+        actor: AuthContext | None = None,
+        created_by: str | None = None,
+    ) -> Dataset:
+        require_role(actor, WRITE_ROLES)
+        session = self.get_session(session_id)
+        if session.session_type != SessionType.OPERATIONAL:
+            raise ValidationError("Only operational sessions can be promoted to datasets.")
+        manifest_with_session = _manifest_input_with_source(commit_manifest, session.session_id)
+        return self.create_dataset(
+            project_id=session.project_id,
+            primary_question_id=primary_question_id,
+            secondary_question_ids=secondary_question_ids,
+            status=status,
+            commit_manifest=manifest_with_session,
+            actor=actor,
+            created_by=created_by,
+        )
+
     def create_analysis(
         self,
         project_id: UUID,
@@ -594,6 +655,15 @@ class LabTrackerAPI:
         del self._store.analyses[analysis_id]
         return analysis
 
+    def _ensure_source_session_valid(self, source_session_id: UUID | None, project_id: UUID) -> None:
+        if source_session_id is None:
+            return
+        session = self.get_session(source_session_id)
+        if session.project_id != project_id:
+            raise ValidationError("Source session must belong to the same project.")
+        if session.session_type != SessionType.OPERATIONAL:
+            raise ValidationError("Only operational sessions can be promoted to datasets.")
+
     def _ensure_target_exists(self, target: EntityRef, project_id: UUID) -> None:
         entity_map = {
             EntityType.PROJECT: self._store.projects,
@@ -636,6 +706,154 @@ def _unique_ids(values: Iterable[UUID] | None) -> list[UUID]:
         seen.add(value)
         unique.append(value)
     return unique
+
+
+def _ensure_primary_question_active(question: Question) -> None:
+    if question.status != QuestionStatus.ACTIVE:
+        raise ValidationError("Primary question must be active to commit a dataset.")
+
+
+def _unique_strings(values: Iterable[str] | None, field_name: str) -> list[str]:
+    if not values:
+        return []
+    seen: set[str] = set()
+    unique: list[str] = []
+    for value in values:
+        _ensure_non_empty(value, field_name)
+        cleaned = value.strip()
+        if cleaned in seen:
+            raise ValidationError(f"Duplicate {field_name}.")
+        seen.add(cleaned)
+        unique.append(cleaned)
+    return unique
+
+
+def _normalize_dataset_files(files: Iterable[DatasetFile]) -> list[DatasetFile]:
+    normalized: list[DatasetFile] = []
+    seen: set[str] = set()
+    for file in files:
+        _ensure_non_empty(file.path, "file.path")
+        _ensure_non_empty(file.checksum, "file.checksum")
+        path = file.path.strip()
+        checksum = file.checksum.strip()
+        if path in seen:
+            raise ValidationError("Duplicate file path in commit manifest.")
+        seen.add(path)
+        normalized.append(DatasetFile(path=path, checksum=checksum))
+    return normalized
+
+
+def _normalize_metadata(metadata: dict[str, str] | None) -> dict[str, str]:
+    if not metadata:
+        return {}
+    cleaned: dict[str, str] = {}
+    for key, value in metadata.items():
+        _ensure_non_empty(key, "metadata key")
+        cleaned_key = key.strip()
+        cleaned_value = value.strip() if isinstance(value, str) else str(value)
+        cleaned[cleaned_key] = cleaned_value
+    return cleaned
+
+
+def _manifest_input_from_commit(manifest: DatasetCommitManifest) -> DatasetCommitManifestInput:
+    return DatasetCommitManifestInput(
+        files=list(manifest.files),
+        metadata=dict(manifest.metadata),
+        note_ids=list(manifest.note_ids),
+        extraction_provenance=list(manifest.extraction_provenance),
+        source_session_id=manifest.source_session_id,
+    )
+
+
+def _manifest_input_with_source(
+    manifest: DatasetCommitManifestInput | DatasetCommitManifest | None,
+    source_session_id: UUID,
+) -> DatasetCommitManifestInput:
+    if isinstance(manifest, DatasetCommitManifest):
+        manifest_input = _manifest_input_from_commit(manifest)
+    else:
+        manifest_input = manifest
+    if manifest_input is None:
+        return DatasetCommitManifestInput(source_session_id=source_session_id)
+    if (
+        manifest_input.source_session_id is not None
+        and manifest_input.source_session_id != source_session_id
+    ):
+        raise ValidationError("commit_manifest source_session_id does not match session.")
+    return DatasetCommitManifestInput(
+        files=manifest_input.files,
+        metadata=manifest_input.metadata,
+        note_ids=manifest_input.note_ids,
+        extraction_provenance=manifest_input.extraction_provenance,
+        source_session_id=source_session_id,
+    )
+
+
+def _build_commit_manifest(
+    manifest: DatasetCommitManifestInput | DatasetCommitManifest | None,
+    question_links: list[QuestionLink],
+) -> DatasetCommitManifest:
+    if isinstance(manifest, DatasetCommitManifest):
+        manifest_input = _manifest_input_from_commit(manifest)
+    else:
+        manifest_input = manifest or DatasetCommitManifestInput()
+    return DatasetCommitManifest(
+        files=_normalize_dataset_files(manifest_input.files),
+        metadata=_normalize_metadata(manifest_input.metadata),
+        note_ids=_unique_ids(manifest_input.note_ids),
+        extraction_provenance=_unique_strings(
+            manifest_input.extraction_provenance,
+            "extraction_provenance",
+        ),
+        question_links=list(question_links),
+        source_session_id=manifest_input.source_session_id,
+    )
+
+
+def _validate_commit_hash(provided: str | None, expected: str) -> None:
+    if provided is None:
+        return
+    _ensure_non_empty(provided, "commit_hash")
+    if provided.strip() != expected:
+        raise ValidationError("commit_hash must match content-addressed manifest hash.")
+
+
+_ROLE_ORDER = {QuestionLinkRole.PRIMARY.value: 0, QuestionLinkRole.SECONDARY.value: 1}
+
+
+def _manifest_payload(manifest: DatasetCommitManifest) -> dict[str, object]:
+    files = sorted(
+        ({"path": file.path, "checksum": file.checksum} for file in manifest.files),
+        key=lambda item: (item["path"], item["checksum"]),
+    )
+    links = sorted(
+        (
+            {
+                "question_id": str(link.question_id),
+                "role": link.role.value,
+                "outcome_status": link.outcome_status.value,
+            }
+            for link in manifest.question_links
+        ),
+        key=lambda item: (_ROLE_ORDER.get(item["role"], 99), item["question_id"]),
+    )
+    note_ids = sorted(str(note_id) for note_id in manifest.note_ids)
+    extraction_provenance = sorted(manifest.extraction_provenance)
+    metadata = {key: manifest.metadata[key] for key in sorted(manifest.metadata)}
+    return {
+        "files": files,
+        "metadata": metadata,
+        "question_links": links,
+        "note_ids": note_ids,
+        "extraction_provenance": extraction_provenance,
+        "source_session_id": str(manifest.source_session_id) if manifest.source_session_id else None,
+    }
+
+
+def _compute_commit_hash(manifest: DatasetCommitManifest) -> str:
+    payload = _manifest_payload(manifest)
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
 
 def _build_extracted_entity(label: str, confidence: float, provenance: str) -> ExtractedEntity:

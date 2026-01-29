@@ -6,6 +6,9 @@ from lab_tracker.api import LabTrackerAPI
 from lab_tracker.auth import AuthContext, AuthService, Role
 from lab_tracker.errors import AuthError, ValidationError
 from lab_tracker.models import (
+    DatasetCommitManifestInput,
+    DatasetFile,
+    DatasetStatus,
     QuestionLinkRole,
     QuestionSource,
     QuestionStatus,
@@ -31,12 +34,13 @@ def test_project_question_dataset_flow():
     )
     dataset = api.create_dataset(
         project_id=project.project_id,
-        commit_hash="abc123",
         primary_question_id=question.question_id,
         actor=actor,
     )
     assert dataset.primary_question_id == question.question_id
     assert any(link.role == QuestionLinkRole.PRIMARY for link in dataset.question_links)
+    assert dataset.commit_hash
+    assert dataset.commit_manifest.question_links == dataset.question_links
 
 
 def test_dataset_requires_primary_question():
@@ -46,10 +50,146 @@ def test_dataset_requires_primary_question():
     with pytest.raises(ValidationError):
         api.create_dataset(
             project_id=project.project_id,
-            commit_hash="abc123",
             primary_question_id=None,  # type: ignore[arg-type]
             actor=actor,
         )
+
+
+def test_commit_hash_is_content_addressed():
+    api = LabTrackerAPI()
+    actor = _actor()
+    project = api.create_project("Neuro Project", actor=actor)
+    question = api.create_question(
+        project_id=project.project_id,
+        text="What is the baseline distribution?",
+        question_type=QuestionType.DESCRIPTIVE,
+        actor=actor,
+    )
+    manifest = DatasetCommitManifestInput(
+        files=[DatasetFile(path="data.csv", checksum="abc123")],
+        metadata={"run": "1"},
+    )
+    dataset = api.create_dataset(
+        project_id=project.project_id,
+        primary_question_id=question.question_id,
+        commit_manifest=manifest,
+        actor=actor,
+    )
+    original_hash = dataset.commit_hash
+    dataset_clone = api.create_dataset(
+        project_id=project.project_id,
+        primary_question_id=question.question_id,
+        commit_manifest=manifest,
+        actor=actor,
+    )
+    assert dataset_clone.commit_hash == original_hash
+    updated_manifest = DatasetCommitManifestInput(
+        files=[
+            DatasetFile(path="data.csv", checksum="abc123"),
+            DatasetFile(path="meta.json", checksum="def456"),
+        ],
+        metadata={"run": "1"},
+    )
+    updated = api.update_dataset(
+        dataset.dataset_id,
+        commit_manifest=updated_manifest,
+        actor=actor,
+    )
+    assert updated.commit_hash != original_hash
+
+
+def test_dataset_commit_requires_active_question():
+    api = LabTrackerAPI()
+    actor = _actor()
+    project = api.create_project("Neuro Project", actor=actor)
+    question = api.create_question(
+        project_id=project.project_id,
+        text="Is the signal stable?",
+        question_type=QuestionType.DESCRIPTIVE,
+        actor=actor,
+    )
+    dataset = api.create_dataset(
+        project_id=project.project_id,
+        primary_question_id=question.question_id,
+        actor=actor,
+    )
+    with pytest.raises(ValidationError):
+        api.update_dataset(dataset.dataset_id, status=DatasetStatus.COMMITTED, actor=actor)
+    api.update_question(question.question_id, status=QuestionStatus.ACTIVE, actor=actor)
+    committed = api.update_dataset(dataset.dataset_id, status=DatasetStatus.COMMITTED, actor=actor)
+    assert committed.status == DatasetStatus.COMMITTED
+
+
+def test_committed_dataset_is_immutable():
+    api = LabTrackerAPI()
+    actor = _actor()
+    project = api.create_project("Neuro Project", actor=actor)
+    question = api.create_question(
+        project_id=project.project_id,
+        text="Does activity drift?",
+        question_type=QuestionType.DESCRIPTIVE,
+        status=QuestionStatus.ACTIVE,
+        actor=actor,
+    )
+    manifest = DatasetCommitManifestInput(
+        files=[DatasetFile(path="data.csv", checksum="abc123")]
+    )
+    dataset = api.create_dataset(
+        project_id=project.project_id,
+        primary_question_id=question.question_id,
+        commit_manifest=manifest,
+        actor=actor,
+    )
+    api.update_dataset(dataset.dataset_id, status=DatasetStatus.COMMITTED, actor=actor)
+    with pytest.raises(ValidationError):
+        api.update_dataset(
+            dataset.dataset_id,
+            commit_manifest=DatasetCommitManifestInput(
+                files=[DatasetFile(path="data.csv", checksum="abc123")],
+                metadata={"extra": "1"},
+            ),
+            actor=actor,
+        )
+    with pytest.raises(ValidationError):
+        api.update_dataset(
+            dataset.dataset_id,
+            question_links=dataset.question_links,
+            actor=actor,
+        )
+    with pytest.raises(ValidationError):
+        api.update_dataset(dataset.dataset_id, commit_hash="deadbeef", actor=actor)
+    archived = api.update_dataset(dataset.dataset_id, status=DatasetStatus.ARCHIVED, actor=actor)
+    assert archived.status == DatasetStatus.ARCHIVED
+
+
+def test_promote_operational_session_to_dataset():
+    api = LabTrackerAPI()
+    actor = _actor()
+    project = api.create_project("Neuro Project", actor=actor)
+    question = api.create_question(
+        project_id=project.project_id,
+        text="Did the rig pass QA?",
+        question_type=QuestionType.DESCRIPTIVE,
+        status=QuestionStatus.ACTIVE,
+        actor=actor,
+    )
+    session = api.create_session(
+        project_id=project.project_id,
+        session_type=SessionType.OPERATIONAL,
+        actor=actor,
+    )
+    manifest = DatasetCommitManifestInput(
+        files=[DatasetFile(path="rig.log", checksum="qa123")]
+    )
+    dataset = api.promote_operational_session(
+        session.session_id,
+        primary_question_id=question.question_id,
+        commit_manifest=manifest,
+        actor=actor,
+    )
+    assert dataset.commit_manifest.source_session_id == session.session_id
+    assert dataset.status == DatasetStatus.COMMITTED
+    assert dataset.project_id == project.project_id
 
 
 def test_auth_service_register_and_authenticate():
