@@ -5,7 +5,7 @@ import pytest
 from lab_tracker.api import LabTrackerAPI
 from lab_tracker.auth import AuthContext, AuthService, Role
 from lab_tracker.errors import AuthError, ValidationError
-from lab_tracker.models import QuestionLinkRole, QuestionType, SessionType
+from lab_tracker.models import QuestionLinkRole, QuestionSource, QuestionStatus, QuestionType, SessionType
 
 
 def _actor(role: Role = Role.ADMIN) -> AuthContext:
@@ -69,3 +69,31 @@ def test_scientific_session_requires_question():
             session_type=SessionType.SCIENTIFIC,
             actor=actor,
         )
+
+
+def test_extract_questions_from_note_stages_questions():
+    api = LabTrackerAPI()
+    actor = _actor()
+    project = api.create_project("Neuro Project", actor=actor)
+    note = api.create_note(
+        project_id=project.project_id,
+        raw_content=(
+            "Q: Does PV inhibition broaden tuning\n"
+            "- Can we see layer-specific effects?\n"
+            "Question: What is the baseline distribution\n"
+            "Notes: check controls"
+        ),
+        actor=actor,
+    )
+
+    questions = api.extract_questions_from_note(note.note_id, actor=actor)
+
+    assert {question.text for question in questions} == {
+        "Does PV inhibition broaden tuning",
+        "Can we see layer-specific effects?",
+        "What is the baseline distribution",
+    }
+    assert all(question.status == QuestionStatus.STAGED for question in questions)
+    assert all(question.created_from == QuestionSource.API for question in questions)
+    assert all(question.created_by and str(note.note_id) in question.created_by for question in questions)
+    assert api.extract_questions_from_note(note.note_id, actor=actor) == []

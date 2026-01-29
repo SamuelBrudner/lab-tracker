@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from datetime import datetime
 from typing import Iterable
 from uuid import UUID, uuid4
@@ -349,6 +350,42 @@ class LabTrackerAPI:
         del self._store.notes[note_id]
         return note
 
+    def extract_questions_from_note(
+        self,
+        note_id: UUID,
+        *,
+        question_type: QuestionType = QuestionType.OTHER,
+        created_from: QuestionSource = QuestionSource.API,
+        provenance: str | None = None,
+        actor: AuthContext | None = None,
+    ) -> list[Question]:
+        """Extract candidate questions from a note and stage them."""
+        require_role(actor, WRITE_ROLES)
+        note = self.get_note(note_id)
+        text = _note_text_for_extraction(note)
+        candidates = _extract_question_candidates(text)
+        if not candidates:
+            return []
+        existing = {question.text.casefold() for question in self.list_questions(project_id=note.project_id)}
+        staged_questions: list[Question] = []
+        provenance_tag = provenance or _build_note_provenance(note.note_id)
+        for candidate in candidates:
+            key = candidate.casefold()
+            if key in existing:
+                continue
+            question = self.create_question(
+                project_id=note.project_id,
+                text=candidate,
+                question_type=question_type,
+                status=QuestionStatus.STAGED,
+                created_from=created_from,
+                actor=actor,
+                created_by=provenance_tag,
+            )
+            staged_questions.append(question)
+            existing.add(key)
+        return staged_questions
+
     def create_session(
         self,
         project_id: UUID,
@@ -530,3 +567,65 @@ def _build_extracted_entity(label: str, confidence: float, provenance: str) -> E
         confidence=confidence,
         provenance=provenance.strip(),
     )
+
+
+_QUESTION_PREFIX_RE = re.compile(r"^\s*(?:q|question)\s*[:\-]\s*(.+)$", re.IGNORECASE)
+_BULLET_PREFIX_RE = re.compile(r"^\s*(?:[-*]|\d+[.)])\s+")
+_QUESTION_SENTENCE_RE = re.compile(r"[^?\n]*\?")
+
+
+def _note_text_for_extraction(note: Note) -> str:
+    if note.transcribed_text:
+        return note.transcribed_text
+    return note.raw_content
+
+
+def _extract_question_candidates(text: str) -> list[str]:
+    if not text:
+        return []
+    candidates: list[str] = []
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        stripped = _BULLET_PREFIX_RE.sub("", stripped).strip()
+        prefix_match = _QUESTION_PREFIX_RE.match(stripped)
+        if prefix_match:
+            candidate = _clean_question_candidate(prefix_match.group(1))
+            if candidate:
+                candidates.append(candidate)
+            continue
+        if "?" in stripped:
+            for match in _QUESTION_SENTENCE_RE.findall(stripped):
+                candidate = _clean_question_candidate(match)
+                if candidate:
+                    candidates.append(candidate)
+    return _dedupe_casefold(candidates)
+
+
+def _clean_question_candidate(candidate: str) -> str | None:
+    cleaned = candidate.strip()
+    if not cleaned:
+        return None
+    if cleaned.endswith(".") and "?" not in cleaned:
+        cleaned = cleaned[:-1].strip()
+    alpha_count = sum(1 for char in cleaned if char.isalpha())
+    if alpha_count < 3:
+        return None
+    return cleaned
+
+
+def _dedupe_casefold(values: Iterable[str]) -> list[str]:
+    seen: set[str] = set()
+    unique: list[str] = []
+    for value in values:
+        key = value.casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(value)
+    return unique
+
+
+def _build_note_provenance(note_id: UUID) -> str:
+    return f"note:{note_id}|question-extractor:v1"
