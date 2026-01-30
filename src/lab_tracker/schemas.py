@@ -101,6 +101,8 @@ class DatasetFileRead(_BaseReadModel):
 class DatasetCommitManifestRead(_BaseReadModel):
     files: list[DatasetFileRead]
     metadata: dict[str, str]
+    nwb_metadata: dict[str, str]
+    bids_metadata: dict[str, str]
     note_ids: list[UUID]
     extraction_provenance: list[str]
     question_links: list[QuestionLinkRead]
@@ -262,6 +264,8 @@ class DatasetFileInput(BaseModel):
 class DatasetCommitManifestInput(BaseModel):
     files: list[DatasetFileInput] = Field(default_factory=list)
     metadata: dict[str, str] = Field(default_factory=dict)
+    nwb_metadata: dict[str, str] = Field(default_factory=dict)
+    bids_metadata: dict[str, str] = Field(default_factory=dict)
     note_ids: list[UUID] = Field(default_factory=list)
     extraction_provenance: list[str] = Field(default_factory=list)
     source_session_id: UUID | None = None

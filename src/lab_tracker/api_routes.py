@@ -1055,6 +1055,8 @@ def _manifest_from_payload(
     return DatasetCommitManifestInputModel(
         files=files,
         metadata=payload.metadata,
+        nwb_metadata=payload.nwb_metadata,
+        bids_metadata=payload.bids_metadata,
         note_ids=payload.note_ids,
         extraction_provenance=payload.extraction_provenance,
         source_session_id=payload.source_session_id,

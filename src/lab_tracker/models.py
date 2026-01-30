@@ -171,6 +171,8 @@ class DatasetFile:
 class DatasetCommitManifestInput:
     files: list[DatasetFile] = field(default_factory=list)
     metadata: dict[str, str] = field(default_factory=dict)
+    nwb_metadata: dict[str, str] = field(default_factory=dict)
+    bids_metadata: dict[str, str] = field(default_factory=dict)
     note_ids: list[UUID] = field(default_factory=list)
     extraction_provenance: list[str] = field(default_factory=list)
     source_session_id: UUID | None = None
@@ -180,6 +182,8 @@ class DatasetCommitManifestInput:
 class DatasetCommitManifest:
     files: list[DatasetFile] = field(default_factory=list)
     metadata: dict[str, str] = field(default_factory=dict)
+    nwb_metadata: dict[str, str] = field(default_factory=dict)
+    bids_metadata: dict[str, str] = field(default_factory=dict)
     note_ids: list[UUID] = field(default_factory=list)
     extraction_provenance: list[str] = field(default_factory=list)
     question_links: list[QuestionLink] = field(default_factory=list)

@@ -425,7 +425,7 @@ class LabTrackerAPI:
         resolved_targets = list(targets or [])
         for target in resolved_targets:
             self._ensure_target_exists(target, project_id)
-        resolved_metadata = _normalize_metadata(metadata)
+        resolved_metadata = _normalize_note_metadata(metadata)
         resolved_entities = [
             _build_extracted_entity(label, confidence, provenance)
             for label, confidence, provenance in (extracted_entities or [])
@@ -517,7 +517,7 @@ class LabTrackerAPI:
                 self._ensure_target_exists(target, note.project_id)
             note.targets = resolved_targets
         if metadata is not None:
-            note.metadata = _normalize_metadata(metadata)
+            note.metadata = _normalize_note_metadata(metadata)
         if status is not None:
             note.status = status
         note.updated_at = utc_now()
@@ -1238,17 +1238,16 @@ def _ensure_non_empty(value: str, field_name: str) -> None:
         raise ValidationError(f"{field_name} must not be empty.")
 
 
-def _normalize_metadata(metadata: dict[str, str] | None) -> dict[str, str]:
+def _normalize_note_metadata(metadata: dict[str, str] | None) -> dict[str, str]:
     if not metadata:
         return {}
-    normalized: dict[str, str] = {}
+    cleaned: dict[str, str] = {}
     for key, value in metadata.items():
-        key_str = str(key).strip()
-        value_str = str(value).strip()
-        if not key_str or not value_str:
-            raise ValidationError("metadata keys and values must not be empty.")
-        normalized[key_str] = value_str
-    return normalized
+        _ensure_non_empty(key, "metadata key")
+        cleaned_key = str(key).strip()
+        cleaned_value = value.strip() if isinstance(value, str) else str(value)
+        cleaned[cleaned_key] = cleaned_value
+    return cleaned
 
 
 def _get_or_raise(store: dict[UUID, object], entity_id: UUID, label: str):
@@ -1460,28 +1459,132 @@ def _merge_acquisition_outputs(
     return DatasetCommitManifestInput(
         files=merged_files,
         metadata=manifest_input.metadata,
+        nwb_metadata=manifest_input.nwb_metadata,
+        bids_metadata=manifest_input.bids_metadata,
         note_ids=manifest_input.note_ids,
         extraction_provenance=manifest_input.extraction_provenance,
         source_session_id=manifest_input.source_session_id,
     )
 
 
-def _normalize_metadata(metadata: dict[str, str] | None) -> dict[str, str]:
+_STANDARD_METADATA_KEY_PATTERN = re.compile(r"[^a-z0-9]+")
+_NWB_METADATA_ALIASES = {
+    "identifier": "identifier",
+    "sessiondescription": "session_description",
+    "session_description": "session_description",
+    "sessionstarttime": "session_start_time",
+    "session_start_time": "session_start_time",
+}
+_BIDS_METADATA_ALIASES = {
+    "name": "name",
+    "datasetname": "name",
+    "bidsversion": "bids_version",
+    "bids_version": "bids_version",
+    "datasettype": "dataset_type",
+    "dataset_type": "dataset_type",
+}
+_NWB_REQUIRED_METADATA_FIELDS = ("identifier", "session_description", "session_start_time")
+_BIDS_REQUIRED_METADATA_FIELDS = ("name", "bids_version")
+
+
+def _normalize_commit_metadata(metadata: dict[str, str] | None) -> dict[str, str]:
     if not metadata:
         return {}
     cleaned: dict[str, str] = {}
     for key, value in metadata.items():
         _ensure_non_empty(key, "metadata key")
-        cleaned_key = key.strip()
+        cleaned_key = str(key).strip()
         cleaned_value = value.strip() if isinstance(value, str) else str(value)
         cleaned[cleaned_key] = cleaned_value
     return cleaned
+
+
+def _canonicalize_standard_metadata_key(key: str) -> str:
+    cleaned = str(key).strip().casefold()
+    cleaned = _STANDARD_METADATA_KEY_PATTERN.sub("_", cleaned)
+    return cleaned.strip("_")
+
+
+def _normalize_standard_metadata(
+    metadata: dict[str, str] | None,
+    aliases: dict[str, str],
+    standard_name: str,
+) -> dict[str, str]:
+    if not metadata:
+        return {}
+    normalized: dict[str, str] = {}
+    for key, value in metadata.items():
+        _ensure_non_empty(key, f"{standard_name} metadata key")
+        canonical = _canonicalize_standard_metadata_key(key)
+        canonical = aliases.get(canonical, canonical)
+        value_str = value.strip() if isinstance(value, str) else str(value)
+        if canonical in normalized and normalized[canonical] != value_str:
+            raise ValidationError(
+                f"Conflicting {standard_name} metadata values for {canonical}."
+            )
+        normalized[canonical] = value_str
+    return normalized
+
+
+def _merge_standard_metadata(
+    primary: dict[str, str],
+    secondary: dict[str, str],
+    standard_name: str,
+) -> dict[str, str]:
+    merged = dict(primary)
+    for key, value in secondary.items():
+        if key in merged and merged[key] != value:
+            raise ValidationError(
+                f"Conflicting {standard_name} metadata values for {key}."
+            )
+        merged.setdefault(key, value)
+    return merged
+
+
+def _split_prefixed_metadata(
+    metadata: dict[str, str],
+    prefix: str,
+) -> tuple[dict[str, str], dict[str, str]]:
+    extracted: dict[str, str] = {}
+    remaining: dict[str, str] = {}
+    prefix_clean = prefix.casefold()
+    prefix_len = len(prefix)
+    for key, value in metadata.items():
+        key_clean = str(key).strip()
+        key_lower = key_clean.casefold()
+        if (
+            key_lower.startswith(prefix_clean)
+            and len(key_lower) > prefix_len
+            and key_lower[prefix_len] in {".", ":"}
+        ):
+            stripped = key_clean[prefix_len + 1 :].strip()
+            if not stripped:
+                raise ValidationError(f"{prefix} metadata key must include a field name.")
+            extracted[stripped] = value
+            continue
+        remaining[key_clean] = value
+    return remaining, extracted
+
+
+def _validate_required_metadata(
+    metadata: dict[str, str],
+    required_fields: Iterable[str],
+    standard_name: str,
+) -> None:
+    if not metadata:
+        return
+    missing = [field for field in required_fields if not metadata.get(field)]
+    if missing:
+        missing_str = ", ".join(missing)
+        raise ValidationError(f"{standard_name} metadata requires: {missing_str}.")
 
 
 def _manifest_input_from_commit(manifest: DatasetCommitManifest) -> DatasetCommitManifestInput:
     return DatasetCommitManifestInput(
         files=list(manifest.files),
         metadata=dict(manifest.metadata),
+        nwb_metadata=dict(manifest.nwb_metadata),
+        bids_metadata=dict(manifest.bids_metadata),
         note_ids=list(manifest.note_ids),
         extraction_provenance=list(manifest.extraction_provenance),
         source_session_id=manifest.source_session_id,
@@ -1506,6 +1609,8 @@ def _manifest_input_with_source(
     return DatasetCommitManifestInput(
         files=manifest_input.files,
         metadata=manifest_input.metadata,
+        nwb_metadata=manifest_input.nwb_metadata,
+        bids_metadata=manifest_input.bids_metadata,
         note_ids=manifest_input.note_ids,
         extraction_provenance=manifest_input.extraction_provenance,
         source_session_id=source_session_id,
@@ -1520,9 +1625,38 @@ def _build_commit_manifest(
         manifest_input = _manifest_input_from_commit(manifest)
     else:
         manifest_input = manifest or DatasetCommitManifestInput()
+    base_metadata = _normalize_commit_metadata(manifest_input.metadata)
+    base_metadata, nwb_prefixed = _split_prefixed_metadata(base_metadata, "nwb")
+    base_metadata, bids_prefixed = _split_prefixed_metadata(base_metadata, "bids")
+    nwb_metadata = _normalize_standard_metadata(
+        manifest_input.nwb_metadata,
+        _NWB_METADATA_ALIASES,
+        "NWB",
+    )
+    nwb_prefixed = _normalize_standard_metadata(
+        nwb_prefixed,
+        _NWB_METADATA_ALIASES,
+        "NWB",
+    )
+    nwb_metadata = _merge_standard_metadata(nwb_metadata, nwb_prefixed, "NWB")
+    bids_metadata = _normalize_standard_metadata(
+        manifest_input.bids_metadata,
+        _BIDS_METADATA_ALIASES,
+        "BIDS",
+    )
+    bids_prefixed = _normalize_standard_metadata(
+        bids_prefixed,
+        _BIDS_METADATA_ALIASES,
+        "BIDS",
+    )
+    bids_metadata = _merge_standard_metadata(bids_metadata, bids_prefixed, "BIDS")
+    _validate_required_metadata(nwb_metadata, _NWB_REQUIRED_METADATA_FIELDS, "NWB")
+    _validate_required_metadata(bids_metadata, _BIDS_REQUIRED_METADATA_FIELDS, "BIDS")
     return DatasetCommitManifest(
         files=_normalize_dataset_files(manifest_input.files),
-        metadata=_normalize_metadata(manifest_input.metadata),
+        metadata=base_metadata,
+        nwb_metadata=nwb_metadata,
+        bids_metadata=bids_metadata,
         note_ids=_unique_ids(manifest_input.note_ids),
         extraction_provenance=_unique_strings(
             manifest_input.extraction_provenance,
@@ -1563,9 +1697,13 @@ def _manifest_payload(manifest: DatasetCommitManifest) -> dict[str, object]:
     note_ids = sorted(str(note_id) for note_id in manifest.note_ids)
     extraction_provenance = sorted(manifest.extraction_provenance)
     metadata = {key: manifest.metadata[key] for key in sorted(manifest.metadata)}
+    nwb_metadata = {key: manifest.nwb_metadata[key] for key in sorted(manifest.nwb_metadata)}
+    bids_metadata = {key: manifest.bids_metadata[key] for key in sorted(manifest.bids_metadata)}
     return {
         "files": files,
         "metadata": metadata,
+        "nwb_metadata": nwb_metadata,
+        "bids_metadata": bids_metadata,
         "question_links": links,
         "note_ids": note_ids,
         "extraction_provenance": extraction_provenance,
