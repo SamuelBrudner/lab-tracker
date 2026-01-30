@@ -28,6 +28,7 @@ from lab_tracker.models import (
     ExtractedEntity,
     EntityType,
     Note,
+    NoteRawAsset,
     NoteStatus,
     Project,
     ProjectStatus,
@@ -45,6 +46,7 @@ from lab_tracker.models import (
     VisualizationInput,
     utc_now,
 )
+from lab_tracker.note_storage import LocalNoteStorage
 
 WRITE_ROLES = {Role.ADMIN, Role.EDITOR}
 
@@ -62,8 +64,14 @@ class InMemoryStore:
 
 
 class LabTrackerAPI:
-    def __init__(self, store: InMemoryStore | None = None) -> None:
+    def __init__(
+        self,
+        store: InMemoryStore | None = None,
+        *,
+        raw_storage: LocalNoteStorage | None = None,
+    ) -> None:
         self._store = store or InMemoryStore()
+        self._raw_storage = raw_storage
 
     def create_project(
         self,
@@ -394,22 +402,27 @@ class LabTrackerAPI:
     def create_note(
         self,
         project_id: UUID,
-        raw_content: str,
+        raw_content: str | None = None,
         *,
+        raw_asset: NoteRawAsset | None = None,
         transcribed_text: str | None = None,
         extracted_entities: Iterable[tuple[str, float, str]] | None = None,
         tag_suggestions: Iterable[EntityTagSuggestion] | None = None,
         targets: Iterable[EntityRef] | None = None,
+        metadata: dict[str, str] | None = None,
         status: NoteStatus = NoteStatus.STAGED,
         actor: AuthContext | None = None,
         created_by: str | None = None,
     ) -> Note:
         require_role(actor, WRITE_ROLES)
         self.get_project(project_id)
-        _ensure_non_empty(raw_content, "raw_content")
+        raw_text = raw_content.strip() if raw_content else ""
+        if not raw_text and raw_asset is None:
+            raise ValidationError("raw_content or raw_asset must be provided.")
         resolved_targets = list(targets or [])
         for target in resolved_targets:
             self._ensure_target_exists(target, project_id)
+        resolved_metadata = _normalize_metadata(metadata)
         resolved_entities = [
             _build_extracted_entity(label, confidence, provenance)
             for label, confidence, provenance in (extracted_entities or [])
@@ -418,16 +431,54 @@ class LabTrackerAPI:
         note = Note(
             note_id=uuid4(),
             project_id=project_id,
-            raw_content=raw_content.strip(),
+            raw_content=raw_text,
+            raw_asset=raw_asset,
             transcribed_text=transcribed_text.strip() if transcribed_text else None,
             extracted_entities=resolved_entities,
             tag_suggestions=resolved_tag_suggestions,
             targets=resolved_targets,
+            metadata=resolved_metadata,
             status=status,
             created_by=created_by,
         )
         self._store.notes[note.note_id] = note
         return note
+
+    def upload_note_raw(
+        self,
+        project_id: UUID,
+        content: bytes,
+        *,
+        filename: str,
+        content_type: str,
+        transcribed_text: str | None = None,
+        extracted_entities: Iterable[tuple[str, float, str]] | None = None,
+        targets: Iterable[EntityRef] | None = None,
+        metadata: dict[str, str] | None = None,
+        status: NoteStatus = NoteStatus.STAGED,
+        actor: AuthContext | None = None,
+        created_by: str | None = None,
+    ) -> Note:
+        require_role(actor, WRITE_ROLES)
+        if self._raw_storage is None:
+            raise ValidationError("Raw storage backend is not configured.")
+        asset = self._raw_storage.store(
+            content,
+            filename=filename,
+            content_type=content_type,
+        )
+        return self.create_note(
+            project_id=project_id,
+            raw_content=None,
+            raw_asset=asset,
+            transcribed_text=transcribed_text,
+            extracted_entities=extracted_entities,
+            targets=targets,
+            metadata=metadata,
+            status=status,
+            actor=actor,
+            created_by=created_by,
+        )
 
     def get_note(self, note_id: UUID) -> Note:
         return _get_or_raise(self._store.notes, note_id, "Note")
@@ -443,6 +494,7 @@ class LabTrackerAPI:
         *,
         transcribed_text: str | None = None,
         targets: Iterable[EntityRef] | None = None,
+        metadata: dict[str, str] | None = None,
         status: NoteStatus | None = None,
         actor: AuthContext | None = None,
     ) -> Note:
@@ -455,10 +507,21 @@ class LabTrackerAPI:
             for target in resolved_targets:
                 self._ensure_target_exists(target, note.project_id)
             note.targets = resolved_targets
+        if metadata is not None:
+            note.metadata = _normalize_metadata(metadata)
         if status is not None:
             note.status = status
         note.updated_at = utc_now()
         return note
+
+    def download_note_raw(self, note_id: UUID) -> tuple[NoteRawAsset, bytes]:
+        note = self.get_note(note_id)
+        if note.raw_asset is None:
+            raise NotFoundError("Note does not have raw content.")
+        if self._raw_storage is None:
+            raise ValidationError("Raw storage backend is not configured.")
+        content = self._raw_storage.read(note.raw_asset.storage_id)
+        return note.raw_asset, content
 
     def suggest_entity_tags(
         self,
@@ -1093,6 +1156,19 @@ def _ensure_non_empty(value: str, field_name: str) -> None:
         raise ValidationError(f"{field_name} must not be empty.")
 
 
+def _normalize_metadata(metadata: dict[str, str] | None) -> dict[str, str]:
+    if not metadata:
+        return {}
+    normalized: dict[str, str] = {}
+    for key, value in metadata.items():
+        key_str = str(key).strip()
+        value_str = str(value).strip()
+        if not key_str or not value_str:
+            raise ValidationError("metadata keys and values must not be empty.")
+        normalized[key_str] = value_str
+    return normalized
+
+
 def _get_or_raise(store: dict[UUID, object], entity_id: UUID, label: str):
     try:
         return store[entity_id]
@@ -1500,6 +1576,8 @@ _QUESTION_SENTENCE_RE = re.compile(r"[^?\n]*\?")
 def _note_text_for_extraction(note: Note) -> str:
     if note.transcribed_text:
         return note.transcribed_text
+    if note.raw_asset is not None:
+        return ""
     return note.raw_content
 
 

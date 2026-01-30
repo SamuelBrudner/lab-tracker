@@ -107,6 +107,23 @@ class DatasetCommitManifestRead(_BaseReadModel):
     source_session_id: UUID | None = None
 
 
+class NoteRawAssetRead(_BaseReadModel):
+    storage_id: UUID
+    filename: str
+    content_type: str
+    size_bytes: int
+    checksum: str
+
+
+class NoteRawDownloadRead(BaseModel):
+    storage_id: UUID
+    filename: str
+    content_type: str
+    size_bytes: int
+    checksum: str
+    content_base64: str
+
+
 class ProjectRead(_BaseReadModel):
     project_id: UUID
     name: str
@@ -148,10 +165,12 @@ class NoteRead(_BaseReadModel):
     note_id: UUID
     project_id: UUID
     raw_content: str
+    raw_asset: NoteRawAssetRead | None = None
     transcribed_text: str | None = None
     extracted_entities: list[ExtractedEntityRead]
     tag_suggestions: list[EntityTagSuggestionRead]
     targets: list[EntityRefRead]
+    metadata: dict[str, str]
     status: NoteStatus
     created_at: datetime
     created_by: str | None = None
@@ -292,6 +311,20 @@ class NoteCreate(BaseModel):
     transcribed_text: str | None = None
     extracted_entities: list[ExtractedEntityInput] | None = None
     targets: list[EntityRefInput] | None = None
+    metadata: dict[str, str] | None = None
+    status: NoteStatus | None = None
+    created_by: str | None = None
+
+
+class NoteUpload(BaseModel):
+    project_id: UUID
+    filename: str = Field(..., min_length=1)
+    content_type: str = Field(..., min_length=1)
+    content_base64: str = Field(..., min_length=1)
+    transcribed_text: str | None = None
+    extracted_entities: list[ExtractedEntityInput] | None = None
+    targets: list[EntityRefInput] | None = None
+    metadata: dict[str, str] | None = None
     status: NoteStatus | None = None
     created_by: str | None = None
 
@@ -299,6 +332,7 @@ class NoteCreate(BaseModel):
 class NoteUpdate(BaseModel):
     transcribed_text: str | None = None
     targets: list[EntityRefInput] | None = None
+    metadata: dict[str, str] | None = None
     status: NoteStatus | None = None
 
 

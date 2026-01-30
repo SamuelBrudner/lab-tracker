@@ -160,6 +160,15 @@ class DatasetCommitManifest:
     source_session_id: UUID | None = None
 
 
+@dataclass(frozen=True)
+class NoteRawAsset:
+    storage_id: UUID
+    filename: str
+    content_type: str
+    size_bytes: int
+    checksum: str
+
+
 @dataclass
 class Project:
     project_id: UUID
@@ -205,10 +214,12 @@ class Note:
     note_id: UUID
     project_id: UUID
     raw_content: str
+    raw_asset: NoteRawAsset | None = None
     transcribed_text: str | None = None
     extracted_entities: list[ExtractedEntity] = field(default_factory=list)
     tag_suggestions: list[EntityTagSuggestion] = field(default_factory=list)
     targets: list[EntityRef] = field(default_factory=list)
+    metadata: dict[str, str] = field(default_factory=dict)
     status: NoteStatus = NoteStatus.STAGED
     created_at: datetime = field(default_factory=utc_now)
     created_by: str | None = None

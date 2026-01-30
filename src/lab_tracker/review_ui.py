@@ -80,6 +80,10 @@ def render_extraction_review(note: Note) -> str:
 def _select_text(note: Note) -> tuple[str, str, str]:
     if note.transcribed_text:
         return note.transcribed_text, "OCR text", "Derived from transcription pipeline."
+    if note.raw_asset is not None:
+        description = f"Binary upload: {note.raw_asset.filename}"
+        hint = f"Stored file ({note.raw_asset.content_type}); OCR pending."
+        return description, "Raw upload", hint
     if note.raw_content:
         return note.raw_content, "Raw content", "OCR pending; showing raw content."
     return "", "OCR text", "No OCR text available."

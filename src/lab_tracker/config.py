@@ -10,6 +10,7 @@ class Settings(BaseSettings):
     environment: str = "local"
     log_level: str = "INFO"
     database_url: str = "sqlite+pysqlite:///./lab_tracker.db"
+    note_storage_path: str = "./note_storage"
 
     model_config = SettingsConfigDict(
         env_prefix="LAB_TRACKER_",

@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
+import base64
+import binascii
 from typing import Any
 from uuid import UUID
 
 try:  # pragma: no cover - exercised when Starlette/FastAPI are available.
     from starlette import status as http_status
     from starlette.requests import Request
-    from starlette.responses import JSONResponse
+    from starlette.responses import JSONResponse, Response
 except ModuleNotFoundError:  # pragma: no cover - lightweight fallback.
 
     class Request:  # type: ignore[override]
@@ -32,6 +34,7 @@ except ModuleNotFoundError:  # pragma: no cover - lightweight fallback.
         HTTP_422_UNPROCESSABLE_ENTITY = 422
 
     http_status = _HTTPStatus()
+    Response = None  # type: ignore[assignment]
 
 from lab_tracker.api import LabTrackerAPI
 from lab_tracker.auth import AuthContext, Role
@@ -78,7 +81,9 @@ from lab_tracker.schemas import (
     ExtractedEntityInput,
     ListEnvelope,
     NoteCreate,
+    NoteRawDownloadRead,
     NoteRead,
+    NoteUpload,
     NoteUpdate,
     PaginationMeta,
     ProjectCreate,
@@ -328,6 +333,35 @@ def register_routes(app: Any, api: LabTrackerAPI) -> None:
             transcribed_text=payload.transcribed_text,
             extracted_entities=extracted_entities,
             targets=targets,
+            metadata=payload.metadata,
+            status=payload.status or note_default_status(),
+            actor=actor,
+            created_by=_resolve_created_by(payload.created_by, actor),
+        )
+        return Envelope(data=NoteRead.model_validate(note))
+
+    @app.post(
+        "/notes/upload",
+        response_model=Envelope[NoteRead],
+        status_code=http_status.HTTP_201_CREATED,
+    )
+    def upload_note(payload: NoteUpload, request: Request):
+        actor = _actor_from_request(request)
+        extracted_entities = _entities_from_payload(payload.extracted_entities)
+        targets = _targets_from_payload(payload.targets)
+        try:
+            content = base64.b64decode(payload.content_base64, validate=True)
+        except binascii.Error as exc:
+            raise ValidationError("content_base64 must be valid base64.") from exc
+        note = api.upload_note_raw(
+            project_id=payload.project_id,
+            content=content,
+            filename=payload.filename,
+            content_type=payload.content_type,
+            transcribed_text=payload.transcribed_text,
+            extracted_entities=extracted_entities,
+            targets=targets,
+            metadata=payload.metadata,
             status=payload.status or note_default_status(),
             actor=actor,
             created_by=_resolve_created_by(payload.created_by, actor),
@@ -357,6 +391,27 @@ def register_routes(app: Any, api: LabTrackerAPI) -> None:
         note = api.get_note(note_id)
         return Envelope(data=NoteRead.model_validate(note))
 
+    @app.get("/notes/{note_id}/raw")
+    def download_note_raw(note_id: UUID, request: Request):
+        raw_asset, content = api.download_note_raw(note_id)
+        accept = (request.headers.get("accept") or "").lower()
+        if Response is not None and "application/json" not in accept:
+            headers = {
+                "Content-Disposition": f'attachment; filename=\"{raw_asset.filename}\"',
+                "Content-Length": str(raw_asset.size_bytes),
+            }
+            return Response(content=content, media_type=raw_asset.content_type, headers=headers)
+        encoded = base64.b64encode(content).decode("ascii")
+        payload = NoteRawDownloadRead(
+            storage_id=raw_asset.storage_id,
+            filename=raw_asset.filename,
+            content_type=raw_asset.content_type,
+            size_bytes=raw_asset.size_bytes,
+            checksum=raw_asset.checksum,
+            content_base64=encoded,
+        )
+        return Envelope(data=payload)
+
     @app.patch("/notes/{note_id}", response_model=Envelope[NoteRead])
     def update_note(note_id: UUID, payload: NoteUpdate, request: Request):
         actor = _actor_from_request(request)
@@ -365,6 +420,7 @@ def register_routes(app: Any, api: LabTrackerAPI) -> None:
             note_id,
             transcribed_text=payload.transcribed_text,
             targets=targets,
+            metadata=payload.metadata,
             status=payload.status,
             actor=actor,
         )
