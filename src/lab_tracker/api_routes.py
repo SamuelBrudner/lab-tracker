@@ -558,6 +558,11 @@ def register_routes(app: Any, api: LabTrackerAPI) -> None:
             meta=PaginationMeta(limit=limit, offset=offset, total=total),
         )
 
+    @app.get("/sessions/by-link/{link_code}", response_model=Envelope[SessionRead])
+    def get_session_by_link_code(link_code: str):
+        session = api.get_session_by_link_code(link_code)
+        return Envelope(data=SessionRead.model_validate(session))
+
     @app.get("/sessions/{session_id}", response_model=Envelope[SessionRead])
     def get_session(session_id: UUID):
         session = api.get_session(session_id)

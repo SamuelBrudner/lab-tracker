@@ -192,6 +192,24 @@ def test_promote_operational_session_to_dataset():
     assert dataset.project_id == project.project_id
 
 
+def test_session_link_code_roundtrip():
+    api = LabTrackerAPI()
+    actor = _actor()
+    project = api.create_project("Neuro Project", actor=actor)
+    session = api.create_session(
+        project_id=project.project_id,
+        session_type=SessionType.OPERATIONAL,
+        actor=actor,
+    )
+    assert session.link_code
+    assert session.link_code.isupper()
+    assert len(session.link_code) == 26
+    resolved = api.get_session_by_link_code(session.link_code)
+    assert resolved.session_id == session.session_id
+    with pytest.raises(ValidationError):
+        api.get_session_by_link_code("not-a-link-code")
+
+
 def test_auth_service_register_and_authenticate():
     service = AuthService()
     user = service.register_user("sam", "secret", Role.ADMIN)

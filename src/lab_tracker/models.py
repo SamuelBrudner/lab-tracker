@@ -2,14 +2,40 @@
 
 from __future__ import annotations
 
+import base64
+import binascii
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
+import re
 from uuid import UUID
 
 
 def utc_now() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def normalize_link_code(link_code: str) -> str:
+    cleaned = re.sub(r"[\s-]+", "", link_code or "")
+    return cleaned.upper()
+
+
+def encode_session_link_code(session_id: UUID) -> str:
+    return base64.b32encode(session_id.bytes).decode("ascii").rstrip("=")
+
+
+def decode_session_link_code(link_code: str) -> UUID:
+    normalized = normalize_link_code(link_code)
+    if not normalized:
+        raise ValueError("link_code must not be empty.")
+    padding = "=" * ((8 - len(normalized) % 8) % 8)
+    try:
+        decoded = base64.b32decode(normalized + padding, casefold=True)
+    except binascii.Error as exc:
+        raise ValueError("Invalid link_code characters.") from exc
+    if len(decoded) != 16:
+        raise ValueError("Invalid link_code length.")
+    return UUID(bytes=decoded)
 
 
 class ProjectStatus(str, Enum):
@@ -237,6 +263,10 @@ class Session:
     ended_at: datetime | None = None
     created_by: str | None = None
     updated_at: datetime = field(default_factory=utc_now)
+
+    @property
+    def link_code(self) -> str:
+        return encode_session_link_code(self.session_id)
 
 
 @dataclass

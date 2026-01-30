@@ -18,6 +18,7 @@ from lab_tracker.models import (
     Claim,
     ClaimInput,
     ClaimStatus,
+    decode_session_link_code,
     Dataset,
     DatasetCommitManifest,
     DatasetCommitManifestInput,
@@ -677,6 +678,14 @@ class LabTrackerAPI:
 
     def get_session(self, session_id: UUID) -> Session:
         return _get_or_raise(self._store.sessions, session_id, "Session")
+
+    def get_session_by_link_code(self, link_code: str) -> Session:
+        _ensure_non_empty(link_code, "link_code")
+        try:
+            session_id = decode_session_link_code(link_code)
+        except ValueError as exc:
+            raise ValidationError("Invalid session link code.") from exc
+        return self.get_session(session_id)
 
     def list_sessions(self, *, project_id: UUID | None = None) -> list[Session]:
         if project_id is None:

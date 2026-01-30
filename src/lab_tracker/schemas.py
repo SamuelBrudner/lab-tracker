@@ -179,6 +179,7 @@ class NoteRead(_BaseReadModel):
 
 class SessionRead(_BaseReadModel):
     session_id: UUID
+    link_code: str
     project_id: UUID
     session_type: SessionType
     status: SessionStatus
