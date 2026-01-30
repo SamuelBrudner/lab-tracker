@@ -2,6 +2,7 @@
 
 from lab_tracker.api import InMemoryStore, LabTrackerAPI
 from lab_tracker.auth import AuthContext, AuthService, Role, require_role
+from lab_tracker.acquisition_watcher import AcquisitionOutputWatcher
 from lab_tracker.errors import (
     AuthError,
     ConflictError,
@@ -10,6 +11,7 @@ from lab_tracker.errors import (
     ValidationError,
 )
 from lab_tracker.models import (
+    AcquisitionOutput,
     Analysis,
     AnalysisStatus,
     Claim,
@@ -43,6 +45,8 @@ from lab_tracker.review_ui import render_extraction_review
 __all__ = [
     "Analysis",
     "AnalysisStatus",
+    "AcquisitionOutput",
+    "AcquisitionOutputWatcher",
     "AuthContext",
     "AuthError",
     "AuthService",

@@ -13,6 +13,7 @@ from uuid import UUID, uuid4
 from lab_tracker.auth import AuthContext, Role, require_role
 from lab_tracker.errors import NotFoundError, ValidationError
 from lab_tracker.models import (
+    AcquisitionOutput,
     Analysis,
     AnalysisStatus,
     Claim,
@@ -59,6 +60,7 @@ class InMemoryStore:
         self.datasets: dict[UUID, Dataset] = {}
         self.notes: dict[UUID, Note] = {}
         self.sessions: dict[UUID, Session] = {}
+        self.acquisition_outputs: dict[UUID, AcquisitionOutput] = {}
         self.analyses: dict[UUID, Analysis] = {}
         self.claims: dict[UUID, Claim] = {}
         self.visualizations: dict[UUID, Visualization] = {}
@@ -715,6 +717,69 @@ class LabTrackerAPI:
         del self._store.sessions[session_id]
         return session
 
+    def register_acquisition_output(
+        self,
+        session_id: UUID,
+        file_path: str,
+        checksum: str,
+        *,
+        size_bytes: int | None = None,
+        actor: AuthContext | None = None,
+    ) -> AcquisitionOutput:
+        require_role(actor, WRITE_ROLES)
+        session = self.get_session(session_id)
+        if session.session_type != SessionType.OPERATIONAL:
+            raise ValidationError("Acquisition outputs require an operational session.")
+        _ensure_non_empty(file_path, "file_path")
+        _ensure_non_empty(checksum, "checksum")
+        if size_bytes is not None and size_bytes < 0:
+            raise ValidationError("size_bytes must be 0 or greater.")
+        cleaned_path = file_path.strip()
+        cleaned_checksum = checksum.strip()
+        existing = _find_acquisition_output(self._store.acquisition_outputs, session_id, cleaned_path)
+        if existing is not None:
+            updated = False
+            if existing.checksum != cleaned_checksum:
+                existing.checksum = cleaned_checksum
+                updated = True
+            if size_bytes is not None and existing.size_bytes != size_bytes:
+                existing.size_bytes = size_bytes
+                updated = True
+            if updated:
+                existing.updated_at = utc_now()
+            return existing
+        output = AcquisitionOutput(
+            output_id=uuid4(),
+            session_id=session_id,
+            file_path=cleaned_path,
+            checksum=cleaned_checksum,
+            size_bytes=size_bytes,
+        )
+        self._store.acquisition_outputs[output.output_id] = output
+        return output
+
+    def list_acquisition_outputs(
+        self,
+        *,
+        session_id: UUID | None = None,
+    ) -> list[AcquisitionOutput]:
+        outputs = list(self._store.acquisition_outputs.values())
+        if session_id is None:
+            return outputs
+        return [output for output in outputs if output.session_id == session_id]
+
+    def delete_acquisition_output(
+        self, output_id: UUID, *, actor: AuthContext | None = None
+    ) -> AcquisitionOutput:
+        require_role(actor, WRITE_ROLES)
+        output = _get_or_raise(
+            self._store.acquisition_outputs,
+            output_id,
+            "Acquisition output",
+        )
+        del self._store.acquisition_outputs[output_id]
+        return output
+
     def promote_operational_session(
         self,
         session_id: UUID,
@@ -730,7 +795,9 @@ class LabTrackerAPI:
         session = self.get_session(session_id)
         if session.session_type != SessionType.OPERATIONAL:
             raise ValidationError("Only operational sessions can be promoted to datasets.")
-        manifest_with_session = _manifest_input_with_source(commit_manifest, session.session_id)
+        outputs = self.list_acquisition_outputs(session_id=session.session_id)
+        merged_manifest = _merge_acquisition_outputs(commit_manifest, outputs)
+        manifest_with_session = _manifest_input_with_source(merged_manifest, session.session_id)
         return self.create_dataset(
             project_id=session.project_id,
             primary_question_id=primary_question_id,
@@ -1354,6 +1421,49 @@ def _normalize_dataset_files(files: Iterable[DatasetFile]) -> list[DatasetFile]:
         seen.add(path)
         normalized.append(DatasetFile(path=path, checksum=checksum))
     return normalized
+
+
+def _find_acquisition_output(
+    outputs: dict[UUID, AcquisitionOutput],
+    session_id: UUID,
+    file_path: str,
+) -> AcquisitionOutput | None:
+    for output in outputs.values():
+        if output.session_id == session_id and output.file_path == file_path:
+            return output
+    return None
+
+
+def _merge_acquisition_outputs(
+    manifest: DatasetCommitManifestInput | DatasetCommitManifest | None,
+    outputs: Iterable[AcquisitionOutput],
+) -> DatasetCommitManifestInput | DatasetCommitManifest | None:
+    outputs_list = list(outputs)
+    if not outputs_list:
+        return manifest
+    if isinstance(manifest, DatasetCommitManifest):
+        manifest_input = _manifest_input_from_commit(manifest)
+    else:
+        manifest_input = manifest or DatasetCommitManifestInput()
+    merged_files = list(manifest_input.files)
+    seen = {file.path.strip(): file.checksum.strip() for file in manifest_input.files}
+    for output in outputs_list:
+        path = output.file_path.strip()
+        checksum = output.checksum.strip()
+        existing = seen.get(path)
+        if existing is None:
+            merged_files.append(DatasetFile(path=path, checksum=checksum))
+            seen[path] = checksum
+            continue
+        if existing != checksum:
+            raise ValidationError("Acquisition output checksum conflict for file path.")
+    return DatasetCommitManifestInput(
+        files=merged_files,
+        metadata=manifest_input.metadata,
+        note_ids=manifest_input.note_ids,
+        extraction_provenance=manifest_input.extraction_provenance,
+        source_session_id=manifest_input.source_session_id,
+    )
 
 
 def _normalize_metadata(metadata: dict[str, str] | None) -> dict[str, str]:

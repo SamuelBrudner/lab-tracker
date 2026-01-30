@@ -190,6 +190,16 @@ class SessionRead(_BaseReadModel):
     updated_at: datetime
 
 
+class AcquisitionOutputRead(_BaseReadModel):
+    output_id: UUID
+    session_id: UUID
+    file_path: str
+    checksum: str
+    size_bytes: int | None = None
+    created_at: datetime
+    updated_at: datetime
+
+
 class AnalysisRead(_BaseReadModel):
     analysis_id: UUID
     project_id: UUID
@@ -357,6 +367,12 @@ class SessionPromotionRequest(BaseModel):
     commit_manifest: DatasetCommitManifestInput | None = None
     status: DatasetStatus | None = None
     created_by: str | None = None
+
+
+class AcquisitionOutputCreate(BaseModel):
+    file_path: str = Field(..., min_length=1)
+    checksum: str = Field(..., min_length=1)
+    size_bytes: int | None = Field(default=None, ge=0)
 
 
 class AnalysisCreate(BaseModel):

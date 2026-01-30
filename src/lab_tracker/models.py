@@ -270,6 +270,17 @@ class Session:
 
 
 @dataclass
+class AcquisitionOutput:
+    output_id: UUID
+    session_id: UUID
+    file_path: str
+    checksum: str
+    size_bytes: int | None = None
+    created_at: datetime = field(default_factory=utc_now)
+    updated_at: datetime = field(default_factory=utc_now)
+
+
+@dataclass
 class Analysis:
     analysis_id: UUID
     project_id: UUID

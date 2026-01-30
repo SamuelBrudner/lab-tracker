@@ -59,6 +59,8 @@ from lab_tracker.models import (
     VisualizationInput,
 )
 from lab_tracker.schemas import (
+    AcquisitionOutputCreate,
+    AcquisitionOutputRead,
     AnalysisCommitRequest,
     AnalysisCommitResult,
     AnalysisCreate,
@@ -578,6 +580,41 @@ def register_routes(app: Any, api: LabTrackerAPI) -> None:
             actor=actor,
         )
         return Envelope(data=SessionRead.model_validate(session))
+
+    @app.get("/sessions/{session_id}/outputs", response_model=ListEnvelope[AcquisitionOutputRead])
+    def list_session_outputs(
+        session_id: UUID,
+        limit: int = 50,
+        offset: int = 0,
+    ):
+        _validate_pagination(limit, offset)
+        outputs = api.list_acquisition_outputs(session_id=session_id)
+        page, total = _paginate(outputs, limit, offset)
+        payload = [AcquisitionOutputRead.model_validate(output) for output in page]
+        return ListEnvelope(
+            data=payload,
+            meta=PaginationMeta(limit=limit, offset=offset, total=total),
+        )
+
+    @app.post(
+        "/sessions/{session_id}/outputs",
+        response_model=Envelope[AcquisitionOutputRead],
+        status_code=http_status.HTTP_201_CREATED,
+    )
+    def create_session_output(
+        session_id: UUID,
+        payload: AcquisitionOutputCreate,
+        request: Request,
+    ):
+        actor = _actor_from_request(request)
+        output = api.register_acquisition_output(
+            session_id,
+            file_path=payload.file_path,
+            checksum=payload.checksum,
+            size_bytes=payload.size_bytes,
+            actor=actor,
+        )
+        return Envelope(data=AcquisitionOutputRead.model_validate(output))
 
     @app.delete("/sessions/{session_id}", response_model=Envelope[SessionRead])
     def delete_session(session_id: UUID, request: Request):
