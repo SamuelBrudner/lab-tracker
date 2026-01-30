@@ -15,6 +15,9 @@ from lab_tracker.errors import NotFoundError, ValidationError
 from lab_tracker.models import (
     Analysis,
     AnalysisStatus,
+    Claim,
+    ClaimInput,
+    ClaimStatus,
     Dataset,
     DatasetCommitManifest,
     DatasetCommitManifestInput,
@@ -38,6 +41,8 @@ from lab_tracker.models import (
     SessionStatus,
     SessionType,
     TagSuggestionStatus,
+    Visualization,
+    VisualizationInput,
     utc_now,
 )
 
@@ -52,6 +57,8 @@ class InMemoryStore:
         self.notes: dict[UUID, Note] = {}
         self.sessions: dict[UUID, Session] = {}
         self.analyses: dict[UUID, Analysis] = {}
+        self.claims: dict[UUID, Claim] = {}
+        self.visualizations: dict[UUID, Visualization] = {}
 
 
 class LabTrackerAPI:
@@ -695,10 +702,34 @@ class LabTrackerAPI:
     def get_analysis(self, analysis_id: UUID) -> Analysis:
         return _get_or_raise(self._store.analyses, analysis_id, "Analysis")
 
-    def list_analyses(self, *, project_id: UUID | None = None) -> list[Analysis]:
+    def list_analyses(
+        self,
+        *,
+        project_id: UUID | None = None,
+        dataset_id: UUID | None = None,
+        question_id: UUID | None = None,
+    ) -> list[Analysis]:
         if project_id is None:
-            return list(self._store.analyses.values())
-        return [a for a in self._store.analyses.values() if a.project_id == project_id]
+            analyses = list(self._store.analyses.values())
+        else:
+            analyses = [a for a in self._store.analyses.values() if a.project_id == project_id]
+        if dataset_id is not None:
+            analyses = [
+                analysis
+                for analysis in analyses
+                if dataset_id in analysis.dataset_ids
+            ]
+        if question_id is not None:
+            analyses = [
+                analysis
+                for analysis in analyses
+                if _analysis_has_question_link(
+                    analysis,
+                    question_id,
+                    self._store.datasets,
+                )
+            ]
+        return analyses
 
     def update_analysis(
         self,
@@ -710,7 +741,15 @@ class LabTrackerAPI:
     ) -> Analysis:
         require_role(actor, WRITE_ROLES)
         analysis = self.get_analysis(analysis_id)
+        if analysis.status == AnalysisStatus.COMMITTED:
+            if environment_hash is not None:
+                raise ValidationError("Committed analyses are immutable.")
+            if status == AnalysisStatus.STAGED:
+                raise ValidationError("Committed analyses cannot return to staged.")
         if status is not None:
+            _ensure_analysis_status_transition(analysis.status, status)
+            if status == AnalysisStatus.COMMITTED and analysis.status != AnalysisStatus.COMMITTED:
+                self._ensure_analysis_datasets_committed(analysis)
             analysis.status = status
         if environment_hash is not None:
             analysis.environment_hash = environment_hash.strip() if environment_hash else None
@@ -722,6 +761,297 @@ class LabTrackerAPI:
         analysis = self.get_analysis(analysis_id)
         del self._store.analyses[analysis_id]
         return analysis
+
+    def commit_analysis(
+        self,
+        analysis_id: UUID,
+        *,
+        environment_hash: str | None = None,
+        claims: Iterable[ClaimInput] | None = None,
+        visualizations: Iterable[VisualizationInput] | None = None,
+        actor: AuthContext | None = None,
+    ) -> tuple[Analysis, list[Claim], list[Visualization]]:
+        require_role(actor, WRITE_ROLES)
+        analysis = self.get_analysis(analysis_id)
+        _ensure_analysis_status_transition(analysis.status, AnalysisStatus.COMMITTED)
+        if analysis.status == AnalysisStatus.COMMITTED and environment_hash is not None:
+            raise ValidationError("Committed analyses are immutable.")
+        if analysis.status != AnalysisStatus.COMMITTED:
+            self._ensure_analysis_datasets_committed(analysis)
+            analysis.status = AnalysisStatus.COMMITTED
+        if environment_hash is not None:
+            analysis.environment_hash = environment_hash.strip() if environment_hash else None
+        analysis.updated_at = utc_now()
+        created_claims: list[Claim] = []
+        for claim_input in claims or []:
+            supported_by_analysis_ids = list(claim_input.supported_by_analysis_ids)
+            if analysis.analysis_id not in supported_by_analysis_ids:
+                supported_by_analysis_ids.append(analysis.analysis_id)
+            created_claims.append(
+                self.create_claim(
+                    project_id=analysis.project_id,
+                    statement=claim_input.statement,
+                    confidence=claim_input.confidence,
+                    status=claim_input.status,
+                    supported_by_dataset_ids=claim_input.supported_by_dataset_ids,
+                    supported_by_analysis_ids=supported_by_analysis_ids,
+                    actor=actor,
+                )
+            )
+        created_visualizations: list[Visualization] = []
+        for viz_input in visualizations or []:
+            created_visualizations.append(
+                self.create_visualization(
+                    analysis_id=analysis.analysis_id,
+                    viz_type=viz_input.viz_type,
+                    file_path=viz_input.file_path,
+                    caption=viz_input.caption,
+                    related_claim_ids=viz_input.related_claim_ids,
+                    actor=actor,
+                )
+            )
+        return analysis, created_claims, created_visualizations
+
+    def create_claim(
+        self,
+        project_id: UUID,
+        statement: str,
+        confidence: float,
+        *,
+        status: ClaimStatus = ClaimStatus.PROPOSED,
+        supported_by_dataset_ids: Iterable[UUID] | None = None,
+        supported_by_analysis_ids: Iterable[UUID] | None = None,
+        actor: AuthContext | None = None,
+    ) -> Claim:
+        require_role(actor, WRITE_ROLES)
+        self.get_project(project_id)
+        _ensure_non_empty(statement, "statement")
+        _ensure_claim_confidence(confidence)
+        dataset_ids, analysis_ids = self._resolve_claim_support_links(
+            project_id,
+            supported_by_dataset_ids,
+            supported_by_analysis_ids,
+        )
+        _ensure_claim_support_links(status, dataset_ids, analysis_ids)
+        claim = Claim(
+            claim_id=uuid4(),
+            project_id=project_id,
+            statement=statement.strip(),
+            confidence=confidence,
+            status=status,
+            supported_by_dataset_ids=dataset_ids,
+            supported_by_analysis_ids=analysis_ids,
+        )
+        self._store.claims[claim.claim_id] = claim
+        return claim
+
+    def get_claim(self, claim_id: UUID) -> Claim:
+        return _get_or_raise(self._store.claims, claim_id, "Claim")
+
+    def list_claims(
+        self,
+        *,
+        project_id: UUID | None = None,
+        status: ClaimStatus | None = None,
+        dataset_id: UUID | None = None,
+        analysis_id: UUID | None = None,
+    ) -> list[Claim]:
+        if project_id is None:
+            claims = list(self._store.claims.values())
+        else:
+            claims = [c for c in self._store.claims.values() if c.project_id == project_id]
+        if status is not None:
+            claims = [claim for claim in claims if claim.status == status]
+        if dataset_id is not None:
+            claims = [
+                claim
+                for claim in claims
+                if dataset_id in claim.supported_by_dataset_ids
+            ]
+        if analysis_id is not None:
+            claims = [
+                claim
+                for claim in claims
+                if analysis_id in claim.supported_by_analysis_ids
+            ]
+        return claims
+
+    def update_claim(
+        self,
+        claim_id: UUID,
+        *,
+        statement: str | None = None,
+        confidence: float | None = None,
+        status: ClaimStatus | None = None,
+        supported_by_dataset_ids: Iterable[UUID] | None = None,
+        supported_by_analysis_ids: Iterable[UUID] | None = None,
+        actor: AuthContext | None = None,
+    ) -> Claim:
+        require_role(actor, WRITE_ROLES)
+        claim = self.get_claim(claim_id)
+        next_status = status or claim.status
+        _ensure_claim_status_transition(claim.status, next_status)
+        if claim.status != ClaimStatus.PROPOSED:
+            if (
+                statement is not None
+                or confidence is not None
+                or supported_by_dataset_ids is not None
+                or supported_by_analysis_ids is not None
+            ):
+                raise ValidationError("Only proposed claims can be edited.")
+        if statement is not None:
+            _ensure_non_empty(statement, "statement")
+            claim.statement = statement.strip()
+        if confidence is not None:
+            _ensure_claim_confidence(confidence)
+            claim.confidence = confidence
+        if supported_by_dataset_ids is not None or supported_by_analysis_ids is not None:
+            dataset_ids, analysis_ids = self._resolve_claim_support_links(
+                claim.project_id,
+                supported_by_dataset_ids or claim.supported_by_dataset_ids,
+                supported_by_analysis_ids or claim.supported_by_analysis_ids,
+            )
+            claim.supported_by_dataset_ids = dataset_ids
+            claim.supported_by_analysis_ids = analysis_ids
+        _ensure_claim_support_links(next_status, claim.supported_by_dataset_ids, claim.supported_by_analysis_ids)
+        if status is not None:
+            claim.status = status
+        claim.updated_at = utc_now()
+        return claim
+
+    def delete_claim(self, claim_id: UUID, *, actor: AuthContext | None = None) -> Claim:
+        require_role(actor, WRITE_ROLES)
+        claim = self.get_claim(claim_id)
+        del self._store.claims[claim_id]
+        return claim
+
+    def create_visualization(
+        self,
+        analysis_id: UUID,
+        viz_type: str,
+        file_path: str,
+        *,
+        caption: str | None = None,
+        related_claim_ids: Iterable[UUID] | None = None,
+        actor: AuthContext | None = None,
+    ) -> Visualization:
+        require_role(actor, WRITE_ROLES)
+        analysis = self.get_analysis(analysis_id)
+        _ensure_non_empty(viz_type, "viz_type")
+        _ensure_non_empty(file_path, "file_path")
+        claim_ids = _unique_ids(related_claim_ids)
+        for claim_id in claim_ids:
+            claim = self.get_claim(claim_id)
+            if claim.project_id != analysis.project_id:
+                raise ValidationError("Related claims must belong to the same project.")
+        visualization = Visualization(
+            viz_id=uuid4(),
+            analysis_id=analysis_id,
+            viz_type=viz_type.strip(),
+            file_path=file_path.strip(),
+            caption=caption.strip() if caption else None,
+            related_claim_ids=claim_ids,
+        )
+        self._store.visualizations[visualization.viz_id] = visualization
+        return visualization
+
+    def get_visualization(self, viz_id: UUID) -> Visualization:
+        return _get_or_raise(self._store.visualizations, viz_id, "Visualization")
+
+    def list_visualizations(
+        self,
+        *,
+        project_id: UUID | None = None,
+        analysis_id: UUID | None = None,
+        claim_id: UUID | None = None,
+    ) -> list[Visualization]:
+        if project_id is None:
+            visualizations = list(self._store.visualizations.values())
+        else:
+            visualizations = [
+                viz
+                for viz in self._store.visualizations.values()
+                if self.get_analysis(viz.analysis_id).project_id == project_id
+            ]
+        if analysis_id is not None:
+            visualizations = [
+                viz
+                for viz in visualizations
+                if viz.analysis_id == analysis_id
+            ]
+        if claim_id is not None:
+            visualizations = [
+                viz
+                for viz in visualizations
+                if claim_id in viz.related_claim_ids
+            ]
+        return visualizations
+
+    def update_visualization(
+        self,
+        viz_id: UUID,
+        *,
+        viz_type: str | None = None,
+        file_path: str | None = None,
+        caption: str | None = None,
+        related_claim_ids: Iterable[UUID] | None = None,
+        actor: AuthContext | None = None,
+    ) -> Visualization:
+        require_role(actor, WRITE_ROLES)
+        visualization = self.get_visualization(viz_id)
+        if viz_type is not None:
+            _ensure_non_empty(viz_type, "viz_type")
+            visualization.viz_type = viz_type.strip()
+        if file_path is not None:
+            _ensure_non_empty(file_path, "file_path")
+            visualization.file_path = file_path.strip()
+        if caption is not None:
+            visualization.caption = caption.strip() if caption else None
+        if related_claim_ids is not None:
+            claim_ids = _unique_ids(related_claim_ids)
+            analysis = self.get_analysis(visualization.analysis_id)
+            for claim_id in claim_ids:
+                claim = self.get_claim(claim_id)
+                if claim.project_id != analysis.project_id:
+                    raise ValidationError("Related claims must belong to the same project.")
+            visualization.related_claim_ids = claim_ids
+        visualization.updated_at = utc_now()
+        return visualization
+
+    def delete_visualization(
+        self,
+        viz_id: UUID,
+        *,
+        actor: AuthContext | None = None,
+    ) -> Visualization:
+        require_role(actor, WRITE_ROLES)
+        visualization = self.get_visualization(viz_id)
+        del self._store.visualizations[viz_id]
+        return visualization
+
+    def _resolve_claim_support_links(
+        self,
+        project_id: UUID,
+        dataset_ids: Iterable[UUID] | None,
+        analysis_ids: Iterable[UUID] | None,
+    ) -> tuple[list[UUID], list[UUID]]:
+        resolved_dataset_ids = _unique_ids(dataset_ids)
+        resolved_analysis_ids = _unique_ids(analysis_ids)
+        for dataset_id in resolved_dataset_ids:
+            dataset = self.get_dataset(dataset_id)
+            if dataset.project_id != project_id:
+                raise ValidationError("Supporting datasets must belong to the same project.")
+        for analysis_id in resolved_analysis_ids:
+            analysis = self.get_analysis(analysis_id)
+            if analysis.project_id != project_id:
+                raise ValidationError("Supporting analyses must belong to the same project.")
+        return resolved_dataset_ids, resolved_analysis_ids
+
+    def _ensure_analysis_datasets_committed(self, analysis: Analysis) -> None:
+        for dataset_id in analysis.dataset_ids:
+            dataset = self.get_dataset(dataset_id)
+            if dataset.status != DatasetStatus.COMMITTED:
+                raise ValidationError("Analyses can only be committed with committed datasets.")
 
     def _ensure_source_session_valid(self, source_session_id: UUID | None, project_id: UUID) -> None:
         if source_session_id is None:
@@ -740,6 +1070,8 @@ class LabTrackerAPI:
             EntityType.NOTE: self._store.notes,
             EntityType.SESSION: self._store.sessions,
             EntityType.ANALYSIS: self._store.analyses,
+            EntityType.CLAIM: self._store.claims,
+            EntityType.VISUALIZATION: self._store.visualizations,
         }
         store = entity_map.get(target.entity_type)
         if store is None:
@@ -747,6 +1079,11 @@ class LabTrackerAPI:
         entity = store.get(target.entity_id)
         if entity is None:
             raise NotFoundError(f"{target.entity_type.value.capitalize()} does not exist.")
+        if target.entity_type == EntityType.VISUALIZATION:
+            analysis = self.get_analysis(entity.analysis_id)
+            if analysis.project_id != project_id:
+                raise ValidationError("Target must belong to the same project.")
+            return
         if hasattr(entity, "project_id") and entity.project_id != project_id:
             raise ValidationError("Target must belong to the same project.")
 
@@ -783,6 +1120,18 @@ _QUESTION_STATUS_TRANSITIONS: dict[QuestionStatus, set[QuestionStatus]] = {
     QuestionStatus.ABANDONED: {QuestionStatus.ABANDONED},
 }
 
+_ANALYSIS_STATUS_TRANSITIONS: dict[AnalysisStatus, set[AnalysisStatus]] = {
+    AnalysisStatus.STAGED: {AnalysisStatus.STAGED, AnalysisStatus.COMMITTED, AnalysisStatus.ARCHIVED},
+    AnalysisStatus.COMMITTED: {AnalysisStatus.COMMITTED, AnalysisStatus.ARCHIVED},
+    AnalysisStatus.ARCHIVED: {AnalysisStatus.ARCHIVED},
+}
+
+_CLAIM_STATUS_TRANSITIONS: dict[ClaimStatus, set[ClaimStatus]] = {
+    ClaimStatus.PROPOSED: {ClaimStatus.PROPOSED, ClaimStatus.SUPPORTED, ClaimStatus.REJECTED},
+    ClaimStatus.SUPPORTED: {ClaimStatus.SUPPORTED},
+    ClaimStatus.REJECTED: {ClaimStatus.REJECTED},
+}
+
 
 def _ensure_question_status_transition(
     current_status: QuestionStatus,
@@ -792,6 +1141,30 @@ def _ensure_question_status_transition(
     if next_status not in allowed:
         raise ValidationError(
             "Question status cannot transition from "
+            f"{current_status.value} to {next_status.value}."
+        )
+
+
+def _ensure_analysis_status_transition(
+    current_status: AnalysisStatus,
+    next_status: AnalysisStatus,
+) -> None:
+    allowed = _ANALYSIS_STATUS_TRANSITIONS.get(current_status, {current_status})
+    if next_status not in allowed:
+        raise ValidationError(
+            "Analysis status cannot transition from "
+            f"{current_status.value} to {next_status.value}."
+        )
+
+
+def _ensure_claim_status_transition(
+    current_status: ClaimStatus,
+    next_status: ClaimStatus,
+) -> None:
+    allowed = _CLAIM_STATUS_TRANSITIONS.get(current_status, {current_status})
+    if next_status not in allowed:
+        raise ValidationError(
+            "Claim status cannot transition from "
             f"{current_status.value} to {next_status.value}."
         )
 
@@ -832,6 +1205,34 @@ def _is_question_ancestor(
 def _ensure_primary_question_active(question: Question) -> None:
     if question.status != QuestionStatus.ACTIVE:
         raise ValidationError("Primary question must be active to commit a dataset.")
+
+
+def _ensure_claim_confidence(confidence: float) -> None:
+    if confidence < 0 or confidence > 100:
+        raise ValidationError("confidence must be between 0 and 100.")
+
+
+def _ensure_claim_support_links(
+    status: ClaimStatus,
+    dataset_ids: list[UUID],
+    analysis_ids: list[UUID],
+) -> None:
+    if status == ClaimStatus.SUPPORTED and not (dataset_ids or analysis_ids):
+        raise ValidationError("Supported claims require supporting datasets or analyses.")
+
+
+def _analysis_has_question_link(
+    analysis: Analysis,
+    question_id: UUID,
+    datasets: dict[UUID, Dataset],
+) -> bool:
+    for dataset_id in analysis.dataset_ids:
+        dataset = datasets.get(dataset_id)
+        if dataset is None:
+            continue
+        if any(link.question_id == question_id for link in dataset.question_links):
+            return True
+    return False
 
 
 def _unique_strings(values: Iterable[str] | None, field_name: str) -> list[str]:

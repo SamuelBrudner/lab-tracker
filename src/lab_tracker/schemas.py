@@ -10,6 +10,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from lab_tracker.models import (
     AnalysisStatus,
+    ClaimStatus,
     DatasetStatus,
     EntityType,
     NoteStatus,
@@ -183,6 +184,29 @@ class AnalysisRead(_BaseReadModel):
     updated_at: datetime
 
 
+class ClaimRead(_BaseReadModel):
+    claim_id: UUID
+    project_id: UUID
+    statement: str
+    confidence: float
+    status: ClaimStatus
+    supported_by_dataset_ids: list[UUID]
+    supported_by_analysis_ids: list[UUID]
+    created_at: datetime
+    updated_at: datetime
+
+
+class VisualizationRead(_BaseReadModel):
+    viz_id: UUID
+    analysis_id: UUID
+    viz_type: str
+    file_path: str
+    caption: str | None = None
+    related_claim_ids: list[UUID]
+    created_at: datetime
+    updated_at: datetime
+
+
 class EntityRefInput(BaseModel):
     entity_type: EntityType
     entity_id: UUID
@@ -314,6 +338,38 @@ class AnalysisUpdate(BaseModel):
     environment_hash: str | None = None
 
 
+class ClaimCreate(BaseModel):
+    project_id: UUID
+    statement: str = Field(..., min_length=1)
+    confidence: float = Field(..., ge=0.0, le=100.0)
+    status: ClaimStatus | None = None
+    supported_by_dataset_ids: list[UUID] | None = None
+    supported_by_analysis_ids: list[UUID] | None = None
+
+
+class ClaimUpdate(BaseModel):
+    statement: str | None = Field(None, min_length=1)
+    confidence: float | None = Field(None, ge=0.0, le=100.0)
+    status: ClaimStatus | None = None
+    supported_by_dataset_ids: list[UUID] | None = None
+    supported_by_analysis_ids: list[UUID] | None = None
+
+
+class VisualizationCreate(BaseModel):
+    analysis_id: UUID
+    viz_type: str = Field(..., min_length=1)
+    file_path: str = Field(..., min_length=1)
+    caption: str | None = None
+    related_claim_ids: list[UUID] | None = None
+
+
+class VisualizationUpdate(BaseModel):
+    viz_type: str | None = Field(None, min_length=1)
+    file_path: str | None = Field(None, min_length=1)
+    caption: str | None = None
+    related_claim_ids: list[UUID] | None = None
+
+
 class TagSuggestionRequest(BaseModel):
     provenance: str | None = None
 
@@ -327,3 +383,30 @@ class QuestionExtractionRequest(BaseModel):
     question_type: QuestionType | None = None
     created_from: QuestionSource | None = None
     provenance: str | None = None
+
+
+class ClaimCommit(BaseModel):
+    statement: str = Field(..., min_length=1)
+    confidence: float = Field(..., ge=0.0, le=100.0)
+    status: ClaimStatus | None = None
+    supported_by_dataset_ids: list[UUID] | None = None
+    supported_by_analysis_ids: list[UUID] | None = None
+
+
+class VisualizationCommit(BaseModel):
+    viz_type: str = Field(..., min_length=1)
+    file_path: str = Field(..., min_length=1)
+    caption: str | None = None
+    related_claim_ids: list[UUID] | None = None
+
+
+class AnalysisCommitRequest(BaseModel):
+    environment_hash: str | None = None
+    claims: list[ClaimCommit] | None = None
+    visualizations: list[VisualizationCommit] | None = None
+
+
+class AnalysisCommitResult(BaseModel):
+    analysis: AnalysisRead
+    claims: list[ClaimRead]
+    visualizations: list[VisualizationRead]

@@ -38,6 +38,8 @@ from lab_tracker.auth import AuthContext, Role
 from lab_tracker.errors import AuthError, ConflictError, LabTrackerError, NotFoundError, ValidationError
 from lab_tracker.models import (
     AnalysisStatus,
+    ClaimInput,
+    ClaimStatus,
     DatasetCommitManifestInput as DatasetCommitManifestInputModel,
     DatasetFile,
     DatasetStatus,
@@ -51,11 +53,18 @@ from lab_tracker.models import (
     SessionStatus,
     SessionType,
     TagSuggestionStatus,
+    VisualizationInput,
 )
 from lab_tracker.schemas import (
+    AnalysisCommitRequest,
+    AnalysisCommitResult,
     AnalysisCreate,
     AnalysisRead,
     AnalysisUpdate,
+    ClaimCommit,
+    ClaimCreate,
+    ClaimRead,
+    ClaimUpdate,
     DatasetCommitManifestInput as DatasetCommitManifestInputSchema,
     DatasetCreate,
     DatasetRead,
@@ -86,6 +95,10 @@ from lab_tracker.schemas import (
     SessionUpdate,
     TagSuggestionRequest,
     TagSuggestionReviewRequest,
+    VisualizationCommit,
+    VisualizationCreate,
+    VisualizationRead,
+    VisualizationUpdate,
 )
 
 try:  # pragma: no cover - exercised when FastAPI is installed.
@@ -549,12 +562,18 @@ def register_routes(app: Any, api: LabTrackerAPI) -> None:
     @app.get("/analyses", response_model=ListEnvelope[AnalysisRead])
     def list_analyses(
         project_id: UUID | None = None,
+        dataset_id: UUID | None = None,
+        question_id: UUID | None = None,
         status: AnalysisStatus | None = None,
         limit: int = 50,
         offset: int = 0,
     ):
         _validate_pagination(limit, offset)
-        analyses = api.list_analyses(project_id=project_id)
+        analyses = api.list_analyses(
+            project_id=project_id,
+            dataset_id=dataset_id,
+            question_id=question_id,
+        )
         if status is not None:
             analyses = [analysis for analysis in analyses if analysis.status == status]
         page, total = _paginate(analyses, limit, offset)
@@ -580,11 +599,159 @@ def register_routes(app: Any, api: LabTrackerAPI) -> None:
         )
         return Envelope(data=AnalysisRead.model_validate(analysis))
 
+    @app.post("/analyses/{analysis_id}/commit", response_model=Envelope[AnalysisCommitResult])
+    def commit_analysis(analysis_id: UUID, payload: AnalysisCommitRequest, request: Request):
+        actor = _actor_from_request(request)
+        analysis, claims, visualizations = api.commit_analysis(
+            analysis_id,
+            environment_hash=payload.environment_hash,
+            claims=_claim_inputs_from_payload(payload.claims),
+            visualizations=_visualization_inputs_from_payload(payload.visualizations),
+            actor=actor,
+        )
+        result = AnalysisCommitResult(
+            analysis=AnalysisRead.model_validate(analysis),
+            claims=[ClaimRead.model_validate(claim) for claim in claims],
+            visualizations=[
+                VisualizationRead.model_validate(viz)
+                for viz in visualizations
+            ],
+        )
+        return Envelope(data=result)
+
     @app.delete("/analyses/{analysis_id}", response_model=Envelope[AnalysisRead])
     def delete_analysis(analysis_id: UUID, request: Request):
         actor = _actor_from_request(request)
         analysis = api.delete_analysis(analysis_id, actor=actor)
         return Envelope(data=AnalysisRead.model_validate(analysis))
+
+    @app.post(
+        "/claims",
+        response_model=Envelope[ClaimRead],
+        status_code=http_status.HTTP_201_CREATED,
+    )
+    def create_claim(payload: ClaimCreate, request: Request):
+        actor = _actor_from_request(request)
+        claim = api.create_claim(
+            project_id=payload.project_id,
+            statement=payload.statement,
+            confidence=payload.confidence,
+            status=payload.status or ClaimStatus.PROPOSED,
+            supported_by_dataset_ids=payload.supported_by_dataset_ids,
+            supported_by_analysis_ids=payload.supported_by_analysis_ids,
+            actor=actor,
+        )
+        return Envelope(data=ClaimRead.model_validate(claim))
+
+    @app.get("/claims", response_model=ListEnvelope[ClaimRead])
+    def list_claims(
+        project_id: UUID | None = None,
+        status: ClaimStatus | None = None,
+        dataset_id: UUID | None = None,
+        analysis_id: UUID | None = None,
+        limit: int = 50,
+        offset: int = 0,
+    ):
+        _validate_pagination(limit, offset)
+        claims = api.list_claims(
+            project_id=project_id,
+            status=status,
+            dataset_id=dataset_id,
+            analysis_id=analysis_id,
+        )
+        page, total = _paginate(claims, limit, offset)
+        payload = [ClaimRead.model_validate(claim) for claim in page]
+        return ListEnvelope(
+            data=payload,
+            meta=PaginationMeta(limit=limit, offset=offset, total=total),
+        )
+
+    @app.get("/claims/{claim_id}", response_model=Envelope[ClaimRead])
+    def get_claim(claim_id: UUID):
+        claim = api.get_claim(claim_id)
+        return Envelope(data=ClaimRead.model_validate(claim))
+
+    @app.patch("/claims/{claim_id}", response_model=Envelope[ClaimRead])
+    def update_claim(claim_id: UUID, payload: ClaimUpdate, request: Request):
+        actor = _actor_from_request(request)
+        claim = api.update_claim(
+            claim_id,
+            statement=payload.statement,
+            confidence=payload.confidence,
+            status=payload.status,
+            supported_by_dataset_ids=payload.supported_by_dataset_ids,
+            supported_by_analysis_ids=payload.supported_by_analysis_ids,
+            actor=actor,
+        )
+        return Envelope(data=ClaimRead.model_validate(claim))
+
+    @app.delete("/claims/{claim_id}", response_model=Envelope[ClaimRead])
+    def delete_claim(claim_id: UUID, request: Request):
+        actor = _actor_from_request(request)
+        claim = api.delete_claim(claim_id, actor=actor)
+        return Envelope(data=ClaimRead.model_validate(claim))
+
+    @app.post(
+        "/visualizations",
+        response_model=Envelope[VisualizationRead],
+        status_code=http_status.HTTP_201_CREATED,
+    )
+    def create_visualization(payload: VisualizationCreate, request: Request):
+        actor = _actor_from_request(request)
+        visualization = api.create_visualization(
+            analysis_id=payload.analysis_id,
+            viz_type=payload.viz_type,
+            file_path=payload.file_path,
+            caption=payload.caption,
+            related_claim_ids=payload.related_claim_ids,
+            actor=actor,
+        )
+        return Envelope(data=VisualizationRead.model_validate(visualization))
+
+    @app.get("/visualizations", response_model=ListEnvelope[VisualizationRead])
+    def list_visualizations(
+        project_id: UUID | None = None,
+        analysis_id: UUID | None = None,
+        claim_id: UUID | None = None,
+        limit: int = 50,
+        offset: int = 0,
+    ):
+        _validate_pagination(limit, offset)
+        visualizations = api.list_visualizations(
+            project_id=project_id,
+            analysis_id=analysis_id,
+            claim_id=claim_id,
+        )
+        page, total = _paginate(visualizations, limit, offset)
+        payload = [VisualizationRead.model_validate(viz) for viz in page]
+        return ListEnvelope(
+            data=payload,
+            meta=PaginationMeta(limit=limit, offset=offset, total=total),
+        )
+
+    @app.get("/visualizations/{viz_id}", response_model=Envelope[VisualizationRead])
+    def get_visualization(viz_id: UUID):
+        visualization = api.get_visualization(viz_id)
+        return Envelope(data=VisualizationRead.model_validate(visualization))
+
+    @app.patch("/visualizations/{viz_id}", response_model=Envelope[VisualizationRead])
+    def update_visualization(viz_id: UUID, payload: VisualizationUpdate, request: Request):
+        actor = _actor_from_request(request)
+        visualization = api.update_visualization(
+            viz_id,
+            viz_type=payload.viz_type,
+            file_path=payload.file_path,
+            caption=payload.caption,
+            related_claim_ids=payload.related_claim_ids,
+            actor=actor,
+        )
+        return Envelope(data=VisualizationRead.model_validate(visualization))
+
+    @app.delete("/visualizations/{viz_id}", response_model=Envelope[VisualizationRead])
+    def delete_visualization(viz_id: UUID, request: Request):
+        actor = _actor_from_request(request)
+        visualization = api.delete_visualization(viz_id, actor=actor)
+        return Envelope(data=VisualizationRead.model_validate(visualization))
 
 
 def _register_exception_handlers(app: Any) -> None:
@@ -728,6 +895,37 @@ def _targets_from_payload(payload: list[EntityRefInput] | None) -> list[EntityRe
     if payload is None:
         return None
     return [EntityRef(entity_type=item.entity_type, entity_id=item.entity_id) for item in payload]
+
+
+def _claim_inputs_from_payload(payload: list[ClaimCommit] | None) -> list[ClaimInput]:
+    if payload is None:
+        return []
+    return [
+        ClaimInput(
+            statement=item.statement,
+            confidence=item.confidence,
+            status=item.status or ClaimStatus.PROPOSED,
+            supported_by_dataset_ids=item.supported_by_dataset_ids or [],
+            supported_by_analysis_ids=item.supported_by_analysis_ids or [],
+        )
+        for item in payload
+    ]
+
+
+def _visualization_inputs_from_payload(
+    payload: list[VisualizationCommit] | None,
+) -> list[VisualizationInput]:
+    if payload is None:
+        return []
+    return [
+        VisualizationInput(
+            viz_type=item.viz_type,
+            file_path=item.file_path,
+            caption=item.caption,
+            related_claim_ids=item.related_claim_ids or [],
+        )
+        for item in payload
+    ]
 
 
 def _links_from_payload(

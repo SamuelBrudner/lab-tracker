@@ -243,6 +243,15 @@ class Analysis:
     updated_at: datetime = field(default_factory=utc_now)
 
 
+@dataclass(frozen=True)
+class ClaimInput:
+    statement: str
+    confidence: float
+    status: ClaimStatus = ClaimStatus.PROPOSED
+    supported_by_dataset_ids: list[UUID] = field(default_factory=list)
+    supported_by_analysis_ids: list[UUID] = field(default_factory=list)
+
+
 @dataclass
 class Claim:
     claim_id: UUID
@@ -254,6 +263,14 @@ class Claim:
     supported_by_analysis_ids: list[UUID] = field(default_factory=list)
     created_at: datetime = field(default_factory=utc_now)
     updated_at: datetime = field(default_factory=utc_now)
+
+
+@dataclass(frozen=True)
+class VisualizationInput:
+    viz_type: str
+    file_path: str
+    caption: str | None = None
+    related_claim_ids: list[UUID] = field(default_factory=list)
 
 
 @dataclass
