@@ -493,6 +493,7 @@ class LabTrackerAPI:
         note_id: UUID,
         *,
         transcribed_text: str | None = None,
+        extracted_entities: Iterable[tuple[str, float, str]] | None = None,
         targets: Iterable[EntityRef] | None = None,
         metadata: dict[str, str] | None = None,
         status: NoteStatus | None = None,
@@ -502,6 +503,11 @@ class LabTrackerAPI:
         note = self.get_note(note_id)
         if transcribed_text is not None:
             note.transcribed_text = transcribed_text.strip() if transcribed_text else None
+        if extracted_entities is not None:
+            note.extracted_entities = [
+                _build_extracted_entity(label, confidence, provenance)
+                for label, confidence, provenance in extracted_entities
+            ]
         if targets is not None:
             resolved_targets = list(targets)
             for target in resolved_targets:

@@ -331,6 +331,7 @@ class NoteUpload(BaseModel):
 
 class NoteUpdate(BaseModel):
     transcribed_text: str | None = None
+    extracted_entities: list[ExtractedEntityInput] | None = None
     targets: list[EntityRefInput] | None = None
     metadata: dict[str, str] | None = None
     status: NoteStatus | None = None

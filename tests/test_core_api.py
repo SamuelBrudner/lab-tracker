@@ -246,6 +246,33 @@ def test_extract_questions_from_note_stages_questions():
     assert api.extract_questions_from_note(note.note_id, actor=actor) == []
 
 
+def test_update_note_accepts_extracted_entities():
+    api = LabTrackerAPI()
+    actor = _actor()
+    project = api.create_project("Neuro Project", actor=actor)
+    note = api.create_note(
+        project_id=project.project_id,
+        raw_content="raw note",
+        actor=actor,
+    )
+
+    updated = api.update_note(
+        note.note_id,
+        extracted_entities=[
+            ("Neuron", 0.82, "ocr:model-1"),
+            ("Hippocampus", 0.77, "ocr:model-1"),
+        ],
+        actor=actor,
+    )
+
+    assert [entity.label for entity in updated.extracted_entities] == [
+        "Neuron",
+        "Hippocampus",
+    ]
+    assert updated.extracted_entities[0].confidence == 0.82
+    assert updated.extracted_entities[0].provenance == "ocr:model-1"
+
+
 def test_suggest_entity_tags_creates_suggestions_and_dedupes():
     api = LabTrackerAPI()
     actor = _actor()

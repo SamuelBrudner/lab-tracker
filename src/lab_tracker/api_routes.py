@@ -415,10 +415,12 @@ def register_routes(app: Any, api: LabTrackerAPI) -> None:
     @app.patch("/notes/{note_id}", response_model=Envelope[NoteRead])
     def update_note(note_id: UUID, payload: NoteUpdate, request: Request):
         actor = _actor_from_request(request)
+        extracted_entities = _entities_from_payload(payload.extracted_entities)
         targets = _targets_from_payload(payload.targets)
         note = api.update_note(
             note_id,
             transcribed_text=payload.transcribed_text,
+            extracted_entities=extracted_entities,
             targets=targets,
             metadata=payload.metadata,
             status=payload.status,
