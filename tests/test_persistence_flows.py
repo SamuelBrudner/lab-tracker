@@ -87,12 +87,39 @@ def test_fastapi_routes_persist_across_app_restarts(monkeypatch, tmp_path):
     app_first = create_app()
     with TestClient(app_first) as client:
         create_response = client.post("/projects", json={"name": "Route Persistence"})
-    assert create_response.status_code == 201
-    project_id = create_response.json()["data"]["project_id"]
+        assert create_response.status_code == 201
+        project_id = create_response.json()["data"]["project_id"]
+        question_response = client.post(
+            "/questions",
+            json={
+                "project_id": project_id,
+                "text": "Can routes persist question data?",
+                "question_type": "descriptive",
+            },
+        )
+        assert question_response.status_code == 201
+        question_id = question_response.json()["data"]["question_id"]
+        dataset_response = client.post(
+            "/datasets",
+            json={
+                "project_id": project_id,
+                "primary_question_id": question_id,
+            },
+        )
+        assert dataset_response.status_code == 201
+        dataset_id = dataset_response.json()["data"]["dataset_id"]
 
     app_second = create_app()
     with TestClient(app_second) as client:
         list_response = client.get("/projects")
+        question_list_response = client.get("/questions")
+        dataset_list_response = client.get("/datasets")
     assert list_response.status_code == 200
+    assert question_list_response.status_code == 200
+    assert dataset_list_response.status_code == 200
     project_ids = [item["project_id"] for item in list_response.json()["data"]]
+    question_ids = [item["question_id"] for item in question_list_response.json()["data"]]
+    dataset_ids = [item["dataset_id"] for item in dataset_list_response.json()["data"]]
     assert project_id in project_ids
+    assert question_id in question_ids
+    assert dataset_id in dataset_ids
