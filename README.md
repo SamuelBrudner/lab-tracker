@@ -3,15 +3,27 @@
 ## Quickstart
 
 ```bash
+uv venv
+source .venv/bin/activate
+uv pip install -e ".[test,lint]"
+```
+
+Install `uv` first if needed (for example: `brew install uv` or `pipx install uv`).
+
+If you prefer pip/venv:
+
+```bash
 python -m venv .venv
 source .venv/bin/activate
 pip install -e ".[test,lint]"
 ```
 
+Commands below use `uv run`. If you used pip/venv instead, drop the `uv run` prefix.
+
 ## Run the API
 
 ```bash
-uvicorn lab_tracker.asgi:app --reload
+uv run uvicorn lab_tracker.asgi:app --reload
 ```
 
 Health check:
@@ -33,11 +45,11 @@ development.
 ## Database migrations
 
 ```bash
-alembic upgrade head
+uv run alembic upgrade head
 ```
 
 ## Tests
 
 ```bash
-pytest -q
+uv run pytest -q
 ```
