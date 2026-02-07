@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from sqlalchemy import create_engine
 from sqlalchemy.engine import Engine
-from sqlalchemy.orm import DeclarativeBase, sessionmaker
+from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 
 from lab_tracker.config import Settings, get_settings
 
@@ -29,4 +29,18 @@ def get_engine(settings: Settings | None = None) -> Engine:
     )
 
 
-SessionLocal = sessionmaker(bind=get_engine(), autoflush=False, autocommit=False)
+def get_session_factory(
+    settings: Settings | None = None,
+    *,
+    engine: Engine | None = None,
+) -> sessionmaker[Session]:
+    return sessionmaker(
+        bind=engine or get_engine(settings),
+        class_=Session,
+        autoflush=False,
+        autocommit=False,
+        future=True,
+    )
+
+
+SessionLocal = get_session_factory()

@@ -7,12 +7,15 @@ import os
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI
+from fastapi import Depends, FastAPI, Request
+from sqlalchemy.engine import Engine
 from starlette.responses import JSONResponse
 
 from lab_tracker.api import LabTrackerAPI
 from lab_tracker.api_routes import register_routes
 from lab_tracker.config import get_settings
+from lab_tracker.db import get_engine, get_session_factory
+from lab_tracker.dependencies import get_sqlalchemy_repository
 from lab_tracker.logging import configure_logging
 from lab_tracker.note_storage import LocalNoteStorage
 
@@ -93,10 +96,46 @@ def _metrics_snapshot(api: LabTrackerAPI, *, environment: str, app_name: str) ->
     }
 
 
+def _configure_database_session_middleware(
+    app: FastAPI,
+) -> None:
+    @app.middleware("http")
+    async def db_session_middleware(request: Request, call_next):
+        db_session = request.app.state.db_session_factory()
+        request.state.db_session = db_session
+        try:
+            response = await call_next(request)
+            if response.status_code >= 400:
+                db_session.rollback()
+            else:
+                db_session.commit()
+            return response
+        except Exception:
+            db_session.rollback()
+            raise
+        finally:
+            db_session.close()
+
+
+def _configure_database_shutdown_hook(app: FastAPI, *, engine: Engine) -> None:
+    @app.on_event("shutdown")
+    def dispose_engine() -> None:
+        engine.dispose()
+
+
 def create_app() -> FastAPI:
     settings = get_settings()
     configure_logging(settings.log_level)
-    app = FastAPI(title=settings.app_name)
+    engine = get_engine(settings)
+    session_factory = get_session_factory(engine=engine)
+    app = FastAPI(
+        title=settings.app_name,
+        dependencies=[Depends(get_sqlalchemy_repository)],
+    )
+    app.state.db_engine = engine
+    app.state.db_session_factory = session_factory
+    _configure_database_session_middleware(app)
+    _configure_database_shutdown_hook(app, engine=engine)
     raw_storage = LocalNoteStorage(settings.note_storage_path)
     api = LabTrackerAPI(raw_storage=raw_storage)
 
