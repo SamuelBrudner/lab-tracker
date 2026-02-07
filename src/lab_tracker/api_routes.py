@@ -7,38 +7,21 @@ import binascii
 from typing import Any
 from uuid import UUID
 
-try:  # pragma: no cover - exercised when Starlette/FastAPI are available.
-    from starlette import status as http_status
-    from starlette.requests import Request
-    from starlette.responses import JSONResponse, Response
-except ModuleNotFoundError:  # pragma: no cover - lightweight fallback.
-
-    class Request:  # type: ignore[override]
-        def __init__(self, headers: dict[str, str] | None = None) -> None:
-            self.headers = headers or {}
-
-    class JSONResponse:  # type: ignore[override]
-        def __init__(self, *, status_code: int, content: dict[str, Any]) -> None:
-            self.status_code = status_code
-            self._content = content
-
-        def json(self) -> dict[str, Any]:
-            return self._content
-
-    class _HTTPStatus:
-        HTTP_201_CREATED = 201
-        HTTP_400_BAD_REQUEST = 400
-        HTTP_401_UNAUTHORIZED = 401
-        HTTP_404_NOT_FOUND = 404
-        HTTP_409_CONFLICT = 409
-        HTTP_422_UNPROCESSABLE_ENTITY = 422
-
-    http_status = _HTTPStatus()
-    Response = None  # type: ignore[assignment]
+from fastapi import FastAPI
+from fastapi.exceptions import RequestValidationError
+from starlette import status as http_status
+from starlette.requests import Request
+from starlette.responses import JSONResponse, Response
 
 from lab_tracker.api import LabTrackerAPI
 from lab_tracker.auth import AuthContext, Role
-from lab_tracker.errors import AuthError, ConflictError, LabTrackerError, NotFoundError, ValidationError
+from lab_tracker.errors import (
+    AuthError,
+    ConflictError,
+    LabTrackerError,
+    NotFoundError,
+    ValidationError,
+)
 from lab_tracker.models import (
     AnalysisStatus,
     ClaimInput,
@@ -108,22 +91,13 @@ from lab_tracker.schemas import (
     VisualizationUpdate,
 )
 
-try:  # pragma: no cover - exercised when FastAPI is installed.
-    from fastapi.exceptions import RequestValidationError
-except Exception:  # pragma: no cover - fallback for shim environments.
-    RequestValidationError = None
-try:  # pragma: no cover - exercised when Pydantic is available.
-    from pydantic import ValidationError as PydanticValidationError
-except Exception:  # pragma: no cover - fallback for shim environments.
-    PydanticValidationError = None
-
 SYSTEM_ACTOR = AuthContext(
     user_id=UUID("00000000-0000-0000-0000-000000000000"),
     role=Role.ADMIN,
 )
 
 
-def register_routes(app: Any, api: LabTrackerAPI) -> None:
+def register_routes(app: FastAPI, api: LabTrackerAPI) -> None:
     _register_exception_handlers(app)
 
     @app.post(
@@ -397,7 +371,7 @@ def register_routes(app: Any, api: LabTrackerAPI) -> None:
     def download_note_raw(note_id: UUID, request: Request):
         raw_asset, content = api.download_note_raw(note_id)
         accept = (request.headers.get("accept") or "").lower()
-        if Response is not None and "application/json" not in accept:
+        if "application/json" not in accept:
             headers = {
                 "Content-Disposition": f'attachment; filename=\"{raw_asset.filename}\"',
                 "Content-Length": str(raw_asset.size_bytes),
@@ -443,8 +417,8 @@ def register_routes(app: Any, api: LabTrackerAPI) -> None:
     )
     def suggest_tag_suggestions(
         note_id: UUID,
+        request: Request,
         payload: TagSuggestionRequest | None = None,
-        request: Request | None = None,
     ):
         actor = _actor_from_request(request)
         provenance = payload.provenance if payload else None
@@ -504,12 +478,16 @@ def register_routes(app: Any, api: LabTrackerAPI) -> None:
     )
     def extract_questions(
         note_id: UUID,
+        request: Request,
         payload: QuestionExtractionRequest | None = None,
-        request: Request | None = None,
     ):
         actor = _actor_from_request(request)
-        question_type = payload.question_type if payload and payload.question_type else QuestionType.OTHER
-        created_from = payload.created_from if payload and payload.created_from else QuestionSource.API
+        question_type = (
+            payload.question_type if payload and payload.question_type else QuestionType.OTHER
+        )
+        created_from = (
+            payload.created_from if payload and payload.created_from else QuestionSource.API
+        )
         questions = api.extract_questions_from_note(
             note_id,
             question_type=question_type,
@@ -627,7 +605,11 @@ def register_routes(app: Any, api: LabTrackerAPI) -> None:
         response_model=Envelope[DatasetRead],
         status_code=http_status.HTTP_201_CREATED,
     )
-    def promote_operational_session(session_id: UUID, payload: SessionPromotionRequest, request: Request):
+    def promote_operational_session(
+        session_id: UUID,
+        payload: SessionPromotionRequest,
+        request: Request,
+    ):
         actor = _actor_from_request(request)
         dataset = api.promote_operational_session(
             session_id,
@@ -854,10 +836,7 @@ def register_routes(app: Any, api: LabTrackerAPI) -> None:
         return Envelope(data=VisualizationRead.model_validate(visualization))
 
 
-def _register_exception_handlers(app: Any) -> None:
-    if not hasattr(app, "exception_handler"):
-        return
-
+def _register_exception_handlers(app: FastAPI) -> None:
     @app.exception_handler(ValidationError)
     def _handle_validation_error(request: Request, exc: ValidationError):
         return _error_response(
@@ -882,41 +861,13 @@ def _register_exception_handlers(app: Any) -> None:
     def _handle_lab_tracker_error(request: Request, exc: LabTrackerError):
         return _error_response(http_status.HTTP_400_BAD_REQUEST, "lab_tracker_error", str(exc))
 
-    if RequestValidationError is not None:
-        @app.exception_handler(RequestValidationError)
-        def _handle_request_validation_error(request: Request, exc: RequestValidationError):
-            return _error_response(
-                http_status.HTTP_422_UNPROCESSABLE_ENTITY,
-                "request_validation_error",
-                "Request validation failed.",
-                issues=_issues_from_validation_errors(exc.errors()),
-            )
-        return
-
-    if PydanticValidationError is not None:
-        @app.exception_handler(PydanticValidationError)
-        def _handle_pydantic_validation_error(request: Request, exc: PydanticValidationError):
-            return _error_response(
-                http_status.HTTP_422_UNPROCESSABLE_ENTITY,
-                "request_validation_error",
-                "Request validation failed.",
-                issues=_issues_from_validation_errors(exc.errors()),
-            )
-
-    @app.exception_handler(ValueError)
-    def _handle_value_error(request: Request, exc: ValueError):
+    @app.exception_handler(RequestValidationError)
+    def _handle_request_validation_error(request: Request, exc: RequestValidationError):
         return _error_response(
             http_status.HTTP_422_UNPROCESSABLE_ENTITY,
             "request_validation_error",
             "Request validation failed.",
-        )
-
-    @app.exception_handler(TypeError)
-    def _handle_type_error(request: Request, exc: TypeError):
-        return _error_response(
-            http_status.HTTP_422_UNPROCESSABLE_ENTITY,
-            "request_validation_error",
-            "Request validation failed.",
+            issues=_issues_from_validation_errors(exc.errors()),
         )
 
 

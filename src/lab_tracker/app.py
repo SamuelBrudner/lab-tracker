@@ -7,24 +7,14 @@ import os
 from pathlib import Path
 from typing import Any
 
+from fastapi import FastAPI
+from starlette.responses import JSONResponse
+
 from lab_tracker.api import LabTrackerAPI
 from lab_tracker.api_routes import register_routes
 from lab_tracker.config import get_settings
-from lab_tracker.fastapi_compat import FastAPI
 from lab_tracker.logging import configure_logging
 from lab_tracker.note_storage import LocalNoteStorage
-
-try:  # pragma: no cover - exercised when Starlette/FastAPI are available.
-    from starlette.responses import JSONResponse
-except ModuleNotFoundError:  # pragma: no cover - lightweight fallback.
-
-    class JSONResponse:  # type: ignore[override]
-        def __init__(self, *, status_code: int, content: dict[str, Any]) -> None:
-            self.status_code = status_code
-            self._content = content
-
-        def json(self) -> dict[str, Any]:
-            return self._content
 
 
 _START_TIME = datetime.now(timezone.utc)

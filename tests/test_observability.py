@@ -1,5 +1,5 @@
 from lab_tracker.app import create_app
-from lab_tracker.fastapi_compat import TestClient
+from fastapi.testclient import TestClient
 
 
 def test_readiness_endpoint(monkeypatch, tmp_path):
