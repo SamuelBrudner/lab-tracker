@@ -12,7 +12,7 @@ def _actor(role: Role = Role.ADMIN) -> AuthContext:
 
 
 def test_upload_note_raw_persists_and_downloads(tmp_path):
-    api = LabTrackerAPI(raw_storage=LocalNoteStorage(tmp_path))
+    api = LabTrackerAPI.in_memory(raw_storage=LocalNoteStorage(tmp_path))
     actor = _actor()
     project = api.create_project("Neuro Project", actor=actor)
     target = EntityRef(entity_type=EntityType.PROJECT, entity_id=project.project_id)

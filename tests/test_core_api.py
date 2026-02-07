@@ -23,7 +23,7 @@ def _actor(role: Role = Role.ADMIN) -> AuthContext:
 
 
 def test_project_question_dataset_flow():
-    api = LabTrackerAPI()
+    api = LabTrackerAPI.in_memory()
     actor = _actor()
     project = api.create_project("Neuro Project", actor=actor)
     question = api.create_question(
@@ -44,7 +44,7 @@ def test_project_question_dataset_flow():
 
 
 def test_dataset_requires_primary_question():
-    api = LabTrackerAPI()
+    api = LabTrackerAPI.in_memory()
     actor = _actor()
     project = api.create_project("Neuro Project", actor=actor)
     with pytest.raises(ValidationError):
@@ -56,7 +56,7 @@ def test_dataset_requires_primary_question():
 
 
 def test_commit_hash_is_content_addressed():
-    api = LabTrackerAPI()
+    api = LabTrackerAPI.in_memory()
     actor = _actor()
     project = api.create_project("Neuro Project", actor=actor)
     question = api.create_question(
@@ -99,7 +99,7 @@ def test_commit_hash_is_content_addressed():
 
 
 def test_dataset_commit_manifest_nwb_metadata_validation():
-    api = LabTrackerAPI()
+    api = LabTrackerAPI.in_memory()
     actor = _actor()
     project = api.create_project("Neuro Project", actor=actor)
     question = api.create_question(
@@ -139,7 +139,7 @@ def test_dataset_commit_manifest_nwb_metadata_validation():
 
 
 def test_dataset_commit_manifest_bids_metadata_validation():
-    api = LabTrackerAPI()
+    api = LabTrackerAPI.in_memory()
     actor = _actor()
     project = api.create_project("Neuro Project", actor=actor)
     question = api.create_question(
@@ -174,7 +174,7 @@ def test_dataset_commit_manifest_bids_metadata_validation():
 
 
 def test_dataset_commit_manifest_prefixed_metadata_hooks():
-    api = LabTrackerAPI()
+    api = LabTrackerAPI.in_memory()
     actor = _actor()
     project = api.create_project("Neuro Project", actor=actor)
     question = api.create_question(
@@ -206,7 +206,7 @@ def test_dataset_commit_manifest_prefixed_metadata_hooks():
 
 
 def test_dataset_commit_requires_active_question():
-    api = LabTrackerAPI()
+    api = LabTrackerAPI.in_memory()
     actor = _actor()
     project = api.create_project("Neuro Project", actor=actor)
     question = api.create_question(
@@ -228,7 +228,7 @@ def test_dataset_commit_requires_active_question():
 
 
 def test_committed_dataset_is_immutable():
-    api = LabTrackerAPI()
+    api = LabTrackerAPI.in_memory()
     actor = _actor()
     project = api.create_project("Neuro Project", actor=actor)
     question = api.create_question(
@@ -270,7 +270,7 @@ def test_committed_dataset_is_immutable():
 
 
 def test_promote_operational_session_to_dataset():
-    api = LabTrackerAPI()
+    api = LabTrackerAPI.in_memory()
     actor = _actor()
     project = api.create_project("Neuro Project", actor=actor)
     question = api.create_question(
@@ -300,7 +300,7 @@ def test_promote_operational_session_to_dataset():
 
 
 def test_session_link_code_roundtrip():
-    api = LabTrackerAPI()
+    api = LabTrackerAPI.in_memory()
     actor = _actor()
     project = api.create_project("Neuro Project", actor=actor)
     session = api.create_session(
@@ -325,14 +325,14 @@ def test_auth_service_register_and_authenticate():
 
 
 def test_role_required_for_writes():
-    api = LabTrackerAPI()
+    api = LabTrackerAPI.in_memory()
     viewer = _actor(Role.VIEWER)
     with pytest.raises(AuthError):
         api.create_project("Nope", actor=viewer)
 
 
 def test_scientific_session_requires_question():
-    api = LabTrackerAPI()
+    api = LabTrackerAPI.in_memory()
     actor = _actor()
     project = api.create_project("Neuro Project", actor=actor)
     with pytest.raises(ValidationError):
@@ -344,7 +344,7 @@ def test_scientific_session_requires_question():
 
 
 def test_extract_questions_from_note_stages_questions():
-    api = LabTrackerAPI()
+    api = LabTrackerAPI.in_memory()
     actor = _actor()
     project = api.create_project("Neuro Project", actor=actor)
     note = api.create_note(
@@ -367,12 +367,15 @@ def test_extract_questions_from_note_stages_questions():
     }
     assert all(question.status == QuestionStatus.STAGED for question in questions)
     assert all(question.created_from == QuestionSource.API for question in questions)
-    assert all(question.created_by and str(note.note_id) in question.created_by for question in questions)
+    assert all(
+        question.created_by and str(note.note_id) in question.created_by
+        for question in questions
+    )
     assert api.extract_questions_from_note(note.note_id, actor=actor) == []
 
 
 def test_update_note_accepts_extracted_entities():
-    api = LabTrackerAPI()
+    api = LabTrackerAPI.in_memory()
     actor = _actor()
     project = api.create_project("Neuro Project", actor=actor)
     note = api.create_note(
@@ -399,7 +402,7 @@ def test_update_note_accepts_extracted_entities():
 
 
 def test_suggest_entity_tags_creates_suggestions_and_dedupes():
-    api = LabTrackerAPI()
+    api = LabTrackerAPI.in_memory()
     actor = _actor()
     project = api.create_project("Neuro Project", actor=actor)
     note = api.create_note(
@@ -418,7 +421,7 @@ def test_suggest_entity_tags_creates_suggestions_and_dedupes():
 
 
 def test_review_entity_tag_suggestion_updates_status():
-    api = LabTrackerAPI()
+    api = LabTrackerAPI.in_memory()
     actor = _actor()
     project = api.create_project("Neuro Project", actor=actor)
     note = api.create_note(

@@ -75,12 +75,27 @@ class LabTrackerAPI:
         *,
         raw_storage: LocalNoteStorage | None = None,
         repository: LabTrackerRepository | None = None,
+        allow_in_memory: bool = False,
     ) -> None:
         self._store = store or InMemoryStore()
         self._raw_storage = raw_storage
         self._repository = repository
+        self._allow_in_memory = allow_in_memory or store is not None
         if repository is not None:
             self.hydrate_from_repository(repository)
+
+    @classmethod
+    def in_memory(
+        cls,
+        *,
+        raw_storage: LocalNoteStorage | None = None,
+        store: InMemoryStore | None = None,
+    ) -> "LabTrackerAPI":
+        return cls(
+            store=store,
+            raw_storage=raw_storage,
+            allow_in_memory=True,
+        )
 
     def _active_repository(self) -> LabTrackerRepository | None:
         return get_active_repository() or self._repository
@@ -139,6 +154,12 @@ class LabTrackerAPI:
     ) -> None:
         resolved_repository = self._active_repository()
         if resolved_repository is None:
+            if not self._allow_in_memory:
+                raise RuntimeError(
+                    "In-memory runtime persistence is deprecated. "
+                    "Configure a SQLAlchemy repository context, or use "
+                    "LabTrackerAPI.in_memory() for explicit non-persistent mode."
+                )
             return
         try:
             operation(resolved_repository)

@@ -30,7 +30,7 @@ def _operational_session(api: LabTrackerAPI, actor: AuthContext):
 
 
 def test_register_acquisition_output_requires_operational_session():
-    api = LabTrackerAPI()
+    api = LabTrackerAPI.in_memory()
     actor = _actor()
     project = api.create_project("Neuro Project", actor=actor)
     question = api.create_question(
@@ -55,7 +55,7 @@ def test_register_acquisition_output_requires_operational_session():
 
 
 def test_promote_operational_session_merges_outputs():
-    api = LabTrackerAPI()
+    api = LabTrackerAPI.in_memory()
     actor = _actor()
     project, session = _operational_session(api, actor)
     question = api.create_question(
@@ -93,7 +93,7 @@ def test_promote_operational_session_merges_outputs():
 
 
 def test_register_acquisition_output_updates_existing():
-    api = LabTrackerAPI()
+    api = LabTrackerAPI.in_memory()
     actor = _actor()
     _, session = _operational_session(api, actor)
     output = api.register_acquisition_output(
@@ -113,7 +113,7 @@ def test_register_acquisition_output_updates_existing():
 
 
 def test_acquisition_output_watcher_registers_outputs(tmp_path):
-    api = LabTrackerAPI()
+    api = LabTrackerAPI.in_memory()
     actor = _actor()
     _, session = _operational_session(api, actor)
     output_path = tmp_path / "output.bin"

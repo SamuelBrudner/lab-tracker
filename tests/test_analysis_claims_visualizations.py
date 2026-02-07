@@ -33,7 +33,7 @@ def _setup_project_with_question(api: LabTrackerAPI, actor: AuthContext):
 
 
 def test_analysis_commit_requires_committed_datasets():
-    api = LabTrackerAPI()
+    api = LabTrackerAPI.in_memory()
     actor = _actor()
     project, question = _setup_project_with_question(api, actor)
     dataset = api.create_dataset(
@@ -76,7 +76,7 @@ def test_analysis_commit_requires_committed_datasets():
 
 
 def test_claim_status_transitions_and_edits():
-    api = LabTrackerAPI()
+    api = LabTrackerAPI.in_memory()
     actor = _actor()
     project, question = _setup_project_with_question(api, actor)
     dataset = api.create_dataset(
@@ -104,7 +104,7 @@ def test_claim_status_transitions_and_edits():
 
 
 def test_visualization_filters_and_analysis_question_links():
-    api = LabTrackerAPI()
+    api = LabTrackerAPI.in_memory()
     actor = _actor()
     project, question = _setup_project_with_question(api, actor)
     dataset = api.create_dataset(
