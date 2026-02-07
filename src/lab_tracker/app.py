@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import Depends, FastAPI, Request
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.engine import Engine
 from starlette.responses import JSONResponse
 
@@ -15,9 +16,10 @@ from lab_tracker.api import LabTrackerAPI
 from lab_tracker.api_routes import register_routes
 from lab_tracker.config import get_settings
 from lab_tracker.db import get_engine, get_session_factory
-from lab_tracker.dependencies import get_sqlalchemy_repository
+from lab_tracker.dependencies import get_sqlalchemy_repository, set_active_repository
 from lab_tracker.logging import configure_logging
 from lab_tracker.note_storage import LocalNoteStorage
+from lab_tracker.sqlalchemy_repository import SQLAlchemyLabTrackerRepository
 
 
 _START_TIME = datetime.now(timezone.utc)
@@ -103,6 +105,9 @@ def _configure_database_session_middleware(
     async def db_session_middleware(request: Request, call_next):
         db_session = request.app.state.db_session_factory()
         request.state.db_session = db_session
+        repository = SQLAlchemyLabTrackerRepository(db_session)
+        request.state.lab_tracker_repository = repository
+        set_active_repository(repository)
         try:
             response = await call_next(request)
             if response.status_code >= 400:
@@ -114,6 +119,7 @@ def _configure_database_session_middleware(
             db_session.rollback()
             raise
         finally:
+            set_active_repository(None)
             db_session.close()
 
 
@@ -138,6 +144,12 @@ def create_app() -> FastAPI:
     _configure_database_shutdown_hook(app, engine=engine)
     raw_storage = LocalNoteStorage(settings.note_storage_path)
     api = LabTrackerAPI(raw_storage=raw_storage)
+    try:
+        with session_factory() as bootstrap_session:
+            api.hydrate_from_repository(SQLAlchemyLabTrackerRepository(bootstrap_session))
+    except SQLAlchemyError:
+        # Schema setup is validated separately; startup should still succeed for health checks.
+        pass
 
     @app.get("/health")
     def health() -> dict[str, str]:

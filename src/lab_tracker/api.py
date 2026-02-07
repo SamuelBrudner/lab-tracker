@@ -7,10 +7,11 @@ import json
 import re
 from dataclasses import dataclass, replace
 from datetime import datetime
-from typing import Iterable
+from typing import Callable, Iterable
 from uuid import UUID, uuid4
 
 from lab_tracker.auth import AuthContext, Role, require_role
+from lab_tracker.dependencies import get_active_repository
 from lab_tracker.errors import NotFoundError, ValidationError
 from lab_tracker.models import (
     AcquisitionOutput,
@@ -49,6 +50,7 @@ from lab_tracker.models import (
     utc_now,
 )
 from lab_tracker.note_storage import LocalNoteStorage
+from lab_tracker.repository import LabTrackerRepository
 
 WRITE_ROLES = {Role.ADMIN, Role.EDITOR}
 
@@ -72,9 +74,78 @@ class LabTrackerAPI:
         store: InMemoryStore | None = None,
         *,
         raw_storage: LocalNoteStorage | None = None,
+        repository: LabTrackerRepository | None = None,
     ) -> None:
         self._store = store or InMemoryStore()
         self._raw_storage = raw_storage
+        self._repository = repository
+        if repository is not None:
+            self.hydrate_from_repository(repository)
+
+    def _active_repository(self) -> LabTrackerRepository | None:
+        return get_active_repository() or self._repository
+
+    def hydrate_from_repository(
+        self,
+        repository: LabTrackerRepository | None = None,
+    ) -> None:
+        resolved_repository = repository or self._active_repository()
+        if resolved_repository is None:
+            return
+        self._store.projects = {
+            project.project_id: project
+            for project in resolved_repository.projects.list()
+        }
+        self._store.questions = {
+            question.question_id: question
+            for question in resolved_repository.questions.list()
+        }
+        self._store.datasets = {
+            dataset.dataset_id: dataset
+            for dataset in resolved_repository.datasets.list()
+        }
+        self._store.notes = {
+            note.note_id: note
+            for note in resolved_repository.notes.list()
+        }
+        self._store.sessions = {
+            session.session_id: session
+            for session in resolved_repository.sessions.list()
+        }
+        self._store.analyses = {
+            analysis.analysis_id: analysis
+            for analysis in resolved_repository.analyses.list()
+        }
+        self._store.claims = {
+            claim.claim_id: claim
+            for claim in resolved_repository.claims.list()
+        }
+        self._store.visualizations = {
+            visualization.viz_id: visualization
+            for visualization in resolved_repository.visualizations.list()
+        }
+        try:
+            acquisition_outputs = resolved_repository.acquisition_outputs.list()
+        except NotImplementedError:
+            acquisition_outputs = []
+        self._store.acquisition_outputs = {
+            output.output_id: output
+            for output in acquisition_outputs
+        }
+
+    def _run_repository_write(
+        self,
+        operation: Callable[[LabTrackerRepository], None],
+    ) -> None:
+        resolved_repository = self._active_repository()
+        if resolved_repository is None:
+            return
+        try:
+            operation(resolved_repository)
+            resolved_repository.commit()
+        except Exception:
+            resolved_repository.rollback()
+            raise
 
     def create_project(
         self,
@@ -95,6 +166,7 @@ class LabTrackerAPI:
             created_by=created_by,
         )
         self._store.projects[project.project_id] = project
+        self._run_repository_write(lambda repository: repository.projects.save(project))
         return project
 
     def get_project(self, project_id: UUID) -> Project:
@@ -122,12 +194,16 @@ class LabTrackerAPI:
         if status is not None:
             project.status = status
         project.updated_at = utc_now()
+        self._run_repository_write(lambda repository: repository.projects.save(project))
         return project
 
     def delete_project(self, project_id: UUID, *, actor: AuthContext | None = None) -> Project:
         require_role(actor, WRITE_ROLES)
         project = self.get_project(project_id)
         del self._store.projects[project_id]
+        self._run_repository_write(
+            lambda repository: repository.projects.delete(project_id)
+        )
         return project
 
     def create_question(
@@ -165,6 +241,9 @@ class LabTrackerAPI:
             created_by=created_by,
         )
         self._store.questions[question.question_id] = question
+        self._run_repository_write(
+            lambda repository: repository.questions.save(question)
+        )
         return question
 
     def get_question(self, question_id: UUID) -> Question:
@@ -271,12 +350,18 @@ class LabTrackerAPI:
             _ensure_question_parents_dag(question.question_id, parent_ids, self._store.questions)
             question.parent_question_ids = parent_ids
         question.updated_at = utc_now()
+        self._run_repository_write(
+            lambda repository: repository.questions.save(question)
+        )
         return question
 
     def delete_question(self, question_id: UUID, *, actor: AuthContext | None = None) -> Question:
         require_role(actor, WRITE_ROLES)
         question = self.get_question(question_id)
         del self._store.questions[question_id]
+        self._run_repository_write(
+            lambda repository: repository.questions.delete(question_id)
+        )
         return question
 
     def create_dataset(
@@ -332,6 +417,9 @@ class LabTrackerAPI:
         if status == DatasetStatus.COMMITTED:
             _ensure_primary_question_active(primary_question)
         self._store.datasets[dataset.dataset_id] = dataset
+        self._run_repository_write(
+            lambda repository: repository.datasets.save(dataset)
+        )
         return dataset
 
     def get_dataset(self, dataset_id: UUID) -> Dataset:
@@ -394,12 +482,18 @@ class LabTrackerAPI:
                 _ensure_primary_question_active(primary_question)
             dataset.status = status
         dataset.updated_at = utc_now()
+        self._run_repository_write(
+            lambda repository: repository.datasets.save(dataset)
+        )
         return dataset
 
     def delete_dataset(self, dataset_id: UUID, *, actor: AuthContext | None = None) -> Dataset:
         require_role(actor, WRITE_ROLES)
         dataset = self.get_dataset(dataset_id)
         del self._store.datasets[dataset_id]
+        self._run_repository_write(
+            lambda repository: repository.datasets.delete(dataset_id)
+        )
         return dataset
 
     def create_note(
@@ -445,6 +539,7 @@ class LabTrackerAPI:
             created_by=created_by,
         )
         self._store.notes[note.note_id] = note
+        self._run_repository_write(lambda repository: repository.notes.save(note))
         return note
 
     def upload_note_raw(
@@ -521,6 +616,7 @@ class LabTrackerAPI:
         if status is not None:
             note.status = status
         note.updated_at = utc_now()
+        self._run_repository_write(lambda repository: repository.notes.save(note))
         return note
 
     def download_note_raw(self, note_id: UUID) -> tuple[NoteRawAsset, bytes]:
@@ -564,6 +660,9 @@ class LabTrackerAPI:
                 note.tag_suggestions.append(suggestion)
                 new_suggestions.append(suggestion)
                 existing.add(key)
+        if new_suggestions:
+            note.updated_at = utc_now()
+            self._run_repository_write(lambda repository: repository.notes.save(note))
         return new_suggestions
 
     def list_entity_tag_suggestions(
@@ -604,6 +703,9 @@ class LabTrackerAPI:
                 )
                 note.tag_suggestions[index] = updated
                 note.updated_at = utc_now()
+                self._run_repository_write(
+                    lambda repository: repository.notes.save(note)
+                )
                 return updated
         raise NotFoundError("Tag suggestion does not exist.")
 
@@ -611,6 +713,7 @@ class LabTrackerAPI:
         require_role(actor, WRITE_ROLES)
         note = self.get_note(note_id)
         del self._store.notes[note_id]
+        self._run_repository_write(lambda repository: repository.notes.delete(note_id))
         return note
 
     def extract_questions_from_note(
@@ -676,6 +779,9 @@ class LabTrackerAPI:
             created_by=created_by,
         )
         self._store.sessions[session.session_id] = session
+        self._run_repository_write(
+            lambda repository: repository.sessions.save(session)
+        )
         return session
 
     def get_session(self, session_id: UUID) -> Session:
@@ -709,12 +815,18 @@ class LabTrackerAPI:
         if ended_at is not None:
             session.ended_at = ended_at
         session.updated_at = utc_now()
+        self._run_repository_write(
+            lambda repository: repository.sessions.save(session)
+        )
         return session
 
     def delete_session(self, session_id: UUID, *, actor: AuthContext | None = None) -> Session:
         require_role(actor, WRITE_ROLES)
         session = self.get_session(session_id)
         del self._store.sessions[session_id]
+        self._run_repository_write(
+            lambda repository: repository.sessions.delete(session_id)
+        )
         return session
 
     def register_acquisition_output(
@@ -747,6 +859,12 @@ class LabTrackerAPI:
                 updated = True
             if updated:
                 existing.updated_at = utc_now()
+                try:
+                    self._run_repository_write(
+                        lambda repository: repository.acquisition_outputs.save(existing)
+                    )
+                except NotImplementedError:
+                    pass
             return existing
         output = AcquisitionOutput(
             output_id=uuid4(),
@@ -756,6 +874,12 @@ class LabTrackerAPI:
             size_bytes=size_bytes,
         )
         self._store.acquisition_outputs[output.output_id] = output
+        try:
+            self._run_repository_write(
+                lambda repository: repository.acquisition_outputs.save(output)
+            )
+        except NotImplementedError:
+            pass
         return output
 
     def list_acquisition_outputs(
@@ -778,6 +902,12 @@ class LabTrackerAPI:
             "Acquisition output",
         )
         del self._store.acquisition_outputs[output_id]
+        try:
+            self._run_repository_write(
+                lambda repository: repository.acquisition_outputs.delete(output_id)
+            )
+        except NotImplementedError:
+            pass
         return output
 
     def promote_operational_session(
@@ -842,6 +972,9 @@ class LabTrackerAPI:
             executed_by=executed_by,
         )
         self._store.analyses[analysis.analysis_id] = analysis
+        self._run_repository_write(
+            lambda repository: repository.analyses.save(analysis)
+        )
         return analysis
 
     def get_analysis(self, analysis_id: UUID) -> Analysis:
@@ -899,12 +1032,18 @@ class LabTrackerAPI:
         if environment_hash is not None:
             analysis.environment_hash = environment_hash.strip() if environment_hash else None
         analysis.updated_at = utc_now()
+        self._run_repository_write(
+            lambda repository: repository.analyses.save(analysis)
+        )
         return analysis
 
     def delete_analysis(self, analysis_id: UUID, *, actor: AuthContext | None = None) -> Analysis:
         require_role(actor, WRITE_ROLES)
         analysis = self.get_analysis(analysis_id)
         del self._store.analyses[analysis_id]
+        self._run_repository_write(
+            lambda repository: repository.analyses.delete(analysis_id)
+        )
         return analysis
 
     def commit_analysis(
@@ -927,6 +1066,9 @@ class LabTrackerAPI:
         if environment_hash is not None:
             analysis.environment_hash = environment_hash.strip() if environment_hash else None
         analysis.updated_at = utc_now()
+        self._run_repository_write(
+            lambda repository: repository.analyses.save(analysis)
+        )
         created_claims: list[Claim] = []
         for claim_input in claims or []:
             supported_by_analysis_ids = list(claim_input.supported_by_analysis_ids)
@@ -988,6 +1130,7 @@ class LabTrackerAPI:
             supported_by_analysis_ids=analysis_ids,
         )
         self._store.claims[claim.claim_id] = claim
+        self._run_repository_write(lambda repository: repository.claims.save(claim))
         return claim
 
     def get_claim(self, claim_id: UUID) -> Claim:
@@ -1062,12 +1205,14 @@ class LabTrackerAPI:
         if status is not None:
             claim.status = status
         claim.updated_at = utc_now()
+        self._run_repository_write(lambda repository: repository.claims.save(claim))
         return claim
 
     def delete_claim(self, claim_id: UUID, *, actor: AuthContext | None = None) -> Claim:
         require_role(actor, WRITE_ROLES)
         claim = self.get_claim(claim_id)
         del self._store.claims[claim_id]
+        self._run_repository_write(lambda repository: repository.claims.delete(claim_id))
         return claim
 
     def create_visualization(
@@ -1098,6 +1243,9 @@ class LabTrackerAPI:
             related_claim_ids=claim_ids,
         )
         self._store.visualizations[visualization.viz_id] = visualization
+        self._run_repository_write(
+            lambda repository: repository.visualizations.save(visualization)
+        )
         return visualization
 
     def get_visualization(self, viz_id: UUID) -> Visualization:
@@ -1161,6 +1309,9 @@ class LabTrackerAPI:
                     raise ValidationError("Related claims must belong to the same project.")
             visualization.related_claim_ids = claim_ids
         visualization.updated_at = utc_now()
+        self._run_repository_write(
+            lambda repository: repository.visualizations.save(visualization)
+        )
         return visualization
 
     def delete_visualization(
@@ -1172,6 +1323,9 @@ class LabTrackerAPI:
         require_role(actor, WRITE_ROLES)
         visualization = self.get_visualization(viz_id)
         del self._store.visualizations[viz_id]
+        self._run_repository_write(
+            lambda repository: repository.visualizations.delete(viz_id)
+        )
         return visualization
 
     def _resolve_claim_support_links(
