@@ -14,7 +14,7 @@ def test_frontend_routes_and_assets_are_served():
     assert app_response.status_code == 200
     assert "text/html" in app_response.headers.get("content-type", "")
     assert "Lab Tracker MVP" in app_response.text
-    assert "id=\"app-root\"" in app_response.text
+    assert 'id="app-root"' in app_response.text
 
     js_response = client.get("/app/static/app.js")
     assert js_response.status_code == 200

@@ -40,7 +40,6 @@ from lab_tracker.models import (
     TagSuggestionStatus,
     Visualization,
 )
-from lab_tracker.review_ui import render_extraction_review
 
 __all__ = [
     "Analysis",
@@ -83,5 +82,4 @@ __all__ = [
     "ValidationError",
     "Visualization",
     "require_role",
-    "render_extraction_review",
 ]

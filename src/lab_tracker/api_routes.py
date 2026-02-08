@@ -31,27 +31,30 @@ from lab_tracker.errors import (
     ValidationError,
 )
 from lab_tracker.models import (
+    AcquisitionOutput,
+    Analysis,
     AnalysisStatus,
-    ClaimInput,
+    Claim,
     ClaimStatus,
-    DatasetCommitManifestInput as DatasetCommitManifestInputModel,
-    DatasetFile,
+    Dataset,
     DatasetStatus,
-    EntityRef,
+    EntityTagSuggestion,
+    Note,
     NoteStatus,
+    Project,
     ProjectStatus,
-    QuestionLink,
+    Question,
     QuestionSource,
     QuestionStatus,
     QuestionType,
+    Session,
     SessionStatus,
     SessionType,
     TagSuggestionStatus,
-    VisualizationInput,
+    Visualization,
 )
 from lab_tracker.schemas import (
     AcquisitionOutputCreate,
-    AcquisitionOutputRead,
     AuthLoginRequest,
     AuthRegisterRequest,
     AuthTokenRead,
@@ -59,49 +62,35 @@ from lab_tracker.schemas import (
     AnalysisCommitRequest,
     AnalysisCommitResult,
     AnalysisCreate,
-    AnalysisRead,
     AnalysisUpdate,
-    ClaimCommit,
     ClaimCreate,
-    ClaimRead,
     ClaimUpdate,
-    DatasetCommitManifestInput as DatasetCommitManifestInputSchema,
     DatasetCreate,
-    DatasetRead,
     DatasetUpdate,
-    EntityRefInput,
-    EntityTagSuggestionRead,
     Envelope,
     ErrorEnvelope,
     ErrorInfo,
     ErrorIssue,
-    ExtractedEntityInput,
     ListEnvelope,
     NoteCreate,
     NoteRawDownloadRead,
-    NoteRead,
     NoteUpload,
     NoteUpdate,
     PaginationMeta,
     ProjectCreate,
-    ProjectRead,
     ProjectUpdate,
     QuestionCreate,
     QuestionExtractionRequest,
-    QuestionLinkInput,
-    QuestionRead,
     QuestionUpdate,
     SessionCreate,
     SessionPromotionRequest,
-    SessionRead,
     SessionUpdate,
     TagSuggestionRequest,
     TagSuggestionReviewRequest,
-    VisualizationCommit,
     VisualizationCreate,
-    VisualizationRead,
     VisualizationUpdate,
 )
+
 
 def register_routes(
     app: FastAPI,
@@ -150,7 +139,7 @@ def register_routes(
 
     @app.post(
         "/projects",
-        response_model=Envelope[ProjectRead],
+        response_model=Envelope[Project],
         status_code=http_status.HTTP_201_CREATED,
     )
     def create_project(payload: ProjectCreate, request: Request):
@@ -162,9 +151,9 @@ def register_routes(
             actor=actor,
             created_by=_resolve_created_by(payload.created_by, actor),
         )
-        return Envelope(data=ProjectRead.model_validate(project))
+        return Envelope(data=project)
 
-    @app.get("/projects", response_model=ListEnvelope[ProjectRead])
+    @app.get("/projects", response_model=ListEnvelope[Project])
     def list_projects(
         status: ProjectStatus | None = None,
         limit: int = 50,
@@ -175,18 +164,18 @@ def register_routes(
         if status is not None:
             projects = [project for project in projects if project.status == status]
         page, total = _paginate(projects, limit, offset)
-        payload = [ProjectRead.model_validate(project) for project in page]
+        payload = page
         return ListEnvelope(
             data=payload,
             meta=PaginationMeta(limit=limit, offset=offset, total=total),
         )
 
-    @app.get("/projects/{project_id}", response_model=Envelope[ProjectRead])
+    @app.get("/projects/{project_id}", response_model=Envelope[Project])
     def get_project(project_id: UUID):
         project = api.get_project(project_id)
-        return Envelope(data=ProjectRead.model_validate(project))
+        return Envelope(data=project)
 
-    @app.patch("/projects/{project_id}", response_model=Envelope[ProjectRead])
+    @app.patch("/projects/{project_id}", response_model=Envelope[Project])
     def update_project(project_id: UUID, payload: ProjectUpdate, request: Request):
         actor = _actor_from_request(request)
         project = api.update_project(
@@ -196,17 +185,17 @@ def register_routes(
             status=payload.status,
             actor=actor,
         )
-        return Envelope(data=ProjectRead.model_validate(project))
+        return Envelope(data=project)
 
-    @app.delete("/projects/{project_id}", response_model=Envelope[ProjectRead])
+    @app.delete("/projects/{project_id}", response_model=Envelope[Project])
     def delete_project(project_id: UUID, request: Request):
         actor = _actor_from_request(request)
         project = api.delete_project(project_id, actor=actor)
-        return Envelope(data=ProjectRead.model_validate(project))
+        return Envelope(data=project)
 
     @app.post(
         "/questions",
-        response_model=Envelope[QuestionRead],
+        response_model=Envelope[Question],
         status_code=http_status.HTTP_201_CREATED,
     )
     def create_question(payload: QuestionCreate, request: Request):
@@ -222,9 +211,9 @@ def register_routes(
             actor=actor,
             created_by=_resolve_created_by(payload.created_by, actor),
         )
-        return Envelope(data=QuestionRead.model_validate(question))
+        return Envelope(data=question)
 
-    @app.get("/questions", response_model=ListEnvelope[QuestionRead])
+    @app.get("/questions", response_model=ListEnvelope[Question])
     def list_questions(
         project_id: UUID | None = None,
         status: QuestionStatus | None = None,
@@ -249,18 +238,18 @@ def register_routes(
             ancestor_question_id=ancestor_question_id,
         )
         page, total = _paginate(questions, limit, offset)
-        payload = [QuestionRead.model_validate(question) for question in page]
+        payload = page
         return ListEnvelope(
             data=payload,
             meta=PaginationMeta(limit=limit, offset=offset, total=total),
         )
 
-    @app.get("/questions/{question_id}", response_model=Envelope[QuestionRead])
+    @app.get("/questions/{question_id}", response_model=Envelope[Question])
     def get_question(question_id: UUID):
         question = api.get_question(question_id)
-        return Envelope(data=QuestionRead.model_validate(question))
+        return Envelope(data=question)
 
-    @app.patch("/questions/{question_id}", response_model=Envelope[QuestionRead])
+    @app.patch("/questions/{question_id}", response_model=Envelope[Question])
     def update_question(question_id: UUID, payload: QuestionUpdate, request: Request):
         actor = _actor_from_request(request)
         question = api.update_question(
@@ -272,17 +261,17 @@ def register_routes(
             parent_question_ids=payload.parent_question_ids,
             actor=actor,
         )
-        return Envelope(data=QuestionRead.model_validate(question))
+        return Envelope(data=question)
 
-    @app.delete("/questions/{question_id}", response_model=Envelope[QuestionRead])
+    @app.delete("/questions/{question_id}", response_model=Envelope[Question])
     def delete_question(question_id: UUID, request: Request):
         actor = _actor_from_request(request)
         question = api.delete_question(question_id, actor=actor)
-        return Envelope(data=QuestionRead.model_validate(question))
+        return Envelope(data=question)
 
     @app.post(
         "/datasets",
-        response_model=Envelope[DatasetRead],
+        response_model=Envelope[Dataset],
         status_code=http_status.HTTP_201_CREATED,
     )
     def create_dataset(payload: DatasetCreate, request: Request):
@@ -292,14 +281,14 @@ def register_routes(
             primary_question_id=payload.primary_question_id,
             secondary_question_ids=payload.secondary_question_ids,
             status=payload.status or dataset_default_status(),
-            commit_manifest=_manifest_from_payload(payload.commit_manifest),
+            commit_manifest=payload.commit_manifest,
             commit_hash=payload.commit_hash,
             actor=actor,
             created_by=_resolve_created_by(payload.created_by, actor),
         )
-        return Envelope(data=DatasetRead.model_validate(dataset))
+        return Envelope(data=dataset)
 
-    @app.get("/datasets", response_model=ListEnvelope[DatasetRead])
+    @app.get("/datasets", response_model=ListEnvelope[Dataset])
     def list_datasets(
         project_id: UUID | None = None,
         status: DatasetStatus | None = None,
@@ -311,68 +300,63 @@ def register_routes(
         if status is not None:
             datasets = [dataset for dataset in datasets if dataset.status == status]
         page, total = _paginate(datasets, limit, offset)
-        payload = [DatasetRead.model_validate(dataset) for dataset in page]
+        payload = page
         return ListEnvelope(
             data=payload,
             meta=PaginationMeta(limit=limit, offset=offset, total=total),
         )
 
-    @app.get("/datasets/{dataset_id}", response_model=Envelope[DatasetRead])
+    @app.get("/datasets/{dataset_id}", response_model=Envelope[Dataset])
     def get_dataset(dataset_id: UUID):
         dataset = api.get_dataset(dataset_id)
-        return Envelope(data=DatasetRead.model_validate(dataset))
+        return Envelope(data=dataset)
 
-    @app.patch("/datasets/{dataset_id}", response_model=Envelope[DatasetRead])
+    @app.patch("/datasets/{dataset_id}", response_model=Envelope[Dataset])
     def update_dataset(dataset_id: UUID, payload: DatasetUpdate, request: Request):
         actor = _actor_from_request(request)
-        question_links = _links_from_payload(payload.question_links)
         dataset = api.update_dataset(
             dataset_id,
             status=payload.status,
-            question_links=question_links,
-            commit_manifest=_manifest_from_payload(payload.commit_manifest),
+            question_links=payload.question_links,
+            commit_manifest=payload.commit_manifest,
             commit_hash=payload.commit_hash,
             actor=actor,
         )
-        return Envelope(data=DatasetRead.model_validate(dataset))
+        return Envelope(data=dataset)
 
-    @app.delete("/datasets/{dataset_id}", response_model=Envelope[DatasetRead])
+    @app.delete("/datasets/{dataset_id}", response_model=Envelope[Dataset])
     def delete_dataset(dataset_id: UUID, request: Request):
         actor = _actor_from_request(request)
         dataset = api.delete_dataset(dataset_id, actor=actor)
-        return Envelope(data=DatasetRead.model_validate(dataset))
+        return Envelope(data=dataset)
 
     @app.post(
         "/notes",
-        response_model=Envelope[NoteRead],
+        response_model=Envelope[Note],
         status_code=http_status.HTTP_201_CREATED,
     )
     def create_note(payload: NoteCreate, request: Request):
         actor = _actor_from_request(request)
-        extracted_entities = _entities_from_payload(payload.extracted_entities)
-        targets = _targets_from_payload(payload.targets)
         note = api.create_note(
             project_id=payload.project_id,
             raw_content=payload.raw_content,
             transcribed_text=payload.transcribed_text,
-            extracted_entities=extracted_entities,
-            targets=targets,
+            extracted_entities=payload.extracted_entities,
+            targets=payload.targets,
             metadata=payload.metadata,
             status=payload.status or note_default_status(),
             actor=actor,
             created_by=_resolve_created_by(payload.created_by, actor),
         )
-        return Envelope(data=NoteRead.model_validate(note))
+        return Envelope(data=note)
 
     @app.post(
         "/notes/upload",
-        response_model=Envelope[NoteRead],
+        response_model=Envelope[Note],
         status_code=http_status.HTTP_201_CREATED,
     )
     def upload_note(payload: NoteUpload, request: Request):
         actor = _actor_from_request(request)
-        extracted_entities = _entities_from_payload(payload.extracted_entities)
-        targets = _targets_from_payload(payload.targets)
         try:
             content = base64.b64decode(payload.content_base64, validate=True)
         except binascii.Error as exc:
@@ -383,16 +367,16 @@ def register_routes(
             filename=payload.filename,
             content_type=payload.content_type,
             transcribed_text=payload.transcribed_text,
-            extracted_entities=extracted_entities,
-            targets=targets,
+            extracted_entities=payload.extracted_entities,
+            targets=payload.targets,
             metadata=payload.metadata,
             status=payload.status or note_default_status(),
             actor=actor,
             created_by=_resolve_created_by(payload.created_by, actor),
         )
-        return Envelope(data=NoteRead.model_validate(note))
+        return Envelope(data=note)
 
-    @app.get("/notes", response_model=ListEnvelope[NoteRead])
+    @app.get("/notes", response_model=ListEnvelope[Note])
     def list_notes(
         project_id: UUID | None = None,
         status: NoteStatus | None = None,
@@ -404,16 +388,16 @@ def register_routes(
         if status is not None:
             notes = [note for note in notes if note.status == status]
         page, total = _paginate(notes, limit, offset)
-        payload = [NoteRead.model_validate(note) for note in page]
+        payload = page
         return ListEnvelope(
             data=payload,
             meta=PaginationMeta(limit=limit, offset=offset, total=total),
         )
 
-    @app.get("/notes/{note_id}", response_model=Envelope[NoteRead])
+    @app.get("/notes/{note_id}", response_model=Envelope[Note])
     def get_note(note_id: UUID):
         note = api.get_note(note_id)
-        return Envelope(data=NoteRead.model_validate(note))
+        return Envelope(data=note)
 
     @app.get("/notes/{note_id}/raw")
     def download_note_raw(note_id: UUID, request: Request):
@@ -421,7 +405,7 @@ def register_routes(
         accept = (request.headers.get("accept") or "").lower()
         if "application/json" not in accept:
             headers = {
-                "Content-Disposition": f'attachment; filename=\"{raw_asset.filename}\"',
+                "Content-Disposition": f'attachment; filename="{raw_asset.filename}"',
                 "Content-Length": str(raw_asset.size_bytes),
             }
             return Response(content=content, media_type=raw_asset.content_type, headers=headers)
@@ -436,31 +420,29 @@ def register_routes(
         )
         return Envelope(data=payload)
 
-    @app.patch("/notes/{note_id}", response_model=Envelope[NoteRead])
+    @app.patch("/notes/{note_id}", response_model=Envelope[Note])
     def update_note(note_id: UUID, payload: NoteUpdate, request: Request):
         actor = _actor_from_request(request)
-        extracted_entities = _entities_from_payload(payload.extracted_entities)
-        targets = _targets_from_payload(payload.targets)
         note = api.update_note(
             note_id,
             transcribed_text=payload.transcribed_text,
-            extracted_entities=extracted_entities,
-            targets=targets,
+            extracted_entities=payload.extracted_entities,
+            targets=payload.targets,
             metadata=payload.metadata,
             status=payload.status,
             actor=actor,
         )
-        return Envelope(data=NoteRead.model_validate(note))
+        return Envelope(data=note)
 
-    @app.delete("/notes/{note_id}", response_model=Envelope[NoteRead])
+    @app.delete("/notes/{note_id}", response_model=Envelope[Note])
     def delete_note(note_id: UUID, request: Request):
         actor = _actor_from_request(request)
         note = api.delete_note(note_id, actor=actor)
-        return Envelope(data=NoteRead.model_validate(note))
+        return Envelope(data=note)
 
     @app.post(
         "/notes/{note_id}/tag-suggestions",
-        response_model=Envelope[list[EntityTagSuggestionRead]],
+        response_model=Envelope[list[EntityTagSuggestion]],
         status_code=http_status.HTTP_201_CREATED,
     )
     def suggest_tag_suggestions(
@@ -476,13 +458,13 @@ def register_routes(
             actor=actor,
         )
         return Envelope(
-            data=[EntityTagSuggestionRead.model_validate(suggestion) for suggestion in suggestions],
+            data=suggestions,
             meta={"count": len(suggestions)},
         )
 
     @app.get(
         "/notes/{note_id}/tag-suggestions",
-        response_model=ListEnvelope[EntityTagSuggestionRead],
+        response_model=ListEnvelope[EntityTagSuggestion],
     )
     def list_tag_suggestions(
         note_id: UUID,
@@ -493,7 +475,7 @@ def register_routes(
         _validate_pagination(limit, offset)
         suggestions = api.list_entity_tag_suggestions(note_id, status=status)
         page, total = _paginate(suggestions, limit, offset)
-        payload = [EntityTagSuggestionRead.model_validate(suggestion) for suggestion in page]
+        payload = page
         return ListEnvelope(
             data=payload,
             meta=PaginationMeta(limit=limit, offset=offset, total=total),
@@ -501,7 +483,7 @@ def register_routes(
 
     @app.patch(
         "/notes/{note_id}/tag-suggestions/{suggestion_id}",
-        response_model=Envelope[EntityTagSuggestionRead],
+        response_model=Envelope[EntityTagSuggestion],
     )
     def review_tag_suggestion(
         note_id: UUID,
@@ -517,11 +499,11 @@ def register_routes(
             reviewed_by=payload.reviewed_by,
             actor=actor,
         )
-        return Envelope(data=EntityTagSuggestionRead.model_validate(suggestion))
+        return Envelope(data=suggestion)
 
     @app.post(
         "/notes/{note_id}/extract-questions",
-        response_model=Envelope[list[QuestionRead]],
+        response_model=Envelope[list[Question]],
         status_code=http_status.HTTP_201_CREATED,
     )
     def extract_questions(
@@ -544,13 +526,13 @@ def register_routes(
             actor=actor,
         )
         return Envelope(
-            data=[QuestionRead.model_validate(question) for question in questions],
+            data=questions,
             meta={"count": len(questions)},
         )
 
     @app.post(
         "/sessions",
-        response_model=Envelope[SessionRead],
+        response_model=Envelope[Session],
         status_code=http_status.HTTP_201_CREATED,
     )
     def create_session(payload: SessionCreate, request: Request):
@@ -563,9 +545,9 @@ def register_routes(
             actor=actor,
             created_by=_resolve_created_by(payload.created_by, actor),
         )
-        return Envelope(data=SessionRead.model_validate(session))
+        return Envelope(data=session)
 
-    @app.get("/sessions", response_model=ListEnvelope[SessionRead])
+    @app.get("/sessions", response_model=ListEnvelope[Session])
     def list_sessions(
         project_id: UUID | None = None,
         status: SessionStatus | None = None,
@@ -580,23 +562,23 @@ def register_routes(
         if session_type is not None:
             sessions = [session for session in sessions if session.session_type == session_type]
         page, total = _paginate(sessions, limit, offset)
-        payload = [SessionRead.model_validate(session) for session in page]
+        payload = page
         return ListEnvelope(
             data=payload,
             meta=PaginationMeta(limit=limit, offset=offset, total=total),
         )
 
-    @app.get("/sessions/by-link/{link_code}", response_model=Envelope[SessionRead])
+    @app.get("/sessions/by-link/{link_code}", response_model=Envelope[Session])
     def get_session_by_link_code(link_code: str):
         session = api.get_session_by_link_code(link_code)
-        return Envelope(data=SessionRead.model_validate(session))
+        return Envelope(data=session)
 
-    @app.get("/sessions/{session_id}", response_model=Envelope[SessionRead])
+    @app.get("/sessions/{session_id}", response_model=Envelope[Session])
     def get_session(session_id: UUID):
         session = api.get_session(session_id)
-        return Envelope(data=SessionRead.model_validate(session))
+        return Envelope(data=session)
 
-    @app.patch("/sessions/{session_id}", response_model=Envelope[SessionRead])
+    @app.patch("/sessions/{session_id}", response_model=Envelope[Session])
     def update_session(session_id: UUID, payload: SessionUpdate, request: Request):
         actor = _actor_from_request(request)
         session = api.update_session(
@@ -605,9 +587,9 @@ def register_routes(
             ended_at=payload.ended_at,
             actor=actor,
         )
-        return Envelope(data=SessionRead.model_validate(session))
+        return Envelope(data=session)
 
-    @app.get("/sessions/{session_id}/outputs", response_model=ListEnvelope[AcquisitionOutputRead])
+    @app.get("/sessions/{session_id}/outputs", response_model=ListEnvelope[AcquisitionOutput])
     def list_session_outputs(
         session_id: UUID,
         limit: int = 50,
@@ -616,7 +598,7 @@ def register_routes(
         _validate_pagination(limit, offset)
         outputs = api.list_acquisition_outputs(session_id=session_id)
         page, total = _paginate(outputs, limit, offset)
-        payload = [AcquisitionOutputRead.model_validate(output) for output in page]
+        payload = page
         return ListEnvelope(
             data=payload,
             meta=PaginationMeta(limit=limit, offset=offset, total=total),
@@ -624,7 +606,7 @@ def register_routes(
 
     @app.post(
         "/sessions/{session_id}/outputs",
-        response_model=Envelope[AcquisitionOutputRead],
+        response_model=Envelope[AcquisitionOutput],
         status_code=http_status.HTTP_201_CREATED,
     )
     def create_session_output(
@@ -640,17 +622,17 @@ def register_routes(
             size_bytes=payload.size_bytes,
             actor=actor,
         )
-        return Envelope(data=AcquisitionOutputRead.model_validate(output))
+        return Envelope(data=output)
 
-    @app.delete("/sessions/{session_id}", response_model=Envelope[SessionRead])
+    @app.delete("/sessions/{session_id}", response_model=Envelope[Session])
     def delete_session(session_id: UUID, request: Request):
         actor = _actor_from_request(request)
         session = api.delete_session(session_id, actor=actor)
-        return Envelope(data=SessionRead.model_validate(session))
+        return Envelope(data=session)
 
     @app.post(
         "/sessions/{session_id}/promote",
-        response_model=Envelope[DatasetRead],
+        response_model=Envelope[Dataset],
         status_code=http_status.HTTP_201_CREATED,
     )
     def promote_operational_session(
@@ -664,15 +646,15 @@ def register_routes(
             primary_question_id=payload.primary_question_id,
             secondary_question_ids=payload.secondary_question_ids,
             status=payload.status or DatasetStatus.COMMITTED,
-            commit_manifest=_manifest_from_payload(payload.commit_manifest),
+            commit_manifest=payload.commit_manifest,
             actor=actor,
             created_by=_resolve_created_by(payload.created_by, actor),
         )
-        return Envelope(data=DatasetRead.model_validate(dataset))
+        return Envelope(data=dataset)
 
     @app.post(
         "/analyses",
-        response_model=Envelope[AnalysisRead],
+        response_model=Envelope[Analysis],
         status_code=http_status.HTTP_201_CREATED,
     )
     def create_analysis(payload: AnalysisCreate, request: Request):
@@ -687,9 +669,9 @@ def register_routes(
             actor=actor,
             executed_by=payload.executed_by or _resolve_created_by(None, actor),
         )
-        return Envelope(data=AnalysisRead.model_validate(analysis))
+        return Envelope(data=analysis)
 
-    @app.get("/analyses", response_model=ListEnvelope[AnalysisRead])
+    @app.get("/analyses", response_model=ListEnvelope[Analysis])
     def list_analyses(
         project_id: UUID | None = None,
         dataset_id: UUID | None = None,
@@ -707,18 +689,18 @@ def register_routes(
         if status is not None:
             analyses = [analysis for analysis in analyses if analysis.status == status]
         page, total = _paginate(analyses, limit, offset)
-        payload = [AnalysisRead.model_validate(analysis) for analysis in page]
+        payload = page
         return ListEnvelope(
             data=payload,
             meta=PaginationMeta(limit=limit, offset=offset, total=total),
         )
 
-    @app.get("/analyses/{analysis_id}", response_model=Envelope[AnalysisRead])
+    @app.get("/analyses/{analysis_id}", response_model=Envelope[Analysis])
     def get_analysis(analysis_id: UUID):
         analysis = api.get_analysis(analysis_id)
-        return Envelope(data=AnalysisRead.model_validate(analysis))
+        return Envelope(data=analysis)
 
-    @app.patch("/analyses/{analysis_id}", response_model=Envelope[AnalysisRead])
+    @app.patch("/analyses/{analysis_id}", response_model=Envelope[Analysis])
     def update_analysis(analysis_id: UUID, payload: AnalysisUpdate, request: Request):
         actor = _actor_from_request(request)
         analysis = api.update_analysis(
@@ -727,7 +709,7 @@ def register_routes(
             environment_hash=payload.environment_hash,
             actor=actor,
         )
-        return Envelope(data=AnalysisRead.model_validate(analysis))
+        return Envelope(data=analysis)
 
     @app.post("/analyses/{analysis_id}/commit", response_model=Envelope[AnalysisCommitResult])
     def commit_analysis(analysis_id: UUID, payload: AnalysisCommitRequest, request: Request):
@@ -735,29 +717,26 @@ def register_routes(
         analysis, claims, visualizations = api.commit_analysis(
             analysis_id,
             environment_hash=payload.environment_hash,
-            claims=_claim_inputs_from_payload(payload.claims),
-            visualizations=_visualization_inputs_from_payload(payload.visualizations),
+            claims=payload.claims,
+            visualizations=payload.visualizations,
             actor=actor,
         )
         result = AnalysisCommitResult(
-            analysis=AnalysisRead.model_validate(analysis),
-            claims=[ClaimRead.model_validate(claim) for claim in claims],
-            visualizations=[
-                VisualizationRead.model_validate(viz)
-                for viz in visualizations
-            ],
+            analysis=analysis,
+            claims=claims,
+            visualizations=visualizations,
         )
         return Envelope(data=result)
 
-    @app.delete("/analyses/{analysis_id}", response_model=Envelope[AnalysisRead])
+    @app.delete("/analyses/{analysis_id}", response_model=Envelope[Analysis])
     def delete_analysis(analysis_id: UUID, request: Request):
         actor = _actor_from_request(request)
         analysis = api.delete_analysis(analysis_id, actor=actor)
-        return Envelope(data=AnalysisRead.model_validate(analysis))
+        return Envelope(data=analysis)
 
     @app.post(
         "/claims",
-        response_model=Envelope[ClaimRead],
+        response_model=Envelope[Claim],
         status_code=http_status.HTTP_201_CREATED,
     )
     def create_claim(payload: ClaimCreate, request: Request):
@@ -771,9 +750,9 @@ def register_routes(
             supported_by_analysis_ids=payload.supported_by_analysis_ids,
             actor=actor,
         )
-        return Envelope(data=ClaimRead.model_validate(claim))
+        return Envelope(data=claim)
 
-    @app.get("/claims", response_model=ListEnvelope[ClaimRead])
+    @app.get("/claims", response_model=ListEnvelope[Claim])
     def list_claims(
         project_id: UUID | None = None,
         status: ClaimStatus | None = None,
@@ -790,18 +769,18 @@ def register_routes(
             analysis_id=analysis_id,
         )
         page, total = _paginate(claims, limit, offset)
-        payload = [ClaimRead.model_validate(claim) for claim in page]
+        payload = page
         return ListEnvelope(
             data=payload,
             meta=PaginationMeta(limit=limit, offset=offset, total=total),
         )
 
-    @app.get("/claims/{claim_id}", response_model=Envelope[ClaimRead])
+    @app.get("/claims/{claim_id}", response_model=Envelope[Claim])
     def get_claim(claim_id: UUID):
         claim = api.get_claim(claim_id)
-        return Envelope(data=ClaimRead.model_validate(claim))
+        return Envelope(data=claim)
 
-    @app.patch("/claims/{claim_id}", response_model=Envelope[ClaimRead])
+    @app.patch("/claims/{claim_id}", response_model=Envelope[Claim])
     def update_claim(claim_id: UUID, payload: ClaimUpdate, request: Request):
         actor = _actor_from_request(request)
         claim = api.update_claim(
@@ -813,17 +792,17 @@ def register_routes(
             supported_by_analysis_ids=payload.supported_by_analysis_ids,
             actor=actor,
         )
-        return Envelope(data=ClaimRead.model_validate(claim))
+        return Envelope(data=claim)
 
-    @app.delete("/claims/{claim_id}", response_model=Envelope[ClaimRead])
+    @app.delete("/claims/{claim_id}", response_model=Envelope[Claim])
     def delete_claim(claim_id: UUID, request: Request):
         actor = _actor_from_request(request)
         claim = api.delete_claim(claim_id, actor=actor)
-        return Envelope(data=ClaimRead.model_validate(claim))
+        return Envelope(data=claim)
 
     @app.post(
         "/visualizations",
-        response_model=Envelope[VisualizationRead],
+        response_model=Envelope[Visualization],
         status_code=http_status.HTTP_201_CREATED,
     )
     def create_visualization(payload: VisualizationCreate, request: Request):
@@ -836,9 +815,9 @@ def register_routes(
             related_claim_ids=payload.related_claim_ids,
             actor=actor,
         )
-        return Envelope(data=VisualizationRead.model_validate(visualization))
+        return Envelope(data=visualization)
 
-    @app.get("/visualizations", response_model=ListEnvelope[VisualizationRead])
+    @app.get("/visualizations", response_model=ListEnvelope[Visualization])
     def list_visualizations(
         project_id: UUID | None = None,
         analysis_id: UUID | None = None,
@@ -853,18 +832,18 @@ def register_routes(
             claim_id=claim_id,
         )
         page, total = _paginate(visualizations, limit, offset)
-        payload = [VisualizationRead.model_validate(viz) for viz in page]
+        payload = page
         return ListEnvelope(
             data=payload,
             meta=PaginationMeta(limit=limit, offset=offset, total=total),
         )
 
-    @app.get("/visualizations/{viz_id}", response_model=Envelope[VisualizationRead])
+    @app.get("/visualizations/{viz_id}", response_model=Envelope[Visualization])
     def get_visualization(viz_id: UUID):
         visualization = api.get_visualization(viz_id)
-        return Envelope(data=VisualizationRead.model_validate(visualization))
+        return Envelope(data=visualization)
 
-    @app.patch("/visualizations/{viz_id}", response_model=Envelope[VisualizationRead])
+    @app.patch("/visualizations/{viz_id}", response_model=Envelope[Visualization])
     def update_visualization(viz_id: UUID, payload: VisualizationUpdate, request: Request):
         actor = _actor_from_request(request)
         visualization = api.update_visualization(
@@ -875,13 +854,13 @@ def register_routes(
             related_claim_ids=payload.related_claim_ids,
             actor=actor,
         )
-        return Envelope(data=VisualizationRead.model_validate(visualization))
+        return Envelope(data=visualization)
 
-    @app.delete("/visualizations/{viz_id}", response_model=Envelope[VisualizationRead])
+    @app.delete("/visualizations/{viz_id}", response_model=Envelope[Visualization])
     def delete_visualization(viz_id: UUID, request: Request):
         actor = _actor_from_request(request)
         visualization = api.delete_visualization(viz_id, actor=actor)
-        return Envelope(data=VisualizationRead.model_validate(visualization))
+        return Envelope(data=visualization)
 
 
 def _register_exception_handlers(app: FastAPI) -> None:
@@ -999,86 +978,6 @@ def _paginate(items: list[Any], limit: int, offset: int) -> tuple[list[Any], int
     if offset >= total:
         return [], total
     return items[offset : offset + limit], total
-
-
-def _entities_from_payload(
-    payload: list[ExtractedEntityInput] | None,
-) -> list[tuple[str, float, str]] | None:
-    if payload is None:
-        return None
-    return [(entity.label, entity.confidence, entity.provenance) for entity in payload]
-
-
-def _targets_from_payload(payload: list[EntityRefInput] | None) -> list[EntityRef] | None:
-    if payload is None:
-        return None
-    return [EntityRef(entity_type=item.entity_type, entity_id=item.entity_id) for item in payload]
-
-
-def _claim_inputs_from_payload(payload: list[ClaimCommit] | None) -> list[ClaimInput]:
-    if payload is None:
-        return []
-    return [
-        ClaimInput(
-            statement=item.statement,
-            confidence=item.confidence,
-            status=item.status or ClaimStatus.PROPOSED,
-            supported_by_dataset_ids=item.supported_by_dataset_ids or [],
-            supported_by_analysis_ids=item.supported_by_analysis_ids or [],
-        )
-        for item in payload
-    ]
-
-
-def _visualization_inputs_from_payload(
-    payload: list[VisualizationCommit] | None,
-) -> list[VisualizationInput]:
-    if payload is None:
-        return []
-    return [
-        VisualizationInput(
-            viz_type=item.viz_type,
-            file_path=item.file_path,
-            caption=item.caption,
-            related_claim_ids=item.related_claim_ids or [],
-        )
-        for item in payload
-    ]
-
-
-def _links_from_payload(
-    payload: list[QuestionLinkInput] | None,
-) -> list[QuestionLink] | None:
-    if payload is None:
-        return None
-    return [
-        QuestionLink(
-            question_id=item.question_id,
-            role=item.role,
-            outcome_status=item.outcome_status,
-        )
-        for item in payload
-    ]
-
-
-def _manifest_from_payload(
-    payload: DatasetCommitManifestInputSchema | None,
-) -> DatasetCommitManifestInputModel | None:
-    if payload is None:
-        return None
-    files = [
-        DatasetFile(path=file_item.path, checksum=file_item.checksum)
-        for file_item in payload.files
-    ]
-    return DatasetCommitManifestInputModel(
-        files=files,
-        metadata=payload.metadata,
-        nwb_metadata=payload.nwb_metadata,
-        bids_metadata=payload.bids_metadata,
-        note_ids=payload.note_ids,
-        extraction_provenance=payload.extraction_provenance,
-        source_session_id=payload.source_session_id,
-    )
 
 
 def project_default_status() -> ProjectStatus:

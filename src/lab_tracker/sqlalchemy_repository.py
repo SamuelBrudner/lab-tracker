@@ -225,7 +225,9 @@ class SQLAlchemyDatasetRepository(EntityRepository[Dataset]):
         if not dataset_ids:
             return link_map
         rows = self._session.scalars(
-            select(DatasetQuestionLinkModel).where(DatasetQuestionLinkModel.dataset_id.in_(dataset_ids))
+            select(DatasetQuestionLinkModel).where(
+                DatasetQuestionLinkModel.dataset_id.in_(dataset_ids)
+            )
         )
         for row in rows:
             link_map[row.dataset_id].append(row)
@@ -324,8 +326,7 @@ class SQLAlchemyNoteRepository(EntityRepository[Note]):
                 note_from_model(
                     row,
                     extracted_entities=[
-                        extracted_entity_from_model(item)
-                        for item in extracted_rows
+                        extracted_entity_from_model(item) for item in extracted_rows
                     ],
                     tag_suggestions=[tag_suggestion_from_model(item) for item in suggestion_rows],
                     targets=[entity_ref_from_model(item) for item in target_rows],
@@ -543,7 +544,9 @@ class SQLAlchemyVisualizationRepository(EntityRepository[Visualization]):
         if not visualization_ids:
             return claim_map
         rows = self._session.scalars(
-            select(VisualizationClaimModel).where(VisualizationClaimModel.viz_id.in_(visualization_ids))
+            select(VisualizationClaimModel).where(
+                VisualizationClaimModel.viz_id.in_(visualization_ids)
+            )
         )
         for row in rows:
             claim_map[row.viz_id].append(UUID(row.claim_id))

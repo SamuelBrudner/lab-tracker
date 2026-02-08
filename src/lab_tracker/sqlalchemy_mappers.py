@@ -380,9 +380,7 @@ def session_from_model(row: SessionModel) -> Session:
         session_type=SessionType(row.session_type),
         status=SessionStatus(row.status),
         primary_question_id=(
-            _uuid(row.primary_question_id)
-            if row.primary_question_id is not None
-            else None
+            _uuid(row.primary_question_id) if row.primary_question_id is not None else None
         ),
         started_at=_as_utc(row.started_at),
         ended_at=_as_utc_optional(row.ended_at),
@@ -396,9 +394,7 @@ def apply_session_to_model(row: SessionModel, session: Session) -> None:
     row.session_type = session.session_type.value
     row.status = session.status.value
     row.primary_question_id = (
-        _uuid_str(session.primary_question_id)
-        if session.primary_question_id is not None
-        else None
+        _uuid_str(session.primary_question_id) if session.primary_question_id is not None else None
     )
     row.started_at = session.started_at
     row.ended_at = session.ended_at

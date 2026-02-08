@@ -65,7 +65,11 @@ class AcquisitionOutputWatcher:
             except (FileNotFoundError, PermissionError):
                 continue
             fingerprint = self._fingerprints.get(file_path)
-            if fingerprint and fingerprint.size_bytes == stat.st_size and fingerprint.mtime == stat.st_mtime:
+            if (
+                fingerprint
+                and fingerprint.size_bytes == stat.st_size
+                and fingerprint.mtime == stat.st_mtime
+            ):
                 continue
             try:
                 checksum = _hash_file(file_path)

@@ -108,9 +108,7 @@ class AuthService:
             return user
 
         with self._session_factory() as session:
-            existing = session.scalar(
-                select(UserModel).where(UserModel.username == normalized)
-            )
+            existing = session.scalar(select(UserModel).where(UserModel.username == normalized))
             if existing is not None:
                 raise ConflictError("Username already exists.")
             user_row = UserModel(

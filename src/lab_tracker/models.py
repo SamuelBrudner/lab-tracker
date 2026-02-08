@@ -1,14 +1,20 @@
-"""Core domain models for lab tracker."""
+"""Core domain models for lab tracker.
+
+The project intentionally keeps a single "domain model" representation that is used
+throughout the in-memory API layer and for API responses (Pydantic models). SQLAlchemy
+models remain the persistence representation.
+"""
 
 from __future__ import annotations
 
 import base64
 import binascii
-from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
 import re
 from uuid import UUID
+
+from pydantic import BaseModel, ConfigDict, Field, computed_field
 
 
 def utc_now() -> datetime:
@@ -127,21 +133,24 @@ class EntityType(str, Enum):
     VISUALIZATION = "visualization"
 
 
-@dataclass(frozen=True)
-class EntityRef:
+class _DomainModel(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+
+class EntityRef(_DomainModel):
     entity_type: EntityType
     entity_id: UUID
 
 
-@dataclass(frozen=True)
-class ExtractedEntity:
+class ExtractedEntity(_DomainModel):
     label: str
     confidence: float
     provenance: str
 
 
-@dataclass(frozen=True)
-class EntityTagSuggestion:
+class EntityTagSuggestion(_DomainModel):
+    model_config = ConfigDict(from_attributes=True, frozen=True)
+
     suggestion_id: UUID
     entity_label: str
     vocabulary: str
@@ -154,44 +163,39 @@ class EntityTagSuggestion:
     reviewed_at: datetime | None = None
 
 
-@dataclass(frozen=True)
-class QuestionLink:
+class QuestionLink(_DomainModel):
     question_id: UUID
     role: QuestionLinkRole
     outcome_status: OutcomeStatus = OutcomeStatus.UNKNOWN
 
 
-@dataclass(frozen=True)
-class DatasetFile:
+class DatasetFile(_DomainModel):
     path: str
     checksum: str
 
 
-@dataclass(frozen=True)
-class DatasetCommitManifestInput:
-    files: list[DatasetFile] = field(default_factory=list)
-    metadata: dict[str, str] = field(default_factory=dict)
-    nwb_metadata: dict[str, str] = field(default_factory=dict)
-    bids_metadata: dict[str, str] = field(default_factory=dict)
-    note_ids: list[UUID] = field(default_factory=list)
-    extraction_provenance: list[str] = field(default_factory=list)
+class DatasetCommitManifestInput(_DomainModel):
+    files: list[DatasetFile] = Field(default_factory=list)
+    metadata: dict[str, str] = Field(default_factory=dict)
+    nwb_metadata: dict[str, str] = Field(default_factory=dict)
+    bids_metadata: dict[str, str] = Field(default_factory=dict)
+    note_ids: list[UUID] = Field(default_factory=list)
+    extraction_provenance: list[str] = Field(default_factory=list)
     source_session_id: UUID | None = None
 
 
-@dataclass(frozen=True)
-class DatasetCommitManifest:
-    files: list[DatasetFile] = field(default_factory=list)
-    metadata: dict[str, str] = field(default_factory=dict)
-    nwb_metadata: dict[str, str] = field(default_factory=dict)
-    bids_metadata: dict[str, str] = field(default_factory=dict)
-    note_ids: list[UUID] = field(default_factory=list)
-    extraction_provenance: list[str] = field(default_factory=list)
-    question_links: list[QuestionLink] = field(default_factory=list)
+class DatasetCommitManifest(_DomainModel):
+    files: list[DatasetFile] = Field(default_factory=list)
+    metadata: dict[str, str] = Field(default_factory=dict)
+    nwb_metadata: dict[str, str] = Field(default_factory=dict)
+    bids_metadata: dict[str, str] = Field(default_factory=dict)
+    note_ids: list[UUID] = Field(default_factory=list)
+    extraction_provenance: list[str] = Field(default_factory=list)
+    question_links: list[QuestionLink] = Field(default_factory=list)
     source_session_id: UUID | None = None
 
 
-@dataclass(frozen=True)
-class NoteRawAsset:
+class NoteRawAsset(_DomainModel):
     storage_id: UUID
     filename: str
     content_type: str
@@ -199,34 +203,31 @@ class NoteRawAsset:
     checksum: str
 
 
-@dataclass
-class Project:
+class Project(_DomainModel):
     project_id: UUID
     name: str
     description: str = ""
     status: ProjectStatus = ProjectStatus.ACTIVE
-    created_at: datetime = field(default_factory=utc_now)
+    created_at: datetime = Field(default_factory=utc_now)
     created_by: str | None = None
-    updated_at: datetime = field(default_factory=utc_now)
+    updated_at: datetime = Field(default_factory=utc_now)
 
 
-@dataclass
-class Question:
+class Question(_DomainModel):
     question_id: UUID
     project_id: UUID
     text: str
     question_type: QuestionType
     hypothesis: str | None = None
     status: QuestionStatus = QuestionStatus.STAGED
-    parent_question_ids: list[UUID] = field(default_factory=list)
+    parent_question_ids: list[UUID] = Field(default_factory=list)
     created_from: QuestionSource = QuestionSource.MANUAL
-    created_at: datetime = field(default_factory=utc_now)
+    created_at: datetime = Field(default_factory=utc_now)
     created_by: str | None = None
-    updated_at: datetime = field(default_factory=utc_now)
+    updated_at: datetime = Field(default_factory=utc_now)
 
 
-@dataclass
-class Dataset:
+class Dataset(_DomainModel):
     dataset_id: UUID
     project_id: UUID
     commit_hash: str
@@ -234,58 +235,55 @@ class Dataset:
     question_links: list[QuestionLink]
     commit_manifest: DatasetCommitManifest
     status: DatasetStatus = DatasetStatus.STAGED
-    created_at: datetime = field(default_factory=utc_now)
+    created_at: datetime = Field(default_factory=utc_now)
     created_by: str | None = None
-    updated_at: datetime = field(default_factory=utc_now)
+    updated_at: datetime = Field(default_factory=utc_now)
 
 
-@dataclass
-class Note:
+class Note(_DomainModel):
     note_id: UUID
     project_id: UUID
     raw_content: str
     raw_asset: NoteRawAsset | None = None
     transcribed_text: str | None = None
-    extracted_entities: list[ExtractedEntity] = field(default_factory=list)
-    tag_suggestions: list[EntityTagSuggestion] = field(default_factory=list)
-    targets: list[EntityRef] = field(default_factory=list)
-    metadata: dict[str, str] = field(default_factory=dict)
+    extracted_entities: list[ExtractedEntity] = Field(default_factory=list)
+    tag_suggestions: list[EntityTagSuggestion] = Field(default_factory=list)
+    targets: list[EntityRef] = Field(default_factory=list)
+    metadata: dict[str, str] = Field(default_factory=dict)
     status: NoteStatus = NoteStatus.STAGED
-    created_at: datetime = field(default_factory=utc_now)
+    created_at: datetime = Field(default_factory=utc_now)
     created_by: str | None = None
-    updated_at: datetime = field(default_factory=utc_now)
+    updated_at: datetime = Field(default_factory=utc_now)
 
 
-@dataclass
-class Session:
+class Session(_DomainModel):
     session_id: UUID
     project_id: UUID
     session_type: SessionType
     status: SessionStatus = SessionStatus.ACTIVE
     primary_question_id: UUID | None = None
-    started_at: datetime = field(default_factory=utc_now)
+    started_at: datetime = Field(default_factory=utc_now)
     ended_at: datetime | None = None
     created_by: str | None = None
-    updated_at: datetime = field(default_factory=utc_now)
+    updated_at: datetime = Field(default_factory=utc_now)
 
+    @computed_field(return_type=str)
     @property
     def link_code(self) -> str:
         return encode_session_link_code(self.session_id)
 
 
-@dataclass
-class AcquisitionOutput:
+class AcquisitionOutput(_DomainModel):
     output_id: UUID
     session_id: UUID
     file_path: str
     checksum: str
     size_bytes: int | None = None
-    created_at: datetime = field(default_factory=utc_now)
-    updated_at: datetime = field(default_factory=utc_now)
+    created_at: datetime = Field(default_factory=utc_now)
+    updated_at: datetime = Field(default_factory=utc_now)
 
 
-@dataclass
-class Analysis:
+class Analysis(_DomainModel):
     analysis_id: UUID
     project_id: UUID
     dataset_ids: list[UUID]
@@ -293,49 +291,49 @@ class Analysis:
     code_version: str
     environment_hash: str | None = None
     executed_by: str | None = None
-    executed_at: datetime = field(default_factory=utc_now)
+    executed_at: datetime = Field(default_factory=utc_now)
     status: AnalysisStatus = AnalysisStatus.STAGED
-    created_at: datetime = field(default_factory=utc_now)
-    updated_at: datetime = field(default_factory=utc_now)
+    created_at: datetime = Field(default_factory=utc_now)
+    updated_at: datetime = Field(default_factory=utc_now)
 
 
-@dataclass(frozen=True)
-class ClaimInput:
+class ClaimInput(_DomainModel):
+    model_config = ConfigDict(from_attributes=True, frozen=True)
+
     statement: str
     confidence: float
     status: ClaimStatus = ClaimStatus.PROPOSED
-    supported_by_dataset_ids: list[UUID] = field(default_factory=list)
-    supported_by_analysis_ids: list[UUID] = field(default_factory=list)
+    supported_by_dataset_ids: list[UUID] = Field(default_factory=list)
+    supported_by_analysis_ids: list[UUID] = Field(default_factory=list)
 
 
-@dataclass
-class Claim:
+class Claim(_DomainModel):
     claim_id: UUID
     project_id: UUID
     statement: str
     confidence: float
     status: ClaimStatus = ClaimStatus.PROPOSED
-    supported_by_dataset_ids: list[UUID] = field(default_factory=list)
-    supported_by_analysis_ids: list[UUID] = field(default_factory=list)
-    created_at: datetime = field(default_factory=utc_now)
-    updated_at: datetime = field(default_factory=utc_now)
+    supported_by_dataset_ids: list[UUID] = Field(default_factory=list)
+    supported_by_analysis_ids: list[UUID] = Field(default_factory=list)
+    created_at: datetime = Field(default_factory=utc_now)
+    updated_at: datetime = Field(default_factory=utc_now)
 
 
-@dataclass(frozen=True)
-class VisualizationInput:
+class VisualizationInput(_DomainModel):
+    model_config = ConfigDict(from_attributes=True, frozen=True)
+
     viz_type: str
     file_path: str
     caption: str | None = None
-    related_claim_ids: list[UUID] = field(default_factory=list)
+    related_claim_ids: list[UUID] = Field(default_factory=list)
 
 
-@dataclass
-class Visualization:
+class Visualization(_DomainModel):
     viz_id: UUID
     analysis_id: UUID
     viz_type: str
     file_path: str
     caption: str | None = None
-    related_claim_ids: list[UUID] = field(default_factory=list)
-    created_at: datetime = field(default_factory=utc_now)
-    updated_at: datetime = field(default_factory=utc_now)
+    related_claim_ids: list[UUID] = Field(default_factory=list)
+    created_at: datetime = Field(default_factory=utc_now)
+    updated_at: datetime = Field(default_factory=utc_now)

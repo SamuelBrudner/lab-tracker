@@ -98,7 +98,7 @@ def test_commit_hash_is_content_addressed():
     assert updated.commit_hash != original_hash
 
 
-def test_dataset_commit_manifest_nwb_metadata_validation():
+def test_dataset_commit_manifest_preserves_nwb_metadata_keys():
     api = LabTrackerAPI.in_memory()
     actor = _actor()
     project = api.create_project("Neuro Project", actor=actor)
@@ -110,35 +110,21 @@ def test_dataset_commit_manifest_nwb_metadata_validation():
     )
     manifest = DatasetCommitManifestInput(
         files=[DatasetFile(path="data.nwb", checksum="abc123")],
-        nwb_metadata={"identifier": "nwb-001", "session_description": "baseline"},
-    )
-    with pytest.raises(ValidationError):
-        api.create_dataset(
-            project_id=project.project_id,
-            primary_question_id=question.question_id,
-            commit_manifest=manifest,
-            actor=actor,
-        )
-    complete_manifest = DatasetCommitManifestInput(
-        files=[DatasetFile(path="data.nwb", checksum="abc123")],
-        nwb_metadata={
-            "Identifier": "nwb-001",
-            "Session Description": "baseline",
-            "session_start_time": "2024-01-01T00:00:00Z",
-        },
+        nwb_metadata={"Identifier": "nwb-001", "Session Description": "baseline"},
     )
     dataset = api.create_dataset(
         project_id=project.project_id,
         primary_question_id=question.question_id,
-        commit_manifest=complete_manifest,
+        commit_manifest=manifest,
         actor=actor,
     )
-    assert dataset.commit_manifest.nwb_metadata["identifier"] == "nwb-001"
-    assert dataset.commit_manifest.nwb_metadata["session_description"] == "baseline"
-    assert dataset.commit_manifest.nwb_metadata["session_start_time"] == "2024-01-01T00:00:00Z"
+    assert dataset.commit_manifest.nwb_metadata == {
+        "Identifier": "nwb-001",
+        "Session Description": "baseline",
+    }
 
 
-def test_dataset_commit_manifest_bids_metadata_validation():
+def test_dataset_commit_manifest_preserves_bids_metadata_keys():
     api = LabTrackerAPI.in_memory()
     actor = _actor()
     project = api.create_project("Neuro Project", actor=actor)
@@ -152,28 +138,16 @@ def test_dataset_commit_manifest_bids_metadata_validation():
         files=[DatasetFile(path="dataset_description.json", checksum="abc123")],
         bids_metadata={"Name": "Example Dataset"},
     )
-    with pytest.raises(ValidationError):
-        api.create_dataset(
-            project_id=project.project_id,
-            primary_question_id=question.question_id,
-            commit_manifest=manifest,
-            actor=actor,
-        )
-    complete_manifest = DatasetCommitManifestInput(
-        files=[DatasetFile(path="dataset_description.json", checksum="abc123")],
-        bids_metadata={"Name": "Example Dataset", "BIDSVersion": "1.9.0"},
-    )
     dataset = api.create_dataset(
         project_id=project.project_id,
         primary_question_id=question.question_id,
-        commit_manifest=complete_manifest,
+        commit_manifest=manifest,
         actor=actor,
     )
-    assert dataset.commit_manifest.bids_metadata["name"] == "Example Dataset"
-    assert dataset.commit_manifest.bids_metadata["bids_version"] == "1.9.0"
+    assert dataset.commit_manifest.bids_metadata == {"Name": "Example Dataset"}
 
 
-def test_dataset_commit_manifest_prefixed_metadata_hooks():
+def test_dataset_commit_manifest_does_not_split_prefixed_metadata():
     api = LabTrackerAPI.in_memory()
     actor = _actor()
     project = api.create_project("Neuro Project", actor=actor)
@@ -200,9 +174,16 @@ def test_dataset_commit_manifest_prefixed_metadata_hooks():
         commit_manifest=manifest,
         actor=actor,
     )
-    assert dataset.commit_manifest.metadata == {"run": "7"}
-    assert dataset.commit_manifest.nwb_metadata["identifier"] == "rig-001"
-    assert dataset.commit_manifest.bids_metadata["name"] == "Rig Dataset"
+    assert dataset.commit_manifest.metadata == {
+        "nwb.identifier": "rig-001",
+        "nwb.session_description": "qa session",
+        "nwb.session_start_time": "2024-01-02T00:00:00Z",
+        "bids.Name": "Rig Dataset",
+        "bids.BIDSVersion": "1.8.0",
+        "run": "7",
+    }
+    assert dataset.commit_manifest.nwb_metadata == {}
+    assert dataset.commit_manifest.bids_metadata == {}
 
 
 def test_dataset_commit_requires_active_question():
@@ -238,9 +219,7 @@ def test_committed_dataset_is_immutable():
         status=QuestionStatus.ACTIVE,
         actor=actor,
     )
-    manifest = DatasetCommitManifestInput(
-        files=[DatasetFile(path="data.csv", checksum="abc123")]
-    )
+    manifest = DatasetCommitManifestInput(files=[DatasetFile(path="data.csv", checksum="abc123")])
     dataset = api.create_dataset(
         project_id=project.project_id,
         primary_question_id=question.question_id,
@@ -285,9 +264,7 @@ def test_promote_operational_session_to_dataset():
         session_type=SessionType.OPERATIONAL,
         actor=actor,
     )
-    manifest = DatasetCommitManifestInput(
-        files=[DatasetFile(path="rig.log", checksum="qa123")]
-    )
+    manifest = DatasetCommitManifestInput(files=[DatasetFile(path="rig.log", checksum="qa123")])
     dataset = api.promote_operational_session(
         session.session_id,
         primary_question_id=question.question_id,
@@ -368,8 +345,7 @@ def test_extract_questions_from_note_stages_questions():
     assert all(question.status == QuestionStatus.STAGED for question in questions)
     assert all(question.created_from == QuestionSource.API for question in questions)
     assert all(
-        question.created_by and str(note.note_id) in question.created_by
-        for question in questions
+        question.created_by and str(note.note_id) in question.created_by for question in questions
     )
     assert api.extract_questions_from_note(note.note_id, actor=actor) == []
 

@@ -8,6 +8,7 @@
 # Daemon runtime files
 daemon.lock
 daemon.log
+daemon-*.log*
 daemon.pid
 bd.sock
 sync-state.json

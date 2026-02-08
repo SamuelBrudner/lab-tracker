@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from dataclasses import replace
 from typing import Iterable
 from uuid import UUID, uuid4
 
@@ -12,6 +11,7 @@ from lab_tracker.models import (
     EntityRef,
     EntityTagSuggestion,
     EntityType,
+    ExtractedEntity,
     Note,
     NoteRawAsset,
     NoteStatus,
@@ -47,7 +47,7 @@ class NoteServiceMixin:
         *,
         raw_asset: NoteRawAsset | None = None,
         transcribed_text: str | None = None,
-        extracted_entities: Iterable[tuple[str, float, str]] | None = None,
+        extracted_entities: Iterable[ExtractedEntity | tuple[str, float, str]] | None = None,
         tag_suggestions: Iterable[EntityTagSuggestion] | None = None,
         targets: Iterable[EntityRef] | None = None,
         metadata: dict[str, str] | None = None,
@@ -64,10 +64,13 @@ class NoteServiceMixin:
         for target in resolved_targets:
             self._ensure_target_exists(target, project_id)
         resolved_metadata = _normalize_note_metadata(metadata)
-        resolved_entities = [
-            _build_extracted_entity(label, confidence, provenance)
-            for label, confidence, provenance in (extracted_entities or [])
-        ]
+        resolved_entities: list[ExtractedEntity] = []
+        for item in extracted_entities or []:
+            if isinstance(item, ExtractedEntity):
+                label, confidence, provenance = item.label, item.confidence, item.provenance
+            else:
+                label, confidence, provenance = item
+            resolved_entities.append(_build_extracted_entity(label, confidence, provenance))
         resolved_tag_suggestions = list(tag_suggestions or [])
         note = Note(
             note_id=uuid4(),
@@ -94,7 +97,7 @@ class NoteServiceMixin:
         filename: str,
         content_type: str,
         transcribed_text: str | None = None,
-        extracted_entities: Iterable[tuple[str, float, str]] | None = None,
+        extracted_entities: Iterable[ExtractedEntity | tuple[str, float, str]] | None = None,
         targets: Iterable[EntityRef] | None = None,
         metadata: dict[str, str] | None = None,
         status: NoteStatus = NoteStatus.STAGED,
@@ -135,7 +138,7 @@ class NoteServiceMixin:
         note_id: UUID,
         *,
         transcribed_text: str | None = None,
-        extracted_entities: Iterable[tuple[str, float, str]] | None = None,
+        extracted_entities: Iterable[ExtractedEntity | tuple[str, float, str]] | None = None,
         targets: Iterable[EntityRef] | None = None,
         metadata: dict[str, str] | None = None,
         status: NoteStatus | None = None,
@@ -146,10 +149,14 @@ class NoteServiceMixin:
         if transcribed_text is not None:
             note.transcribed_text = transcribed_text.strip() if transcribed_text else None
         if extracted_entities is not None:
-            note.extracted_entities = [
-                _build_extracted_entity(label, confidence, provenance)
-                for label, confidence, provenance in extracted_entities
-            ]
+            resolved_entities: list[ExtractedEntity] = []
+            for item in extracted_entities:
+                if isinstance(item, ExtractedEntity):
+                    label, confidence, provenance = item.label, item.confidence, item.provenance
+                else:
+                    label, confidence, provenance = item
+                resolved_entities.append(_build_extracted_entity(label, confidence, provenance))
+            note.extracted_entities = resolved_entities
         if targets is not None:
             resolved_targets = list(targets)
             for target in resolved_targets:
@@ -239,11 +246,12 @@ class NoteServiceMixin:
                 else:
                     resolved_reviewed_at = None
                     resolved_reviewed_by = None
-                updated = replace(
-                    suggestion,
-                    status=status,
-                    reviewed_by=resolved_reviewed_by,
-                    reviewed_at=resolved_reviewed_at,
+                updated = suggestion.model_copy(
+                    update={
+                        "status": status,
+                        "reviewed_by": resolved_reviewed_by,
+                        "reviewed_at": resolved_reviewed_at,
+                    }
                 )
                 note.tag_suggestions[index] = updated
                 note.updated_at = utc_now()

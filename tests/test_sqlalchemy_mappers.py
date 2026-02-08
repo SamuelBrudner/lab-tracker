@@ -159,12 +159,10 @@ def test_note_mapper_round_trip_for_supported_fields():
     mapped = note_from_model(
         row,
         extracted_entities=[
-            extracted_entity_from_model(item)
-            for item in note_extracted_entity_models(note)
+            extracted_entity_from_model(item) for item in note_extracted_entity_models(note)
         ],
         tag_suggestions=[
-            tag_suggestion_from_model(item)
-            for item in note_tag_suggestion_models(note)
+            tag_suggestion_from_model(item) for item in note_tag_suggestion_models(note)
         ],
         targets=[entity_ref_from_model(item) for item in note_target_models(note)],
     )
