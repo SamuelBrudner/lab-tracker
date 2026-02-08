@@ -9,8 +9,10 @@ from typing import Any
 
 from fastapi import Depends, FastAPI, Request
 from fastapi.staticfiles import StaticFiles
+from sqlalchemy import func, select
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.engine import Engine
+from sqlalchemy.orm import Session, sessionmaker
 from starlette.responses import FileResponse, JSONResponse, RedirectResponse
 
 from lab_tracker.api import LabTrackerAPI
@@ -18,6 +20,16 @@ from lab_tracker.api_routes import register_routes
 from lab_tracker.auth import AuthContext, AuthService, TokenService, extract_bearer_token
 from lab_tracker.config import get_settings
 from lab_tracker.db import get_engine, get_session_factory
+from lab_tracker.db_models import (
+    AnalysisModel,
+    ClaimModel,
+    DatasetModel,
+    NoteModel,
+    ProjectModel,
+    QuestionModel,
+    SessionModel,
+    VisualizationModel,
+)
 from lab_tracker.dependencies import get_sqlalchemy_repository, set_active_repository
 from lab_tracker.errors import AuthError
 from lab_tracker.logging import configure_logging
@@ -96,25 +108,57 @@ def _note_storage_check(path: Path) -> dict[str, str]:
     }
 
 
-def _metrics_snapshot(api: LabTrackerAPI, *, environment: str, app_name: str) -> dict[str, Any]:
+def _empty_store_counts() -> dict[str, int]:
+    return {
+        "projects": 0,
+        "questions": 0,
+        "datasets": 0,
+        "notes": 0,
+        "sessions": 0,
+        # Acquisition outputs are not yet persisted in SQLAlchemy.
+        "acquisition_outputs": 0,
+        "analyses": 0,
+        "claims": 0,
+        "visualizations": 0,
+    }
+
+
+def _count_rows(session: Session, model: type) -> int:
+    count = session.scalar(select(func.count()).select_from(model))
+    return int(count or 0)
+
+
+def _store_counts_from_database(session_factory: sessionmaker[Session]) -> dict[str, int]:
+    counts = _empty_store_counts()
+    try:
+        with session_factory() as session:
+            counts["projects"] = _count_rows(session, ProjectModel)
+            counts["questions"] = _count_rows(session, QuestionModel)
+            counts["datasets"] = _count_rows(session, DatasetModel)
+            counts["notes"] = _count_rows(session, NoteModel)
+            counts["sessions"] = _count_rows(session, SessionModel)
+            counts["analyses"] = _count_rows(session, AnalysisModel)
+            counts["claims"] = _count_rows(session, ClaimModel)
+            counts["visualizations"] = _count_rows(session, VisualizationModel)
+    except SQLAlchemyError:
+        # Schema setup is validated separately; observability should still respond.
+        return _empty_store_counts()
+    return counts
+
+
+def _metrics_snapshot(
+    session_factory: sessionmaker[Session],
+    *,
+    environment: str,
+    app_name: str,
+) -> dict[str, Any]:
     now = datetime.now(timezone.utc)
-    store = api._store
     return {
         "status": "ok",
         "timestamp": now.isoformat(),
         "uptime_seconds": (now - _START_TIME).total_seconds(),
         "app": {"name": app_name, "environment": environment},
-        "store": {
-            "projects": len(store.projects),
-            "questions": len(store.questions),
-            "datasets": len(store.datasets),
-            "notes": len(store.notes),
-            "sessions": len(store.sessions),
-            "acquisition_outputs": len(store.acquisition_outputs),
-            "analyses": len(store.analyses),
-            "claims": len(store.claims),
-            "visualizations": len(store.visualizations),
-        },
+        "store": _store_counts_from_database(session_factory),
     }
 
 
@@ -252,7 +296,11 @@ def create_app() -> FastAPI:
 
     @app.get("/metrics")
     def metrics():
-        return _metrics_snapshot(api, environment=settings.environment, app_name=settings.app_name)
+        return _metrics_snapshot(
+            session_factory,
+            environment=settings.environment,
+            app_name=settings.app_name,
+        )
 
     _configure_frontend_routes(app)
     register_routes(
