@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import logging
 import os
 from pathlib import Path
 from typing import Any
@@ -40,6 +41,7 @@ from lab_tracker.sqlalchemy_repository import SQLAlchemyLabTrackerRepository
 
 _START_TIME = datetime.now(timezone.utc)
 _FRONTEND_DIR = Path(__file__).resolve().parent / "frontend"
+_logger = logging.getLogger(__name__)
 _PUBLIC_PATHS = frozenset(
     {
         "/",
@@ -230,6 +232,7 @@ def _configure_database_shutdown_hook(app: FastAPI, *, engine: Engine) -> None:
 def _configure_frontend_routes(app: FastAPI) -> None:
     index_file = _FRONTEND_DIR / "index.html"
     if not index_file.exists():
+        _logger.warning("Frontend files not found at %s; /app routes will not be served.", _FRONTEND_DIR)
         return
     app.mount(
         "/app/static",
