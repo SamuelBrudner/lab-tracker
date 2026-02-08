@@ -15,7 +15,14 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 
 from lab_tracker.api import LabTrackerAPI
-from lab_tracker.auth import AuthContext, AuthService, TokenService, User
+from lab_tracker.auth import (
+    AuthContext,
+    AuthService,
+    Role,
+    TokenService,
+    User,
+    extract_bearer_token,
+)
 from lab_tracker.errors import (
     AuthError,
     ConflictError,
@@ -110,7 +117,15 @@ def register_routes(
         response_model=Envelope[AuthTokenRead],
         status_code=http_status.HTTP_201_CREATED,
     )
-    def register_auth(payload: AuthRegisterRequest):
+    def register_auth(payload: AuthRegisterRequest, request: Request):
+        if payload.role != Role.VIEWER:
+            actor = _actor_from_authorization_header(
+                request,
+                auth_service=auth_service,
+                token_service=token_service,
+            )
+            if actor.role != Role.ADMIN:
+                raise AuthError("Admin privileges required to register non-viewer users.")
         user = auth_service.register_user(
             username=payload.username,
             password=payload.password,
@@ -931,6 +946,20 @@ def _actor_from_request(request: Request | None) -> AuthContext:
     if actor is None:
         raise AuthError("Authentication required.")
     return actor
+
+
+def _actor_from_authorization_header(
+    request: Request,
+    *,
+    auth_service: AuthService,
+    token_service: TokenService,
+) -> AuthContext:
+    token = extract_bearer_token(request.headers.get("authorization"))
+    claims = token_service.verify_access_token(token)
+    user = auth_service.get_user_by_id(claims.user_id)
+    if user is None:
+        raise AuthError("Invalid token.")
+    return AuthContext(user_id=user.user_id, role=user.role)
 
 
 def _auth_user_read(user: User) -> AuthUserRead:

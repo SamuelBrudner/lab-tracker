@@ -4,6 +4,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
 
 from lab_tracker.app import create_app
+from lab_tracker.auth import Role
 from lab_tracker.db import Base
 
 
@@ -27,12 +28,29 @@ def _auth_headers(token: str) -> dict[str, str]:
     return {"Authorization": f"Bearer {token}"}
 
 
+def _seed_admin(client: TestClient, *, username: str = "root", password: str = "secret") -> None:
+    client.app.state.auth_service.register_user(
+        username=username,
+        password=password,
+        role=Role.ADMIN,
+    )
+
+
+def _login(client: TestClient, username: str, password: str) -> str:
+    login_response = client.post(
+        "/auth/login",
+        json={"username": username, "password": password},
+    )
+    assert login_response.status_code == 200
+    return login_response.json()["data"]["access_token"]
+
+
 def test_register_login_and_me_round_trip(monkeypatch, tmp_path):
     _bootstrap_database(monkeypatch, tmp_path)
     with TestClient(create_app()) as client:
         register_response = client.post(
             "/auth/register",
-            json={"username": "sam", "password": "secret", "role": "admin"},
+            json={"username": "sam", "password": "secret"},
         )
         assert register_response.status_code == 201
         register_payload = register_response.json()["data"]
@@ -43,7 +61,7 @@ def test_register_login_and_me_round_trip(monkeypatch, tmp_path):
         assert me_response.status_code == 200
         me_payload = me_response.json()["data"]
         assert me_payload["username"] == "sam"
-        assert me_payload["role"] == "admin"
+        assert me_payload["role"] == "viewer"
 
         login_response = client.post(
             "/auth/login",
@@ -59,7 +77,7 @@ def test_login_rejects_invalid_credentials(monkeypatch, tmp_path):
     with TestClient(create_app()) as client:
         register_response = client.post(
             "/auth/register",
-            json={"username": "sam", "password": "secret", "role": "admin"},
+            json={"username": "sam", "password": "secret"},
         )
         assert register_response.status_code == 201
 
@@ -84,12 +102,8 @@ def test_protected_routes_require_authorization(monkeypatch, tmp_path):
 def test_protected_routes_accept_valid_authorization(monkeypatch, tmp_path):
     _bootstrap_database(monkeypatch, tmp_path)
     with TestClient(create_app()) as client:
-        register_response = client.post(
-            "/auth/register",
-            json={"username": "sam", "password": "secret", "role": "admin"},
-        )
-        assert register_response.status_code == 201
-        token = register_response.json()["data"]["access_token"]
+        _seed_admin(client, username="sam", password="secret")
+        token = _login(client, "sam", "secret")
 
         create_response = client.post(
             "/projects",
@@ -103,3 +117,39 @@ def test_protected_routes_accept_valid_authorization(monkeypatch, tmp_path):
         assert list_response.status_code == 200
         project_ids = [item["project_id"] for item in list_response.json()["data"]]
         assert project_id in project_ids
+
+
+def test_register_non_viewer_requires_admin_token(monkeypatch, tmp_path):
+    _bootstrap_database(monkeypatch, tmp_path)
+    with TestClient(create_app()) as client:
+        no_auth_response = client.post(
+            "/auth/register",
+            json={"username": "editor-1", "password": "secret", "role": "editor"},
+        )
+        assert no_auth_response.status_code == 401
+        assert no_auth_response.json()["error"]["code"] == "auth_error"
+
+        viewer_register_response = client.post(
+            "/auth/register",
+            json={"username": "viewer-1", "password": "secret"},
+        )
+        assert viewer_register_response.status_code == 201
+        viewer_token = viewer_register_response.json()["data"]["access_token"]
+
+        viewer_auth_response = client.post(
+            "/auth/register",
+            json={"username": "editor-2", "password": "secret", "role": "editor"},
+            headers=_auth_headers(viewer_token),
+        )
+        assert viewer_auth_response.status_code == 401
+        assert viewer_auth_response.json()["error"]["code"] == "auth_error"
+
+        _seed_admin(client)
+        admin_token = _login(client, "root", "secret")
+        admin_auth_response = client.post(
+            "/auth/register",
+            json={"username": "editor-3", "password": "secret", "role": "editor"},
+            headers=_auth_headers(admin_token),
+        )
+        assert admin_auth_response.status_code == 201
+        assert admin_auth_response.json()["data"]["user"]["role"] == "editor"

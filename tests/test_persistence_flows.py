@@ -21,6 +21,14 @@ def _auth_headers(token: str) -> dict[str, str]:
     return {"Authorization": f"Bearer {token}"}
 
 
+def _seed_admin(app, *, username: str, password: str) -> None:
+    app.state.auth_service.register_user(
+        username=username,
+        password=password,
+        role=Role.ADMIN,
+    )
+
+
 def test_repository_backed_api_persists_core_entities(tmp_path):
     db_path = tmp_path / "api-persistence.db"
     engine = create_engine(
@@ -89,17 +97,21 @@ def test_fastapi_routes_persist_across_app_restarts(monkeypatch, tmp_path):
     engine.dispose()
 
     app_first = create_app()
+    _seed_admin(
+        app_first,
+        username="route-persistence-admin",
+        password="secret",
+    )
     with TestClient(app_first) as client:
-        register_response = client.post(
-            "/auth/register",
+        login_response = client.post(
+            "/auth/login",
             json={
                 "username": "route-persistence-admin",
                 "password": "secret",
-                "role": "admin",
             },
         )
-        assert register_response.status_code == 201
-        token = register_response.json()["data"]["access_token"]
+        assert login_response.status_code == 200
+        token = login_response.json()["data"]["access_token"]
         headers = _auth_headers(token)
 
         create_response = client.post(
