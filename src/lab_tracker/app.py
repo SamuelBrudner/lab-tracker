@@ -14,15 +14,30 @@ from starlette.responses import JSONResponse
 
 from lab_tracker.api import LabTrackerAPI
 from lab_tracker.api_routes import register_routes
+from lab_tracker.auth import AuthContext, AuthService, TokenService, extract_bearer_token
 from lab_tracker.config import get_settings
 from lab_tracker.db import get_engine, get_session_factory
 from lab_tracker.dependencies import get_sqlalchemy_repository, set_active_repository
+from lab_tracker.errors import AuthError
 from lab_tracker.logging import configure_logging
 from lab_tracker.note_storage import LocalNoteStorage
+from lab_tracker.schemas import ErrorEnvelope, ErrorInfo
 from lab_tracker.sqlalchemy_repository import SQLAlchemyLabTrackerRepository
 
 
 _START_TIME = datetime.now(timezone.utc)
+_PUBLIC_PATHS = frozenset(
+    {
+        "/health",
+        "/metrics",
+        "/readiness",
+        "/auth/login",
+        "/auth/register",
+        "/openapi.json",
+        "/docs",
+        "/redoc",
+    }
+)
 
 
 def _nearest_existing_parent(path: Path) -> Path | None:
@@ -98,6 +113,35 @@ def _metrics_snapshot(api: LabTrackerAPI, *, environment: str, app_name: str) ->
     }
 
 
+def _auth_error_response(message: str) -> JSONResponse:
+    payload = ErrorEnvelope(error=ErrorInfo(code="auth_error", message=message))
+    return JSONResponse(status_code=401, content=payload.model_dump())
+
+
+def _is_public_path(path: str) -> bool:
+    if path in _PUBLIC_PATHS:
+        return True
+    # Keep docs assets and tests reachable without credentials.
+    return path.startswith("/docs/") or path.startswith("/redoc/") or path.startswith("/_test/")
+
+
+def _configure_auth_middleware(app: FastAPI) -> None:
+    @app.middleware("http")
+    async def auth_middleware(request: Request, call_next):
+        if request.method == "OPTIONS" or _is_public_path(request.url.path):
+            return await call_next(request)
+        try:
+            token = extract_bearer_token(request.headers.get("Authorization"))
+            claims = app.state.token_service.verify_access_token(token)
+            user = app.state.auth_service.get_user_by_id(claims.user_id)
+            if user is None:
+                raise AuthError("Invalid token.")
+            request.state.auth_context = AuthContext(user_id=user.user_id, role=user.role)
+        except AuthError as exc:
+            return _auth_error_response(str(exc))
+        return await call_next(request)
+
+
 def _configure_database_session_middleware(
     app: FastAPI,
 ) -> None:
@@ -134,12 +178,20 @@ def create_app() -> FastAPI:
     configure_logging(settings.log_level)
     engine = get_engine(settings)
     session_factory = get_session_factory(engine=engine)
+    auth_service = AuthService(session_factory=session_factory)
+    token_service = TokenService(
+        settings.auth_secret_key,
+        ttl_minutes=settings.auth_token_ttl_minutes,
+    )
     app = FastAPI(
         title=settings.app_name,
         dependencies=[Depends(get_sqlalchemy_repository)],
     )
     app.state.db_engine = engine
     app.state.db_session_factory = session_factory
+    app.state.auth_service = auth_service
+    app.state.token_service = token_service
+    _configure_auth_middleware(app)
     _configure_database_session_middleware(app)
     _configure_database_shutdown_hook(app, engine=engine)
     raw_storage = LocalNoteStorage(settings.note_storage_path)
@@ -172,7 +224,12 @@ def create_app() -> FastAPI:
     def metrics():
         return _metrics_snapshot(api, environment=settings.environment, app_name=settings.app_name)
 
-    register_routes(app, api)
+    register_routes(
+        app,
+        api,
+        auth_service=auth_service,
+        token_service=token_service,
+    )
 
     return app
 

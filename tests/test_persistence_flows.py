@@ -17,6 +17,10 @@ def _actor() -> AuthContext:
     return AuthContext(user_id=uuid4(), role=Role.ADMIN)
 
 
+def _auth_headers(token: str) -> dict[str, str]:
+    return {"Authorization": f"Bearer {token}"}
+
+
 def test_repository_backed_api_persists_core_entities(tmp_path):
     db_path = tmp_path / "api-persistence.db"
     engine = create_engine(
@@ -86,7 +90,23 @@ def test_fastapi_routes_persist_across_app_restarts(monkeypatch, tmp_path):
 
     app_first = create_app()
     with TestClient(app_first) as client:
-        create_response = client.post("/projects", json={"name": "Route Persistence"})
+        register_response = client.post(
+            "/auth/register",
+            json={
+                "username": "route-persistence-admin",
+                "password": "secret",
+                "role": "admin",
+            },
+        )
+        assert register_response.status_code == 201
+        token = register_response.json()["data"]["access_token"]
+        headers = _auth_headers(token)
+
+        create_response = client.post(
+            "/projects",
+            json={"name": "Route Persistence"},
+            headers=headers,
+        )
         assert create_response.status_code == 201
         project_id = create_response.json()["data"]["project_id"]
         question_response = client.post(
@@ -96,6 +116,7 @@ def test_fastapi_routes_persist_across_app_restarts(monkeypatch, tmp_path):
                 "text": "Can routes persist question data?",
                 "question_type": "descriptive",
             },
+            headers=headers,
         )
         assert question_response.status_code == 201
         question_id = question_response.json()["data"]["question_id"]
@@ -105,15 +126,27 @@ def test_fastapi_routes_persist_across_app_restarts(monkeypatch, tmp_path):
                 "project_id": project_id,
                 "primary_question_id": question_id,
             },
+            headers=headers,
         )
         assert dataset_response.status_code == 201
         dataset_id = dataset_response.json()["data"]["dataset_id"]
 
     app_second = create_app()
     with TestClient(app_second) as client:
-        list_response = client.get("/projects")
-        question_list_response = client.get("/questions")
-        dataset_list_response = client.get("/datasets")
+        login_response = client.post(
+            "/auth/login",
+            json={
+                "username": "route-persistence-admin",
+                "password": "secret",
+            },
+        )
+        assert login_response.status_code == 200
+        token = login_response.json()["data"]["access_token"]
+        headers = _auth_headers(token)
+
+        list_response = client.get("/projects", headers=headers)
+        question_list_response = client.get("/questions", headers=headers)
+        dataset_list_response = client.get("/datasets", headers=headers)
     assert list_response.status_code == 200
     assert question_list_response.status_code == 200
     assert dataset_list_response.status_code == 200

@@ -11,6 +11,8 @@ class Settings(BaseSettings):
     log_level: str = "INFO"
     database_url: str = "sqlite+pysqlite:///./lab_tracker.db"
     note_storage_path: str = "./note_storage"
+    auth_secret_key: str = "dev-only-change-me"
+    auth_token_ttl_minutes: int = 60 * 12
 
     model_config = SettingsConfigDict(
         env_prefix="LAB_TRACKER_",

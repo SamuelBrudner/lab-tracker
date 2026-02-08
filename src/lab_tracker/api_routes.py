@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import binascii
+from datetime import datetime
 from typing import Any
 from uuid import UUID
 
@@ -14,7 +15,7 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 
 from lab_tracker.api import LabTrackerAPI
-from lab_tracker.auth import AuthContext, Role
+from lab_tracker.auth import AuthContext, AuthService, TokenService, User
 from lab_tracker.errors import (
     AuthError,
     ConflictError,
@@ -44,6 +45,10 @@ from lab_tracker.models import (
 from lab_tracker.schemas import (
     AcquisitionOutputCreate,
     AcquisitionOutputRead,
+    AuthLoginRequest,
+    AuthRegisterRequest,
+    AuthTokenRead,
+    AuthUserRead,
     AnalysisCommitRequest,
     AnalysisCommitResult,
     AnalysisCreate,
@@ -91,14 +96,42 @@ from lab_tracker.schemas import (
     VisualizationUpdate,
 )
 
-SYSTEM_ACTOR = AuthContext(
-    user_id=UUID("00000000-0000-0000-0000-000000000000"),
-    role=Role.ADMIN,
-)
-
-
-def register_routes(app: FastAPI, api: LabTrackerAPI) -> None:
+def register_routes(
+    app: FastAPI,
+    api: LabTrackerAPI,
+    *,
+    auth_service: AuthService,
+    token_service: TokenService,
+) -> None:
     _register_exception_handlers(app)
+
+    @app.post(
+        "/auth/register",
+        response_model=Envelope[AuthTokenRead],
+        status_code=http_status.HTTP_201_CREATED,
+    )
+    def register_auth(payload: AuthRegisterRequest):
+        user = auth_service.register_user(
+            username=payload.username,
+            password=payload.password,
+            role=payload.role,
+        )
+        token = token_service.issue_access_token(user)
+        return Envelope(data=_auth_token_read(user, token.token, token.expires_at))
+
+    @app.post("/auth/login", response_model=Envelope[AuthTokenRead])
+    def login_auth(payload: AuthLoginRequest):
+        user = auth_service.authenticate(payload.username, payload.password)
+        token = token_service.issue_access_token(user)
+        return Envelope(data=_auth_token_read(user, token.token, token.expires_at))
+
+    @app.get("/auth/me", response_model=Envelope[AuthUserRead])
+    def auth_me(request: Request):
+        actor = _actor_from_request(request)
+        user = auth_service.get_user_by_id(actor.user_id)
+        if user is None:
+            raise AuthError("Authentication required.")
+        return Envelope(data=_auth_user_read(user))
 
     @app.post(
         "/projects",
@@ -893,23 +926,28 @@ def _issues_from_validation_errors(errors: list[dict[str, Any]]) -> list[ErrorIs
 
 def _actor_from_request(request: Request | None) -> AuthContext:
     if request is None:
-        return SYSTEM_ACTOR
-    user_id_raw = request.headers.get("x-user-id")
-    role_raw = request.headers.get("x-role")
-    if not user_id_raw and not role_raw:
-        return SYSTEM_ACTOR
-    if not user_id_raw or not role_raw:
-        raise ValidationError("Both X-User-Id and X-Role headers are required.")
-    try:
-        user_id = UUID(user_id_raw)
-    except ValueError as exc:
-        raise ValidationError("X-User-Id must be a valid UUID.") from exc
-    role_value = role_raw.strip().lower()
-    try:
-        role = Role(role_value)
-    except ValueError as exc:
-        raise ValidationError("X-Role must be one of: admin, editor, viewer.") from exc
-    return AuthContext(user_id=user_id, role=role)
+        raise AuthError("Authentication required.")
+    actor = getattr(request.state, "auth_context", None)
+    if actor is None:
+        raise AuthError("Authentication required.")
+    return actor
+
+
+def _auth_user_read(user: User) -> AuthUserRead:
+    return AuthUserRead(
+        user_id=user.user_id,
+        username=user.username,
+        role=user.role,
+        created_at=user.created_at,
+    )
+
+
+def _auth_token_read(user: User, token: str, expires_at: datetime) -> AuthTokenRead:
+    return AuthTokenRead(
+        access_token=token,
+        expires_at=expires_at,
+        user=_auth_user_read(user),
+    )
 
 
 def _resolve_created_by(created_by: str | None, actor: AuthContext | None) -> str | None:

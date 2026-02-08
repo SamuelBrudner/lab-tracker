@@ -8,6 +8,7 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from lab_tracker.auth import Role
 from lab_tracker.models import (
     AnalysisStatus,
     ClaimStatus,
@@ -57,6 +58,31 @@ class ErrorInfo(BaseModel):
 
 class ErrorEnvelope(BaseModel):
     error: ErrorInfo
+
+
+class AuthUserRead(BaseModel):
+    user_id: UUID
+    username: str
+    role: Role
+    created_at: datetime
+
+
+class AuthTokenRead(BaseModel):
+    access_token: str
+    token_type: str = "bearer"
+    expires_at: datetime
+    user: AuthUserRead
+
+
+class AuthRegisterRequest(BaseModel):
+    username: str = Field(..., min_length=1)
+    password: str = Field(..., min_length=1)
+    role: Role = Role.VIEWER
+
+
+class AuthLoginRequest(BaseModel):
+    username: str = Field(..., min_length=1)
+    password: str = Field(..., min_length=1)
 
 
 class _BaseReadModel(BaseModel):
