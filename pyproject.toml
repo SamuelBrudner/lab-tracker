@@ -26,7 +26,7 @@ lint = [
 
 [tool.setuptools]
 package-dir = {"" = "src"}
-packages = ["lab_tracker"]
+packages = ["lab_tracker", "lab_tracker.services"]
 
 [tool.setuptools.package-data]
 lab_tracker = ["frontend/*"]
