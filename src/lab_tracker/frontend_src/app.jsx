@@ -90,6 +90,450 @@ function roleClass(role) {
   return `pill role-${role || "viewer"}`;
 }
 
+function AppHeader({ user, onLogout }) {
+  return (
+    <header className="hero">
+      <div className="hero-row">
+        <div>
+          <h1>Lab Tracker Frontend MVP</h1>
+          <p className="subtle">
+            Project dashboard, staged question review, note capture, and dataset commit workflow.
+          </p>
+        </div>
+        <div className="inline">
+          {user ? <span className={roleClass(user.role)}>{user.role}</span> : null}
+          {user ? <span className="pill">{user.username}</span> : null}
+          {user ? (
+            <button className="btn-secondary" onClick={onLogout}>
+              Sign out
+            </button>
+          ) : null}
+        </div>
+      </div>
+    </header>
+  );
+}
+
+function FlashMessages({ message, error }) {
+  if (!message && !error) {
+    return null;
+  }
+
+  return (
+    <>
+      {message ? <p className="flash ok">{message}</p> : null}
+      {error ? <p className="flash error">{error}</p> : null}
+    </>
+  );
+}
+
+function AuthForm({
+  authMode,
+  authUsername,
+  authPassword,
+  authBusy,
+  onSubmit,
+  onUsernameChange,
+  onPasswordChange,
+  onToggleMode,
+}) {
+  return (
+    <article className="card span-6">
+      <h2>{authMode === "login" ? "Sign In" : "Create Viewer Account"}</h2>
+      <p className="subtle">
+        Viewer registration is public. Admin/editor accounts must be provisioned by an admin.
+      </p>
+      <form className="form" onSubmit={onSubmit}>
+        <label>
+          Username
+          <input value={authUsername} onChange={onUsernameChange} autoComplete="username" />
+        </label>
+        <label>
+          Password
+          <input
+            type="password"
+            value={authPassword}
+            onChange={onPasswordChange}
+            autoComplete={authMode === "login" ? "current-password" : "new-password"}
+          />
+        </label>
+        <div className="inline">
+          <button className="btn-primary" disabled={authBusy}>
+            {authBusy ? "Working..." : authMode === "login" ? "Sign in" : "Register"}
+          </button>
+          <button type="button" className="btn-secondary" onClick={onToggleMode}>
+            {authMode === "login" ? "Need an account?" : "Have an account?"}
+          </button>
+        </div>
+      </form>
+    </article>
+  );
+}
+
+function WorkflowCoverageCard() {
+  return (
+    <article className="card span-6">
+      <h2>Workflow Coverage</h2>
+      <div className="stack">
+        <div className="item">1. Project dashboard and project creation</div>
+        <div className="item">2. Question capture and staged-to-active commit</div>
+        <div className="item">3. Text notes and photo uploads</div>
+        <div className="item">4. Dataset staging and dataset commit review</div>
+      </div>
+    </article>
+  );
+}
+
+function Dashboard({
+  projects,
+  questions,
+  datasets,
+  notes,
+  selectedProjectId,
+  onSelectedProjectChange,
+  canWrite,
+  busy,
+  projectName,
+  projectDescription,
+  onProjectNameChange,
+  onProjectDescriptionChange,
+  onCreateProject,
+}) {
+  return (
+    <article className="card span-4">
+      <h2>Dashboard</h2>
+      <div className="inline">
+        <div className="kpi">
+          <span className="subtle">Projects</span>
+          <strong>{projects.length}</strong>
+        </div>
+        <div className="kpi">
+          <span className="subtle">Questions</span>
+          <strong>{questions.length}</strong>
+        </div>
+        <div className="kpi">
+          <span className="subtle">Datasets</span>
+          <strong>{datasets.length}</strong>
+        </div>
+        <div className="kpi">
+          <span className="subtle">Notes</span>
+          <strong>{notes.length}</strong>
+        </div>
+      </div>
+
+      <label>
+        Active project
+        <select value={selectedProjectId} onChange={onSelectedProjectChange}>
+          <option value="">Select a project</option>
+          {projects.map((project) => (
+            <option key={project.project_id} value={project.project_id}>
+              {project.name}
+            </option>
+          ))}
+        </select>
+      </label>
+
+      <form className="form" onSubmit={onCreateProject}>
+        <h3>New Project</h3>
+        <label>
+          Name
+          <input value={projectName} onChange={onProjectNameChange} disabled={!canWrite} />
+        </label>
+        <label>
+          Description
+          <textarea
+            value={projectDescription}
+            onChange={onProjectDescriptionChange}
+            disabled={!canWrite}
+          />
+        </label>
+        <button className="btn-primary" disabled={!canWrite || busy}>
+          Create project
+        </button>
+      </form>
+
+      {!canWrite ? (
+        <p className="warn">
+          Your role is read-only. Ask an admin to provision an editor or admin account for write
+          workflows.
+        </p>
+      ) : null}
+    </article>
+  );
+}
+
+function QuestionPanel({
+  canWrite,
+  busy,
+  selectedProjectId,
+  questionText,
+  questionType,
+  questionHypothesis,
+  onQuestionTextChange,
+  onQuestionTypeChange,
+  onQuestionHypothesisChange,
+  onCreateQuestion,
+  stagedQuestions,
+  onActivateQuestion,
+}) {
+  return (
+    <article className="card span-8">
+      <h2>Question Staging & Commit</h2>
+      <p className="subtle">
+        Capture questions into staging, then activate when ready for use in acquisition and dataset
+        creation.
+      </p>
+
+      <form className="form" onSubmit={onCreateQuestion}>
+        <label>
+          Question text
+          <textarea
+            value={questionText}
+            onChange={onQuestionTextChange}
+            disabled={!canWrite || !selectedProjectId}
+          />
+        </label>
+        <label>
+          Question type
+          <select
+            value={questionType}
+            onChange={onQuestionTypeChange}
+            disabled={!canWrite || !selectedProjectId}
+          >
+            {QUESTION_TYPES.map((typeValue) => (
+              <option value={typeValue} key={typeValue}>
+                {typeValue}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label>
+          Hypothesis (optional)
+          <input
+            value={questionHypothesis}
+            onChange={onQuestionHypothesisChange}
+            disabled={!canWrite || !selectedProjectId}
+          />
+        </label>
+        <button className="btn-primary" disabled={!canWrite || !selectedProjectId || busy}>
+          Stage question
+        </button>
+      </form>
+
+      <h3>Staging Inbox</h3>
+      {stagedQuestions.length === 0 ? (
+        <p className="subtle">No staged questions for this project.</p>
+      ) : (
+        <div className="stack">
+          {stagedQuestions.map((question) => (
+            <article key={question.question_id} className="item">
+              <div className="item-head">
+                <strong>{question.text}</strong>
+                <span className="pill">{question.question_type}</span>
+              </div>
+              <p className="mono">{question.question_id}</p>
+              <div className="inline">
+                <button
+                  className="btn-primary"
+                  disabled={!canWrite || busy}
+                  onClick={() => onActivateQuestion(question.question_id)}
+                >
+                  Commit (activate)
+                </button>
+              </div>
+            </article>
+          ))}
+        </div>
+      )}
+    </article>
+  );
+}
+
+function NotePanel({
+  canWrite,
+  busy,
+  selectedProjectId,
+  noteText,
+  onNoteTextChange,
+  onCreateTextNote,
+  onUploadNote,
+  onUploadFileChange,
+  uploadTargetQuestionId,
+  onUploadTargetQuestionIdChange,
+  uploadTranscript,
+  onUploadTranscriptChange,
+  activeQuestions,
+  notes,
+}) {
+  return (
+    <article className="card span-6">
+      <h2>Note Capture</h2>
+      <form className="form" onSubmit={onCreateTextNote}>
+        <h3>Quick text note</h3>
+        <label>
+          Raw note text
+          <textarea
+            value={noteText}
+            onChange={onNoteTextChange}
+            disabled={!canWrite || !selectedProjectId}
+          />
+        </label>
+        <button className="btn-secondary" disabled={!canWrite || !selectedProjectId || busy}>
+          Save text note
+        </button>
+      </form>
+
+      <form className="form" onSubmit={onUploadNote}>
+        <h3>Photo upload</h3>
+        <label>
+          Select image/file
+          <input
+            type="file"
+            accept="image/*"
+            onChange={onUploadFileChange}
+            disabled={!canWrite || !selectedProjectId}
+          />
+        </label>
+        <label>
+          Link to active question (optional)
+          <select
+            value={uploadTargetQuestionId}
+            onChange={onUploadTargetQuestionIdChange}
+            disabled={!canWrite || !selectedProjectId}
+          >
+            <option value="">No question link</option>
+            {activeQuestions.map((question) => (
+              <option value={question.question_id} key={question.question_id}>
+                {question.text}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label>
+          Transcribed text (optional)
+          <textarea
+            value={uploadTranscript}
+            onChange={onUploadTranscriptChange}
+            disabled={!canWrite || !selectedProjectId}
+          />
+        </label>
+        <button className="btn-primary" disabled={!canWrite || !selectedProjectId || busy}>
+          Upload photo note
+        </button>
+      </form>
+
+      <h3>Recent Notes</h3>
+      <div className="stack">
+        {notes.slice(0, 5).map((note) => (
+          <article className="item" key={note.note_id}>
+            <div className="item-head">
+              <span className="pill">{note.status}</span>
+              <span className="subtle">{formatDate(note.created_at)}</span>
+            </div>
+            <p>{note.transcribed_text || note.raw_content || "(binary upload)"}</p>
+            <p className="mono">{note.note_id}</p>
+          </article>
+        ))}
+      </div>
+    </article>
+  );
+}
+
+function DatasetPanel({
+  canWrite,
+  busy,
+  selectedProjectId,
+  datasetPrimaryQuestionId,
+  onDatasetPrimaryQuestionIdChange,
+  datasetSecondaryRaw,
+  onDatasetSecondaryRawChange,
+  onCreateDataset,
+  questions,
+  datasets,
+  onCommitDataset,
+}) {
+  return (
+    <article className="card span-6">
+      <h2>Dataset Review</h2>
+      <p className="subtle">Stage datasets against active questions, then commit after review.</p>
+
+      <form className="form" onSubmit={onCreateDataset}>
+        <label>
+          Primary question
+          <select
+            value={datasetPrimaryQuestionId}
+            onChange={onDatasetPrimaryQuestionIdChange}
+            disabled={!canWrite || !selectedProjectId || questions.length === 0}
+          >
+            <option value="">Select question</option>
+            {questions.map((question) => (
+              <option value={question.question_id} key={question.question_id}>
+                {question.text}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label>
+          Secondary question IDs (comma-separated UUIDs)
+          <input
+            value={datasetSecondaryRaw}
+            onChange={onDatasetSecondaryRawChange}
+            disabled={!canWrite || !selectedProjectId}
+          />
+        </label>
+        <button className="btn-secondary" disabled={!canWrite || !selectedProjectId || busy}>
+          Stage dataset
+        </button>
+      </form>
+
+      <div className="stack">
+        {datasets.map((dataset) => (
+          <article className="item" key={dataset.dataset_id}>
+            <div className="item-head">
+              <strong>{dataset.status}</strong>
+              <span className="subtle">{formatDate(dataset.created_at)}</span>
+            </div>
+            <p className="mono">{dataset.dataset_id}</p>
+            <p className="mono">commit hash: {dataset.commit_hash}</p>
+            <p>
+              Links:{" "}
+              {dataset.question_links
+                .map((link) => `${link.role}:${link.question_id}`)
+                .join(" | ")}
+            </p>
+            {dataset.status !== "committed" ? (
+              <button
+                className="btn-primary"
+                disabled={!canWrite || busy}
+                onClick={() => onCommitDataset(dataset.dataset_id)}
+              >
+                Commit dataset
+              </button>
+            ) : null}
+          </article>
+        ))}
+      </div>
+    </article>
+  );
+}
+
+function ProjectContextCard({ selectedProject }) {
+  return (
+    <article className="card span-12">
+      <h2>Project Context</h2>
+      {selectedProject ? (
+        <div>
+          <strong>{selectedProject.name}</strong>
+          <p>{selectedProject.description || "No project description."}</p>
+          <p className="mono">{selectedProject.project_id}</p>
+        </div>
+      ) : (
+        <p className="subtle">Create or select a project to start the workflow.</p>
+      )}
+    </article>
+  );
+}
+
 function App() {
   const [token, setToken] = useState(() => localStorage.getItem(TOKEN_STORAGE_KEY) || "");
   const [user, setUser] = useState(null);
@@ -543,361 +987,95 @@ function App() {
 
   return (
     <div className="app-shell">
-      <header className="hero">
-        <div className="hero-row">
-          <div>
-            <h1>Lab Tracker Frontend MVP</h1>
-            <p className="subtle">
-              Project dashboard, staged question review, note capture, and dataset commit workflow.
-            </p>
-          </div>
-          <div className="inline">
-            {user ? <span className={roleClass(user.role)}>{user.role}</span> : null}
-            {user ? <span className="pill">{user.username}</span> : null}
-            {user ? (
-              <button className="btn-secondary" onClick={handleLogout}>
-                Sign out
-              </button>
-            ) : null}
-          </div>
-        </div>
-      </header>
+      <AppHeader user={user} onLogout={handleLogout} />
 
-      {message ? <p className="flash ok">{message}</p> : null}
-      {error ? <p className="flash error">{error}</p> : null}
+      <FlashMessages message={message} error={error} />
 
       {!token ? (
         <section className="grid">
-          <article className="card span-6">
-            <h2>{authMode === "login" ? "Sign In" : "Create Viewer Account"}</h2>
-            <p className="subtle">
-              Viewer registration is public. Admin/editor accounts must be provisioned by an admin.
-            </p>
-            <form className="form" onSubmit={handleAuthSubmit}>
-              <label>
-                Username
-                <input
-                  value={authUsername}
-                  onChange={(event) => setAuthUsername(event.target.value)}
-                  autoComplete="username"
-                />
-              </label>
-              <label>
-                Password
-                <input
-                  type="password"
-                  value={authPassword}
-                  onChange={(event) => setAuthPassword(event.target.value)}
-                  autoComplete={authMode === "login" ? "current-password" : "new-password"}
-                />
-              </label>
-              <div className="inline">
-                <button className="btn-primary" disabled={authBusy}>
-                  {authBusy ? "Working..." : authMode === "login" ? "Sign in" : "Register"}
-                </button>
-                <button
-                  type="button"
-                  className="btn-secondary"
-                  onClick={() => setAuthMode((current) => (current === "login" ? "register" : "login"))}
-                >
-                  {authMode === "login" ? "Need an account?" : "Have an account?"}
-                </button>
-              </div>
-            </form>
-          </article>
-          <article className="card span-6">
-            <h2>Workflow Coverage</h2>
-            <div className="stack">
-              <div className="item">1. Project dashboard and project creation</div>
-              <div className="item">2. Question capture and staged-to-active commit</div>
-              <div className="item">3. Text notes and photo uploads</div>
-              <div className="item">4. Dataset staging and dataset commit review</div>
-            </div>
-          </article>
+          <AuthForm
+            authMode={authMode}
+            authUsername={authUsername}
+            authPassword={authPassword}
+            authBusy={authBusy}
+            onSubmit={handleAuthSubmit}
+            onUsernameChange={(event) => setAuthUsername(event.target.value)}
+            onPasswordChange={(event) => setAuthPassword(event.target.value)}
+            onToggleMode={() =>
+              setAuthMode((current) => (current === "login" ? "register" : "login"))
+            }
+          />
+          <WorkflowCoverageCard />
         </section>
       ) : (
         <section className="grid">
-          <article className="card span-4">
-            <h2>Dashboard</h2>
-            <div className="inline">
-              <div className="kpi">
-                <span className="subtle">Projects</span>
-                <strong>{projects.length}</strong>
-              </div>
-              <div className="kpi">
-                <span className="subtle">Questions</span>
-                <strong>{questions.length}</strong>
-              </div>
-              <div className="kpi">
-                <span className="subtle">Datasets</span>
-                <strong>{datasets.length}</strong>
-              </div>
-              <div className="kpi">
-                <span className="subtle">Notes</span>
-                <strong>{notes.length}</strong>
-              </div>
-            </div>
+          <Dashboard
+            projects={projects}
+            questions={questions}
+            datasets={datasets}
+            notes={notes}
+            selectedProjectId={selectedProjectId}
+            onSelectedProjectChange={(event) => setSelectedProjectId(event.target.value)}
+            canWrite={canWrite}
+            busy={busy}
+            projectName={projectName}
+            projectDescription={projectDescription}
+            onProjectNameChange={(event) => setProjectName(event.target.value)}
+            onProjectDescriptionChange={(event) => setProjectDescription(event.target.value)}
+            onCreateProject={handleCreateProject}
+          />
 
-            <label>
-              Active project
-              <select
-                value={selectedProjectId}
-                onChange={(event) => setSelectedProjectId(event.target.value)}
-              >
-                <option value="">Select a project</option>
-                {projects.map((project) => (
-                  <option key={project.project_id} value={project.project_id}>
-                    {project.name}
-                  </option>
-                ))}
-              </select>
-            </label>
+          <QuestionPanel
+            canWrite={canWrite}
+            busy={busy}
+            selectedProjectId={selectedProjectId}
+            questionText={questionText}
+            questionType={questionType}
+            questionHypothesis={questionHypothesis}
+            onQuestionTextChange={(event) => setQuestionText(event.target.value)}
+            onQuestionTypeChange={(event) => setQuestionType(event.target.value)}
+            onQuestionHypothesisChange={(event) => setQuestionHypothesis(event.target.value)}
+            onCreateQuestion={handleCreateQuestion}
+            stagedQuestions={stagedQuestions}
+            onActivateQuestion={handleActivateQuestion}
+          />
 
-            <form className="form" onSubmit={handleCreateProject}>
-              <h3>New Project</h3>
-              <label>
-                Name
-                <input
-                  value={projectName}
-                  onChange={(event) => setProjectName(event.target.value)}
-                  disabled={!canWrite}
-                />
-              </label>
-              <label>
-                Description
-                <textarea
-                  value={projectDescription}
-                  onChange={(event) => setProjectDescription(event.target.value)}
-                  disabled={!canWrite}
-                />
-              </label>
-              <button className="btn-primary" disabled={!canWrite || busy}>
-                Create project
-              </button>
-            </form>
+          <NotePanel
+            canWrite={canWrite}
+            busy={busy}
+            selectedProjectId={selectedProjectId}
+            noteText={noteText}
+            onNoteTextChange={(event) => setNoteText(event.target.value)}
+            onCreateTextNote={handleCreateTextNote}
+            onUploadNote={handleUploadNote}
+            onUploadFileChange={(event) => setUploadFile(event.target.files?.[0] || null)}
+            uploadTargetQuestionId={uploadTargetQuestionId}
+            onUploadTargetQuestionIdChange={(event) =>
+              setUploadTargetQuestionId(event.target.value)
+            }
+            uploadTranscript={uploadTranscript}
+            onUploadTranscriptChange={(event) => setUploadTranscript(event.target.value)}
+            activeQuestions={activeQuestions}
+            notes={notes}
+          />
 
-            {!canWrite ? (
-              <p className="warn">
-                Your role is read-only. Ask an admin to provision an editor or admin account for write
-                workflows.
-              </p>
-            ) : null}
-          </article>
+          <DatasetPanel
+            canWrite={canWrite}
+            busy={busy}
+            selectedProjectId={selectedProjectId}
+            datasetPrimaryQuestionId={datasetPrimaryQuestionId}
+            onDatasetPrimaryQuestionIdChange={(event) =>
+              setDatasetPrimaryQuestionId(event.target.value)
+            }
+            datasetSecondaryRaw={datasetSecondaryRaw}
+            onDatasetSecondaryRawChange={(event) => setDatasetSecondaryRaw(event.target.value)}
+            onCreateDataset={handleCreateDataset}
+            questions={questions}
+            datasets={datasets}
+            onCommitDataset={handleCommitDataset}
+          />
 
-          <article className="card span-8">
-            <h2>Question Staging & Commit</h2>
-            <p className="subtle">
-              Capture questions into staging, then activate when ready for use in acquisition and dataset
-              creation.
-            </p>
-
-            <form className="form" onSubmit={handleCreateQuestion}>
-              <label>
-                Question text
-                <textarea
-                  value={questionText}
-                  onChange={(event) => setQuestionText(event.target.value)}
-                  disabled={!canWrite || !selectedProjectId}
-                />
-              </label>
-              <label>
-                Question type
-                <select
-                  value={questionType}
-                  onChange={(event) => setQuestionType(event.target.value)}
-                  disabled={!canWrite || !selectedProjectId}
-                >
-                  {QUESTION_TYPES.map((typeValue) => (
-                    <option value={typeValue} key={typeValue}>
-                      {typeValue}
-                    </option>
-                  ))}
-                </select>
-              </label>
-              <label>
-                Hypothesis (optional)
-                <input
-                  value={questionHypothesis}
-                  onChange={(event) => setQuestionHypothesis(event.target.value)}
-                  disabled={!canWrite || !selectedProjectId}
-                />
-              </label>
-              <button className="btn-primary" disabled={!canWrite || !selectedProjectId || busy}>
-                Stage question
-              </button>
-            </form>
-
-            <h3>Staging Inbox</h3>
-            {stagedQuestions.length === 0 ? (
-              <p className="subtle">No staged questions for this project.</p>
-            ) : (
-              <div className="stack">
-                {stagedQuestions.map((question) => (
-                  <article key={question.question_id} className="item">
-                    <div className="item-head">
-                      <strong>{question.text}</strong>
-                      <span className="pill">{question.question_type}</span>
-                    </div>
-                    <p className="mono">{question.question_id}</p>
-                    <div className="inline">
-                      <button
-                        className="btn-primary"
-                        disabled={!canWrite || busy}
-                        onClick={() => handleActivateQuestion(question.question_id)}
-                      >
-                        Commit (activate)
-                      </button>
-                    </div>
-                  </article>
-                ))}
-              </div>
-            )}
-          </article>
-
-          <article className="card span-6">
-            <h2>Note Capture</h2>
-            <form className="form" onSubmit={handleCreateTextNote}>
-              <h3>Quick text note</h3>
-              <label>
-                Raw note text
-                <textarea
-                  value={noteText}
-                  onChange={(event) => setNoteText(event.target.value)}
-                  disabled={!canWrite || !selectedProjectId}
-                />
-              </label>
-              <button className="btn-secondary" disabled={!canWrite || !selectedProjectId || busy}>
-                Save text note
-              </button>
-            </form>
-
-            <form className="form" onSubmit={handleUploadNote}>
-              <h3>Photo upload</h3>
-              <label>
-                Select image/file
-                <input
-                  type="file"
-                  accept="image/*"
-                  onChange={(event) => setUploadFile(event.target.files?.[0] || null)}
-                  disabled={!canWrite || !selectedProjectId}
-                />
-              </label>
-              <label>
-                Link to active question (optional)
-                <select
-                  value={uploadTargetQuestionId}
-                  onChange={(event) => setUploadTargetQuestionId(event.target.value)}
-                  disabled={!canWrite || !selectedProjectId}
-                >
-                  <option value="">No question link</option>
-                  {activeQuestions.map((question) => (
-                    <option value={question.question_id} key={question.question_id}>
-                      {question.text}
-                    </option>
-                  ))}
-                </select>
-              </label>
-              <label>
-                Transcribed text (optional)
-                <textarea
-                  value={uploadTranscript}
-                  onChange={(event) => setUploadTranscript(event.target.value)}
-                  disabled={!canWrite || !selectedProjectId}
-                />
-              </label>
-              <button className="btn-primary" disabled={!canWrite || !selectedProjectId || busy}>
-                Upload photo note
-              </button>
-            </form>
-
-            <h3>Recent Notes</h3>
-            <div className="stack">
-              {notes.slice(0, 5).map((note) => (
-                <article className="item" key={note.note_id}>
-                  <div className="item-head">
-                    <span className="pill">{note.status}</span>
-                    <span className="subtle">{formatDate(note.created_at)}</span>
-                  </div>
-                  <p>{note.transcribed_text || note.raw_content || "(binary upload)"}</p>
-                  <p className="mono">{note.note_id}</p>
-                </article>
-              ))}
-            </div>
-          </article>
-
-          <article className="card span-6">
-            <h2>Dataset Review</h2>
-            <p className="subtle">
-              Stage datasets against active questions, then commit after review.
-            </p>
-
-            <form className="form" onSubmit={handleCreateDataset}>
-              <label>
-                Primary question
-                <select
-                  value={datasetPrimaryQuestionId}
-                  onChange={(event) => setDatasetPrimaryQuestionId(event.target.value)}
-                  disabled={!canWrite || !selectedProjectId || questions.length === 0}
-                >
-                  <option value="">Select question</option>
-                  {questions.map((question) => (
-                    <option value={question.question_id} key={question.question_id}>
-                      {question.text}
-                    </option>
-                  ))}
-                </select>
-              </label>
-              <label>
-                Secondary question IDs (comma-separated UUIDs)
-                <input
-                  value={datasetSecondaryRaw}
-                  onChange={(event) => setDatasetSecondaryRaw(event.target.value)}
-                  disabled={!canWrite || !selectedProjectId}
-                />
-              </label>
-              <button className="btn-secondary" disabled={!canWrite || !selectedProjectId || busy}>
-                Stage dataset
-              </button>
-            </form>
-
-            <div className="stack">
-              {datasets.map((dataset) => (
-                <article className="item" key={dataset.dataset_id}>
-                  <div className="item-head">
-                    <strong>{dataset.status}</strong>
-                    <span className="subtle">{formatDate(dataset.created_at)}</span>
-                  </div>
-                  <p className="mono">{dataset.dataset_id}</p>
-                  <p className="mono">commit hash: {dataset.commit_hash}</p>
-                  <p>
-                    Links: {dataset.question_links.map((link) => `${link.role}:${link.question_id}`).join(" | ")}
-                  </p>
-                  {dataset.status !== "committed" ? (
-                    <button
-                      className="btn-primary"
-                      disabled={!canWrite || busy}
-                      onClick={() => handleCommitDataset(dataset.dataset_id)}
-                    >
-                      Commit dataset
-                    </button>
-                  ) : null}
-                </article>
-              ))}
-            </div>
-          </article>
-
-          <article className="card span-12">
-            <h2>Project Context</h2>
-            {selectedProject ? (
-              <div>
-                <strong>{selectedProject.name}</strong>
-                <p>{selectedProject.description || "No project description."}</p>
-                <p className="mono">{selectedProject.project_id}</p>
-              </div>
-            ) : (
-              <p className="subtle">Create or select a project to start the workflow.</p>
-            )}
-          </article>
+          <ProjectContextCard selectedProject={selectedProject} />
         </section>
       )}
 
