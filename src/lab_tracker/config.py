@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
+from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+DEFAULT_AUTH_SECRET_KEY = "dev-only-change-me"
 
 
 class Settings(BaseSettings):
@@ -11,8 +15,20 @@ class Settings(BaseSettings):
     log_level: str = "INFO"
     database_url: str = "sqlite+pysqlite:///./lab_tracker.db"
     note_storage_path: str = "./note_storage"
-    auth_secret_key: str = "dev-only-change-me"
+    auth_secret_key: str = DEFAULT_AUTH_SECRET_KEY
     auth_token_ttl_minutes: int = 60 * 12
+
+    @model_validator(mode="after")
+    def _validate_auth_secret_key(self) -> Settings:
+        if (
+            self.environment.strip().lower() != "local"
+            and self.auth_secret_key == DEFAULT_AUTH_SECRET_KEY
+        ):
+            raise ValueError(
+                "LAB_TRACKER_AUTH_SECRET_KEY must be set when "
+                "LAB_TRACKER_ENVIRONMENT is not 'local'."
+            )
+        return self
 
     model_config = SettingsConfigDict(
         env_prefix="LAB_TRACKER_",
