@@ -1,0 +1,53 @@
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      LAB_TRACKER_APP_NAME: ${LAB_TRACKER_APP_NAME:-lab-tracker}
+      LAB_TRACKER_ENVIRONMENT: ${LAB_TRACKER_ENVIRONMENT:-production}
+      LAB_TRACKER_LOG_LEVEL: ${LAB_TRACKER_LOG_LEVEL:-INFO}
+      LAB_TRACKER_DATABASE_URL: ${LAB_TRACKER_DATABASE_URL:-postgresql+psycopg://lab_tracker:lab_tracker@postgres:5432/lab_tracker}
+      LAB_TRACKER_NOTE_STORAGE_PATH: ${LAB_TRACKER_NOTE_STORAGE_PATH:-/app/data/note_storage}
+      LAB_TRACKER_AUTH_SECRET_KEY: ${LAB_TRACKER_AUTH_SECRET_KEY:-replace-with-a-strong-secret}
+      LAB_TRACKER_AUTH_TOKEN_TTL_MINUTES: ${LAB_TRACKER_AUTH_TOKEN_TTL_MINUTES:-720}
+    ports:
+      - "8000:8000"
+    volumes:
+      - note_storage:/app/data/note_storage
+    restart: unless-stopped
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - import urllib.request; urllib.request.urlopen("http://127.0.0.1:8000/health", timeout=3)
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-lab_tracker}
+      POSTGRES_USER: ${POSTGRES_USER:-lab_tracker}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-lab_tracker}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    restart: unless-stopped
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - pg_isready -U ${POSTGRES_USER:-lab_tracker} -d ${POSTGRES_DB:-lab_tracker}
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+volumes:
+  note_storage:
+  postgres_data:
