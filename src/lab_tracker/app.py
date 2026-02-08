@@ -8,9 +8,10 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import Depends, FastAPI, Request
+from fastapi.staticfiles import StaticFiles
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.engine import Engine
-from starlette.responses import JSONResponse
+from starlette.responses import FileResponse, JSONResponse, RedirectResponse
 
 from lab_tracker.api import LabTrackerAPI
 from lab_tracker.api_routes import register_routes
@@ -26,8 +27,12 @@ from lab_tracker.sqlalchemy_repository import SQLAlchemyLabTrackerRepository
 
 
 _START_TIME = datetime.now(timezone.utc)
+_FRONTEND_DIR = Path(__file__).resolve().parent / "frontend"
 _PUBLIC_PATHS = frozenset(
     {
+        "/",
+        "/app",
+        "/app/",
         "/health",
         "/metrics",
         "/readiness",
@@ -122,7 +127,12 @@ def _is_public_path(path: str) -> bool:
     if path in _PUBLIC_PATHS:
         return True
     # Keep docs assets and tests reachable without credentials.
-    return path.startswith("/docs/") or path.startswith("/redoc/") or path.startswith("/_test/")
+    return (
+        path.startswith("/docs/")
+        or path.startswith("/redoc/")
+        or path.startswith("/_test/")
+        or path.startswith("/app/")
+    )
 
 
 def _configure_auth_middleware(app: FastAPI) -> None:
@@ -171,6 +181,26 @@ def _configure_database_shutdown_hook(app: FastAPI, *, engine: Engine) -> None:
     @app.on_event("shutdown")
     def dispose_engine() -> None:
         engine.dispose()
+
+
+def _configure_frontend_routes(app: FastAPI) -> None:
+    index_file = _FRONTEND_DIR / "index.html"
+    if not index_file.exists():
+        return
+    app.mount(
+        "/app/static",
+        StaticFiles(directory=_FRONTEND_DIR),
+        name="frontend-static",
+    )
+
+    @app.get("/", include_in_schema=False)
+    def root_redirect():
+        return RedirectResponse(url="/app")
+
+    @app.get("/app", include_in_schema=False)
+    @app.get("/app/{_path:path}", include_in_schema=False)
+    def frontend_index(_path: str = ""):
+        return FileResponse(index_file)
 
 
 def create_app() -> FastAPI:
@@ -224,6 +254,7 @@ def create_app() -> FastAPI:
     def metrics():
         return _metrics_snapshot(api, environment=settings.environment, app_name=settings.app_name)
 
+    _configure_frontend_routes(app)
     register_routes(
         app,
         api,

@@ -32,6 +32,21 @@ Health check:
 curl http://127.0.0.1:8000/health
 ```
 
+Frontend MVP:
+
+Open `http://127.0.0.1:8000/app`.
+
+The frontend includes:
+- project dashboard
+- question staging and activate (commit) workflow
+- note creation (text + photo upload)
+- dataset staging and commit review
+
+Authentication notes:
+- register/login is available in the UI
+- public registration creates viewer accounts
+- write workflows require editor/admin role
+
 ## Configuration
 
 Environment variables are loaded with the `LAB_TRACKER_` prefix. The defaults are suitable for local
@@ -41,6 +56,9 @@ development.
 - `LAB_TRACKER_ENVIRONMENT`: environment label (default: `local`)
 - `LAB_TRACKER_LOG_LEVEL`: logging level (default: `INFO`)
 - `LAB_TRACKER_DATABASE_URL`: SQLAlchemy database URL (default: `sqlite+pysqlite:///./lab_tracker.db`)
+- `LAB_TRACKER_NOTE_STORAGE_PATH`: note storage directory (default: `./note_storage`)
+- `LAB_TRACKER_AUTH_SECRET_KEY`: auth signing secret (default allowed only in `local`)
+- `LAB_TRACKER_AUTH_TOKEN_TTL_MINUTES`: access token lifetime (default: `720`)
 
 ## Database migrations
 

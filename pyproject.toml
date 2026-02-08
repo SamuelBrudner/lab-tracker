@@ -28,6 +28,9 @@ lint = [
 package-dir = {"" = "src"}
 packages = ["lab_tracker"]
 
+[tool.setuptools.package-data]
+lab_tracker = ["frontend/*"]
+
 [tool.codex_orchestrator]
 env = "lab_tracker"
 allow_env_creation = true
