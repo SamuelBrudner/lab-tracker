@@ -5,7 +5,9 @@ from uuid import uuid4
 
 from alembic import command
 from alembic.config import Config
+from alembic.script import ScriptDirectory
 from sqlalchemy import create_engine, inspect
+from sqlalchemy import text
 
 from lab_tracker.api import LabTrackerAPI
 from lab_tracker.auth import AuthContext, Role
@@ -18,11 +20,57 @@ def _actor() -> AuthContext:
     return AuthContext(user_id=uuid4(), role=Role.ADMIN)
 
 
-def _upgrade_head(database_url: str, monkeypatch) -> None:
+def _alembic_config() -> Config:
     repo_root = Path(__file__).resolve().parent.parent
-    config = Config(str(repo_root / "alembic.ini"))
+    return Config(str(repo_root / "alembic.ini"))
+
+
+def _set_database_url(monkeypatch, database_url: str) -> None:
     monkeypatch.setenv("LAB_TRACKER_DATABASE_URL", database_url)
-    command.upgrade(config, "head")
+
+
+def _ordered_revisions(config: Config) -> list[str]:
+    script = ScriptDirectory.from_config(config)
+    revisions = list(script.walk_revisions(base="base", head="heads"))
+    revisions.reverse()
+    return [revision.revision for revision in revisions]
+
+
+def _current_revision(database_url: str) -> str | None:
+    engine = create_engine(
+        database_url,
+        future=True,
+        connect_args={"check_same_thread": False},
+    )
+    try:
+        inspector = inspect(engine)
+        if "alembic_version" not in inspector.get_table_names():
+            return None
+        with engine.connect() as connection:
+            row = connection.execute(text("SELECT version_num FROM alembic_version")).one_or_none()
+        return str(row[0]) if row else None
+    finally:
+        engine.dispose()
+
+
+def _upgrade_head(database_url: str, monkeypatch) -> None:
+    _set_database_url(monkeypatch, database_url)
+    command.upgrade(_alembic_config(), "head")
+
+
+def test_alembic_upgrade_chain_from_empty_to_head(monkeypatch, tmp_path):
+    db_path = tmp_path / "migrations-chain.db"
+    database_url = f"sqlite+pysqlite:///{db_path}"
+    config = _alembic_config()
+    _set_database_url(monkeypatch, database_url)
+
+    assert _current_revision(database_url) is None
+
+    revisions = _ordered_revisions(config)
+    assert revisions
+    for revision in revisions:
+        command.upgrade(config, revision)
+        assert _current_revision(database_url) == revision
 
 
 def test_alembic_upgrade_head_creates_expected_tables(monkeypatch, tmp_path):
