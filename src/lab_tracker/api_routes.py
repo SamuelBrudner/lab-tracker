@@ -141,6 +141,15 @@ def register_routes(
         token = token_service.issue_access_token(user)
         return Envelope(data=_auth_token_read(user, token.token, token.expires_at))
 
+    @app.post("/auth/refresh", response_model=Envelope[AuthTokenRead])
+    def refresh_auth(request: Request):
+        actor = _actor_from_request(request)
+        user = auth_service.get_user_by_id(actor.user_id)
+        if user is None:
+            raise AuthError("Authentication required.")
+        token = token_service.issue_access_token(user)
+        return Envelope(data=_auth_token_read(user, token.token, token.expires_at))
+
     @app.get("/auth/me", response_model=Envelope[AuthUserRead])
     def auth_me(request: Request):
         actor = _actor_from_request(request)

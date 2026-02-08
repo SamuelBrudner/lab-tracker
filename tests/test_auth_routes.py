@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
+
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
 
@@ -192,3 +194,62 @@ def test_bootstrap_admin_allows_first_admin_registration(monkeypatch, tmp_path):
         )
         assert repeat_bootstrap.status_code == 401
         assert repeat_bootstrap.json()["error"]["code"] == "auth_error"
+
+
+def test_refresh_issues_fresh_token_ttl(monkeypatch, tmp_path):
+    _bootstrap_database(monkeypatch, tmp_path)
+
+    import lab_tracker.auth as auth_module
+
+    now = datetime(2026, 1, 1, 12, 0, tzinfo=timezone.utc)
+    current_time = {"value": now}
+
+    def fake_utc_now() -> datetime:
+        return current_time["value"]
+
+    monkeypatch.setattr(auth_module, "utc_now", fake_utc_now)
+
+    with TestClient(create_app()) as client:
+        register_response = client.post(
+            "/auth/register",
+            json={"username": "sam", "password": "secret"},
+        )
+        assert register_response.status_code == 201
+        token = register_response.json()["data"]["access_token"]
+        expires_at = datetime.fromisoformat(register_response.json()["data"]["expires_at"])
+
+        current_time["value"] = now + timedelta(hours=1)
+        refresh_response = client.post("/auth/refresh", headers=_auth_headers(token))
+        assert refresh_response.status_code == 200
+        refresh_payload = refresh_response.json()["data"]
+        refreshed_expires_at = datetime.fromisoformat(refresh_payload["expires_at"])
+
+        assert refreshed_expires_at > expires_at
+
+
+def test_refresh_rejects_expired_token(monkeypatch, tmp_path):
+    _bootstrap_database(monkeypatch, tmp_path)
+    monkeypatch.setenv("LAB_TRACKER_AUTH_TOKEN_TTL_MINUTES", "1")
+
+    import lab_tracker.auth as auth_module
+
+    now = datetime(2026, 1, 1, 12, 0, tzinfo=timezone.utc)
+    current_time = {"value": now}
+
+    def fake_utc_now() -> datetime:
+        return current_time["value"]
+
+    monkeypatch.setattr(auth_module, "utc_now", fake_utc_now)
+
+    with TestClient(create_app()) as client:
+        register_response = client.post(
+            "/auth/register",
+            json={"username": "sam", "password": "secret"},
+        )
+        assert register_response.status_code == 201
+        token = register_response.json()["data"]["access_token"]
+
+        current_time["value"] = now + timedelta(minutes=2)
+        refresh_response = client.post("/auth/refresh", headers=_auth_headers(token))
+        assert refresh_response.status_code == 401
+        assert refresh_response.json()["error"]["code"] == "auth_error"
