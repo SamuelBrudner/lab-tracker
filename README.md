@@ -36,6 +36,17 @@ Frontend MVP:
 
 Open `http://127.0.0.1:8000/app`.
 
+### Frontend build
+
+The frontend bundle is committed to the repo and served from `src/lab_tracker/frontend/app.js`.
+
+If you change the frontend source in `src/lab_tracker/frontend_src/app.jsx`, rebuild the bundle:
+
+```bash
+npm install
+npm run build
+```
+
 The frontend includes:
 - project dashboard
 - question staging and activate (commit) workflow

@@ -1,3 +1,6 @@
+import * as React from "react";
+import * as ReactDOM from "react-dom/client";
+
 const { useEffect, useMemo, useState } = React;
 
 const TOKEN_STORAGE_KEY = "lab_tracker_access_token";
