@@ -36,7 +36,10 @@ def render_extraction_review(note: Note) -> str:
             "    .entity-label { font-weight: 600; color: #1a1a1a; }",
             "    .entity-meta { font-size: 13px; color: #4a4a4a; margin-top: 6px; }",
             "    .entity-actions { display: flex; gap: 8px; margin-top: 10px; }",
-            "    .tag-section { margin-top: 10px; border-top: 1px solid #eeeeee; padding-top: 10px; }",
+            (
+                "    .tag-section { margin-top: 10px; border-top: 1px solid #eeeeee; "
+                "padding-top: 10px; }"
+            ),
             "    .tag-list { display: grid; gap: 8px; }",
             "    .tag-item { border: 1px solid #ededed; border-radius: 4px; padding: 8px;",
             "               background: #fafafa; }",
