@@ -232,7 +232,10 @@ def _configure_database_shutdown_hook(app: FastAPI, *, engine: Engine) -> None:
 def _configure_frontend_routes(app: FastAPI) -> None:
     index_file = _FRONTEND_DIR / "index.html"
     if not index_file.exists():
-        _logger.warning("Frontend files not found at %s; /app routes will not be served.", _FRONTEND_DIR)
+        _logger.warning(
+            "Frontend files not found at %s; /app routes will not be served.",
+            _FRONTEND_DIR,
+        )
         return
     app.mount(
         "/app/static",
@@ -311,6 +314,7 @@ def create_app() -> FastAPI:
         api,
         auth_service=auth_service,
         token_service=token_service,
+        bootstrap_admin_token=settings.bootstrap_admin_token,
     )
 
     return app

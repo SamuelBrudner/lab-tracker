@@ -78,6 +78,7 @@ class AuthRegisterRequest(BaseModel):
     username: str = Field(..., min_length=1)
     password: str = Field(..., min_length=1)
     role: Role = Role.VIEWER
+    bootstrap_token: str | None = Field(default=None, min_length=1)
 
 
 class AuthLoginRequest(BaseModel):

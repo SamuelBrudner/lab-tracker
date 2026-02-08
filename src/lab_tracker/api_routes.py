@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import binascii
 from datetime import datetime
+import hmac
 from typing import Any
 from uuid import UUID
 
@@ -109,6 +110,7 @@ def register_routes(
     *,
     auth_service: AuthService,
     token_service: TokenService,
+    bootstrap_admin_token: str | None = None,
 ) -> None:
     _register_exception_handlers(app)
 
@@ -119,13 +121,23 @@ def register_routes(
     )
     def register_auth(payload: AuthRegisterRequest, request: Request):
         if payload.role != Role.VIEWER:
-            actor = _actor_from_authorization_header(
-                request,
-                auth_service=auth_service,
-                token_service=token_service,
-            )
-            if actor.role != Role.ADMIN:
-                raise AuthError("Admin privileges required to register non-viewer users.")
+            if payload.role == Role.ADMIN and not auth_service.has_users():
+                expected = (bootstrap_admin_token or "").strip()
+                provided = (payload.bootstrap_token or "").strip()
+                if not expected:
+                    raise AuthError("Admin bootstrap is not configured for this deployment.")
+                if not provided:
+                    raise AuthError("Bootstrap token required to create initial admin user.")
+                if not hmac.compare_digest(provided, expected):
+                    raise AuthError("Invalid bootstrap token.")
+            else:
+                actor = _actor_from_authorization_header(
+                    request,
+                    auth_service=auth_service,
+                    token_service=token_service,
+                )
+                if actor.role != Role.ADMIN:
+                    raise AuthError("Admin privileges required to register non-viewer users.")
         user = auth_service.register_user(
             username=payload.username,
             password=payload.password,
