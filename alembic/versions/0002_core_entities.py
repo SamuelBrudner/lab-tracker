@@ -98,7 +98,11 @@ def upgrade() -> None:
         sa.Column("question_id", sa.String(length=36), nullable=False),
         sa.Column("parent_question_id", sa.String(length=36), nullable=False),
         sa.ForeignKeyConstraint(["question_id"], ["questions.question_id"], ondelete="CASCADE"),
-        sa.ForeignKeyConstraint(["parent_question_id"], ["questions.question_id"], ondelete="CASCADE"),
+        sa.ForeignKeyConstraint(
+            ["parent_question_id"],
+            ["questions.question_id"],
+            ondelete="CASCADE",
+        ),
         sa.PrimaryKeyConstraint("question_id", "parent_question_id"),
     )
     op.create_table(

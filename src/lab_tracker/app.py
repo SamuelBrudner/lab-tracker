@@ -314,6 +314,7 @@ def create_app() -> FastAPI:
         api,
         auth_service=auth_service,
         token_service=token_service,
+        bootstrap_admin_token=settings.bootstrap_admin_token,
     )
 
     return app

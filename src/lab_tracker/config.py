@@ -17,6 +17,7 @@ class Settings(BaseSettings):
     note_storage_path: str = "./note_storage"
     auth_secret_key: str = DEFAULT_AUTH_SECRET_KEY
     auth_token_ttl_minutes: int = 60 * 12
+    bootstrap_admin_token: str = ""
 
     @model_validator(mode="after")
     def _validate_auth_secret_key(self) -> Settings:

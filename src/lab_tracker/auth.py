@@ -153,6 +153,12 @@ class AuthService:
                 return None
             return _user_from_model(row)
 
+    def has_users(self) -> bool:
+        if self._session_factory is None:
+            return bool(self._users_by_username)
+        with self._session_factory() as session:
+            return session.scalar(select(UserModel.user_id).limit(1)) is not None
+
     @staticmethod
     def _normalize_username(username: str) -> str:
         if not username or not username.strip():

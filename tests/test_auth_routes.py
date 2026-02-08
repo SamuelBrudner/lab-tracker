@@ -153,3 +153,42 @@ def test_register_non_viewer_requires_admin_token(monkeypatch, tmp_path):
         )
         assert admin_auth_response.status_code == 201
         assert admin_auth_response.json()["data"]["user"]["role"] == "editor"
+
+
+def test_bootstrap_admin_allows_first_admin_registration(monkeypatch, tmp_path):
+    _bootstrap_database(monkeypatch, tmp_path)
+    monkeypatch.setenv("LAB_TRACKER_BOOTSTRAP_ADMIN_TOKEN", "bootstrap-secret")
+    with TestClient(create_app()) as client:
+        bootstrap_response = client.post(
+            "/auth/register",
+            json={
+                "username": "root",
+                "password": "secret",
+                "role": "admin",
+                "bootstrap_token": "bootstrap-secret",
+            },
+        )
+        assert bootstrap_response.status_code == 201
+        payload = bootstrap_response.json()["data"]
+        assert payload["user"]["role"] == "admin"
+
+        admin_token = payload["access_token"]
+        editor_response = client.post(
+            "/auth/register",
+            json={"username": "editor-1", "password": "secret", "role": "editor"},
+            headers=_auth_headers(admin_token),
+        )
+        assert editor_response.status_code == 201
+        assert editor_response.json()["data"]["user"]["role"] == "editor"
+
+        repeat_bootstrap = client.post(
+            "/auth/register",
+            json={
+                "username": "root-2",
+                "password": "secret",
+                "role": "admin",
+                "bootstrap_token": "bootstrap-secret",
+            },
+        )
+        assert repeat_bootstrap.status_code == 401
+        assert repeat_bootstrap.json()["error"]["code"] == "auth_error"
