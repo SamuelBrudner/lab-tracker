@@ -8,6 +8,7 @@ wrappers (e.g., note raw assets, dataset files).
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import hashlib
@@ -39,6 +40,20 @@ class FileStorageBackend(ABC):
     @abstractmethod
     def exists(self, storage_id: UUID) -> bool:
         """Return True when the storage id is present."""
+
+    def iter_chunks(
+        self,
+        storage_id: UUID,
+        *,
+        chunk_size: int = 1024 * 1024,
+    ) -> Iterable[bytes]:
+        """Yield file content in chunks for streaming responses.
+
+        Backends should override this to avoid loading large files into memory.
+        The default implementation falls back to `retrieve()`.
+        """
+
+        yield self.retrieve(storage_id)
 
 
 @dataclass(frozen=True)
@@ -130,6 +145,26 @@ class LocalFileStorageBackend(FileStorageBackend):
 
     def exists(self, storage_id: UUID) -> bool:
         return self._data_path(storage_id).exists()
+
+    def iter_chunks(
+        self,
+        storage_id: UUID,
+        *,
+        chunk_size: int = 1024 * 1024,
+    ) -> Iterable[bytes]:
+        path = self._data_path(storage_id)
+        if not path.exists():
+            raise NotFoundError("Stored file not found.")
+
+        def _generate() -> Iterator[bytes]:
+            with path.open("rb") as handle:
+                while True:
+                    chunk = handle.read(chunk_size)
+                    if not chunk:
+                        break
+                    yield chunk
+
+        return _generate()
 
     def _shard_dir(self, storage_id: UUID) -> Path:
         hex_id = storage_id.hex

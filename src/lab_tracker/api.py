@@ -11,6 +11,7 @@ from lab_tracker.models import (
     Analysis,
     Claim,
     Dataset,
+    DatasetReview,
     Note,
     Project,
     Question,
@@ -23,6 +24,7 @@ from lab_tracker.services import (
     AnalysisServiceMixin,
     ClaimServiceMixin,
     DatasetServiceMixin,
+    DatasetReviewServiceMixin,
     NoteServiceMixin,
     ProjectServiceMixin,
     QuestionServiceMixin,
@@ -48,6 +50,7 @@ class InMemoryStore:
         self.projects: dict[UUID, Project] = {}
         self.questions: dict[UUID, Question] = {}
         self.datasets: dict[UUID, Dataset] = {}
+        self.dataset_reviews: dict[UUID, DatasetReview] = {}
         self.notes: dict[UUID, Note] = {}
         self.sessions: dict[UUID, Session] = {}
         self.acquisition_outputs: dict[UUID, AcquisitionOutput] = {}
@@ -60,6 +63,7 @@ class LabTrackerAPI(
     ProjectServiceMixin,
     QuestionServiceMixin,
     DatasetServiceMixin,
+    DatasetReviewServiceMixin,
     NoteServiceMixin,
     SessionServiceMixin,
     AnalysisServiceMixin,
@@ -131,6 +135,9 @@ class LabTrackerAPI(
         }
         self._store.datasets = {
             dataset.dataset_id: dataset for dataset in resolved_repository.datasets.list()
+        }
+        self._store.dataset_reviews = {
+            review.review_id: review for review in resolved_repository.dataset_reviews.list()
         }
         self._store.notes = {note.note_id: note for note in resolved_repository.notes.list()}
         self._store.sessions = {

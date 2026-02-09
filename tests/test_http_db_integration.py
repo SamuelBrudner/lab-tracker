@@ -92,6 +92,13 @@ def test_core_entity_crud_routes_use_database_persistence(
     assert dataset_list_response.status_code == 200
     assert dataset_id in _ids(dataset_list_response.json()["data"], "dataset_id")
 
+    file_upload_response = client.post(
+        f"/datasets/{dataset_id}/files",
+        files={"file": ("data.bin", b"integration-test-data", "application/octet-stream")},
+        headers=headers,
+    )
+    assert file_upload_response.status_code == 201
+
     dataset_update_response = client.patch(
         f"/datasets/{dataset_id}",
         json={"status": "committed"},

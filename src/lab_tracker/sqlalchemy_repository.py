@@ -17,6 +17,7 @@ from lab_tracker.db_models import (
     ClaimModel,
     DatasetModel,
     DatasetQuestionLinkModel,
+    DatasetReviewModel,
     NoteExtractedEntityModel,
     NoteModel,
     NoteTagSuggestionModel,
@@ -33,6 +34,7 @@ from lab_tracker.models import (
     Analysis,
     Claim,
     Dataset,
+    DatasetReview,
     Note,
     Project,
     Question,
@@ -60,6 +62,9 @@ from lab_tracker.sqlalchemy_mappers import (
     dataset_question_link_from_model,
     dataset_question_link_models,
     dataset_to_model,
+    dataset_review_from_model,
+    dataset_review_to_model,
+    apply_dataset_review_to_model,
     entity_ref_from_model,
     extracted_entity_from_model,
     note_extracted_entity_models,
@@ -279,6 +284,21 @@ class SQLAlchemyDatasetRepository(EntityRepository[Dataset]):
         if row is not None:
             self._session.delete(row)
         return entity
+
+
+class SQLAlchemyDatasetReviewRepository(
+    _SQLAlchemyModelRepository[DatasetReview, DatasetReviewModel]
+):
+    def __init__(self, session: OrmSession) -> None:
+        super().__init__(
+            session,
+            model_type=DatasetReviewModel,
+            id_column=DatasetReviewModel.requested_at,
+            entity_id_getter=lambda entity: entity.review_id,
+            to_model=dataset_review_to_model,
+            from_model=dataset_review_from_model,
+            apply_to_model=apply_dataset_review_to_model,
+        )
 
 
 class SQLAlchemyNoteRepository(EntityRepository[Note]):
@@ -627,6 +647,7 @@ class SQLAlchemyLabTrackerRepository(LabTrackerRepository):
         self.projects = SQLAlchemyProjectRepository(session)
         self.questions = SQLAlchemyQuestionRepository(session)
         self.datasets = SQLAlchemyDatasetRepository(session)
+        self.dataset_reviews = SQLAlchemyDatasetReviewRepository(session)
         self.notes = SQLAlchemyNoteRepository(session)
         self.sessions = SQLAlchemySessionRepository(session)
         self.acquisition_outputs = UnsupportedAcquisitionOutputRepository()

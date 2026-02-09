@@ -14,6 +14,7 @@ from lab_tracker.db_models import (
     ClaimModel,
     DatasetModel,
     DatasetQuestionLinkModel,
+    DatasetReviewModel,
     NoteExtractedEntityModel,
     NoteModel,
     NoteTagSuggestionModel,
@@ -32,6 +33,8 @@ from lab_tracker.models import (
     ClaimStatus,
     Dataset,
     DatasetCommitManifest,
+    DatasetReview,
+    DatasetReviewStatus,
     DatasetStatus,
     EntityRef,
     EntityTagSuggestion,
@@ -82,6 +85,7 @@ def project_to_model(project: Project) -> ProjectModel:
         name=project.name,
         description=project.description,
         status=project.status.value,
+        dataset_review_required=project.dataset_review_required,
         created_by=project.created_by,
         created_at=project.created_at,
         updated_at=project.updated_at,
@@ -94,6 +98,7 @@ def project_from_model(row: ProjectModel) -> Project:
         name=row.name,
         description=row.description,
         status=ProjectStatus(row.status),
+        dataset_review_required=getattr(row, "dataset_review_required", False),
         created_by=row.created_by,
         created_at=_as_utc(row.created_at),
         updated_at=_as_utc(row.updated_at),
@@ -104,6 +109,7 @@ def apply_project_to_model(row: ProjectModel, project: Project) -> None:
     row.name = project.name
     row.description = project.description
     row.status = project.status.value
+    row.dataset_review_required = project.dataset_review_required
     row.created_by = project.created_by
     row.created_at = project.created_at
     row.updated_at = project.updated_at
@@ -236,6 +242,39 @@ def apply_dataset_to_model(row: DatasetModel, dataset: Dataset) -> None:
     row.created_by = dataset.created_by
     row.created_at = dataset.created_at
     row.updated_at = dataset.updated_at
+
+
+def dataset_review_to_model(review: DatasetReview) -> DatasetReviewModel:
+    return DatasetReviewModel(
+        review_id=_uuid_str(review.review_id),
+        dataset_id=_uuid_str(review.dataset_id),
+        reviewer_user_id=_uuid_str(review.reviewer_user_id) if review.reviewer_user_id else None,
+        status=review.status.value,
+        comments=review.comments,
+        requested_at=review.requested_at,
+        resolved_at=review.resolved_at,
+    )
+
+
+def dataset_review_from_model(row: DatasetReviewModel) -> DatasetReview:
+    return DatasetReview(
+        review_id=_uuid(row.review_id),
+        dataset_id=_uuid(row.dataset_id),
+        reviewer_user_id=_uuid(row.reviewer_user_id) if row.reviewer_user_id else None,
+        status=DatasetReviewStatus(row.status),
+        comments=row.comments,
+        requested_at=_as_utc(row.requested_at),
+        resolved_at=_as_utc_optional(row.resolved_at),
+    )
+
+
+def apply_dataset_review_to_model(row: DatasetReviewModel, review: DatasetReview) -> None:
+    row.dataset_id = _uuid_str(review.dataset_id)
+    row.reviewer_user_id = _uuid_str(review.reviewer_user_id) if review.reviewer_user_id else None
+    row.status = review.status.value
+    row.comments = review.comments
+    row.requested_at = review.requested_at
+    row.resolved_at = review.resolved_at
 
 
 def note_to_model(note: Note) -> NoteModel:

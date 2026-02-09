@@ -76,6 +76,13 @@ class DatasetStatus(str, Enum):
     ARCHIVED = "archived"
 
 
+class DatasetReviewStatus(str, Enum):
+    PENDING = "pending"
+    APPROVED = "approved"
+    CHANGES_REQUESTED = "changes_requested"
+    REJECTED = "rejected"
+
+
 class NoteStatus(str, Enum):
     STAGED = "staged"
     COMMITTED = "committed"
@@ -210,6 +217,7 @@ class Project(_DomainModel):
     name: str
     description: str = ""
     status: ProjectStatus = ProjectStatus.ACTIVE
+    dataset_review_required: bool = False
     created_at: datetime = Field(default_factory=utc_now)
     created_by: str | None = None
     updated_at: datetime = Field(default_factory=utc_now)
@@ -240,6 +248,16 @@ class Dataset(_DomainModel):
     created_at: datetime = Field(default_factory=utc_now)
     created_by: str | None = None
     updated_at: datetime = Field(default_factory=utc_now)
+
+
+class DatasetReview(_DomainModel):
+    review_id: UUID
+    dataset_id: UUID
+    reviewer_user_id: UUID | None = None
+    status: DatasetReviewStatus = DatasetReviewStatus.PENDING
+    comments: str | None = None
+    requested_at: datetime = Field(default_factory=utc_now)
+    resolved_at: datetime | None = None
 
 
 class Note(_DomainModel):

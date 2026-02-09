@@ -111,6 +111,7 @@ class ProjectCreate(BaseModel):
     name: str = Field(..., min_length=1)
     description: str | None = None
     status: ProjectStatus | None = None
+    dataset_review_required: bool | None = None
     created_by: str | None = None
 
 
@@ -118,6 +119,7 @@ class ProjectUpdate(BaseModel):
     name: str | None = None
     description: str | None = None
     status: ProjectStatus | None = None
+    dataset_review_required: bool | None = None
 
 
 class QuestionCreate(BaseModel):

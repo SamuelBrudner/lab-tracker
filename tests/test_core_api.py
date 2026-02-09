@@ -8,6 +8,7 @@ from lab_tracker.errors import AuthError, ValidationError
 from lab_tracker.models import (
     DatasetCommitManifestInput,
     DatasetFile,
+    DatasetReviewStatus,
     DatasetStatus,
     QuestionLinkRole,
     QuestionSource,
@@ -196,15 +197,58 @@ def test_dataset_commit_requires_active_question():
         question_type=QuestionType.DESCRIPTIVE,
         actor=actor,
     )
+    manifest = DatasetCommitManifestInput(files=[DatasetFile(path="data.csv", checksum="abc123")])
     dataset = api.create_dataset(
         project_id=project.project_id,
         primary_question_id=question.question_id,
+        commit_manifest=manifest,
         actor=actor,
     )
     with pytest.raises(ValidationError):
         api.update_dataset(dataset.dataset_id, status=DatasetStatus.COMMITTED, actor=actor)
     api.update_question(question.question_id, status=QuestionStatus.ACTIVE, actor=actor)
     committed = api.update_dataset(dataset.dataset_id, status=DatasetStatus.COMMITTED, actor=actor)
+    assert committed.status == DatasetStatus.COMMITTED
+
+
+def test_dataset_commit_can_create_review_request_when_policy_requires_it():
+    api = LabTrackerAPI.in_memory()
+    actor = _actor()
+    project = api.create_project(
+        "Neuro Project",
+        dataset_review_required=True,
+        actor=actor,
+    )
+    question = api.create_question(
+        project_id=project.project_id,
+        text="Is the signal stable?",
+        question_type=QuestionType.DESCRIPTIVE,
+        status=QuestionStatus.ACTIVE,
+        actor=actor,
+    )
+    dataset = api.create_dataset(
+        project_id=project.project_id,
+        primary_question_id=question.question_id,
+        actor=actor,
+    )
+
+    updated = api.update_dataset(dataset.dataset_id, status=DatasetStatus.COMMITTED, actor=actor)
+    assert updated.status == DatasetStatus.STAGED
+
+    reviews = api.list_dataset_reviews(
+        dataset_id=dataset.dataset_id,
+        status=DatasetReviewStatus.PENDING,
+    )
+    assert len(reviews) == 1
+    review = reviews[0]
+    assert review.dataset_id == dataset.dataset_id
+
+    api.resolve_dataset_review(
+        review.review_id,
+        status=DatasetReviewStatus.APPROVED,
+        actor=actor,
+    )
+    committed = api.get_dataset(dataset.dataset_id)
     assert committed.status == DatasetStatus.COMMITTED
 
 

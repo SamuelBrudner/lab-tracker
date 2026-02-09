@@ -19,6 +19,7 @@ class ProjectServiceMixin:
         name: str,
         description: str = "",
         status: ProjectStatus = ProjectStatus.ACTIVE,
+        dataset_review_required: bool = False,
         *,
         actor: AuthContext | None = None,
         created_by: str | None = None,
@@ -30,6 +31,7 @@ class ProjectServiceMixin:
             name=name.strip(),
             description=description.strip(),
             status=status,
+            dataset_review_required=dataset_review_required,
             created_by=created_by,
         )
         self._store.projects[project.project_id] = project
@@ -49,6 +51,7 @@ class ProjectServiceMixin:
         name: str | None = None,
         description: str | None = None,
         status: ProjectStatus | None = None,
+        dataset_review_required: bool | None = None,
         actor: AuthContext | None = None,
     ) -> Project:
         require_role(actor, WRITE_ROLES)
@@ -60,6 +63,8 @@ class ProjectServiceMixin:
             project.description = description.strip()
         if status is not None:
             project.status = status
+        if dataset_review_required is not None:
+            project.dataset_review_required = dataset_review_required
         project.updated_at = utc_now()
         self._run_repository_write(lambda repository: repository.projects.save(project))
         return project

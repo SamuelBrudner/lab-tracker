@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 from pathlib import Path
+from uuid import uuid4
 
 from fastapi.testclient import TestClient
 
@@ -94,6 +95,57 @@ def test_dataset_file_upload_list_delete_flow(
     )
     assert list_after_delete.status_code == 200
     assert list_after_delete.json()["meta"]["total"] == 0
+
+
+def test_dataset_file_download_streams_raw_bytes(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+):
+    headers = admin_auth_headers
+
+    project_id = client.post(
+        "/projects",
+        json={"name": "Dataset file download", "description": "integration"},
+        headers=headers,
+    ).json()["data"]["project_id"]
+    question_id = client.post(
+        "/questions",
+        json={
+            "project_id": project_id,
+            "text": "Can I download attached files?",
+            "question_type": "descriptive",
+        },
+        headers=headers,
+    ).json()["data"]["question_id"]
+    dataset_id = client.post(
+        "/datasets",
+        json={"project_id": project_id, "primary_question_id": question_id},
+        headers=headers,
+    ).json()["data"]["dataset_id"]
+
+    content = b"hello world"
+    upload = client.post(
+        f"/datasets/{dataset_id}/files",
+        files={"file": ("example.txt", content, "text/plain")},
+        headers=headers,
+    )
+    assert upload.status_code == 201
+    file_id = upload.json()["data"]["file_id"]
+
+    download = client.get(
+        f"/datasets/{dataset_id}/files/{file_id}/download",
+        headers=headers,
+    )
+    assert download.status_code == 200
+    assert download.content == content
+    assert download.headers["content-disposition"] == 'attachment; filename="example.txt"'
+    assert download.headers["content-length"] == str(len(content))
+    assert download.headers["content-type"].startswith("text/plain")
+
+
+def test_dataset_file_download_requires_auth(client: TestClient):
+    response = client.get(f"/datasets/{uuid4()}/files/{uuid4()}/download")
+    assert response.status_code == 401
 
 
 def test_dataset_file_upload_rejects_duplicate_path(
@@ -190,4 +242,3 @@ def test_dataset_file_upload_requires_staged_dataset(
         headers=headers,
     )
     assert upload_response.status_code == 422
-

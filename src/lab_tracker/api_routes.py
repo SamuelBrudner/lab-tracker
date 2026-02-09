@@ -16,7 +16,7 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from starlette import status as http_status
 from starlette.requests import Request
-from starlette.responses import JSONResponse, Response
+from starlette.responses import JSONResponse, Response, StreamingResponse
 
 from lab_tracker.api import LabTrackerAPI
 from lab_tracker.auth import (
@@ -177,6 +177,7 @@ def register_routes(
             name=payload.name,
             description=payload.description or "",
             status=payload.status or project_default_status(),
+            dataset_review_required=payload.dataset_review_required or False,
             actor=actor,
             created_by=_resolve_created_by(payload.created_by, actor),
         )
@@ -212,6 +213,7 @@ def register_routes(
             name=payload.name,
             description=payload.description,
             status=payload.status,
+            dataset_review_required=payload.dataset_review_required,
             actor=actor,
         )
         return Envelope(data=project)
@@ -517,6 +519,42 @@ def register_routes(
         return ListEnvelope(
             data=payload,
             meta=PaginationMeta(limit=limit, offset=offset, total=total),
+        )
+
+    @app.get("/datasets/{dataset_id}/files/{file_id}/download")
+    def download_dataset_file(
+        dataset_id: UUID,
+        file_id: UUID,
+        request: Request,
+    ):
+        _actor_from_request(request)
+
+        db_session = getattr(request.state, "db_session", None)
+        if db_session is None:
+            raise RuntimeError("Database session is not available on request state.")
+
+        storage_backend = getattr(request.app.state, "file_storage_backend", None)
+        if storage_backend is None:
+            raise ValidationError("File storage backend is not configured.")
+
+        dataset_row = db_session.get(DatasetModel, str(dataset_id))
+        if dataset_row is None:
+            raise NotFoundError("Dataset does not exist.")
+
+        row = db_session.get(DatasetFileModel, str(file_id))
+        if row is None or row.dataset_id != str(dataset_id):
+            raise NotFoundError("Dataset file does not exist.")
+
+        headers = {
+            "Content-Disposition": (
+                f'attachment; filename="{_safe_attachment_filename(row.filename)}"'
+            ),
+            "Content-Length": str(row.size_bytes),
+        }
+        return StreamingResponse(
+            storage_backend.iter_chunks(UUID(row.storage_id)),
+            media_type=row.content_type,
+            headers=headers,
         )
 
     @app.delete(
@@ -1174,6 +1212,18 @@ def _actor_from_authorization_header(
     if user is None:
         raise AuthError("Invalid token.")
     return AuthContext(user_id=user.user_id, role=user.role)
+
+
+def _safe_attachment_filename(filename: str) -> str:
+    cleaned = (filename or "").strip()
+    if not cleaned:
+        return "download"
+    cleaned = cleaned.replace("\r", "_").replace("\n", "_")
+    cleaned = cleaned.replace("\\", "/").split("/")[-1]
+    cleaned = cleaned.replace('"', "'")
+    if not cleaned:
+        return "download"
+    return cleaned
 
 
 def _auth_user_read(user: User) -> AuthUserRead:

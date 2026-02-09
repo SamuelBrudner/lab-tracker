@@ -10,6 +10,7 @@ from lab_tracker.models import (
     Analysis,
     Claim,
     Dataset,
+    DatasetReview,
     Note,
     Project,
     Question,
@@ -42,6 +43,7 @@ class LabTrackerRepository(Protocol):
     projects: EntityRepository[Project]
     questions: EntityRepository[Question]
     datasets: EntityRepository[Dataset]
+    dataset_reviews: EntityRepository[DatasetReview]
     notes: EntityRepository[Note]
     sessions: EntityRepository[Session]
     acquisition_outputs: EntityRepository[AcquisitionOutput]
