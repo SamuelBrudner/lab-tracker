@@ -11,6 +11,107 @@ const QUESTION_TYPES = [
   "other",
 ];
 
+class ErrorBoundary extends React.Component {
+  constructor(props) {
+    super(props);
+    this.state = {
+      hasError: false,
+      errorMessage: "",
+      componentStack: "",
+      resetKey: 0,
+    };
+    this.handleRetry = this.handleRetry.bind(this);
+    this.handleReload = this.handleReload.bind(this);
+  }
+
+  static getDerivedStateFromError(error) {
+    let errorMessage = "Unknown error.";
+    if (error instanceof Error && error.message) {
+      errorMessage = error.message;
+    } else if (typeof error === "string") {
+      errorMessage = error;
+    } else if (error && typeof error === "object" && "message" in error) {
+      errorMessage = String(error.message || errorMessage);
+    } else if (error) {
+      errorMessage = String(error);
+    }
+
+    return { hasError: true, errorMessage };
+  }
+
+  componentDidCatch(error, errorInfo) {
+    // eslint-disable-next-line no-console
+    console.error("React rendering error:", error, errorInfo);
+    const componentStack =
+      errorInfo && typeof errorInfo.componentStack === "string" ? errorInfo.componentStack : "";
+    if (componentStack) {
+      this.setState({ componentStack });
+    }
+  }
+
+  handleRetry() {
+    this.setState((current) => ({
+      hasError: false,
+      errorMessage: "",
+      componentStack: "",
+      resetKey: current.resetKey + 1,
+    }));
+  }
+
+  handleReload() {
+    window.location.reload();
+  }
+
+  render() {
+    if (this.state.hasError) {
+      return (
+        <div className="app-shell">
+          <header className="hero">
+            <div className="hero-row">
+              <div>
+                <h1>Lab Tracker Frontend MVP</h1>
+                <p className="subtle">The app hit an unexpected error.</p>
+              </div>
+            </div>
+          </header>
+
+          <section className="grid">
+            <article className="card span-12">
+              <h2>Something went wrong</h2>
+              <p className="subtle">
+                Click &quot;Try again&quot; to re-render the app. If the problem persists, reload the
+                page.
+              </p>
+
+              <div className="inline">
+                <button type="button" className="btn-primary" onClick={this.handleRetry}>
+                  Try again
+                </button>
+                <button type="button" className="btn-secondary" onClick={this.handleReload}>
+                  Reload page
+                </button>
+              </div>
+
+              {this.state.errorMessage ? (
+                <p className="flash error">Error: {this.state.errorMessage}</p>
+              ) : null}
+
+              {process.env.NODE_ENV !== "production" && this.state.componentStack ? (
+                <details className="subtle">
+                  <summary>Details</summary>
+                  <pre className="mono">{this.state.componentStack}</pre>
+                </details>
+              ) : null}
+            </article>
+          </section>
+        </div>
+      );
+    }
+
+    return <React.Fragment key={this.state.resetKey}>{this.props.children}</React.Fragment>;
+  }
+}
+
 function parseApiError(payload, fallbackMessage) {
   if (!payload || typeof payload !== "object") {
     return fallbackMessage;
@@ -1085,4 +1186,8 @@ function App() {
 }
 
 const root = ReactDOM.createRoot(document.getElementById("app-root"));
-root.render(<App />);
+root.render(
+  <ErrorBoundary>
+    <App />
+  </ErrorBoundary>
+);
