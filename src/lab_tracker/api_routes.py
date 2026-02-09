@@ -44,6 +44,8 @@ from lab_tracker.models import (
     ClaimStatus,
     Dataset,
     DatasetFile,
+    DatasetReview,
+    DatasetReviewStatus,
     DatasetStatus,
     EntityTagSuggestion,
     Note,
@@ -73,6 +75,8 @@ from lab_tracker.schemas import (
     ClaimCreate,
     ClaimUpdate,
     DatasetCreate,
+    DatasetReviewRequest,
+    DatasetReviewUpdate,
     DatasetUpdate,
     Envelope,
     ErrorEnvelope,
@@ -391,6 +395,78 @@ def register_routes(
         actor = _actor_from_request(request)
         dataset = api.delete_dataset(dataset_id, actor=actor)
         return Envelope(data=dataset)
+
+    @app.post(
+        "/datasets/{dataset_id}/review",
+        response_model=Envelope[DatasetReview],
+        status_code=http_status.HTTP_201_CREATED,
+    )
+    def request_dataset_review(
+        dataset_id: UUID,
+        request: Request,
+        payload: DatasetReviewRequest | None = None,
+    ):
+        actor = _actor_from_request(request)
+        dataset = api.get_dataset(dataset_id)
+        reviewer_user_id = api._default_dataset_reviewer_user_id(dataset.project_id)
+        review = api.request_dataset_review(
+            dataset_id,
+            reviewer_user_id=reviewer_user_id,
+            comments=payload.comments if payload else None,
+            actor=actor,
+        )
+        return Envelope(data=review)
+
+    @app.get("/datasets/{dataset_id}/review", response_model=Envelope[DatasetReview])
+    def get_dataset_review(dataset_id: UUID):
+        api.get_dataset(dataset_id)
+        reviews = api.list_dataset_reviews(dataset_id=dataset_id)
+        if not reviews:
+            raise NotFoundError("Dataset review does not exist.")
+        pending = [review for review in reviews if review.status == DatasetReviewStatus.PENDING]
+        review = pending[0] if pending else reviews[-1]
+        return Envelope(data=review)
+
+    @app.patch("/datasets/{dataset_id}/review", response_model=Envelope[DatasetReview])
+    def resolve_dataset_review(
+        dataset_id: UUID,
+        payload: DatasetReviewUpdate,
+        request: Request,
+    ):
+        actor = _actor_from_request(request)
+        api.get_dataset(dataset_id)
+        pending = api.list_dataset_reviews(
+            dataset_id=dataset_id,
+            status=DatasetReviewStatus.PENDING,
+        )
+        if not pending:
+            raise NotFoundError("Pending dataset review does not exist.")
+        status_by_action = {
+            "approve": DatasetReviewStatus.APPROVED,
+            "request_changes": DatasetReviewStatus.CHANGES_REQUESTED,
+            "reject": DatasetReviewStatus.REJECTED,
+        }
+        status = status_by_action[payload.action.value]
+        review = api.resolve_dataset_review(
+            pending[0].review_id,
+            status=status,
+            comments=payload.comments,
+            actor=actor,
+        )
+        return Envelope(data=review)
+
+    @app.get("/reviews/pending", response_model=ListEnvelope[DatasetReview])
+    def list_pending_reviews(request: Request, limit: int = 50, offset: int = 0):
+        actor = _actor_from_request(request)
+        _validate_pagination(limit, offset)
+        reviews = api.list_dataset_reviews(status=DatasetReviewStatus.PENDING)
+        assigned = [review for review in reviews if review.reviewer_user_id == actor.user_id]
+        page, total = _paginate(assigned, limit, offset)
+        payload = page
+        return ListEnvelope(
+            data=payload,
+            meta=PaginationMeta(limit=limit, offset=offset, total=total),
+        )
 
     @app.post(
         "/datasets/{dataset_id}/files",

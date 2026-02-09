@@ -237,6 +237,15 @@ class Question(_DomainModel):
     updated_at: datetime = Field(default_factory=utc_now)
 
 
+class QuestionExtractionCandidate(_DomainModel):
+    """Candidate question extracted from a note for human review."""
+
+    text: str = Field(..., min_length=1)
+    confidence: float = Field(..., ge=0.0, le=1.0)
+    suggested_question_type: QuestionType = QuestionType.OTHER
+    provenance: str | None = None
+
+
 class Dataset(_DomainModel):
     dataset_id: UUID
     project_id: UUID

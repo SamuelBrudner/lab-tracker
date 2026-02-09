@@ -284,6 +284,56 @@ button:disabled {
   font-size: 0.88rem;
 }
 
+.link {
+  color: var(--ink);
+  text-decoration: none;
+}
+
+.link:hover {
+  text-decoration: underline;
+  text-decoration-thickness: 2px;
+  text-underline-offset: 3px;
+}
+
+.search-row {
+  display: grid;
+  grid-template-columns: minmax(0, 2fr) minmax(0, 1fr);
+  gap: 0.7rem;
+  align-items: end;
+}
+
+.search-results {
+  margin-top: 0.85rem;
+}
+
+.pill.relevance {
+  font-weight: 700;
+}
+
+.pill.relevance-top {
+  background: #e8f5ff;
+  border-color: #bfd7ea;
+}
+
+.pill.relevance-high {
+  background: #ebf9ef;
+  border-color: #bedcc8;
+}
+
+.pill.relevance-med {
+  background: #fff8e5;
+  border-color: #ecdcb0;
+}
+
+.pill.relevance-low {
+  background: #f5f1ea;
+  border-color: #d8d0c6;
+}
+
+.detail-actions {
+  margin-top: 0.85rem;
+}
+
 @media (max-width: 980px) {
   .span-4,
   .span-6,
@@ -294,5 +344,9 @@ button:disabled {
 
   .hero {
     position: static;
+  }
+
+  .search-row {
+    grid-template-columns: 1fr;
   }
 }

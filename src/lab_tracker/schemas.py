@@ -7,10 +7,11 @@ Envelope/ListEnvelope wrappers. Request payloads use purpose-built schemas below
 from __future__ import annotations
 
 from datetime import datetime
+from enum import Enum
 from typing import Any, Generic, TypeVar
 from uuid import UUID
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from lab_tracker.auth import Role
 from lab_tracker.models import (
@@ -156,6 +157,34 @@ class DatasetUpdate(BaseModel):
     commit_hash: str | None = None
     status: DatasetStatus | None = None
     question_links: list[QuestionLink] | None = None
+
+
+class DatasetReviewRequest(BaseModel):
+    comments: str | None = None
+
+
+class DatasetReviewAction(str, Enum):
+    APPROVE = "approve"
+    REQUEST_CHANGES = "request_changes"
+    REJECT = "reject"
+
+
+class DatasetReviewUpdate(BaseModel):
+    action: DatasetReviewAction
+    comments: str | None = None
+
+    @field_validator("action", mode="before")
+    @classmethod
+    def _normalize_action(cls, value: object) -> object:
+        if not isinstance(value, str):
+            return value
+        cleaned = value.strip().lower().replace("-", "_")
+        mapping = {
+            "approved": DatasetReviewAction.APPROVE.value,
+            "changes_requested": DatasetReviewAction.REQUEST_CHANGES.value,
+            "rejected": DatasetReviewAction.REJECT.value,
+        }
+        return mapping.get(cleaned, cleaned)
 
 
 class NoteCreate(BaseModel):
