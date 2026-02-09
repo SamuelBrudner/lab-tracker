@@ -151,7 +151,10 @@ async function apiRequest(path, options = {}) {
   const payload = isJson ? await response.json() : null;
 
   if (!response.ok) {
-    throw new Error(parseApiError(payload, `Request failed with ${response.status}`));
+    const error = new Error(parseApiError(payload, `Request failed with ${response.status}`));
+    error.status = response.status;
+    error.payload = payload;
+    throw error;
   }
 
   if (!payload || !Object.prototype.hasOwnProperty.call(payload, "data")) {
@@ -1084,6 +1087,8 @@ function DatasetPanel({
   onLoadDatasetFiles,
   onUploadDatasetFiles,
   onDeleteDatasetFile,
+  reviewPolicy,
+  datasetReviewsById,
 }) {
   useEffect(() => {
     if (!selectedProjectId) {
@@ -1101,10 +1106,18 @@ function DatasetPanel({
       });
   }, [datasets, datasetFilesById, onLoadDatasetFiles, selectedProjectId]);
 
+  const reviewRequired = Boolean(reviewPolicy && reviewPolicy !== "none");
+
   return (
     <article className="card span-6">
-      <h2>Dataset Review</h2>
-      <p className="subtle">Stage datasets against active questions, then commit after review.</p>
+      <div className="item-head">
+        <h2>Dataset Review</h2>
+        {reviewPolicy ? <span className="pill">review: {reviewPolicy}</span> : null}
+      </div>
+      <p className="subtle">
+        Stage datasets against active questions, then{" "}
+        {reviewRequired ? "submit for PI approval." : "commit when ready."}
+      </p>
 
       <form className="form" onSubmit={onCreateDataset}>
         <label>
@@ -1136,12 +1149,35 @@ function DatasetPanel({
       </form>
 
       <div className="stack">
-        {datasets.map((dataset) => (
-          <article className="item" key={dataset.dataset_id}>
-            <div className="item-head">
-              <strong>{dataset.status}</strong>
-              <span className="subtle">{formatDate(dataset.created_at)}</span>
-            </div>
+        {datasets.map((dataset) => {
+          const reviewState = datasetReviewsById ? datasetReviewsById[dataset.dataset_id] : null;
+          const review = reviewState?.review || null;
+          const reviewStatus = review?.status ? String(review.status) : "";
+          const reviewStatusLabel = reviewStatus.replace(/_/g, " ");
+          const reviewStatusClass = reviewStatus ? `pill review-status review-${reviewStatus}` : "";
+          const reviewPending = reviewStatus === "pending";
+          const reviewResolved = Boolean(reviewStatus && !reviewPending);
+          const reviewLocked = reviewRequired && reviewPending;
+
+          const commitLabel = !reviewRequired
+            ? "Commit dataset"
+            : reviewPending
+              ? "Awaiting PI review"
+              : reviewResolved
+                ? "Resubmit for review"
+                : "Submit for PI review";
+
+          return (
+            <article className="item" key={dataset.dataset_id}>
+              <div className="item-head">
+                <strong>{dataset.status}</strong>
+                <div className="inline">
+                  {reviewRequired && reviewStatus ? (
+                    <span className={reviewStatusClass}>{reviewStatusLabel}</span>
+                  ) : null}
+                  <span className="subtle">{formatDate(dataset.created_at)}</span>
+                </div>
+              </div>
             <p className="mono">{dataset.dataset_id}</p>
             <p className="mono">commit hash: {dataset.commit_hash}</p>
             <p>
@@ -1150,6 +1186,39 @@ function DatasetPanel({
                 .map((link) => `${link.role}:${link.question_id}`)
                 .join(" | ")}
             </p>
+
+            {reviewRequired ? (
+              <div className="stack">
+                <div className="subtle">Review</div>
+                {reviewState?.loading ? <p className="subtle">Loading review status...</p> : null}
+                {reviewState?.error ? (
+                  <p className="subtle">Review unavailable: {reviewState.error}</p>
+                ) : null}
+                {review ? (
+                  <>
+                    <div className="inline">
+                      {reviewStatus ? <span className={reviewStatusClass}>{reviewStatusLabel}</span> : null}
+                      {review.reviewer_user_id ? (
+                        <span className="pill mono" title="Reviewer user_id">
+                          {review.reviewer_user_id}
+                        </span>
+                      ) : (
+                        <span className="pill">unassigned</span>
+                      )}
+                      <span className="subtle">
+                        {formatDate(review.resolved_at || review.requested_at)}
+                      </span>
+                    </div>
+                    {review.comments ? (
+                      <p className="source-snippet">{review.comments}</p>
+                    ) : null}
+                  </>
+                ) : null}
+                {reviewLocked ? (
+                  <p className="warn">Review requested. Attachments are locked until resolved.</p>
+                ) : null}
+              </div>
+            ) : null}
 
             <div className="stack">
               <div className="item">
@@ -1178,7 +1247,7 @@ function DatasetPanel({
                       <input
                         type="file"
                         multiple
-                        disabled={!canWrite || busy}
+                        disabled={!canWrite || busy || reviewLocked}
                         onChange={(event) => {
                           const files = Array.from(event.target.files || []);
                           event.target.value = "";
@@ -1239,7 +1308,7 @@ function DatasetPanel({
                         <button
                           type="button"
                           className="btn-danger"
-                          disabled={!canWrite || busy}
+                          disabled={!canWrite || busy || reviewLocked}
                           onClick={() => onDeleteDatasetFile(dataset.dataset_id, file.file_id)}
                         >
                           Remove file
@@ -1256,7 +1325,7 @@ function DatasetPanel({
                 type="button"
                 className="btn-primary"
                 disabled={(() => {
-                  if (!canWrite || busy) {
+                  if (!canWrite || busy || reviewLocked) {
                     return true;
                   }
                   const state = datasetFilesById[dataset.dataset_id];
@@ -1270,11 +1339,568 @@ function DatasetPanel({
                 })()}
                 onClick={() => onCommitDataset(dataset.dataset_id)}
               >
-                Commit dataset
+                {commitLabel}
               </button>
             ) : null}
-          </article>
-        ))}
+            </article>
+          );
+        })}
+      </div>
+    </article>
+  );
+}
+
+function ReviewPanel({
+  token,
+  user,
+  projects,
+  selectedProjectId,
+  navigate,
+  onFlash,
+  onRefreshActiveProject,
+}) {
+  const [queueBusy, setQueueBusy] = useState(false);
+  const [queueError, setQueueError] = useState("");
+  const [pendingReviews, setPendingReviews] = useState([]);
+  const [selectedReviewId, setSelectedReviewId] = useState("");
+  const [selectedDatasetId, setSelectedDatasetId] = useState("");
+
+  const [detailBusy, setDetailBusy] = useState(false);
+  const [detailError, setDetailError] = useState("");
+  const [dataset, setDataset] = useState(null);
+  const [datasetFiles, setDatasetFiles] = useState([]);
+  const [questionsById, setQuestionsById] = useState({});
+  const [attachedNotes, setAttachedNotes] = useState([]);
+
+  const [actionBusy, setActionBusy] = useState(false);
+  const [actionError, setActionError] = useState("");
+  const [reviewComment, setReviewComment] = useState("");
+
+  const isAdmin = Boolean(user && user.role === "admin");
+
+  const projectById = useMemo(() => {
+    const index = {};
+    (projects || []).forEach((project) => {
+      index[project.project_id] = project;
+    });
+    return index;
+  }, [projects]);
+
+  const loadQueue = useCallback(
+    async ({ keepSelection = true, selectionReviewId = "" } = {}) => {
+      if (!token) {
+        setPendingReviews([]);
+        setSelectedReviewId("");
+        setSelectedDatasetId("");
+        setQueueError("");
+        return;
+      }
+      setQueueBusy(true);
+      setQueueError("");
+      try {
+        const payload = await apiRequest("/reviews/pending?limit=200", { token });
+        const items = Array.isArray(payload) ? payload : [];
+        setPendingReviews(items);
+
+        const desiredSelection = keepSelection ? selectionReviewId : "";
+        if (!desiredSelection) {
+          const next = items[0] || null;
+          setSelectedReviewId(next ? next.review_id : "");
+          setSelectedDatasetId(next ? next.dataset_id : "");
+          return;
+        }
+
+        const stillThere = items.some((review) => review.review_id === desiredSelection);
+        if (!stillThere) {
+          const next = items[0] || null;
+          setSelectedReviewId(next ? next.review_id : "");
+          setSelectedDatasetId(next ? next.dataset_id : "");
+        }
+      } catch (err) {
+        setQueueError(err.message || "Failed to load review queue.");
+        setPendingReviews([]);
+        setSelectedReviewId("");
+        setSelectedDatasetId("");
+      } finally {
+        setQueueBusy(false);
+      }
+    },
+    [token]
+  );
+
+  useEffect(() => {
+    loadQueue({ keepSelection: false });
+  }, [loadQueue]);
+
+  useEffect(() => {
+    if (!selectedReviewId) {
+      setSelectedDatasetId("");
+      return;
+    }
+    const found = pendingReviews.find((review) => review.review_id === selectedReviewId) || null;
+    setSelectedDatasetId(found ? found.dataset_id : "");
+    setDetailError("");
+    setActionError("");
+    setReviewComment("");
+  }, [pendingReviews, selectedReviewId]);
+
+  useEffect(() => {
+    let canceled = false;
+    if (!token || !selectedDatasetId) {
+      setDataset(null);
+      setDatasetFiles([]);
+      setQuestionsById({});
+      setAttachedNotes([]);
+      setDetailError("");
+      return () => {
+        canceled = true;
+      };
+    }
+
+    async function loadDetail() {
+      setDetailBusy(true);
+      setDetailError("");
+      try {
+        const loadedDataset = await apiRequest(`/datasets/${selectedDatasetId}`, { token });
+        if (canceled) {
+          return;
+        }
+        setDataset(loadedDataset);
+
+        const [filesPayload, manifestNotesPayload] = await Promise.all([
+          apiRequest(`/datasets/${selectedDatasetId}/files?limit=200`, { token }).catch(() => []),
+          (async () => {
+            const noteIds = loadedDataset?.commit_manifest?.note_ids || [];
+            if (!Array.isArray(noteIds) || noteIds.length === 0) {
+              return [];
+            }
+            const settled = await Promise.allSettled(
+              noteIds.map((noteId) => apiRequest(`/notes/${noteId}`, { token }))
+            );
+            return settled
+              .filter((result) => result.status === "fulfilled")
+              .map((result) => result.value);
+          })(),
+        ]);
+
+        const files = Array.isArray(filesPayload) ? filesPayload : [];
+        setDatasetFiles(files);
+
+        const manifestNotes = Array.isArray(manifestNotesPayload) ? manifestNotesPayload : [];
+
+        const datasetProjectId = loadedDataset?.project_id || "";
+        let projectNotes = [];
+        if (datasetProjectId) {
+          try {
+            const payload = await apiRequest(
+              `/notes?project_id=${encodeURIComponent(datasetProjectId)}&limit=200`,
+              { token }
+            );
+            projectNotes = Array.isArray(payload) ? payload : [];
+          } catch {
+            projectNotes = [];
+          }
+        }
+
+        const manifestNoteIds = new Set(
+          (loadedDataset?.commit_manifest?.note_ids || []).map((value) => String(value))
+        );
+        const noteIndex = {};
+
+        for (const note of manifestNotes) {
+          if (!note || !note.note_id) {
+            continue;
+          }
+          noteIndex[String(note.note_id)] = note;
+        }
+
+        for (const note of projectNotes) {
+          if (!note || !note.note_id) {
+            continue;
+          }
+          const noteId = String(note.note_id);
+          const targets = Array.isArray(note.targets) ? note.targets : [];
+          const targetsDataset = targets.some(
+            (target) => target.entity_type === "dataset" && String(target.entity_id) === selectedDatasetId
+          );
+          if (targetsDataset || manifestNoteIds.has(noteId)) {
+            if (!noteIndex[noteId]) {
+              noteIndex[noteId] = note;
+            }
+          }
+        }
+
+        const mergedNotes = Object.values(noteIndex);
+        mergedNotes.sort((a, b) => {
+          const aTime = Date.parse(a.created_at || "") || 0;
+          const bTime = Date.parse(b.created_at || "") || 0;
+          return bTime - aTime;
+        });
+        if (!canceled) {
+          setAttachedNotes(mergedNotes);
+        }
+
+        const questionIds = (loadedDataset?.question_links || []).map((link) => link.question_id);
+        const questionSettled = await Promise.allSettled(
+          questionIds.map((questionId) => apiRequest(`/questions/${questionId}`, { token }))
+        );
+        const nextQuestionsById = {};
+        questionSettled.forEach((result, index) => {
+          if (result.status !== "fulfilled") {
+            return;
+          }
+          const question = result.value;
+          if (!question || !question.question_id) {
+            return;
+          }
+          nextQuestionsById[String(question.question_id)] = question;
+        });
+        if (!canceled) {
+          setQuestionsById(nextQuestionsById);
+        }
+      } catch (err) {
+        if (!canceled) {
+          setDetailError(err.message || "Failed to load review detail.");
+          setDataset(null);
+          setDatasetFiles([]);
+          setQuestionsById({});
+          setAttachedNotes([]);
+        }
+      } finally {
+        if (!canceled) {
+          setDetailBusy(false);
+        }
+      }
+    }
+
+    loadDetail();
+
+    return () => {
+      canceled = true;
+    };
+  }, [selectedDatasetId, token]);
+
+  async function handleResolve(action) {
+    if (!token || !dataset || !dataset.dataset_id) {
+      return;
+    }
+    if (!isAdmin) {
+      setActionError("Only admins can resolve dataset reviews.");
+      return;
+    }
+
+    const trimmed = reviewComment.trim();
+    if (action === "request_changes" && !trimmed) {
+      setActionError("Add a comment explaining the requested changes.");
+      return;
+    }
+
+    setActionBusy(true);
+    setActionError("");
+    try {
+      await apiRequest(`/datasets/${dataset.dataset_id}/review`, {
+        method: "PATCH",
+        token,
+        body: {
+          action,
+          comments: trimmed || null,
+        },
+      });
+
+      if (typeof onFlash === "function") {
+        const verb = action === "approve" ? "approved" : action === "reject" ? "rejected" : "sent back";
+        onFlash(`Dataset review ${verb}.`);
+      }
+
+      if (
+        typeof onRefreshActiveProject === "function" &&
+        selectedProjectId &&
+        String(dataset.project_id) === String(selectedProjectId)
+      ) {
+        await onRefreshActiveProject();
+      }
+
+      setReviewComment("");
+      await loadQueue({ keepSelection: false });
+    } catch (err) {
+      setActionError(err.message || "Failed to resolve dataset review.");
+    } finally {
+      setActionBusy(false);
+    }
+  }
+
+  const selectedProject = dataset ? projectById[dataset.project_id] : null;
+  const selectedReview =
+    pendingReviews.find((review) => review.review_id === selectedReviewId) || null;
+
+  const reviewStatus = selectedReview?.status ? String(selectedReview.status) : "";
+  const reviewStatusLabel = reviewStatus.replace(/_/g, " ");
+  const reviewStatusClass = reviewStatus ? `pill review-status review-${reviewStatus}` : "";
+
+  const manifest = dataset?.commit_manifest || null;
+  const manifestPreview = useMemo(() => {
+    if (!manifest) {
+      return "";
+    }
+    try {
+      return JSON.stringify(manifest, null, 2);
+    } catch {
+      return String(manifest);
+    }
+  }, [manifest]);
+
+  return (
+    <article className="card span-12">
+      <div className="item-head">
+        <h2>Dataset PR (Review Queue)</h2>
+        <div className="inline">
+          <span className="pill">assigned: {pendingReviews.length}</span>
+          <button
+            type="button"
+            className="btn-secondary"
+            disabled={!token || queueBusy}
+            onClick={() => loadQueue({ keepSelection: true, selectionReviewId: selectedReviewId })}
+          >
+            Refresh
+          </button>
+        </div>
+      </div>
+      <p className="subtle">
+        Pending dataset reviews assigned to you. Approving commits the dataset; requesting changes
+        keeps it staged.
+      </p>
+
+      {queueError ? <p className="flash error">{queueError}</p> : null}
+
+      <div className="dataset-pr-layout">
+        <section className="review-pane">
+          <div className="item-head">
+            <h3>Queue</h3>
+            {queueBusy ? <span className="pill">Loading...</span> : null}
+          </div>
+
+          {!token ? <p className="subtle">Sign in to view review assignments.</p> : null}
+
+          {token && pendingReviews.length === 0 && !queueBusy ? (
+            <p className="subtle">No pending reviews assigned.</p>
+          ) : null}
+
+          {pendingReviews.length > 0 ? (
+            <div className="stack">
+              {pendingReviews.map((review) => {
+                const isSelected = review.review_id === selectedReviewId;
+                const status = review?.status ? String(review.status) : "";
+                const statusLabel = status.replace(/_/g, " ");
+                const statusClass = status ? `pill review-status review-${status}` : "";
+                return (
+                  <button
+                    key={review.review_id}
+                    type="button"
+                    className={`review-queue-item${isSelected ? " selected" : ""}`}
+                    onClick={() => setSelectedReviewId(review.review_id)}
+                  >
+                    <div className="item-head">
+                      <strong className="mono">{review.dataset_id}</strong>
+                      {status ? <span className={statusClass}>{statusLabel}</span> : null}
+                    </div>
+                    <div className="subtle">Requested {formatDate(review.requested_at)}</div>
+                  </button>
+                );
+              })}
+            </div>
+          ) : null}
+        </section>
+
+        <section className="review-pane">
+          <div className="item-head">
+            <h3>Detail</h3>
+            <div className="inline">
+              {detailBusy ? <span className="pill">Loading...</span> : null}
+              {dataset ? (
+                <AppLink
+                  to={`/app/datasets/${dataset.dataset_id}`}
+                  navigate={navigate}
+                  className="link"
+                >
+                  Open dataset
+                </AppLink>
+              ) : null}
+            </div>
+          </div>
+
+          {detailError ? <p className="flash error">{detailError}</p> : null}
+
+          {dataset ? (
+            <div className="stack">
+              <div className="inline">
+                <span className="pill">{dataset.status}</span>
+                {selectedProject ? <span className="pill">{selectedProject.name}</span> : null}
+                {reviewStatus ? <span className={reviewStatusClass}>{reviewStatusLabel}</span> : null}
+              </div>
+
+              <div className="dataset-pr-grid">
+                <section className="review-pane">
+                  <div className="item-head">
+                    <h4>Files</h4>
+                    <span className="pill">{datasetFiles.length}</span>
+                  </div>
+                  {datasetFiles.length === 0 ? (
+                    <p className="subtle">(No attached files found.)</p>
+                  ) : (
+                    <div className="stack">
+                      {datasetFiles.map((file) => (
+                        <div className="item" key={file.file_id || file.path}>
+                          <div className="item-head">
+                            <span className="mono">{file.path}</span>
+                            <span className="subtle">{formatBytes(file.size_bytes)}</span>
+                          </div>
+                          <p className="mono">sha256: {file.checksum}</p>
+                          {file.file_id ? (
+                            <a
+                              className="link"
+                              href={`/datasets/${dataset.dataset_id}/files/${file.file_id}/download`}
+                            >
+                              Download
+                            </a>
+                          ) : null}
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </section>
+
+                <section className="review-pane">
+                  <div className="item-head">
+                    <h4>Linked Questions</h4>
+                    <span className="pill">{(dataset.question_links || []).length}</span>
+                  </div>
+                  {(dataset.question_links || []).length === 0 ? (
+                    <p className="subtle">(No question links.)</p>
+                  ) : (
+                    <div className="stack">
+                      {(dataset.question_links || []).map((link) => {
+                        const question = questionsById[String(link.question_id)];
+                        return (
+                          <div className="item" key={`${link.role}:${link.question_id}`}>
+                            <div className="item-head">
+                              <strong>{link.role}</strong>
+                              <span className="pill">{link.outcome_status}</span>
+                            </div>
+                            <p className="mono">{link.question_id}</p>
+                            {question ? (
+                              <p className="subtle">{String(question.text || "").slice(0, 160)}</p>
+                            ) : null}
+                            <AppLink
+                              to={`/app/questions/${link.question_id}`}
+                              navigate={navigate}
+                              className="link"
+                            >
+                              Open question
+                            </AppLink>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+                </section>
+
+                <section className="review-pane">
+                  <div className="item-head">
+                    <h4>Attached Notes</h4>
+                    <span className="pill">{attachedNotes.length}</span>
+                  </div>
+                  {attachedNotes.length === 0 ? (
+                    <p className="subtle">(No notes linked to this dataset.)</p>
+                  ) : (
+                    <div className="stack">
+                      {attachedNotes.map((note) => (
+                        <div className="item" key={note.note_id}>
+                          <div className="item-head">
+                            <span className="pill">{note.status}</span>
+                            <span className="subtle">{formatDate(note.created_at)}</span>
+                          </div>
+                          <p className="mono">{note.note_id}</p>
+                          <p className="subtle">
+                            {(note.transcribed_text || note.raw_content || "(binary upload)").slice(0, 180)}
+                          </p>
+                          <AppLink to={`/app/notes/${note.note_id}`} navigate={navigate} className="link">
+                            Open note
+                          </AppLink>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </section>
+
+                <section className="review-pane">
+                  <div className="item-head">
+                    <h4>Commit Manifest</h4>
+                    <span className="pill mono">{dataset.commit_hash}</span>
+                  </div>
+                  {manifestPreview ? (
+                    <pre className="mono manifest-preview">{manifestPreview}</pre>
+                  ) : (
+                    <p className="subtle">(No manifest.)</p>
+                  )}
+                </section>
+              </div>
+
+              {!isAdmin ? (
+                <p className="warn">Review actions require an admin account.</p>
+              ) : null}
+
+              {actionError ? <p className="flash error">{actionError}</p> : null}
+
+              <form
+                className="form"
+                onSubmit={(event) => {
+                  event.preventDefault();
+                  handleResolve("request_changes");
+                }}
+              >
+                <label>
+                  Comment (required for request changes)
+                  <textarea
+                    value={reviewComment}
+                    onChange={(event) => setReviewComment(event.target.value)}
+                    disabled={!token || actionBusy}
+                    placeholder="e.g. Please attach the rig log + add secondary question link."
+                  />
+                </label>
+
+                <div className="inline">
+                  <button
+                    type="button"
+                    className="btn-primary"
+                    disabled={!token || !isAdmin || actionBusy}
+                    onClick={() => handleResolve("approve")}
+                  >
+                    Approve
+                  </button>
+                  <button
+                    type="submit"
+                    className="btn-secondary"
+                    disabled={!token || !isAdmin || actionBusy}
+                  >
+                    Request changes
+                  </button>
+                  <button
+                    type="button"
+                    className="btn-danger"
+                    disabled={!token || !isAdmin || actionBusy}
+                    onClick={() => handleResolve("reject")}
+                  >
+                    Reject
+                  </button>
+                </div>
+              </form>
+            </div>
+          ) : token && selectedReviewId ? (
+            <p className="subtle">Select a review to see details.</p>
+          ) : (
+            <p className="subtle">Pick a pending review from the queue.</p>
+          )}
+        </section>
       </div>
     </article>
   );
@@ -2254,12 +2880,15 @@ function SessionDetailCard({
   onSetActiveProject,
   canWrite,
   onCloseSession,
+  onPromoteSession,
 }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [session, setSession] = useState(null);
   const [outputsState, setOutputsState] = useState({ loading: false, error: "", items: [] });
   const [noteState, setNoteState] = useState({ loading: false, error: "", items: [] });
+  const [promotionQuestionId, setPromotionQuestionId] = useState("");
+  const [promotionBusy, setPromotionBusy] = useState(false);
 
   const project = useMemo(() => {
     if (!session) {
@@ -2274,6 +2903,34 @@ function SessionDetailCard({
     }
     return questions.find((item) => item.question_id === session.primary_question_id) || null;
   }, [questions, session]);
+
+  const promotionOptions = useMemo(() => {
+    if (!session) {
+      return [];
+    }
+    const items = (questions || [])
+      .filter((question) => question.project_id === session.project_id)
+      .filter((question) => question.status === "active");
+    items.sort((a, b) => {
+      const aTime = Date.parse(a.updated_at || a.created_at || "") || 0;
+      const bTime = Date.parse(b.updated_at || b.created_at || "") || 0;
+      return bTime - aTime;
+    });
+    return items;
+  }, [questions, session]);
+
+  useEffect(() => {
+    if (!session || session.session_type !== "operational") {
+      setPromotionQuestionId("");
+      return;
+    }
+    setPromotionQuestionId((current) => {
+      if (current) {
+        return current;
+      }
+      return promotionOptions[0]?.question_id || "";
+    });
+  }, [promotionOptions, session]);
 
   useEffect(() => {
     let canceled = false;
@@ -2399,6 +3056,31 @@ function SessionDetailCard({
     }
   }
 
+  async function handlePromoteSession() {
+    if (!session || !canWrite || !onPromoteSession) {
+      return;
+    }
+    if (!promotionQuestionId) {
+      setError("Pick a primary question to promote this session.");
+      return;
+    }
+    setPromotionBusy(true);
+    try {
+      const updated = await onPromoteSession(
+        session.session_id,
+        promotionQuestionId,
+        session.project_id
+      );
+      if (updated) {
+        setSession(updated);
+      }
+    } catch (err) {
+      setError(err.message || "Failed to promote session.");
+    } finally {
+      setPromotionBusy(false);
+    }
+  }
+
   return (
     <article className="card span-8">
       <div className="item-head">
@@ -2439,6 +3121,44 @@ function SessionDetailCard({
                 <strong>{primaryQuestion ? primaryQuestion.text : session.primary_question_id}</strong>
               </AppLink>
               <div className="mono">{session.primary_question_id}</div>
+            </div>
+          ) : null}
+
+          {session.session_type === "operational" ? (
+            <div className="stack">
+              <div className="item-head">
+                <h3>Promotion</h3>
+              </div>
+              <p className="subtle">
+                Promote this operational session into the scientific knowledge graph by linking a primary
+                question.
+              </p>
+              <label>
+                Primary question (required)
+                <select
+                  value={promotionQuestionId}
+                  onChange={(event) => setPromotionQuestionId(event.target.value)}
+                  disabled={!canWrite || promotionBusy || promotionOptions.length === 0}
+                >
+                  <option value="">Select an active question</option>
+                  {promotionOptions.map((question) => (
+                    <option value={question.question_id} key={question.question_id}>
+                      {question.text}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              {promotionOptions.length === 0 ? (
+                <p className="warn">Activate a question in this project before promoting the session.</p>
+              ) : null}
+              <button
+                type="button"
+                className="btn-primary"
+                disabled={!canWrite || promotionBusy || promotionOptions.length === 0 || !promotionQuestionId}
+                onClick={handlePromoteSession}
+              >
+                Promote to scientific
+              </button>
             </div>
           ) : null}
 
@@ -2843,6 +3563,7 @@ function App() {
   const [datasetPrimaryQuestionId, setDatasetPrimaryQuestionId] = useState("");
   const [datasetSecondaryRaw, setDatasetSecondaryRaw] = useState("");
   const [datasetFilesById, setDatasetFilesById] = useState({});
+  const [datasetReviewsById, setDatasetReviewsById] = useState({});
 
   const [sessionType, setSessionType] = useState("scientific");
   const [sessionPrimaryQuestionId, setSessionPrimaryQuestionId] = useState("");
@@ -2867,6 +3588,14 @@ function App() {
   const activeQuestions = useMemo(
     () => questions.filter((item) => item.status === "active"),
     [questions]
+  );
+
+  const selectedProject = useMemo(
+    () => projects.find((item) => item.project_id === selectedProjectId) || null,
+    [projects, selectedProjectId]
+  );
+  const reviewRequired = Boolean(
+    selectedProject && selectedProject.review_policy && selectedProject.review_policy !== "none"
   );
 
   function setFlash(nextMessage, nextError = "") {
@@ -2962,6 +3691,14 @@ function App() {
     });
   }
 
+  const refreshActiveProject = useCallback(async () => {
+    try {
+      await refreshProjectData(selectedProjectId);
+    } catch {
+      // Best-effort refresh; review actions should not fail if the active project refresh fails.
+    }
+  }, [selectedProjectId, token]);
+
   useEffect(() => {
     if (token) {
       localStorage.setItem(TOKEN_STORAGE_KEY, token);
@@ -2972,6 +3709,7 @@ function App() {
 
   useEffect(() => {
     setDatasetFilesById({});
+    setDatasetReviewsById({});
     setAnalysisDatasetIds([]);
     setSessionPrimaryQuestionId("");
   }, [selectedProjectId, token]);
@@ -3065,6 +3803,67 @@ function App() {
       canceled = true;
     };
   }, [selectedProjectId, token]);
+
+  useEffect(() => {
+    let canceled = false;
+    if (!token || !selectedProjectId || !reviewRequired) {
+      setDatasetReviewsById({});
+      return () => {
+        canceled = true;
+      };
+    }
+
+    const stagedDatasets = (datasets || []).filter((dataset) => dataset.status === "staged");
+    const datasetIds = stagedDatasets.map((dataset) => dataset.dataset_id);
+
+    if (datasetIds.length === 0) {
+      setDatasetReviewsById({});
+      return () => {
+        canceled = true;
+      };
+    }
+
+    setDatasetReviewsById((current) => {
+      const next = {};
+      datasetIds.forEach((datasetId) => {
+        next[datasetId] = {
+          review: current[datasetId]?.review || null,
+          loading: true,
+          error: "",
+        };
+      });
+      return next;
+    });
+
+    Promise.all(
+      datasetIds.map(async (datasetId) => {
+        try {
+          const review = await apiRequest(`/datasets/${datasetId}/review`, { token });
+          return { datasetId, review, error: "" };
+        } catch (err) {
+          if (err && err.status === 404) {
+            return { datasetId, review: null, error: "" };
+          }
+          return { datasetId, review: null, error: err.message || "Failed to load review." };
+        }
+      })
+    ).then((results) => {
+      if (canceled) {
+        return;
+      }
+      setDatasetReviewsById(() => {
+        const next = {};
+        results.forEach(({ datasetId, review, error }) => {
+          next[datasetId] = { review, loading: false, error };
+        });
+        return next;
+      });
+    });
+
+    return () => {
+      canceled = true;
+    };
+  }, [datasets, reviewRequired, selectedProjectId, token]);
 
   async function handleAuthSubmit(event) {
     event.preventDefault();
@@ -3671,13 +4470,17 @@ function App() {
     setBusy(true);
     setFlash("", "");
     try {
-      await apiRequest(`/datasets/${datasetId}`, {
+      const updated = await apiRequest(`/datasets/${datasetId}`, {
         method: "PATCH",
         token,
         body: { status: "committed" },
       });
       await refreshProjectData(selectedProjectId);
-      setFlash("Dataset committed.");
+      if (updated && updated.status === "committed") {
+        setFlash("Dataset committed.");
+      } else {
+        setFlash("Commit requested. Awaiting PI review.");
+      }
     } catch (err) {
       setFlash("", err.message || "Failed to commit dataset.");
     } finally {
@@ -3738,6 +4541,37 @@ function App() {
       return payload;
     } catch (err) {
       setFlash("", err.message || "Failed to close session.");
+      return null;
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function handlePromoteSession(sessionId, primaryQuestionId, projectId = "") {
+    if (!canWrite) {
+      return null;
+    }
+    if (!primaryQuestionId) {
+      setFlash("", "Pick a primary question to promote the session.");
+      return null;
+    }
+    setBusy(true);
+    setFlash("", "");
+    try {
+      const payload = await apiRequest(`/sessions/${sessionId}/promote`, {
+        method: "POST",
+        token,
+        body: { primary_question_id: primaryQuestionId },
+      });
+      if (projectId && projectId === selectedProjectId) {
+        setSessions((current) =>
+          current.map((item) => (item.session_id === payload.session_id ? payload : item))
+        );
+      }
+      setFlash("Session promoted.");
+      return payload;
+    } catch (err) {
+      setFlash("", err.message || "Failed to promote session.");
       return null;
     } finally {
       setBusy(false);
@@ -3830,8 +4664,6 @@ function App() {
       setBusy(false);
     }
   }
-
-  const selectedProject = projects.find((item) => item.project_id === selectedProjectId) || null;
 
   return (
     <div className="app-shell">
@@ -3949,6 +4781,7 @@ function App() {
               onSetActiveProject={(projectId) => setSelectedProjectId(projectId)}
               canWrite={canWrite}
               onCloseSession={handleCloseSession}
+              onPromoteSession={handlePromoteSession}
             />
           ) : null}
 
@@ -4010,6 +4843,20 @@ function App() {
               onLoadDatasetFiles={loadDatasetFiles}
               onUploadDatasetFiles={handleUploadDatasetFiles}
               onDeleteDatasetFile={handleDeleteDatasetFile}
+              reviewPolicy={selectedProject?.review_policy || ""}
+              datasetReviewsById={datasetReviewsById}
+            />
+          ) : null}
+
+          {route.kind === "home" ? (
+            <ReviewPanel
+              token={token}
+              user={user}
+              projects={projects}
+              selectedProjectId={selectedProjectId}
+              navigate={navigate}
+              onFlash={setFlash}
+              onRefreshActiveProject={refreshActiveProject}
             />
           ) : null}
 

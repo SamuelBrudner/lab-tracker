@@ -97,6 +97,7 @@ from lab_tracker.schemas import (
     QuestionUpdate,
     SearchResults,
     SessionCreate,
+    SessionDatasetPromotionRequest,
     SessionPromotionRequest,
     SessionUpdate,
     TagSuggestionRequest,
@@ -972,18 +973,32 @@ def register_routes(
         session = api.delete_session(session_id, actor=actor)
         return Envelope(data=session)
 
-    @app.post(
-        "/sessions/{session_id}/promote",
-        response_model=Envelope[Dataset],
-        status_code=http_status.HTTP_201_CREATED,
-    )
+    @app.post("/sessions/{session_id}/promote", response_model=Envelope[Session])
     def promote_operational_session(
         session_id: UUID,
         payload: SessionPromotionRequest,
         request: Request,
     ):
         actor = _actor_from_request(request)
-        dataset = api.promote_operational_session(
+        session = api.promote_operational_session(
+            session_id,
+            primary_question_id=payload.primary_question_id,
+            actor=actor,
+        )
+        return Envelope(data=session)
+
+    @app.post(
+        "/sessions/{session_id}/promote-to-dataset",
+        response_model=Envelope[Dataset],
+        status_code=http_status.HTTP_201_CREATED,
+    )
+    def promote_operational_session_to_dataset(
+        session_id: UUID,
+        payload: SessionDatasetPromotionRequest,
+        request: Request,
+    ):
+        actor = _actor_from_request(request)
+        dataset = api.promote_operational_session_to_dataset(
             session_id,
             primary_question_id=payload.primary_question_id,
             secondary_question_ids=payload.secondary_question_ids,

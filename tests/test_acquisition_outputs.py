@@ -1,11 +1,8 @@
 from uuid import uuid4
 
-import pytest
-
 from lab_tracker.acquisition_watcher import AcquisitionOutputWatcher
 from lab_tracker.api import LabTrackerAPI
 from lab_tracker.auth import AuthContext, Role
-from lab_tracker.errors import ValidationError
 from lab_tracker.models import (
     DatasetCommitManifestInput,
     DatasetFile,
@@ -29,7 +26,7 @@ def _operational_session(api: LabTrackerAPI, actor: AuthContext):
     return project, session
 
 
-def test_register_acquisition_output_requires_operational_session():
+def test_register_acquisition_output_accepts_scientific_session():
     api = LabTrackerAPI.in_memory()
     actor = _actor()
     project = api.create_project("Neuro Project", actor=actor)
@@ -37,6 +34,7 @@ def test_register_acquisition_output_requires_operational_session():
         project_id=project.project_id,
         text="Is the rig stable?",
         question_type=QuestionType.DESCRIPTIVE,
+        status=QuestionStatus.ACTIVE,
         actor=actor,
     )
     session = api.create_session(
@@ -45,13 +43,13 @@ def test_register_acquisition_output_requires_operational_session():
         primary_question_id=question.question_id,
         actor=actor,
     )
-    with pytest.raises(ValidationError):
-        api.register_acquisition_output(
-            session.session_id,
-            file_path="output.bin",
-            checksum="abc123",
-            actor=actor,
-        )
+    output = api.register_acquisition_output(
+        session.session_id,
+        file_path="output.bin",
+        checksum="abc123",
+        actor=actor,
+    )
+    assert output.session_id == session.session_id
 
 
 def test_promote_operational_session_merges_outputs():
@@ -81,7 +79,7 @@ def test_promote_operational_session_merges_outputs():
         files=[DatasetFile(path="rig.log", checksum="def456")],
         metadata={"run": "7"},
     )
-    dataset = api.promote_operational_session(
+    dataset = api.promote_operational_session_to_dataset(
         session.session_id,
         primary_question_id=question.question_id,
         commit_manifest=manifest,

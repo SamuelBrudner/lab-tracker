@@ -234,6 +234,12 @@ class SessionUpdate(BaseModel):
 
 
 class SessionPromotionRequest(BaseModel):
+    """Promote an operational session into a scientific session by linking a primary question."""
+
+    primary_question_id: UUID
+
+
+class SessionDatasetPromotionRequest(BaseModel):
     primary_question_id: UUID
     secondary_question_ids: list[UUID] | None = None
     commit_manifest: DatasetCommitManifestInput | None = None

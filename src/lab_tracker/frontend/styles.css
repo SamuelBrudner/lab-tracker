@@ -298,6 +298,70 @@ button:disabled {
   margin-top: 0.9rem;
 }
 
+.dataset-pr-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 0.9fr) minmax(0, 1.4fr);
+  gap: 0.95rem;
+  margin-top: 0.9rem;
+}
+
+.dataset-pr-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.95rem;
+  margin-top: 0.85rem;
+}
+
+.review-queue-item {
+  width: 100%;
+  text-align: left;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 0.58rem;
+  background: #fcfcfc;
+}
+
+.review-queue-item.selected {
+  border-color: #2b6cb0;
+  background: #e8f5ff;
+}
+
+.pill.review-status {
+  font-weight: 700;
+  text-transform: capitalize;
+}
+
+.pill.review-pending {
+  background: #fff8e5;
+  border-color: #ecdcb0;
+}
+
+.pill.review-approved {
+  background: var(--accent-soft);
+  border-color: #b9e2d4;
+}
+
+.pill.review-changes_requested {
+  background: #fff3d2;
+  border-color: #e6d2a0;
+}
+
+.pill.review-rejected {
+  background: var(--danger-soft);
+  border-color: #e3b7bd;
+}
+
+.manifest-preview {
+  margin: 0.55rem 0 0;
+  white-space: pre-wrap;
+  background: #f7f6f3;
+  border: 1px dashed var(--line);
+  border-radius: 12px;
+  padding: 0.7rem;
+  max-height: 320px;
+  overflow: auto;
+}
+
 .review-pane {
   border: 1px solid var(--line);
   border-radius: 14px;
@@ -448,7 +512,15 @@ button:disabled {
     grid-template-columns: 1fr;
   }
 
+  .dataset-pr-layout {
+    grid-template-columns: 1fr;
+  }
+
   .review-fields {
+    grid-template-columns: 1fr;
+  }
+
+  .dataset-pr-grid {
     grid-template-columns: 1fr;
   }
 }

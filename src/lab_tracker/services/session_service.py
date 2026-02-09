@@ -14,6 +14,7 @@ from lab_tracker.models import (
     DatasetCommitManifest,
     DatasetCommitManifestInput,
     DatasetStatus,
+    QuestionStatus,
     Session,
     SessionStatus,
     SessionType,
@@ -43,12 +44,18 @@ class SessionServiceMixin:
     ) -> Session:
         require_role(actor, WRITE_ROLES)
         self.get_project(project_id)
-        if session_type == SessionType.SCIENTIFIC and primary_question_id is None:
-            raise ValidationError("Scientific sessions require a primary question.")
+        if session_type == SessionType.SCIENTIFIC:
+            if primary_question_id is None:
+                raise ValidationError("Scientific sessions require a primary question.")
+        elif session_type == SessionType.OPERATIONAL:
+            if primary_question_id is not None:
+                raise ValidationError("Operational sessions cannot have a primary question.")
         if primary_question_id is not None:
             question = self.get_question(primary_question_id)
             if question.project_id != project_id:
                 raise ValidationError("Primary question must belong to the same project.")
+            if session_type == SessionType.SCIENTIFIC and question.status != QuestionStatus.ACTIVE:
+                raise ValidationError("Primary question must be active for scientific sessions.")
         session = Session(
             session_id=uuid4(),
             project_id=project_id,
@@ -112,9 +119,7 @@ class SessionServiceMixin:
         actor: AuthContext | None = None,
     ) -> AcquisitionOutput:
         require_role(actor, WRITE_ROLES)
-        session = self.get_session(session_id)
-        if session.session_type != SessionType.OPERATIONAL:
-            raise ValidationError("Acquisition outputs require an operational session.")
+        self.get_session(session_id)
         _ensure_non_empty(file_path, "file_path")
         _ensure_non_empty(checksum, "checksum")
         if size_bytes is not None and size_bytes < 0:
@@ -186,6 +191,30 @@ class SessionServiceMixin:
         return output
 
     def promote_operational_session(
+        self,
+        session_id: UUID,
+        primary_question_id: UUID,
+        *,
+        actor: AuthContext | None = None,
+    ) -> Session:
+        require_role(actor, WRITE_ROLES)
+        session = self.get_session(session_id)
+        if session.session_type != SessionType.OPERATIONAL:
+            raise ValidationError(
+                "Only operational sessions can be promoted to scientific sessions."
+            )
+        question = self.get_question(primary_question_id)
+        if question.project_id != session.project_id:
+            raise ValidationError("Primary question must belong to the same project.")
+        if question.status != QuestionStatus.ACTIVE:
+            raise ValidationError("Primary question must be active for scientific sessions.")
+        session.session_type = SessionType.SCIENTIFIC
+        session.primary_question_id = primary_question_id
+        session.updated_at = utc_now()
+        self._run_repository_write(lambda repository: repository.sessions.save(session))
+        return session
+
+    def promote_operational_session_to_dataset(
         self,
         session_id: UUID,
         primary_question_id: UUID,

@@ -332,7 +332,7 @@ def test_promote_operational_session_to_dataset():
         actor=actor,
     )
     manifest = DatasetCommitManifestInput(files=[DatasetFile(path="rig.log", checksum="qa123")])
-    dataset = api.promote_operational_session(
+    dataset = api.promote_operational_session_to_dataset(
         session.session_id,
         primary_question_id=question.question_id,
         commit_manifest=manifest,
@@ -341,6 +341,34 @@ def test_promote_operational_session_to_dataset():
     assert dataset.commit_manifest.source_session_id == session.session_id
     assert dataset.status == DatasetStatus.COMMITTED
     assert dataset.project_id == project.project_id
+
+
+def test_promote_operational_session_to_scientific():
+    api = LabTrackerAPI.in_memory()
+    actor = _actor()
+    project = api.create_project("Neuro Project", actor=actor)
+    question = api.create_question(
+        project_id=project.project_id,
+        text="Is this now a scientific run?",
+        question_type=QuestionType.DESCRIPTIVE,
+        status=QuestionStatus.ACTIVE,
+        actor=actor,
+    )
+    session = api.create_session(
+        project_id=project.project_id,
+        session_type=SessionType.OPERATIONAL,
+        actor=actor,
+    )
+
+    promoted = api.promote_operational_session(
+        session.session_id,
+        primary_question_id=question.question_id,
+        actor=actor,
+    )
+
+    assert promoted.session_id == session.session_id
+    assert promoted.session_type == SessionType.SCIENTIFIC
+    assert promoted.primary_question_id == question.question_id
 
 
 def test_session_link_code_roundtrip():
@@ -383,6 +411,26 @@ def test_scientific_session_requires_question():
         api.create_session(
             project_id=project.project_id,
             session_type=SessionType.SCIENTIFIC,
+            actor=actor,
+        )
+
+
+def test_operational_session_disallows_primary_question():
+    api = LabTrackerAPI.in_memory()
+    actor = _actor()
+    project = api.create_project("Neuro Project", actor=actor)
+    question = api.create_question(
+        project_id=project.project_id,
+        text="Is this a maintenance session?",
+        question_type=QuestionType.DESCRIPTIVE,
+        status=QuestionStatus.ACTIVE,
+        actor=actor,
+    )
+    with pytest.raises(ValidationError):
+        api.create_session(
+            project_id=project.project_id,
+            session_type=SessionType.OPERATIONAL,
+            primary_question_id=question.question_id,
             actor=actor,
         )
 
