@@ -23,8 +23,10 @@ from lab_tracker.models import (
     DatasetStatus,
     EntityRef,
     ExtractedEntity,
+    Note,
     NoteStatus,
     ProjectStatus,
+    Question,
     QuestionLink,
     QuestionSource,
     QuestionStatus,
@@ -273,6 +275,11 @@ class QuestionExtractionRequest(BaseModel):
     question_type: QuestionType | None = None
     created_from: QuestionSource | None = None
     provenance: str | None = None
+
+
+class SearchResults(BaseModel):
+    questions: list[Question] = Field(default_factory=list)
+    notes: list[Note] = Field(default_factory=list)
 
 
 class AnalysisCommitRequest(BaseModel):

@@ -30,10 +30,8 @@ from lab_tracker.services.shared import (
     _build_extracted_entity,
     _build_note_provenance,
     _build_note_tag_provenance,
-    _extract_question_candidates,
     _get_or_raise,
     _normalize_note_metadata,
-    _note_text_for_extraction,
     _resolve_tag_mappings,
     _tag_suggestion_key,
 )
@@ -86,6 +84,7 @@ class NoteServiceMixin:
             created_by=created_by,
         )
         self._store.notes[note.note_id] = note
+        self._search_backend.upsert_notes([note])
         self._run_repository_write(lambda repository: repository.notes.save(note))
         return note
 
@@ -167,6 +166,7 @@ class NoteServiceMixin:
         if status is not None:
             note.status = status
         note.updated_at = utc_now()
+        self._search_backend.upsert_notes([note])
         self._run_repository_write(lambda repository: repository.notes.save(note))
         return note
 
@@ -263,6 +263,7 @@ class NoteServiceMixin:
         require_role(actor, WRITE_ROLES)
         note = self.get_note(note_id)
         del self._store.notes[note_id]
+        self._search_backend.delete_notes([note_id])
         self._run_repository_write(lambda repository: repository.notes.delete(note_id))
         return note
 
@@ -278,8 +279,15 @@ class NoteServiceMixin:
         """Extract candidate questions from a note and stage them."""
         require_role(actor, WRITE_ROLES)
         note = self.get_note(note_id)
-        text = _note_text_for_extraction(note)
-        candidates = _extract_question_candidates(text)
+        raw_asset_bytes: bytes | None = None
+        backend = self._question_extraction_backend
+        if (
+            backend.requires_raw_asset_bytes(note)
+            and note.raw_asset is not None
+            and self._raw_storage is not None
+        ):
+            raw_asset_bytes = self._raw_storage.read(note.raw_asset.storage_id)
+        candidates = backend.extract_questions(note, raw_asset_bytes=raw_asset_bytes)
         if not candidates:
             return []
         existing = {

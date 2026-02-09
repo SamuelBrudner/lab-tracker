@@ -29,6 +29,15 @@ from lab_tracker.services import (
     SessionServiceMixin,
     VisualizationServiceMixin,
 )
+from lab_tracker.services.extraction_backends import (
+    QuestionExtractionBackend,
+    RegexQuestionExtractionBackend,
+)
+from lab_tracker.services.search_backends import (
+    InMemorySubstringSearchBackend,
+    SearchBackend,
+    SearchQuery,
+)
 
 
 class InMemoryStore:
@@ -59,15 +68,23 @@ class LabTrackerAPI(
         store: InMemoryStore | None = None,
         *,
         raw_storage: LocalNoteStorage | None = None,
+        question_extraction_backend: QuestionExtractionBackend | None = None,
+        search_backend: SearchBackend | None = None,
         repository: LabTrackerRepository | None = None,
         allow_in_memory: bool = False,
     ) -> None:
         self._store = store or InMemoryStore()
         self._raw_storage = raw_storage
         self._repository = repository
+        self._question_extraction_backend = (
+            question_extraction_backend or RegexQuestionExtractionBackend()
+        )
+        self._search_backend = search_backend or InMemorySubstringSearchBackend()
         self._allow_in_memory = allow_in_memory or store is not None
         if repository is not None:
             self.hydrate_from_repository(repository)
+        else:
+            self._hydrate_search_backend()
 
     @classmethod
     def in_memory(
@@ -75,10 +92,14 @@ class LabTrackerAPI(
         *,
         raw_storage: LocalNoteStorage | None = None,
         store: InMemoryStore | None = None,
+        question_extraction_backend: QuestionExtractionBackend | None = None,
+        search_backend: SearchBackend | None = None,
     ) -> "LabTrackerAPI":
         return cls(
             store=store,
             raw_storage=raw_storage,
+            question_extraction_backend=question_extraction_backend,
+            search_backend=search_backend,
             allow_in_memory=True,
         )
 
@@ -120,6 +141,11 @@ class LabTrackerAPI(
         self._store.acquisition_outputs = {
             output.output_id: output for output in acquisition_outputs
         }
+        self._hydrate_search_backend()
+
+    def _hydrate_search_backend(self) -> None:
+        self._search_backend.upsert_questions(self._store.questions.values())
+        self._search_backend.upsert_notes(self._store.notes.values())
 
     def _run_repository_write(
         self,
@@ -140,3 +166,39 @@ class LabTrackerAPI(
         except Exception:
             resolved_repository.rollback()
             raise
+
+    def search_questions(
+        self,
+        query: str,
+        *,
+        project_id: UUID | None = None,
+        limit: int | None = None,
+        offset: int = 0,
+    ) -> list[Question]:
+        ids = self._search_backend.search_question_ids(
+            SearchQuery(query=query, project_id=project_id, limit=limit, offset=offset)
+        )
+        results: list[Question] = []
+        for question_id in ids:
+            question = self._store.questions.get(question_id)
+            if question is not None:
+                results.append(question)
+        return results
+
+    def search_notes(
+        self,
+        query: str,
+        *,
+        project_id: UUID | None = None,
+        limit: int | None = None,
+        offset: int = 0,
+    ) -> list[Note]:
+        ids = self._search_backend.search_note_ids(
+            SearchQuery(query=query, project_id=project_id, limit=limit, offset=offset)
+        )
+        results: list[Note] = []
+        for note_id in ids:
+            note = self._store.notes.get(note_id)
+            if note is not None:
+                results.append(note)
+        return results

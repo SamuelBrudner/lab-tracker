@@ -14,6 +14,7 @@ from lab_tracker.models import (
     utc_now,
 )
 from lab_tracker.errors import ValidationError
+from lab_tracker.services.search_backends import SearchQuery
 from lab_tracker.services.shared import (
     WRITE_ROLES,
     _ensure_non_empty,
@@ -61,6 +62,7 @@ class QuestionServiceMixin:
             created_by=created_by,
         )
         self._store.questions[question.question_id] = question
+        self._search_backend.upsert_questions([question])
         self._run_repository_write(lambda repository: repository.questions.save(question))
         return question
 
@@ -131,12 +133,16 @@ class QuestionServiceMixin:
                 )
             ]
         if search is not None and search.strip():
-            needle = search.casefold()
+            candidate_ids = [question.question_id for question in questions]
+            hits = self._search_backend.search_question_ids(
+                SearchQuery(query=search, project_id=project_id),
+                question_ids=candidate_ids,
+            )
+            question_map = {question.question_id: question for question in questions}
             questions = [
-                question
-                for question in questions
-                if needle in question.text.casefold()
-                or (question.hypothesis and needle in question.hypothesis.casefold())
+                question_map[question_id]
+                for question_id in hits
+                if question_id in question_map
             ]
         return questions
 
@@ -172,6 +178,7 @@ class QuestionServiceMixin:
             _ensure_question_parents_dag(question.question_id, parent_ids, self._store.questions)
             question.parent_question_ids = parent_ids
         question.updated_at = utc_now()
+        self._search_backend.upsert_questions([question])
         self._run_repository_write(lambda repository: repository.questions.save(question))
         return question
 
@@ -179,5 +186,6 @@ class QuestionServiceMixin:
         require_role(actor, WRITE_ROLES)
         question = self.get_question(question_id)
         del self._store.questions[question_id]
+        self._search_backend.delete_questions([question_id])
         self._run_repository_write(lambda repository: repository.questions.delete(question_id))
         return question
