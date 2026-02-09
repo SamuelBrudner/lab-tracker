@@ -31,3 +31,9 @@ def test_non_local_environment_accepts_custom_auth_secret(monkeypatch):
     monkeypatch.setenv("LAB_TRACKER_AUTH_SECRET_KEY", "custom-secret")
     settings = Settings()
     assert settings.auth_secret_key == "custom-secret"
+
+
+def test_embedding_provider_reads_env(monkeypatch):
+    monkeypatch.setenv("LAB_TRACKER_EMBEDDING_PROVIDER", "openai")
+    settings = Settings()
+    assert settings.embedding_provider == "openai"

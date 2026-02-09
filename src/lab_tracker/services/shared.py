@@ -573,5 +573,5 @@ def _dedupe_casefold(values: Iterable[str]) -> list[str]:
     return unique
 
 
-def _build_note_provenance(note_id: UUID) -> str:
-    return f"note:{note_id}|question-extractor:v1"
+def _build_note_provenance(note_id: UUID, *, backend_name: str) -> str:
+    return f"note:{note_id}|question-extractor:v2|backend:{backend_name}"

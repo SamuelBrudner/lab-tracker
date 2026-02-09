@@ -272,7 +272,7 @@ class NoteServiceMixin:
         note_id: UUID,
         *,
         question_type: QuestionType = QuestionType.OTHER,
-        created_from: QuestionSource = QuestionSource.API,
+        created_from: QuestionSource = QuestionSource.MEETING_CAPTURE,
         provenance: str | None = None,
         actor: AuthContext | None = None,
     ) -> list[Question]:
@@ -294,14 +294,18 @@ class NoteServiceMixin:
             question.text.casefold() for question in self.list_questions(project_id=note.project_id)
         }
         staged_questions: list[Question] = []
-        provenance_tag = provenance or _build_note_provenance(note.note_id)
+        provenance_tag = provenance or _build_note_provenance(
+            note.note_id,
+            backend_name=backend.backend_name,
+        )
         for candidate in candidates:
-            key = candidate.casefold()
+            normalized_text = candidate.text.strip()
+            key = normalized_text.casefold()
             if key in existing:
                 continue
             question = self.create_question(
                 project_id=note.project_id,
-                text=candidate,
+                text=normalized_text,
                 question_type=question_type,
                 status=QuestionStatus.STAGED,
                 created_from=created_from,

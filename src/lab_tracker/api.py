@@ -31,7 +31,7 @@ from lab_tracker.services import (
 )
 from lab_tracker.services.extraction_backends import (
     QuestionExtractionBackend,
-    RegexQuestionExtractionBackend,
+    default_question_extraction_backend,
 )
 from lab_tracker.services.search_backends import (
     InMemorySubstringSearchBackend,
@@ -77,7 +77,7 @@ class LabTrackerAPI(
         self._raw_storage = raw_storage
         self._repository = repository
         self._question_extraction_backend = (
-            question_extraction_backend or RegexQuestionExtractionBackend()
+            question_extraction_backend or default_question_extraction_backend()
         )
         self._search_backend = search_backend or InMemorySubstringSearchBackend()
         self._allow_in_memory = allow_in_memory or store is not None

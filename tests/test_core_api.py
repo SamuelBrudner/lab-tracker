@@ -343,7 +343,7 @@ def test_extract_questions_from_note_stages_questions():
         "What is the baseline distribution",
     }
     assert all(question.status == QuestionStatus.STAGED for question in questions)
-    assert all(question.created_from == QuestionSource.API for question in questions)
+    assert all(question.created_from == QuestionSource.MEETING_CAPTURE for question in questions)
     assert all(
         question.created_by and str(note.note_id) in question.created_by for question in questions
     )

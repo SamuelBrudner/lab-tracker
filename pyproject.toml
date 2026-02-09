@@ -9,6 +9,7 @@ description = "Lab tracker project"
 requires-python = ">=3.10"
 dependencies = [
   "alembic",
+  "chromadb",
   "fastapi",
   "pydantic-settings",
   "sqlalchemy>=2.0",
@@ -20,8 +21,16 @@ test = [
   "httpx",
   "pytest",
 ]
+embeddings = [
+  "sentence-transformers",
+]
 lint = [
   "ruff",
+]
+ocr = [
+  "pytesseract",
+  "Pillow",
+  "pillow-heif",
 ]
 
 [tool.setuptools]

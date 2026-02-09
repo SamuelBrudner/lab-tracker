@@ -569,7 +569,9 @@ def register_routes(
             payload.question_type if payload and payload.question_type else QuestionType.OTHER
         )
         created_from = (
-            payload.created_from if payload and payload.created_from else QuestionSource.API
+            payload.created_from
+            if payload and payload.created_from
+            else QuestionSource.MEETING_CAPTURE
         )
         questions = api.extract_questions_from_note(
             note_id,

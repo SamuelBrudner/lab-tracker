@@ -6,6 +6,7 @@ from lab_tracker.api import LabTrackerAPI
 from lab_tracker.auth import AuthContext, Role
 from lab_tracker.models import Note, Question, QuestionStatus, QuestionType
 from lab_tracker.services.extraction_backends import (
+    QuestionCandidate,
     QuestionExtractionBackend,
     RegexQuestionExtractionBackend,
 )
@@ -34,11 +35,12 @@ def test_regex_question_extraction_backend_extracts_candidates():
 
     candidates = backend.extract_questions(note)
 
-    assert set(candidates) == {
+    assert {candidate.text for candidate in candidates} == {
         "Does PV inhibition broaden tuning",
         "Can we see layer-specific effects?",
         "What is the baseline distribution",
     }
+    assert all(0.0 <= candidate.confidence <= 1.0 for candidate in candidates)
 
 
 def test_extract_questions_from_note_uses_pluggable_backend():
@@ -47,10 +49,14 @@ def test_extract_questions_from_note_uses_pluggable_backend():
 
         def extract_questions(
             self, note: Note, *, raw_asset_bytes: bytes | None = None
-        ) -> list[str]:
+        ) -> list[QuestionCandidate]:
             assert note.note_id is not None
             assert raw_asset_bytes is None
-            return ["What is A?", "What is A?", "What is B?  "]
+            return [
+                QuestionCandidate(text="What is A?", confidence=0.9),
+                QuestionCandidate(text="What is A?", confidence=0.8),
+                QuestionCandidate(text="What is B?  ", confidence=0.7),
+            ]
 
     api = LabTrackerAPI.in_memory(question_extraction_backend=StubBackend())
     actor = _actor()
