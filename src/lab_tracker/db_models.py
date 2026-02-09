@@ -123,6 +123,35 @@ class DatasetQuestionLinkModel(Base):
     outcome_status: Mapped[str] = mapped_column(String(20), default="unknown")
 
 
+class DatasetFileModel(Base):
+    __tablename__ = "dataset_files"
+    __table_args__ = (
+        UniqueConstraint(
+            "dataset_id",
+            "path",
+            name="uq_dataset_files_dataset_path",
+        ),
+    )
+
+    file_id: Mapped[str] = mapped_column(
+        String(36),
+        primary_key=True,
+        default=lambda: str(uuid4()),
+    )
+    dataset_id: Mapped[str] = mapped_column(
+        String(36),
+        ForeignKey("datasets.dataset_id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    storage_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    path: Mapped[str] = mapped_column(String(1000), nullable=False)
+    filename: Mapped[str] = mapped_column(String(255), nullable=False)
+    content_type: Mapped[str] = mapped_column(String(255), nullable=False)
+    size_bytes: Mapped[int] = mapped_column(Integer, nullable=False)
+    checksum: Mapped[str] = mapped_column(String(64), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utc_now)
+
+
 class NoteModel(Base):
     __tablename__ = "notes"
 

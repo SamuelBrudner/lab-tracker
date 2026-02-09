@@ -7,6 +7,7 @@ from lab_tracker.db_models import ProjectModel
 
 
 def test_readiness_endpoint(monkeypatch, tmp_path):
+    monkeypatch.setenv("LAB_TRACKER_FILE_STORAGE_PATH", str(tmp_path / "file-storage"))
     monkeypatch.setenv("LAB_TRACKER_NOTE_STORAGE_PATH", str(tmp_path))
     client = TestClient(create_app())
     response = client.get("/readiness")
@@ -16,9 +17,11 @@ def test_readiness_endpoint(monkeypatch, tmp_path):
     assert "timestamp" in payload
     checks = payload["checks"]
     assert any(check["name"] == "note_storage" for check in checks)
+    assert any(check["name"] == "file_storage" for check in checks)
 
 
 def test_metrics_endpoint(monkeypatch, tmp_path):
+    monkeypatch.setenv("LAB_TRACKER_FILE_STORAGE_PATH", str(tmp_path / "file-storage"))
     monkeypatch.setenv("LAB_TRACKER_NOTE_STORAGE_PATH", str(tmp_path))
     client = TestClient(create_app())
     response = client.get("/metrics")
@@ -34,6 +37,7 @@ def test_metrics_endpoint_reads_database_counts(monkeypatch, tmp_path):
     db_path = tmp_path / "observability.db"
     database_url = f"sqlite+pysqlite:///{db_path}"
     monkeypatch.setenv("LAB_TRACKER_DATABASE_URL", database_url)
+    monkeypatch.setenv("LAB_TRACKER_FILE_STORAGE_PATH", str(tmp_path / "file-storage"))
     monkeypatch.setenv("LAB_TRACKER_NOTE_STORAGE_PATH", str(tmp_path / "note-storage"))
 
     engine = create_engine(

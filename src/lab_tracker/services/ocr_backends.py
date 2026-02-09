@@ -9,6 +9,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 import io
+import os
 from typing import Any, Iterable
 
 from lab_tracker.errors import ValidationError
@@ -384,3 +385,38 @@ class TesseractOCRBackend(OCRBackend):
             regions=regions,
         )
 
+
+def default_ocr_backend(
+    *,
+    tesseract_cmd: str | None = None,
+    languages: str | None = None,
+) -> OCRBackend | None:
+    """Return the default OCR backend when optional dependencies are available.
+
+    The default backend uses Tesseract via ``pytesseract``. The required Python
+    dependencies are installed via the optional `ocr` extra in ``pyproject.toml``.
+
+    This helper is intentionally conservative: if the Python OCR dependencies are
+    missing, it returns ``None`` so callers can skip OCR without raising.
+    """
+
+    try:
+        import pytesseract  # noqa: F401  # type: ignore[import-not-found]
+        from PIL import Image  # noqa: F401  # type: ignore[import-not-found]
+    except ModuleNotFoundError:
+        return None
+
+    resolved_cmd = (
+        (tesseract_cmd or "").strip()
+        if tesseract_cmd is not None
+        else (os.getenv("LAB_TRACKER_OCR_TESSERACT_CMD") or "").strip()
+    )
+    resolved_langs = (
+        (languages or "").strip()
+        if languages is not None
+        else (os.getenv("LAB_TRACKER_OCR_TESSERACT_LANGUAGES") or "").strip()
+    )
+    return TesseractOCRBackend(
+        tesseract_cmd=resolved_cmd or None,
+        languages=resolved_langs or "eng",
+    )

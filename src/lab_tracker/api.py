@@ -33,11 +33,14 @@ from lab_tracker.services.extraction_backends import (
     QuestionExtractionBackend,
     default_question_extraction_backend,
 )
+from lab_tracker.services.ocr_backends import OCRBackend, default_ocr_backend
 from lab_tracker.services.search_backends import (
     InMemorySubstringSearchBackend,
     SearchBackend,
     SearchQuery,
 )
+
+_DEFAULT_OCR_BACKEND: object = object()
 
 
 class InMemoryStore:
@@ -68,6 +71,7 @@ class LabTrackerAPI(
         store: InMemoryStore | None = None,
         *,
         raw_storage: LocalNoteStorage | None = None,
+        ocr_backend: OCRBackend | None | object = _DEFAULT_OCR_BACKEND,
         question_extraction_backend: QuestionExtractionBackend | None = None,
         search_backend: SearchBackend | None = None,
         repository: LabTrackerRepository | None = None,
@@ -76,6 +80,10 @@ class LabTrackerAPI(
         self._store = store or InMemoryStore()
         self._raw_storage = raw_storage
         self._repository = repository
+        if ocr_backend is _DEFAULT_OCR_BACKEND:
+            self._ocr_backend = default_ocr_backend()
+        else:
+            self._ocr_backend = ocr_backend
         self._question_extraction_backend = (
             question_extraction_backend or default_question_extraction_backend()
         )
@@ -92,12 +100,14 @@ class LabTrackerAPI(
         *,
         raw_storage: LocalNoteStorage | None = None,
         store: InMemoryStore | None = None,
+        ocr_backend: OCRBackend | None | object = _DEFAULT_OCR_BACKEND,
         question_extraction_backend: QuestionExtractionBackend | None = None,
         search_backend: SearchBackend | None = None,
     ) -> "LabTrackerAPI":
         return cls(
             store=store,
             raw_storage=raw_storage,
+            ocr_backend=ocr_backend,
             question_extraction_backend=question_extraction_backend,
             search_backend=search_backend,
             allow_in_memory=True,

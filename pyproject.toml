@@ -12,6 +12,7 @@ dependencies = [
   "chromadb",
   "fastapi",
   "pydantic-settings",
+  "python-multipart",
   "sqlalchemy>=2.0",
   "uvicorn",
 ]

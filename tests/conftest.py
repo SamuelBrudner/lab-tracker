@@ -33,6 +33,7 @@ def migrated_sqlite_database_url(
     tmp_path,
 ) -> str:
     monkeypatch.setenv("LAB_TRACKER_DATABASE_URL", sqlite_database_url)
+    monkeypatch.setenv("LAB_TRACKER_FILE_STORAGE_PATH", str(tmp_path / "file-storage"))
     monkeypatch.setenv("LAB_TRACKER_NOTE_STORAGE_PATH", str(tmp_path / "note-storage"))
     monkeypatch.setenv("LAB_TRACKER_AUTH_SECRET_KEY", "test-secret")
 

@@ -5,12 +5,15 @@ from __future__ import annotations
 import base64
 import binascii
 from datetime import datetime
+import hashlib
 import hmac
 from typing import Any
 from uuid import UUID
 
-from fastapi import FastAPI
+from fastapi import FastAPI, File, UploadFile
 from fastapi.exceptions import RequestValidationError
+from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from starlette import status as http_status
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
@@ -23,7 +26,9 @@ from lab_tracker.auth import (
     TokenService,
     User,
     extract_bearer_token,
+    require_role,
 )
+from lab_tracker.db_models import DatasetFileModel, DatasetModel
 from lab_tracker.errors import (
     AuthError,
     ConflictError,
@@ -38,6 +43,7 @@ from lab_tracker.models import (
     Claim,
     ClaimStatus,
     Dataset,
+    DatasetFile,
     DatasetStatus,
     EntityTagSuggestion,
     Note,
@@ -92,6 +98,7 @@ from lab_tracker.schemas import (
     VisualizationCreate,
     VisualizationUpdate,
 )
+from lab_tracker.services.shared import WRITE_ROLES
 
 
 def register_routes(
@@ -382,6 +389,179 @@ def register_routes(
         actor = _actor_from_request(request)
         dataset = api.delete_dataset(dataset_id, actor=actor)
         return Envelope(data=dataset)
+
+    @app.post(
+        "/datasets/{dataset_id}/files",
+        response_model=Envelope[DatasetFile],
+        status_code=http_status.HTTP_201_CREATED,
+    )
+    async def upload_dataset_file(
+        dataset_id: UUID,
+        request: Request,
+        file: UploadFile = File(...),
+    ):
+        actor = _actor_from_request(request)
+        require_role(actor, WRITE_ROLES)
+
+        db_session = getattr(request.state, "db_session", None)
+        if db_session is None:
+            raise RuntimeError("Database session is not available on request state.")
+
+        storage_backend = getattr(request.app.state, "file_storage_backend", None)
+        if storage_backend is None:
+            raise ValidationError("File storage backend is not configured.")
+
+        dataset_row = db_session.get(DatasetModel, str(dataset_id))
+        if dataset_row is None:
+            raise NotFoundError("Dataset does not exist.")
+        if dataset_row.status != DatasetStatus.STAGED.value:
+            raise ValidationError("Files can only be attached while dataset status is staged.")
+
+        filename = (file.filename or "").strip()
+        if not filename:
+            raise ValidationError("filename must not be empty.")
+        path = filename
+        existing = db_session.scalar(
+            select(DatasetFileModel).where(
+                DatasetFileModel.dataset_id == str(dataset_id),
+                DatasetFileModel.path == path,
+            )
+        )
+        if existing is not None:
+            raise ConflictError("Dataset file path already exists.")
+
+        content_type = (file.content_type or "application/octet-stream").strip()
+        if not content_type:
+            content_type = "application/octet-stream"
+        content = await file.read()
+        if not content:
+            raise ValidationError("file must not be empty.")
+
+        checksum = hashlib.sha256(content).hexdigest()
+        size_bytes = len(content)
+        storage_id = storage_backend.store(
+            content,
+            filename=filename,
+            content_type=content_type,
+        )
+        try:
+            row = DatasetFileModel(
+                dataset_id=str(dataset_id),
+                storage_id=str(storage_id),
+                path=path,
+                filename=filename,
+                content_type=content_type,
+                size_bytes=size_bytes,
+                checksum=checksum,
+            )
+            db_session.add(row)
+            db_session.flush()
+        except IntegrityError as exc:
+            try:
+                storage_backend.delete(storage_id)
+            except Exception:
+                pass
+            raise ConflictError("Dataset file could not be registered.") from exc
+        except Exception:
+            try:
+                storage_backend.delete(storage_id)
+            except Exception:
+                pass
+            raise
+
+        payload = DatasetFile(
+            file_id=UUID(row.file_id),
+            path=row.path,
+            checksum=row.checksum,
+            size_bytes=row.size_bytes,
+        )
+        return Envelope(data=payload)
+
+    @app.get(
+        "/datasets/{dataset_id}/files",
+        response_model=ListEnvelope[DatasetFile],
+    )
+    def list_dataset_files(
+        dataset_id: UUID,
+        request: Request,
+        limit: int = 50,
+        offset: int = 0,
+    ):
+        _validate_pagination(limit, offset)
+        db_session = getattr(request.state, "db_session", None)
+        if db_session is None:
+            raise RuntimeError("Database session is not available on request state.")
+
+        dataset_row = db_session.get(DatasetModel, str(dataset_id))
+        if dataset_row is None:
+            raise NotFoundError("Dataset does not exist.")
+
+        rows = list(
+            db_session.scalars(
+                select(DatasetFileModel)
+                .where(DatasetFileModel.dataset_id == str(dataset_id))
+                .order_by(DatasetFileModel.created_at, DatasetFileModel.file_id)
+            )
+        )
+        files = [
+            DatasetFile(
+                file_id=UUID(row.file_id),
+                path=row.path,
+                checksum=row.checksum,
+                size_bytes=row.size_bytes,
+            )
+            for row in rows
+        ]
+        page, total = _paginate(files, limit, offset)
+        payload = page
+        return ListEnvelope(
+            data=payload,
+            meta=PaginationMeta(limit=limit, offset=offset, total=total),
+        )
+
+    @app.delete(
+        "/datasets/{dataset_id}/files/{file_id}",
+        response_model=Envelope[DatasetFile],
+    )
+    def delete_dataset_file(
+        dataset_id: UUID,
+        file_id: UUID,
+        request: Request,
+    ):
+        actor = _actor_from_request(request)
+        require_role(actor, WRITE_ROLES)
+
+        db_session = getattr(request.state, "db_session", None)
+        if db_session is None:
+            raise RuntimeError("Database session is not available on request state.")
+
+        storage_backend = getattr(request.app.state, "file_storage_backend", None)
+        if storage_backend is None:
+            raise ValidationError("File storage backend is not configured.")
+
+        dataset_row = db_session.get(DatasetModel, str(dataset_id))
+        if dataset_row is None:
+            raise NotFoundError("Dataset does not exist.")
+        if dataset_row.status != DatasetStatus.STAGED.value:
+            raise ValidationError("Files can only be attached while dataset status is staged.")
+
+        row = db_session.get(DatasetFileModel, str(file_id))
+        if row is None or row.dataset_id != str(dataset_id):
+            raise NotFoundError("Dataset file does not exist.")
+
+        try:
+            storage_backend.delete(UUID(row.storage_id))
+        except NotFoundError:
+            pass
+
+        payload = DatasetFile(
+            file_id=file_id,
+            path=row.path,
+            checksum=row.checksum,
+            size_bytes=row.size_bytes,
+        )
+        db_session.delete(row)
+        return Envelope(data=payload)
 
     @app.post(
         "/notes",

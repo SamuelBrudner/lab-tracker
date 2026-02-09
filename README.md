@@ -69,12 +69,23 @@ development.
 - `LAB_TRACKER_DATABASE_URL`: SQLAlchemy database URL (default: `sqlite+pysqlite:///./lab_tracker.db`)
 - `LAB_TRACKER_FILE_STORAGE_PATH`: file storage directory (default: `./file_storage`)
 - `LAB_TRACKER_NOTE_STORAGE_PATH`: note storage directory (default: `./note_storage`)
+- `LAB_TRACKER_SEARCH_BACKEND`: search backend (default: `in_memory_substring`, options: `in_memory_substring`, `chromadb`)
+- `LAB_TRACKER_CHROMADB_PERSIST_PATH`: ChromaDB persistence directory (default: `./.lab-tracker/chromadb`)
 - `LAB_TRACKER_AUTH_SECRET_KEY`: auth signing secret (default allowed only in `local`)
 - `LAB_TRACKER_AUTH_TOKEN_TTL_MINUTES`: access token lifetime (default: `720`)
 - `LAB_TRACKER_OCR_TESSERACT_CMD`: optional path to the `tesseract` binary for OCR
 - `LAB_TRACKER_OCR_TESSERACT_LANGUAGES`: Tesseract language packs (default: `eng`, example: `eng+deu`)
 - `LAB_TRACKER_EMBEDDING_PROVIDER`: embedding backend for vector search (default: `chroma_default`, options: `sentence_transformers`, `openai`)
 - `OPENAI_API_KEY` (or `LAB_TRACKER_OPENAI_API_KEY`): required when `LAB_TRACKER_EMBEDDING_PROVIDER=openai`
+
+### Reindex search backend
+
+If you switch to a persistent backend (for example, `LAB_TRACKER_SEARCH_BACKEND=chromadb`),
+backfill the index from the database:
+
+```bash
+uv run python -m lab_tracker.reindex --reset
+```
 
 ## Database migrations
 

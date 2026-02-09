@@ -33,10 +33,13 @@ from lab_tracker.db_models import (
 )
 from lab_tracker.dependencies import get_sqlalchemy_repository, set_active_repository
 from lab_tracker.errors import AuthError
+from lab_tracker.file_storage import LocalFileStorageBackend
 from lab_tracker.logging import configure_logging
 from lab_tracker.note_storage import LocalNoteStorage
 from lab_tracker.schemas import ErrorEnvelope, ErrorInfo
 from lab_tracker.sqlalchemy_repository import SQLAlchemyLabTrackerRepository
+from lab_tracker.services.ocr_backends import default_ocr_backend
+from lab_tracker.services.search_backend_factory import build_search_backend
 
 
 _START_TIME = datetime.now(timezone.utc)
@@ -68,20 +71,20 @@ def _nearest_existing_parent(path: Path) -> Path | None:
     return None
 
 
-def _note_storage_check(path: Path) -> dict[str, str]:
+def _storage_dir_check(name: str, path: Path) -> dict[str, str]:
     resolved = path.expanduser()
     if resolved.exists():
         if not resolved.is_dir():
             return {
-                "name": "note_storage",
+                "name": name,
                 "status": "fail",
                 "path": str(resolved),
                 "detail": "path exists but is not a directory",
             }
         if os.access(resolved, os.W_OK):
-            return {"name": "note_storage", "status": "ok", "path": str(resolved)}
+            return {"name": name, "status": "ok", "path": str(resolved)}
         return {
-            "name": "note_storage",
+            "name": name,
             "status": "fail",
             "path": str(resolved),
             "detail": "path is not writable",
@@ -90,24 +93,32 @@ def _note_storage_check(path: Path) -> dict[str, str]:
     parent = _nearest_existing_parent(resolved)
     if parent is None:
         return {
-            "name": "note_storage",
+            "name": name,
             "status": "fail",
             "path": str(resolved),
             "detail": "no existing parent directory",
         }
     if os.access(parent, os.W_OK):
         return {
-            "name": "note_storage",
+            "name": name,
             "status": "ok",
             "path": str(resolved),
             "detail": "path will be created on first write",
         }
     return {
-        "name": "note_storage",
+        "name": name,
         "status": "fail",
         "path": str(resolved),
         "detail": f"parent directory not writable: {parent}",
     }
+
+
+def _note_storage_check(path: Path) -> dict[str, str]:
+    return _storage_dir_check("note_storage", path)
+
+
+def _file_storage_check(path: Path) -> dict[str, str]:
+    return _storage_dir_check("file_storage", path)
 
 
 def _empty_store_counts() -> dict[str, int]:
@@ -274,8 +285,18 @@ def create_app() -> FastAPI:
     _configure_auth_middleware(app)
     _configure_database_session_middleware(app)
     _configure_database_shutdown_hook(app, engine=engine)
+    app.state.file_storage_backend = LocalFileStorageBackend(settings.file_storage_path)
     raw_storage = LocalNoteStorage(settings.note_storage_path)
-    api = LabTrackerAPI(raw_storage=raw_storage)
+    search_backend = build_search_backend(settings)
+    ocr_backend = default_ocr_backend(
+        tesseract_cmd=settings.ocr_tesseract_cmd,
+        languages=settings.ocr_tesseract_languages,
+    )
+    api = LabTrackerAPI(
+        raw_storage=raw_storage,
+        search_backend=search_backend,
+        ocr_backend=ocr_backend,
+    )
     try:
         with session_factory() as bootstrap_session:
             api.hydrate_from_repository(SQLAlchemyLabTrackerRepository(bootstrap_session))
@@ -289,7 +310,10 @@ def create_app() -> FastAPI:
 
     @app.get("/readiness")
     def readiness():
-        checks = [_note_storage_check(Path(settings.note_storage_path))]
+        checks = [
+            _note_storage_check(Path(settings.note_storage_path)),
+            _file_storage_check(Path(settings.file_storage_path)),
+        ]
         status = "ok" if all(check["status"] == "ok" for check in checks) else "fail"
         payload = {
             "status": status,

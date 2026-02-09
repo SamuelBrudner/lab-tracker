@@ -170,8 +170,10 @@ class QuestionLink(_DomainModel):
 
 
 class DatasetFile(_DomainModel):
+    file_id: UUID | None = None
     path: str
     checksum: str
+    size_bytes: int | None = None
 
 
 class DatasetCommitManifestInput(_DomainModel):

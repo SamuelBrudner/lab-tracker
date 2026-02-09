@@ -16,6 +16,8 @@ class Settings(BaseSettings):
     database_url: str = "sqlite+pysqlite:///./lab_tracker.db"
     file_storage_path: str = "./file_storage"
     note_storage_path: str = "./note_storage"
+    search_backend: str = "in_memory_substring"
+    chromadb_persist_path: str = ".lab-tracker/chromadb"
     embedding_provider: str = "chroma_default"
     auth_secret_key: str = DEFAULT_AUTH_SECRET_KEY
     auth_token_ttl_minutes: int = 60 * 12
