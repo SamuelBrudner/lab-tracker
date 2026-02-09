@@ -27,6 +27,7 @@ from lab_tracker.models import (
     Note,
     NoteStatus,
     ProjectStatus,
+    ProjectReviewPolicy,
     Question,
     QuestionLink,
     QuestionSource,
@@ -112,7 +113,7 @@ class ProjectCreate(BaseModel):
     name: str = Field(..., min_length=1)
     description: str | None = None
     status: ProjectStatus | None = None
-    dataset_review_required: bool | None = None
+    review_policy: ProjectReviewPolicy | None = None
     created_by: str | None = None
 
 
@@ -120,7 +121,7 @@ class ProjectUpdate(BaseModel):
     name: str | None = None
     description: str | None = None
     status: ProjectStatus | None = None
-    dataset_review_required: bool | None = None
+    review_policy: ProjectReviewPolicy | None = None
 
 
 class QuestionCreate(BaseModel):

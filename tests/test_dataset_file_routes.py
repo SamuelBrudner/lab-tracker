@@ -187,6 +187,68 @@ def test_dataset_file_upload_rejects_duplicate_path(
     assert second.status_code == 409
 
 
+def test_dataset_commit_requires_attached_file(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+):
+    headers = admin_auth_headers
+
+    project_id = client.post(
+        "/projects",
+        json={"name": "Commit validation"},
+        headers=headers,
+    ).json()["data"]["project_id"]
+    question_id = client.post(
+        "/questions",
+        json={
+            "project_id": project_id,
+            "text": "Do we require a dataset file before commit?",
+            "question_type": "descriptive",
+        },
+        headers=headers,
+    ).json()["data"]["question_id"]
+    activate_response = client.patch(
+        f"/questions/{question_id}",
+        json={"status": "active"},
+        headers=headers,
+    )
+    assert activate_response.status_code == 200
+
+    dataset_response = client.post(
+        "/datasets",
+        json={"project_id": project_id, "primary_question_id": question_id},
+        headers=headers,
+    )
+    assert dataset_response.status_code == 201
+    dataset_payload = dataset_response.json()["data"]
+    dataset_id = dataset_payload["dataset_id"]
+    staged_hash = dataset_payload["commit_hash"]
+
+    commit_without_file = client.patch(
+        f"/datasets/{dataset_id}",
+        json={"status": "committed"},
+        headers=headers,
+    )
+    assert commit_without_file.status_code == 422
+
+    attach_response = client.post(
+        f"/datasets/{dataset_id}/files",
+        files={"file": ("data.bin", b"real-data", "application/octet-stream")},
+        headers=headers,
+    )
+    assert attach_response.status_code == 201
+
+    commit_with_file = client.patch(
+        f"/datasets/{dataset_id}",
+        json={"status": "committed"},
+        headers=headers,
+    )
+    assert commit_with_file.status_code == 200
+    committed_payload = commit_with_file.json()["data"]
+    assert committed_payload["status"] == "committed"
+    assert committed_payload["commit_hash"] != staged_hash
+
+
 def test_dataset_file_upload_requires_staged_dataset(
     client: TestClient,
     admin_auth_headers: dict[str, str],

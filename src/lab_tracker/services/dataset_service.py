@@ -18,6 +18,7 @@ from lab_tracker.models import (
     DatasetFile,
     DatasetStatus,
     EntityType,
+    ProjectReviewPolicy,
     QuestionLink,
     QuestionLinkRole,
     utc_now,
@@ -92,7 +93,9 @@ def _merge_unique_ids(base: list[UUID], additions: Iterable[UUID]) -> list[UUID]
 
 class DatasetServiceMixin:
     def _dataset_review_required(self, project_id: UUID) -> bool:
-        return bool(self.get_project(project_id).dataset_review_required)
+        policy = self.get_project(project_id).review_policy
+        # TODO: implement selective criteria; until then, treat it as review-required.
+        return policy in (ProjectReviewPolicy.ALL, ProjectReviewPolicy.SELECTIVE)
 
     def _default_dataset_reviewer_user_id(self, project_id: UUID) -> UUID | None:
         project = self.get_project(project_id)
@@ -242,8 +245,8 @@ class DatasetServiceMixin:
                     files = list(base_manifest.files)
                 else:
                     files = attached_files
-                    if not files:
-                        raise ValidationError("At least one file is required to commit a dataset.")
+                if not files:
+                    raise ValidationError("At least one file is required to commit a dataset.")
 
                 note_ids = list(base_manifest.note_ids)
                 note_targets = _load_dataset_note_targets(dataset.dataset_id)

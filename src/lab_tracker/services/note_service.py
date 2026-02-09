@@ -17,6 +17,7 @@ from lab_tracker.models import (
     NoteRawAsset,
     NoteStatus,
     Question,
+    QuestionExtractionCandidate,
     QuestionSource,
     QuestionStatus,
     QuestionType,
@@ -46,6 +47,79 @@ def _should_attempt_ocr(content: bytes, content_type: str) -> bool:
     # Prefer sniffing the bytes so we only attempt OCR for supported image formats.
     # This avoids trying (and warning) on non-image uploads that are mislabeled.
     return _sniff_content_type(content) is not None
+
+
+_DESCRIPTIVE_PREFIXES = ("what ", "which ", "when ", "where ", "who ")
+_DESCRIPTIVE_HOW_PREFIXES = ("how many", "how much", "how long", "how often")
+_HYPOTHESIS_PREFIXES = (
+    "does ",
+    "do ",
+    "can ",
+    "could ",
+    "will ",
+    "would ",
+    "is ",
+    "are ",
+    "should ",
+)
+_METHOD_HINTS = (
+    "protocol",
+    "pipeline",
+    "workflow",
+    "method",
+    "assay",
+    "setup",
+    "configure",
+    "implement",
+    "optimiz",
+    "calibrat",
+    "benchmark",
+    "validate",
+)
+
+
+def _suggest_question_type(text: str) -> QuestionType:
+    """Heuristic suggestion for question_type for extracted candidates.
+
+    This is intentionally lightweight: the UI treats this as a suggestion that the human reviewer
+    can override.
+    """
+
+    normalized = " ".join((text or "").strip().casefold().split())
+    if not normalized:
+        return QuestionType.OTHER
+
+    if normalized.startswith(_DESCRIPTIVE_HOW_PREFIXES):
+        return QuestionType.DESCRIPTIVE
+
+    if normalized.startswith("how to ") or any(hint in normalized for hint in _METHOD_HINTS):
+        return QuestionType.METHOD_DEV
+
+    if normalized.startswith(_DESCRIPTIVE_PREFIXES):
+        return QuestionType.DESCRIPTIVE
+
+    if normalized.startswith(_HYPOTHESIS_PREFIXES):
+        return QuestionType.HYPOTHESIS_DRIVEN
+
+    if any(
+        token in normalized
+        for token in (
+            "effect",
+            "impact",
+            "increase",
+            "decrease",
+            "difference",
+            "compare",
+            "correlat",
+            "predict",
+            "cause",
+            "lead to",
+            "modulat",
+        )
+    ):
+        return QuestionType.HYPOTHESIS_DRIVEN
+
+    return QuestionType.OTHER
 
 
 class NoteServiceMixin:
@@ -350,6 +424,61 @@ class NoteServiceMixin:
             staged_questions.append(question)
             existing.add(key)
         return staged_questions
+
+    def extract_question_candidates_from_note(
+        self,
+        note_id: UUID,
+        *,
+        default_question_type: QuestionType | None = None,
+        provenance: str | None = None,
+        actor: AuthContext | None = None,
+    ) -> list[QuestionExtractionCandidate]:
+        """Extract candidate questions from a note for human review.
+
+        Unlike :meth:`extract_questions_from_note`, this does not create/stage questions. The
+        frontend can present the candidates for editing and then stage accepted items explicitly.
+        """
+
+        require_role(actor, WRITE_ROLES)
+        note = self.get_note(note_id)
+        raw_asset_bytes: bytes | None = None
+        backend = self._question_extraction_backend
+        if (
+            backend.requires_raw_asset_bytes(note)
+            and note.raw_asset is not None
+            and self._raw_storage is not None
+        ):
+            raw_asset_bytes = self._raw_storage.read(note.raw_asset.storage_id)
+        candidates = backend.extract_questions(note, raw_asset_bytes=raw_asset_bytes)
+        if not candidates:
+            return []
+
+        existing = {
+            question.text.casefold() for question in self.list_questions(project_id=note.project_id)
+        }
+        provenance_tag = provenance or _build_note_provenance(
+            note.note_id,
+            backend_name=backend.backend_name,
+        )
+        extracted: list[QuestionExtractionCandidate] = []
+        for candidate in candidates:
+            normalized_text = candidate.text.strip()
+            if not normalized_text:
+                continue
+            key = normalized_text.casefold()
+            if key in existing:
+                continue
+            suggested_type = default_question_type or _suggest_question_type(normalized_text)
+            extracted.append(
+                QuestionExtractionCandidate(
+                    text=normalized_text,
+                    confidence=candidate.confidence,
+                    suggested_question_type=suggested_type,
+                    provenance=provenance_tag,
+                )
+            )
+            existing.add(key)
+        return extracted
 
     def _ensure_target_exists(self, target: EntityRef, project_id: UUID) -> None:
         entity_map = {

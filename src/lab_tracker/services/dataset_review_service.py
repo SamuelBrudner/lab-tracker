@@ -112,8 +112,8 @@ class DatasetReviewServiceMixin:
                     files = list(base_manifest.files)
                 else:
                     files = attached_files
-                    if not files:
-                        raise ValidationError("At least one file is required to commit a dataset.")
+                if not files:
+                    raise ValidationError("At least one file is required to commit a dataset.")
 
                 note_ids = list(base_manifest.note_ids)
                 note_targets = _load_dataset_note_targets(dataset.dataset_id)

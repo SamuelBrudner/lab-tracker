@@ -44,6 +44,7 @@ from lab_tracker.models import (
     NoteStatus,
     OutcomeStatus,
     Project,
+    ProjectReviewPolicy,
     ProjectStatus,
     Question,
     QuestionLink,
@@ -85,7 +86,7 @@ def project_to_model(project: Project) -> ProjectModel:
         name=project.name,
         description=project.description,
         status=project.status.value,
-        dataset_review_required=project.dataset_review_required,
+        review_policy=project.review_policy.value,
         created_by=project.created_by,
         created_at=project.created_at,
         updated_at=project.updated_at,
@@ -98,7 +99,7 @@ def project_from_model(row: ProjectModel) -> Project:
         name=row.name,
         description=row.description,
         status=ProjectStatus(row.status),
-        dataset_review_required=getattr(row, "dataset_review_required", False),
+        review_policy=ProjectReviewPolicy(getattr(row, "review_policy", "none")),
         created_by=row.created_by,
         created_at=_as_utc(row.created_at),
         updated_at=_as_utc(row.updated_at),
@@ -109,7 +110,7 @@ def apply_project_to_model(row: ProjectModel, project: Project) -> None:
     row.name = project.name
     row.description = project.description
     row.status = project.status.value
-    row.dataset_review_required = project.dataset_review_required
+    row.review_policy = project.review_policy.value
     row.created_by = project.created_by
     row.created_at = project.created_at
     row.updated_at = project.updated_at

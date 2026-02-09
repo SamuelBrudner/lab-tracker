@@ -5,7 +5,7 @@ from __future__ import annotations
 from uuid import UUID, uuid4
 
 from lab_tracker.auth import AuthContext, require_role
-from lab_tracker.models import Project, ProjectStatus, utc_now
+from lab_tracker.models import Project, ProjectReviewPolicy, ProjectStatus, utc_now
 from lab_tracker.services.shared import (
     WRITE_ROLES,
     _ensure_non_empty,
@@ -19,7 +19,7 @@ class ProjectServiceMixin:
         name: str,
         description: str = "",
         status: ProjectStatus = ProjectStatus.ACTIVE,
-        dataset_review_required: bool = False,
+        review_policy: ProjectReviewPolicy = ProjectReviewPolicy.NONE,
         *,
         actor: AuthContext | None = None,
         created_by: str | None = None,
@@ -31,7 +31,7 @@ class ProjectServiceMixin:
             name=name.strip(),
             description=description.strip(),
             status=status,
-            dataset_review_required=dataset_review_required,
+            review_policy=review_policy,
             created_by=created_by,
         )
         self._store.projects[project.project_id] = project
@@ -51,7 +51,7 @@ class ProjectServiceMixin:
         name: str | None = None,
         description: str | None = None,
         status: ProjectStatus | None = None,
-        dataset_review_required: bool | None = None,
+        review_policy: ProjectReviewPolicy | None = None,
         actor: AuthContext | None = None,
     ) -> Project:
         require_role(actor, WRITE_ROLES)
@@ -63,8 +63,8 @@ class ProjectServiceMixin:
             project.description = description.strip()
         if status is not None:
             project.status = status
-        if dataset_review_required is not None:
-            project.dataset_review_required = dataset_review_required
+        if review_policy is not None:
+            project.review_policy = review_policy
         project.updated_at = utc_now()
         self._run_repository_write(lambda repository: repository.projects.save(project))
         return project

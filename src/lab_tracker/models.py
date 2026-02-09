@@ -49,6 +49,12 @@ class ProjectStatus(str, Enum):
     ARCHIVED = "archived"
 
 
+class ProjectReviewPolicy(str, Enum):
+    NONE = "none"
+    SELECTIVE = "selective"
+    ALL = "all"
+
+
 class QuestionStatus(str, Enum):
     STAGED = "staged"
     ACTIVE = "active"
@@ -217,7 +223,7 @@ class Project(_DomainModel):
     name: str
     description: str = ""
     status: ProjectStatus = ProjectStatus.ACTIVE
-    dataset_review_required: bool = False
+    review_policy: ProjectReviewPolicy = ProjectReviewPolicy.NONE
     created_at: datetime = Field(default_factory=utc_now)
     created_by: str | None = None
     updated_at: datetime = Field(default_factory=utc_now)

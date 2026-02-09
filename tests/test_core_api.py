@@ -10,6 +10,7 @@ from lab_tracker.models import (
     DatasetFile,
     DatasetReviewStatus,
     DatasetStatus,
+    ProjectReviewPolicy,
     QuestionLinkRole,
     QuestionSource,
     QuestionStatus,
@@ -211,12 +212,32 @@ def test_dataset_commit_requires_active_question():
     assert committed.status == DatasetStatus.COMMITTED
 
 
+def test_dataset_commit_requires_file_attachment():
+    api = LabTrackerAPI.in_memory()
+    actor = _actor()
+    project = api.create_project("Neuro Project", actor=actor)
+    question = api.create_question(
+        project_id=project.project_id,
+        text="Is there any data to commit?",
+        question_type=QuestionType.DESCRIPTIVE,
+        status=QuestionStatus.ACTIVE,
+        actor=actor,
+    )
+    dataset = api.create_dataset(
+        project_id=project.project_id,
+        primary_question_id=question.question_id,
+        actor=actor,
+    )
+    with pytest.raises(ValidationError, match="At least one file is required to commit a dataset."):
+        api.update_dataset(dataset.dataset_id, status=DatasetStatus.COMMITTED, actor=actor)
+
+
 def test_dataset_commit_can_create_review_request_when_policy_requires_it():
     api = LabTrackerAPI.in_memory()
     actor = _actor()
     project = api.create_project(
         "Neuro Project",
-        dataset_review_required=True,
+        review_policy=ProjectReviewPolicy.ALL,
         actor=actor,
     )
     question = api.create_question(
@@ -226,9 +247,11 @@ def test_dataset_commit_can_create_review_request_when_policy_requires_it():
         status=QuestionStatus.ACTIVE,
         actor=actor,
     )
+    manifest = DatasetCommitManifestInput(files=[DatasetFile(path="data.csv", checksum="abc123")])
     dataset = api.create_dataset(
         project_id=project.project_id,
         primary_question_id=question.question_id,
+        commit_manifest=manifest,
         actor=actor,
     )
 

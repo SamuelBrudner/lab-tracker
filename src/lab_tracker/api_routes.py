@@ -51,8 +51,10 @@ from lab_tracker.models import (
     Note,
     NoteStatus,
     Project,
+    ProjectReviewPolicy,
     ProjectStatus,
     Question,
+    QuestionExtractionCandidate,
     QuestionSource,
     QuestionStatus,
     QuestionType,
@@ -181,7 +183,7 @@ def register_routes(
             name=payload.name,
             description=payload.description or "",
             status=payload.status or project_default_status(),
-            dataset_review_required=payload.dataset_review_required or False,
+            review_policy=payload.review_policy or ProjectReviewPolicy.NONE,
             actor=actor,
             created_by=_resolve_created_by(payload.created_by, actor),
         )
@@ -217,7 +219,7 @@ def register_routes(
             name=payload.name,
             description=payload.description,
             status=payload.status,
-            dataset_review_required=payload.dataset_review_required,
+            review_policy=payload.review_policy,
             actor=actor,
         )
         return Envelope(data=project)
@@ -850,8 +852,7 @@ def register_routes(
 
     @app.post(
         "/notes/{note_id}/extract-questions",
-        response_model=Envelope[list[Question]],
-        status_code=http_status.HTTP_201_CREATED,
+        response_model=Envelope[list[QuestionExtractionCandidate]],
     )
     def extract_questions(
         note_id: UUID,
@@ -859,24 +860,16 @@ def register_routes(
         payload: QuestionExtractionRequest | None = None,
     ):
         actor = _actor_from_request(request)
-        question_type = (
-            payload.question_type if payload and payload.question_type else QuestionType.OTHER
-        )
-        created_from = (
-            payload.created_from
-            if payload and payload.created_from
-            else QuestionSource.MEETING_CAPTURE
-        )
-        questions = api.extract_questions_from_note(
+        default_question_type = payload.question_type if payload else None
+        candidates = api.extract_question_candidates_from_note(
             note_id,
-            question_type=question_type,
-            created_from=created_from,
+            default_question_type=default_question_type,
             provenance=payload.provenance if payload else None,
             actor=actor,
         )
         return Envelope(
-            data=questions,
-            meta={"count": len(questions)},
+            data=candidates,
+            meta={"count": len(candidates)},
         )
 
     @app.post(

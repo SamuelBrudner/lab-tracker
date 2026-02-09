@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from uuid import uuid4
 
-from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Integer, String, Text, UniqueConstraint
+from sqlalchemy import DateTime, Float, ForeignKey, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
 from lab_tracker.db import Base
@@ -26,7 +26,7 @@ class ProjectModel(Base):
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     description: Mapped[str] = mapped_column(String(1000), default="")
     status: Mapped[str] = mapped_column(String(20), default="active")
-    dataset_review_required: Mapped[bool] = mapped_column(Boolean, default=False)
+    review_policy: Mapped[str] = mapped_column(String(20), default="none")
     created_by: Mapped[str | None] = mapped_column(String(255))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utc_now)
     updated_at: Mapped[datetime] = mapped_column(

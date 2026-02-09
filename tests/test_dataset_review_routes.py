@@ -15,7 +15,7 @@ def test_dataset_review_request_queue_approve_commits_dataset(
 
     project_response = client.post(
         "/projects",
-        json={"name": "Review flow", "dataset_review_required": True},
+        json={"name": "Review flow", "review_policy": "all"},
         headers=headers,
     )
     assert project_response.status_code == 201
@@ -105,7 +105,7 @@ def test_dataset_review_reject_leaves_dataset_staged_and_persists_comments(
 
     project_id = client.post(
         "/projects",
-        json={"name": "Review reject", "dataset_review_required": True},
+        json={"name": "Review reject", "review_policy": "all"},
         headers=headers,
     ).json()["data"]["project_id"]
 
@@ -164,3 +164,21 @@ def test_dataset_review_reject_leaves_dataset_staged_and_persists_comments(
     assert review_after.json()["data"]["status"] == "rejected"
     assert review_after.json()["data"]["comments"] == "not acceptable"
 
+
+def test_project_patch_can_set_review_policy(
+    client: TestClient, admin_auth_headers: dict[str, str],
+):
+    headers = admin_auth_headers
+
+    resp = client.post(
+        "/projects", json={"name": "Review policy patch"}, headers=headers,
+    )
+    project_id = resp.json()["data"]["project_id"]
+
+    update_response = client.patch(
+        f"/projects/{project_id}",
+        json={"review_policy": "all"},
+        headers=headers,
+    )
+    assert update_response.status_code == 200
+    assert update_response.json()["data"]["review_policy"] == "all"

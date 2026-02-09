@@ -9,6 +9,8 @@ from lab_tracker.models import (
     AnalysisStatus,
     ClaimInput,
     ClaimStatus,
+    DatasetCommitManifestInput,
+    DatasetFile,
     DatasetStatus,
     QuestionStatus,
     QuestionType,
@@ -39,6 +41,9 @@ def test_analysis_commit_requires_committed_datasets():
     dataset = api.create_dataset(
         project_id=project.project_id,
         primary_question_id=question.question_id,
+        commit_manifest=DatasetCommitManifestInput(
+            files=[DatasetFile(path="data.csv", checksum="abc123")]
+        ),
         actor=actor,
     )
     analysis = api.create_analysis(
