@@ -216,13 +216,15 @@ def test_refresh_issues_fresh_token_ttl(monkeypatch, tmp_path):
         )
         assert register_response.status_code == 201
         token = register_response.json()["data"]["access_token"]
-        expires_at = datetime.fromisoformat(register_response.json()["data"]["expires_at"].replace("Z", "+00:00"))
+        raw_expires = register_response.json()["data"]["expires_at"]
+        expires_at = datetime.fromisoformat(raw_expires.replace("Z", "+00:00"))
 
         current_time["value"] = now + timedelta(hours=1)
         refresh_response = client.post("/auth/refresh", headers=_auth_headers(token))
         assert refresh_response.status_code == 200
         refresh_payload = refresh_response.json()["data"]
-        refreshed_expires_at = datetime.fromisoformat(refresh_payload["expires_at"].replace("Z", "+00:00"))
+        raw_refreshed = refresh_payload["expires_at"]
+        refreshed_expires_at = datetime.fromisoformat(raw_refreshed.replace("Z", "+00:00"))
 
         assert refreshed_expires_at > expires_at
 
