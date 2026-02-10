@@ -8,7 +8,9 @@
 # Daemon runtime files
 daemon.lock
 daemon.log
+daemon-*.log*
 daemon.pid
+daemon-*.log*
 bd.sock
 sync-state.json
 last-touched
@@ -36,6 +38,10 @@ beads.right.meta.json
 # These files are machine-specific and should not be shared across clones
 .sync.lock
 sync_base.jsonl
+export-state/
+
+# Process semaphore slot files (runtime concurrency limiting)
+sem/
 
 # NOTE: Do NOT add negation patterns (e.g., !issues.jsonl) here.
 # They would override fork protection in .git/info/exclude, allowing

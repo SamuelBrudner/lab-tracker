@@ -2,3 +2,6 @@ __pycache__/
 *.py[cod]
 *.egg-info/
 docs/runs/
+node_modules/
+lab_tracker.db
+.npm-cache/

@@ -9,8 +9,10 @@ description = "Lab tracker project"
 requires-python = ">=3.10"
 dependencies = [
   "alembic",
+  "chromadb",
   "fastapi",
   "pydantic-settings",
+  "python-multipart",
   "sqlalchemy>=2.0",
   "uvicorn",
 ]
@@ -20,13 +22,24 @@ test = [
   "httpx",
   "pytest",
 ]
+embeddings = [
+  "sentence-transformers",
+]
 lint = [
   "ruff",
+]
+ocr = [
+  "pytesseract",
+  "Pillow",
+  "pillow-heif",
 ]
 
 [tool.setuptools]
 package-dir = {"" = "src"}
-packages = ["lab_tracker"]
+packages = ["lab_tracker", "lab_tracker.services"]
+
+[tool.setuptools.package-data]
+lab_tracker = ["frontend/*"]
 
 [tool.codex_orchestrator]
 env = "lab_tracker"

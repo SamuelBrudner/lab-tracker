@@ -26,6 +26,7 @@ class ProjectModel(Base):
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     description: Mapped[str] = mapped_column(String(1000), default="")
     status: Mapped[str] = mapped_column(String(20), default="active")
+    review_policy: Mapped[str] = mapped_column(String(20), default="none")
     created_by: Mapped[str | None] = mapped_column(String(255))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utc_now)
     updated_at: Mapped[datetime] = mapped_column(
@@ -123,6 +124,55 @@ class DatasetQuestionLinkModel(Base):
     outcome_status: Mapped[str] = mapped_column(String(20), default="unknown")
 
 
+class DatasetFileModel(Base):
+    __tablename__ = "dataset_files"
+    __table_args__ = (
+        UniqueConstraint(
+            "dataset_id",
+            "path",
+            name="uq_dataset_files_dataset_path",
+        ),
+    )
+
+    file_id: Mapped[str] = mapped_column(
+        String(36),
+        primary_key=True,
+        default=lambda: str(uuid4()),
+    )
+    dataset_id: Mapped[str] = mapped_column(
+        String(36),
+        ForeignKey("datasets.dataset_id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    storage_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    path: Mapped[str] = mapped_column(String(1000), nullable=False)
+    filename: Mapped[str] = mapped_column(String(255), nullable=False)
+    content_type: Mapped[str] = mapped_column(String(255), nullable=False)
+    size_bytes: Mapped[int] = mapped_column(Integer, nullable=False)
+    checksum: Mapped[str] = mapped_column(String(64), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utc_now)
+
+
+class DatasetReviewModel(Base):
+    __tablename__ = "dataset_reviews"
+
+    review_id: Mapped[str] = mapped_column(
+        String(36),
+        primary_key=True,
+        default=lambda: str(uuid4()),
+    )
+    dataset_id: Mapped[str] = mapped_column(
+        String(36),
+        ForeignKey("datasets.dataset_id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    reviewer_user_id: Mapped[str | None] = mapped_column(String(36))
+    status: Mapped[str] = mapped_column(String(30), default="pending")
+    comments: Mapped[str | None] = mapped_column(Text)
+    requested_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utc_now)
+    resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
 class NoteModel(Base):
     __tablename__ = "notes"
 
@@ -160,6 +210,39 @@ class NoteExtractedEntityModel(Base):
     label: Mapped[str] = mapped_column(String(255), nullable=False)
     confidence: Mapped[float] = mapped_column(Float, nullable=False)
     provenance: Mapped[str] = mapped_column(String(255), nullable=False)
+
+
+class NoteTagSuggestionModel(Base):
+    __tablename__ = "note_tag_suggestions"
+    __table_args__ = (
+        UniqueConstraint(
+            "note_id",
+            "entity_label",
+            "vocabulary",
+            "term_id",
+            name="uq_note_tag_suggestion",
+        ),
+    )
+
+    suggestion_id: Mapped[str] = mapped_column(
+        String(36),
+        primary_key=True,
+        default=lambda: str(uuid4()),
+    )
+    note_id: Mapped[str] = mapped_column(
+        String(36),
+        ForeignKey("notes.note_id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    entity_label: Mapped[str] = mapped_column(String(255), nullable=False)
+    vocabulary: Mapped[str] = mapped_column(String(40), nullable=False)
+    term_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    term_label: Mapped[str] = mapped_column(String(255), nullable=False)
+    confidence: Mapped[float] = mapped_column(Float, nullable=False)
+    provenance: Mapped[str] = mapped_column(String(255), nullable=False)
+    status: Mapped[str] = mapped_column(String(20), default="staged")
+    reviewed_by: Mapped[str | None] = mapped_column(String(255))
+    reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class NoteTargetModel(Base):
@@ -241,6 +324,99 @@ class AnalysisDatasetModel(Base):
     dataset_id: Mapped[str] = mapped_column(
         String(36),
         ForeignKey("datasets.dataset_id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+
+
+class ClaimModel(Base):
+    __tablename__ = "claims"
+
+    claim_id: Mapped[str] = mapped_column(
+        String(36),
+        primary_key=True,
+        default=lambda: str(uuid4()),
+    )
+    project_id: Mapped[str] = mapped_column(
+        String(36),
+        ForeignKey("projects.project_id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    statement: Mapped[str] = mapped_column(Text, nullable=False)
+    confidence: Mapped[float] = mapped_column(Float, nullable=False)
+    status: Mapped[str] = mapped_column(String(20), default="proposed")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utc_now)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=_utc_now,
+        onupdate=_utc_now,
+    )
+
+
+class ClaimDatasetModel(Base):
+    __tablename__ = "claim_datasets"
+
+    claim_id: Mapped[str] = mapped_column(
+        String(36),
+        ForeignKey("claims.claim_id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    dataset_id: Mapped[str] = mapped_column(
+        String(36),
+        ForeignKey("datasets.dataset_id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+
+
+class ClaimAnalysisModel(Base):
+    __tablename__ = "claim_analyses"
+
+    claim_id: Mapped[str] = mapped_column(
+        String(36),
+        ForeignKey("claims.claim_id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    analysis_id: Mapped[str] = mapped_column(
+        String(36),
+        ForeignKey("analyses.analysis_id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+
+
+class VisualizationModel(Base):
+    __tablename__ = "visualizations"
+
+    viz_id: Mapped[str] = mapped_column(
+        String(36),
+        primary_key=True,
+        default=lambda: str(uuid4()),
+    )
+    analysis_id: Mapped[str] = mapped_column(
+        String(36),
+        ForeignKey("analyses.analysis_id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    viz_type: Mapped[str] = mapped_column(String(40), nullable=False)
+    file_path: Mapped[str] = mapped_column(String(1000), nullable=False)
+    caption: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utc_now)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=_utc_now,
+        onupdate=_utc_now,
+    )
+
+
+class VisualizationClaimModel(Base):
+    __tablename__ = "visualization_claims"
+
+    viz_id: Mapped[str] = mapped_column(
+        String(36),
+        ForeignKey("visualizations.viz_id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    claim_id: Mapped[str] = mapped_column(
+        String(36),
+        ForeignKey("claims.claim_id", ondelete="CASCADE"),
         primary_key=True,
     )
 
