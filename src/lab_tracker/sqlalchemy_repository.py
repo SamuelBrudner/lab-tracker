@@ -10,6 +10,7 @@ from sqlalchemy import delete, select
 from sqlalchemy.orm import Session as OrmSession
 
 from lab_tracker.db_models import (
+    AcquisitionOutputModel,
     AnalysisDatasetModel,
     AnalysisModel,
     ClaimAnalysisModel,
@@ -43,9 +44,12 @@ from lab_tracker.models import (
 )
 from lab_tracker.repository import EntityRepository, LabTrackerRepository
 from lab_tracker.sqlalchemy_mappers import (
+    acquisition_output_from_model,
+    acquisition_output_to_model,
     analysis_dataset_models,
     analysis_from_model,
     analysis_to_model,
+    apply_acquisition_output_to_model,
     apply_analysis_to_model,
     apply_claim_to_model,
     apply_dataset_to_model,
@@ -406,6 +410,21 @@ class SQLAlchemySessionRepository(_SQLAlchemyModelRepository[Session, SessionMod
         )
 
 
+class SQLAlchemyAcquisitionOutputRepository(
+    _SQLAlchemyModelRepository[AcquisitionOutput, AcquisitionOutputModel]
+):
+    def __init__(self, session: OrmSession) -> None:
+        super().__init__(
+            session,
+            model_type=AcquisitionOutputModel,
+            id_column=AcquisitionOutputModel.created_at,
+            entity_id_getter=lambda entity: entity.output_id,
+            to_model=acquisition_output_to_model,
+            from_model=acquisition_output_from_model,
+            apply_to_model=apply_acquisition_output_to_model,
+        )
+
+
 class SQLAlchemyAnalysisRepository(EntityRepository[Analysis]):
     def __init__(self, session: OrmSession) -> None:
         self._session = session
@@ -620,25 +639,6 @@ class SQLAlchemyVisualizationRepository(EntityRepository[Visualization]):
         return entity
 
 
-class UnsupportedAcquisitionOutputRepository(EntityRepository[AcquisitionOutput]):
-    _error = (
-        "Acquisition outputs are not yet mapped to SQLAlchemy because there is no "
-        "acquisition_outputs table in the current migration set."
-    )
-
-    def get(self, entity_id: UUID) -> AcquisitionOutput | None:
-        raise NotImplementedError(self._error)
-
-    def list(self) -> list[AcquisitionOutput]:
-        raise NotImplementedError(self._error)
-
-    def save(self, entity: AcquisitionOutput) -> None:
-        raise NotImplementedError(self._error)
-
-    def delete(self, entity_id: UUID) -> AcquisitionOutput | None:
-        raise NotImplementedError(self._error)
-
-
 class SQLAlchemyLabTrackerRepository(LabTrackerRepository):
     """Repository scaffold backed by a SQLAlchemy ORM session."""
 
@@ -650,7 +650,7 @@ class SQLAlchemyLabTrackerRepository(LabTrackerRepository):
         self.dataset_reviews = SQLAlchemyDatasetReviewRepository(session)
         self.notes = SQLAlchemyNoteRepository(session)
         self.sessions = SQLAlchemySessionRepository(session)
-        self.acquisition_outputs = UnsupportedAcquisitionOutputRepository()
+        self.acquisition_outputs = SQLAlchemyAcquisitionOutputRepository(session)
         self.analyses = SQLAlchemyAnalysisRepository(session)
         self.claims = SQLAlchemyClaimRepository(session)
         self.visualizations = SQLAlchemyVisualizationRepository(session)

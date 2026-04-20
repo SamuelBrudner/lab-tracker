@@ -152,3 +152,97 @@ def test_core_entity_crud_routes_use_database_persistence(
     project_delete_response = client.delete(f"/projects/{project_id}", headers=headers)
     assert project_delete_response.status_code == 200
     assert client.get(f"/projects/{project_id}", headers=headers).status_code == 404
+
+
+def test_analysis_commit_route_is_atomic_on_failure(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+):
+    headers = admin_auth_headers
+
+    project_id = client.post(
+        "/projects",
+        json={"name": "Atomic analysis"},
+        headers=headers,
+    ).json()["data"]["project_id"]
+    question_id = client.post(
+        "/questions",
+        json={
+            "project_id": project_id,
+            "text": "Does atomic commit hold?",
+            "question_type": "descriptive",
+            "status": "active",
+        },
+        headers=headers,
+    ).json()["data"]["question_id"]
+    dataset_id = client.post(
+        "/datasets",
+        json={
+            "project_id": project_id,
+            "primary_question_id": question_id,
+        },
+        headers=headers,
+    ).json()["data"]["dataset_id"]
+    upload_response = client.post(
+        f"/datasets/{dataset_id}/files",
+        files={"file": ("data.bin", b"atomic-test", "application/octet-stream")},
+        headers=headers,
+    )
+    assert upload_response.status_code == 201
+    commit_dataset = client.patch(
+        f"/datasets/{dataset_id}",
+        json={"status": "committed"},
+        headers=headers,
+    )
+    assert commit_dataset.status_code == 200
+
+    analysis_response = client.post(
+        "/analyses",
+        json={
+            "project_id": project_id,
+            "dataset_ids": [dataset_id],
+            "method_hash": "method-1",
+            "code_version": "v1",
+        },
+        headers=headers,
+    )
+    assert analysis_response.status_code == 201
+    analysis_id = analysis_response.json()["data"]["analysis_id"]
+
+    commit_response = client.post(
+        f"/analyses/{analysis_id}/commit",
+        json={
+            "environment_hash": "env-1",
+            "claims": [
+                {
+                    "statement": "Signal is stable",
+                    "confidence": 0.8,
+                    "status": "supported",
+                }
+            ],
+            "visualizations": [
+                {
+                    "viz_type": "line",
+                    "file_path": "figs/signal.png",
+                    "related_claim_ids": ["11111111-1111-1111-1111-111111111111"],
+                }
+            ],
+        },
+        headers=headers,
+    )
+    assert commit_response.status_code == 404
+
+    analysis_get = client.get(f"/analyses/{analysis_id}", headers=headers)
+    claims_get = client.get("/claims", params={"project_id": project_id}, headers=headers)
+    visualizations_get = client.get(
+        "/visualizations",
+        params={"analysis_id": analysis_id},
+        headers=headers,
+    )
+
+    assert analysis_get.status_code == 200
+    assert analysis_get.json()["data"]["status"] == "staged"
+    assert claims_get.status_code == 200
+    assert claims_get.json()["data"] == []
+    assert visualizations_get.status_code == 200
+    assert visualizations_get.json()["data"] == []

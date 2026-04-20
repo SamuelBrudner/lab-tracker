@@ -46,6 +46,22 @@ def test_local_file_storage_backend_store_retrieve_delete(tmp_path):
         backend.delete(storage_id)
 
 
+def test_local_file_storage_backend_store_stream(tmp_path):
+    backend = LocalFileStorageBackend(tmp_path)
+    chunks = [b"hello", b"-", b"world"]
+
+    metadata = backend.store_stream(
+        chunks,
+        filename="stream.txt",
+        content_type="text/plain",
+    )
+
+    assert backend.exists(metadata.storage_id) is True
+    assert backend.retrieve(metadata.storage_id) == b"hello-world"
+    assert metadata.size_bytes == len(b"hello-world")
+    assert metadata.sha256 == hashlib.sha256(b"hello-world").hexdigest()
+
+
 def test_local_file_storage_backend_uses_env_var_default(tmp_path, monkeypatch):
     monkeypatch.setenv(LAB_TRACKER_FILE_STORAGE_PATH_ENV, str(tmp_path))
     backend = LocalFileStorageBackend()

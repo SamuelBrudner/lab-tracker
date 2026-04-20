@@ -139,12 +139,9 @@ class SessionServiceMixin:
                 updated = True
             if updated:
                 existing.updated_at = utc_now()
-                try:
-                    self._run_repository_write(
-                        lambda repository: repository.acquisition_outputs.save(existing)
-                    )
-                except NotImplementedError:
-                    pass
+                self._run_repository_write(
+                    lambda repository: repository.acquisition_outputs.save(existing)
+                )
             return existing
         output = AcquisitionOutput(
             output_id=uuid4(),
@@ -154,12 +151,7 @@ class SessionServiceMixin:
             size_bytes=size_bytes,
         )
         self._store.acquisition_outputs[output.output_id] = output
-        try:
-            self._run_repository_write(
-                lambda repository: repository.acquisition_outputs.save(output)
-            )
-        except NotImplementedError:
-            pass
+        self._run_repository_write(lambda repository: repository.acquisition_outputs.save(output))
         return output
 
     def list_acquisition_outputs(
@@ -182,12 +174,9 @@ class SessionServiceMixin:
             "Acquisition output",
         )
         del self._store.acquisition_outputs[output_id]
-        try:
-            self._run_repository_write(
-                lambda repository: repository.acquisition_outputs.delete(output_id)
-            )
-        except NotImplementedError:
-            pass
+        self._run_repository_write(
+            lambda repository: repository.acquisition_outputs.delete(output_id)
+        )
         return output
 
     def promote_operational_session(

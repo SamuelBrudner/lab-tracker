@@ -22,6 +22,7 @@ from lab_tracker.auth import AuthContext, AuthService, TokenService, extract_bea
 from lab_tracker.config import get_settings
 from lab_tracker.db import get_engine, get_session_factory
 from lab_tracker.db_models import (
+    AcquisitionOutputModel,
     AnalysisModel,
     ClaimModel,
     DatasetModel,
@@ -128,7 +129,6 @@ def _empty_store_counts() -> dict[str, int]:
         "datasets": 0,
         "notes": 0,
         "sessions": 0,
-        # Acquisition outputs are not yet persisted in SQLAlchemy.
         "acquisition_outputs": 0,
         "analyses": 0,
         "claims": 0,
@@ -141,7 +141,9 @@ def _count_rows(session: Session, model: type) -> int:
     return int(count or 0)
 
 
-def _store_counts_from_database(session_factory: sessionmaker[Session]) -> dict[str, int]:
+def _store_counts_from_database(
+    session_factory: sessionmaker[Session],
+) -> tuple[dict[str, int], str | None]:
     counts = _empty_store_counts()
     try:
         with session_factory() as session:
@@ -150,13 +152,24 @@ def _store_counts_from_database(session_factory: sessionmaker[Session]) -> dict[
             counts["datasets"] = _count_rows(session, DatasetModel)
             counts["notes"] = _count_rows(session, NoteModel)
             counts["sessions"] = _count_rows(session, SessionModel)
+            counts["acquisition_outputs"] = _count_rows(session, AcquisitionOutputModel)
             counts["analyses"] = _count_rows(session, AnalysisModel)
             counts["claims"] = _count_rows(session, ClaimModel)
             counts["visualizations"] = _count_rows(session, VisualizationModel)
-    except SQLAlchemyError:
-        # Schema setup is validated separately; observability should still respond.
-        return _empty_store_counts()
-    return counts
+    except SQLAlchemyError as exc:
+        return _empty_store_counts(), f"{exc.__class__.__name__}: {exc}"
+    return counts, None
+
+
+def _database_check(session_factory: sessionmaker[Session]) -> dict[str, str]:
+    _, database_error = _store_counts_from_database(session_factory)
+    if database_error is None:
+        return {"name": "database", "status": "ok"}
+    return {
+        "name": "database",
+        "status": "fail",
+        "detail": database_error,
+    }
 
 
 def _metrics_snapshot(
@@ -166,13 +179,17 @@ def _metrics_snapshot(
     app_name: str,
 ) -> dict[str, Any]:
     now = datetime.now(timezone.utc)
-    return {
-        "status": "ok",
+    store, database_error = _store_counts_from_database(session_factory)
+    payload: dict[str, Any] = {
+        "status": "ok" if database_error is None else "fail",
         "timestamp": now.isoformat(),
         "uptime_seconds": (now - _START_TIME).total_seconds(),
         "app": {"name": app_name, "environment": environment},
-        "store": _store_counts_from_database(session_factory),
+        "store": store,
     }
+    if database_error is not None:
+        payload["errors"] = [{"name": "database", "detail": database_error}]
+    return payload
 
 
 def _auth_error_response(message: str) -> JSONResponse:
@@ -211,6 +228,8 @@ def _configure_auth_middleware(app: FastAPI) -> None:
 
 def _configure_database_session_middleware(
     app: FastAPI,
+    *,
+    api: LabTrackerAPI,
 ) -> None:
     @app.middleware("http")
     async def db_session_middleware(request: Request, call_next):
@@ -219,19 +238,25 @@ def _configure_database_session_middleware(
         repository = SQLAlchemyLabTrackerRepository(db_session)
         request.state.lab_tracker_repository = repository
         set_active_repository(repository)
+        api.begin_request()
+        committed = False
         try:
             response = await call_next(request)
             if response.status_code >= 400:
                 db_session.rollback()
             else:
                 db_session.commit()
+                committed = True
             return response
         except Exception:
             db_session.rollback()
             raise
         finally:
-            set_active_repository(None)
-            db_session.close()
+            try:
+                api.finish_request(committed=committed)
+            finally:
+                set_active_repository(None)
+                db_session.close()
 
 
 def _configure_database_shutdown_hook(app: FastAPI, *, engine: Engine) -> None:
@@ -282,24 +307,26 @@ def create_app() -> FastAPI:
     app.state.db_session_factory = session_factory
     app.state.auth_service = auth_service
     app.state.token_service = token_service
-    _configure_auth_middleware(app)
-    _configure_database_session_middleware(app)
-    _configure_database_shutdown_hook(app, engine=engine)
     app.state.file_storage_backend = LocalFileStorageBackend(settings.file_storage_path)
-    raw_storage = LocalNoteStorage(settings.note_storage_path)
-    search_backend = build_search_backend(settings)
-    ocr_backend = default_ocr_backend(
+    app.state.raw_note_storage = LocalNoteStorage(settings.note_storage_path)
+    app.state.search_backend = build_search_backend(settings)
+    app.state.ocr_backend = default_ocr_backend(
         tesseract_cmd=settings.ocr_tesseract_cmd,
         languages=settings.ocr_tesseract_languages,
     )
-    api = LabTrackerAPI(
-        raw_storage=raw_storage,
-        search_backend=search_backend,
-        ocr_backend=ocr_backend,
+    app.state.lab_tracker_api = LabTrackerAPI(
+        raw_storage=app.state.raw_note_storage,
+        search_backend=app.state.search_backend,
+        ocr_backend=app.state.ocr_backend,
     )
+    _configure_auth_middleware(app)
+    _configure_database_session_middleware(app, api=app.state.lab_tracker_api)
+    _configure_database_shutdown_hook(app, engine=engine)
     try:
         with session_factory() as bootstrap_session:
-            api.hydrate_from_repository(SQLAlchemyLabTrackerRepository(bootstrap_session))
+            app.state.lab_tracker_api.hydrate_from_repository(
+                SQLAlchemyLabTrackerRepository(bootstrap_session)
+            )
     except SQLAlchemyError:
         # Schema setup is validated separately; startup should still succeed for health checks.
         pass
@@ -311,6 +338,7 @@ def create_app() -> FastAPI:
     @app.get("/readiness")
     def readiness():
         checks = [
+            _database_check(session_factory),
             _note_storage_check(Path(settings.note_storage_path)),
             _file_storage_check(Path(settings.file_storage_path)),
         ]
@@ -335,7 +363,7 @@ def create_app() -> FastAPI:
     _configure_frontend_routes(app)
     register_routes(
         app,
-        api,
+        app.state.lab_tracker_api,
         auth_service=auth_service,
         token_service=token_service,
         bootstrap_admin_token=settings.bootstrap_admin_token,

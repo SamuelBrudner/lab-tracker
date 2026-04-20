@@ -169,8 +169,8 @@ class NoteServiceMixin:
             created_by=created_by,
         )
         self._store.notes[note.note_id] = note
-        self._search_backend.upsert_notes([note])
         self._run_repository_write(lambda repository: repository.notes.save(note))
+        self._queue_search_op("upsert_notes", [note])
         return note
 
     def upload_note_raw(
@@ -275,8 +275,8 @@ class NoteServiceMixin:
         if status is not None:
             note.status = status
         note.updated_at = utc_now()
-        self._search_backend.upsert_notes([note])
         self._run_repository_write(lambda repository: repository.notes.save(note))
+        self._queue_search_op("upsert_notes", [note])
         return note
 
     def download_note_raw(self, note_id: UUID) -> tuple[NoteRawAsset, bytes]:
@@ -372,8 +372,8 @@ class NoteServiceMixin:
         require_role(actor, WRITE_ROLES)
         note = self.get_note(note_id)
         del self._store.notes[note_id]
-        self._search_backend.delete_notes([note_id])
         self._run_repository_write(lambda repository: repository.notes.delete(note_id))
+        self._queue_search_op("delete_notes", [note_id])
         return note
 
     def extract_questions_from_note(

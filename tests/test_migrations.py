@@ -93,6 +93,7 @@ def test_alembic_upgrade_head_creates_expected_tables(monkeypatch, tmp_path):
         "dataset_files",
         "notes",
         "sessions",
+        "acquisition_outputs",
         "analyses",
         "claims",
         "visualizations",

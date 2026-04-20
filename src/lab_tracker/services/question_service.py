@@ -62,8 +62,8 @@ class QuestionServiceMixin:
             created_by=created_by,
         )
         self._store.questions[question.question_id] = question
-        self._search_backend.upsert_questions([question])
         self._run_repository_write(lambda repository: repository.questions.save(question))
+        self._queue_search_op("upsert_questions", [question])
         return question
 
     def get_question(self, question_id: UUID) -> Question:
@@ -178,14 +178,14 @@ class QuestionServiceMixin:
             _ensure_question_parents_dag(question.question_id, parent_ids, self._store.questions)
             question.parent_question_ids = parent_ids
         question.updated_at = utc_now()
-        self._search_backend.upsert_questions([question])
         self._run_repository_write(lambda repository: repository.questions.save(question))
+        self._queue_search_op("upsert_questions", [question])
         return question
 
     def delete_question(self, question_id: UUID, *, actor: AuthContext | None = None) -> Question:
         require_role(actor, WRITE_ROLES)
         question = self.get_question(question_id)
         del self._store.questions[question_id]
-        self._search_backend.delete_questions([question_id])
         self._run_repository_write(lambda repository: repository.questions.delete(question_id))
+        self._queue_search_op("delete_questions", [question_id])
         return question

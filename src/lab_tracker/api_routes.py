@@ -5,7 +5,6 @@ from __future__ import annotations
 import base64
 import binascii
 from datetime import datetime
-import hashlib
 import hmac
 from typing import Any
 from uuid import UUID
@@ -514,17 +513,18 @@ def register_routes(
         content_type = (file.content_type or "application/octet-stream").strip()
         if not content_type:
             content_type = "application/octet-stream"
-        content = await file.read()
-        if not content:
-            raise ValidationError("file must not be empty.")
-
-        checksum = hashlib.sha256(content).hexdigest()
-        size_bytes = len(content)
-        storage_id = storage_backend.store(
-            content,
+        metadata = storage_backend.store_stream(
+            iter(lambda: file.file.read(1024 * 1024), b""),
             filename=filename,
             content_type=content_type,
         )
+        storage_id = metadata.storage_id
+        if metadata.size_bytes <= 0:
+            try:
+                storage_backend.delete(storage_id)
+            except Exception:
+                pass
+            raise ValidationError("file must not be empty.")
         try:
             row = DatasetFileModel(
                 dataset_id=str(dataset_id),
@@ -532,8 +532,8 @@ def register_routes(
                 path=path,
                 filename=filename,
                 content_type=content_type,
-                size_bytes=size_bytes,
-                checksum=checksum,
+                size_bytes=metadata.size_bytes,
+                checksum=metadata.sha256,
             )
             db_session.add(row)
             db_session.flush()

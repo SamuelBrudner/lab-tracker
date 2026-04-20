@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from contextvars import ContextVar
+import logging
 from typing import Callable
 from uuid import UUID
 
@@ -43,6 +45,19 @@ from lab_tracker.services.search_backends import (
 )
 
 _DEFAULT_OCR_BACKEND: object = object()
+_ACTIVE_STORE: ContextVar["InMemoryStore | None"] = ContextVar(
+    "lab_tracker_active_store",
+    default=None,
+)
+_REQUEST_MANAGED: ContextVar[bool] = ContextVar(
+    "lab_tracker_request_managed",
+    default=False,
+)
+_PENDING_SEARCH_OPS: ContextVar[list[tuple[str, tuple[object, ...]]] | None] = ContextVar(
+    "lab_tracker_pending_search_ops",
+    default=None,
+)
+_logger = logging.getLogger(__name__)
 
 
 class InMemoryStore:
@@ -70,6 +85,23 @@ class LabTrackerAPI(
     ClaimServiceMixin,
     VisualizationServiceMixin,
 ):
+    @property
+    def _store(self) -> InMemoryStore:
+        active_store = _ACTIVE_STORE.get()
+        if active_store is not None:
+            return active_store
+        if _REQUEST_MANAGED.get():
+            resolved_repository = self._active_repository()
+            if resolved_repository is not None:
+                active_store = self._build_store_from_repository(resolved_repository)
+                _ACTIVE_STORE.set(active_store)
+                return active_store
+        return self._base_store
+
+    @_store.setter
+    def _store(self, value: InMemoryStore) -> None:
+        self._base_store = value
+
     def __init__(
         self,
         store: InMemoryStore | None = None,
@@ -120,49 +152,111 @@ class LabTrackerAPI(
     def _active_repository(self) -> LabTrackerRepository | None:
         return get_active_repository() or self._repository
 
+    def begin_request(self) -> None:
+        _REQUEST_MANAGED.set(True)
+        _ACTIVE_STORE.set(None)
+        _PENDING_SEARCH_OPS.set([])
+
+    def finish_request(self, *, committed: bool) -> None:
+        if committed:
+            self._flush_pending_search_ops()
+        else:
+            _PENDING_SEARCH_OPS.set([])
+        _ACTIVE_STORE.set(None)
+        _REQUEST_MANAGED.set(False)
+        _PENDING_SEARCH_OPS.set(None)
+
+    def _is_request_managed(self) -> bool:
+        return _REQUEST_MANAGED.get()
+
+    def _build_store_from_repository(
+        self,
+        repository: LabTrackerRepository,
+    ) -> InMemoryStore:
+        store = InMemoryStore()
+        self._hydrate_store_from_repository(store, repository)
+        return store
+
+    def _hydrate_store_from_repository(
+        self,
+        store: InMemoryStore,
+        repository: LabTrackerRepository,
+    ) -> None:
+        store.projects = {project.project_id: project for project in repository.projects.list()}
+        store.questions = {
+            question.question_id: question for question in repository.questions.list()
+        }
+        store.datasets = {dataset.dataset_id: dataset for dataset in repository.datasets.list()}
+        store.dataset_reviews = {
+            review.review_id: review for review in repository.dataset_reviews.list()
+        }
+        store.notes = {note.note_id: note for note in repository.notes.list()}
+        store.sessions = {session.session_id: session for session in repository.sessions.list()}
+        store.acquisition_outputs = {
+            output.output_id: output for output in repository.acquisition_outputs.list()
+        }
+        store.analyses = {
+            analysis.analysis_id: analysis for analysis in repository.analyses.list()
+        }
+        store.claims = {claim.claim_id: claim for claim in repository.claims.list()}
+        store.visualizations = {
+            visualization.viz_id: visualization
+            for visualization in repository.visualizations.list()
+        }
+
     def hydrate_from_repository(
         self,
         repository: LabTrackerRepository | None = None,
+        *,
+        store: InMemoryStore | None = None,
+        hydrate_search_backend: bool = True,
     ) -> None:
         resolved_repository = repository or self._active_repository()
         if resolved_repository is None:
             return
-        self._store.projects = {
-            project.project_id: project for project in resolved_repository.projects.list()
-        }
-        self._store.questions = {
-            question.question_id: question for question in resolved_repository.questions.list()
-        }
-        self._store.datasets = {
-            dataset.dataset_id: dataset for dataset in resolved_repository.datasets.list()
-        }
-        self._store.dataset_reviews = {
-            review.review_id: review for review in resolved_repository.dataset_reviews.list()
-        }
-        self._store.notes = {note.note_id: note for note in resolved_repository.notes.list()}
-        self._store.sessions = {
-            session.session_id: session for session in resolved_repository.sessions.list()
-        }
-        self._store.analyses = {
-            analysis.analysis_id: analysis for analysis in resolved_repository.analyses.list()
-        }
-        self._store.claims = {claim.claim_id: claim for claim in resolved_repository.claims.list()}
-        self._store.visualizations = {
-            visualization.viz_id: visualization
-            for visualization in resolved_repository.visualizations.list()
-        }
-        try:
-            acquisition_outputs = resolved_repository.acquisition_outputs.list()
-        except NotImplementedError:
-            acquisition_outputs = []
-        self._store.acquisition_outputs = {
-            output.output_id: output for output in acquisition_outputs
-        }
-        self._hydrate_search_backend()
+        target_store = store or self._store
+        self._hydrate_store_from_repository(target_store, resolved_repository)
+        if hydrate_search_backend:
+            self._hydrate_search_backend(target_store)
 
-    def _hydrate_search_backend(self) -> None:
-        self._search_backend.upsert_questions(self._store.questions.values())
-        self._search_backend.upsert_notes(self._store.notes.values())
+    def _hydrate_search_backend(self, store: InMemoryStore | None = None) -> None:
+        target_store = store or self._store
+        self._search_backend.upsert_questions(target_store.questions.values())
+        self._search_backend.upsert_notes(target_store.notes.values())
+
+    def _queue_search_op(self, operation: str, *args: object) -> None:
+        pending = _PENDING_SEARCH_OPS.get()
+        if self._is_request_managed() and pending is not None:
+            pending.append((operation, args))
+            return
+        self._apply_search_op(operation, *args)
+
+    def _apply_search_op(self, operation: str, *args: object) -> None:
+        if operation == "upsert_questions":
+            self._search_backend.upsert_questions(args[0])
+            return
+        if operation == "delete_questions":
+            self._search_backend.delete_questions(args[0])
+            return
+        if operation == "upsert_notes":
+            self._search_backend.upsert_notes(args[0])
+            return
+        if operation == "delete_notes":
+            self._search_backend.delete_notes(args[0])
+            return
+        raise ValueError(f"Unknown search operation: {operation}")
+
+    def _flush_pending_search_ops(self) -> None:
+        pending = _PENDING_SEARCH_OPS.get() or []
+        for operation, args in pending:
+            try:
+                self._apply_search_op(operation, *args)
+            except Exception:
+                _logger.warning(
+                    "Failed to apply deferred search operation %s.",
+                    operation,
+                    exc_info=True,
+                )
 
     def _run_repository_write(
         self,
@@ -179,9 +273,19 @@ class LabTrackerAPI(
             return
         try:
             operation(resolved_repository)
-            resolved_repository.commit()
+            if not self._is_request_managed():
+                resolved_repository.commit()
         except Exception:
             resolved_repository.rollback()
+            if self._is_request_managed():
+                _ACTIVE_STORE.set(None)
+                _PENDING_SEARCH_OPS.set([])
+            elif resolved_repository is self._repository:
+                self.hydrate_from_repository(
+                    resolved_repository,
+                    store=self._base_store,
+                    hydrate_search_backend=False,
+                )
             raise
 
     def search_questions(

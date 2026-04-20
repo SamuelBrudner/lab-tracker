@@ -286,6 +286,37 @@ class SessionModel(Base):
     )
 
 
+class AcquisitionOutputModel(Base):
+    __tablename__ = "acquisition_outputs"
+    __table_args__ = (
+        UniqueConstraint(
+            "session_id",
+            "file_path",
+            name="uq_acquisition_outputs_session_path",
+        ),
+    )
+
+    output_id: Mapped[str] = mapped_column(
+        String(36),
+        primary_key=True,
+        default=lambda: str(uuid4()),
+    )
+    session_id: Mapped[str] = mapped_column(
+        String(36),
+        ForeignKey("sessions.session_id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    file_path: Mapped[str] = mapped_column(String(1000), nullable=False)
+    checksum: Mapped[str] = mapped_column(String(64), nullable=False)
+    size_bytes: Mapped[int | None] = mapped_column(Integer)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utc_now)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=_utc_now,
+        onupdate=_utc_now,
+    )
+
+
 class AnalysisModel(Base):
     __tablename__ = "analyses"
 

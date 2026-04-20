@@ -25,6 +25,29 @@ LAB_TRACKER_FILE_STORAGE_PATH_ENV = "LAB_TRACKER_FILE_STORAGE_PATH"
 
 
 class FileStorageBackend(ABC):
+    def store_stream(
+        self,
+        chunks: Iterable[bytes],
+        *,
+        filename: str,
+        content_type: str,
+    ) -> StoredFileMetadata:
+        """Persist a stream of byte chunks and return stored-file metadata."""
+
+        payload = bytearray()
+        for chunk in chunks:
+            if chunk:
+                payload.extend(chunk)
+        storage_id = self.store(bytes(payload), filename=filename, content_type=content_type)
+        return StoredFileMetadata(
+            storage_id=storage_id,
+            filename=(filename or "").strip(),
+            content_type=(content_type or "").strip(),
+            size_bytes=len(payload),
+            sha256=hashlib.sha256(payload).hexdigest(),
+            created_at=datetime.now(timezone.utc),
+        )
+
     @abstractmethod
     def store(self, file_bytes: bytes, *, filename: str, content_type: str) -> UUID:
         """Persist bytes and return a storage id."""
@@ -103,6 +126,16 @@ class LocalFileStorageBackend(FileStorageBackend):
         return self._base_path
 
     def store(self, file_bytes: bytes, *, filename: str, content_type: str) -> UUID:
+        metadata = self.store_stream([file_bytes], filename=filename, content_type=content_type)
+        return metadata.storage_id
+
+    def store_stream(
+        self,
+        chunks: Iterable[bytes],
+        *,
+        filename: str,
+        content_type: str,
+    ) -> StoredFileMetadata:
         cleaned_filename = (filename or "").strip()
         cleaned_content_type = (content_type or "").strip()
         if not cleaned_filename:
@@ -111,22 +144,35 @@ class LocalFileStorageBackend(FileStorageBackend):
             raise ValidationError("content_type must not be empty.")
 
         storage_id = uuid4()
-        checksum = hashlib.sha256(file_bytes).hexdigest()
+        hasher = hashlib.sha256()
+        size_bytes = 0
+        data_path = self._data_path(storage_id)
+        data_path.parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.NamedTemporaryFile("wb", delete=False, dir=data_path.parent) as handle:
+            for chunk in chunks:
+                if not chunk:
+                    continue
+                hasher.update(chunk)
+                size_bytes += len(chunk)
+                handle.write(chunk)
+            handle.flush()
+            os.fsync(handle.fileno())
+            tmp_name = handle.name
+        os.replace(tmp_name, data_path)
+        checksum = hasher.hexdigest()
         metadata = StoredFileMetadata(
             storage_id=storage_id,
             filename=cleaned_filename,
             content_type=cleaned_content_type,
-            size_bytes=len(file_bytes),
+            size_bytes=size_bytes,
             sha256=checksum,
             created_at=datetime.now(timezone.utc),
         )
-
-        _atomic_write_bytes(self._data_path(storage_id), file_bytes)
         _atomic_write_bytes(
             self._meta_path(storage_id),
             json.dumps(metadata.to_json_dict(), indent=2, sort_keys=True).encode("utf-8"),
         )
-        return storage_id
+        return metadata
 
     def retrieve(self, storage_id: UUID) -> bytes:
         path = self._data_path(storage_id)
