@@ -9,7 +9,7 @@ description = "Lab tracker project"
 requires-python = ">=3.10"
 dependencies = [
   "alembic",
-  "chromadb",
+  "chromadb>=1.5.8,<1.6",
   "fastapi",
   "pydantic-settings",
   "python-multipart",

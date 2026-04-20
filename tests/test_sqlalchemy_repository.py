@@ -7,6 +7,7 @@ from sqlalchemy.orm import sessionmaker
 
 from lab_tracker.db import Base
 from lab_tracker.models import (
+    AcquisitionOutput,
     EntityRef,
     EntityTagSuggestion,
     EntityType,
@@ -19,6 +20,8 @@ from lab_tracker.models import (
     QuestionSource,
     QuestionStatus,
     QuestionType,
+    Session,
+    SessionType,
     TagSuggestionStatus,
 )
 from lab_tracker.sqlalchemy_repository import SQLAlchemyLabTrackerRepository
@@ -149,7 +152,41 @@ def test_note_repository_persists_supported_children(db_session):
     assert loaded_note.raw_asset is None
 
 
-def test_acquisition_output_repository_is_explicitly_unsupported(db_session):
+def test_acquisition_output_repository_crud(db_session):
     repo = SQLAlchemyLabTrackerRepository(db_session)
-    with pytest.raises(NotImplementedError):
-        repo.acquisition_outputs.list()
+    project = Project(
+        project_id=uuid4(),
+        name="Sessions",
+        status=ProjectStatus.ACTIVE,
+        created_at=_ts(),
+        updated_at=_ts(),
+    )
+    session = Session(
+        session_id=uuid4(),
+        project_id=project.project_id,
+        session_type=SessionType.OPERATIONAL,
+        created_at=_ts(1),
+        updated_at=_ts(1),
+    )
+    output = AcquisitionOutput(
+        output_id=uuid4(),
+        session_id=session.session_id,
+        file_path="rig/output.bin",
+        checksum="abc123",
+        size_bytes=42,
+        created_at=_ts(2),
+        updated_at=_ts(2),
+    )
+
+    repo.projects.save(project)
+    repo.sessions.save(session)
+    repo.acquisition_outputs.save(output)
+    repo.commit()
+
+    assert repo.acquisition_outputs.get(output.output_id) == output
+    assert repo.acquisition_outputs.list() == [output]
+
+    deleted = repo.acquisition_outputs.delete(output.output_id)
+    repo.commit()
+    assert deleted == output
+    assert repo.acquisition_outputs.get(output.output_id) is None

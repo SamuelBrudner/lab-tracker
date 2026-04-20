@@ -7,6 +7,7 @@ from typing import Iterable
 from uuid import UUID
 
 from lab_tracker.db_models import (
+    AcquisitionOutputModel,
     AnalysisDatasetModel,
     AnalysisModel,
     ClaimAnalysisModel,
@@ -27,6 +28,7 @@ from lab_tracker.db_models import (
     VisualizationModel,
 )
 from lab_tracker.models import (
+    AcquisitionOutput,
     Analysis,
     AnalysisStatus,
     Claim,
@@ -440,6 +442,42 @@ def apply_session_to_model(row: SessionModel, session: Session) -> None:
     row.ended_at = session.ended_at
     row.created_by = session.created_by
     row.updated_at = session.updated_at
+
+
+def acquisition_output_to_model(output: AcquisitionOutput) -> AcquisitionOutputModel:
+    return AcquisitionOutputModel(
+        output_id=_uuid_str(output.output_id),
+        session_id=_uuid_str(output.session_id),
+        file_path=output.file_path,
+        checksum=output.checksum,
+        size_bytes=output.size_bytes,
+        created_at=output.created_at,
+        updated_at=output.updated_at,
+    )
+
+
+def acquisition_output_from_model(row: AcquisitionOutputModel) -> AcquisitionOutput:
+    return AcquisitionOutput(
+        output_id=_uuid(row.output_id),
+        session_id=_uuid(row.session_id),
+        file_path=row.file_path,
+        checksum=row.checksum,
+        size_bytes=row.size_bytes,
+        created_at=_as_utc(row.created_at),
+        updated_at=_as_utc(row.updated_at),
+    )
+
+
+def apply_acquisition_output_to_model(
+    row: AcquisitionOutputModel,
+    output: AcquisitionOutput,
+) -> None:
+    row.session_id = _uuid_str(output.session_id)
+    row.file_path = output.file_path
+    row.checksum = output.checksum
+    row.size_bytes = output.size_bytes
+    row.created_at = output.created_at
+    row.updated_at = output.updated_at
 
 
 def analysis_to_model(analysis: Analysis) -> AnalysisModel:

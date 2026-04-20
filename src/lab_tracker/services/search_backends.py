@@ -199,6 +199,41 @@ class _TokenHashEmbeddingFunction:
     def __call__(self, input: list[str]) -> list[list[float]]:  # noqa: A002
         return [self._embed(text) for text in input]
 
+    def embed_query(self, input: list[str]) -> list[list[float]]:  # noqa: A002
+        return self.__call__(input)
+
+    @staticmethod
+    def name() -> str:
+        return "token_hash"
+
+    @staticmethod
+    def build_from_config(config: dict[str, object]) -> "_TokenHashEmbeddingFunction":
+        dimension = int(config.get("dimension", 256))
+        return _TokenHashEmbeddingFunction(dimension=dimension)
+
+    def get_config(self) -> dict[str, object]:
+        return {"dimension": self._dimension}
+
+    def is_legacy(self) -> bool:
+        return False
+
+    def default_space(self) -> str:
+        return "cosine"
+
+    def supported_spaces(self) -> list[str]:
+        return ["cosine", "l2", "ip"]
+
+    def validate_config_update(
+        self,
+        old_config: dict[str, object],
+        new_config: dict[str, object],
+    ) -> None:
+        return
+
+    @staticmethod
+    def validate_config(config: dict[str, object]) -> None:
+        return
+
     def _embed(self, text: str) -> list[float]:
         vector = [0.0] * self._dimension
         tokens = self._token_re.findall((text or "").casefold())
@@ -335,12 +370,17 @@ class ChromaDBSearchBackend(SearchBackend):
             allowed_list = sorted({str(item) for item in allowed_ids})
             if not allowed_list:
                 return []
-        where: dict[str, object] = {}
+        clauses: list[dict[str, object]] = []
         if query.project_id is not None:
-            where["project_id"] = str(query.project_id)
+            clauses.append({"project_id": str(query.project_id)})
         if allowed_list is not None:
-            where["entity_id"] = {"$in": allowed_list}
-        resolved_where = where or None
+            clauses.append({"entity_id": {"$in": allowed_list}})
+        if not clauses:
+            resolved_where = None
+        elif len(clauses) == 1:
+            resolved_where = clauses[0]
+        else:
+            resolved_where = {"$and": clauses}
 
         match_count = self._count_matches(collection, resolved_where, allowed_list)
         if match_count <= 0:

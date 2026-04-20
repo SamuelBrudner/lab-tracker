@@ -34,6 +34,39 @@ class EmbeddingProvider(ABC):
     def embed(self, texts: list[str]) -> list[list[float]]:
         """Return a vector for each input text, preserving input order."""
 
+    def name(self) -> str:
+        return self.backend_name
+
+    def embed_query(self, input: Sequence[str]) -> list[list[float]]:  # noqa: A002
+        return self.__call__(input)
+
+    @classmethod
+    def build_from_config(cls, config: dict[str, Any]) -> "EmbeddingProvider":
+        return cls(**config)
+
+    def get_config(self) -> dict[str, Any]:
+        return {}
+
+    def is_legacy(self) -> bool:
+        return False
+
+    def default_space(self) -> str:
+        return "cosine"
+
+    def supported_spaces(self) -> list[str]:
+        return ["cosine", "l2", "ip"]
+
+    def validate_config_update(
+        self,
+        old_config: dict[str, Any],
+        new_config: dict[str, Any],
+    ) -> None:
+        return
+
+    @staticmethod
+    def validate_config(config: dict[str, Any]) -> None:
+        return
+
     def __call__(self, input: Sequence[str]) -> list[list[float]]:  # noqa: A002
         """ChromaDB-style embedding function compatibility."""
 
@@ -68,6 +101,9 @@ class SentenceTransformerEmbeddingProvider(EmbeddingProvider):
             ) from exc
         self._model = st.SentenceTransformer(self._model_name)
         return self._model
+
+    def get_config(self) -> dict[str, Any]:
+        return {"model_name": self._model_name}
 
 
 class OpenAIEmbeddingProvider(EmbeddingProvider):
@@ -144,6 +180,14 @@ class OpenAIEmbeddingProvider(EmbeddingProvider):
                 "Unexpected OpenAI embeddings response: embedding count does not match input."
             )
         return embeddings
+
+    def get_config(self) -> dict[str, Any]:
+        return {
+            "model": self._model,
+            "base_url": self._base_url,
+            "timeout_seconds": self._timeout_seconds,
+            "batch_size": self._batch_size,
+        }
 
 
 def resolve_embedding_provider(provider_name: str | None) -> EmbeddingProvider | None:
