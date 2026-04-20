@@ -10,7 +10,7 @@ describe("ReviewPanel", () => {
   it("loads the pending queue and review detail", async () => {
     installFetchMock([
       {
-        match: "/reviews/pending?limit=200",
+        match: "/reviews/pending?limit=200&offset=0",
         response: apiResponse([
           {
             dataset_id: "dataset-1",
@@ -41,7 +41,7 @@ describe("ReviewPanel", () => {
         }),
       },
       {
-        match: "/datasets/dataset-1/files?limit=200",
+        match: "/datasets/dataset-1/files?limit=200&offset=0",
         response: apiResponse([
           {
             checksum: "sha256-1",
@@ -63,7 +63,8 @@ describe("ReviewPanel", () => {
         }),
       },
       {
-        match: "/notes?project_id=project-1&limit=200",
+        match:
+          "/notes?project_id=project-1&target_entity_type=dataset&target_entity_id=dataset-1&limit=200&offset=0",
         response: apiResponse([
           {
             created_at: "2026-04-20T02:00:00Z",
@@ -113,7 +114,7 @@ describe("ReviewPanel", () => {
 
     installFetchMock([
       {
-        match: "/reviews/pending?limit=200",
+        match: "/reviews/pending?limit=200&offset=0",
         response: [
           apiResponse([
             {
@@ -141,11 +142,12 @@ describe("ReviewPanel", () => {
         }),
       },
       {
-        match: "/datasets/dataset-2/files?limit=200",
+        match: "/datasets/dataset-2/files?limit=200&offset=0",
         response: apiResponse([]),
       },
       {
-        match: "/notes?project_id=project-1&limit=200",
+        match:
+          "/notes?project_id=project-1&target_entity_type=dataset&target_entity_id=dataset-2&limit=200&offset=0",
         response: apiResponse([]),
       },
       {

@@ -16,8 +16,8 @@ function createResponse(status, payload) {
   };
 }
 
-function apiResponse(data, status = 200) {
-  return createResponse(status, { data });
+function apiResponse(data, status = 200, meta = null) {
+  return createResponse(status, meta ? { data, meta } : { data });
 }
 
 function errorResponse(message, status = 400) {

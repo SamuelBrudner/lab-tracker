@@ -114,3 +114,40 @@ def test_metrics_endpoint_reads_database_counts(monkeypatch, tmp_path):
     assert response.status_code == 200
     payload = response.json()
     assert payload["store"]["projects"] == 1
+
+
+def test_observability_reports_search_degradation(monkeypatch, tmp_path):
+    db_path = tmp_path / "search-health.db"
+    database_url = f"sqlite+pysqlite:///{db_path}"
+    monkeypatch.setenv("LAB_TRACKER_DATABASE_URL", database_url)
+    monkeypatch.setenv("LAB_TRACKER_FILE_STORAGE_PATH", str(tmp_path / "file-storage"))
+    monkeypatch.setenv("LAB_TRACKER_NOTE_STORAGE_PATH", str(tmp_path / "note-storage"))
+
+    engine = create_engine(
+        database_url,
+        future=True,
+        connect_args={"check_same_thread": False},
+    )
+    Base.metadata.create_all(bind=engine)
+    engine.dispose()
+
+    app = create_app()
+    app.state.lab_tracker_api._record_search_failure("upsert_questions", RuntimeError("index down"))
+
+    with TestClient(app) as client:
+        readiness = client.get("/readiness")
+        assert readiness.status_code == 503
+        readiness_payload = readiness.json()
+        search_check = next(
+            check for check in readiness_payload["checks"] if check["name"] == "search"
+        )
+        assert search_check["status"] == "fail"
+        assert search_check["operation"] == "upsert_questions"
+
+        metrics = client.get("/metrics")
+        assert metrics.status_code == 200
+        metrics_payload = metrics.json()
+        assert metrics_payload["status"] == "fail"
+        assert metrics_payload["search"]["degraded"] is True
+        assert metrics_payload["search"]["failure_count"] == 1
+        assert metrics_payload["errors"][0]["name"] == "search"

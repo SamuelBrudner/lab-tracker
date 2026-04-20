@@ -6,10 +6,11 @@ import base64
 import binascii
 from datetime import datetime
 import hmac
+import json
 from typing import Any
 from uuid import UUID
 
-from fastapi import FastAPI, File, UploadFile
+from fastapi import FastAPI, File, Form, UploadFile
 from fastapi.exceptions import RequestValidationError
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
@@ -46,6 +47,8 @@ from lab_tracker.models import (
     DatasetReview,
     DatasetReviewStatus,
     DatasetStatus,
+    EntityRef,
+    EntityType,
     EntityTagSuggestion,
     Note,
     NoteStatus,
@@ -191,20 +194,27 @@ def register_routes(
 
     @app.get("/projects", response_model=ListEnvelope[Project])
     def list_projects(
+        request: Request,
         status: ProjectStatus | None = None,
         limit: int = 50,
         offset: int = 0,
     ):
         _validate_pagination(limit, offset)
+        paged = _query_repository_page(
+            request,
+            "query_projects",
+            status=status.value if status is not None else None,
+            limit=limit,
+            offset=offset,
+        )
+        if paged is not None:
+            projects, total = paged
+            return _list_response(projects, limit=limit, offset=offset, total=total)
         projects = api.list_projects()
         if status is not None:
             projects = [project for project in projects if project.status == status]
         page, total = _paginate(projects, limit, offset)
-        payload = page
-        return ListEnvelope(
-            data=payload,
-            meta=PaginationMeta(limit=limit, offset=offset, total=total),
-        )
+        return _list_response(page, limit=limit, offset=offset, total=total)
 
     @app.get("/projects/{project_id}", response_model=Envelope[Project])
     def get_project(project_id: UUID):
@@ -252,6 +262,7 @@ def register_routes(
 
     @app.get("/questions", response_model=ListEnvelope[Question])
     def list_questions(
+        request: Request,
         project_id: UUID | None = None,
         status: QuestionStatus | None = None,
         question_type: QuestionType | None = None,
@@ -265,6 +276,22 @@ def register_routes(
     ):
         _validate_pagination(limit, offset)
         resolved_search = search or q
+        if not resolved_search:
+            paged = _query_repository_page(
+                request,
+                "query_questions",
+                project_id=project_id,
+                status=status.value if status is not None else None,
+                question_type=question_type.value if question_type is not None else None,
+                created_from=created_from.value if created_from is not None else None,
+                parent_question_id=parent_question_id,
+                ancestor_question_id=ancestor_question_id,
+                limit=limit,
+                offset=offset,
+            )
+            if paged is not None:
+                questions, total = paged
+                return _list_response(questions, limit=limit, offset=offset, total=total)
         questions = api.list_questions(
             project_id=project_id,
             status=status,
@@ -275,11 +302,7 @@ def register_routes(
             ancestor_question_id=ancestor_question_id,
         )
         page, total = _paginate(questions, limit, offset)
-        payload = page
-        return ListEnvelope(
-            data=payload,
-            meta=PaginationMeta(limit=limit, offset=offset, total=total),
-        )
+        return _list_response(page, limit=limit, offset=offset, total=total)
 
     @app.get("/search", response_model=Envelope[SearchResults])
     def search(
@@ -358,21 +381,29 @@ def register_routes(
 
     @app.get("/datasets", response_model=ListEnvelope[Dataset])
     def list_datasets(
+        request: Request,
         project_id: UUID | None = None,
         status: DatasetStatus | None = None,
         limit: int = 50,
         offset: int = 0,
     ):
         _validate_pagination(limit, offset)
+        paged = _query_repository_page(
+            request,
+            "query_datasets",
+            project_id=project_id,
+            status=status.value if status is not None else None,
+            limit=limit,
+            offset=offset,
+        )
+        if paged is not None:
+            datasets, total = paged
+            return _list_response(datasets, limit=limit, offset=offset, total=total)
         datasets = api.list_datasets(project_id=project_id)
         if status is not None:
             datasets = [dataset for dataset in datasets if dataset.status == status]
         page, total = _paginate(datasets, limit, offset)
-        payload = page
-        return ListEnvelope(
-            data=payload,
-            meta=PaginationMeta(limit=limit, offset=offset, total=total),
-        )
+        return _list_response(page, limit=limit, offset=offset, total=total)
 
     @app.get("/datasets/{dataset_id}", response_model=Envelope[Dataset])
     def get_dataset(dataset_id: UUID):
@@ -461,14 +492,21 @@ def register_routes(
     def list_pending_reviews(request: Request, limit: int = 50, offset: int = 0):
         actor = _actor_from_request(request)
         _validate_pagination(limit, offset)
+        paged = _query_repository_page(
+            request,
+            "query_dataset_reviews",
+            status=DatasetReviewStatus.PENDING.value,
+            reviewer_user_id=actor.user_id,
+            limit=limit,
+            offset=offset,
+        )
+        if paged is not None:
+            reviews, total = paged
+            return _list_response(reviews, limit=limit, offset=offset, total=total)
         reviews = api.list_dataset_reviews(status=DatasetReviewStatus.PENDING)
         assigned = [review for review in reviews if review.reviewer_user_id == actor.user_id]
         page, total = _paginate(assigned, limit, offset)
-        payload = page
-        return ListEnvelope(
-            data=payload,
-            meta=PaginationMeta(limit=limit, offset=offset, total=total),
-        )
+        return _list_response(page, limit=limit, offset=offset, total=total)
 
     @app.post(
         "/datasets/{dataset_id}/files",
@@ -577,6 +615,17 @@ def register_routes(
         if dataset_row is None:
             raise NotFoundError("Dataset does not exist.")
 
+        paged = _query_repository_page(
+            request,
+            "query_dataset_files",
+            dataset_id=dataset_id,
+            limit=limit,
+            offset=offset,
+        )
+        if paged is not None:
+            files, total = paged
+            return _list_response(files, limit=limit, offset=offset, total=total)
+
         rows = list(
             db_session.scalars(
                 select(DatasetFileModel)
@@ -594,11 +643,7 @@ def register_routes(
             for row in rows
         ]
         page, total = _paginate(files, limit, offset)
-        payload = page
-        return ListEnvelope(
-            data=payload,
-            meta=PaginationMeta(limit=limit, offset=offset, total=total),
-        )
+        return _list_response(page, limit=limit, offset=offset, total=total)
 
     @app.get("/datasets/{dataset_id}/files/{file_id}/download")
     def download_dataset_file(
@@ -704,6 +749,7 @@ def register_routes(
         "/notes/upload",
         response_model=Envelope[Note],
         status_code=http_status.HTTP_201_CREATED,
+        deprecated=True,
     )
     def upload_note(payload: NoteUpload, request: Request):
         actor = _actor_from_request(request)
@@ -726,23 +772,75 @@ def register_routes(
         )
         return Envelope(data=note)
 
+    @app.post(
+        "/notes/upload-file",
+        response_model=Envelope[Note],
+        status_code=http_status.HTTP_201_CREATED,
+    )
+    async def upload_note_file(
+        request: Request,
+        file: UploadFile = File(...),
+        project_id: UUID = Form(...),
+        transcribed_text: str | None = Form(None),
+        targets: str | None = Form(None),
+        metadata: str | None = Form(None),
+        status: NoteStatus | None = Form(None),
+        created_by: str | None = Form(None),
+    ):
+        actor = _actor_from_request(request)
+        filename = (file.filename or "").strip()
+        if not filename:
+            raise ValidationError("filename must not be empty.")
+        content_type = (file.content_type or "application/octet-stream").strip()
+        asset = api.store_note_raw_asset(
+            file.file,
+            filename=filename,
+            content_type=content_type,
+        )
+        note = api.upload_note_raw(
+            project_id=project_id,
+            raw_asset=asset,
+            transcribed_text=transcribed_text,
+            targets=_parse_entity_refs_form(targets),
+            metadata=_parse_metadata_form(metadata),
+            status=status or note_default_status(),
+            actor=actor,
+            created_by=_resolve_created_by(created_by, actor),
+        )
+        return Envelope(data=note)
+
     @app.get("/notes", response_model=ListEnvelope[Note])
     def list_notes(
+        request: Request,
         project_id: UUID | None = None,
         status: NoteStatus | None = None,
+        target_entity_type: EntityType | None = None,
+        target_entity_id: UUID | None = None,
         limit: int = 50,
         offset: int = 0,
     ):
         _validate_pagination(limit, offset)
-        notes = api.list_notes(project_id=project_id)
-        if status is not None:
-            notes = [note for note in notes if note.status == status]
-        page, total = _paginate(notes, limit, offset)
-        payload = page
-        return ListEnvelope(
-            data=payload,
-            meta=PaginationMeta(limit=limit, offset=offset, total=total),
+        paged = _query_repository_page(
+            request,
+            "query_notes",
+            project_id=project_id,
+            status=status.value if status is not None else None,
+            target_entity_type=target_entity_type.value if target_entity_type is not None else None,
+            target_entity_id=target_entity_id,
+            limit=limit,
+            offset=offset,
         )
+        if paged is not None:
+            notes, total = paged
+            return _list_response(notes, limit=limit, offset=offset, total=total)
+        notes = api.list_notes(
+            project_id=project_id,
+            status=status,
+            target_entity_type=target_entity_type,
+            target_entity_id=target_entity_id,
+        )
+        page, total = _paginate(notes, limit, offset)
+        return _list_response(page, limit=limit, offset=offset, total=total)
 
     @app.get("/notes/{note_id}", response_model=Envelope[Note])
     def get_note(note_id: UUID):
@@ -892,6 +990,7 @@ def register_routes(
 
     @app.get("/sessions", response_model=ListEnvelope[Session])
     def list_sessions(
+        request: Request,
         project_id: UUID | None = None,
         status: SessionStatus | None = None,
         session_type: SessionType | None = None,
@@ -899,17 +998,25 @@ def register_routes(
         offset: int = 0,
     ):
         _validate_pagination(limit, offset)
+        paged = _query_repository_page(
+            request,
+            "query_sessions",
+            project_id=project_id,
+            status=status.value if status is not None else None,
+            session_type=session_type.value if session_type is not None else None,
+            limit=limit,
+            offset=offset,
+        )
+        if paged is not None:
+            sessions, total = paged
+            return _list_response(sessions, limit=limit, offset=offset, total=total)
         sessions = api.list_sessions(project_id=project_id)
         if status is not None:
             sessions = [session for session in sessions if session.status == status]
         if session_type is not None:
             sessions = [session for session in sessions if session.session_type == session_type]
         page, total = _paginate(sessions, limit, offset)
-        payload = page
-        return ListEnvelope(
-            data=payload,
-            meta=PaginationMeta(limit=limit, offset=offset, total=total),
-        )
+        return _list_response(page, limit=limit, offset=offset, total=total)
 
     @app.get("/sessions/by-link/{link_code}", response_model=Envelope[Session])
     def get_session_by_link_code(link_code: str):
@@ -934,18 +1041,25 @@ def register_routes(
 
     @app.get("/sessions/{session_id}/outputs", response_model=ListEnvelope[AcquisitionOutput])
     def list_session_outputs(
+        request: Request,
         session_id: UUID,
         limit: int = 50,
         offset: int = 0,
     ):
         _validate_pagination(limit, offset)
+        paged = _query_repository_page(
+            request,
+            "query_acquisition_outputs",
+            session_id=session_id,
+            limit=limit,
+            offset=offset,
+        )
+        if paged is not None:
+            outputs, total = paged
+            return _list_response(outputs, limit=limit, offset=offset, total=total)
         outputs = api.list_acquisition_outputs(session_id=session_id)
         page, total = _paginate(outputs, limit, offset)
-        payload = page
-        return ListEnvelope(
-            data=payload,
-            meta=PaginationMeta(limit=limit, offset=offset, total=total),
-        )
+        return _list_response(page, limit=limit, offset=offset, total=total)
 
     @app.post(
         "/sessions/{session_id}/outputs",
@@ -1030,6 +1144,7 @@ def register_routes(
 
     @app.get("/analyses", response_model=ListEnvelope[Analysis])
     def list_analyses(
+        request: Request,
         project_id: UUID | None = None,
         dataset_id: UUID | None = None,
         question_id: UUID | None = None,
@@ -1038,6 +1153,19 @@ def register_routes(
         offset: int = 0,
     ):
         _validate_pagination(limit, offset)
+        paged = _query_repository_page(
+            request,
+            "query_analyses",
+            project_id=project_id,
+            dataset_id=dataset_id,
+            question_id=question_id,
+            status=status.value if status is not None else None,
+            limit=limit,
+            offset=offset,
+        )
+        if paged is not None:
+            analyses, total = paged
+            return _list_response(analyses, limit=limit, offset=offset, total=total)
         analyses = api.list_analyses(
             project_id=project_id,
             dataset_id=dataset_id,
@@ -1046,11 +1174,7 @@ def register_routes(
         if status is not None:
             analyses = [analysis for analysis in analyses if analysis.status == status]
         page, total = _paginate(analyses, limit, offset)
-        payload = page
-        return ListEnvelope(
-            data=payload,
-            meta=PaginationMeta(limit=limit, offset=offset, total=total),
-        )
+        return _list_response(page, limit=limit, offset=offset, total=total)
 
     @app.get("/analyses/{analysis_id}", response_model=Envelope[Analysis])
     def get_analysis(analysis_id: UUID):
@@ -1111,6 +1235,7 @@ def register_routes(
 
     @app.get("/claims", response_model=ListEnvelope[Claim])
     def list_claims(
+        request: Request,
         project_id: UUID | None = None,
         status: ClaimStatus | None = None,
         dataset_id: UUID | None = None,
@@ -1119,6 +1244,19 @@ def register_routes(
         offset: int = 0,
     ):
         _validate_pagination(limit, offset)
+        paged = _query_repository_page(
+            request,
+            "query_claims",
+            project_id=project_id,
+            status=status.value if status is not None else None,
+            dataset_id=dataset_id,
+            analysis_id=analysis_id,
+            limit=limit,
+            offset=offset,
+        )
+        if paged is not None:
+            claims, total = paged
+            return _list_response(claims, limit=limit, offset=offset, total=total)
         claims = api.list_claims(
             project_id=project_id,
             status=status,
@@ -1126,11 +1264,7 @@ def register_routes(
             analysis_id=analysis_id,
         )
         page, total = _paginate(claims, limit, offset)
-        payload = page
-        return ListEnvelope(
-            data=payload,
-            meta=PaginationMeta(limit=limit, offset=offset, total=total),
-        )
+        return _list_response(page, limit=limit, offset=offset, total=total)
 
     @app.get("/claims/{claim_id}", response_model=Envelope[Claim])
     def get_claim(claim_id: UUID):
@@ -1176,6 +1310,7 @@ def register_routes(
 
     @app.get("/visualizations", response_model=ListEnvelope[Visualization])
     def list_visualizations(
+        request: Request,
         project_id: UUID | None = None,
         analysis_id: UUID | None = None,
         claim_id: UUID | None = None,
@@ -1183,17 +1318,25 @@ def register_routes(
         offset: int = 0,
     ):
         _validate_pagination(limit, offset)
+        paged = _query_repository_page(
+            request,
+            "query_visualizations",
+            project_id=project_id,
+            analysis_id=analysis_id,
+            claim_id=claim_id,
+            limit=limit,
+            offset=offset,
+        )
+        if paged is not None:
+            visualizations, total = paged
+            return _list_response(visualizations, limit=limit, offset=offset, total=total)
         visualizations = api.list_visualizations(
             project_id=project_id,
             analysis_id=analysis_id,
             claim_id=claim_id,
         )
         page, total = _paginate(visualizations, limit, offset)
-        payload = page
-        return ListEnvelope(
-            data=payload,
-            meta=PaginationMeta(limit=limit, offset=offset, total=total),
-        )
+        return _list_response(page, limit=limit, offset=offset, total=total)
 
     @app.get("/visualizations/{viz_id}", response_model=Envelope[Visualization])
     def get_visualization(viz_id: UUID):
@@ -1347,6 +1490,59 @@ def _paginate(items: list[Any], limit: int, offset: int) -> tuple[list[Any], int
     if offset >= total:
         return [], total
     return items[offset : offset + limit], total
+
+
+def _query_repository_page(
+    request: Request,
+    method_name: str,
+    **kwargs: Any,
+) -> tuple[list[Any], int] | None:
+    repository = getattr(request.state, "lab_tracker_repository", None)
+    if repository is None:
+        return None
+    method = getattr(repository, method_name, None)
+    if method is None:
+        return None
+    return method(**kwargs)
+
+
+def _list_response(items: list[Any], *, limit: int, offset: int, total: int) -> ListEnvelope[Any]:
+    return ListEnvelope(
+        data=items,
+        meta=PaginationMeta(limit=limit, offset=offset, total=total),
+    )
+
+
+def _parse_json_form_field(raw_value: str | None, field_name: str) -> Any:
+    if raw_value is None or not raw_value.strip():
+        return None
+    try:
+        return json.loads(raw_value)
+    except json.JSONDecodeError as exc:
+        raise ValidationError(f"{field_name} must be valid JSON.") from exc
+
+
+def _parse_entity_refs_form(raw_value: str | None) -> list[EntityRef] | None:
+    parsed = _parse_json_form_field(raw_value, "targets")
+    if parsed is None:
+        return None
+    if not isinstance(parsed, list):
+        raise ValidationError("targets must decode to a list.")
+    try:
+        return [EntityRef.model_validate(item) for item in parsed]
+    except Exception as exc:
+        raise ValidationError("targets contains invalid entity refs.") from exc
+
+
+def _parse_metadata_form(raw_value: str | None) -> dict[str, str] | None:
+    parsed = _parse_json_form_field(raw_value, "metadata")
+    if parsed is None:
+        return None
+    if not isinstance(parsed, dict) or not all(
+        isinstance(key, str) and isinstance(value, str) for key, value in parsed.items()
+    ):
+        raise ValidationError("metadata must decode to an object of string values.")
+    return parsed
 
 
 def project_default_status() -> ProjectStatus:

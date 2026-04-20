@@ -11,7 +11,6 @@ from lab_tracker.models import Visualization, utc_now
 from lab_tracker.services.shared import (
     WRITE_ROLES,
     _ensure_non_empty,
-    _get_or_raise,
     _unique_ids,
 )
 
@@ -49,7 +48,12 @@ class VisualizationServiceMixin:
         return visualization
 
     def get_visualization(self, viz_id: UUID) -> Visualization:
-        return _get_or_raise(self._store.visualizations, viz_id, "Visualization")
+        return self._get_from_repository_or_store(
+            attribute_name="visualizations",
+            entity_id=viz_id,
+            label="Visualization",
+            loader=lambda repository: repository.visualizations.get(viz_id),
+        )
 
     def list_visualizations(
         self,
@@ -58,6 +62,46 @@ class VisualizationServiceMixin:
         analysis_id: UUID | None = None,
         claim_id: UUID | None = None,
     ) -> list[Visualization]:
+        repository = self._active_repository()
+        if repository is not None and not self._allow_in_memory:
+            query_repo = getattr(repository, "query_visualizations", None)
+            if query_repo is not None:
+                visualizations, _ = query_repo(
+                    project_id=project_id,
+                    analysis_id=analysis_id,
+                    claim_id=claim_id,
+                    limit=None,
+                    offset=0,
+                )
+                return self._cache_entities(
+                    "visualizations",
+                    visualizations,
+                    lambda visualization: visualization.viz_id,
+                )
+            visualizations = self._list_from_repository_or_store(
+                attribute_name="visualizations",
+                loader=lambda current_repository: current_repository.visualizations.list(),
+                entity_id_getter=lambda visualization: visualization.viz_id,
+            )
+            if project_id is not None:
+                visualizations = [
+                    visualization
+                    for visualization in visualizations
+                    if self.get_analysis(visualization.analysis_id).project_id == project_id
+                ]
+            if analysis_id is not None:
+                visualizations = [
+                    visualization
+                    for visualization in visualizations
+                    if visualization.analysis_id == analysis_id
+                ]
+            if claim_id is not None:
+                visualizations = [
+                    visualization
+                    for visualization in visualizations
+                    if claim_id in visualization.related_claim_ids
+                ]
+            return visualizations
         if project_id is None:
             visualizations = list(self._store.visualizations.values())
         else:
@@ -112,6 +156,6 @@ class VisualizationServiceMixin:
     ) -> Visualization:
         require_role(actor, WRITE_ROLES)
         visualization = self.get_visualization(viz_id)
-        del self._store.visualizations[viz_id]
+        self._store.visualizations.pop(viz_id, None)
         self._run_repository_write(lambda repository: repository.visualizations.delete(viz_id))
         return visualization

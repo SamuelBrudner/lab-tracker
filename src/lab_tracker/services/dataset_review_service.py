@@ -23,14 +23,18 @@ from lab_tracker.services.shared import (
     _build_commit_manifest,
     _compute_commit_hash,
     _ensure_primary_question_active,
-    _get_or_raise,
     _manifest_input_from_commit,
 )
 
 
 class DatasetReviewServiceMixin:
     def get_dataset_review(self, review_id: UUID) -> DatasetReview:
-        return _get_or_raise(self._store.dataset_reviews, review_id, "Dataset review")
+        return self._get_from_repository_or_store(
+            attribute_name="dataset_reviews",
+            entity_id=review_id,
+            label="Dataset review",
+            loader=lambda repository: repository.dataset_reviews.get(review_id),
+        )
 
     def list_dataset_reviews(
         self,
@@ -38,6 +42,32 @@ class DatasetReviewServiceMixin:
         dataset_id: UUID | None = None,
         status: DatasetReviewStatus | None = None,
     ) -> list[DatasetReview]:
+        repository = self._active_repository()
+        if repository is not None and not self._allow_in_memory:
+            query_repo = getattr(repository, "query_dataset_reviews", None)
+            if query_repo is not None:
+                reviews, _ = query_repo(
+                    dataset_id=dataset_id,
+                    status=status.value if status is not None else None,
+                    limit=None,
+                    offset=0,
+                )
+                return self._cache_entities(
+                    "dataset_reviews",
+                    reviews,
+                    lambda review: review.review_id,
+                )
+            reviews = self._list_from_repository_or_store(
+                attribute_name="dataset_reviews",
+                loader=lambda current_repository: current_repository.dataset_reviews.list(),
+                entity_id_getter=lambda review: review.review_id,
+            )
+            if dataset_id is not None:
+                reviews = [review for review in reviews if review.dataset_id == dataset_id]
+            if status is not None:
+                reviews = [review for review in reviews if review.status == status]
+            reviews.sort(key=lambda review: (review.requested_at, str(review.review_id)))
+            return reviews
         reviews = list(self._store.dataset_reviews.values())
         if dataset_id is not None:
             reviews = [review for review in reviews if review.dataset_id == dataset_id]

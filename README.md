@@ -44,8 +44,11 @@ If you change the frontend source in `src/lab_tracker/frontend_src/app.jsx`, reb
 
 ```bash
 npm install
+npm run lint:frontend
 npm run build
 ```
+
+The committed frontend bundle ships without a source map by default.
 
 The frontend includes:
 - project dashboard
@@ -87,6 +90,9 @@ backfill the index from the database:
 uv run python -m lab_tracker.reindex --reset
 ```
 
+If you keep the default in-memory search backend, restart the app to rebuild the index from the
+database snapshot at startup.
+
 ## Database migrations
 
 ```bash
@@ -97,4 +103,7 @@ uv run alembic upgrade head
 
 ```bash
 uv run pytest -q
+npm run test:frontend
+npm run lint:frontend
+npm run build
 ```

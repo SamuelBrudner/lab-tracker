@@ -28,7 +28,6 @@ from lab_tracker.services.shared import (
     _build_commit_manifest,
     _compute_commit_hash,
     _ensure_primary_question_active,
-    _get_or_raise,
     _manifest_input_from_commit,
     _unique_ids,
     _validate_commit_hash,
@@ -177,9 +176,32 @@ class DatasetServiceMixin:
         return dataset
 
     def get_dataset(self, dataset_id: UUID) -> Dataset:
-        return _get_or_raise(self._store.datasets, dataset_id, "Dataset")
+        return self._get_from_repository_or_store(
+            attribute_name="datasets",
+            entity_id=dataset_id,
+            label="Dataset",
+            loader=lambda repository: repository.datasets.get(dataset_id),
+        )
 
     def list_datasets(self, *, project_id: UUID | None = None) -> list[Dataset]:
+        repository = self._active_repository()
+        if repository is not None and not self._allow_in_memory:
+            query_repo = getattr(repository, "query_datasets", None)
+            if query_repo is not None:
+                datasets, _ = query_repo(project_id=project_id, limit=None, offset=0)
+                return self._cache_entities(
+                    "datasets",
+                    datasets,
+                    lambda dataset: dataset.dataset_id,
+                )
+            datasets = self._list_from_repository_or_store(
+                attribute_name="datasets",
+                loader=lambda current_repository: current_repository.datasets.list(),
+                entity_id_getter=lambda dataset: dataset.dataset_id,
+            )
+            if project_id is None:
+                return datasets
+            return [dataset for dataset in datasets if dataset.project_id == project_id]
         if project_id is None:
             return list(self._store.datasets.values())
         return [d for d in self._store.datasets.values() if d.project_id == project_id]
@@ -297,6 +319,6 @@ class DatasetServiceMixin:
     def delete_dataset(self, dataset_id: UUID, *, actor: AuthContext | None = None) -> Dataset:
         require_role(actor, WRITE_ROLES)
         dataset = self.get_dataset(dataset_id)
-        del self._store.datasets[dataset_id]
+        self._store.datasets.pop(dataset_id, None)
         self._run_repository_write(lambda repository: repository.datasets.delete(dataset_id))
         return dataset

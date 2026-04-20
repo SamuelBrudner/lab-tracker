@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 from contextvars import ContextVar
+from dataclasses import dataclass
+from datetime import datetime, timezone
 import logging
 from typing import Callable
 from uuid import UUID
 
 from lab_tracker.dependencies import get_active_repository
+from lab_tracker.errors import NotFoundError
 from lab_tracker.models import (
     AcquisitionOutput,
     Analysis,
@@ -74,6 +77,16 @@ class InMemoryStore:
         self.visualizations: dict[UUID, Visualization] = {}
 
 
+@dataclass(frozen=True)
+class SearchHealthSnapshot:
+    backend_name: str
+    degraded: bool
+    failure_count: int
+    last_failure_at: str | None
+    last_failure_message: str | None
+    last_failure_operation: str | None
+
+
 class LabTrackerAPI(
     ProjectServiceMixin,
     QuestionServiceMixin,
@@ -90,12 +103,6 @@ class LabTrackerAPI(
         active_store = _ACTIVE_STORE.get()
         if active_store is not None:
             return active_store
-        if _REQUEST_MANAGED.get():
-            resolved_repository = self._active_repository()
-            if resolved_repository is not None:
-                active_store = self._build_store_from_repository(resolved_repository)
-                _ACTIVE_STORE.set(active_store)
-                return active_store
         return self._base_store
 
     @_store.setter
@@ -125,6 +132,10 @@ class LabTrackerAPI(
         )
         self._search_backend = search_backend or InMemorySubstringSearchBackend()
         self._allow_in_memory = allow_in_memory or store is not None
+        self._search_failure_count = 0
+        self._search_last_failure_at: datetime | None = None
+        self._search_last_failure_message: str | None = None
+        self._search_last_failure_operation: str | None = None
         if repository is not None:
             self.hydrate_from_repository(repository)
         else:
@@ -152,9 +163,93 @@ class LabTrackerAPI(
     def _active_repository(self) -> LabTrackerRepository | None:
         return get_active_repository() or self._repository
 
+    def _is_repository_backed(self) -> bool:
+        return self._active_repository() is not None and not self._allow_in_memory
+
+    def _cache_map(self, attribute_name: str) -> dict[UUID, object]:
+        return getattr(self._store, attribute_name)
+
+    def _cache_entity(self, attribute_name: str, entity_id: UUID, entity: object):
+        self._cache_map(attribute_name)[entity_id] = entity
+        return entity
+
+    def _cache_entities(
+        self,
+        attribute_name: str,
+        entities: list[object],
+        entity_id_getter: Callable[[object], UUID],
+    ) -> list[object]:
+        cache = self._cache_map(attribute_name)
+        for entity in entities:
+            cache[entity_id_getter(entity)] = entity
+        return entities
+
+    def _get_cached_entity(self, attribute_name: str, entity_id: UUID):
+        return self._cache_map(attribute_name).get(entity_id)
+
+    def _get_from_repository_or_store(
+        self,
+        *,
+        attribute_name: str,
+        entity_id: UUID,
+        label: str,
+        loader: Callable[[LabTrackerRepository], object | None],
+    ):
+        cached = self._get_cached_entity(attribute_name, entity_id)
+        if cached is not None:
+            return cached
+        repository = self._active_repository()
+        if repository is not None and not self._allow_in_memory:
+            entity = loader(repository)
+            if entity is None:
+                raise NotFoundError(f"{label} does not exist.")
+            return self._cache_entity(attribute_name, entity_id, entity)
+        raise NotFoundError(f"{label} does not exist.")
+
+    def _list_from_repository_or_store(
+        self,
+        *,
+        attribute_name: str,
+        loader: Callable[[LabTrackerRepository], list[object]],
+        entity_id_getter: Callable[[object], UUID],
+    ) -> list[object]:
+        repository = self._active_repository()
+        if repository is not None and not self._allow_in_memory:
+            entities = loader(repository)
+            return self._cache_entities(attribute_name, entities, entity_id_getter)
+        return list(self._cache_map(attribute_name).values())
+
+    def _record_search_failure(self, operation: str, exc: Exception) -> None:
+        self._search_failure_count += 1
+        self._search_last_failure_at = datetime.now(timezone.utc)
+        self._search_last_failure_message = f"{exc.__class__.__name__}: {exc}"
+        self._search_last_failure_operation = operation
+        _logger.warning(
+            "Search backend operation %s failed; search is now degraded.",
+            operation,
+            exc_info=True,
+        )
+
+    def search_health(self) -> SearchHealthSnapshot:
+        return SearchHealthSnapshot(
+            backend_name=self._search_backend.backend_name,
+            degraded=self._search_failure_count > 0,
+            failure_count=self._search_failure_count,
+            last_failure_at=(
+                self._search_last_failure_at.isoformat()
+                if self._search_last_failure_at is not None
+                else None
+            ),
+            last_failure_message=self._search_last_failure_message,
+            last_failure_operation=self._search_last_failure_operation,
+        )
+
     def begin_request(self) -> None:
         _REQUEST_MANAGED.set(True)
-        _ACTIVE_STORE.set(None)
+        if self._is_repository_backed():
+            _ACTIVE_STORE.set(InMemoryStore())
+        else:
+            _ACTIVE_STORE.set(None)
         _PENDING_SEARCH_OPS.set([])
 
     def finish_request(self, *, committed: bool) -> None:
@@ -229,7 +324,7 @@ class LabTrackerAPI(
         if self._is_request_managed() and pending is not None:
             pending.append((operation, args))
             return
-        self._apply_search_op(operation, *args)
+        self._apply_search_op_safely(operation, *args)
 
     def _apply_search_op(self, operation: str, *args: object) -> None:
         if operation == "upsert_questions":
@@ -246,17 +341,16 @@ class LabTrackerAPI(
             return
         raise ValueError(f"Unknown search operation: {operation}")
 
+    def _apply_search_op_safely(self, operation: str, *args: object) -> None:
+        try:
+            self._apply_search_op(operation, *args)
+        except Exception as exc:
+            self._record_search_failure(operation, exc)
+
     def _flush_pending_search_ops(self) -> None:
         pending = _PENDING_SEARCH_OPS.get() or []
         for operation, args in pending:
-            try:
-                self._apply_search_op(operation, *args)
-            except Exception:
-                _logger.warning(
-                    "Failed to apply deferred search operation %s.",
-                    operation,
-                    exc_info=True,
-                )
+            self._apply_search_op_safely(operation, *args)
 
     def _run_repository_write(
         self,
@@ -299,6 +393,16 @@ class LabTrackerAPI(
         ids = self._search_backend.search_question_ids(
             SearchQuery(query=query, project_id=project_id, limit=limit, offset=offset)
         )
+        repository = self._active_repository()
+        if repository is not None and not self._allow_in_memory:
+            fetch_questions = getattr(repository, "fetch_questions", None)
+            if fetch_questions is not None:
+                questions = fetch_questions(ids)
+                return self._cache_entities(
+                    "questions",
+                    questions,
+                    lambda question: question.question_id,
+                )
         results: list[Question] = []
         for question_id in ids:
             question = self._store.questions.get(question_id)
@@ -317,6 +421,16 @@ class LabTrackerAPI(
         ids = self._search_backend.search_note_ids(
             SearchQuery(query=query, project_id=project_id, limit=limit, offset=offset)
         )
+        repository = self._active_repository()
+        if repository is not None and not self._allow_in_memory:
+            fetch_notes = getattr(repository, "fetch_notes", None)
+            if fetch_notes is not None:
+                notes = fetch_notes(ids)
+                return self._cache_entities(
+                    "notes",
+                    notes,
+                    lambda note: note.note_id,
+                )
         results: list[Note] = []
         for note_id in ids:
             note = self._store.notes.get(note_id)

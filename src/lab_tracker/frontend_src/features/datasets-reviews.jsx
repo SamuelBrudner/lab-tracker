@@ -1,6 +1,6 @@
 import * as React from "react";
 
-import { apiRequest } from "../shared/api.js";
+import { apiRequest, buildApiPath, fetchAllPages } from "../shared/api.js";
 import { formatBytes, formatDate } from "../shared/formatters.js";
 import { AppLink } from "../shared/routing.jsx";
 import { useApiResource } from "../hooks/useApiResource.js";
@@ -331,8 +331,7 @@ function ReviewPanel({
       setQueueBusy(true);
       setQueueError("");
       try {
-        const payload = await apiRequest("/reviews/pending?limit=200", { token });
-        const items = Array.isArray(payload) ? payload : [];
+        const items = await fetchAllPages("/reviews/pending", { token });
         setPendingReviews(items);
 
         const desiredSelection = keepSelection ? selectionReviewId : "";
@@ -407,10 +406,7 @@ function ReviewPanel({
 
         let files = [];
         try {
-          const filesPayload = await apiRequest(`/datasets/${selectedDatasetId}/files?limit=200`, {
-            token,
-          });
-          files = Array.isArray(filesPayload) ? filesPayload : [];
+          files = await fetchAllPages(`/datasets/${selectedDatasetId}/files`, { token });
         } catch (err) {
           warnings.push(err.message || "Dataset file list could not be loaded.");
         }
@@ -430,16 +426,19 @@ function ReviewPanel({
         }
 
         const datasetProjectId = loadedDataset?.project_id || "";
-        let projectNotes = [];
+        let datasetNotes = [];
         if (datasetProjectId) {
           try {
-            const payload = await apiRequest(
-              `/notes?project_id=${encodeURIComponent(datasetProjectId)}&limit=200`,
+            datasetNotes = await fetchAllPages(
+              buildApiPath("/notes", {
+                project_id: datasetProjectId,
+                target_entity_type: "dataset",
+                target_entity_id: selectedDatasetId,
+              }),
               { token }
             );
-            projectNotes = Array.isArray(payload) ? payload : [];
           } catch (err) {
-            warnings.push(err.message || "Project note list could not be loaded.");
+            warnings.push(err.message || "Dataset note list could not be loaded.");
           }
         }
 
@@ -455,7 +454,7 @@ function ReviewPanel({
           noteIndex[String(note.note_id)] = note;
         }
 
-        for (const note of projectNotes) {
+        for (const note of datasetNotes) {
           if (!note || !note.note_id) {
             continue;
           }
@@ -888,7 +887,7 @@ function DatasetDetailCard({ token, datasetId, projects, navigate, onSetActivePr
     }
 
     setFileState((current) => ({ ...current, loading: true, error: "" }));
-    apiRequest(`/datasets/${dataset.dataset_id}/files?limit=200`, { token })
+    fetchAllPages(`/datasets/${dataset.dataset_id}/files`, { token })
       .then((items) => {
         if (!canceled) {
           setFileState({ loading: false, error: "", items: Array.isArray(items) ? items : [] });

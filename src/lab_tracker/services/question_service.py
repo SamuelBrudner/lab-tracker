@@ -20,7 +20,6 @@ from lab_tracker.services.shared import (
     _ensure_non_empty,
     _ensure_question_parents_dag,
     _ensure_question_status_transition,
-    _get_or_raise,
     _is_question_ancestor,
     _unique_ids,
 )
@@ -67,7 +66,12 @@ class QuestionServiceMixin:
         return question
 
     def get_question(self, question_id: UUID) -> Question:
-        return _get_or_raise(self._store.questions, question_id, "Question")
+        return self._get_from_repository_or_store(
+            attribute_name="questions",
+            entity_id=question_id,
+            label="Question",
+            loader=lambda repository: repository.questions.get(question_id),
+        )
 
     def list_questions(
         self,
@@ -101,49 +105,120 @@ class QuestionServiceMixin:
         parent_question_id: UUID | None = None,
         ancestor_question_id: UUID | None = None,
     ) -> list[Question]:
-        if project_id is None:
-            questions = list(self._store.questions.values())
-        else:
-            questions = [q for q in self._store.questions.values() if q.project_id == project_id]
-        if status is not None:
-            questions = [question for question in questions if question.status == status]
-        if question_type is not None:
-            questions = [
-                question for question in questions if question.question_type == question_type
-            ]
-        if created_from is not None:
-            questions = [
-                question for question in questions if question.created_from == created_from
-            ]
-        if parent_question_id is not None:
-            questions = [
-                question
-                for question in questions
-                if parent_question_id in question.parent_question_ids
-            ]
-        if ancestor_question_id is not None:
-            questions = [
-                question
-                for question in questions
-                if question.question_id != ancestor_question_id
-                and _is_question_ancestor(
-                    question.question_id,
-                    ancestor_question_id,
-                    self._store.questions,
+        repository = self._active_repository()
+        if repository is not None and not self._allow_in_memory:
+            query_repo = getattr(repository, "query_questions", None)
+            fetch_questions = getattr(repository, "fetch_questions", None)
+            if query_repo is not None:
+                questions, _ = query_repo(
+                    project_id=project_id,
+                    status=status.value if status is not None else None,
+                    question_type=question_type.value if question_type is not None else None,
+                    created_from=created_from.value if created_from is not None else None,
+                    parent_question_id=parent_question_id,
+                    ancestor_question_id=ancestor_question_id,
+                    limit=None,
+                    offset=0,
                 )
-            ]
+                self._cache_entities(
+                    "questions",
+                    questions,
+                    lambda question: question.question_id,
+                )
+            else:
+                questions = self._list_from_repository_or_store(
+                    attribute_name="questions",
+                    loader=lambda current_repository: current_repository.questions.list(),
+                    entity_id_getter=lambda question: question.question_id,
+                )
+                if project_id is not None:
+                    questions = [q for q in questions if q.project_id == project_id]
+                if status is not None:
+                    questions = [question for question in questions if question.status == status]
+                if question_type is not None:
+                    questions = [
+                        question
+                        for question in questions
+                        if question.question_type == question_type
+                    ]
+                if created_from is not None:
+                    questions = [
+                        question for question in questions if question.created_from == created_from
+                    ]
+                if parent_question_id is not None:
+                    questions = [
+                        question
+                        for question in questions
+                        if parent_question_id in question.parent_question_ids
+                    ]
+                if ancestor_question_id is not None:
+                    question_map = {question.question_id: question for question in questions}
+                    questions = [
+                        question
+                        for question in questions
+                        if question.question_id != ancestor_question_id
+                        and _is_question_ancestor(
+                            question.question_id,
+                            ancestor_question_id,
+                            question_map,
+                        )
+                    ]
+        else:
+            if project_id is None:
+                questions = list(self._store.questions.values())
+            else:
+                questions = [
+                    question
+                    for question in self._store.questions.values()
+                    if question.project_id == project_id
+                ]
+            if status is not None:
+                questions = [question for question in questions if question.status == status]
+            if question_type is not None:
+                questions = [
+                    question for question in questions if question.question_type == question_type
+                ]
+            if created_from is not None:
+                questions = [
+                    question for question in questions if question.created_from == created_from
+                ]
+            if parent_question_id is not None:
+                questions = [
+                    question
+                    for question in questions
+                    if parent_question_id in question.parent_question_ids
+                ]
+            if ancestor_question_id is not None:
+                questions = [
+                    question
+                    for question in questions
+                    if question.question_id != ancestor_question_id
+                    and _is_question_ancestor(
+                        question.question_id,
+                        ancestor_question_id,
+                        self._store.questions,
+                    )
+                ]
         if search is not None and search.strip():
             candidate_ids = [question.question_id for question in questions]
             hits = self._search_backend.search_question_ids(
                 SearchQuery(query=search, project_id=project_id),
                 question_ids=candidate_ids,
             )
-            question_map = {question.question_id: question for question in questions}
-            questions = [
-                question_map[question_id]
-                for question_id in hits
-                if question_id in question_map
-            ]
+            if repository is not None and not self._allow_in_memory and fetch_questions is not None:
+                questions = fetch_questions(hits)
+                self._cache_entities(
+                    "questions",
+                    questions,
+                    lambda question: question.question_id,
+                )
+            else:
+                question_map = {question.question_id: question for question in questions}
+                questions = [
+                    question_map[question_id]
+                    for question_id in hits
+                    if question_id in question_map
+                ]
         return questions
 
     def update_question(
@@ -185,7 +260,7 @@ class QuestionServiceMixin:
     def delete_question(self, question_id: UUID, *, actor: AuthContext | None = None) -> Question:
         require_role(actor, WRITE_ROLES)
         question = self.get_question(question_id)
-        del self._store.questions[question_id]
+        self._store.questions.pop(question_id, None)
         self._run_repository_write(lambda repository: repository.questions.delete(question_id))
         self._queue_search_op("delete_questions", [question_id])
         return question

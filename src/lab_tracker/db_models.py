@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from uuid import uuid4
 
-from sqlalchemy import DateTime, Float, ForeignKey, Integer, String, Text, UniqueConstraint
+from sqlalchemy import DateTime, Float, ForeignKey, Index, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
 from lab_tracker.db import Base
@@ -187,6 +187,11 @@ class NoteModel(Base):
         nullable=False,
     )
     raw_content: Mapped[str] = mapped_column(Text, nullable=False)
+    raw_storage_id: Mapped[str | None] = mapped_column(String(36))
+    raw_filename: Mapped[str | None] = mapped_column(String(255))
+    raw_content_type: Mapped[str | None] = mapped_column(String(255))
+    raw_size_bytes: Mapped[int | None] = mapped_column(Integer)
+    raw_checksum: Mapped[str | None] = mapped_column(String(64))
     transcribed_text: Mapped[str | None] = mapped_column(Text)
     status: Mapped[str] = mapped_column(String(20), default="staged")
     created_by: Mapped[str | None] = mapped_column(String(255))
@@ -465,3 +470,38 @@ class UserModel(Base):
     password_hash: Mapped[str] = mapped_column(String(255), nullable=False)
     role: Mapped[str] = mapped_column(String(20), nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utc_now)
+
+
+Index("ix_questions_project_created_at", QuestionModel.project_id, QuestionModel.created_at)
+Index("ix_datasets_project_created_at", DatasetModel.project_id, DatasetModel.created_at)
+Index(
+    "ix_dataset_reviews_dataset_requested_at",
+    DatasetReviewModel.dataset_id,
+    DatasetReviewModel.requested_at,
+)
+Index(
+    "ix_dataset_reviews_reviewer_status_requested_at",
+    DatasetReviewModel.reviewer_user_id,
+    DatasetReviewModel.status,
+    DatasetReviewModel.requested_at,
+)
+Index("ix_notes_project_created_at", NoteModel.project_id, NoteModel.created_at)
+Index(
+    "ix_note_targets_entity_lookup",
+    NoteTargetModel.entity_type,
+    NoteTargetModel.entity_id,
+    NoteTargetModel.note_id,
+)
+Index("ix_sessions_project_started_at", SessionModel.project_id, SessionModel.started_at)
+Index("ix_analysis_datasets_dataset_id", AnalysisDatasetModel.dataset_id)
+Index("ix_analyses_project_created_at", AnalysisModel.project_id, AnalysisModel.created_at)
+Index("ix_claim_datasets_dataset_id", ClaimDatasetModel.dataset_id)
+Index("ix_claim_analyses_analysis_id", ClaimAnalysisModel.analysis_id)
+Index("ix_claims_project_created_at", ClaimModel.project_id, ClaimModel.created_at)
+Index("ix_dataset_question_links_question_id", DatasetQuestionLinkModel.question_id)
+Index(
+    "ix_visualizations_analysis_created_at",
+    VisualizationModel.analysis_id,
+    VisualizationModel.created_at,
+)
+Index("ix_visualization_claims_claim_id", VisualizationClaimModel.claim_id)

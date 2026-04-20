@@ -1,6 +1,6 @@
 import * as React from "react";
 
-import { apiRequest, toBase64Content } from "../shared/api.js";
+import { apiRequest, buildApiPath, fetchAllPages } from "../shared/api.js";
 import { TOKEN_STORAGE_KEY } from "../shared/constants.js";
 import { useAppRoute } from "../shared/routing.jsx";
 
@@ -88,7 +88,6 @@ function useLabTrackerAppState() {
         return;
       }
 
-      const encodedProjectId = encodeURIComponent(projectId);
       const [
         nextQuestions,
         nextDatasets,
@@ -97,12 +96,14 @@ function useLabTrackerAppState() {
         nextAnalyses,
         nextVisualizations,
       ] = await Promise.all([
-        apiRequest(`/questions?project_id=${encodedProjectId}&limit=200`, { token }),
-        apiRequest(`/datasets?project_id=${encodedProjectId}&limit=200`, { token }),
-        apiRequest(`/notes?project_id=${encodedProjectId}&limit=200`, { token }),
-        apiRequest(`/sessions?project_id=${encodedProjectId}&limit=200`, { token }),
-        apiRequest(`/analyses?project_id=${encodedProjectId}&limit=200`, { token }),
-        apiRequest(`/visualizations?project_id=${encodedProjectId}&limit=200`, { token }),
+        fetchAllPages(buildApiPath("/questions", { project_id: projectId }), { token }),
+        fetchAllPages(buildApiPath("/datasets", { project_id: projectId }), { token }),
+        fetchAllPages(buildApiPath("/notes", { project_id: projectId }), { token }),
+        fetchAllPages(buildApiPath("/sessions", { project_id: projectId }), { token }),
+        fetchAllPages(buildApiPath("/analyses", { project_id: projectId }), { token }),
+        fetchAllPages(buildApiPath("/visualizations", { project_id: projectId }), {
+          token,
+        }),
       ]);
 
       setQuestions(nextQuestions);
@@ -130,7 +131,7 @@ function useLabTrackerAppState() {
     async (nextToken) => {
       const [nextUser, nextProjects] = await Promise.all([
         apiRequest("/auth/me", { token: nextToken }),
-        apiRequest("/projects", { token: nextToken }),
+        fetchAllPages("/projects", { token: nextToken }),
       ]);
       setUser(nextUser);
       setProjects(nextProjects);
@@ -158,7 +159,7 @@ function useLabTrackerAppState() {
     if (!token) {
       return;
     }
-    const nextProjects = await apiRequest("/projects", { token });
+    const nextProjects = await fetchAllPages("/projects", { token });
     setProjects(nextProjects);
     if (nextProjects.length === 0) {
       setSelectedProjectId("");
@@ -210,7 +211,7 @@ function useLabTrackerAppState() {
       }));
 
       try {
-        const items = await apiRequest(`/datasets/${datasetId}/files?limit=200`, { token });
+        const items = await fetchAllPages(`/datasets/${datasetId}/files`, { token });
         const normalized = Array.isArray(items) ? items : [];
         setDatasetFilesById((current) => ({
           ...current,
@@ -566,24 +567,25 @@ function useLabTrackerAppState() {
     setBusy(true);
     setFlash("", "");
     try {
-      const encoded = await toBase64Content(uploadFile);
-      const payload = {
-        content_base64: encoded,
-        content_type: uploadFile.type || "application/octet-stream",
-        filename: uploadFile.name,
-        project_id: selectedProjectId,
-        transcribed_text: uploadTranscript.trim() || null,
-      };
+      const payload = new FormData();
+      payload.append("file", uploadFile);
+      payload.append("project_id", selectedProjectId);
+      if (uploadTranscript.trim()) {
+        payload.append("transcribed_text", uploadTranscript.trim());
+      }
       if (uploadTargetQuestionId) {
-        payload.targets = [
-          {
-            entity_id: uploadTargetQuestionId,
-            entity_type: "question",
-          },
-        ];
+        payload.append(
+          "targets",
+          JSON.stringify([
+            {
+              entity_id: uploadTargetQuestionId,
+              entity_type: "question",
+            },
+          ])
+        );
       }
 
-      await apiRequest("/notes/upload", {
+      await apiRequest("/notes/upload-file", {
         body: payload,
         method: "POST",
         token,

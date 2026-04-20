@@ -39,7 +39,11 @@ package-dir = {"" = "src"}
 packages = ["lab_tracker", "lab_tracker.services"]
 
 [tool.setuptools.package-data]
-lab_tracker = ["frontend/*"]
+lab_tracker = [
+  "frontend/index.html",
+  "frontend/app.js",
+  "frontend/styles.css",
+]
 
 [tool.codex_orchestrator]
 env = "lab_tracker"

@@ -43,6 +43,7 @@ from lab_tracker.models import (
     EntityType,
     ExtractedEntity,
     Note,
+    NoteRawAsset,
     NoteStatus,
     OutcomeStatus,
     Project,
@@ -285,6 +286,13 @@ def note_to_model(note: Note) -> NoteModel:
         note_id=_uuid_str(note.note_id),
         project_id=_uuid_str(note.project_id),
         raw_content=note.raw_content,
+        raw_storage_id=(
+            _uuid_str(note.raw_asset.storage_id) if note.raw_asset is not None else None
+        ),
+        raw_filename=note.raw_asset.filename if note.raw_asset is not None else None,
+        raw_content_type=note.raw_asset.content_type if note.raw_asset is not None else None,
+        raw_size_bytes=note.raw_asset.size_bytes if note.raw_asset is not None else None,
+        raw_checksum=note.raw_asset.checksum if note.raw_asset is not None else None,
         transcribed_text=note.transcribed_text,
         status=note.status.value,
         created_by=note.created_by,
@@ -300,10 +308,20 @@ def note_from_model(
     tag_suggestions: Iterable[EntityTagSuggestion] = (),
     targets: Iterable[EntityRef] = (),
 ) -> Note:
+    raw_asset = None
+    if row.raw_storage_id:
+        raw_asset = NoteRawAsset(
+            storage_id=_uuid(row.raw_storage_id),
+            filename=row.raw_filename or "",
+            content_type=row.raw_content_type or "",
+            size_bytes=row.raw_size_bytes or 0,
+            checksum=row.raw_checksum or "",
+        )
     return Note(
         note_id=_uuid(row.note_id),
         project_id=_uuid(row.project_id),
         raw_content=row.raw_content,
+        raw_asset=raw_asset,
         transcribed_text=row.transcribed_text,
         extracted_entities=list(extracted_entities),
         tag_suggestions=list(tag_suggestions),
@@ -390,6 +408,13 @@ def note_target_models(note: Note) -> list[NoteTargetModel]:
 def apply_note_to_model(row: NoteModel, note: Note) -> None:
     row.project_id = _uuid_str(note.project_id)
     row.raw_content = note.raw_content
+    row.raw_storage_id = (
+        _uuid_str(note.raw_asset.storage_id) if note.raw_asset is not None else None
+    )
+    row.raw_filename = note.raw_asset.filename if note.raw_asset is not None else None
+    row.raw_content_type = note.raw_asset.content_type if note.raw_asset is not None else None
+    row.raw_size_bytes = note.raw_asset.size_bytes if note.raw_asset is not None else None
+    row.raw_checksum = note.raw_asset.checksum if note.raw_asset is not None else None
     row.transcribed_text = note.transcribed_text
     row.status = note.status.value
     row.created_by = note.created_by

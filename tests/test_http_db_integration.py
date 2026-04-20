@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import base64
+import json
+
 from fastapi.testclient import TestClient
 
 
@@ -246,3 +249,126 @@ def test_analysis_commit_route_is_atomic_on_failure(
     assert claims_get.json()["data"] == []
     assert visualizations_get.status_code == 200
     assert visualizations_get.json()["data"] == []
+
+
+def test_question_list_paginates_beyond_200_records(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+):
+    headers = admin_auth_headers
+    project_id = client.post(
+        "/projects",
+        json={"name": "Pagination Project"},
+        headers=headers,
+    ).json()["data"]["project_id"]
+
+    for index in range(205):
+        response = client.post(
+            "/questions",
+            json={
+                "project_id": project_id,
+                "text": f"Paginated question {index}",
+                "question_type": "descriptive",
+            },
+            headers=headers,
+        )
+        assert response.status_code == 201
+
+    page = client.get(
+        "/questions",
+        params={"project_id": project_id, "limit": 200, "offset": 200},
+        headers=headers,
+    )
+    assert page.status_code == 200
+    payload = page.json()
+    assert payload["meta"] == {"limit": 200, "offset": 200, "total": 205}
+    assert len(payload["data"]) == 5
+
+
+def test_note_routes_support_target_filters_and_multipart_upload(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+):
+    headers = admin_auth_headers
+    project_id = client.post(
+        "/projects",
+        json={"name": "Notes Project"},
+        headers=headers,
+    ).json()["data"]["project_id"]
+    question_id = client.post(
+        "/questions",
+        json={
+            "project_id": project_id,
+            "text": "Which dataset note is linked?",
+            "question_type": "descriptive",
+            "status": "active",
+        },
+        headers=headers,
+    ).json()["data"]["question_id"]
+    dataset_id = client.post(
+        "/datasets",
+        json={
+            "project_id": project_id,
+            "primary_question_id": question_id,
+        },
+        headers=headers,
+    ).json()["data"]["dataset_id"]
+
+    multipart_upload = client.post(
+        "/notes/upload-file",
+        data={
+            "project_id": project_id,
+            "transcribed_text": "typed capture",
+            "targets": json.dumps(
+                [
+                    {
+                        "entity_id": dataset_id,
+                        "entity_type": "dataset",
+                    }
+                ]
+            ),
+            "metadata": json.dumps({"source": "camera"}),
+        },
+        files={"file": ("capture.txt", b"raw-capture", "text/plain")},
+        headers=headers,
+    )
+    assert multipart_upload.status_code == 201
+    multipart_payload = multipart_upload.json()["data"]
+    assert multipart_payload["transcribed_text"] == "typed capture"
+    assert multipart_payload["metadata"] == {"source": "camera"}
+    assert multipart_payload["raw_asset"]["filename"] == "capture.txt"
+    assert multipart_payload["targets"][0]["entity_type"] == "dataset"
+    assert multipart_payload["targets"][0]["entity_id"] == dataset_id
+
+    raw_download = client.get(
+        f"/notes/{multipart_payload['note_id']}/raw",
+        headers=headers,
+    )
+    assert raw_download.status_code == 200
+    assert raw_download.content == b"raw-capture"
+
+    legacy_upload = client.post(
+        "/notes/upload",
+        json={
+            "content_base64": base64.b64encode(b"legacy-capture").decode("ascii"),
+            "content_type": "text/plain",
+            "filename": "legacy.txt",
+            "project_id": project_id,
+        },
+        headers=headers,
+    )
+    assert legacy_upload.status_code == 201
+
+    filtered = client.get(
+        "/notes",
+        params={
+            "project_id": project_id,
+            "target_entity_type": "dataset",
+            "target_entity_id": dataset_id,
+        },
+        headers=headers,
+    )
+    assert filtered.status_code == 200
+    filtered_payload = filtered.json()
+    assert filtered_payload["meta"]["total"] == 1
+    assert _ids(filtered_payload["data"], "note_id") == {multipart_payload["note_id"]}

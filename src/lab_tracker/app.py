@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 import logging
 import os
@@ -12,11 +13,10 @@ from fastapi import Depends, FastAPI, Request
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy import func, select
 from sqlalchemy.exc import SQLAlchemyError
-from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session, sessionmaker
 from starlette.responses import FileResponse, JSONResponse, RedirectResponse
 
-from lab_tracker.api import LabTrackerAPI
+from lab_tracker.api import InMemoryStore, LabTrackerAPI
 from lab_tracker.api_routes import register_routes
 from lab_tracker.auth import AuthContext, AuthService, TokenService, extract_bearer_token
 from lab_tracker.config import get_settings
@@ -172,23 +172,68 @@ def _database_check(session_factory: sessionmaker[Session]) -> dict[str, str]:
     }
 
 
+def _search_check(api: LabTrackerAPI) -> dict[str, str]:
+    snapshot = api.search_health()
+    if not snapshot.degraded:
+        return {
+            "name": "search",
+            "status": "ok",
+            "backend": snapshot.backend_name,
+        }
+    return {
+        "name": "search",
+        "status": "fail",
+        "backend": snapshot.backend_name,
+        "detail": snapshot.last_failure_message or "search backend degraded",
+        "operation": snapshot.last_failure_operation or "unknown",
+        "repair": (
+            "run `uv run python -m lab_tracker.reindex --reset` for persistent backends; "
+            "restart the app to rebuild the in-memory default backend"
+        ),
+    }
+
+
 def _metrics_snapshot(
     session_factory: sessionmaker[Session],
     *,
     environment: str,
     app_name: str,
+    api: LabTrackerAPI,
 ) -> dict[str, Any]:
     now = datetime.now(timezone.utc)
     store, database_error = _store_counts_from_database(session_factory)
+    search_snapshot = api.search_health()
     payload: dict[str, Any] = {
-        "status": "ok" if database_error is None else "fail",
+        "status": "ok" if database_error is None and not search_snapshot.degraded else "fail",
         "timestamp": now.isoformat(),
         "uptime_seconds": (now - _START_TIME).total_seconds(),
         "app": {"name": app_name, "environment": environment},
         "store": store,
+        "search": {
+            "backend": search_snapshot.backend_name,
+            "degraded": search_snapshot.degraded,
+            "failure_count": search_snapshot.failure_count,
+            "last_failure_at": search_snapshot.last_failure_at,
+            "last_failure_message": search_snapshot.last_failure_message,
+            "last_failure_operation": search_snapshot.last_failure_operation,
+            "repair": (
+                "run `uv run python -m lab_tracker.reindex --reset` for persistent backends; "
+                "restart the app to rebuild the in-memory default backend"
+            ),
+        },
     }
+    errors: list[dict[str, str]] = []
     if database_error is not None:
-        payload["errors"] = [{"name": "database", "detail": database_error}]
+        errors.append({"name": "database", "detail": database_error})
+    if search_snapshot.degraded:
+        errors.append(
+            {
+                "name": "search",
+                "detail": search_snapshot.last_failure_message or "search backend degraded",
+            }
+        )
+    if errors:
+        payload["errors"] = errors
     return payload
 
 
@@ -259,12 +304,6 @@ def _configure_database_session_middleware(
                 db_session.close()
 
 
-def _configure_database_shutdown_hook(app: FastAPI, *, engine: Engine) -> None:
-    @app.on_event("shutdown")
-    def dispose_engine() -> None:
-        engine.dispose()
-
-
 def _configure_frontend_routes(app: FastAPI) -> None:
     index_file = _FRONTEND_DIR / "index.html"
     if not index_file.exists():
@@ -299,37 +338,51 @@ def create_app() -> FastAPI:
         settings.auth_secret_key,
         ttl_minutes=settings.auth_token_ttl_minutes,
     )
+    file_storage_backend = LocalFileStorageBackend(settings.file_storage_path)
+    raw_note_storage = LocalNoteStorage(settings.note_storage_path)
+    search_backend = build_search_backend(settings)
+    ocr_backend = default_ocr_backend(
+        tesseract_cmd=settings.ocr_tesseract_cmd,
+        languages=settings.ocr_tesseract_languages,
+    )
+    lab_tracker_api = LabTrackerAPI(
+        raw_storage=raw_note_storage,
+        search_backend=search_backend,
+        ocr_backend=ocr_backend,
+    )
+
+    @asynccontextmanager
+    async def lifespan(app: FastAPI):
+        try:
+            with session_factory() as bootstrap_session:
+                app.state.lab_tracker_api.hydrate_from_repository(
+                    SQLAlchemyLabTrackerRepository(bootstrap_session),
+                    store=InMemoryStore(),
+                )
+        except SQLAlchemyError:
+            # Schema setup is validated separately; startup should still succeed for health checks.
+            pass
+        try:
+            yield
+        finally:
+            engine.dispose()
+
     app = FastAPI(
         title=settings.app_name,
         dependencies=[Depends(get_sqlalchemy_repository)],
+        lifespan=lifespan,
     )
     app.state.db_engine = engine
     app.state.db_session_factory = session_factory
     app.state.auth_service = auth_service
     app.state.token_service = token_service
-    app.state.file_storage_backend = LocalFileStorageBackend(settings.file_storage_path)
-    app.state.raw_note_storage = LocalNoteStorage(settings.note_storage_path)
-    app.state.search_backend = build_search_backend(settings)
-    app.state.ocr_backend = default_ocr_backend(
-        tesseract_cmd=settings.ocr_tesseract_cmd,
-        languages=settings.ocr_tesseract_languages,
-    )
-    app.state.lab_tracker_api = LabTrackerAPI(
-        raw_storage=app.state.raw_note_storage,
-        search_backend=app.state.search_backend,
-        ocr_backend=app.state.ocr_backend,
-    )
+    app.state.file_storage_backend = file_storage_backend
+    app.state.raw_note_storage = raw_note_storage
+    app.state.search_backend = search_backend
+    app.state.ocr_backend = ocr_backend
+    app.state.lab_tracker_api = lab_tracker_api
     _configure_auth_middleware(app)
     _configure_database_session_middleware(app, api=app.state.lab_tracker_api)
-    _configure_database_shutdown_hook(app, engine=engine)
-    try:
-        with session_factory() as bootstrap_session:
-            app.state.lab_tracker_api.hydrate_from_repository(
-                SQLAlchemyLabTrackerRepository(bootstrap_session)
-            )
-    except SQLAlchemyError:
-        # Schema setup is validated separately; startup should still succeed for health checks.
-        pass
 
     @app.get("/health")
     def health() -> dict[str, str]:
@@ -339,6 +392,7 @@ def create_app() -> FastAPI:
     def readiness():
         checks = [
             _database_check(session_factory),
+            _search_check(app.state.lab_tracker_api),
             _note_storage_check(Path(settings.note_storage_path)),
             _file_storage_check(Path(settings.file_storage_path)),
         ]
@@ -358,6 +412,7 @@ def create_app() -> FastAPI:
             session_factory,
             environment=settings.environment,
             app_name=settings.app_name,
+            api=app.state.lab_tracker_api,
         )
 
     _configure_frontend_routes(app)

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from typing import Iterable
+from typing import BinaryIO, Iterable
 from uuid import UUID, uuid4
 
 from lab_tracker.auth import AuthContext, require_role
@@ -32,7 +32,6 @@ from lab_tracker.services.shared import (
     _build_extracted_entity,
     _build_note_provenance,
     _build_note_tag_provenance,
-    _get_or_raise,
     _normalize_note_metadata,
     _resolve_tag_mappings,
     _tag_suggestion_key,
@@ -173,13 +172,36 @@ class NoteServiceMixin:
         self._queue_search_op("upsert_notes", [note])
         return note
 
-    def upload_note_raw(
+    def store_note_raw_asset(
         self,
-        project_id: UUID,
-        content: bytes,
+        stream: BinaryIO,
         *,
         filename: str,
         content_type: str,
+    ) -> NoteRawAsset:
+        if self._raw_storage is None:
+            raise ValidationError("Raw storage backend is not configured.")
+        store_stream = getattr(self._raw_storage, "store_stream", None)
+        if callable(store_stream):
+            return store_stream(
+                stream,
+                filename=filename,
+                content_type=content_type,
+            )
+        return self._raw_storage.store(
+            stream.read(),
+            filename=filename,
+            content_type=content_type,
+        )
+
+    def upload_note_raw(
+        self,
+        project_id: UUID,
+        content: bytes | None = None,
+        *,
+        filename: str | None = None,
+        content_type: str | None = None,
+        raw_asset: NoteRawAsset | None = None,
         transcribed_text: str | None = None,
         extracted_entities: Iterable[ExtractedEntity | tuple[str, float, str]] | None = None,
         targets: Iterable[EntityRef] | None = None,
@@ -191,14 +213,29 @@ class NoteServiceMixin:
         require_role(actor, WRITE_ROLES)
         if self._raw_storage is None:
             raise ValidationError("Raw storage backend is not configured.")
-        asset = self._raw_storage.store(
-            content,
-            filename=filename,
-            content_type=content_type,
-        )
+        asset = raw_asset
+        resolved_content = content
+        if asset is None:
+            if resolved_content is None:
+                raise ValidationError("content must not be empty.")
+            asset = self._raw_storage.store(
+                resolved_content,
+                filename=(filename or "").strip(),
+                content_type=(content_type or "").strip(),
+            )
+        elif (
+            resolved_content is None
+            and transcribed_text is None
+            and asset.content_type.strip().lower().startswith("image/")
+        ):
+            resolved_content = self._raw_storage.read(asset.storage_id)
 
         resolved_transcribed_text = transcribed_text.strip() if transcribed_text else None
-        if resolved_transcribed_text is None and _should_attempt_ocr(content, content_type):
+        if (
+            resolved_transcribed_text is None
+            and resolved_content is not None
+            and _should_attempt_ocr(resolved_content, asset.content_type)
+        ):
             ocr_backend = getattr(self, "_ocr_backend", None)
             if ocr_backend is None:
                 global _OCR_UNAVAILABLE_WARNED
@@ -210,13 +247,13 @@ class NoteServiceMixin:
                     _OCR_UNAVAILABLE_WARNED = True
             else:
                 try:
-                    result = ocr_backend.extract_text(content, content_type)
+                    result = ocr_backend.extract_text(resolved_content, asset.content_type)
                     resolved_transcribed_text = result.text.strip() if result.text else None
                 except Exception as exc:
                     _logger.warning(
                         "OCR failed for uploaded note %s (content_type=%s): %s",
-                        filename,
-                        content_type,
+                        asset.filename,
+                        asset.content_type,
                         exc,
                         exc_info=True,
                     )
@@ -234,12 +271,77 @@ class NoteServiceMixin:
         )
 
     def get_note(self, note_id: UUID) -> Note:
-        return _get_or_raise(self._store.notes, note_id, "Note")
+        return self._get_from_repository_or_store(
+            attribute_name="notes",
+            entity_id=note_id,
+            label="Note",
+            loader=lambda repository: repository.notes.get(note_id),
+        )
 
-    def list_notes(self, *, project_id: UUID | None = None) -> list[Note]:
+    def list_notes(
+        self,
+        *,
+        project_id: UUID | None = None,
+        status: NoteStatus | None = None,
+        target_entity_type: EntityType | None = None,
+        target_entity_id: UUID | None = None,
+    ) -> list[Note]:
+        repository = self._active_repository()
+        if repository is not None and not self._allow_in_memory:
+            query_repo = getattr(repository, "query_notes", None)
+            if query_repo is not None:
+                notes, _ = query_repo(
+                    project_id=project_id,
+                    status=status.value if status is not None else None,
+                    target_entity_type=(
+                        target_entity_type.value if target_entity_type is not None else None
+                    ),
+                    target_entity_id=target_entity_id,
+                    limit=None,
+                    offset=0,
+                )
+                return self._cache_entities(
+                    "notes",
+                    notes,
+                    lambda note: note.note_id,
+                )
+            notes = self._list_from_repository_or_store(
+                attribute_name="notes",
+                loader=lambda current_repository: current_repository.notes.list(),
+                entity_id_getter=lambda note: note.note_id,
+            )
+            if project_id is not None:
+                notes = [note for note in notes if note.project_id == project_id]
+            if status is not None:
+                notes = [note for note in notes if note.status == status]
+            if target_entity_type is not None and target_entity_id is not None:
+                notes = [
+                    note
+                    for note in notes
+                    if any(
+                        target.entity_type == target_entity_type
+                        and target.entity_id == target_entity_id
+                        for target in note.targets
+                    )
+                ]
+            return notes
         if project_id is None:
-            return list(self._store.notes.values())
-        return [n for n in self._store.notes.values() if n.project_id == project_id]
+            notes = list(self._store.notes.values())
+        else:
+            notes = [n for n in self._store.notes.values() if n.project_id == project_id]
+        if status is not None:
+            notes = [note for note in notes if note.status == status]
+        if target_entity_type is not None and target_entity_id is not None:
+            notes = [
+                note
+                for note in notes
+                if any(
+                    target.entity_type == target_entity_type
+                    and target.entity_id == target_entity_id
+                    for target in note.targets
+                )
+            ]
+        return notes
 
     def update_note(
         self,
@@ -371,7 +473,7 @@ class NoteServiceMixin:
     def delete_note(self, note_id: UUID, *, actor: AuthContext | None = None) -> Note:
         require_role(actor, WRITE_ROLES)
         note = self.get_note(note_id)
-        del self._store.notes[note_id]
+        self._store.notes.pop(note_id, None)
         self._run_repository_write(lambda repository: repository.notes.delete(note_id))
         self._queue_search_op("delete_notes", [note_id])
         return note
@@ -481,22 +583,20 @@ class NoteServiceMixin:
         return extracted
 
     def _ensure_target_exists(self, target: EntityRef, project_id: UUID) -> None:
-        entity_map = {
-            EntityType.PROJECT: self._store.projects,
-            EntityType.QUESTION: self._store.questions,
-            EntityType.DATASET: self._store.datasets,
-            EntityType.NOTE: self._store.notes,
-            EntityType.SESSION: self._store.sessions,
-            EntityType.ANALYSIS: self._store.analyses,
-            EntityType.CLAIM: self._store.claims,
-            EntityType.VISUALIZATION: self._store.visualizations,
+        entity_getters = {
+            EntityType.PROJECT: self.get_project,
+            EntityType.QUESTION: self.get_question,
+            EntityType.DATASET: self.get_dataset,
+            EntityType.NOTE: self.get_note,
+            EntityType.SESSION: self.get_session,
+            EntityType.ANALYSIS: self.get_analysis,
+            EntityType.CLAIM: self.get_claim,
+            EntityType.VISUALIZATION: self.get_visualization,
         }
-        store = entity_map.get(target.entity_type)
-        if store is None:
+        getter = entity_getters.get(target.entity_type)
+        if getter is None:
             raise ValidationError("Unsupported target entity type.")
-        entity = store.get(target.entity_id)
-        if entity is None:
-            raise NotFoundError(f"{target.entity_type.value.capitalize()} does not exist.")
+        entity = getter(target.entity_id)
         if target.entity_type == EntityType.VISUALIZATION:
             analysis = self.get_analysis(entity.analysis_id)
             if analysis.project_id != project_id:

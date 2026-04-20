@@ -8,7 +8,19 @@ function parseApiError(payload, fallbackMessage) {
   return fallbackMessage;
 }
 
-async function apiRequest(path, options = {}) {
+function buildApiPath(path, params = {}) {
+  const url = new URL(path, "http://lab-tracker.local");
+  Object.entries(params).forEach(([key, value]) => {
+    if (value === null || value === undefined || value === "") {
+      url.searchParams.delete(key);
+      return;
+    }
+    url.searchParams.set(key, String(value));
+  });
+  return `${url.pathname}${url.search}${url.hash}`;
+}
+
+async function apiFetch(path, options = {}) {
   const { method = "GET", token = "", body = null } = options;
   const isFormData = typeof FormData !== "undefined" && body instanceof FormData;
   const headers = {
@@ -38,27 +50,65 @@ async function apiRequest(path, options = {}) {
     throw error;
   }
 
+  return payload;
+}
+
+async function apiRequest(path, options = {}) {
+  const payload = await apiFetch(path, options);
   if (!payload || !Object.prototype.hasOwnProperty.call(payload, "data")) {
     return null;
   }
   return payload.data;
 }
 
-function toBase64Content(file) {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onerror = () => reject(new Error("Unable to read file."));
-    reader.onload = () => {
-      const value = String(reader.result || "");
-      const marker = value.indexOf(",");
-      if (marker < 0) {
-        reject(new Error("Unable to parse uploaded file."));
-        return;
-      }
-      resolve(value.slice(marker + 1));
-    };
-    reader.readAsDataURL(file);
-  });
+async function apiListRequest(path, options = {}) {
+  const payload = await apiFetch(path, options);
+  const data = Array.isArray(payload?.data) ? payload.data : [];
+  const meta =
+    payload && typeof payload.meta === "object" && payload.meta !== null
+      ? payload.meta
+      : {
+          limit: data.length,
+          offset: 0,
+          total: data.length,
+        };
+  return { data, meta };
 }
 
-export { apiRequest, parseApiError, toBase64Content };
+async function fetchAllPages(path, options = {}) {
+  const { limit = 200, ...requestOptions } = options;
+  const items = [];
+  let offset = 0;
+  let total = null;
+
+  while (true) {
+    const { data, meta } = await apiListRequest(
+      buildApiPath(path, { limit, offset }),
+      requestOptions
+    );
+    items.push(...data);
+
+    const resolvedLimit =
+      typeof meta?.limit === "number" && meta.limit > 0 ? meta.limit : limit;
+    const resolvedOffset = typeof meta?.offset === "number" ? meta.offset : offset;
+    if (typeof meta?.total === "number") {
+      total = meta.total;
+    }
+
+    if (data.length === 0) {
+      break;
+    }
+    if (total !== null && items.length >= total) {
+      break;
+    }
+    if (data.length < resolvedLimit) {
+      break;
+    }
+
+    offset = resolvedOffset + data.length;
+  }
+
+  return items;
+}
+
+export { apiRequest, apiListRequest, buildApiPath, fetchAllPages, parseApiError };

@@ -2,7 +2,7 @@ from datetime import datetime, timedelta, timezone
 from uuid import uuid4
 
 import pytest
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, event
 from sqlalchemy.orm import sessionmaker
 
 from lab_tracker.db import Base
@@ -190,3 +190,161 @@ def test_acquisition_output_repository_crud(db_session):
     repo.commit()
     assert deleted == output
     assert repo.acquisition_outputs.get(output.output_id) is None
+
+
+def test_query_questions_applies_filters_and_pagination(db_session):
+    repo = SQLAlchemyLabTrackerRepository(db_session)
+    project = Project(
+        project_id=uuid4(),
+        name="Filtered questions",
+        status=ProjectStatus.ACTIVE,
+        created_at=_ts(),
+        updated_at=_ts(),
+    )
+    repo.projects.save(project)
+
+    active_ids = []
+    for index in range(3):
+        question = Question(
+            question_id=uuid4(),
+            project_id=project.project_id,
+            text=f"Question {index}",
+            question_type=QuestionType.DESCRIPTIVE,
+            status=QuestionStatus.ACTIVE if index < 2 else QuestionStatus.STAGED,
+            parent_question_ids=[],
+            created_from=QuestionSource.API,
+            created_at=_ts(index + 1),
+            updated_at=_ts(index + 1),
+        )
+        repo.questions.save(question)
+        if question.status == QuestionStatus.ACTIVE:
+            active_ids.append(question.question_id)
+    repo.commit()
+
+    page, total = repo.query_questions(
+        project_id=project.project_id,
+        status=QuestionStatus.ACTIVE.value,
+        limit=1,
+        offset=1,
+    )
+
+    assert total == 2
+    assert len(page) == 1
+    assert page[0].question_id == active_ids[1]
+
+
+def test_note_repository_list_batches_child_queries(db_session):
+    repo = SQLAlchemyLabTrackerRepository(db_session)
+    project = Project(
+        project_id=uuid4(),
+        name="Batch notes",
+        status=ProjectStatus.ACTIVE,
+        created_at=_ts(),
+        updated_at=_ts(),
+    )
+    repo.projects.save(project)
+    for index in range(2):
+        repo.notes.save(
+            Note(
+                note_id=uuid4(),
+                project_id=project.project_id,
+                raw_content=f"note {index}",
+                extracted_entities=[
+                    ExtractedEntity(label=f"entity-{index}", confidence=0.9, provenance="ocr")
+                ],
+                tag_suggestions=[
+                    EntityTagSuggestion(
+                        suggestion_id=uuid4(),
+                        entity_label=f"entity-{index}",
+                        vocabulary="UBERON",
+                        term_id=f"term-{index}",
+                        term_label=f"Entity {index}",
+                        confidence=0.9,
+                        provenance="nlp",
+                        status=TagSuggestionStatus.STAGED,
+                    )
+                ],
+                targets=[
+                    EntityRef(
+                        entity_type=EntityType.PROJECT,
+                        entity_id=project.project_id,
+                    )
+                ],
+                status=NoteStatus.STAGED,
+                created_at=_ts(index + 1),
+                updated_at=_ts(index + 1),
+            )
+        )
+    repo.commit()
+
+    select_count = 0
+
+    def before_cursor_execute(
+        conn,
+        cursor,
+        statement,
+        parameters,
+        context,
+        executemany,
+    ):
+        nonlocal select_count
+        if statement.lstrip().upper().startswith("SELECT"):
+            select_count += 1
+
+    engine = db_session.get_bind()
+    event.listen(engine, "before_cursor_execute", before_cursor_execute)
+    try:
+        notes = repo.notes.list()
+    finally:
+        event.remove(engine, "before_cursor_execute", before_cursor_execute)
+
+    assert len(notes) == 2
+    assert select_count == 4
+
+
+def test_query_notes_filters_by_target(db_session):
+    repo = SQLAlchemyLabTrackerRepository(db_session)
+    project = Project(
+        project_id=uuid4(),
+        name="Note targets",
+        status=ProjectStatus.ACTIVE,
+        created_at=_ts(),
+        updated_at=_ts(),
+    )
+    dataset_target = uuid4()
+    other_target = uuid4()
+    repo.projects.save(project)
+    repo.notes.save(
+        Note(
+            note_id=uuid4(),
+            project_id=project.project_id,
+            raw_content="dataset note",
+            targets=[EntityRef(entity_type=EntityType.DATASET, entity_id=dataset_target)],
+            status=NoteStatus.STAGED,
+            created_at=_ts(1),
+            updated_at=_ts(1),
+        )
+    )
+    repo.notes.save(
+        Note(
+            note_id=uuid4(),
+            project_id=project.project_id,
+            raw_content="other note",
+            targets=[EntityRef(entity_type=EntityType.DATASET, entity_id=other_target)],
+            status=NoteStatus.STAGED,
+            created_at=_ts(2),
+            updated_at=_ts(2),
+        )
+    )
+    repo.commit()
+
+    notes, total = repo.query_notes(
+        project_id=project.project_id,
+        target_entity_type=EntityType.DATASET.value,
+        target_entity_id=dataset_target,
+        limit=None,
+        offset=0,
+    )
+
+    assert total == 1
+    assert [note.raw_content for note in notes] == ["dataset note"]

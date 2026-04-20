@@ -1,6 +1,6 @@
 import * as React from "react";
 
-import { apiRequest } from "../shared/api.js";
+import { buildApiPath, fetchAllPages } from "../shared/api.js";
 import { formatBytes, formatDate, sessionTypeClass } from "../shared/formatters.js";
 import { AppLink } from "../shared/routing.jsx";
 import { useApiResource } from "../hooks/useApiResource.js";
@@ -277,7 +277,7 @@ function SessionDetailCard({
     }
 
     setOutputsState({ loading: true, error: "", items: [] });
-    apiRequest(`/sessions/${sessionId}/outputs?limit=200`, { token })
+    fetchAllPages(`/sessions/${sessionId}/outputs`, { token })
       .then((items) => {
         if (canceled) {
           return;
@@ -315,25 +315,25 @@ function SessionDetailCard({
     }
 
     setNoteState({ loading: true, error: "", items: [] });
-    const encodedProjectId = encodeURIComponent(session.project_id);
-    apiRequest(`/notes?project_id=${encodedProjectId}&limit=200`, { token })
+    fetchAllPages(
+      buildApiPath("/notes", {
+        project_id: session.project_id,
+        target_entity_type: "session",
+        target_entity_id: session.session_id,
+      }),
+      { token }
+    )
       .then((items) => {
         if (canceled) {
           return;
         }
         const normalized = Array.isArray(items) ? items : [];
-        const linked = normalized.filter((note) => {
-          const targets = Array.isArray(note.targets) ? note.targets : [];
-          return targets.some(
-            (target) => target.entity_type === "session" && target.entity_id === session.session_id
-          );
-        });
-        linked.sort((a, b) => {
+        normalized.sort((a, b) => {
           const aTime = Date.parse(a.created_at || "") || 0;
           const bTime = Date.parse(b.created_at || "") || 0;
           return bTime - aTime;
         });
-        setNoteState({ loading: false, error: "", items: linked });
+        setNoteState({ loading: false, error: "", items: normalized });
       })
       .catch((err) => {
         if (!canceled) {

@@ -9,7 +9,6 @@ from lab_tracker.models import Project, ProjectReviewPolicy, ProjectStatus, utc_
 from lab_tracker.services.shared import (
     WRITE_ROLES,
     _ensure_non_empty,
-    _get_or_raise,
 )
 
 
@@ -39,10 +38,19 @@ class ProjectServiceMixin:
         return project
 
     def get_project(self, project_id: UUID) -> Project:
-        return _get_or_raise(self._store.projects, project_id, "Project")
+        return self._get_from_repository_or_store(
+            attribute_name="projects",
+            entity_id=project_id,
+            label="Project",
+            loader=lambda repository: repository.projects.get(project_id),
+        )
 
     def list_projects(self) -> list[Project]:
-        return list(self._store.projects.values())
+        return self._list_from_repository_or_store(
+            attribute_name="projects",
+            loader=lambda repository: repository.projects.list(),
+            entity_id_getter=lambda project: project.project_id,
+        )
 
     def update_project(
         self,
@@ -72,6 +80,6 @@ class ProjectServiceMixin:
     def delete_project(self, project_id: UUID, *, actor: AuthContext | None = None) -> Project:
         require_role(actor, WRITE_ROLES)
         project = self.get_project(project_id)
-        del self._store.projects[project_id]
+        self._store.projects.pop(project_id, None)
         self._run_repository_write(lambda repository: repository.projects.delete(project_id))
         return project
