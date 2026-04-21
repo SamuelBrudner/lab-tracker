@@ -31,6 +31,17 @@ from lab_tracker.services.shared import (
 
 
 class QuestionServiceMixin:
+    def _question_graph(self, project_id: UUID) -> dict[UUID, Question]:
+        repository = self._active_repository()
+        if repository is not None and not self._allow_in_memory:
+            questions, _ = repository.query_questions(
+                project_id=project_id,
+                limit=None,
+                offset=0,
+            )
+            return {question.question_id: question for question in questions}
+        return self._store.questions
+
     def create_question(
         self,
         project_id: UUID,
@@ -53,7 +64,11 @@ class QuestionServiceMixin:
             parent = self.get_question(parent_id)
             if parent.project_id != project_id:
                 raise ValidationError("Parent question must belong to the same project.")
-        _ensure_question_parents_dag(question_id, parent_ids, self._store.questions)
+        _ensure_question_parents_dag(
+            question_id,
+            parent_ids,
+            self._question_graph(project_id),
+        )
         question = Question(
             question_id=question_id,
             project_id=project_id,
@@ -226,7 +241,11 @@ class QuestionServiceMixin:
                 parent = self.get_question(parent_id)
                 if parent.project_id != question.project_id:
                     raise ValidationError("Parent question must belong to the same project.")
-            _ensure_question_parents_dag(question.question_id, parent_ids, self._store.questions)
+            _ensure_question_parents_dag(
+                question.question_id,
+                parent_ids,
+                self._question_graph(question.project_id),
+            )
             question.parent_question_ids = parent_ids
         question.updated_at = utc_now()
         self._run_repository_write(lambda repository: repository.questions.save(question))

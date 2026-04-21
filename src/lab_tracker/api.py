@@ -147,10 +147,13 @@ class LabTrackerAPI(
         self._search_last_failure_message: str | None = None
         self._search_last_failure_operation: str | None = None
         if repository is not None:
-            self.hydrate_from_repository(
-                repository,
-                hydrate_search_backend=self._should_sync_search_backend(),
-            )
+            if self._allow_in_memory:
+                self.hydrate_from_repository(
+                    repository,
+                    hydrate_search_backend=self._should_sync_search_backend(),
+                )
+            elif self._should_sync_search_backend():
+                self._hydrate_search_backend(self._build_store_from_repository(repository))
         elif self._should_sync_search_backend():
             self._hydrate_search_backend()
 
@@ -179,6 +182,9 @@ class LabTrackerAPI(
     def _is_repository_backed(self) -> bool:
         return self._active_repository() is not None and not self._allow_in_memory
 
+    def _uses_in_memory_entity_cache(self) -> bool:
+        return not self._is_repository_backed()
+
     def _uses_live_repository_substring_search(self) -> bool:
         return (
             self._is_repository_backed()
@@ -192,6 +198,8 @@ class LabTrackerAPI(
         return getattr(self._store, attribute_name)
 
     def _cache_entity(self, attribute_name: str, entity_id: UUID, entity: object):
+        if not self._uses_in_memory_entity_cache():
+            return entity
         self._cache_map(attribute_name)[entity_id] = entity
         return entity
 
@@ -201,12 +209,16 @@ class LabTrackerAPI(
         entities: list[object],
         entity_id_getter: Callable[[object], UUID],
     ) -> list[object]:
+        if not self._uses_in_memory_entity_cache():
+            return entities
         cache = self._cache_map(attribute_name)
         for entity in entities:
             cache[entity_id_getter(entity)] = entity
         return entities
 
     def _get_cached_entity(self, attribute_name: str, entity_id: UUID):
+        if not self._uses_in_memory_entity_cache():
+            return None
         return self._cache_map(attribute_name).get(entity_id)
 
     def _get_from_repository_or_store(

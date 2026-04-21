@@ -3,6 +3,7 @@ from __future__ import annotations
 from uuid import uuid4
 
 from fastapi.testclient import TestClient
+import pytest
 from sqlalchemy import create_engine
 
 from lab_tracker.api import LabTrackerAPI
@@ -10,6 +11,7 @@ from lab_tracker.app import create_app
 from lab_tracker.auth import AuthContext, Role
 from lab_tracker.db import Base, get_session_factory
 from lab_tracker.db_models import NoteModel, ProjectModel, QuestionModel
+from lab_tracker.errors import ValidationError
 from lab_tracker.models import QuestionType, SessionType
 from lab_tracker.sqlalchemy_repository import SQLAlchemyLabTrackerRepository
 
@@ -88,6 +90,86 @@ def test_repository_backed_api_persists_core_entities(tmp_path):
         assert api.get_session(created_session.session_id).project_id == project.project_id
         outputs = api.list_acquisition_outputs(session_id=created_session.session_id)
         assert outputs == [created_output]
+
+    engine.dispose()
+
+
+def test_repository_backed_api_updates_existing_acquisition_output_without_store_cache(tmp_path):
+    db_path = tmp_path / "api-output-upsert.db"
+    engine = create_engine(
+        f"sqlite+pysqlite:///{db_path}",
+        future=True,
+        connect_args={"check_same_thread": False},
+    )
+    Base.metadata.create_all(bind=engine)
+    session_factory = get_session_factory(engine=engine)
+    actor = _actor()
+
+    with session_factory() as session:
+        api = LabTrackerAPI(repository=SQLAlchemyLabTrackerRepository(session))
+        project = api.create_project("Persistence Project", actor=actor)
+        created_session = api.create_session(
+            project_id=project.project_id,
+            session_type=SessionType.OPERATIONAL,
+            actor=actor,
+        )
+        first = api.register_acquisition_output(
+            created_session.session_id,
+            file_path="capture/output.bin",
+            checksum="abc123",
+            size_bytes=12,
+            actor=actor,
+        )
+        updated = api.register_acquisition_output(
+            created_session.session_id,
+            file_path="capture/output.bin",
+            checksum="def456",
+            size_bytes=24,
+            actor=actor,
+        )
+
+        assert updated.output_id == first.output_id
+        assert updated.checksum == "def456"
+        assert updated.size_bytes == 24
+        assert len(api.list_acquisition_outputs(session_id=created_session.session_id)) == 1
+
+    engine.dispose()
+
+
+def test_repository_backed_api_rejects_question_parent_cycles_without_store_cache(tmp_path):
+    db_path = tmp_path / "api-question-cycles.db"
+    engine = create_engine(
+        f"sqlite+pysqlite:///{db_path}",
+        future=True,
+        connect_args={"check_same_thread": False},
+    )
+    Base.metadata.create_all(bind=engine)
+    session_factory = get_session_factory(engine=engine)
+    actor = _actor()
+
+    with session_factory() as session:
+        api = LabTrackerAPI(repository=SQLAlchemyLabTrackerRepository(session))
+        project = api.create_project("Persistence Project", actor=actor)
+        parent = api.create_question(
+            project_id=project.project_id,
+            text="Parent question",
+            question_type=QuestionType.DESCRIPTIVE,
+            actor=actor,
+        )
+        child = api.create_question(
+            project_id=project.project_id,
+            text="Child question",
+            question_type=QuestionType.DESCRIPTIVE,
+            parent_question_ids=[parent.question_id],
+            actor=actor,
+        )
+
+        with pytest.raises(ValidationError, match="acyclic"):
+            api.update_question(
+                parent.question_id,
+                parent_question_ids=[child.question_id],
+                actor=actor,
+            )
 
     engine.dispose()
 

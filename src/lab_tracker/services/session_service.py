@@ -32,6 +32,25 @@ from lab_tracker.services.shared import (
 
 
 class SessionServiceMixin:
+    def _find_existing_acquisition_output(
+        self,
+        session_id: UUID,
+        file_path: str,
+    ) -> AcquisitionOutput | None:
+        repository = self._active_repository()
+        if repository is not None and not self._allow_in_memory:
+            outputs, _ = repository.query_acquisition_outputs(
+                session_id=session_id,
+                limit=None,
+                offset=0,
+            )
+            return _find_acquisition_output(
+                {output.output_id: output for output in outputs},
+                session_id,
+                file_path,
+            )
+        return _find_acquisition_output(self._store.acquisition_outputs, session_id, file_path)
+
     def create_session(
         self,
         project_id: UUID,
@@ -138,9 +157,7 @@ class SessionServiceMixin:
             raise ValidationError("size_bytes must be 0 or greater.")
         cleaned_path = file_path.strip()
         cleaned_checksum = checksum.strip()
-        existing = _find_acquisition_output(
-            self._store.acquisition_outputs, session_id, cleaned_path
-        )
+        existing = self._find_existing_acquisition_output(session_id, cleaned_path)
         if existing is not None:
             updated = False
             if existing.checksum != cleaned_checksum:
