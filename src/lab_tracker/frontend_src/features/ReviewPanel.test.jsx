@@ -4,7 +4,7 @@ import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { vi } from "vitest";
 
 import { ReviewPanel } from "./reviews.jsx";
-import { apiResponse, installFetchMock } from "../test/utils.js";
+import { apiResponse, binaryResponse, errorResponse, installFetchMock } from "../test/utils.js";
 
 describe("ReviewPanel", () => {
   it("loads the pending queue and review detail", async () => {
@@ -178,5 +178,104 @@ describe("ReviewPanel", () => {
       expect(onFlash).toHaveBeenCalledWith("Dataset review approved.");
       expect(onRefreshActiveProject).toHaveBeenCalled();
     });
+  });
+
+  it("downloads protected dataset files with auth and reports failures", async () => {
+    const onFlash = vi.fn();
+    const onRefreshActiveProject = vi.fn(async () => ({ ok: true }));
+    const clickSpy = vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => {});
+    const createObjectURL = vi.fn(() => "blob:dataset-download");
+    const revokeObjectURL = vi.fn();
+    vi.stubGlobal("URL", Object.assign(URL, { createObjectURL, revokeObjectURL }));
+
+    const fetchMock = installFetchMock([
+      {
+        match: "/reviews/pending?limit=200&offset=0",
+        response: apiResponse([
+          {
+            dataset_id: "dataset-3",
+            requested_at: "2026-04-20T00:00:00Z",
+            review_id: "review-3",
+            status: "pending",
+          },
+        ]),
+      },
+      {
+        match: "/datasets/dataset-3",
+        response: apiResponse({
+          commit_hash: "ghi789",
+          commit_manifest: {
+            files: [],
+            note_ids: [],
+          },
+          dataset_id: "dataset-3",
+          project_id: "project-1",
+          question_links: [],
+          status: "staged",
+        }),
+      },
+      {
+        match: "/datasets/dataset-3/files?limit=200&offset=0",
+        response: apiResponse([
+          {
+            checksum: "sha256-3",
+            file_id: "file-3",
+            path: "dataset.csv",
+            size_bytes: 1024,
+          },
+        ]),
+      },
+      {
+        match:
+          "/notes?project_id=project-1&target_entity_type=dataset&target_entity_id=dataset-3&limit=200&offset=0",
+        response: apiResponse([]),
+      },
+      {
+        match: "/datasets/dataset-3/files/file-3/download",
+        response: [
+          binaryResponse({
+            body: "downloaded-dataset",
+            contentType: "text/csv",
+            disposition: 'attachment; filename="dataset.csv"',
+          }),
+          errorResponse("Token has expired.", 401),
+        ],
+      },
+    ]);
+
+    render(
+      <ReviewPanel
+        token="token-3"
+        user={{ role: "admin", username: "sam" }}
+        projects={[{ name: "Project One", project_id: "project-1" }]}
+        selectedProjectId="project-1"
+        navigate={vi.fn()}
+        onFlash={onFlash}
+        onRefreshActiveProject={onRefreshActiveProject}
+      />
+    );
+
+    fireEvent.click(await screen.findByRole("button", { name: "Download" }));
+
+    await waitFor(() => {
+      expect(fetchMock).toHaveBeenCalledWith(
+        "/datasets/dataset-3/files/file-3/download",
+        expect.objectContaining({
+          headers: expect.objectContaining({
+            Authorization: "Bearer token-3",
+          }),
+          method: "GET",
+        })
+      );
+      expect(clickSpy).toHaveBeenCalled();
+      expect(createObjectURL).toHaveBeenCalled();
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Download" }));
+
+    await waitFor(() => {
+      expect(onFlash).toHaveBeenCalledWith("", "Token has expired.");
+    });
+    expect(revokeObjectURL).toHaveBeenCalledWith("blob:dataset-download");
   });
 });

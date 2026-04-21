@@ -428,6 +428,62 @@ def test_note_multipart_upload_cleans_up_raw_asset_on_failure(
     assert after == before
 
 
+def test_note_multipart_upload_rejects_invalid_targets_without_leaking_raw_asset(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+):
+    headers = admin_auth_headers
+    project_id = client.post(
+        "/projects",
+        json={"name": "Invalid targets cleanup"},
+        headers=headers,
+    ).json()["data"]["project_id"]
+    storage_root = Path(client.app.state.raw_note_storage._base_path)
+    before = sorted(path.name for path in storage_root.iterdir()) if storage_root.exists() else []
+
+    response = client.post(
+        "/notes/upload-file",
+        data={
+            "project_id": project_id,
+            "targets": "{not json",
+        },
+        files={"file": ("capture.txt", b"raw-capture", "text/plain")},
+        headers=headers,
+    )
+
+    assert response.status_code == 422
+    after = sorted(path.name for path in storage_root.iterdir()) if storage_root.exists() else []
+    assert after == before
+
+
+def test_note_multipart_upload_rejects_invalid_metadata_without_leaking_raw_asset(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+):
+    headers = admin_auth_headers
+    project_id = client.post(
+        "/projects",
+        json={"name": "Invalid metadata cleanup"},
+        headers=headers,
+    ).json()["data"]["project_id"]
+    storage_root = Path(client.app.state.raw_note_storage._base_path)
+    before = sorted(path.name for path in storage_root.iterdir()) if storage_root.exists() else []
+
+    response = client.post(
+        "/notes/upload-file",
+        data={
+            "project_id": project_id,
+            "metadata": '{"source": 123}',
+        },
+        files={"file": ("capture.txt", b"raw-capture", "text/plain")},
+        headers=headers,
+    )
+
+    assert response.status_code == 422
+    after = sorted(path.name for path in storage_root.iterdir()) if storage_root.exists() else []
+    assert after == before
+
+
 def test_note_upload_cleans_up_raw_asset_when_request_commit_fails(app, monkeypatch):
     with TestClient(app, raise_server_exceptions=False) as client:
         headers = _admin_headers(client)
@@ -447,6 +503,37 @@ def test_note_upload_cleans_up_raw_asset_when_request_commit_fails(app, monkeypa
                 "content_type": "text/plain",
                 "content_base64": base64.b64encode(b"rollback-note").decode("ascii"),
             },
+            headers=headers,
+        )
+
+        assert response.status_code == 500
+        remaining = (
+            sorted(path.name for path in storage_root.iterdir())
+            if storage_root.exists()
+            else []
+        )
+        assert remaining == []
+
+        listed = client.get("/notes", params={"project_id": project_id}, headers=headers)
+        assert listed.status_code == 200
+        assert listed.json()["meta"]["total"] == 0
+
+
+def test_note_multipart_upload_cleans_up_raw_asset_when_request_commit_fails(app, monkeypatch):
+    with TestClient(app, raise_server_exceptions=False) as client:
+        headers = _admin_headers(client)
+        project_id = client.post(
+            "/projects",
+            json={"name": "Multipart note upload rollback"},
+            headers=headers,
+        ).json()["data"]["project_id"]
+        storage_root = Path(client.app.state.raw_note_storage._base_path)
+
+        _fail_next_commit(monkeypatch)
+        response = client.post(
+            "/notes/upload-file",
+            data={"project_id": project_id},
+            files={"file": ("rollback.txt", b"rollback-note", "text/plain")},
             headers=headers,
         )
 

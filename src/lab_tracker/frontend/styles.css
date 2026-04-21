@@ -445,9 +445,17 @@ button:disabled {
 .link {
   color: var(--ink);
   text-decoration: none;
+  background: none;
+  border: 0;
+  padding: 0;
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
 }
 
 .link:hover {
+  transform: none;
+  box-shadow: none;
   text-decoration: underline;
   text-decoration-thickness: 2px;
   text-underline-offset: 3px;

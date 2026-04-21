@@ -1,4 +1,4 @@
-"""Note and search routes."""
+"""Note routes."""
 
 from __future__ import annotations
 
@@ -29,12 +29,12 @@ from lab_tracker.schemas import (
     NoteUpload,
     NoteUpdate,
     QuestionExtractionRequest,
-    SearchResults,
     TagSuggestionRequest,
     TagSuggestionReviewRequest,
 )
 
 from .shared import (
+    api_from_request,
     actor_from_request,
     list_response,
     note_default_status,
@@ -47,37 +47,8 @@ from .shared import (
 )
 
 
-def build_notes_search_router(api: LabTrackerAPI) -> APIRouter:
+def build_notes_router(api: LabTrackerAPI) -> APIRouter:
     router = APIRouter()
-
-    @router.get("/search", response_model=Envelope[SearchResults])
-    def search(
-        q: str,
-        project_id: UUID | None = None,
-        include: str | None = None,
-        limit: int = 20,
-        offset: int = 0,
-    ):
-        validate_pagination(limit, offset)
-        include_set = {
-            item.strip().casefold()
-            for item in (include.split(",") if include else ["questions", "notes"])
-            if item.strip()
-        }
-        questions = (
-            api.search_questions(q, project_id=project_id, limit=limit, offset=offset)
-            if not include_set or "questions" in include_set
-            else []
-        )
-        notes = (
-            api.search_notes(q, project_id=project_id, limit=limit, offset=offset)
-            if not include_set or "notes" in include_set
-            else []
-        )
-        return Envelope(
-            data=SearchResults(questions=questions, notes=notes),
-            meta={"questions_count": len(questions), "notes_count": len(notes)},
-        )
 
     @router.post(
         "/notes",
@@ -86,7 +57,7 @@ def build_notes_search_router(api: LabTrackerAPI) -> APIRouter:
     )
     def create_note(payload: NoteCreate, request: Request):
         actor = actor_from_request(request)
-        note = api.create_note(
+        note = api_from_request(request, api).create_note(
             project_id=payload.project_id,
             raw_content=payload.raw_content,
             transcribed_text=payload.transcribed_text,
@@ -110,7 +81,7 @@ def build_notes_search_router(api: LabTrackerAPI) -> APIRouter:
             content = base64.b64decode(payload.content_base64, validate=True)
         except binascii.Error as exc:
             raise ValidationError("content_base64 must be valid base64.") from exc
-        note = api.upload_note_raw(
+        note = api_from_request(request, api).upload_note_raw(
             project_id=payload.project_id,
             content=content,
             filename=payload.filename,
@@ -139,22 +110,25 @@ def build_notes_search_router(api: LabTrackerAPI) -> APIRouter:
         status: NoteStatus | None = Form(None),
     ):
         actor = actor_from_request(request)
+        request_api = api_from_request(request, api)
         filename = (file.filename or "").strip()
         if not filename:
             raise ValidationError("filename must not be empty.")
         content_type = (file.content_type or "application/octet-stream").strip()
-        asset = api.store_note_raw_asset(
+        parsed_targets = parse_entity_refs_form(targets)
+        parsed_metadata = parse_metadata_form(metadata)
+        asset = request_api.store_note_raw_asset(
             file.file,
             filename=filename,
             content_type=content_type,
         )
-        note = api.upload_note_raw(
+        note = request_api.upload_note_raw(
             project_id=project_id,
             raw_asset=asset,
             owns_raw_asset=True,
             transcribed_text=transcribed_text,
-            targets=parse_entity_refs_form(targets),
-            metadata=parse_metadata_form(metadata),
+            targets=parsed_targets,
+            metadata=parsed_metadata,
             status=status or note_default_status(),
             actor=actor,
         )
@@ -182,13 +156,13 @@ def build_notes_search_router(api: LabTrackerAPI) -> APIRouter:
         return list_response(notes, limit=limit, offset=offset, total=total)
 
     @router.get("/notes/{note_id}", response_model=Envelope[Note])
-    def get_note(note_id: UUID):
-        note = api.get_note(note_id)
+    def get_note(note_id: UUID, request: Request):
+        note = api_from_request(request, api).get_note(note_id)
         return Envelope(data=note)
 
     @router.get("/notes/{note_id}/raw")
     def download_note_raw(note_id: UUID, request: Request):
-        raw_asset, content = api.download_note_raw(note_id)
+        raw_asset, content = api_from_request(request, api).download_note_raw(note_id)
         accept = (request.headers.get("accept") or "").lower()
         if "application/json" not in accept:
             headers = {
@@ -212,7 +186,7 @@ def build_notes_search_router(api: LabTrackerAPI) -> APIRouter:
     @router.patch("/notes/{note_id}", response_model=Envelope[Note])
     def update_note(note_id: UUID, payload: NoteUpdate, request: Request):
         actor = actor_from_request(request)
-        note = api.update_note(
+        note = api_from_request(request, api).update_note(
             note_id,
             transcribed_text=payload.transcribed_text,
             extracted_entities=payload.extracted_entities,
@@ -226,7 +200,7 @@ def build_notes_search_router(api: LabTrackerAPI) -> APIRouter:
     @router.delete("/notes/{note_id}", response_model=Envelope[Note])
     def delete_note(note_id: UUID, request: Request):
         actor = actor_from_request(request)
-        note = api.delete_note(note_id, actor=actor)
+        note = api_from_request(request, api).delete_note(note_id, actor=actor)
         return Envelope(data=note)
 
     @router.post(
@@ -240,7 +214,7 @@ def build_notes_search_router(api: LabTrackerAPI) -> APIRouter:
         payload: TagSuggestionRequest | None = None,
     ):
         actor = actor_from_request(request)
-        suggestions = api.suggest_entity_tags(
+        suggestions = api_from_request(request, api).suggest_entity_tags(
             note_id,
             provenance=payload.provenance if payload else None,
             actor=actor,
@@ -252,13 +226,17 @@ def build_notes_search_router(api: LabTrackerAPI) -> APIRouter:
         response_model=ListEnvelope[EntityTagSuggestion],
     )
     def list_tag_suggestions(
+        request: Request,
         note_id: UUID,
         status: TagSuggestionStatus | None = None,
         limit: int = 50,
         offset: int = 0,
     ):
         validate_pagination(limit, offset)
-        suggestions = api.list_entity_tag_suggestions(note_id, status=status)
+        suggestions = api_from_request(request, api).list_entity_tag_suggestions(
+            note_id,
+            status=status,
+        )
         page, total = paginate(suggestions, limit, offset)
         return list_response(page, limit=limit, offset=offset, total=total)
 
@@ -273,7 +251,7 @@ def build_notes_search_router(api: LabTrackerAPI) -> APIRouter:
         request: Request,
     ):
         actor = actor_from_request(request)
-        suggestion = api.review_entity_tag_suggestion(
+        suggestion = api_from_request(request, api).review_entity_tag_suggestion(
             note_id,
             suggestion_id,
             status=payload.status,
@@ -292,7 +270,7 @@ def build_notes_search_router(api: LabTrackerAPI) -> APIRouter:
         payload: QuestionExtractionRequest | None = None,
     ):
         actor = actor_from_request(request)
-        candidates = api.extract_question_candidates_from_note(
+        candidates = api_from_request(request, api).extract_question_candidates_from_note(
             note_id,
             default_question_type=payload.question_type if payload else None,
             provenance=payload.provenance if payload else None,

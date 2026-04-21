@@ -2,14 +2,12 @@
 
 from __future__ import annotations
 
-from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import logging
 from typing import Callable
 from uuid import UUID
 
-from lab_tracker.dependencies import get_active_repository
 from lab_tracker.errors import NotFoundError
 from lab_tracker.models import (
     AcquisitionOutput,
@@ -24,6 +22,7 @@ from lab_tracker.models import (
     Visualization,
 )
 from lab_tracker.note_storage import LocalNoteStorage
+from lab_tracker.request_context import LabTrackerRequestContext
 from lab_tracker.repository import LabTrackerRepository
 from lab_tracker.services import (
     AnalysisServiceMixin,
@@ -50,26 +49,6 @@ from lab_tracker.services.search_backends import (
 )
 
 _DEFAULT_OCR_BACKEND: object = object()
-_ACTIVE_STORE: ContextVar["InMemoryStore | None"] = ContextVar(
-    "lab_tracker_active_store",
-    default=None,
-)
-_REQUEST_MANAGED: ContextVar[bool] = ContextVar(
-    "lab_tracker_request_managed",
-    default=False,
-)
-_PENDING_SEARCH_OPS: ContextVar[list[tuple[str, tuple[object, ...]]] | None] = ContextVar(
-    "lab_tracker_pending_search_ops",
-    default=None,
-)
-_AFTER_COMMIT_ACTIONS: ContextVar[list[Callable[[], None]] | None] = ContextVar(
-    "lab_tracker_after_commit_actions",
-    default=None,
-)
-_AFTER_ROLLBACK_ACTIONS: ContextVar[list[Callable[[], None]] | None] = ContextVar(
-    "lab_tracker_after_rollback_actions",
-    default=None,
-)
 _logger = logging.getLogger(__name__)
 
 
@@ -110,9 +89,9 @@ class LabTrackerAPI(
 ):
     @property
     def _store(self) -> InMemoryStore:
-        active_store = _ACTIVE_STORE.get()
-        if active_store is not None:
-            return active_store
+        request_context = self._request_context
+        if request_context is not None and request_context.active_store is not None:
+            return request_context.active_store
         return self._base_store
 
     @_store.setter
@@ -133,6 +112,7 @@ class LabTrackerAPI(
         self._store = store or InMemoryStore()
         self._raw_storage = raw_storage
         self._repository = repository
+        self._request_context: LabTrackerRequestContext | None = None
         if ocr_backend is _DEFAULT_OCR_BACKEND:
             self._ocr_backend = default_ocr_backend()
         else:
@@ -176,8 +156,25 @@ class LabTrackerAPI(
             allow_in_memory=True,
         )
 
+    def build_request_context(
+        self,
+        repository: LabTrackerRepository,
+    ) -> LabTrackerRequestContext:
+        active_store = InMemoryStore() if repository is not None and not self._allow_in_memory else None
+        return LabTrackerRequestContext(
+            repository=repository,
+            active_store=active_store,
+        )
+
+    def bind_request_context(self, request_context: LabTrackerRequestContext) -> "LabTrackerAPI":
+        bound = object.__new__(self.__class__)
+        bound.__dict__ = {**self.__dict__, "_request_context": request_context}
+        return bound
+
     def _active_repository(self) -> LabTrackerRepository | None:
-        return get_active_repository() or self._repository
+        if self._request_context is not None:
+            return self._request_context.repository
+        return self._repository
 
     def _is_repository_backed(self) -> bool:
         return self._active_repository() is not None and not self._allow_in_memory
@@ -278,31 +275,8 @@ class LabTrackerAPI(
             last_failure_operation=self._search_last_failure_operation,
         )
 
-    def begin_request(self) -> None:
-        _REQUEST_MANAGED.set(True)
-        if self._is_repository_backed():
-            _ACTIVE_STORE.set(InMemoryStore())
-        else:
-            _ACTIVE_STORE.set(None)
-        _PENDING_SEARCH_OPS.set([])
-        _AFTER_COMMIT_ACTIONS.set([])
-        _AFTER_ROLLBACK_ACTIONS.set([])
-
-    def finish_request(self, *, committed: bool) -> None:
-        if committed:
-            self._flush_pending_search_ops()
-            self._run_deferred_actions(_AFTER_COMMIT_ACTIONS.get(), label="after_commit")
-        else:
-            _PENDING_SEARCH_OPS.set([])
-            self._run_deferred_actions(_AFTER_ROLLBACK_ACTIONS.get(), label="after_rollback")
-        _ACTIVE_STORE.set(None)
-        _REQUEST_MANAGED.set(False)
-        _PENDING_SEARCH_OPS.set(None)
-        _AFTER_COMMIT_ACTIONS.set(None)
-        _AFTER_ROLLBACK_ACTIONS.set(None)
-
     def _is_request_managed(self) -> bool:
-        return _REQUEST_MANAGED.get()
+        return self._request_context is not None
 
     def _build_store_from_repository(
         self,
@@ -362,9 +336,8 @@ class LabTrackerAPI(
     def _queue_search_op(self, operation: str, *args: object) -> None:
         if not self._should_sync_search_backend():
             return
-        pending = _PENDING_SEARCH_OPS.get()
-        if self._is_request_managed() and pending is not None:
-            pending.append((operation, args))
+        if self._request_context is not None:
+            self._request_context.pending_search_ops.append((operation, args))
             return
         self._apply_search_op_safely(operation, *args)
 
@@ -398,11 +371,6 @@ class LabTrackerAPI(
         except Exception as exc:
             self._record_search_failure(operation, exc)
 
-    def _flush_pending_search_ops(self) -> None:
-        pending = _PENDING_SEARCH_OPS.get() or []
-        for operation, args in pending:
-            self._apply_search_op_safely(operation, *args)
-
     def _run_deferred_actions(
         self,
         actions: list[Callable[[], None]] | None,
@@ -416,19 +384,15 @@ class LabTrackerAPI(
                 _logger.warning("Deferred %s action failed: %s", label, exc, exc_info=True)
 
     def run_after_commit(self, action: Callable[[], None]) -> None:
-        if self._is_request_managed():
-            actions = _AFTER_COMMIT_ACTIONS.get()
-            if actions is not None:
-                actions.append(action)
-                return
+        if self._request_context is not None:
+            self._request_context.after_commit_actions.append(action)
+            return
         action()
 
     def run_after_rollback(self, action: Callable[[], None]) -> None:
-        if not self._is_request_managed():
+        if self._request_context is None:
             return
-        actions = _AFTER_ROLLBACK_ACTIONS.get()
-        if actions is not None:
-            actions.append(action)
+        self._request_context.after_rollback_actions.append(action)
 
     def _run_repository_write(
         self,
@@ -449,9 +413,8 @@ class LabTrackerAPI(
                 resolved_repository.commit()
         except Exception:
             resolved_repository.rollback()
-            if self._is_request_managed():
-                _ACTIVE_STORE.set(None)
-                _PENDING_SEARCH_OPS.set([])
+            if self._request_context is not None:
+                self._request_context.reset_after_failure()
             elif resolved_repository is self._repository:
                 self.hydrate_from_repository(
                     resolved_repository,

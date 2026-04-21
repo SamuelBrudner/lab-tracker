@@ -361,6 +361,7 @@ function App() {
               onClearSelection={state.handleClearCandidateSelection}
               onRejectSelected={state.handleRejectExtractionCandidates}
               onStageSelected={state.handleStageExtractionCandidates}
+              onFlash={state.setFlash}
             />
           ) : null}
 

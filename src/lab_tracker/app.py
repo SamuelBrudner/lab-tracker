@@ -31,7 +31,7 @@ from lab_tracker.db_models import (
     SessionModel,
     VisualizationModel,
 )
-from lab_tracker.dependencies import get_sqlalchemy_repository, set_active_repository
+from lab_tracker.dependencies import get_sqlalchemy_repository
 from lab_tracker.errors import AuthError
 from lab_tracker.file_storage import LocalFileStorageBackend
 from lab_tracker.logging import configure_logging
@@ -282,8 +282,8 @@ def _configure_database_session_middleware(
         request.state.db_session = db_session
         repository = SQLAlchemyLabTrackerRepository(db_session)
         request.state.lab_tracker_repository = repository
-        set_active_repository(repository)
-        api.begin_request()
+        request_context = api.build_request_context(repository)
+        request.state.lab_tracker_api = api.bind_request_context(request_context)
         committed = False
         try:
             response = await call_next(request)
@@ -298,9 +298,18 @@ def _configure_database_session_middleware(
             raise
         finally:
             try:
-                api.finish_request(committed=committed)
+                request_context.finish(
+                    committed=committed,
+                    apply_search_op=lambda operation, args: request.state.lab_tracker_api._apply_search_op_safely(  # noqa: SLF001
+                        operation,
+                        *args,
+                    ),
+                    run_deferred_actions=lambda actions, label: request.state.lab_tracker_api._run_deferred_actions(  # noqa: SLF001
+                        actions,
+                        label=label,
+                    ),
+                )
             finally:
-                set_active_repository(None)
                 db_session.close()
 
 

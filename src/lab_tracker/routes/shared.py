@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
+from lab_tracker.api import LabTrackerAPI
 from lab_tracker.auth import AuthContext, AuthService, TokenService, User, extract_bearer_token
 from lab_tracker.errors import AuthError, ValidationError
 from lab_tracker.models import (
@@ -61,6 +62,15 @@ def actor_from_request(request: Request | None) -> AuthContext:
     if actor is None:
         raise AuthError("Authentication required.")
     return actor
+
+
+def api_from_request(request: Request, fallback: LabTrackerAPI | None = None) -> LabTrackerAPI:
+    api = getattr(request.state, "lab_tracker_api", None)
+    if api is not None:
+        return api
+    if fallback is not None:
+        return fallback
+    raise RuntimeError("Lab Tracker API is not available on request state.")
 
 
 def actor_from_authorization_header(
