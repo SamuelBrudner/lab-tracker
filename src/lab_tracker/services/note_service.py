@@ -224,6 +224,7 @@ class NoteServiceMixin:
         filename: str | None = None,
         content_type: str | None = None,
         raw_asset: NoteRawAsset | None = None,
+        owns_raw_asset: bool = False,
         transcribed_text: str | None = None,
         extracted_entities: Iterable[ExtractedEntity | tuple[str, float, str]] | None = None,
         targets: Iterable[EntityRef] | None = None,
@@ -281,7 +282,7 @@ class NoteServiceMixin:
                             exc,
                             exc_info=True,
                         )
-            return self.create_note(
+            note = self.create_note(
                 project_id=project_id,
                 raw_content=None,
                 raw_asset=asset,
@@ -293,9 +294,12 @@ class NoteServiceMixin:
                 actor=actor,
             )
         except Exception:
-            if asset is not None and (created_asset or raw_asset is not None):
+            if asset is not None and (created_asset or owns_raw_asset):
                 self._delete_raw_asset(asset)
             raise
+        if asset is not None and (created_asset or owns_raw_asset):
+            self.run_after_rollback(lambda asset=asset: self._delete_raw_asset(asset))
+        return note
 
     def get_note(self, note_id: UUID) -> Note:
         return self._get_from_repository_or_store(
@@ -481,7 +485,10 @@ class NoteServiceMixin:
         self._store.notes.pop(note_id, None)
         self._run_repository_write(lambda repository: repository.notes.delete(note_id))
         self._queue_search_op("delete_notes", [note_id])
-        self._delete_raw_asset(note.raw_asset)
+        if note.raw_asset is not None:
+            self.run_after_commit(
+                lambda raw_asset=note.raw_asset: self._delete_raw_asset(raw_asset)
+            )
         return note
 
     def extract_questions_from_note(

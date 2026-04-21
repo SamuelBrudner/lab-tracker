@@ -2,13 +2,17 @@
 
 from __future__ import annotations
 
+import logging
 from uuid import UUID
 
 from fastapi import APIRouter
+from sqlalchemy import select
 from starlette import status as http_status
 from starlette.requests import Request
 
 from lab_tracker.api import LabTrackerAPI
+from lab_tracker.db_models import DatasetFileModel, DatasetModel, NoteModel
+from lab_tracker.errors import NotFoundError
 from lab_tracker.models import (
     Project,
     ProjectReviewPolicy,
@@ -29,6 +33,8 @@ from lab_tracker.schemas import (
 
 from .shared import (
     actor_from_request,
+    db_session_from_request,
+    file_storage_from_request,
     list_response,
     paginate,
     project_default_status,
@@ -36,6 +42,22 @@ from .shared import (
     repository_from_request,
     validate_pagination,
 )
+
+_logger = logging.getLogger(__name__)
+
+
+def _delete_stored_file(storage_backend: object, storage_id: UUID) -> None:
+    try:
+        storage_backend.delete(storage_id)
+    except NotFoundError:
+        return
+    except Exception as exc:
+        _logger.warning(
+            "Failed to delete project-scoped storage object %s: %s",
+            storage_id,
+            exc,
+            exc_info=True,
+        )
 
 
 def build_projects_questions_router(api: LabTrackerAPI) -> APIRouter:
@@ -93,7 +115,42 @@ def build_projects_questions_router(api: LabTrackerAPI) -> APIRouter:
     @router.delete("/projects/{project_id}", response_model=Envelope[Project])
     def delete_project(project_id: UUID, request: Request):
         actor = actor_from_request(request)
+        db_session = db_session_from_request(request)
+        file_storage_backend = file_storage_from_request(request)
+        raw_note_storage = request.app.state.raw_note_storage
+        dataset_file_storage_ids = [
+            UUID(value)
+            for value in db_session.scalars(
+                select(DatasetFileModel.storage_id)
+                .join(DatasetModel, DatasetModel.dataset_id == DatasetFileModel.dataset_id)
+                .where(DatasetModel.project_id == str(project_id))
+            )
+        ]
+        raw_note_storage_ids = [
+            UUID(value)
+            for value in db_session.scalars(
+                select(NoteModel.raw_storage_id).where(
+                    NoteModel.project_id == str(project_id),
+                    NoteModel.raw_storage_id.is_not(None),
+                )
+            )
+        ]
         project = api.delete_project(project_id, actor=actor)
+        db_session.flush()
+        for storage_id in dataset_file_storage_ids:
+            api.run_after_commit(
+                lambda storage_id=storage_id: _delete_stored_file(
+                    file_storage_backend,
+                    storage_id,
+                )
+            )
+        for storage_id in raw_note_storage_ids:
+            api.run_after_commit(
+                lambda storage_id=storage_id: _delete_stored_file(
+                    raw_note_storage,
+                    storage_id,
+                )
+            )
         return Envelope(data=project)
 
     @router.post(

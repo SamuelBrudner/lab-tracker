@@ -6,10 +6,43 @@ from pathlib import Path
 from uuid import uuid4
 
 from fastapi.testclient import TestClient
+from sqlalchemy.orm import Session
+
+from lab_tracker.auth import Role
 
 
 def _ids(payload: list[dict[str, object]], key: str) -> set[str]:
     return {str(item[key]) for item in payload}
+
+
+def _admin_headers(client: TestClient) -> dict[str, str]:
+    username = f"admin-{uuid4().hex[:8]}"
+    password = "secret"
+    client.app.state.auth_service.register_user(
+        username=username,
+        password=password,
+        role=Role.ADMIN,
+    )
+    response = client.post(
+        "/auth/login",
+        json={"username": username, "password": password},
+    )
+    assert response.status_code == 200
+    token = response.json()["data"]["access_token"]
+    return {"Authorization": f"Bearer {token}"}
+
+
+def _fail_next_commit(monkeypatch) -> None:
+    original_commit = Session.commit
+    state = {"failed": False}
+
+    def _commit_once(self, *args, **kwargs):  # noqa: ANN001, ANN202
+        if not state["failed"]:
+            state["failed"] = True
+            raise RuntimeError("forced commit failure")
+        return original_commit(self, *args, **kwargs)
+
+    monkeypatch.setattr(Session, "commit", _commit_once)
 
 
 def test_core_entity_crud_routes_use_database_persistence(
@@ -395,6 +428,76 @@ def test_note_multipart_upload_cleans_up_raw_asset_on_failure(
     assert after == before
 
 
+def test_note_upload_cleans_up_raw_asset_when_request_commit_fails(app, monkeypatch):
+    with TestClient(app, raise_server_exceptions=False) as client:
+        headers = _admin_headers(client)
+        project_id = client.post(
+            "/projects",
+            json={"name": "Note upload rollback"},
+            headers=headers,
+        ).json()["data"]["project_id"]
+        storage_root = Path(client.app.state.raw_note_storage._base_path)
+
+        _fail_next_commit(monkeypatch)
+        response = client.post(
+            "/notes/upload",
+            json={
+                "project_id": project_id,
+                "filename": "rollback.txt",
+                "content_type": "text/plain",
+                "content_base64": base64.b64encode(b"rollback-note").decode("ascii"),
+            },
+            headers=headers,
+        )
+
+        assert response.status_code == 500
+        remaining = (
+            sorted(path.name for path in storage_root.iterdir())
+            if storage_root.exists()
+            else []
+        )
+        assert remaining == []
+
+        listed = client.get("/notes", params={"project_id": project_id}, headers=headers)
+        assert listed.status_code == 200
+        assert listed.json()["meta"]["total"] == 0
+
+
+def test_note_delete_preserves_raw_asset_when_request_commit_fails(app, monkeypatch):
+    with TestClient(app, raise_server_exceptions=False) as client:
+        headers = _admin_headers(client)
+        project_id = client.post(
+            "/projects",
+            json={"name": "Note delete rollback"},
+            headers=headers,
+        ).json()["data"]["project_id"]
+        upload = client.post(
+            "/notes/upload",
+            json={
+                "project_id": project_id,
+                "filename": "rollback.txt",
+                "content_type": "text/plain",
+                "content_base64": base64.b64encode(b"rollback-note").decode("ascii"),
+            },
+            headers=headers,
+        )
+        assert upload.status_code == 201
+        note_id = upload.json()["data"]["note_id"]
+        storage_root = Path(client.app.state.raw_note_storage._base_path)
+        before = sorted(path.name for path in storage_root.iterdir())
+        assert len(before) == 1
+
+        _fail_next_commit(monkeypatch)
+        response = client.delete(f"/notes/{note_id}", headers=headers)
+
+        assert response.status_code == 500
+        after = sorted(path.name for path in storage_root.iterdir())
+        assert after == before
+
+        loaded = client.get(f"/notes/{note_id}", headers=headers)
+        assert loaded.status_code == 200
+
+
 def test_write_routes_ignore_client_supplied_created_by(
     client: TestClient,
     admin_auth_headers: dict[str, str],
@@ -493,6 +596,64 @@ def test_analysis_create_ignores_client_supplied_executed_by(
     )
     assert analysis_response.status_code == 201
     assert analysis_response.json()["data"]["executed_by"] == actor_id
+
+
+def test_project_delete_cleans_up_cascaded_attachments(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+):
+    headers = admin_auth_headers
+    project_id = client.post(
+        "/projects",
+        json={"name": "Project cleanup"},
+        headers=headers,
+    ).json()["data"]["project_id"]
+    question_id = client.post(
+        "/questions",
+        json={
+            "project_id": project_id,
+            "text": "Does project delete clean attachments?",
+            "question_type": "descriptive",
+        },
+        headers=headers,
+    ).json()["data"]["question_id"]
+    dataset_id = client.post(
+        "/datasets",
+        json={"project_id": project_id, "primary_question_id": question_id},
+        headers=headers,
+    ).json()["data"]["dataset_id"]
+    file_upload = client.post(
+        f"/datasets/{dataset_id}/files",
+        files={"file": ("cleanup.bin", b"dataset-bytes", "application/octet-stream")},
+        headers=headers,
+    )
+    assert file_upload.status_code == 201
+    note_upload = client.post(
+        "/notes/upload",
+        json={
+            "project_id": project_id,
+            "filename": "capture.txt",
+            "content_type": "text/plain",
+            "content_base64": base64.b64encode(b"note-bytes").decode("ascii"),
+        },
+        headers=headers,
+    )
+    assert note_upload.status_code == 201
+
+    file_storage_root = Path(client.app.state.file_storage_backend.base_path)
+    note_storage_root = Path(client.app.state.raw_note_storage._base_path)
+    assert sorted(path.suffix for path in file_storage_root.rglob("*") if path.is_file()) == [
+        ".bin",
+        ".json",
+    ]
+    assert len([path for path in note_storage_root.iterdir() if path.is_file()]) == 1
+
+    delete_response = client.delete(f"/projects/{project_id}", headers=headers)
+    assert delete_response.status_code == 200
+    assert client.get(f"/projects/{project_id}", headers=headers).status_code == 404
+    assert list(file_storage_root.rglob("*.bin")) == []
+    assert list(file_storage_root.rglob("*.json")) == []
+    assert list(note_storage_root.iterdir()) == []
 
 
 def test_note_raw_download_sanitizes_attachment_filename(

@@ -5,12 +5,45 @@ from pathlib import Path
 from uuid import uuid4
 
 from fastapi.testclient import TestClient
+from sqlalchemy.orm import Session
+
+from lab_tracker.auth import Role
 
 
 def _count_suffix(root: Path, suffix: str) -> int:
     if not root.exists():
         return 0
     return sum(1 for _ in root.rglob(f"*{suffix}"))
+
+
+def _admin_headers(client: TestClient) -> dict[str, str]:
+    username = f"admin-{uuid4().hex[:8]}"
+    password = "secret"
+    client.app.state.auth_service.register_user(
+        username=username,
+        password=password,
+        role=Role.ADMIN,
+    )
+    response = client.post(
+        "/auth/login",
+        json={"username": username, "password": password},
+    )
+    assert response.status_code == 200
+    token = response.json()["data"]["access_token"]
+    return {"Authorization": f"Bearer {token}"}
+
+
+def _fail_next_commit(monkeypatch) -> None:
+    original_commit = Session.commit
+    state = {"failed": False}
+
+    def _commit_once(self, *args, **kwargs):  # noqa: ANN001, ANN202
+        if not state["failed"]:
+            state["failed"] = True
+            raise RuntimeError("forced commit failure")
+        return original_commit(self, *args, **kwargs)
+
+    monkeypatch.setattr(Session, "commit", _commit_once)
 
 
 def test_dataset_file_upload_list_delete_flow(
@@ -304,3 +337,135 @@ def test_dataset_file_upload_requires_staged_dataset(
         headers=headers,
     )
     assert upload_response.status_code == 422
+
+
+def test_dataset_file_upload_cleans_up_storage_when_request_commit_fails(app, monkeypatch):
+    with TestClient(app, raise_server_exceptions=False) as client:
+        headers = _admin_headers(client)
+        project_id = client.post(
+            "/projects",
+            json={"name": "Upload rollback"},
+            headers=headers,
+        ).json()["data"]["project_id"]
+        question_id = client.post(
+            "/questions",
+            json={
+                "project_id": project_id,
+                "text": "Does upload rollback clean storage?",
+                "question_type": "descriptive",
+            },
+            headers=headers,
+        ).json()["data"]["question_id"]
+        dataset_id = client.post(
+            "/datasets",
+            json={"project_id": project_id, "primary_question_id": question_id},
+            headers=headers,
+        ).json()["data"]["dataset_id"]
+
+        storage_root = Path(client.app.state.file_storage_backend.base_path)
+        _fail_next_commit(monkeypatch)
+
+        response = client.post(
+            f"/datasets/{dataset_id}/files",
+            files={"file": ("rollback.txt", b"rollback-bytes", "text/plain")},
+            headers=headers,
+        )
+
+        assert response.status_code == 500
+        assert _count_suffix(storage_root, ".bin") == 0
+        assert _count_suffix(storage_root, ".json") == 0
+
+        listed = client.get(f"/datasets/{dataset_id}/files", headers=headers)
+        assert listed.status_code == 200
+        assert listed.json()["meta"]["total"] == 0
+
+
+def test_dataset_file_delete_preserves_storage_when_request_commit_fails(app, monkeypatch):
+    with TestClient(app, raise_server_exceptions=False) as client:
+        headers = _admin_headers(client)
+        project_id = client.post(
+            "/projects",
+            json={"name": "Delete rollback"},
+            headers=headers,
+        ).json()["data"]["project_id"]
+        question_id = client.post(
+            "/questions",
+            json={
+                "project_id": project_id,
+                "text": "Does delete rollback preserve storage?",
+                "question_type": "descriptive",
+            },
+            headers=headers,
+        ).json()["data"]["question_id"]
+        dataset_id = client.post(
+            "/datasets",
+            json={"project_id": project_id, "primary_question_id": question_id},
+            headers=headers,
+        ).json()["data"]["dataset_id"]
+        upload_response = client.post(
+            f"/datasets/{dataset_id}/files",
+            files={"file": ("rollback.txt", b"rollback-bytes", "text/plain")},
+            headers=headers,
+        )
+        assert upload_response.status_code == 201
+        file_id = upload_response.json()["data"]["file_id"]
+
+        storage_root = Path(client.app.state.file_storage_backend.base_path)
+        assert _count_suffix(storage_root, ".bin") == 1
+        assert _count_suffix(storage_root, ".json") == 1
+
+        _fail_next_commit(monkeypatch)
+        response = client.delete(
+            f"/datasets/{dataset_id}/files/{file_id}",
+            headers=headers,
+        )
+
+        assert response.status_code == 500
+        assert _count_suffix(storage_root, ".bin") == 1
+        assert _count_suffix(storage_root, ".json") == 1
+
+        listed = client.get(f"/datasets/{dataset_id}/files", headers=headers)
+        assert listed.status_code == 200
+        assert listed.json()["meta"]["total"] == 1
+
+
+def test_dataset_delete_removes_attached_files_from_storage(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+):
+    headers = admin_auth_headers
+    project_id = client.post(
+        "/projects",
+        json={"name": "Dataset delete cleanup"},
+        headers=headers,
+    ).json()["data"]["project_id"]
+    question_id = client.post(
+        "/questions",
+        json={
+            "project_id": project_id,
+            "text": "Does dataset delete remove stored files?",
+            "question_type": "descriptive",
+        },
+        headers=headers,
+    ).json()["data"]["question_id"]
+    dataset_id = client.post(
+        "/datasets",
+        json={"project_id": project_id, "primary_question_id": question_id},
+        headers=headers,
+    ).json()["data"]["dataset_id"]
+
+    upload_response = client.post(
+        f"/datasets/{dataset_id}/files",
+        files={"file": ("cleanup.txt", b"cleanup-bytes", "text/plain")},
+        headers=headers,
+    )
+    assert upload_response.status_code == 201
+
+    storage_root = Path(client.app.state.file_storage_backend.base_path)
+    assert _count_suffix(storage_root, ".bin") == 1
+    assert _count_suffix(storage_root, ".json") == 1
+
+    delete_response = client.delete(f"/datasets/{dataset_id}", headers=headers)
+    assert delete_response.status_code == 200
+    assert _count_suffix(storage_root, ".bin") == 0
+    assert _count_suffix(storage_root, ".json") == 0

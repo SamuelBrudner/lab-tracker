@@ -151,6 +151,7 @@ def build_notes_search_router(api: LabTrackerAPI) -> APIRouter:
         note = api.upload_note_raw(
             project_id=project_id,
             raw_asset=asset,
+            owns_raw_asset=True,
             transcribed_text=transcribed_text,
             targets=parse_entity_refs_form(targets),
             metadata=parse_metadata_form(metadata),

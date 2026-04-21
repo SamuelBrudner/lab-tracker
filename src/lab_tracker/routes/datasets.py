@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from uuid import UUID
 
 from fastapi import APIRouter, File, UploadFile
@@ -42,6 +43,22 @@ from .shared import (
     safe_attachment_filename,
     validate_pagination,
 )
+
+_logger = logging.getLogger(__name__)
+
+
+def _delete_stored_dataset_file(storage_backend: object, storage_id: UUID) -> None:
+    try:
+        storage_backend.delete(storage_id)
+    except NotFoundError:
+        return
+    except Exception as exc:
+        _logger.warning(
+            "Failed to delete dataset file storage object %s: %s",
+            storage_id,
+            exc,
+            exc_info=True,
+        )
 
 
 def build_datasets_router(api: LabTrackerAPI) -> APIRouter:
@@ -103,7 +120,25 @@ def build_datasets_router(api: LabTrackerAPI) -> APIRouter:
     @router.delete("/datasets/{dataset_id}", response_model=Envelope[Dataset])
     def delete_dataset(dataset_id: UUID, request: Request):
         actor = actor_from_request(request)
+        db_session = db_session_from_request(request)
+        storage_backend = file_storage_from_request(request)
+        storage_ids = [
+            UUID(value)
+            for value in db_session.scalars(
+                select(DatasetFileModel.storage_id).where(
+                    DatasetFileModel.dataset_id == str(dataset_id)
+                )
+            )
+        ]
         dataset = api.delete_dataset(dataset_id, actor=actor)
+        db_session.flush()
+        for storage_id in storage_ids:
+            api.run_after_commit(
+                lambda storage_id=storage_id: _delete_stored_dataset_file(
+                    storage_backend,
+                    storage_id,
+                )
+            )
         return Envelope(data=dataset)
 
     @router.post(
@@ -247,6 +282,12 @@ def build_datasets_router(api: LabTrackerAPI) -> APIRouter:
             except Exception:
                 pass
             raise
+        api.run_after_rollback(
+            lambda storage_id=storage_id: _delete_stored_dataset_file(
+                storage_backend,
+                storage_id,
+            )
+        )
 
         return Envelope(
             data=DatasetFile(
@@ -331,18 +372,21 @@ def build_datasets_router(api: LabTrackerAPI) -> APIRouter:
         if row is None or row.dataset_id != str(dataset_id):
             raise NotFoundError("Dataset file does not exist.")
 
-        try:
-            storage_backend.delete(UUID(row.storage_id))
-        except NotFoundError:
-            pass
-
         payload = DatasetFile(
             file_id=file_id,
             path=row.path,
             checksum=row.checksum,
             size_bytes=row.size_bytes,
         )
+        storage_id = UUID(row.storage_id)
         db_session.delete(row)
+        db_session.flush()
+        api.run_after_commit(
+            lambda storage_id=storage_id: _delete_stored_dataset_file(
+                storage_backend,
+                storage_id,
+            )
+        )
         return Envelope(data=payload)
 
     return router

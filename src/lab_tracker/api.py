@@ -62,6 +62,14 @@ _PENDING_SEARCH_OPS: ContextVar[list[tuple[str, tuple[object, ...]]] | None] = C
     "lab_tracker_pending_search_ops",
     default=None,
 )
+_AFTER_COMMIT_ACTIONS: ContextVar[list[Callable[[], None]] | None] = ContextVar(
+    "lab_tracker_after_commit_actions",
+    default=None,
+)
+_AFTER_ROLLBACK_ACTIONS: ContextVar[list[Callable[[], None]] | None] = ContextVar(
+    "lab_tracker_after_rollback_actions",
+    default=None,
+)
 _logger = logging.getLogger(__name__)
 
 
@@ -265,15 +273,21 @@ class LabTrackerAPI(
         else:
             _ACTIVE_STORE.set(None)
         _PENDING_SEARCH_OPS.set([])
+        _AFTER_COMMIT_ACTIONS.set([])
+        _AFTER_ROLLBACK_ACTIONS.set([])
 
     def finish_request(self, *, committed: bool) -> None:
         if committed:
             self._flush_pending_search_ops()
+            self._run_deferred_actions(_AFTER_COMMIT_ACTIONS.get(), label="after_commit")
         else:
             _PENDING_SEARCH_OPS.set([])
+            self._run_deferred_actions(_AFTER_ROLLBACK_ACTIONS.get(), label="after_rollback")
         _ACTIVE_STORE.set(None)
         _REQUEST_MANAGED.set(False)
         _PENDING_SEARCH_OPS.set(None)
+        _AFTER_COMMIT_ACTIONS.set(None)
+        _AFTER_ROLLBACK_ACTIONS.set(None)
 
     def _is_request_managed(self) -> bool:
         return _REQUEST_MANAGED.get()
@@ -376,6 +390,33 @@ class LabTrackerAPI(
         pending = _PENDING_SEARCH_OPS.get() or []
         for operation, args in pending:
             self._apply_search_op_safely(operation, *args)
+
+    def _run_deferred_actions(
+        self,
+        actions: list[Callable[[], None]] | None,
+        *,
+        label: str,
+    ) -> None:
+        for action in actions or []:
+            try:
+                action()
+            except Exception as exc:
+                _logger.warning("Deferred %s action failed: %s", label, exc, exc_info=True)
+
+    def run_after_commit(self, action: Callable[[], None]) -> None:
+        if self._is_request_managed():
+            actions = _AFTER_COMMIT_ACTIONS.get()
+            if actions is not None:
+                actions.append(action)
+                return
+        action()
+
+    def run_after_rollback(self, action: Callable[[], None]) -> None:
+        if not self._is_request_managed():
+            return
+        actions = _AFTER_ROLLBACK_ACTIONS.get()
+        if actions is not None:
+            actions.append(action)
 
     def _run_repository_write(
         self,
