@@ -3,15 +3,15 @@ from __future__ import annotations
 from fastapi.testclient import TestClient
 
 
+def _auth_headers(token: str) -> dict[str, str]:
+    return {"Authorization": f"Bearer {token}"}
+
+
 def test_dataset_review_request_queue_approve_commits_dataset(
     client: TestClient,
     admin_auth_headers: dict[str, str],
 ):
     headers = admin_auth_headers
-
-    me_response = client.get("/auth/me", headers=headers)
-    assert me_response.status_code == 200
-    reviewer_user_id = me_response.json()["data"]["user_id"]
 
     project_response = client.post(
         "/projects",
@@ -64,7 +64,7 @@ def test_dataset_review_request_queue_approve_commits_dataset(
     review_payload = request_review_response.json()["data"]
     assert review_payload["dataset_id"] == dataset_id
     assert review_payload["status"] == "pending"
-    assert review_payload["reviewer_user_id"] == reviewer_user_id
+    assert review_payload["reviewer_user_id"] is None
     assert review_payload["comments"] == "please review"
 
     get_review_response = client.get(f"/datasets/{dataset_id}/review", headers=headers)
@@ -163,6 +163,76 @@ def test_dataset_review_reject_leaves_dataset_staged_and_persists_comments(
     assert review_after.status_code == 200
     assert review_after.json()["data"]["status"] == "rejected"
     assert review_after.json()["data"]["comments"] == "not acceptable"
+
+
+def test_editor_can_resolve_unassigned_pending_review(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+):
+    register_response = client.post(
+        "/auth/register",
+        json={"username": "editor-review", "password": "secret", "role": "editor"},
+        headers=admin_auth_headers,
+    )
+    assert register_response.status_code == 201
+    editor_headers = _auth_headers(register_response.json()["data"]["access_token"])
+
+    project_id = client.post(
+        "/projects",
+        json={"name": "Editor review", "review_policy": "all"},
+        headers=editor_headers,
+    ).json()["data"]["project_id"]
+    question_id = client.post(
+        "/questions",
+        json={
+            "project_id": project_id,
+            "text": "Can editors resolve pending reviews?",
+            "question_type": "descriptive",
+        },
+        headers=editor_headers,
+    ).json()["data"]["question_id"]
+    activate_response = client.patch(
+        f"/questions/{question_id}",
+        json={"status": "active"},
+        headers=editor_headers,
+    )
+    assert activate_response.status_code == 200
+
+    dataset_id = client.post(
+        "/datasets",
+        json={"project_id": project_id, "primary_question_id": question_id},
+        headers=editor_headers,
+    ).json()["data"]["dataset_id"]
+    attach_response = client.post(
+        f"/datasets/{dataset_id}/files",
+        files={"file": ("data.bin", b"real-data", "application/octet-stream")},
+        headers=editor_headers,
+    )
+    assert attach_response.status_code == 201
+
+    request_review = client.post(
+        f"/datasets/{dataset_id}/review",
+        json={"comments": "please review"},
+        headers=editor_headers,
+    )
+    assert request_review.status_code == 201
+    assert request_review.json()["data"]["reviewer_user_id"] is None
+
+    queue_response = client.get("/reviews/pending", headers=editor_headers)
+    assert queue_response.status_code == 200
+    assert queue_response.json()["meta"]["total"] == 1
+
+    approve_response = client.patch(
+        f"/datasets/{dataset_id}/review",
+        json={"action": "approve"},
+        headers=editor_headers,
+    )
+    assert approve_response.status_code == 200
+    assert approve_response.json()["data"]["status"] == "approved"
+
+    dataset_after = client.get(f"/datasets/{dataset_id}", headers=editor_headers)
+    assert dataset_after.status_code == 200
+    assert dataset_after.json()["data"]["status"] == "committed"
 
 
 def test_project_patch_can_set_review_policy(

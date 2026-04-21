@@ -160,7 +160,7 @@ describe("ReviewPanel", () => {
     render(
       <ReviewPanel
         token="token-2"
-        user={{ role: "admin", username: "sam" }}
+        user={{ role: "editor", username: "sam" }}
         projects={[{ name: "Project One", project_id: "project-1" }]}
         selectedProjectId="project-1"
         navigate={vi.fn()}
@@ -173,7 +173,7 @@ describe("ReviewPanel", () => {
 
     fireEvent.click(await screen.findByRole("button", { name: "Approve" }));
 
-    expect(await screen.findByText("No pending reviews assigned.")).toBeInTheDocument();
+    expect(await screen.findByText("No pending reviews available.")).toBeInTheDocument();
     await waitFor(() => {
       expect(onFlash).toHaveBeenCalledWith("Dataset review approved.");
       expect(onRefreshActiveProject).toHaveBeenCalled();

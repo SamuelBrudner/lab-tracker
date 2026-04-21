@@ -75,6 +75,12 @@ class LocalNoteStorage:
             raise NotFoundError("Raw note content not found.")
         return path.read_bytes()
 
+    def delete(self, storage_id: UUID) -> None:
+        path = self._path_for(storage_id)
+        if not path.exists():
+            raise NotFoundError("Raw note content not found.")
+        path.unlink()
+
     def _validate_store_inputs(self, *, filename: str, content_type: str) -> None:
         if not filename or not filename.strip():
             raise ValidationError("filename must not be empty.")

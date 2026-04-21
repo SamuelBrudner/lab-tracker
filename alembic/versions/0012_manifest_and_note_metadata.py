@@ -23,7 +23,9 @@ def upgrade() -> None:
         batch_op.add_column(sa.Column("manifest_bids_metadata", sa.JSON(), nullable=True))
         batch_op.add_column(sa.Column("manifest_note_ids", sa.JSON(), nullable=True))
         batch_op.add_column(sa.Column("manifest_extraction_provenance", sa.JSON(), nullable=True))
-        batch_op.add_column(sa.Column("manifest_source_session_id", sa.String(length=36), nullable=True))
+        batch_op.add_column(
+            sa.Column("manifest_source_session_id", sa.String(length=36), nullable=True)
+        )
 
     with op.batch_alter_table("notes") as batch_op:
         batch_op.add_column(sa.Column("metadata", sa.JSON(), nullable=True))

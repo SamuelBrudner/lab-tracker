@@ -1,8 +1,11 @@
 import hashlib
 from uuid import uuid4
 
+import pytest
+
 from lab_tracker.api import LabTrackerAPI
 from lab_tracker.auth import AuthContext, Role
+from lab_tracker.errors import NotFoundError
 from lab_tracker.models import EntityRef, EntityType
 from lab_tracker.note_storage import LocalNoteStorage
 from lab_tracker.services.extraction_backends import RegexQuestionExtractionBackend
@@ -134,3 +137,40 @@ def test_upload_note_raw_gracefully_handles_ocr_failure(tmp_path):
 
     assert note.raw_asset is not None
     assert note.transcribed_text is None
+
+
+def test_upload_note_raw_rolls_back_raw_asset_when_note_creation_fails(tmp_path):
+    api = LabTrackerAPI.in_memory(raw_storage=LocalNoteStorage(tmp_path))
+    actor = _actor()
+
+    with pytest.raises(NotFoundError, match="Project does not exist."):
+        api.upload_note_raw(
+            project_id=uuid4(),
+            content=b"binary-note",
+            filename="note.jpg",
+            content_type="image/jpeg",
+            actor=actor,
+        )
+
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_delete_note_removes_stored_raw_asset(tmp_path):
+    api = LabTrackerAPI.in_memory(raw_storage=LocalNoteStorage(tmp_path))
+    actor = _actor()
+    project = api.create_project("Neuro Project", actor=actor)
+
+    note = api.upload_note_raw(
+        project_id=project.project_id,
+        content=b"binary-note",
+        filename="note.jpg",
+        content_type="image/jpeg",
+        actor=actor,
+    )
+    assert note.raw_asset is not None
+    raw_path = tmp_path / note.raw_asset.storage_id.hex
+    assert raw_path.exists()
+
+    api.delete_note(note.note_id, actor=actor)
+
+    assert not raw_path.exists()

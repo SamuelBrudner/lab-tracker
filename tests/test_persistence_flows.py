@@ -9,7 +9,7 @@ from lab_tracker.api import LabTrackerAPI
 from lab_tracker.app import create_app
 from lab_tracker.auth import AuthContext, Role
 from lab_tracker.db import Base, get_session_factory
-from lab_tracker.db_models import ProjectModel
+from lab_tracker.db_models import NoteModel, ProjectModel, QuestionModel
 from lab_tracker.models import QuestionType, SessionType
 from lab_tracker.sqlalchemy_repository import SQLAlchemyLabTrackerRepository
 
@@ -244,6 +244,74 @@ def test_fastapi_routes_read_database_changes_after_app_start(monkeypatch, tmp_p
     assert list_response.status_code == 200
     names = [item["name"] for item in list_response.json()["data"]]
     assert "Inserted after startup" in names
+
+
+def test_fastapi_search_reads_database_changes_after_app_start(monkeypatch, tmp_path):
+    db_path = tmp_path / "route-search-refresh.db"
+    database_url = f"sqlite+pysqlite:///{db_path}"
+    monkeypatch.setenv("LAB_TRACKER_DATABASE_URL", database_url)
+    monkeypatch.setenv("LAB_TRACKER_FILE_STORAGE_PATH", str(tmp_path / "file-storage"))
+    monkeypatch.setenv("LAB_TRACKER_NOTE_STORAGE_PATH", str(tmp_path / "note-storage"))
+
+    engine = create_engine(
+        database_url,
+        future=True,
+        connect_args={"check_same_thread": False},
+    )
+    Base.metadata.create_all(bind=engine)
+    engine.dispose()
+
+    app = create_app()
+    _seed_admin(
+        app,
+        username="route-search-admin",
+        password="secret",
+    )
+
+    with app.state.db_session_factory() as session:
+        project = ProjectModel(name="Inserted for search", description="external")
+        session.add(project)
+        session.flush()
+        question = QuestionModel(
+            project_id=project.project_id,
+            text="Externally inserted search target",
+            question_type="descriptive",
+            status="active",
+            created_from="manual",
+        )
+        note = NoteModel(
+            project_id=project.project_id,
+            raw_content="Externally inserted note search target",
+            note_metadata={"owner": "Sam"},
+            status="committed",
+        )
+        session.add(question)
+        session.add(note)
+        session.commit()
+        project_id = project.project_id
+        question_id = question.question_id
+        note_id = note.note_id
+
+    with TestClient(app) as client:
+        login_response = client.post(
+            "/auth/login",
+            json={
+                "username": "route-search-admin",
+                "password": "secret",
+            },
+        )
+        assert login_response.status_code == 200
+        headers = _auth_headers(login_response.json()["data"]["access_token"])
+        search_response = client.get(
+            "/search",
+            params={"q": "search target", "project_id": project_id},
+            headers=headers,
+        )
+
+    assert search_response.status_code == 200
+    payload = search_response.json()["data"]
+    assert {item["question_id"] for item in payload["questions"]} == {question_id}
+    assert {item["note_id"] for item in payload["notes"]} == {note_id}
 
 
 def test_note_metadata_search_survives_app_restart(monkeypatch, tmp_path):

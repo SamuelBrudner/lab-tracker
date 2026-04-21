@@ -14,7 +14,11 @@ from lab_tracker.models import (
     utc_now,
 )
 from lab_tracker.errors import ValidationError
-from lab_tracker.services.search_backends import SearchQuery
+from lab_tracker.services.search_backends import (
+    InMemorySubstringSearchBackend,
+    SearchQuery,
+    question_matches_substring,
+)
 from lab_tracker.services.shared import (
     WRITE_ROLES,
     _actor_user_id,
@@ -161,25 +165,36 @@ class QuestionServiceMixin:
                     )
                 ]
         if search is not None and search.strip():
-            candidate_ids = [question.question_id for question in questions]
-            hits = self._search_backend.search_question_ids(
-                SearchQuery(query=search, project_id=project_id),
-                question_ids=candidate_ids,
-            )
-            if repository is not None and not self._allow_in_memory:
-                questions = repository.fetch_questions(hits)
-                self._cache_entities(
-                    "questions",
-                    questions,
-                    lambda question: question.question_id,
-                )
-            else:
-                question_map = {question.question_id: question for question in questions}
+            if (
+                repository is not None
+                and not self._allow_in_memory
+                and self._search_backend.backend_name == InMemorySubstringSearchBackend.backend_name
+            ):
                 questions = [
-                    question_map[question_id]
-                    for question_id in hits
-                    if question_id in question_map
+                    question
+                    for question in questions
+                    if question_matches_substring(question, search)
                 ]
+            else:
+                candidate_ids = [question.question_id for question in questions]
+                hits = self._search_backend.search_question_ids(
+                    SearchQuery(query=search, project_id=project_id),
+                    question_ids=candidate_ids,
+                )
+                if repository is not None and not self._allow_in_memory:
+                    questions = repository.fetch_questions(hits)
+                    self._cache_entities(
+                        "questions",
+                        questions,
+                        lambda question: question.question_id,
+                    )
+                else:
+                    question_map = {question.question_id: question for question in questions}
+                    questions = [
+                        question_map[question_id]
+                        for question_id in hits
+                        if question_id in question_map
+                    ]
         return questions
 
     def update_question(

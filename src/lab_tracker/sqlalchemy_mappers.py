@@ -204,7 +204,9 @@ def dataset_to_model(dataset: Dataset) -> DatasetModel:
         manifest_note_ids=[str(note_id) for note_id in manifest.note_ids],
         manifest_extraction_provenance=list(manifest.extraction_provenance),
         manifest_source_session_id=(
-            _uuid_str(manifest.source_session_id) if manifest.source_session_id is not None else None
+            _uuid_str(manifest.source_session_id)
+            if manifest.source_session_id is not None
+            else None
         ),
         status=dataset.status.value,
         created_by=dataset.created_by,

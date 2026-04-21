@@ -45,6 +45,8 @@ from lab_tracker.services.search_backends import (
     InMemorySubstringSearchBackend,
     SearchBackend,
     SearchQuery,
+    note_matches_substring,
+    question_matches_substring,
 )
 
 _DEFAULT_OCR_BACKEND: object = object()
@@ -137,8 +139,11 @@ class LabTrackerAPI(
         self._search_last_failure_message: str | None = None
         self._search_last_failure_operation: str | None = None
         if repository is not None:
-            self.hydrate_from_repository(repository)
-        else:
+            self.hydrate_from_repository(
+                repository,
+                hydrate_search_backend=self._should_sync_search_backend(),
+            )
+        elif self._should_sync_search_backend():
             self._hydrate_search_backend()
 
     @classmethod
@@ -165,6 +170,15 @@ class LabTrackerAPI(
 
     def _is_repository_backed(self) -> bool:
         return self._active_repository() is not None and not self._allow_in_memory
+
+    def _uses_live_repository_substring_search(self) -> bool:
+        return (
+            self._is_repository_backed()
+            and self._search_backend.backend_name == InMemorySubstringSearchBackend.backend_name
+        )
+
+    def _should_sync_search_backend(self) -> bool:
+        return not self._uses_live_repository_substring_search()
 
     def _cache_map(self, attribute_name: str) -> dict[UUID, object]:
         return getattr(self._store, attribute_name)
@@ -311,7 +325,7 @@ class LabTrackerAPI(
             return
         target_store = store or self._store
         self._hydrate_store_from_repository(target_store, resolved_repository)
-        if hydrate_search_backend:
+        if hydrate_search_backend and self._should_sync_search_backend():
             self._hydrate_search_backend(target_store)
 
     def _hydrate_search_backend(self, store: InMemoryStore | None = None) -> None:
@@ -320,11 +334,22 @@ class LabTrackerAPI(
         self._search_backend.upsert_notes(target_store.notes.values())
 
     def _queue_search_op(self, operation: str, *args: object) -> None:
+        if not self._should_sync_search_backend():
+            return
         pending = _PENDING_SEARCH_OPS.get()
         if self._is_request_managed() and pending is not None:
             pending.append((operation, args))
             return
         self._apply_search_op_safely(operation, *args)
+
+    @staticmethod
+    def _slice_entities(items: list[object], *, limit: int | None, offset: int) -> list[object]:
+        resolved_offset = max(offset, 0)
+        if limit is None:
+            return items[resolved_offset:]
+        if limit <= 0:
+            return []
+        return items[resolved_offset : resolved_offset + limit]
 
     def _apply_search_op(self, operation: str, *args: object) -> None:
         if operation == "upsert_questions":
@@ -390,17 +415,37 @@ class LabTrackerAPI(
         limit: int | None = None,
         offset: int = 0,
     ) -> list[Question]:
-        ids = self._search_backend.search_question_ids(
-            SearchQuery(query=query, project_id=project_id, limit=limit, offset=offset)
-        )
         repository = self._active_repository()
         if repository is not None and not self._allow_in_memory:
+            if self._uses_live_repository_substring_search():
+                questions, _ = repository.query_questions(
+                    project_id=project_id,
+                    limit=None,
+                    offset=0,
+                )
+                matches = [
+                    question
+                    for question in questions
+                    if question_matches_substring(question, query)
+                ]
+                paged = self._slice_entities(matches, limit=limit, offset=offset)
+                return self._cache_entities(
+                    "questions",
+                    paged,
+                    lambda question: question.question_id,
+                )
+            ids = self._search_backend.search_question_ids(
+                SearchQuery(query=query, project_id=project_id, limit=limit, offset=offset)
+            )
             questions = repository.fetch_questions(ids)
             return self._cache_entities(
                 "questions",
                 questions,
                 lambda question: question.question_id,
             )
+        ids = self._search_backend.search_question_ids(
+            SearchQuery(query=query, project_id=project_id, limit=limit, offset=offset)
+        )
         results: list[Question] = []
         for question_id in ids:
             question = self._store.questions.get(question_id)
@@ -416,17 +461,33 @@ class LabTrackerAPI(
         limit: int | None = None,
         offset: int = 0,
     ) -> list[Note]:
-        ids = self._search_backend.search_note_ids(
-            SearchQuery(query=query, project_id=project_id, limit=limit, offset=offset)
-        )
         repository = self._active_repository()
         if repository is not None and not self._allow_in_memory:
+            if self._uses_live_repository_substring_search():
+                notes, _ = repository.query_notes(
+                    project_id=project_id,
+                    limit=None,
+                    offset=0,
+                )
+                matches = [note for note in notes if note_matches_substring(note, query)]
+                paged = self._slice_entities(matches, limit=limit, offset=offset)
+                return self._cache_entities(
+                    "notes",
+                    paged,
+                    lambda note: note.note_id,
+                )
+            ids = self._search_backend.search_note_ids(
+                SearchQuery(query=query, project_id=project_id, limit=limit, offset=offset)
+            )
             notes = repository.fetch_notes(ids)
             return self._cache_entities(
                 "notes",
                 notes,
                 lambda note: note.note_id,
             )
+        ids = self._search_backend.search_note_ids(
+            SearchQuery(query=query, project_id=project_id, limit=limit, offset=offset)
+        )
         results: list[Note] = []
         for note_id in ids:
             note = self._store.notes.get(note_id)

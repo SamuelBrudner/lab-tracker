@@ -33,7 +33,7 @@ function ReviewPanel({
   const [actionError, setActionError] = useState("");
   const [reviewComment, setReviewComment] = useState("");
 
-  const isAdmin = Boolean(user && user.role === "admin");
+  const canResolve = Boolean(user && (user.role === "admin" || user.role === "editor"));
 
   const projectById = useMemo(() => {
     const index = {};
@@ -253,8 +253,8 @@ function ReviewPanel({
     if (!token || !dataset || !dataset.dataset_id) {
       return;
     }
-    if (!isAdmin) {
-      setActionError("Only admins can resolve dataset reviews.");
+    if (!canResolve) {
+      setActionError("Only editors and admins can resolve dataset reviews.");
       return;
     }
 
@@ -332,7 +332,7 @@ function ReviewPanel({
       <div className="item-head">
         <h2>Dataset PR (Review Queue)</h2>
         <div className="inline">
-          <span className="pill">assigned: {pendingReviews.length}</span>
+          <span className="pill">pending: {pendingReviews.length}</span>
           <button
             type="button"
             className="btn-secondary"
@@ -344,8 +344,7 @@ function ReviewPanel({
         </div>
       </div>
       <p className="subtle">
-        Pending dataset reviews assigned to you. Approving commits the dataset; requesting changes
-        keeps it staged.
+        Pending dataset reviews. Approving commits the dataset; requesting changes keeps it staged.
       </p>
 
       {queueError ? <p className="flash error">{queueError}</p> : null}
@@ -357,10 +356,10 @@ function ReviewPanel({
             {queueBusy ? <span className="pill">Loading...</span> : null}
           </div>
 
-          {!token ? <p className="subtle">Sign in to view review assignments.</p> : null}
+          {!token ? <p className="subtle">Sign in to view pending reviews.</p> : null}
 
           {token && pendingReviews.length === 0 && !queueBusy ? (
-            <p className="subtle">No pending reviews assigned.</p>
+            <p className="subtle">No pending reviews available.</p>
           ) : null}
 
           {pendingReviews.length > 0 ? (
@@ -528,7 +527,9 @@ function ReviewPanel({
                 </section>
               </div>
 
-              {!isAdmin ? <p className="warn">Review actions require an admin account.</p> : null}
+              {!canResolve ? (
+                <p className="warn">Review actions require an editor or admin account.</p>
+              ) : null}
 
               {actionError ? <p className="flash error">{actionError}</p> : null}
 
@@ -553,7 +554,7 @@ function ReviewPanel({
                   <button
                     type="button"
                     className="btn-primary"
-                    disabled={!token || !isAdmin || actionBusy}
+                    disabled={!token || !canResolve || actionBusy}
                     onClick={() => handleResolve("approve")}
                   >
                     Approve
@@ -561,14 +562,14 @@ function ReviewPanel({
                   <button
                     type="submit"
                     className="btn-secondary"
-                    disabled={!token || !isAdmin || actionBusy}
+                    disabled={!token || !canResolve || actionBusy}
                   >
                     Request changes
                   </button>
                   <button
                     type="button"
                     className="btn-danger"
-                    disabled={!token || !isAdmin || actionBusy}
+                    disabled={!token || !canResolve || actionBusy}
                     onClick={() => handleResolve("reject")}
                   >
                     Reject

@@ -15,7 +15,13 @@ from lab_tracker.api import LabTrackerAPI
 from lab_tracker.auth import require_role
 from lab_tracker.db_models import DatasetFileModel, DatasetModel
 from lab_tracker.errors import ConflictError, NotFoundError, ValidationError
-from lab_tracker.models import Dataset, DatasetFile, DatasetReview, DatasetReviewStatus, DatasetStatus
+from lab_tracker.models import (
+    Dataset,
+    DatasetFile,
+    DatasetReview,
+    DatasetReviewStatus,
+    DatasetStatus,
+)
 from lab_tracker.schemas import (
     DatasetCreate,
     DatasetReviewRequest,
@@ -32,7 +38,6 @@ from .shared import (
     db_session_from_request,
     file_storage_from_request,
     list_response,
-    paginate,
     repository_from_request,
     safe_attachment_filename,
     validate_pagination,
@@ -112,11 +117,8 @@ def build_datasets_router(api: LabTrackerAPI) -> APIRouter:
         payload: DatasetReviewRequest | None = None,
     ):
         actor = actor_from_request(request)
-        dataset = api.get_dataset(dataset_id)
-        reviewer_user_id = api._default_dataset_reviewer_user_id(dataset.project_id)
         review = api.request_dataset_review(
             dataset_id,
-            reviewer_user_id=reviewer_user_id,
             comments=payload.comments if payload else None,
             actor=actor,
         )
@@ -162,10 +164,10 @@ def build_datasets_router(api: LabTrackerAPI) -> APIRouter:
     @router.get("/reviews/pending", response_model=ListEnvelope[DatasetReview])
     def list_pending_reviews(request: Request, limit: int = 50, offset: int = 0):
         actor = actor_from_request(request)
+        require_role(actor, WRITE_ROLES)
         validate_pagination(limit, offset)
         reviews, total = repository_from_request(request).query_dataset_reviews(
             status=DatasetReviewStatus.PENDING.value,
-            reviewer_user_id=actor.user_id,
             limit=limit,
             offset=offset,
         )

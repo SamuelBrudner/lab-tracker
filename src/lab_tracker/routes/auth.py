@@ -10,7 +10,13 @@ from starlette.requests import Request
 
 from lab_tracker.auth import AuthService, Role, TokenService
 from lab_tracker.errors import AuthError
-from lab_tracker.schemas import AuthLoginRequest, AuthRegisterRequest, AuthTokenRead, AuthUserRead, Envelope
+from lab_tracker.schemas import (
+    AuthLoginRequest,
+    AuthRegisterRequest,
+    AuthTokenRead,
+    AuthUserRead,
+    Envelope,
+)
 
 from .shared import (
     actor_from_authorization_header,

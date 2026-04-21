@@ -234,7 +234,7 @@ def test_dataset_commit_requires_file_attachment():
 
 def test_dataset_commit_can_create_review_request_when_policy_requires_it():
     api = LabTrackerAPI.in_memory()
-    actor = _actor()
+    actor = _actor(Role.EDITOR)
     project = api.create_project(
         "Neuro Project",
         review_policy=ProjectReviewPolicy.ALL,
@@ -265,6 +265,7 @@ def test_dataset_commit_can_create_review_request_when_policy_requires_it():
     assert len(reviews) == 1
     review = reviews[0]
     assert review.dataset_id == dataset.dataset_id
+    assert review.reviewer_user_id is None
 
     api.resolve_dataset_review(
         review.review_id,

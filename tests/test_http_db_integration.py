@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import base64
 import json
+from pathlib import Path
+from uuid import uuid4
 
 from fastapi.testclient import TestClient
 
@@ -372,6 +374,25 @@ def test_note_routes_support_target_filters_and_multipart_upload(
     filtered_payload = filtered.json()
     assert filtered_payload["meta"]["total"] == 1
     assert _ids(filtered_payload["data"], "note_id") == {multipart_payload["note_id"]}
+
+
+def test_note_multipart_upload_cleans_up_raw_asset_on_failure(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+):
+    storage_root = Path(client.app.state.raw_note_storage._base_path)
+    before = sorted(path.name for path in storage_root.iterdir()) if storage_root.exists() else []
+
+    response = client.post(
+        "/notes/upload-file",
+        data={"project_id": str(uuid4())},
+        files={"file": ("capture.txt", b"raw-capture", "text/plain")},
+        headers=admin_auth_headers,
+    )
+
+    assert response.status_code == 404
+    after = sorted(path.name for path in storage_root.iterdir()) if storage_root.exists() else []
+    assert after == before
 
 
 def test_write_routes_ignore_client_supplied_created_by(

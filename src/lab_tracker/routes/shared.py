@@ -25,10 +25,8 @@ from lab_tracker.repository import LabTrackerRepository
 from lab_tracker.schemas import (
     AuthTokenRead,
     AuthUserRead,
-    Envelope,
     ErrorEnvelope,
     ErrorInfo,
-    ErrorIssue,
     ListEnvelope,
     PaginationMeta,
 )

@@ -16,7 +16,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session, sessionmaker
 from starlette.responses import FileResponse, JSONResponse, RedirectResponse
 
-from lab_tracker.api import InMemoryStore, LabTrackerAPI
+from lab_tracker.api import LabTrackerAPI
 from lab_tracker.auth import AuthContext, AuthService, TokenService, extract_bearer_token
 from lab_tracker.config import get_settings
 from lab_tracker.db import get_engine, get_session_factory
@@ -353,15 +353,6 @@ def create_app() -> FastAPI:
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
-        try:
-            with session_factory() as bootstrap_session:
-                app.state.lab_tracker_api.hydrate_from_repository(
-                    SQLAlchemyLabTrackerRepository(bootstrap_session),
-                    store=InMemoryStore(),
-                )
-        except SQLAlchemyError:
-            # Schema setup is validated separately; startup should still succeed for health checks.
-            pass
         try:
             yield
         finally:

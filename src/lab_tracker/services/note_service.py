@@ -123,6 +123,28 @@ def _suggest_question_type(text: str) -> QuestionType:
 
 
 class NoteServiceMixin:
+    def _delete_raw_asset(self, raw_asset: NoteRawAsset | None) -> None:
+        if raw_asset is None or self._raw_storage is None:
+            return
+        delete = getattr(self._raw_storage, "delete", None)
+        if not callable(delete):
+            _logger.warning(
+                "Raw storage backend does not support deletion for %s.",
+                raw_asset.storage_id,
+            )
+            return
+        try:
+            delete(raw_asset.storage_id)
+        except NotFoundError:
+            return
+        except Exception as exc:
+            _logger.warning(
+                "Failed to delete raw note asset %s: %s",
+                raw_asset.storage_id,
+                exc,
+                exc_info=True,
+            )
+
     def create_note(
         self,
         project_id: UUID,
@@ -214,6 +236,7 @@ class NoteServiceMixin:
             raise ValidationError("Raw storage backend is not configured.")
         asset = raw_asset
         resolved_content = content
+        created_asset = False
         if asset is None:
             if resolved_content is None:
                 raise ValidationError("content must not be empty.")
@@ -222,51 +245,57 @@ class NoteServiceMixin:
                 filename=(filename or "").strip(),
                 content_type=(content_type or "").strip(),
             )
-        elif (
-            resolved_content is None
-            and transcribed_text is None
-            and asset.content_type.strip().lower().startswith("image/")
-        ):
-            resolved_content = self._raw_storage.read(asset.storage_id)
+            created_asset = True
+        try:
+            if (
+                resolved_content is None
+                and transcribed_text is None
+                and asset.content_type.strip().lower().startswith("image/")
+            ):
+                resolved_content = self._raw_storage.read(asset.storage_id)
 
-        resolved_transcribed_text = transcribed_text.strip() if transcribed_text else None
-        if (
-            resolved_transcribed_text is None
-            and resolved_content is not None
-            and _should_attempt_ocr(resolved_content, asset.content_type)
-        ):
-            ocr_backend = getattr(self, "_ocr_backend", None)
-            if ocr_backend is None:
-                global _OCR_UNAVAILABLE_WARNED
-                if not _OCR_UNAVAILABLE_WARNED:
-                    _logger.warning(
-                        "OCR backend is unavailable; uploaded notes will not be transcribed. "
-                        "Install with `pip install -e '.[ocr]'` to enable OCR."
-                    )
-                    _OCR_UNAVAILABLE_WARNED = True
-            else:
-                try:
-                    result = ocr_backend.extract_text(resolved_content, asset.content_type)
-                    resolved_transcribed_text = result.text.strip() if result.text else None
-                except Exception as exc:
-                    _logger.warning(
-                        "OCR failed for uploaded note %s (content_type=%s): %s",
-                        asset.filename,
-                        asset.content_type,
-                        exc,
-                        exc_info=True,
-                    )
-        return self.create_note(
-            project_id=project_id,
-            raw_content=None,
-            raw_asset=asset,
-            transcribed_text=resolved_transcribed_text,
-            extracted_entities=extracted_entities,
-            targets=targets,
-            metadata=metadata,
-            status=status,
-            actor=actor,
-        )
+            resolved_transcribed_text = transcribed_text.strip() if transcribed_text else None
+            if (
+                resolved_transcribed_text is None
+                and resolved_content is not None
+                and _should_attempt_ocr(resolved_content, asset.content_type)
+            ):
+                ocr_backend = getattr(self, "_ocr_backend", None)
+                if ocr_backend is None:
+                    global _OCR_UNAVAILABLE_WARNED
+                    if not _OCR_UNAVAILABLE_WARNED:
+                        _logger.warning(
+                            "OCR backend is unavailable; uploaded notes will not be transcribed. "
+                            "Install with `pip install -e '.[ocr]'` to enable OCR."
+                        )
+                        _OCR_UNAVAILABLE_WARNED = True
+                else:
+                    try:
+                        result = ocr_backend.extract_text(resolved_content, asset.content_type)
+                        resolved_transcribed_text = result.text.strip() if result.text else None
+                    except Exception as exc:
+                        _logger.warning(
+                            "OCR failed for uploaded note %s (content_type=%s): %s",
+                            asset.filename,
+                            asset.content_type,
+                            exc,
+                            exc_info=True,
+                        )
+            return self.create_note(
+                project_id=project_id,
+                raw_content=None,
+                raw_asset=asset,
+                transcribed_text=resolved_transcribed_text,
+                extracted_entities=extracted_entities,
+                targets=targets,
+                metadata=metadata,
+                status=status,
+                actor=actor,
+            )
+        except Exception:
+            if asset is not None and (created_asset or raw_asset is not None):
+                self._delete_raw_asset(asset)
+            raise
 
     def get_note(self, note_id: UUID) -> Note:
         return self._get_from_repository_or_store(
@@ -452,6 +481,7 @@ class NoteServiceMixin:
         self._store.notes.pop(note_id, None)
         self._run_repository_write(lambda repository: repository.notes.delete(note_id))
         self._queue_search_op("delete_notes", [note_id])
+        self._delete_raw_asset(note.raw_asset)
         return note
 
     def extract_questions_from_note(

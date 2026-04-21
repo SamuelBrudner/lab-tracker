@@ -59,15 +59,6 @@ class DatasetServiceMixin:
         policy = self.get_project(project_id).review_policy
         return policy == ProjectReviewPolicy.ALL
 
-    def _default_dataset_reviewer_user_id(self, project_id: UUID) -> UUID | None:
-        project = self.get_project(project_id)
-        if not project.created_by:
-            return None
-        try:
-            return UUID(project.created_by)
-        except ValueError:
-            return None
-
     def create_dataset(
         self,
         project_id: UUID,
@@ -132,7 +123,6 @@ class DatasetServiceMixin:
         if review_required:
             self.request_dataset_review(
                 dataset.dataset_id,
-                reviewer_user_id=self._default_dataset_reviewer_user_id(project_id),
                 actor=actor,
             )
         return dataset
@@ -259,9 +249,6 @@ class DatasetServiceMixin:
                 if self._dataset_review_required(dataset.project_id):
                     self.request_dataset_review(
                         dataset.dataset_id,
-                        reviewer_user_id=self._default_dataset_reviewer_user_id(
-                            dataset.project_id
-                        ),
                         actor=actor,
                     )
                 else:

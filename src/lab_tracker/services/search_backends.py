@@ -70,6 +70,10 @@ class SearchBackend(ABC):
         """Return matching note ids ordered by backend-defined relevance."""
 
 
+def _normalized_query(query: str) -> str:
+    return (query or "").casefold().strip()
+
+
 @dataclass(frozen=True)
 class _QuestionDoc:
     question_id: UUID
@@ -85,6 +89,33 @@ class _NoteDoc:
     raw_content: str
     transcribed_text: str | None
     metadata: dict[str, str]
+
+
+def question_matches_substring(
+    question: Question | _QuestionDoc,
+    query: str,
+) -> bool:
+    needle = _normalized_query(query)
+    if not needle:
+        return False
+    hypothesis = question.hypothesis
+    return needle in question.text.casefold() or (
+        hypothesis is not None and needle in hypothesis.casefold()
+    )
+
+
+def note_matches_substring(
+    note: Note | _NoteDoc,
+    query: str,
+) -> bool:
+    needle = _normalized_query(query)
+    if not needle:
+        return False
+    if needle in note.raw_content.casefold():
+        return True
+    if note.transcribed_text and needle in note.transcribed_text.casefold():
+        return True
+    return any(needle in str(value).casefold() for value in note.metadata.values())
 
 
 class InMemorySubstringSearchBackend(SearchBackend):
@@ -129,8 +160,7 @@ class InMemorySubstringSearchBackend(SearchBackend):
         *,
         question_ids: Iterable[UUID] | None = None,
     ) -> list[UUID]:
-        needle = (query.query or "").casefold().strip()
-        if not needle:
+        if not _normalized_query(query.query):
             return []
         allowed = set(question_ids) if question_ids is not None else None
         matches: list[UUID] = []
@@ -139,10 +169,7 @@ class InMemorySubstringSearchBackend(SearchBackend):
                 continue
             if allowed is not None and doc.question_id not in allowed:
                 continue
-            hypothesis = doc.hypothesis
-            if needle in doc.text.casefold() or (
-                hypothesis is not None and needle in hypothesis.casefold()
-            ):
+            if question_matches_substring(doc, query.query):
                 matches.append(doc.question_id)
         return _slice(matches, limit=query.limit, offset=query.offset)
 
@@ -152,8 +179,7 @@ class InMemorySubstringSearchBackend(SearchBackend):
         *,
         note_ids: Iterable[UUID] | None = None,
     ) -> list[UUID]:
-        needle = (query.query or "").casefold().strip()
-        if not needle:
+        if not _normalized_query(query.query):
             return []
         allowed = set(note_ids) if note_ids is not None else None
         matches: list[UUID] = []
@@ -162,13 +188,7 @@ class InMemorySubstringSearchBackend(SearchBackend):
                 continue
             if allowed is not None and doc.note_id not in allowed:
                 continue
-            if needle in doc.raw_content.casefold():
-                matches.append(doc.note_id)
-                continue
-            if doc.transcribed_text and needle in doc.transcribed_text.casefold():
-                matches.append(doc.note_id)
-                continue
-            if any(needle in value.casefold() for value in doc.metadata.values()):
+            if note_matches_substring(doc, query.query):
                 matches.append(doc.note_id)
         return _slice(matches, limit=query.limit, offset=query.offset)
 

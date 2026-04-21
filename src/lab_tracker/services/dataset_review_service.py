@@ -83,13 +83,7 @@ class DatasetReviewServiceMixin:
             status=DatasetReviewStatus.PENDING,
         )
         if pending:
-            review = pending[0]
-            if review.reviewer_user_id is None and reviewer_user_id is not None:
-                review.reviewer_user_id = reviewer_user_id
-                self._run_repository_write(
-                    lambda repository: repository.dataset_reviews.save(review)
-                )
-            return review
+            return pending[0]
 
         review = DatasetReview(
             review_id=uuid4(),
@@ -112,7 +106,7 @@ class DatasetReviewServiceMixin:
         comments: str | None = None,
         actor: AuthContext | None = None,
     ) -> DatasetReview:
-        require_role(actor, {Role.ADMIN})
+        require_role(actor, {Role.ADMIN, Role.EDITOR})
         review = self.get_dataset_review(review_id)
         if review.status != DatasetReviewStatus.PENDING:
             raise ValidationError("Dataset review is already resolved.")
