@@ -28,6 +28,7 @@ from lab_tracker.services.shared import (
     WRITE_ROLES,
     _DEFAULT_TAG_MAP,
     _TagMapping,
+    _actor_user_id,
     _build_entity_tag_suggestion,
     _build_extracted_entity,
     _build_note_provenance,
@@ -135,7 +136,6 @@ class NoteServiceMixin:
         metadata: dict[str, str] | None = None,
         status: NoteStatus = NoteStatus.STAGED,
         actor: AuthContext | None = None,
-        created_by: str | None = None,
     ) -> Note:
         require_role(actor, WRITE_ROLES)
         self.get_project(project_id)
@@ -165,7 +165,7 @@ class NoteServiceMixin:
             targets=resolved_targets,
             metadata=resolved_metadata,
             status=status,
-            created_by=created_by,
+            created_by=_actor_user_id(actor),
         )
         self._store.notes[note.note_id] = note
         self._run_repository_write(lambda repository: repository.notes.save(note))
@@ -208,7 +208,6 @@ class NoteServiceMixin:
         metadata: dict[str, str] | None = None,
         status: NoteStatus = NoteStatus.STAGED,
         actor: AuthContext | None = None,
-        created_by: str | None = None,
     ) -> Note:
         require_role(actor, WRITE_ROLES)
         if self._raw_storage is None:
@@ -267,7 +266,6 @@ class NoteServiceMixin:
             metadata=metadata,
             status=status,
             actor=actor,
-            created_by=created_by,
         )
 
     def get_note(self, note_id: UUID) -> Note:
@@ -288,43 +286,21 @@ class NoteServiceMixin:
     ) -> list[Note]:
         repository = self._active_repository()
         if repository is not None and not self._allow_in_memory:
-            query_repo = getattr(repository, "query_notes", None)
-            if query_repo is not None:
-                notes, _ = query_repo(
-                    project_id=project_id,
-                    status=status.value if status is not None else None,
-                    target_entity_type=(
-                        target_entity_type.value if target_entity_type is not None else None
-                    ),
-                    target_entity_id=target_entity_id,
-                    limit=None,
-                    offset=0,
-                )
-                return self._cache_entities(
-                    "notes",
-                    notes,
-                    lambda note: note.note_id,
-                )
-            notes = self._list_from_repository_or_store(
-                attribute_name="notes",
-                loader=lambda current_repository: current_repository.notes.list(),
-                entity_id_getter=lambda note: note.note_id,
+            notes, _ = repository.query_notes(
+                project_id=project_id,
+                status=status.value if status is not None else None,
+                target_entity_type=(
+                    target_entity_type.value if target_entity_type is not None else None
+                ),
+                target_entity_id=target_entity_id,
+                limit=None,
+                offset=0,
             )
-            if project_id is not None:
-                notes = [note for note in notes if note.project_id == project_id]
-            if status is not None:
-                notes = [note for note in notes if note.status == status]
-            if target_entity_type is not None and target_entity_id is not None:
-                notes = [
-                    note
-                    for note in notes
-                    if any(
-                        target.entity_type == target_entity_type
-                        and target.entity_id == target_entity_id
-                        for target in note.targets
-                    )
-                ]
-            return notes
+            return self._cache_entities(
+                "notes",
+                notes,
+                lambda note: note.note_id,
+            )
         if project_id is None:
             notes = list(self._store.notes.values())
         else:
@@ -520,8 +496,8 @@ class NoteServiceMixin:
                 question_type=question_type,
                 status=QuestionStatus.STAGED,
                 created_from=created_from,
+                source_provenance=provenance_tag,
                 actor=actor,
-                created_by=provenance_tag,
             )
             staged_questions.append(question)
             existing.add(key)

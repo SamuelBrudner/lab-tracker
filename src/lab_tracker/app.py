@@ -17,7 +17,6 @@ from sqlalchemy.orm import Session, sessionmaker
 from starlette.responses import FileResponse, JSONResponse, RedirectResponse
 
 from lab_tracker.api import InMemoryStore, LabTrackerAPI
-from lab_tracker.api_routes import register_routes
 from lab_tracker.auth import AuthContext, AuthService, TokenService, extract_bearer_token
 from lab_tracker.config import get_settings
 from lab_tracker.db import get_engine, get_session_factory
@@ -38,6 +37,7 @@ from lab_tracker.file_storage import LocalFileStorageBackend
 from lab_tracker.logging import configure_logging
 from lab_tracker.note_storage import LocalNoteStorage
 from lab_tracker.schemas import ErrorEnvelope, ErrorInfo
+from lab_tracker.routes import register_routes
 from lab_tracker.sqlalchemy_repository import SQLAlchemyLabTrackerRepository
 from lab_tracker.services.ocr_backends import default_ocr_backend
 from lab_tracker.services.search_backend_factory import build_search_backend

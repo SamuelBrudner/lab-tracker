@@ -114,7 +114,6 @@ class ProjectCreate(BaseModel):
     description: str | None = None
     status: ProjectStatus | None = None
     review_policy: ProjectReviewPolicy | None = None
-    created_by: str | None = None
 
 
 class ProjectUpdate(BaseModel):
@@ -132,7 +131,7 @@ class QuestionCreate(BaseModel):
     status: QuestionStatus | None = None
     parent_question_ids: list[UUID] | None = None
     created_from: QuestionSource | None = None
-    created_by: str | None = None
+    source_provenance: str | None = None
 
 
 class QuestionUpdate(BaseModel):
@@ -150,7 +149,6 @@ class DatasetCreate(BaseModel):
     primary_question_id: UUID
     secondary_question_ids: list[UUID] | None = None
     status: DatasetStatus | None = None
-    created_by: str | None = None
 
 
 class DatasetUpdate(BaseModel):
@@ -196,7 +194,6 @@ class NoteCreate(BaseModel):
     targets: list[EntityRef] | None = None
     metadata: dict[str, str] | None = None
     status: NoteStatus | None = None
-    created_by: str | None = None
 
 
 class NoteUpload(BaseModel):
@@ -209,7 +206,6 @@ class NoteUpload(BaseModel):
     targets: list[EntityRef] | None = None
     metadata: dict[str, str] | None = None
     status: NoteStatus | None = None
-    created_by: str | None = None
 
 
 class NoteUpdate(BaseModel):
@@ -225,7 +221,6 @@ class SessionCreate(BaseModel):
     session_type: SessionType
     primary_question_id: UUID | None = None
     status: SessionStatus | None = None
-    created_by: str | None = None
 
 
 class SessionUpdate(BaseModel):
@@ -244,7 +239,6 @@ class SessionDatasetPromotionRequest(BaseModel):
     secondary_question_ids: list[UUID] | None = None
     commit_manifest: DatasetCommitManifestInput | None = None
     status: DatasetStatus | None = None
-    created_by: str | None = None
 
 
 class AcquisitionOutputCreate(BaseModel):
@@ -260,7 +254,6 @@ class AnalysisCreate(BaseModel):
     code_version: str = Field(..., min_length=1)
     environment_hash: str | None = None
     status: AnalysisStatus | None = None
-    executed_by: str | None = None
 
 
 class AnalysisUpdate(BaseModel):

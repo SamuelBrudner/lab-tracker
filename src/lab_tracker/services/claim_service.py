@@ -75,39 +75,19 @@ class ClaimServiceMixin:
     ) -> list[Claim]:
         repository = self._active_repository()
         if repository is not None and not self._allow_in_memory:
-            query_repo = getattr(repository, "query_claims", None)
-            if query_repo is not None:
-                claims, _ = query_repo(
-                    project_id=project_id,
-                    status=status.value if status is not None else None,
-                    dataset_id=dataset_id,
-                    analysis_id=analysis_id,
-                    limit=None,
-                    offset=0,
-                )
-                return self._cache_entities(
-                    "claims",
-                    claims,
-                    lambda claim: claim.claim_id,
-                )
-            claims = self._list_from_repository_or_store(
-                attribute_name="claims",
-                loader=lambda current_repository: current_repository.claims.list(),
-                entity_id_getter=lambda claim: claim.claim_id,
+            claims, _ = repository.query_claims(
+                project_id=project_id,
+                status=status.value if status is not None else None,
+                dataset_id=dataset_id,
+                analysis_id=analysis_id,
+                limit=None,
+                offset=0,
             )
-            if project_id is not None:
-                claims = [claim for claim in claims if claim.project_id == project_id]
-            if status is not None:
-                claims = [claim for claim in claims if claim.status == status]
-            if dataset_id is not None:
-                claims = [
-                    claim for claim in claims if dataset_id in claim.supported_by_dataset_ids
-                ]
-            if analysis_id is not None:
-                claims = [
-                    claim for claim in claims if analysis_id in claim.supported_by_analysis_ids
-                ]
-            return claims
+            return self._cache_entities(
+                "claims",
+                claims,
+                lambda claim: claim.claim_id,
+            )
         if project_id is None:
             claims = list(self._store.claims.values())
         else:

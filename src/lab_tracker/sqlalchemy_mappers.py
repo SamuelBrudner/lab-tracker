@@ -35,6 +35,7 @@ from lab_tracker.models import (
     ClaimStatus,
     Dataset,
     DatasetCommitManifest,
+    DatasetFile,
     DatasetReview,
     DatasetReviewStatus,
     DatasetStatus,
@@ -83,6 +84,16 @@ def _as_utc_optional(value: datetime | None) -> datetime | None:
     return _as_utc(value)
 
 
+def _dataset_files_to_json(files: Iterable[DatasetFile]) -> list[dict[str, object]]:
+    return [file.model_dump(mode="json") for file in files]
+
+
+def _dataset_files_from_json(raw_files: Iterable[object] | None) -> list[DatasetFile]:
+    if not raw_files:
+        return []
+    return [DatasetFile.model_validate(item) for item in raw_files]
+
+
 def project_to_model(project: Project) -> ProjectModel:
     return ProjectModel(
         project_id=_uuid_str(project.project_id),
@@ -128,6 +139,7 @@ def question_to_model(question: Question) -> QuestionModel:
         hypothesis=question.hypothesis,
         status=question.status.value,
         created_from=question.created_from.value,
+        source_provenance=question.source_provenance,
         created_by=question.created_by,
         created_at=question.created_at,
         updated_at=question.updated_at,
@@ -148,6 +160,7 @@ def question_from_model(
         status=QuestionStatus(row.status),
         parent_question_ids=list(parent_question_ids),
         created_from=QuestionSource(row.created_from),
+        source_provenance=row.source_provenance,
         created_by=row.created_by,
         created_at=_as_utc(row.created_at),
         updated_at=_as_utc(row.updated_at),
@@ -171,17 +184,28 @@ def apply_question_to_model(row: QuestionModel, question: Question) -> None:
     row.hypothesis = question.hypothesis
     row.status = question.status.value
     row.created_from = question.created_from.value
+    row.source_provenance = question.source_provenance
     row.created_by = question.created_by
     row.created_at = question.created_at
     row.updated_at = question.updated_at
 
 
 def dataset_to_model(dataset: Dataset) -> DatasetModel:
+    manifest = dataset.commit_manifest
     return DatasetModel(
         dataset_id=_uuid_str(dataset.dataset_id),
         project_id=_uuid_str(dataset.project_id),
         commit_hash=dataset.commit_hash,
         primary_question_id=_uuid_str(dataset.primary_question_id),
+        manifest_files=_dataset_files_to_json(manifest.files),
+        manifest_metadata=dict(manifest.metadata),
+        manifest_nwb_metadata=dict(manifest.nwb_metadata),
+        manifest_bids_metadata=dict(manifest.bids_metadata),
+        manifest_note_ids=[str(note_id) for note_id in manifest.note_ids],
+        manifest_extraction_provenance=list(manifest.extraction_provenance),
+        manifest_source_session_id=(
+            _uuid_str(manifest.source_session_id) if manifest.source_session_id is not None else None
+        ),
         status=dataset.status.value,
         created_by=dataset.created_by,
         created_at=dataset.created_at,
@@ -203,7 +227,20 @@ def dataset_from_model(
                 role=QuestionLinkRole.PRIMARY,
             ),
         )
-    manifest = DatasetCommitManifest(question_links=links)
+    manifest = DatasetCommitManifest(
+        files=_dataset_files_from_json(getattr(row, "manifest_files", None)),
+        metadata=dict(getattr(row, "manifest_metadata", {}) or {}),
+        nwb_metadata=dict(getattr(row, "manifest_nwb_metadata", {}) or {}),
+        bids_metadata=dict(getattr(row, "manifest_bids_metadata", {}) or {}),
+        note_ids=[_uuid(note_id) for note_id in getattr(row, "manifest_note_ids", []) or []],
+        extraction_provenance=list(getattr(row, "manifest_extraction_provenance", []) or []),
+        question_links=links,
+        source_session_id=(
+            _uuid(row.manifest_source_session_id)
+            if getattr(row, "manifest_source_session_id", None)
+            else None
+        ),
+    )
     return Dataset(
         dataset_id=_uuid(row.dataset_id),
         project_id=_uuid(row.project_id),
@@ -239,9 +276,19 @@ def dataset_question_link_models(dataset: Dataset) -> list[DatasetQuestionLinkMo
 
 
 def apply_dataset_to_model(row: DatasetModel, dataset: Dataset) -> None:
+    manifest = dataset.commit_manifest
     row.project_id = _uuid_str(dataset.project_id)
     row.commit_hash = dataset.commit_hash
     row.primary_question_id = _uuid_str(dataset.primary_question_id)
+    row.manifest_files = _dataset_files_to_json(manifest.files)
+    row.manifest_metadata = dict(manifest.metadata)
+    row.manifest_nwb_metadata = dict(manifest.nwb_metadata)
+    row.manifest_bids_metadata = dict(manifest.bids_metadata)
+    row.manifest_note_ids = [str(note_id) for note_id in manifest.note_ids]
+    row.manifest_extraction_provenance = list(manifest.extraction_provenance)
+    row.manifest_source_session_id = (
+        _uuid_str(manifest.source_session_id) if manifest.source_session_id is not None else None
+    )
     row.status = dataset.status.value
     row.created_by = dataset.created_by
     row.created_at = dataset.created_at
@@ -294,6 +341,7 @@ def note_to_model(note: Note) -> NoteModel:
         raw_size_bytes=note.raw_asset.size_bytes if note.raw_asset is not None else None,
         raw_checksum=note.raw_asset.checksum if note.raw_asset is not None else None,
         transcribed_text=note.transcribed_text,
+        note_metadata=dict(note.metadata),
         status=note.status.value,
         created_by=note.created_by,
         created_at=note.created_at,
@@ -326,6 +374,7 @@ def note_from_model(
         extracted_entities=list(extracted_entities),
         tag_suggestions=list(tag_suggestions),
         targets=list(targets),
+        metadata=dict(getattr(row, "note_metadata", {}) or {}),
         status=NoteStatus(row.status),
         created_by=row.created_by,
         created_at=_as_utc(row.created_at),
@@ -416,6 +465,7 @@ def apply_note_to_model(row: NoteModel, note: Note) -> None:
     row.raw_size_bytes = note.raw_asset.size_bytes if note.raw_asset is not None else None
     row.raw_checksum = note.raw_asset.checksum if note.raw_asset is not None else None
     row.transcribed_text = note.transcribed_text
+    row.note_metadata = dict(note.metadata)
     row.status = note.status.value
     row.created_by = note.created_by
     row.created_at = note.created_at

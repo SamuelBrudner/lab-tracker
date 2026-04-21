@@ -3,7 +3,7 @@ import * as React from "react";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { vi } from "vitest";
 
-import { ReviewPanel } from "./datasets-reviews.jsx";
+import { ReviewPanel } from "./reviews.jsx";
 import { apiResponse, installFetchMock } from "../test/utils.js";
 
 describe("ReviewPanel", () => {

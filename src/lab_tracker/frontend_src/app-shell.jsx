@@ -2,15 +2,20 @@ import * as React from "react";
 
 import { Dashboard } from "./features/dashboard-projects.jsx";
 import { AnalysisPanel, SearchPanel, VisualizationDetailCard } from "./features/analysis-search.jsx";
-import { DatasetDetailCard, DatasetPanel, ReviewPanel } from "./features/datasets-reviews.jsx";
+import { DatasetDetailCard, DatasetPanel } from "./features/datasets.jsx";
 import { NoteDetailCard, NotePanel } from "./features/notes.jsx";
 import {
   QuestionDetailCard,
   QuestionExtractionInboxPanel,
   QuestionPanel,
 } from "./features/questions.jsx";
+import { ReviewPanel } from "./features/reviews.jsx";
 import { SessionDetailCard, SessionPanel } from "./features/sessions.jsx";
-import { useLabTrackerAppState } from "./hooks/useLabTrackerAppState.js";
+import { useAnalysisWorkflow } from "./hooks/useAnalysisWorkflow.js";
+import { useAuthSession } from "./hooks/useAuthSession.js";
+import { useDatasetWorkflow } from "./hooks/useDatasetWorkflow.js";
+import { useProjectWorkspace } from "./hooks/useProjectWorkspace.js";
+import { useQuestionExtractionWorkflow } from "./hooks/useQuestionExtractionWorkflow.js";
 import {
   AppHeader,
   AuthForm,
@@ -19,9 +24,87 @@ import {
   UnknownRouteCard,
   WorkflowCoverageCard,
 } from "./shared/ui.jsx";
+import { useAppRoute } from "./shared/routing.jsx";
 
 function App() {
-  const state = useLabTrackerAppState();
+  const { navigate, replace, route } = useAppRoute();
+  const [busy, setBusy] = React.useState(false);
+  const [message, setMessage] = React.useState("");
+  const [error, setError] = React.useState("");
+
+  const setFlash = React.useCallback((nextMessage, nextError = "") => {
+    setMessage(nextMessage);
+    setError(nextError);
+  }, []);
+
+  const auth = useAuthSession({ replace, setBusy, setFlash });
+  const workspace = useProjectWorkspace({
+    token: auth.token,
+    canWrite: auth.canWrite,
+    setBusy,
+    setFlash,
+  });
+  const dataset = useDatasetWorkflow({
+    token: auth.token,
+    canWrite: auth.canWrite,
+    selectedProjectId: workspace.selectedProjectId,
+    selectedProject: workspace.selectedProject,
+    questions: workspace.questions,
+    datasets: workspace.datasets,
+    refreshProjectData: workspace.refreshProjectData,
+    setBusy,
+    setFlash,
+  });
+  const analysis = useAnalysisWorkflow({
+    token: auth.token,
+    canWrite: auth.canWrite,
+    selectedProjectId: workspace.selectedProjectId,
+    setBusy,
+    setFlash,
+  });
+  const extraction = useQuestionExtractionWorkflow({
+    token: auth.token,
+    canWrite: auth.canWrite,
+    selectedProjectId: workspace.selectedProjectId,
+    refreshProjectData: workspace.refreshProjectData,
+    setBusy,
+    setFlash,
+  });
+  const { refreshAnalysisData } = analysis;
+  const { refreshProjectData, selectedProjectId } = workspace;
+
+  const refreshActiveProject = React.useCallback(async () => {
+    if (!auth.token || !selectedProjectId) {
+      return { ok: true };
+    }
+    try {
+      await Promise.all([
+        refreshProjectData(selectedProjectId),
+        refreshAnalysisData(selectedProjectId),
+      ]);
+      return { ok: true };
+    } catch (err) {
+      return {
+        error: err.message || "Failed to refresh active project.",
+        ok: false,
+      };
+    }
+  }, [auth.token, refreshAnalysisData, refreshProjectData, selectedProjectId]);
+
+  const state = {
+    ...analysis,
+    ...auth,
+    ...dataset,
+    ...extraction,
+    ...workspace,
+    busy,
+    error,
+    message,
+    navigate,
+    refreshActiveProject,
+    route,
+    setFlash,
+  };
 
   return (
     <div className="app-shell">

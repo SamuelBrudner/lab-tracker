@@ -793,6 +793,22 @@ class SQLAlchemyLabTrackerRepository(LabTrackerRepository):
         by_id = {note.note_id: note for note in self.notes._notes_from_rows(rows)}
         return [by_id[note_id] for note_id in note_ids if note_id in by_id]
 
+    def list_dataset_files(self, dataset_id: UUID) -> list[DatasetFile]:
+        files, _ = self.query_dataset_files(dataset_id=dataset_id, limit=None, offset=0)
+        return files
+
+    def list_dataset_note_target_ids(self, dataset_id: UUID) -> list[UUID]:
+        self._session.flush()
+        rows = list(
+            self._session.scalars(
+                select(NoteTargetModel.note_id).where(
+                    NoteTargetModel.entity_type == "dataset",
+                    NoteTargetModel.entity_id == str(dataset_id),
+                )
+            )
+        )
+        return [UUID(note_id) for note_id in rows]
+
     def query_projects(
         self,
         *,

@@ -51,7 +51,6 @@ class ProjectStatus(str, Enum):
 
 class ProjectReviewPolicy(str, Enum):
     NONE = "none"
-    SELECTIVE = "selective"
     ALL = "all"
 
 
@@ -238,6 +237,7 @@ class Question(_DomainModel):
     status: QuestionStatus = QuestionStatus.STAGED
     parent_question_ids: list[UUID] = Field(default_factory=list)
     created_from: QuestionSource = QuestionSource.MANUAL
+    source_provenance: str | None = None
     created_at: datetime = Field(default_factory=utc_now)
     created_by: str | None = None
     updated_at: datetime = Field(default_factory=utc_now)

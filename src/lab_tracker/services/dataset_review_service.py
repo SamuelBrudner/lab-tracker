@@ -44,28 +44,17 @@ class DatasetReviewServiceMixin:
     ) -> list[DatasetReview]:
         repository = self._active_repository()
         if repository is not None and not self._allow_in_memory:
-            query_repo = getattr(repository, "query_dataset_reviews", None)
-            if query_repo is not None:
-                reviews, _ = query_repo(
-                    dataset_id=dataset_id,
-                    status=status.value if status is not None else None,
-                    limit=None,
-                    offset=0,
-                )
-                return self._cache_entities(
-                    "dataset_reviews",
-                    reviews,
-                    lambda review: review.review_id,
-                )
-            reviews = self._list_from_repository_or_store(
-                attribute_name="dataset_reviews",
-                loader=lambda current_repository: current_repository.dataset_reviews.list(),
-                entity_id_getter=lambda review: review.review_id,
+            reviews, _ = repository.query_dataset_reviews(
+                dataset_id=dataset_id,
+                status=status.value if status is not None else None,
+                limit=None,
+                offset=0,
             )
-            if dataset_id is not None:
-                reviews = [review for review in reviews if review.dataset_id == dataset_id]
-            if status is not None:
-                reviews = [review for review in reviews if review.status == status]
+            reviews = self._cache_entities(
+                "dataset_reviews",
+                reviews,
+                lambda review: review.review_id,
+            )
             reviews.sort(key=lambda review: (review.requested_at, str(review.review_id)))
             return reviews
         reviews = list(self._store.dataset_reviews.values())
@@ -137,7 +126,7 @@ class DatasetReviewServiceMixin:
                 primary_question = self.get_question(dataset.primary_question_id)
                 _ensure_primary_question_active(primary_question)
                 base_manifest = _manifest_input_from_commit(dataset.commit_manifest)
-                attached_files = _load_attached_files(dataset.dataset_id)
+                attached_files = _load_attached_files(self, dataset.dataset_id)
                 if attached_files is None:
                     files = list(base_manifest.files)
                 else:
@@ -146,7 +135,7 @@ class DatasetReviewServiceMixin:
                     raise ValidationError("At least one file is required to commit a dataset.")
 
                 note_ids = list(base_manifest.note_ids)
-                note_targets = _load_dataset_note_targets(dataset.dataset_id)
+                note_targets = _load_dataset_note_targets(self, dataset.dataset_id)
                 if note_targets:
                     note_ids = _merge_unique_ids(note_ids, note_targets)
 

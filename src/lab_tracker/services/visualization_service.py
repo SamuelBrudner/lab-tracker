@@ -64,44 +64,18 @@ class VisualizationServiceMixin:
     ) -> list[Visualization]:
         repository = self._active_repository()
         if repository is not None and not self._allow_in_memory:
-            query_repo = getattr(repository, "query_visualizations", None)
-            if query_repo is not None:
-                visualizations, _ = query_repo(
-                    project_id=project_id,
-                    analysis_id=analysis_id,
-                    claim_id=claim_id,
-                    limit=None,
-                    offset=0,
-                )
-                return self._cache_entities(
-                    "visualizations",
-                    visualizations,
-                    lambda visualization: visualization.viz_id,
-                )
-            visualizations = self._list_from_repository_or_store(
-                attribute_name="visualizations",
-                loader=lambda current_repository: current_repository.visualizations.list(),
-                entity_id_getter=lambda visualization: visualization.viz_id,
+            visualizations, _ = repository.query_visualizations(
+                project_id=project_id,
+                analysis_id=analysis_id,
+                claim_id=claim_id,
+                limit=None,
+                offset=0,
             )
-            if project_id is not None:
-                visualizations = [
-                    visualization
-                    for visualization in visualizations
-                    if self.get_analysis(visualization.analysis_id).project_id == project_id
-                ]
-            if analysis_id is not None:
-                visualizations = [
-                    visualization
-                    for visualization in visualizations
-                    if visualization.analysis_id == analysis_id
-                ]
-            if claim_id is not None:
-                visualizations = [
-                    visualization
-                    for visualization in visualizations
-                    if claim_id in visualization.related_claim_ids
-                ]
-            return visualizations
+            return self._cache_entities(
+                "visualizations",
+                visualizations,
+                lambda visualization: visualization.viz_id,
+            )
         if project_id is None:
             visualizations = list(self._store.visualizations.values())
         else:

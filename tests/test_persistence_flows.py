@@ -246,6 +246,87 @@ def test_fastapi_routes_read_database_changes_after_app_start(monkeypatch, tmp_p
     assert "Inserted after startup" in names
 
 
+def test_note_metadata_search_survives_app_restart(monkeypatch, tmp_path):
+    db_path = tmp_path / "note-search-persistence.db"
+    database_url = f"sqlite+pysqlite:///{db_path}"
+    monkeypatch.setenv("LAB_TRACKER_DATABASE_URL", database_url)
+    monkeypatch.setenv("LAB_TRACKER_FILE_STORAGE_PATH", str(tmp_path / "file-storage"))
+    monkeypatch.setenv("LAB_TRACKER_NOTE_STORAGE_PATH", str(tmp_path / "note-storage"))
+
+    engine = create_engine(
+        database_url,
+        future=True,
+        connect_args={"check_same_thread": False},
+    )
+    Base.metadata.create_all(bind=engine)
+    engine.dispose()
+
+    app_first = create_app()
+    _seed_admin(
+        app_first,
+        username="search-persistence-admin",
+        password="secret",
+    )
+    with TestClient(app_first) as client:
+        login_response = client.post(
+            "/auth/login",
+            json={
+                "username": "search-persistence-admin",
+                "password": "secret",
+            },
+        )
+        assert login_response.status_code == 200
+        headers = _auth_headers(login_response.json()["data"]["access_token"])
+
+        project_id = client.post(
+            "/projects",
+            json={"name": "Metadata search"},
+            headers=headers,
+        ).json()["data"]["project_id"]
+        note_response = client.post(
+            "/notes",
+            json={
+                "project_id": project_id,
+                "raw_content": "capture log",
+                "metadata": {"owner": "Sam", "rig": "np2"},
+            },
+            headers=headers,
+        )
+        assert note_response.status_code == 201
+        note_id = note_response.json()["data"]["note_id"]
+
+        search_response = client.get(
+            "/search",
+            params={"q": "sam", "project_id": project_id},
+            headers=headers,
+        )
+        assert search_response.status_code == 200
+        search_ids = [item["note_id"] for item in search_response.json()["data"]["notes"]]
+        assert note_id in search_ids
+
+    app_second = create_app()
+    with TestClient(app_second) as client:
+        login_response = client.post(
+            "/auth/login",
+            json={
+                "username": "search-persistence-admin",
+                "password": "secret",
+            },
+        )
+        assert login_response.status_code == 200
+        headers = _auth_headers(login_response.json()["data"]["access_token"])
+
+        search_response = client.get(
+            "/search",
+            params={"q": "sam", "project_id": project_id},
+            headers=headers,
+        )
+
+    assert search_response.status_code == 200
+    search_ids = [item["note_id"] for item in search_response.json()["data"]["notes"]]
+    assert note_id in search_ids
+
+
 def test_repository_backed_api_rolls_back_failed_writes_from_read_state():
     class _EmptyRepoPart:
         def list(self):

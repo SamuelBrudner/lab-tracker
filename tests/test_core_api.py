@@ -459,8 +459,10 @@ def test_extract_questions_from_note_stages_questions():
     }
     assert all(question.status == QuestionStatus.STAGED for question in questions)
     assert all(question.created_from == QuestionSource.MEETING_CAPTURE for question in questions)
+    assert all(question.created_by == str(actor.user_id) for question in questions)
     assert all(
-        question.created_by and str(note.note_id) in question.created_by for question in questions
+        question.source_provenance and str(note.note_id) in question.source_provenance
+        for question in questions
     )
     assert api.extract_questions_from_note(note.note_id, actor=actor) == []
 

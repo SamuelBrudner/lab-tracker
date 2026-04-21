@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from typing import Iterable
 from uuid import UUID, uuid4
 
-from lab_tracker.auth import Role
+from lab_tracker.auth import AuthContext, Role
 from lab_tracker.errors import NotFoundError, ValidationError
 from lab_tracker.models import (
     AcquisitionOutput,
@@ -30,6 +30,12 @@ from lab_tracker.models import (
 )
 
 WRITE_ROLES = {Role.ADMIN, Role.EDITOR}
+
+
+def _actor_user_id(actor: AuthContext | None) -> str | None:
+    if actor is None:
+        return None
+    return str(actor.user_id)
 
 
 def _ensure_non_empty(value: str, field_name: str) -> None:

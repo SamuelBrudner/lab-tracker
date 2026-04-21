@@ -8,15 +8,21 @@ from sqlalchemy.orm import sessionmaker
 from lab_tracker.db import Base
 from lab_tracker.models import (
     AcquisitionOutput,
+    Dataset,
+    DatasetCommitManifest,
+    DatasetStatus,
     EntityRef,
     EntityTagSuggestion,
     EntityType,
     ExtractedEntity,
     Note,
     NoteStatus,
+    OutcomeStatus,
     Project,
     ProjectStatus,
     Question,
+    QuestionLink,
+    QuestionLinkRole,
     QuestionSource,
     QuestionStatus,
     QuestionType,
@@ -148,8 +154,79 @@ def test_note_repository_persists_supported_children(db_session):
     assert loaded_note.extracted_entities == note.extracted_entities
     assert loaded_note.tag_suggestions == note.tag_suggestions
     assert loaded_note.targets == note.targets
-    assert loaded_note.metadata == {}
+    assert loaded_note.metadata == {"ignored": "schema-gap"}
     assert loaded_note.raw_asset is None
+
+
+def test_dataset_repository_preserves_commit_manifest(db_session):
+    repo = SQLAlchemyLabTrackerRepository(db_session)
+    project = Project(
+        project_id=uuid4(),
+        name="Datasets",
+        status=ProjectStatus.ACTIVE,
+        created_at=_ts(),
+        updated_at=_ts(),
+    )
+    question = Question(
+        question_id=uuid4(),
+        project_id=project.project_id,
+        text="Does the manifest survive persistence?",
+        question_type=QuestionType.DESCRIPTIVE,
+        status=QuestionStatus.ACTIVE,
+        parent_question_ids=[],
+        created_from=QuestionSource.MANUAL,
+        created_at=_ts(1),
+        updated_at=_ts(1),
+    )
+    dataset = Dataset(
+        dataset_id=uuid4(),
+        project_id=project.project_id,
+        commit_hash="commit-1",
+        primary_question_id=question.question_id,
+        question_links=[
+            QuestionLink(
+                question_id=question.question_id,
+                role=QuestionLinkRole.PRIMARY,
+                outcome_status=OutcomeStatus.SUPPORTS,
+            )
+        ],
+        commit_manifest=DatasetCommitManifest(
+            files=[],
+            metadata={"run": "7"},
+            nwb_metadata={"Session Description": "baseline"},
+            bids_metadata={"Name": "Example"},
+            note_ids=[uuid4()],
+            extraction_provenance=["nlp-v1"],
+            question_links=[
+                QuestionLink(
+                    question_id=question.question_id,
+                    role=QuestionLinkRole.PRIMARY,
+                    outcome_status=OutcomeStatus.SUPPORTS,
+                )
+            ],
+            source_session_id=uuid4(),
+        ),
+        status=DatasetStatus.COMMITTED,
+        created_at=_ts(2),
+        updated_at=_ts(2),
+    )
+
+    repo.projects.save(project)
+    repo.questions.save(question)
+    repo.datasets.save(dataset)
+    repo.commit()
+
+    loaded_dataset = repo.datasets.get(dataset.dataset_id)
+    assert loaded_dataset is not None
+    assert loaded_dataset.commit_manifest.metadata == {"run": "7"}
+    assert loaded_dataset.commit_manifest.nwb_metadata == {"Session Description": "baseline"}
+    assert loaded_dataset.commit_manifest.bids_metadata == {"Name": "Example"}
+    assert loaded_dataset.commit_manifest.note_ids == dataset.commit_manifest.note_ids
+    assert loaded_dataset.commit_manifest.extraction_provenance == ["nlp-v1"]
+    assert (
+        loaded_dataset.commit_manifest.source_session_id
+        == dataset.commit_manifest.source_session_id
+    )
 
 
 def test_acquisition_output_repository_crud(db_session):

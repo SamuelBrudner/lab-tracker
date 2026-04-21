@@ -395,14 +395,12 @@ class LabTrackerAPI(
         )
         repository = self._active_repository()
         if repository is not None and not self._allow_in_memory:
-            fetch_questions = getattr(repository, "fetch_questions", None)
-            if fetch_questions is not None:
-                questions = fetch_questions(ids)
-                return self._cache_entities(
-                    "questions",
-                    questions,
-                    lambda question: question.question_id,
-                )
+            questions = repository.fetch_questions(ids)
+            return self._cache_entities(
+                "questions",
+                questions,
+                lambda question: question.question_id,
+            )
         results: list[Question] = []
         for question_id in ids:
             question = self._store.questions.get(question_id)
@@ -423,14 +421,12 @@ class LabTrackerAPI(
         )
         repository = self._active_repository()
         if repository is not None and not self._allow_in_memory:
-            fetch_notes = getattr(repository, "fetch_notes", None)
-            if fetch_notes is not None:
-                notes = fetch_notes(ids)
-                return self._cache_entities(
-                    "notes",
-                    notes,
-                    lambda note: note.note_id,
-                )
+            notes = repository.fetch_notes(ids)
+            return self._cache_entities(
+                "notes",
+                notes,
+                lambda note: note.note_id,
+            )
         results: list[Note] = []
         for note_id in ids:
             note = self._store.notes.get(note_id)

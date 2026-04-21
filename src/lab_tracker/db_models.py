@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from uuid import uuid4
 
-from sqlalchemy import DateTime, Float, ForeignKey, Index, Integer, String, Text, UniqueConstraint
+from sqlalchemy import JSON, DateTime, Float, ForeignKey, Index, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
 from lab_tracker.db import Base
@@ -54,6 +54,7 @@ class QuestionModel(Base):
     hypothesis: Mapped[str | None] = mapped_column(Text)
     status: Mapped[str] = mapped_column(String(20), default="staged")
     created_from: Mapped[str] = mapped_column(String(40), default="manual")
+    source_provenance: Mapped[str | None] = mapped_column(String(255))
     created_by: Mapped[str | None] = mapped_column(String(255))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utc_now)
     updated_at: Mapped[datetime] = mapped_column(
@@ -97,6 +98,13 @@ class DatasetModel(Base):
         ForeignKey("questions.question_id"),
         nullable=False,
     )
+    manifest_files: Mapped[list[dict[str, object]]] = mapped_column(JSON, default=list)
+    manifest_metadata: Mapped[dict[str, str]] = mapped_column(JSON, default=dict)
+    manifest_nwb_metadata: Mapped[dict[str, str]] = mapped_column(JSON, default=dict)
+    manifest_bids_metadata: Mapped[dict[str, str]] = mapped_column(JSON, default=dict)
+    manifest_note_ids: Mapped[list[str]] = mapped_column(JSON, default=list)
+    manifest_extraction_provenance: Mapped[list[str]] = mapped_column(JSON, default=list)
+    manifest_source_session_id: Mapped[str | None] = mapped_column(String(36))
     status: Mapped[str] = mapped_column(String(20), default="staged")
     created_by: Mapped[str | None] = mapped_column(String(255))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utc_now)
@@ -193,6 +201,7 @@ class NoteModel(Base):
     raw_size_bytes: Mapped[int | None] = mapped_column(Integer)
     raw_checksum: Mapped[str | None] = mapped_column(String(64))
     transcribed_text: Mapped[str | None] = mapped_column(Text)
+    note_metadata: Mapped[dict[str, str]] = mapped_column("metadata", JSON, default=dict)
     status: Mapped[str] = mapped_column(String(20), default="staged")
     created_by: Mapped[str | None] = mapped_column(String(255))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utc_now)

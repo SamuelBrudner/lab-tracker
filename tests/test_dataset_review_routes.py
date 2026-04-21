@@ -182,3 +182,67 @@ def test_project_patch_can_set_review_policy(
     )
     assert update_response.status_code == 200
     assert update_response.json()["data"]["review_policy"] == "all"
+
+
+def test_dataset_commit_with_none_policy_skips_review_queue(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+):
+    headers = admin_auth_headers
+
+    project_id = client.post(
+        "/projects",
+        json={"name": "No review policy", "review_policy": "none"},
+        headers=headers,
+    ).json()["data"]["project_id"]
+    question_id = client.post(
+        "/questions",
+        json={
+            "project_id": project_id,
+            "text": "Should commit skip review?",
+            "question_type": "descriptive",
+            "status": "active",
+        },
+        headers=headers,
+    ).json()["data"]["question_id"]
+    dataset_id = client.post(
+        "/datasets",
+        json={"project_id": project_id, "primary_question_id": question_id},
+        headers=headers,
+    ).json()["data"]["dataset_id"]
+
+    attach_response = client.post(
+        f"/datasets/{dataset_id}/files",
+        files={"file": ("data.bin", b"real-data", "application/octet-stream")},
+        headers=headers,
+    )
+    assert attach_response.status_code == 201
+
+    commit_response = client.patch(
+        f"/datasets/{dataset_id}",
+        json={"status": "committed"},
+        headers=headers,
+    )
+    assert commit_response.status_code == 200
+    assert commit_response.json()["data"]["status"] == "committed"
+
+    review_response = client.get(f"/datasets/{dataset_id}/review", headers=headers)
+    assert review_response.status_code == 404
+
+    queue_response = client.get("/reviews/pending", headers=headers)
+    assert queue_response.status_code == 200
+    assert queue_response.json()["meta"]["total"] == 0
+
+
+def test_project_rejects_selective_review_policy(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+):
+    response = client.post(
+        "/projects",
+        json={"name": "Selective policy", "review_policy": "selective"},
+        headers=admin_auth_headers,
+    )
+
+    assert response.status_code == 422
+    assert response.json()["error"]["code"] == "request_validation_error"

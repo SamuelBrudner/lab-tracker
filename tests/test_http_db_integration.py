@@ -372,3 +372,135 @@ def test_note_routes_support_target_filters_and_multipart_upload(
     filtered_payload = filtered.json()
     assert filtered_payload["meta"]["total"] == 1
     assert _ids(filtered_payload["data"], "note_id") == {multipart_payload["note_id"]}
+
+
+def test_write_routes_ignore_client_supplied_created_by(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+):
+    headers = admin_auth_headers
+    actor_id = client.get("/auth/me", headers=headers).json()["data"]["user_id"]
+
+    project_response = client.post(
+        "/projects",
+        json={"name": "Audit project", "created_by": "spoofed-user"},
+        headers=headers,
+    )
+    assert project_response.status_code == 201
+    project_payload = project_response.json()["data"]
+    assert project_payload["created_by"] == actor_id
+    project_id = project_payload["project_id"]
+
+    question_response = client.post(
+        "/questions",
+        json={
+            "project_id": project_id,
+            "text": "Should actor identity be derived server side?",
+            "question_type": "descriptive",
+            "created_by": "spoofed-user",
+            "source_provenance": "ocr://note-123",
+        },
+        headers=headers,
+    )
+    assert question_response.status_code == 201
+    question_payload = question_response.json()["data"]
+    assert question_payload["created_by"] == actor_id
+    assert question_payload["source_provenance"] == "ocr://note-123"
+
+    note_response = client.post(
+        "/notes",
+        json={
+            "project_id": project_id,
+            "raw_content": "audit test note",
+            "created_by": "spoofed-user",
+        },
+        headers=headers,
+    )
+    assert note_response.status_code == 201
+    assert note_response.json()["data"]["created_by"] == actor_id
+
+    session_response = client.post(
+        "/sessions",
+        json={
+            "project_id": project_id,
+            "session_type": "operational",
+            "created_by": "spoofed-user",
+        },
+        headers=headers,
+    )
+    assert session_response.status_code == 201
+    assert session_response.json()["data"]["created_by"] == actor_id
+
+
+def test_analysis_create_ignores_client_supplied_executed_by(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+):
+    headers = admin_auth_headers
+    actor_id = client.get("/auth/me", headers=headers).json()["data"]["user_id"]
+
+    project_id = client.post(
+        "/projects",
+        json={"name": "Analysis audit"},
+        headers=headers,
+    ).json()["data"]["project_id"]
+    question_id = client.post(
+        "/questions",
+        json={
+            "project_id": project_id,
+            "text": "Can analysis authorship be spoofed?",
+            "question_type": "descriptive",
+        },
+        headers=headers,
+    ).json()["data"]["question_id"]
+    dataset_id = client.post(
+        "/datasets",
+        json={"project_id": project_id, "primary_question_id": question_id},
+        headers=headers,
+    ).json()["data"]["dataset_id"]
+
+    analysis_response = client.post(
+        "/analyses",
+        json={
+            "project_id": project_id,
+            "dataset_ids": [dataset_id],
+            "method_hash": "method-1",
+            "code_version": "v1",
+            "executed_by": "spoofed-user",
+        },
+        headers=headers,
+    )
+    assert analysis_response.status_code == 201
+    assert analysis_response.json()["data"]["executed_by"] == actor_id
+
+
+def test_note_raw_download_sanitizes_attachment_filename(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+):
+    headers = admin_auth_headers
+    project_id = client.post(
+        "/projects",
+        json={"name": "Filename sanitization"},
+        headers=headers,
+    ).json()["data"]["project_id"]
+
+    upload_response = client.post(
+        "/notes/upload",
+        json={
+            "project_id": project_id,
+            "filename": '../../bad"\r\nname.txt',
+            "content_type": "text/plain",
+            "content_base64": base64.b64encode(b"raw-capture").decode("ascii"),
+        },
+        headers=headers,
+    )
+    assert upload_response.status_code == 201
+    note_id = upload_response.json()["data"]["note_id"]
+
+    raw_download = client.get(f"/notes/{note_id}/raw", headers=headers)
+    assert raw_download.status_code == 200
+    assert raw_download.content == b"raw-capture"
+    assert raw_download.headers["content-disposition"] == (
+        'attachment; filename="bad\'__name.txt"'
+    )

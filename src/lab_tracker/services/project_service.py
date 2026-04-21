@@ -8,6 +8,7 @@ from lab_tracker.auth import AuthContext, require_role
 from lab_tracker.models import Project, ProjectReviewPolicy, ProjectStatus, utc_now
 from lab_tracker.services.shared import (
     WRITE_ROLES,
+    _actor_user_id,
     _ensure_non_empty,
 )
 
@@ -21,7 +22,6 @@ class ProjectServiceMixin:
         review_policy: ProjectReviewPolicy = ProjectReviewPolicy.NONE,
         *,
         actor: AuthContext | None = None,
-        created_by: str | None = None,
     ) -> Project:
         require_role(actor, WRITE_ROLES)
         _ensure_non_empty(name, "name")
@@ -31,7 +31,7 @@ class ProjectServiceMixin:
             description=description.strip(),
             status=status,
             review_policy=review_policy,
-            created_by=created_by,
+            created_by=_actor_user_id(actor),
         )
         self._store.projects[project.project_id] = project
         self._run_repository_write(lambda repository: repository.projects.save(project))

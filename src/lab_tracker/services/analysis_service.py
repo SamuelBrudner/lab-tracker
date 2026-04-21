@@ -20,6 +20,7 @@ from lab_tracker.models import (
 from lab_tracker.services.shared import (
     WRITE_ROLES,
     _analysis_has_question_link,
+    _actor_user_id,
     _ensure_analysis_status_transition,
     _ensure_non_empty,
     _unique_ids,
@@ -27,13 +28,6 @@ from lab_tracker.services.shared import (
 
 
 class AnalysisServiceMixin:
-    def _uses_analysis_repository_queries(self, repository) -> bool:
-        return not (
-            repository is None
-            or self._allow_in_memory
-            or getattr(repository, "query_analyses", None) is None
-        )
-
     def create_analysis(
         self,
         project_id: UUID,
@@ -44,7 +38,6 @@ class AnalysisServiceMixin:
         environment_hash: str | None = None,
         status: AnalysisStatus = AnalysisStatus.STAGED,
         actor: AuthContext | None = None,
-        executed_by: str | None = None,
     ) -> Analysis:
         require_role(actor, WRITE_ROLES)
         self.get_project(project_id)
@@ -65,7 +58,7 @@ class AnalysisServiceMixin:
             code_version=code_version.strip(),
             environment_hash=environment_hash.strip() if environment_hash else None,
             status=status,
-            executed_by=executed_by,
+            executed_by=_actor_user_id(actor),
         )
         self._store.analyses[analysis.analysis_id] = analysis
         self._run_repository_write(lambda repository: repository.analyses.save(analysis))
@@ -88,35 +81,28 @@ class AnalysisServiceMixin:
     ) -> list[Analysis]:
         repository = self._active_repository()
         if repository is not None and not self._allow_in_memory:
-            query_repo = getattr(repository, "query_analyses", None)
-            if query_repo is not None:
-                analyses, _ = query_repo(
-                    project_id=project_id,
-                    dataset_id=dataset_id,
-                    question_id=question_id,
-                    limit=None,
-                    offset=0,
-                )
-                return self._cache_entities(
-                    "analyses",
-                    analyses,
-                    lambda analysis: analysis.analysis_id,
-                )
-            analyses = self._list_from_repository_or_store(
-                attribute_name="analyses",
-                loader=lambda current_repository: current_repository.analyses.list(),
-                entity_id_getter=lambda analysis: analysis.analysis_id,
+            analyses, _ = repository.query_analyses(
+                project_id=project_id,
+                dataset_id=dataset_id,
+                question_id=question_id,
+                limit=None,
+                offset=0,
+            )
+            return self._cache_entities(
+                "analyses",
+                analyses,
+                lambda analysis: analysis.analysis_id,
             )
         else:
             if project_id is None:
                 analyses = list(self._store.analyses.values())
             else:
                 analyses = [a for a in self._store.analyses.values() if a.project_id == project_id]
-        if project_id is not None and not self._uses_analysis_repository_queries(repository):
+        if project_id is not None:
             analyses = [analysis for analysis in analyses if analysis.project_id == project_id]
-        if dataset_id is not None and not self._uses_analysis_repository_queries(repository):
+        if dataset_id is not None:
             analyses = [analysis for analysis in analyses if dataset_id in analysis.dataset_ids]
-        if question_id is not None and not self._uses_analysis_repository_queries(repository):
+        if question_id is not None:
             dataset_map = {dataset.dataset_id: dataset for dataset in self.list_datasets()}
             analyses = [
                 analysis

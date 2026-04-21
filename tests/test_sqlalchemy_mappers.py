@@ -72,6 +72,7 @@ def test_question_mapper_round_trip_with_parent_links():
         status=QuestionStatus.ACTIVE,
         parent_question_ids=[parent_id],
         created_from=QuestionSource.IMPORTED,
+        source_provenance="ocr://note-1",
         created_by="operator-1",
         created_at=_ts(),
         updated_at=_ts(),
@@ -84,7 +85,7 @@ def test_question_mapper_round_trip_with_parent_links():
     assert mapped == question
 
 
-def test_dataset_mapper_round_trip_rebuilds_manifest_links():
+def test_dataset_mapper_round_trip_preserves_manifest_fields():
     primary_question_id = uuid4()
     secondary_question_id = uuid4()
     links = [
@@ -108,7 +109,11 @@ def test_dataset_mapper_round_trip_rebuilds_manifest_links():
         commit_manifest=DatasetCommitManifest(
             question_links=links,
             metadata={"run": "7"},
+            bids_metadata={"Name": "Example"},
+            nwb_metadata={"Session Description": "baseline"},
+            note_ids=[uuid4()],
             extraction_provenance=["nlp-v1"],
+            source_session_id=uuid4(),
         ),
         created_by="operator-1",
         created_at=_ts(),
@@ -120,8 +125,13 @@ def test_dataset_mapper_round_trip_rebuilds_manifest_links():
     mapped = dataset_from_model(row, question_links=mapped_links)
     assert mapped.question_links == links
     assert mapped.commit_manifest.question_links == links
-    assert mapped.commit_manifest.metadata == {}
-    assert mapped.commit_manifest.extraction_provenance == []
+    assert mapped.commit_manifest.files == []
+    assert mapped.commit_manifest.metadata == {"run": "7"}
+    assert mapped.commit_manifest.bids_metadata == {"Name": "Example"}
+    assert mapped.commit_manifest.nwb_metadata == {"Session Description": "baseline"}
+    assert mapped.commit_manifest.note_ids == dataset.commit_manifest.note_ids
+    assert mapped.commit_manifest.extraction_provenance == ["nlp-v1"]
+    assert mapped.commit_manifest.source_session_id == dataset.commit_manifest.source_session_id
 
 
 def test_note_mapper_round_trip_for_supported_fields():
@@ -167,7 +177,7 @@ def test_note_mapper_round_trip_for_supported_fields():
         targets=[entity_ref_from_model(item) for item in note_target_models(note)],
     )
     assert mapped.raw_asset is None
-    assert mapped.metadata == {}
+    assert mapped.metadata == {"device": "np2"}
     assert mapped.extracted_entities == extracted
     assert mapped.tag_suggestions == suggestions
     assert mapped.targets == targets
