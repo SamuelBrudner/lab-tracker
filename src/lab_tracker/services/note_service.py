@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import logging
 from typing import BinaryIO, Iterable
 from uuid import UUID, uuid4
 
@@ -16,109 +15,14 @@ from lab_tracker.models import (
     Note,
     NoteRawAsset,
     NoteStatus,
-    Question,
-    QuestionExtractionCandidate,
-    QuestionSource,
-    QuestionStatus,
-    QuestionType,
-    TagSuggestionStatus,
     utc_now,
 )
 from lab_tracker.services.shared import (
     WRITE_ROLES,
-    _DEFAULT_TAG_MAP,
-    _TagMapping,
     _actor_user_id,
-    _build_entity_tag_suggestion,
     _build_extracted_entity,
-    _build_note_provenance,
-    _build_note_tag_provenance,
     _normalize_note_metadata,
-    _resolve_tag_mappings,
-    _tag_suggestion_key,
 )
-from lab_tracker.services.ocr_backends import _sniff_content_type
-
-_logger = logging.getLogger(__name__)
-
-
-def _should_attempt_ocr(content: bytes, content_type: str) -> bool:
-    # Prefer sniffing the bytes so we only attempt OCR for supported image formats.
-    # This avoids trying (and warning) on non-image uploads that are mislabeled.
-    return _sniff_content_type(content) is not None
-
-
-_DESCRIPTIVE_PREFIXES = ("what ", "which ", "when ", "where ", "who ")
-_DESCRIPTIVE_HOW_PREFIXES = ("how many", "how much", "how long", "how often")
-_HYPOTHESIS_PREFIXES = (
-    "does ",
-    "do ",
-    "can ",
-    "could ",
-    "will ",
-    "would ",
-    "is ",
-    "are ",
-    "should ",
-)
-_METHOD_HINTS = (
-    "protocol",
-    "pipeline",
-    "workflow",
-    "method",
-    "assay",
-    "setup",
-    "configure",
-    "implement",
-    "optimiz",
-    "calibrat",
-    "benchmark",
-    "validate",
-)
-
-
-def _suggest_question_type(text: str) -> QuestionType:
-    """Heuristic suggestion for question_type for extracted candidates.
-
-    This is intentionally lightweight: the UI treats this as a suggestion that the human reviewer
-    can override.
-    """
-
-    normalized = " ".join((text or "").strip().casefold().split())
-    if not normalized:
-        return QuestionType.OTHER
-
-    if normalized.startswith(_DESCRIPTIVE_HOW_PREFIXES):
-        return QuestionType.DESCRIPTIVE
-
-    if normalized.startswith("how to ") or any(hint in normalized for hint in _METHOD_HINTS):
-        return QuestionType.METHOD_DEV
-
-    if normalized.startswith(_DESCRIPTIVE_PREFIXES):
-        return QuestionType.DESCRIPTIVE
-
-    if normalized.startswith(_HYPOTHESIS_PREFIXES):
-        return QuestionType.HYPOTHESIS_DRIVEN
-
-    if any(
-        token in normalized
-        for token in (
-            "effect",
-            "impact",
-            "increase",
-            "decrease",
-            "difference",
-            "compare",
-            "correlat",
-            "predict",
-            "cause",
-            "lead to",
-            "modulat",
-        )
-    ):
-        return QuestionType.HYPOTHESIS_DRIVEN
-
-    return QuestionType.OTHER
 
 
 class NoteServiceMixin:
@@ -255,24 +159,6 @@ class NoteServiceMixin:
                 resolved_content = self._raw_storage.read(asset.storage_id)
 
             resolved_transcribed_text = transcribed_text.strip() if transcribed_text else None
-            ocr_backend = getattr(self, "_ocr_backend", None)
-            if (
-                ocr_backend is not None
-                and resolved_transcribed_text is None
-                and resolved_content is not None
-                and _should_attempt_ocr(resolved_content, asset.content_type)
-            ):
-                try:
-                    result = ocr_backend.extract_text(resolved_content, asset.content_type)
-                    resolved_transcribed_text = result.text.strip() if result.text else None
-                except Exception as exc:
-                    _logger.warning(
-                        "OCR failed for uploaded note %s (content_type=%s): %s",
-                        asset.filename,
-                        asset.content_type,
-                        exc,
-                        exc_info=True,
-                    )
             note = self.create_note(
                 project_id=project_id,
                 raw_content=None,
@@ -390,86 +276,6 @@ class NoteServiceMixin:
         content = self._raw_storage.read(note.raw_asset.storage_id)
         return note.raw_asset, content
 
-    def suggest_entity_tags(
-        self,
-        note_id: UUID,
-        *,
-        mapping: dict[str, list["_TagMapping"]] | None = None,
-        provenance: str | None = None,
-        actor: AuthContext | None = None,
-    ) -> list[EntityTagSuggestion]:
-        require_role(actor, WRITE_ROLES)
-        note = self.get_note(note_id)
-        if not note.extracted_entities:
-            return []
-        resolved_mapping = mapping or _DEFAULT_TAG_MAP
-        if not resolved_mapping:
-            return []
-        provenance_tag = provenance or _build_note_tag_provenance(note.note_id)
-        existing = {_tag_suggestion_key(suggestion) for suggestion in note.tag_suggestions}
-        new_suggestions: list[EntityTagSuggestion] = []
-        for entity in note.extracted_entities:
-            for term in _resolve_tag_mappings(entity.label, resolved_mapping):
-                suggestion = _build_entity_tag_suggestion(
-                    entity_label=entity.label,
-                    term=term,
-                    extracted_confidence=entity.confidence,
-                    provenance=provenance_tag,
-                )
-                key = _tag_suggestion_key(suggestion)
-                if key in existing:
-                    continue
-                note.tag_suggestions.append(suggestion)
-                new_suggestions.append(suggestion)
-                existing.add(key)
-        if new_suggestions:
-            note.updated_at = utc_now()
-            self._run_repository_write(lambda repository: repository.notes.save(note))
-        return new_suggestions
-
-    def list_entity_tag_suggestions(
-        self,
-        note_id: UUID,
-        *,
-        status: TagSuggestionStatus | None = None,
-    ) -> list[EntityTagSuggestion]:
-        note = self.get_note(note_id)
-        if status is None:
-            return list(note.tag_suggestions)
-        return [suggestion for suggestion in note.tag_suggestions if suggestion.status == status]
-
-    def review_entity_tag_suggestion(
-        self,
-        note_id: UUID,
-        suggestion_id: UUID,
-        *,
-        status: TagSuggestionStatus,
-        reviewed_by: str | None = None,
-        actor: AuthContext | None = None,
-    ) -> EntityTagSuggestion:
-        require_role(actor, WRITE_ROLES)
-        note = self.get_note(note_id)
-        for index, suggestion in enumerate(note.tag_suggestions):
-            if suggestion.suggestion_id == suggestion_id:
-                if status in {TagSuggestionStatus.ACCEPTED, TagSuggestionStatus.REJECTED}:
-                    resolved_reviewed_at = utc_now()
-                    resolved_reviewed_by = reviewed_by or (str(actor.user_id) if actor else None)
-                else:
-                    resolved_reviewed_at = None
-                    resolved_reviewed_by = None
-                updated = suggestion.model_copy(
-                    update={
-                        "status": status,
-                        "reviewed_by": resolved_reviewed_by,
-                        "reviewed_at": resolved_reviewed_at,
-                    }
-                )
-                note.tag_suggestions[index] = updated
-                note.updated_at = utc_now()
-                self._run_repository_write(lambda repository: repository.notes.save(note))
-                return updated
-        raise NotFoundError("Tag suggestion does not exist.")
-
     def delete_note(self, note_id: UUID, *, actor: AuthContext | None = None) -> Note:
         require_role(actor, WRITE_ROLES)
         note = self.get_note(note_id)
@@ -481,114 +287,6 @@ class NoteServiceMixin:
                 lambda raw_asset=note.raw_asset: self._delete_raw_asset(raw_asset)
             )
         return note
-
-    def extract_questions_from_note(
-        self,
-        note_id: UUID,
-        *,
-        question_type: QuestionType = QuestionType.OTHER,
-        created_from: QuestionSource = QuestionSource.MEETING_CAPTURE,
-        provenance: str | None = None,
-        actor: AuthContext | None = None,
-    ) -> list[Question]:
-        """Extract candidate questions from a note and stage them."""
-        require_role(actor, WRITE_ROLES)
-        note = self.get_note(note_id)
-        raw_asset_bytes: bytes | None = None
-        backend = self._question_extraction_backend
-        if backend is None:
-            raise ValidationError("Question extraction is not enabled.")
-        if (
-            backend.requires_raw_asset_bytes(note)
-            and note.raw_asset is not None
-            and self._raw_storage is not None
-        ):
-            raw_asset_bytes = self._raw_storage.read(note.raw_asset.storage_id)
-        candidates = backend.extract_questions(note, raw_asset_bytes=raw_asset_bytes)
-        if not candidates:
-            return []
-        existing = {
-            question.text.casefold() for question in self.list_questions(project_id=note.project_id)
-        }
-        staged_questions: list[Question] = []
-        provenance_tag = provenance or _build_note_provenance(
-            note.note_id,
-            backend_name=backend.backend_name,
-        )
-        for candidate in candidates:
-            normalized_text = candidate.text.strip()
-            key = normalized_text.casefold()
-            if key in existing:
-                continue
-            question = self.create_question(
-                project_id=note.project_id,
-                text=normalized_text,
-                question_type=question_type,
-                status=QuestionStatus.STAGED,
-                created_from=created_from,
-                source_provenance=provenance_tag,
-                actor=actor,
-            )
-            staged_questions.append(question)
-            existing.add(key)
-        return staged_questions
-
-    def extract_question_candidates_from_note(
-        self,
-        note_id: UUID,
-        *,
-        default_question_type: QuestionType | None = None,
-        provenance: str | None = None,
-        actor: AuthContext | None = None,
-    ) -> list[QuestionExtractionCandidate]:
-        """Extract candidate questions from a note for human review.
-
-        Unlike :meth:`extract_questions_from_note`, this does not create/stage questions. The
-        frontend can present the candidates for editing and then stage accepted items explicitly.
-        """
-
-        require_role(actor, WRITE_ROLES)
-        note = self.get_note(note_id)
-        raw_asset_bytes: bytes | None = None
-        backend = self._question_extraction_backend
-        if backend is None:
-            raise ValidationError("Question extraction is not enabled.")
-        if (
-            backend.requires_raw_asset_bytes(note)
-            and note.raw_asset is not None
-            and self._raw_storage is not None
-        ):
-            raw_asset_bytes = self._raw_storage.read(note.raw_asset.storage_id)
-        candidates = backend.extract_questions(note, raw_asset_bytes=raw_asset_bytes)
-        if not candidates:
-            return []
-
-        existing = {
-            question.text.casefold() for question in self.list_questions(project_id=note.project_id)
-        }
-        provenance_tag = provenance or _build_note_provenance(
-            note.note_id,
-            backend_name=backend.backend_name,
-        )
-        extracted: list[QuestionExtractionCandidate] = []
-        for candidate in candidates:
-            normalized_text = candidate.text.strip()
-            if not normalized_text:
-                continue
-            key = normalized_text.casefold()
-            if key in existing:
-                continue
-            suggested_type = default_question_type or _suggest_question_type(normalized_text)
-            extracted.append(
-                QuestionExtractionCandidate(
-                    text=normalized_text,
-                    confidence=candidate.confidence,
-                    suggested_question_type=suggested_type,
-                    provenance=provenance_tag,
-                )
-            )
-            existing.add(key)
-        return extracted
 
     def _ensure_target_exists(self, target: EntityRef, project_id: UUID) -> None:
         entity_getters = {

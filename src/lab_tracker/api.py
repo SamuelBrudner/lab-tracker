@@ -35,8 +35,6 @@ from lab_tracker.services import (
     SessionServiceMixin,
     VisualizationServiceMixin,
 )
-from lab_tracker.services.extraction_backends import QuestionExtractionBackend
-from lab_tracker.services.ocr_backends import OCRBackend
 from lab_tracker.services.search_backends import (
     InMemorySubstringSearchBackend,
     SearchBackend,
@@ -104,8 +102,6 @@ class LabTrackerAPI(
         store: InMemoryStore | None = None,
         *,
         raw_storage: LocalNoteStorage | None = None,
-        ocr_backend: OCRBackend | None = None,
-        question_extraction_backend: QuestionExtractionBackend | None = None,
         search_backend: SearchBackend | None = None,
         repository: LabTrackerRepository | None = None,
         allow_in_memory: bool = False,
@@ -114,8 +110,6 @@ class LabTrackerAPI(
         self._raw_storage = raw_storage
         self._repository = repository
         self._request_context: LabTrackerRequestContext | None = None
-        self._ocr_backend = ocr_backend
-        self._question_extraction_backend = question_extraction_backend
         self._search_backend = search_backend or InMemorySubstringSearchBackend()
         self._allow_in_memory = allow_in_memory or store is not None
         self._search_health_state = _SearchHealthState()
@@ -136,15 +130,11 @@ class LabTrackerAPI(
         *,
         raw_storage: LocalNoteStorage | None = None,
         store: InMemoryStore | None = None,
-        ocr_backend: OCRBackend | None = None,
-        question_extraction_backend: QuestionExtractionBackend | None = None,
         search_backend: SearchBackend | None = None,
     ) -> "LabTrackerAPI":
         return cls(
             store=store,
             raw_storage=raw_storage,
-            ocr_backend=ocr_backend,
-            question_extraction_backend=question_extraction_backend,
             search_backend=search_backend,
             allow_in_memory=True,
         )

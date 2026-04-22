@@ -13,7 +13,7 @@ from starlette.requests import Request
 from lab_tracker.api import LabTrackerAPI
 from lab_tracker.db_models import DatasetFileModel, DatasetModel, NoteModel
 from lab_tracker.errors import NotFoundError
-from lab_tracker.models import Project, ProjectReviewPolicy, ProjectStatus
+from lab_tracker.models import Project, ProjectStatus
 from lab_tracker.schemas import Envelope, ListEnvelope, ProjectCreate, ProjectUpdate
 
 from .shared import (
@@ -58,7 +58,6 @@ def build_projects_router(api: LabTrackerAPI) -> APIRouter:
             name=payload.name,
             description=payload.description or "",
             status=payload.status or project_default_status(),
-            review_policy=payload.review_policy or ProjectReviewPolicy.NONE,
             actor=actor,
         )
         return Envelope(data=project)
@@ -91,7 +90,6 @@ def build_projects_router(api: LabTrackerAPI) -> APIRouter:
             name=payload.name,
             description=payload.description,
             status=payload.status,
-            review_policy=payload.review_policy,
             actor=actor,
         )
         return Envelope(data=project)

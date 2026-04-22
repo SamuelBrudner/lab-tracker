@@ -44,7 +44,7 @@ That document is the source of truth for the ongoing `lab-0rm` cleanup.
 
 The frontend bundle is committed to the repo and served from `src/lab_tracker/frontend/app.js`.
 
-If you change the frontend source in `src/lab_tracker/frontend_src/app.jsx`, rebuild the bundle:
+If you change the frontend source in `src/lab_tracker/frontend_src`, rebuild the bundle:
 
 ```bash
 npm install
@@ -82,8 +82,10 @@ development.
 - `LAB_TRACKER_AUTH_TOKEN_TTL_MINUTES`: access token lifetime (default: `720`)
 
 The retained v1 runtime keeps note handling manual and uses the built-in substring index for
-simple query flows. OCR, extraction inboxes, dataset review queues, and configurable vector-search
-providers are not part of the supported default path.
+simple query flows. Deferred ideas such as OCR assists, extraction inboxes, semantic/vector search,
+and dataset review governance live in the restoration ledger in
+[`docs/retained-v1-surface.md`](/Users/samuelbrudner/Documents/GitHub/lab-tracker/docs/retained-v1-surface.md)
+rather than the supported runtime.
 
 ## Database migrations
 

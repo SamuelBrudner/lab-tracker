@@ -11,14 +11,11 @@ from lab_tracker.models import (
     DatasetStatus,
     ProjectReviewPolicy,
     QuestionLinkRole,
-    QuestionSource,
     QuestionStatus,
     QuestionType,
     SessionStatus,
     SessionType,
-    TagSuggestionStatus,
 )
-from lab_tracker.services.extraction_backends import RegexQuestionExtractionBackend
 
 
 def _actor(role: Role = Role.ADMIN) -> AuthContext:
@@ -509,40 +506,6 @@ def test_operational_session_disallows_primary_question():
             primary_question_id=question.question_id,
             actor=actor,
         )
-
-
-def test_extract_questions_from_note_stages_questions():
-    api = LabTrackerAPI.in_memory(question_extraction_backend=RegexQuestionExtractionBackend())
-    actor = _actor()
-    project = api.create_project("Neuro Project", actor=actor)
-    note = api.create_note(
-        project_id=project.project_id,
-        raw_content=(
-            "Q: Does PV inhibition broaden tuning\n"
-            "- Can we see layer-specific effects?\n"
-            "Question: What is the baseline distribution\n"
-            "Notes: check controls"
-        ),
-        actor=actor,
-    )
-
-    questions = api.extract_questions_from_note(note.note_id, actor=actor)
-
-    assert {question.text for question in questions} == {
-        "Does PV inhibition broaden tuning",
-        "Can we see layer-specific effects?",
-        "What is the baseline distribution",
-    }
-    assert all(question.status == QuestionStatus.STAGED for question in questions)
-    assert all(question.created_from == QuestionSource.MEETING_CAPTURE for question in questions)
-    assert all(question.created_by == str(actor.user_id) for question in questions)
-    assert all(
-        question.source_provenance and str(note.note_id) in question.source_provenance
-        for question in questions
-    )
-    assert api.extract_questions_from_note(note.note_id, actor=actor) == []
-
-
 def test_update_note_accepts_extracted_entities():
     api = LabTrackerAPI.in_memory()
     actor = _actor()
@@ -568,47 +531,3 @@ def test_update_note_accepts_extracted_entities():
     ]
     assert updated.extracted_entities[0].confidence == 0.82
     assert updated.extracted_entities[0].provenance == "ocr:model-1"
-
-
-def test_suggest_entity_tags_creates_suggestions_and_dedupes():
-    api = LabTrackerAPI.in_memory()
-    actor = _actor()
-    project = api.create_project("Neuro Project", actor=actor)
-    note = api.create_note(
-        project_id=project.project_id,
-        raw_content="Neuron note",
-        extracted_entities=[("Neuron", 0.8, "ocr:model-1")],
-        actor=actor,
-    )
-
-    suggestions = api.suggest_entity_tags(note.note_id, actor=actor)
-
-    assert suggestions
-    assert all(suggestion.entity_label == "Neuron" for suggestion in suggestions)
-    assert all(suggestion.status == TagSuggestionStatus.STAGED for suggestion in suggestions)
-    assert api.suggest_entity_tags(note.note_id, actor=actor) == []
-
-
-def test_review_entity_tag_suggestion_updates_status():
-    api = LabTrackerAPI.in_memory()
-    actor = _actor()
-    project = api.create_project("Neuro Project", actor=actor)
-    note = api.create_note(
-        project_id=project.project_id,
-        raw_content="Neuron note",
-        extracted_entities=[("Neuron", 0.8, "ocr:model-1")],
-        actor=actor,
-    )
-
-    suggestion = api.suggest_entity_tags(note.note_id, actor=actor)[0]
-    reviewed = api.review_entity_tag_suggestion(
-        note.note_id,
-        suggestion.suggestion_id,
-        status=TagSuggestionStatus.ACCEPTED,
-        reviewed_by="reviewer",
-        actor=actor,
-    )
-
-    assert reviewed.status == TagSuggestionStatus.ACCEPTED
-    assert reviewed.reviewed_by == "reviewer"
-    assert reviewed.reviewed_at is not None

@@ -1,5 +1,1 @@
-export {
-  QuestionDetailCard,
-  QuestionExtractionInboxPanel,
-  QuestionPanel,
-} from "./questions/index.js";
+export { QuestionDetailCard, QuestionPanel } from "./questions/index.js";

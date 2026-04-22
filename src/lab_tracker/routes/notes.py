@@ -14,12 +14,9 @@ from starlette.responses import Response
 from lab_tracker.api import LabTrackerAPI
 from lab_tracker.errors import ValidationError
 from lab_tracker.models import (
-    EntityTagSuggestion,
     EntityType,
     Note,
     NoteStatus,
-    QuestionExtractionCandidate,
-    TagSuggestionStatus,
 )
 from lab_tracker.schemas import (
     Envelope,
@@ -28,9 +25,6 @@ from lab_tracker.schemas import (
     NoteRawDownloadRead,
     NoteUpload,
     NoteUpdate,
-    QuestionExtractionRequest,
-    TagSuggestionRequest,
-    TagSuggestionReviewRequest,
 )
 
 from .shared import (
@@ -38,7 +32,6 @@ from .shared import (
     actor_from_request,
     list_response,
     note_default_status,
-    paginate,
     parse_entity_refs_form,
     parse_metadata_form,
     repository_from_request,
@@ -202,84 +195,5 @@ def build_notes_router(api: LabTrackerAPI) -> APIRouter:
         actor = actor_from_request(request)
         note = api_from_request(request, api).delete_note(note_id, actor=actor)
         return Envelope(data=note)
-
-    @router.post(
-        "/notes/{note_id}/tag-suggestions",
-        response_model=Envelope[list[EntityTagSuggestion]],
-        status_code=http_status.HTTP_201_CREATED,
-        include_in_schema=False,
-    )
-    def suggest_tag_suggestions(
-        note_id: UUID,
-        request: Request,
-        payload: TagSuggestionRequest | None = None,
-    ):
-        actor = actor_from_request(request)
-        suggestions = api_from_request(request, api).suggest_entity_tags(
-            note_id,
-            provenance=payload.provenance if payload else None,
-            actor=actor,
-        )
-        return Envelope(data=suggestions, meta={"count": len(suggestions)})
-
-    @router.get(
-        "/notes/{note_id}/tag-suggestions",
-        response_model=ListEnvelope[EntityTagSuggestion],
-        include_in_schema=False,
-    )
-    def list_tag_suggestions(
-        request: Request,
-        note_id: UUID,
-        status: TagSuggestionStatus | None = None,
-        limit: int = 50,
-        offset: int = 0,
-    ):
-        validate_pagination(limit, offset)
-        suggestions = api_from_request(request, api).list_entity_tag_suggestions(
-            note_id,
-            status=status,
-        )
-        page, total = paginate(suggestions, limit, offset)
-        return list_response(page, limit=limit, offset=offset, total=total)
-
-    @router.patch(
-        "/notes/{note_id}/tag-suggestions/{suggestion_id}",
-        response_model=Envelope[EntityTagSuggestion],
-        include_in_schema=False,
-    )
-    def review_tag_suggestion(
-        note_id: UUID,
-        suggestion_id: UUID,
-        payload: TagSuggestionReviewRequest,
-        request: Request,
-    ):
-        actor = actor_from_request(request)
-        suggestion = api_from_request(request, api).review_entity_tag_suggestion(
-            note_id,
-            suggestion_id,
-            status=payload.status,
-            reviewed_by=payload.reviewed_by,
-            actor=actor,
-        )
-        return Envelope(data=suggestion)
-
-    @router.post(
-        "/notes/{note_id}/extract-questions",
-        response_model=Envelope[list[QuestionExtractionCandidate]],
-        include_in_schema=False,
-    )
-    def extract_questions(
-        note_id: UUID,
-        request: Request,
-        payload: QuestionExtractionRequest | None = None,
-    ):
-        actor = actor_from_request(request)
-        candidates = api_from_request(request, api).extract_question_candidates_from_note(
-            note_id,
-            default_question_type=payload.question_type if payload else None,
-            provenance=payload.provenance if payload else None,
-            actor=actor,
-        )
-        return Envelope(data=candidates, meta={"count": len(candidates)})
 
     return router

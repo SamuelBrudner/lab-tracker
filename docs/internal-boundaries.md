@@ -24,7 +24,7 @@ The SQLAlchemy repository is now split into focused modules under
 
 - `common.py`: shared pagination/count helpers and the generic model repository
 - `core.py`: projects and questions
-- `datasets.py`: datasets and dataset reviews
+- `datasets.py`: datasets and attached files
 - `notes.py`: notes and note child rows
 - `sessions.py`: sessions and acquisition outputs
 - `analyses.py`: analyses, claims, and visualizations
@@ -40,7 +40,7 @@ Mixed-resource route modules have been replaced with one-resource routers under
 Examples:
 
 - `projects.py`, `questions.py`
-- `datasets.py`, `dataset_reviews.py`, `dataset_files.py`
+- `datasets.py`, `dataset_files.py`
 - `notes.py`, `search.py`
 - `sessions.py`, `analyses.py`, `claims.py`, `visualizations.py`
 

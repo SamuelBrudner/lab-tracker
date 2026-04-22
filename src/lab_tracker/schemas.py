@@ -7,11 +7,10 @@ Envelope/ListEnvelope wrappers. Request payloads use purpose-built schemas below
 from __future__ import annotations
 
 from datetime import datetime
-from enum import Enum
 from typing import Any, Generic, TypeVar
 from uuid import UUID
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field
 
 from lab_tracker.auth import Role
 from lab_tracker.models import (
@@ -27,7 +26,6 @@ from lab_tracker.models import (
     Note,
     NoteStatus,
     ProjectStatus,
-    ProjectReviewPolicy,
     Question,
     QuestionLink,
     QuestionSource,
@@ -35,7 +33,6 @@ from lab_tracker.models import (
     QuestionType,
     SessionStatus,
     SessionType,
-    TagSuggestionStatus,
     Visualization,
     VisualizationInput,
 )
@@ -113,14 +110,12 @@ class ProjectCreate(BaseModel):
     name: str = Field(..., min_length=1)
     description: str | None = None
     status: ProjectStatus | None = None
-    review_policy: ProjectReviewPolicy | None = None
 
 
 class ProjectUpdate(BaseModel):
     name: str | None = None
     description: str | None = None
     status: ProjectStatus | None = None
-    review_policy: ProjectReviewPolicy | None = None
 
 
 class QuestionCreate(BaseModel):
@@ -156,34 +151,6 @@ class DatasetUpdate(BaseModel):
     commit_hash: str | None = None
     status: DatasetStatus | None = None
     question_links: list[QuestionLink] | None = None
-
-
-class DatasetReviewRequest(BaseModel):
-    comments: str | None = None
-
-
-class DatasetReviewAction(str, Enum):
-    APPROVE = "approve"
-    REQUEST_CHANGES = "request_changes"
-    REJECT = "reject"
-
-
-class DatasetReviewUpdate(BaseModel):
-    action: DatasetReviewAction
-    comments: str | None = None
-
-    @field_validator("action", mode="before")
-    @classmethod
-    def _normalize_action(cls, value: object) -> object:
-        if not isinstance(value, str):
-            return value
-        cleaned = value.strip().lower().replace("-", "_")
-        mapping = {
-            "approved": DatasetReviewAction.APPROVE.value,
-            "changes_requested": DatasetReviewAction.REQUEST_CHANGES.value,
-            "rejected": DatasetReviewAction.REJECT.value,
-        }
-        return mapping.get(cleaned, cleaned)
 
 
 class NoteCreate(BaseModel):
@@ -291,21 +258,6 @@ class VisualizationUpdate(BaseModel):
     file_path: str | None = Field(None, min_length=1)
     caption: str | None = None
     related_claim_ids: list[UUID] | None = None
-
-
-class TagSuggestionRequest(BaseModel):
-    provenance: str | None = None
-
-
-class TagSuggestionReviewRequest(BaseModel):
-    status: TagSuggestionStatus
-    reviewed_by: str | None = None
-
-
-class QuestionExtractionRequest(BaseModel):
-    question_type: QuestionType | None = None
-    created_from: QuestionSource | None = None
-    provenance: str | None = None
 
 
 class SearchResults(BaseModel):

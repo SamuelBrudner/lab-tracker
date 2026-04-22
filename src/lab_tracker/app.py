@@ -184,10 +184,7 @@ def _search_check(api: LabTrackerAPI) -> dict[str, str]:
         "backend": snapshot.backend_name,
         "detail": snapshot.last_failure_message or "search backend degraded",
         "operation": snapshot.last_failure_operation or "unknown",
-        "repair": (
-            "run `uv run python -m lab_tracker.reindex --reset` for persistent backends; "
-            "restart the app to rebuild the in-memory default backend"
-        ),
+        "repair": "restart the app to rebuild the in-memory substring backend",
     }
 
 
@@ -214,10 +211,7 @@ def _metrics_snapshot(
             "last_failure_at": search_snapshot.last_failure_at,
             "last_failure_message": search_snapshot.last_failure_message,
             "last_failure_operation": search_snapshot.last_failure_operation,
-            "repair": (
-                "run `uv run python -m lab_tracker.reindex --reset` for persistent backends; "
-                "restart the app to rebuild the in-memory default backend"
-            ),
+            "repair": "restart the app to rebuild the in-memory substring backend",
         },
     }
     errors: list[dict[str, str]] = []
@@ -344,11 +338,9 @@ def create_app() -> FastAPI:
     file_storage_backend = LocalFileStorageBackend(settings.file_storage_path)
     raw_note_storage = LocalNoteStorage(settings.note_storage_path)
     search_backend = InMemorySubstringSearchBackend()
-    ocr_backend = None
     lab_tracker_api = LabTrackerAPI(
         raw_storage=raw_note_storage,
         search_backend=search_backend,
-        ocr_backend=ocr_backend,
     )
 
     @asynccontextmanager
@@ -369,7 +361,6 @@ def create_app() -> FastAPI:
     app.state.file_storage_backend = file_storage_backend
     app.state.raw_note_storage = raw_note_storage
     app.state.search_backend = search_backend
-    app.state.ocr_backend = ocr_backend
     app.state.lab_tracker_api = lab_tracker_api
     _configure_auth_middleware(app)
     _configure_database_session_middleware(app, api=app.state.lab_tracker_api)
