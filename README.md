@@ -36,6 +36,10 @@ Frontend MVP:
 
 Open `http://127.0.0.1:8000/app`.
 
+The retained v1 product surface is defined in
+[`docs/retained-v1-surface.md`](/Users/samuelbrudner/Documents/GitHub/lab-tracker/docs/retained-v1-surface.md).
+That document is the source of truth for the ongoing `lab-0rm` cleanup.
+
 ### Frontend build
 
 The frontend bundle is committed to the repo and served from `src/lab_tracker/frontend/app.js`.
@@ -52,9 +56,11 @@ The committed frontend bundle ships without a source map by default.
 
 The frontend includes:
 - project dashboard
-- question staging and activate (commit) workflow
-- note creation (text + photo upload)
-- dataset staging and commit review
+- question staging and activate workflow
+- manual note creation and upload/download handling
+- sessions and acquisition outputs
+- dataset staging, file attachment, and direct commit with provenance capture
+- analysis, claim, and visualization tracking
 
 Authentication notes:
 - register/login is available in the UI
