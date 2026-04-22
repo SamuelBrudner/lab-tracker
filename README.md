@@ -32,13 +32,14 @@ Health check:
 curl http://127.0.0.1:8000/health
 ```
 
-Frontend MVP:
+Frontend:
 
 Open `http://127.0.0.1:8000/app`.
 
 The retained v1 product surface is defined in
 [`docs/retained-v1-surface.md`](/Users/samuelbrudner/Documents/GitHub/lab-tracker/docs/retained-v1-surface.md).
-That document is the source of truth for the ongoing `lab-0rm` cleanup.
+If this README and the retained-surface document disagree, the retained-surface
+document defines the supported runtime.
 
 ### Frontend build
 
@@ -54,7 +55,7 @@ npm run build
 
 The committed frontend bundle ships without a source map by default.
 
-The frontend includes:
+Supported workflows in the frontend include:
 - project dashboard
 - question staging and activate workflow
 - manual note creation and upload/download handling
@@ -81,11 +82,13 @@ development.
 - `LAB_TRACKER_AUTH_SECRET_KEY`: auth signing secret (default allowed only in `local`)
 - `LAB_TRACKER_AUTH_TOKEN_TTL_MINUTES`: access token lifetime (default: `720`)
 
-The retained v1 runtime keeps note handling manual and uses the built-in substring index for
-simple query flows. Deferred ideas such as OCR assists, extraction inboxes, semantic/vector search,
-and dataset review governance live in the restoration ledger in
+The retained v1 runtime keeps note handling manual and uses the built-in
+substring search backend for query flows. OCR assists, extraction inboxes,
+entity/tag suggestion flows, semantic/vector search, and dataset review
+governance are not part of the supported runtime; those ideas live in the
+restoration ledger in
 [`docs/retained-v1-surface.md`](/Users/samuelbrudner/Documents/GitHub/lab-tracker/docs/retained-v1-surface.md)
-rather than the supported runtime.
+rather than the active product surface.
 
 ## Database migrations
 
@@ -93,10 +96,18 @@ rather than the supported runtime.
 uv run alembic upgrade head
 ```
 
-## Tests
+## Validation
+
+Core backend validation:
 
 ```bash
 uv run pytest -q
+```
+
+Run the frontend checks only when you change `src/lab_tracker/frontend_src` or
+the committed bundle in `src/lab_tracker/frontend`:
+
+```bash
 npm run test:frontend
 npm run lint:frontend
 npm run build
