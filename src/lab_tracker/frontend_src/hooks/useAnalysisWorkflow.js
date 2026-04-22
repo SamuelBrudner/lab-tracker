@@ -2,7 +2,7 @@ import * as React from "react";
 
 import { apiRequest, buildApiPath, fetchAllPages } from "../shared/api.js";
 
-const { useCallback, useEffect, useState } = React;
+const { useCallback, useEffect, useRef, useState } = React;
 
 function useAnalysisWorkflow({ token, canWrite, selectedProjectId, setBusy, setFlash }) {
   const [analyses, setAnalyses] = useState([]);
@@ -12,6 +12,7 @@ function useAnalysisWorkflow({ token, canWrite, selectedProjectId, setBusy, setF
   const [analysisCodeVersion, setAnalysisCodeVersion] = useState("");
   const [analysisMethodHash, setAnalysisMethodHash] = useState("");
   const [analysisEnvironmentHash, setAnalysisEnvironmentHash] = useState("");
+  const analysisRequestRef = useRef(0);
 
   const refreshAnalysisData = useCallback(
     async (projectId) => {
@@ -21,10 +22,15 @@ function useAnalysisWorkflow({ token, canWrite, selectedProjectId, setBusy, setF
         return;
       }
 
+      const requestId = analysisRequestRef.current + 1;
+      analysisRequestRef.current = requestId;
       const [nextAnalyses, nextVisualizations] = await Promise.all([
         fetchAllPages(buildApiPath("/analyses", { project_id: projectId }), { token }),
         fetchAllPages(buildApiPath("/visualizations", { project_id: projectId }), { token }),
       ]);
+      if (analysisRequestRef.current !== requestId) {
+        return;
+      }
       setAnalyses(nextAnalyses);
       setVisualizations(nextVisualizations);
     },
@@ -40,6 +46,7 @@ function useAnalysisWorkflow({ token, canWrite, selectedProjectId, setBusy, setF
 
   useEffect(() => {
     if (!token || !selectedProjectId) {
+      analysisRequestRef.current += 1;
       setAnalyses([]);
       setVisualizations([]);
       return;

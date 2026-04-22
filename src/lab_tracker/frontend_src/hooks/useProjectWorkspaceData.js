@@ -2,7 +2,7 @@ import * as React from "react";
 
 import { buildApiPath, fetchAllPages } from "../shared/api.js";
 
-const { useCallback, useEffect, useMemo, useState } = React;
+const { useCallback, useEffect, useMemo, useRef, useState } = React;
 
 function useProjectWorkspaceData({ token, setBusy, setFlash }) {
   const [projects, setProjects] = useState([]);
@@ -11,6 +11,8 @@ function useProjectWorkspaceData({ token, setBusy, setFlash }) {
   const [datasets, setDatasets] = useState([]);
   const [notes, setNotes] = useState([]);
   const [sessions, setSessions] = useState([]);
+  const projectsRequestRef = useRef(0);
+  const projectDataRequestRef = useRef(0);
 
   const clearProjectState = useCallback(() => {
     setSelectedProjectId("");
@@ -26,6 +28,8 @@ function useProjectWorkspaceData({ token, setBusy, setFlash }) {
         return;
       }
 
+      const requestId = projectDataRequestRef.current + 1;
+      projectDataRequestRef.current = requestId;
       const [nextQuestions, nextDatasets, nextNotes, nextSessions] = await Promise.all([
         fetchAllPages(buildApiPath("/questions", { project_id: projectId }), { token }),
         fetchAllPages(buildApiPath("/datasets", { project_id: projectId }), { token }),
@@ -33,6 +37,9 @@ function useProjectWorkspaceData({ token, setBusy, setFlash }) {
         fetchAllPages(buildApiPath("/sessions", { project_id: projectId }), { token }),
       ]);
 
+      if (projectDataRequestRef.current !== requestId) {
+        return;
+      }
       setQuestions(nextQuestions);
       setDatasets(nextDatasets);
       setNotes(nextNotes);
@@ -45,7 +52,12 @@ function useProjectWorkspaceData({ token, setBusy, setFlash }) {
     if (!token) {
       return [];
     }
+    const requestId = projectsRequestRef.current + 1;
+    projectsRequestRef.current = requestId;
     const nextProjects = await fetchAllPages("/projects", { token });
+    if (projectsRequestRef.current !== requestId) {
+      return nextProjects;
+    }
     setProjects(nextProjects);
     if (nextProjects.length === 0) {
       clearProjectState();
@@ -62,6 +74,8 @@ function useProjectWorkspaceData({ token, setBusy, setFlash }) {
 
   useEffect(() => {
     if (!token) {
+      projectsRequestRef.current += 1;
+      projectDataRequestRef.current += 1;
       setProjects([]);
       clearProjectState();
       return;
@@ -88,6 +102,11 @@ function useProjectWorkspaceData({ token, setBusy, setFlash }) {
 
   useEffect(() => {
     if (!token || !selectedProjectId) {
+      projectDataRequestRef.current += 1;
+      setQuestions([]);
+      setDatasets([]);
+      setNotes([]);
+      setSessions([]);
       return;
     }
 
