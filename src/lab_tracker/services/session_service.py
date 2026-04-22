@@ -83,7 +83,7 @@ class SessionServiceMixin:
             primary_question_id=primary_question_id,
             created_by=_actor_user_id(actor),
         )
-        self._store.sessions[session.session_id] = session
+        self._remember_entity("sessions", session.session_id, session)
         self._run_repository_write(lambda repository: repository.sessions.save(session))
         return session
 
@@ -144,7 +144,7 @@ class SessionServiceMixin:
     def delete_session(self, session_id: UUID, *, actor: AuthContext | None = None) -> Session:
         require_role(actor, WRITE_ROLES)
         session = self.get_session(session_id)
-        self._store.sessions.pop(session_id, None)
+        self._forget_entity("sessions", session_id)
         self._run_repository_write(lambda repository: repository.sessions.delete(session_id))
         return session
 
@@ -187,7 +187,7 @@ class SessionServiceMixin:
             checksum=cleaned_checksum,
             size_bytes=size_bytes,
         )
-        self._store.acquisition_outputs[output.output_id] = output
+        self._remember_entity("acquisition_outputs", output.output_id, output)
         self._run_repository_write(lambda repository: repository.acquisition_outputs.save(output))
         return output
 
@@ -223,7 +223,7 @@ class SessionServiceMixin:
             label="Acquisition output",
             loader=lambda repository: repository.acquisition_outputs.get(output_id),
         )
-        self._store.acquisition_outputs.pop(output_id, None)
+        self._forget_entity("acquisition_outputs", output_id)
         self._run_repository_write(
             lambda repository: repository.acquisition_outputs.delete(output_id)
         )

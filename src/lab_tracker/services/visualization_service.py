@@ -43,7 +43,7 @@ class VisualizationServiceMixin:
             caption=caption.strip() if caption else None,
             related_claim_ids=claim_ids,
         )
-        self._store.visualizations[visualization.viz_id] = visualization
+        self._remember_entity("visualizations", visualization.viz_id, visualization)
         self._run_repository_write(lambda repository: repository.visualizations.save(visualization))
         return visualization
 
@@ -130,6 +130,6 @@ class VisualizationServiceMixin:
     ) -> Visualization:
         require_role(actor, WRITE_ROLES)
         visualization = self.get_visualization(viz_id)
-        self._store.visualizations.pop(viz_id, None)
+        self._forget_entity("visualizations", viz_id)
         self._run_repository_write(lambda repository: repository.visualizations.delete(viz_id))
         return visualization

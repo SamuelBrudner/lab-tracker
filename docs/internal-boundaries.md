@@ -2,7 +2,7 @@
 
 ## Request Context Lifecycle
 
-Each HTTP request now gets an explicit `LabTrackerRequestContext` in
+Each HTTP request gets an explicit `LabTrackerRequestContext` in
 [`src/lab_tracker/request_context.py`](/Users/samuelbrudner/Documents/GitHub/lab-tracker/src/lab_tracker/request_context.py).
 
 The lifecycle is:
@@ -10,12 +10,10 @@ The lifecycle is:
 1. The database middleware creates a request-scoped SQLAlchemy repository.
 2. `LabTrackerAPI.build_request_context(...)` creates a context that owns:
    - the active repository
-   - an optional per-request in-memory store
-   - queued search-sync operations
    - deferred `after_commit` and `after_rollback` actions
 3. `LabTrackerAPI.bind_request_context(...)` attaches that context to the request-local API instance.
 4. Route handlers use `request.state.lab_tracker_api` via `api_from_request(...)`.
-5. On exit, middleware commits or rolls back the SQLAlchemy session, then calls `request_context.finish(...)` to flush queued side effects in the correct order.
+5. On exit, middleware commits or rolls back the SQLAlchemy session, then calls `request_context.finish(...)` to run the matching deferred side effects.
 
 Service logic should not depend on hidden globals or `ContextVar` state for request orchestration.
 

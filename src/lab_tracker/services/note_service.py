@@ -188,7 +188,7 @@ class NoteServiceMixin:
             status=status,
             created_by=_actor_user_id(actor),
         )
-        self._store.notes[note.note_id] = note
+        self._remember_entity("notes", note.note_id, note)
         self._run_repository_write(lambda repository: repository.notes.save(note))
         self._queue_search_op("upsert_notes", [note])
         return note
@@ -473,7 +473,7 @@ class NoteServiceMixin:
     def delete_note(self, note_id: UUID, *, actor: AuthContext | None = None) -> Note:
         require_role(actor, WRITE_ROLES)
         note = self.get_note(note_id)
-        self._store.notes.pop(note_id, None)
+        self._forget_entity("notes", note_id)
         self._run_repository_write(lambda repository: repository.notes.delete(note_id))
         self._queue_search_op("delete_notes", [note_id])
         if note.raw_asset is not None:

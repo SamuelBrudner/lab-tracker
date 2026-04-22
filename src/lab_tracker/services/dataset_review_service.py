@@ -95,7 +95,7 @@ class DatasetReviewServiceMixin:
             requested_at=utc_now(),
             resolved_at=None,
         )
-        self._store.dataset_reviews[review.review_id] = review
+        self._remember_entity("dataset_reviews", review.review_id, review)
         self._run_repository_write(lambda repository: repository.dataset_reviews.save(review))
         return review
 

@@ -119,7 +119,7 @@ class DatasetServiceMixin:
         )
         if commit_requested:
             _ensure_primary_question_active(primary_question)
-        self._store.datasets[dataset.dataset_id] = dataset
+        self._remember_entity("datasets", dataset.dataset_id, dataset)
         self._run_repository_write(lambda repository: repository.datasets.save(dataset))
         if review_required:
             self.request_dataset_review(
@@ -263,6 +263,6 @@ class DatasetServiceMixin:
     def delete_dataset(self, dataset_id: UUID, *, actor: AuthContext | None = None) -> Dataset:
         require_role(actor, WRITE_ROLES)
         dataset = self.get_dataset(dataset_id)
-        self._store.datasets.pop(dataset_id, None)
+        self._forget_entity("datasets", dataset_id)
         self._run_repository_write(lambda repository: repository.datasets.delete(dataset_id))
         return dataset

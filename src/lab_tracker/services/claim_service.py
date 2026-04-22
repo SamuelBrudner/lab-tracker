@@ -53,7 +53,7 @@ class ClaimServiceMixin:
             supported_by_dataset_ids=dataset_ids,
             supported_by_analysis_ids=analysis_ids,
         )
-        self._store.claims[claim.claim_id] = claim
+        self._remember_entity("claims", claim.claim_id, claim)
         self._run_repository_write(lambda repository: repository.claims.save(claim))
         return claim
 
@@ -149,7 +149,7 @@ class ClaimServiceMixin:
     def delete_claim(self, claim_id: UUID, *, actor: AuthContext | None = None) -> Claim:
         require_role(actor, WRITE_ROLES)
         claim = self.get_claim(claim_id)
-        self._store.claims.pop(claim_id, None)
+        self._forget_entity("claims", claim_id)
         self._run_repository_write(lambda repository: repository.claims.delete(claim_id))
         return claim
 

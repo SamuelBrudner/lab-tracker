@@ -9,7 +9,7 @@ import os
 from pathlib import Path
 from typing import Any
 
-from fastapi import Depends, FastAPI, Request
+from fastapi import FastAPI, Request
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy import func, select
 from sqlalchemy.exc import SQLAlchemyError
@@ -31,7 +31,6 @@ from lab_tracker.db_models import (
     SessionModel,
     VisualizationModel,
 )
-from lab_tracker.dependencies import get_sqlalchemy_repository
 from lab_tracker.errors import AuthError
 from lab_tracker.file_storage import LocalFileStorageBackend
 from lab_tracker.logging import configure_logging
@@ -299,10 +298,6 @@ def _configure_database_session_middleware(
             try:
                 request_context.finish(
                     committed=committed,
-                    apply_search_op=lambda operation, args: request.state.lab_tracker_api._apply_search_op_safely(  # noqa: SLF001
-                        operation,
-                        *args,
-                    ),
                     run_deferred_actions=lambda actions, label: request.state.lab_tracker_api._run_deferred_actions(  # noqa: SLF001
                         actions,
                         label=label,
@@ -365,7 +360,6 @@ def create_app() -> FastAPI:
 
     app = FastAPI(
         title=settings.app_name,
-        dependencies=[Depends(get_sqlalchemy_repository)],
         lifespan=lifespan,
     )
     app.state.db_engine = engine

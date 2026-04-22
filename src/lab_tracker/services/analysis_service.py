@@ -68,7 +68,7 @@ class AnalysisServiceMixin:
             status=status,
             executed_by=_actor_user_id(actor),
         )
-        self._store.analyses[analysis.analysis_id] = analysis
+        self._remember_entity("analyses", analysis.analysis_id, analysis)
         self._run_repository_write(lambda repository: repository.analyses.save(analysis))
         return analysis
 
@@ -152,7 +152,7 @@ class AnalysisServiceMixin:
     def delete_analysis(self, analysis_id: UUID, *, actor: AuthContext | None = None) -> Analysis:
         require_role(actor, WRITE_ROLES)
         analysis = self.get_analysis(analysis_id)
-        self._store.analyses.pop(analysis_id, None)
+        self._forget_entity("analyses", analysis_id)
         self._run_repository_write(lambda repository: repository.analyses.delete(analysis_id))
         return analysis
 

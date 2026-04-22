@@ -93,9 +93,6 @@ class LabTrackerAPI(
 ):
     @property
     def _store(self) -> InMemoryStore:
-        request_context = self._request_context
-        if request_context is not None and request_context.active_store is not None:
-            return request_context.active_store
         return self._base_store
 
     @_store.setter
@@ -156,11 +153,7 @@ class LabTrackerAPI(
         self,
         repository: LabTrackerRepository,
     ) -> LabTrackerRequestContext:
-        active_store = InMemoryStore() if repository is not None and not self._allow_in_memory else None
-        return LabTrackerRequestContext(
-            repository=repository,
-            active_store=active_store,
-        )
+        return LabTrackerRequestContext(repository=repository)
 
     def bind_request_context(self, request_context: LabTrackerRequestContext) -> "LabTrackerAPI":
         bound = object.__new__(self.__class__)
@@ -196,6 +189,9 @@ class LabTrackerAPI(
         self._cache_map(attribute_name)[entity_id] = entity
         return entity
 
+    def _remember_entity(self, attribute_name: str, entity_id: UUID, entity: object):
+        return self._cache_entity(attribute_name, entity_id, entity)
+
     def _cache_entities(
         self,
         attribute_name: str,
@@ -213,6 +209,11 @@ class LabTrackerAPI(
         if not self._uses_in_memory_entity_cache():
             return None
         return self._cache_map(attribute_name).get(entity_id)
+
+    def _forget_entity(self, attribute_name: str, entity_id: UUID) -> None:
+        if not self._uses_in_memory_entity_cache():
+            return
+        self._cache_map(attribute_name).pop(entity_id, None)
 
     def _get_from_repository_or_store(
         self,
@@ -341,10 +342,14 @@ class LabTrackerAPI(
     def _queue_search_op(self, operation: str, *args: object) -> None:
         if not self._should_sync_search_backend():
             return
+        action = lambda operation=operation, args=args: self._apply_search_op_safely(
+            operation,
+            *args,
+        )
         if self._request_context is not None:
-            self._request_context.pending_search_ops.append((operation, args))
+            self._request_context.after_commit_actions.append(action)
             return
-        self._apply_search_op_safely(operation, *args)
+        action()
 
     @staticmethod
     def _slice_entities(items: list[object], *, limit: int | None, offset: int) -> list[object]:
@@ -419,9 +424,7 @@ class LabTrackerAPI(
                 resolved_repository.commit()
         except Exception:
             resolved_repository.rollback()
-            if self._request_context is not None:
-                self._request_context.reset_after_failure()
-            elif resolved_repository is self._repository:
+            if resolved_repository is self._repository:
                 self.hydrate_from_repository(
                     resolved_repository,
                     store=self._base_store,

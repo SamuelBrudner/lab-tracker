@@ -33,7 +33,7 @@ class ProjectServiceMixin:
             review_policy=review_policy,
             created_by=_actor_user_id(actor),
         )
-        self._store.projects[project.project_id] = project
+        self._remember_entity("projects", project.project_id, project)
         self._run_repository_write(lambda repository: repository.projects.save(project))
         return project
 
@@ -80,6 +80,6 @@ class ProjectServiceMixin:
     def delete_project(self, project_id: UUID, *, actor: AuthContext | None = None) -> Project:
         require_role(actor, WRITE_ROLES)
         project = self.get_project(project_id)
-        self._store.projects.pop(project_id, None)
+        self._forget_entity("projects", project_id)
         self._run_repository_write(lambda repository: repository.projects.delete(project_id))
         return project

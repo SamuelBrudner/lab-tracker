@@ -81,7 +81,7 @@ class QuestionServiceMixin:
             source_provenance=source_provenance.strip() if source_provenance else None,
             created_by=_actor_user_id(actor),
         )
-        self._store.questions[question.question_id] = question
+        self._remember_entity("questions", question.question_id, question)
         self._run_repository_write(lambda repository: repository.questions.save(question))
         self._queue_search_op("upsert_questions", [question])
         return question
@@ -255,7 +255,7 @@ class QuestionServiceMixin:
     def delete_question(self, question_id: UUID, *, actor: AuthContext | None = None) -> Question:
         require_role(actor, WRITE_ROLES)
         question = self.get_question(question_id)
-        self._store.questions.pop(question_id, None)
+        self._forget_entity("questions", question_id)
         self._run_repository_write(lambda repository: repository.questions.delete(question_id))
         self._queue_search_op("delete_questions", [question_id])
         return question
