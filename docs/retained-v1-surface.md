@@ -12,6 +12,8 @@ research record:
 - Auth and role-based access control.
 - Projects as the top-level container for work.
 - Questions created, staged, activated, and maintained explicitly by users.
+- Simple query/search flows over questions and notes using the built-in
+  substring behavior.
 - Manual note capture, including text notes, raw file upload, raw file
   download, and attaching notes to retained entities.
 - Sessions and acquisition outputs, including closing sessions and promoting
@@ -22,6 +24,11 @@ research record:
 
 Anything not listed above is out of the retained v1 surface and should not
 shape the default runtime, supported docs, or simplified architecture.
+
+Some legacy domain types, tables, and test fixtures may still mention deferred
+workflows while the hard-delete work is being decomposed. Treat those as
+compatibility surfaces for historical data or cleanup staging, not as supported
+product capabilities.
 
 ## Deferred Workflows
 
@@ -65,4 +72,3 @@ not:
 | Entity/tag suggestion workflows | Machine suggestions can help normalize notes without replacing the raw human record. | Attach suggestions as optional annotations with confidence/provenance on one record at a time; never require them for commit or navigation. |
 | Semantic/vector search + embeddings | Cross-note and cross-question retrieval is useful once the core record is stable and large enough to search meaningfully. | Start with opt-in indexing behind one operational switch and a clean substring fallback; avoid provider sprawl in the default runtime. |
 | Dataset review queue/policy/UI | Some labs may eventually want second-person approval for selected commits. | Layer review as an optional governance feature on top of direct commit, not as the default dataset lifecycle or a prerequisite for provenance capture. |
-

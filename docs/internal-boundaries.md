@@ -1,5 +1,9 @@
 # Internal Boundaries
 
+This document describes the active runtime boundaries only. Compatibility
+surfaces that still exist for historical data handling or staged cleanup are
+intentionally omitted unless they participate in the retained v1 runtime.
+
 ## Request Context Lifecycle
 
 Each HTTP request gets an explicit `LabTrackerRequestContext` in
@@ -45,6 +49,10 @@ Examples:
 - `sessions.py`, `analyses.py`, `claims.py`, `visualizations.py`
 
 Routes keep their existing URLs, envelopes, pagination, and auth requirements.
+`search.py` is the retained query surface and stays on the simple substring
+behavior documented in
+[`docs/retained-v1-surface.md`](/Users/samuelbrudner/Documents/GitHub/lab-tracker/docs/retained-v1-surface.md),
+not semantic/vector retrieval.
 
 ## Frontend Data Loading and Downloads
 
