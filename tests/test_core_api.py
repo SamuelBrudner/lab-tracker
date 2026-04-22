@@ -15,6 +15,7 @@ from lab_tracker.models import (
     QuestionSource,
     QuestionStatus,
     QuestionType,
+    SessionStatus,
     SessionType,
     TagSuggestionStatus,
 )
@@ -370,6 +371,96 @@ def test_promote_operational_session_to_scientific():
     assert promoted.session_id == session.session_id
     assert promoted.session_type == SessionType.SCIENTIFIC
     assert promoted.primary_question_id == question.question_id
+
+
+def test_closed_operational_session_cannot_be_promoted():
+    api = LabTrackerAPI.in_memory()
+    actor = _actor()
+    project = api.create_project("Neuro Project", actor=actor)
+    question = api.create_question(
+        project_id=project.project_id,
+        text="Can this session still be promoted?",
+        question_type=QuestionType.DESCRIPTIVE,
+        status=QuestionStatus.ACTIVE,
+        actor=actor,
+    )
+    session = api.create_session(
+        project_id=project.project_id,
+        session_type=SessionType.OPERATIONAL,
+        actor=actor,
+    )
+    api.update_session(session.session_id, status=SessionStatus.CLOSED, actor=actor)
+
+    with pytest.raises(ValidationError):
+        api.promote_operational_session(
+            session.session_id,
+            primary_question_id=question.question_id,
+            actor=actor,
+        )
+
+    with pytest.raises(ValidationError):
+        api.promote_operational_session_to_dataset(
+            session.session_id,
+            primary_question_id=question.question_id,
+            commit_manifest=DatasetCommitManifestInput(
+                files=[DatasetFile(path="rig.log", checksum="qa123")]
+            ),
+            actor=actor,
+        )
+
+
+def test_session_cannot_be_reopened_after_closing():
+    api = LabTrackerAPI.in_memory()
+    actor = _actor()
+    project = api.create_project("Neuro Project", actor=actor)
+    session = api.create_session(
+        project_id=project.project_id,
+        session_type=SessionType.OPERATIONAL,
+        actor=actor,
+    )
+    api.update_session(session.session_id, status=SessionStatus.CLOSED, actor=actor)
+
+    with pytest.raises(ValidationError):
+        api.update_session(session.session_id, status=SessionStatus.ACTIVE, actor=actor)
+
+
+def test_active_session_cannot_set_end_time_without_closing():
+    api = LabTrackerAPI.in_memory()
+    actor = _actor()
+    project = api.create_project("Neuro Project", actor=actor)
+    session = api.create_session(
+        project_id=project.project_id,
+        session_type=SessionType.OPERATIONAL,
+        actor=actor,
+    )
+
+    with pytest.raises(ValidationError):
+        api.update_session(session.session_id, ended_at=api.get_session(session.session_id).started_at, actor=actor)
+
+
+def test_archived_dataset_cannot_be_recommitted():
+    api = LabTrackerAPI.in_memory()
+    actor = _actor()
+    project = api.create_project("Neuro Project", actor=actor)
+    question = api.create_question(
+        project_id=project.project_id,
+        text="Can an archived dataset be recommitted?",
+        question_type=QuestionType.DESCRIPTIVE,
+        status=QuestionStatus.ACTIVE,
+        actor=actor,
+    )
+    manifest = DatasetCommitManifestInput(files=[DatasetFile(path="data.csv", checksum="abc123")])
+    dataset = api.create_dataset(
+        project_id=project.project_id,
+        primary_question_id=question.question_id,
+        commit_manifest=manifest,
+        actor=actor,
+    )
+    api.update_dataset(dataset.dataset_id, status=DatasetStatus.COMMITTED, actor=actor)
+    api.update_dataset(dataset.dataset_id, status=DatasetStatus.ARCHIVED, actor=actor)
+
+    with pytest.raises(ValidationError):
+        api.update_dataset(dataset.dataset_id, status=DatasetStatus.COMMITTED, actor=actor)
 
 
 def test_session_link_code_roundtrip():

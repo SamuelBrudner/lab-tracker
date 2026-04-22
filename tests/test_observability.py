@@ -2,8 +2,37 @@ from lab_tracker.app import create_app
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
 
+from lab_tracker.auth import Role
 from lab_tracker.db import Base
 from lab_tracker.db_models import ProjectModel
+from lab_tracker.services.search_backends import SearchBackend
+
+
+class _FlakySearchBackend(SearchBackend):
+    backend_name = "flaky"
+
+    def __init__(self) -> None:
+        self._fail_next_upsert = True
+
+    def upsert_questions(self, questions) -> None:  # noqa: ANN001
+        if self._fail_next_upsert and list(questions):
+            self._fail_next_upsert = False
+            raise RuntimeError("temporary index outage")
+
+    def upsert_notes(self, notes) -> None:  # noqa: ANN001
+        return
+
+    def delete_questions(self, question_ids) -> None:  # noqa: ANN001
+        return
+
+    def delete_notes(self, note_ids) -> None:  # noqa: ANN001
+        return
+
+    def search_question_ids(self, query, *, question_ids=None):  # noqa: ANN001
+        return []
+
+    def search_note_ids(self, query, *, note_ids=None):  # noqa: ANN001
+        return []
 
 
 def test_readiness_endpoint(monkeypatch, tmp_path):
@@ -151,3 +180,73 @@ def test_observability_reports_search_degradation(monkeypatch, tmp_path):
         assert metrics_payload["search"]["degraded"] is True
         assert metrics_payload["search"]["failure_count"] == 1
         assert metrics_payload["errors"][0]["name"] == "search"
+
+
+def test_readiness_recovers_after_transient_search_failure(monkeypatch, tmp_path):
+    db_path = tmp_path / "search-recovery.db"
+    database_url = f"sqlite+pysqlite:///{db_path}"
+    monkeypatch.setenv("LAB_TRACKER_DATABASE_URL", database_url)
+    monkeypatch.setenv("LAB_TRACKER_FILE_STORAGE_PATH", str(tmp_path / "file-storage"))
+    monkeypatch.setenv("LAB_TRACKER_NOTE_STORAGE_PATH", str(tmp_path / "note-storage"))
+
+    engine = create_engine(
+        database_url,
+        future=True,
+        connect_args={"check_same_thread": False},
+    )
+    Base.metadata.create_all(bind=engine)
+    engine.dispose()
+
+    backend = _FlakySearchBackend()
+    monkeypatch.setattr("lab_tracker.app.build_search_backend", lambda settings: backend)
+
+    app = create_app()
+    app.state.auth_service.register_user(
+        username="search-recovery-admin",
+        password="secret",
+        role=Role.ADMIN,
+    )
+
+    with TestClient(app) as client:
+        login_response = client.post(
+            "/auth/login",
+            json={"username": "search-recovery-admin", "password": "secret"},
+        )
+        assert login_response.status_code == 200
+        token = login_response.json()["data"]["access_token"]
+        headers = {"Authorization": f"Bearer {token}"}
+
+        project_id = client.post(
+            "/projects",
+            json={"name": "Search recovery"},
+            headers=headers,
+        ).json()["data"]["project_id"]
+
+        first_question = client.post(
+            "/questions",
+            json={
+                "project_id": project_id,
+                "text": "Does the first sync fail?",
+                "question_type": "descriptive",
+            },
+            headers=headers,
+        )
+        assert first_question.status_code == 201
+
+        first_readiness = client.get("/readiness")
+        assert first_readiness.status_code == 503
+
+        second_question = client.post(
+            "/questions",
+            json={
+                "project_id": project_id,
+                "text": "Does the second sync recover?",
+                "question_type": "descriptive",
+            },
+            headers=headers,
+        )
+        assert second_question.status_code == 201
+
+        recovered_readiness = client.get("/readiness")
+        assert recovered_readiness.status_code == 200
+        assert recovered_readiness.json()["status"] == "ok"

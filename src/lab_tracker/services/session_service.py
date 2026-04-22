@@ -25,6 +25,7 @@ from lab_tracker.services.shared import (
     WRITE_ROLES,
     _actor_user_id,
     _ensure_non_empty,
+    _ensure_session_status_transition,
     _find_acquisition_output,
     _manifest_input_with_source,
     _merge_acquisition_outputs,
@@ -125,9 +126,16 @@ class SessionServiceMixin:
     ) -> Session:
         require_role(actor, WRITE_ROLES)
         session = self.get_session(session_id)
+        next_status = status or session.status
+        if status is not None:
+            _ensure_session_status_transition(session.status, status)
+        if ended_at is not None and next_status != SessionStatus.CLOSED:
+            raise ValidationError("ended_at can only be set when closing a session.")
         if status is not None:
             session.status = status
-        if ended_at is not None:
+        if next_status == SessionStatus.CLOSED:
+            session.ended_at = ended_at or session.ended_at or utc_now()
+        elif ended_at is not None:
             session.ended_at = ended_at
         session.updated_at = utc_now()
         self._run_repository_write(lambda repository: repository.sessions.save(session))
@@ -234,6 +242,8 @@ class SessionServiceMixin:
             raise ValidationError(
                 "Only operational sessions can be promoted to scientific sessions."
             )
+        if session.status != SessionStatus.ACTIVE:
+            raise ValidationError("Only active operational sessions can be promoted.")
         question = self.get_question(primary_question_id)
         if question.project_id != session.project_id:
             raise ValidationError("Primary question must belong to the same project.")
@@ -259,6 +269,8 @@ class SessionServiceMixin:
         session = self.get_session(session_id)
         if session.session_type != SessionType.OPERATIONAL:
             raise ValidationError("Only operational sessions can be promoted to datasets.")
+        if session.status != SessionStatus.ACTIVE:
+            raise ValidationError("Only active operational sessions can be promoted.")
         outputs = self.list_acquisition_outputs(session_id=session.session_id)
         merged_manifest = _merge_acquisition_outputs(commit_manifest, outputs)
         manifest_with_session = _manifest_input_with_source(merged_manifest, session.session_id)

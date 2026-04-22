@@ -20,13 +20,15 @@ from lab_tracker.models import (
     DatasetCommitManifest,
     DatasetCommitManifestInput,
     DatasetFile,
+    DatasetStatus,
     EntityTagSuggestion,
     ExtractedEntity,
+    Note,
     Question,
     QuestionLink,
     QuestionLinkRole,
     QuestionStatus,
-    Note,
+    SessionStatus,
 )
 
 WRITE_ROLES = {Role.ADMIN, Role.EDITOR}
@@ -96,6 +98,21 @@ _ANALYSIS_STATUS_TRANSITIONS: dict[AnalysisStatus, set[AnalysisStatus]] = {
     AnalysisStatus.ARCHIVED: {AnalysisStatus.ARCHIVED},
 }
 
+_DATASET_STATUS_TRANSITIONS: dict[DatasetStatus, set[DatasetStatus]] = {
+    DatasetStatus.STAGED: {
+        DatasetStatus.STAGED,
+        DatasetStatus.COMMITTED,
+        DatasetStatus.ARCHIVED,
+    },
+    DatasetStatus.COMMITTED: {DatasetStatus.COMMITTED, DatasetStatus.ARCHIVED},
+    DatasetStatus.ARCHIVED: {DatasetStatus.ARCHIVED},
+}
+
+_SESSION_STATUS_TRANSITIONS: dict[SessionStatus, set[SessionStatus]] = {
+    SessionStatus.ACTIVE: {SessionStatus.ACTIVE, SessionStatus.CLOSED},
+    SessionStatus.CLOSED: {SessionStatus.CLOSED},
+}
+
 _CLAIM_STATUS_TRANSITIONS: dict[ClaimStatus, set[ClaimStatus]] = {
     ClaimStatus.PROPOSED: {ClaimStatus.PROPOSED, ClaimStatus.SUPPORTED, ClaimStatus.REJECTED},
     ClaimStatus.SUPPORTED: {ClaimStatus.SUPPORTED},
@@ -122,6 +139,28 @@ def _ensure_analysis_status_transition(
     if next_status not in allowed:
         raise ValidationError(
             f"Analysis status cannot transition from {current_status.value} to {next_status.value}."
+        )
+
+
+def _ensure_dataset_status_transition(
+    current_status: DatasetStatus,
+    next_status: DatasetStatus,
+) -> None:
+    allowed = _DATASET_STATUS_TRANSITIONS.get(current_status, {current_status})
+    if next_status not in allowed:
+        raise ValidationError(
+            f"Dataset status cannot transition from {current_status.value} to {next_status.value}."
+        )
+
+
+def _ensure_session_status_transition(
+    current_status: SessionStatus,
+    next_status: SessionStatus,
+) -> None:
+    allowed = _SESSION_STATUS_TRANSITIONS.get(current_status, {current_status})
+    if next_status not in allowed:
+        raise ValidationError(
+            f"Session status cannot transition from {current_status.value} to {next_status.value}."
         )
 
 

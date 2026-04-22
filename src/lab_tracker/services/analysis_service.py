@@ -44,12 +44,20 @@ class AnalysisServiceMixin:
         dataset_id_list = _unique_ids(dataset_ids)
         if not dataset_id_list:
             raise ValidationError("Analysis must reference at least one dataset.")
+        datasets = []
         for dataset_id in dataset_id_list:
             dataset = self.get_dataset(dataset_id)
             if dataset.project_id != project_id:
                 raise ValidationError("Datasets must belong to the same project.")
+            datasets.append(dataset)
         _ensure_non_empty(method_hash, "method_hash")
         _ensure_non_empty(code_version, "code_version")
+        if status == AnalysisStatus.COMMITTED:
+            for dataset in datasets:
+                if dataset.status != DatasetStatus.COMMITTED:
+                    raise ValidationError(
+                        "Analyses can only be created as committed with committed datasets."
+                    )
         analysis = Analysis(
             analysis_id=uuid4(),
             project_id=project_id,

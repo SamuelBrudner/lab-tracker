@@ -22,6 +22,7 @@ from lab_tracker.services.shared import (
     WRITE_ROLES,
     _build_commit_manifest,
     _compute_commit_hash,
+    _ensure_dataset_status_transition,
     _ensure_primary_question_active,
     _manifest_input_from_commit,
 )
@@ -117,6 +118,7 @@ class DatasetReviewServiceMixin:
         if status == DatasetReviewStatus.APPROVED:
             dataset = self.get_dataset(review.dataset_id)
             if dataset.status != DatasetStatus.COMMITTED:
+                _ensure_dataset_status_transition(dataset.status, DatasetStatus.COMMITTED)
                 primary_question = self.get_question(dataset.primary_question_id)
                 _ensure_primary_question_active(primary_question)
                 base_manifest = _manifest_input_from_commit(dataset.commit_manifest)

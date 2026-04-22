@@ -23,6 +23,7 @@ from lab_tracker.services.shared import (
     _actor_user_id,
     _build_commit_manifest,
     _compute_commit_hash,
+    _ensure_dataset_status_transition,
     _ensure_primary_question_active,
     _manifest_input_from_commit,
     _unique_ids,
@@ -164,12 +165,12 @@ class DatasetServiceMixin:
     ) -> Dataset:
         require_role(actor, WRITE_ROLES)
         dataset = self.get_dataset(dataset_id)
+        if status is not None:
+            _ensure_dataset_status_transition(dataset.status, status)
         was_committed = dataset.status == DatasetStatus.COMMITTED
         if was_committed:
             if commit_hash is not None or question_links is not None or commit_manifest is not None:
                 raise ValidationError("Committed datasets are immutable.")
-            if status == DatasetStatus.STAGED:
-                raise ValidationError("Committed datasets cannot return to staged.")
         if question_links is not None:
             links = list(question_links)
             primary_links = [link for link in links if link.role == QuestionLinkRole.PRIMARY]

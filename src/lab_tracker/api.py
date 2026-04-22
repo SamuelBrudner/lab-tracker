@@ -76,6 +76,14 @@ class SearchHealthSnapshot:
     last_failure_operation: str | None
 
 
+@dataclass
+class _SearchHealthState:
+    failure_count: int = 0
+    last_failure_at: datetime | None = None
+    last_failure_message: str | None = None
+    last_failure_operation: str | None = None
+
+
 class LabTrackerAPI(
     ProjectServiceMixin,
     QuestionServiceMixin,
@@ -122,10 +130,7 @@ class LabTrackerAPI(
         )
         self._search_backend = search_backend or InMemorySubstringSearchBackend()
         self._allow_in_memory = allow_in_memory or store is not None
-        self._search_failure_count = 0
-        self._search_last_failure_at: datetime | None = None
-        self._search_last_failure_message: str | None = None
-        self._search_last_failure_operation: str | None = None
+        self._search_health_state = _SearchHealthState()
         if repository is not None:
             if self._allow_in_memory:
                 self.hydrate_from_repository(
@@ -251,28 +256,37 @@ class LabTrackerAPI(
         return list(self._cache_map(attribute_name).values())
 
     def _record_search_failure(self, operation: str, exc: Exception) -> None:
-        self._search_failure_count += 1
-        self._search_last_failure_at = datetime.now(timezone.utc)
-        self._search_last_failure_message = f"{exc.__class__.__name__}: {exc}"
-        self._search_last_failure_operation = operation
+        state = self._search_health_state
+        state.failure_count += 1
+        state.last_failure_at = datetime.now(timezone.utc)
+        state.last_failure_message = f"{exc.__class__.__name__}: {exc}"
+        state.last_failure_operation = operation
         _logger.warning(
             "Search backend operation %s failed; search is now degraded.",
             operation,
             exc_info=True,
         )
 
+    def _clear_search_failure_state(self) -> None:
+        state = self._search_health_state
+        state.failure_count = 0
+        state.last_failure_at = None
+        state.last_failure_message = None
+        state.last_failure_operation = None
+
     def search_health(self) -> SearchHealthSnapshot:
+        state = self._search_health_state
         return SearchHealthSnapshot(
             backend_name=self._search_backend.backend_name,
-            degraded=self._search_failure_count > 0,
-            failure_count=self._search_failure_count,
+            degraded=state.failure_count > 0,
+            failure_count=state.failure_count,
             last_failure_at=(
-                self._search_last_failure_at.isoformat()
-                if self._search_last_failure_at is not None
+                state.last_failure_at.isoformat()
+                if state.last_failure_at is not None
                 else None
             ),
-            last_failure_message=self._search_last_failure_message,
-            last_failure_operation=self._search_last_failure_operation,
+            last_failure_message=state.last_failure_message,
+            last_failure_operation=state.last_failure_operation,
         )
 
     def _is_request_managed(self) -> bool:
@@ -368,6 +382,7 @@ class LabTrackerAPI(
     def _apply_search_op_safely(self, operation: str, *args: object) -> None:
         try:
             self._apply_search_op(operation, *args)
+            self._clear_search_failure_state()
         except Exception as exc:
             self._record_search_failure(operation, exc)
 
@@ -450,18 +465,28 @@ class LabTrackerAPI(
                     paged,
                     lambda question: question.question_id,
                 )
-            ids = self._search_backend.search_question_ids(
-                SearchQuery(query=query, project_id=project_id, limit=limit, offset=offset)
-            )
+            try:
+                ids = self._search_backend.search_question_ids(
+                    SearchQuery(query=query, project_id=project_id, limit=limit, offset=offset)
+                )
+                self._clear_search_failure_state()
+            except Exception as exc:
+                self._record_search_failure("search_questions", exc)
+                raise
             questions = repository.fetch_questions(ids)
             return self._cache_entities(
                 "questions",
                 questions,
                 lambda question: question.question_id,
             )
-        ids = self._search_backend.search_question_ids(
-            SearchQuery(query=query, project_id=project_id, limit=limit, offset=offset)
-        )
+        try:
+            ids = self._search_backend.search_question_ids(
+                SearchQuery(query=query, project_id=project_id, limit=limit, offset=offset)
+            )
+            self._clear_search_failure_state()
+        except Exception as exc:
+            self._record_search_failure("search_questions", exc)
+            raise
         results: list[Question] = []
         for question_id in ids:
             question = self._store.questions.get(question_id)
@@ -492,18 +517,28 @@ class LabTrackerAPI(
                     paged,
                     lambda note: note.note_id,
                 )
-            ids = self._search_backend.search_note_ids(
-                SearchQuery(query=query, project_id=project_id, limit=limit, offset=offset)
-            )
+            try:
+                ids = self._search_backend.search_note_ids(
+                    SearchQuery(query=query, project_id=project_id, limit=limit, offset=offset)
+                )
+                self._clear_search_failure_state()
+            except Exception as exc:
+                self._record_search_failure("search_notes", exc)
+                raise
             notes = repository.fetch_notes(ids)
             return self._cache_entities(
                 "notes",
                 notes,
                 lambda note: note.note_id,
             )
-        ids = self._search_backend.search_note_ids(
-            SearchQuery(query=query, project_id=project_id, limit=limit, offset=offset)
-        )
+        try:
+            ids = self._search_backend.search_note_ids(
+                SearchQuery(query=query, project_id=project_id, limit=limit, offset=offset)
+            )
+            self._clear_search_failure_state()
+        except Exception as exc:
+            self._record_search_failure("search_notes", exc)
+            raise
         results: list[Note] = []
         for note_id in ids:
             note = self._store.notes.get(note_id)
