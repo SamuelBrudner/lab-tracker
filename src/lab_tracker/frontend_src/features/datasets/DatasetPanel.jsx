@@ -20,8 +20,6 @@ function DatasetPanel({
   onLoadDatasetFiles,
   onUploadDatasetFiles,
   onDeleteDatasetFile,
-  reviewPolicy,
-  datasetReviewsById,
 }) {
   useEffect(() => {
     if (!selectedProjectId) {
@@ -39,17 +37,13 @@ function DatasetPanel({
       });
   }, [datasets, datasetFilesById, onLoadDatasetFiles, selectedProjectId]);
 
-  const reviewRequired = Boolean(reviewPolicy && reviewPolicy !== "none");
-
   return (
     <article className="card span-6">
       <div className="item-head">
-        <h2>Dataset Review</h2>
-        {reviewPolicy ? <span className="pill">review: {reviewPolicy}</span> : null}
+        <h2>Datasets</h2>
       </div>
       <p className="subtle">
-        Stage datasets against active questions, then{" "}
-        {reviewRequired ? "submit for PI approval." : "commit when ready."}
+        Stage datasets against active questions, attach files, and commit when ready.
       </p>
 
       <form className="form" onSubmit={onCreateDataset}>
@@ -82,32 +76,11 @@ function DatasetPanel({
       </form>
 
       <div className="stack">
-        {datasets.map((dataset) => {
-          const reviewState = datasetReviewsById ? datasetReviewsById[dataset.dataset_id] : null;
-          const review = reviewState?.review || null;
-          const reviewStatus = review?.status ? String(review.status) : "";
-          const reviewStatusLabel = reviewStatus.replace(/_/g, " ");
-          const reviewStatusClass = reviewStatus ? `pill review-status review-${reviewStatus}` : "";
-          const reviewPending = reviewStatus === "pending";
-          const reviewResolved = Boolean(reviewStatus && !reviewPending);
-          const reviewLocked = reviewRequired && reviewPending;
-
-          const commitLabel = !reviewRequired
-            ? "Commit dataset"
-            : reviewPending
-              ? "Awaiting PI review"
-              : reviewResolved
-                ? "Resubmit for review"
-                : "Submit for PI review";
-
-          return (
-            <article className="item" key={dataset.dataset_id}>
+        {datasets.map((dataset) => (
+          <article className="item" key={dataset.dataset_id}>
               <div className="item-head">
                 <strong>{dataset.status}</strong>
                 <div className="inline">
-                  {reviewRequired && reviewStatus ? (
-                    <span className={reviewStatusClass}>{reviewStatusLabel}</span>
-                  ) : null}
                   <span className="subtle">{formatDate(dataset.created_at)}</span>
                 </div>
               </div>
@@ -117,39 +90,6 @@ function DatasetPanel({
                 Links:{" "}
                 {dataset.question_links.map((link) => `${link.role}:${link.question_id}`).join(" | ")}
               </p>
-
-              {reviewRequired ? (
-                <div className="stack">
-                  <div className="subtle">Review</div>
-                  {reviewState?.loading ? <p className="subtle">Loading review status...</p> : null}
-                  {reviewState?.error ? (
-                    <p className="subtle">Review unavailable: {reviewState.error}</p>
-                  ) : null}
-                  {review ? (
-                    <>
-                      <div className="inline">
-                        {reviewStatus ? (
-                          <span className={reviewStatusClass}>{reviewStatusLabel}</span>
-                        ) : null}
-                        {review.reviewer_user_id ? (
-                          <span className="pill mono" title="Reviewer user_id">
-                            {review.reviewer_user_id}
-                          </span>
-                        ) : (
-                          <span className="pill">unassigned</span>
-                        )}
-                        <span className="subtle">
-                          {formatDate(review.resolved_at || review.requested_at)}
-                        </span>
-                      </div>
-                      {review.comments ? <p className="source-snippet">{review.comments}</p> : null}
-                    </>
-                  ) : null}
-                  {reviewLocked ? (
-                    <p className="warn">Review requested. Attachments are locked until resolved.</p>
-                  ) : null}
-                </div>
-              ) : null}
 
               <div className="stack">
                 <div className="item">
@@ -177,7 +117,7 @@ function DatasetPanel({
                       <input
                         type="file"
                         multiple
-                        disabled={!canWrite || busy || reviewLocked}
+                        disabled={!canWrite || busy}
                         onChange={(event) => {
                           const files = Array.from(event.target.files || []);
                           event.target.value = "";
@@ -237,7 +177,7 @@ function DatasetPanel({
                           <button
                             type="button"
                             className="btn-danger"
-                            disabled={!canWrite || busy || reviewLocked}
+                            disabled={!canWrite || busy}
                             onClick={() => onDeleteDatasetFile(dataset.dataset_id, file.file_id)}
                           >
                             Remove file
@@ -254,7 +194,7 @@ function DatasetPanel({
                   type="button"
                   className="btn-primary"
                   disabled={(() => {
-                    if (!canWrite || busy || reviewLocked) {
+                    if (!canWrite || busy) {
                       return true;
                     }
                     const state = datasetFilesById[dataset.dataset_id];
@@ -268,12 +208,11 @@ function DatasetPanel({
                   })()}
                   onClick={() => onCommitDataset(dataset.dataset_id)}
                 >
-                  {commitLabel}
+                  Commit dataset
                 </button>
               ) : null}
-            </article>
-          );
-        })}
+          </article>
+        ))}
       </div>
     </article>
   );

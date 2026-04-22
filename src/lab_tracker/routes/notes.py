@@ -207,6 +207,7 @@ def build_notes_router(api: LabTrackerAPI) -> APIRouter:
         "/notes/{note_id}/tag-suggestions",
         response_model=Envelope[list[EntityTagSuggestion]],
         status_code=http_status.HTTP_201_CREATED,
+        include_in_schema=False,
     )
     def suggest_tag_suggestions(
         note_id: UUID,
@@ -224,6 +225,7 @@ def build_notes_router(api: LabTrackerAPI) -> APIRouter:
     @router.get(
         "/notes/{note_id}/tag-suggestions",
         response_model=ListEnvelope[EntityTagSuggestion],
+        include_in_schema=False,
     )
     def list_tag_suggestions(
         request: Request,
@@ -243,6 +245,7 @@ def build_notes_router(api: LabTrackerAPI) -> APIRouter:
     @router.patch(
         "/notes/{note_id}/tag-suggestions/{suggestion_id}",
         response_model=Envelope[EntityTagSuggestion],
+        include_in_schema=False,
     )
     def review_tag_suggestion(
         note_id: UUID,
@@ -263,6 +266,7 @@ def build_notes_router(api: LabTrackerAPI) -> APIRouter:
     @router.post(
         "/notes/{note_id}/extract-questions",
         response_model=Envelope[list[QuestionExtractionCandidate]],
+        include_in_schema=False,
     )
     def extract_questions(
         note_id: UUID,

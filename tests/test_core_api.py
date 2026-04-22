@@ -8,7 +8,6 @@ from lab_tracker.errors import AuthError, ValidationError
 from lab_tracker.models import (
     DatasetCommitManifestInput,
     DatasetFile,
-    DatasetReviewStatus,
     DatasetStatus,
     ProjectReviewPolicy,
     QuestionLinkRole,
@@ -19,6 +18,7 @@ from lab_tracker.models import (
     SessionType,
     TagSuggestionStatus,
 )
+from lab_tracker.services.extraction_backends import RegexQuestionExtractionBackend
 
 
 def _actor(role: Role = Role.ADMIN) -> AuthContext:
@@ -233,7 +233,7 @@ def test_dataset_commit_requires_file_attachment():
         api.update_dataset(dataset.dataset_id, status=DatasetStatus.COMMITTED, actor=actor)
 
 
-def test_dataset_commit_can_create_review_request_when_policy_requires_it():
+def test_dataset_commit_ignores_legacy_review_policy_and_commits_directly():
     api = LabTrackerAPI.in_memory()
     actor = _actor(Role.EDITOR)
     project = api.create_project(
@@ -257,24 +257,8 @@ def test_dataset_commit_can_create_review_request_when_policy_requires_it():
     )
 
     updated = api.update_dataset(dataset.dataset_id, status=DatasetStatus.COMMITTED, actor=actor)
-    assert updated.status == DatasetStatus.STAGED
-
-    reviews = api.list_dataset_reviews(
-        dataset_id=dataset.dataset_id,
-        status=DatasetReviewStatus.PENDING,
-    )
-    assert len(reviews) == 1
-    review = reviews[0]
-    assert review.dataset_id == dataset.dataset_id
-    assert review.reviewer_user_id is None
-
-    api.resolve_dataset_review(
-        review.review_id,
-        status=DatasetReviewStatus.APPROVED,
-        actor=actor,
-    )
-    committed = api.get_dataset(dataset.dataset_id)
-    assert committed.status == DatasetStatus.COMMITTED
+    assert updated.status == DatasetStatus.COMMITTED
+    assert api.list_dataset_reviews(dataset_id=dataset.dataset_id) == []
 
 
 def test_committed_dataset_is_immutable():
@@ -528,7 +512,7 @@ def test_operational_session_disallows_primary_question():
 
 
 def test_extract_questions_from_note_stages_questions():
-    api = LabTrackerAPI.in_memory()
+    api = LabTrackerAPI.in_memory(question_extraction_backend=RegexQuestionExtractionBackend())
     actor = _actor()
     project = api.create_project("Neuro Project", actor=actor)
     note = api.create_note(

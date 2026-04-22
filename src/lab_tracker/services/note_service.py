@@ -40,7 +40,6 @@ from lab_tracker.services.shared import (
 from lab_tracker.services.ocr_backends import _sniff_content_type
 
 _logger = logging.getLogger(__name__)
-_OCR_UNAVAILABLE_WARNED = False
 
 
 def _should_attempt_ocr(content: bytes, content_type: str) -> bool:
@@ -256,32 +255,24 @@ class NoteServiceMixin:
                 resolved_content = self._raw_storage.read(asset.storage_id)
 
             resolved_transcribed_text = transcribed_text.strip() if transcribed_text else None
+            ocr_backend = getattr(self, "_ocr_backend", None)
             if (
-                resolved_transcribed_text is None
+                ocr_backend is not None
+                and resolved_transcribed_text is None
                 and resolved_content is not None
                 and _should_attempt_ocr(resolved_content, asset.content_type)
             ):
-                ocr_backend = getattr(self, "_ocr_backend", None)
-                if ocr_backend is None:
-                    global _OCR_UNAVAILABLE_WARNED
-                    if not _OCR_UNAVAILABLE_WARNED:
-                        _logger.warning(
-                            "OCR backend is unavailable; uploaded notes will not be transcribed. "
-                            "Install with `pip install -e '.[ocr]'` to enable OCR."
-                        )
-                        _OCR_UNAVAILABLE_WARNED = True
-                else:
-                    try:
-                        result = ocr_backend.extract_text(resolved_content, asset.content_type)
-                        resolved_transcribed_text = result.text.strip() if result.text else None
-                    except Exception as exc:
-                        _logger.warning(
-                            "OCR failed for uploaded note %s (content_type=%s): %s",
-                            asset.filename,
-                            asset.content_type,
-                            exc,
-                            exc_info=True,
-                        )
+                try:
+                    result = ocr_backend.extract_text(resolved_content, asset.content_type)
+                    resolved_transcribed_text = result.text.strip() if result.text else None
+                except Exception as exc:
+                    _logger.warning(
+                        "OCR failed for uploaded note %s (content_type=%s): %s",
+                        asset.filename,
+                        asset.content_type,
+                        exc,
+                        exc_info=True,
+                    )
             note = self.create_note(
                 project_id=project_id,
                 raw_content=None,
@@ -505,6 +496,8 @@ class NoteServiceMixin:
         note = self.get_note(note_id)
         raw_asset_bytes: bytes | None = None
         backend = self._question_extraction_backend
+        if backend is None:
+            raise ValidationError("Question extraction is not enabled.")
         if (
             backend.requires_raw_asset_bytes(note)
             and note.raw_asset is not None
@@ -558,6 +551,8 @@ class NoteServiceMixin:
         note = self.get_note(note_id)
         raw_asset_bytes: bytes | None = None
         backend = self._question_extraction_backend
+        if backend is None:
+            raise ValidationError("Question extraction is not enabled.")
         if (
             backend.requires_raw_asset_bytes(note)
             and note.raw_asset is not None

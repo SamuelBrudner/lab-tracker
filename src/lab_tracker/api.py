@@ -35,11 +35,8 @@ from lab_tracker.services import (
     SessionServiceMixin,
     VisualizationServiceMixin,
 )
-from lab_tracker.services.extraction_backends import (
-    QuestionExtractionBackend,
-    default_question_extraction_backend,
-)
-from lab_tracker.services.ocr_backends import OCRBackend, default_ocr_backend
+from lab_tracker.services.extraction_backends import QuestionExtractionBackend
+from lab_tracker.services.ocr_backends import OCRBackend
 from lab_tracker.services.search_backends import (
     InMemorySubstringSearchBackend,
     SearchBackend,
@@ -48,7 +45,6 @@ from lab_tracker.services.search_backends import (
     question_matches_substring,
 )
 
-_DEFAULT_OCR_BACKEND: object = object()
 _logger = logging.getLogger(__name__)
 
 
@@ -111,7 +107,7 @@ class LabTrackerAPI(
         store: InMemoryStore | None = None,
         *,
         raw_storage: LocalNoteStorage | None = None,
-        ocr_backend: OCRBackend | None | object = _DEFAULT_OCR_BACKEND,
+        ocr_backend: OCRBackend | None = None,
         question_extraction_backend: QuestionExtractionBackend | None = None,
         search_backend: SearchBackend | None = None,
         repository: LabTrackerRepository | None = None,
@@ -121,13 +117,8 @@ class LabTrackerAPI(
         self._raw_storage = raw_storage
         self._repository = repository
         self._request_context: LabTrackerRequestContext | None = None
-        if ocr_backend is _DEFAULT_OCR_BACKEND:
-            self._ocr_backend = default_ocr_backend()
-        else:
-            self._ocr_backend = ocr_backend
-        self._question_extraction_backend = (
-            question_extraction_backend or default_question_extraction_backend()
-        )
+        self._ocr_backend = ocr_backend
+        self._question_extraction_backend = question_extraction_backend
         self._search_backend = search_backend or InMemorySubstringSearchBackend()
         self._allow_in_memory = allow_in_memory or store is not None
         self._search_health_state = _SearchHealthState()
@@ -148,7 +139,7 @@ class LabTrackerAPI(
         *,
         raw_storage: LocalNoteStorage | None = None,
         store: InMemoryStore | None = None,
-        ocr_backend: OCRBackend | None | object = _DEFAULT_OCR_BACKEND,
+        ocr_backend: OCRBackend | None = None,
         question_extraction_backend: QuestionExtractionBackend | None = None,
         search_backend: SearchBackend | None = None,
     ) -> "LabTrackerAPI":

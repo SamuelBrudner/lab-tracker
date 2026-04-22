@@ -39,8 +39,7 @@ from lab_tracker.note_storage import LocalNoteStorage
 from lab_tracker.schemas import ErrorEnvelope, ErrorInfo
 from lab_tracker.routes import register_routes
 from lab_tracker.sqlalchemy_repository import SQLAlchemyLabTrackerRepository
-from lab_tracker.services.ocr_backends import default_ocr_backend
-from lab_tracker.services.search_backend_factory import build_search_backend
+from lab_tracker.services.search_backends import InMemorySubstringSearchBackend
 
 
 _START_TIME = datetime.now(timezone.utc)
@@ -349,11 +348,8 @@ def create_app() -> FastAPI:
     )
     file_storage_backend = LocalFileStorageBackend(settings.file_storage_path)
     raw_note_storage = LocalNoteStorage(settings.note_storage_path)
-    search_backend = build_search_backend(settings)
-    ocr_backend = default_ocr_backend(
-        tesseract_cmd=settings.ocr_tesseract_cmd,
-        languages=settings.ocr_tesseract_languages,
-    )
+    search_backend = InMemorySubstringSearchBackend()
+    ocr_backend = None
     lab_tracker_api = LabTrackerAPI(
         raw_storage=raw_note_storage,
         search_backend=search_backend,

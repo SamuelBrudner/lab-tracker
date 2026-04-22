@@ -1,21 +1,15 @@
 import * as React from "react";
 
 import { Dashboard } from "./features/dashboard-projects.jsx";
-import { AnalysisPanel, SearchPanel, VisualizationDetailCard } from "./features/analysis-search.jsx";
+import { AnalysisPanel, VisualizationDetailCard } from "./features/analysis-search.jsx";
 import { DatasetDetailCard, DatasetPanel } from "./features/datasets.jsx";
 import { NoteDetailCard, NotePanel } from "./features/notes.jsx";
-import {
-  QuestionDetailCard,
-  QuestionExtractionInboxPanel,
-  QuestionPanel,
-} from "./features/questions.jsx";
-import { ReviewPanel } from "./features/reviews.jsx";
+import { QuestionDetailCard, QuestionPanel } from "./features/questions.jsx";
 import { SessionDetailCard, SessionPanel } from "./features/sessions.jsx";
 import { useAnalysisWorkflow } from "./hooks/useAnalysisWorkflow.js";
 import { useAuthSession } from "./hooks/useAuthSession.js";
 import { useDatasetWorkflow } from "./hooks/useDatasetWorkflow.js";
 import { useProjectWorkspace } from "./hooks/useProjectWorkspace.js";
-import { useQuestionExtractionWorkflow } from "./hooks/useQuestionExtractionWorkflow.js";
 import {
   AppHeader,
   AuthForm,
@@ -48,9 +42,7 @@ function App() {
     token: auth.token,
     canWrite: auth.canWrite,
     selectedProjectId: workspace.selectedProjectId,
-    selectedProject: workspace.selectedProject,
     questions: workspace.questions,
-    datasets: workspace.datasets,
     refreshProjectData: workspace.refreshProjectData,
     setBusy,
     setFlash,
@@ -59,14 +51,6 @@ function App() {
     token: auth.token,
     canWrite: auth.canWrite,
     selectedProjectId: workspace.selectedProjectId,
-    setBusy,
-    setFlash,
-  });
-  const extraction = useQuestionExtractionWorkflow({
-    token: auth.token,
-    canWrite: auth.canWrite,
-    selectedProjectId: workspace.selectedProjectId,
-    refreshProjectData: workspace.refreshProjectData,
     setBusy,
     setFlash,
   });
@@ -95,7 +79,6 @@ function App() {
     ...analysis,
     ...auth,
     ...dataset,
-    ...extraction,
     ...workspace,
     busy,
     error,
@@ -130,13 +113,6 @@ function App() {
         </section>
       ) : (
         <section className="grid">
-          <SearchPanel
-            token={state.token}
-            projects={state.projects}
-            selectedProjectId={state.selectedProjectId}
-            navigate={state.navigate}
-          />
-
           <Dashboard
             projects={state.projects}
             questions={state.questions}
@@ -288,20 +264,6 @@ function App() {
               onLoadDatasetFiles={state.loadDatasetFiles}
               onUploadDatasetFiles={state.handleUploadDatasetFiles}
               onDeleteDatasetFile={state.handleDeleteDatasetFile}
-              reviewPolicy={state.selectedProject?.review_policy || ""}
-              datasetReviewsById={state.datasetReviewsById}
-            />
-          ) : null}
-
-          {state.route.kind === "home" ? (
-            <ReviewPanel
-              token={state.token}
-              user={state.user}
-              projects={state.projects}
-              selectedProjectId={state.selectedProjectId}
-              navigate={state.navigate}
-              onFlash={state.setFlash}
-              onRefreshActiveProject={state.refreshActiveProject}
             />
           ) : null}
 
@@ -336,32 +298,6 @@ function App() {
               onCommitAnalysis={state.handleCommitAnalysis}
               onArchiveAnalysis={state.handleArchiveAnalysis}
               navigate={state.navigate}
-            />
-          ) : null}
-
-          {state.route.kind === "home" ? (
-            <QuestionExtractionInboxPanel
-              canWrite={state.canWrite}
-              busy={state.busy}
-              token={state.token}
-              selectedProjectId={state.selectedProjectId}
-              notes={state.notes}
-              questions={state.questions}
-              navigate={state.navigate}
-              selectedNoteId={state.extractionNoteId}
-              onSelectedNoteIdChange={state.handleExtractionNoteIdChange}
-              note={state.extractionNote}
-              noteRaw={state.extractionNoteRaw}
-              noteRawError={state.extractionNoteRawError}
-              candidates={state.extractionCandidates}
-              onExtractCandidates={state.handleExtractQuestionCandidates}
-              onUpdateCandidate={state.handleUpdateExtractionCandidate}
-              onToggleCandidateSelected={state.handleToggleExtractionCandidateSelected}
-              onSelectAllPending={state.handleSelectAllPendingCandidates}
-              onClearSelection={state.handleClearCandidateSelection}
-              onRejectSelected={state.handleRejectExtractionCandidates}
-              onStageSelected={state.handleStageExtractionCandidates}
-              onFlash={state.setFlash}
             />
           ) : null}
 

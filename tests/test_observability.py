@@ -197,10 +197,10 @@ def test_readiness_recovers_after_transient_search_failure(monkeypatch, tmp_path
     Base.metadata.create_all(bind=engine)
     engine.dispose()
 
-    backend = _FlakySearchBackend()
-    monkeypatch.setattr("lab_tracker.app.build_search_backend", lambda settings: backend)
-
     app = create_app()
+    backend = _FlakySearchBackend()
+    app.state.search_backend = backend
+    app.state.lab_tracker_api._search_backend = backend
     app.state.auth_service.register_user(
         username="search-recovery-admin",
         password="secret",

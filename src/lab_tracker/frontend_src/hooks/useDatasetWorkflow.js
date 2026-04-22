@@ -8,9 +8,7 @@ function useDatasetWorkflow({
   token,
   canWrite,
   selectedProjectId,
-  selectedProject,
   questions,
-  datasets,
   refreshProjectData,
   setBusy,
   setFlash,
@@ -18,7 +16,6 @@ function useDatasetWorkflow({
   const [datasetPrimaryQuestionId, setDatasetPrimaryQuestionId] = useState("");
   const [datasetSecondaryRaw, setDatasetSecondaryRaw] = useState("");
   const [datasetFilesById, setDatasetFilesById] = useState({});
-  const [datasetReviewsById, setDatasetReviewsById] = useState({});
 
   const loadDatasetFiles = useCallback(
     async (datasetId) => {
@@ -67,7 +64,6 @@ function useDatasetWorkflow({
 
   useEffect(() => {
     setDatasetFilesById({});
-    setDatasetReviewsById({});
   }, [selectedProjectId, token]);
 
   useEffect(() => {
@@ -80,75 +76,6 @@ function useDatasetWorkflow({
       setDatasetPrimaryQuestionId(questions[0].question_id);
     }
   }, [datasetPrimaryQuestionId, questions]);
-
-  useEffect(() => {
-    let canceled = false;
-    const reviewRequired = Boolean(
-      selectedProject && selectedProject.review_policy && selectedProject.review_policy !== "none"
-    );
-
-    if (!token || !selectedProjectId || !reviewRequired) {
-      setDatasetReviewsById({});
-      return () => {
-        canceled = true;
-      };
-    }
-
-    const stagedDatasets = (datasets || []).filter((dataset) => dataset.status === "staged");
-    const datasetIds = stagedDatasets.map((dataset) => dataset.dataset_id);
-
-    if (datasetIds.length === 0) {
-      setDatasetReviewsById({});
-      return () => {
-        canceled = true;
-      };
-    }
-
-    setDatasetReviewsById((current) => {
-      const next = {};
-      datasetIds.forEach((datasetId) => {
-        next[datasetId] = {
-          error: "",
-          loading: true,
-          review: current[datasetId]?.review || null,
-        };
-      });
-      return next;
-    });
-
-    Promise.all(
-      datasetIds.map(async (datasetId) => {
-        try {
-          const review = await apiRequest(`/datasets/${datasetId}/review`, { token });
-          return { datasetId, error: "", review };
-        } catch (err) {
-          if (err && err.status === 404) {
-            return { datasetId, error: "", review: null };
-          }
-          return {
-            datasetId,
-            error: err.message || "Failed to load review.",
-            review: null,
-          };
-        }
-      })
-    ).then((results) => {
-      if (canceled) {
-        return;
-      }
-      setDatasetReviewsById(() => {
-        const next = {};
-        results.forEach(({ datasetId, review, error: reviewError }) => {
-          next[datasetId] = { error: reviewError, loading: false, review };
-        });
-        return next;
-      });
-    });
-
-    return () => {
-      canceled = true;
-    };
-  }, [datasets, selectedProject, selectedProjectId, token]);
 
   async function handleUploadDatasetFiles(datasetId, files) {
     if (!canWrite) {
@@ -268,9 +195,7 @@ function useDatasetWorkflow({
       });
       await refreshProjectData(selectedProjectId);
       setFlash(
-        updated && updated.status === "committed"
-          ? "Dataset committed."
-          : "Commit requested. Awaiting PI review."
+        updated && updated.status === "committed" ? "Dataset committed." : "Dataset updated."
       );
     } catch (err) {
       setFlash("", err.message || "Failed to commit dataset.");
@@ -282,7 +207,6 @@ function useDatasetWorkflow({
   return {
     datasetFilesById,
     datasetPrimaryQuestionId,
-    datasetReviewsById,
     datasetSecondaryRaw,
     handleCommitDataset,
     handleCreateDataset,

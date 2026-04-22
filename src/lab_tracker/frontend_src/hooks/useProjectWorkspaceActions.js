@@ -155,7 +155,7 @@ function useProjectWorkspaceActions({
       return;
     }
     if (!uploadFile) {
-      setFlash("", "Select an image or note file before upload.");
+      setFlash("", "Select a file before upload.");
       return;
     }
 
@@ -190,7 +190,7 @@ function useProjectWorkspaceActions({
       setUploadTargetQuestionId("");
       event.target.reset();
       await refreshProjectData(selectedProjectId);
-      setFlash("Photo note uploaded.");
+      setFlash("Note file uploaded.");
     } catch (err) {
       setFlash("", err.message || "Failed to upload note.");
     } finally {

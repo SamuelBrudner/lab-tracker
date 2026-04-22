@@ -30,7 +30,7 @@ from .shared import (
 
 
 def build_dataset_reviews_router(api: LabTrackerAPI) -> APIRouter:
-    router = APIRouter()
+    router = APIRouter(include_in_schema=False)
 
     @router.post(
         "/datasets/{dataset_id}/review",

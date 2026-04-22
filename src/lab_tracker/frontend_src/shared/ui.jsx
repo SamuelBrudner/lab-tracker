@@ -189,9 +189,9 @@ function WorkflowCoverageCard() {
       <h2>Workflow Coverage</h2>
       <div className="stack">
         <div className="item">1. Project dashboard and project creation</div>
-        <div className="item">2. Question capture + extracted candidate staging inbox</div>
-        <div className="item">3. Text notes and photo uploads</div>
-        <div className="item">4. Dataset staging and dataset commit review</div>
+        <div className="item">2. Manual question capture and explicit staging</div>
+        <div className="item">3. Text notes and raw file uploads</div>
+        <div className="item">4. Dataset staging, file attachment, and direct commit</div>
       </div>
     </article>
   );

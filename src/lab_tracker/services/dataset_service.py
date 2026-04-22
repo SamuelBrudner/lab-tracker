@@ -13,7 +13,6 @@ from lab_tracker.models import (
     DatasetCommitManifestInput,
     DatasetFile,
     DatasetStatus,
-    ProjectReviewPolicy,
     QuestionLink,
     QuestionLinkRole,
     utc_now,
@@ -57,8 +56,9 @@ def _merge_unique_ids(base: list[UUID], additions: Iterable[UUID]) -> list[UUID]
 
 class DatasetServiceMixin:
     def _dataset_review_required(self, project_id: UUID) -> bool:
-        policy = self.get_project(project_id).review_policy
-        return policy == ProjectReviewPolicy.ALL
+        # Review metadata remains readable, but direct commit is now the retained default path.
+        self.get_project(project_id)
+        return False
 
     def create_dataset(
         self,
