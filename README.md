@@ -6,7 +6,7 @@ Lab Tracker keeps the *reasoning* behind experiments connected to the data they 
 
 - **Questions are first-class.** Projects contain Questions — descriptive, hypothesis-driven, method-development, or other — that are created, staged, activated, and maintained explicitly by users.
 - **Sessions and datasets.** Acquisition sessions capture outputs at the rig, are closed when done, and eligible sessions can be promoted into Datasets. Dataset staging and direct commit capture a provenance manifest.
-- **Notes attached to entities.** Manual note capture — text or raw file upload/download — attached to the question, session, dataset, or analysis they describe. Notes stay as the raw human record.
+- **Notes attached to entities.** Manual note capture — text or multipart raw file upload/download — attached to the question, session, dataset, or analysis they describe. Notes stay as the raw human record.
 - **Analysis, claims, visualizations.** Explicit records linking analysis runs back to the datasets and questions they address, with claims and visualizations as first-class artifacts.
 - **Search.** Substring search over questions and notes so prior context is findable later.
 
@@ -74,7 +74,7 @@ The committed frontend bundle ships without a source map by default.
 Supported workflows in the frontend include:
 - project dashboard
 - question staging and activate workflow
-- manual note creation and upload/download handling
+- manual note creation and multipart upload/download handling
 - sessions and acquisition outputs
 - dataset staging, file attachment, and direct commit with provenance capture
 - analysis, claim, and visualization tracking

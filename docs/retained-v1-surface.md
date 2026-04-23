@@ -14,7 +14,7 @@ research record:
 - Questions created, staged, activated, and maintained explicitly by users.
 - Simple query/search flows over questions and notes using the built-in
   substring behavior.
-- Manual note capture, including text notes, raw file upload, raw file
+- Manual note capture, including text notes, multipart raw file upload, raw file
   download, and attaching notes to retained entities.
 - Sessions and acquisition outputs, including closing sessions and promoting
   eligible sessions into datasets.

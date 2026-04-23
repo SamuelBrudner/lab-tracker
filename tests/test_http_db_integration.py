@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import base64
 import json
 from pathlib import Path
 from uuid import uuid4
@@ -382,18 +381,6 @@ def test_note_routes_support_target_filters_and_multipart_upload(
     assert raw_download.status_code == 200
     assert raw_download.content == b"raw-capture"
 
-    legacy_upload = client.post(
-        "/notes/upload",
-        json={
-            "content_base64": base64.b64encode(b"legacy-capture").decode("ascii"),
-            "content_type": "text/plain",
-            "filename": "legacy.txt",
-            "project_id": project_id,
-        },
-        headers=headers,
-    )
-    assert legacy_upload.status_code == 201
-
     filtered = client.get(
         "/notes",
         params={
@@ -407,6 +394,14 @@ def test_note_routes_support_target_filters_and_multipart_upload(
     filtered_payload = filtered.json()
     assert filtered_payload["meta"]["total"] == 1
     assert _ids(filtered_payload["data"], "note_id") == {multipart_payload["note_id"]}
+
+
+def test_removed_note_upload_route_returns_404(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+):
+    response = client.post("/notes/upload", json={}, headers=admin_auth_headers)
+    assert response.status_code == 404
 
 
 def test_note_multipart_upload_cleans_up_raw_asset_on_failure(
@@ -484,41 +479,6 @@ def test_note_multipart_upload_rejects_invalid_metadata_without_leaking_raw_asse
     assert after == before
 
 
-def test_note_upload_cleans_up_raw_asset_when_request_commit_fails(app, monkeypatch):
-    with TestClient(app, raise_server_exceptions=False) as client:
-        headers = _admin_headers(client)
-        project_id = client.post(
-            "/projects",
-            json={"name": "Note upload rollback"},
-            headers=headers,
-        ).json()["data"]["project_id"]
-        storage_root = Path(client.app.state.raw_note_storage._base_path)
-
-        _fail_next_commit(monkeypatch)
-        response = client.post(
-            "/notes/upload",
-            json={
-                "project_id": project_id,
-                "filename": "rollback.txt",
-                "content_type": "text/plain",
-                "content_base64": base64.b64encode(b"rollback-note").decode("ascii"),
-            },
-            headers=headers,
-        )
-
-        assert response.status_code == 500
-        remaining = (
-            sorted(path.name for path in storage_root.iterdir())
-            if storage_root.exists()
-            else []
-        )
-        assert remaining == []
-
-        listed = client.get("/notes", params={"project_id": project_id}, headers=headers)
-        assert listed.status_code == 200
-        assert listed.json()["meta"]["total"] == 0
-
-
 def test_note_multipart_upload_cleans_up_raw_asset_when_request_commit_fails(app, monkeypatch):
     with TestClient(app, raise_server_exceptions=False) as client:
         headers = _admin_headers(client)
@@ -559,13 +519,9 @@ def test_note_delete_preserves_raw_asset_when_request_commit_fails(app, monkeypa
             headers=headers,
         ).json()["data"]["project_id"]
         upload = client.post(
-            "/notes/upload",
-            json={
-                "project_id": project_id,
-                "filename": "rollback.txt",
-                "content_type": "text/plain",
-                "content_base64": base64.b64encode(b"rollback-note").decode("ascii"),
-            },
+            "/notes/upload-file",
+            data={"project_id": project_id},
+            files={"file": ("rollback.txt", b"rollback-note", "text/plain")},
             headers=headers,
         )
         assert upload.status_code == 201
@@ -711,13 +667,9 @@ def test_project_delete_cleans_up_cascaded_attachments(
     )
     assert file_upload.status_code == 201
     note_upload = client.post(
-        "/notes/upload",
-        json={
-            "project_id": project_id,
-            "filename": "capture.txt",
-            "content_type": "text/plain",
-            "content_base64": base64.b64encode(b"note-bytes").decode("ascii"),
-        },
+        "/notes/upload-file",
+        data={"project_id": project_id},
+        files={"file": ("capture.txt", b"note-bytes", "text/plain")},
         headers=headers,
     )
     assert note_upload.status_code == 201
@@ -750,13 +702,9 @@ def test_note_raw_download_sanitizes_attachment_filename(
     ).json()["data"]["project_id"]
 
     upload_response = client.post(
-        "/notes/upload",
-        json={
-            "project_id": project_id,
-            "filename": '../../bad"\r\nname.txt',
-            "content_type": "text/plain",
-            "content_base64": base64.b64encode(b"raw-capture").decode("ascii"),
-        },
+        "/notes/upload-file",
+        data={"project_id": project_id},
+        files={"file": ('../../bad"\r\nname.txt', b"raw-capture", "text/plain")},
         headers=headers,
     )
     assert upload_response.status_code == 201
