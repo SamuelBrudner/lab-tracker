@@ -7,7 +7,7 @@ intentionally omitted unless they participate in the retained v1 runtime.
 ## Request Context Lifecycle
 
 Each HTTP request gets an explicit `LabTrackerRequestContext` in
-[`src/lab_tracker/request_context.py`](/Users/samuelbrudner/Documents/GitHub/lab-tracker/src/lab_tracker/request_context.py).
+[`src/lab_tracker/request_context.py`](../src/lab_tracker/request_context.py).
 
 The lifecycle is:
 
@@ -24,7 +24,7 @@ Service logic should not depend on hidden globals or `ContextVar` state for requ
 ## Repository Layout
 
 The SQLAlchemy repository is now split into focused modules under
-[`src/lab_tracker/sqlalchemy_repository_parts`](/Users/samuelbrudner/Documents/GitHub/lab-tracker/src/lab_tracker/sqlalchemy_repository_parts).
+[`src/lab_tracker/sqlalchemy_repository_parts`](../src/lab_tracker/sqlalchemy_repository_parts).
 
 - `common.py`: shared pagination/count helpers and the generic model repository
 - `core.py`: projects and questions
@@ -34,12 +34,12 @@ The SQLAlchemy repository is now split into focused modules under
 - `analyses.py`: analyses, claims, and visualizations
 - `repository.py`: the top-level `SQLAlchemyLabTrackerRepository` query surface
 
-[`src/lab_tracker/sqlalchemy_repository.py`](/Users/samuelbrudner/Documents/GitHub/lab-tracker/src/lab_tracker/sqlalchemy_repository.py) remains as the import-stable compatibility barrel.
+[`src/lab_tracker/sqlalchemy_repository.py`](../src/lab_tracker/sqlalchemy_repository.py) remains as the import-stable compatibility barrel.
 
 ## Route Layout
 
 Mixed-resource route modules have been replaced with one-resource routers under
-[`src/lab_tracker/routes`](/Users/samuelbrudner/Documents/GitHub/lab-tracker/src/lab_tracker/routes).
+[`src/lab_tracker/routes`](../src/lab_tracker/routes).
 
 Examples:
 
@@ -51,20 +51,20 @@ Examples:
 Routes keep their existing URLs, envelopes, pagination, and auth requirements.
 `search.py` is the retained query surface and stays on the simple substring
 behavior documented in
-[`docs/retained-v1-surface.md`](/Users/samuelbrudner/Documents/GitHub/lab-tracker/docs/retained-v1-surface.md),
+[`docs/retained-v1-surface.md`](retained-v1-surface.md),
 not semantic/vector retrieval.
 
 ## Frontend Data Loading and Downloads
 
 Workspace state is no longer concentrated in one hook.
 
-- [`useProjectWorkspaceData.js`](/Users/samuelbrudner/Documents/GitHub/lab-tracker/src/lab_tracker/frontend_src/hooks/useProjectWorkspaceData.js) owns project/resource loading and selection
-- [`useProjectWorkspaceForms.js`](/Users/samuelbrudner/Documents/GitHub/lab-tracker/src/lab_tracker/frontend_src/hooks/useProjectWorkspaceForms.js) owns form state
-- [`useProjectWorkspaceActions.js`](/Users/samuelbrudner/Documents/GitHub/lab-tracker/src/lab_tracker/frontend_src/hooks/useProjectWorkspaceActions.js) owns mutations and refresh behavior
+- [`useProjectWorkspaceData.js`](../src/lab_tracker/frontend_src/hooks/useProjectWorkspaceData.js) owns project/resource loading and selection
+- [`useProjectWorkspaceForms.js`](../src/lab_tracker/frontend_src/hooks/useProjectWorkspaceForms.js) owns form state
+- [`useProjectWorkspaceActions.js`](../src/lab_tracker/frontend_src/hooks/useProjectWorkspaceActions.js) owns mutations and refresh behavior
 
 Protected browser downloads must go through
-[`downloadProtectedResource(...)`](/Users/samuelbrudner/Documents/GitHub/lab-tracker/src/lab_tracker/frontend_src/shared/api.js),
+[`downloadProtectedResource(...)`](../src/lab_tracker/frontend_src/shared/api.js),
 not plain anchors, so bearer-token auth is preserved for note raw assets and dataset files.
 
 Oversized feature modules now export smaller workflow components from focused folders under
-[`src/lab_tracker/frontend_src/features`](/Users/samuelbrudner/Documents/GitHub/lab-tracker/src/lab_tracker/frontend_src/features).
+[`src/lab_tracker/frontend_src/features`](../src/lab_tracker/frontend_src/features).

@@ -37,7 +37,7 @@ Frontend:
 Open `http://127.0.0.1:8000/app`.
 
 The retained v1 product surface is defined in
-[`docs/retained-v1-surface.md`](/Users/samuelbrudner/Documents/GitHub/lab-tracker/docs/retained-v1-surface.md).
+[`docs/retained-v1-surface.md`](docs/retained-v1-surface.md).
 If this README and the retained-surface document disagree, the retained-surface
 document defines the supported runtime.
 
@@ -84,7 +84,7 @@ development.
 
 The retained v1 runtime keeps note handling manual and uses direct substring
 search for query flows. Deferred concepts live in
-[`docs/retained-v1-surface.md`](/Users/samuelbrudner/Documents/GitHub/lab-tracker/docs/retained-v1-surface.md)
+[`docs/retained-v1-surface.md`](docs/retained-v1-surface.md)
 rather than the active product surface.
 
 ## Database migrations
