@@ -15,6 +15,7 @@ from .datasets import build_datasets_router
 from .errors import register_error_handlers
 from .notes import build_notes_router
 from .projects import build_projects_router
+from .provenance import build_provenance_router
 from .questions import build_questions_router
 from .search import build_search_router
 from .sessions import build_sessions_router
@@ -42,6 +43,7 @@ def register_routes(
     app.include_router(build_datasets_router(api))
     app.include_router(build_dataset_files_router(api))
     app.include_router(build_notes_router(api))
+    app.include_router(build_provenance_router(api))
     app.include_router(build_search_router(api))
     app.include_router(build_sessions_router(api))
     app.include_router(build_analyses_router(api))
