@@ -59,26 +59,19 @@ class LabTrackerAPI(
     ClaimServiceMixin,
     VisualizationServiceMixin,
 ):
-    @property
-    def _store(self) -> InMemoryStore:
-        return self._base_store
-
-    @_store.setter
-    def _store(self, value: InMemoryStore) -> None:
-        self._base_store = value
-
     def __init__(
         self,
         store: InMemoryStore | None = None,
         *,
         raw_storage: LocalNoteStorage | None = None,
         repository: LabTrackerRepository | None = None,
+        request_context: LabTrackerRequestContext | None = None,
         allow_in_memory: bool = False,
     ) -> None:
         self._store = store or InMemoryStore()
         self._raw_storage = raw_storage
         self._repository = repository
-        self._request_context: LabTrackerRequestContext | None = None
+        self._request_context = request_context
         self._allow_in_memory = allow_in_memory or store is not None
         if repository is not None and self._allow_in_memory:
             self.hydrate_from_repository(repository)
@@ -96,16 +89,14 @@ class LabTrackerAPI(
             allow_in_memory=True,
         )
 
-    def build_request_context(
-        self,
-        repository: LabTrackerRepository,
-    ) -> LabTrackerRequestContext:
-        return LabTrackerRequestContext(repository=repository)
-
-    def bind_request_context(self, request_context: LabTrackerRequestContext) -> "LabTrackerAPI":
-        bound = object.__new__(self.__class__)
-        bound.__dict__ = {**self.__dict__, "_request_context": request_context}
-        return bound
+    def for_request(self, repository: LabTrackerRepository) -> "LabTrackerAPI":
+        return self.__class__(
+            store=self._store if self._allow_in_memory else None,
+            raw_storage=self._raw_storage,
+            repository=repository,
+            request_context=LabTrackerRequestContext(repository=repository),
+            allow_in_memory=self._allow_in_memory,
+        )
 
     def _active_repository(self) -> LabTrackerRepository | None:
         if self._request_context is not None:
@@ -253,6 +244,17 @@ class LabTrackerAPI(
             return
         self._request_context.after_rollback_actions.append(action)
 
+    def finish_request(self, *, committed: bool) -> None:
+        if self._request_context is None:
+            return
+        self._request_context.finish(
+            committed=committed,
+            run_deferred_actions=lambda actions, label: self._run_deferred_actions(
+                actions,
+                label=label,
+            ),
+        )
+
     def _run_repository_write(
         self,
         operation: Callable[[LabTrackerRepository], None],
@@ -275,7 +277,7 @@ class LabTrackerAPI(
             if resolved_repository is self._repository:
                 self.hydrate_from_repository(
                     resolved_repository,
-                    store=self._base_store,
+                    store=self._store,
                 )
             raise
 

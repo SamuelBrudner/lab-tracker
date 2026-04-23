@@ -237,8 +237,8 @@ def _configure_database_session_middleware(
         request.state.db_session = db_session
         repository = SQLAlchemyLabTrackerRepository(db_session)
         request.state.lab_tracker_repository = repository
-        request_context = api.build_request_context(repository)
-        request.state.lab_tracker_api = api.bind_request_context(request_context)
+        request_api = api.for_request(repository)
+        request.state.lab_tracker_api = request_api
         committed = False
         try:
             response = await call_next(request)
@@ -253,16 +253,7 @@ def _configure_database_session_middleware(
             raise
         finally:
             try:
-                def _run_deferred_actions(actions, label):  # noqa: ANN001, ANN202
-                    request.state.lab_tracker_api._run_deferred_actions(  # noqa: SLF001
-                        actions,
-                        label=label,
-                    )
-
-                request_context.finish(
-                    committed=committed,
-                    run_deferred_actions=_run_deferred_actions,
-                )
+                request_api.finish_request(committed=committed)
             finally:
                 db_session.close()
 
