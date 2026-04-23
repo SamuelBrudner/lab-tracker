@@ -253,12 +253,15 @@ def _configure_database_session_middleware(
             raise
         finally:
             try:
-                request_context.finish(
-                    committed=committed,
-                    run_deferred_actions=lambda actions, label: request.state.lab_tracker_api._run_deferred_actions(  # noqa: SLF001
+                def _run_deferred_actions(actions, label):  # noqa: ANN001, ANN202
+                    request.state.lab_tracker_api._run_deferred_actions(  # noqa: SLF001
                         actions,
                         label=label,
-                    ),
+                    )
+
+                request_context.finish(
+                    committed=committed,
+                    run_deferred_actions=_run_deferred_actions,
                 )
             finally:
                 db_session.close()

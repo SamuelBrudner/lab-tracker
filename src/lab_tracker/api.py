@@ -306,7 +306,9 @@ class LabTrackerAPI(
         questions = list(self._store.questions.values())
         if project_id is not None:
             questions = [question for question in questions if question.project_id == project_id]
-        matches = [question for question in questions if question_matches_substring(question, query)]
+        matches = [
+            question for question in questions if question_matches_substring(question, query)
+        ]
         return self._slice_entities(matches, limit=limit, offset=offset)
 
     def search_notes(

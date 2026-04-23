@@ -10,8 +10,7 @@ from starlette import status as http_status
 from starlette.requests import Request
 
 from lab_tracker.api import LabTrackerAPI
-from lab_tracker.db_models import DatasetFileModel, DatasetModel
-from lab_tracker.errors import NotFoundError
+from lab_tracker.db_models import DatasetFileModel
 from lab_tracker.models import Dataset, DatasetStatus
 from lab_tracker.schemas import DatasetCreate, DatasetUpdate, Envelope, ListEnvelope
 

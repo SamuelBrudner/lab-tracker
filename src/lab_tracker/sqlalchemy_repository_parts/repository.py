@@ -127,7 +127,10 @@ class SQLAlchemyLabTrackerRepository(LabTrackerRepository):
             for row in rows
         ]
 
-    def visualization_entities_from_rows(self, rows: list[VisualizationModel]) -> list[Visualization]:
+    def visualization_entities_from_rows(
+        self,
+        rows: list[VisualizationModel],
+    ) -> list[Visualization]:
         viz_ids = [row.viz_id for row in rows]
         claim_map = self.visualizations.claim_map(viz_ids)
         return [

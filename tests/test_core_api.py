@@ -402,7 +402,11 @@ def test_active_session_cannot_set_end_time_without_closing():
     )
 
     with pytest.raises(ValidationError):
-        api.update_session(session.session_id, ended_at=api.get_session(session.session_id).started_at, actor=actor)
+        api.update_session(
+            session.session_id,
+            ended_at=api.get_session(session.session_id).started_at,
+            actor=actor,
+        )
 
 
 def test_archived_dataset_cannot_be_recommitted():
