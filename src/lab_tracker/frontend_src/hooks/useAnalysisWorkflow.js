@@ -4,7 +4,7 @@ import { apiRequest, buildApiPath, fetchAllPages } from "../shared/api.js";
 
 const { useCallback, useEffect, useRef, useState } = React;
 
-function useAnalysisWorkflow({ token, canWrite, selectedProjectId, setBusy, setFlash }) {
+function useAnalysisWorkflow({ token, canWrite, selectedProjectId, setBusy, setFlash, enabled = true }) {
   const [analyses, setAnalyses] = useState([]);
   const [visualizations, setVisualizations] = useState([]);
 
@@ -45,7 +45,7 @@ function useAnalysisWorkflow({ token, canWrite, selectedProjectId, setBusy, setF
   }, [selectedProjectId, token]);
 
   useEffect(() => {
-    if (!token || !selectedProjectId) {
+    if (!enabled || !token || !selectedProjectId) {
       analysisRequestRef.current += 1;
       setAnalyses([]);
       setVisualizations([]);
@@ -69,7 +69,7 @@ function useAnalysisWorkflow({ token, canWrite, selectedProjectId, setBusy, setF
     return () => {
       canceled = true;
     };
-  }, [refreshAnalysisData, selectedProjectId, setBusy, setFlash, token]);
+  }, [enabled, refreshAnalysisData, selectedProjectId, setBusy, setFlash, token]);
 
   async function handleCreateAnalysis(event) {
     event.preventDefault();

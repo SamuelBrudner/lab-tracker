@@ -49,3 +49,49 @@ def test_search_endpoint_returns_questions_and_notes(
     assert {item["question_id"] for item in payload["questions"]} == {question_id}
     assert {item["note_id"] for item in payload["notes"]} == {note_id}
 
+
+def test_question_list_search_uses_database_filtering_and_pagination(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+):
+    project_response = client.post(
+        "/projects",
+        json={"name": "Question search project", "description": ""},
+        headers=admin_auth_headers,
+    )
+    assert project_response.status_code == 201
+    project_id = project_response.json()["data"]["project_id"]
+
+    for index in range(3):
+        response = client.post(
+            "/questions",
+            json={
+                "project_id": project_id,
+                "text": f"Baseline question {index}",
+                "question_type": "descriptive",
+            },
+            headers=admin_auth_headers,
+        )
+        assert response.status_code == 201
+
+    response = client.post(
+        "/questions",
+        json={
+            "project_id": project_id,
+            "text": "Unrelated question",
+            "question_type": "descriptive",
+        },
+        headers=admin_auth_headers,
+    )
+    assert response.status_code == 201
+
+    search_response = client.get(
+        "/questions",
+        params={"project_id": project_id, "search": "baseline", "limit": 1, "offset": 1},
+        headers=admin_auth_headers,
+    )
+    assert search_response.status_code == 200
+    payload = search_response.json()
+    assert payload["meta"]["total"] == 3
+    assert len(payload["data"]) == 1
+    assert payload["data"][0]["text"] == "Baseline question 1"

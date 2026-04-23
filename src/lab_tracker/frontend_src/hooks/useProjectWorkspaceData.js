@@ -1,16 +1,21 @@
 import * as React from "react";
 
-import { buildApiPath, fetchAllPages } from "../shared/api.js";
+import { apiListRequest, buildApiPath, fetchAllPages } from "../shared/api.js";
 
 const { useCallback, useEffect, useMemo, useRef, useState } = React;
 
-function useProjectWorkspaceData({ token, setBusy, setFlash }) {
+function useProjectWorkspaceData({ token, setBusy, setFlash, loadProjectData = true }) {
   const [projects, setProjects] = useState([]);
   const [selectedProjectId, setSelectedProjectId] = useState("");
   const [questions, setQuestions] = useState([]);
   const [datasets, setDatasets] = useState([]);
   const [notes, setNotes] = useState([]);
   const [sessions, setSessions] = useState([]);
+  const [projectCounts, setProjectCounts] = useState({
+    datasets: 0,
+    notes: 0,
+    questions: 0,
+  });
   const projectsRequestRef = useRef(0);
   const projectDataRequestRef = useRef(0);
 
@@ -20,6 +25,7 @@ function useProjectWorkspaceData({ token, setBusy, setFlash }) {
     setDatasets([]);
     setNotes([]);
     setSessions([]);
+    setProjectCounts({ datasets: 0, notes: 0, questions: 0 });
   }, []);
 
   const refreshProjectData = useCallback(
@@ -44,6 +50,47 @@ function useProjectWorkspaceData({ token, setBusy, setFlash }) {
       setDatasets(nextDatasets);
       setNotes(nextNotes);
       setSessions(nextSessions);
+      setProjectCounts({
+        datasets: nextDatasets.length,
+        notes: nextNotes.length,
+        questions: nextQuestions.length,
+      });
+    },
+    [token]
+  );
+
+  const refreshProjectCounts = useCallback(
+    async (projectId) => {
+      if (!projectId || !token) {
+        return;
+      }
+
+      const requestId = projectDataRequestRef.current + 1;
+      projectDataRequestRef.current = requestId;
+      const [questionPage, datasetPage, notePage] = await Promise.all([
+        apiListRequest(buildApiPath("/questions", { project_id: projectId, limit: 1, offset: 0 }), {
+          token,
+        }),
+        apiListRequest(buildApiPath("/datasets", { project_id: projectId, limit: 1, offset: 0 }), {
+          token,
+        }),
+        apiListRequest(buildApiPath("/notes", { project_id: projectId, limit: 1, offset: 0 }), {
+          token,
+        }),
+      ]);
+
+      if (projectDataRequestRef.current !== requestId) {
+        return;
+      }
+      setQuestions([]);
+      setDatasets([]);
+      setNotes([]);
+      setSessions([]);
+      setProjectCounts({
+        datasets: datasetPage.meta.total,
+        notes: notePage.meta.total,
+        questions: questionPage.meta.total,
+      });
     },
     [token]
   );
@@ -107,12 +154,14 @@ function useProjectWorkspaceData({ token, setBusy, setFlash }) {
       setDatasets([]);
       setNotes([]);
       setSessions([]);
+      setProjectCounts({ datasets: 0, notes: 0, questions: 0 });
       return;
     }
 
     let canceled = false;
     setBusy(true);
-    refreshProjectData(selectedProjectId)
+    const loader = loadProjectData ? refreshProjectData : refreshProjectCounts;
+    loader(selectedProjectId)
       .catch((err) => {
         if (!canceled) {
           setFlash("", err.message || "Unable to load project data.");
@@ -127,7 +176,15 @@ function useProjectWorkspaceData({ token, setBusy, setFlash }) {
     return () => {
       canceled = true;
     };
-  }, [refreshProjectData, selectedProjectId, setBusy, setFlash, token]);
+  }, [
+    loadProjectData,
+    refreshProjectCounts,
+    refreshProjectData,
+    selectedProjectId,
+    setBusy,
+    setFlash,
+    token,
+  ]);
 
   const stagedQuestions = useMemo(
     () => questions.filter((item) => item.status === "staged"),
@@ -146,7 +203,9 @@ function useProjectWorkspaceData({ token, setBusy, setFlash }) {
     activeQuestions,
     datasets,
     notes,
+    noteCount: projectCounts.notes,
     projects,
+    questionCount: projectCounts.questions,
     questions,
     refreshProjectData,
     refreshProjects,
@@ -156,6 +215,7 @@ function useProjectWorkspaceData({ token, setBusy, setFlash }) {
     setSelectedProjectId,
     setSessions,
     stagedQuestions,
+    datasetCount: projectCounts.datasets,
   };
 }
 

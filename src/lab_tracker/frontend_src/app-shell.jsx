@@ -26,6 +26,7 @@ import { useAppRoute } from "./shared/routing.jsx";
 
 function App() {
   const { navigate, replace, route } = useAppRoute();
+  const isHomeRoute = route.kind === "home";
   const [busy, setBusy] = React.useState(false);
   const [message, setMessage] = React.useState("");
   const [error, setError] = React.useState("");
@@ -37,6 +38,7 @@ function App() {
 
   const auth = useAuthSession({ replace, setBusy, setFlash });
   const workspaceData = useProjectWorkspaceData({
+    loadProjectData: isHomeRoute,
     token: auth.token,
     setBusy,
     setFlash,
@@ -84,13 +86,13 @@ function App() {
     setFlash,
   });
   const analysis = useAnalysisWorkflow({
+    enabled: isHomeRoute,
     token: auth.token,
     canWrite: auth.canWrite,
     selectedProjectId: workspaceData.selectedProjectId,
     setBusy,
     setFlash,
   });
-  const isHomeRoute = route.kind === "home";
 
   return (
     <div className="app-shell">
@@ -118,9 +120,9 @@ function App() {
         <section className="grid">
           <Dashboard
             projects={workspaceData.projects}
-            questions={workspaceData.questions}
-            datasets={workspaceData.datasets}
-            notes={workspaceData.notes}
+            questionCount={workspaceData.questionCount}
+            datasetCount={workspaceData.datasetCount}
+            noteCount={workspaceData.noteCount}
             selectedProjectId={workspaceData.selectedProjectId}
             onSelectedProjectChange={(event) =>
               workspaceData.setSelectedProjectId(event.target.value)
@@ -204,7 +206,6 @@ function App() {
               token={auth.token}
               sessionId={route.sessionId}
               projects={workspaceData.projects}
-              questions={workspaceData.questions}
               navigate={navigate}
               onSetActiveProject={workspaceData.setSelectedProjectId}
               canWrite={auth.canWrite}

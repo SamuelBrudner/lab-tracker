@@ -11,7 +11,6 @@ function SessionDetailCard({
   token,
   sessionId,
   projects,
-  questions,
   navigate,
   onSetActiveProject,
   canWrite,
@@ -26,8 +25,20 @@ function SessionDetailCard({
   const [actionError, setActionError] = useState("");
   const [outputsState, setOutputsState] = useState({ loading: false, error: "", items: [] });
   const [noteState, setNoteState] = useState({ loading: false, error: "", items: [] });
+  const [activeQuestionState, setActiveQuestionState] = useState({
+    loading: false,
+    error: "",
+    items: [],
+  });
   const [promotionQuestionId, setPromotionQuestionId] = useState("");
   const [promotionBusy, setPromotionBusy] = useState(false);
+  const {
+    data: primaryQuestionData,
+  } = useApiResource(
+    token && session?.primary_question_id ? `/questions/${session.primary_question_id}` : "",
+    token,
+    "Failed to load primary question."
+  );
 
   const project = useMemo(() => {
     if (!session) {
@@ -40,23 +51,22 @@ function SessionDetailCard({
     if (!session?.primary_question_id) {
       return null;
     }
-    return questions.find((item) => item.question_id === session.primary_question_id) || null;
-  }, [questions, session]);
+    return (
+      activeQuestionState.items.find((item) => item.question_id === session.primary_question_id) ||
+      primaryQuestionData ||
+      null
+    );
+  }, [activeQuestionState.items, primaryQuestionData, session]);
 
   const promotionOptions = useMemo(() => {
-    if (!session) {
-      return [];
-    }
-    const items = (questions || [])
-      .filter((question) => question.project_id === session.project_id)
-      .filter((question) => question.status === "active");
+    const items = [...(activeQuestionState.items || [])];
     items.sort((a, b) => {
       const aTime = Date.parse(a.updated_at || a.created_at || "") || 0;
       const bTime = Date.parse(b.updated_at || b.created_at || "") || 0;
       return bTime - aTime;
     });
     return items;
-  }, [questions, session]);
+  }, [activeQuestionState.items]);
 
   useEffect(() => {
     setActionError("");
@@ -107,6 +117,48 @@ function SessionDetailCard({
       canceled = true;
     };
   }, [sessionId, token]);
+
+  useEffect(() => {
+    let canceled = false;
+    if (!token || !session) {
+      setActiveQuestionState({ loading: false, error: "", items: [] });
+      return () => {
+        canceled = true;
+      };
+    }
+
+    setActiveQuestionState({ loading: true, error: "", items: [] });
+    fetchAllPages(
+      buildApiPath("/questions", {
+        project_id: session.project_id,
+        status: "active",
+      }),
+      { token }
+    )
+      .then((items) => {
+        if (canceled) {
+          return;
+        }
+        setActiveQuestionState({
+          loading: false,
+          error: "",
+          items: Array.isArray(items) ? items : [],
+        });
+      })
+      .catch((err) => {
+        if (!canceled) {
+          setActiveQuestionState({
+            loading: false,
+            error: err.message || "Failed to load active questions.",
+            items: [],
+          });
+        }
+      });
+
+    return () => {
+      canceled = true;
+    };
+  }, [session, token]);
 
   useEffect(() => {
     let canceled = false;
@@ -253,7 +305,12 @@ function SessionDetailCard({
                 <select
                   value={promotionQuestionId}
                   onChange={(event) => setPromotionQuestionId(event.target.value)}
-                  disabled={!canWrite || promotionBusy || promotionOptions.length === 0}
+                  disabled={
+                    !canWrite ||
+                    promotionBusy ||
+                    activeQuestionState.loading ||
+                    promotionOptions.length === 0
+                  }
                 >
                   <option value="">Select an active question</option>
                   {promotionOptions.map((question) => (
@@ -263,6 +320,9 @@ function SessionDetailCard({
                   ))}
                 </select>
               </label>
+              {activeQuestionState.error ? (
+                <p className="flash error">{activeQuestionState.error}</p>
+              ) : null}
               {promotionOptions.length === 0 ? (
                 <p className="warn">Activate a question in this project before promoting the session.</p>
               ) : null}

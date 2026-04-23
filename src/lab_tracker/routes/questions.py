@@ -16,7 +16,6 @@ from .shared import (
     api_from_request,
     actor_from_request,
     list_response,
-    paginate,
     question_default_status,
     repository_from_request,
     validate_pagination,
@@ -59,27 +58,17 @@ def build_questions_router(api: LabTrackerAPI) -> APIRouter:
     ):
         validate_pagination(limit, offset)
         resolved_search = search or q
-        if not resolved_search:
-            questions, total = repository_from_request(request).query_questions(
-                project_id=project_id,
-                status=status.value if status is not None else None,
-                question_type=question_type.value if question_type is not None else None,
-                parent_question_id=parent_question_id,
-                ancestor_question_id=ancestor_question_id,
-                limit=limit,
-                offset=offset,
-            )
-            return list_response(questions, limit=limit, offset=offset, total=total)
-        questions = api_from_request(request, api).list_questions(
+        questions, total = repository_from_request(request).query_questions(
             project_id=project_id,
-            status=status,
-            question_type=question_type,
+            status=status.value if status is not None else None,
+            question_type=question_type.value if question_type is not None else None,
             search=resolved_search,
             parent_question_id=parent_question_id,
             ancestor_question_id=ancestor_question_id,
+            limit=limit,
+            offset=offset,
         )
-        page, total = paginate(questions, limit, offset)
-        return list_response(page, limit=limit, offset=offset, total=total)
+        return list_response(questions, limit=limit, offset=offset, total=total)
 
     @router.get("/questions/{question_id}", response_model=Envelope[Question])
     def get_question(question_id: UUID, request: Request):

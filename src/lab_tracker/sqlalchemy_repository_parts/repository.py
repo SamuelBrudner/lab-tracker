@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from uuid import UUID
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.orm import Session as OrmSession
 
 from lab_tracker.db_models import (
@@ -61,6 +61,16 @@ from .core import SQLAlchemyProjectRepository, SQLAlchemyQuestionRepository
 from .datasets import SQLAlchemyDatasetRepository
 from .notes import SQLAlchemyNoteRepository
 from .sessions import SQLAlchemyAcquisitionOutputRepository, SQLAlchemySessionRepository
+
+
+def _substring_pattern(query: str | None) -> str | None:
+    if query is None:
+        return None
+    needle = query.strip()
+    if not needle:
+        return None
+    escaped = needle.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    return f"%{escaped}%"
 
 
 class SQLAlchemyLabTrackerRepository(LabTrackerRepository):
@@ -228,6 +238,7 @@ class SQLAlchemyLabTrackerRepository(LabTrackerRepository):
         project_id: UUID | None = None,
         status: str | None = None,
         question_type: str | None = None,
+        search: str | None = None,
         parent_question_id: UUID | None = None,
         ancestor_question_id: UUID | None = None,
         limit: int | None = None,
@@ -245,6 +256,14 @@ class SQLAlchemyLabTrackerRepository(LabTrackerRepository):
         if question_type is not None:
             stmt = stmt.where(QuestionModel.question_type == question_type)
             count_stmt = count_stmt.where(QuestionModel.question_type == question_type)
+        pattern = _substring_pattern(search)
+        if pattern is not None:
+            search_clause = or_(
+                QuestionModel.text.ilike(pattern, escape="\\"),
+                QuestionModel.hypothesis.ilike(pattern, escape="\\"),
+            )
+            stmt = stmt.where(search_clause)
+            count_stmt = count_stmt.where(search_clause)
         if parent_question_id is not None:
             stmt = stmt.join(
                 QuestionParentModel,
@@ -292,6 +311,7 @@ class SQLAlchemyLabTrackerRepository(LabTrackerRepository):
         *,
         project_id: UUID | None = None,
         status: str | None = None,
+        search: str | None = None,
         target_entity_type: str | None = None,
         target_entity_id: UUID | None = None,
         limit: int | None = None,
@@ -306,6 +326,14 @@ class SQLAlchemyLabTrackerRepository(LabTrackerRepository):
         if status is not None:
             stmt = stmt.where(NoteModel.status == status)
             count_stmt = count_stmt.where(NoteModel.status == status)
+        pattern = _substring_pattern(search)
+        if pattern is not None:
+            search_clause = or_(
+                NoteModel.raw_content.ilike(pattern, escape="\\"),
+                NoteModel.transcribed_text.ilike(pattern, escape="\\"),
+            )
+            stmt = stmt.where(search_clause)
+            count_stmt = count_stmt.where(search_clause)
         if target_entity_type is not None and target_entity_id is not None:
             stmt = stmt.join(NoteTargetModel, NoteTargetModel.note_id == NoteModel.note_id).where(
                 NoteTargetModel.entity_type == target_entity_type,

@@ -83,6 +83,67 @@ describe("App", () => {
     expect(await screen.findByRole("heading", { name: "Sign In" })).toBeInTheDocument();
   });
 
+  it("loads project summary counts instead of full workspace data on detail routes", async () => {
+    const questionId = "11111111-1111-4111-8111-111111111111";
+    localStorage.setItem(TOKEN_STORAGE_KEY, "token-detail-summary");
+    window.history.replaceState({}, "", `/app/questions/${questionId}`);
+
+    installFetchMock([
+      {
+        match: "/auth/me",
+        response: apiResponse({ role: "viewer", username: "sam" }),
+      },
+      {
+        match: "/projects?limit=200&offset=0",
+        response: apiResponse([{ name: "Project One", project_id: "project-1" }]),
+      },
+      {
+        match: "/questions?project_id=project-1&limit=1&offset=0",
+        response: apiResponse(
+          [
+            {
+              project_id: "project-1",
+              question_id: "question-1",
+              question_type: "descriptive",
+              status: "active",
+              text: "Project count placeholder",
+            },
+          ],
+          200,
+          { limit: 1, offset: 0, total: 12 }
+        ),
+      },
+      {
+        match: "/datasets?project_id=project-1&limit=1&offset=0",
+        response: apiResponse([], 200, { limit: 1, offset: 0, total: 4 }),
+      },
+      {
+        match: "/notes?project_id=project-1&limit=1&offset=0",
+        response: apiResponse([], 200, { limit: 1, offset: 0, total: 7 }),
+      },
+      {
+        match: `/questions/${questionId}`,
+        response: apiResponse({
+          created_at: "2026-04-20T00:00:00Z",
+          project_id: "project-1",
+          question_id: questionId,
+          question_type: "descriptive",
+          status: "active",
+          text: "How stable is the rig today?",
+          updated_at: "2026-04-20T01:00:00Z",
+        }),
+      },
+    ]);
+
+    render(<App />);
+
+    expect(await screen.findByRole("heading", { name: "Question Detail" })).toBeInTheDocument();
+    expect(await screen.findByText("How stable is the rig today?")).toBeInTheDocument();
+    expect(await screen.findByText("12")).toBeInTheDocument();
+    expect(await screen.findByText("4")).toBeInTheDocument();
+    expect(await screen.findByText("7")).toBeInTheDocument();
+  });
+
   it("loads paginated project data and refreshes when the active project changes", async () => {
     localStorage.setItem(TOKEN_STORAGE_KEY, "token-4");
 

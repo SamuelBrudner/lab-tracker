@@ -24,6 +24,17 @@ describe("SessionDetailCard", () => {
         }),
       },
       {
+        match: "/questions?project_id=project-1&status=active&limit=200&offset=0",
+        response: apiResponse([
+          {
+            project_id: "project-1",
+            question_id: "question-1",
+            status: "active",
+            text: "Is the rig stable?",
+          },
+        ]),
+      },
+      {
         match: "/sessions/session-1/outputs?limit=200&offset=0",
         response: apiResponse([
           {
@@ -61,14 +72,6 @@ describe("SessionDetailCard", () => {
         token="token-1"
         sessionId="session-1"
         projects={[{ name: "Project One", project_id: "project-1" }]}
-        questions={[
-          {
-            project_id: "project-1",
-            question_id: "question-1",
-            status: "active",
-            text: "Is the rig stable?",
-          },
-        ]}
         navigate={vi.fn()}
         onSetActiveProject={vi.fn()}
         canWrite={true}

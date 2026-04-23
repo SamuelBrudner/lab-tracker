@@ -283,6 +283,50 @@ def test_query_questions_applies_filters_and_pagination(db_session):
     assert page[0].question_id == active_ids[1]
 
 
+def test_query_questions_applies_substring_search_in_database(db_session):
+    repo = SQLAlchemyLabTrackerRepository(db_session)
+    project = Project(
+        project_id=uuid4(),
+        name="Question search",
+        status=ProjectStatus.ACTIVE,
+        created_at=_ts(),
+        updated_at=_ts(),
+    )
+    repo.projects.save(project)
+    repo.questions.save(
+        Question(
+            question_id=uuid4(),
+            project_id=project.project_id,
+            text="What is the baseline distribution?",
+            hypothesis="Baseline differs by condition",
+            question_type=QuestionType.DESCRIPTIVE,
+            status=QuestionStatus.ACTIVE,
+            parent_question_ids=[],
+            created_at=_ts(1),
+            updated_at=_ts(1),
+        )
+    )
+    repo.questions.save(
+        Question(
+            question_id=uuid4(),
+            project_id=project.project_id,
+            text="Signal drift check",
+            hypothesis=None,
+            question_type=QuestionType.DESCRIPTIVE,
+            status=QuestionStatus.ACTIVE,
+            parent_question_ids=[],
+            created_at=_ts(2),
+            updated_at=_ts(2),
+        )
+    )
+    repo.commit()
+
+    page, total = repo.query_questions(project_id=project.project_id, search="baseline")
+
+    assert total == 1
+    assert [question.text for question in page] == ["What is the baseline distribution?"]
+
+
 def test_note_repository_list_batches_child_queries(db_session):
     repo = SQLAlchemyLabTrackerRepository(db_session)
     project = Project(
@@ -383,3 +427,43 @@ def test_query_notes_filters_by_target(db_session):
 
     assert total == 1
     assert [note.raw_content for note in notes] == ["dataset note"]
+
+
+def test_query_notes_applies_substring_search_in_database(db_session):
+    repo = SQLAlchemyLabTrackerRepository(db_session)
+    project = Project(
+        project_id=uuid4(),
+        name="Note search",
+        status=ProjectStatus.ACTIVE,
+        created_at=_ts(),
+        updated_at=_ts(),
+    )
+    repo.projects.save(project)
+    repo.notes.save(
+        Note(
+            note_id=uuid4(),
+            project_id=project.project_id,
+            raw_content="raw baseline capture",
+            transcribed_text=None,
+            status=NoteStatus.STAGED,
+            created_at=_ts(1),
+            updated_at=_ts(1),
+        )
+    )
+    repo.notes.save(
+        Note(
+            note_id=uuid4(),
+            project_id=project.project_id,
+            raw_content="raw capture",
+            transcribed_text="Follow-up baseline summary",
+            status=NoteStatus.STAGED,
+            created_at=_ts(2),
+            updated_at=_ts(2),
+        )
+    )
+    repo.commit()
+
+    notes, total = repo.query_notes(project_id=project.project_id, search="baseline")
+
+    assert total == 2
+    assert [note.raw_content for note in notes] == ["raw baseline capture", "raw capture"]
