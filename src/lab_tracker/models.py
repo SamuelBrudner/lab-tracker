@@ -48,12 +48,6 @@ class ProjectStatus(str, Enum):
     ACTIVE = "active"
     ARCHIVED = "archived"
 
-
-class ProjectReviewPolicy(str, Enum):
-    NONE = "none"
-    ALL = "all"
-
-
 class QuestionStatus(str, Enum):
     STAGED = "staged"
     ACTIVE = "active"
@@ -68,24 +62,10 @@ class QuestionType(str, Enum):
     OTHER = "other"
 
 
-class QuestionSource(str, Enum):
-    MANUAL = "manual"
-    MEETING_CAPTURE = "meeting_capture"
-    IMPORTED = "imported"
-    API = "api"
-
-
 class DatasetStatus(str, Enum):
     STAGED = "staged"
     COMMITTED = "committed"
     ARCHIVED = "archived"
-
-
-class DatasetReviewStatus(str, Enum):
-    PENDING = "pending"
-    APPROVED = "approved"
-    CHANGES_REQUESTED = "changes_requested"
-    REJECTED = "rejected"
 
 
 class NoteStatus(str, Enum):
@@ -128,12 +108,6 @@ class OutcomeStatus(str, Enum):
     INCONCLUSIVE = "inconclusive"
 
 
-class TagSuggestionStatus(str, Enum):
-    STAGED = "staged"
-    ACCEPTED = "accepted"
-    REJECTED = "rejected"
-
-
 class EntityType(str, Enum):
     PROJECT = "project"
     QUESTION = "question"
@@ -152,28 +126,6 @@ class _DomainModel(BaseModel):
 class EntityRef(_DomainModel):
     entity_type: EntityType
     entity_id: UUID
-
-
-class ExtractedEntity(_DomainModel):
-    label: str
-    confidence: float
-    provenance: str
-
-
-class EntityTagSuggestion(_DomainModel):
-    model_config = ConfigDict(from_attributes=True, frozen=True)
-
-    suggestion_id: UUID
-    entity_label: str
-    vocabulary: str
-    term_id: str
-    term_label: str
-    confidence: float
-    provenance: str
-    status: TagSuggestionStatus = TagSuggestionStatus.STAGED
-    reviewed_by: str | None = None
-    reviewed_at: datetime | None = None
-
 
 class QuestionLink(_DomainModel):
     question_id: UUID
@@ -194,7 +146,6 @@ class DatasetCommitManifestInput(_DomainModel):
     nwb_metadata: dict[str, str] = Field(default_factory=dict)
     bids_metadata: dict[str, str] = Field(default_factory=dict)
     note_ids: list[UUID] = Field(default_factory=list)
-    extraction_provenance: list[str] = Field(default_factory=list)
     source_session_id: UUID | None = None
 
 
@@ -204,7 +155,6 @@ class DatasetCommitManifest(_DomainModel):
     nwb_metadata: dict[str, str] = Field(default_factory=dict)
     bids_metadata: dict[str, str] = Field(default_factory=dict)
     note_ids: list[UUID] = Field(default_factory=list)
-    extraction_provenance: list[str] = Field(default_factory=list)
     question_links: list[QuestionLink] = Field(default_factory=list)
     source_session_id: UUID | None = None
 
@@ -222,7 +172,6 @@ class Project(_DomainModel):
     name: str
     description: str = ""
     status: ProjectStatus = ProjectStatus.ACTIVE
-    review_policy: ProjectReviewPolicy = ProjectReviewPolicy.NONE
     created_at: datetime = Field(default_factory=utc_now)
     created_by: str | None = None
     updated_at: datetime = Field(default_factory=utc_now)
@@ -236,8 +185,6 @@ class Question(_DomainModel):
     hypothesis: str | None = None
     status: QuestionStatus = QuestionStatus.STAGED
     parent_question_ids: list[UUID] = Field(default_factory=list)
-    created_from: QuestionSource = QuestionSource.MANUAL
-    source_provenance: str | None = None
     created_at: datetime = Field(default_factory=utc_now)
     created_by: str | None = None
     updated_at: datetime = Field(default_factory=utc_now)
@@ -256,24 +203,12 @@ class Dataset(_DomainModel):
     updated_at: datetime = Field(default_factory=utc_now)
 
 
-class DatasetReview(_DomainModel):
-    review_id: UUID
-    dataset_id: UUID
-    reviewer_user_id: UUID | None = None
-    status: DatasetReviewStatus = DatasetReviewStatus.PENDING
-    comments: str | None = None
-    requested_at: datetime = Field(default_factory=utc_now)
-    resolved_at: datetime | None = None
-
-
 class Note(_DomainModel):
     note_id: UUID
     project_id: UUID
     raw_content: str
     raw_asset: NoteRawAsset | None = None
     transcribed_text: str | None = None
-    extracted_entities: list[ExtractedEntity] = Field(default_factory=list)
-    tag_suggestions: list[EntityTagSuggestion] = Field(default_factory=list)
     targets: list[EntityRef] = Field(default_factory=list)
     metadata: dict[str, str] = Field(default_factory=dict)
     status: NoteStatus = NoteStatus.STAGED

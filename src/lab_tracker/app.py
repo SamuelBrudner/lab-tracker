@@ -38,7 +38,6 @@ from lab_tracker.note_storage import LocalNoteStorage
 from lab_tracker.schemas import ErrorEnvelope, ErrorInfo
 from lab_tracker.routes import register_routes
 from lab_tracker.sqlalchemy_repository import SQLAlchemyLabTrackerRepository
-from lab_tracker.services.search_backends import InMemorySubstringSearchBackend
 
 
 _START_TIME = datetime.now(timezone.utc)
@@ -170,60 +169,24 @@ def _database_check(session_factory: sessionmaker[Session]) -> dict[str, str]:
     }
 
 
-def _search_check(api: LabTrackerAPI) -> dict[str, str]:
-    snapshot = api.search_health()
-    if not snapshot.degraded:
-        return {
-            "name": "search",
-            "status": "ok",
-            "backend": snapshot.backend_name,
-        }
-    return {
-        "name": "search",
-        "status": "fail",
-        "backend": snapshot.backend_name,
-        "detail": snapshot.last_failure_message or "search backend degraded",
-        "operation": snapshot.last_failure_operation or "unknown",
-        "repair": "restart the app to rebuild the in-memory substring backend",
-    }
-
-
 def _metrics_snapshot(
     session_factory: sessionmaker[Session],
     *,
     environment: str,
     app_name: str,
-    api: LabTrackerAPI,
 ) -> dict[str, Any]:
     now = datetime.now(timezone.utc)
     store, database_error = _store_counts_from_database(session_factory)
-    search_snapshot = api.search_health()
     payload: dict[str, Any] = {
-        "status": "ok" if database_error is None and not search_snapshot.degraded else "fail",
+        "status": "ok" if database_error is None else "fail",
         "timestamp": now.isoformat(),
         "uptime_seconds": (now - _START_TIME).total_seconds(),
         "app": {"name": app_name, "environment": environment},
         "store": store,
-        "search": {
-            "backend": search_snapshot.backend_name,
-            "degraded": search_snapshot.degraded,
-            "failure_count": search_snapshot.failure_count,
-            "last_failure_at": search_snapshot.last_failure_at,
-            "last_failure_message": search_snapshot.last_failure_message,
-            "last_failure_operation": search_snapshot.last_failure_operation,
-            "repair": "restart the app to rebuild the in-memory substring backend",
-        },
     }
     errors: list[dict[str, str]] = []
     if database_error is not None:
         errors.append({"name": "database", "detail": database_error})
-    if search_snapshot.degraded:
-        errors.append(
-            {
-                "name": "search",
-                "detail": search_snapshot.last_failure_message or "search backend degraded",
-            }
-        )
     if errors:
         payload["errors"] = errors
     return payload
@@ -337,10 +300,8 @@ def create_app() -> FastAPI:
     )
     file_storage_backend = LocalFileStorageBackend(settings.file_storage_path)
     raw_note_storage = LocalNoteStorage(settings.note_storage_path)
-    search_backend = InMemorySubstringSearchBackend()
     lab_tracker_api = LabTrackerAPI(
         raw_storage=raw_note_storage,
-        search_backend=search_backend,
     )
 
     @asynccontextmanager
@@ -360,7 +321,6 @@ def create_app() -> FastAPI:
     app.state.token_service = token_service
     app.state.file_storage_backend = file_storage_backend
     app.state.raw_note_storage = raw_note_storage
-    app.state.search_backend = search_backend
     app.state.lab_tracker_api = lab_tracker_api
     _configure_auth_middleware(app)
     _configure_database_session_middleware(app, api=app.state.lab_tracker_api)
@@ -373,7 +333,6 @@ def create_app() -> FastAPI:
     def readiness():
         checks = [
             _database_check(session_factory),
-            _search_check(app.state.lab_tracker_api),
             _note_storage_check(Path(settings.note_storage_path)),
             _file_storage_check(Path(settings.file_storage_path)),
         ]
@@ -393,7 +352,6 @@ def create_app() -> FastAPI:
             session_factory,
             environment=settings.environment,
             app_name=settings.app_name,
-            api=app.state.lab_tracker_api,
         )
 
     _configure_frontend_routes(app)

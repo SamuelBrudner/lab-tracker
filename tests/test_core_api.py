@@ -9,7 +9,6 @@ from lab_tracker.models import (
     DatasetCommitManifestInput,
     DatasetFile,
     DatasetStatus,
-    ProjectReviewPolicy,
     QuestionLinkRole,
     QuestionStatus,
     QuestionType,
@@ -230,32 +229,19 @@ def test_dataset_commit_requires_file_attachment():
         api.update_dataset(dataset.dataset_id, status=DatasetStatus.COMMITTED, actor=actor)
 
 
-def test_dataset_commit_ignores_legacy_review_policy_and_commits_directly():
+def test_session_creation_starts_active_without_end_time():
     api = LabTrackerAPI.in_memory()
     actor = _actor(Role.EDITOR)
-    project = api.create_project(
-        "Neuro Project",
-        review_policy=ProjectReviewPolicy.ALL,
-        actor=actor,
-    )
-    question = api.create_question(
+    project = api.create_project("Neuro Project", actor=actor)
+
+    session = api.create_session(
         project_id=project.project_id,
-        text="Is the signal stable?",
-        question_type=QuestionType.DESCRIPTIVE,
-        status=QuestionStatus.ACTIVE,
-        actor=actor,
-    )
-    manifest = DatasetCommitManifestInput(files=[DatasetFile(path="data.csv", checksum="abc123")])
-    dataset = api.create_dataset(
-        project_id=project.project_id,
-        primary_question_id=question.question_id,
-        commit_manifest=manifest,
+        session_type=SessionType.OPERATIONAL,
         actor=actor,
     )
 
-    updated = api.update_dataset(dataset.dataset_id, status=DatasetStatus.COMMITTED, actor=actor)
-    assert updated.status == DatasetStatus.COMMITTED
-    assert api.list_dataset_reviews(dataset_id=dataset.dataset_id) == []
+    assert session.status == SessionStatus.ACTIVE
+    assert session.ended_at is None
 
 
 def test_committed_dataset_is_immutable():
@@ -506,28 +492,3 @@ def test_operational_session_disallows_primary_question():
             primary_question_id=question.question_id,
             actor=actor,
         )
-def test_update_note_accepts_extracted_entities():
-    api = LabTrackerAPI.in_memory()
-    actor = _actor()
-    project = api.create_project("Neuro Project", actor=actor)
-    note = api.create_note(
-        project_id=project.project_id,
-        raw_content="raw note",
-        actor=actor,
-    )
-
-    updated = api.update_note(
-        note.note_id,
-        extracted_entities=[
-            ("Neuron", 0.82, "ocr:model-1"),
-            ("Hippocampus", 0.77, "ocr:model-1"),
-        ],
-        actor=actor,
-    )
-
-    assert [entity.label for entity in updated.extracted_entities] == [
-        "Neuron",
-        "Hippocampus",
-    ]
-    assert updated.extracted_entities[0].confidence == 0.82
-    assert updated.extracted_entities[0].provenance == "ocr:model-1"

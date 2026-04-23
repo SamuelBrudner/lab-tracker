@@ -89,7 +89,6 @@ def test_alembic_upgrade_head_creates_expected_tables(monkeypatch, tmp_path):
         "projects",
         "questions",
         "datasets",
-        "dataset_reviews",
         "dataset_files",
         "notes",
         "sessions",
@@ -105,6 +104,18 @@ def test_alembic_upgrade_head_creates_expected_tables(monkeypatch, tmp_path):
         "visualization_claims",
     }
     assert expected.issubset(table_names)
+    assert "dataset_reviews" not in table_names
+    assert "note_extracted_entities" not in table_names
+    assert "note_tag_suggestions" not in table_names
+
+    project_columns = {column["name"] for column in inspector.get_columns("projects")}
+    question_columns = {column["name"] for column in inspector.get_columns("questions")}
+    dataset_columns = {column["name"] for column in inspector.get_columns("datasets")}
+
+    assert "review_policy" not in project_columns
+    assert "created_from" not in question_columns
+    assert "source_provenance" not in question_columns
+    assert "manifest_extraction_provenance" not in dataset_columns
     engine.dispose()
 
 

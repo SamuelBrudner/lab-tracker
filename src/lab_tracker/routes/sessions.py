@@ -32,7 +32,6 @@ from .shared import (
     api_from_request,
     list_response,
     repository_from_request,
-    session_default_status,
     validate_pagination,
 )
 
@@ -51,7 +50,6 @@ def build_sessions_router(api: LabTrackerAPI) -> APIRouter:
             project_id=payload.project_id,
             session_type=payload.session_type,
             primary_question_id=payload.primary_question_id,
-            status=payload.status or session_default_status(),
             actor=actor,
         )
         return Envelope(data=session)

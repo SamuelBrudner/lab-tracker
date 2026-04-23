@@ -24,7 +24,7 @@ def register_error_handlers(app: FastAPI) -> None:
     @app.exception_handler(ValidationError)
     def _handle_validation_error(request: Request, exc: ValidationError):
         return error_response(
-            http_status.HTTP_422_UNPROCESSABLE_ENTITY,
+            http_status.HTTP_422_UNPROCESSABLE_CONTENT,
             "validation_error",
             str(exc),
         )
@@ -48,7 +48,7 @@ def register_error_handlers(app: FastAPI) -> None:
     @app.exception_handler(RequestValidationError)
     def _handle_request_validation_error(request: Request, exc: RequestValidationError):
         return error_response(
-            http_status.HTTP_422_UNPROCESSABLE_ENTITY,
+            http_status.HTTP_422_UNPROCESSABLE_CONTENT,
             "request_validation_error",
             "Request validation failed.",
             issues=issues_from_validation_errors(exc.errors()),

@@ -1,4 +1,4 @@
-"""Dataset and dataset-review SQLAlchemy repositories."""
+"""Dataset SQLAlchemy repository."""
 
 from __future__ import annotations
 
@@ -8,21 +8,18 @@ from uuid import UUID
 from sqlalchemy import select
 from sqlalchemy.orm import Session as OrmSession
 
-from lab_tracker.db_models import DatasetModel, DatasetQuestionLinkModel, DatasetReviewModel
-from lab_tracker.models import Dataset, DatasetReview
+from lab_tracker.db_models import DatasetModel, DatasetQuestionLinkModel
+from lab_tracker.models import Dataset
 from lab_tracker.repository import EntityRepository
 from lab_tracker.sqlalchemy_mappers import (
-    apply_dataset_review_to_model,
     apply_dataset_to_model,
     dataset_from_model,
     dataset_question_link_from_model,
     dataset_question_link_models,
-    dataset_review_from_model,
-    dataset_review_to_model,
     dataset_to_model,
 )
 
-from .common import SQLAlchemyModelRepository, replace_child_rows
+from .common import replace_child_rows
 
 
 class SQLAlchemyDatasetRepository(EntityRepository[Dataset]):
@@ -90,18 +87,3 @@ class SQLAlchemyDatasetRepository(EntityRepository[Dataset]):
         if row is not None:
             self._session.delete(row)
         return entity
-
-
-class SQLAlchemyDatasetReviewRepository(
-    SQLAlchemyModelRepository[DatasetReview, DatasetReviewModel]
-):
-    def __init__(self, session: OrmSession) -> None:
-        super().__init__(
-            session,
-            model_type=DatasetReviewModel,
-            id_column=DatasetReviewModel.requested_at,
-            entity_id_getter=lambda entity: entity.review_id,
-            to_model=dataset_review_to_model,
-            from_model=dataset_review_from_model,
-            apply_to_model=apply_dataset_review_to_model,
-        )

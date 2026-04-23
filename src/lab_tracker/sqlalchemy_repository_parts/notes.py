@@ -2,31 +2,20 @@
 
 from __future__ import annotations
 
-from collections import defaultdict
-from typing import Any
 from uuid import UUID
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session as OrmSession
 
-from lab_tracker.db_models import (
-    NoteExtractedEntityModel,
-    NoteModel,
-    NoteTagSuggestionModel,
-    NoteTargetModel,
-)
+from lab_tracker.db_models import NoteModel, NoteTargetModel
 from lab_tracker.models import Note
 from lab_tracker.repository import EntityRepository
 from lab_tracker.sqlalchemy_mappers import (
     apply_note_to_model,
     entity_ref_from_model,
-    extracted_entity_from_model,
-    note_extracted_entity_models,
     note_from_model,
-    note_tag_suggestion_models,
     note_target_models,
     note_to_model,
-    tag_suggestion_from_model,
 )
 
 from .common import replace_child_rows
@@ -36,50 +25,23 @@ class SQLAlchemyNoteRepository(EntityRepository[Note]):
     def __init__(self, session: OrmSession) -> None:
         self._session = session
 
-    def children_map(
-        self,
-        note_ids: list[str],
-    ) -> tuple[dict[str, list[Any]], dict[str, list[Any]], dict[str, list[Any]]]:
-        extracted_map: dict[str, list[Any]] = defaultdict(list)
-        suggestion_map: dict[str, list[Any]] = defaultdict(list)
-        target_map: dict[str, list[Any]] = defaultdict(list)
+    def target_map(self, note_ids: list[str]) -> dict[str, list[NoteTargetModel]]:
+        target_map: dict[str, list[NoteTargetModel]] = {}
         if not note_ids:
-            return extracted_map, suggestion_map, target_map
-        extracted_rows = list(
-            self._session.scalars(
-                select(NoteExtractedEntityModel).where(NoteExtractedEntityModel.note_id.in_(note_ids))
-            )
-        )
-        suggestion_rows = list(
-            self._session.scalars(
-                select(NoteTagSuggestionModel).where(NoteTagSuggestionModel.note_id.in_(note_ids))
-            )
-        )
+            return target_map
         target_rows = list(
             self._session.scalars(select(NoteTargetModel).where(NoteTargetModel.note_id.in_(note_ids)))
         )
-        for row in extracted_rows:
-            extracted_map[row.note_id].append(row)
-        for row in suggestion_rows:
-            suggestion_map[row.note_id].append(row)
         for row in target_rows:
-            target_map[row.note_id].append(row)
-        return extracted_map, suggestion_map, target_map
+            target_map.setdefault(row.note_id, []).append(row)
+        return target_map
 
     def notes_from_rows(self, rows: list[NoteModel]) -> list[Note]:
         note_ids = [row.note_id for row in rows]
-        extracted_map, suggestion_map, target_map = self.children_map(note_ids)
+        target_map = self.target_map(note_ids)
         return [
             note_from_model(
                 row,
-                extracted_entities=[
-                    extracted_entity_from_model(item)
-                    for item in extracted_map.get(row.note_id, [])
-                ],
-                tag_suggestions=[
-                    tag_suggestion_from_model(item)
-                    for item in suggestion_map.get(row.note_id, [])
-                ],
                 targets=[entity_ref_from_model(item) for item in target_map.get(row.note_id, [])],
             )
             for row in rows
@@ -108,20 +70,6 @@ class SQLAlchemyNoteRepository(EntityRepository[Note]):
             self._session.add(note_to_model(entity))
         else:
             apply_note_to_model(row, entity)
-        replace_child_rows(
-            self._session,
-            NoteExtractedEntityModel,
-            NoteExtractedEntityModel.note_id,
-            entity_id,
-            note_extracted_entity_models(entity),
-        )
-        replace_child_rows(
-            self._session,
-            NoteTagSuggestionModel,
-            NoteTagSuggestionModel.note_id,
-            entity_id,
-            note_tag_suggestion_models(entity),
-        )
         replace_child_rows(
             self._session,
             NoteTargetModel,

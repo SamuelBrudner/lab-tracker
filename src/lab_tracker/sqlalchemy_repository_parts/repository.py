@@ -17,7 +17,6 @@ from lab_tracker.db_models import (
     DatasetFileModel,
     DatasetModel,
     DatasetQuestionLinkModel,
-    DatasetReviewModel,
     NoteModel,
     NoteTargetModel,
     ProjectModel,
@@ -33,7 +32,6 @@ from lab_tracker.models import (
     Claim,
     Dataset,
     DatasetFile,
-    DatasetReview,
     Note,
     Project,
     Question,
@@ -47,7 +45,6 @@ from lab_tracker.sqlalchemy_mappers import (
     claim_from_model,
     dataset_from_model,
     dataset_question_link_from_model,
-    dataset_review_from_model,
     project_from_model,
     question_from_model,
     session_from_model,
@@ -61,7 +58,7 @@ from .analyses import (
 )
 from .common import apply_pagination, count_from_statement
 from .core import SQLAlchemyProjectRepository, SQLAlchemyQuestionRepository
-from .datasets import SQLAlchemyDatasetRepository, SQLAlchemyDatasetReviewRepository
+from .datasets import SQLAlchemyDatasetRepository
 from .notes import SQLAlchemyNoteRepository
 from .sessions import SQLAlchemyAcquisitionOutputRepository, SQLAlchemySessionRepository
 
@@ -74,7 +71,6 @@ class SQLAlchemyLabTrackerRepository(LabTrackerRepository):
         self.projects = SQLAlchemyProjectRepository(session)
         self.questions = SQLAlchemyQuestionRepository(session)
         self.datasets = SQLAlchemyDatasetRepository(session)
-        self.dataset_reviews = SQLAlchemyDatasetReviewRepository(session)
         self.notes = SQLAlchemyNoteRepository(session)
         self.sessions = SQLAlchemySessionRepository(session)
         self.acquisition_outputs = SQLAlchemyAcquisitionOutputRepository(session)
@@ -229,7 +225,6 @@ class SQLAlchemyLabTrackerRepository(LabTrackerRepository):
         project_id: UUID | None = None,
         status: str | None = None,
         question_type: str | None = None,
-        created_from: str | None = None,
         parent_question_id: UUID | None = None,
         ancestor_question_id: UUID | None = None,
         limit: int | None = None,
@@ -247,9 +242,6 @@ class SQLAlchemyLabTrackerRepository(LabTrackerRepository):
         if question_type is not None:
             stmt = stmt.where(QuestionModel.question_type == question_type)
             count_stmt = count_stmt.where(QuestionModel.question_type == question_type)
-        if created_from is not None:
-            stmt = stmt.where(QuestionModel.created_from == created_from)
-            count_stmt = count_stmt.where(QuestionModel.created_from == created_from)
         if parent_question_id is not None:
             stmt = stmt.join(
                 QuestionParentModel,
@@ -291,34 +283,6 @@ class SQLAlchemyLabTrackerRepository(LabTrackerRepository):
         total = count_from_statement(self._session, count_stmt)
         rows = list(self._session.scalars(apply_pagination(stmt, limit=limit, offset=offset)))
         return self.dataset_entities_from_rows(rows), total
-
-    def query_dataset_reviews(
-        self,
-        *,
-        dataset_id: UUID | None = None,
-        status: str | None = None,
-        reviewer_user_id: UUID | None = None,
-        limit: int | None = None,
-        offset: int = 0,
-    ) -> tuple[list[DatasetReview], int]:
-        self._session.flush()
-        stmt = select(DatasetReviewModel)
-        count_stmt = select(DatasetReviewModel.review_id)
-        if dataset_id is not None:
-            stmt = stmt.where(DatasetReviewModel.dataset_id == str(dataset_id))
-            count_stmt = count_stmt.where(DatasetReviewModel.dataset_id == str(dataset_id))
-        if status is not None:
-            stmt = stmt.where(DatasetReviewModel.status == status)
-            count_stmt = count_stmt.where(DatasetReviewModel.status == status)
-        if reviewer_user_id is not None:
-            stmt = stmt.where(DatasetReviewModel.reviewer_user_id == str(reviewer_user_id))
-            count_stmt = count_stmt.where(
-                DatasetReviewModel.reviewer_user_id == str(reviewer_user_id)
-            )
-        stmt = stmt.order_by(DatasetReviewModel.requested_at, DatasetReviewModel.review_id)
-        total = count_from_statement(self._session, count_stmt)
-        rows = list(self._session.scalars(apply_pagination(stmt, limit=limit, offset=offset)))
-        return [dataset_review_from_model(row) for row in rows], total
 
     def query_notes(
         self,

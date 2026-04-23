@@ -4,10 +4,8 @@ from __future__ import annotations
 
 import hashlib
 import json
-import re
-from dataclasses import dataclass
 from typing import Iterable
-from uuid import UUID, uuid4
+from uuid import UUID
 
 from lab_tracker.auth import AuthContext, Role
 from lab_tracker.errors import NotFoundError, ValidationError
@@ -21,8 +19,6 @@ from lab_tracker.models import (
     DatasetCommitManifestInput,
     DatasetFile,
     DatasetStatus,
-    EntityTagSuggestion,
-    ExtractedEntity,
     Note,
     Question,
     QuestionLink,
@@ -55,6 +51,29 @@ def _normalize_note_metadata(metadata: dict[str, str] | None) -> dict[str, str]:
         cleaned_value = value.strip() if isinstance(value, str) else str(value)
         cleaned[cleaned_key] = cleaned_value
     return cleaned
+
+
+def _normalized_query(query: str) -> str:
+    return (query or "").casefold().strip()
+
+
+def question_matches_substring(question: Question, query: str) -> bool:
+    needle = _normalized_query(query)
+    if not needle:
+        return False
+    hypothesis = question.hypothesis
+    return needle in question.text.casefold() or (
+        hypothesis is not None and needle in hypothesis.casefold()
+    )
+
+
+def note_matches_substring(note: Note, query: str) -> bool:
+    needle = _normalized_query(query)
+    if not needle:
+        return False
+    if needle in note.raw_content.casefold():
+        return True
+    return note.transcribed_text is not None and needle in note.transcribed_text.casefold()
 
 
 def _get_or_raise(store: dict[UUID, object], entity_id: UUID, label: str):
@@ -241,21 +260,6 @@ def _analysis_has_question_link(
     return False
 
 
-def _unique_strings(values: Iterable[str] | None, field_name: str) -> list[str]:
-    if not values:
-        return []
-    seen: set[str] = set()
-    unique: list[str] = []
-    for value in values:
-        _ensure_non_empty(value, field_name)
-        cleaned = value.strip()
-        if cleaned in seen:
-            raise ValidationError(f"Duplicate {field_name}.")
-        seen.add(cleaned)
-        unique.append(cleaned)
-    return unique
-
-
 def _normalize_dataset_files(files: Iterable[DatasetFile]) -> list[DatasetFile]:
     normalized: list[DatasetFile] = []
     seen: set[str] = set()
@@ -311,7 +315,6 @@ def _merge_acquisition_outputs(
         nwb_metadata=manifest_input.nwb_metadata,
         bids_metadata=manifest_input.bids_metadata,
         note_ids=manifest_input.note_ids,
-        extraction_provenance=manifest_input.extraction_provenance,
         source_session_id=manifest_input.source_session_id,
     )
 
@@ -335,7 +338,6 @@ def _manifest_input_from_commit(manifest: DatasetCommitManifest) -> DatasetCommi
         nwb_metadata=dict(manifest.nwb_metadata),
         bids_metadata=dict(manifest.bids_metadata),
         note_ids=list(manifest.note_ids),
-        extraction_provenance=list(manifest.extraction_provenance),
         source_session_id=manifest.source_session_id,
     )
 
@@ -361,7 +363,6 @@ def _manifest_input_with_source(
         nwb_metadata=manifest_input.nwb_metadata,
         bids_metadata=manifest_input.bids_metadata,
         note_ids=manifest_input.note_ids,
-        extraction_provenance=manifest_input.extraction_provenance,
         source_session_id=source_session_id,
     )
 
@@ -383,10 +384,6 @@ def _build_commit_manifest(
         nwb_metadata=nwb_metadata,
         bids_metadata=bids_metadata,
         note_ids=_unique_ids(manifest_input.note_ids),
-        extraction_provenance=_unique_strings(
-            manifest_input.extraction_provenance,
-            "extraction_provenance",
-        ),
         question_links=list(question_links),
         source_session_id=manifest_input.source_session_id,
     )
@@ -420,7 +417,6 @@ def _manifest_payload(manifest: DatasetCommitManifest) -> dict[str, object]:
         key=lambda item: (_ROLE_ORDER.get(item["role"], 99), item["question_id"]),
     )
     note_ids = sorted(str(note_id) for note_id in manifest.note_ids)
-    extraction_provenance = sorted(manifest.extraction_provenance)
     metadata = {key: manifest.metadata[key] for key in sorted(manifest.metadata)}
     nwb_metadata = {key: manifest.nwb_metadata[key] for key in sorted(manifest.nwb_metadata)}
     bids_metadata = {key: manifest.bids_metadata[key] for key in sorted(manifest.bids_metadata)}
@@ -431,7 +427,6 @@ def _manifest_payload(manifest: DatasetCommitManifest) -> dict[str, object]:
         "bids_metadata": bids_metadata,
         "question_links": links,
         "note_ids": note_ids,
-        "extraction_provenance": extraction_provenance,
         "source_session_id": str(manifest.source_session_id)
         if manifest.source_session_id
         else None,
@@ -442,181 +437,3 @@ def _compute_commit_hash(manifest: DatasetCommitManifest) -> str:
     payload = _manifest_payload(manifest)
     encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
-
-
-def _build_extracted_entity(label: str, confidence: float, provenance: str) -> ExtractedEntity:
-    _ensure_non_empty(label, "label")
-    if not 0.0 <= confidence <= 1.0:
-        raise ValidationError("confidence must be between 0 and 1.")
-    _ensure_non_empty(provenance, "provenance")
-    return ExtractedEntity(
-        label=label.strip(),
-        confidence=confidence,
-        provenance=provenance.strip(),
-    )
-
-
-@dataclass(frozen=True)
-class _TagMapping:
-    vocabulary: str
-    term_label: str
-    match_confidence: float = 1.0
-    term_id: str | None = None
-
-
-_DEFAULT_TAG_MAP: dict[str, list[_TagMapping]] = {
-    "neuron": [
-        _TagMapping(vocabulary="NIFSTD", term_label="Neuron", match_confidence=0.95),
-        _TagMapping(vocabulary="NCIT", term_label="Neuron", match_confidence=0.9),
-    ],
-    "astrocyte": [_TagMapping(vocabulary="NIFSTD", term_label="Astrocyte", match_confidence=0.93)],
-    "hippocampus": [
-        _TagMapping(vocabulary="UBERON", term_label="Hippocampus", match_confidence=0.92)
-    ],
-    "patch clamp": [_TagMapping(vocabulary="OBI", term_label="Patch clamp", match_confidence=0.88)],
-}
-
-
-def _build_entity_tag_suggestion(
-    *,
-    entity_label: str,
-    term: _TagMapping,
-    extracted_confidence: float,
-    provenance: str,
-) -> EntityTagSuggestion:
-    _ensure_non_empty(entity_label, "entity_label")
-    _ensure_non_empty(term.vocabulary, "vocabulary")
-    _ensure_non_empty(term.term_label, "term_label")
-    _ensure_non_empty(provenance, "provenance")
-    if not 0.0 <= extracted_confidence <= 1.0:
-        raise ValidationError("extracted_confidence must be between 0 and 1.")
-    if not 0.0 <= term.match_confidence <= 1.0:
-        raise ValidationError("match_confidence must be between 0 and 1.")
-    term_id = term.term_id or f"{term.vocabulary}:{_slugify_label(term.term_label)}"
-    confidence = min(1.0, extracted_confidence * term.match_confidence)
-    return EntityTagSuggestion(
-        suggestion_id=uuid4(),
-        entity_label=entity_label.strip(),
-        vocabulary=term.vocabulary.strip(),
-        term_id=term_id,
-        term_label=term.term_label.strip(),
-        confidence=confidence,
-        provenance=provenance.strip(),
-    )
-
-
-def _build_note_tag_provenance(note_id: UUID) -> str:
-    return f"note:{note_id}|tag-mapper:v1"
-
-
-def _normalize_entity_label(label: str) -> str:
-    cleaned = label.strip().casefold()
-    cleaned = re.sub(r"\s+", " ", cleaned)
-    cleaned = re.sub(r"[_\-]+", " ", cleaned)
-    return cleaned.strip()
-
-
-def _slugify_label(label: str) -> str:
-    cleaned = _normalize_entity_label(label)
-    slug = re.sub(r"[^a-z0-9]+", "-", cleaned).strip("-")
-    return slug or "term"
-
-
-def _resolve_tag_mappings(label: str, mapping: dict[str, list[_TagMapping]]) -> list[_TagMapping]:
-    normalized = _normalize_entity_label(label)
-    keys_to_try = [normalized]
-    if normalized.endswith("s") and len(normalized) > 1:
-        keys_to_try.append(normalized[:-1])
-    resolved: list[_TagMapping] = []
-    for key in keys_to_try:
-        resolved.extend(mapping.get(key, []))
-    if not resolved:
-        for key, terms in mapping.items():
-            if key and key in normalized:
-                resolved.extend(terms)
-    return _dedupe_tag_mappings(resolved)
-
-
-def _dedupe_tag_mappings(terms: Iterable[_TagMapping]) -> list[_TagMapping]:
-    seen: set[tuple[str, str, str | None]] = set()
-    unique: list[_TagMapping] = []
-    for term in terms:
-        key = (term.vocabulary.casefold(), term.term_label.casefold(), term.term_id)
-        if key in seen:
-            continue
-        seen.add(key)
-        unique.append(term)
-    return unique
-
-
-def _tag_suggestion_key(suggestion: EntityTagSuggestion) -> tuple[str, str, str, str]:
-    return (
-        suggestion.entity_label.casefold(),
-        suggestion.vocabulary.casefold(),
-        suggestion.term_id.casefold(),
-        suggestion.term_label.casefold(),
-    )
-
-
-_QUESTION_PREFIX_RE = re.compile(r"^\s*(?:q|question)\s*[:\-]\s*(.+)$", re.IGNORECASE)
-_BULLET_PREFIX_RE = re.compile(r"^\s*(?:[-*]|\d+[.)])\s+")
-_QUESTION_SENTENCE_RE = re.compile(r"[^?\n]*\?")
-
-
-def _note_text_for_extraction(note: Note) -> str:
-    if note.transcribed_text:
-        return note.transcribed_text
-    if note.raw_asset is not None:
-        return ""
-    return note.raw_content
-
-
-def _extract_question_candidates(text: str) -> list[str]:
-    if not text:
-        return []
-    candidates: list[str] = []
-    for line in text.splitlines():
-        stripped = line.strip()
-        if not stripped:
-            continue
-        stripped = _BULLET_PREFIX_RE.sub("", stripped).strip()
-        prefix_match = _QUESTION_PREFIX_RE.match(stripped)
-        if prefix_match:
-            candidate = _clean_question_candidate(prefix_match.group(1))
-            if candidate:
-                candidates.append(candidate)
-            continue
-        if "?" in stripped:
-            for match in _QUESTION_SENTENCE_RE.findall(stripped):
-                candidate = _clean_question_candidate(match)
-                if candidate:
-                    candidates.append(candidate)
-    return _dedupe_casefold(candidates)
-
-
-def _clean_question_candidate(candidate: str) -> str | None:
-    cleaned = candidate.strip()
-    if not cleaned:
-        return None
-    if cleaned.endswith(".") and "?" not in cleaned:
-        cleaned = cleaned[:-1].strip()
-    alpha_count = sum(1 for char in cleaned if char.isalpha())
-    if alpha_count < 3:
-        return None
-    return cleaned
-
-
-def _dedupe_casefold(values: Iterable[str]) -> list[str]:
-    seen: set[str] = set()
-    unique: list[str] = []
-    for value in values:
-        key = value.casefold()
-        if key in seen:
-            continue
-        seen.add(key)
-        unique.append(value)
-    return unique
-
-
-def _build_note_provenance(note_id: UUID, *, backend_name: str) -> str:
-    return f"note:{note_id}|question-extractor:v2|backend:{backend_name}"

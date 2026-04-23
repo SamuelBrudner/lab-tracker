@@ -585,22 +585,23 @@ def test_note_delete_preserves_raw_asset_when_request_commit_fails(app, monkeypa
         assert loaded.status_code == 200
 
 
-def test_write_routes_ignore_client_supplied_created_by(
+def test_write_routes_reject_unknown_and_removed_fields(
     client: TestClient,
     admin_auth_headers: dict[str, str],
 ):
     headers = admin_auth_headers
-    actor_id = client.get("/auth/me", headers=headers).json()["data"]["user_id"]
+    project_id = client.post(
+        "/projects",
+        json={"name": "Audit project"},
+        headers=headers,
+    ).json()["data"]["project_id"]
 
     project_response = client.post(
         "/projects",
         json={"name": "Audit project", "created_by": "spoofed-user"},
         headers=headers,
     )
-    assert project_response.status_code == 201
-    project_payload = project_response.json()["data"]
-    assert project_payload["created_by"] == actor_id
-    project_id = project_payload["project_id"]
+    assert project_response.status_code == 422
 
     question_response = client.post(
         "/questions",
@@ -613,10 +614,7 @@ def test_write_routes_ignore_client_supplied_created_by(
         },
         headers=headers,
     )
-    assert question_response.status_code == 201
-    question_payload = question_response.json()["data"]
-    assert question_payload["created_by"] == actor_id
-    assert question_payload["source_provenance"] == "ocr://note-123"
+    assert question_response.status_code == 422
 
     note_response = client.post(
         "/notes",
@@ -624,11 +622,11 @@ def test_write_routes_ignore_client_supplied_created_by(
             "project_id": project_id,
             "raw_content": "audit test note",
             "created_by": "spoofed-user",
+            "extracted_entities": [{"label": "Neuron"}],
         },
         headers=headers,
     )
-    assert note_response.status_code == 201
-    assert note_response.json()["data"]["created_by"] == actor_id
+    assert note_response.status_code == 422
 
     session_response = client.post(
         "/sessions",
@@ -636,20 +634,18 @@ def test_write_routes_ignore_client_supplied_created_by(
             "project_id": project_id,
             "session_type": "operational",
             "created_by": "spoofed-user",
+            "status": "closed",
         },
         headers=headers,
     )
-    assert session_response.status_code == 201
-    assert session_response.json()["data"]["created_by"] == actor_id
+    assert session_response.status_code == 422
 
 
-def test_analysis_create_ignores_client_supplied_executed_by(
+def test_analysis_create_rejects_unknown_fields(
     client: TestClient,
     admin_auth_headers: dict[str, str],
 ):
     headers = admin_auth_headers
-    actor_id = client.get("/auth/me", headers=headers).json()["data"]["user_id"]
-
     project_id = client.post(
         "/projects",
         json={"name": "Analysis audit"},
@@ -681,8 +677,7 @@ def test_analysis_create_ignores_client_supplied_executed_by(
         },
         headers=headers,
     )
-    assert analysis_response.status_code == 201
-    assert analysis_response.json()["data"]["executed_by"] == actor_id
+    assert analysis_response.status_code == 422
 
 
 def test_project_delete_cleans_up_cascaded_attachments(

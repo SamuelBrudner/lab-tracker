@@ -82,11 +82,8 @@ development.
 - `LAB_TRACKER_AUTH_SECRET_KEY`: auth signing secret (default allowed only in `local`)
 - `LAB_TRACKER_AUTH_TOKEN_TTL_MINUTES`: access token lifetime (default: `720`)
 
-The retained v1 runtime keeps note handling manual and uses the built-in
-substring search backend for query flows. OCR assists, extraction inboxes,
-entity/tag suggestion flows, semantic/vector search, and dataset review
-governance are not part of the supported runtime; those ideas live in the
-restoration ledger in
+The retained v1 runtime keeps note handling manual and uses direct substring
+search for query flows. Deferred concepts live in
 [`docs/retained-v1-surface.md`](/Users/samuelbrudner/Documents/GitHub/lab-tracker/docs/retained-v1-surface.md)
 rather than the active product surface.
 

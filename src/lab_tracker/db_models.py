@@ -36,7 +36,6 @@ class ProjectModel(Base):
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     description: Mapped[str] = mapped_column(String(1000), default="")
     status: Mapped[str] = mapped_column(String(20), default="active")
-    review_policy: Mapped[str] = mapped_column(String(20), default="none")
     created_by: Mapped[str | None] = mapped_column(String(255))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utc_now)
     updated_at: Mapped[datetime] = mapped_column(
@@ -63,8 +62,6 @@ class QuestionModel(Base):
     question_type: Mapped[str] = mapped_column(String(40), nullable=False)
     hypothesis: Mapped[str | None] = mapped_column(Text)
     status: Mapped[str] = mapped_column(String(20), default="staged")
-    created_from: Mapped[str] = mapped_column(String(40), default="manual")
-    source_provenance: Mapped[str | None] = mapped_column(String(255))
     created_by: Mapped[str | None] = mapped_column(String(255))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utc_now)
     updated_at: Mapped[datetime] = mapped_column(
@@ -113,7 +110,6 @@ class DatasetModel(Base):
     manifest_nwb_metadata: Mapped[dict[str, str]] = mapped_column(JSON, default=dict)
     manifest_bids_metadata: Mapped[dict[str, str]] = mapped_column(JSON, default=dict)
     manifest_note_ids: Mapped[list[str]] = mapped_column(JSON, default=list)
-    manifest_extraction_provenance: Mapped[list[str]] = mapped_column(JSON, default=list)
     manifest_source_session_id: Mapped[str | None] = mapped_column(String(36))
     status: Mapped[str] = mapped_column(String(20), default="staged")
     created_by: Mapped[str | None] = mapped_column(String(255))
@@ -171,26 +167,6 @@ class DatasetFileModel(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utc_now)
 
 
-class DatasetReviewModel(Base):
-    __tablename__ = "dataset_reviews"
-
-    review_id: Mapped[str] = mapped_column(
-        String(36),
-        primary_key=True,
-        default=lambda: str(uuid4()),
-    )
-    dataset_id: Mapped[str] = mapped_column(
-        String(36),
-        ForeignKey("datasets.dataset_id", ondelete="CASCADE"),
-        nullable=False,
-    )
-    reviewer_user_id: Mapped[str | None] = mapped_column(String(36))
-    status: Mapped[str] = mapped_column(String(30), default="pending")
-    comments: Mapped[str | None] = mapped_column(Text)
-    requested_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utc_now)
-    resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-
-
 class NoteModel(Base):
     __tablename__ = "notes"
 
@@ -220,53 +196,6 @@ class NoteModel(Base):
         default=_utc_now,
         onupdate=_utc_now,
     )
-
-
-class NoteExtractedEntityModel(Base):
-    __tablename__ = "note_extracted_entities"
-
-    extracted_entity_id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    note_id: Mapped[str] = mapped_column(
-        String(36),
-        ForeignKey("notes.note_id", ondelete="CASCADE"),
-        nullable=False,
-    )
-    label: Mapped[str] = mapped_column(String(255), nullable=False)
-    confidence: Mapped[float] = mapped_column(Float, nullable=False)
-    provenance: Mapped[str] = mapped_column(String(255), nullable=False)
-
-
-class NoteTagSuggestionModel(Base):
-    __tablename__ = "note_tag_suggestions"
-    __table_args__ = (
-        UniqueConstraint(
-            "note_id",
-            "entity_label",
-            "vocabulary",
-            "term_id",
-            name="uq_note_tag_suggestion",
-        ),
-    )
-
-    suggestion_id: Mapped[str] = mapped_column(
-        String(36),
-        primary_key=True,
-        default=lambda: str(uuid4()),
-    )
-    note_id: Mapped[str] = mapped_column(
-        String(36),
-        ForeignKey("notes.note_id", ondelete="CASCADE"),
-        nullable=False,
-    )
-    entity_label: Mapped[str] = mapped_column(String(255), nullable=False)
-    vocabulary: Mapped[str] = mapped_column(String(40), nullable=False)
-    term_id: Mapped[str] = mapped_column(String(255), nullable=False)
-    term_label: Mapped[str] = mapped_column(String(255), nullable=False)
-    confidence: Mapped[float] = mapped_column(Float, nullable=False)
-    provenance: Mapped[str] = mapped_column(String(255), nullable=False)
-    status: Mapped[str] = mapped_column(String(20), default="staged")
-    reviewed_by: Mapped[str | None] = mapped_column(String(255))
-    reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class NoteTargetModel(Base):
@@ -493,17 +422,6 @@ class UserModel(Base):
 
 Index("ix_questions_project_created_at", QuestionModel.project_id, QuestionModel.created_at)
 Index("ix_datasets_project_created_at", DatasetModel.project_id, DatasetModel.created_at)
-Index(
-    "ix_dataset_reviews_dataset_requested_at",
-    DatasetReviewModel.dataset_id,
-    DatasetReviewModel.requested_at,
-)
-Index(
-    "ix_dataset_reviews_reviewer_status_requested_at",
-    DatasetReviewModel.reviewer_user_id,
-    DatasetReviewModel.status,
-    DatasetReviewModel.requested_at,
-)
 Index("ix_notes_project_created_at", NoteModel.project_id, NoteModel.created_at)
 Index(
     "ix_note_targets_entity_lookup",

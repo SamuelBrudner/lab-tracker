@@ -11,7 +11,6 @@ from lab_tracker.models import (
     Claim,
     Dataset,
     DatasetFile,
-    DatasetReview,
     Note,
     Project,
     Question,
@@ -44,7 +43,6 @@ class LabTrackerRepository(Protocol):
     projects: EntityRepository[Project]
     questions: EntityRepository[Question]
     datasets: EntityRepository[Dataset]
-    dataset_reviews: EntityRepository[DatasetReview]
     notes: EntityRepository[Note]
     sessions: EntityRepository[Session]
     acquisition_outputs: EntityRepository[AcquisitionOutput]
@@ -73,7 +71,6 @@ class LabTrackerRepository(Protocol):
         project_id: UUID | None = None,
         status: str | None = None,
         question_type: str | None = None,
-        created_from: str | None = None,
         parent_question_id: UUID | None = None,
         ancestor_question_id: UUID | None = None,
         limit: int | None = None,
@@ -90,17 +87,6 @@ class LabTrackerRepository(Protocol):
         offset: int = 0,
     ) -> tuple[list[Dataset], int]:
         """Query datasets with filters and pagination."""
-
-    def query_dataset_reviews(
-        self,
-        *,
-        dataset_id: UUID | None = None,
-        status: str | None = None,
-        reviewer_user_id: UUID | None = None,
-        limit: int | None = None,
-        offset: int = 0,
-    ) -> tuple[list[DatasetReview], int]:
-        """Query dataset reviews with filters and pagination."""
 
     def query_notes(
         self,

@@ -10,7 +10,7 @@ from datetime import datetime
 from typing import Any, Generic, TypeVar
 from uuid import UUID
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from lab_tracker.auth import Role
 from lab_tracker.models import (
@@ -22,13 +22,11 @@ from lab_tracker.models import (
     DatasetCommitManifestInput,
     DatasetStatus,
     EntityRef,
-    ExtractedEntity,
     Note,
     NoteStatus,
     ProjectStatus,
     Question,
     QuestionLink,
-    QuestionSource,
     QuestionStatus,
     QuestionType,
     SessionStatus,
@@ -38,6 +36,10 @@ from lab_tracker.models import (
 )
 
 T = TypeVar("T")
+
+
+class RequestModel(BaseModel):
+    model_config = ConfigDict(extra="forbid")
 
 
 class Envelope(BaseModel, Generic[T]):
@@ -85,14 +87,14 @@ class AuthTokenRead(BaseModel):
     user: AuthUserRead
 
 
-class AuthRegisterRequest(BaseModel):
+class AuthRegisterRequest(RequestModel):
     username: str = Field(..., min_length=1)
     password: str = Field(..., min_length=1)
     role: Role = Role.VIEWER
     bootstrap_token: str | None = Field(default=None, min_length=1)
 
 
-class AuthLoginRequest(BaseModel):
+class AuthLoginRequest(RequestModel):
     username: str = Field(..., min_length=1)
     password: str = Field(..., min_length=1)
 
@@ -106,30 +108,28 @@ class NoteRawDownloadRead(BaseModel):
     content_base64: str
 
 
-class ProjectCreate(BaseModel):
+class ProjectCreate(RequestModel):
     name: str = Field(..., min_length=1)
     description: str | None = None
     status: ProjectStatus | None = None
 
 
-class ProjectUpdate(BaseModel):
+class ProjectUpdate(RequestModel):
     name: str | None = None
     description: str | None = None
     status: ProjectStatus | None = None
 
 
-class QuestionCreate(BaseModel):
+class QuestionCreate(RequestModel):
     project_id: UUID
     text: str = Field(..., min_length=1)
     question_type: QuestionType
     hypothesis: str | None = None
     status: QuestionStatus | None = None
     parent_question_ids: list[UUID] | None = None
-    created_from: QuestionSource | None = None
-    source_provenance: str | None = None
 
 
-class QuestionUpdate(BaseModel):
+class QuestionUpdate(RequestModel):
     text: str | None = None
     question_type: QuestionType | None = None
     hypothesis: str | None = None
@@ -137,7 +137,7 @@ class QuestionUpdate(BaseModel):
     parent_question_ids: list[UUID] | None = None
 
 
-class DatasetCreate(BaseModel):
+class DatasetCreate(RequestModel):
     project_id: UUID
     commit_manifest: DatasetCommitManifestInput | None = None
     commit_hash: str | None = None
@@ -146,75 +146,71 @@ class DatasetCreate(BaseModel):
     status: DatasetStatus | None = None
 
 
-class DatasetUpdate(BaseModel):
+class DatasetUpdate(RequestModel):
     commit_manifest: DatasetCommitManifestInput | None = None
     commit_hash: str | None = None
     status: DatasetStatus | None = None
     question_links: list[QuestionLink] | None = None
 
 
-class NoteCreate(BaseModel):
+class NoteCreate(RequestModel):
     project_id: UUID
     raw_content: str = Field(..., min_length=1)
     transcribed_text: str | None = None
-    extracted_entities: list[ExtractedEntity] | None = None
     targets: list[EntityRef] | None = None
     metadata: dict[str, str] | None = None
     status: NoteStatus | None = None
 
 
-class NoteUpload(BaseModel):
+class NoteUpload(RequestModel):
     project_id: UUID
     filename: str = Field(..., min_length=1)
     content_type: str = Field(..., min_length=1)
     content_base64: str = Field(..., min_length=1)
     transcribed_text: str | None = None
-    extracted_entities: list[ExtractedEntity] | None = None
     targets: list[EntityRef] | None = None
     metadata: dict[str, str] | None = None
     status: NoteStatus | None = None
 
 
-class NoteUpdate(BaseModel):
+class NoteUpdate(RequestModel):
     transcribed_text: str | None = None
-    extracted_entities: list[ExtractedEntity] | None = None
     targets: list[EntityRef] | None = None
     metadata: dict[str, str] | None = None
     status: NoteStatus | None = None
 
 
-class SessionCreate(BaseModel):
+class SessionCreate(RequestModel):
     project_id: UUID
     session_type: SessionType
     primary_question_id: UUID | None = None
-    status: SessionStatus | None = None
 
 
-class SessionUpdate(BaseModel):
+class SessionUpdate(RequestModel):
     status: SessionStatus | None = None
     ended_at: datetime | None = None
 
 
-class SessionPromotionRequest(BaseModel):
+class SessionPromotionRequest(RequestModel):
     """Promote an operational session into a scientific session by linking a primary question."""
 
     primary_question_id: UUID
 
 
-class SessionDatasetPromotionRequest(BaseModel):
+class SessionDatasetPromotionRequest(RequestModel):
     primary_question_id: UUID
     secondary_question_ids: list[UUID] | None = None
     commit_manifest: DatasetCommitManifestInput | None = None
     status: DatasetStatus | None = None
 
 
-class AcquisitionOutputCreate(BaseModel):
+class AcquisitionOutputCreate(RequestModel):
     file_path: str = Field(..., min_length=1)
     checksum: str = Field(..., min_length=1)
     size_bytes: int | None = Field(default=None, ge=0)
 
 
-class AnalysisCreate(BaseModel):
+class AnalysisCreate(RequestModel):
     project_id: UUID
     dataset_ids: list[UUID] = Field(..., min_length=1)
     method_hash: str = Field(..., min_length=1)
@@ -223,12 +219,12 @@ class AnalysisCreate(BaseModel):
     status: AnalysisStatus | None = None
 
 
-class AnalysisUpdate(BaseModel):
+class AnalysisUpdate(RequestModel):
     status: AnalysisStatus | None = None
     environment_hash: str | None = None
 
 
-class ClaimCreate(BaseModel):
+class ClaimCreate(RequestModel):
     project_id: UUID
     statement: str = Field(..., min_length=1)
     confidence: float = Field(..., ge=0.0, le=100.0)
@@ -237,7 +233,7 @@ class ClaimCreate(BaseModel):
     supported_by_analysis_ids: list[UUID] | None = None
 
 
-class ClaimUpdate(BaseModel):
+class ClaimUpdate(RequestModel):
     statement: str | None = Field(None, min_length=1)
     confidence: float | None = Field(None, ge=0.0, le=100.0)
     status: ClaimStatus | None = None
@@ -245,7 +241,7 @@ class ClaimUpdate(BaseModel):
     supported_by_analysis_ids: list[UUID] | None = None
 
 
-class VisualizationCreate(BaseModel):
+class VisualizationCreate(RequestModel):
     analysis_id: UUID
     viz_type: str = Field(..., min_length=1)
     file_path: str = Field(..., min_length=1)
@@ -253,7 +249,7 @@ class VisualizationCreate(BaseModel):
     related_claim_ids: list[UUID] | None = None
 
 
-class VisualizationUpdate(BaseModel):
+class VisualizationUpdate(RequestModel):
     viz_type: str | None = Field(None, min_length=1)
     file_path: str | None = Field(None, min_length=1)
     caption: str | None = None
@@ -265,7 +261,7 @@ class SearchResults(BaseModel):
     notes: list[Note] = Field(default_factory=list)
 
 
-class AnalysisCommitRequest(BaseModel):
+class AnalysisCommitRequest(RequestModel):
     environment_hash: str | None = None
     claims: list[ClaimInput] | None = None
     visualizations: list[VisualizationInput] | None = None

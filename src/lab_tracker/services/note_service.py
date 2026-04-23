@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from typing import BinaryIO, Iterable
 from uuid import UUID, uuid4
 
@@ -9,9 +10,7 @@ from lab_tracker.auth import AuthContext, require_role
 from lab_tracker.errors import NotFoundError, ValidationError
 from lab_tracker.models import (
     EntityRef,
-    EntityTagSuggestion,
     EntityType,
-    ExtractedEntity,
     Note,
     NoteRawAsset,
     NoteStatus,
@@ -20,9 +19,10 @@ from lab_tracker.models import (
 from lab_tracker.services.shared import (
     WRITE_ROLES,
     _actor_user_id,
-    _build_extracted_entity,
     _normalize_note_metadata,
 )
+
+_logger = logging.getLogger(__name__)
 
 
 class NoteServiceMixin:
@@ -55,8 +55,6 @@ class NoteServiceMixin:
         *,
         raw_asset: NoteRawAsset | None = None,
         transcribed_text: str | None = None,
-        extracted_entities: Iterable[ExtractedEntity | tuple[str, float, str]] | None = None,
-        tag_suggestions: Iterable[EntityTagSuggestion] | None = None,
         targets: Iterable[EntityRef] | None = None,
         metadata: dict[str, str] | None = None,
         status: NoteStatus = NoteStatus.STAGED,
@@ -71,22 +69,12 @@ class NoteServiceMixin:
         for target in resolved_targets:
             self._ensure_target_exists(target, project_id)
         resolved_metadata = _normalize_note_metadata(metadata)
-        resolved_entities: list[ExtractedEntity] = []
-        for item in extracted_entities or []:
-            if isinstance(item, ExtractedEntity):
-                label, confidence, provenance = item.label, item.confidence, item.provenance
-            else:
-                label, confidence, provenance = item
-            resolved_entities.append(_build_extracted_entity(label, confidence, provenance))
-        resolved_tag_suggestions = list(tag_suggestions or [])
         note = Note(
             note_id=uuid4(),
             project_id=project_id,
             raw_content=raw_text,
             raw_asset=raw_asset,
             transcribed_text=transcribed_text.strip() if transcribed_text else None,
-            extracted_entities=resolved_entities,
-            tag_suggestions=resolved_tag_suggestions,
             targets=resolved_targets,
             metadata=resolved_metadata,
             status=status,
@@ -94,7 +82,6 @@ class NoteServiceMixin:
         )
         self._remember_entity("notes", note.note_id, note)
         self._run_repository_write(lambda repository: repository.notes.save(note))
-        self._queue_search_op("upsert_notes", [note])
         return note
 
     def store_note_raw_asset(
@@ -129,7 +116,6 @@ class NoteServiceMixin:
         raw_asset: NoteRawAsset | None = None,
         owns_raw_asset: bool = False,
         transcribed_text: str | None = None,
-        extracted_entities: Iterable[ExtractedEntity | tuple[str, float, str]] | None = None,
         targets: Iterable[EntityRef] | None = None,
         metadata: dict[str, str] | None = None,
         status: NoteStatus = NoteStatus.STAGED,
@@ -164,7 +150,6 @@ class NoteServiceMixin:
                 raw_content=None,
                 raw_asset=asset,
                 transcribed_text=resolved_transcribed_text,
-                extracted_entities=extracted_entities,
                 targets=targets,
                 metadata=metadata,
                 status=status,
@@ -234,7 +219,6 @@ class NoteServiceMixin:
         note_id: UUID,
         *,
         transcribed_text: str | None = None,
-        extracted_entities: Iterable[ExtractedEntity | tuple[str, float, str]] | None = None,
         targets: Iterable[EntityRef] | None = None,
         metadata: dict[str, str] | None = None,
         status: NoteStatus | None = None,
@@ -244,15 +228,6 @@ class NoteServiceMixin:
         note = self.get_note(note_id)
         if transcribed_text is not None:
             note.transcribed_text = transcribed_text.strip() if transcribed_text else None
-        if extracted_entities is not None:
-            resolved_entities: list[ExtractedEntity] = []
-            for item in extracted_entities:
-                if isinstance(item, ExtractedEntity):
-                    label, confidence, provenance = item.label, item.confidence, item.provenance
-                else:
-                    label, confidence, provenance = item
-                resolved_entities.append(_build_extracted_entity(label, confidence, provenance))
-            note.extracted_entities = resolved_entities
         if targets is not None:
             resolved_targets = list(targets)
             for target in resolved_targets:
@@ -264,7 +239,6 @@ class NoteServiceMixin:
             note.status = status
         note.updated_at = utc_now()
         self._run_repository_write(lambda repository: repository.notes.save(note))
-        self._queue_search_op("upsert_notes", [note])
         return note
 
     def download_note_raw(self, note_id: UUID) -> tuple[NoteRawAsset, bytes]:
@@ -281,7 +255,6 @@ class NoteServiceMixin:
         note = self.get_note(note_id)
         self._forget_entity("notes", note_id)
         self._run_repository_write(lambda repository: repository.notes.delete(note_id))
-        self._queue_search_op("delete_notes", [note_id])
         if note.raw_asset is not None:
             self.run_after_commit(
                 lambda raw_asset=note.raw_asset: self._delete_raw_asset(raw_asset)

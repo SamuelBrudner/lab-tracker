@@ -6,18 +6,12 @@ from typing import Iterable
 from uuid import UUID, uuid4
 
 from lab_tracker.auth import AuthContext, require_role
+from lab_tracker.errors import ValidationError
 from lab_tracker.models import (
     Question,
-    QuestionSource,
     QuestionStatus,
     QuestionType,
     utc_now,
-)
-from lab_tracker.errors import ValidationError
-from lab_tracker.services.search_backends import (
-    InMemorySubstringSearchBackend,
-    SearchQuery,
-    question_matches_substring,
 )
 from lab_tracker.services.shared import (
     WRITE_ROLES,
@@ -26,6 +20,7 @@ from lab_tracker.services.shared import (
     _ensure_question_parents_dag,
     _ensure_question_status_transition,
     _is_question_ancestor,
+    question_matches_substring,
     _unique_ids,
 )
 
@@ -51,8 +46,6 @@ class QuestionServiceMixin:
         hypothesis: str | None = None,
         status: QuestionStatus = QuestionStatus.STAGED,
         parent_question_ids: Iterable[UUID] | None = None,
-        created_from: QuestionSource = QuestionSource.MANUAL,
-        source_provenance: str | None = None,
         actor: AuthContext | None = None,
     ) -> Question:
         require_role(actor, WRITE_ROLES)
@@ -77,13 +70,10 @@ class QuestionServiceMixin:
             hypothesis=hypothesis.strip() if hypothesis else None,
             status=status,
             parent_question_ids=parent_ids,
-            created_from=created_from,
-            source_provenance=source_provenance.strip() if source_provenance else None,
             created_by=_actor_user_id(actor),
         )
         self._remember_entity("questions", question.question_id, question)
         self._run_repository_write(lambda repository: repository.questions.save(question))
-        self._queue_search_op("upsert_questions", [question])
         return question
 
     def get_question(self, question_id: UUID) -> Question:
@@ -100,7 +90,6 @@ class QuestionServiceMixin:
         project_id: UUID | None = None,
         status: QuestionStatus | None = None,
         question_type: QuestionType | None = None,
-        created_from: QuestionSource | None = None,
         search: str | None = None,
         parent_question_id: UUID | None = None,
         ancestor_question_id: UUID | None = None,
@@ -109,7 +98,6 @@ class QuestionServiceMixin:
             project_id=project_id,
             status=status,
             question_type=question_type,
-            created_from=created_from,
             search=search,
             parent_question_id=parent_question_id,
             ancestor_question_id=ancestor_question_id,
@@ -121,7 +109,6 @@ class QuestionServiceMixin:
         project_id: UUID | None = None,
         status: QuestionStatus | None = None,
         question_type: QuestionType | None = None,
-        created_from: QuestionSource | None = None,
         search: str | None = None,
         parent_question_id: UUID | None = None,
         ancestor_question_id: UUID | None = None,
@@ -132,7 +119,6 @@ class QuestionServiceMixin:
                 project_id=project_id,
                 status=status.value if status is not None else None,
                 question_type=question_type.value if question_type is not None else None,
-                created_from=created_from.value if created_from is not None else None,
                 parent_question_id=parent_question_id,
                 ancestor_question_id=ancestor_question_id,
                 limit=None,
@@ -158,10 +144,6 @@ class QuestionServiceMixin:
                 questions = [
                     question for question in questions if question.question_type == question_type
                 ]
-            if created_from is not None:
-                questions = [
-                    question for question in questions if question.created_from == created_from
-                ]
             if parent_question_id is not None:
                 questions = [
                     question
@@ -180,36 +162,9 @@ class QuestionServiceMixin:
                     )
                 ]
         if search is not None and search.strip():
-            if (
-                repository is not None
-                and not self._allow_in_memory
-                and self._search_backend.backend_name == InMemorySubstringSearchBackend.backend_name
-            ):
-                questions = [
-                    question
-                    for question in questions
-                    if question_matches_substring(question, search)
-                ]
-            else:
-                candidate_ids = [question.question_id for question in questions]
-                hits = self._search_backend.search_question_ids(
-                    SearchQuery(query=search, project_id=project_id),
-                    question_ids=candidate_ids,
-                )
-                if repository is not None and not self._allow_in_memory:
-                    questions = repository.fetch_questions(hits)
-                    self._cache_entities(
-                        "questions",
-                        questions,
-                        lambda question: question.question_id,
-                    )
-                else:
-                    question_map = {question.question_id: question for question in questions}
-                    questions = [
-                        question_map[question_id]
-                        for question_id in hits
-                        if question_id in question_map
-                    ]
+            questions = [
+                question for question in questions if question_matches_substring(question, search)
+            ]
         return questions
 
     def update_question(
@@ -249,7 +204,6 @@ class QuestionServiceMixin:
             question.parent_question_ids = parent_ids
         question.updated_at = utc_now()
         self._run_repository_write(lambda repository: repository.questions.save(question))
-        self._queue_search_op("upsert_questions", [question])
         return question
 
     def delete_question(self, question_id: UUID, *, actor: AuthContext | None = None) -> Question:
@@ -257,5 +211,4 @@ class QuestionServiceMixin:
         question = self.get_question(question_id)
         self._forget_entity("questions", question_id)
         self._run_repository_write(lambda repository: repository.questions.delete(question_id))
-        self._queue_search_op("delete_questions", [question_id])
         return question

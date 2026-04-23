@@ -5,7 +5,7 @@ from __future__ import annotations
 from uuid import UUID, uuid4
 
 from lab_tracker.auth import AuthContext, require_role
-from lab_tracker.models import Project, ProjectReviewPolicy, ProjectStatus, utc_now
+from lab_tracker.models import Project, ProjectStatus, utc_now
 from lab_tracker.services.shared import (
     WRITE_ROLES,
     _actor_user_id,
@@ -19,7 +19,6 @@ class ProjectServiceMixin:
         name: str,
         description: str = "",
         status: ProjectStatus = ProjectStatus.ACTIVE,
-        review_policy: ProjectReviewPolicy = ProjectReviewPolicy.NONE,
         *,
         actor: AuthContext | None = None,
     ) -> Project:
@@ -30,7 +29,6 @@ class ProjectServiceMixin:
             name=name.strip(),
             description=description.strip(),
             status=status,
-            review_policy=review_policy,
             created_by=_actor_user_id(actor),
         )
         self._remember_entity("projects", project.project_id, project)
@@ -59,7 +57,6 @@ class ProjectServiceMixin:
         name: str | None = None,
         description: str | None = None,
         status: ProjectStatus | None = None,
-        review_policy: ProjectReviewPolicy | None = None,
         actor: AuthContext | None = None,
     ) -> Project:
         require_role(actor, WRITE_ROLES)
@@ -71,8 +68,6 @@ class ProjectServiceMixin:
             project.description = description.strip()
         if status is not None:
             project.status = status
-        if review_policy is not None:
-            project.review_policy = review_policy
         project.updated_at = utc_now()
         self._run_repository_write(lambda repository: repository.projects.save(project))
         return project

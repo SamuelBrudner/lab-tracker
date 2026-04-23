@@ -359,7 +359,6 @@ def test_fastapi_search_reads_database_changes_after_app_start(monkeypatch, tmp_
             text="Externally inserted search target",
             question_type="descriptive",
             status="active",
-            created_from="manual",
         )
         note = NoteModel(
             project_id=project.project_id,
@@ -396,7 +395,7 @@ def test_fastapi_search_reads_database_changes_after_app_start(monkeypatch, tmp_
     assert {item["note_id"] for item in payload["notes"]} == {note_id}
 
 
-def test_note_metadata_search_survives_app_restart(monkeypatch, tmp_path):
+def test_note_transcribed_text_search_survives_app_restart(monkeypatch, tmp_path):
     db_path = tmp_path / "note-search-persistence.db"
     database_url = f"sqlite+pysqlite:///{db_path}"
     monkeypatch.setenv("LAB_TRACKER_DATABASE_URL", database_url)
@@ -430,7 +429,7 @@ def test_note_metadata_search_survives_app_restart(monkeypatch, tmp_path):
 
         project_id = client.post(
             "/projects",
-            json={"name": "Metadata search"},
+            json={"name": "Transcript search"},
             headers=headers,
         ).json()["data"]["project_id"]
         note_response = client.post(
@@ -438,6 +437,7 @@ def test_note_metadata_search_survives_app_restart(monkeypatch, tmp_path):
             json={
                 "project_id": project_id,
                 "raw_content": "capture log",
+                "transcribed_text": "Sam observed stable recordings",
                 "metadata": {"owner": "Sam", "rig": "np2"},
             },
             headers=headers,
@@ -501,7 +501,6 @@ def test_repository_backed_api_rolls_back_failed_writes_from_read_state():
             other = _EmptyRepoPart()
             self.questions = other
             self.datasets = other
-            self.dataset_reviews = other
             self.notes = other
             self.sessions = other
             self.acquisition_outputs = other

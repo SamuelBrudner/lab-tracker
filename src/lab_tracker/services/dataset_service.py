@@ -29,6 +29,7 @@ from lab_tracker.services.shared import (
     _validate_commit_hash,
 )
 
+
 def _load_attached_files(self, dataset_id: UUID) -> list[DatasetFile] | None:
     repository = self._active_repository()
     if repository is None or self._allow_in_memory:
@@ -55,11 +56,6 @@ def _merge_unique_ids(base: list[UUID], additions: Iterable[UUID]) -> list[UUID]
 
 
 class DatasetServiceMixin:
-    def _dataset_review_required(self, project_id: UUID) -> bool:
-        # Review metadata remains readable, but direct commit is now the retained default path.
-        self.get_project(project_id)
-        return False
-
     def create_dataset(
         self,
         project_id: UUID,
@@ -87,8 +83,6 @@ class DatasetServiceMixin:
                 raise ValidationError("Secondary questions must belong to the same project.")
 
         commit_requested = status == DatasetStatus.COMMITTED
-        review_required = commit_requested and self._dataset_review_required(project_id)
-        resolved_status = DatasetStatus.STAGED if review_required else status
 
         question_links = [
             QuestionLink(question_id=primary_question_id, role=QuestionLinkRole.PRIMARY),
@@ -102,7 +96,7 @@ class DatasetServiceMixin:
             question_links,
         )
         self._ensure_source_session_valid(resolved_manifest.source_session_id, project_id)
-        if resolved_status == DatasetStatus.COMMITTED and not resolved_manifest.files:
+        if status == DatasetStatus.COMMITTED and not resolved_manifest.files:
             raise ValidationError("At least one file is required to commit a dataset.")
         resolved_commit_hash = _compute_commit_hash(resolved_manifest)
         _validate_commit_hash(commit_hash, resolved_commit_hash)
@@ -114,18 +108,13 @@ class DatasetServiceMixin:
             primary_question_id=primary_question_id,
             question_links=question_links,
             commit_manifest=resolved_manifest,
-            status=resolved_status,
+            status=status,
             created_by=_actor_user_id(actor),
         )
         if commit_requested:
             _ensure_primary_question_active(primary_question)
         self._remember_entity("datasets", dataset.dataset_id, dataset)
         self._run_repository_write(lambda repository: repository.datasets.save(dataset))
-        if review_required:
-            self.request_dataset_review(
-                dataset.dataset_id,
-                actor=actor,
-            )
         return dataset
 
     def get_dataset(self, dataset_id: UUID) -> Dataset:
@@ -190,15 +179,13 @@ class DatasetServiceMixin:
         commit_requested = (
             status == DatasetStatus.COMMITTED and dataset.status != DatasetStatus.COMMITTED
         )
-        review_required = commit_requested and self._dataset_review_required(dataset.project_id)
-        is_committing = commit_requested and not review_required
 
         if commit_requested:
             primary_question = self.get_question(dataset.primary_question_id)
             _ensure_primary_question_active(primary_question)
 
         should_refresh_manifest = (
-            commit_manifest is not None or question_links is not None or is_committing
+            commit_manifest is not None or question_links is not None or commit_requested
         )
         if should_refresh_manifest:
             if commit_manifest is None:
@@ -208,7 +195,7 @@ class DatasetServiceMixin:
             else:
                 base_manifest = commit_manifest
 
-            if is_committing:
+            if commit_requested:
                 attached_files = _load_attached_files(self, dataset.dataset_id)
                 if attached_files is None:
                     files = list(base_manifest.files)
@@ -228,7 +215,6 @@ class DatasetServiceMixin:
                     nwb_metadata=base_manifest.nwb_metadata,
                     bids_metadata=base_manifest.bids_metadata,
                     note_ids=note_ids,
-                    extraction_provenance=base_manifest.extraction_provenance,
                     source_session_id=base_manifest.source_session_id,
                 )
 
@@ -246,16 +232,7 @@ class DatasetServiceMixin:
         else:
             _validate_commit_hash(commit_hash, _compute_commit_hash(dataset.commit_manifest))
         if status is not None:
-            if status == DatasetStatus.COMMITTED and dataset.status != DatasetStatus.COMMITTED:
-                if self._dataset_review_required(dataset.project_id):
-                    self.request_dataset_review(
-                        dataset.dataset_id,
-                        actor=actor,
-                    )
-                else:
-                    dataset.status = status
-            else:
-                dataset.status = status
+            dataset.status = status
         dataset.updated_at = utc_now()
         self._run_repository_write(lambda repository: repository.datasets.save(dataset))
         return dataset

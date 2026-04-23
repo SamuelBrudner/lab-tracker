@@ -12,9 +12,7 @@ from lab_tracker.models import (
     DatasetCommitManifest,
     DatasetStatus,
     EntityRef,
-    EntityTagSuggestion,
     EntityType,
-    ExtractedEntity,
     Note,
     NoteStatus,
     OutcomeStatus,
@@ -23,12 +21,10 @@ from lab_tracker.models import (
     Question,
     QuestionLink,
     QuestionLinkRole,
-    QuestionSource,
     QuestionStatus,
     QuestionType,
     Session,
     SessionType,
-    TagSuggestionStatus,
 )
 from lab_tracker.sqlalchemy_repository import SQLAlchemyLabTrackerRepository
 
@@ -88,7 +84,6 @@ def test_question_repository_persists_parent_links(db_session):
         question_type=QuestionType.HYPOTHESIS_DRIVEN,
         status=QuestionStatus.ACTIVE,
         parent_question_ids=[],
-        created_from=QuestionSource.MANUAL,
         created_at=_ts(1),
         updated_at=_ts(1),
     )
@@ -99,7 +94,6 @@ def test_question_repository_persists_parent_links(db_session):
         question_type=QuestionType.METHOD_DEV,
         status=QuestionStatus.STAGED,
         parent_question_ids=[parent_question.question_id],
-        created_from=QuestionSource.API,
         created_at=_ts(2),
         updated_at=_ts(2),
     )
@@ -126,21 +120,6 @@ def test_note_repository_persists_supported_children(db_session):
         project_id=project.project_id,
         raw_content="capture.md",
         transcribed_text="signal stable",
-        extracted_entities=[
-            ExtractedEntity(label="hippocampus", confidence=0.91, provenance="ocr")
-        ],
-        tag_suggestions=[
-            EntityTagSuggestion(
-                suggestion_id=uuid4(),
-                entity_label="hippocampus",
-                vocabulary="UBERON",
-                term_id="0002421",
-                term_label="Hippocampus",
-                confidence=0.92,
-                provenance="nlp-v1",
-                status=TagSuggestionStatus.STAGED,
-            )
-        ],
         targets=[EntityRef(entity_type=EntityType.PROJECT, entity_id=project.project_id)],
         metadata={"ignored": "schema-gap"},
         status=NoteStatus.COMMITTED,
@@ -151,8 +130,6 @@ def test_note_repository_persists_supported_children(db_session):
     repo.commit()
     loaded_note = repo.notes.get(note.note_id)
     assert loaded_note is not None
-    assert loaded_note.extracted_entities == note.extracted_entities
-    assert loaded_note.tag_suggestions == note.tag_suggestions
     assert loaded_note.targets == note.targets
     assert loaded_note.metadata == {"ignored": "schema-gap"}
     assert loaded_note.raw_asset is None
@@ -174,7 +151,6 @@ def test_dataset_repository_preserves_commit_manifest(db_session):
         question_type=QuestionType.DESCRIPTIVE,
         status=QuestionStatus.ACTIVE,
         parent_question_ids=[],
-        created_from=QuestionSource.MANUAL,
         created_at=_ts(1),
         updated_at=_ts(1),
     )
@@ -196,7 +172,6 @@ def test_dataset_repository_preserves_commit_manifest(db_session):
             nwb_metadata={"Session Description": "baseline"},
             bids_metadata={"Name": "Example"},
             note_ids=[uuid4()],
-            extraction_provenance=["nlp-v1"],
             question_links=[
                 QuestionLink(
                     question_id=question.question_id,
@@ -222,7 +197,6 @@ def test_dataset_repository_preserves_commit_manifest(db_session):
     assert loaded_dataset.commit_manifest.nwb_metadata == {"Session Description": "baseline"}
     assert loaded_dataset.commit_manifest.bids_metadata == {"Name": "Example"}
     assert loaded_dataset.commit_manifest.note_ids == dataset.commit_manifest.note_ids
-    assert loaded_dataset.commit_manifest.extraction_provenance == ["nlp-v1"]
     assert (
         loaded_dataset.commit_manifest.source_session_id
         == dataset.commit_manifest.source_session_id
@@ -289,7 +263,6 @@ def test_query_questions_applies_filters_and_pagination(db_session):
             question_type=QuestionType.DESCRIPTIVE,
             status=QuestionStatus.ACTIVE if index < 2 else QuestionStatus.STAGED,
             parent_question_ids=[],
-            created_from=QuestionSource.API,
             created_at=_ts(index + 1),
             updated_at=_ts(index + 1),
         )
@@ -326,21 +299,6 @@ def test_note_repository_list_batches_child_queries(db_session):
                 note_id=uuid4(),
                 project_id=project.project_id,
                 raw_content=f"note {index}",
-                extracted_entities=[
-                    ExtractedEntity(label=f"entity-{index}", confidence=0.9, provenance="ocr")
-                ],
-                tag_suggestions=[
-                    EntityTagSuggestion(
-                        suggestion_id=uuid4(),
-                        entity_label=f"entity-{index}",
-                        vocabulary="UBERON",
-                        term_id=f"term-{index}",
-                        term_label=f"Entity {index}",
-                        confidence=0.9,
-                        provenance="nlp",
-                        status=TagSuggestionStatus.STAGED,
-                    )
-                ],
                 targets=[
                     EntityRef(
                         entity_type=EntityType.PROJECT,
@@ -376,7 +334,7 @@ def test_note_repository_list_batches_child_queries(db_session):
         event.remove(engine, "before_cursor_execute", before_cursor_execute)
 
     assert len(notes) == 2
-    assert select_count == 4
+    assert select_count == 2
 
 
 def test_query_notes_filters_by_target(db_session):

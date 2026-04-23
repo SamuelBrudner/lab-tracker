@@ -109,8 +109,8 @@ describe("App", () => {
       {
         match: "/projects?limit=200&offset=0",
         response: apiResponse([
-          { name: "Project One", project_id: "project-1", review_policy: "none" },
-          { name: "Project Two", project_id: "project-2", review_policy: "none" },
+          { name: "Project One", project_id: "project-1" },
+          { name: "Project Two", project_id: "project-2" },
         ]),
       },
       {

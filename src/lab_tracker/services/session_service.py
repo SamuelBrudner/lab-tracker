@@ -58,7 +58,6 @@ class SessionServiceMixin:
         session_type: SessionType,
         *,
         primary_question_id: UUID | None = None,
-        status: SessionStatus = SessionStatus.ACTIVE,
         actor: AuthContext | None = None,
     ) -> Session:
         require_role(actor, WRITE_ROLES)
@@ -79,7 +78,7 @@ class SessionServiceMixin:
             session_id=uuid4(),
             project_id=project_id,
             session_type=session_type,
-            status=status,
+            status=SessionStatus.ACTIVE,
             primary_question_id=primary_question_id,
             created_by=_actor_user_id(actor),
         )

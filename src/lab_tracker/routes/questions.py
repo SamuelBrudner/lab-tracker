@@ -9,7 +9,7 @@ from starlette import status as http_status
 from starlette.requests import Request
 
 from lab_tracker.api import LabTrackerAPI
-from lab_tracker.models import Question, QuestionSource, QuestionStatus, QuestionType
+from lab_tracker.models import Question, QuestionStatus, QuestionType
 from lab_tracker.schemas import Envelope, ListEnvelope, QuestionCreate, QuestionUpdate
 
 from .shared import (
@@ -40,8 +40,6 @@ def build_questions_router(api: LabTrackerAPI) -> APIRouter:
             hypothesis=payload.hypothesis,
             status=payload.status or question_default_status(),
             parent_question_ids=payload.parent_question_ids,
-            created_from=payload.created_from or QuestionSource.MANUAL,
-            source_provenance=payload.source_provenance,
             actor=actor,
         )
         return Envelope(data=question)
@@ -52,7 +50,6 @@ def build_questions_router(api: LabTrackerAPI) -> APIRouter:
         project_id: UUID | None = None,
         status: QuestionStatus | None = None,
         question_type: QuestionType | None = None,
-        created_from: QuestionSource | None = None,
         search: str | None = None,
         q: str | None = None,
         parent_question_id: UUID | None = None,
@@ -67,7 +64,6 @@ def build_questions_router(api: LabTrackerAPI) -> APIRouter:
                 project_id=project_id,
                 status=status.value if status is not None else None,
                 question_type=question_type.value if question_type is not None else None,
-                created_from=created_from.value if created_from is not None else None,
                 parent_question_id=parent_question_id,
                 ancestor_question_id=ancestor_question_id,
                 limit=limit,
@@ -78,7 +74,6 @@ def build_questions_router(api: LabTrackerAPI) -> APIRouter:
             project_id=project_id,
             status=status,
             question_type=question_type,
-            created_from=created_from,
             search=resolved_search,
             parent_question_id=parent_question_id,
             ancestor_question_id=ancestor_question_id,

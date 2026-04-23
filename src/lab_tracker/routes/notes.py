@@ -54,7 +54,6 @@ def build_notes_router(api: LabTrackerAPI) -> APIRouter:
             project_id=payload.project_id,
             raw_content=payload.raw_content,
             transcribed_text=payload.transcribed_text,
-            extracted_entities=payload.extracted_entities,
             targets=payload.targets,
             metadata=payload.metadata,
             status=payload.status or note_default_status(),
@@ -80,7 +79,6 @@ def build_notes_router(api: LabTrackerAPI) -> APIRouter:
             filename=payload.filename,
             content_type=payload.content_type,
             transcribed_text=payload.transcribed_text,
-            extracted_entities=payload.extracted_entities,
             targets=payload.targets,
             metadata=payload.metadata,
             status=payload.status or note_default_status(),
@@ -182,7 +180,6 @@ def build_notes_router(api: LabTrackerAPI) -> APIRouter:
         note = api_from_request(request, api).update_note(
             note_id,
             transcribed_text=payload.transcribed_text,
-            extracted_entities=payload.extracted_entities,
             targets=payload.targets,
             metadata=payload.metadata,
             status=payload.status,
