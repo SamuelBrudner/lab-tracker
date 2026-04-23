@@ -5,7 +5,15 @@ from __future__ import annotations
 from datetime import datetime
 from urllib.parse import quote
 
-from lab_tracker.models import Analysis, Claim, Dataset, DatasetFile, Visualization
+from lab_tracker.models import (
+    Analysis,
+    Claim,
+    Dataset,
+    DatasetFile,
+    QuestionLink,
+    QuestionLinkRole,
+    Visualization,
+)
 
 
 def _normalize_base_url(base_url: str) -> str:
@@ -88,6 +96,23 @@ def _question_link_id(base_url: str, dataset: Dataset, question_id: object) -> s
     )
 
 
+_QUESTION_LINK_ORDER = {QuestionLinkRole.PRIMARY: 0, QuestionLinkRole.SECONDARY: 1}
+
+
+def _sorted_dataset_files(files: list[DatasetFile]) -> list[DatasetFile]:
+    return sorted(files, key=lambda file: (file.path, file.checksum, str(file.file_id or "")))
+
+
+def _sorted_question_links(question_links: list[QuestionLink]) -> list[QuestionLink]:
+    return sorted(
+        question_links,
+        key=lambda link: (
+            _QUESTION_LINK_ORDER.get(link.role, 99),
+            str(link.question_id),
+        ),
+    )
+
+
 def _dataset_file_node(base_url: str, dataset: Dataset, file: DatasetFile) -> dict[str, object]:
     node: dict[str, object] = {
         "@id": _file_entity_id(base_url, dataset, file),
@@ -112,6 +137,9 @@ def _dataset_question_link_node(base_url: str, dataset: Dataset, link) -> dict[s
 def build_dataset_provenance_document(base_url: str, dataset: Dataset) -> dict[str, object]:
     dataset_iri = _resource_iri(base_url, "datasets", dataset.dataset_id)
     commit_activity_iri = _synthetic_child_iri(dataset_iri, "provenance", "commit")
+    files = _sorted_dataset_files(dataset.commit_manifest.files)
+    question_links = _sorted_question_links(dataset.commit_manifest.question_links)
+    notes = sorted(dataset.commit_manifest.note_ids, key=str)
     graph: list[dict[str, object]] = []
 
     dataset_node: dict[str, object] = {
@@ -130,24 +158,24 @@ def build_dataset_provenance_document(base_url: str, dataset: Dataset) -> dict[s
 
     used_files = [
         {"@id": _file_entity_id(base_url, dataset, file)}
-        for file in dataset.commit_manifest.files
+        for file in files
     ]
     if used_files:
         commit_node["prov:used"] = used_files
 
-    question_links = [
+    question_link_refs = [
         {"@id": _question_link_id(base_url, dataset, link.question_id)}
-        for link in dataset.commit_manifest.question_links
+        for link in question_links
     ]
-    if question_links:
-        commit_node["questionLink"] = question_links
+    if question_link_refs:
+        commit_node["questionLink"] = question_link_refs
 
-    notes = [
+    note_refs = [
         {"@id": _resource_iri(base_url, "notes", note_id)}
-        for note_id in dataset.commit_manifest.note_ids
+        for note_id in notes
     ]
-    if notes:
-        commit_node["note"] = notes
+    if note_refs:
+        commit_node["note"] = note_refs
 
     if dataset.commit_manifest.source_session_id is not None:
         commit_node["sourceSession"] = {
@@ -166,12 +194,10 @@ def build_dataset_provenance_document(base_url: str, dataset: Dataset) -> dict[s
         commit_node["bidsMetadata"] = dataset.commit_manifest.bids_metadata
 
     graph.append(commit_node)
-    graph.extend(
-        _dataset_file_node(base_url, dataset, file) for file in dataset.commit_manifest.files
-    )
+    graph.extend(_dataset_file_node(base_url, dataset, file) for file in files)
     graph.extend(
         _dataset_question_link_node(base_url, dataset, link)
-        for link in dataset.commit_manifest.question_links
+        for link in question_links
     )
 
     return {"@context": _context(base_url), "@graph": graph}
