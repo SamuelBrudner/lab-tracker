@@ -16,7 +16,6 @@ class Settings(BaseSettings):
     database_url: str = "sqlite+pysqlite:///./lab_tracker.db"
     file_storage_path: str = "./file_storage"
     note_storage_path: str = "./note_storage"
-    search_backend: str = "in_memory_substring"
     auth_secret_key: str = DEFAULT_AUTH_SECRET_KEY
     auth_token_ttl_minutes: int = 60 * 12
     bootstrap_admin_token: str = ""

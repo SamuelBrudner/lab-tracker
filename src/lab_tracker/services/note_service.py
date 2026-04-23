@@ -125,25 +125,17 @@ class NoteServiceMixin:
         if self._raw_storage is None:
             raise ValidationError("Raw storage backend is not configured.")
         asset = raw_asset
-        resolved_content = content
         created_asset = False
         if asset is None:
-            if resolved_content is None:
+            if content is None:
                 raise ValidationError("content must not be empty.")
             asset = self._raw_storage.store(
-                resolved_content,
+                content,
                 filename=(filename or "").strip(),
                 content_type=(content_type or "").strip(),
             )
             created_asset = True
         try:
-            if (
-                resolved_content is None
-                and transcribed_text is None
-                and asset.content_type.strip().lower().startswith("image/")
-            ):
-                resolved_content = self._raw_storage.read(asset.storage_id)
-
             resolved_transcribed_text = transcribed_text.strip() if transcribed_text else None
             note = self.create_note(
                 project_id=project_id,
