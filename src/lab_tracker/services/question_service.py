@@ -6,27 +6,37 @@ from typing import Iterable
 from uuid import UUID, uuid4
 
 from lab_tracker.auth import AuthContext, require_role
+from lab_tracker.errors import ValidationError
 from lab_tracker.models import (
     Question,
-    QuestionSource,
     QuestionStatus,
     QuestionType,
     utc_now,
 )
-from lab_tracker.errors import ValidationError
-from lab_tracker.services.search_backends import SearchQuery
 from lab_tracker.services.shared import (
     WRITE_ROLES,
+    _actor_user_id,
     _ensure_non_empty,
     _ensure_question_parents_dag,
     _ensure_question_status_transition,
-    _get_or_raise,
     _is_question_ancestor,
+    question_matches_substring,
     _unique_ids,
 )
 
 
 class QuestionServiceMixin:
+    def _question_graph(self, project_id: UUID) -> dict[UUID, Question]:
+        repository = self._active_repository()
+        if repository is not None and not self._allow_in_memory:
+            questions, _ = repository.query_questions(
+                project_id=project_id,
+                limit=None,
+                offset=0,
+            )
+            return {question.question_id: question for question in questions}
+        return self._store.questions
+
     def create_question(
         self,
         project_id: UUID,
@@ -36,9 +46,7 @@ class QuestionServiceMixin:
         hypothesis: str | None = None,
         status: QuestionStatus = QuestionStatus.STAGED,
         parent_question_ids: Iterable[UUID] | None = None,
-        created_from: QuestionSource = QuestionSource.MANUAL,
         actor: AuthContext | None = None,
-        created_by: str | None = None,
     ) -> Question:
         require_role(actor, WRITE_ROLES)
         self.get_project(project_id)
@@ -49,7 +57,11 @@ class QuestionServiceMixin:
             parent = self.get_question(parent_id)
             if parent.project_id != project_id:
                 raise ValidationError("Parent question must belong to the same project.")
-        _ensure_question_parents_dag(question_id, parent_ids, self._store.questions)
+        _ensure_question_parents_dag(
+            question_id,
+            parent_ids,
+            self._question_graph(project_id),
+        )
         question = Question(
             question_id=question_id,
             project_id=project_id,
@@ -58,16 +70,19 @@ class QuestionServiceMixin:
             hypothesis=hypothesis.strip() if hypothesis else None,
             status=status,
             parent_question_ids=parent_ids,
-            created_from=created_from,
-            created_by=created_by,
+            created_by=_actor_user_id(actor),
         )
-        self._store.questions[question.question_id] = question
+        self._remember_entity("questions", question.question_id, question)
         self._run_repository_write(lambda repository: repository.questions.save(question))
-        self._queue_search_op("upsert_questions", [question])
         return question
 
     def get_question(self, question_id: UUID) -> Question:
-        return _get_or_raise(self._store.questions, question_id, "Question")
+        return self._get_from_repository_or_store(
+            attribute_name="questions",
+            entity_id=question_id,
+            label="Question",
+            loader=lambda repository: repository.questions.get(question_id),
+        )
 
     def list_questions(
         self,
@@ -75,7 +90,6 @@ class QuestionServiceMixin:
         project_id: UUID | None = None,
         status: QuestionStatus | None = None,
         question_type: QuestionType | None = None,
-        created_from: QuestionSource | None = None,
         search: str | None = None,
         parent_question_id: UUID | None = None,
         ancestor_question_id: UUID | None = None,
@@ -84,7 +98,6 @@ class QuestionServiceMixin:
             project_id=project_id,
             status=status,
             question_type=question_type,
-            created_from=created_from,
             search=search,
             parent_question_id=parent_question_id,
             ancestor_question_id=ancestor_question_id,
@@ -96,53 +109,61 @@ class QuestionServiceMixin:
         project_id: UUID | None = None,
         status: QuestionStatus | None = None,
         question_type: QuestionType | None = None,
-        created_from: QuestionSource | None = None,
         search: str | None = None,
         parent_question_id: UUID | None = None,
         ancestor_question_id: UUID | None = None,
     ) -> list[Question]:
-        if project_id is None:
-            questions = list(self._store.questions.values())
-        else:
-            questions = [q for q in self._store.questions.values() if q.project_id == project_id]
-        if status is not None:
-            questions = [question for question in questions if question.status == status]
-        if question_type is not None:
-            questions = [
-                question for question in questions if question.question_type == question_type
-            ]
-        if created_from is not None:
-            questions = [
-                question for question in questions if question.created_from == created_from
-            ]
-        if parent_question_id is not None:
-            questions = [
-                question
-                for question in questions
-                if parent_question_id in question.parent_question_ids
-            ]
-        if ancestor_question_id is not None:
-            questions = [
-                question
-                for question in questions
-                if question.question_id != ancestor_question_id
-                and _is_question_ancestor(
-                    question.question_id,
-                    ancestor_question_id,
-                    self._store.questions,
-                )
-            ]
-        if search is not None and search.strip():
-            candidate_ids = [question.question_id for question in questions]
-            hits = self._search_backend.search_question_ids(
-                SearchQuery(query=search, project_id=project_id),
-                question_ids=candidate_ids,
+        repository = self._active_repository()
+        if repository is not None and not self._allow_in_memory:
+            questions, _ = repository.query_questions(
+                project_id=project_id,
+                status=status.value if status is not None else None,
+                question_type=question_type.value if question_type is not None else None,
+                parent_question_id=parent_question_id,
+                ancestor_question_id=ancestor_question_id,
+                limit=None,
+                offset=0,
             )
-            question_map = {question.question_id: question for question in questions}
+            self._cache_entities(
+                "questions",
+                questions,
+                lambda question: question.question_id,
+            )
+        else:
+            if project_id is None:
+                questions = list(self._store.questions.values())
+            else:
+                questions = [
+                    question
+                    for question in self._store.questions.values()
+                    if question.project_id == project_id
+                ]
+            if status is not None:
+                questions = [question for question in questions if question.status == status]
+            if question_type is not None:
+                questions = [
+                    question for question in questions if question.question_type == question_type
+                ]
+            if parent_question_id is not None:
+                questions = [
+                    question
+                    for question in questions
+                    if parent_question_id in question.parent_question_ids
+                ]
+            if ancestor_question_id is not None:
+                questions = [
+                    question
+                    for question in questions
+                    if question.question_id != ancestor_question_id
+                    and _is_question_ancestor(
+                        question.question_id,
+                        ancestor_question_id,
+                        self._store.questions,
+                    )
+                ]
+        if search is not None and search.strip():
             questions = [
-                question_map[question_id]
-                for question_id in hits
-                if question_id in question_map
+                question for question in questions if question_matches_substring(question, search)
             ]
         return questions
 
@@ -175,17 +196,19 @@ class QuestionServiceMixin:
                 parent = self.get_question(parent_id)
                 if parent.project_id != question.project_id:
                     raise ValidationError("Parent question must belong to the same project.")
-            _ensure_question_parents_dag(question.question_id, parent_ids, self._store.questions)
+            _ensure_question_parents_dag(
+                question.question_id,
+                parent_ids,
+                self._question_graph(question.project_id),
+            )
             question.parent_question_ids = parent_ids
         question.updated_at = utc_now()
         self._run_repository_write(lambda repository: repository.questions.save(question))
-        self._queue_search_op("upsert_questions", [question])
         return question
 
     def delete_question(self, question_id: UUID, *, actor: AuthContext | None = None) -> Question:
         require_role(actor, WRITE_ROLES)
         question = self.get_question(question_id)
-        del self._store.questions[question_id]
+        self._forget_entity("questions", question_id)
         self._run_repository_write(lambda repository: repository.questions.delete(question_id))
-        self._queue_search_op("delete_questions", [question_id])
         return question

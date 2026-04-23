@@ -1,6 +1,6 @@
 import * as React from "react";
 
-import { fireEvent, render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 
 import { App } from "./app-shell.jsx";
 import { TOKEN_STORAGE_KEY } from "./shared/constants.js";
@@ -15,7 +15,7 @@ describe("App", () => {
         response: apiResponse({ role: "admin", username: "sam" }),
       },
       {
-        match: "/projects",
+        match: "/projects?limit=200&offset=0",
         response: apiResponse([]),
       },
     ]);
@@ -41,7 +41,7 @@ describe("App", () => {
         response: apiResponse({ role: "viewer", username: "sam" }),
       },
       {
-        match: "/projects",
+        match: "/projects?limit=200&offset=0",
         response: apiResponse([]),
       },
       {
@@ -72,7 +72,7 @@ describe("App", () => {
         response: errorResponse("Session expired.", 401),
       },
       {
-        match: "/projects",
+        match: "/projects?limit=200&offset=0",
         response: apiResponse([]),
       },
     ]);
@@ -81,5 +81,217 @@ describe("App", () => {
 
     expect(await screen.findByText("Session expired.")).toBeInTheDocument();
     expect(await screen.findByRole("heading", { name: "Sign In" })).toBeInTheDocument();
+  });
+
+  it("loads paginated project data and refreshes when the active project changes", async () => {
+    localStorage.setItem(TOKEN_STORAGE_KEY, "token-4");
+
+    const firstProjectQuestions = Array.from({ length: 205 }, (_, index) => ({
+      project_id: "project-1",
+      question_id: `question-1-${index}`,
+      question_type: "descriptive",
+      status: "staged",
+      text: `Project One Question ${index}`,
+    }));
+    const secondProjectQuestions = Array.from({ length: 3 }, (_, index) => ({
+      project_id: "project-2",
+      question_id: `question-2-${index}`,
+      question_type: "descriptive",
+      status: "staged",
+      text: `Project Two Question ${index}`,
+    }));
+
+    installFetchMock([
+      {
+        match: "/auth/me",
+        response: apiResponse({ role: "admin", username: "sam" }),
+      },
+      {
+        match: "/projects?limit=200&offset=0",
+        response: apiResponse([
+          { name: "Project One", project_id: "project-1" },
+          { name: "Project Two", project_id: "project-2" },
+        ]),
+      },
+      {
+        match: "/questions?project_id=project-1&limit=200&offset=0",
+        response: apiResponse(firstProjectQuestions.slice(0, 200), 200, {
+          limit: 200,
+          offset: 0,
+          total: 205,
+        }),
+      },
+      {
+        match: "/questions?project_id=project-1&limit=200&offset=200",
+        response: apiResponse(firstProjectQuestions.slice(200), 200, {
+          limit: 200,
+          offset: 200,
+          total: 205,
+        }),
+      },
+      {
+        match: "/datasets?project_id=project-1&limit=200&offset=0",
+        response: apiResponse([]),
+      },
+      {
+        match: "/notes?project_id=project-1&limit=200&offset=0",
+        response: apiResponse([]),
+      },
+      {
+        match: "/sessions?project_id=project-1&limit=200&offset=0",
+        response: apiResponse([]),
+      },
+      {
+        match: "/analyses?project_id=project-1&limit=200&offset=0",
+        response: apiResponse([]),
+      },
+      {
+        match: "/visualizations?project_id=project-1&limit=200&offset=0",
+        response: apiResponse([]),
+      },
+      {
+        match: "/questions?project_id=project-2&limit=200&offset=0",
+        response: apiResponse(secondProjectQuestions),
+      },
+      {
+        match: "/datasets?project_id=project-2&limit=200&offset=0",
+        response: apiResponse([]),
+      },
+      {
+        match: "/notes?project_id=project-2&limit=200&offset=0",
+        response: apiResponse([]),
+      },
+      {
+        match: "/sessions?project_id=project-2&limit=200&offset=0",
+        response: apiResponse([]),
+      },
+      {
+        match: "/analyses?project_id=project-2&limit=200&offset=0",
+        response: apiResponse([]),
+      },
+      {
+        match: "/visualizations?project_id=project-2&limit=200&offset=0",
+        response: apiResponse([]),
+      },
+    ]);
+
+    render(<App />);
+
+    expect((await screen.findAllByText("Project One Question 204")).length).toBeGreaterThan(0);
+
+    fireEvent.change(screen.getByLabelText("Active project"), {
+      target: { value: "project-2" },
+    });
+
+    expect((await screen.findAllByText("Project Two Question 2")).length).toBeGreaterThan(0);
+  });
+
+  it("ignores stale project data after switching the active project", async () => {
+    localStorage.setItem(TOKEN_STORAGE_KEY, "token-5");
+
+    let resolveProjectOneQuestions;
+
+    installFetchMock([
+      {
+        match: "/auth/me",
+        response: apiResponse({ role: "admin", username: "sam" }),
+      },
+      {
+        match: "/projects?limit=200&offset=0",
+        response: apiResponse([
+          { name: "Project One", project_id: "project-1" },
+          { name: "Project Two", project_id: "project-2" },
+        ]),
+      },
+      {
+        match: "/questions?project_id=project-1&limit=200&offset=0",
+        response: () =>
+          new Promise((resolve) => {
+            resolveProjectOneQuestions = () =>
+              resolve(
+                apiResponse([
+                  {
+                    project_id: "project-1",
+                    question_id: "question-1",
+                    question_type: "descriptive",
+                    status: "staged",
+                    text: "Project One Question 0",
+                  },
+                ])
+              );
+          }),
+      },
+      {
+        match: "/datasets?project_id=project-1&limit=200&offset=0",
+        response: apiResponse([]),
+      },
+      {
+        match: "/notes?project_id=project-1&limit=200&offset=0",
+        response: apiResponse([]),
+      },
+      {
+        match: "/sessions?project_id=project-1&limit=200&offset=0",
+        response: apiResponse([]),
+      },
+      {
+        match: "/analyses?project_id=project-1&limit=200&offset=0",
+        response: apiResponse([]),
+      },
+      {
+        match: "/visualizations?project_id=project-1&limit=200&offset=0",
+        response: apiResponse([]),
+      },
+      {
+        match: "/questions?project_id=project-2&limit=200&offset=0",
+        response: apiResponse([
+          {
+            project_id: "project-2",
+            question_id: "question-2",
+            question_type: "descriptive",
+            status: "staged",
+            text: "Project Two Question 0",
+          },
+        ]),
+      },
+      {
+        match: "/datasets?project_id=project-2&limit=200&offset=0",
+        response: apiResponse([]),
+      },
+      {
+        match: "/notes?project_id=project-2&limit=200&offset=0",
+        response: apiResponse([]),
+      },
+      {
+        match: "/sessions?project_id=project-2&limit=200&offset=0",
+        response: apiResponse([]),
+      },
+      {
+        match: "/analyses?project_id=project-2&limit=200&offset=0",
+        response: apiResponse([]),
+      },
+      {
+        match: "/visualizations?project_id=project-2&limit=200&offset=0",
+        response: apiResponse([]),
+      },
+    ]);
+
+    render(<App />);
+
+    await waitFor(() => expect(typeof resolveProjectOneQuestions).toBe("function"));
+
+    fireEvent.change(screen.getByLabelText("Active project"), {
+      target: { value: "project-2" },
+    });
+
+    expect(
+      await screen.findByText("Project Two Question 0", { selector: "strong" })
+    ).toBeInTheDocument();
+
+    resolveProjectOneQuestions();
+
+    await waitFor(() => {
+      expect(screen.queryByText("Project One Question 0")).not.toBeInTheDocument();
+      expect(screen.getByText("Project Two Question 0", { selector: "strong" })).toBeInTheDocument();
+    });
   });
 });

@@ -80,6 +80,46 @@ def test_analysis_commit_requires_committed_datasets():
     assert visualizations
 
 
+def test_analysis_cannot_be_created_as_committed_with_staged_datasets():
+    api = LabTrackerAPI.in_memory()
+    actor = _actor()
+    project, question = _setup_project_with_question(api, actor)
+    dataset = api.create_dataset(
+        project_id=project.project_id,
+        primary_question_id=question.question_id,
+        actor=actor,
+    )
+
+    with pytest.raises(ValidationError):
+        api.create_analysis(
+            project_id=project.project_id,
+            dataset_ids=[dataset.dataset_id],
+            method_hash="method-1",
+            code_version="v1",
+            status=AnalysisStatus.COMMITTED,
+            actor=actor,
+        )
+
+    api.update_dataset(
+        dataset.dataset_id,
+        commit_manifest=DatasetCommitManifestInput(
+            files=[DatasetFile(path="data.csv", checksum="abc123")]
+        ),
+        actor=actor,
+    )
+    api.update_dataset(dataset.dataset_id, status=DatasetStatus.COMMITTED, actor=actor)
+    committed = api.create_analysis(
+        project_id=project.project_id,
+        dataset_ids=[dataset.dataset_id],
+        method_hash="method-2",
+        code_version="v2",
+        status=AnalysisStatus.COMMITTED,
+        actor=actor,
+    )
+
+    assert committed.status == AnalysisStatus.COMMITTED
+
+
 def test_claim_status_transitions_and_edits():
     api = LabTrackerAPI.in_memory()
     actor = _actor()

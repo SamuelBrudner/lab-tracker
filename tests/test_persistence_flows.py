@@ -3,13 +3,15 @@ from __future__ import annotations
 from uuid import uuid4
 
 from fastapi.testclient import TestClient
+import pytest
 from sqlalchemy import create_engine
 
 from lab_tracker.api import LabTrackerAPI
 from lab_tracker.app import create_app
 from lab_tracker.auth import AuthContext, Role
 from lab_tracker.db import Base, get_session_factory
-from lab_tracker.db_models import ProjectModel
+from lab_tracker.db_models import NoteModel, ProjectModel, QuestionModel
+from lab_tracker.errors import ValidationError
 from lab_tracker.models import QuestionType, SessionType
 from lab_tracker.sqlalchemy_repository import SQLAlchemyLabTrackerRepository
 
@@ -88,6 +90,86 @@ def test_repository_backed_api_persists_core_entities(tmp_path):
         assert api.get_session(created_session.session_id).project_id == project.project_id
         outputs = api.list_acquisition_outputs(session_id=created_session.session_id)
         assert outputs == [created_output]
+
+    engine.dispose()
+
+
+def test_repository_backed_api_updates_existing_acquisition_output_without_store_cache(tmp_path):
+    db_path = tmp_path / "api-output-upsert.db"
+    engine = create_engine(
+        f"sqlite+pysqlite:///{db_path}",
+        future=True,
+        connect_args={"check_same_thread": False},
+    )
+    Base.metadata.create_all(bind=engine)
+    session_factory = get_session_factory(engine=engine)
+    actor = _actor()
+
+    with session_factory() as session:
+        api = LabTrackerAPI(repository=SQLAlchemyLabTrackerRepository(session))
+        project = api.create_project("Persistence Project", actor=actor)
+        created_session = api.create_session(
+            project_id=project.project_id,
+            session_type=SessionType.OPERATIONAL,
+            actor=actor,
+        )
+        first = api.register_acquisition_output(
+            created_session.session_id,
+            file_path="capture/output.bin",
+            checksum="abc123",
+            size_bytes=12,
+            actor=actor,
+        )
+        updated = api.register_acquisition_output(
+            created_session.session_id,
+            file_path="capture/output.bin",
+            checksum="def456",
+            size_bytes=24,
+            actor=actor,
+        )
+
+        assert updated.output_id == first.output_id
+        assert updated.checksum == "def456"
+        assert updated.size_bytes == 24
+        assert len(api.list_acquisition_outputs(session_id=created_session.session_id)) == 1
+
+    engine.dispose()
+
+
+def test_repository_backed_api_rejects_question_parent_cycles_without_store_cache(tmp_path):
+    db_path = tmp_path / "api-question-cycles.db"
+    engine = create_engine(
+        f"sqlite+pysqlite:///{db_path}",
+        future=True,
+        connect_args={"check_same_thread": False},
+    )
+    Base.metadata.create_all(bind=engine)
+    session_factory = get_session_factory(engine=engine)
+    actor = _actor()
+
+    with session_factory() as session:
+        api = LabTrackerAPI(repository=SQLAlchemyLabTrackerRepository(session))
+        project = api.create_project("Persistence Project", actor=actor)
+        parent = api.create_question(
+            project_id=project.project_id,
+            text="Parent question",
+            question_type=QuestionType.DESCRIPTIVE,
+            actor=actor,
+        )
+        child = api.create_question(
+            project_id=project.project_id,
+            text="Child question",
+            question_type=QuestionType.DESCRIPTIVE,
+            parent_question_ids=[parent.question_id],
+            actor=actor,
+        )
+
+        with pytest.raises(ValidationError, match="acyclic"):
+            api.update_question(
+                parent.question_id,
+                parent_question_ids=[child.question_id],
+                actor=actor,
+            )
 
     engine.dispose()
 
@@ -246,6 +328,155 @@ def test_fastapi_routes_read_database_changes_after_app_start(monkeypatch, tmp_p
     assert "Inserted after startup" in names
 
 
+def test_fastapi_search_reads_database_changes_after_app_start(monkeypatch, tmp_path):
+    db_path = tmp_path / "route-search-refresh.db"
+    database_url = f"sqlite+pysqlite:///{db_path}"
+    monkeypatch.setenv("LAB_TRACKER_DATABASE_URL", database_url)
+    monkeypatch.setenv("LAB_TRACKER_FILE_STORAGE_PATH", str(tmp_path / "file-storage"))
+    monkeypatch.setenv("LAB_TRACKER_NOTE_STORAGE_PATH", str(tmp_path / "note-storage"))
+
+    engine = create_engine(
+        database_url,
+        future=True,
+        connect_args={"check_same_thread": False},
+    )
+    Base.metadata.create_all(bind=engine)
+    engine.dispose()
+
+    app = create_app()
+    _seed_admin(
+        app,
+        username="route-search-admin",
+        password="secret",
+    )
+
+    with app.state.db_session_factory() as session:
+        project = ProjectModel(name="Inserted for search", description="external")
+        session.add(project)
+        session.flush()
+        question = QuestionModel(
+            project_id=project.project_id,
+            text="Externally inserted search target",
+            question_type="descriptive",
+            status="active",
+        )
+        note = NoteModel(
+            project_id=project.project_id,
+            raw_content="Externally inserted note search target",
+            note_metadata={"owner": "Sam"},
+            status="committed",
+        )
+        session.add(question)
+        session.add(note)
+        session.commit()
+        project_id = project.project_id
+        question_id = question.question_id
+        note_id = note.note_id
+
+    with TestClient(app) as client:
+        login_response = client.post(
+            "/auth/login",
+            json={
+                "username": "route-search-admin",
+                "password": "secret",
+            },
+        )
+        assert login_response.status_code == 200
+        headers = _auth_headers(login_response.json()["data"]["access_token"])
+        search_response = client.get(
+            "/search",
+            params={"q": "search target", "project_id": project_id},
+            headers=headers,
+        )
+
+    assert search_response.status_code == 200
+    payload = search_response.json()["data"]
+    assert {item["question_id"] for item in payload["questions"]} == {question_id}
+    assert {item["note_id"] for item in payload["notes"]} == {note_id}
+
+
+def test_note_transcribed_text_search_survives_app_restart(monkeypatch, tmp_path):
+    db_path = tmp_path / "note-search-persistence.db"
+    database_url = f"sqlite+pysqlite:///{db_path}"
+    monkeypatch.setenv("LAB_TRACKER_DATABASE_URL", database_url)
+    monkeypatch.setenv("LAB_TRACKER_FILE_STORAGE_PATH", str(tmp_path / "file-storage"))
+    monkeypatch.setenv("LAB_TRACKER_NOTE_STORAGE_PATH", str(tmp_path / "note-storage"))
+
+    engine = create_engine(
+        database_url,
+        future=True,
+        connect_args={"check_same_thread": False},
+    )
+    Base.metadata.create_all(bind=engine)
+    engine.dispose()
+
+    app_first = create_app()
+    _seed_admin(
+        app_first,
+        username="search-persistence-admin",
+        password="secret",
+    )
+    with TestClient(app_first) as client:
+        login_response = client.post(
+            "/auth/login",
+            json={
+                "username": "search-persistence-admin",
+                "password": "secret",
+            },
+        )
+        assert login_response.status_code == 200
+        headers = _auth_headers(login_response.json()["data"]["access_token"])
+
+        project_id = client.post(
+            "/projects",
+            json={"name": "Transcript search"},
+            headers=headers,
+        ).json()["data"]["project_id"]
+        note_response = client.post(
+            "/notes",
+            json={
+                "project_id": project_id,
+                "raw_content": "capture log",
+                "transcribed_text": "Sam observed stable recordings",
+                "metadata": {"owner": "Sam", "rig": "np2"},
+            },
+            headers=headers,
+        )
+        assert note_response.status_code == 201
+        note_id = note_response.json()["data"]["note_id"]
+
+        search_response = client.get(
+            "/search",
+            params={"q": "sam", "project_id": project_id},
+            headers=headers,
+        )
+        assert search_response.status_code == 200
+        search_ids = [item["note_id"] for item in search_response.json()["data"]["notes"]]
+        assert note_id in search_ids
+
+    app_second = create_app()
+    with TestClient(app_second) as client:
+        login_response = client.post(
+            "/auth/login",
+            json={
+                "username": "search-persistence-admin",
+                "password": "secret",
+            },
+        )
+        assert login_response.status_code == 200
+        headers = _auth_headers(login_response.json()["data"]["access_token"])
+
+        search_response = client.get(
+            "/search",
+            params={"q": "sam", "project_id": project_id},
+            headers=headers,
+        )
+
+    assert search_response.status_code == 200
+    search_ids = [item["note_id"] for item in search_response.json()["data"]["notes"]]
+    assert note_id in search_ids
+
+
 def test_repository_backed_api_rolls_back_failed_writes_from_read_state():
     class _EmptyRepoPart:
         def list(self):
@@ -270,7 +501,6 @@ def test_repository_backed_api_rolls_back_failed_writes_from_read_state():
             other = _EmptyRepoPart()
             self.questions = other
             self.datasets = other
-            self.dataset_reviews = other
             self.notes = other
             self.sessions = other
             self.acquisition_outputs = other

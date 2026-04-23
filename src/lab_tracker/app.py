@@ -2,22 +2,21 @@
 
 from __future__ import annotations
 
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 import logging
 import os
 from pathlib import Path
 from typing import Any
 
-from fastapi import Depends, FastAPI, Request
+from fastapi import FastAPI, Request
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy import func, select
 from sqlalchemy.exc import SQLAlchemyError
-from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session, sessionmaker
 from starlette.responses import FileResponse, JSONResponse, RedirectResponse
 
 from lab_tracker.api import LabTrackerAPI
-from lab_tracker.api_routes import register_routes
 from lab_tracker.auth import AuthContext, AuthService, TokenService, extract_bearer_token
 from lab_tracker.config import get_settings
 from lab_tracker.db import get_engine, get_session_factory
@@ -32,15 +31,13 @@ from lab_tracker.db_models import (
     SessionModel,
     VisualizationModel,
 )
-from lab_tracker.dependencies import get_sqlalchemy_repository, set_active_repository
 from lab_tracker.errors import AuthError
 from lab_tracker.file_storage import LocalFileStorageBackend
 from lab_tracker.logging import configure_logging
 from lab_tracker.note_storage import LocalNoteStorage
 from lab_tracker.schemas import ErrorEnvelope, ErrorInfo
+from lab_tracker.routes import register_routes
 from lab_tracker.sqlalchemy_repository import SQLAlchemyLabTrackerRepository
-from lab_tracker.services.ocr_backends import default_ocr_backend
-from lab_tracker.services.search_backend_factory import build_search_backend
 
 
 _START_TIME = datetime.now(timezone.utc)
@@ -187,8 +184,11 @@ def _metrics_snapshot(
         "app": {"name": app_name, "environment": environment},
         "store": store,
     }
+    errors: list[dict[str, str]] = []
     if database_error is not None:
-        payload["errors"] = [{"name": "database", "detail": database_error}]
+        errors.append({"name": "database", "detail": database_error})
+    if errors:
+        payload["errors"] = errors
     return payload
 
 
@@ -237,8 +237,8 @@ def _configure_database_session_middleware(
         request.state.db_session = db_session
         repository = SQLAlchemyLabTrackerRepository(db_session)
         request.state.lab_tracker_repository = repository
-        set_active_repository(repository)
-        api.begin_request()
+        request_context = api.build_request_context(repository)
+        request.state.lab_tracker_api = api.bind_request_context(request_context)
         committed = False
         try:
             response = await call_next(request)
@@ -253,16 +253,15 @@ def _configure_database_session_middleware(
             raise
         finally:
             try:
-                api.finish_request(committed=committed)
+                request_context.finish(
+                    committed=committed,
+                    run_deferred_actions=lambda actions, label: request.state.lab_tracker_api._run_deferred_actions(  # noqa: SLF001
+                        actions,
+                        label=label,
+                    ),
+                )
             finally:
-                set_active_repository(None)
                 db_session.close()
-
-
-def _configure_database_shutdown_hook(app: FastAPI, *, engine: Engine) -> None:
-    @app.on_event("shutdown")
-    def dispose_engine() -> None:
-        engine.dispose()
 
 
 def _configure_frontend_routes(app: FastAPI) -> None:
@@ -299,37 +298,32 @@ def create_app() -> FastAPI:
         settings.auth_secret_key,
         ttl_minutes=settings.auth_token_ttl_minutes,
     )
+    file_storage_backend = LocalFileStorageBackend(settings.file_storage_path)
+    raw_note_storage = LocalNoteStorage(settings.note_storage_path)
+    lab_tracker_api = LabTrackerAPI(
+        raw_storage=raw_note_storage,
+    )
+
+    @asynccontextmanager
+    async def lifespan(app: FastAPI):
+        try:
+            yield
+        finally:
+            engine.dispose()
+
     app = FastAPI(
         title=settings.app_name,
-        dependencies=[Depends(get_sqlalchemy_repository)],
+        lifespan=lifespan,
     )
     app.state.db_engine = engine
     app.state.db_session_factory = session_factory
     app.state.auth_service = auth_service
     app.state.token_service = token_service
-    app.state.file_storage_backend = LocalFileStorageBackend(settings.file_storage_path)
-    app.state.raw_note_storage = LocalNoteStorage(settings.note_storage_path)
-    app.state.search_backend = build_search_backend(settings)
-    app.state.ocr_backend = default_ocr_backend(
-        tesseract_cmd=settings.ocr_tesseract_cmd,
-        languages=settings.ocr_tesseract_languages,
-    )
-    app.state.lab_tracker_api = LabTrackerAPI(
-        raw_storage=app.state.raw_note_storage,
-        search_backend=app.state.search_backend,
-        ocr_backend=app.state.ocr_backend,
-    )
+    app.state.file_storage_backend = file_storage_backend
+    app.state.raw_note_storage = raw_note_storage
+    app.state.lab_tracker_api = lab_tracker_api
     _configure_auth_middleware(app)
     _configure_database_session_middleware(app, api=app.state.lab_tracker_api)
-    _configure_database_shutdown_hook(app, engine=engine)
-    try:
-        with session_factory() as bootstrap_session:
-            app.state.lab_tracker_api.hydrate_from_repository(
-                SQLAlchemyLabTrackerRepository(bootstrap_session)
-            )
-    except SQLAlchemyError:
-        # Schema setup is validated separately; startup should still succeed for health checks.
-        pass
 
     @app.get("/health")
     def health() -> dict[str, str]:

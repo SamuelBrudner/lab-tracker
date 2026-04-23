@@ -5,7 +5,17 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from uuid import uuid4
 
-from sqlalchemy import DateTime, Float, ForeignKey, Integer, String, Text, UniqueConstraint
+from sqlalchemy import (
+    JSON,
+    DateTime,
+    Float,
+    ForeignKey,
+    Index,
+    Integer,
+    String,
+    Text,
+    UniqueConstraint,
+)
 from sqlalchemy.orm import Mapped, mapped_column
 
 from lab_tracker.db import Base
@@ -26,7 +36,6 @@ class ProjectModel(Base):
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     description: Mapped[str] = mapped_column(String(1000), default="")
     status: Mapped[str] = mapped_column(String(20), default="active")
-    review_policy: Mapped[str] = mapped_column(String(20), default="none")
     created_by: Mapped[str | None] = mapped_column(String(255))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utc_now)
     updated_at: Mapped[datetime] = mapped_column(
@@ -53,7 +62,6 @@ class QuestionModel(Base):
     question_type: Mapped[str] = mapped_column(String(40), nullable=False)
     hypothesis: Mapped[str | None] = mapped_column(Text)
     status: Mapped[str] = mapped_column(String(20), default="staged")
-    created_from: Mapped[str] = mapped_column(String(40), default="manual")
     created_by: Mapped[str | None] = mapped_column(String(255))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utc_now)
     updated_at: Mapped[datetime] = mapped_column(
@@ -97,6 +105,12 @@ class DatasetModel(Base):
         ForeignKey("questions.question_id"),
         nullable=False,
     )
+    manifest_files: Mapped[list[dict[str, object]]] = mapped_column(JSON, default=list)
+    manifest_metadata: Mapped[dict[str, str]] = mapped_column(JSON, default=dict)
+    manifest_nwb_metadata: Mapped[dict[str, str]] = mapped_column(JSON, default=dict)
+    manifest_bids_metadata: Mapped[dict[str, str]] = mapped_column(JSON, default=dict)
+    manifest_note_ids: Mapped[list[str]] = mapped_column(JSON, default=list)
+    manifest_source_session_id: Mapped[str | None] = mapped_column(String(36))
     status: Mapped[str] = mapped_column(String(20), default="staged")
     created_by: Mapped[str | None] = mapped_column(String(255))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utc_now)
@@ -153,26 +167,6 @@ class DatasetFileModel(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utc_now)
 
 
-class DatasetReviewModel(Base):
-    __tablename__ = "dataset_reviews"
-
-    review_id: Mapped[str] = mapped_column(
-        String(36),
-        primary_key=True,
-        default=lambda: str(uuid4()),
-    )
-    dataset_id: Mapped[str] = mapped_column(
-        String(36),
-        ForeignKey("datasets.dataset_id", ondelete="CASCADE"),
-        nullable=False,
-    )
-    reviewer_user_id: Mapped[str | None] = mapped_column(String(36))
-    status: Mapped[str] = mapped_column(String(30), default="pending")
-    comments: Mapped[str | None] = mapped_column(Text)
-    requested_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utc_now)
-    resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-
-
 class NoteModel(Base):
     __tablename__ = "notes"
 
@@ -187,7 +181,13 @@ class NoteModel(Base):
         nullable=False,
     )
     raw_content: Mapped[str] = mapped_column(Text, nullable=False)
+    raw_storage_id: Mapped[str | None] = mapped_column(String(36))
+    raw_filename: Mapped[str | None] = mapped_column(String(255))
+    raw_content_type: Mapped[str | None] = mapped_column(String(255))
+    raw_size_bytes: Mapped[int | None] = mapped_column(Integer)
+    raw_checksum: Mapped[str | None] = mapped_column(String(64))
     transcribed_text: Mapped[str | None] = mapped_column(Text)
+    note_metadata: Mapped[dict[str, str]] = mapped_column("metadata", JSON, default=dict)
     status: Mapped[str] = mapped_column(String(20), default="staged")
     created_by: Mapped[str | None] = mapped_column(String(255))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utc_now)
@@ -196,53 +196,6 @@ class NoteModel(Base):
         default=_utc_now,
         onupdate=_utc_now,
     )
-
-
-class NoteExtractedEntityModel(Base):
-    __tablename__ = "note_extracted_entities"
-
-    extracted_entity_id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    note_id: Mapped[str] = mapped_column(
-        String(36),
-        ForeignKey("notes.note_id", ondelete="CASCADE"),
-        nullable=False,
-    )
-    label: Mapped[str] = mapped_column(String(255), nullable=False)
-    confidence: Mapped[float] = mapped_column(Float, nullable=False)
-    provenance: Mapped[str] = mapped_column(String(255), nullable=False)
-
-
-class NoteTagSuggestionModel(Base):
-    __tablename__ = "note_tag_suggestions"
-    __table_args__ = (
-        UniqueConstraint(
-            "note_id",
-            "entity_label",
-            "vocabulary",
-            "term_id",
-            name="uq_note_tag_suggestion",
-        ),
-    )
-
-    suggestion_id: Mapped[str] = mapped_column(
-        String(36),
-        primary_key=True,
-        default=lambda: str(uuid4()),
-    )
-    note_id: Mapped[str] = mapped_column(
-        String(36),
-        ForeignKey("notes.note_id", ondelete="CASCADE"),
-        nullable=False,
-    )
-    entity_label: Mapped[str] = mapped_column(String(255), nullable=False)
-    vocabulary: Mapped[str] = mapped_column(String(40), nullable=False)
-    term_id: Mapped[str] = mapped_column(String(255), nullable=False)
-    term_label: Mapped[str] = mapped_column(String(255), nullable=False)
-    confidence: Mapped[float] = mapped_column(Float, nullable=False)
-    provenance: Mapped[str] = mapped_column(String(255), nullable=False)
-    status: Mapped[str] = mapped_column(String(20), default="staged")
-    reviewed_by: Mapped[str | None] = mapped_column(String(255))
-    reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class NoteTargetModel(Base):
@@ -465,3 +418,27 @@ class UserModel(Base):
     password_hash: Mapped[str] = mapped_column(String(255), nullable=False)
     role: Mapped[str] = mapped_column(String(20), nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utc_now)
+
+
+Index("ix_questions_project_created_at", QuestionModel.project_id, QuestionModel.created_at)
+Index("ix_datasets_project_created_at", DatasetModel.project_id, DatasetModel.created_at)
+Index("ix_notes_project_created_at", NoteModel.project_id, NoteModel.created_at)
+Index(
+    "ix_note_targets_entity_lookup",
+    NoteTargetModel.entity_type,
+    NoteTargetModel.entity_id,
+    NoteTargetModel.note_id,
+)
+Index("ix_sessions_project_started_at", SessionModel.project_id, SessionModel.started_at)
+Index("ix_analysis_datasets_dataset_id", AnalysisDatasetModel.dataset_id)
+Index("ix_analyses_project_created_at", AnalysisModel.project_id, AnalysisModel.created_at)
+Index("ix_claim_datasets_dataset_id", ClaimDatasetModel.dataset_id)
+Index("ix_claim_analyses_analysis_id", ClaimAnalysisModel.analysis_id)
+Index("ix_claims_project_created_at", ClaimModel.project_id, ClaimModel.created_at)
+Index("ix_dataset_question_links_question_id", DatasetQuestionLinkModel.question_id)
+Index(
+    "ix_visualizations_analysis_created_at",
+    VisualizationModel.analysis_id,
+    VisualizationModel.created_at,
+)
+Index("ix_visualization_claims_claim_id", VisualizationClaimModel.claim_id)

@@ -5,11 +5,7 @@ from __future__ import annotations
 from typing import Iterable
 from uuid import UUID, uuid4
 
-from sqlalchemy import select
-
 from lab_tracker.auth import AuthContext, require_role
-from lab_tracker.db_models import DatasetFileModel, NoteTargetModel
-from lab_tracker.dependencies import get_active_repository
 from lab_tracker.errors import ValidationError
 from lab_tracker.models import (
     Dataset,
@@ -17,67 +13,35 @@ from lab_tracker.models import (
     DatasetCommitManifestInput,
     DatasetFile,
     DatasetStatus,
-    EntityType,
-    ProjectReviewPolicy,
     QuestionLink,
     QuestionLinkRole,
     utc_now,
 )
 from lab_tracker.services.shared import (
     WRITE_ROLES,
+    _actor_user_id,
     _build_commit_manifest,
     _compute_commit_hash,
+    _ensure_dataset_status_transition,
     _ensure_primary_question_active,
-    _get_or_raise,
     _manifest_input_from_commit,
     _unique_ids,
     _validate_commit_hash,
 )
 
-_DATASET_NOTE_TARGET_ENTITY_TYPE = EntityType.DATASET.value
 
-
-def _load_attached_files(dataset_id: UUID) -> list[DatasetFile] | None:
-    """Fetch dataset files from the active repository, when backed by SQLAlchemy."""
-
-    repository = get_active_repository()
-    session = getattr(repository, "_session", None)
-    if session is None:
+def _load_attached_files(self, dataset_id: UUID) -> list[DatasetFile] | None:
+    repository = self._active_repository()
+    if repository is None or self._allow_in_memory:
         return None
-    rows = list(
-        session.scalars(
-            select(DatasetFileModel)
-            .where(DatasetFileModel.dataset_id == str(dataset_id))
-            .order_by(DatasetFileModel.path, DatasetFileModel.file_id)
-        )
-    )
-    return [
-        DatasetFile(
-            file_id=UUID(row.file_id),
-            path=row.path,
-            checksum=row.checksum,
-            size_bytes=row.size_bytes,
-        )
-        for row in rows
-    ]
+    return repository.list_dataset_files(dataset_id)
 
 
-def _load_dataset_note_targets(dataset_id: UUID) -> list[UUID] | None:
-    """Fetch note IDs targeting a dataset from the active repository, when backed by SQLAlchemy."""
-
-    repository = get_active_repository()
-    session = getattr(repository, "_session", None)
-    if session is None:
+def _load_dataset_note_targets(self, dataset_id: UUID) -> list[UUID] | None:
+    repository = self._active_repository()
+    if repository is None or self._allow_in_memory:
         return None
-    rows = list(
-        session.scalars(
-            select(NoteTargetModel.note_id).where(
-                NoteTargetModel.entity_type == _DATASET_NOTE_TARGET_ENTITY_TYPE,
-                NoteTargetModel.entity_id == str(dataset_id),
-            )
-        )
-    )
-    return [UUID(note_id) for note_id in rows]
+    return repository.list_dataset_note_target_ids(dataset_id)
 
 
 def _merge_unique_ids(base: list[UUID], additions: Iterable[UUID]) -> list[UUID]:
@@ -92,20 +56,6 @@ def _merge_unique_ids(base: list[UUID], additions: Iterable[UUID]) -> list[UUID]
 
 
 class DatasetServiceMixin:
-    def _dataset_review_required(self, project_id: UUID) -> bool:
-        policy = self.get_project(project_id).review_policy
-        # TODO: implement selective criteria; until then, treat it as review-required.
-        return policy in (ProjectReviewPolicy.ALL, ProjectReviewPolicy.SELECTIVE)
-
-    def _default_dataset_reviewer_user_id(self, project_id: UUID) -> UUID | None:
-        project = self.get_project(project_id)
-        if not project.created_by:
-            return None
-        try:
-            return UUID(project.created_by)
-        except ValueError:
-            return None
-
     def create_dataset(
         self,
         project_id: UUID,
@@ -116,7 +66,6 @@ class DatasetServiceMixin:
         commit_manifest: DatasetCommitManifestInput | DatasetCommitManifest | None = None,
         commit_hash: str | None = None,
         actor: AuthContext | None = None,
-        created_by: str | None = None,
     ) -> Dataset:
         require_role(actor, WRITE_ROLES)
         self.get_project(project_id)
@@ -134,8 +83,6 @@ class DatasetServiceMixin:
                 raise ValidationError("Secondary questions must belong to the same project.")
 
         commit_requested = status == DatasetStatus.COMMITTED
-        review_required = commit_requested and self._dataset_review_required(project_id)
-        resolved_status = DatasetStatus.STAGED if review_required else status
 
         question_links = [
             QuestionLink(question_id=primary_question_id, role=QuestionLinkRole.PRIMARY),
@@ -149,7 +96,7 @@ class DatasetServiceMixin:
             question_links,
         )
         self._ensure_source_session_valid(resolved_manifest.source_session_id, project_id)
-        if resolved_status == DatasetStatus.COMMITTED and not resolved_manifest.files:
+        if status == DatasetStatus.COMMITTED and not resolved_manifest.files:
             raise ValidationError("At least one file is required to commit a dataset.")
         resolved_commit_hash = _compute_commit_hash(resolved_manifest)
         _validate_commit_hash(commit_hash, resolved_commit_hash)
@@ -161,25 +108,36 @@ class DatasetServiceMixin:
             primary_question_id=primary_question_id,
             question_links=question_links,
             commit_manifest=resolved_manifest,
-            status=resolved_status,
-            created_by=created_by,
+            status=status,
+            created_by=_actor_user_id(actor),
         )
         if commit_requested:
             _ensure_primary_question_active(primary_question)
-        self._store.datasets[dataset.dataset_id] = dataset
+        self._remember_entity("datasets", dataset.dataset_id, dataset)
         self._run_repository_write(lambda repository: repository.datasets.save(dataset))
-        if review_required:
-            self.request_dataset_review(
-                dataset.dataset_id,
-                reviewer_user_id=self._default_dataset_reviewer_user_id(project_id),
-                actor=actor,
-            )
         return dataset
 
     def get_dataset(self, dataset_id: UUID) -> Dataset:
-        return _get_or_raise(self._store.datasets, dataset_id, "Dataset")
+        return self._get_from_repository_or_store(
+            attribute_name="datasets",
+            entity_id=dataset_id,
+            label="Dataset",
+            loader=lambda repository: repository.datasets.get(dataset_id),
+        )
 
     def list_datasets(self, *, project_id: UUID | None = None) -> list[Dataset]:
+        repository = self._active_repository()
+        if repository is not None and not self._allow_in_memory:
+            datasets, _ = repository.query_datasets(
+                project_id=project_id,
+                limit=None,
+                offset=0,
+            )
+            return self._cache_entities(
+                "datasets",
+                datasets,
+                lambda dataset: dataset.dataset_id,
+            )
         if project_id is None:
             return list(self._store.datasets.values())
         return [d for d in self._store.datasets.values() if d.project_id == project_id]
@@ -196,12 +154,12 @@ class DatasetServiceMixin:
     ) -> Dataset:
         require_role(actor, WRITE_ROLES)
         dataset = self.get_dataset(dataset_id)
+        if status is not None:
+            _ensure_dataset_status_transition(dataset.status, status)
         was_committed = dataset.status == DatasetStatus.COMMITTED
         if was_committed:
             if commit_hash is not None or question_links is not None or commit_manifest is not None:
                 raise ValidationError("Committed datasets are immutable.")
-            if status == DatasetStatus.STAGED:
-                raise ValidationError("Committed datasets cannot return to staged.")
         if question_links is not None:
             links = list(question_links)
             primary_links = [link for link in links if link.role == QuestionLinkRole.PRIMARY]
@@ -221,15 +179,13 @@ class DatasetServiceMixin:
         commit_requested = (
             status == DatasetStatus.COMMITTED and dataset.status != DatasetStatus.COMMITTED
         )
-        review_required = commit_requested and self._dataset_review_required(dataset.project_id)
-        is_committing = commit_requested and not review_required
 
         if commit_requested:
             primary_question = self.get_question(dataset.primary_question_id)
             _ensure_primary_question_active(primary_question)
 
         should_refresh_manifest = (
-            commit_manifest is not None or question_links is not None or is_committing
+            commit_manifest is not None or question_links is not None or commit_requested
         )
         if should_refresh_manifest:
             if commit_manifest is None:
@@ -239,8 +195,8 @@ class DatasetServiceMixin:
             else:
                 base_manifest = commit_manifest
 
-            if is_committing:
-                attached_files = _load_attached_files(dataset.dataset_id)
+            if commit_requested:
+                attached_files = _load_attached_files(self, dataset.dataset_id)
                 if attached_files is None:
                     files = list(base_manifest.files)
                 else:
@@ -249,7 +205,7 @@ class DatasetServiceMixin:
                     raise ValidationError("At least one file is required to commit a dataset.")
 
                 note_ids = list(base_manifest.note_ids)
-                note_targets = _load_dataset_note_targets(dataset.dataset_id)
+                note_targets = _load_dataset_note_targets(self, dataset.dataset_id)
                 if note_targets:
                     note_ids = _merge_unique_ids(note_ids, note_targets)
 
@@ -259,7 +215,6 @@ class DatasetServiceMixin:
                     nwb_metadata=base_manifest.nwb_metadata,
                     bids_metadata=base_manifest.bids_metadata,
                     note_ids=note_ids,
-                    extraction_provenance=base_manifest.extraction_provenance,
                     source_session_id=base_manifest.source_session_id,
                 )
 
@@ -277,19 +232,7 @@ class DatasetServiceMixin:
         else:
             _validate_commit_hash(commit_hash, _compute_commit_hash(dataset.commit_manifest))
         if status is not None:
-            if status == DatasetStatus.COMMITTED and dataset.status != DatasetStatus.COMMITTED:
-                if self._dataset_review_required(dataset.project_id):
-                    self.request_dataset_review(
-                        dataset.dataset_id,
-                        reviewer_user_id=self._default_dataset_reviewer_user_id(
-                            dataset.project_id
-                        ),
-                        actor=actor,
-                    )
-                else:
-                    dataset.status = status
-            else:
-                dataset.status = status
+            dataset.status = status
         dataset.updated_at = utc_now()
         self._run_repository_write(lambda repository: repository.datasets.save(dataset))
         return dataset
@@ -297,6 +240,6 @@ class DatasetServiceMixin:
     def delete_dataset(self, dataset_id: UUID, *, actor: AuthContext | None = None) -> Dataset:
         require_role(actor, WRITE_ROLES)
         dataset = self.get_dataset(dataset_id)
-        del self._store.datasets[dataset_id]
+        self._forget_entity("datasets", dataset_id)
         self._run_repository_write(lambda repository: repository.datasets.delete(dataset_id))
         return dataset

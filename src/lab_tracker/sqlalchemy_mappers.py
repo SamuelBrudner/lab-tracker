@@ -15,10 +15,7 @@ from lab_tracker.db_models import (
     ClaimModel,
     DatasetModel,
     DatasetQuestionLinkModel,
-    DatasetReviewModel,
-    NoteExtractedEntityModel,
     NoteModel,
-    NoteTagSuggestionModel,
     NoteTargetModel,
     ProjectModel,
     QuestionModel,
@@ -35,29 +32,24 @@ from lab_tracker.models import (
     ClaimStatus,
     Dataset,
     DatasetCommitManifest,
-    DatasetReview,
-    DatasetReviewStatus,
+    DatasetFile,
     DatasetStatus,
     EntityRef,
-    EntityTagSuggestion,
     EntityType,
-    ExtractedEntity,
     Note,
+    NoteRawAsset,
     NoteStatus,
     OutcomeStatus,
     Project,
-    ProjectReviewPolicy,
     ProjectStatus,
     Question,
     QuestionLink,
     QuestionLinkRole,
-    QuestionSource,
     QuestionStatus,
     QuestionType,
     Session,
     SessionStatus,
     SessionType,
-    TagSuggestionStatus,
     Visualization,
 )
 
@@ -82,13 +74,22 @@ def _as_utc_optional(value: datetime | None) -> datetime | None:
     return _as_utc(value)
 
 
+def _dataset_files_to_json(files: Iterable[DatasetFile]) -> list[dict[str, object]]:
+    return [file.model_dump(mode="json") for file in files]
+
+
+def _dataset_files_from_json(raw_files: Iterable[object] | None) -> list[DatasetFile]:
+    if not raw_files:
+        return []
+    return [DatasetFile.model_validate(item) for item in raw_files]
+
+
 def project_to_model(project: Project) -> ProjectModel:
     return ProjectModel(
         project_id=_uuid_str(project.project_id),
         name=project.name,
         description=project.description,
         status=project.status.value,
-        review_policy=project.review_policy.value,
         created_by=project.created_by,
         created_at=project.created_at,
         updated_at=project.updated_at,
@@ -101,7 +102,6 @@ def project_from_model(row: ProjectModel) -> Project:
         name=row.name,
         description=row.description,
         status=ProjectStatus(row.status),
-        review_policy=ProjectReviewPolicy(getattr(row, "review_policy", "none")),
         created_by=row.created_by,
         created_at=_as_utc(row.created_at),
         updated_at=_as_utc(row.updated_at),
@@ -112,7 +112,6 @@ def apply_project_to_model(row: ProjectModel, project: Project) -> None:
     row.name = project.name
     row.description = project.description
     row.status = project.status.value
-    row.review_policy = project.review_policy.value
     row.created_by = project.created_by
     row.created_at = project.created_at
     row.updated_at = project.updated_at
@@ -126,7 +125,6 @@ def question_to_model(question: Question) -> QuestionModel:
         question_type=question.question_type.value,
         hypothesis=question.hypothesis,
         status=question.status.value,
-        created_from=question.created_from.value,
         created_by=question.created_by,
         created_at=question.created_at,
         updated_at=question.updated_at,
@@ -146,7 +144,6 @@ def question_from_model(
         hypothesis=row.hypothesis,
         status=QuestionStatus(row.status),
         parent_question_ids=list(parent_question_ids),
-        created_from=QuestionSource(row.created_from),
         created_by=row.created_by,
         created_at=_as_utc(row.created_at),
         updated_at=_as_utc(row.updated_at),
@@ -169,18 +166,28 @@ def apply_question_to_model(row: QuestionModel, question: Question) -> None:
     row.question_type = question.question_type.value
     row.hypothesis = question.hypothesis
     row.status = question.status.value
-    row.created_from = question.created_from.value
     row.created_by = question.created_by
     row.created_at = question.created_at
     row.updated_at = question.updated_at
 
 
 def dataset_to_model(dataset: Dataset) -> DatasetModel:
+    manifest = dataset.commit_manifest
     return DatasetModel(
         dataset_id=_uuid_str(dataset.dataset_id),
         project_id=_uuid_str(dataset.project_id),
         commit_hash=dataset.commit_hash,
         primary_question_id=_uuid_str(dataset.primary_question_id),
+        manifest_files=_dataset_files_to_json(manifest.files),
+        manifest_metadata=dict(manifest.metadata),
+        manifest_nwb_metadata=dict(manifest.nwb_metadata),
+        manifest_bids_metadata=dict(manifest.bids_metadata),
+        manifest_note_ids=[str(note_id) for note_id in manifest.note_ids],
+        manifest_source_session_id=(
+            _uuid_str(manifest.source_session_id)
+            if manifest.source_session_id is not None
+            else None
+        ),
         status=dataset.status.value,
         created_by=dataset.created_by,
         created_at=dataset.created_at,
@@ -202,7 +209,19 @@ def dataset_from_model(
                 role=QuestionLinkRole.PRIMARY,
             ),
         )
-    manifest = DatasetCommitManifest(question_links=links)
+    manifest = DatasetCommitManifest(
+        files=_dataset_files_from_json(getattr(row, "manifest_files", None)),
+        metadata=dict(getattr(row, "manifest_metadata", {}) or {}),
+        nwb_metadata=dict(getattr(row, "manifest_nwb_metadata", {}) or {}),
+        bids_metadata=dict(getattr(row, "manifest_bids_metadata", {}) or {}),
+        note_ids=[_uuid(note_id) for note_id in getattr(row, "manifest_note_ids", []) or []],
+        question_links=links,
+        source_session_id=(
+            _uuid(row.manifest_source_session_id)
+            if getattr(row, "manifest_source_session_id", None)
+            else None
+        ),
+    )
     return Dataset(
         dataset_id=_uuid(row.dataset_id),
         project_id=_uuid(row.project_id),
@@ -238,46 +257,22 @@ def dataset_question_link_models(dataset: Dataset) -> list[DatasetQuestionLinkMo
 
 
 def apply_dataset_to_model(row: DatasetModel, dataset: Dataset) -> None:
+    manifest = dataset.commit_manifest
     row.project_id = _uuid_str(dataset.project_id)
     row.commit_hash = dataset.commit_hash
     row.primary_question_id = _uuid_str(dataset.primary_question_id)
+    row.manifest_files = _dataset_files_to_json(manifest.files)
+    row.manifest_metadata = dict(manifest.metadata)
+    row.manifest_nwb_metadata = dict(manifest.nwb_metadata)
+    row.manifest_bids_metadata = dict(manifest.bids_metadata)
+    row.manifest_note_ids = [str(note_id) for note_id in manifest.note_ids]
+    row.manifest_source_session_id = (
+        _uuid_str(manifest.source_session_id) if manifest.source_session_id is not None else None
+    )
     row.status = dataset.status.value
     row.created_by = dataset.created_by
     row.created_at = dataset.created_at
     row.updated_at = dataset.updated_at
-
-
-def dataset_review_to_model(review: DatasetReview) -> DatasetReviewModel:
-    return DatasetReviewModel(
-        review_id=_uuid_str(review.review_id),
-        dataset_id=_uuid_str(review.dataset_id),
-        reviewer_user_id=_uuid_str(review.reviewer_user_id) if review.reviewer_user_id else None,
-        status=review.status.value,
-        comments=review.comments,
-        requested_at=review.requested_at,
-        resolved_at=review.resolved_at,
-    )
-
-
-def dataset_review_from_model(row: DatasetReviewModel) -> DatasetReview:
-    return DatasetReview(
-        review_id=_uuid(row.review_id),
-        dataset_id=_uuid(row.dataset_id),
-        reviewer_user_id=_uuid(row.reviewer_user_id) if row.reviewer_user_id else None,
-        status=DatasetReviewStatus(row.status),
-        comments=row.comments,
-        requested_at=_as_utc(row.requested_at),
-        resolved_at=_as_utc_optional(row.resolved_at),
-    )
-
-
-def apply_dataset_review_to_model(row: DatasetReviewModel, review: DatasetReview) -> None:
-    row.dataset_id = _uuid_str(review.dataset_id)
-    row.reviewer_user_id = _uuid_str(review.reviewer_user_id) if review.reviewer_user_id else None
-    row.status = review.status.value
-    row.comments = review.comments
-    row.requested_at = review.requested_at
-    row.resolved_at = review.resolved_at
 
 
 def note_to_model(note: Note) -> NoteModel:
@@ -285,7 +280,15 @@ def note_to_model(note: Note) -> NoteModel:
         note_id=_uuid_str(note.note_id),
         project_id=_uuid_str(note.project_id),
         raw_content=note.raw_content,
+        raw_storage_id=(
+            _uuid_str(note.raw_asset.storage_id) if note.raw_asset is not None else None
+        ),
+        raw_filename=note.raw_asset.filename if note.raw_asset is not None else None,
+        raw_content_type=note.raw_asset.content_type if note.raw_asset is not None else None,
+        raw_size_bytes=note.raw_asset.size_bytes if note.raw_asset is not None else None,
+        raw_checksum=note.raw_asset.checksum if note.raw_asset is not None else None,
         transcribed_text=note.transcribed_text,
+        note_metadata=dict(note.metadata),
         status=note.status.value,
         created_by=note.created_by,
         created_at=note.created_at,
@@ -296,77 +299,30 @@ def note_to_model(note: Note) -> NoteModel:
 def note_from_model(
     row: NoteModel,
     *,
-    extracted_entities: Iterable[ExtractedEntity] = (),
-    tag_suggestions: Iterable[EntityTagSuggestion] = (),
     targets: Iterable[EntityRef] = (),
 ) -> Note:
+    raw_asset = None
+    if row.raw_storage_id:
+        raw_asset = NoteRawAsset(
+            storage_id=_uuid(row.raw_storage_id),
+            filename=row.raw_filename or "",
+            content_type=row.raw_content_type or "",
+            size_bytes=row.raw_size_bytes or 0,
+            checksum=row.raw_checksum or "",
+        )
     return Note(
         note_id=_uuid(row.note_id),
         project_id=_uuid(row.project_id),
         raw_content=row.raw_content,
+        raw_asset=raw_asset,
         transcribed_text=row.transcribed_text,
-        extracted_entities=list(extracted_entities),
-        tag_suggestions=list(tag_suggestions),
         targets=list(targets),
+        metadata=dict(getattr(row, "note_metadata", {}) or {}),
         status=NoteStatus(row.status),
         created_by=row.created_by,
         created_at=_as_utc(row.created_at),
         updated_at=_as_utc(row.updated_at),
     )
-
-
-def extracted_entity_from_model(row: NoteExtractedEntityModel) -> ExtractedEntity:
-    return ExtractedEntity(
-        label=row.label,
-        confidence=row.confidence,
-        provenance=row.provenance,
-    )
-
-
-def note_extracted_entity_models(note: Note) -> list[NoteExtractedEntityModel]:
-    return [
-        NoteExtractedEntityModel(
-            note_id=_uuid_str(note.note_id),
-            label=entity.label,
-            confidence=entity.confidence,
-            provenance=entity.provenance,
-        )
-        for entity in note.extracted_entities
-    ]
-
-
-def tag_suggestion_from_model(row: NoteTagSuggestionModel) -> EntityTagSuggestion:
-    return EntityTagSuggestion(
-        suggestion_id=_uuid(row.suggestion_id),
-        entity_label=row.entity_label,
-        vocabulary=row.vocabulary,
-        term_id=row.term_id,
-        term_label=row.term_label,
-        confidence=row.confidence,
-        provenance=row.provenance,
-        status=TagSuggestionStatus(row.status),
-        reviewed_by=row.reviewed_by,
-        reviewed_at=_as_utc_optional(row.reviewed_at),
-    )
-
-
-def note_tag_suggestion_models(note: Note) -> list[NoteTagSuggestionModel]:
-    return [
-        NoteTagSuggestionModel(
-            suggestion_id=_uuid_str(suggestion.suggestion_id),
-            note_id=_uuid_str(note.note_id),
-            entity_label=suggestion.entity_label,
-            vocabulary=suggestion.vocabulary,
-            term_id=suggestion.term_id,
-            term_label=suggestion.term_label,
-            confidence=suggestion.confidence,
-            provenance=suggestion.provenance,
-            status=suggestion.status.value,
-            reviewed_by=suggestion.reviewed_by,
-            reviewed_at=suggestion.reviewed_at,
-        )
-        for suggestion in note.tag_suggestions
-    ]
 
 
 def entity_ref_from_model(row: NoteTargetModel) -> EntityRef:
@@ -390,7 +346,15 @@ def note_target_models(note: Note) -> list[NoteTargetModel]:
 def apply_note_to_model(row: NoteModel, note: Note) -> None:
     row.project_id = _uuid_str(note.project_id)
     row.raw_content = note.raw_content
+    row.raw_storage_id = (
+        _uuid_str(note.raw_asset.storage_id) if note.raw_asset is not None else None
+    )
+    row.raw_filename = note.raw_asset.filename if note.raw_asset is not None else None
+    row.raw_content_type = note.raw_asset.content_type if note.raw_asset is not None else None
+    row.raw_size_bytes = note.raw_asset.size_bytes if note.raw_asset is not None else None
+    row.raw_checksum = note.raw_asset.checksum if note.raw_asset is not None else None
     row.transcribed_text = note.transcribed_text
+    row.note_metadata = dict(note.metadata)
     row.status = note.status.value
     row.created_by = note.created_by
     row.created_at = note.created_at

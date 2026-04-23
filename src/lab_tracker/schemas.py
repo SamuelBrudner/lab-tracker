@@ -7,11 +7,10 @@ Envelope/ListEnvelope wrappers. Request payloads use purpose-built schemas below
 from __future__ import annotations
 
 from datetime import datetime
-from enum import Enum
 from typing import Any, Generic, TypeVar
 from uuid import UUID
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field
 
 from lab_tracker.auth import Role
 from lab_tracker.models import (
@@ -23,24 +22,24 @@ from lab_tracker.models import (
     DatasetCommitManifestInput,
     DatasetStatus,
     EntityRef,
-    ExtractedEntity,
     Note,
     NoteStatus,
     ProjectStatus,
-    ProjectReviewPolicy,
     Question,
     QuestionLink,
-    QuestionSource,
     QuestionStatus,
     QuestionType,
     SessionStatus,
     SessionType,
-    TagSuggestionStatus,
     Visualization,
     VisualizationInput,
 )
 
 T = TypeVar("T")
+
+
+class RequestModel(BaseModel):
+    model_config = ConfigDict(extra="forbid")
 
 
 class Envelope(BaseModel, Generic[T]):
@@ -88,14 +87,14 @@ class AuthTokenRead(BaseModel):
     user: AuthUserRead
 
 
-class AuthRegisterRequest(BaseModel):
+class AuthRegisterRequest(RequestModel):
     username: str = Field(..., min_length=1)
     password: str = Field(..., min_length=1)
     role: Role = Role.VIEWER
     bootstrap_token: str | None = Field(default=None, min_length=1)
 
 
-class AuthLoginRequest(BaseModel):
+class AuthLoginRequest(RequestModel):
     username: str = Field(..., min_length=1)
     password: str = Field(..., min_length=1)
 
@@ -109,33 +108,28 @@ class NoteRawDownloadRead(BaseModel):
     content_base64: str
 
 
-class ProjectCreate(BaseModel):
+class ProjectCreate(RequestModel):
     name: str = Field(..., min_length=1)
     description: str | None = None
     status: ProjectStatus | None = None
-    review_policy: ProjectReviewPolicy | None = None
-    created_by: str | None = None
 
 
-class ProjectUpdate(BaseModel):
+class ProjectUpdate(RequestModel):
     name: str | None = None
     description: str | None = None
     status: ProjectStatus | None = None
-    review_policy: ProjectReviewPolicy | None = None
 
 
-class QuestionCreate(BaseModel):
+class QuestionCreate(RequestModel):
     project_id: UUID
     text: str = Field(..., min_length=1)
     question_type: QuestionType
     hypothesis: str | None = None
     status: QuestionStatus | None = None
     parent_question_ids: list[UUID] | None = None
-    created_from: QuestionSource | None = None
-    created_by: str | None = None
 
 
-class QuestionUpdate(BaseModel):
+class QuestionUpdate(RequestModel):
     text: str | None = None
     question_type: QuestionType | None = None
     hypothesis: str | None = None
@@ -143,132 +137,94 @@ class QuestionUpdate(BaseModel):
     parent_question_ids: list[UUID] | None = None
 
 
-class DatasetCreate(BaseModel):
+class DatasetCreate(RequestModel):
     project_id: UUID
     commit_manifest: DatasetCommitManifestInput | None = None
     commit_hash: str | None = None
     primary_question_id: UUID
     secondary_question_ids: list[UUID] | None = None
     status: DatasetStatus | None = None
-    created_by: str | None = None
 
 
-class DatasetUpdate(BaseModel):
+class DatasetUpdate(RequestModel):
     commit_manifest: DatasetCommitManifestInput | None = None
     commit_hash: str | None = None
     status: DatasetStatus | None = None
     question_links: list[QuestionLink] | None = None
 
 
-class DatasetReviewRequest(BaseModel):
-    comments: str | None = None
-
-
-class DatasetReviewAction(str, Enum):
-    APPROVE = "approve"
-    REQUEST_CHANGES = "request_changes"
-    REJECT = "reject"
-
-
-class DatasetReviewUpdate(BaseModel):
-    action: DatasetReviewAction
-    comments: str | None = None
-
-    @field_validator("action", mode="before")
-    @classmethod
-    def _normalize_action(cls, value: object) -> object:
-        if not isinstance(value, str):
-            return value
-        cleaned = value.strip().lower().replace("-", "_")
-        mapping = {
-            "approved": DatasetReviewAction.APPROVE.value,
-            "changes_requested": DatasetReviewAction.REQUEST_CHANGES.value,
-            "rejected": DatasetReviewAction.REJECT.value,
-        }
-        return mapping.get(cleaned, cleaned)
-
-
-class NoteCreate(BaseModel):
+class NoteCreate(RequestModel):
     project_id: UUID
     raw_content: str = Field(..., min_length=1)
     transcribed_text: str | None = None
-    extracted_entities: list[ExtractedEntity] | None = None
     targets: list[EntityRef] | None = None
     metadata: dict[str, str] | None = None
     status: NoteStatus | None = None
-    created_by: str | None = None
 
 
-class NoteUpload(BaseModel):
+class NoteUpload(RequestModel):
     project_id: UUID
     filename: str = Field(..., min_length=1)
     content_type: str = Field(..., min_length=1)
     content_base64: str = Field(..., min_length=1)
     transcribed_text: str | None = None
-    extracted_entities: list[ExtractedEntity] | None = None
     targets: list[EntityRef] | None = None
     metadata: dict[str, str] | None = None
     status: NoteStatus | None = None
-    created_by: str | None = None
 
 
-class NoteUpdate(BaseModel):
+class NoteUpdate(RequestModel):
     transcribed_text: str | None = None
-    extracted_entities: list[ExtractedEntity] | None = None
     targets: list[EntityRef] | None = None
     metadata: dict[str, str] | None = None
     status: NoteStatus | None = None
 
 
-class SessionCreate(BaseModel):
+class SessionCreate(RequestModel):
     project_id: UUID
     session_type: SessionType
     primary_question_id: UUID | None = None
-    status: SessionStatus | None = None
-    created_by: str | None = None
 
 
-class SessionUpdate(BaseModel):
+class SessionUpdate(RequestModel):
     status: SessionStatus | None = None
     ended_at: datetime | None = None
 
 
-class SessionPromotionRequest(BaseModel):
+class SessionPromotionRequest(RequestModel):
     """Promote an operational session into a scientific session by linking a primary question."""
 
     primary_question_id: UUID
 
 
-class SessionDatasetPromotionRequest(BaseModel):
+class SessionDatasetPromotionRequest(RequestModel):
     primary_question_id: UUID
     secondary_question_ids: list[UUID] | None = None
     commit_manifest: DatasetCommitManifestInput | None = None
     status: DatasetStatus | None = None
-    created_by: str | None = None
 
 
-class AcquisitionOutputCreate(BaseModel):
+class AcquisitionOutputCreate(RequestModel):
     file_path: str = Field(..., min_length=1)
     checksum: str = Field(..., min_length=1)
     size_bytes: int | None = Field(default=None, ge=0)
 
 
-class AnalysisCreate(BaseModel):
+class AnalysisCreate(RequestModel):
     project_id: UUID
     dataset_ids: list[UUID] = Field(..., min_length=1)
     method_hash: str = Field(..., min_length=1)
     code_version: str = Field(..., min_length=1)
     environment_hash: str | None = None
     status: AnalysisStatus | None = None
-    executed_by: str | None = None
 
 
-class AnalysisUpdate(BaseModel):
+class AnalysisUpdate(RequestModel):
     status: AnalysisStatus | None = None
     environment_hash: str | None = None
 
 
-class ClaimCreate(BaseModel):
+class ClaimCreate(RequestModel):
     project_id: UUID
     statement: str = Field(..., min_length=1)
     confidence: float = Field(..., ge=0.0, le=100.0)
@@ -277,7 +233,7 @@ class ClaimCreate(BaseModel):
     supported_by_analysis_ids: list[UUID] | None = None
 
 
-class ClaimUpdate(BaseModel):
+class ClaimUpdate(RequestModel):
     statement: str | None = Field(None, min_length=1)
     confidence: float | None = Field(None, ge=0.0, le=100.0)
     status: ClaimStatus | None = None
@@ -285,7 +241,7 @@ class ClaimUpdate(BaseModel):
     supported_by_analysis_ids: list[UUID] | None = None
 
 
-class VisualizationCreate(BaseModel):
+class VisualizationCreate(RequestModel):
     analysis_id: UUID
     viz_type: str = Field(..., min_length=1)
     file_path: str = Field(..., min_length=1)
@@ -293,26 +249,11 @@ class VisualizationCreate(BaseModel):
     related_claim_ids: list[UUID] | None = None
 
 
-class VisualizationUpdate(BaseModel):
+class VisualizationUpdate(RequestModel):
     viz_type: str | None = Field(None, min_length=1)
     file_path: str | None = Field(None, min_length=1)
     caption: str | None = None
     related_claim_ids: list[UUID] | None = None
-
-
-class TagSuggestionRequest(BaseModel):
-    provenance: str | None = None
-
-
-class TagSuggestionReviewRequest(BaseModel):
-    status: TagSuggestionStatus
-    reviewed_by: str | None = None
-
-
-class QuestionExtractionRequest(BaseModel):
-    question_type: QuestionType | None = None
-    created_from: QuestionSource | None = None
-    provenance: str | None = None
 
 
 class SearchResults(BaseModel):
@@ -320,7 +261,7 @@ class SearchResults(BaseModel):
     notes: list[Note] = Field(default_factory=list)
 
 
-class AnalysisCommitRequest(BaseModel):
+class AnalysisCommitRequest(RequestModel):
     environment_hash: str | None = None
     claims: list[ClaimInput] | None = None
     visualizations: list[VisualizationInput] | None = None

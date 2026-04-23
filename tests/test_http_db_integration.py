@@ -1,10 +1,48 @@
 from __future__ import annotations
 
+import base64
+import json
+from pathlib import Path
+from uuid import uuid4
+
 from fastapi.testclient import TestClient
+from sqlalchemy.orm import Session
+
+from lab_tracker.auth import Role
 
 
 def _ids(payload: list[dict[str, object]], key: str) -> set[str]:
     return {str(item[key]) for item in payload}
+
+
+def _admin_headers(client: TestClient) -> dict[str, str]:
+    username = f"admin-{uuid4().hex[:8]}"
+    password = "secret"
+    client.app.state.auth_service.register_user(
+        username=username,
+        password=password,
+        role=Role.ADMIN,
+    )
+    response = client.post(
+        "/auth/login",
+        json={"username": username, "password": password},
+    )
+    assert response.status_code == 200
+    token = response.json()["data"]["access_token"]
+    return {"Authorization": f"Bearer {token}"}
+
+
+def _fail_next_commit(monkeypatch) -> None:
+    original_commit = Session.commit
+    state = {"failed": False}
+
+    def _commit_once(self, *args, **kwargs):  # noqa: ANN001, ANN202
+        if not state["failed"]:
+            state["failed"] = True
+            raise RuntimeError("forced commit failure")
+        return original_commit(self, *args, **kwargs)
+
+    monkeypatch.setattr(Session, "commit", _commit_once)
 
 
 def test_core_entity_crud_routes_use_database_persistence(
@@ -246,3 +284,487 @@ def test_analysis_commit_route_is_atomic_on_failure(
     assert claims_get.json()["data"] == []
     assert visualizations_get.status_code == 200
     assert visualizations_get.json()["data"] == []
+
+
+def test_question_list_paginates_beyond_200_records(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+):
+    headers = admin_auth_headers
+    project_id = client.post(
+        "/projects",
+        json={"name": "Pagination Project"},
+        headers=headers,
+    ).json()["data"]["project_id"]
+
+    for index in range(205):
+        response = client.post(
+            "/questions",
+            json={
+                "project_id": project_id,
+                "text": f"Paginated question {index}",
+                "question_type": "descriptive",
+            },
+            headers=headers,
+        )
+        assert response.status_code == 201
+
+    page = client.get(
+        "/questions",
+        params={"project_id": project_id, "limit": 200, "offset": 200},
+        headers=headers,
+    )
+    assert page.status_code == 200
+    payload = page.json()
+    assert payload["meta"] == {"limit": 200, "offset": 200, "total": 205}
+    assert len(payload["data"]) == 5
+
+
+def test_note_routes_support_target_filters_and_multipart_upload(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+):
+    headers = admin_auth_headers
+    project_id = client.post(
+        "/projects",
+        json={"name": "Notes Project"},
+        headers=headers,
+    ).json()["data"]["project_id"]
+    question_id = client.post(
+        "/questions",
+        json={
+            "project_id": project_id,
+            "text": "Which dataset note is linked?",
+            "question_type": "descriptive",
+            "status": "active",
+        },
+        headers=headers,
+    ).json()["data"]["question_id"]
+    dataset_id = client.post(
+        "/datasets",
+        json={
+            "project_id": project_id,
+            "primary_question_id": question_id,
+        },
+        headers=headers,
+    ).json()["data"]["dataset_id"]
+
+    multipart_upload = client.post(
+        "/notes/upload-file",
+        data={
+            "project_id": project_id,
+            "transcribed_text": "typed capture",
+            "targets": json.dumps(
+                [
+                    {
+                        "entity_id": dataset_id,
+                        "entity_type": "dataset",
+                    }
+                ]
+            ),
+            "metadata": json.dumps({"source": "camera"}),
+        },
+        files={"file": ("capture.txt", b"raw-capture", "text/plain")},
+        headers=headers,
+    )
+    assert multipart_upload.status_code == 201
+    multipart_payload = multipart_upload.json()["data"]
+    assert multipart_payload["transcribed_text"] == "typed capture"
+    assert multipart_payload["metadata"] == {"source": "camera"}
+    assert multipart_payload["raw_asset"]["filename"] == "capture.txt"
+    assert multipart_payload["targets"][0]["entity_type"] == "dataset"
+    assert multipart_payload["targets"][0]["entity_id"] == dataset_id
+
+    raw_download = client.get(
+        f"/notes/{multipart_payload['note_id']}/raw",
+        headers=headers,
+    )
+    assert raw_download.status_code == 200
+    assert raw_download.content == b"raw-capture"
+
+    legacy_upload = client.post(
+        "/notes/upload",
+        json={
+            "content_base64": base64.b64encode(b"legacy-capture").decode("ascii"),
+            "content_type": "text/plain",
+            "filename": "legacy.txt",
+            "project_id": project_id,
+        },
+        headers=headers,
+    )
+    assert legacy_upload.status_code == 201
+
+    filtered = client.get(
+        "/notes",
+        params={
+            "project_id": project_id,
+            "target_entity_type": "dataset",
+            "target_entity_id": dataset_id,
+        },
+        headers=headers,
+    )
+    assert filtered.status_code == 200
+    filtered_payload = filtered.json()
+    assert filtered_payload["meta"]["total"] == 1
+    assert _ids(filtered_payload["data"], "note_id") == {multipart_payload["note_id"]}
+
+
+def test_note_multipart_upload_cleans_up_raw_asset_on_failure(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+):
+    storage_root = Path(client.app.state.raw_note_storage._base_path)
+    before = sorted(path.name for path in storage_root.iterdir()) if storage_root.exists() else []
+
+    response = client.post(
+        "/notes/upload-file",
+        data={"project_id": str(uuid4())},
+        files={"file": ("capture.txt", b"raw-capture", "text/plain")},
+        headers=admin_auth_headers,
+    )
+
+    assert response.status_code == 404
+    after = sorted(path.name for path in storage_root.iterdir()) if storage_root.exists() else []
+    assert after == before
+
+
+def test_note_multipart_upload_rejects_invalid_targets_without_leaking_raw_asset(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+):
+    headers = admin_auth_headers
+    project_id = client.post(
+        "/projects",
+        json={"name": "Invalid targets cleanup"},
+        headers=headers,
+    ).json()["data"]["project_id"]
+    storage_root = Path(client.app.state.raw_note_storage._base_path)
+    before = sorted(path.name for path in storage_root.iterdir()) if storage_root.exists() else []
+
+    response = client.post(
+        "/notes/upload-file",
+        data={
+            "project_id": project_id,
+            "targets": "{not json",
+        },
+        files={"file": ("capture.txt", b"raw-capture", "text/plain")},
+        headers=headers,
+    )
+
+    assert response.status_code == 422
+    after = sorted(path.name for path in storage_root.iterdir()) if storage_root.exists() else []
+    assert after == before
+
+
+def test_note_multipart_upload_rejects_invalid_metadata_without_leaking_raw_asset(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+):
+    headers = admin_auth_headers
+    project_id = client.post(
+        "/projects",
+        json={"name": "Invalid metadata cleanup"},
+        headers=headers,
+    ).json()["data"]["project_id"]
+    storage_root = Path(client.app.state.raw_note_storage._base_path)
+    before = sorted(path.name for path in storage_root.iterdir()) if storage_root.exists() else []
+
+    response = client.post(
+        "/notes/upload-file",
+        data={
+            "project_id": project_id,
+            "metadata": '{"source": 123}',
+        },
+        files={"file": ("capture.txt", b"raw-capture", "text/plain")},
+        headers=headers,
+    )
+
+    assert response.status_code == 422
+    after = sorted(path.name for path in storage_root.iterdir()) if storage_root.exists() else []
+    assert after == before
+
+
+def test_note_upload_cleans_up_raw_asset_when_request_commit_fails(app, monkeypatch):
+    with TestClient(app, raise_server_exceptions=False) as client:
+        headers = _admin_headers(client)
+        project_id = client.post(
+            "/projects",
+            json={"name": "Note upload rollback"},
+            headers=headers,
+        ).json()["data"]["project_id"]
+        storage_root = Path(client.app.state.raw_note_storage._base_path)
+
+        _fail_next_commit(monkeypatch)
+        response = client.post(
+            "/notes/upload",
+            json={
+                "project_id": project_id,
+                "filename": "rollback.txt",
+                "content_type": "text/plain",
+                "content_base64": base64.b64encode(b"rollback-note").decode("ascii"),
+            },
+            headers=headers,
+        )
+
+        assert response.status_code == 500
+        remaining = (
+            sorted(path.name for path in storage_root.iterdir())
+            if storage_root.exists()
+            else []
+        )
+        assert remaining == []
+
+        listed = client.get("/notes", params={"project_id": project_id}, headers=headers)
+        assert listed.status_code == 200
+        assert listed.json()["meta"]["total"] == 0
+
+
+def test_note_multipart_upload_cleans_up_raw_asset_when_request_commit_fails(app, monkeypatch):
+    with TestClient(app, raise_server_exceptions=False) as client:
+        headers = _admin_headers(client)
+        project_id = client.post(
+            "/projects",
+            json={"name": "Multipart note upload rollback"},
+            headers=headers,
+        ).json()["data"]["project_id"]
+        storage_root = Path(client.app.state.raw_note_storage._base_path)
+
+        _fail_next_commit(monkeypatch)
+        response = client.post(
+            "/notes/upload-file",
+            data={"project_id": project_id},
+            files={"file": ("rollback.txt", b"rollback-note", "text/plain")},
+            headers=headers,
+        )
+
+        assert response.status_code == 500
+        remaining = (
+            sorted(path.name for path in storage_root.iterdir())
+            if storage_root.exists()
+            else []
+        )
+        assert remaining == []
+
+        listed = client.get("/notes", params={"project_id": project_id}, headers=headers)
+        assert listed.status_code == 200
+        assert listed.json()["meta"]["total"] == 0
+
+
+def test_note_delete_preserves_raw_asset_when_request_commit_fails(app, monkeypatch):
+    with TestClient(app, raise_server_exceptions=False) as client:
+        headers = _admin_headers(client)
+        project_id = client.post(
+            "/projects",
+            json={"name": "Note delete rollback"},
+            headers=headers,
+        ).json()["data"]["project_id"]
+        upload = client.post(
+            "/notes/upload",
+            json={
+                "project_id": project_id,
+                "filename": "rollback.txt",
+                "content_type": "text/plain",
+                "content_base64": base64.b64encode(b"rollback-note").decode("ascii"),
+            },
+            headers=headers,
+        )
+        assert upload.status_code == 201
+        note_id = upload.json()["data"]["note_id"]
+        storage_root = Path(client.app.state.raw_note_storage._base_path)
+        before = sorted(path.name for path in storage_root.iterdir())
+        assert len(before) == 1
+
+        _fail_next_commit(monkeypatch)
+        response = client.delete(f"/notes/{note_id}", headers=headers)
+
+        assert response.status_code == 500
+        after = sorted(path.name for path in storage_root.iterdir())
+        assert after == before
+
+        loaded = client.get(f"/notes/{note_id}", headers=headers)
+        assert loaded.status_code == 200
+
+
+def test_write_routes_reject_unknown_and_removed_fields(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+):
+    headers = admin_auth_headers
+    project_id = client.post(
+        "/projects",
+        json={"name": "Audit project"},
+        headers=headers,
+    ).json()["data"]["project_id"]
+
+    project_response = client.post(
+        "/projects",
+        json={"name": "Audit project", "created_by": "spoofed-user"},
+        headers=headers,
+    )
+    assert project_response.status_code == 422
+
+    question_response = client.post(
+        "/questions",
+        json={
+            "project_id": project_id,
+            "text": "Should actor identity be derived server side?",
+            "question_type": "descriptive",
+            "created_by": "spoofed-user",
+            "source_provenance": "ocr://note-123",
+        },
+        headers=headers,
+    )
+    assert question_response.status_code == 422
+
+    note_response = client.post(
+        "/notes",
+        json={
+            "project_id": project_id,
+            "raw_content": "audit test note",
+            "created_by": "spoofed-user",
+            "extracted_entities": [{"label": "Neuron"}],
+        },
+        headers=headers,
+    )
+    assert note_response.status_code == 422
+
+    session_response = client.post(
+        "/sessions",
+        json={
+            "project_id": project_id,
+            "session_type": "operational",
+            "created_by": "spoofed-user",
+            "status": "closed",
+        },
+        headers=headers,
+    )
+    assert session_response.status_code == 422
+
+
+def test_analysis_create_rejects_unknown_fields(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+):
+    headers = admin_auth_headers
+    project_id = client.post(
+        "/projects",
+        json={"name": "Analysis audit"},
+        headers=headers,
+    ).json()["data"]["project_id"]
+    question_id = client.post(
+        "/questions",
+        json={
+            "project_id": project_id,
+            "text": "Can analysis authorship be spoofed?",
+            "question_type": "descriptive",
+        },
+        headers=headers,
+    ).json()["data"]["question_id"]
+    dataset_id = client.post(
+        "/datasets",
+        json={"project_id": project_id, "primary_question_id": question_id},
+        headers=headers,
+    ).json()["data"]["dataset_id"]
+
+    analysis_response = client.post(
+        "/analyses",
+        json={
+            "project_id": project_id,
+            "dataset_ids": [dataset_id],
+            "method_hash": "method-1",
+            "code_version": "v1",
+            "executed_by": "spoofed-user",
+        },
+        headers=headers,
+    )
+    assert analysis_response.status_code == 422
+
+
+def test_project_delete_cleans_up_cascaded_attachments(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+):
+    headers = admin_auth_headers
+    project_id = client.post(
+        "/projects",
+        json={"name": "Project cleanup"},
+        headers=headers,
+    ).json()["data"]["project_id"]
+    question_id = client.post(
+        "/questions",
+        json={
+            "project_id": project_id,
+            "text": "Does project delete clean attachments?",
+            "question_type": "descriptive",
+        },
+        headers=headers,
+    ).json()["data"]["question_id"]
+    dataset_id = client.post(
+        "/datasets",
+        json={"project_id": project_id, "primary_question_id": question_id},
+        headers=headers,
+    ).json()["data"]["dataset_id"]
+    file_upload = client.post(
+        f"/datasets/{dataset_id}/files",
+        files={"file": ("cleanup.bin", b"dataset-bytes", "application/octet-stream")},
+        headers=headers,
+    )
+    assert file_upload.status_code == 201
+    note_upload = client.post(
+        "/notes/upload",
+        json={
+            "project_id": project_id,
+            "filename": "capture.txt",
+            "content_type": "text/plain",
+            "content_base64": base64.b64encode(b"note-bytes").decode("ascii"),
+        },
+        headers=headers,
+    )
+    assert note_upload.status_code == 201
+
+    file_storage_root = Path(client.app.state.file_storage_backend.base_path)
+    note_storage_root = Path(client.app.state.raw_note_storage._base_path)
+    assert sorted(path.suffix for path in file_storage_root.rglob("*") if path.is_file()) == [
+        ".bin",
+        ".json",
+    ]
+    assert len([path for path in note_storage_root.iterdir() if path.is_file()]) == 1
+
+    delete_response = client.delete(f"/projects/{project_id}", headers=headers)
+    assert delete_response.status_code == 200
+    assert client.get(f"/projects/{project_id}", headers=headers).status_code == 404
+    assert list(file_storage_root.rglob("*.bin")) == []
+    assert list(file_storage_root.rglob("*.json")) == []
+    assert list(note_storage_root.iterdir()) == []
+
+
+def test_note_raw_download_sanitizes_attachment_filename(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+):
+    headers = admin_auth_headers
+    project_id = client.post(
+        "/projects",
+        json={"name": "Filename sanitization"},
+        headers=headers,
+    ).json()["data"]["project_id"]
+
+    upload_response = client.post(
+        "/notes/upload",
+        json={
+            "project_id": project_id,
+            "filename": '../../bad"\r\nname.txt',
+            "content_type": "text/plain",
+            "content_base64": base64.b64encode(b"raw-capture").decode("ascii"),
+        },
+        headers=headers,
+    )
+    assert upload_response.status_code == 201
+    note_id = upload_response.json()["data"]["note_id"]
+
+    raw_download = client.get(f"/notes/{note_id}/raw", headers=headers)
+    assert raw_download.status_code == 200
+    assert raw_download.content == b"raw-capture"
+    assert raw_download.headers["content-disposition"] == (
+        'attachment; filename="bad\'__name.txt"'
+    )

@@ -110,7 +110,7 @@ function AppHeader({ user, onLogout }) {
         <div>
           <h1>Lab Tracker Frontend MVP</h1>
           <p className="subtle">
-            Project dashboard, staged question review, note capture, and dataset commit workflow.
+            Projects, questions, notes, sessions, datasets, and analysis records.
           </p>
         </div>
         <div className="inline">
@@ -189,9 +189,9 @@ function WorkflowCoverageCard() {
       <h2>Workflow Coverage</h2>
       <div className="stack">
         <div className="item">1. Project dashboard and project creation</div>
-        <div className="item">2. Question capture + extracted candidate staging inbox</div>
-        <div className="item">3. Text notes and photo uploads</div>
-        <div className="item">4. Dataset staging and dataset commit review</div>
+        <div className="item">2. Manual question capture and explicit activation</div>
+        <div className="item">3. Note capture, raw file upload, and download-ready records</div>
+        <div className="item">4. Sessions, dataset commit, and explicit analysis registration</div>
       </div>
     </article>
   );

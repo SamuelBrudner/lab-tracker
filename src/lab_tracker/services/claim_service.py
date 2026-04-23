@@ -18,7 +18,6 @@ from lab_tracker.services.shared import (
     _ensure_claim_status_transition,
     _ensure_claim_support_links,
     _ensure_non_empty,
-    _get_or_raise,
     _unique_ids,
 )
 
@@ -54,12 +53,17 @@ class ClaimServiceMixin:
             supported_by_dataset_ids=dataset_ids,
             supported_by_analysis_ids=analysis_ids,
         )
-        self._store.claims[claim.claim_id] = claim
+        self._remember_entity("claims", claim.claim_id, claim)
         self._run_repository_write(lambda repository: repository.claims.save(claim))
         return claim
 
     def get_claim(self, claim_id: UUID) -> Claim:
-        return _get_or_raise(self._store.claims, claim_id, "Claim")
+        return self._get_from_repository_or_store(
+            attribute_name="claims",
+            entity_id=claim_id,
+            label="Claim",
+            loader=lambda repository: repository.claims.get(claim_id),
+        )
 
     def list_claims(
         self,
@@ -69,6 +73,21 @@ class ClaimServiceMixin:
         dataset_id: UUID | None = None,
         analysis_id: UUID | None = None,
     ) -> list[Claim]:
+        repository = self._active_repository()
+        if repository is not None and not self._allow_in_memory:
+            claims, _ = repository.query_claims(
+                project_id=project_id,
+                status=status.value if status is not None else None,
+                dataset_id=dataset_id,
+                analysis_id=analysis_id,
+                limit=None,
+                offset=0,
+            )
+            return self._cache_entities(
+                "claims",
+                claims,
+                lambda claim: claim.claim_id,
+            )
         if project_id is None:
             claims = list(self._store.claims.values())
         else:
@@ -130,7 +149,7 @@ class ClaimServiceMixin:
     def delete_claim(self, claim_id: UUID, *, actor: AuthContext | None = None) -> Claim:
         require_role(actor, WRITE_ROLES)
         claim = self.get_claim(claim_id)
-        del self._store.claims[claim_id]
+        self._forget_entity("claims", claim_id)
         self._run_repository_write(lambda repository: repository.claims.delete(claim_id))
         return claim
 

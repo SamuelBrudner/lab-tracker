@@ -40,12 +40,11 @@ function NotePanel({
       </form>
 
       <form className="form" onSubmit={onUploadNote}>
-        <h3>Photo upload</h3>
+        <h3>File upload</h3>
         <label>
-          Select image/file
+          Select file
           <input
             type="file"
-            accept="image/*"
             onChange={onUploadFileChange}
             disabled={!canWrite || !selectedProjectId}
           />
@@ -66,7 +65,7 @@ function NotePanel({
           </select>
         </label>
         <label>
-          Transcribed text (optional)
+          Manual transcript (optional)
           <textarea
             value={uploadTranscript}
             onChange={onUploadTranscriptChange}
@@ -74,7 +73,7 @@ function NotePanel({
           />
         </label>
         <button className="btn-primary" disabled={!canWrite || !selectedProjectId || busy}>
-          Upload photo note
+          Upload note file
         </button>
       </form>
 

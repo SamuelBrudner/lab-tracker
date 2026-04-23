@@ -11,7 +11,6 @@ from lab_tracker.models import Visualization, utc_now
 from lab_tracker.services.shared import (
     WRITE_ROLES,
     _ensure_non_empty,
-    _get_or_raise,
     _unique_ids,
 )
 
@@ -44,12 +43,17 @@ class VisualizationServiceMixin:
             caption=caption.strip() if caption else None,
             related_claim_ids=claim_ids,
         )
-        self._store.visualizations[visualization.viz_id] = visualization
+        self._remember_entity("visualizations", visualization.viz_id, visualization)
         self._run_repository_write(lambda repository: repository.visualizations.save(visualization))
         return visualization
 
     def get_visualization(self, viz_id: UUID) -> Visualization:
-        return _get_or_raise(self._store.visualizations, viz_id, "Visualization")
+        return self._get_from_repository_or_store(
+            attribute_name="visualizations",
+            entity_id=viz_id,
+            label="Visualization",
+            loader=lambda repository: repository.visualizations.get(viz_id),
+        )
 
     def list_visualizations(
         self,
@@ -58,6 +62,20 @@ class VisualizationServiceMixin:
         analysis_id: UUID | None = None,
         claim_id: UUID | None = None,
     ) -> list[Visualization]:
+        repository = self._active_repository()
+        if repository is not None and not self._allow_in_memory:
+            visualizations, _ = repository.query_visualizations(
+                project_id=project_id,
+                analysis_id=analysis_id,
+                claim_id=claim_id,
+                limit=None,
+                offset=0,
+            )
+            return self._cache_entities(
+                "visualizations",
+                visualizations,
+                lambda visualization: visualization.viz_id,
+            )
         if project_id is None:
             visualizations = list(self._store.visualizations.values())
         else:
@@ -112,6 +130,6 @@ class VisualizationServiceMixin:
     ) -> Visualization:
         require_role(actor, WRITE_ROLES)
         visualization = self.get_visualization(viz_id)
-        del self._store.visualizations[viz_id]
+        self._forget_entity("visualizations", viz_id)
         self._run_repository_write(lambda repository: repository.visualizations.delete(viz_id))
         return visualization

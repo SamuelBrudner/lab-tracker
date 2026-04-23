@@ -1,23 +1,30 @@
 import { vi } from "vitest";
 
-function createResponse(status, payload) {
+function createResponse(status, payload, extras = {}) {
+  const { blob = null, contentType = "application/json", headers = {}, text = "" } = extras;
   return {
     headers: {
       get(name) {
-        if (String(name).toLowerCase() === "content-type") {
-          return "application/json";
+        const normalized = String(name).toLowerCase();
+        if (normalized in headers) {
+          return headers[normalized];
+        }
+        if (normalized === "content-type") {
+          return contentType;
         }
         return null;
       },
     },
+    blob: async () => blob,
     json: async () => payload,
     ok: status >= 200 && status < 300,
     status,
+    text: async () => text,
   };
 }
 
-function apiResponse(data, status = 200) {
-  return createResponse(status, { data });
+function apiResponse(data, status = 200, meta = null) {
+  return createResponse(status, meta ? { data, meta } : { data });
 }
 
 function errorResponse(message, status = 400) {
@@ -25,6 +32,24 @@ function errorResponse(message, status = 400) {
     error: {
       message,
     },
+  });
+}
+
+function binaryResponse({
+  body,
+  contentType = "application/octet-stream",
+  disposition = "",
+  status = 200,
+}) {
+  const blob = body instanceof Blob ? body : new Blob([body], { type: contentType });
+  const headers = {};
+  if (disposition) {
+    headers["content-disposition"] = disposition;
+  }
+  return createResponse(status, null, {
+    blob,
+    contentType,
+    headers,
   });
 }
 
@@ -69,4 +94,4 @@ function installFetchMock(routes) {
   return fetchMock;
 }
 
-export { apiResponse, errorResponse, installFetchMock };
+export { apiResponse, binaryResponse, errorResponse, installFetchMock };

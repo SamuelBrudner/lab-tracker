@@ -23,24 +23,42 @@ from lab_tracker.models import (
 )
 from lab_tracker.services.shared import (
     WRITE_ROLES,
+    _actor_user_id,
     _ensure_non_empty,
+    _ensure_session_status_transition,
     _find_acquisition_output,
-    _get_or_raise,
     _manifest_input_with_source,
     _merge_acquisition_outputs,
 )
 
 
 class SessionServiceMixin:
+    def _find_existing_acquisition_output(
+        self,
+        session_id: UUID,
+        file_path: str,
+    ) -> AcquisitionOutput | None:
+        repository = self._active_repository()
+        if repository is not None and not self._allow_in_memory:
+            outputs, _ = repository.query_acquisition_outputs(
+                session_id=session_id,
+                limit=None,
+                offset=0,
+            )
+            return _find_acquisition_output(
+                {output.output_id: output for output in outputs},
+                session_id,
+                file_path,
+            )
+        return _find_acquisition_output(self._store.acquisition_outputs, session_id, file_path)
+
     def create_session(
         self,
         project_id: UUID,
         session_type: SessionType,
         *,
         primary_question_id: UUID | None = None,
-        status: SessionStatus = SessionStatus.ACTIVE,
         actor: AuthContext | None = None,
-        created_by: str | None = None,
     ) -> Session:
         require_role(actor, WRITE_ROLES)
         self.get_project(project_id)
@@ -60,16 +78,21 @@ class SessionServiceMixin:
             session_id=uuid4(),
             project_id=project_id,
             session_type=session_type,
-            status=status,
+            status=SessionStatus.ACTIVE,
             primary_question_id=primary_question_id,
-            created_by=created_by,
+            created_by=_actor_user_id(actor),
         )
-        self._store.sessions[session.session_id] = session
+        self._remember_entity("sessions", session.session_id, session)
         self._run_repository_write(lambda repository: repository.sessions.save(session))
         return session
 
     def get_session(self, session_id: UUID) -> Session:
-        return _get_or_raise(self._store.sessions, session_id, "Session")
+        return self._get_from_repository_or_store(
+            attribute_name="sessions",
+            entity_id=session_id,
+            label="Session",
+            loader=lambda repository: repository.sessions.get(session_id),
+        )
 
     def get_session_by_link_code(self, link_code: str) -> Session:
         _ensure_non_empty(link_code, "link_code")
@@ -80,6 +103,14 @@ class SessionServiceMixin:
         return self.get_session(session_id)
 
     def list_sessions(self, *, project_id: UUID | None = None) -> list[Session]:
+        repository = self._active_repository()
+        if repository is not None and not self._allow_in_memory:
+            sessions, _ = repository.query_sessions(project_id=project_id, limit=None, offset=0)
+            return self._cache_entities(
+                "sessions",
+                sessions,
+                lambda session: session.session_id,
+            )
         if project_id is None:
             return list(self._store.sessions.values())
         return [s for s in self._store.sessions.values() if s.project_id == project_id]
@@ -94,9 +125,16 @@ class SessionServiceMixin:
     ) -> Session:
         require_role(actor, WRITE_ROLES)
         session = self.get_session(session_id)
+        next_status = status or session.status
+        if status is not None:
+            _ensure_session_status_transition(session.status, status)
+        if ended_at is not None and next_status != SessionStatus.CLOSED:
+            raise ValidationError("ended_at can only be set when closing a session.")
         if status is not None:
             session.status = status
-        if ended_at is not None:
+        if next_status == SessionStatus.CLOSED:
+            session.ended_at = ended_at or session.ended_at or utc_now()
+        elif ended_at is not None:
             session.ended_at = ended_at
         session.updated_at = utc_now()
         self._run_repository_write(lambda repository: repository.sessions.save(session))
@@ -105,7 +143,7 @@ class SessionServiceMixin:
     def delete_session(self, session_id: UUID, *, actor: AuthContext | None = None) -> Session:
         require_role(actor, WRITE_ROLES)
         session = self.get_session(session_id)
-        del self._store.sessions[session_id]
+        self._forget_entity("sessions", session_id)
         self._run_repository_write(lambda repository: repository.sessions.delete(session_id))
         return session
 
@@ -126,9 +164,7 @@ class SessionServiceMixin:
             raise ValidationError("size_bytes must be 0 or greater.")
         cleaned_path = file_path.strip()
         cleaned_checksum = checksum.strip()
-        existing = _find_acquisition_output(
-            self._store.acquisition_outputs, session_id, cleaned_path
-        )
+        existing = self._find_existing_acquisition_output(session_id, cleaned_path)
         if existing is not None:
             updated = False
             if existing.checksum != cleaned_checksum:
@@ -150,7 +186,7 @@ class SessionServiceMixin:
             checksum=cleaned_checksum,
             size_bytes=size_bytes,
         )
-        self._store.acquisition_outputs[output.output_id] = output
+        self._remember_entity("acquisition_outputs", output.output_id, output)
         self._run_repository_write(lambda repository: repository.acquisition_outputs.save(output))
         return output
 
@@ -159,6 +195,18 @@ class SessionServiceMixin:
         *,
         session_id: UUID | None = None,
     ) -> list[AcquisitionOutput]:
+        repository = self._active_repository()
+        if repository is not None and not self._allow_in_memory:
+            outputs, _ = repository.query_acquisition_outputs(
+                session_id=session_id,
+                limit=None,
+                offset=0,
+            )
+            return self._cache_entities(
+                "acquisition_outputs",
+                outputs,
+                lambda output: output.output_id,
+            )
         outputs = list(self._store.acquisition_outputs.values())
         if session_id is None:
             return outputs
@@ -168,12 +216,13 @@ class SessionServiceMixin:
         self, output_id: UUID, *, actor: AuthContext | None = None
     ) -> AcquisitionOutput:
         require_role(actor, WRITE_ROLES)
-        output = _get_or_raise(
-            self._store.acquisition_outputs,
-            output_id,
-            "Acquisition output",
+        output = self._get_from_repository_or_store(
+            attribute_name="acquisition_outputs",
+            entity_id=output_id,
+            label="Acquisition output",
+            loader=lambda repository: repository.acquisition_outputs.get(output_id),
         )
-        del self._store.acquisition_outputs[output_id]
+        self._forget_entity("acquisition_outputs", output_id)
         self._run_repository_write(
             lambda repository: repository.acquisition_outputs.delete(output_id)
         )
@@ -192,6 +241,8 @@ class SessionServiceMixin:
             raise ValidationError(
                 "Only operational sessions can be promoted to scientific sessions."
             )
+        if session.status != SessionStatus.ACTIVE:
+            raise ValidationError("Only active operational sessions can be promoted.")
         question = self.get_question(primary_question_id)
         if question.project_id != session.project_id:
             raise ValidationError("Primary question must belong to the same project.")
@@ -212,12 +263,13 @@ class SessionServiceMixin:
         status: DatasetStatus = DatasetStatus.COMMITTED,
         commit_manifest: DatasetCommitManifestInput | DatasetCommitManifest | None = None,
         actor: AuthContext | None = None,
-        created_by: str | None = None,
     ) -> Dataset:
         require_role(actor, WRITE_ROLES)
         session = self.get_session(session_id)
         if session.session_type != SessionType.OPERATIONAL:
             raise ValidationError("Only operational sessions can be promoted to datasets.")
+        if session.status != SessionStatus.ACTIVE:
+            raise ValidationError("Only active operational sessions can be promoted.")
         outputs = self.list_acquisition_outputs(session_id=session.session_id)
         merged_manifest = _merge_acquisition_outputs(commit_manifest, outputs)
         manifest_with_session = _manifest_input_with_source(merged_manifest, session.session_id)
@@ -228,7 +280,6 @@ class SessionServiceMixin:
             status=status,
             commit_manifest=manifest_with_session,
             actor=actor,
-            created_by=created_by,
         )
 
     def _ensure_source_session_valid(

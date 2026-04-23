@@ -1,16 +1,19 @@
 import * as React from "react";
 
 import { Dashboard } from "./features/dashboard-projects.jsx";
-import { AnalysisPanel, SearchPanel, VisualizationDetailCard } from "./features/analysis-search.jsx";
-import { DatasetDetailCard, DatasetPanel, ReviewPanel } from "./features/datasets-reviews.jsx";
+import { AnalysisPanel } from "./features/analysis/AnalysisPanel.jsx";
+import { VisualizationDetailCard } from "./features/analysis/VisualizationDetailCard.jsx";
+import { DatasetDetailCard, DatasetPanel } from "./features/datasets/index.js";
 import { NoteDetailCard, NotePanel } from "./features/notes.jsx";
-import {
-  QuestionDetailCard,
-  QuestionExtractionInboxPanel,
-  QuestionPanel,
-} from "./features/questions.jsx";
-import { SessionDetailCard, SessionPanel } from "./features/sessions.jsx";
-import { useLabTrackerAppState } from "./hooks/useLabTrackerAppState.js";
+import { QuestionDetailCard } from "./features/questions/QuestionDetailCard.jsx";
+import { QuestionPanel } from "./features/questions/QuestionPanel.jsx";
+import { SessionDetailCard, SessionPanel } from "./features/sessions/index.js";
+import { useAnalysisWorkflow } from "./hooks/useAnalysisWorkflow.js";
+import { useAuthSession } from "./hooks/useAuthSession.js";
+import { useDatasetWorkflow } from "./hooks/useDatasetWorkflow.js";
+import { useProjectWorkspaceActions } from "./hooks/useProjectWorkspaceActions.js";
+import { useProjectWorkspaceData } from "./hooks/useProjectWorkspaceData.js";
+import { useProjectWorkspaceForms } from "./hooks/useProjectWorkspaceForms.js";
 import {
   AppHeader,
   AuthForm,
@@ -19,275 +22,309 @@ import {
   UnknownRouteCard,
   WorkflowCoverageCard,
 } from "./shared/ui.jsx";
+import { useAppRoute } from "./shared/routing.jsx";
 
 function App() {
-  const state = useLabTrackerAppState();
+  const { navigate, replace, route } = useAppRoute();
+  const [busy, setBusy] = React.useState(false);
+  const [message, setMessage] = React.useState("");
+  const [error, setError] = React.useState("");
+
+  const setFlash = React.useCallback((nextMessage, nextError = "") => {
+    setMessage(nextMessage);
+    setError(nextError);
+  }, []);
+
+  const auth = useAuthSession({ replace, setBusy, setFlash });
+  const workspaceData = useProjectWorkspaceData({
+    token: auth.token,
+    setBusy,
+    setFlash,
+  });
+  const workspaceForms = useProjectWorkspaceForms({
+    questions: workspaceData.questions,
+  });
+  const workspaceActions = useProjectWorkspaceActions({
+    token: auth.token,
+    canWrite: auth.canWrite,
+    selectedProjectId: workspaceData.selectedProjectId,
+    refreshProjects: workspaceData.refreshProjects,
+    refreshProjectData: workspaceData.refreshProjectData,
+    setBusy,
+    setFlash,
+    setSelectedProjectId: workspaceData.setSelectedProjectId,
+    setSessions: workspaceData.setSessions,
+    projectName: workspaceForms.projectName,
+    setProjectName: workspaceForms.setProjectName,
+    projectDescription: workspaceForms.projectDescription,
+    setProjectDescription: workspaceForms.setProjectDescription,
+    questionText: workspaceForms.questionText,
+    setQuestionText: workspaceForms.setQuestionText,
+    questionType: workspaceForms.questionType,
+    questionHypothesis: workspaceForms.questionHypothesis,
+    setQuestionHypothesis: workspaceForms.setQuestionHypothesis,
+    noteText: workspaceForms.noteText,
+    setNoteText: workspaceForms.setNoteText,
+    uploadFile: workspaceForms.uploadFile,
+    setUploadFile: workspaceForms.setUploadFile,
+    uploadTranscript: workspaceForms.uploadTranscript,
+    setUploadTranscript: workspaceForms.setUploadTranscript,
+    uploadTargetQuestionId: workspaceForms.uploadTargetQuestionId,
+    setUploadTargetQuestionId: workspaceForms.setUploadTargetQuestionId,
+    sessionType: workspaceForms.sessionType,
+    sessionPrimaryQuestionId: workspaceForms.sessionPrimaryQuestionId,
+  });
+  const dataset = useDatasetWorkflow({
+    token: auth.token,
+    canWrite: auth.canWrite,
+    selectedProjectId: workspaceData.selectedProjectId,
+    questions: workspaceData.questions,
+    refreshProjectData: workspaceData.refreshProjectData,
+    setBusy,
+    setFlash,
+  });
+  const analysis = useAnalysisWorkflow({
+    token: auth.token,
+    canWrite: auth.canWrite,
+    selectedProjectId: workspaceData.selectedProjectId,
+    setBusy,
+    setFlash,
+  });
+  const isHomeRoute = route.kind === "home";
 
   return (
     <div className="app-shell">
-      <AppHeader user={state.user} onLogout={state.handleLogout} />
+      <AppHeader user={auth.user} onLogout={auth.handleLogout} />
 
-      <FlashMessages message={state.message} error={state.error} />
+      <FlashMessages message={message} error={error} />
 
-      {!state.token ? (
+      {!auth.token ? (
         <section className="grid">
           <AuthForm
-            authMode={state.authMode}
-            authUsername={state.authUsername}
-            authPassword={state.authPassword}
-            authBusy={state.authBusy}
-            onSubmit={state.handleAuthSubmit}
-            onUsernameChange={(event) => state.setAuthUsername(event.target.value)}
-            onPasswordChange={(event) => state.setAuthPassword(event.target.value)}
+            authMode={auth.authMode}
+            authUsername={auth.authUsername}
+            authPassword={auth.authPassword}
+            authBusy={auth.authBusy}
+            onSubmit={auth.handleAuthSubmit}
+            onUsernameChange={(event) => auth.setAuthUsername(event.target.value)}
+            onPasswordChange={(event) => auth.setAuthPassword(event.target.value)}
             onToggleMode={() =>
-              state.setAuthMode((current) => (current === "login" ? "register" : "login"))
+              auth.setAuthMode((current) => (current === "login" ? "register" : "login"))
             }
           />
           <WorkflowCoverageCard />
         </section>
       ) : (
         <section className="grid">
-          <SearchPanel
-            token={state.token}
-            projects={state.projects}
-            selectedProjectId={state.selectedProjectId}
-            navigate={state.navigate}
-          />
-
           <Dashboard
-            projects={state.projects}
-            questions={state.questions}
-            datasets={state.datasets}
-            notes={state.notes}
-            selectedProjectId={state.selectedProjectId}
-            onSelectedProjectChange={(event) => state.setSelectedProjectId(event.target.value)}
-            canWrite={state.canWrite}
-            busy={state.busy}
-            projectName={state.projectName}
-            projectDescription={state.projectDescription}
-            onProjectNameChange={(event) => state.setProjectName(event.target.value)}
-            onProjectDescriptionChange={(event) => state.setProjectDescription(event.target.value)}
-            onCreateProject={state.handleCreateProject}
+            projects={workspaceData.projects}
+            questions={workspaceData.questions}
+            datasets={workspaceData.datasets}
+            notes={workspaceData.notes}
+            selectedProjectId={workspaceData.selectedProjectId}
+            onSelectedProjectChange={(event) =>
+              workspaceData.setSelectedProjectId(event.target.value)
+            }
+            canWrite={auth.canWrite}
+            busy={busy}
+            projectName={workspaceForms.projectName}
+            projectDescription={workspaceForms.projectDescription}
+            onProjectNameChange={(event) => workspaceForms.setProjectName(event.target.value)}
+            onProjectDescriptionChange={(event) =>
+              workspaceForms.setProjectDescription(event.target.value)
+            }
+            onCreateProject={workspaceActions.handleCreateProject}
           />
 
-          {state.route.kind === "home" ? (
+          {isHomeRoute ? (
             <QuestionPanel
-              canWrite={state.canWrite}
-              busy={state.busy}
-              selectedProjectId={state.selectedProjectId}
-              questionText={state.questionText}
-              questionType={state.questionType}
-              questionHypothesis={state.questionHypothesis}
-              onQuestionTextChange={(event) => state.setQuestionText(event.target.value)}
-              onQuestionTypeChange={(event) => state.setQuestionType(event.target.value)}
-              onQuestionHypothesisChange={(event) => state.setQuestionHypothesis(event.target.value)}
-              onCreateQuestion={state.handleCreateQuestion}
-              stagedQuestions={state.stagedQuestions}
-              onActivateQuestion={state.handleActivateQuestion}
+              canWrite={auth.canWrite}
+              busy={busy}
+              selectedProjectId={workspaceData.selectedProjectId}
+              questionText={workspaceForms.questionText}
+              questionType={workspaceForms.questionType}
+              questionHypothesis={workspaceForms.questionHypothesis}
+              onQuestionTextChange={(event) => workspaceForms.setQuestionText(event.target.value)}
+              onQuestionTypeChange={(event) => workspaceForms.setQuestionType(event.target.value)}
+              onQuestionHypothesisChange={(event) =>
+                workspaceForms.setQuestionHypothesis(event.target.value)
+              }
+              onCreateQuestion={workspaceActions.handleCreateQuestion}
+              stagedQuestions={workspaceData.stagedQuestions}
+              onActivateQuestion={workspaceActions.handleActivateQuestion}
             />
           ) : null}
 
-          {state.route.kind === "home" ? (
+          {isHomeRoute ? (
             <SessionPanel
-              canWrite={state.canWrite}
-              busy={state.busy}
-              projects={state.projects}
-              selectedProjectId={state.selectedProjectId}
-              onSelectedProjectChange={(event) => state.setSelectedProjectId(event.target.value)}
-              sessionType={state.sessionType}
-              onSessionTypeChange={(event) => state.setSessionType(event.target.value)}
-              sessionPrimaryQuestionId={state.sessionPrimaryQuestionId}
+              canWrite={auth.canWrite}
+              busy={busy}
+              projects={workspaceData.projects}
+              selectedProjectId={workspaceData.selectedProjectId}
+              onSelectedProjectChange={(event) =>
+                workspaceData.setSelectedProjectId(event.target.value)
+              }
+              sessionType={workspaceForms.sessionType}
+              onSessionTypeChange={(event) => workspaceForms.setSessionType(event.target.value)}
+              sessionPrimaryQuestionId={workspaceForms.sessionPrimaryQuestionId}
               onSessionPrimaryQuestionIdChange={(event) =>
-                state.setSessionPrimaryQuestionId(event.target.value)
+                workspaceForms.setSessionPrimaryQuestionId(event.target.value)
               }
-              activeQuestions={state.activeQuestions}
-              questions={state.questions}
-              sessions={state.sessions}
-              onCreateSession={state.handleCreateSession}
-              onCloseSession={state.handleCloseSession}
-              navigate={state.navigate}
+              activeQuestions={workspaceData.activeQuestions}
+              questions={workspaceData.questions}
+              sessions={workspaceData.sessions}
+              onCreateSession={workspaceActions.handleCreateSession}
+              onCloseSession={workspaceActions.handleCloseSession}
+              navigate={navigate}
             />
           ) : null}
 
-          {state.route.kind === "question" ? (
+          {route.kind === "question" ? (
             <QuestionDetailCard
-              token={state.token}
-              questionId={state.route.questionId}
-              projects={state.projects}
-              navigate={state.navigate}
-              onSetActiveProject={state.setSelectedProjectId}
+              token={auth.token}
+              questionId={route.questionId}
+              projects={workspaceData.projects}
+              navigate={navigate}
+              onSetActiveProject={workspaceData.setSelectedProjectId}
             />
           ) : null}
 
-          {state.route.kind === "note" ? (
+          {route.kind === "note" ? (
             <NoteDetailCard
-              token={state.token}
-              noteId={state.route.noteId}
-              projects={state.projects}
-              navigate={state.navigate}
-              onSetActiveProject={state.setSelectedProjectId}
+              token={auth.token}
+              noteId={route.noteId}
+              projects={workspaceData.projects}
+              navigate={navigate}
+              onSetActiveProject={workspaceData.setSelectedProjectId}
             />
           ) : null}
 
-          {state.route.kind === "session" ? (
+          {route.kind === "session" ? (
             <SessionDetailCard
-              token={state.token}
-              sessionId={state.route.sessionId}
-              projects={state.projects}
-              questions={state.questions}
-              navigate={state.navigate}
-              onSetActiveProject={state.setSelectedProjectId}
-              canWrite={state.canWrite}
-              onCloseSession={state.handleCloseSession}
-              onPromoteSession={state.handlePromoteSession}
+              token={auth.token}
+              sessionId={route.sessionId}
+              projects={workspaceData.projects}
+              questions={workspaceData.questions}
+              navigate={navigate}
+              onSetActiveProject={workspaceData.setSelectedProjectId}
+              canWrite={auth.canWrite}
+              onCloseSession={workspaceActions.handleCloseSession}
+              onPromoteSession={workspaceActions.handlePromoteSession}
             />
           ) : null}
 
-          {state.route.kind === "dataset" ? (
+          {route.kind === "dataset" ? (
             <DatasetDetailCard
-              token={state.token}
-              datasetId={state.route.datasetId}
-              projects={state.projects}
-              navigate={state.navigate}
-              onSetActiveProject={state.setSelectedProjectId}
+              token={auth.token}
+              datasetId={route.datasetId}
+              projects={workspaceData.projects}
+              navigate={navigate}
+              onSetActiveProject={workspaceData.setSelectedProjectId}
             />
           ) : null}
 
-          {state.route.kind === "visualization" ? (
+          {route.kind === "visualization" ? (
             <VisualizationDetailCard
-              token={state.token}
-              vizId={state.route.vizId}
-              navigate={state.navigate}
+              token={auth.token}
+              vizId={route.vizId}
+              navigate={navigate}
             />
           ) : null}
 
-          {state.route.kind === "unknown" ? (
-            <UnknownRouteCard pathname={state.route.pathname} navigate={state.navigate} />
+          {route.kind === "unknown" ? (
+            <UnknownRouteCard pathname={route.pathname} navigate={navigate} />
           ) : null}
 
-          {state.route.kind === "home" ? (
+          {isHomeRoute ? (
             <NotePanel
-              canWrite={state.canWrite}
-              busy={state.busy}
-              selectedProjectId={state.selectedProjectId}
-              noteText={state.noteText}
-              onNoteTextChange={(event) => state.setNoteText(event.target.value)}
-              onCreateTextNote={state.handleCreateTextNote}
-              onUploadNote={state.handleUploadNote}
-              onUploadFileChange={(event) => state.setUploadFile(event.target.files?.[0] || null)}
-              uploadTargetQuestionId={state.uploadTargetQuestionId}
+              canWrite={auth.canWrite}
+              busy={busy}
+              selectedProjectId={workspaceData.selectedProjectId}
+              noteText={workspaceForms.noteText}
+              onNoteTextChange={(event) => workspaceForms.setNoteText(event.target.value)}
+              onCreateTextNote={workspaceActions.handleCreateTextNote}
+              onUploadNote={workspaceActions.handleUploadNote}
+              onUploadFileChange={(event) =>
+                workspaceForms.setUploadFile(event.target.files?.[0] || null)
+              }
+              uploadTargetQuestionId={workspaceForms.uploadTargetQuestionId}
               onUploadTargetQuestionIdChange={(event) =>
-                state.setUploadTargetQuestionId(event.target.value)
+                workspaceForms.setUploadTargetQuestionId(event.target.value)
               }
-              uploadTranscript={state.uploadTranscript}
-              onUploadTranscriptChange={(event) => state.setUploadTranscript(event.target.value)}
-              activeQuestions={state.activeQuestions}
-              notes={state.notes}
+              uploadTranscript={workspaceForms.uploadTranscript}
+              onUploadTranscriptChange={(event) =>
+                workspaceForms.setUploadTranscript(event.target.value)
+              }
+              activeQuestions={workspaceData.activeQuestions}
+              notes={workspaceData.notes}
             />
           ) : null}
 
-          {state.route.kind === "home" ? (
+          {isHomeRoute ? (
             <DatasetPanel
-              canWrite={state.canWrite}
-              busy={state.busy}
-              selectedProjectId={state.selectedProjectId}
-              datasetPrimaryQuestionId={state.datasetPrimaryQuestionId}
+              canWrite={auth.canWrite}
+              busy={busy}
+              selectedProjectId={workspaceData.selectedProjectId}
+              datasetPrimaryQuestionId={dataset.datasetPrimaryQuestionId}
               onDatasetPrimaryQuestionIdChange={(event) =>
-                state.setDatasetPrimaryQuestionId(event.target.value)
+                dataset.setDatasetPrimaryQuestionId(event.target.value)
               }
-              datasetSecondaryRaw={state.datasetSecondaryRaw}
-              onDatasetSecondaryRawChange={(event) => state.setDatasetSecondaryRaw(event.target.value)}
-              onCreateDataset={state.handleCreateDataset}
-              questions={state.questions}
-              datasets={state.datasets}
-              onCommitDataset={state.handleCommitDataset}
-              datasetFilesById={state.datasetFilesById}
-              onLoadDatasetFiles={state.loadDatasetFiles}
-              onUploadDatasetFiles={state.handleUploadDatasetFiles}
-              onDeleteDatasetFile={state.handleDeleteDatasetFile}
-              reviewPolicy={state.selectedProject?.review_policy || ""}
-              datasetReviewsById={state.datasetReviewsById}
+              datasetSecondaryRaw={dataset.datasetSecondaryRaw}
+              onDatasetSecondaryRawChange={(event) =>
+                dataset.setDatasetSecondaryRaw(event.target.value)
+              }
+              onCreateDataset={dataset.handleCreateDataset}
+              questions={workspaceData.questions}
+              datasets={workspaceData.datasets}
+              onCommitDataset={dataset.handleCommitDataset}
+              datasetFilesById={dataset.datasetFilesById}
+              onLoadDatasetFiles={dataset.loadDatasetFiles}
+              onUploadDatasetFiles={dataset.handleUploadDatasetFiles}
+              onDeleteDatasetFile={dataset.handleDeleteDatasetFile}
             />
           ) : null}
 
-          {state.route.kind === "home" ? (
-            <ReviewPanel
-              token={state.token}
-              user={state.user}
-              projects={state.projects}
-              selectedProjectId={state.selectedProjectId}
-              navigate={state.navigate}
-              onFlash={state.setFlash}
-              onRefreshActiveProject={state.refreshActiveProject}
-            />
-          ) : null}
-
-          {state.route.kind === "home" ? (
+          {isHomeRoute ? (
             <AnalysisPanel
-              canWrite={state.canWrite}
-              busy={state.busy}
-              selectedProjectId={state.selectedProjectId}
-              datasets={state.datasets}
-              analyses={state.analyses}
-              visualizations={state.visualizations}
-              analysisDatasetIds={state.analysisDatasetIds}
-              analysisCodeVersion={state.analysisCodeVersion}
-              analysisMethodHash={state.analysisMethodHash}
-              analysisEnvironmentHash={state.analysisEnvironmentHash}
+              canWrite={auth.canWrite}
+              busy={busy}
+              selectedProjectId={workspaceData.selectedProjectId}
+              datasets={workspaceData.datasets}
+              analyses={analysis.analyses}
+              visualizations={analysis.visualizations}
+              analysisDatasetIds={analysis.analysisDatasetIds}
+              analysisCodeVersion={analysis.analysisCodeVersion}
+              analysisMethodHash={analysis.analysisMethodHash}
+              analysisEnvironmentHash={analysis.analysisEnvironmentHash}
               onAnalysisDatasetIdsChange={(event) => {
                 const selected = Array.from(event.target.selectedOptions || []).map(
                   (option) => option.value
                 );
-                state.setAnalysisDatasetIds(selected);
+                analysis.setAnalysisDatasetIds(selected);
               }}
               onAnalysisCodeVersionChange={(event) =>
-                state.setAnalysisCodeVersion(event.target.value)
+                analysis.setAnalysisCodeVersion(event.target.value)
               }
               onAnalysisMethodHashChange={(event) =>
-                state.setAnalysisMethodHash(event.target.value)
+                analysis.setAnalysisMethodHash(event.target.value)
               }
               onAnalysisEnvironmentHashChange={(event) =>
-                state.setAnalysisEnvironmentHash(event.target.value)
+                analysis.setAnalysisEnvironmentHash(event.target.value)
               }
-              onCreateAnalysis={state.handleCreateAnalysis}
-              onCommitAnalysis={state.handleCommitAnalysis}
-              onArchiveAnalysis={state.handleArchiveAnalysis}
-              navigate={state.navigate}
+              onCreateAnalysis={analysis.handleCreateAnalysis}
+              onCommitAnalysis={analysis.handleCommitAnalysis}
+              onArchiveAnalysis={analysis.handleArchiveAnalysis}
+              navigate={navigate}
             />
           ) : null}
 
-          {state.route.kind === "home" ? (
-            <QuestionExtractionInboxPanel
-              canWrite={state.canWrite}
-              busy={state.busy}
-              token={state.token}
-              selectedProjectId={state.selectedProjectId}
-              notes={state.notes}
-              questions={state.questions}
-              navigate={state.navigate}
-              selectedNoteId={state.extractionNoteId}
-              onSelectedNoteIdChange={state.handleExtractionNoteIdChange}
-              note={state.extractionNote}
-              noteRaw={state.extractionNoteRaw}
-              noteRawError={state.extractionNoteRawError}
-              candidates={state.extractionCandidates}
-              onExtractCandidates={state.handleExtractQuestionCandidates}
-              onUpdateCandidate={state.handleUpdateExtractionCandidate}
-              onToggleCandidateSelected={state.handleToggleExtractionCandidateSelected}
-              onSelectAllPending={state.handleSelectAllPendingCandidates}
-              onClearSelection={state.handleClearCandidateSelection}
-              onRejectSelected={state.handleRejectExtractionCandidates}
-              onStageSelected={state.handleStageExtractionCandidates}
-            />
-          ) : null}
-
-          {state.route.kind === "home" ? (
-            <ProjectContextCard selectedProject={state.selectedProject} />
+          {isHomeRoute ? (
+            <ProjectContextCard selectedProject={workspaceData.selectedProject} />
           ) : null}
         </section>
       )}
 
-      {state.busy ? <p className="subtle">Syncing...</p> : null}
+      {busy ? <p className="subtle">Syncing...</p> : null}
     </div>
   );
 }

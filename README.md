@@ -32,26 +32,36 @@ Health check:
 curl http://127.0.0.1:8000/health
 ```
 
-Frontend MVP:
+Frontend:
 
 Open `http://127.0.0.1:8000/app`.
+
+The retained v1 product surface is defined in
+[`docs/retained-v1-surface.md`](/Users/samuelbrudner/Documents/GitHub/lab-tracker/docs/retained-v1-surface.md).
+If this README and the retained-surface document disagree, the retained-surface
+document defines the supported runtime.
 
 ### Frontend build
 
 The frontend bundle is committed to the repo and served from `src/lab_tracker/frontend/app.js`.
 
-If you change the frontend source in `src/lab_tracker/frontend_src/app.jsx`, rebuild the bundle:
+If you change the frontend source in `src/lab_tracker/frontend_src`, rebuild the bundle:
 
 ```bash
 npm install
+npm run lint:frontend
 npm run build
 ```
 
-The frontend includes:
+The committed frontend bundle ships without a source map by default.
+
+Supported workflows in the frontend include:
 - project dashboard
-- question staging and activate (commit) workflow
-- note creation (text + photo upload)
-- dataset staging and commit review
+- question staging and activate workflow
+- manual note creation and upload/download handling
+- sessions and acquisition outputs
+- dataset staging, file attachment, and direct commit with provenance capture
+- analysis, claim, and visualization tracking
 
 Authentication notes:
 - register/login is available in the UI
@@ -69,23 +79,13 @@ development.
 - `LAB_TRACKER_DATABASE_URL`: SQLAlchemy database URL (default: `sqlite+pysqlite:///./lab_tracker.db`)
 - `LAB_TRACKER_FILE_STORAGE_PATH`: file storage directory (default: `./file_storage`)
 - `LAB_TRACKER_NOTE_STORAGE_PATH`: note storage directory (default: `./note_storage`)
-- `LAB_TRACKER_SEARCH_BACKEND`: search backend (default: `in_memory_substring`, options: `in_memory_substring`, `chromadb`)
-- `LAB_TRACKER_CHROMADB_PERSIST_PATH`: ChromaDB persistence directory (default: `./.lab-tracker/chromadb`)
 - `LAB_TRACKER_AUTH_SECRET_KEY`: auth signing secret (default allowed only in `local`)
 - `LAB_TRACKER_AUTH_TOKEN_TTL_MINUTES`: access token lifetime (default: `720`)
-- `LAB_TRACKER_OCR_TESSERACT_CMD`: optional path to the `tesseract` binary for OCR
-- `LAB_TRACKER_OCR_TESSERACT_LANGUAGES`: Tesseract language packs (default: `eng`, example: `eng+deu`)
-- `LAB_TRACKER_EMBEDDING_PROVIDER`: embedding backend for vector search (default: `chroma_default`, options: `sentence_transformers`, `openai`)
-- `OPENAI_API_KEY` (or `LAB_TRACKER_OPENAI_API_KEY`): required when `LAB_TRACKER_EMBEDDING_PROVIDER=openai`
 
-### Reindex search backend
-
-If you switch to a persistent backend (for example, `LAB_TRACKER_SEARCH_BACKEND=chromadb`),
-backfill the index from the database:
-
-```bash
-uv run python -m lab_tracker.reindex --reset
-```
+The retained v1 runtime keeps note handling manual and uses direct substring
+search for query flows. Deferred concepts live in
+[`docs/retained-v1-surface.md`](/Users/samuelbrudner/Documents/GitHub/lab-tracker/docs/retained-v1-surface.md)
+rather than the active product surface.
 
 ## Database migrations
 
@@ -93,8 +93,19 @@ uv run python -m lab_tracker.reindex --reset
 uv run alembic upgrade head
 ```
 
-## Tests
+## Validation
+
+Core backend validation:
 
 ```bash
 uv run pytest -q
+```
+
+Run the frontend checks only when you change `src/lab_tracker/frontend_src` or
+the committed bundle in `src/lab_tracker/frontend`:
+
+```bash
+npm run test:frontend
+npm run lint:frontend
+npm run build
 ```
