@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import datetime
 import json
 from typing import Any
+from urllib.parse import unquote
 
 from sqlalchemy.orm import Session
 from starlette.requests import Request
@@ -88,7 +89,7 @@ def actor_from_authorization_header(
 
 
 def safe_attachment_filename(filename: str) -> str:
-    cleaned = (filename or "").strip()
+    cleaned = unquote((filename or "").strip())
     if not cleaned:
         return "download"
     cleaned = cleaned.replace("\r", "_").replace("\n", "_")

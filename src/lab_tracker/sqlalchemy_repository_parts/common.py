@@ -38,6 +38,16 @@ def apply_pagination(statement: Any, *, limit: int | None, offset: int) -> Any:
     return statement
 
 
+def substring_pattern(query: str | None) -> str | None:
+    if query is None:
+        return None
+    needle = query.strip()
+    if not needle:
+        return None
+    escaped = needle.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    return f"%{escaped}%"
+
+
 class SQLAlchemyModelRepository(Generic[EntityT, ModelT], EntityRepository[EntityT]):
     def __init__(
         self,

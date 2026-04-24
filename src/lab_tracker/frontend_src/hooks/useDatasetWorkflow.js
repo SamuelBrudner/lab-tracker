@@ -9,6 +9,7 @@ function useDatasetWorkflow({
   canWrite,
   selectedProjectId,
   questions,
+  datasets,
   refreshProjectData,
   setBusy,
   setFlash,
@@ -18,9 +19,19 @@ function useDatasetWorkflow({
   const [datasetFilesById, setDatasetFilesById] = useState({});
 
   const loadDatasetFiles = useCallback(
-    async (datasetId) => {
+    async (datasetId, { force = false } = {}) => {
       if (!token) {
         return null;
+      }
+      const currentState = datasetFilesById[datasetId];
+      if (
+        !force &&
+        currentState &&
+        currentState.loaded &&
+        !currentState.loading &&
+        !currentState.error
+      ) {
+        return currentState.items;
       }
 
       setDatasetFilesById((current) => ({
@@ -59,7 +70,7 @@ function useDatasetWorkflow({
         return null;
       }
     },
-    [token]
+    [datasetFilesById, token]
   );
 
   useEffect(() => {
@@ -67,15 +78,28 @@ function useDatasetWorkflow({
   }, [selectedProjectId, token]);
 
   useEffect(() => {
-    if (questions.length === 0) {
+    const activeQuestions = questions.filter((item) => item.status === "active");
+    if (activeQuestions.length === 0) {
       setDatasetPrimaryQuestionId("");
       return;
     }
-    const hasCurrent = questions.some((item) => item.question_id === datasetPrimaryQuestionId);
+    const hasCurrent = activeQuestions.some((item) => item.question_id === datasetPrimaryQuestionId);
     if (!hasCurrent) {
-      setDatasetPrimaryQuestionId(questions[0].question_id);
+      setDatasetPrimaryQuestionId(activeQuestions[0].question_id);
     }
   }, [datasetPrimaryQuestionId, questions]);
+
+  useEffect(() => {
+    const stagedIds = new Set(
+      (datasets || []).filter((item) => item.status === "staged").map((item) => item.dataset_id)
+    );
+    setDatasetFilesById((current) => {
+      const nextEntries = Object.entries(current).filter(([datasetId]) => stagedIds.has(datasetId));
+      return nextEntries.length === Object.keys(current).length
+        ? current
+        : Object.fromEntries(nextEntries);
+    });
+  }, [datasets]);
 
   async function handleUploadDatasetFiles(datasetId, files) {
     if (!canWrite) {
@@ -106,7 +130,7 @@ function useDatasetWorkflow({
       setFlash("", err.message || "Failed to attach dataset file.");
     } finally {
       if (uploadedCount > 0) {
-        await loadDatasetFiles(datasetId);
+        await loadDatasetFiles(datasetId, { force: true });
       }
       setBusy(false);
     }
@@ -123,7 +147,7 @@ function useDatasetWorkflow({
         method: "DELETE",
         token,
       });
-      await loadDatasetFiles(datasetId);
+      await loadDatasetFiles(datasetId, { force: true });
       setFlash("Dataset file removed.");
     } catch (err) {
       setFlash("", err.message || "Failed to remove dataset file.");

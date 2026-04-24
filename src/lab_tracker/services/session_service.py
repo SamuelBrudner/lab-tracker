@@ -103,14 +103,17 @@ class SessionServiceMixin:
         return self.get_session(session_id)
 
     def list_sessions(self, *, project_id: UUID | None = None) -> list[Session]:
-        repository = self._active_repository()
-        if repository is not None and not self._allow_in_memory:
-            sessions, _ = repository.query_sessions(project_id=project_id, limit=None, offset=0)
-            return self._cache_entities(
-                "sessions",
-                sessions,
-                lambda session: session.session_id,
-            )
+        sessions = self._query_from_repository(
+            attribute_name="sessions",
+            loader=lambda repository: repository.query_sessions(
+                project_id=project_id,
+                limit=None,
+                offset=0,
+            ),
+            entity_id_getter=lambda session: session.session_id,
+        )
+        if sessions is not None:
+            return sessions
         if project_id is None:
             return list(self._store.sessions.values())
         return [s for s in self._store.sessions.values() if s.project_id == project_id]
@@ -195,18 +198,17 @@ class SessionServiceMixin:
         *,
         session_id: UUID | None = None,
     ) -> list[AcquisitionOutput]:
-        repository = self._active_repository()
-        if repository is not None and not self._allow_in_memory:
-            outputs, _ = repository.query_acquisition_outputs(
+        outputs = self._query_from_repository(
+            attribute_name="acquisition_outputs",
+            loader=lambda repository: repository.query_acquisition_outputs(
                 session_id=session_id,
                 limit=None,
                 offset=0,
-            )
-            return self._cache_entities(
-                "acquisition_outputs",
-                outputs,
-                lambda output: output.output_id,
-            )
+            ),
+            entity_id_getter=lambda output: output.output_id,
+        )
+        if outputs is not None:
+            return outputs
         outputs = list(self._store.acquisition_outputs.values())
         if session_id is None:
             return outputs

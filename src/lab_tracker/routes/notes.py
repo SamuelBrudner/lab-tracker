@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import base64
-import binascii
 from uuid import UUID
 
 from fastapi import APIRouter, File, Form, UploadFile
@@ -23,7 +22,6 @@ from lab_tracker.schemas import (
     ListEnvelope,
     NoteCreate,
     NoteRawDownloadRead,
-    NoteUpload,
     NoteUpdate,
 )
 
@@ -53,31 +51,6 @@ def build_notes_router(api: LabTrackerAPI) -> APIRouter:
         note = api_from_request(request, api).create_note(
             project_id=payload.project_id,
             raw_content=payload.raw_content,
-            transcribed_text=payload.transcribed_text,
-            targets=payload.targets,
-            metadata=payload.metadata,
-            status=payload.status or note_default_status(),
-            actor=actor,
-        )
-        return Envelope(data=note)
-
-    @router.post(
-        "/notes/upload",
-        response_model=Envelope[Note],
-        status_code=http_status.HTTP_201_CREATED,
-        deprecated=True,
-    )
-    def upload_note(payload: NoteUpload, request: Request):
-        actor = actor_from_request(request)
-        try:
-            content = base64.b64decode(payload.content_base64, validate=True)
-        except binascii.Error as exc:
-            raise ValidationError("content_base64 must be valid base64.") from exc
-        note = api_from_request(request, api).upload_note_raw(
-            project_id=payload.project_id,
-            content=content,
-            filename=payload.filename,
-            content_type=payload.content_type,
             transcribed_text=payload.transcribed_text,
             targets=payload.targets,
             metadata=payload.metadata,
@@ -146,12 +119,12 @@ def build_notes_router(api: LabTrackerAPI) -> APIRouter:
         )
         return list_response(notes, limit=limit, offset=offset, total=total)
 
-    @router.get("/notes/{note_id}", response_model=Envelope[Note])
+    @router.get("/notes/{note_id:uuid}", response_model=Envelope[Note])
     def get_note(note_id: UUID, request: Request):
         note = api_from_request(request, api).get_note(note_id)
         return Envelope(data=note)
 
-    @router.get("/notes/{note_id}/raw")
+    @router.get("/notes/{note_id:uuid}/raw")
     def download_note_raw(note_id: UUID, request: Request):
         raw_asset, content = api_from_request(request, api).download_note_raw(note_id)
         accept = (request.headers.get("accept") or "").lower()
@@ -174,7 +147,7 @@ def build_notes_router(api: LabTrackerAPI) -> APIRouter:
         )
         return Envelope(data=payload)
 
-    @router.patch("/notes/{note_id}", response_model=Envelope[Note])
+    @router.patch("/notes/{note_id:uuid}", response_model=Envelope[Note])
     def update_note(note_id: UUID, payload: NoteUpdate, request: Request):
         actor = actor_from_request(request)
         note = api_from_request(request, api).update_note(
@@ -187,7 +160,7 @@ def build_notes_router(api: LabTrackerAPI) -> APIRouter:
         )
         return Envelope(data=note)
 
-    @router.delete("/notes/{note_id}", response_model=Envelope[Note])
+    @router.delete("/notes/{note_id:uuid}", response_model=Envelope[Note])
     def delete_note(note_id: UUID, request: Request):
         actor = actor_from_request(request)
         note = api_from_request(request, api).delete_note(note_id, actor=actor)

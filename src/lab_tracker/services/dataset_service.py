@@ -126,18 +126,17 @@ class DatasetServiceMixin:
         )
 
     def list_datasets(self, *, project_id: UUID | None = None) -> list[Dataset]:
-        repository = self._active_repository()
-        if repository is not None and not self._allow_in_memory:
-            datasets, _ = repository.query_datasets(
+        datasets = self._query_from_repository(
+            attribute_name="datasets",
+            loader=lambda repository: repository.query_datasets(
                 project_id=project_id,
                 limit=None,
                 offset=0,
-            )
-            return self._cache_entities(
-                "datasets",
-                datasets,
-                lambda dataset: dataset.dataset_id,
-            )
+            ),
+            entity_id_getter=lambda dataset: dataset.dataset_id,
+        )
+        if datasets is not None:
+            return datasets
         if project_id is None:
             return list(self._store.datasets.values())
         return [d for d in self._store.datasets.values() if d.project_id == project_id]

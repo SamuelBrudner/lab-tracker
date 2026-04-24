@@ -62,20 +62,19 @@ class VisualizationServiceMixin:
         analysis_id: UUID | None = None,
         claim_id: UUID | None = None,
     ) -> list[Visualization]:
-        repository = self._active_repository()
-        if repository is not None and not self._allow_in_memory:
-            visualizations, _ = repository.query_visualizations(
+        visualizations = self._query_from_repository(
+            attribute_name="visualizations",
+            loader=lambda repository: repository.query_visualizations(
                 project_id=project_id,
                 analysis_id=analysis_id,
                 claim_id=claim_id,
                 limit=None,
                 offset=0,
-            )
-            return self._cache_entities(
-                "visualizations",
-                visualizations,
-                lambda visualization: visualization.viz_id,
-            )
+            ),
+            entity_id_getter=lambda visualization: visualization.viz_id,
+        )
+        if visualizations is not None:
+            return visualizations
         if project_id is None:
             visualizations = list(self._store.visualizations.values())
         else:

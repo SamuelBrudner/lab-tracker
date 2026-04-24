@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from fastapi import Request
 from fastapi.testclient import TestClient
+from starlette.responses import JSONResponse
 
 from lab_tracker.app import create_app
 from lab_tracker.sqlalchemy_repository import SQLAlchemyLabTrackerRepository
@@ -88,3 +89,39 @@ def test_global_repository_dependency_is_wired():
     assert response.status_code == 200
     assert payload["has_repository"] is True
     assert payload["shares_session"] is True
+
+
+def test_db_session_middleware_runs_after_commit_actions_once():
+    app = create_app()
+    events: list[str] = []
+
+    @app.get("/_test/after-commit")
+    def after_commit_probe(request: Request):
+        request_api = request.state.lab_tracker_api
+        request_api.run_after_commit(lambda: events.append("commit"))
+        request_api.run_after_rollback(lambda: events.append("rollback"))
+        return {"status": "ok"}
+
+    with TestClient(app) as client:
+        response = client.get("/_test/after-commit")
+
+    assert response.status_code == 200
+    assert events == ["commit"]
+
+
+def test_db_session_middleware_runs_after_rollback_actions_on_error_response():
+    app = create_app()
+    events: list[str] = []
+
+    @app.get("/_test/after-rollback")
+    def after_rollback_probe(request: Request):
+        request_api = request.state.lab_tracker_api
+        request_api.run_after_commit(lambda: events.append("commit"))
+        request_api.run_after_rollback(lambda: events.append("rollback"))
+        return JSONResponse(status_code=409, content={"error": "conflict"})
+
+    with TestClient(app) as client:
+        response = client.get("/_test/after-rollback")
+
+    assert response.status_code == 409
+    assert events == ["rollback"]

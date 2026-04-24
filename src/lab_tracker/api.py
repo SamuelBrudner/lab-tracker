@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from typing import Callable
+from typing import Callable, TypeVar
 from uuid import UUID
 
 from lab_tracker.errors import NotFoundError
@@ -34,6 +34,7 @@ from lab_tracker.services import (
 from lab_tracker.services.shared import note_matches_substring, question_matches_substring
 
 _logger = logging.getLogger(__name__)
+EntityT = TypeVar("EntityT")
 
 
 class InMemoryStore:
@@ -59,26 +60,19 @@ class LabTrackerAPI(
     ClaimServiceMixin,
     VisualizationServiceMixin,
 ):
-    @property
-    def _store(self) -> InMemoryStore:
-        return self._base_store
-
-    @_store.setter
-    def _store(self, value: InMemoryStore) -> None:
-        self._base_store = value
-
     def __init__(
         self,
         store: InMemoryStore | None = None,
         *,
         raw_storage: LocalNoteStorage | None = None,
         repository: LabTrackerRepository | None = None,
+        request_context: LabTrackerRequestContext | None = None,
         allow_in_memory: bool = False,
     ) -> None:
         self._store = store or InMemoryStore()
         self._raw_storage = raw_storage
         self._repository = repository
-        self._request_context: LabTrackerRequestContext | None = None
+        self._request_context = request_context
         self._allow_in_memory = allow_in_memory or store is not None
         if repository is not None and self._allow_in_memory:
             self.hydrate_from_repository(repository)
@@ -96,16 +90,14 @@ class LabTrackerAPI(
             allow_in_memory=True,
         )
 
-    def build_request_context(
-        self,
-        repository: LabTrackerRepository,
-    ) -> LabTrackerRequestContext:
-        return LabTrackerRequestContext(repository=repository)
-
-    def bind_request_context(self, request_context: LabTrackerRequestContext) -> "LabTrackerAPI":
-        bound = object.__new__(self.__class__)
-        bound.__dict__ = {**self.__dict__, "_request_context": request_context}
-        return bound
+    def for_request(self, repository: LabTrackerRepository) -> "LabTrackerAPI":
+        return self.__class__(
+            store=self._store if self._allow_in_memory else None,
+            raw_storage=self._raw_storage,
+            repository=repository,
+            request_context=LabTrackerRequestContext(repository=repository),
+            allow_in_memory=self._allow_in_memory,
+        )
 
     def _active_repository(self) -> LabTrackerRepository | None:
         if self._request_context is not None:
@@ -183,6 +175,19 @@ class LabTrackerAPI(
             return self._cache_entities(attribute_name, entities, entity_id_getter)
         return list(self._cache_map(attribute_name).values())
 
+    def _query_from_repository(
+        self,
+        *,
+        attribute_name: str,
+        loader: Callable[[LabTrackerRepository], tuple[list[EntityT], int]],
+        entity_id_getter: Callable[[EntityT], UUID],
+    ) -> list[EntityT] | None:
+        repository = self._active_repository()
+        if repository is None or self._allow_in_memory:
+            return None
+        entities, _ = loader(repository)
+        return self._cache_entities(attribute_name, entities, entity_id_getter)
+
     def _is_request_managed(self) -> bool:
         return self._request_context is not None
 
@@ -253,6 +258,17 @@ class LabTrackerAPI(
             return
         self._request_context.after_rollback_actions.append(action)
 
+    def finish_request(self, *, committed: bool) -> None:
+        if self._request_context is None:
+            return
+        self._request_context.finish(
+            committed=committed,
+            run_deferred_actions=lambda actions, label: self._run_deferred_actions(
+                actions,
+                label=label,
+            ),
+        )
+
     def _run_repository_write(
         self,
         operation: Callable[[LabTrackerRepository], None],
@@ -275,7 +291,7 @@ class LabTrackerAPI(
             if resolved_repository is self._repository:
                 self.hydrate_from_repository(
                     resolved_repository,
-                    store=self._base_store,
+                    store=self._store,
                 )
             raise
 
@@ -287,22 +303,18 @@ class LabTrackerAPI(
         limit: int | None = None,
         offset: int = 0,
     ) -> list[Question]:
-        repository = self._active_repository()
-        if repository is not None and not self._allow_in_memory:
-            questions, _ = repository.query_questions(
+        questions = self._query_from_repository(
+            attribute_name="questions",
+            loader=lambda repository: repository.query_questions(
                 project_id=project_id,
-                limit=None,
-                offset=0,
-            )
-            matches = [
-                question for question in questions if question_matches_substring(question, query)
-            ]
-            paged = self._slice_entities(matches, limit=limit, offset=offset)
-            return self._cache_entities(
-                "questions",
-                paged,
-                lambda question: question.question_id,
-            )
+                search=query,
+                limit=limit,
+                offset=offset,
+            ),
+            entity_id_getter=lambda question: question.question_id,
+        )
+        if questions is not None:
+            return questions
         questions = list(self._store.questions.values())
         if project_id is not None:
             questions = [question for question in questions if question.project_id == project_id]
@@ -319,20 +331,18 @@ class LabTrackerAPI(
         limit: int | None = None,
         offset: int = 0,
     ) -> list[Note]:
-        repository = self._active_repository()
-        if repository is not None and not self._allow_in_memory:
-            notes, _ = repository.query_notes(
+        notes = self._query_from_repository(
+            attribute_name="notes",
+            loader=lambda repository: repository.query_notes(
                 project_id=project_id,
-                limit=None,
-                offset=0,
-            )
-            matches = [note for note in notes if note_matches_substring(note, query)]
-            paged = self._slice_entities(matches, limit=limit, offset=offset)
-            return self._cache_entities(
-                "notes",
-                paged,
-                lambda note: note.note_id,
-            )
+                search=query,
+                limit=limit,
+                offset=offset,
+            ),
+            entity_id_getter=lambda note: note.note_id,
+        )
+        if notes is not None:
+            return notes
         notes = list(self._store.notes.values())
         if project_id is not None:
             notes = [note for note in notes if note.project_id == project_id]

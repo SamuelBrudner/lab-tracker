@@ -1,16 +1,19 @@
 import * as React from "react";
 
-import { buildApiPath, fetchAllPages } from "../shared/api.js";
+import { apiListRequest, buildApiPath, fetchAllPages } from "../shared/api.js";
 
 const { useCallback, useEffect, useMemo, useRef, useState } = React;
 
-function useProjectWorkspaceData({ token, setBusy, setFlash }) {
+function useProjectWorkspaceData({ token, setBusy, setFlash, loadProjectData = true }) {
   const [projects, setProjects] = useState([]);
   const [selectedProjectId, setSelectedProjectId] = useState("");
   const [questions, setQuestions] = useState([]);
   const [datasets, setDatasets] = useState([]);
-  const [notes, setNotes] = useState([]);
-  const [sessions, setSessions] = useState([]);
+  const [projectCounts, setProjectCounts] = useState({
+    datasets: 0,
+    notes: 0,
+    questions: 0,
+  });
   const projectsRequestRef = useRef(0);
   const projectDataRequestRef = useRef(0);
 
@@ -18,8 +21,7 @@ function useProjectWorkspaceData({ token, setBusy, setFlash }) {
     setSelectedProjectId("");
     setQuestions([]);
     setDatasets([]);
-    setNotes([]);
-    setSessions([]);
+    setProjectCounts({ datasets: 0, notes: 0, questions: 0 });
   }, []);
 
   const refreshProjectData = useCallback(
@@ -30,11 +32,12 @@ function useProjectWorkspaceData({ token, setBusy, setFlash }) {
 
       const requestId = projectDataRequestRef.current + 1;
       projectDataRequestRef.current = requestId;
-      const [nextQuestions, nextDatasets, nextNotes, nextSessions] = await Promise.all([
+      const [nextQuestions, nextDatasets, notePage] = await Promise.all([
         fetchAllPages(buildApiPath("/questions", { project_id: projectId }), { token }),
         fetchAllPages(buildApiPath("/datasets", { project_id: projectId }), { token }),
-        fetchAllPages(buildApiPath("/notes", { project_id: projectId }), { token }),
-        fetchAllPages(buildApiPath("/sessions", { project_id: projectId }), { token }),
+        apiListRequest(buildApiPath("/notes", { project_id: projectId, limit: 1, offset: 0 }), {
+          token,
+        }),
       ]);
 
       if (projectDataRequestRef.current !== requestId) {
@@ -42,8 +45,47 @@ function useProjectWorkspaceData({ token, setBusy, setFlash }) {
       }
       setQuestions(nextQuestions);
       setDatasets(nextDatasets);
-      setNotes(nextNotes);
-      setSessions(nextSessions);
+      setProjectCounts({
+        datasets: nextDatasets.length,
+        notes: notePage.meta.total,
+        questions: nextQuestions.length,
+      });
+    },
+    [token]
+  );
+
+  const refreshProjectCounts = useCallback(
+    async (projectId, { clearCollections = false } = {}) => {
+      if (!projectId || !token) {
+        return;
+      }
+
+      const requestId = projectDataRequestRef.current + 1;
+      projectDataRequestRef.current = requestId;
+      const [questionPage, datasetPage, notePage] = await Promise.all([
+        apiListRequest(buildApiPath("/questions", { project_id: projectId, limit: 1, offset: 0 }), {
+          token,
+        }),
+        apiListRequest(buildApiPath("/datasets", { project_id: projectId, limit: 1, offset: 0 }), {
+          token,
+        }),
+        apiListRequest(buildApiPath("/notes", { project_id: projectId, limit: 1, offset: 0 }), {
+          token,
+        }),
+      ]);
+
+      if (projectDataRequestRef.current !== requestId) {
+        return;
+      }
+      if (clearCollections) {
+        setQuestions([]);
+        setDatasets([]);
+      }
+      setProjectCounts({
+        datasets: datasetPage.meta.total,
+        notes: notePage.meta.total,
+        questions: questionPage.meta.total,
+      });
     },
     [token]
   );
@@ -105,14 +147,16 @@ function useProjectWorkspaceData({ token, setBusy, setFlash }) {
       projectDataRequestRef.current += 1;
       setQuestions([]);
       setDatasets([]);
-      setNotes([]);
-      setSessions([]);
+      setProjectCounts({ datasets: 0, notes: 0, questions: 0 });
       return;
     }
 
     let canceled = false;
     setBusy(true);
-    refreshProjectData(selectedProjectId)
+    const loader = loadProjectData
+      ? refreshProjectData
+      : (projectId) => refreshProjectCounts(projectId, { clearCollections: true });
+    loader(selectedProjectId)
       .catch((err) => {
         if (!canceled) {
           setFlash("", err.message || "Unable to load project data.");
@@ -127,7 +171,15 @@ function useProjectWorkspaceData({ token, setBusy, setFlash }) {
     return () => {
       canceled = true;
     };
-  }, [refreshProjectData, selectedProjectId, setBusy, setFlash, token]);
+  }, [
+    loadProjectData,
+    refreshProjectCounts,
+    refreshProjectData,
+    selectedProjectId,
+    setBusy,
+    setFlash,
+    token,
+  ]);
 
   const stagedQuestions = useMemo(
     () => questions.filter((item) => item.status === "staged"),
@@ -137,6 +189,10 @@ function useProjectWorkspaceData({ token, setBusy, setFlash }) {
     () => questions.filter((item) => item.status === "active"),
     [questions]
   );
+  const stagedDatasets = useMemo(
+    () => datasets.filter((item) => item.status === "staged"),
+    [datasets]
+  );
   const selectedProject = useMemo(
     () => projects.find((item) => item.project_id === selectedProjectId) || null,
     [projects, selectedProjectId]
@@ -145,17 +201,19 @@ function useProjectWorkspaceData({ token, setBusy, setFlash }) {
   return {
     activeQuestions,
     datasets,
-    notes,
+    noteCount: projectCounts.notes,
     projects,
+    questionCount: projectCounts.questions,
     questions,
     refreshProjectData,
+    refreshProjectCounts,
     refreshProjects,
     selectedProject,
     selectedProjectId,
-    sessions,
     setSelectedProjectId,
-    setSessions,
+    stagedDatasets,
     stagedQuestions,
+    datasetCount: projectCounts.datasets,
   };
 }
 

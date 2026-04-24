@@ -31,7 +31,3 @@ def test_non_local_environment_accepts_custom_auth_secret(monkeypatch):
     monkeypatch.setenv("LAB_TRACKER_AUTH_SECRET_KEY", "custom-secret")
     settings = Settings()
     assert settings.auth_secret_key == "custom-secret"
-def test_search_backend_defaults_to_in_memory_substring(monkeypatch):
-    monkeypatch.delenv("LAB_TRACKER_SEARCH_BACKEND", raising=False)
-    settings = Settings()
-    assert settings.search_backend == "in_memory_substring"

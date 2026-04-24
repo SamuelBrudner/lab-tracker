@@ -10,7 +10,7 @@ from starlette.requests import Request
 from lab_tracker.api import LabTrackerAPI
 from lab_tracker.schemas import Envelope, SearchResults
 
-from .shared import api_from_request, validate_pagination
+from .shared import repository_from_request, validate_pagination
 
 
 def build_search_router(api: LabTrackerAPI) -> APIRouter:
@@ -26,19 +26,29 @@ def build_search_router(api: LabTrackerAPI) -> APIRouter:
         offset: int = 0,
     ):
         validate_pagination(limit, offset)
-        request_api = api_from_request(request, api)
+        repository = repository_from_request(request)
         include_set = {
             item.strip().casefold()
             for item in (include.split(",") if include else ["questions", "notes"])
             if item.strip()
         }
         questions = (
-            request_api.search_questions(q, project_id=project_id, limit=limit, offset=offset)
+            repository.query_questions(
+                project_id=project_id,
+                search=q,
+                limit=limit,
+                offset=offset,
+            )[0]
             if not include_set or "questions" in include_set
             else []
         )
         notes = (
-            request_api.search_notes(q, project_id=project_id, limit=limit, offset=offset)
+            repository.query_notes(
+                project_id=project_id,
+                search=q,
+                limit=limit,
+                offset=offset,
+            )[0]
             if not include_set or "notes" in include_set
             else []
         )

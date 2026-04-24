@@ -2,9 +2,9 @@ import * as React from "react";
 
 function Dashboard({
   projects,
-  questions,
-  datasets,
-  notes,
+  questionCount,
+  datasetCount,
+  noteCount,
   selectedProjectId,
   onSelectedProjectChange,
   canWrite,
@@ -25,15 +25,15 @@ function Dashboard({
         </div>
         <div className="kpi">
           <span className="subtle">Questions</span>
-          <strong>{questions.length}</strong>
+          <strong>{questionCount}</strong>
         </div>
         <div className="kpi">
           <span className="subtle">Datasets</span>
-          <strong>{datasets.length}</strong>
+          <strong>{datasetCount}</strong>
         </div>
         <div className="kpi">
           <span className="subtle">Notes</span>
-          <strong>{notes.length}</strong>
+          <strong>{noteCount}</strong>
         </div>
       </div>
 

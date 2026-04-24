@@ -162,17 +162,6 @@ class NoteCreate(RequestModel):
     status: NoteStatus | None = None
 
 
-class NoteUpload(RequestModel):
-    project_id: UUID
-    filename: str = Field(..., min_length=1)
-    content_type: str = Field(..., min_length=1)
-    content_base64: str = Field(..., min_length=1)
-    transcribed_text: str | None = None
-    targets: list[EntityRef] | None = None
-    metadata: dict[str, str] | None = None
-    status: NoteStatus | None = None
-
-
 class NoteUpdate(RequestModel):
     transcribed_text: str | None = None
     targets: list[EntityRef] | None = None

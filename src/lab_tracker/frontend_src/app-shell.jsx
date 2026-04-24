@@ -1,24 +1,27 @@
 import * as React from "react";
 
 import { Dashboard } from "./features/dashboard-projects.jsx";
-import { AnalysisPanel } from "./features/analysis/AnalysisPanel.jsx";
 import { VisualizationDetailCard } from "./features/analysis/VisualizationDetailCard.jsx";
-import { DatasetDetailCard, DatasetPanel } from "./features/datasets/index.js";
-import { NoteDetailCard, NotePanel } from "./features/notes.jsx";
+import { DatasetDetailCard } from "./features/datasets/index.js";
+import { NoteDetailCard } from "./features/notes.jsx";
 import { QuestionDetailCard } from "./features/questions/QuestionDetailCard.jsx";
-import { QuestionPanel } from "./features/questions/QuestionPanel.jsx";
-import { SessionDetailCard, SessionPanel } from "./features/sessions/index.js";
+import { SessionDetailCard } from "./features/sessions/index.js";
+import { WorkspaceHome } from "./features/workspace/WorkspaceHome.jsx";
 import { useAnalysisWorkflow } from "./hooks/useAnalysisWorkflow.js";
 import { useAuthSession } from "./hooks/useAuthSession.js";
 import { useDatasetWorkflow } from "./hooks/useDatasetWorkflow.js";
-import { useProjectWorkspaceActions } from "./hooks/useProjectWorkspaceActions.js";
+import { useNoteActions } from "./hooks/useNoteActions.js";
+import { useProjectActions } from "./hooks/useProjectActions.js";
+import { useProjectNoteData } from "./hooks/useProjectNoteData.js";
+import { useProjectSessionData } from "./hooks/useProjectSessionData.js";
 import { useProjectWorkspaceData } from "./hooks/useProjectWorkspaceData.js";
 import { useProjectWorkspaceForms } from "./hooks/useProjectWorkspaceForms.js";
+import { useQuestionActions } from "./hooks/useQuestionActions.js";
+import { useSessionActions } from "./hooks/useSessionActions.js";
 import {
   AppHeader,
   AuthForm,
   FlashMessages,
-  ProjectContextCard,
   UnknownRouteCard,
   WorkflowCoverageCard,
 } from "./shared/ui.jsx";
@@ -26,6 +29,7 @@ import { useAppRoute } from "./shared/routing.jsx";
 
 function App() {
   const { navigate, replace, route } = useAppRoute();
+  const isHomeRoute = route.kind === "home";
   const [busy, setBusy] = React.useState(false);
   const [message, setMessage] = React.useState("");
   const [error, setError] = React.useState("");
@@ -37,32 +41,59 @@ function App() {
 
   const auth = useAuthSession({ replace, setBusy, setFlash });
   const workspaceData = useProjectWorkspaceData({
+    loadProjectData: isHomeRoute,
     token: auth.token,
     setBusy,
     setFlash,
+  });
+  const noteData = useProjectNoteData({
+    enabled: isHomeRoute,
+    selectedProjectId: workspaceData.selectedProjectId,
+    setFlash,
+    token: auth.token,
+  });
+  const sessionData = useProjectSessionData({
+    enabled: isHomeRoute,
+    selectedProjectId: workspaceData.selectedProjectId,
+    setFlash,
+    token: auth.token,
   });
   const workspaceForms = useProjectWorkspaceForms({
     questions: workspaceData.questions,
   });
-  const workspaceActions = useProjectWorkspaceActions({
+  const projectActions = useProjectActions({
     token: auth.token,
     canWrite: auth.canWrite,
-    selectedProjectId: workspaceData.selectedProjectId,
     refreshProjects: workspaceData.refreshProjects,
-    refreshProjectData: workspaceData.refreshProjectData,
     setBusy,
     setFlash,
     setSelectedProjectId: workspaceData.setSelectedProjectId,
-    setSessions: workspaceData.setSessions,
     projectName: workspaceForms.projectName,
     setProjectName: workspaceForms.setProjectName,
     projectDescription: workspaceForms.projectDescription,
     setProjectDescription: workspaceForms.setProjectDescription,
+  });
+  const questionActions = useQuestionActions({
+    token: auth.token,
+    canWrite: auth.canWrite,
+    selectedProjectId: workspaceData.selectedProjectId,
+    refreshProjectData: workspaceData.refreshProjectData,
+    setBusy,
+    setFlash,
     questionText: workspaceForms.questionText,
     setQuestionText: workspaceForms.setQuestionText,
     questionType: workspaceForms.questionType,
     questionHypothesis: workspaceForms.questionHypothesis,
     setQuestionHypothesis: workspaceForms.setQuestionHypothesis,
+  });
+  const noteActions = useNoteActions({
+    token: auth.token,
+    canWrite: auth.canWrite,
+    selectedProjectId: workspaceData.selectedProjectId,
+    refreshProjectCounts: workspaceData.refreshProjectCounts,
+    refreshRecentNotes: noteData.refreshRecentNotes,
+    setBusy,
+    setFlash,
     noteText: workspaceForms.noteText,
     setNoteText: workspaceForms.setNoteText,
     uploadFile: workspaceForms.uploadFile,
@@ -71,6 +102,15 @@ function App() {
     setUploadTranscript: workspaceForms.setUploadTranscript,
     uploadTargetQuestionId: workspaceForms.uploadTargetQuestionId,
     setUploadTargetQuestionId: workspaceForms.setUploadTargetQuestionId,
+  });
+  const sessionActions = useSessionActions({
+    token: auth.token,
+    canWrite: auth.canWrite,
+    selectedProjectId: workspaceData.selectedProjectId,
+    refreshActiveSessions: sessionData.refreshActiveSessions,
+    setBusy,
+    setFlash,
+    setSessions: sessionData.setSessions,
     sessionType: workspaceForms.sessionType,
     sessionPrimaryQuestionId: workspaceForms.sessionPrimaryQuestionId,
   });
@@ -79,18 +119,35 @@ function App() {
     canWrite: auth.canWrite,
     selectedProjectId: workspaceData.selectedProjectId,
     questions: workspaceData.questions,
+    datasets: workspaceData.stagedDatasets,
     refreshProjectData: workspaceData.refreshProjectData,
     setBusy,
     setFlash,
   });
   const analysis = useAnalysisWorkflow({
+    enabled: isHomeRoute,
     token: auth.token,
     canWrite: auth.canWrite,
     selectedProjectId: workspaceData.selectedProjectId,
     setBusy,
     setFlash,
   });
-  const isHomeRoute = route.kind === "home";
+  const dashboardProps = {
+    projects: workspaceData.projects,
+    questionCount: workspaceData.questionCount,
+    datasetCount: workspaceData.datasetCount,
+    noteCount: workspaceData.noteCount,
+    selectedProjectId: workspaceData.selectedProjectId,
+    onSelectedProjectChange: (event) => workspaceData.setSelectedProjectId(event.target.value),
+    canWrite: auth.canWrite,
+    busy,
+    projectName: workspaceForms.projectName,
+    projectDescription: workspaceForms.projectDescription,
+    onProjectNameChange: (event) => workspaceForms.setProjectName(event.target.value),
+    onProjectDescriptionChange: (event) =>
+      workspaceForms.setProjectDescription(event.target.value),
+    onCreateProject: projectActions.handleCreateProject,
+  };
 
   return (
     <div className="app-shell">
@@ -116,68 +173,25 @@ function App() {
         </section>
       ) : (
         <section className="grid">
-          <Dashboard
-            projects={workspaceData.projects}
-            questions={workspaceData.questions}
-            datasets={workspaceData.datasets}
-            notes={workspaceData.notes}
-            selectedProjectId={workspaceData.selectedProjectId}
-            onSelectedProjectChange={(event) =>
-              workspaceData.setSelectedProjectId(event.target.value)
-            }
-            canWrite={auth.canWrite}
-            busy={busy}
-            projectName={workspaceForms.projectName}
-            projectDescription={workspaceForms.projectDescription}
-            onProjectNameChange={(event) => workspaceForms.setProjectName(event.target.value)}
-            onProjectDescriptionChange={(event) =>
-              workspaceForms.setProjectDescription(event.target.value)
-            }
-            onCreateProject={workspaceActions.handleCreateProject}
-          />
-
           {isHomeRoute ? (
-            <QuestionPanel
-              canWrite={auth.canWrite}
+            <WorkspaceHome
+              auth={auth}
               busy={busy}
-              selectedProjectId={workspaceData.selectedProjectId}
-              questionText={workspaceForms.questionText}
-              questionType={workspaceForms.questionType}
-              questionHypothesis={workspaceForms.questionHypothesis}
-              onQuestionTextChange={(event) => workspaceForms.setQuestionText(event.target.value)}
-              onQuestionTypeChange={(event) => workspaceForms.setQuestionType(event.target.value)}
-              onQuestionHypothesisChange={(event) =>
-                workspaceForms.setQuestionHypothesis(event.target.value)
-              }
-              onCreateQuestion={workspaceActions.handleCreateQuestion}
-              stagedQuestions={workspaceData.stagedQuestions}
-              onActivateQuestion={workspaceActions.handleActivateQuestion}
-            />
-          ) : null}
-
-          {isHomeRoute ? (
-            <SessionPanel
-              canWrite={auth.canWrite}
-              busy={busy}
-              projects={workspaceData.projects}
-              selectedProjectId={workspaceData.selectedProjectId}
-              onSelectedProjectChange={(event) =>
-                workspaceData.setSelectedProjectId(event.target.value)
-              }
-              sessionType={workspaceForms.sessionType}
-              onSessionTypeChange={(event) => workspaceForms.setSessionType(event.target.value)}
-              sessionPrimaryQuestionId={workspaceForms.sessionPrimaryQuestionId}
-              onSessionPrimaryQuestionIdChange={(event) =>
-                workspaceForms.setSessionPrimaryQuestionId(event.target.value)
-              }
-              activeQuestions={workspaceData.activeQuestions}
-              questions={workspaceData.questions}
-              sessions={workspaceData.sessions}
-              onCreateSession={workspaceActions.handleCreateSession}
-              onCloseSession={workspaceActions.handleCloseSession}
               navigate={navigate}
+              workspaceData={workspaceData}
+              workspaceForms={workspaceForms}
+              projectActions={projectActions}
+              questionActions={questionActions}
+              noteActions={noteActions}
+              noteData={noteData}
+              sessionActions={sessionActions}
+              sessionData={sessionData}
+              dataset={dataset}
+              analysis={analysis}
             />
-          ) : null}
+          ) : (
+            <Dashboard {...dashboardProps} />
+          )}
 
           {route.kind === "question" ? (
             <QuestionDetailCard
@@ -204,12 +218,11 @@ function App() {
               token={auth.token}
               sessionId={route.sessionId}
               projects={workspaceData.projects}
-              questions={workspaceData.questions}
               navigate={navigate}
               onSetActiveProject={workspaceData.setSelectedProjectId}
               canWrite={auth.canWrite}
-              onCloseSession={workspaceActions.handleCloseSession}
-              onPromoteSession={workspaceActions.handlePromoteSession}
+              onCloseSession={sessionActions.handleCloseSession}
+              onPromoteSession={sessionActions.handlePromoteSession}
             />
           ) : null}
 
@@ -233,93 +246,6 @@ function App() {
 
           {route.kind === "unknown" ? (
             <UnknownRouteCard pathname={route.pathname} navigate={navigate} />
-          ) : null}
-
-          {isHomeRoute ? (
-            <NotePanel
-              canWrite={auth.canWrite}
-              busy={busy}
-              selectedProjectId={workspaceData.selectedProjectId}
-              noteText={workspaceForms.noteText}
-              onNoteTextChange={(event) => workspaceForms.setNoteText(event.target.value)}
-              onCreateTextNote={workspaceActions.handleCreateTextNote}
-              onUploadNote={workspaceActions.handleUploadNote}
-              onUploadFileChange={(event) =>
-                workspaceForms.setUploadFile(event.target.files?.[0] || null)
-              }
-              uploadTargetQuestionId={workspaceForms.uploadTargetQuestionId}
-              onUploadTargetQuestionIdChange={(event) =>
-                workspaceForms.setUploadTargetQuestionId(event.target.value)
-              }
-              uploadTranscript={workspaceForms.uploadTranscript}
-              onUploadTranscriptChange={(event) =>
-                workspaceForms.setUploadTranscript(event.target.value)
-              }
-              activeQuestions={workspaceData.activeQuestions}
-              notes={workspaceData.notes}
-            />
-          ) : null}
-
-          {isHomeRoute ? (
-            <DatasetPanel
-              canWrite={auth.canWrite}
-              busy={busy}
-              selectedProjectId={workspaceData.selectedProjectId}
-              datasetPrimaryQuestionId={dataset.datasetPrimaryQuestionId}
-              onDatasetPrimaryQuestionIdChange={(event) =>
-                dataset.setDatasetPrimaryQuestionId(event.target.value)
-              }
-              datasetSecondaryRaw={dataset.datasetSecondaryRaw}
-              onDatasetSecondaryRawChange={(event) =>
-                dataset.setDatasetSecondaryRaw(event.target.value)
-              }
-              onCreateDataset={dataset.handleCreateDataset}
-              questions={workspaceData.questions}
-              datasets={workspaceData.datasets}
-              onCommitDataset={dataset.handleCommitDataset}
-              datasetFilesById={dataset.datasetFilesById}
-              onLoadDatasetFiles={dataset.loadDatasetFiles}
-              onUploadDatasetFiles={dataset.handleUploadDatasetFiles}
-              onDeleteDatasetFile={dataset.handleDeleteDatasetFile}
-            />
-          ) : null}
-
-          {isHomeRoute ? (
-            <AnalysisPanel
-              canWrite={auth.canWrite}
-              busy={busy}
-              selectedProjectId={workspaceData.selectedProjectId}
-              datasets={workspaceData.datasets}
-              analyses={analysis.analyses}
-              visualizations={analysis.visualizations}
-              analysisDatasetIds={analysis.analysisDatasetIds}
-              analysisCodeVersion={analysis.analysisCodeVersion}
-              analysisMethodHash={analysis.analysisMethodHash}
-              analysisEnvironmentHash={analysis.analysisEnvironmentHash}
-              onAnalysisDatasetIdsChange={(event) => {
-                const selected = Array.from(event.target.selectedOptions || []).map(
-                  (option) => option.value
-                );
-                analysis.setAnalysisDatasetIds(selected);
-              }}
-              onAnalysisCodeVersionChange={(event) =>
-                analysis.setAnalysisCodeVersion(event.target.value)
-              }
-              onAnalysisMethodHashChange={(event) =>
-                analysis.setAnalysisMethodHash(event.target.value)
-              }
-              onAnalysisEnvironmentHashChange={(event) =>
-                analysis.setAnalysisEnvironmentHash(event.target.value)
-              }
-              onCreateAnalysis={analysis.handleCreateAnalysis}
-              onCommitAnalysis={analysis.handleCommitAnalysis}
-              onArchiveAnalysis={analysis.handleArchiveAnalysis}
-              navigate={navigate}
-            />
-          ) : null}
-
-          {isHomeRoute ? (
-            <ProjectContextCard selectedProject={workspaceData.selectedProject} />
           ) : null}
         </section>
       )}

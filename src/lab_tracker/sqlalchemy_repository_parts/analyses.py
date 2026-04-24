@@ -14,6 +14,7 @@ from lab_tracker.db_models import (
     ClaimAnalysisModel,
     ClaimDatasetModel,
     ClaimModel,
+    DatasetQuestionLinkModel,
     VisualizationClaimModel,
     VisualizationModel,
 )
@@ -35,7 +36,7 @@ from lab_tracker.sqlalchemy_mappers import (
     visualization_to_model,
 )
 
-from .common import replace_child_rows
+from .common import apply_pagination, count_from_statement, replace_child_rows
 
 
 class SQLAlchemyAnalysisRepository(EntityRepository[Analysis]):
@@ -53,13 +54,20 @@ class SQLAlchemyAnalysisRepository(EntityRepository[Analysis]):
             dataset_map[row.analysis_id].append(UUID(row.dataset_id))
         return dataset_map
 
+    def analyses_from_rows(self, rows: list[AnalysisModel]) -> list[Analysis]:
+        analysis_ids = [row.analysis_id for row in rows]
+        dataset_map = self.dataset_map(analysis_ids)
+        return [
+            analysis_from_model(row, dataset_ids=dataset_map.get(row.analysis_id, []))
+            for row in rows
+        ]
+
     def get(self, entity_id: UUID) -> Analysis | None:
         self._session.flush()
         row = self._session.get(AnalysisModel, str(entity_id))
         if row is None:
             return None
-        dataset_ids = self.dataset_map([row.analysis_id]).get(row.analysis_id, [])
-        return analysis_from_model(row, dataset_ids=dataset_ids)
+        return self.analyses_from_rows([row])[0]
 
     def list(self) -> list[Analysis]:
         self._session.flush()
@@ -68,12 +76,7 @@ class SQLAlchemyAnalysisRepository(EntityRepository[Analysis]):
                 select(AnalysisModel).order_by(AnalysisModel.created_at, AnalysisModel.analysis_id)
             )
         )
-        analysis_ids = [row.analysis_id for row in rows]
-        dataset_map = self.dataset_map(analysis_ids)
-        return [
-            analysis_from_model(row, dataset_ids=dataset_map.get(row.analysis_id, []))
-            for row in rows
-        ]
+        return self.analyses_from_rows(rows)
 
     def save(self, entity: Analysis) -> None:
         entity_id = str(entity.analysis_id)
@@ -98,6 +101,59 @@ class SQLAlchemyAnalysisRepository(EntityRepository[Analysis]):
         if row is not None:
             self._session.delete(row)
         return entity
+
+    def query(
+        self,
+        *,
+        project_id: UUID | None = None,
+        dataset_id: UUID | None = None,
+        question_id: UUID | None = None,
+        status: str | None = None,
+        limit: int | None = None,
+        offset: int = 0,
+    ) -> tuple[list[Analysis], int]:
+        self._session.flush()
+        stmt = select(AnalysisModel)
+        count_stmt = select(AnalysisModel.analysis_id)
+        distinct_required = False
+        if project_id is not None:
+            stmt = stmt.where(AnalysisModel.project_id == str(project_id))
+            count_stmt = count_stmt.where(AnalysisModel.project_id == str(project_id))
+        if dataset_id is not None:
+            stmt = stmt.join(
+                AnalysisDatasetModel,
+                AnalysisDatasetModel.analysis_id == AnalysisModel.analysis_id,
+            ).where(AnalysisDatasetModel.dataset_id == str(dataset_id))
+            count_stmt = count_stmt.join(
+                AnalysisDatasetModel,
+                AnalysisDatasetModel.analysis_id == AnalysisModel.analysis_id,
+            ).where(AnalysisDatasetModel.dataset_id == str(dataset_id))
+        if question_id is not None:
+            distinct_required = True
+            stmt = stmt.join(
+                AnalysisDatasetModel,
+                AnalysisDatasetModel.analysis_id == AnalysisModel.analysis_id,
+            ).join(
+                DatasetQuestionLinkModel,
+                DatasetQuestionLinkModel.dataset_id == AnalysisDatasetModel.dataset_id,
+            ).where(DatasetQuestionLinkModel.question_id == str(question_id))
+            count_stmt = count_stmt.join(
+                AnalysisDatasetModel,
+                AnalysisDatasetModel.analysis_id == AnalysisModel.analysis_id,
+            ).join(
+                DatasetQuestionLinkModel,
+                DatasetQuestionLinkModel.dataset_id == AnalysisDatasetModel.dataset_id,
+            ).where(DatasetQuestionLinkModel.question_id == str(question_id))
+        if status is not None:
+            stmt = stmt.where(AnalysisModel.status == status)
+            count_stmt = count_stmt.where(AnalysisModel.status == status)
+        if distinct_required:
+            stmt = stmt.distinct()
+            count_stmt = count_stmt.distinct()
+        stmt = stmt.order_by(AnalysisModel.created_at, AnalysisModel.analysis_id)
+        total = count_from_statement(self._session, count_stmt)
+        rows = list(self._session.scalars(apply_pagination(stmt, limit=limit, offset=offset)))
+        return self.analyses_from_rows(rows), total
 
 
 class SQLAlchemyClaimRepository(EntityRepository[Claim]):
@@ -126,27 +182,7 @@ class SQLAlchemyClaimRepository(EntityRepository[Claim]):
             analysis_map[row.claim_id].append(UUID(row.analysis_id))
         return analysis_map
 
-    def get(self, entity_id: UUID) -> Claim | None:
-        self._session.flush()
-        row = self._session.get(ClaimModel, str(entity_id))
-        if row is None:
-            return None
-        claim_ids = [row.claim_id]
-        dataset_ids = self.dataset_map(claim_ids).get(row.claim_id, [])
-        analysis_ids = self.analysis_map(claim_ids).get(row.claim_id, [])
-        return claim_from_model(
-            row,
-            supported_by_dataset_ids=dataset_ids,
-            supported_by_analysis_ids=analysis_ids,
-        )
-
-    def list(self) -> list[Claim]:
-        self._session.flush()
-        rows = list(
-            self._session.scalars(
-                select(ClaimModel).order_by(ClaimModel.created_at, ClaimModel.claim_id)
-            )
-        )
+    def claims_from_rows(self, rows: list[ClaimModel]) -> list[Claim]:
         claim_ids = [row.claim_id for row in rows]
         dataset_map = self.dataset_map(claim_ids)
         analysis_map = self.analysis_map(claim_ids)
@@ -158,6 +194,22 @@ class SQLAlchemyClaimRepository(EntityRepository[Claim]):
             )
             for row in rows
         ]
+
+    def get(self, entity_id: UUID) -> Claim | None:
+        self._session.flush()
+        row = self._session.get(ClaimModel, str(entity_id))
+        if row is None:
+            return None
+        return self.claims_from_rows([row])[0]
+
+    def list(self) -> list[Claim]:
+        self._session.flush()
+        rows = list(
+            self._session.scalars(
+                select(ClaimModel).order_by(ClaimModel.created_at, ClaimModel.claim_id)
+            )
+        )
+        return self.claims_from_rows(rows)
 
     def save(self, entity: Claim) -> None:
         entity_id = str(entity.claim_id)
@@ -190,6 +242,54 @@ class SQLAlchemyClaimRepository(EntityRepository[Claim]):
             self._session.delete(row)
         return entity
 
+    def query(
+        self,
+        *,
+        project_id: UUID | None = None,
+        status: str | None = None,
+        dataset_id: UUID | None = None,
+        analysis_id: UUID | None = None,
+        limit: int | None = None,
+        offset: int = 0,
+    ) -> tuple[list[Claim], int]:
+        self._session.flush()
+        stmt = select(ClaimModel)
+        count_stmt = select(ClaimModel.claim_id)
+        distinct_required = False
+        if project_id is not None:
+            stmt = stmt.where(ClaimModel.project_id == str(project_id))
+            count_stmt = count_stmt.where(ClaimModel.project_id == str(project_id))
+        if status is not None:
+            stmt = stmt.where(ClaimModel.status == status)
+            count_stmt = count_stmt.where(ClaimModel.status == status)
+        if dataset_id is not None:
+            distinct_required = True
+            stmt = stmt.join(
+                ClaimDatasetModel,
+                ClaimDatasetModel.claim_id == ClaimModel.claim_id,
+            ).where(ClaimDatasetModel.dataset_id == str(dataset_id))
+            count_stmt = count_stmt.join(
+                ClaimDatasetModel,
+                ClaimDatasetModel.claim_id == ClaimModel.claim_id,
+            ).where(ClaimDatasetModel.dataset_id == str(dataset_id))
+        if analysis_id is not None:
+            distinct_required = True
+            stmt = stmt.join(
+                ClaimAnalysisModel,
+                ClaimAnalysisModel.claim_id == ClaimModel.claim_id,
+            ).where(ClaimAnalysisModel.analysis_id == str(analysis_id))
+            count_stmt = count_stmt.join(
+                ClaimAnalysisModel,
+                ClaimAnalysisModel.claim_id == ClaimModel.claim_id,
+            ).where(ClaimAnalysisModel.analysis_id == str(analysis_id))
+        if distinct_required:
+            stmt = stmt.distinct()
+            count_stmt = count_stmt.distinct()
+        stmt = stmt.order_by(ClaimModel.created_at, ClaimModel.claim_id)
+        total = count_from_statement(self._session, count_stmt)
+        rows = list(self._session.scalars(apply_pagination(stmt, limit=limit, offset=offset)))
+        return self.claims_from_rows(rows), total
+
 
 class SQLAlchemyVisualizationRepository(EntityRepository[Visualization]):
     def __init__(self, session: OrmSession) -> None:
@@ -208,13 +308,20 @@ class SQLAlchemyVisualizationRepository(EntityRepository[Visualization]):
             claim_map[row.viz_id].append(UUID(row.claim_id))
         return claim_map
 
+    def visualizations_from_rows(self, rows: list[VisualizationModel]) -> list[Visualization]:
+        visualization_ids = [row.viz_id for row in rows]
+        claim_map = self.claim_map(visualization_ids)
+        return [
+            visualization_from_model(row, related_claim_ids=claim_map.get(row.viz_id, []))
+            for row in rows
+        ]
+
     def get(self, entity_id: UUID) -> Visualization | None:
         self._session.flush()
         row = self._session.get(VisualizationModel, str(entity_id))
         if row is None:
             return None
-        claim_ids = self.claim_map([row.viz_id]).get(row.viz_id, [])
-        return visualization_from_model(row, related_claim_ids=claim_ids)
+        return self.visualizations_from_rows([row])[0]
 
     def list(self) -> list[Visualization]:
         self._session.flush()
@@ -226,12 +333,7 @@ class SQLAlchemyVisualizationRepository(EntityRepository[Visualization]):
                 )
             )
         )
-        visualization_ids = [row.viz_id for row in rows]
-        claim_map = self.claim_map(visualization_ids)
-        return [
-            visualization_from_model(row, related_claim_ids=claim_map.get(row.viz_id, []))
-            for row in rows
-        ]
+        return self.visualizations_from_rows(rows)
 
     def save(self, entity: Visualization) -> None:
         entity_id = str(entity.viz_id)
@@ -256,3 +358,46 @@ class SQLAlchemyVisualizationRepository(EntityRepository[Visualization]):
         if row is not None:
             self._session.delete(row)
         return entity
+
+    def query(
+        self,
+        *,
+        project_id: UUID | None = None,
+        analysis_id: UUID | None = None,
+        claim_id: UUID | None = None,
+        limit: int | None = None,
+        offset: int = 0,
+    ) -> tuple[list[Visualization], int]:
+        self._session.flush()
+        stmt = select(VisualizationModel)
+        count_stmt = select(VisualizationModel.viz_id)
+        distinct_required = False
+        if project_id is not None:
+            stmt = stmt.join(
+                AnalysisModel,
+                AnalysisModel.analysis_id == VisualizationModel.analysis_id,
+            ).where(AnalysisModel.project_id == str(project_id))
+            count_stmt = count_stmt.join(
+                AnalysisModel,
+                AnalysisModel.analysis_id == VisualizationModel.analysis_id,
+            ).where(AnalysisModel.project_id == str(project_id))
+        if analysis_id is not None:
+            stmt = stmt.where(VisualizationModel.analysis_id == str(analysis_id))
+            count_stmt = count_stmt.where(VisualizationModel.analysis_id == str(analysis_id))
+        if claim_id is not None:
+            distinct_required = True
+            stmt = stmt.join(
+                VisualizationClaimModel,
+                VisualizationClaimModel.viz_id == VisualizationModel.viz_id,
+            ).where(VisualizationClaimModel.claim_id == str(claim_id))
+            count_stmt = count_stmt.join(
+                VisualizationClaimModel,
+                VisualizationClaimModel.viz_id == VisualizationModel.viz_id,
+            ).where(VisualizationClaimModel.claim_id == str(claim_id))
+        if distinct_required:
+            stmt = stmt.distinct()
+            count_stmt = count_stmt.distinct()
+        stmt = stmt.order_by(VisualizationModel.created_at, VisualizationModel.viz_id)
+        total = count_from_statement(self._session, count_stmt)
+        rows = list(self._session.scalars(apply_pagination(stmt, limit=limit, offset=offset)))
+        return self.visualizations_from_rows(rows), total

@@ -125,25 +125,17 @@ class NoteServiceMixin:
         if self._raw_storage is None:
             raise ValidationError("Raw storage backend is not configured.")
         asset = raw_asset
-        resolved_content = content
         created_asset = False
         if asset is None:
-            if resolved_content is None:
+            if content is None:
                 raise ValidationError("content must not be empty.")
             asset = self._raw_storage.store(
-                resolved_content,
+                content,
                 filename=(filename or "").strip(),
                 content_type=(content_type or "").strip(),
             )
             created_asset = True
         try:
-            if (
-                resolved_content is None
-                and transcribed_text is None
-                and asset.content_type.strip().lower().startswith("image/")
-            ):
-                resolved_content = self._raw_storage.read(asset.storage_id)
-
             resolved_transcribed_text = transcribed_text.strip() if transcribed_text else None
             note = self.create_note(
                 project_id=project_id,
@@ -179,9 +171,9 @@ class NoteServiceMixin:
         target_entity_type: EntityType | None = None,
         target_entity_id: UUID | None = None,
     ) -> list[Note]:
-        repository = self._active_repository()
-        if repository is not None and not self._allow_in_memory:
-            notes, _ = repository.query_notes(
+        notes = self._query_from_repository(
+            attribute_name="notes",
+            loader=lambda repository: repository.query_notes(
                 project_id=project_id,
                 status=status.value if status is not None else None,
                 target_entity_type=(
@@ -190,12 +182,11 @@ class NoteServiceMixin:
                 target_entity_id=target_entity_id,
                 limit=None,
                 offset=0,
-            )
-            return self._cache_entities(
-                "notes",
-                notes,
-                lambda note: note.note_id,
-            )
+            ),
+            entity_id_getter=lambda note: note.note_id,
+        )
+        if notes is not None:
+            return notes
         if project_id is None:
             notes = list(self._store.notes.values())
         else:
