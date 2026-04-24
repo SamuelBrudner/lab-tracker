@@ -17,7 +17,9 @@ function WorkspaceHome({
   projectActions,
   questionActions,
   noteActions,
+  noteData,
   sessionActions,
+  sessionData,
   dataset,
   analysis,
 }) {
@@ -61,6 +63,8 @@ function WorkspaceHome({
       <SessionPanel
         canWrite={auth.canWrite}
         busy={busy}
+        error={sessionData.error}
+        loading={sessionData.loading}
         projects={workspaceData.projects}
         selectedProjectId={workspaceData.selectedProjectId}
         onSelectedProjectChange={(event) => workspaceData.setSelectedProjectId(event.target.value)}
@@ -72,7 +76,7 @@ function WorkspaceHome({
         }
         activeQuestions={workspaceData.activeQuestions}
         questions={workspaceData.questions}
-        sessions={workspaceData.sessions}
+        sessions={sessionData.sessions}
         onCreateSession={sessionActions.handleCreateSession}
         onCloseSession={sessionActions.handleCloseSession}
         navigate={navigate}
@@ -81,6 +85,8 @@ function WorkspaceHome({
       <NotePanel
         canWrite={auth.canWrite}
         busy={busy}
+        error={noteData.error}
+        loading={noteData.loading}
         selectedProjectId={workspaceData.selectedProjectId}
         noteText={workspaceForms.noteText}
         onNoteTextChange={(event) => workspaceForms.setNoteText(event.target.value)}
@@ -96,7 +102,7 @@ function WorkspaceHome({
           workspaceForms.setUploadTranscript(event.target.value)
         }
         activeQuestions={workspaceData.activeQuestions}
-        notes={workspaceData.notes}
+        notes={noteData.notes}
       />
 
       <DatasetPanel
@@ -110,8 +116,8 @@ function WorkspaceHome({
         datasetSecondaryRaw={dataset.datasetSecondaryRaw}
         onDatasetSecondaryRawChange={(event) => dataset.setDatasetSecondaryRaw(event.target.value)}
         onCreateDataset={dataset.handleCreateDataset}
-        questions={workspaceData.questions}
-        datasets={workspaceData.datasets}
+        questions={workspaceData.activeQuestions}
+        datasets={workspaceData.stagedDatasets}
         onCommitDataset={dataset.handleCommitDataset}
         datasetFilesById={dataset.datasetFilesById}
         onLoadDatasetFiles={dataset.loadDatasetFiles}
@@ -122,10 +128,13 @@ function WorkspaceHome({
       <AnalysisPanel
         canWrite={auth.canWrite}
         busy={busy}
+        error={analysis.analysisError}
+        loading={analysis.analysisLoading}
         selectedProjectId={workspaceData.selectedProjectId}
         datasets={workspaceData.datasets}
-        analyses={analysis.analyses}
-        visualizations={analysis.visualizations}
+        stagedAnalyses={analysis.stagedAnalyses}
+        recentCommittedAnalyses={analysis.recentCommittedAnalyses}
+        visualizationStates={analysis.visualizationStates}
         analysisDatasetIds={analysis.analysisDatasetIds}
         analysisCodeVersion={analysis.analysisCodeVersion}
         analysisMethodHash={analysis.analysisMethodHash}
@@ -148,6 +157,7 @@ function WorkspaceHome({
         onCreateAnalysis={analysis.handleCreateAnalysis}
         onCommitAnalysis={analysis.handleCommitAnalysis}
         onArchiveAnalysis={analysis.handleArchiveAnalysis}
+        onLoadVisualizations={analysis.loadVisualizations}
         navigate={navigate}
       />
 

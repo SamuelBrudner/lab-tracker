@@ -8,6 +8,8 @@ const { useMemo } = React;
 function SessionPanel({
   canWrite,
   busy,
+  loading,
+  error,
   projects,
   selectedProjectId,
   onSelectedProjectChange,
@@ -125,7 +127,9 @@ function SessionPanel({
       </form>
 
       <h3>Active Sessions</h3>
-      {activeSessions.length === 0 ? (
+      {loading ? <p className="subtle">Loading active sessions...</p> : null}
+      {error ? <p className="flash error">{error}</p> : null}
+      {!loading && activeSessions.length === 0 ? (
         <p className="subtle">No active sessions for this project.</p>
       ) : (
         <div className="stack">

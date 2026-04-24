@@ -9,8 +9,6 @@ function useProjectWorkspaceData({ token, setBusy, setFlash, loadProjectData = t
   const [selectedProjectId, setSelectedProjectId] = useState("");
   const [questions, setQuestions] = useState([]);
   const [datasets, setDatasets] = useState([]);
-  const [notes, setNotes] = useState([]);
-  const [sessions, setSessions] = useState([]);
   const [projectCounts, setProjectCounts] = useState({
     datasets: 0,
     notes: 0,
@@ -23,8 +21,6 @@ function useProjectWorkspaceData({ token, setBusy, setFlash, loadProjectData = t
     setSelectedProjectId("");
     setQuestions([]);
     setDatasets([]);
-    setNotes([]);
-    setSessions([]);
     setProjectCounts({ datasets: 0, notes: 0, questions: 0 });
   }, []);
 
@@ -36,11 +32,12 @@ function useProjectWorkspaceData({ token, setBusy, setFlash, loadProjectData = t
 
       const requestId = projectDataRequestRef.current + 1;
       projectDataRequestRef.current = requestId;
-      const [nextQuestions, nextDatasets, nextNotes, nextSessions] = await Promise.all([
+      const [nextQuestions, nextDatasets, notePage] = await Promise.all([
         fetchAllPages(buildApiPath("/questions", { project_id: projectId }), { token }),
         fetchAllPages(buildApiPath("/datasets", { project_id: projectId }), { token }),
-        fetchAllPages(buildApiPath("/notes", { project_id: projectId }), { token }),
-        fetchAllPages(buildApiPath("/sessions", { project_id: projectId }), { token }),
+        apiListRequest(buildApiPath("/notes", { project_id: projectId, limit: 1, offset: 0 }), {
+          token,
+        }),
       ]);
 
       if (projectDataRequestRef.current !== requestId) {
@@ -48,11 +45,9 @@ function useProjectWorkspaceData({ token, setBusy, setFlash, loadProjectData = t
       }
       setQuestions(nextQuestions);
       setDatasets(nextDatasets);
-      setNotes(nextNotes);
-      setSessions(nextSessions);
       setProjectCounts({
         datasets: nextDatasets.length,
-        notes: nextNotes.length,
+        notes: notePage.meta.total,
         questions: nextQuestions.length,
       });
     },
@@ -60,7 +55,7 @@ function useProjectWorkspaceData({ token, setBusy, setFlash, loadProjectData = t
   );
 
   const refreshProjectCounts = useCallback(
-    async (projectId) => {
+    async (projectId, { clearCollections = false } = {}) => {
       if (!projectId || !token) {
         return;
       }
@@ -82,10 +77,10 @@ function useProjectWorkspaceData({ token, setBusy, setFlash, loadProjectData = t
       if (projectDataRequestRef.current !== requestId) {
         return;
       }
-      setQuestions([]);
-      setDatasets([]);
-      setNotes([]);
-      setSessions([]);
+      if (clearCollections) {
+        setQuestions([]);
+        setDatasets([]);
+      }
       setProjectCounts({
         datasets: datasetPage.meta.total,
         notes: notePage.meta.total,
@@ -152,15 +147,15 @@ function useProjectWorkspaceData({ token, setBusy, setFlash, loadProjectData = t
       projectDataRequestRef.current += 1;
       setQuestions([]);
       setDatasets([]);
-      setNotes([]);
-      setSessions([]);
       setProjectCounts({ datasets: 0, notes: 0, questions: 0 });
       return;
     }
 
     let canceled = false;
     setBusy(true);
-    const loader = loadProjectData ? refreshProjectData : refreshProjectCounts;
+    const loader = loadProjectData
+      ? refreshProjectData
+      : (projectId) => refreshProjectCounts(projectId, { clearCollections: true });
     loader(selectedProjectId)
       .catch((err) => {
         if (!canceled) {
@@ -194,6 +189,10 @@ function useProjectWorkspaceData({ token, setBusy, setFlash, loadProjectData = t
     () => questions.filter((item) => item.status === "active"),
     [questions]
   );
+  const stagedDatasets = useMemo(
+    () => datasets.filter((item) => item.status === "staged"),
+    [datasets]
+  );
   const selectedProject = useMemo(
     () => projects.find((item) => item.project_id === selectedProjectId) || null,
     [projects, selectedProjectId]
@@ -202,18 +201,17 @@ function useProjectWorkspaceData({ token, setBusy, setFlash, loadProjectData = t
   return {
     activeQuestions,
     datasets,
-    notes,
     noteCount: projectCounts.notes,
     projects,
     questionCount: projectCounts.questions,
     questions,
     refreshProjectData,
+    refreshProjectCounts,
     refreshProjects,
     selectedProject,
     selectedProjectId,
-    sessions,
     setSelectedProjectId,
-    setSessions,
+    stagedDatasets,
     stagedQuestions,
     datasetCount: projectCounts.datasets,
   };

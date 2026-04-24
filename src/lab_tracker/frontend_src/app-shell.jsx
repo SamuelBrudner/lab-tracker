@@ -12,6 +12,8 @@ import { useAuthSession } from "./hooks/useAuthSession.js";
 import { useDatasetWorkflow } from "./hooks/useDatasetWorkflow.js";
 import { useNoteActions } from "./hooks/useNoteActions.js";
 import { useProjectActions } from "./hooks/useProjectActions.js";
+import { useProjectNoteData } from "./hooks/useProjectNoteData.js";
+import { useProjectSessionData } from "./hooks/useProjectSessionData.js";
 import { useProjectWorkspaceData } from "./hooks/useProjectWorkspaceData.js";
 import { useProjectWorkspaceForms } from "./hooks/useProjectWorkspaceForms.js";
 import { useQuestionActions } from "./hooks/useQuestionActions.js";
@@ -43,6 +45,18 @@ function App() {
     token: auth.token,
     setBusy,
     setFlash,
+  });
+  const noteData = useProjectNoteData({
+    enabled: isHomeRoute,
+    selectedProjectId: workspaceData.selectedProjectId,
+    setFlash,
+    token: auth.token,
+  });
+  const sessionData = useProjectSessionData({
+    enabled: isHomeRoute,
+    selectedProjectId: workspaceData.selectedProjectId,
+    setFlash,
+    token: auth.token,
   });
   const workspaceForms = useProjectWorkspaceForms({
     questions: workspaceData.questions,
@@ -76,7 +90,8 @@ function App() {
     token: auth.token,
     canWrite: auth.canWrite,
     selectedProjectId: workspaceData.selectedProjectId,
-    refreshProjectData: workspaceData.refreshProjectData,
+    refreshProjectCounts: workspaceData.refreshProjectCounts,
+    refreshRecentNotes: noteData.refreshRecentNotes,
     setBusy,
     setFlash,
     noteText: workspaceForms.noteText,
@@ -92,10 +107,10 @@ function App() {
     token: auth.token,
     canWrite: auth.canWrite,
     selectedProjectId: workspaceData.selectedProjectId,
-    refreshProjectData: workspaceData.refreshProjectData,
+    refreshActiveSessions: sessionData.refreshActiveSessions,
     setBusy,
     setFlash,
-    setSessions: workspaceData.setSessions,
+    setSessions: sessionData.setSessions,
     sessionType: workspaceForms.sessionType,
     sessionPrimaryQuestionId: workspaceForms.sessionPrimaryQuestionId,
   });
@@ -104,6 +119,7 @@ function App() {
     canWrite: auth.canWrite,
     selectedProjectId: workspaceData.selectedProjectId,
     questions: workspaceData.questions,
+    datasets: workspaceData.stagedDatasets,
     refreshProjectData: workspaceData.refreshProjectData,
     setBusy,
     setFlash,
@@ -167,7 +183,9 @@ function App() {
               projectActions={projectActions}
               questionActions={questionActions}
               noteActions={noteActions}
+              noteData={noteData}
               sessionActions={sessionActions}
+              sessionData={sessionData}
               dataset={dataset}
               analysis={analysis}
             />

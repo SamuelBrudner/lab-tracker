@@ -8,6 +8,8 @@ const { useMemo } = React;
 function NotePanel({
   canWrite,
   busy,
+  loading,
+  error,
   selectedProjectId,
   noteText,
   onNoteTextChange,
@@ -78,8 +80,13 @@ function NotePanel({
       </form>
 
       <h3>Recent Notes</h3>
+      {loading ? <p className="subtle">Loading recent notes...</p> : null}
+      {error ? <p className="flash error">{error}</p> : null}
+      {!loading && !error && notes.length === 0 ? (
+        <p className="subtle">No recent notes for this project.</p>
+      ) : null}
       <div className="stack">
-        {notes.slice(0, 5).map((note) => (
+        {notes.map((note) => (
           <article className="item" key={note.note_id}>
             <div className="item-head">
               <span className="pill">{note.status}</span>

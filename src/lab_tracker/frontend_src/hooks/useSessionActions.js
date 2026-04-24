@@ -4,7 +4,7 @@ function useSessionActions({
   token,
   canWrite,
   selectedProjectId,
-  refreshProjectData,
+  refreshActiveSessions,
   setBusy,
   setFlash,
   setSessions,
@@ -36,7 +36,7 @@ function useSessionActions({
         method: "POST",
         token,
       });
-      await refreshProjectData(selectedProjectId);
+      await refreshActiveSessions(selectedProjectId);
       setFlash("Session started.");
     } catch (err) {
       setFlash("", err.message || "Failed to start session.");
@@ -58,7 +58,7 @@ function useSessionActions({
         token,
       });
       if (projectId && projectId === selectedProjectId) {
-        await refreshProjectData(selectedProjectId);
+        await refreshActiveSessions(selectedProjectId);
       }
       setFlash("Session closed.");
       return payload;

@@ -4,7 +4,8 @@ function useNoteActions({
   token,
   canWrite,
   selectedProjectId,
-  refreshProjectData,
+  refreshProjectCounts,
+  refreshRecentNotes,
   setBusy,
   setFlash,
   noteText,
@@ -38,7 +39,10 @@ function useNoteActions({
         token,
       });
       setNoteText("");
-      await refreshProjectData(selectedProjectId);
+      await Promise.all([
+        refreshProjectCounts(selectedProjectId),
+        refreshRecentNotes(selectedProjectId),
+      ]);
       setFlash("Text note added.");
     } catch (err) {
       setFlash("", err.message || "Failed to create note.");
@@ -87,7 +91,10 @@ function useNoteActions({
       setUploadTranscript("");
       setUploadTargetQuestionId("");
       event.target.reset();
-      await refreshProjectData(selectedProjectId);
+      await Promise.all([
+        refreshProjectCounts(selectedProjectId),
+        refreshRecentNotes(selectedProjectId),
+      ]);
       setFlash("Note file uploaded.");
     } catch (err) {
       setFlash("", err.message || "Failed to upload note.");
