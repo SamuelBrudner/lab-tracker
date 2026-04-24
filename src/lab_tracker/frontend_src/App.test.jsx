@@ -1,10 +1,229 @@
 import * as React from "react";
 
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 
 import { App } from "./app-shell.jsx";
+import { buildApiPath } from "./shared/api.js";
 import { TOKEN_STORAGE_KEY } from "./shared/constants.js";
 import { apiResponse, errorResponse, installFetchMock } from "./test/utils.js";
+
+const projectsPath = buildApiPath("/projects", { limit: 200, offset: 0 });
+
+function questionListPath(projectId, { limit = 200, offset = 0, ...rest } = {}) {
+  return buildApiPath("/questions", {
+    project_id: projectId,
+    ...rest,
+    limit,
+    offset,
+  });
+}
+
+function questionCountPath(projectId) {
+  return buildApiPath("/questions", { project_id: projectId, limit: 1, offset: 0 });
+}
+
+function datasetListPath(projectId, { limit = 200, offset = 0, ...rest } = {}) {
+  return buildApiPath("/datasets", {
+    project_id: projectId,
+    ...rest,
+    limit,
+    offset,
+  });
+}
+
+function datasetCountPath(projectId) {
+  return buildApiPath("/datasets", { project_id: projectId, limit: 1, offset: 0 });
+}
+
+function noteCountPath(projectId) {
+  return buildApiPath("/notes", { project_id: projectId, limit: 1, offset: 0 });
+}
+
+function recentNotesPath(projectId) {
+  return buildApiPath("/notes", { limit: 5, offset: 0, project_id: projectId });
+}
+
+function activeSessionsPath(projectId) {
+  return buildApiPath("/sessions", {
+    project_id: projectId,
+    status: "active",
+    limit: 200,
+    offset: 0,
+  });
+}
+
+function stagedAnalysesPath(projectId) {
+  return buildApiPath("/analyses", {
+    project_id: projectId,
+    status: "staged",
+    limit: 200,
+    offset: 0,
+  });
+}
+
+function committedAnalysesMetaPath(projectId) {
+  return buildApiPath("/analyses", {
+    limit: 1,
+    offset: 0,
+    project_id: projectId,
+    status: "committed",
+  });
+}
+
+function committedAnalysesRecentPath(projectId, total) {
+  return buildApiPath("/analyses", {
+    limit: 5,
+    offset: Math.max(total - 5, 0),
+    project_id: projectId,
+    status: "committed",
+  });
+}
+
+function datasetFilesPath(datasetId) {
+  return buildApiPath(`/datasets/${datasetId}/files`, { limit: 200, offset: 0 });
+}
+
+function visualizationsPath(analysisId) {
+  return buildApiPath("/visualizations", {
+    analysis_id: analysisId,
+    limit: 200,
+    offset: 0,
+  });
+}
+
+function paged(data, { limit = 200, offset = 0, total = data.length } = {}) {
+  return apiResponse(data, 200, { limit, offset, total });
+}
+
+function project(projectId, name) {
+  return { name, project_id: projectId };
+}
+
+function question({
+  createdAt = "2026-04-20T00:00:00Z",
+  projectId = "project-1",
+  questionId = "question-1",
+  status = "active",
+  text = "Question",
+  updatedAt = "2026-04-20T01:00:00Z",
+} = {}) {
+  return {
+    created_at: createdAt,
+    project_id: projectId,
+    question_id: questionId,
+    question_type: "descriptive",
+    status,
+    text,
+    updated_at: updatedAt,
+  };
+}
+
+function dataset({
+  commitHash = "commit-1",
+  createdAt = "2026-04-20T00:00:00Z",
+  datasetId = "dataset-1",
+  primaryQuestionId = "question-1",
+  projectId = "project-1",
+  questionLinks = null,
+  status = "staged",
+  updatedAt = "2026-04-20T01:00:00Z",
+} = {}) {
+  return {
+    commit_hash: commitHash,
+    created_at: createdAt,
+    dataset_id: datasetId,
+    primary_question_id: primaryQuestionId,
+    project_id: projectId,
+    question_links:
+      questionLinks || [{ outcome_status: "unknown", question_id: primaryQuestionId, role: "primary" }],
+    status,
+    updated_at: updatedAt,
+  };
+}
+
+function note({
+  createdAt = "2026-04-20T00:00:00Z",
+  noteId = "note-1",
+  projectId = "project-1",
+  rawContent = "",
+  status = "staged",
+  transcribedText = "Captured note",
+} = {}) {
+  return {
+    created_at: createdAt,
+    note_id: noteId,
+    project_id: projectId,
+    raw_content: rawContent,
+    status,
+    transcribed_text: transcribedText,
+  };
+}
+
+function session({
+  linkCode = "ABC123",
+  primaryQuestionId = "question-1",
+  projectId = "project-1",
+  sessionId = "session-1",
+  sessionType = "scientific",
+  startedAt = "2026-04-20T03:00:00Z",
+  status = "active",
+} = {}) {
+  return {
+    link_code: linkCode,
+    primary_question_id: primaryQuestionId,
+    project_id: projectId,
+    session_id: sessionId,
+    session_type: sessionType,
+    started_at: startedAt,
+    status,
+  };
+}
+
+function analysis({
+  analysisId = "analysis-1",
+  codeVersion = "sha-1",
+  createdAt = "2026-04-20T00:00:00Z",
+  datasetIds = ["dataset-1"],
+  environmentHash = null,
+  executedAt = "2026-04-20T02:00:00Z",
+  methodHash = "method-1",
+  projectId = "project-1",
+  status = "staged",
+  updatedAt = "2026-04-20T02:00:00Z",
+} = {}) {
+  return {
+    analysis_id: analysisId,
+    code_version: codeVersion,
+    created_at: createdAt,
+    dataset_ids: datasetIds,
+    environment_hash: environmentHash,
+    executed_at: executedAt,
+    method_hash: methodHash,
+    project_id: projectId,
+    status,
+    updated_at: updatedAt,
+  };
+}
+
+function visualization({
+  analysisId = "analysis-1",
+  createdAt = "2026-04-20T02:00:00Z",
+  filePath = "viz/output.png",
+  vizId = "viz-1",
+  vizType = "timeseries",
+} = {}) {
+  return {
+    analysis_id: analysisId,
+    created_at: createdAt,
+    file_path: filePath,
+    viz_id: vizId,
+    viz_type: vizType,
+  };
+}
+
+function requestedUrls(fetchMock) {
+  return fetchMock.mock.calls.map(([input]) => (typeof input === "string" ? input : input.url));
+}
 
 describe("App", () => {
   it("restores a stored session and signs out", async () => {
@@ -15,7 +234,7 @@ describe("App", () => {
         response: apiResponse({ role: "admin", username: "sam" }),
       },
       {
-        match: "/projects?limit=200&offset=0",
+        match: projectsPath,
         response: apiResponse([]),
       },
     ]);
@@ -41,20 +260,17 @@ describe("App", () => {
         response: apiResponse({ role: "viewer", username: "sam" }),
       },
       {
-        match: "/projects?limit=200&offset=0",
+        match: projectsPath,
         response: apiResponse([]),
       },
       {
         match: `/questions/${questionId}`,
-        response: apiResponse({
-          created_at: "2026-04-20T00:00:00Z",
-          project_id: "project-1",
-          question_id: questionId,
-          question_type: "descriptive",
-          status: "active",
-          text: "How stable is the rig today?",
-          updated_at: "2026-04-20T01:00:00Z",
-        }),
+        response: apiResponse(
+          question({
+            questionId,
+            text: "How stable is the rig today?",
+          })
+        ),
       },
     ]);
 
@@ -72,7 +288,7 @@ describe("App", () => {
         response: errorResponse("Session expired.", 401),
       },
       {
-        match: "/projects?limit=200&offset=0",
+        match: projectsPath,
         response: apiResponse([]),
       },
     ]);
@@ -94,44 +310,29 @@ describe("App", () => {
         response: apiResponse({ role: "viewer", username: "sam" }),
       },
       {
-        match: "/projects?limit=200&offset=0",
-        response: apiResponse([{ name: "Project One", project_id: "project-1" }]),
+        match: projectsPath,
+        response: apiResponse([project("project-1", "Project One")]),
       },
       {
-        match: "/questions?project_id=project-1&limit=1&offset=0",
-        response: apiResponse(
-          [
-            {
-              project_id: "project-1",
-              question_id: "question-1",
-              question_type: "descriptive",
-              status: "active",
-              text: "Project count placeholder",
-            },
-          ],
-          200,
-          { limit: 1, offset: 0, total: 12 }
-        ),
+        match: questionCountPath("project-1"),
+        response: paged([question()], { limit: 1, offset: 0, total: 12 }),
       },
       {
-        match: "/datasets?project_id=project-1&limit=1&offset=0",
-        response: apiResponse([], 200, { limit: 1, offset: 0, total: 4 }),
+        match: datasetCountPath("project-1"),
+        response: paged([], { limit: 1, offset: 0, total: 4 }),
       },
       {
-        match: "/notes?project_id=project-1&limit=1&offset=0",
-        response: apiResponse([], 200, { limit: 1, offset: 0, total: 7 }),
+        match: noteCountPath("project-1"),
+        response: paged([], { limit: 1, offset: 0, total: 7 }),
       },
       {
         match: `/questions/${questionId}`,
-        response: apiResponse({
-          created_at: "2026-04-20T00:00:00Z",
-          project_id: "project-1",
-          question_id: questionId,
-          question_type: "descriptive",
-          status: "active",
-          text: "How stable is the rig today?",
-          updated_at: "2026-04-20T01:00:00Z",
-        }),
+        response: apiResponse(
+          question({
+            questionId,
+            text: "How stable is the rig today?",
+          })
+        ),
       },
     ]);
 
@@ -144,278 +345,134 @@ describe("App", () => {
     expect(await screen.findByText("7")).toBeInTheDocument();
   });
 
-  it("loads paginated project data and refreshes when the active project changes", async () => {
-    localStorage.setItem(TOKEN_STORAGE_KEY, "token-4");
+  it("loads reduced-scope home data and refreshes when the active project changes", async () => {
+    localStorage.setItem(TOKEN_STORAGE_KEY, "token-home-reduced");
 
-    const firstProjectQuestions = Array.from({ length: 205 }, (_, index) => ({
-      project_id: "project-1",
-      question_id: `question-1-${index}`,
-      question_type: "descriptive",
-      status: "staged",
-      text: `Project One Question ${index}`,
-    }));
-    const secondProjectQuestions = Array.from({ length: 3 }, (_, index) => ({
-      project_id: "project-2",
-      question_id: `question-2-${index}`,
-      question_type: "descriptive",
-      status: "staged",
-      text: `Project Two Question ${index}`,
-    }));
+    const firstProjectQuestions = Array.from({ length: 205 }, (_, index) =>
+      question({
+        projectId: "project-1",
+        questionId: `question-1-${index}`,
+        status: "staged",
+        text: `Project One Question ${index}`,
+      })
+    );
+    const secondProjectQuestions = Array.from({ length: 3 }, (_, index) =>
+      question({
+        projectId: "project-2",
+        questionId: `question-2-${index}`,
+        status: "staged",
+        text: `Project Two Question ${index}`,
+      })
+    );
 
-    installFetchMock([
+    const fetchMock = installFetchMock([
       {
         match: "/auth/me",
         response: apiResponse({ role: "admin", username: "sam" }),
       },
       {
-        match: "/projects?limit=200&offset=0",
-        response: apiResponse([
-          { name: "Project One", project_id: "project-1" },
-          { name: "Project Two", project_id: "project-2" },
-        ]),
+        match: projectsPath,
+        response: apiResponse([project("project-1", "Project One"), project("project-2", "Project Two")]),
       },
       {
-        match: "/questions?project_id=project-1&limit=200&offset=0",
-        response: apiResponse(firstProjectQuestions.slice(0, 200), 200, {
+        match: questionListPath("project-1"),
+        response: paged(firstProjectQuestions.slice(0, 200), {
           limit: 200,
           offset: 0,
           total: 205,
         }),
       },
       {
-        match: "/questions?project_id=project-1&limit=200&offset=200",
-        response: apiResponse(firstProjectQuestions.slice(200), 200, {
+        match: questionListPath("project-1", { offset: 200 }),
+        response: paged(firstProjectQuestions.slice(200), {
           limit: 200,
           offset: 200,
           total: 205,
         }),
       },
       {
-        match: "/datasets?project_id=project-1&limit=200&offset=0",
+        match: datasetListPath("project-1"),
         response: apiResponse([]),
       },
       {
-        match: "/notes?project_id=project-1&limit=200&offset=0",
+        match: noteCountPath("project-1"),
+        response: paged([], { limit: 1, offset: 0, total: 4 }),
+      },
+      {
+        match: recentNotesPath("project-1"),
+        response: paged([note({ noteId: "note-1", transcribedText: "Project One note" })], {
+          limit: 5,
+          offset: 0,
+          total: 1,
+        }),
+      },
+      {
+        match: activeSessionsPath("project-1"),
+        response: paged([session({ sessionId: "session-1", linkCode: "P1CODE" })]),
+      },
+      {
+        match: stagedAnalysesPath("project-1"),
+        response: paged([]),
+      },
+      {
+        match: committedAnalysesMetaPath("project-1"),
+        response: paged([], { limit: 1, offset: 0, total: 0 }),
+      },
+      {
+        match: questionListPath("project-2"),
+        response: paged(secondProjectQuestions),
+      },
+      {
+        match: datasetListPath("project-2"),
         response: apiResponse([]),
       },
       {
-        match: "/sessions?project_id=project-1&limit=200&offset=0",
-        response: apiResponse([]),
+        match: noteCountPath("project-2"),
+        response: paged([], { limit: 1, offset: 0, total: 2 }),
       },
       {
-        match: "/analyses?project_id=project-1&limit=200&offset=0",
-        response: apiResponse([]),
+        match: recentNotesPath("project-2"),
+        response: paged([note({ noteId: "note-2", projectId: "project-2", transcribedText: "Project Two note" })], {
+          limit: 5,
+          offset: 0,
+          total: 1,
+        }),
       },
       {
-        match: "/visualizations?project_id=project-1&limit=200&offset=0",
-        response: apiResponse([]),
+        match: activeSessionsPath("project-2"),
+        response: paged([session({ sessionId: "session-2", linkCode: "P2CODE", projectId: "project-2" })]),
       },
       {
-        match: "/questions?project_id=project-2&limit=200&offset=0",
-        response: apiResponse(secondProjectQuestions),
+        match: stagedAnalysesPath("project-2"),
+        response: paged([]),
       },
       {
-        match: "/datasets?project_id=project-2&limit=200&offset=0",
-        response: apiResponse([]),
-      },
-      {
-        match: "/notes?project_id=project-2&limit=200&offset=0",
-        response: apiResponse([]),
-      },
-      {
-        match: "/sessions?project_id=project-2&limit=200&offset=0",
-        response: apiResponse([]),
-      },
-      {
-        match: "/analyses?project_id=project-2&limit=200&offset=0",
-        response: apiResponse([]),
-      },
-      {
-        match: "/visualizations?project_id=project-2&limit=200&offset=0",
-        response: apiResponse([]),
+        match: committedAnalysesMetaPath("project-2"),
+        response: paged([], { limit: 1, offset: 0, total: 0 }),
       },
     ]);
 
     render(<App />);
 
     expect((await screen.findAllByText("Project One Question 204")).length).toBeGreaterThan(0);
+    expect(await screen.findByText("Project One note")).toBeInTheDocument();
+    expect(await screen.findByText("P1CODE")).toBeInTheDocument();
 
     fireEvent.change(screen.getByLabelText("Active project"), {
       target: { value: "project-2" },
     });
 
     expect((await screen.findAllByText("Project Two Question 2")).length).toBeGreaterThan(0);
-  });
+    expect(await screen.findByText("Project Two note")).toBeInTheDocument();
+    expect(await screen.findByText("P2CODE")).toBeInTheDocument();
 
-  it("ignores stale project data after switching the active project", async () => {
-    localStorage.setItem(TOKEN_STORAGE_KEY, "token-5");
-
-    let resolveProjectOneQuestions;
-
-    installFetchMock([
-      {
-        match: "/auth/me",
-        response: apiResponse({ role: "admin", username: "sam" }),
-      },
-      {
-        match: "/projects?limit=200&offset=0",
-        response: apiResponse([
-          { name: "Project One", project_id: "project-1" },
-          { name: "Project Two", project_id: "project-2" },
-        ]),
-      },
-      {
-        match: "/questions?project_id=project-1&limit=200&offset=0",
-        response: () =>
-          new Promise((resolve) => {
-            resolveProjectOneQuestions = () =>
-              resolve(
-                apiResponse([
-                  {
-                    project_id: "project-1",
-                    question_id: "question-1",
-                    question_type: "descriptive",
-                    status: "staged",
-                    text: "Project One Question 0",
-                  },
-                ])
-              );
-          }),
-      },
-      {
-        match: "/datasets?project_id=project-1&limit=200&offset=0",
-        response: apiResponse([]),
-      },
-      {
-        match: "/notes?project_id=project-1&limit=200&offset=0",
-        response: apiResponse([]),
-      },
-      {
-        match: "/sessions?project_id=project-1&limit=200&offset=0",
-        response: apiResponse([]),
-      },
-      {
-        match: "/analyses?project_id=project-1&limit=200&offset=0",
-        response: apiResponse([]),
-      },
-      {
-        match: "/visualizations?project_id=project-1&limit=200&offset=0",
-        response: apiResponse([]),
-      },
-      {
-        match: "/questions?project_id=project-2&limit=200&offset=0",
-        response: apiResponse([
-          {
-            project_id: "project-2",
-            question_id: "question-2",
-            question_type: "descriptive",
-            status: "staged",
-            text: "Project Two Question 0",
-          },
-        ]),
-      },
-      {
-        match: "/datasets?project_id=project-2&limit=200&offset=0",
-        response: apiResponse([]),
-      },
-      {
-        match: "/notes?project_id=project-2&limit=200&offset=0",
-        response: apiResponse([]),
-      },
-      {
-        match: "/sessions?project_id=project-2&limit=200&offset=0",
-        response: apiResponse([]),
-      },
-      {
-        match: "/analyses?project_id=project-2&limit=200&offset=0",
-        response: apiResponse([]),
-      },
-      {
-        match: "/visualizations?project_id=project-2&limit=200&offset=0",
-        response: apiResponse([]),
-      },
-    ]);
-
-    render(<App />);
-
-    await waitFor(() => expect(typeof resolveProjectOneQuestions).toBe("function"));
-
-    fireEvent.change(screen.getByLabelText("Active project"), {
-      target: { value: "project-2" },
-    });
-
-    expect(
-      await screen.findByText("Project Two Question 0", { selector: "strong" })
-    ).toBeInTheDocument();
-
-    resolveProjectOneQuestions();
-
-    await waitFor(() => {
-      expect(screen.queryByText("Project One Question 0")).not.toBeInTheDocument();
-      expect(screen.getByText("Project Two Question 0", { selector: "strong" })).toBeInTheDocument();
-    });
-  });
-
-  it("creates a project from the home route", async () => {
-    localStorage.setItem(TOKEN_STORAGE_KEY, "token-create-project");
-
-    installFetchMock([
-      {
-        match: "/auth/me",
-        response: apiResponse({ role: "admin", username: "sam" }),
-      },
-      {
-        match: "/projects?limit=200&offset=0",
-        response: [
-          apiResponse([]),
-          apiResponse([{ name: "Project One", project_id: "project-1" }]),
-        ],
-      },
-      {
-        match: "/projects",
-        method: "POST",
-        response: apiResponse({ name: "Project One", project_id: "project-1" }, 201),
-      },
-      {
-        match: "/questions?project_id=project-1&limit=200&offset=0",
-        response: apiResponse([]),
-      },
-      {
-        match: "/datasets?project_id=project-1&limit=200&offset=0",
-        response: apiResponse([]),
-      },
-      {
-        match: "/notes?project_id=project-1&limit=200&offset=0",
-        response: apiResponse([]),
-      },
-      {
-        match: "/sessions?project_id=project-1&limit=200&offset=0",
-        response: apiResponse([]),
-      },
-      {
-        match: "/analyses?project_id=project-1&limit=200&offset=0",
-        response: apiResponse([]),
-      },
-      {
-        match: "/visualizations?project_id=project-1&limit=200&offset=0",
-        response: apiResponse([]),
-      },
-    ]);
-
-    render(<App />);
-
-    expect(await screen.findByRole("heading", { name: "Dashboard" })).toBeInTheDocument();
-
-    fireEvent.change(screen.getByLabelText("Name"), {
-      target: { value: "Project One" },
-    });
-    fireEvent.change(screen.getByLabelText("Description"), {
-      target: { value: "Created from test" },
-    });
-    fireEvent.click(screen.getByRole("button", { name: "Create project" }));
-
-    expect(await screen.findByText("Project created.")).toBeInTheDocument();
-    expect(await screen.findAllByRole("option", { name: "Project One" })).toHaveLength(2);
+    const urls = requestedUrls(fetchMock);
+    expect(urls).toContain(recentNotesPath("project-1"));
+    expect(urls).toContain(activeSessionsPath("project-1"));
+    expect(urls).toContain(committedAnalysesMetaPath("project-1"));
+    expect(urls).not.toContain(buildApiPath("/notes", { project_id: "project-1", limit: 200, offset: 0 }));
+    expect(urls).not.toContain(buildApiPath("/sessions", { project_id: "project-1", limit: 200, offset: 0 }));
+    expect(urls.some((url) => url.startsWith("/visualizations?project_id="))).toBe(false);
   });
 
   it("stages and activates a question from the home route", async () => {
@@ -427,77 +484,59 @@ describe("App", () => {
         response: apiResponse({ role: "admin", username: "sam" }),
       },
       {
-        match: "/projects?limit=200&offset=0",
-        response: apiResponse([{ name: "Project One", project_id: "project-1" }]),
+        match: projectsPath,
+        response: apiResponse([project("project-1", "Project One")]),
       },
       {
-        match: "/questions?project_id=project-1&limit=200&offset=0",
+        match: questionListPath("project-1"),
         response: [
-          apiResponse([]),
-          apiResponse([
-            {
-              project_id: "project-1",
-              question_id: "question-1",
-              question_type: "descriptive",
-              status: "staged",
-              text: "How stable is the rig?",
-            },
-          ]),
-          apiResponse([
-            {
-              project_id: "project-1",
-              question_id: "question-1",
-              question_type: "descriptive",
-              status: "active",
-              text: "How stable is the rig?",
-            },
-          ]),
+          paged([]),
+          paged([question({ questionId: "question-1", status: "staged", text: "How stable is the rig?" })]),
+          paged([question({ questionId: "question-1", status: "active", text: "How stable is the rig?" })]),
         ],
       },
       {
         match: "/questions",
         method: "POST",
         response: apiResponse(
-          {
-            project_id: "project-1",
-            question_id: "question-1",
-            question_type: "descriptive",
-            status: "staged",
-            text: "How stable is the rig?",
-          },
+          question({ questionId: "question-1", status: "staged", text: "How stable is the rig?" }),
           201
         ),
       },
       {
         match: "/questions/question-1",
         method: "PATCH",
-        response: apiResponse({
-          project_id: "project-1",
-          question_id: "question-1",
-          question_type: "descriptive",
-          status: "active",
-          text: "How stable is the rig?",
-        }),
+        response: apiResponse(
+          question({ questionId: "question-1", status: "active", text: "How stable is the rig?" })
+        ),
       },
       {
-        match: "/datasets?project_id=project-1&limit=200&offset=0",
-        response: [apiResponse([]), apiResponse([]), apiResponse([])],
+        match: datasetListPath("project-1"),
+        response: [paged([]), paged([]), paged([])],
       },
       {
-        match: "/notes?project_id=project-1&limit=200&offset=0",
-        response: [apiResponse([]), apiResponse([]), apiResponse([])],
+        match: noteCountPath("project-1"),
+        response: [
+          paged([], { limit: 1, offset: 0, total: 0 }),
+          paged([], { limit: 1, offset: 0, total: 0 }),
+          paged([], { limit: 1, offset: 0, total: 0 }),
+        ],
       },
       {
-        match: "/sessions?project_id=project-1&limit=200&offset=0",
-        response: [apiResponse([]), apiResponse([]), apiResponse([])],
+        match: recentNotesPath("project-1"),
+        response: paged([]),
       },
       {
-        match: "/analyses?project_id=project-1&limit=200&offset=0",
-        response: [apiResponse([]), apiResponse([]), apiResponse([])],
+        match: activeSessionsPath("project-1"),
+        response: paged([]),
       },
       {
-        match: "/visualizations?project_id=project-1&limit=200&offset=0",
-        response: [apiResponse([]), apiResponse([]), apiResponse([])],
+        match: stagedAnalysesPath("project-1"),
+        response: paged([]),
+      },
+      {
+        match: committedAnalysesMetaPath("project-1"),
+        response: paged([], { limit: 1, offset: 0, total: 0 }),
       },
     ]);
 
@@ -523,86 +562,71 @@ describe("App", () => {
     });
   });
 
-  it("uploads a note file from the home route", async () => {
+  it("uploads a note file from the home route and refreshes recent notes", async () => {
     localStorage.setItem(TOKEN_STORAGE_KEY, "token-note-upload");
 
-    installFetchMock([
+    const fetchMock = installFetchMock([
       {
         match: "/auth/me",
         response: apiResponse({ role: "admin", username: "sam" }),
       },
       {
-        match: "/projects?limit=200&offset=0",
-        response: apiResponse([{ name: "Project One", project_id: "project-1" }]),
+        match: projectsPath,
+        response: apiResponse([project("project-1", "Project One")]),
       },
       {
-        match: "/questions?project_id=project-1&limit=200&offset=0",
+        match: questionListPath("project-1"),
+        response: paged([question({ text: "Active question" })]),
+      },
+      {
+        match: datasetListPath("project-1"),
+        response: paged([]),
+      },
+      {
+        match: noteCountPath("project-1"),
         response: [
-          apiResponse([
-            {
-              project_id: "project-1",
-              question_id: "question-1",
-              question_type: "descriptive",
-              status: "active",
-              text: "Active question",
-            },
-          ]),
-          apiResponse([
-            {
-              project_id: "project-1",
-              question_id: "question-1",
-              question_type: "descriptive",
-              status: "active",
-              text: "Active question",
-            },
-          ]),
+          paged([], { limit: 1, offset: 0, total: 0 }),
+          paged([question()], { limit: 1, offset: 0, total: 1 }),
         ],
+      },
+      {
+        match: recentNotesPath("project-1"),
+        response: [
+          paged([], { limit: 5, offset: 0, total: 0 }),
+          paged([note({ transcribedText: "Captured session note" })], {
+            limit: 5,
+            offset: 0,
+            total: 1,
+          }),
+        ],
+      },
+      {
+        match: activeSessionsPath("project-1"),
+        response: paged([]),
+      },
+      {
+        match: stagedAnalysesPath("project-1"),
+        response: paged([]),
+      },
+      {
+        match: committedAnalysesMetaPath("project-1"),
+        response: paged([], { limit: 1, offset: 0, total: 0 }),
+      },
+      {
+        match: questionCountPath("project-1"),
+        response: paged([question()], { limit: 1, offset: 0, total: 1 }),
+      },
+      {
+        match: datasetCountPath("project-1"),
+        response: paged([], { limit: 1, offset: 0, total: 0 }),
       },
       {
         match: "/notes/upload-file",
         method: "POST",
         response: apiResponse(
-          {
-            note_id: "note-1",
-            project_id: "project-1",
-            raw_content: "",
-            status: "staged",
-            transcribed_text: "Captured session note",
-          },
+          note({ transcribedText: "Captured session note" }),
           201
         ),
-      },
-      {
-        match: "/notes?project_id=project-1&limit=200&offset=0",
-        response: [
-          apiResponse([]),
-          apiResponse([
-            {
-              created_at: "2026-04-20T00:00:00Z",
-              note_id: "note-1",
-              project_id: "project-1",
-              raw_content: "",
-              status: "staged",
-              transcribed_text: "Captured session note",
-            },
-          ]),
-        ],
-      },
-      {
-        match: "/datasets?project_id=project-1&limit=200&offset=0",
-        response: [apiResponse([]), apiResponse([])],
-      },
-      {
-        match: "/sessions?project_id=project-1&limit=200&offset=0",
-        response: [apiResponse([]), apiResponse([])],
-      },
-      {
-        match: "/analyses?project_id=project-1&limit=200&offset=0",
-        response: [apiResponse([]), apiResponse([])],
-      },
-      {
-        match: "/visualizations?project_id=project-1&limit=200&offset=0",
-        response: [apiResponse([]), apiResponse([])],
       },
     ]);
 
@@ -621,9 +645,11 @@ describe("App", () => {
 
     expect(await screen.findByText("Note file uploaded.")).toBeInTheDocument();
     expect(await screen.findByText("Captured session note")).toBeInTheDocument();
+
+    expect(requestedUrls(fetchMock).filter((url) => url === recentNotesPath("project-1"))).toHaveLength(2);
   });
 
-  it("starts a session from the home route", async () => {
+  it("starts and closes a session from the home route with the active-session loader", async () => {
     localStorage.setItem(TOKEN_STORAGE_KEY, "token-session-create");
 
     installFetchMock([
@@ -632,82 +658,59 @@ describe("App", () => {
         response: apiResponse({ role: "admin", username: "sam" }),
       },
       {
-        match: "/projects?limit=200&offset=0",
-        response: apiResponse([{ name: "Project One", project_id: "project-1" }]),
+        match: projectsPath,
+        response: apiResponse([project("project-1", "Project One")]),
       },
       {
-        match: "/questions?project_id=project-1&limit=200&offset=0",
+        match: questionListPath("project-1"),
+        response: paged([
+          question({
+            text: "Primary question",
+            updatedAt: "2026-04-20T02:00:00Z",
+          }),
+        ]),
+      },
+      {
+        match: datasetListPath("project-1"),
+        response: paged([]),
+      },
+      {
+        match: noteCountPath("project-1"),
+        response: paged([], { limit: 1, offset: 0, total: 0 }),
+      },
+      {
+        match: recentNotesPath("project-1"),
+        response: paged([]),
+      },
+      {
+        match: activeSessionsPath("project-1"),
         response: [
-          apiResponse([
-            {
-              project_id: "project-1",
-              question_id: "question-1",
-              question_type: "descriptive",
-              status: "active",
-              text: "Primary question",
-              updated_at: "2026-04-20T02:00:00Z",
-            },
-          ]),
-          apiResponse([
-            {
-              project_id: "project-1",
-              question_id: "question-1",
-              question_type: "descriptive",
-              status: "active",
-              text: "Primary question",
-              updated_at: "2026-04-20T02:00:00Z",
-            },
-          ]),
+          paged([]),
+          paged([session()]),
+          paged([]),
         ],
+      },
+      {
+        match: stagedAnalysesPath("project-1"),
+        response: paged([]),
+      },
+      {
+        match: committedAnalysesMetaPath("project-1"),
+        response: paged([], { limit: 1, offset: 0, total: 0 }),
       },
       {
         match: "/sessions",
         method: "POST",
-        response: apiResponse(
-          {
-            link_code: "ABC123",
-            primary_question_id: "question-1",
-            project_id: "project-1",
-            session_id: "session-1",
-            session_type: "scientific",
-            started_at: "2026-04-20T03:00:00Z",
-            status: "active",
-          },
-          201
-        ),
+        response: apiResponse(session(), 201),
       },
       {
-        match: "/sessions?project_id=project-1&limit=200&offset=0",
-        response: [
-          apiResponse([]),
-          apiResponse([
-            {
-              link_code: "ABC123",
-              primary_question_id: "question-1",
-              project_id: "project-1",
-              session_id: "session-1",
-              session_type: "scientific",
-              started_at: "2026-04-20T03:00:00Z",
-              status: "active",
-            },
-          ]),
-        ],
-      },
-      {
-        match: "/datasets?project_id=project-1&limit=200&offset=0",
-        response: [apiResponse([]), apiResponse([])],
-      },
-      {
-        match: "/notes?project_id=project-1&limit=200&offset=0",
-        response: [apiResponse([]), apiResponse([])],
-      },
-      {
-        match: "/analyses?project_id=project-1&limit=200&offset=0",
-        response: [apiResponse([]), apiResponse([])],
-      },
-      {
-        match: "/visualizations?project_id=project-1&limit=200&offset=0",
-        response: [apiResponse([]), apiResponse([])],
+        match: "/sessions/session-1",
+        method: "PATCH",
+        response: apiResponse({
+          ...session(),
+          ended_at: "2026-04-20T04:00:00Z",
+          status: "closed",
+        }),
       },
     ]);
 
@@ -719,5 +722,218 @@ describe("App", () => {
 
     expect(await screen.findByText("Session started.")).toBeInTheDocument();
     expect(await screen.findByText("ABC123")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Close session" }));
+
+    expect(await screen.findByText("Session closed.")).toBeInTheDocument();
+    await waitFor(() => {
+      expect(screen.queryByText("ABC123")).not.toBeInTheDocument();
+    });
+  });
+
+  it("loads staged dataset files lazily from the home route", async () => {
+    localStorage.setItem(TOKEN_STORAGE_KEY, "token-dataset-files");
+
+    const fetchMock = installFetchMock([
+      {
+        match: "/auth/me",
+        response: apiResponse({ role: "admin", username: "sam" }),
+      },
+      {
+        match: projectsPath,
+        response: apiResponse([project("project-1", "Project One")]),
+      },
+      {
+        match: questionListPath("project-1"),
+        response: paged([question({ text: "Primary question" })]),
+      },
+      {
+        match: datasetListPath("project-1"),
+        response: paged([
+          dataset({
+            datasetId: "dataset-1",
+            status: "staged",
+          }),
+        ]),
+      },
+      {
+        match: noteCountPath("project-1"),
+        response: paged([], { limit: 1, offset: 0, total: 0 }),
+      },
+      {
+        match: recentNotesPath("project-1"),
+        response: paged([]),
+      },
+      {
+        match: activeSessionsPath("project-1"),
+        response: paged([]),
+      },
+      {
+        match: stagedAnalysesPath("project-1"),
+        response: paged([]),
+      },
+      {
+        match: committedAnalysesMetaPath("project-1"),
+        response: paged([], { limit: 1, offset: 0, total: 0 }),
+      },
+      {
+        match: datasetFilesPath("dataset-1"),
+        response: paged([
+          {
+            checksum: "sha256-file",
+            file_id: "file-1",
+            path: "staged/file-1.bin",
+            size_bytes: 512,
+          },
+        ]),
+      },
+    ]);
+
+    render(<App />);
+
+    await screen.findByRole("heading", { name: "Dataset Queue" });
+
+    expect(requestedUrls(fetchMock)).not.toContain(datasetFilesPath("dataset-1"));
+
+    fireEvent.click(screen.getByRole("button", { name: "Manage files" }));
+
+    expect(await screen.findByText("staged/file-1.bin")).toBeInTheDocument();
+    expect(requestedUrls(fetchMock).filter((url) => url === datasetFilesPath("dataset-1"))).toHaveLength(1);
+
+    fireEvent.click(screen.getByRole("button", { name: "Hide files" }));
+    fireEvent.click(screen.getByRole("button", { name: "Manage files" }));
+
+    await screen.findByText("staged/file-1.bin");
+    expect(requestedUrls(fetchMock).filter((url) => url === datasetFilesPath("dataset-1"))).toHaveLength(1);
+  });
+
+  it("loads analysis visualizations lazily and keeps commit/archive actions on the home route", async () => {
+    localStorage.setItem(TOKEN_STORAGE_KEY, "token-analysis-queue");
+
+    const stagedAnalysis = analysis({
+      analysisId: "analysis-staged",
+      codeVersion: "sha-staged",
+      status: "staged",
+    });
+    const committedAnalysis = analysis({
+      analysisId: "analysis-committed",
+      codeVersion: "sha-committed",
+      status: "committed",
+    });
+    const committedAfterCommit = analysis({
+      analysisId: "analysis-staged",
+      codeVersion: "sha-staged",
+      status: "committed",
+      updatedAt: "2026-04-20T03:00:00Z",
+      executedAt: "2026-04-20T03:00:00Z",
+    });
+
+    const fetchMock = installFetchMock([
+      {
+        match: "/auth/me",
+        response: apiResponse({ role: "admin", username: "sam" }),
+      },
+      {
+        match: projectsPath,
+        response: apiResponse([project("project-1", "Project One")]),
+      },
+      {
+        match: questionListPath("project-1"),
+        response: paged([question({ text: "Primary question" })]),
+      },
+      {
+        match: datasetListPath("project-1"),
+        response: paged([
+          dataset({
+            datasetId: "dataset-1",
+            commitHash: "commit-1",
+            status: "committed",
+          }),
+        ]),
+      },
+      {
+        match: noteCountPath("project-1"),
+        response: paged([], { limit: 1, offset: 0, total: 0 }),
+      },
+      {
+        match: recentNotesPath("project-1"),
+        response: paged([]),
+      },
+      {
+        match: activeSessionsPath("project-1"),
+        response: paged([]),
+      },
+      {
+        match: stagedAnalysesPath("project-1"),
+        response: [
+          paged([stagedAnalysis]),
+          paged([]),
+          paged([]),
+        ],
+      },
+      {
+        match: committedAnalysesMetaPath("project-1"),
+        response: [
+          paged([committedAnalysis], { limit: 1, offset: 0, total: 1 }),
+          paged([], { limit: 1, offset: 0, total: 2 }),
+          paged([committedAfterCommit], { limit: 1, offset: 0, total: 1 }),
+        ],
+      },
+      {
+        match: committedAnalysesRecentPath("project-1", 2),
+        response: paged([committedAfterCommit, committedAnalysis], {
+          limit: 5,
+          offset: 0,
+          total: 2,
+        }),
+      },
+      {
+        match: visualizationsPath("analysis-committed"),
+        response: paged([
+          visualization({
+            analysisId: "analysis-committed",
+            filePath: "viz/analysis-committed.png",
+            vizType: "heatmap",
+          }),
+        ]),
+      },
+      {
+        match: "/analyses/analysis-staged/commit",
+        method: "POST",
+        response: apiResponse(committedAfterCommit),
+      },
+      {
+        match: "/analyses/analysis-committed",
+        method: "PATCH",
+        response: apiResponse({
+          ...committedAnalysis,
+          status: "archived",
+        }),
+      },
+    ]);
+
+    render(<App />);
+
+    expect(await screen.findByText("analysis-staged")).toBeInTheDocument();
+    expect(await screen.findByText("analysis-committed")).toBeInTheDocument();
+    expect(requestedUrls(fetchMock)).not.toContain(visualizationsPath("analysis-committed"));
+    expect(requestedUrls(fetchMock).some((url) => url.startsWith("/visualizations?project_id="))).toBe(false);
+
+    fireEvent.click(screen.getByRole("button", { name: "Load visualizations" }));
+
+    expect(await screen.findByText("viz/analysis-committed.png")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Commit analysis" }));
+
+    expect(await screen.findByText("Analysis committed.")).toBeInTheDocument();
+    expect(await screen.findByText("analysis-staged")).toBeInTheDocument();
+
+    const committedRow = screen.getByText("analysis-committed").closest("article");
+    fireEvent.click(within(committedRow).getByRole("button", { name: "Archive analysis" }));
+
+    expect(await screen.findByText("Analysis archived.")).toBeInTheDocument();
+    await waitFor(() => {
+      expect(screen.queryByText("analysis-committed")).not.toBeInTheDocument();
+    });
   });
 });
