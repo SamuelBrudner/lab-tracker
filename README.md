@@ -38,8 +38,9 @@ Commands below use `uv run`. If you used pip/venv instead, drop the `uv run` pre
 
 ## LLM / MCP frontend
 
-Lab Tracker can also run as a Model Context Protocol (MCP) server so an LLM client can use
-the lab record directly instead of driving the React UI or raw HTTP routes.
+Lab Tracker's primary LLM entrypoint is a ChatGPT-oriented Model Context Protocol (MCP)
+server. It exposes curated capture-and-review tools plus a compact embedded review
+dashboard. The React web app remains available as a human admin/debug fallback.
 
 Install the optional MCP runtime:
 
@@ -68,13 +69,13 @@ brew install cloudflared
 ```
 
 The script prints the `https://...trycloudflare.com/mcp` endpoint to paste into ChatGPT
-web's custom MCP app setup. It defaults MCP calls to `viewer`; rerun with
-`LAB_TRACKER_MCP_ACTOR_ROLE=editor` only when you want ChatGPT to write Lab Tracker records.
+web's custom MCP app setup. It defaults MCP calls to read-only viewer mode; rerun with
+`LAB_TRACKER_MCP_ACTOR_ROLE=editor LAB_TRACKER_MCP_ENABLE_WRITES=true` only when you want
+ChatGPT to write Lab Tracker records.
 
 The MCP server uses the same `LAB_TRACKER_` settings as the FastAPI app. MCP tool calls run
-with a local actor role of `admin` by default; set `LAB_TRACKER_MCP_ACTOR_ROLE=editor` or
-`viewer` if a client should have less authority. See [`docs/mcp.md`](docs/mcp.md) for the
-tool surface and client configuration notes.
+with a local actor role of `viewer` and write tools disabled by default. See
+[`docs/mcp.md`](docs/mcp.md) for the tool surface and client configuration notes.
 
 ## Run the API
 
@@ -139,7 +140,11 @@ development.
 - `LAB_TRACKER_AUTH_TOKEN_TTL_MINUTES`: access token lifetime (default: `720`)
 - `LAB_TRACKER_MCP_ACTOR_USER_ID`: user id stamped on MCP-created records
   (default: `00000000-0000-0000-0000-000000000000`)
-- `LAB_TRACKER_MCP_ACTOR_ROLE`: role used by MCP tool calls (default: `admin`)
+- `LAB_TRACKER_MCP_ACTOR_ROLE`: role used by MCP tool calls (default: `viewer`)
+- `LAB_TRACKER_MCP_ENABLE_WRITES`: register ChatGPT write tools when actor role allows it
+  (default: `false`)
+- `LAB_TRACKER_MCP_EXPOSE_LEGACY_TOOLS`: expose legacy granular MCP tools for debugging
+  (default: `false`)
 
 The retained v1 runtime keeps note handling manual and uses direct substring
 search for query flows. Deferred concepts live in

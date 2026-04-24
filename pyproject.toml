@@ -43,6 +43,7 @@ lab_tracker = [
   "frontend/index.html",
   "frontend/app.js",
   "frontend/styles.css",
+  "mcp_app/*.html",
 ]
 
 [tool.codex_orchestrator]

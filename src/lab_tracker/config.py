@@ -22,7 +22,9 @@ class Settings(BaseSettings):
     auth_token_ttl_minutes: int = 60 * 12
     bootstrap_admin_token: str = ""
     mcp_actor_user_id: UUID = UUID("00000000-0000-0000-0000-000000000000")
-    mcp_actor_role: str = "admin"
+    mcp_actor_role: str = "viewer"
+    mcp_enable_writes: bool = False
+    mcp_expose_legacy_tools: bool = False
 
     @model_validator(mode="after")
     def _validate_auth_secret_key(self) -> Settings:

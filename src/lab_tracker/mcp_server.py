@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+from importlib import resources
 from collections.abc import Callable, Iterable
 from typing import Any, Protocol, TypeVar
 from uuid import UUID
@@ -37,6 +38,12 @@ from lab_tracker.note_storage import LocalNoteStorage
 from lab_tracker.sqlalchemy_repository import SQLAlchemyLabTrackerRepository
 
 T = TypeVar("T")
+REVIEW_DASHBOARD_URI = "ui://lab-tracker/review-dashboard-v1.html"
+REVIEW_DASHBOARD_MIME_TYPE = "text/html;profile=mcp-app"
+CHATGPT_APP_META = {
+    "ui": {"resourceUri": REVIEW_DASHBOARD_URI, "visibility": ["model", "app"]},
+    "openai/outputTemplate": REVIEW_DASHBOARD_URI,
+}
 
 
 class MCPServerLike(Protocol):
@@ -52,6 +59,8 @@ class MCPServerLike(Protocol):
 
 class LabTrackerRuntimeLike(Protocol):
     actor: AuthContext
+    enable_writes: bool
+    expose_legacy_tools: bool
 
     def execute(self, operation: Callable[[LabTrackerAPI], T]) -> T:
         """Run one Lab Tracker operation against the configured persistence layer."""
@@ -86,6 +95,8 @@ class LabTrackerMCPRuntime:
             user_id=self.settings.mcp_actor_user_id,
             role=actor_role,
         )
+        self.enable_writes = self.settings.mcp_enable_writes
+        self.expose_legacy_tools = self.settings.mcp_expose_legacy_tools
 
     def execute(self, operation: Callable[[LabTrackerAPI], T]) -> T:
         with self._session_factory() as session:
@@ -114,6 +125,45 @@ def _model_data(model: Any) -> dict[str, Any]:
 
 def _models_data(models: Iterable[Any]) -> list[dict[str, Any]]:
     return [_model_data(model) for model in models]
+
+
+def _tool_result(
+    structured_content: dict[str, Any],
+    text: str,
+    *,
+    meta: dict[str, Any] | None = None,
+) -> Any:
+    from mcp.types import CallToolResult, TextContent
+
+    return CallToolResult(
+        content=[TextContent(type="text", text=text)],
+        structuredContent=structured_content,
+        _meta=meta or {},
+    )
+
+
+def _read_annotations() -> Any:
+    from mcp.types import ToolAnnotations
+
+    return ToolAnnotations(readOnlyHint=True)
+
+
+def _write_annotations() -> Any:
+    from mcp.types import ToolAnnotations
+
+    return ToolAnnotations(
+        readOnlyHint=False,
+        destructiveHint=False,
+        openWorldHint=False,
+    )
+
+
+def _read_review_dashboard_html() -> str:
+    return (
+        resources.files("lab_tracker.mcp_app")
+        .joinpath("review-dashboard-v1.html")
+        .read_text(encoding="utf-8")
+    )
 
 
 def _parse_uuid(value: str | UUID, field_name: str) -> UUID:
@@ -266,11 +316,96 @@ def _project_context(api: LabTrackerAPI, project_id: UUID) -> dict[str, Any]:
     }
 
 
-def register_lab_tracker_mcp_interface(
+def _sort_latest(items: Iterable[Any]) -> list[Any]:
+    def timestamp(item: Any) -> str:
+        return str(getattr(item, "updated_at", None) or getattr(item, "created_at", None) or "")
+
+    return sorted(items, key=timestamp, reverse=True)
+
+
+def _resolve_dashboard_project(
+    api: LabTrackerAPI,
+    project_id: UUID | None,
+) -> tuple[Any | None, list[Any]]:
+    projects = api.list_projects()
+    if project_id is not None:
+        return api.get_project(project_id), projects
+    if not projects:
+        return None, []
+    active_projects = [project for project in projects if project.status == ProjectStatus.ACTIVE]
+    return (active_projects or projects)[0], projects
+
+
+def _review_dashboard_payload(
+    api: LabTrackerAPI,
+    project_id: UUID | None,
+    *,
+    limit: int = 5,
+) -> dict[str, Any]:
+    project, projects = _resolve_dashboard_project(api, project_id)
+    if project is None:
+        return {
+            "project": None,
+            "projects": [],
+            "counts": {
+                "projects": 0,
+                "active_questions": 0,
+                "staged_questions": 0,
+                "recent_notes": 0,
+                "active_sessions": 0,
+            },
+            "active_questions": [],
+            "staged_questions": [],
+            "recent_notes": [],
+            "active_sessions": [],
+        }
+
+    questions = api.list_questions(project_id=project.project_id)
+    notes = api.list_notes(project_id=project.project_id)
+    sessions = api.list_sessions(project_id=project.project_id)
+    active_questions = [
+        question for question in questions if question.status == QuestionStatus.ACTIVE
+    ]
+    staged_questions = [
+        question for question in questions if question.status == QuestionStatus.STAGED
+    ]
+    active_sessions = [session for session in sessions if session.status == SessionStatus.ACTIVE]
+    recent_notes = _sort_latest(notes)[:limit]
+    return {
+        "project": _model_data(project),
+        "projects": _models_data(projects),
+        "counts": {
+            "projects": len(projects),
+            "active_questions": len(active_questions),
+            "staged_questions": len(staged_questions),
+            "recent_notes": len(recent_notes),
+            "active_sessions": len(active_sessions),
+        },
+        "active_questions": _models_data(active_questions[:limit]),
+        "staged_questions": _models_data(staged_questions[:limit]),
+        "recent_notes": _models_data(recent_notes),
+        "active_sessions": _models_data(active_sessions[:limit]),
+    }
+
+
+def _ensure_mcp_write_allowed(runtime: LabTrackerRuntimeLike) -> None:
+    if not runtime.enable_writes:
+        raise ValidationError(
+            "MCP writes are disabled. Set LAB_TRACKER_MCP_ENABLE_WRITES=true to enable them."
+        )
+    if runtime.actor.role not in {Role.ADMIN, Role.EDITOR}:
+        raise ValidationError("MCP write tools require an editor or admin actor role.")
+
+
+def _should_register_write_tools(runtime: LabTrackerRuntimeLike) -> bool:
+    return runtime.enable_writes and runtime.actor.role in {Role.ADMIN, Role.EDITOR}
+
+
+def register_legacy_lab_tracker_mcp_interface(
     mcp: MCPServerLike,
     runtime: LabTrackerRuntimeLike,
 ) -> MCPServerLike:
-    """Register Lab Tracker tools, resources, and prompts on a FastMCP-like server."""
+    """Register the pre-ChatGPT-App granular MCP tools."""
 
     @mcp.tool()
     def lab_tracker_overview(project_id: str | None = None) -> dict[str, Any]:
@@ -923,7 +1058,7 @@ def register_lab_tracker_mcp_interface(
 
         return json.dumps(lab_tracker_get_project_context(project_id), indent=2, sort_keys=True)
 
-    @mcp.prompt()
+    @mcp.prompt(name="lab_tracker_legacy_workflow_prompt")
     def lab_tracker_workflow_prompt(goal: str, project_id: str | None = None) -> str:
         """Prompt template for using Lab Tracker as an LLM-facing lab notebook."""
 
@@ -943,6 +1078,409 @@ def register_lab_tracker_mcp_interface(
             "lab_tracker_get_project_context, or lab_tracker_search. Create staged records when "
             "intent is clear but evidence is incomplete. Do not invent checksums, file paths, "
             "dataset files, claims, or confidence values; ask for missing provenance when needed."
+        )
+
+    return mcp
+
+
+def register_lab_tracker_mcp_interface(
+    mcp: MCPServerLike,
+    runtime: LabTrackerRuntimeLike,
+) -> MCPServerLike:
+    """Register the ChatGPT-App-first MCP surface."""
+
+    @mcp.resource(
+        REVIEW_DASHBOARD_URI,
+        name="lab_tracker_review_dashboard",
+        title="Lab Tracker review dashboard",
+        description="Compact ChatGPT App dashboard for captured lab context.",
+        mime_type=REVIEW_DASHBOARD_MIME_TYPE,
+        meta={"ui": {"resourceUri": REVIEW_DASHBOARD_URI}},
+    )
+    def review_dashboard_resource() -> str:
+        """Return the packaged ChatGPT App review dashboard."""
+
+        return _read_review_dashboard_html()
+
+    @mcp.tool(
+        name="lab_context",
+        title="Show lab context",
+        description=(
+            "Return the current Lab Tracker project context, including active questions, "
+            "staged questions, recent notes, and active sessions."
+        ),
+        annotations=_read_annotations(),
+        meta=CHATGPT_APP_META,
+    )
+    def lab_context(project_id: str | None = None, limit: int = 5) -> Any:
+        """Return a compact project context snapshot for ChatGPT and the review widget."""
+
+        parsed_project_id = _parse_optional_uuid(project_id, "project_id")
+        resolved_limit = max(1, min(limit, 20))
+        dashboard = runtime.execute(
+            lambda api: _review_dashboard_payload(
+                api,
+                parsed_project_id,
+                limit=resolved_limit,
+            )
+        )
+        project_name = dashboard["project"]["name"] if dashboard["project"] else "No project"
+        return _tool_result(
+            {"dashboard": dashboard},
+            f"Loaded Lab Tracker context for {project_name}.",
+            meta={"dashboard": dashboard},
+        )
+
+    @mcp.tool(
+        name="refresh_review_dashboard",
+        title="Refresh review dashboard",
+        description="Refresh the Lab Tracker ChatGPT review dashboard without changing records.",
+        annotations=_read_annotations(),
+        meta={
+            **CHATGPT_APP_META,
+            "ui": {"resourceUri": REVIEW_DASHBOARD_URI, "visibility": ["app"]},
+        },
+    )
+    def refresh_review_dashboard(project_id: str | None = None, limit: int = 5) -> Any:
+        """Return the latest widget hydration payload."""
+
+        parsed_project_id = _parse_optional_uuid(project_id, "project_id")
+        resolved_limit = max(1, min(limit, 20))
+        dashboard = runtime.execute(
+            lambda api: _review_dashboard_payload(
+                api,
+                parsed_project_id,
+                limit=resolved_limit,
+            )
+        )
+        return _tool_result(
+            {"dashboard": dashboard},
+            "Refreshed the Lab Tracker review dashboard.",
+            meta={"dashboard": dashboard},
+        )
+
+    @mcp.tool(
+        name="search_lab_context",
+        title="Search lab context",
+        description="Search Lab Tracker questions and notes by substring.",
+        annotations=_read_annotations(),
+        meta=CHATGPT_APP_META,
+    )
+    def search_lab_context(
+        query: str,
+        project_id: str | None = None,
+        include: list[str] | None = None,
+        limit: int = 10,
+    ) -> Any:
+        """Search questions and notes."""
+
+        parsed_project_id = _parse_optional_uuid(project_id, "project_id")
+        include_set = {item.strip().casefold() for item in include or ["questions", "notes"]}
+        include_questions = not include_set or "questions" in include_set
+        include_notes = not include_set or "notes" in include_set
+        resolved_limit = max(1, min(limit, 50))
+
+        def operation(api: LabTrackerAPI) -> dict[str, Any]:
+            questions = (
+                api.search_questions(query, project_id=parsed_project_id, limit=resolved_limit)
+                if include_questions
+                else []
+            )
+            notes = (
+                api.search_notes(query, project_id=parsed_project_id, limit=resolved_limit)
+                if include_notes
+                else []
+            )
+            return {
+                "query": query,
+                "questions": _models_data(questions),
+                "notes": _models_data(notes),
+                "counts": {"questions": len(questions), "notes": len(notes)},
+            }
+
+        results = runtime.execute(operation)
+        return _tool_result(
+            results,
+            (
+                "Found "
+                f"{results['counts']['questions']} questions and "
+                f"{results['counts']['notes']} notes matching {query!r}."
+            ),
+            meta={"search_results": results},
+        )
+
+    if _should_register_write_tools(runtime):
+
+        @mcp.tool(
+            name="capture_note",
+            title="Capture note",
+            description="Create a staged manual note, optionally targeted to a project entity.",
+            annotations=_write_annotations(),
+            meta=CHATGPT_APP_META,
+        )
+        def capture_note(
+            project_id: str,
+            raw_content: str,
+            target_entity_type: str | None = None,
+            target_entity_id: str | None = None,
+            transcribed_text: str | None = None,
+            metadata: dict[str, Any] | None = None,
+        ) -> Any:
+            """Capture a staged note."""
+
+            _ensure_mcp_write_allowed(runtime)
+            parsed_project_id = _parse_uuid(project_id, "project_id")
+            targets = None
+            if target_entity_type or target_entity_id:
+                if not target_entity_type or not target_entity_id:
+                    raise ValidationError(
+                        "target_entity_type and target_entity_id must be provided together."
+                    )
+                targets = _parse_entity_refs(
+                    [{"entity_type": target_entity_type, "entity_id": target_entity_id}]
+                )
+            resolved_metadata = {
+                "created_via": "chatgpt_app",
+                **_string_map(metadata, "metadata"),
+            }
+
+            def operation(api: LabTrackerAPI) -> dict[str, Any]:
+                note = api.create_note(
+                    project_id=parsed_project_id,
+                    raw_content=raw_content,
+                    transcribed_text=transcribed_text,
+                    targets=targets,
+                    metadata=resolved_metadata,
+                    status=NoteStatus.STAGED,
+                    actor=runtime.actor,
+                )
+                dashboard = _review_dashboard_payload(api, parsed_project_id)
+                return {"note": _model_data(note), "dashboard": dashboard}
+
+            result = runtime.execute(operation)
+            return _tool_result(
+                {"note": result["note"], "dashboard": result["dashboard"]},
+                "Captured a staged Lab Tracker note.",
+                meta={"dashboard": result["dashboard"]},
+            )
+
+        @mcp.tool(
+            name="stage_question",
+            title="Stage question",
+            description="Create a staged research question for review.",
+            annotations=_write_annotations(),
+            meta=CHATGPT_APP_META,
+        )
+        def stage_question(
+            project_id: str,
+            text: str,
+            question_type: str = QuestionType.DESCRIPTIVE.value,
+            hypothesis: str | None = None,
+            parent_question_ids: list[str] | None = None,
+        ) -> Any:
+            """Create a staged question."""
+
+            _ensure_mcp_write_allowed(runtime)
+            parsed_project_id = _parse_uuid(project_id, "project_id")
+            parsed_question_type = _parse_enum(
+                QuestionType,
+                question_type,
+                "question_type",
+                QuestionType.DESCRIPTIVE,
+            )
+            parsed_parent_ids = _parse_uuid_list(parent_question_ids, "parent_question_ids")
+
+            def operation(api: LabTrackerAPI) -> dict[str, Any]:
+                question = api.create_question(
+                    project_id=parsed_project_id,
+                    text=text,
+                    question_type=parsed_question_type,
+                    hypothesis=hypothesis,
+                    status=QuestionStatus.STAGED,
+                    parent_question_ids=parsed_parent_ids,
+                    actor=runtime.actor,
+                )
+                dashboard = _review_dashboard_payload(api, parsed_project_id)
+                return {"question": _model_data(question), "dashboard": dashboard}
+
+            result = runtime.execute(operation)
+            return _tool_result(
+                {"question": result["question"], "dashboard": result["dashboard"]},
+                "Staged a Lab Tracker question for review.",
+                meta={"dashboard": result["dashboard"]},
+            )
+
+        @mcp.tool(
+            name="update_staged_question",
+            title="Update staged question",
+            description="Edit a staged question before activation.",
+            annotations=_write_annotations(),
+            meta=CHATGPT_APP_META,
+        )
+        def update_staged_question(
+            question_id: str,
+            text: str | None = None,
+            question_type: str | None = None,
+            hypothesis: str | None = None,
+            parent_question_ids: list[str] | None = None,
+        ) -> Any:
+            """Update a staged question."""
+
+            _ensure_mcp_write_allowed(runtime)
+            parsed_question_id = _parse_uuid(question_id, "question_id")
+            parsed_question_type = _parse_optional_enum(
+                QuestionType,
+                question_type,
+                "question_type",
+            )
+            parsed_parent_ids = (
+                _parse_uuid_list(parent_question_ids, "parent_question_ids")
+                if parent_question_ids is not None
+                else None
+            )
+
+            def operation(api: LabTrackerAPI) -> dict[str, Any]:
+                existing = api.get_question(parsed_question_id)
+                if existing.status != QuestionStatus.STAGED:
+                    raise ValidationError("Only staged questions can be edited by ChatGPT.")
+                question = api.update_question(
+                    parsed_question_id,
+                    text=text,
+                    question_type=parsed_question_type,
+                    hypothesis=hypothesis,
+                    parent_question_ids=parsed_parent_ids,
+                    actor=runtime.actor,
+                )
+                dashboard = _review_dashboard_payload(api, question.project_id)
+                return {"question": _model_data(question), "dashboard": dashboard}
+
+            result = runtime.execute(operation)
+            return _tool_result(
+                {"question": result["question"], "dashboard": result["dashboard"]},
+                "Updated the staged Lab Tracker question.",
+                meta={"dashboard": result["dashboard"]},
+            )
+
+        @mcp.tool(
+            name="activate_question",
+            title="Activate question",
+            description="Activate a staged question so it can guide acquisition work.",
+            annotations=_write_annotations(),
+            meta=CHATGPT_APP_META,
+        )
+        def activate_question(question_id: str) -> Any:
+            """Activate a staged question."""
+
+            _ensure_mcp_write_allowed(runtime)
+            parsed_question_id = _parse_uuid(question_id, "question_id")
+
+            def operation(api: LabTrackerAPI) -> dict[str, Any]:
+                question = api.update_question(
+                    parsed_question_id,
+                    status=QuestionStatus.ACTIVE,
+                    actor=runtime.actor,
+                )
+                dashboard = _review_dashboard_payload(api, question.project_id)
+                return {"question": _model_data(question), "dashboard": dashboard}
+
+            result = runtime.execute(operation)
+            return _tool_result(
+                {"question": result["question"], "dashboard": result["dashboard"]},
+                "Activated the Lab Tracker question.",
+                meta={"dashboard": result["dashboard"]},
+            )
+
+        @mcp.tool(
+            name="start_session",
+            title="Start session",
+            description="Start a non-destructive operational or scientific acquisition session.",
+            annotations=_write_annotations(),
+            meta=CHATGPT_APP_META,
+        )
+        def start_session(
+            project_id: str,
+            session_type: str = SessionType.OPERATIONAL.value,
+            primary_question_id: str | None = None,
+        ) -> Any:
+            """Start a session."""
+
+            _ensure_mcp_write_allowed(runtime)
+            parsed_project_id = _parse_uuid(project_id, "project_id")
+            parsed_session_type = _parse_enum(
+                SessionType,
+                session_type,
+                "session_type",
+                SessionType.OPERATIONAL,
+            )
+            parsed_primary_question_id = _parse_optional_uuid(
+                primary_question_id,
+                "primary_question_id",
+            )
+
+            def operation(api: LabTrackerAPI) -> dict[str, Any]:
+                session = api.create_session(
+                    project_id=parsed_project_id,
+                    session_type=parsed_session_type,
+                    primary_question_id=parsed_primary_question_id,
+                    actor=runtime.actor,
+                )
+                dashboard = _review_dashboard_payload(api, parsed_project_id)
+                return {"session": _model_data(session), "dashboard": dashboard}
+
+            result = runtime.execute(operation)
+            return _tool_result(
+                {"session": result["session"], "dashboard": result["dashboard"]},
+                "Started a Lab Tracker session.",
+                meta={"dashboard": result["dashboard"]},
+            )
+
+        @mcp.tool(
+            name="close_session",
+            title="Close session",
+            description="Close an active acquisition session without deleting records.",
+            annotations=_write_annotations(),
+            meta=CHATGPT_APP_META,
+        )
+        def close_session(session_id: str) -> Any:
+            """Close a session."""
+
+            _ensure_mcp_write_allowed(runtime)
+            parsed_session_id = _parse_uuid(session_id, "session_id")
+
+            def operation(api: LabTrackerAPI) -> dict[str, Any]:
+                session = api.update_session(
+                    parsed_session_id,
+                    status=SessionStatus.CLOSED,
+                    actor=runtime.actor,
+                )
+                dashboard = _review_dashboard_payload(api, session.project_id)
+                return {"session": _model_data(session), "dashboard": dashboard}
+
+            result = runtime.execute(operation)
+            return _tool_result(
+                {"session": result["session"], "dashboard": result["dashboard"]},
+                "Closed the Lab Tracker session.",
+                meta={"dashboard": result["dashboard"]},
+            )
+
+    if runtime.expose_legacy_tools:
+        register_legacy_lab_tracker_mcp_interface(mcp, runtime)
+
+    @mcp.prompt()
+    def lab_tracker_workflow_prompt(goal: str, project_id: str | None = None) -> str:
+        """Prompt template for using Lab Tracker as a ChatGPT App."""
+
+        project_hint = (
+            f" Work inside project_id {project_id} unless the user explicitly redirects you."
+            if project_id
+            else " Start by calling lab_context to inspect available projects."
+        )
+        return (
+            "You are operating Lab Tracker as a ChatGPT App. Preserve scientific reasoning: "
+            "questions explain why work is being done, notes capture the human record, and "
+            "sessions capture acquisition activity. Use lab_context first, use staged records "
+            "for uncertain user intent, and do not invent file paths, checksums, claims, or "
+            f"confidence values. {project_hint} Goal: {goal}"
         )
 
     return mcp

@@ -1,0 +1,262 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Lab Tracker Review</title>
+    <style>
+      :root {
+        color-scheme: light dark;
+        font-family:
+          Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI",
+          sans-serif;
+      }
+
+      body {
+        margin: 0;
+        background: Canvas;
+        color: CanvasText;
+      }
+
+      main {
+        box-sizing: border-box;
+        display: grid;
+        gap: 14px;
+        max-width: 920px;
+        min-height: 100vh;
+        padding: 18px;
+      }
+
+      header {
+        border-bottom: 1px solid color-mix(in srgb, CanvasText 16%, transparent);
+        display: flex;
+        gap: 12px;
+        justify-content: space-between;
+        padding-bottom: 12px;
+      }
+
+      h1,
+      h2,
+      p {
+        margin: 0;
+      }
+
+      h1 {
+        font-size: 1.15rem;
+        line-height: 1.3;
+      }
+
+      h2 {
+        font-size: 0.88rem;
+        letter-spacing: 0;
+      }
+
+      .muted {
+        color: color-mix(in srgb, CanvasText 68%, transparent);
+        font-size: 0.82rem;
+        margin-top: 4px;
+      }
+
+      .grid {
+        display: grid;
+        gap: 12px;
+        grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+      }
+
+      section {
+        border: 1px solid color-mix(in srgb, CanvasText 15%, transparent);
+        border-radius: 8px;
+        padding: 12px;
+      }
+
+      ul {
+        display: grid;
+        gap: 8px;
+        list-style: none;
+        margin: 10px 0 0;
+        padding: 0;
+      }
+
+      li {
+        border-top: 1px solid color-mix(in srgb, CanvasText 10%, transparent);
+        padding-top: 8px;
+      }
+
+      code {
+        background: color-mix(in srgb, CanvasText 8%, transparent);
+        border-radius: 4px;
+        font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        font-size: 0.74rem;
+        padding: 2px 4px;
+        word-break: break-all;
+      }
+
+      .status {
+        display: inline-block;
+        font-size: 0.74rem;
+        margin-top: 4px;
+      }
+
+      .empty {
+        color: color-mix(in srgb, CanvasText 58%, transparent);
+        font-size: 0.82rem;
+        margin-top: 10px;
+      }
+
+      button {
+        align-self: start;
+        background: CanvasText;
+        border: 0;
+        border-radius: 6px;
+        color: Canvas;
+        cursor: pointer;
+        font: inherit;
+        font-size: 0.82rem;
+        min-height: 34px;
+        padding: 7px 10px;
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <header>
+        <div>
+          <h1 id="title">Lab Tracker Review</h1>
+          <p id="subtitle" class="muted">Waiting for lab context.</p>
+        </div>
+        <button id="refresh" type="button">Refresh</button>
+      </header>
+      <div class="grid">
+        <section>
+          <h2>Staged questions</h2>
+          <ul id="staged-questions"></ul>
+        </section>
+        <section>
+          <h2>Recent notes</h2>
+          <ul id="recent-notes"></ul>
+        </section>
+        <section>
+          <h2>Active sessions</h2>
+          <ul id="active-sessions"></ul>
+        </section>
+      </div>
+    </main>
+    <script type="module">
+      const lists = {
+        questions: document.getElementById("staged-questions"),
+        notes: document.getElementById("recent-notes"),
+        sessions: document.getElementById("active-sessions"),
+      };
+
+      function text(value, fallback = "") {
+        return typeof value === "string" && value.trim() ? value : fallback;
+      }
+
+      function renderList(node, items, renderItem, emptyText) {
+        node.replaceChildren();
+        if (!Array.isArray(items) || items.length === 0) {
+          const empty = document.createElement("p");
+          empty.className = "empty";
+          empty.textContent = emptyText;
+          node.appendChild(empty);
+          return;
+        }
+        for (const item of items) {
+          const li = document.createElement("li");
+          renderItem(li, item);
+          node.appendChild(li);
+        }
+      }
+
+      function appendTitle(parent, title, id) {
+        const p = document.createElement("p");
+        p.textContent = title;
+        parent.appendChild(p);
+        if (id) {
+          const code = document.createElement("code");
+          code.textContent = id;
+          parent.appendChild(code);
+        }
+      }
+
+      function renderDashboard(dashboard) {
+        const project = dashboard?.project;
+        window.currentProjectId = project?.project_id || "";
+        document.getElementById("title").textContent = project?.name || "Lab Tracker Review";
+        document.getElementById("subtitle").textContent = project?.project_id
+          ? `Project ${project.project_id}`
+          : "No project selected.";
+
+        renderList(
+          lists.questions,
+          dashboard?.staged_questions,
+          (li, question) => {
+            appendTitle(li, text(question.text, "Untitled question"), question.question_id);
+            const status = document.createElement("span");
+            status.className = "status";
+            status.textContent = `${question.question_type || "question"} / ${question.status}`;
+            li.appendChild(status);
+          },
+          "No staged questions."
+        );
+
+        renderList(
+          lists.notes,
+          dashboard?.recent_notes,
+          (li, note) => {
+            appendTitle(li, text(note.transcribed_text || note.raw_content, "Untitled note"), note.note_id);
+            const status = document.createElement("span");
+            status.className = "status";
+            status.textContent = note.status || "note";
+            li.appendChild(status);
+          },
+          "No recent notes."
+        );
+
+        renderList(
+          lists.sessions,
+          dashboard?.active_sessions,
+          (li, session) => {
+            appendTitle(li, session.session_type || "session", session.session_id);
+            const status = document.createElement("span");
+            status.className = "status";
+            status.textContent = session.status || "active";
+            li.appendChild(status);
+          },
+          "No active sessions."
+        );
+      }
+
+      window.addEventListener(
+        "message",
+        (event) => {
+          if (event.source !== window.parent) return;
+          const message = event.data;
+          if (!message || message.jsonrpc !== "2.0") return;
+          if (message.method !== "ui/notifications/tool-result") return;
+          const dashboard =
+            message.params?._meta?.dashboard ||
+            message.params?.structuredContent?.dashboard ||
+            message.params?.structuredContent;
+          renderDashboard(dashboard);
+        },
+        { passive: true }
+      );
+
+      document.getElementById("refresh").addEventListener("click", () => {
+        window.parent.postMessage(
+          {
+            jsonrpc: "2.0",
+            id: `refresh-${Date.now()}`,
+            method: "tools/call",
+            params: {
+              name: "refresh_review_dashboard",
+              arguments: window.currentProjectId ? { project_id: window.currentProjectId } : {},
+            },
+          },
+          "*"
+        );
+      });
+    </script>
+  </body>
+</html>

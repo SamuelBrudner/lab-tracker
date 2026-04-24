@@ -11,6 +11,7 @@ LOCAL_URL="http://${HOST}:${PORT}"
 MCP_URL="${LOCAL_URL}/mcp"
 
 export LAB_TRACKER_MCP_ACTOR_ROLE="${LAB_TRACKER_MCP_ACTOR_ROLE:-viewer}"
+export LAB_TRACKER_MCP_ENABLE_WRITES="${LAB_TRACKER_MCP_ENABLE_WRITES:-false}"
 
 if ! command -v uv >/dev/null 2>&1; then
   echo "uv is required. Install it with: brew install uv" >&2
@@ -73,7 +74,9 @@ When the https://*.trycloudflare.com URL appears below, use:
   https://<that-hostname>/mcp
 
 Default MCP actor role: ${LAB_TRACKER_MCP_ACTOR_ROLE}
-For write testing, rerun with LAB_TRACKER_MCP_ACTOR_ROLE=editor.
+Writes enabled: ${LAB_TRACKER_MCP_ENABLE_WRITES}
+For write testing, rerun with:
+  LAB_TRACKER_MCP_ACTOR_ROLE=editor LAB_TRACKER_MCP_ENABLE_WRITES=true ./scripts/chatgpt-mcp-tunnel.sh
 
 EOF
 
