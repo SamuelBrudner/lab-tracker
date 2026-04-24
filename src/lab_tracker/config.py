@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from uuid import UUID
+
 from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -19,6 +21,8 @@ class Settings(BaseSettings):
     auth_secret_key: str = DEFAULT_AUTH_SECRET_KEY
     auth_token_ttl_minutes: int = 60 * 12
     bootstrap_admin_token: str = ""
+    mcp_actor_user_id: UUID = UUID("00000000-0000-0000-0000-000000000000")
+    mcp_actor_role: str = "admin"
 
     @model_validator(mode="after")
     def _validate_auth_secret_key(self) -> Settings:

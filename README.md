@@ -36,6 +36,35 @@ pip install -e ".[test,lint]"
 
 Commands below use `uv run`. If you used pip/venv instead, drop the `uv run` prefix.
 
+## LLM / MCP frontend
+
+Lab Tracker can also run as a Model Context Protocol (MCP) server so an LLM client can use
+the lab record directly instead of driving the React UI or raw HTTP routes.
+
+Install the optional MCP runtime:
+
+```bash
+uv pip install -e ".[mcp]"
+```
+
+Run database migrations first, then start the local MCP server over stdio:
+
+```bash
+uv run alembic upgrade head
+uv run lab-tracker-mcp
+```
+
+For streamable HTTP MCP clients:
+
+```bash
+uv run lab-tracker-mcp --transport streamable-http
+```
+
+The MCP server uses the same `LAB_TRACKER_` settings as the FastAPI app. MCP tool calls run
+with a local actor role of `admin` by default; set `LAB_TRACKER_MCP_ACTOR_ROLE=editor` or
+`viewer` if a client should have less authority. See [`docs/mcp.md`](docs/mcp.md) for the
+tool surface and client configuration notes.
+
 ## Run the API
 
 ```bash
@@ -97,6 +126,9 @@ development.
 - `LAB_TRACKER_NOTE_STORAGE_PATH`: note storage directory (default: `./note_storage`)
 - `LAB_TRACKER_AUTH_SECRET_KEY`: auth signing secret (default allowed only in `local`)
 - `LAB_TRACKER_AUTH_TOKEN_TTL_MINUTES`: access token lifetime (default: `720`)
+- `LAB_TRACKER_MCP_ACTOR_USER_ID`: user id stamped on MCP-created records
+  (default: `00000000-0000-0000-0000-000000000000`)
+- `LAB_TRACKER_MCP_ACTOR_ROLE`: role used by MCP tool calls (default: `admin`)
 
 The retained v1 runtime keeps note handling manual and uses direct substring
 search for query flows. Deferred concepts live in
