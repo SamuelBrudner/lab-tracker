@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from uuid import UUID
 
-from sqlalchemy import or_, select
+from sqlalchemy import select
 from sqlalchemy.orm import Session as OrmSession
 
 from lab_tracker.db_models import (
@@ -19,9 +19,7 @@ from lab_tracker.db_models import (
     DatasetQuestionLinkModel,
     NoteModel,
     NoteTargetModel,
-    ProjectModel,
     QuestionModel,
-    QuestionParentModel,
     SessionModel,
     VisualizationClaimModel,
     VisualizationModel,
@@ -45,8 +43,6 @@ from lab_tracker.sqlalchemy_mappers import (
     claim_from_model,
     dataset_from_model,
     dataset_question_link_from_model,
-    project_from_model,
-    question_from_model,
     session_from_model,
     visualization_from_model,
 )
@@ -61,16 +57,6 @@ from .core import SQLAlchemyProjectRepository, SQLAlchemyQuestionRepository
 from .datasets import SQLAlchemyDatasetRepository
 from .notes import SQLAlchemyNoteRepository
 from .sessions import SQLAlchemyAcquisitionOutputRepository, SQLAlchemySessionRepository
-
-
-def _substring_pattern(query: str | None) -> str | None:
-    if query is None:
-        return None
-    needle = query.strip()
-    if not needle:
-        return None
-    escaped = needle.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
-    return f"%{escaped}%"
 
 
 class SQLAlchemyLabTrackerRepository(LabTrackerRepository):
@@ -93,14 +79,6 @@ class SQLAlchemyLabTrackerRepository(LabTrackerRepository):
 
     def rollback(self) -> None:
         self._session.rollback()
-
-    def question_entities_from_rows(self, rows: list[QuestionModel]) -> list[Question]:
-        question_ids = [row.question_id for row in rows]
-        parent_map = self.questions.parent_map(question_ids)
-        return [
-            question_from_model(row, parent_question_ids=parent_map.get(row.question_id, []))
-            for row in rows
-        ]
 
     def dataset_entities_from_rows(self, rows: list[DatasetModel]) -> list[Dataset]:
         dataset_ids = [row.dataset_id for row in rows]
@@ -165,8 +143,7 @@ class SQLAlchemyLabTrackerRepository(LabTrackerRepository):
             )
         )
         by_id = {
-            question.question_id: question
-            for question in self.question_entities_from_rows(rows)
+            question.question_id: question for question in self.questions.questions_from_rows(rows)
         }
         return [by_id[question_id] for question_id in question_ids if question_id in by_id]
 
@@ -207,30 +184,7 @@ class SQLAlchemyLabTrackerRepository(LabTrackerRepository):
         limit: int | None = None,
         offset: int = 0,
     ) -> tuple[list[Project], int]:
-        self._session.flush()
-        stmt = select(ProjectModel)
-        count_stmt = select(ProjectModel.project_id)
-        if status is not None:
-            stmt = stmt.where(ProjectModel.status == status)
-            count_stmt = count_stmt.where(ProjectModel.status == status)
-        stmt = stmt.order_by(ProjectModel.created_at, ProjectModel.project_id)
-        total = count_from_statement(self._session, count_stmt)
-        rows = list(self._session.scalars(apply_pagination(stmt, limit=limit, offset=offset)))
-        return [project_from_model(row) for row in rows], total
-
-    def descendant_question_cte(self, ancestor_question_id: UUID):
-        descendants = (
-            select(QuestionParentModel.question_id.label("question_id"))
-            .where(QuestionParentModel.parent_question_id == str(ancestor_question_id))
-            .cte(name="descendant_questions", recursive=True)
-        )
-        descendants = descendants.union_all(
-            select(QuestionParentModel.question_id).join(
-                descendants,
-                QuestionParentModel.parent_question_id == descendants.c.question_id,
-            )
-        )
-        return descendants
+        return self.projects.query(status=status, limit=limit, offset=offset)
 
     def query_questions(
         self,
@@ -244,45 +198,16 @@ class SQLAlchemyLabTrackerRepository(LabTrackerRepository):
         limit: int | None = None,
         offset: int = 0,
     ) -> tuple[list[Question], int]:
-        self._session.flush()
-        stmt = select(QuestionModel)
-        count_stmt = select(QuestionModel.question_id)
-        if project_id is not None:
-            stmt = stmt.where(QuestionModel.project_id == str(project_id))
-            count_stmt = count_stmt.where(QuestionModel.project_id == str(project_id))
-        if status is not None:
-            stmt = stmt.where(QuestionModel.status == status)
-            count_stmt = count_stmt.where(QuestionModel.status == status)
-        if question_type is not None:
-            stmt = stmt.where(QuestionModel.question_type == question_type)
-            count_stmt = count_stmt.where(QuestionModel.question_type == question_type)
-        pattern = _substring_pattern(search)
-        if pattern is not None:
-            search_clause = or_(
-                QuestionModel.text.ilike(pattern, escape="\\"),
-                QuestionModel.hypothesis.ilike(pattern, escape="\\"),
-            )
-            stmt = stmt.where(search_clause)
-            count_stmt = count_stmt.where(search_clause)
-        if parent_question_id is not None:
-            stmt = stmt.join(
-                QuestionParentModel,
-                QuestionParentModel.question_id == QuestionModel.question_id,
-            ).where(QuestionParentModel.parent_question_id == str(parent_question_id))
-            count_stmt = count_stmt.join(
-                QuestionParentModel,
-                QuestionParentModel.question_id == QuestionModel.question_id,
-            ).where(QuestionParentModel.parent_question_id == str(parent_question_id))
-        if ancestor_question_id is not None:
-            descendants = self.descendant_question_cte(ancestor_question_id)
-            stmt = stmt.where(QuestionModel.question_id.in_(select(descendants.c.question_id)))
-            count_stmt = count_stmt.where(
-                QuestionModel.question_id.in_(select(descendants.c.question_id))
-            )
-        stmt = stmt.order_by(QuestionModel.created_at, QuestionModel.question_id)
-        total = count_from_statement(self._session, count_stmt)
-        rows = list(self._session.scalars(apply_pagination(stmt, limit=limit, offset=offset)))
-        return self.question_entities_from_rows(rows), total
+        return self.questions.query(
+            project_id=project_id,
+            status=status,
+            question_type=question_type,
+            search=search,
+            parent_question_id=parent_question_id,
+            ancestor_question_id=ancestor_question_id,
+            limit=limit,
+            offset=offset,
+        )
 
     def query_datasets(
         self,
@@ -317,39 +242,15 @@ class SQLAlchemyLabTrackerRepository(LabTrackerRepository):
         limit: int | None = None,
         offset: int = 0,
     ) -> tuple[list[Note], int]:
-        self._session.flush()
-        stmt = select(NoteModel)
-        count_stmt = select(NoteModel.note_id)
-        if project_id is not None:
-            stmt = stmt.where(NoteModel.project_id == str(project_id))
-            count_stmt = count_stmt.where(NoteModel.project_id == str(project_id))
-        if status is not None:
-            stmt = stmt.where(NoteModel.status == status)
-            count_stmt = count_stmt.where(NoteModel.status == status)
-        pattern = _substring_pattern(search)
-        if pattern is not None:
-            search_clause = or_(
-                NoteModel.raw_content.ilike(pattern, escape="\\"),
-                NoteModel.transcribed_text.ilike(pattern, escape="\\"),
-            )
-            stmt = stmt.where(search_clause)
-            count_stmt = count_stmt.where(search_clause)
-        if target_entity_type is not None and target_entity_id is not None:
-            stmt = stmt.join(NoteTargetModel, NoteTargetModel.note_id == NoteModel.note_id).where(
-                NoteTargetModel.entity_type == target_entity_type,
-                NoteTargetModel.entity_id == str(target_entity_id),
-            )
-            count_stmt = count_stmt.join(
-                NoteTargetModel,
-                NoteTargetModel.note_id == NoteModel.note_id,
-            ).where(
-                NoteTargetModel.entity_type == target_entity_type,
-                NoteTargetModel.entity_id == str(target_entity_id),
-            )
-        stmt = stmt.order_by(NoteModel.created_at, NoteModel.note_id)
-        total = count_from_statement(self._session, count_stmt)
-        rows = list(self._session.scalars(apply_pagination(stmt, limit=limit, offset=offset)))
-        return self.notes.notes_from_rows(rows), total
+        return self.notes.query(
+            project_id=project_id,
+            status=status,
+            search=search,
+            target_entity_type=target_entity_type,
+            target_entity_id=target_entity_id,
+            limit=limit,
+            offset=offset,
+        )
 
     def query_sessions(
         self,

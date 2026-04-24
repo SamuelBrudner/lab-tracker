@@ -119,12 +119,13 @@ class QuestionServiceMixin:
                 project_id=project_id,
                 status=status.value if status is not None else None,
                 question_type=question_type.value if question_type is not None else None,
+                search=search,
                 parent_question_id=parent_question_id,
                 ancestor_question_id=ancestor_question_id,
                 limit=None,
                 offset=0,
             )
-            self._cache_entities(
+            return self._cache_entities(
                 "questions",
                 questions,
                 lambda question: question.question_id,

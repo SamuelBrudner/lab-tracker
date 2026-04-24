@@ -32,6 +32,21 @@ def _seed_admin(app, *, username: str, password: str) -> None:
     )
 
 
+class _SpySearchRepository(SQLAlchemyLabTrackerRepository):
+    def __init__(self, session) -> None:  # noqa: ANN001
+        super().__init__(session)
+        self.last_note_query: dict[str, object] | None = None
+        self.last_question_query: dict[str, object] | None = None
+
+    def query_questions(self, **kwargs):  # noqa: ANN003
+        self.last_question_query = dict(kwargs)
+        return super().query_questions(**kwargs)
+
+    def query_notes(self, **kwargs):  # noqa: ANN003
+        self.last_note_query = dict(kwargs)
+        return super().query_notes(**kwargs)
+
+
 def test_repository_backed_api_persists_core_entities(tmp_path):
     db_path = tmp_path / "api-persistence.db"
     engine = create_engine(
@@ -170,6 +185,100 @@ def test_repository_backed_api_rejects_question_parent_cycles_without_store_cach
                 parent_question_ids=[child.question_id],
                 actor=actor,
             )
+
+    engine.dispose()
+
+
+def test_repository_backed_api_search_helpers_delegate_to_repository_queries(tmp_path):
+    db_path = tmp_path / "api-search.db"
+    engine = create_engine(
+        f"sqlite+pysqlite:///{db_path}",
+        future=True,
+        connect_args={"check_same_thread": False},
+    )
+    Base.metadata.create_all(bind=engine)
+    session_factory = get_session_factory(engine=engine)
+    actor = _actor()
+
+    with session_factory() as session:
+        api = LabTrackerAPI(repository=SQLAlchemyLabTrackerRepository(session))
+        project = api.create_project("Search Project", actor=actor)
+        api.create_question(
+            project_id=project.project_id,
+            text="Baseline question",
+            question_type=QuestionType.DESCRIPTIVE,
+            actor=actor,
+        )
+        api.create_question(
+            project_id=project.project_id,
+            text="Control question",
+            question_type=QuestionType.DESCRIPTIVE,
+            actor=actor,
+        )
+        api.create_note(
+            project_id=project.project_id,
+            raw_content="baseline capture",
+            actor=actor,
+        )
+        api.create_note(
+            project_id=project.project_id,
+            raw_content="raw capture",
+            transcribed_text="baseline transcript",
+            actor=actor,
+        )
+
+    with session_factory() as session:
+        repository = _SpySearchRepository(session)
+        api = LabTrackerAPI(repository=repository)
+
+        filtered_questions = api.list_questions_filtered(
+            project_id=project.project_id,
+            search="baseline",
+        )
+
+        assert repository.last_question_query == {
+            "ancestor_question_id": None,
+            "limit": None,
+            "offset": 0,
+            "parent_question_id": None,
+            "project_id": project.project_id,
+            "question_type": None,
+            "search": "baseline",
+            "status": None,
+        }
+        assert [question.text for question in filtered_questions] == ["Baseline question"]
+
+        repository.last_question_query = None
+        searched_questions = api.search_questions(
+            "baseline",
+            project_id=project.project_id,
+            limit=1,
+            offset=0,
+        )
+
+        assert repository.last_question_query == {
+            "limit": 1,
+            "offset": 0,
+            "project_id": project.project_id,
+            "search": "baseline",
+        }
+        assert len(searched_questions) == 1
+        assert searched_questions[0].text == "Baseline question"
+
+        searched_notes = api.search_notes(
+            "baseline",
+            project_id=project.project_id,
+            limit=1,
+            offset=0,
+        )
+
+        assert repository.last_note_query == {
+            "limit": 1,
+            "offset": 0,
+            "project_id": project.project_id,
+            "search": "baseline",
+        }
+        assert len(searched_notes) == 1
 
     engine.dispose()
 

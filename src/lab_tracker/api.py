@@ -293,16 +293,13 @@ class LabTrackerAPI(
         if repository is not None and not self._allow_in_memory:
             questions, _ = repository.query_questions(
                 project_id=project_id,
-                limit=None,
-                offset=0,
+                search=query,
+                limit=limit,
+                offset=offset,
             )
-            matches = [
-                question for question in questions if question_matches_substring(question, query)
-            ]
-            paged = self._slice_entities(matches, limit=limit, offset=offset)
             return self._cache_entities(
                 "questions",
-                paged,
+                questions,
                 lambda question: question.question_id,
             )
         questions = list(self._store.questions.values())
@@ -325,14 +322,13 @@ class LabTrackerAPI(
         if repository is not None and not self._allow_in_memory:
             notes, _ = repository.query_notes(
                 project_id=project_id,
-                limit=None,
-                offset=0,
+                search=query,
+                limit=limit,
+                offset=offset,
             )
-            matches = [note for note in notes if note_matches_substring(note, query)]
-            paged = self._slice_entities(matches, limit=limit, offset=offset)
             return self._cache_entities(
                 "notes",
-                paged,
+                notes,
                 lambda note: note.note_id,
             )
         notes = list(self._store.notes.values())
