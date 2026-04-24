@@ -355,4 +355,369 @@ describe("App", () => {
       expect(screen.getByText("Project Two Question 0", { selector: "strong" })).toBeInTheDocument();
     });
   });
+
+  it("creates a project from the home route", async () => {
+    localStorage.setItem(TOKEN_STORAGE_KEY, "token-create-project");
+
+    installFetchMock([
+      {
+        match: "/auth/me",
+        response: apiResponse({ role: "admin", username: "sam" }),
+      },
+      {
+        match: "/projects?limit=200&offset=0",
+        response: [
+          apiResponse([]),
+          apiResponse([{ name: "Project One", project_id: "project-1" }]),
+        ],
+      },
+      {
+        match: "/projects",
+        method: "POST",
+        response: apiResponse({ name: "Project One", project_id: "project-1" }, 201),
+      },
+      {
+        match: "/questions?project_id=project-1&limit=200&offset=0",
+        response: apiResponse([]),
+      },
+      {
+        match: "/datasets?project_id=project-1&limit=200&offset=0",
+        response: apiResponse([]),
+      },
+      {
+        match: "/notes?project_id=project-1&limit=200&offset=0",
+        response: apiResponse([]),
+      },
+      {
+        match: "/sessions?project_id=project-1&limit=200&offset=0",
+        response: apiResponse([]),
+      },
+      {
+        match: "/analyses?project_id=project-1&limit=200&offset=0",
+        response: apiResponse([]),
+      },
+      {
+        match: "/visualizations?project_id=project-1&limit=200&offset=0",
+        response: apiResponse([]),
+      },
+    ]);
+
+    render(<App />);
+
+    expect(await screen.findByRole("heading", { name: "Dashboard" })).toBeInTheDocument();
+
+    fireEvent.change(screen.getByLabelText("Name"), {
+      target: { value: "Project One" },
+    });
+    fireEvent.change(screen.getByLabelText("Description"), {
+      target: { value: "Created from test" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Create project" }));
+
+    expect(await screen.findByText("Project created.")).toBeInTheDocument();
+    expect(await screen.findAllByRole("option", { name: "Project One" })).toHaveLength(2);
+  });
+
+  it("stages and activates a question from the home route", async () => {
+    localStorage.setItem(TOKEN_STORAGE_KEY, "token-question-actions");
+
+    installFetchMock([
+      {
+        match: "/auth/me",
+        response: apiResponse({ role: "admin", username: "sam" }),
+      },
+      {
+        match: "/projects?limit=200&offset=0",
+        response: apiResponse([{ name: "Project One", project_id: "project-1" }]),
+      },
+      {
+        match: "/questions?project_id=project-1&limit=200&offset=0",
+        response: [
+          apiResponse([]),
+          apiResponse([
+            {
+              project_id: "project-1",
+              question_id: "question-1",
+              question_type: "descriptive",
+              status: "staged",
+              text: "How stable is the rig?",
+            },
+          ]),
+          apiResponse([
+            {
+              project_id: "project-1",
+              question_id: "question-1",
+              question_type: "descriptive",
+              status: "active",
+              text: "How stable is the rig?",
+            },
+          ]),
+        ],
+      },
+      {
+        match: "/questions",
+        method: "POST",
+        response: apiResponse(
+          {
+            project_id: "project-1",
+            question_id: "question-1",
+            question_type: "descriptive",
+            status: "staged",
+            text: "How stable is the rig?",
+          },
+          201
+        ),
+      },
+      {
+        match: "/questions/question-1",
+        method: "PATCH",
+        response: apiResponse({
+          project_id: "project-1",
+          question_id: "question-1",
+          question_type: "descriptive",
+          status: "active",
+          text: "How stable is the rig?",
+        }),
+      },
+      {
+        match: "/datasets?project_id=project-1&limit=200&offset=0",
+        response: [apiResponse([]), apiResponse([]), apiResponse([])],
+      },
+      {
+        match: "/notes?project_id=project-1&limit=200&offset=0",
+        response: [apiResponse([]), apiResponse([]), apiResponse([])],
+      },
+      {
+        match: "/sessions?project_id=project-1&limit=200&offset=0",
+        response: [apiResponse([]), apiResponse([]), apiResponse([])],
+      },
+      {
+        match: "/analyses?project_id=project-1&limit=200&offset=0",
+        response: [apiResponse([]), apiResponse([]), apiResponse([])],
+      },
+      {
+        match: "/visualizations?project_id=project-1&limit=200&offset=0",
+        response: [apiResponse([]), apiResponse([]), apiResponse([])],
+      },
+    ]);
+
+    render(<App />);
+
+    expect(await screen.findByRole("heading", { name: "Question Staging & Commit" })).toBeInTheDocument();
+
+    fireEvent.change(screen.getByLabelText("Question text"), {
+      target: { value: "How stable is the rig?" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Stage question" }));
+
+    expect(await screen.findByText("Question staged.")).toBeInTheDocument();
+    expect(
+      await screen.findByText("How stable is the rig?", { selector: ".item strong" })
+    ).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Commit (activate)" }));
+
+    expect(await screen.findByText("Question activated.")).toBeInTheDocument();
+    await waitFor(() => {
+      expect(screen.queryByRole("button", { name: "Commit (activate)" })).not.toBeInTheDocument();
+    });
+  });
+
+  it("uploads a note file from the home route", async () => {
+    localStorage.setItem(TOKEN_STORAGE_KEY, "token-note-upload");
+
+    installFetchMock([
+      {
+        match: "/auth/me",
+        response: apiResponse({ role: "admin", username: "sam" }),
+      },
+      {
+        match: "/projects?limit=200&offset=0",
+        response: apiResponse([{ name: "Project One", project_id: "project-1" }]),
+      },
+      {
+        match: "/questions?project_id=project-1&limit=200&offset=0",
+        response: [
+          apiResponse([
+            {
+              project_id: "project-1",
+              question_id: "question-1",
+              question_type: "descriptive",
+              status: "active",
+              text: "Active question",
+            },
+          ]),
+          apiResponse([
+            {
+              project_id: "project-1",
+              question_id: "question-1",
+              question_type: "descriptive",
+              status: "active",
+              text: "Active question",
+            },
+          ]),
+        ],
+      },
+      {
+        match: "/notes/upload-file",
+        method: "POST",
+        response: apiResponse(
+          {
+            note_id: "note-1",
+            project_id: "project-1",
+            raw_content: "",
+            status: "staged",
+            transcribed_text: "Captured session note",
+          },
+          201
+        ),
+      },
+      {
+        match: "/notes?project_id=project-1&limit=200&offset=0",
+        response: [
+          apiResponse([]),
+          apiResponse([
+            {
+              created_at: "2026-04-20T00:00:00Z",
+              note_id: "note-1",
+              project_id: "project-1",
+              raw_content: "",
+              status: "staged",
+              transcribed_text: "Captured session note",
+            },
+          ]),
+        ],
+      },
+      {
+        match: "/datasets?project_id=project-1&limit=200&offset=0",
+        response: [apiResponse([]), apiResponse([])],
+      },
+      {
+        match: "/sessions?project_id=project-1&limit=200&offset=0",
+        response: [apiResponse([]), apiResponse([])],
+      },
+      {
+        match: "/analyses?project_id=project-1&limit=200&offset=0",
+        response: [apiResponse([]), apiResponse([])],
+      },
+      {
+        match: "/visualizations?project_id=project-1&limit=200&offset=0",
+        response: [apiResponse([]), apiResponse([])],
+      },
+    ]);
+
+    render(<App />);
+
+    expect(await screen.findByRole("heading", { name: "Note Capture" })).toBeInTheDocument();
+
+    const file = new File(["note-bytes"], "note.txt", { type: "text/plain" });
+    fireEvent.change(screen.getByLabelText("Select file"), {
+      target: { files: [file] },
+    });
+    fireEvent.change(screen.getByLabelText("Manual transcript (optional)"), {
+      target: { value: "Captured session note" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Upload note file" }));
+
+    expect(await screen.findByText("Note file uploaded.")).toBeInTheDocument();
+    expect(await screen.findByText("Captured session note")).toBeInTheDocument();
+  });
+
+  it("starts a session from the home route", async () => {
+    localStorage.setItem(TOKEN_STORAGE_KEY, "token-session-create");
+
+    installFetchMock([
+      {
+        match: "/auth/me",
+        response: apiResponse({ role: "admin", username: "sam" }),
+      },
+      {
+        match: "/projects?limit=200&offset=0",
+        response: apiResponse([{ name: "Project One", project_id: "project-1" }]),
+      },
+      {
+        match: "/questions?project_id=project-1&limit=200&offset=0",
+        response: [
+          apiResponse([
+            {
+              project_id: "project-1",
+              question_id: "question-1",
+              question_type: "descriptive",
+              status: "active",
+              text: "Primary question",
+              updated_at: "2026-04-20T02:00:00Z",
+            },
+          ]),
+          apiResponse([
+            {
+              project_id: "project-1",
+              question_id: "question-1",
+              question_type: "descriptive",
+              status: "active",
+              text: "Primary question",
+              updated_at: "2026-04-20T02:00:00Z",
+            },
+          ]),
+        ],
+      },
+      {
+        match: "/sessions",
+        method: "POST",
+        response: apiResponse(
+          {
+            link_code: "ABC123",
+            primary_question_id: "question-1",
+            project_id: "project-1",
+            session_id: "session-1",
+            session_type: "scientific",
+            started_at: "2026-04-20T03:00:00Z",
+            status: "active",
+          },
+          201
+        ),
+      },
+      {
+        match: "/sessions?project_id=project-1&limit=200&offset=0",
+        response: [
+          apiResponse([]),
+          apiResponse([
+            {
+              link_code: "ABC123",
+              primary_question_id: "question-1",
+              project_id: "project-1",
+              session_id: "session-1",
+              session_type: "scientific",
+              started_at: "2026-04-20T03:00:00Z",
+              status: "active",
+            },
+          ]),
+        ],
+      },
+      {
+        match: "/datasets?project_id=project-1&limit=200&offset=0",
+        response: [apiResponse([]), apiResponse([])],
+      },
+      {
+        match: "/notes?project_id=project-1&limit=200&offset=0",
+        response: [apiResponse([]), apiResponse([])],
+      },
+      {
+        match: "/analyses?project_id=project-1&limit=200&offset=0",
+        response: [apiResponse([]), apiResponse([])],
+      },
+      {
+        match: "/visualizations?project_id=project-1&limit=200&offset=0",
+        response: [apiResponse([]), apiResponse([])],
+      },
+    ]);
+
+    render(<App />);
+
+    expect(await screen.findByRole("heading", { name: "Sessions" })).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Start session" }));
+
+    expect(await screen.findByText("Session started.")).toBeInTheDocument();
+    expect(await screen.findByText("ABC123")).toBeInTheDocument();
+  });
 });
