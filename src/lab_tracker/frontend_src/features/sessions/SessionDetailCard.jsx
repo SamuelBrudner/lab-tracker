@@ -1,9 +1,10 @@
 import * as React from "react";
 
-import { buildApiPath, fetchAllPages } from "../../shared/api.js";
-import { formatBytes, formatDate, sessionTypeClass } from "../../shared/formatters.js";
+import { formatDate, sessionTypeClass } from "../../shared/formatters.js";
 import { AppLink } from "../../shared/routing.jsx";
-import { useApiResource } from "../../hooks/useApiResource.js";
+import { SessionLinkedNotesSection } from "./SessionLinkedNotesSection.jsx";
+import { SessionOutputsSection } from "./SessionOutputsSection.jsx";
+import { useSessionDetailData } from "./useSessionDetailData.js";
 
 const { useEffect, useMemo, useState } = React;
 
@@ -17,46 +18,23 @@ function SessionDetailCard({
   onCloseSession,
   onPromoteSession,
 }) {
-  const { data: session, error: loadError, loading } = useApiResource(
-    token && sessionId ? `/sessions/${sessionId}` : "",
-    token,
-    "Failed to load session."
-  );
   const [actionError, setActionError] = useState("");
-  const [outputsState, setOutputsState] = useState({ loading: false, error: "", items: [] });
-  const [noteState, setNoteState] = useState({ loading: false, error: "", items: [] });
-  const [activeQuestionState, setActiveQuestionState] = useState({
-    loading: false,
-    error: "",
-    items: [],
-  });
   const [promotionQuestionId, setPromotionQuestionId] = useState("");
   const [promotionBusy, setPromotionBusy] = useState(false);
   const {
-    data: primaryQuestionData,
-  } = useApiResource(
-    token && session?.primary_question_id ? `/questions/${session.primary_question_id}` : "",
+    activeQuestionState,
+    loadError,
+    loading,
+    noteState,
+    outputsState,
+    primaryQuestion,
+    project,
+    session,
+  } = useSessionDetailData({
     token,
-    "Failed to load primary question."
-  );
-
-  const project = useMemo(() => {
-    if (!session) {
-      return null;
-    }
-    return projects.find((item) => item.project_id === session.project_id) || null;
-  }, [projects, session]);
-
-  const primaryQuestion = useMemo(() => {
-    if (!session?.primary_question_id) {
-      return null;
-    }
-    return (
-      activeQuestionState.items.find((item) => item.question_id === session.primary_question_id) ||
-      primaryQuestionData ||
-      null
-    );
-  }, [activeQuestionState.items, primaryQuestionData, session]);
+    sessionId,
+    projects,
+  });
 
   const promotionOptions = useMemo(() => {
     const items = [...(activeQuestionState.items || [])];
@@ -79,131 +57,6 @@ function SessionDetailCard({
     }
     setPromotionQuestionId((current) => current || promotionOptions[0]?.question_id || "");
   }, [promotionOptions, session]);
-
-  useEffect(() => {
-    let canceled = false;
-    if (!token || !sessionId) {
-      setOutputsState({ loading: false, error: "", items: [] });
-      return () => {
-        canceled = true;
-      };
-    }
-
-    setOutputsState({ loading: true, error: "", items: [] });
-    fetchAllPages(`/sessions/${sessionId}/outputs`, { token })
-      .then((items) => {
-        if (canceled) {
-          return;
-        }
-        const normalized = Array.isArray(items) ? items : [];
-        normalized.sort((a, b) => {
-          const aTime = Date.parse(a.created_at || "") || 0;
-          const bTime = Date.parse(b.created_at || "") || 0;
-          return bTime - aTime;
-        });
-        setOutputsState({ loading: false, error: "", items: normalized });
-      })
-      .catch((err) => {
-        if (!canceled) {
-          setOutputsState({
-            loading: false,
-            error: err.message || "Failed to load outputs.",
-            items: [],
-          });
-        }
-      });
-
-    return () => {
-      canceled = true;
-    };
-  }, [sessionId, token]);
-
-  useEffect(() => {
-    let canceled = false;
-    if (!token || !session) {
-      setActiveQuestionState({ loading: false, error: "", items: [] });
-      return () => {
-        canceled = true;
-      };
-    }
-
-    setActiveQuestionState({ loading: true, error: "", items: [] });
-    fetchAllPages(
-      buildApiPath("/questions", {
-        project_id: session.project_id,
-        status: "active",
-      }),
-      { token }
-    )
-      .then((items) => {
-        if (canceled) {
-          return;
-        }
-        setActiveQuestionState({
-          loading: false,
-          error: "",
-          items: Array.isArray(items) ? items : [],
-        });
-      })
-      .catch((err) => {
-        if (!canceled) {
-          setActiveQuestionState({
-            loading: false,
-            error: err.message || "Failed to load active questions.",
-            items: [],
-          });
-        }
-      });
-
-    return () => {
-      canceled = true;
-    };
-  }, [session, token]);
-
-  useEffect(() => {
-    let canceled = false;
-    if (!token || !session) {
-      setNoteState({ loading: false, error: "", items: [] });
-      return () => {
-        canceled = true;
-      };
-    }
-
-    setNoteState({ loading: true, error: "", items: [] });
-    fetchAllPages(
-      buildApiPath("/notes", {
-        project_id: session.project_id,
-        target_entity_type: "session",
-        target_entity_id: session.session_id,
-      }),
-      { token }
-    )
-      .then((items) => {
-        if (canceled) {
-          return;
-        }
-        const normalized = Array.isArray(items) ? items : [];
-        normalized.sort((a, b) => {
-          const aTime = Date.parse(a.created_at || "") || 0;
-          const bTime = Date.parse(b.created_at || "") || 0;
-          return bTime - aTime;
-        });
-        setNoteState({ loading: false, error: "", items: normalized });
-      })
-      .catch((err) => {
-        if (!canceled) {
-          setNoteState({
-            loading: false,
-            error: err.message || "Failed to load linked notes.",
-            items: [],
-          });
-        }
-      });
-
-    return () => {
-      canceled = true;
-    };
-  }, [session, token]);
 
   async function handleCloseSession() {
     if (!session || !canWrite) {
@@ -337,60 +190,9 @@ function SessionDetailCard({
             </div>
           ) : null}
 
-          <div className="stack">
-            <div className="item-head">
-              <h3>Acquisition Outputs</h3>
-              <span className="pill">{outputsState.items.length}</span>
-            </div>
-            {outputsState.loading ? <p className="subtle">Loading outputs...</p> : null}
-            {outputsState.error ? <p className="flash error">{outputsState.error}</p> : null}
-            {outputsState.items.length === 0 && !outputsState.loading ? (
-              <p className="subtle">(no outputs)</p>
-            ) : (
-              <div className="stack">
-                {outputsState.items.map((output) => (
-                  <div className="item" key={output.output_id}>
-                    <div className="item-head">
-                      <span className="mono">{output.file_path}</span>
-                      <span className="subtle">{formatBytes(output.size_bytes)}</span>
-                    </div>
-                    <p className="mono">sha256: {output.checksum}</p>
-                    <p className="subtle">{formatDate(output.created_at)}</p>
-                  </div>
-                ))}
-              </div>
-            )}
-          </div>
+          <SessionOutputsSection outputsState={outputsState} />
 
-          <div className="stack">
-            <div className="item-head">
-              <h3>Linked Notes</h3>
-              <span className="pill">{noteState.items.length}</span>
-            </div>
-            {noteState.loading ? <p className="subtle">Loading linked notes...</p> : null}
-            {noteState.error ? <p className="flash error">{noteState.error}</p> : null}
-            {noteState.items.length === 0 && !noteState.loading ? (
-              <p className="subtle">(no linked notes)</p>
-            ) : (
-              <div className="stack">
-                {noteState.items.map((note) => {
-                  const preview = note.transcribed_text || note.raw_content || "(binary upload)";
-                  return (
-                    <div className="item" key={note.note_id}>
-                      <div className="item-head">
-                        <AppLink to={`/app/notes/${note.note_id}`} navigate={navigate} className="link">
-                          <strong>{preview.slice(0, 120)}</strong>
-                        </AppLink>
-                        <span className="pill">{note.status}</span>
-                      </div>
-                      <p className="mono">{note.note_id}</p>
-                      <p className="subtle">{formatDate(note.created_at)}</p>
-                    </div>
-                  );
-                })}
-              </div>
-            )}
-          </div>
+          <SessionLinkedNotesSection noteState={noteState} navigate={navigate} />
         </div>
       ) : null}
 
