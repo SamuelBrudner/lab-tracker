@@ -90,8 +90,7 @@ class LabTrackerMCPRuntime:
     def execute(self, operation: Callable[[LabTrackerAPI], T]) -> T:
         with self._session_factory() as session:
             repository = SQLAlchemyLabTrackerRepository(session)
-            request_context = self._api.build_request_context(repository)
-            bound_api = self._api.bind_request_context(request_context)
+            bound_api = self._api.for_request(repository)
             committed = False
             try:
                 result = operation(bound_api)
@@ -102,13 +101,7 @@ class LabTrackerMCPRuntime:
                 session.rollback()
                 raise
             finally:
-                request_context.finish(
-                    committed=committed,
-                    run_deferred_actions=lambda actions, label: bound_api._run_deferred_actions(
-                        actions,
-                        label=label,
-                    ),
-                )
+                bound_api.finish_request(committed=committed)
 
     def close(self) -> None:
         if self._owns_engine:
@@ -955,7 +948,12 @@ def register_lab_tracker_mcp_interface(
     return mcp
 
 
-def build_mcp_server(runtime: LabTrackerRuntimeLike | None = None) -> Any:
+def build_mcp_server(
+    runtime: LabTrackerRuntimeLike | None = None,
+    *,
+    host: str = "127.0.0.1",
+    port: int = 8000,
+) -> Any:
     """Build the FastMCP server instance."""
 
     try:
@@ -966,7 +964,13 @@ def build_mcp_server(runtime: LabTrackerRuntimeLike | None = None) -> Any:
             "pip install -e '.[mcp]'"
         ) from exc
 
-    mcp = FastMCP("Lab Tracker", stateless_http=True, json_response=True)
+    mcp = FastMCP(
+        "Lab Tracker",
+        host=host,
+        port=port,
+        stateless_http=True,
+        json_response=True,
+    )
     return register_lab_tracker_mcp_interface(mcp, runtime or LabTrackerMCPRuntime())
 
 
@@ -978,8 +982,19 @@ def main(argv: list[str] | None = None) -> None:
         default="stdio",
         help="MCP transport to use. stdio is the default for local LLM clients.",
     )
+    parser.add_argument(
+        "--host",
+        default="127.0.0.1",
+        help="Host for streamable-http transport.",
+    )
+    parser.add_argument(
+        "--port",
+        type=int,
+        default=8000,
+        help="Port for streamable-http transport.",
+    )
     args = parser.parse_args(argv)
-    mcp = build_mcp_server()
+    mcp = build_mcp_server(host=args.host, port=args.port)
     if args.transport == "stdio":
         mcp.run()
     else:

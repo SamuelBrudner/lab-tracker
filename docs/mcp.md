@@ -25,6 +25,9 @@ Streamable HTTP clients:
 uv run lab-tracker-mcp --transport streamable-http
 ```
 
+The streamable HTTP endpoint is `/mcp`, so the default local URL is
+`http://127.0.0.1:8000/mcp`.
+
 The server reads the normal `LAB_TRACKER_` settings, including `LAB_TRACKER_DATABASE_URL`,
 `LAB_TRACKER_NOTE_STORAGE_PATH`, and `LAB_TRACKER_AUTH_SECRET_KEY`.
 
@@ -35,6 +38,36 @@ expected to be trusted automation running on the same machine:
 LAB_TRACKER_MCP_ACTOR_ROLE=editor
 LAB_TRACKER_MCP_ACTOR_USER_ID=00000000-0000-0000-0000-000000000000
 ```
+
+## ChatGPT Web Quick Tunnel
+
+ChatGPT cannot connect to a local stdio server or to `localhost`; it needs a remote HTTPS
+MCP endpoint. For local testing from ChatGPT web, use the bundled Cloudflare Tunnel wrapper:
+
+```bash
+brew install cloudflared
+./scripts/chatgpt-mcp-tunnel.sh
+```
+
+The script:
+
+- creates `.venv` if needed
+- installs the MCP extra
+- runs Alembic migrations
+- starts `lab-tracker-mcp --transport streamable-http`
+- starts `cloudflared tunnel --url http://127.0.0.1:8000`
+- prints the ChatGPT endpoint as `https://...trycloudflare.com/mcp`
+
+The tunnel script defaults `LAB_TRACKER_MCP_ACTOR_ROLE` to `viewer` so the first ChatGPT
+connection can inspect context without modifying records. For write testing:
+
+```bash
+LAB_TRACKER_MCP_ACTOR_ROLE=editor ./scripts/chatgpt-mcp-tunnel.sh
+```
+
+Keep the terminal open while testing; closing it stops both the MCP server and tunnel.
+Temporary tunnels are for development only. For regular use, deploy the MCP server behind a
+stable HTTPS URL with authentication.
 
 ## Client Example
 
@@ -53,6 +86,11 @@ For a stdio MCP client, configure the command as:
 
 For HTTP clients, start the server and connect to the SDK default MCP endpoint exposed by
 the `streamable-http` transport.
+
+For ChatGPT web, configure a custom MCP app with the HTTPS `/mcp` URL printed by the tunnel
+script, or your own deployed HTTPS `/mcp` URL. If the ChatGPT settings UI asks for auth and
+you are using the development tunnel, choose no authentication and keep the actor role at
+`viewer` unless you are deliberately testing writes.
 
 ## Tool Surface
 

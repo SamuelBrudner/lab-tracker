@@ -60,6 +60,17 @@ For streamable HTTP MCP clients:
 uv run lab-tracker-mcp --transport streamable-http
 ```
 
+For ChatGPT web testing, the easiest local path is a temporary HTTPS tunnel:
+
+```bash
+brew install cloudflared
+./scripts/chatgpt-mcp-tunnel.sh
+```
+
+The script prints the `https://...trycloudflare.com/mcp` endpoint to paste into ChatGPT
+web's custom MCP app setup. It defaults MCP calls to `viewer`; rerun with
+`LAB_TRACKER_MCP_ACTOR_ROLE=editor` only when you want ChatGPT to write Lab Tracker records.
+
 The MCP server uses the same `LAB_TRACKER_` settings as the FastAPI app. MCP tool calls run
 with a local actor role of `admin` by default; set `LAB_TRACKER_MCP_ACTOR_ROLE=editor` or
 `viewer` if a client should have less authority. See [`docs/mcp.md`](docs/mcp.md) for the

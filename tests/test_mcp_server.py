@@ -11,7 +11,11 @@ from lab_tracker.api import LabTrackerAPI
 from lab_tracker.auth import AuthContext, Role
 from lab_tracker.config import Settings
 from lab_tracker.db import Base
-from lab_tracker.mcp_server import LabTrackerMCPRuntime, register_lab_tracker_mcp_interface
+from lab_tracker.mcp_server import (
+    LabTrackerMCPRuntime,
+    build_mcp_server,
+    register_lab_tracker_mcp_interface,
+)
 
 
 class FakeMCP:
@@ -121,3 +125,11 @@ def test_mcp_runtime_persists_with_sqlalchemy(tmp_path: Path):
         engine.dispose()
 
     assert [project.name for project in projects] == [project.name]
+
+
+def test_build_mcp_server_uses_configurable_http_bind():
+    server = build_mcp_server(runtime=InMemoryRuntime(), host="0.0.0.0", port=8123)
+
+    assert server.settings.host == "0.0.0.0"
+    assert server.settings.port == 8123
+    assert server.settings.streamable_http_path == "/mcp"
