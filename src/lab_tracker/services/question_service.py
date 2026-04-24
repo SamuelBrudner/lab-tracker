@@ -27,13 +27,16 @@ from lab_tracker.services.shared import (
 
 class QuestionServiceMixin:
     def _question_graph(self, project_id: UUID) -> dict[UUID, Question]:
-        repository = self._active_repository()
-        if repository is not None and not self._allow_in_memory:
-            questions, _ = repository.query_questions(
+        questions = self._query_from_repository(
+            attribute_name="questions",
+            loader=lambda repository: repository.query_questions(
                 project_id=project_id,
                 limit=None,
                 offset=0,
-            )
+            ),
+            entity_id_getter=lambda question: question.question_id,
+        )
+        if questions is not None:
             return {question.question_id: question for question in questions}
         return self._store.questions
 
@@ -113,9 +116,9 @@ class QuestionServiceMixin:
         parent_question_id: UUID | None = None,
         ancestor_question_id: UUID | None = None,
     ) -> list[Question]:
-        repository = self._active_repository()
-        if repository is not None and not self._allow_in_memory:
-            questions, _ = repository.query_questions(
+        questions = self._query_from_repository(
+            attribute_name="questions",
+            loader=lambda repository: repository.query_questions(
                 project_id=project_id,
                 status=status.value if status is not None else None,
                 question_type=question_type.value if question_type is not None else None,
@@ -124,13 +127,10 @@ class QuestionServiceMixin:
                 ancestor_question_id=ancestor_question_id,
                 limit=None,
                 offset=0,
-            )
-            return self._cache_entities(
-                "questions",
-                questions,
-                lambda question: question.question_id,
-            )
-        else:
+            ),
+            entity_id_getter=lambda question: question.question_id,
+        )
+        if questions is None:
             if project_id is None:
                 questions = list(self._store.questions.values())
             else:

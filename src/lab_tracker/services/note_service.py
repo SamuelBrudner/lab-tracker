@@ -171,9 +171,9 @@ class NoteServiceMixin:
         target_entity_type: EntityType | None = None,
         target_entity_id: UUID | None = None,
     ) -> list[Note]:
-        repository = self._active_repository()
-        if repository is not None and not self._allow_in_memory:
-            notes, _ = repository.query_notes(
+        notes = self._query_from_repository(
+            attribute_name="notes",
+            loader=lambda repository: repository.query_notes(
                 project_id=project_id,
                 status=status.value if status is not None else None,
                 target_entity_type=(
@@ -182,12 +182,11 @@ class NoteServiceMixin:
                 target_entity_id=target_entity_id,
                 limit=None,
                 offset=0,
-            )
-            return self._cache_entities(
-                "notes",
-                notes,
-                lambda note: note.note_id,
-            )
+            ),
+            entity_id_getter=lambda note: note.note_id,
+        )
+        if notes is not None:
+            return notes
         if project_id is None:
             notes = list(self._store.notes.values())
         else:

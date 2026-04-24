@@ -12,7 +12,15 @@ from lab_tracker.auth import AuthContext, Role
 from lab_tracker.db import Base, get_session_factory
 from lab_tracker.db_models import NoteModel, ProjectModel, QuestionModel
 from lab_tracker.errors import ValidationError
-from lab_tracker.models import QuestionType, SessionType
+from lab_tracker.models import (
+    AnalysisStatus,
+    ClaimStatus,
+    DatasetStatus,
+    DatasetCommitManifestInput,
+    QuestionStatus,
+    QuestionType,
+    SessionType,
+)
 from lab_tracker.sqlalchemy_repository import SQLAlchemyLabTrackerRepository
 
 
@@ -45,6 +53,43 @@ class _SpySearchRepository(SQLAlchemyLabTrackerRepository):
     def query_notes(self, **kwargs):  # noqa: ANN003
         self.last_note_query = dict(kwargs)
         return super().query_notes(**kwargs)
+
+
+class _SpyQueryRepository(SQLAlchemyLabTrackerRepository):
+    def __init__(self, session) -> None:  # noqa: ANN001
+        super().__init__(session)
+        self.calls: dict[str, dict[str, object]] = {}
+
+    def _remember(self, name: str, kwargs: dict[str, object]) -> None:
+        self.calls[name] = dict(kwargs)
+
+    def query_datasets(self, **kwargs):  # noqa: ANN003
+        self._remember("datasets", kwargs)
+        return super().query_datasets(**kwargs)
+
+    def query_notes(self, **kwargs):  # noqa: ANN003
+        self._remember("notes", kwargs)
+        return super().query_notes(**kwargs)
+
+    def query_sessions(self, **kwargs):  # noqa: ANN003
+        self._remember("sessions", kwargs)
+        return super().query_sessions(**kwargs)
+
+    def query_acquisition_outputs(self, **kwargs):  # noqa: ANN003
+        self._remember("acquisition_outputs", kwargs)
+        return super().query_acquisition_outputs(**kwargs)
+
+    def query_analyses(self, **kwargs):  # noqa: ANN003
+        self._remember("analyses", kwargs)
+        return super().query_analyses(**kwargs)
+
+    def query_claims(self, **kwargs):  # noqa: ANN003
+        self._remember("claims", kwargs)
+        return super().query_claims(**kwargs)
+
+    def query_visualizations(self, **kwargs):  # noqa: ANN003
+        self._remember("visualizations", kwargs)
+        return super().query_visualizations(**kwargs)
 
 
 def test_repository_backed_api_persists_core_entities(tmp_path):
@@ -281,6 +326,248 @@ def test_repository_backed_api_search_helpers_delegate_to_repository_queries(tmp
         assert len(searched_notes) == 1
 
     engine.dispose()
+
+
+def test_repository_backed_api_list_helpers_delegate_to_repository_queries(tmp_path):
+    db_path = tmp_path / "api-list-queries.db"
+    engine = create_engine(
+        f"sqlite+pysqlite:///{db_path}",
+        future=True,
+        connect_args={"check_same_thread": False},
+    )
+    Base.metadata.create_all(bind=engine)
+    session_factory = get_session_factory(engine=engine)
+    actor = _actor()
+
+    with session_factory() as session:
+        api = LabTrackerAPI(repository=SQLAlchemyLabTrackerRepository(session))
+        project = api.create_project("List Query Project", actor=actor)
+        question = api.create_question(
+            project_id=project.project_id,
+            text="Primary question",
+            question_type=QuestionType.DESCRIPTIVE,
+            status=QuestionStatus.ACTIVE,
+            actor=actor,
+        )
+        dataset = api.create_dataset(
+            project_id=project.project_id,
+            primary_question_id=question.question_id,
+            status=DatasetStatus.COMMITTED,
+            commit_manifest=DatasetCommitManifestInput(
+                files=[
+                    {
+                        "checksum": "checksum-1",
+                        "path": "capture/data.bin",
+                        "size_bytes": 10,
+                    }
+                ]
+            ),
+            actor=actor,
+        )
+        created_note = api.create_note(
+            project_id=project.project_id,
+            raw_content="session note",
+            actor=actor,
+        )
+        created_session = api.create_session(
+            project_id=project.project_id,
+            session_type=SessionType.OPERATIONAL,
+            actor=actor,
+        )
+        created_output = api.register_acquisition_output(
+            created_session.session_id,
+            file_path="capture/output.bin",
+            checksum="abc123",
+            size_bytes=12,
+            actor=actor,
+        )
+        created_analysis = api.create_analysis(
+            project_id=project.project_id,
+            dataset_ids=[dataset.dataset_id],
+            method_hash="method-1",
+            code_version="code-1",
+            status=AnalysisStatus.COMMITTED,
+            actor=actor,
+        )
+        created_claim = api.create_claim(
+            project_id=project.project_id,
+            statement="Supported claim",
+            confidence=0.9,
+            status=ClaimStatus.PROPOSED,
+            supported_by_dataset_ids=[dataset.dataset_id],
+            supported_by_analysis_ids=[created_analysis.analysis_id],
+            actor=actor,
+        )
+        created_visualization = api.create_visualization(
+            analysis_id=created_analysis.analysis_id,
+            viz_type="heatmap",
+            file_path="viz/heatmap.png",
+            related_claim_ids=[created_claim.claim_id],
+            actor=actor,
+        )
+
+    with session_factory() as session:
+        repository = _SpyQueryRepository(session)
+        api = LabTrackerAPI(repository=repository)
+
+        assert api.list_notes(project_id=project.project_id) == [created_note]
+        assert repository.calls["notes"] == {
+            "limit": None,
+            "offset": 0,
+            "project_id": project.project_id,
+            "status": None,
+            "target_entity_id": None,
+            "target_entity_type": None,
+        }
+
+        assert api.list_sessions(project_id=project.project_id) == [created_session]
+        assert repository.calls["sessions"] == {
+            "limit": None,
+            "offset": 0,
+            "project_id": project.project_id,
+        }
+
+        assert api.list_acquisition_outputs(session_id=created_session.session_id) == [
+            created_output
+        ]
+        assert repository.calls["acquisition_outputs"] == {
+            "limit": None,
+            "offset": 0,
+            "session_id": created_session.session_id,
+        }
+
+        assert api.list_datasets(project_id=project.project_id) == [dataset]
+        assert repository.calls["datasets"] == {
+            "limit": None,
+            "offset": 0,
+            "project_id": project.project_id,
+        }
+
+        assert api.list_analyses(project_id=project.project_id, dataset_id=dataset.dataset_id) == [
+            created_analysis
+        ]
+        assert repository.calls["analyses"] == {
+            "dataset_id": dataset.dataset_id,
+            "limit": None,
+            "offset": 0,
+            "project_id": project.project_id,
+            "question_id": None,
+        }
+
+        assert api.list_claims(
+            project_id=project.project_id,
+            dataset_id=dataset.dataset_id,
+            analysis_id=created_analysis.analysis_id,
+        ) == [created_claim]
+        assert repository.calls["claims"] == {
+            "analysis_id": created_analysis.analysis_id,
+            "dataset_id": dataset.dataset_id,
+            "limit": None,
+            "offset": 0,
+            "project_id": project.project_id,
+            "status": None,
+        }
+
+        assert api.list_visualizations(
+            project_id=project.project_id,
+            analysis_id=created_analysis.analysis_id,
+            claim_id=created_claim.claim_id,
+        ) == [created_visualization]
+        assert repository.calls["visualizations"] == {
+            "analysis_id": created_analysis.analysis_id,
+            "claim_id": created_claim.claim_id,
+            "limit": None,
+            "offset": 0,
+            "project_id": project.project_id,
+        }
+
+    engine.dispose()
+
+
+def test_in_memory_list_helpers_preserve_filtered_results():
+    api = LabTrackerAPI.in_memory()
+    actor = _actor()
+
+    project = api.create_project("In-memory Project", actor=actor)
+    question = api.create_question(
+        project_id=project.project_id,
+        text="Primary question",
+        question_type=QuestionType.DESCRIPTIVE,
+        status=QuestionStatus.ACTIVE,
+        actor=actor,
+    )
+    dataset = api.create_dataset(
+        project_id=project.project_id,
+        primary_question_id=question.question_id,
+        status=DatasetStatus.COMMITTED,
+        commit_manifest=DatasetCommitManifestInput(
+            files=[
+                {
+                    "checksum": "checksum-1",
+                    "path": "capture/data.bin",
+                    "size_bytes": 10,
+                }
+            ]
+        ),
+        actor=actor,
+    )
+    created_session = api.create_session(
+        project_id=project.project_id,
+        session_type=SessionType.OPERATIONAL,
+        actor=actor,
+    )
+    api.register_acquisition_output(
+        created_session.session_id,
+        file_path="capture/output.bin",
+        checksum="abc123",
+        size_bytes=12,
+        actor=actor,
+    )
+    created_analysis = api.create_analysis(
+        project_id=project.project_id,
+        dataset_ids=[dataset.dataset_id],
+        method_hash="method-1",
+        code_version="code-1",
+        status=AnalysisStatus.COMMITTED,
+        actor=actor,
+    )
+    created_claim = api.create_claim(
+        project_id=project.project_id,
+        statement="Supported claim",
+        confidence=0.9,
+        status=ClaimStatus.PROPOSED,
+        supported_by_dataset_ids=[dataset.dataset_id],
+        supported_by_analysis_ids=[created_analysis.analysis_id],
+        actor=actor,
+    )
+    created_visualization = api.create_visualization(
+        analysis_id=created_analysis.analysis_id,
+        viz_type="heatmap",
+        file_path="viz/heatmap.png",
+        related_claim_ids=[created_claim.claim_id],
+        actor=actor,
+    )
+
+    assert api.list_sessions(project_id=project.project_id) == [created_session]
+    assert api.list_acquisition_outputs(session_id=created_session.session_id)[0].file_path == (
+        "capture/output.bin"
+    )
+    assert api.list_datasets(project_id=project.project_id) == [dataset]
+    assert api.list_analyses(
+        project_id=project.project_id,
+        dataset_id=dataset.dataset_id,
+        question_id=question.question_id,
+    ) == [created_analysis]
+    assert api.list_claims(
+        project_id=project.project_id,
+        dataset_id=dataset.dataset_id,
+        analysis_id=created_analysis.analysis_id,
+    ) == [created_claim]
+    assert api.list_visualizations(
+        project_id=project.project_id,
+        analysis_id=created_analysis.analysis_id,
+        claim_id=created_claim.claim_id,
+    ) == [created_visualization]
 
 
 def test_fastapi_routes_persist_across_app_restarts(monkeypatch, tmp_path):

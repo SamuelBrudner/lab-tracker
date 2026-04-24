@@ -87,21 +87,18 @@ class AnalysisServiceMixin:
         dataset_id: UUID | None = None,
         question_id: UUID | None = None,
     ) -> list[Analysis]:
-        repository = self._active_repository()
-        if repository is not None and not self._allow_in_memory:
-            analyses, _ = repository.query_analyses(
+        analyses = self._query_from_repository(
+            attribute_name="analyses",
+            loader=lambda repository: repository.query_analyses(
                 project_id=project_id,
                 dataset_id=dataset_id,
                 question_id=question_id,
                 limit=None,
                 offset=0,
-            )
-            return self._cache_entities(
-                "analyses",
-                analyses,
-                lambda analysis: analysis.analysis_id,
-            )
-        else:
+            ),
+            entity_id_getter=lambda analysis: analysis.analysis_id,
+        )
+        if analyses is None:
             if project_id is None:
                 analyses = list(self._store.analyses.values())
             else:

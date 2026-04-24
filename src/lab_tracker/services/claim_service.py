@@ -73,21 +73,20 @@ class ClaimServiceMixin:
         dataset_id: UUID | None = None,
         analysis_id: UUID | None = None,
     ) -> list[Claim]:
-        repository = self._active_repository()
-        if repository is not None and not self._allow_in_memory:
-            claims, _ = repository.query_claims(
+        claims = self._query_from_repository(
+            attribute_name="claims",
+            loader=lambda repository: repository.query_claims(
                 project_id=project_id,
                 status=status.value if status is not None else None,
                 dataset_id=dataset_id,
                 analysis_id=analysis_id,
                 limit=None,
                 offset=0,
-            )
-            return self._cache_entities(
-                "claims",
-                claims,
-                lambda claim: claim.claim_id,
-            )
+            ),
+            entity_id_getter=lambda claim: claim.claim_id,
+        )
+        if claims is not None:
+            return claims
         if project_id is None:
             claims = list(self._store.claims.values())
         else:
