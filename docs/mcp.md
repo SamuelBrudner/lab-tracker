@@ -101,6 +101,7 @@ you are deliberately testing local mutations.
 Read and context tools:
 
 - `lab_context`
+- `prepare_lab_note_draft`
 - `search_lab_context`
 - `refresh_review_dashboard`
 
@@ -124,8 +125,13 @@ Resource and prompt:
 ## Uploaded Lab-Note Images
 
 For photographed notebook pages or whiteboard notes, upload the image to ChatGPT and ask it
-to transcribe the image, summarize the scientific content, and extract proposed questions.
-ChatGPT should then call `draft_lab_note_commit` with:
+to transcribe the image. Before converting the transcription into structured records,
+ChatGPT should call `prepare_lab_note_draft` with the transcription and a few search terms
+from the page. That read-only step queries existing Lab Tracker questions, notes, active
+sessions, and dashboard context so ChatGPT can reuse existing IDs and avoid duplicate
+questions.
+
+After reviewing the returned candidates, ChatGPT should call `draft_lab_note_commit` with:
 
 - `transcribed_text`: the OCR/transcription text ChatGPT read from the image
 - `summary`: a concise interpretation to display in review surfaces
@@ -136,6 +142,7 @@ ChatGPT should then call `draft_lab_note_commit` with:
 The MCP server does not store the image bytes in this workflow. It stores only the
 LLM-produced transcription/summary as a staged note, creates any proposed questions as
 staged questions, and groups the records with a generated `draft_commit_id` for review.
+Do not go directly from transcription to structured records without the context lookup.
 
 ## Operating Notes
 

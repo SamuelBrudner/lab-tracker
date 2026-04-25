@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 from importlib import resources
 from collections.abc import Callable, Iterable
 from typing import Any, Protocol, TypeVar
@@ -43,6 +44,20 @@ REVIEW_DASHBOARD_MIME_TYPE = "text/html;profile=mcp-app"
 CHATGPT_APP_META = {
     "ui": {"resourceUri": REVIEW_DASHBOARD_URI, "visibility": ["model", "app"]},
     "openai/outputTemplate": REVIEW_DASHBOARD_URI,
+}
+CONTEXT_SEARCH_STOP_WORDS = {
+    "about",
+    "after",
+    "before",
+    "during",
+    "from",
+    "into",
+    "looked",
+    "notes",
+    "page",
+    "that",
+    "this",
+    "with",
 }
 
 
@@ -396,6 +411,27 @@ def _preview_text(value: str | None, *, limit: int = 180) -> str:
     return f"{text[: limit - 1].rstrip()}..."
 
 
+def _derive_context_search_terms(
+    transcribed_text: str,
+    search_terms: list[str] | None,
+    *,
+    limit: int,
+) -> list[str]:
+    terms: list[str] = []
+    raw_terms = search_terms or re.findall(r"[A-Za-z][A-Za-z0-9_-]{3,}", transcribed_text)
+    for raw_term in raw_terms:
+        term = str(raw_term).strip()
+        normalized = term.casefold()
+        if not term or normalized in CONTEXT_SEARCH_STOP_WORDS:
+            continue
+        if normalized in {existing.casefold() for existing in terms}:
+            continue
+        terms.append(term)
+        if len(terms) >= limit:
+            break
+    return terms
+
+
 def _draft_commit_summaries(notes: Iterable[Any], *, limit: int) -> list[dict[str, Any]]:
     summaries: list[dict[str, Any]] = []
     seen: set[str] = set()
@@ -430,6 +466,151 @@ def _draft_commit_summaries(notes: Iterable[Any], *, limit: int) -> list[dict[st
         if len(summaries) >= limit:
             break
     return summaries
+
+
+def _candidate_entry(
+    *,
+    entity_type: EntityType,
+    entity_id: str | None,
+    label: str | None,
+    status: str | None,
+    source: str,
+) -> dict[str, str]:
+    entry = {
+        "entity_type": entity_type.value,
+        "entity_id": entity_id or "",
+        "label": _preview_text(label, limit=120),
+        "source": source,
+    }
+    if status:
+        entry["status"] = status
+    return entry
+
+
+def _add_candidate(
+    candidates: dict[str, dict[str, str]],
+    *,
+    entity_type: EntityType,
+    entity_id: str | None,
+    label: str | None,
+    status: str | None = None,
+    source: str,
+) -> None:
+    if not entity_id:
+        return
+    candidates[f"{entity_type.value}:{entity_id}"] = _candidate_entry(
+        entity_type=entity_type,
+        entity_id=entity_id,
+        label=label,
+        status=status,
+        source=source,
+    )
+
+
+def _candidate_targets(
+    dashboard: dict[str, Any],
+    searches: list[dict[str, Any]],
+) -> dict[str, list[dict[str, str]]]:
+    question_candidates: dict[str, dict[str, str]] = {}
+    note_candidates: dict[str, dict[str, str]] = {}
+    session_candidates: dict[str, dict[str, str]] = {}
+    for question in [
+        *dashboard.get("active_questions", []),
+        *dashboard.get("staged_questions", []),
+    ]:
+        _add_candidate(
+            question_candidates,
+            entity_type=EntityType.QUESTION,
+            entity_id=question.get("question_id"),
+            label=question.get("text"),
+            status=question.get("status"),
+            source="dashboard",
+        )
+    for session in dashboard.get("active_sessions", []):
+        _add_candidate(
+            session_candidates,
+            entity_type=EntityType.SESSION,
+            entity_id=session.get("session_id"),
+            label=session.get("session_type"),
+            status=session.get("status"),
+            source="dashboard",
+        )
+    for note in dashboard.get("recent_notes", []):
+        _add_candidate(
+            note_candidates,
+            entity_type=EntityType.NOTE,
+            entity_id=note.get("note_id"),
+            label=note.get("transcribed_text") or note.get("raw_content"),
+            status=note.get("status"),
+            source="dashboard",
+        )
+    for search in searches:
+        for question in search["questions"]:
+            _add_candidate(
+                question_candidates,
+                entity_type=EntityType.QUESTION,
+                entity_id=question.get("question_id"),
+                label=question.get("text"),
+                status=question.get("status"),
+                source=f"search:{search['query']}",
+            )
+        for note in search["notes"]:
+            _add_candidate(
+                note_candidates,
+                entity_type=EntityType.NOTE,
+                entity_id=note.get("note_id"),
+                label=note.get("transcribed_text") or note.get("raw_content"),
+                status=note.get("status"),
+                source=f"search:{search['query']}",
+            )
+    return {
+        "questions": list(question_candidates.values()),
+        "notes": list(note_candidates.values()),
+        "active_sessions": list(session_candidates.values()),
+    }
+
+
+def _prepare_lab_note_draft_context(
+    api: LabTrackerAPI,
+    project_id: UUID | None,
+    *,
+    transcribed_text: str,
+    search_terms: list[str] | None,
+    limit: int,
+) -> dict[str, Any]:
+    dashboard = _review_dashboard_payload(api, project_id, limit=limit)
+    terms = _derive_context_search_terms(transcribed_text, search_terms, limit=limit)
+    searches: list[dict[str, Any]] = []
+    for term in terms:
+        questions = api.search_questions(term, project_id=project_id, limit=limit)
+        notes = api.search_notes(term, project_id=project_id, limit=limit)
+        searches.append(
+            {
+                "query": term,
+                "questions": _models_data(questions),
+                "notes": _models_data(notes),
+                "counts": {"questions": len(questions), "notes": len(notes)},
+            }
+        )
+    candidates = _candidate_targets(dashboard, searches)
+    return {
+        "transcription_preview": _preview_text(transcribed_text),
+        "search_terms": terms,
+        "searches": searches,
+        "candidate_targets": candidates,
+        "dashboard": dashboard,
+        "instructions": (
+            "Use these existing records to choose project, target, parent question, or session "
+            "IDs. Create new staged questions only when the transcription is not already "
+            "covered by an existing question."
+        ),
+        "counts": {
+            "searches": len(searches),
+            "question_candidates": len(candidates["questions"]),
+            "note_candidates": len(candidates["notes"]),
+            "active_session_candidates": len(candidates["active_sessions"]),
+        },
+    }
 
 
 def _review_dashboard_payload(
@@ -1208,7 +1389,7 @@ def register_lab_tracker_mcp_interface(
         title="Show lab context",
         description=(
             "Return the current Lab Tracker project context, including active questions, "
-            "staged questions, recent notes, and active sessions."
+            "staged questions, draft commits, recent notes, and active sessions."
         ),
         annotations=_read_annotations(),
         meta=CHATGPT_APP_META,
@@ -1230,6 +1411,56 @@ def register_lab_tracker_mcp_interface(
             {"dashboard": dashboard},
             f"Loaded Lab Tracker context for {project_name}.",
             meta={"dashboard": dashboard},
+        )
+
+    @mcp.tool(
+        name="prepare_lab_note_draft",
+        title="Prepare lab-note draft",
+        description=(
+            "Before structuring an uploaded lab-note transcription, query existing Lab Tracker "
+            "questions, notes, active sessions, and dashboard context for reusable IDs."
+        ),
+        annotations=_read_annotations(),
+        meta=CHATGPT_APP_META,
+    )
+    def prepare_lab_note_draft(
+        transcribed_text: str,
+        project_id: str | None = None,
+        search_terms: list[str] | None = None,
+        limit: int = 5,
+    ) -> Any:
+        """Return existing database context relevant to a lab-note transcription."""
+
+        transcription = transcribed_text.strip()
+        if not transcription:
+            raise ValidationError("transcribed_text must not be empty.")
+        parsed_project_id = _parse_optional_uuid(project_id, "project_id")
+        resolved_limit = max(1, min(limit, 20))
+        draft_context = runtime.execute(
+            lambda api: _prepare_lab_note_draft_context(
+                api,
+                parsed_project_id,
+                transcribed_text=transcription,
+                search_terms=search_terms,
+                limit=resolved_limit,
+            )
+        )
+        counts = draft_context["counts"]
+        return _tool_result(
+            {
+                "draft_context": draft_context,
+                "dashboard": draft_context["dashboard"],
+            },
+            (
+                "Queried Lab Tracker context for a lab-note draft: "
+                f"{counts['question_candidates']} question candidates, "
+                f"{counts['note_candidates']} note candidates, and "
+                f"{counts['active_session_candidates']} active sessions."
+            ),
+            meta={
+                "dashboard": draft_context["dashboard"],
+                "draft_context": draft_context,
+            },
         )
 
     @mcp.tool(
@@ -1316,8 +1547,9 @@ def register_lab_tracker_mcp_interface(
             name="draft_lab_note_commit",
             title="Draft lab-note commit",
             description=(
-                "Convert ChatGPT's OCR/transcription from an uploaded lab-note image into "
-                "one staged note plus optional staged questions for review."
+                "After prepare_lab_note_draft has queried existing context, convert "
+                "ChatGPT's OCR/transcription from an uploaded lab-note image into one staged "
+                "note plus optional staged questions for review."
             ),
             annotations=_write_annotations(),
             meta=CHATGPT_APP_META,
@@ -1696,10 +1928,12 @@ def register_lab_tracker_mcp_interface(
         return (
             "You are operating Lab Tracker as a ChatGPT App. Preserve scientific reasoning: "
             "questions explain why work is being done, notes capture the human record, and "
-            "sessions capture acquisition activity. Use lab_context first, use "
-            "draft_lab_note_commit after reading uploaded lab-note images, use staged records "
-            "for uncertain user intent, and do not invent file paths, checksums, claims, or "
-            f"confidence values. {project_hint} Goal: {goal}"
+            "sessions capture acquisition activity. Use lab_context first. After reading an "
+            "uploaded lab-note image, call prepare_lab_note_draft with the transcription and "
+            "search terms before choosing structured records; reuse returned IDs when "
+            "appropriate, then call draft_lab_note_commit. Use staged records for uncertain "
+            "user intent, and do not invent file paths, checksums, claims, or confidence "
+            f"values. {project_hint} Goal: {goal}"
         )
 
     return mcp

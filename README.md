@@ -74,9 +74,12 @@ web's custom MCP app setup. It defaults MCP calls to read-only viewer mode; reru
 ChatGPT to write Lab Tracker records.
 
 For photographed notebook pages, upload the image to ChatGPT and have it read the page.
-With writes enabled, ChatGPT can call `draft_lab_note_commit` to turn its transcription
-and extracted questions into one staged note plus staged questions, grouped by a generated
-draft id for review. The MCP workflow stores the LLM-produced text, not the image bytes.
+ChatGPT should call `prepare_lab_note_draft` with the transcription first, so it can query
+existing Lab Tracker questions, notes, and active sessions before choosing targets or
+proposing new questions. With writes enabled, ChatGPT can then call `draft_lab_note_commit`
+to turn its transcription and extracted questions into one staged note plus staged
+questions, grouped by a generated draft id for review. The MCP workflow stores the
+LLM-produced text, not the image bytes.
 
 The MCP server uses the same `LAB_TRACKER_` settings as the FastAPI app. MCP tool calls run
 with a local actor role of `viewer` and write tools disabled by default. See

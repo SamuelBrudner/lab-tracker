@@ -76,7 +76,12 @@ class InMemoryRuntime:
         )
 
 
-READ_TOOL_NAMES = {"lab_context", "search_lab_context", "refresh_review_dashboard"}
+READ_TOOL_NAMES = {
+    "lab_context",
+    "prepare_lab_note_draft",
+    "search_lab_context",
+    "refresh_review_dashboard",
+}
 WRITE_TOOL_NAMES = {
     "draft_lab_note_commit",
     "capture_note",
@@ -121,6 +126,10 @@ def test_tool_descriptors_include_app_metadata_and_annotations():
     assert context_meta["annotations"].readOnlyHint is True
     assert context_meta["meta"]["ui"]["resourceUri"] == REVIEW_DASHBOARD_URI
     assert context_meta["meta"]["openai/outputTemplate"] == REVIEW_DASHBOARD_URI
+
+    prepare_meta = mcp.tool_meta["prepare_lab_note_draft"]
+    assert prepare_meta["title"] == "Prepare lab-note draft"
+    assert prepare_meta["annotations"].readOnlyHint is True
 
     write_meta = mcp.tool_meta["capture_note"]
     assert write_meta["annotations"].readOnlyHint is False
@@ -211,6 +220,33 @@ def test_chatgpt_image_note_draft_commit_creates_staged_bundle():
         question_type=QuestionType.DESCRIPTIVE.value,
     )
     existing_question_id = existing_question.structuredContent["question"]["question_id"]
+    active_session = mcp.tools["start_session"](
+        project_id=str(project.project_id),
+        session_type="operational",
+    )
+    active_session_id = active_session.structuredContent["session"]["session_id"]
+
+    prepared = mcp.tools["prepare_lab_note_draft"](
+        project_id=str(project.project_id),
+        transcribed_text=(
+            "Day 3 notes\n"
+            "Rig warmed for 15 min.\n"
+            "Baseline looked stable before photostim."
+        ),
+        search_terms=["baseline", "photostim"],
+    )
+    draft_context = prepared.structuredContent["draft_context"]
+
+    assert draft_context["search_terms"] == ["baseline", "photostim"]
+    assert draft_context["counts"]["question_candidates"] >= 1
+    assert existing_question_id in {
+        candidate["entity_id"] for candidate in draft_context["candidate_targets"]["questions"]
+    }
+    assert active_session_id in {
+        candidate["entity_id"]
+        for candidate in draft_context["candidate_targets"]["active_sessions"]
+    }
+    assert prepared.meta["draft_context"]["instructions"].startswith("Use these existing records")
 
     result = mcp.tools["draft_lab_note_commit"](
         project_id=str(project.project_id),
