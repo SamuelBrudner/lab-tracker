@@ -10,7 +10,7 @@ Lab Tracker keeps the *reasoning* behind experiments connected to the data they 
 - **Analysis, claims, visualizations.** Explicit records linking analysis runs back to the datasets and questions they address, with claims and visualizations as first-class artifacts.
 - **Search.** Substring search over questions and notes so prior context is findable later.
 
-What ships today is the minimum that preserves the core research record. The supported surface is defined in [`docs/retained-v1-surface.md`](docs/retained-v1-surface.md) — if it and this README disagree, that document wins. The broader vision (meeting-photo question capture, OCR, vector search, PI review gates) lives in [`idea.md`](idea.md) and is explicitly deferred.
+What ships today is the minimum that preserves the core research record. The supported surface is defined in [`docs/retained-v1-surface.md`](docs/retained-v1-surface.md) — if it and this README disagree, that document wins. The broader vision (server-side OCR, vector search, PI review gates) lives in [`idea.md`](idea.md) and is explicitly deferred.
 
 ## Who it's for
 
@@ -72,6 +72,11 @@ The script prints the `https://...trycloudflare.com/mcp` endpoint to paste into 
 web's custom MCP app setup. It defaults MCP calls to read-only viewer mode; rerun with
 `LAB_TRACKER_MCP_ACTOR_ROLE=editor LAB_TRACKER_MCP_ENABLE_WRITES=true` only when you want
 ChatGPT to write Lab Tracker records.
+
+For photographed notebook pages, upload the image to ChatGPT and have it read the page.
+With writes enabled, ChatGPT can call `draft_lab_note_commit` to turn its transcription
+and extracted questions into one staged note plus staged questions, grouped by a generated
+draft id for review. The MCP workflow stores the LLM-produced text, not the image bytes.
 
 The MCP server uses the same `LAB_TRACKER_` settings as the FastAPI app. MCP tool calls run
 with a local actor role of `viewer` and write tools disabled by default. See

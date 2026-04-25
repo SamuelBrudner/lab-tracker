@@ -7,7 +7,7 @@ import json
 from importlib import resources
 from collections.abc import Callable, Iterable
 from typing import Any, Protocol, TypeVar
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session, sessionmaker
@@ -233,6 +233,59 @@ def _parse_entity_refs(raw_targets: list[dict[str, str]] | None) -> list[EntityR
     return targets
 
 
+def _entity_ref_key(ref: EntityRef) -> tuple[EntityType, UUID]:
+    return (ref.entity_type, ref.entity_id)
+
+
+def _dedupe_entity_refs(refs: Iterable[EntityRef]) -> list[EntityRef]:
+    seen: set[tuple[EntityType, UUID]] = set()
+    deduped: list[EntityRef] = []
+    for ref in refs:
+        key = _entity_ref_key(ref)
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(ref)
+    return deduped
+
+
+def _parse_proposed_questions(
+    raw_questions: list[dict[str, Any]] | None,
+) -> list[dict[str, Any]]:
+    questions: list[dict[str, Any]] = []
+    for index, raw_question in enumerate(raw_questions or []):
+        if not isinstance(raw_question, dict):
+            raise ValidationError(f"proposed_questions[{index}] must be an object.")
+        text = str(raw_question.get("text", "")).strip()
+        if not text:
+            raise ValidationError(f"proposed_questions[{index}].text must not be empty.")
+        raw_question_type = raw_question.get("question_type", raw_question.get("type"))
+        if isinstance(raw_question_type, str):
+            raw_question_type = (
+                raw_question_type.strip().lower().replace("-", "_").replace(" ", "_")
+            )
+        question_type = _parse_enum(
+            QuestionType,
+            raw_question_type,
+            f"proposed_questions[{index}].question_type",
+            QuestionType.DESCRIPTIVE,
+        )
+        hypothesis = raw_question.get("hypothesis")
+        parent_ids = _parse_uuid_list(
+            raw_question.get("parent_question_ids"),
+            f"proposed_questions[{index}].parent_question_ids",
+        )
+        questions.append(
+            {
+                "text": text,
+                "question_type": question_type,
+                "hypothesis": str(hypothesis).strip() if hypothesis else None,
+                "parent_question_ids": parent_ids,
+            }
+        )
+    return questions
+
+
 def _parse_dataset_files(raw_files: list[dict[str, Any]] | None) -> list[DatasetFile]:
     files: list[DatasetFile] = []
     for index, raw_file in enumerate(raw_files or []):
@@ -336,6 +389,49 @@ def _resolve_dashboard_project(
     return (active_projects or projects)[0], projects
 
 
+def _preview_text(value: str | None, *, limit: int = 180) -> str:
+    text = " ".join((value or "").split())
+    if len(text) <= limit:
+        return text
+    return f"{text[: limit - 1].rstrip()}..."
+
+
+def _draft_commit_summaries(notes: Iterable[Any], *, limit: int) -> list[dict[str, Any]]:
+    summaries: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for note in _sort_latest(
+        note for note in notes if note.metadata.get("draft_commit_id")
+    ):
+        draft_commit_id = note.metadata["draft_commit_id"]
+        if draft_commit_id in seen:
+            continue
+        seen.add(draft_commit_id)
+        target_refs = [
+            {"entity_type": target.entity_type.value, "entity_id": str(target.entity_id)}
+            for target in note.targets
+        ]
+        summaries.append(
+            {
+                "draft_commit_id": draft_commit_id,
+                "status": note.metadata.get("draft_status", NoteStatus.STAGED.value),
+                "source_label": note.metadata.get("source_label"),
+                "note_id": str(note.note_id),
+                "created_question_ids": [
+                    str(target.entity_id)
+                    for target in note.targets
+                    if target.entity_type == EntityType.QUESTION
+                ],
+                "targets": target_refs,
+                "preview": _preview_text(note.transcribed_text or note.raw_content),
+                "created_at": str(note.created_at),
+                "updated_at": str(note.updated_at),
+            }
+        )
+        if len(summaries) >= limit:
+            break
+    return summaries
+
+
 def _review_dashboard_payload(
     api: LabTrackerAPI,
     project_id: UUID | None,
@@ -353,11 +449,13 @@ def _review_dashboard_payload(
                 "staged_questions": 0,
                 "recent_notes": 0,
                 "active_sessions": 0,
+                "draft_commits": 0,
             },
             "active_questions": [],
             "staged_questions": [],
             "recent_notes": [],
             "active_sessions": [],
+            "draft_commits": [],
         }
 
     questions = api.list_questions(project_id=project.project_id)
@@ -371,6 +469,7 @@ def _review_dashboard_payload(
     ]
     active_sessions = [session for session in sessions if session.status == SessionStatus.ACTIVE]
     recent_notes = _sort_latest(notes)[:limit]
+    draft_commits = _draft_commit_summaries(notes, limit=limit)
     return {
         "project": _model_data(project),
         "projects": _models_data(projects),
@@ -380,11 +479,13 @@ def _review_dashboard_payload(
             "staged_questions": len(staged_questions),
             "recent_notes": len(recent_notes),
             "active_sessions": len(active_sessions),
+            "draft_commits": len(draft_commits),
         },
         "active_questions": _models_data(active_questions[:limit]),
         "staged_questions": _models_data(staged_questions[:limit]),
         "recent_notes": _models_data(recent_notes),
         "active_sessions": _models_data(active_sessions[:limit]),
+        "draft_commits": draft_commits,
     }
 
 
@@ -1212,6 +1313,123 @@ def register_lab_tracker_mcp_interface(
     if _should_register_write_tools(runtime):
 
         @mcp.tool(
+            name="draft_lab_note_commit",
+            title="Draft lab-note commit",
+            description=(
+                "Convert ChatGPT's OCR/transcription from an uploaded lab-note image into "
+                "one staged note plus optional staged questions for review."
+            ),
+            annotations=_write_annotations(),
+            meta=CHATGPT_APP_META,
+        )
+        def draft_lab_note_commit(
+            project_id: str,
+            transcribed_text: str,
+            summary: str | None = None,
+            source_label: str | None = None,
+            proposed_questions: list[dict[str, Any]] | None = None,
+            target_entity_type: str | None = None,
+            target_entity_id: str | None = None,
+            metadata: dict[str, Any] | None = None,
+        ) -> Any:
+            """Create a staged draft bundle from LLM-read image notes."""
+
+            _ensure_mcp_write_allowed(runtime)
+            parsed_project_id = _parse_uuid(project_id, "project_id")
+            ocr_text = transcribed_text.strip()
+            if not ocr_text:
+                raise ValidationError("transcribed_text must not be empty.")
+            parsed_questions = _parse_proposed_questions(proposed_questions)
+            explicit_targets: list[EntityRef] = []
+            if target_entity_type or target_entity_id:
+                if not target_entity_type or not target_entity_id:
+                    raise ValidationError(
+                        "target_entity_type and target_entity_id must be provided together."
+                    )
+                explicit_targets = _parse_entity_refs(
+                    [{"entity_type": target_entity_type, "entity_id": target_entity_id}]
+                ) or []
+            draft_commit_id = str(uuid4())
+            resolved_summary = summary.strip() if summary and summary.strip() else None
+            resolved_metadata = {
+                **_string_map(metadata, "metadata"),
+                "created_via": "chatgpt_app",
+                "source_type": "image_lab_notes",
+                "draft_commit_id": draft_commit_id,
+                "draft_status": NoteStatus.STAGED.value,
+            }
+            if source_label and source_label.strip():
+                resolved_metadata["source_label"] = source_label.strip()
+
+            def operation(api: LabTrackerAPI) -> dict[str, Any]:
+                questions = [
+                    api.create_question(
+                        project_id=parsed_project_id,
+                        text=question["text"],
+                        question_type=question["question_type"],
+                        hypothesis=question["hypothesis"],
+                        status=QuestionStatus.STAGED,
+                        parent_question_ids=question["parent_question_ids"],
+                        actor=runtime.actor,
+                    )
+                    for question in parsed_questions
+                ]
+                targets = _dedupe_entity_refs(
+                    [
+                        *explicit_targets,
+                        *[
+                            EntityRef(
+                                entity_type=EntityType.QUESTION,
+                                entity_id=question.question_id,
+                            )
+                            for question in questions
+                        ],
+                    ]
+                )
+                note = api.create_note(
+                    project_id=parsed_project_id,
+                    raw_content=ocr_text,
+                    transcribed_text=resolved_summary,
+                    targets=targets,
+                    metadata=resolved_metadata,
+                    status=NoteStatus.STAGED,
+                    actor=runtime.actor,
+                )
+                dashboard = _review_dashboard_payload(api, parsed_project_id)
+                draft_commit = {
+                    "draft_commit_id": draft_commit_id,
+                    "status": NoteStatus.STAGED.value,
+                    "source_label": resolved_metadata.get("source_label"),
+                    "note_id": str(note.note_id),
+                    "question_ids": [str(question.question_id) for question in questions],
+                    "counts": {"notes": 1, "staged_questions": len(questions)},
+                }
+                return {
+                    "draft_commit": draft_commit,
+                    "note": _model_data(note),
+                    "questions": _models_data(questions),
+                    "dashboard": dashboard,
+                }
+
+            result = runtime.execute(operation)
+            return _tool_result(
+                {
+                    "draft_commit": result["draft_commit"],
+                    "note": result["note"],
+                    "questions": result["questions"],
+                    "dashboard": result["dashboard"],
+                },
+                (
+                    "Created a draft lab-note commit with 1 staged note and "
+                    f"{len(result['questions'])} staged questions."
+                ),
+                meta={
+                    "dashboard": result["dashboard"],
+                    "draft_commit": result["draft_commit"],
+                },
+            )
+
+        @mcp.tool(
             name="capture_note",
             title="Capture note",
             description="Create a staged manual note, optionally targeted to a project entity.",
@@ -1478,7 +1696,8 @@ def register_lab_tracker_mcp_interface(
         return (
             "You are operating Lab Tracker as a ChatGPT App. Preserve scientific reasoning: "
             "questions explain why work is being done, notes capture the human record, and "
-            "sessions capture acquisition activity. Use lab_context first, use staged records "
+            "sessions capture acquisition activity. Use lab_context first, use "
+            "draft_lab_note_commit after reading uploaded lab-note images, use staged records "
             "for uncertain user intent, and do not invent file paths, checksums, claims, or "
             f"confidence values. {project_hint} Goal: {goal}"
         )

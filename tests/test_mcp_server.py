@@ -78,6 +78,7 @@ class InMemoryRuntime:
 
 READ_TOOL_NAMES = {"lab_context", "search_lab_context", "refresh_review_dashboard"}
 WRITE_TOOL_NAMES = {
+    "draft_lab_note_commit",
     "capture_note",
     "stage_question",
     "update_staged_question",
@@ -125,6 +126,10 @@ def test_tool_descriptors_include_app_metadata_and_annotations():
     assert write_meta["annotations"].readOnlyHint is False
     assert write_meta["annotations"].destructiveHint is False
     assert write_meta["annotations"].openWorldHint is False
+
+    draft_meta = mcp.tool_meta["draft_lab_note_commit"]
+    assert draft_meta["title"] == "Draft lab-note commit"
+    assert draft_meta["annotations"].destructiveHint is False
 
 
 def test_write_tools_require_explicit_enable_and_editor_role():
@@ -194,6 +199,67 @@ def test_chatgpt_capture_review_workflow_round_trip():
     assert refreshed.meta["dashboard"]["project"]["project_id"] == str(project.project_id)
 
 
+def test_chatgpt_image_note_draft_commit_creates_staged_bundle():
+    runtime = InMemoryRuntime(role=Role.EDITOR, enable_writes=True)
+    project = runtime.seed_project()
+    mcp = FakeMCP()
+    register_lab_tracker_mcp_interface(mcp, runtime)
+
+    existing_question = mcp.tools["stage_question"](
+        project_id=str(project.project_id),
+        text="Is the baseline stable before stimulation?",
+        question_type=QuestionType.DESCRIPTIVE.value,
+    )
+    existing_question_id = existing_question.structuredContent["question"]["question_id"]
+
+    result = mcp.tools["draft_lab_note_commit"](
+        project_id=str(project.project_id),
+        transcribed_text=(
+            "Day 3 notes\n"
+            "Rig warmed for 15 min.\n"
+            "Baseline looked stable before photostim."
+        ),
+        summary="Rig baseline stabilized after a 15 minute warmup.",
+        source_label="IMG_1024.jpeg",
+        proposed_questions=[
+            {
+                "text": "Does a 15 minute warmup stabilize the rig baseline?",
+                "type": "hypothesis-driven",
+                "hypothesis": "The baseline is stable after a 15 minute warmup.",
+            }
+        ],
+        target_entity_type="question",
+        target_entity_id=existing_question_id,
+        metadata={"notebook_page": "p. 12"},
+    )
+
+    draft_commit = result.structuredContent["draft_commit"]
+    note = result.structuredContent["note"]
+    question = result.structuredContent["questions"][0]
+    dashboard = result.structuredContent["dashboard"]
+
+    assert draft_commit["status"] == "staged"
+    assert draft_commit["counts"] == {"notes": 1, "staged_questions": 1}
+    assert note["raw_content"].startswith("Day 3 notes")
+    assert note["transcribed_text"] == "Rig baseline stabilized after a 15 minute warmup."
+    assert note["metadata"]["created_via"] == "chatgpt_app"
+    assert note["metadata"]["source_type"] == "image_lab_notes"
+    assert note["metadata"]["draft_commit_id"] == draft_commit["draft_commit_id"]
+    assert note["metadata"]["notebook_page"] == "p. 12"
+    assert note["metadata"]["source_label"] == "IMG_1024.jpeg"
+    assert question["status"] == "staged"
+    assert question["question_type"] == QuestionType.HYPOTHESIS_DRIVEN.value
+    assert draft_commit["question_ids"] == [question["question_id"]]
+    assert {
+        existing_question_id,
+        question["question_id"],
+    }.issubset({target["entity_id"] for target in note["targets"]})
+    assert dashboard["counts"]["draft_commits"] == 1
+    assert dashboard["draft_commits"][0]["source_label"] == "IMG_1024.jpeg"
+    assert dashboard["draft_commits"][0]["note_id"] == note["note_id"]
+    assert result.meta["draft_commit"]["draft_commit_id"] == draft_commit["draft_commit_id"]
+
+
 def test_review_dashboard_widget_is_packaged_and_host_bridge_only():
     mcp = FakeMCP()
     register_lab_tracker_mcp_interface(mcp, InMemoryRuntime())
@@ -201,6 +267,7 @@ def test_review_dashboard_widget_is_packaged_and_host_bridge_only():
     html = mcp.resources[REVIEW_DASHBOARD_URI]()
 
     assert "Lab Tracker Review" in html
+    assert "Draft commits" in html
     assert "ui/notifications/tool-result" in html
     assert "tools/call" in html
     assert "fetch(" not in html

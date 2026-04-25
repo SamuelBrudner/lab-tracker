@@ -132,6 +132,10 @@
           <ul id="staged-questions"></ul>
         </section>
         <section>
+          <h2>Draft commits</h2>
+          <ul id="draft-commits"></ul>
+        </section>
+        <section>
           <h2>Recent notes</h2>
           <ul id="recent-notes"></ul>
         </section>
@@ -144,6 +148,7 @@
     <script type="module">
       const lists = {
         questions: document.getElementById("staged-questions"),
+        drafts: document.getElementById("draft-commits"),
         notes: document.getElementById("recent-notes"),
         sessions: document.getElementById("active-sessions"),
       };
@@ -198,6 +203,23 @@
             li.appendChild(status);
           },
           "No staged questions."
+        );
+
+        renderList(
+          lists.drafts,
+          dashboard?.draft_commits,
+          (li, draft) => {
+            appendTitle(
+              li,
+              text(draft.source_label || draft.preview, "Draft lab-note commit"),
+              draft.draft_commit_id
+            );
+            const status = document.createElement("span");
+            status.className = "status";
+            status.textContent = `${draft.status || "staged"} / note ${draft.note_id || "pending"}`;
+            li.appendChild(status);
+          },
+          "No draft commits."
         );
 
         renderList(

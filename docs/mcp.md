@@ -107,6 +107,7 @@ Read and context tools:
 Write tools, registered only when `LAB_TRACKER_MCP_ENABLE_WRITES=true` and actor role is
 `editor` or `admin`:
 
+- `draft_lab_note_commit`
 - `capture_note`
 - `stage_question`
 - `update_staged_question`
@@ -119,6 +120,22 @@ Resource and prompt:
 - `ui://lab-tracker/review-dashboard-v1.html` renders the embedded ChatGPT review dashboard.
 - `lab_tracker_workflow_prompt` gives an LLM a safe operating procedure for preserving
   questions, notes, and sessions.
+
+## Uploaded Lab-Note Images
+
+For photographed notebook pages or whiteboard notes, upload the image to ChatGPT and ask it
+to transcribe the image, summarize the scientific content, and extract proposed questions.
+ChatGPT should then call `draft_lab_note_commit` with:
+
+- `transcribed_text`: the OCR/transcription text ChatGPT read from the image
+- `summary`: a concise interpretation to display in review surfaces
+- `source_label`: an optional filename or user-facing description
+- `proposed_questions`: optional staged questions extracted from the image
+- `target_entity_type` and `target_entity_id`: optional existing context to attach the note to
+
+The MCP server does not store the image bytes in this workflow. It stores only the
+LLM-produced transcription/summary as a staged note, creates any proposed questions as
+staged questions, and groups the records with a generated `draft_commit_id` for review.
 
 ## Operating Notes
 
