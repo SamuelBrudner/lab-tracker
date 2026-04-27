@@ -36,6 +36,9 @@ pip install -e ".[test,lint]"
 
 Commands below use `uv run`. If you used pip/venv instead, drop the `uv run` prefix.
 
+Windows fresh-clone notes, including Beads/Dolt setup, are in
+[`docs/windows-fresh-clone.md`](docs/windows-fresh-clone.md).
+
 ## Run the API
 
 ```bash
