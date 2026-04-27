@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "beads": {
+      "command": "C:\\Users\\snb6\\AppData\\Roaming\\Python\\Python313\\Scripts\\beads-mcp.exe",
+      "env": {
+        "BEADS_PATH": "C:\\Users\\snb6\\AppData\\Local\\Programs\\bd\\bd.exe",
+        "BEADS_WORKING_DIR": "C:\\Users\\snb6\\Documents\\GitHub\\lab-tracker"
+      }
+    }
+  }
+}
