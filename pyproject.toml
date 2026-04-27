@@ -30,6 +30,7 @@ lint = [
 
 [project.scripts]
 lab-tracker-mcp = "lab_tracker.mcp_server:main"
+lab-tracker-coding-mcp = "lab_tracker.mcp_server:coding_main"
 
 [tool.setuptools]
 package-dir = {"" = "src"}

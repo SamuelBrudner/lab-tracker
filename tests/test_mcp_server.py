@@ -11,13 +11,15 @@ from lab_tracker.auth import AuthContext, Role
 from lab_tracker.config import Settings
 from lab_tracker.db import Base
 from lab_tracker.mcp_server import (
+    CODING_GUIDE_URI,
     REVIEW_DASHBOARD_MIME_TYPE,
     REVIEW_DASHBOARD_URI,
     LabTrackerMCPRuntime,
     build_mcp_server,
+    register_lab_tracker_coding_mcp_interface,
     register_lab_tracker_mcp_interface,
 )
-from lab_tracker.models import QuestionType
+from lab_tracker.models import QuestionStatus, QuestionType, SessionType
 
 
 class FakeMCP:
@@ -81,6 +83,11 @@ READ_TOOL_NAMES = {
     "prepare_lab_note_draft",
     "search_lab_context",
     "refresh_review_dashboard",
+}
+CODING_READ_TOOL_NAMES = {
+    "coding_lab_context",
+    "coding_search_lab",
+    "coding_project_context",
 }
 WRITE_TOOL_NAMES = {
     "draft_lab_note_commit",
@@ -159,6 +166,87 @@ def test_write_tools_require_explicit_enable_and_editor_role():
         InMemoryRuntime(role=Role.EDITOR, enable_writes=True),
     )
     assert WRITE_TOOL_NAMES.issubset(editor_mcp.tools)
+
+
+def test_coding_profile_is_read_only_and_omits_chatgpt_app_surface():
+    mcp = FakeMCP()
+    register_lab_tracker_coding_mcp_interface(
+        mcp,
+        InMemoryRuntime(role=Role.ADMIN, enable_writes=True, expose_legacy_tools=True),
+    )
+
+    assert set(mcp.tools) == CODING_READ_TOOL_NAMES
+    assert WRITE_TOOL_NAMES.isdisjoint(mcp.tools)
+    assert "lab_tracker_create_project" not in mcp.tools
+    assert REVIEW_DASHBOARD_URI not in mcp.resources
+    assert CODING_GUIDE_URI in mcp.resources
+    assert "lab_tracker_coding_workflow_prompt" in mcp.prompts
+    assert "lab_tracker_workflow_prompt" not in mcp.prompts
+
+    for tool_name, tool_meta in mcp.tool_meta.items():
+        assert tool_name.startswith("coding_")
+        assert tool_meta["annotations"].readOnlyHint is True
+        assert "openai/outputTemplate" not in tool_meta.get("meta", {})
+        assert "ui" not in tool_meta.get("meta", {})
+
+
+def test_coding_profile_context_search_and_project_context_round_trip():
+    runtime = InMemoryRuntime(role=Role.ADMIN, enable_writes=True)
+    project = runtime.seed_project()
+    actor = AuthContext(user_id=uuid4(), role=Role.ADMIN)
+    question = runtime.api.create_question(
+        project_id=project.project_id,
+        text="Does baseline drift affect calcium signal quality?",
+        question_type=QuestionType.HYPOTHESIS_DRIVEN,
+        hypothesis="Baseline drift reduces signal quality.",
+        status=QuestionStatus.ACTIVE,
+        actor=actor,
+    )
+    note = runtime.api.create_note(
+        project_id=project.project_id,
+        raw_content="Baseline drift was visible after the buffer change.",
+        targets=[],
+        actor=actor,
+    )
+    session = runtime.api.create_session(
+        project_id=project.project_id,
+        session_type=SessionType.OPERATIONAL,
+        actor=actor,
+    )
+    mcp = FakeMCP()
+    register_lab_tracker_coding_mcp_interface(mcp, runtime)
+
+    lab_context = mcp.tools["coding_lab_context"](project_id=str(project.project_id))
+    search = mcp.tools["coding_search_lab"]("baseline", project_id=str(project.project_id))
+    project_context = mcp.tools["coding_project_context"](
+        project_id=str(project.project_id),
+        limit=5,
+    )
+
+    assert lab_context.structuredContent["lab_context"]["project"]["project_id"] == str(
+        project.project_id
+    )
+    assert lab_context.structuredContent["lab_context"]["active_questions"][0][
+        "question_id"
+    ] == str(question.question_id)
+    assert lab_context.structuredContent["lab_context"]["recent_notes"][0]["note_id"] == str(
+        note.note_id
+    )
+    assert lab_context.structuredContent["lab_context"]["active_sessions"][0][
+        "session_id"
+    ] == str(session.session_id)
+    assert search.structuredContent["search_results"]["counts"] == {
+        "questions": 1,
+        "notes": 1,
+    }
+    assert project_context.structuredContent["project_context"]["counts"]["questions"] == 1
+    assert project_context.structuredContent["project_context"]["limits"] == {
+        "per_collection": 5,
+        "counts_are_before_limits": True,
+    }
+    assert lab_context.meta == {}
+    assert search.meta == {}
+    assert project_context.meta == {}
 
 
 def test_chatgpt_capture_review_workflow_round_trip():
@@ -343,9 +431,38 @@ def test_mcp_runtime_persists_with_sqlalchemy(tmp_path: Path):
     assert [project.name for project in projects] == [project.name]
 
 
+def test_lab_tracker_coding_skill_docs_and_script_are_packaged():
+    skill = Path("agent-skills/lab-tracker-coding/SKILL.md").read_text(encoding="utf-8")
+    docs = Path("docs/coding-agent-support.md").read_text(encoding="utf-8")
+    pyproject = Path("pyproject.toml").read_text(encoding="utf-8")
+
+    assert skill.startswith("---\n")
+    assert "name: lab-tracker-coding" in skill
+    assert "read-only" in skill
+    assert "coding MCP" in skill
+    assert "AGENTS.md" in skill
+    assert "uv run lab-tracker-coding-mcp" in docs
+    assert "Codex" in docs
+    assert "docs/mcp.md" in docs
+    assert 'lab-tracker-coding-mcp = "lab_tracker.mcp_server:coding_main"' in pyproject
+
+
 def test_build_mcp_server_uses_configurable_http_bind():
     server = build_mcp_server(runtime=InMemoryRuntime(), host="0.0.0.0", port=8123)
 
     assert server.settings.host == "0.0.0.0"
     assert server.settings.port == 8123
+    assert server.settings.streamable_http_path == "/mcp"
+
+
+def test_build_mcp_server_supports_coding_profile_http_bind():
+    server = build_mcp_server(
+        runtime=InMemoryRuntime(),
+        host="0.0.0.0",
+        port=8124,
+        profile="coding",
+    )
+
+    assert server.settings.host == "0.0.0.0"
+    assert server.settings.port == 8124
     assert server.settings.streamable_http_path == "/mcp"

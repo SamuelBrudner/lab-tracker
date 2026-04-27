@@ -41,10 +41,18 @@ from lab_tracker.sqlalchemy_repository import SQLAlchemyLabTrackerRepository
 T = TypeVar("T")
 REVIEW_DASHBOARD_URI = "ui://lab-tracker/review-dashboard-v1.html"
 REVIEW_DASHBOARD_MIME_TYPE = "text/html;profile=mcp-app"
+CODING_GUIDE_URI = "lab-tracker://coding/guide"
 CHATGPT_APP_META = {
     "ui": {"resourceUri": REVIEW_DASHBOARD_URI, "visibility": ["model", "app"]},
     "openai/outputTemplate": REVIEW_DASHBOARD_URI,
 }
+MCP_PROFILES = {"chatgpt", "coding"}
+CODING_MCP_INSTRUCTIONS = (
+    "Use this read-only MCP server when coding on Lab Tracker and live lab context, "
+    "project questions, notes, sessions, or scientific workflow state would improve the "
+    "code change. Inspect source files with normal coding tools; use MCP only for Lab "
+    "Tracker domain context. Do not mutate lab records through this coding profile."
+)
 CONTEXT_SEARCH_STOP_WORDS = {
     "about",
     "after",
@@ -384,6 +392,30 @@ def _project_context(api: LabTrackerAPI, project_id: UUID) -> dict[str, Any]:
     }
 
 
+def _limited_project_context(
+    api: LabTrackerAPI,
+    project_id: UUID,
+    *,
+    limit: int,
+) -> dict[str, Any]:
+    context = _project_context(api, project_id)
+    for key in [
+        "questions",
+        "notes",
+        "sessions",
+        "datasets",
+        "analyses",
+        "claims",
+        "visualizations",
+    ]:
+        context[key] = context[key][:limit]
+    context["limits"] = {
+        "per_collection": limit,
+        "counts_are_before_limits": True,
+    }
+    return context
+
+
 def _sort_latest(items: Iterable[Any]) -> list[Any]:
     def timestamp(item: Any) -> str:
         return str(getattr(item, "updated_at", None) or getattr(item, "created_at", None) or "")
@@ -668,6 +700,25 @@ def _review_dashboard_payload(
         "active_sessions": _models_data(active_sessions[:limit]),
         "draft_commits": draft_commits,
     }
+
+
+def _coding_guide_markdown() -> str:
+    return "\n".join(
+        [
+            "# Lab Tracker Coding Context",
+            "",
+            "Use this MCP profile from coding agents when a code change depends on live Lab "
+            "Tracker domain context.",
+            "",
+            "- Query `coding_lab_context` before changing scientific workflow behavior.",
+            "- Use `coding_search_lab` to find existing questions or notes relevant to the task.",
+            "- Use `coding_project_context` when a project id is known and broader entity context "
+            "is needed.",
+            "- Inspect source files, tests, migrations, and docs with normal filesystem tools.",
+            "- Keep this profile read-only; do not create, activate, close, archive, delete, or "
+            "commit Lab Tracker records from coding-agent MCP access.",
+        ]
+    )
 
 
 def _ensure_mcp_write_allowed(runtime: LabTrackerRuntimeLike) -> None:
@@ -1939,14 +1990,157 @@ def register_lab_tracker_mcp_interface(
     return mcp
 
 
+def register_lab_tracker_coding_mcp_interface(
+    mcp: MCPServerLike,
+    runtime: LabTrackerRuntimeLike,
+) -> MCPServerLike:
+    """Register the read-only coding-agent MCP surface."""
+
+    @mcp.resource(
+        CODING_GUIDE_URI,
+        name="lab_tracker_coding_guide",
+        title="Lab Tracker coding guide",
+        description="Compact guide for using Lab Tracker MCP context while coding.",
+        mime_type="text/markdown",
+    )
+    def coding_guide_resource() -> str:
+        """Return compact coding-agent guidance."""
+
+        return _coding_guide_markdown()
+
+    @mcp.tool(
+        name="coding_lab_context",
+        title="Show coding lab context",
+        description=(
+            "Return a compact read-only Lab Tracker context snapshot for coding agents, "
+            "including projects, active/staged questions, recent notes, and active sessions."
+        ),
+        annotations=_read_annotations(),
+    )
+    def coding_lab_context(project_id: str | None = None, limit: int = 10) -> Any:
+        """Return compact live lab context for coding work."""
+
+        parsed_project_id = _parse_optional_uuid(project_id, "project_id")
+        resolved_limit = max(1, min(limit, 50))
+        lab_context = runtime.execute(
+            lambda api: _review_dashboard_payload(
+                api,
+                parsed_project_id,
+                limit=resolved_limit,
+            )
+        )
+        project_name = lab_context["project"]["name"] if lab_context["project"] else "No project"
+        return _tool_result(
+            {"lab_context": lab_context},
+            f"Loaded read-only coding context for {project_name}.",
+        )
+
+    @mcp.tool(
+        name="coding_search_lab",
+        title="Search coding lab context",
+        description="Search Lab Tracker questions and notes by substring for coding context.",
+        annotations=_read_annotations(),
+    )
+    def coding_search_lab(
+        query: str,
+        project_id: str | None = None,
+        include: list[str] | None = None,
+        limit: int = 20,
+    ) -> Any:
+        """Search read-only Lab Tracker entities relevant to coding work."""
+
+        parsed_project_id = _parse_optional_uuid(project_id, "project_id")
+        include_set = {item.strip().casefold() for item in include or ["questions", "notes"]}
+        include_questions = not include_set or "questions" in include_set
+        include_notes = not include_set or "notes" in include_set
+        resolved_limit = max(1, min(limit, 100))
+
+        def operation(api: LabTrackerAPI) -> dict[str, Any]:
+            questions = (
+                api.search_questions(query, project_id=parsed_project_id, limit=resolved_limit)
+                if include_questions
+                else []
+            )
+            notes = (
+                api.search_notes(query, project_id=parsed_project_id, limit=resolved_limit)
+                if include_notes
+                else []
+            )
+            return {
+                "query": query,
+                "questions": _models_data(questions),
+                "notes": _models_data(notes),
+                "counts": {"questions": len(questions), "notes": len(notes)},
+                "limits": {"per_collection": resolved_limit},
+            }
+
+        results = runtime.execute(operation)
+        return _tool_result(
+            {"search_results": results},
+            (
+                "Found "
+                f"{results['counts']['questions']} questions and "
+                f"{results['counts']['notes']} notes matching {query!r}."
+            ),
+        )
+
+    @mcp.tool(
+        name="coding_project_context",
+        title="Show coding project context",
+        description=(
+            "Return capped read-only project context across Lab Tracker entities for coding "
+            "agents that already know the project id."
+        ),
+        annotations=_read_annotations(),
+    )
+    def coding_project_context(project_id: str, limit: int = 20) -> Any:
+        """Return capped project context for coding work."""
+
+        parsed_project_id = _parse_uuid(project_id, "project_id")
+        resolved_limit = max(1, min(limit, 100))
+        project_context = runtime.execute(
+            lambda api: _limited_project_context(
+                api,
+                parsed_project_id,
+                limit=resolved_limit,
+            )
+        )
+        return _tool_result(
+            {"project_context": project_context},
+            f"Loaded read-only project context for {project_context['project']['name']}.",
+        )
+
+    @mcp.prompt(name="lab_tracker_coding_workflow_prompt")
+    def lab_tracker_coding_workflow_prompt(task: str, project_id: str | None = None) -> str:
+        """Prompt template for coding agents using Lab Tracker context."""
+
+        project_hint = (
+            f" Start with coding_project_context for project_id {project_id}."
+            if project_id
+            else " Start with coding_lab_context, then search if the task names lab concepts."
+        )
+        return (
+            "You are coding on Lab Tracker. First read AGENTS.md and relevant repo docs. "
+            "Use normal filesystem/search tools for source code. Use the read-only coding MCP "
+            "profile when live Lab Tracker project, question, note, or session context would "
+            f"change the implementation decision. {project_hint} Never mutate lab records "
+            f"through coding-agent MCP access. Task: {task}"
+        )
+
+    return mcp
+
+
 def build_mcp_server(
     runtime: LabTrackerRuntimeLike | None = None,
     *,
     host: str = "127.0.0.1",
     port: int = 8000,
+    profile: str = "chatgpt",
 ) -> Any:
     """Build the FastMCP server instance."""
 
+    if profile not in MCP_PROFILES:
+        raise ValidationError("MCP profile must be one of: chatgpt, coding.")
     try:
         from mcp.server.fastmcp import FastMCP
     except ModuleNotFoundError as exc:
@@ -1956,17 +2150,27 @@ def build_mcp_server(
         ) from exc
 
     mcp = FastMCP(
-        "Lab Tracker",
+        "Lab Tracker Coding" if profile == "coding" else "Lab Tracker",
+        instructions=CODING_MCP_INSTRUCTIONS if profile == "coding" else None,
         host=host,
         port=port,
         stateless_http=True,
         json_response=True,
     )
-    return register_lab_tracker_mcp_interface(mcp, runtime or LabTrackerMCPRuntime())
+    resolved_runtime = runtime or LabTrackerMCPRuntime()
+    if profile == "coding":
+        return register_lab_tracker_coding_mcp_interface(mcp, resolved_runtime)
+    return register_lab_tracker_mcp_interface(mcp, resolved_runtime)
 
 
-def main(argv: list[str] | None = None) -> None:
+def _run_cli(argv: list[str] | None = None, *, default_profile: str = "chatgpt") -> None:
     parser = argparse.ArgumentParser(description="Run the Lab Tracker MCP server.")
+    parser.add_argument(
+        "--profile",
+        choices=sorted(MCP_PROFILES),
+        default=default_profile,
+        help="MCP profile to expose. chatgpt is the default app surface; coding is read-only.",
+    )
     parser.add_argument(
         "--transport",
         choices=["stdio", "streamable-http"],
@@ -1985,11 +2189,19 @@ def main(argv: list[str] | None = None) -> None:
         help="Port for streamable-http transport.",
     )
     args = parser.parse_args(argv)
-    mcp = build_mcp_server(host=args.host, port=args.port)
+    mcp = build_mcp_server(host=args.host, port=args.port, profile=args.profile)
     if args.transport == "stdio":
         mcp.run()
     else:
         mcp.run(transport=args.transport)
+
+
+def main(argv: list[str] | None = None) -> None:
+    _run_cli(argv, default_profile="chatgpt")
+
+
+def coding_main(argv: list[str] | None = None) -> None:
+    _run_cli(argv, default_profile="coding")
 
 
 if __name__ == "__main__":

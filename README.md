@@ -40,7 +40,9 @@ Commands below use `uv run`. If you used pip/venv instead, drop the `uv run` pre
 
 Lab Tracker's primary LLM entrypoint is a ChatGPT-oriented Model Context Protocol (MCP)
 server. It exposes curated capture-and-review tools plus a compact embedded review
-dashboard. The React web app remains available as a human admin/debug fallback.
+dashboard. Coding agents can also use a separate read-only MCP profile and portable skill
+to bring live lab context into code changes. The React web app remains available as a human
+admin/debug fallback.
 
 Install the optional MCP runtime:
 
@@ -83,7 +85,9 @@ LLM-produced text, not the image bytes.
 
 The MCP server uses the same `LAB_TRACKER_` settings as the FastAPI app. MCP tool calls run
 with a local actor role of `viewer` and write tools disabled by default. See
-[`docs/mcp.md`](docs/mcp.md) for the tool surface and client configuration notes.
+[`docs/mcp.md`](docs/mcp.md) for the ChatGPT App tool surface and
+[`docs/coding-agent-support.md`](docs/coding-agent-support.md) for Claude Code, Codex, and
+other coding-agent setup.
 
 ## Run the API
 

@@ -4,6 +4,9 @@ Lab Tracker's MCP server is the primary LLM-facing frontend. It exposes a curate
 ChatGPT App surface for capture-and-review workflows, backed by the same domain service
 layer as the HTTP app. The React app remains a human admin/debug fallback.
 
+This page covers the default `chatgpt` MCP profile. Coding-agent setup for Claude Code,
+Codex, and other coding assistants lives in [`docs/coding-agent-support.md`](coding-agent-support.md).
+
 ## Install
 
 ```bash
@@ -17,6 +20,12 @@ Local stdio clients:
 
 ```bash
 uv run lab-tracker-mcp
+```
+
+Equivalent explicit profile:
+
+```bash
+uv run lab-tracker-mcp --profile chatgpt
 ```
 
 Streamable HTTP clients:
