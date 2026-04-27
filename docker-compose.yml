@@ -11,12 +11,15 @@ services:
       LAB_TRACKER_ENVIRONMENT: ${LAB_TRACKER_ENVIRONMENT:-production}
       LAB_TRACKER_LOG_LEVEL: ${LAB_TRACKER_LOG_LEVEL:-INFO}
       LAB_TRACKER_DATABASE_URL: ${LAB_TRACKER_DATABASE_URL:-postgresql+psycopg://lab_tracker:lab_tracker@postgres:5432/lab_tracker}
+      LAB_TRACKER_FILE_STORAGE_PATH: ${LAB_TRACKER_FILE_STORAGE_PATH:-/app/data/file_storage}
       LAB_TRACKER_NOTE_STORAGE_PATH: ${LAB_TRACKER_NOTE_STORAGE_PATH:-/app/data/note_storage}
       LAB_TRACKER_AUTH_SECRET_KEY: ${LAB_TRACKER_AUTH_SECRET_KEY:-replace-with-a-strong-secret}
       LAB_TRACKER_AUTH_TOKEN_TTL_MINUTES: ${LAB_TRACKER_AUTH_TOKEN_TTL_MINUTES:-720}
+      LAB_TRACKER_BOOTSTRAP_ADMIN_TOKEN: ${LAB_TRACKER_BOOTSTRAP_ADMIN_TOKEN:-}
     ports:
       - "8000:8000"
     volumes:
+      - file_storage:/app/data/file_storage
       - note_storage:/app/data/note_storage
     restart: unless-stopped
     healthcheck:
@@ -49,5 +52,6 @@ services:
       start_period: 10s
 
 volumes:
+  file_storage:
   note_storage:
   postgres_data:

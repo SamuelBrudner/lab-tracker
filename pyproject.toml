@@ -20,6 +20,9 @@ dependencies = [
 mcp = [
   "mcp>=1.0",
 ]
+postgres = [
+  "psycopg[binary]>=3.1",
+]
 test = [
   "httpx",
   "pytest",

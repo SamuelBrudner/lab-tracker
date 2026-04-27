@@ -89,6 +89,10 @@ with a local actor role of `viewer` and write tools disabled by default. See
 [`docs/coding-agent-support.md`](docs/coding-agent-support.md) for Claude Code, Codex, and
 other coding-agent setup.
 
+For many computers or agents sharing one metadata store, run one shared server backed by
+Postgres and shared file/note storage. See
+[`docs/shared-deployment.md`](docs/shared-deployment.md).
+
 ## Run the API
 
 ```bash
@@ -150,6 +154,8 @@ development.
 - `LAB_TRACKER_NOTE_STORAGE_PATH`: note storage directory (default: `./note_storage`)
 - `LAB_TRACKER_AUTH_SECRET_KEY`: auth signing secret (default allowed only in `local`)
 - `LAB_TRACKER_AUTH_TOKEN_TTL_MINUTES`: access token lifetime (default: `720`)
+- `LAB_TRACKER_BOOTSTRAP_ADMIN_TOKEN`: one-time bearer token that permits initial admin
+  registration when no users exist
 - `LAB_TRACKER_MCP_ACTOR_USER_ID`: user id stamped on MCP-created records
   (default: `00000000-0000-0000-0000-000000000000`)
 - `LAB_TRACKER_MCP_ACTOR_ROLE`: role used by MCP tool calls (default: `viewer`)
