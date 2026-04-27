@@ -5,3 +5,8 @@ docs/runs/
 node_modules/
 lab_tracker.db
 .npm-cache/
+
+# Beads / Dolt files (added by bd init)
+.dolt/
+*.db
+.beads-credential-key
