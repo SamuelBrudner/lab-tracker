@@ -9,7 +9,7 @@ bd ready              # Find available work
 bd show <id>          # View issue details
 bd update <id> --status in_progress  # Claim work
 bd close <id>         # Complete work
-bd sync               # Sync with git
+bd export             # Refresh .beads/issues.jsonl for git
 ```
 
 ## Commit Messages
@@ -38,7 +38,8 @@ Example:
 4. **PUSH TO REMOTE** - This is MANDATORY:
    ```bash
    git pull --rebase
-   bd sync
+   bd export
+   bd dolt push  # only when `bd dolt remote list` shows a configured remote
    git push
    git status  # MUST show "up to date with origin"
    ```
@@ -130,11 +131,11 @@ bd close bd-42 --reason "Completed" --json
 
 ### Auto-Sync
 
-bd automatically syncs via Dolt:
+bd stores issues in Dolt and auto-exports a git-tracked JSONL view:
 
 - Each write auto-commits to Dolt history
-- Use `bd dolt push`/`bd dolt pull` for remote sync
-- No manual export/import needed!
+- `bd export` refreshes `.beads/issues.jsonl` for Git-based clone recovery
+- Use `bd dolt push`/`bd dolt pull` only after a Dolt remote is configured
 
 ### Important Rules
 
@@ -160,7 +161,8 @@ For more details, see README.md and docs/QUICKSTART.md.
 4. **PUSH TO REMOTE** - This is MANDATORY:
    ```bash
    git pull --rebase
-   bd dolt push
+   bd export
+   bd dolt push  # only when `bd dolt remote list` shows a configured remote
    git push
    git status  # MUST show "up to date with origin"
    ```

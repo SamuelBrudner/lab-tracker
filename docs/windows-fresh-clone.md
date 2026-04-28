@@ -7,21 +7,19 @@ new checkout.
 
 - Python 3.10 or newer
 - Node.js 20 or newer and npm
-- Dolt for Beads issue tracking
+- `bd` (Beads) for issue tracking
 
-If Dolt is installed but `bd` cannot find it, add the Dolt binary directory to
-the current PowerShell session before running Beads commands:
+Install or update Beads with the Windows PowerShell installer:
 
 ```powershell
-$env:PATH = 'C:\Program Files\Dolt\bin;' + $env:PATH
+irm https://raw.githubusercontent.com/steveyegge/beads/main/install.ps1 | iex
 ```
 
-New terminals should pick up the user PATH if Dolt was installed with winget.
 You can verify the installation with:
 
 ```powershell
-dolt version
-bd doctor
+bd version
+bd context
 ```
 
 ## Application Setup
@@ -54,29 +52,29 @@ Then open `http://127.0.0.1:8000/app`.
 
 ## Beads Bootstrap
 
-Fresh clones may have `.beads/issues.jsonl` but no local Dolt database yet.
-Run:
+Fresh clones may have `.beads/issues.jsonl` but no local embedded Dolt database
+yet. Run:
 
 ```powershell
-bd doctor
-bd init --prefix lab-tracker --from-jsonl --skip-agents --skip-hooks
-bd import
+bd bootstrap --yes
 bd ready
 ```
 
-This repository sets `dolt.database: "beads"` in `.beads/config.yaml`, so Beads
-should use the expected local Dolt database name. If `bd doctor` reports schema
-or project identity issues after initialization, run:
+If bootstrap finds an existing empty or broken local embedded database, keep a
+backup of `.beads/`, then reinitialize from the tracked JSONL:
 
 ```powershell
-bd doctor --fix --yes
+bd init --prefix lab-tracker --reinit-local --skip-agents --skip-hooks --non-interactive
 bd import
 ```
 
-Use `bd dolt show` to confirm the active database, host, and port. If the Dolt
-database has local uncommitted table changes after Beads configuration updates,
-commit them with:
+This repository sets `dolt.database: "beads"` and `sync.branch: "beads-sync"` in
+`.beads/config.yaml`, so Beads should use the expected local database name and
+sync branch setting. Use `bd dolt show` to confirm the active database. This
+repo currently syncs Beads state through the git-tracked `.beads/issues.jsonl`;
+`bd dolt push` requires a separately configured Dolt remote:
 
 ```powershell
-bd dolt commit -m "Update beads configuration"
+bd dolt remote list
+bd export
 ```
