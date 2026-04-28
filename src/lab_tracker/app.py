@@ -8,6 +8,7 @@ import logging
 import os
 from pathlib import Path
 from typing import Any
+from uuid import UUID
 
 from fastapi import FastAPI, Request
 from fastapi.staticfiles import StaticFiles
@@ -17,7 +18,7 @@ from sqlalchemy.orm import Session, sessionmaker
 from starlette.responses import FileResponse, JSONResponse, RedirectResponse
 
 from lab_tracker.api import LabTrackerAPI
-from lab_tracker.auth import AuthContext, AuthService, TokenService, extract_bearer_token
+from lab_tracker.auth import AuthContext, AuthService, Role, TokenService, extract_bearer_token
 from lab_tracker.config import get_settings
 from lab_tracker.db import get_engine, get_session_factory
 from lab_tracker.db_models import (
@@ -42,6 +43,7 @@ from lab_tracker.sqlalchemy_repository import SQLAlchemyLabTrackerRepository
 
 _START_TIME = datetime.now(timezone.utc)
 _FRONTEND_DIR = Path(__file__).resolve().parent / "frontend"
+_LOCAL_AUTH_USER_ID = UUID("00000000-0000-4000-8000-000000000001")
 _logger = logging.getLogger(__name__)
 _PUBLIC_PATHS = frozenset(
     {
@@ -197,6 +199,10 @@ def _auth_error_response(message: str) -> JSONResponse:
     return JSONResponse(status_code=401, content=payload.model_dump())
 
 
+def local_auth_context() -> AuthContext:
+    return AuthContext(user_id=_LOCAL_AUTH_USER_ID, role=Role.ADMIN)
+
+
 def _is_public_path(path: str) -> bool:
     if path in _PUBLIC_PATHS:
         return True
@@ -212,6 +218,9 @@ def _is_public_path(path: str) -> bool:
 def _configure_auth_middleware(app: FastAPI) -> None:
     @app.middleware("http")
     async def auth_middleware(request: Request, call_next):
+        if not request.app.state.auth_enabled:
+            request.state.auth_context = local_auth_context()
+            return await call_next(request)
         if request.method == "OPTIONS" or _is_public_path(request.url.path):
             return await call_next(request)
         try:
@@ -312,6 +321,7 @@ def create_app() -> FastAPI:
     app.state.db_engine = engine
     app.state.db_session_factory = session_factory
     app.state.auth_service = auth_service
+    app.state.auth_enabled = settings.is_auth_enabled()
     app.state.token_service = token_service
     app.state.file_storage_backend = file_storage_backend
     app.state.raw_note_storage = raw_note_storage
@@ -342,11 +352,13 @@ def create_app() -> FastAPI:
 
     @app.get("/metrics")
     def metrics():
-        return _metrics_snapshot(
+        payload = _metrics_snapshot(
             session_factory,
             environment=settings.environment,
             app_name=settings.app_name,
         )
+        payload["auth"] = {"enabled": app.state.auth_enabled}
+        return payload
 
     _configure_frontend_routes(app)
     register_routes(

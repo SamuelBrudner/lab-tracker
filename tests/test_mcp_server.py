@@ -124,16 +124,35 @@ def test_create_project_uses_api_validation_path() -> None:
     assert [request.url.path for request in requests] == ["/auth/login", "/projects"]
 
 
-def test_authenticated_tool_requires_service_credentials() -> None:
+def test_authenticated_tool_requires_service_credentials_when_api_requires_auth() -> None:
     client = mcp_server.LabTrackerAPIClient(
         mcp_server.MCPSettings(base_url="http://testserver"),
-        transport=httpx.MockTransport(lambda request: _json_response(500, {})),
+        transport=httpx.MockTransport(
+            lambda request: _json_response(401, {"error": {"message": "Missing auth"}})
+        ),
     )
 
     with pytest.raises(mcp_server.LabTrackerAPIError, match="LAB_TRACKER_MCP_USERNAME"):
         client.list_projects()
 
     client.close()
+
+
+def test_authenticated_tool_without_credentials_can_use_auth_disabled_api() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/projects"
+        assert "authorization" not in request.headers
+        return _json_response(200, {"data": [{"project_id": "p1"}]})
+
+    client = mcp_server.LabTrackerAPIClient(
+        mcp_server.MCPSettings(base_url="http://testserver"),
+        transport=httpx.MockTransport(handler),
+    )
+
+    try:
+        assert client.list_projects() == {"data": [{"project_id": "p1"}]}
+    finally:
+        client.close()
 
 
 def test_public_health_does_not_require_credentials() -> None:

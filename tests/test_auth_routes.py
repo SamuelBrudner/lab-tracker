@@ -16,6 +16,7 @@ def _bootstrap_database(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("LAB_TRACKER_DATABASE_URL", database_url)
     monkeypatch.setenv("LAB_TRACKER_NOTE_STORAGE_PATH", str(tmp_path / "note-storage"))
     monkeypatch.setenv("LAB_TRACKER_AUTH_SECRET_KEY", "test-secret")
+    monkeypatch.setenv("LAB_TRACKER_AUTH_ENABLED", "true")
 
     engine = create_engine(
         database_url,
@@ -99,6 +100,22 @@ def test_protected_routes_require_authorization(monkeypatch, tmp_path):
     assert response.status_code == 401
     payload = response.json()
     assert payload["error"]["code"] == "auth_error"
+
+
+def test_local_auth_disabled_allows_write_without_authorization(monkeypatch, tmp_path):
+    _bootstrap_database(monkeypatch, tmp_path)
+    monkeypatch.setenv("LAB_TRACKER_AUTH_ENABLED", "false")
+    with TestClient(create_app()) as client:
+        me_response = client.get("/auth/me")
+        assert me_response.status_code == 200
+        me_payload = me_response.json()
+        assert me_payload["data"]["username"] == "local-tester"
+        assert me_payload["data"]["role"] == "admin"
+        assert me_payload["meta"]["auth_enabled"] is False
+
+        create_response = client.post("/projects", json={"name": "No Login"})
+        assert create_response.status_code == 201
+        assert create_response.json()["data"]["created_by"] == me_payload["data"]["user_id"]
 
 
 def test_protected_routes_accept_valid_authorization(monkeypatch, tmp_path):

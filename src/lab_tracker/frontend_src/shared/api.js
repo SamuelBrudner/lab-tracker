@@ -198,6 +198,7 @@ async function downloadProtectedResource({ path, token = "", filename = "" }) {
 }
 
 export {
+  apiFetch,
   apiRequest,
   apiListRequest,
   buildApiPath,

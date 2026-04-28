@@ -36,6 +36,7 @@ def migrated_sqlite_database_url(
     monkeypatch.setenv("LAB_TRACKER_FILE_STORAGE_PATH", str(tmp_path / "file-storage"))
     monkeypatch.setenv("LAB_TRACKER_NOTE_STORAGE_PATH", str(tmp_path / "note-storage"))
     monkeypatch.setenv("LAB_TRACKER_AUTH_SECRET_KEY", "test-secret")
+    monkeypatch.setenv("LAB_TRACKER_AUTH_ENABLED", "true")
 
     config = Config(str(_repo_root() / "alembic.ini"))
     command.upgrade(config, "head")

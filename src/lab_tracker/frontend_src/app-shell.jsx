@@ -151,11 +151,19 @@ function App() {
 
   return (
     <div className="app-shell">
-      <AppHeader user={auth.user} onLogout={auth.handleLogout} />
+      <AppHeader
+        authEnabled={auth.authEnabled}
+        user={auth.user}
+        onLogout={auth.handleLogout}
+      />
 
       <FlashMessages message={message} error={error} />
 
-      {!auth.token ? (
+      {!auth.authChecked ? (
+        <section className="grid">
+          <WorkflowCoverageCard />
+        </section>
+      ) : auth.authEnabled && !auth.token ? (
         <section className="grid">
           <AuthForm
             authMode={auth.authMode}

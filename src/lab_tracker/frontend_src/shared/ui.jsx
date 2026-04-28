@@ -103,7 +103,7 @@ class ErrorBoundary extends React.Component {
   }
 }
 
-function AppHeader({ user, onLogout }) {
+function AppHeader({ authEnabled, user, onLogout }) {
   return (
     <header className="hero">
       <div className="hero-row">
@@ -116,7 +116,7 @@ function AppHeader({ user, onLogout }) {
         <div className="inline">
           {user ? <span className={roleClass(user.role)}>{user.role}</span> : null}
           {user ? <span className="pill">{user.username}</span> : null}
-          {user ? (
+          {authEnabled && user ? (
             <button className="btn-secondary" onClick={onLogout}>
               Sign out
             </button>

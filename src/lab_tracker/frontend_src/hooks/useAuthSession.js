@@ -1,6 +1,6 @@
 import * as React from "react";
 
-import { apiRequest } from "../shared/api.js";
+import { apiFetch, apiRequest } from "../shared/api.js";
 import { TOKEN_STORAGE_KEY } from "../shared/constants.js";
 
 const { useEffect, useMemo, useState } = React;
@@ -8,6 +8,8 @@ const { useEffect, useMemo, useState } = React;
 function useAuthSession({ replace, setBusy, setFlash }) {
   const [token, setToken] = useState(() => localStorage.getItem(TOKEN_STORAGE_KEY) || "");
   const [user, setUser] = useState(null);
+  const [authChecked, setAuthChecked] = useState(false);
+  const [authEnabled, setAuthEnabled] = useState(true);
 
   const [authMode, setAuthMode] = useState("login");
   const [authUsername, setAuthUsername] = useState("");
@@ -30,29 +32,34 @@ function useAuthSession({ replace, setBusy, setFlash }) {
   useEffect(() => {
     let canceled = false;
 
-    if (!token) {
-      setUser(null);
-      return () => {
-        canceled = true;
-      };
-    }
-
     setBusy(true);
-    setFlash("", "");
-    apiRequest("/auth/me", { token })
-      .then((nextUser) => {
+    if (token) {
+      setFlash("", "");
+    }
+    apiFetch("/auth/me", token ? { token } : {})
+      .then((payload) => {
         if (!canceled) {
-          setUser(nextUser);
+          const nextAuthEnabled = payload?.meta?.auth_enabled !== false;
+          setAuthEnabled(nextAuthEnabled);
+          setUser(payload?.data || null);
+          if (!nextAuthEnabled && token) {
+            setToken("");
+          }
         }
       })
       .catch((err) => {
         if (!canceled) {
-          setToken("");
-          setFlash("", err.message || "Failed to restore session.");
+          setAuthEnabled(true);
+          setUser(null);
+          if (token) {
+            setToken("");
+            setFlash("", err.message || "Failed to restore session.");
+          }
         }
       })
       .finally(() => {
         if (!canceled) {
+          setAuthChecked(true);
           setBusy(false);
         }
       });
@@ -95,6 +102,10 @@ function useAuthSession({ replace, setBusy, setFlash }) {
   }
 
   function handleLogout() {
+    if (!authEnabled) {
+      replace("/app");
+      return;
+    }
     setToken("");
     setUser(null);
     setAuthPassword("");
@@ -104,6 +115,8 @@ function useAuthSession({ replace, setBusy, setFlash }) {
 
   return {
     authBusy,
+    authChecked,
+    authEnabled,
     authMode,
     authPassword,
     authUsername,

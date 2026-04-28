@@ -221,7 +221,7 @@ class LabTrackerAPIClient:
         retry_on_unauthorized: bool = True,
     ) -> JsonObject:
         headers: dict[str, str] = {}
-        if authenticated:
+        if authenticated and self._has_credentials():
             headers["Authorization"] = f"Bearer {self._token()}"
         response = self._client.request(
             method,
@@ -232,6 +232,11 @@ class LabTrackerAPIClient:
         )
         if response.status_code == 401 and authenticated and retry_on_unauthorized:
             self._access_token = None
+            if not self._has_credentials():
+                raise LabTrackerAPIError(
+                    "LAB_TRACKER_MCP_USERNAME and LAB_TRACKER_MCP_PASSWORD are required "
+                    "when the Lab Tracker API has authentication enabled."
+                )
             headers["Authorization"] = f"Bearer {self._token()}"
             response = self._client.request(
                 method,
@@ -243,6 +248,9 @@ class LabTrackerAPIClient:
         if response.status_code >= 400:
             raise LabTrackerAPIError(_response_error(response))
         return _response_json(response)
+
+    def _has_credentials(self) -> bool:
+        return bool((self._settings.username or "").strip() and self._settings.password)
 
     def _token(self) -> str:
         if self._access_token:
@@ -480,8 +488,9 @@ def lab_tracker_quickstart() -> str:
         "# Lab Tracker MCP Quickstart\n\n"
         "Use `lab_tracker_health` and `lab_tracker_readiness` first. "
         "Read and write tools call the running Lab Tracker API, so start the app "
-        "and set `LAB_TRACKER_MCP_BASE_URL`, `LAB_TRACKER_MCP_USERNAME`, and "
-        "`LAB_TRACKER_MCP_PASSWORD` in the MCP client environment.\n"
+        "and set `LAB_TRACKER_MCP_BASE_URL` in the MCP client environment. "
+        "`LAB_TRACKER_MCP_USERNAME` and `LAB_TRACKER_MCP_PASSWORD` are only "
+        "required when API authentication is enabled.\n"
     )
 
 

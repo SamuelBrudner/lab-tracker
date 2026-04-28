@@ -12,7 +12,7 @@ Run the MCP server with:
 python -m lab_tracker.mcp_server
 ```
 
-Required environment for read/write tools:
+Environment for read/write tools:
 
 ```bash
 LAB_TRACKER_MCP_BASE_URL=http://127.0.0.1:8000
@@ -21,7 +21,8 @@ LAB_TRACKER_MCP_PASSWORD=<service-account-password>
 ```
 
 The server does not store bearer tokens. It logs in with the configured service
-account and retries once after a 401.
+account and retries once after a 401. The username/password are only required
+when `LAB_TRACKER_AUTH_ENABLED=true`; local auth-disabled testing can omit them.
 
 Available tools:
 
@@ -53,6 +54,10 @@ docker compose up app
 ```
 
 SQLite remains the local fallback for simple single-client development.
+
+Local development starts with authentication disabled. Set
+`LAB_TRACKER_AUTH_ENABLED=true` when you want to test login, roles, or service
+account credentials.
 
 ## Dolt Mirror
 

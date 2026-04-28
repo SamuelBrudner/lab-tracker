@@ -76,6 +76,11 @@ docker compose up app
 
 SQLite remains the default single-client local fallback.
 
+Local development starts with authentication disabled so early testing can use
+the app without creating accounts. Set `LAB_TRACKER_AUTH_ENABLED=true` to test
+the login and role flow. Non-local environments keep authentication enabled by
+default.
+
 The retained v1 product surface is defined in
 [`docs/retained-v1-surface.md`](docs/retained-v1-surface.md).
 If this README and the retained-surface document disagree, the retained-surface
@@ -121,6 +126,8 @@ development.
 - `LAB_TRACKER_NOTE_STORAGE_PATH`: note storage directory (default: `./note_storage`)
 - `LAB_TRACKER_AUTH_SECRET_KEY`: auth signing secret (default allowed only in `local`)
 - `LAB_TRACKER_AUTH_TOKEN_TTL_MINUTES`: access token lifetime (default: `720`)
+- `LAB_TRACKER_AUTH_ENABLED`: enable login and role enforcement (default: `false`
+  in `local`, `true` otherwise; non-local environments cannot disable auth)
 
 The retained v1 runtime keeps note handling manual and uses direct substring
 search for query flows. Deferred concepts live in
@@ -160,6 +167,8 @@ LAB_TRACKER_MCP_USERNAME=<service-account-username>
 LAB_TRACKER_MCP_PASSWORD=<service-account-password>
 python -m lab_tracker.mcp_server
 ```
+
+The MCP username/password are only required when `LAB_TRACKER_AUTH_ENABLED=true`.
 
 Dolt is an export-only versioned mirror in v1:
 

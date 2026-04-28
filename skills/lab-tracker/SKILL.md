@@ -29,13 +29,16 @@ research-context system, not a generic file manager.
 The local MCP server is `python -m lab_tracker.mcp_server`. It calls the running
 Lab Tracker API and does not write directly to the database.
 
-Required MCP environment:
+MCP environment:
 
 ```bash
 LAB_TRACKER_MCP_BASE_URL=http://127.0.0.1:8000
 LAB_TRACKER_MCP_USERNAME=<service-account-username>
 LAB_TRACKER_MCP_PASSWORD=<service-account-password>
 ```
+
+MCP username/password are only required when `LAB_TRACKER_AUTH_ENABLED=true`.
+Local auth-disabled testing can omit them.
 
 Use these tools when available:
 
@@ -49,8 +52,9 @@ Use these tools when available:
 - `lab_tracker_create_question` creates a question in a project.
 - `lab_tracker_create_note` creates a text note in a project.
 
-Creation tools write through the API using the configured service account. Be explicit
-before creating or mutating research records.
+Creation tools write through the API, using the configured service account when
+authentication is enabled. Be explicit before creating or mutating research
+records.
 
 ## Dolt Mirror
 

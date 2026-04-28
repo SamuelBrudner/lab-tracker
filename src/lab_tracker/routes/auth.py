@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 import hmac
+from uuid import UUID
 
 from fastapi import APIRouter
 from starlette import status as http_status
@@ -24,6 +26,8 @@ from .shared import (
     auth_token_read,
     auth_user_read,
 )
+
+_LOCAL_AUTH_USERNAME = "local-tester"
 
 
 def build_auth_router(
@@ -74,6 +78,8 @@ def build_auth_router(
 
     @router.post("/auth/refresh", response_model=Envelope[AuthTokenRead])
     def refresh_auth(request: Request):
+        if not request.app.state.auth_enabled:
+            raise AuthError("Token refresh is unavailable when authentication is disabled.")
         actor = actor_from_request(request)
         user = auth_service.get_user_by_id(actor.user_id)
         if user is None:
@@ -84,9 +90,17 @@ def build_auth_router(
     @router.get("/auth/me", response_model=Envelope[AuthUserRead])
     def auth_me(request: Request):
         actor = actor_from_request(request)
+        if not request.app.state.auth_enabled:
+            user = AuthUserRead(
+                user_id=UUID(str(actor.user_id)),
+                username=_LOCAL_AUTH_USERNAME,
+                role=actor.role,
+                created_at=datetime.now(timezone.utc),
+            )
+            return Envelope(data=user, meta={"auth_enabled": False})
         user = auth_service.get_user_by_id(actor.user_id)
         if user is None:
             raise AuthError("Authentication required.")
-        return Envelope(data=auth_user_read(user))
+        return Envelope(data=auth_user_read(user), meta={"auth_enabled": True})
 
     return router
