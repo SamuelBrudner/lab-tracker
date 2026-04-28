@@ -1,5 +1,15 @@
 {
   "mcpServers": {
+    "lab-tracker": {
+      "command": "C:\\Users\\snb6\\Documents\\GitHub\\lab-tracker\\.venv\\Scripts\\python.exe",
+      "args": [
+        "-m",
+        "lab_tracker.mcp_server"
+      ],
+      "env": {
+        "LAB_TRACKER_MCP_BASE_URL": "http://127.0.0.1:8000"
+      }
+    },
     "beads": {
       "command": "C:\\Users\\snb6\\AppData\\Roaming\\Python\\Python313\\Scripts\\beads-mcp.exe",
       "env": {

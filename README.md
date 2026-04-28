@@ -55,6 +55,27 @@ Frontend:
 
 Open `http://127.0.0.1:8000/app`.
 
+### Multi-client runtime
+
+For browser, Codex, Claude, scripts, and future workers writing at the same time,
+use Postgres as the live source of truth and keep writes behind the Lab Tracker
+API. Start only Postgres for local development:
+
+```powershell
+docker compose up postgres
+$env:LAB_TRACKER_DATABASE_URL = "postgresql+psycopg://lab_tracker:lab_tracker@127.0.0.1:5432/lab_tracker"
+uv run alembic upgrade head
+uv run uvicorn lab_tracker.asgi:app --reload
+```
+
+Or run the full app stack:
+
+```bash
+docker compose up app
+```
+
+SQLite remains the default single-client local fallback.
+
 The retained v1 product surface is defined in
 [`docs/retained-v1-surface.md`](docs/retained-v1-surface.md).
 If this README and the retained-surface document disagree, the retained-surface
@@ -128,3 +149,24 @@ npm run test:frontend
 npm run lint:frontend
 npm run build
 ```
+
+## MCP and Dolt mirror
+
+Lab Tracker ships an API-backed MCP server for assistants:
+
+```bash
+LAB_TRACKER_MCP_BASE_URL=http://127.0.0.1:8000
+LAB_TRACKER_MCP_USERNAME=<service-account-username>
+LAB_TRACKER_MCP_PASSWORD=<service-account-password>
+python -m lab_tracker.mcp_server
+```
+
+Dolt is an export-only versioned mirror in v1:
+
+```bash
+python -m lab_tracker.dolt_mirror export --message "Lab Tracker snapshot"
+```
+
+The default local mirror path is `.lab-tracker-dolt/`. See
+[`docs/lab-tracker-mcp-skills.md`](docs/lab-tracker-mcp-skills.md) for setup
+details.

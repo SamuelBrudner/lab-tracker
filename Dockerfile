@@ -14,8 +14,7 @@ COPY src /app/src
 COPY alembic /app/alembic
 
 RUN pip install --no-cache-dir uv \
-    && uv pip install --system . \
-    && uv pip install --system "psycopg[binary]>=3.1"
+    && uv pip install --system .
 
 COPY docker-entrypoint.sh /app/docker-entrypoint.sh
 RUN chmod +x /app/docker-entrypoint.sh
