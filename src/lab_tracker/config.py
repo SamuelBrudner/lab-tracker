@@ -20,6 +20,10 @@ class Settings(BaseSettings):
     auth_token_ttl_minutes: int = 60 * 12
     bootstrap_admin_token: str = ""
     auth_enabled: bool | None = None
+    openai_api_key: str = ""
+    openai_model: str = "gpt-5.4-mini"
+    openai_base_url: str = "https://api.openai.com/v1"
+    openai_timeout_seconds: float = 60.0
 
     def is_auth_enabled(self) -> bool:
         if self.auth_enabled is not None:

@@ -210,6 +210,84 @@ class NoteTargetModel(Base):
     entity_id: Mapped[str] = mapped_column(String(36), primary_key=True)
 
 
+class GraphChangeSetModel(Base):
+    __tablename__ = "graph_change_sets"
+
+    change_set_id: Mapped[str] = mapped_column(
+        String(36),
+        primary_key=True,
+        default=lambda: str(uuid4()),
+    )
+    project_id: Mapped[str] = mapped_column(
+        String(36),
+        ForeignKey("projects.project_id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    source_note_id: Mapped[str] = mapped_column(
+        String(36),
+        ForeignKey("notes.note_id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    source_checksum: Mapped[str | None] = mapped_column(String(64))
+    source_content_type: Mapped[str | None] = mapped_column(String(255))
+    source_filename: Mapped[str | None] = mapped_column(String(255))
+    provider: Mapped[str] = mapped_column(String(40), nullable=False)
+    model: Mapped[str] = mapped_column(String(100), nullable=False)
+    prompt_version: Mapped[str] = mapped_column(String(80), nullable=False)
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="drafting")
+    commit_message: Mapped[str | None] = mapped_column(Text)
+    error_metadata: Mapped[dict[str, object]] = mapped_column(JSON, default=dict)
+    created_by: Mapped[str | None] = mapped_column(String(255))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utc_now)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=_utc_now,
+        onupdate=_utc_now,
+    )
+    committed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    committed_by: Mapped[str | None] = mapped_column(String(255))
+
+
+class GraphChangeOperationModel(Base):
+    __tablename__ = "graph_change_operations"
+    __table_args__ = (
+        UniqueConstraint(
+            "change_set_id",
+            "sequence",
+            name="uq_graph_change_operations_change_set_sequence",
+        ),
+    )
+
+    operation_id: Mapped[str] = mapped_column(
+        String(36),
+        primary_key=True,
+        default=lambda: str(uuid4()),
+    )
+    change_set_id: Mapped[str] = mapped_column(
+        String(36),
+        ForeignKey("graph_change_sets.change_set_id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    sequence: Mapped[int] = mapped_column(Integer, nullable=False)
+    op: Mapped[str] = mapped_column(String(20), nullable=False)
+    entity_type: Mapped[str] = mapped_column(String(30), nullable=False)
+    target_entity_id: Mapped[str | None] = mapped_column(String(36))
+    client_ref: Mapped[str | None] = mapped_column(String(80))
+    payload: Mapped[dict[str, object]] = mapped_column(JSON, default=dict)
+    rationale: Mapped[str] = mapped_column(Text, default="")
+    confidence: Mapped[float | None] = mapped_column(Float)
+    source_refs: Mapped[list[dict[str, object]]] = mapped_column(JSON, default=list)
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="proposed")
+    result_entity_id: Mapped[str | None] = mapped_column(String(36))
+    error_metadata: Mapped[dict[str, object]] = mapped_column(JSON, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utc_now)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=_utc_now,
+        onupdate=_utc_now,
+    )
+
+
 class SessionModel(Base):
     __tablename__ = "sessions"
 
@@ -423,6 +501,21 @@ class UserModel(Base):
 Index("ix_questions_project_created_at", QuestionModel.project_id, QuestionModel.created_at)
 Index("ix_datasets_project_created_at", DatasetModel.project_id, DatasetModel.created_at)
 Index("ix_notes_project_created_at", NoteModel.project_id, NoteModel.created_at)
+Index(
+    "ix_graph_change_sets_project_created_at",
+    GraphChangeSetModel.project_id,
+    GraphChangeSetModel.created_at,
+)
+Index(
+    "ix_graph_change_sets_note_created_at",
+    GraphChangeSetModel.source_note_id,
+    GraphChangeSetModel.created_at,
+)
+Index(
+    "ix_graph_change_operations_change_set_sequence",
+    GraphChangeOperationModel.change_set_id,
+    GraphChangeOperationModel.sequence,
+)
 Index(
     "ix_note_targets_entity_lookup",
     NoteTargetModel.entity_type,

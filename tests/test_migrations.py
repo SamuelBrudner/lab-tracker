@@ -102,6 +102,8 @@ def test_alembic_upgrade_head_creates_expected_tables(monkeypatch, tmp_path):
         "claim_datasets",
         "claim_analyses",
         "visualization_claims",
+        "graph_change_sets",
+        "graph_change_operations",
     }
     assert expected.issubset(table_names)
     assert "dataset_reviews" not in table_names

@@ -51,6 +51,8 @@ def test_retained_table_exports_exclude_users() -> None:
     assert "projects" in table_names
     assert "questions" in table_names
     assert "notes" in table_names
+    assert "graph_change_sets" in table_names
+    assert "graph_change_operations" in table_names
 
 
 def test_export_tables_writes_deterministic_primary_key_order(

@@ -1,6 +1,7 @@
 import * as React from "react";
 
 import { Dashboard } from "./features/dashboard-projects.jsx";
+import { GraphDraftDetailCard } from "./features/graph-drafts.jsx";
 import { VisualizationDetailCard } from "./features/analysis/VisualizationDetailCard.jsx";
 import { DatasetDetailCard } from "./features/datasets/index.js";
 import { NoteDetailCard } from "./features/notes.jsx";
@@ -218,6 +219,20 @@ function App() {
               projects={workspaceData.projects}
               navigate={navigate}
               onSetActiveProject={workspaceData.setSelectedProjectId}
+              canWrite={auth.canWrite}
+              setBusy={setBusy}
+              setFlash={setFlash}
+            />
+          ) : null}
+
+          {route.kind === "graph-draft" ? (
+            <GraphDraftDetailCard
+              token={auth.token}
+              changeSetId={route.changeSetId}
+              navigate={navigate}
+              canWrite={auth.canWrite}
+              setBusy={setBusy}
+              setFlash={setFlash}
             />
           ) : null}
 

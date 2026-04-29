@@ -14,6 +14,7 @@ from lab_tracker.models import (
     Claim,
     Dataset,
     DatasetFile,
+    GraphChangeSet,
     Note,
     Project,
     Question,
@@ -29,6 +30,7 @@ from .analyses import (
 )
 from .core import SQLAlchemyProjectRepository, SQLAlchemyQuestionRepository
 from .datasets import SQLAlchemyDatasetRepository
+from .graph_drafts import SQLAlchemyGraphChangeSetRepository
 from .notes import SQLAlchemyNoteRepository
 from .sessions import SQLAlchemyAcquisitionOutputRepository, SQLAlchemySessionRepository
 
@@ -47,6 +49,7 @@ class SQLAlchemyLabTrackerRepository(LabTrackerRepository):
         self.analyses = SQLAlchemyAnalysisRepository(session)
         self.claims = SQLAlchemyClaimRepository(session)
         self.visualizations = SQLAlchemyVisualizationRepository(session)
+        self.graph_change_sets = SQLAlchemyGraphChangeSetRepository(session)
 
     def commit(self) -> None:
         self._session.commit()
@@ -250,6 +253,23 @@ class SQLAlchemyLabTrackerRepository(LabTrackerRepository):
             project_id=project_id,
             analysis_id=analysis_id,
             claim_id=claim_id,
+            limit=limit,
+            offset=offset,
+        )
+
+    def query_graph_change_sets(
+        self,
+        *,
+        project_id: UUID | None = None,
+        status: str | None = None,
+        source_note_id: UUID | None = None,
+        limit: int | None = None,
+        offset: int = 0,
+    ) -> tuple[list[GraphChangeSet], int]:
+        return self.graph_change_sets.query(
+            project_id=project_id,
+            status=status,
+            source_note_id=source_note_id,
             limit=limit,
             offset=offset,
         )

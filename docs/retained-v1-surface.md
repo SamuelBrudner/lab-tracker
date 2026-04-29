@@ -16,6 +16,8 @@ research record:
   substring behavior.
 - Manual note capture, including text notes, multipart raw file upload, raw file
   download, and attaching notes to retained entities.
+- On-demand image-to-graph draft review for a single uploaded image note, with
+  human edit/accept/reject before commit through normal API validation.
 - Sessions and acquisition outputs, including closing sessions and promoting
   eligible sessions into datasets.
 - Dataset staging and direct commit with provenance/manifest capture, without
@@ -36,7 +38,9 @@ The following workflows are explicitly deferred and are being retired from the
 supported product path:
 
 - OCR-based note transcription.
-- Automatic question extraction and extraction inbox workflows.
+- Automatic question extraction and extraction inbox workflows. The retained
+  image-to-graph draft action is explicitly on-demand and note-scoped; it is not
+  a standing extraction inbox.
 - Entity and tag suggestion workflows derived from notes or OCR output.
 - Semantic/vector search, embedding providers, and backend-specific relevance
   ranking.

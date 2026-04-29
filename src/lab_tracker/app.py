@@ -26,6 +26,7 @@ from lab_tracker.db_models import (
     AnalysisModel,
     ClaimModel,
     DatasetModel,
+    GraphChangeSetModel,
     NoteModel,
     ProjectModel,
     QuestionModel,
@@ -34,6 +35,7 @@ from lab_tracker.db_models import (
 )
 from lab_tracker.errors import AuthError
 from lab_tracker.file_storage import LocalFileStorageBackend
+from lab_tracker.graph_drafting import OpenAIGraphDraftClient
 from lab_tracker.logging import configure_logging
 from lab_tracker.note_storage import LocalNoteStorage
 from lab_tracker.schemas import ErrorEnvelope, ErrorInfo
@@ -132,6 +134,7 @@ def _empty_store_counts() -> dict[str, int]:
         "analyses": 0,
         "claims": 0,
         "visualizations": 0,
+        "graph_change_sets": 0,
     }
 
 
@@ -155,6 +158,7 @@ def _store_counts_from_database(
             counts["analyses"] = _count_rows(session, AnalysisModel)
             counts["claims"] = _count_rows(session, ClaimModel)
             counts["visualizations"] = _count_rows(session, VisualizationModel)
+            counts["graph_change_sets"] = _count_rows(session, GraphChangeSetModel)
     except SQLAlchemyError as exc:
         return _empty_store_counts(), f"{exc.__class__.__name__}: {exc}"
     return counts, None
@@ -322,10 +326,12 @@ def create_app() -> FastAPI:
     app.state.db_session_factory = session_factory
     app.state.auth_service = auth_service
     app.state.auth_enabled = settings.is_auth_enabled()
+    app.state.settings = settings
     app.state.token_service = token_service
     app.state.file_storage_backend = file_storage_backend
     app.state.raw_note_storage = raw_note_storage
     app.state.lab_tracker_api = lab_tracker_api
+    app.state.graph_draft_client_factory = OpenAIGraphDraftClient.from_settings
     _configure_auth_middleware(app)
     _configure_database_session_middleware(app, api=app.state.lab_tracker_api)
 

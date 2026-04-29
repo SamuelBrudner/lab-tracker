@@ -12,6 +12,7 @@ import binascii
 from datetime import datetime, timezone
 from enum import Enum
 import re
+from typing import Any
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, computed_field
@@ -119,6 +120,26 @@ class EntityType(str, Enum):
     VISUALIZATION = "visualization"
 
 
+class GraphChangeSetStatus(str, Enum):
+    DRAFTING = "drafting"
+    READY = "ready"
+    FAILED = "failed"
+    COMMITTED = "committed"
+
+
+class GraphChangeOperationStatus(str, Enum):
+    PROPOSED = "proposed"
+    ACCEPTED = "accepted"
+    REJECTED = "rejected"
+    APPLIED = "applied"
+    FAILED = "failed"
+
+
+class GraphChangeOp(str, Enum):
+    CREATE = "create"
+    UPDATE = "update"
+
+
 class _DomainModel(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -165,6 +186,46 @@ class NoteRawAsset(_DomainModel):
     content_type: str
     size_bytes: int
     checksum: str
+
+
+class GraphChangeOperation(_DomainModel):
+    operation_id: UUID
+    change_set_id: UUID
+    sequence: int
+    op: GraphChangeOp
+    entity_type: EntityType
+    payload: dict[str, Any] = Field(default_factory=dict)
+    target_entity_id: UUID | None = None
+    client_ref: str | None = None
+    rationale: str = ""
+    confidence: float | None = Field(default=None, ge=0.0, le=1.0)
+    source_refs: list[dict[str, Any]] = Field(default_factory=list)
+    status: GraphChangeOperationStatus = GraphChangeOperationStatus.PROPOSED
+    result_entity_id: UUID | None = None
+    error_metadata: dict[str, Any] = Field(default_factory=dict)
+    created_at: datetime = Field(default_factory=utc_now)
+    updated_at: datetime = Field(default_factory=utc_now)
+
+
+class GraphChangeSet(_DomainModel):
+    change_set_id: UUID
+    project_id: UUID
+    source_note_id: UUID
+    source_checksum: str | None = None
+    source_content_type: str | None = None
+    source_filename: str | None = None
+    provider: str = "openai"
+    model: str
+    prompt_version: str
+    status: GraphChangeSetStatus = GraphChangeSetStatus.DRAFTING
+    commit_message: str | None = None
+    error_metadata: dict[str, Any] = Field(default_factory=dict)
+    operations: list[GraphChangeOperation] = Field(default_factory=list)
+    created_at: datetime = Field(default_factory=utc_now)
+    created_by: str | None = None
+    updated_at: datetime = Field(default_factory=utc_now)
+    committed_at: datetime | None = None
+    committed_by: str | None = None
 
 
 class Project(_DomainModel):

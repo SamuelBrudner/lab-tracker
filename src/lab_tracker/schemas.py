@@ -22,6 +22,8 @@ from lab_tracker.models import (
     DatasetCommitManifestInput,
     DatasetStatus,
     EntityRef,
+    GraphChangeOperationStatus,
+    GraphChangeSetStatus,
     Note,
     NoteStatus,
     ProjectStatus,
@@ -167,6 +169,21 @@ class NoteUpdate(RequestModel):
     targets: list[EntityRef] | None = None
     metadata: dict[str, str] | None = None
     status: NoteStatus | None = None
+
+
+class GraphDraftOperationUpdate(RequestModel):
+    payload: dict[str, Any] | None = None
+    status: GraphChangeOperationStatus | None = None
+
+
+class GraphDraftCommitRequest(RequestModel):
+    message: str = Field(..., min_length=1)
+
+
+class GraphDraftListFilters(BaseModel):
+    project_id: UUID | None = None
+    status: GraphChangeSetStatus | None = None
+    source_note_id: UUID | None = None
 
 
 class SessionCreate(RequestModel):

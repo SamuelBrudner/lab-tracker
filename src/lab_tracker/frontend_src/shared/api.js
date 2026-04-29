@@ -60,8 +60,8 @@ function buildApiPath(path, params = {}) {
 }
 
 async function apiFetch(path, options = {}) {
-  const { method = "GET", token = "", body = null } = options;
-  const { headers, isFormData } = buildRequestHeaders({ body, token });
+  const { method = "GET", token = "", body = null, accept = "application/json" } = options;
+  const { headers, isFormData } = buildRequestHeaders({ accept, body, token });
 
   const response = await fetch(path, {
     method,

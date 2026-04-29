@@ -13,7 +13,7 @@ function useApiResource(path, token, errorMessage) {
 
   useEffect(() => {
     let canceled = false;
-    if (!token || !path) {
+    if (!path) {
       setState({ data: null, error: "", loading: false });
       return () => {
         canceled = true;

@@ -8,6 +8,7 @@ Lab Tracker keeps the *reasoning* behind experiments connected to the data they 
 - **Sessions and datasets.** Acquisition sessions capture outputs at the rig, are closed when done, and eligible sessions can be promoted into Datasets. Dataset staging and direct commit capture a provenance manifest.
 - **Notes attached to entities.** Manual note capture — text or multipart raw file upload/download — attached to the question, session, dataset, or analysis they describe. Notes stay as the raw human record.
 - **Analysis, claims, visualizations.** Explicit records linking analysis runs back to the datasets and questions they address, with claims and visualizations as first-class artifacts.
+- **Image-to-graph draft review.** Image notes can ask GPT to draft graph changes, then humans edit, accept/reject, and commit those operations through the same API validation as normal writes.
 - **Search.** Substring search over questions and notes so prior context is findable later.
 
 What ships today is the minimum that preserves the core research record. The supported surface is defined in [`docs/retained-v1-surface.md`](docs/retained-v1-surface.md) — if it and this README disagree, that document wins. The broader vision (meeting-photo question capture, OCR, vector search, PI review gates) lives in [`idea.md`](idea.md) and is explicitly deferred.
@@ -104,6 +105,7 @@ Supported workflows in the frontend include:
 - project dashboard
 - question staging and activate workflow
 - manual note creation and multipart upload/download handling
+- image note graph draft review with human edit, accept/reject, and commit
 - sessions and acquisition outputs
 - dataset staging, file attachment, and direct commit with provenance capture
 - analysis, claim, and visualization tracking
@@ -128,6 +130,29 @@ development.
 - `LAB_TRACKER_AUTH_TOKEN_TTL_MINUTES`: access token lifetime (default: `720`)
 - `LAB_TRACKER_AUTH_ENABLED`: enable login and role enforcement (default: `false`
   in `local`, `true` otherwise; non-local environments cannot disable auth)
+- `LAB_TRACKER_OPENAI_API_KEY`: required for image-to-graph draft generation
+- `LAB_TRACKER_OPENAI_MODEL`: OpenAI model for graph drafts (default:
+  `gpt-5.4-mini`; set `gpt-5.5` or another compatible model to override)
+- `LAB_TRACKER_OPENAI_BASE_URL`: OpenAI API base URL (default:
+  `https://api.openai.com/v1`)
+- `LAB_TRACKER_OPENAI_TIMEOUT_SECONDS`: graph draft API timeout in seconds
+  (default: `60`)
+
+### Image-to-graph draft review
+
+To try the local image review loop:
+
+```powershell
+$env:LAB_TRACKER_OPENAI_API_KEY = "<your OpenAI API key>"
+$env:LAB_TRACKER_OPENAI_MODEL = "gpt-5.4-mini"
+uv run alembic upgrade head
+uv run uvicorn lab_tracker.asgi:app --reload
+```
+
+Open `http://127.0.0.1:8000/app`, upload an image as a note, open the note
+detail page, choose `Draft graph update`, review the operation payload JSON, and
+commit the accepted changes with a message. The uploaded image note remains the
+provenance anchor; GPT drafts are untrusted until reviewed and committed.
 
 The retained v1 runtime keeps note handling manual and uses direct substring
 search for query flows. Deferred concepts live in

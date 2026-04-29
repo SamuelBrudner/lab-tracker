@@ -1,9 +1,10 @@
 import * as React from "react";
 
+import { apiRequest } from "../shared/api.js";
 import { formatDate } from "../shared/formatters.js";
 import { useApiResource } from "../hooks/useApiResource.js";
 
-const { useMemo } = React;
+const { useEffect, useMemo, useState } = React;
 
 function NotePanel({
   canWrite,
@@ -101,12 +102,23 @@ function NotePanel({
   );
 }
 
-function NoteDetailCard({ token, noteId, projects, navigate, onSetActiveProject }) {
+function NoteDetailCard({
+  token,
+  noteId,
+  projects,
+  navigate,
+  onSetActiveProject,
+  canWrite,
+  setBusy,
+  setFlash,
+}) {
   const { data: note, error, loading } = useApiResource(
-    token && noteId ? `/notes/${noteId}` : "",
+    noteId ? `/notes/${noteId}` : "",
     token,
     "Failed to load note."
   );
+  const [imagePreview, setImagePreview] = useState("");
+  const isImage = Boolean(note?.raw_asset?.content_type?.startsWith("image/"));
 
   const project = useMemo(() => {
     if (!note) {
@@ -114,6 +126,56 @@ function NoteDetailCard({ token, noteId, projects, navigate, onSetActiveProject 
     }
     return projects.find((item) => item.project_id === note.project_id) || null;
   }, [projects, note]);
+
+  useEffect(() => {
+    let canceled = false;
+    setImagePreview("");
+    if (!note || !isImage) {
+      return () => {
+        canceled = true;
+      };
+    }
+    apiRequest(`/notes/${note.note_id}/raw`, { token })
+      .then((raw) => {
+        if (!canceled && raw?.content_base64 && raw?.content_type) {
+          setImagePreview(`data:${raw.content_type};base64,${raw.content_base64}`);
+        }
+      })
+      .catch(() => {
+        if (!canceled) {
+          setImagePreview("");
+        }
+      });
+    return () => {
+      canceled = true;
+    };
+  }, [isImage, note, token]);
+
+  async function handleDraftGraphUpdate() {
+    if (!note || !canWrite || !isImage) {
+      return;
+    }
+    setBusy(true);
+    setFlash("", "");
+    try {
+      const draft = await apiRequest(`/notes/${note.note_id}/graph-drafts`, {
+        method: "POST",
+        token,
+      });
+      if (draft?.status === "failed") {
+        setFlash("", draft.error_metadata?.message || "Graph draft failed.");
+      } else {
+        setFlash("Graph draft ready for review.");
+      }
+      if (draft?.change_set_id) {
+        navigate(`/app/graph-drafts/${draft.change_set_id}`);
+      }
+    } catch (err) {
+      setFlash("", err.message || "Failed to draft graph update.");
+    } finally {
+      setBusy(false);
+    }
+  }
 
   return (
     <article className="card span-8">
@@ -127,7 +189,15 @@ function NoteDetailCard({ token, noteId, projects, navigate, onSetActiveProject 
           <div className="inline">
             <span className="pill">{note.status}</span>
             {project ? <span className="pill">{project.name}</span> : null}
+            {note.raw_asset ? <span className="pill">{note.raw_asset.content_type}</span> : null}
           </div>
+          {imagePreview ? (
+            <img
+              className="note-image"
+              src={imagePreview}
+              alt={note.raw_asset?.filename || "Uploaded note"}
+            />
+          ) : null}
           <div className="stack">
             <div>
               <div className="subtle">Transcribed text</div>
@@ -165,6 +235,16 @@ function NoteDetailCard({ token, noteId, projects, navigate, onSetActiveProject 
             }}
           >
             Set active project
+          </button>
+        ) : null}
+        {note && isImage ? (
+          <button
+            type="button"
+            className="btn-primary"
+            disabled={!canWrite}
+            onClick={handleDraftGraphUpdate}
+          >
+            Draft graph update
           </button>
         ) : null}
       </div>

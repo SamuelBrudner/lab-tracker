@@ -143,19 +143,26 @@ function dataset({
 
 function note({
   createdAt = "2026-04-20T00:00:00Z",
+  metadata = {},
   noteId = "note-1",
   projectId = "project-1",
+  rawAsset = null,
   rawContent = "",
   status = "staged",
+  targets = [],
   transcribedText = "Captured note",
 } = {}) {
   return {
     created_at: createdAt,
+    metadata,
     note_id: noteId,
     project_id: projectId,
+    raw_asset: rawAsset,
     raw_content: rawContent,
     status,
+    targets,
     transcribed_text: transcribedText,
+    updated_at: createdAt,
   };
 }
 
@@ -278,6 +285,228 @@ describe("App", () => {
 
     expect(await screen.findByRole("heading", { name: "Question Detail" })).toBeInTheDocument();
     expect(await screen.findByText("How stable is the rig today?")).toBeInTheDocument();
+  });
+
+  it("previews an image note and starts a graph draft", async () => {
+    const noteId = "11111111-1111-4111-8111-111111111111";
+    const draftId = "22222222-2222-4222-8222-222222222222";
+    localStorage.setItem(TOKEN_STORAGE_KEY, "token-note-draft");
+    window.history.replaceState({}, "", `/app/notes/${noteId}`);
+
+    installFetchMock([
+      {
+        match: "/auth/me",
+        response: apiResponse({ role: "admin", username: "sam" }),
+      },
+      {
+        match: projectsPath,
+        response: apiResponse([]),
+      },
+      {
+        match: `/notes/${noteId}`,
+        response: apiResponse(
+          note({
+            noteId,
+            rawAsset: {
+              checksum: "abc",
+              content_type: "image/jpeg",
+              filename: "whiteboard.jpg",
+              size_bytes: 4,
+              storage_id: "33333333-3333-4333-8333-333333333333",
+            },
+          })
+        ),
+      },
+      {
+        match: `/notes/${noteId}/raw`,
+        response: apiResponse({
+          checksum: "abc",
+          content_base64: "aW1n",
+          content_type: "image/jpeg",
+          filename: "whiteboard.jpg",
+          size_bytes: 4,
+          storage_id: "33333333-3333-4333-8333-333333333333",
+        }),
+      },
+      {
+        match: `/notes/${noteId}/graph-drafts`,
+        method: "POST",
+        response: apiResponse({
+          change_set_id: draftId,
+          created_at: "2026-04-20T00:00:00Z",
+          model: "gpt-5.4-mini",
+          operations: [],
+          project_id: "project-1",
+          prompt_version: "image-graph-draft-v1",
+          provider: "openai",
+          source_content_type: "image/jpeg",
+          source_note_id: noteId,
+          status: "ready",
+          updated_at: "2026-04-20T00:00:00Z",
+        }),
+      },
+      {
+        match: `/graph-drafts/${draftId}`,
+        response: apiResponse({
+          change_set_id: draftId,
+          created_at: "2026-04-20T00:00:00Z",
+          model: "gpt-5.4-mini",
+          operations: [],
+          project_id: "project-1",
+          prompt_version: "image-graph-draft-v1",
+          provider: "openai",
+          source_content_type: "image/jpeg",
+          source_note_id: noteId,
+          status: "ready",
+          updated_at: "2026-04-20T00:00:00Z",
+        }),
+      },
+    ]);
+
+    render(<App />);
+
+    expect(await screen.findByRole("heading", { name: "Note Detail" })).toBeInTheDocument();
+    expect(await screen.findByAltText("whiteboard.jpg")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Draft graph update" }));
+
+    expect(await screen.findByRole("heading", { name: "Graph Draft Review" })).toBeInTheDocument();
+    expect(await screen.findByText("Graph draft ready for review.")).toBeInTheDocument();
+  });
+
+  it("reviews, edits, accepts, and commits a graph draft", async () => {
+    const noteId = "11111111-1111-4111-8111-111111111111";
+    const draftId = "22222222-2222-4222-8222-222222222222";
+    const operationId = "33333333-3333-4333-8333-333333333333";
+    const questionId = "44444444-4444-4444-8444-444444444444";
+    const baseOperation = {
+      change_set_id: draftId,
+      client_ref: "q1",
+      confidence: 0.82,
+      created_at: "2026-04-20T00:00:00Z",
+      entity_type: "question",
+      error_metadata: {},
+      op: "create",
+      operation_id: operationId,
+      payload: {
+        project_id: "project-1",
+        question_type: "descriptive",
+        text: "Drafted question",
+      },
+      rationale: "The whiteboard asks this explicitly.",
+      result_entity_id: null,
+      sequence: 1,
+      source_refs: [{ label: "whiteboard", quote: "yield?", region: null }],
+      status: "proposed",
+      target_entity_id: null,
+      updated_at: "2026-04-20T00:00:00Z",
+    };
+    const draftBase = {
+      change_set_id: draftId,
+      created_at: "2026-04-20T00:00:00Z",
+      model: "gpt-5.4-mini",
+      operations: [baseOperation],
+      project_id: "project-1",
+      prompt_version: "image-graph-draft-v1",
+      provider: "openai",
+      source_content_type: "image/jpeg",
+      source_filename: "whiteboard.jpg",
+      source_note_id: noteId,
+      status: "ready",
+      updated_at: "2026-04-20T00:00:00Z",
+    };
+
+    localStorage.setItem(TOKEN_STORAGE_KEY, "token-graph-draft");
+    window.history.replaceState({}, "", `/app/graph-drafts/${draftId}`);
+
+    installFetchMock([
+      {
+        match: "/auth/me",
+        response: apiResponse({ role: "admin", username: "sam" }),
+      },
+      {
+        match: projectsPath,
+        response: apiResponse([]),
+      },
+      {
+        match: `/graph-drafts/${draftId}`,
+        response: apiResponse(draftBase),
+      },
+      {
+        match: `/notes/${noteId}/raw`,
+        response: apiResponse({
+          checksum: "abc",
+          content_base64: "aW1n",
+          content_type: "image/jpeg",
+          filename: "whiteboard.jpg",
+          size_bytes: 4,
+          storage_id: "55555555-5555-4555-8555-555555555555",
+        }),
+      },
+      {
+        match: `/graph-drafts/${draftId}/operations/${operationId}`,
+        method: "PATCH",
+        response: (request) => {
+          const body = JSON.parse(request.init.body);
+          expect(body.status).toBe("accepted");
+          expect(body.payload.text).toBe("Edited draft question");
+          return apiResponse({
+            ...draftBase,
+            operations: [
+              {
+                ...baseOperation,
+                payload: body.payload,
+                status: "accepted",
+              },
+            ],
+          });
+        },
+      },
+      {
+        match: `/graph-drafts/${draftId}/commit`,
+        method: "POST",
+        response: (request) => {
+          const body = JSON.parse(request.init.body);
+          expect(body.message).toBe("Commit image draft");
+          return apiResponse({
+            ...draftBase,
+            commit_message: "Commit image draft",
+            operations: [
+              {
+                ...baseOperation,
+                result_entity_id: questionId,
+                status: "applied",
+              },
+            ],
+            status: "committed",
+          });
+        },
+      },
+    ]);
+
+    render(<App />);
+
+    expect(await screen.findByRole("heading", { name: "Graph Draft Review" })).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText("Payload JSON"), {
+      target: {
+        value: JSON.stringify({
+          project_id: "project-1",
+          question_type: "descriptive",
+          text: "Edited draft question",
+        }),
+      },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Accept" }));
+
+    expect(await screen.findByText("accepted")).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText("Commit message"), {
+      target: { value: "Commit image draft" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Commit accepted changes" }));
+
+    expect(await screen.findByText("Graph draft committed.")).toBeInTheDocument();
+    expect(await screen.findByText("applied")).toBeInTheDocument();
+    expect(await screen.findByText(questionId)).toBeInTheDocument();
   });
 
   it("shows a visible restore error when session bootstrap fails", async () => {

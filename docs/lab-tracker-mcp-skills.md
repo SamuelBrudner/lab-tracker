@@ -75,7 +75,8 @@ Defaults:
 - Override binary with `LAB_TRACKER_DOLT_BIN`
 - Override mirror path with `LAB_TRACKER_DOLT_MIRROR_PATH`
 
-The exporter mirrors retained Lab Tracker tables and excludes `users`.
+The exporter mirrors retained Lab Tracker tables, including graph draft review
+tables, and excludes `users`.
 
 ## Skill
 
