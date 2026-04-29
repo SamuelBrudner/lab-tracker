@@ -14,6 +14,7 @@ def _bootstrap_database(monkeypatch, tmp_path) -> None:
     db_path = tmp_path / "auth-routes.db"
     database_url = f"sqlite+pysqlite:///{db_path}"
     monkeypatch.setenv("LAB_TRACKER_DATABASE_URL", database_url)
+    monkeypatch.setenv("LAB_TRACKER_ENVIRONMENT", "local")
     monkeypatch.setenv("LAB_TRACKER_NOTE_STORAGE_PATH", str(tmp_path / "note-storage"))
     monkeypatch.setenv("LAB_TRACKER_AUTH_SECRET_KEY", "test-secret")
     monkeypatch.setenv("LAB_TRACKER_AUTH_ENABLED", "true")

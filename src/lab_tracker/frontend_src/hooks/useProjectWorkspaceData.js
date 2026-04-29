@@ -4,7 +4,13 @@ import { apiListRequest, buildApiPath, fetchAllPages } from "../shared/api.js";
 
 const { useCallback, useEffect, useMemo, useRef, useState } = React;
 
-function useProjectWorkspaceData({ token, setBusy, setFlash, loadProjectData = true }) {
+function useProjectWorkspaceData({
+  token,
+  setBusy,
+  setFlash,
+  enabled = true,
+  loadProjectData = true,
+}) {
   const [projects, setProjects] = useState([]);
   const [selectedProjectId, setSelectedProjectId] = useState("");
   const [questions, setQuestions] = useState([]);
@@ -26,7 +32,7 @@ function useProjectWorkspaceData({ token, setBusy, setFlash, loadProjectData = t
 
   const refreshProjectData = useCallback(
     async (projectId) => {
-      if (!projectId || !token) {
+      if (!projectId) {
         return;
       }
 
@@ -56,7 +62,7 @@ function useProjectWorkspaceData({ token, setBusy, setFlash, loadProjectData = t
 
   const refreshProjectCounts = useCallback(
     async (projectId, { clearCollections = false } = {}) => {
-      if (!projectId || !token) {
+      if (!projectId) {
         return;
       }
 
@@ -91,7 +97,7 @@ function useProjectWorkspaceData({ token, setBusy, setFlash, loadProjectData = t
   );
 
   const refreshProjects = useCallback(async () => {
-    if (!token) {
+    if (!enabled) {
       return [];
     }
     const requestId = projectsRequestRef.current + 1;
@@ -112,10 +118,10 @@ function useProjectWorkspaceData({ token, setBusy, setFlash, loadProjectData = t
       return nextProjects[0].project_id;
     });
     return nextProjects;
-  }, [clearProjectState, token]);
+  }, [clearProjectState, enabled, token]);
 
   useEffect(() => {
-    if (!token) {
+    if (!enabled) {
       projectsRequestRef.current += 1;
       projectDataRequestRef.current += 1;
       setProjects([]);
@@ -140,10 +146,10 @@ function useProjectWorkspaceData({ token, setBusy, setFlash, loadProjectData = t
     return () => {
       canceled = true;
     };
-  }, [clearProjectState, refreshProjects, setBusy, setFlash, token]);
+  }, [clearProjectState, enabled, refreshProjects, setBusy, setFlash]);
 
   useEffect(() => {
-    if (!token || !selectedProjectId) {
+    if (!enabled || !selectedProjectId) {
       projectDataRequestRef.current += 1;
       setQuestions([]);
       setDatasets([]);
@@ -178,7 +184,7 @@ function useProjectWorkspaceData({ token, setBusy, setFlash, loadProjectData = t
     selectedProjectId,
     setBusy,
     setFlash,
-    token,
+    enabled,
   ]);
 
   const stagedQuestions = useMemo(

@@ -12,7 +12,7 @@ function useProjectSessionData({ token, selectedProjectId, setFlash, enabled = t
 
   const refreshActiveSessions = useCallback(
     async (projectId = selectedProjectId) => {
-      if (!token || !projectId) {
+      if (!projectId) {
         setSessions([]);
         setError("");
         return [];
@@ -54,7 +54,7 @@ function useProjectSessionData({ token, selectedProjectId, setFlash, enabled = t
   );
 
   useEffect(() => {
-    if (!enabled || !token || !selectedProjectId) {
+    if (!enabled || !selectedProjectId) {
       requestRef.current += 1;
       setLoading(false);
       setError("");
@@ -63,7 +63,7 @@ function useProjectSessionData({ token, selectedProjectId, setFlash, enabled = t
     }
 
     refreshActiveSessions(selectedProjectId);
-  }, [enabled, refreshActiveSessions, selectedProjectId, token]);
+  }, [enabled, refreshActiveSessions, selectedProjectId]);
 
   return {
     error,

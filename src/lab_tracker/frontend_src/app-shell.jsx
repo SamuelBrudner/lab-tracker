@@ -41,20 +41,22 @@ function App() {
   }, []);
 
   const auth = useAuthSession({ replace, setBusy, setFlash });
+  const apiEnabled = auth.authChecked && (!auth.authEnabled || Boolean(auth.token));
   const workspaceData = useProjectWorkspaceData({
+    enabled: apiEnabled,
     loadProjectData: isHomeRoute,
     token: auth.token,
     setBusy,
     setFlash,
   });
   const noteData = useProjectNoteData({
-    enabled: isHomeRoute,
+    enabled: isHomeRoute && apiEnabled,
     selectedProjectId: workspaceData.selectedProjectId,
     setFlash,
     token: auth.token,
   });
   const sessionData = useProjectSessionData({
-    enabled: isHomeRoute,
+    enabled: isHomeRoute && apiEnabled,
     selectedProjectId: workspaceData.selectedProjectId,
     setFlash,
     token: auth.token,
@@ -126,7 +128,7 @@ function App() {
     setFlash,
   });
   const analysis = useAnalysisWorkflow({
-    enabled: isHomeRoute,
+    enabled: isHomeRoute && apiEnabled,
     token: auth.token,
     canWrite: auth.canWrite,
     selectedProjectId: workspaceData.selectedProjectId,

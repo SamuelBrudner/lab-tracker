@@ -53,6 +53,7 @@ class Settings(BaseSettings):
         env_prefix="LAB_TRACKER_",
         env_file=".env",
         case_sensitive=False,
+        extra="ignore",
     )
 
 

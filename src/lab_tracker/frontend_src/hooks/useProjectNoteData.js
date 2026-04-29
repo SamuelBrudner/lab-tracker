@@ -14,7 +14,7 @@ function useProjectNoteData({ token, selectedProjectId, setFlash, enabled = true
 
   const refreshRecentNotes = useCallback(
     async (projectId = selectedProjectId) => {
-      if (!token || !projectId) {
+      if (!projectId) {
         setNotes([]);
         setError("");
         return [];
@@ -57,7 +57,7 @@ function useProjectNoteData({ token, selectedProjectId, setFlash, enabled = true
   );
 
   useEffect(() => {
-    if (!enabled || !token || !selectedProjectId) {
+    if (!enabled || !selectedProjectId) {
       requestRef.current += 1;
       setLoading(false);
       setError("");
@@ -66,7 +66,7 @@ function useProjectNoteData({ token, selectedProjectId, setFlash, enabled = true
     }
 
     refreshRecentNotes(selectedProjectId);
-  }, [enabled, refreshRecentNotes, selectedProjectId, token]);
+  }, [enabled, refreshRecentNotes, selectedProjectId]);
 
   return {
     error,

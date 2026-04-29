@@ -20,7 +20,7 @@ function useDatasetWorkflow({
 
   const loadDatasetFiles = useCallback(
     async (datasetId, { force = false } = {}) => {
-      if (!token) {
+      if (!datasetId) {
         return null;
       }
       const currentState = datasetFilesById[datasetId];

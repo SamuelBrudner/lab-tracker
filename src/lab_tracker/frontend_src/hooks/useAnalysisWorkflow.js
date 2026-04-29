@@ -33,7 +33,7 @@ function useAnalysisWorkflow({ token, canWrite, selectedProjectId, setBusy, setF
 
   const refreshAnalysisData = useCallback(
     async (projectId = selectedProjectId) => {
-      if (!projectId || !token) {
+      if (!projectId) {
         setAnalysisError("");
         setStagedAnalyses([]);
         setRecentCommittedAnalyses([]);
@@ -119,7 +119,7 @@ function useAnalysisWorkflow({ token, canWrite, selectedProjectId, setBusy, setF
 
   const loadVisualizations = useCallback(
     async (analysisId, { force = false } = {}) => {
-      if (!analysisId || !token) {
+      if (!analysisId) {
         return [];
       }
 
@@ -192,7 +192,7 @@ function useAnalysisWorkflow({ token, canWrite, selectedProjectId, setBusy, setF
   }, [selectedProjectId, token]);
 
   useEffect(() => {
-    if (!enabled || !token || !selectedProjectId) {
+    if (!enabled || !selectedProjectId) {
       analysisRequestRef.current += 1;
       setAnalysisLoading(false);
       setAnalysisError("");
@@ -202,7 +202,7 @@ function useAnalysisWorkflow({ token, canWrite, selectedProjectId, setBusy, setF
     }
 
     refreshAnalysisData(selectedProjectId);
-  }, [enabled, refreshAnalysisData, selectedProjectId, token]);
+  }, [enabled, refreshAnalysisData, selectedProjectId]);
 
   async function handleCreateAnalysis(event) {
     event.preventDefault();

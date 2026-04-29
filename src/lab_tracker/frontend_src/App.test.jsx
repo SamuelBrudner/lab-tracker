@@ -233,6 +233,59 @@ function requestedUrls(fetchMock) {
 }
 
 describe("App", () => {
+  it("loads projects without a token when local auth is disabled", async () => {
+    const fetchMock = installFetchMock([
+      {
+        match: "/auth/me",
+        response: apiResponse(
+          { role: "admin", username: "local-tester" },
+          200,
+          { auth_enabled: false }
+        ),
+      },
+      {
+        match: projectsPath,
+        response: apiResponse([project("project-1", "Temporal odor project")]),
+      },
+      {
+        match: questionListPath("project-1"),
+        response: paged([question({ projectId: "project-1", text: "Odor timing?" })]),
+      },
+      {
+        match: datasetListPath("project-1"),
+        response: paged([]),
+      },
+      {
+        match: noteCountPath("project-1"),
+        response: paged([], { limit: 1, offset: 0, total: 0 }),
+      },
+      {
+        match: recentNotesPath("project-1"),
+        response: paged([]),
+      },
+      {
+        match: activeSessionsPath("project-1"),
+        response: paged([]),
+      },
+      {
+        match: stagedAnalysesPath("project-1"),
+        response: paged([]),
+      },
+      {
+        match: committedAnalysesMetaPath("project-1"),
+        response: paged([], { limit: 1, offset: 0, total: 0 }),
+      },
+    ]);
+
+    render(<App />);
+
+    const selector = await screen.findByLabelText("Active project");
+    await waitFor(() => expect(selector).toHaveValue("project-1"));
+    expect(screen.getAllByText("Temporal odor project").length).toBeGreaterThan(0);
+    await waitFor(() => expect(screen.getAllByText("Odor timing?").length).toBeGreaterThan(0));
+    expect(requestedUrls(fetchMock)).toContain(projectsPath);
+  });
+
   it("restores a stored session and signs out", async () => {
     localStorage.setItem(TOKEN_STORAGE_KEY, "token-1");
     installFetchMock([
