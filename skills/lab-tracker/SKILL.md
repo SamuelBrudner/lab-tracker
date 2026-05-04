@@ -45,11 +45,14 @@ Use these tools when available:
 - `lab_tracker_health` checks the API health endpoint.
 - `lab_tracker_readiness` checks database and storage readiness.
 - `lab_tracker_list_projects` lists active or archived projects.
-- `lab_tracker_list_questions` filters questions by project, status, type, or search text.
+- `lab_tracker_list_questions` filters questions by project, status, type, search text,
+  direct parent, or recursive ancestor.
 - `lab_tracker_list_notes` filters notes by project, status, or search text.
 - `lab_tracker_search` searches questions and notes together.
 - `lab_tracker_create_project` creates a local project.
-- `lab_tracker_create_question` creates a question in a project.
+- `lab_tracker_create_question` creates a question in a project; pass
+  `parent_question_ids` to place atomic child questions under broader motivating
+  questions.
 - `lab_tracker_create_note` creates a text note in a project.
 
 Creation tools write through the API, using the configured service account when
@@ -71,6 +74,9 @@ Use `LAB_TRACKER_DOLT_BIN` or `LAB_TRACKER_DOLT_MIRROR_PATH` to override them.
 ## Domain Cues
 
 - Questions are first-class and may be staged, active, answered, or abandoned.
+- Use `parent_question_ids` as the v1 hierarchy mechanism: broad motivating
+  questions should sit above small atomic experimental, method, control, and
+  analysis questions.
 - Sessions capture acquisition activity and can promote outputs into datasets.
 - Notes are raw human records and can target projects, questions, sessions, datasets,
   analyses, claims, or visualizations.

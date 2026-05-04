@@ -12,6 +12,8 @@ function useQuestionActions({
   questionType,
   questionHypothesis,
   setQuestionHypothesis,
+  questionParentIds = [],
+  setQuestionParentIds = () => {},
 }) {
   async function handleCreateQuestion(event) {
     event.preventDefault();
@@ -31,6 +33,7 @@ function useQuestionActions({
           hypothesis: questionHypothesis.trim() || null,
           project_id: selectedProjectId,
           question_type: questionType,
+          parent_question_ids: questionParentIds,
           text: questionText.trim(),
         },
         method: "POST",
@@ -38,6 +41,7 @@ function useQuestionActions({
       });
       setQuestionText("");
       setQuestionHypothesis("");
+      setQuestionParentIds([]);
       await refreshProjectData(selectedProjectId);
       setFlash("Question staged.");
     } catch (err) {

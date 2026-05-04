@@ -89,6 +89,8 @@ class LabTrackerAPIClient:
         status: str | None = None,
         question_type: str | None = None,
         search: str | None = None,
+        parent_question_id: str | None = None,
+        ancestor_question_id: str | None = None,
         limit: int = 50,
         offset: int = 0,
     ) -> JsonObject:
@@ -100,6 +102,8 @@ class LabTrackerAPIClient:
                 "status": status,
                 "question_type": question_type,
                 "search": search,
+                "parent_question_id": parent_question_id,
+                "ancestor_question_id": ancestor_question_id,
                 "limit": limit,
                 "offset": offset,
             },
@@ -354,10 +358,12 @@ def lab_tracker_list_questions(
     status: str | None = None,
     question_type: str | None = None,
     search: str | None = None,
+    parent_question_id: str | None = None,
+    ancestor_question_id: str | None = None,
     limit: int = 50,
     offset: int = 0,
 ) -> JsonObject:
-    """List or search Lab Tracker questions through the API."""
+    """List/search questions; use parent or ancestor filters for hierarchy traversal."""
     client = client_from_env()
     try:
         return client.list_questions(
@@ -365,6 +371,8 @@ def lab_tracker_list_questions(
             status=status,
             question_type=question_type,
             search=search,
+            parent_question_id=parent_question_id,
+            ancestor_question_id=ancestor_question_id,
             limit=limit,
             offset=offset,
         )

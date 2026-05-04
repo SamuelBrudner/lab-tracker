@@ -5,7 +5,14 @@ import { useApiResource } from "../../hooks/useApiResource.js";
 
 const { useMemo } = React;
 
-function QuestionDetailCard({ token, questionId, projects, navigate, onSetActiveProject }) {
+function QuestionDetailCard({
+  token,
+  questionId,
+  projects,
+  questions = [],
+  navigate,
+  onSetActiveProject,
+}) {
   const { data: question, error, loading } = useApiResource(
     token && questionId ? `/questions/${questionId}` : "",
     token,
@@ -18,6 +25,15 @@ function QuestionDetailCard({ token, questionId, projects, navigate, onSetActive
     }
     return projects.find((item) => item.project_id === question.project_id) || null;
   }, [projects, question]);
+  const parentQuestionNames = useMemo(() => {
+    if (!question || !Array.isArray(question.parent_question_ids)) {
+      return [];
+    }
+    const questionById = new Map(questions.map((item) => [item.question_id, item]));
+    return question.parent_question_ids.map(
+      (parentId) => questionById.get(parentId)?.text || parentId
+    );
+  }, [question, questions]);
 
   return (
     <article className="card span-8">
@@ -35,6 +51,9 @@ function QuestionDetailCard({ token, questionId, projects, navigate, onSetActive
           </div>
           <p>{question.text}</p>
           {question.hypothesis ? <p className="subtle">Hypothesis: {question.hypothesis}</p> : null}
+          {parentQuestionNames.length > 0 ? (
+            <p className="subtle">Parents: {parentQuestionNames.join(" / ")}</p>
+          ) : null}
           <div className="stack">
             <div className="subtle">Question ID</div>
             <div className="mono">{question.question_id}</div>

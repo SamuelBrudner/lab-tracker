@@ -50,14 +50,23 @@ function WorkspaceHome({
         questionText={workspaceForms.questionText}
         questionType={workspaceForms.questionType}
         questionHypothesis={workspaceForms.questionHypothesis}
+        questionParentIds={workspaceForms.questionParentIds}
         onQuestionTextChange={(event) => workspaceForms.setQuestionText(event.target.value)}
         onQuestionTypeChange={(event) => workspaceForms.setQuestionType(event.target.value)}
         onQuestionHypothesisChange={(event) =>
           workspaceForms.setQuestionHypothesis(event.target.value)
         }
+        onQuestionParentIdsChange={(event) => {
+          const selected = Array.from(event.target.selectedOptions || []).map(
+            (option) => option.value
+          );
+          workspaceForms.setQuestionParentIds(selected);
+        }}
         onCreateQuestion={questionActions.handleCreateQuestion}
+        questions={workspaceData.questions}
         stagedQuestions={workspaceData.stagedQuestions}
         onActivateQuestion={questionActions.handleActivateQuestion}
+        navigate={navigate}
       />
 
       <SessionPanel

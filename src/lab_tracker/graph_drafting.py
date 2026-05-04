@@ -193,10 +193,15 @@ def _instructions() -> str:
         "changes. Propose only changes that are supported by the image and context. "
         "Use create or update operations for project, question, note, session, dataset, "
         "analysis, claim, or visualization entities. Use payload_json as a JSON object "
-        "string matching the existing Lab Tracker API request shape. For created objects "
-        "that later operations should reference, set client_ref to a short stable name "
-        "and use {\"$ref\":\"name\"} inside later payload_json fields. Never claim a "
-        "canonical update happened; these are drafts for human review."
+        "string matching the existing Lab Tracker API request shape. For questions, prefer "
+        "small atomic experimental, method, control, or analysis questions linked under "
+        "broader motivating questions with parent_question_ids. If the image supports a "
+        "new broad question and child question, create the parent first with a client_ref "
+        "such as \"parent_question\", then set the child payload's parent_question_ids to "
+        "[{\"$ref\":\"parent_question\"}]. For created objects that later operations "
+        "should reference, set client_ref to a short stable name and use {\"$ref\":\"name\"} "
+        "inside later payload_json fields. Never claim a canonical update happened; these "
+        "are drafts for human review."
     )
 
 

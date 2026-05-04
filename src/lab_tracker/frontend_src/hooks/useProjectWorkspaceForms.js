@@ -9,6 +9,7 @@ function useProjectWorkspaceForms({ questions }) {
   const [questionText, setQuestionText] = useState("");
   const [questionType, setQuestionType] = useState("descriptive");
   const [questionHypothesis, setQuestionHypothesis] = useState("");
+  const [questionParentIds, setQuestionParentIds] = useState([]);
 
   const [noteText, setNoteText] = useState("");
   const [uploadFile, setUploadFile] = useState(null);
@@ -37,11 +38,20 @@ function useProjectWorkspaceForms({ questions }) {
     }
   }, [questions, sessionPrimaryQuestionId, sessionType]);
 
+  useEffect(() => {
+    const validQuestionIds = new Set(questions.map((item) => item.question_id));
+    setQuestionParentIds((current) => {
+      const next = current.filter((questionId) => validQuestionIds.has(questionId));
+      return next.length === current.length ? current : next;
+    });
+  }, [questions]);
+
   return {
     noteText,
     projectDescription,
     projectName,
     questionHypothesis,
+    questionParentIds,
     questionText,
     questionType,
     sessionPrimaryQuestionId,
@@ -50,6 +60,7 @@ function useProjectWorkspaceForms({ questions }) {
     setProjectDescription,
     setProjectName,
     setQuestionHypothesis,
+    setQuestionParentIds,
     setQuestionText,
     setQuestionType,
     setSessionPrimaryQuestionId,

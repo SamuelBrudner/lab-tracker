@@ -276,6 +276,39 @@ button:disabled {
   align-items: center;
 }
 
+.question-parent-list {
+  margin-top: 0.32rem;
+}
+
+.question-map {
+  display: grid;
+  gap: 0.45rem;
+  margin-top: 0.45rem;
+}
+
+.question-node {
+  border-left: 3px solid var(--line);
+  padding: 0.38rem 0 0.38rem 0.6rem;
+}
+
+.question-node-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.42rem;
+  align-items: center;
+}
+
+.question-node-text {
+  max-width: 100%;
+  text-align: left;
+}
+
+.question-node-children {
+  display: grid;
+  gap: 0.35rem;
+  margin-top: 0.35rem;
+}
+
 .item-rejected {
   opacity: 0.72;
   background: #f6f2eb;

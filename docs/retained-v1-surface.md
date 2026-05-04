@@ -11,7 +11,8 @@ research record:
 
 - Auth and role-based access control.
 - Projects as the top-level container for work.
-- Questions created, staged, activated, and maintained explicitly by users.
+- Questions created, staged, activated, maintained explicitly by users, and
+  connected with `parent_question_ids` to form broad-to-atomic hierarchies.
 - Simple query/search flows over questions and notes using the built-in
   substring behavior.
 - Manual note capture, including text notes, multipart raw file upload, raw file

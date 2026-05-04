@@ -101,6 +101,7 @@ function project(projectId, name) {
 
 function question({
   createdAt = "2026-04-20T00:00:00Z",
+  parentQuestionIds = [],
   projectId = "project-1",
   questionId = "question-1",
   status = "active",
@@ -109,6 +110,7 @@ function question({
 } = {}) {
   return {
     created_at: createdAt,
+    parent_question_ids: parentQuestionIds,
     project_id: projectId,
     question_id: questionId,
     question_type: "descriptive",
@@ -841,6 +843,135 @@ describe("App", () => {
     expect(await screen.findByText("Question activated.")).toBeInTheDocument();
     await waitFor(() => {
       expect(screen.queryByRole("button", { name: "Commit (activate)" })).not.toBeInTheDocument();
+    });
+  });
+
+  it("stages a question under parents and renders the question map", async () => {
+    localStorage.setItem(TOKEN_STORAGE_KEY, "token-question-hierarchy");
+
+    const rootQuestion = question({
+      questionId: "question-root",
+      text: "How does odor timing shape navigation?",
+    });
+    const childQuestion = question({
+      parentQuestionIds: ["question-root"],
+      questionId: "question-child",
+      text: "Which temporal odor features drive forward locomotion?",
+    });
+    const grandchildQuestion = question({
+      parentQuestionIds: ["question-child"],
+      questionId: "question-grandchild",
+      status: "staged",
+      text: "Which controls isolate forward locomotion?",
+    });
+    const multiParentQuestion = question({
+      parentQuestionIds: ["question-root", "question-child"],
+      questionId: "question-multi",
+      text: "Which analysis controls rule out speed artifacts?",
+    });
+
+    const fetchMock = installFetchMock([
+      {
+        match: "/auth/me",
+        response: apiResponse({ role: "admin", username: "sam" }),
+      },
+      {
+        match: projectsPath,
+        response: apiResponse([project("project-1", "Temporal odor project")]),
+      },
+      {
+        match: questionListPath("project-1"),
+        response: [
+          paged([rootQuestion, childQuestion, grandchildQuestion, multiParentQuestion]),
+          paged([
+            rootQuestion,
+            childQuestion,
+            grandchildQuestion,
+            multiParentQuestion,
+            question({
+              parentQuestionIds: ["question-root"],
+              questionId: "question-new",
+              status: "staged",
+              text: "Which plume gaps change run length?",
+            }),
+          ]),
+        ],
+      },
+      {
+        match: "/questions",
+        method: "POST",
+        response: apiResponse(
+          question({
+            parentQuestionIds: ["question-root"],
+            questionId: "question-new",
+            status: "staged",
+            text: "Which plume gaps change run length?",
+          }),
+          201
+        ),
+      },
+      {
+        match: datasetListPath("project-1"),
+        response: [paged([]), paged([])],
+      },
+      {
+        match: noteCountPath("project-1"),
+        response: [
+          paged([], { limit: 1, offset: 0, total: 0 }),
+          paged([], { limit: 1, offset: 0, total: 0 }),
+        ],
+      },
+      {
+        match: recentNotesPath("project-1"),
+        response: paged([]),
+      },
+      {
+        match: activeSessionsPath("project-1"),
+        response: paged([]),
+      },
+      {
+        match: stagedAnalysesPath("project-1"),
+        response: paged([]),
+      },
+      {
+        match: committedAnalysesMetaPath("project-1"),
+        response: paged([], { limit: 1, offset: 0, total: 0 }),
+      },
+    ]);
+
+    render(<App />);
+
+    const questionMap = await screen.findByTestId("question-map");
+    expect(
+      within(questionMap).getAllByText("How does odor timing shape navigation?").length
+    ).toBeGreaterThan(0);
+    expect(
+      within(questionMap).getAllByText(
+        "Which temporal odor features drive forward locomotion?"
+      ).length
+    ).toBeGreaterThan(0);
+    expect(
+      within(questionMap).getAllByText("Which controls isolate forward locomotion?").length
+    ).toBeGreaterThan(0);
+    expect(within(questionMap).getAllByText("also linked elsewhere").length).toBeGreaterThan(0);
+
+    const parentSelect = screen.getByLabelText("Parent questions");
+    Array.from(parentSelect.options).forEach((option) => {
+      option.selected = option.value === "question-root";
+    });
+    fireEvent.change(parentSelect);
+    fireEvent.change(screen.getByLabelText("Question text"), {
+      target: { value: "Which plume gaps change run length?" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Stage question" }));
+
+    expect(await screen.findByText("Question staged.")).toBeInTheDocument();
+    const questionPost = fetchMock.mock.calls.find(
+      ([url, init]) => url === "/questions" && init?.method === "POST"
+    );
+    expect(JSON.parse(questionPost[1].body)).toMatchObject({
+      parent_question_ids: ["question-root"],
+      text: "Which plume gaps change run length?",
     });
   });
 

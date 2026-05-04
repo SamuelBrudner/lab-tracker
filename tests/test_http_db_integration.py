@@ -319,6 +319,102 @@ def test_question_list_paginates_beyond_200_records(
     assert len(payload["data"]) == 5
 
 
+def test_question_routes_store_and_filter_hierarchy(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+):
+    headers = admin_auth_headers
+    project_id = client.post(
+        "/projects",
+        json={"name": "Question hierarchy"},
+        headers=headers,
+    ).json()["data"]["project_id"]
+    other_project_id = client.post(
+        "/projects",
+        json={"name": "Other hierarchy project"},
+        headers=headers,
+    ).json()["data"]["project_id"]
+
+    root_id = client.post(
+        "/questions",
+        json={
+            "project_id": project_id,
+            "text": "What motivates this experiment?",
+            "question_type": "descriptive",
+        },
+        headers=headers,
+    ).json()["data"]["question_id"]
+    child_response = client.post(
+        "/questions",
+        json={
+            "project_id": project_id,
+            "text": "Which atomic behavior changes?",
+            "question_type": "hypothesis_driven",
+            "parent_question_ids": [root_id],
+        },
+        headers=headers,
+    )
+    assert child_response.status_code == 201
+    child_payload = child_response.json()["data"]
+    child_id = child_payload["question_id"]
+    assert child_payload["parent_question_ids"] == [root_id]
+
+    grandchild_id = client.post(
+        "/questions",
+        json={
+            "project_id": project_id,
+            "text": "Which control explains the change?",
+            "question_type": "method_dev",
+            "parent_question_ids": [child_id],
+        },
+        headers=headers,
+    ).json()["data"]["question_id"]
+
+    direct_children = client.get(
+        "/questions",
+        params={"project_id": project_id, "parent_question_id": root_id},
+        headers=headers,
+    )
+    assert direct_children.status_code == 200
+    assert _ids(direct_children.json()["data"], "question_id") == {child_id}
+
+    descendants = client.get(
+        "/questions",
+        params={"project_id": project_id, "ancestor_question_id": root_id},
+        headers=headers,
+    )
+    assert descendants.status_code == 200
+    assert _ids(descendants.json()["data"], "question_id") == {child_id, grandchild_id}
+
+    other_question_id = client.post(
+        "/questions",
+        json={
+            "project_id": other_project_id,
+            "text": "A question from another project",
+            "question_type": "descriptive",
+        },
+        headers=headers,
+    ).json()["data"]["question_id"]
+    cross_project_response = client.post(
+        "/questions",
+        json={
+            "project_id": project_id,
+            "text": "Should cross-project parents fail?",
+            "question_type": "other",
+            "parent_question_ids": [other_question_id],
+        },
+        headers=headers,
+    )
+    assert cross_project_response.status_code == 422
+
+    cycle_response = client.patch(
+        f"/questions/{root_id}",
+        json={"parent_question_ids": [grandchild_id]},
+        headers=headers,
+    )
+    assert cycle_response.status_code == 422
+
+
 def test_note_routes_support_target_filters_and_multipart_upload(
     client: TestClient,
     admin_auth_headers: dict[str, str],

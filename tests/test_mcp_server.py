@@ -55,6 +55,32 @@ def test_client_service_login_sends_bearer_auth_to_protected_routes() -> None:
     ]
 
 
+def test_client_list_questions_sends_hierarchy_filters() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/questions":
+            assert request.url.params["project_id"] == "project-1"
+            assert request.url.params["parent_question_id"] == "question-root"
+            assert request.url.params["ancestor_question_id"] == "question-ancestor"
+            return _json_response(200, {"data": [], "meta": {"total": 0}})
+        return _json_response(404, {"error": {"message": "not found"}})
+
+    client = mcp_server.LabTrackerAPIClient(
+        mcp_server.MCPSettings(base_url="http://testserver"),
+        transport=httpx.MockTransport(handler),
+    )
+
+    try:
+        payload = client.list_questions(
+            project_id="project-1",
+            parent_question_id="question-root",
+            ancestor_question_id="question-ancestor",
+        )
+    finally:
+        client.close()
+
+    assert payload["data"] == []
+
+
 def test_client_retries_once_after_expired_token() -> None:
     calls: list[tuple[str, str, str | None]] = []
 

@@ -36,6 +36,12 @@ Available tools:
 - `lab_tracker_create_question`
 - `lab_tracker_create_note`
 
+`lab_tracker_list_questions` can traverse the v1 question hierarchy with
+`parent_question_id` for direct children or `ancestor_question_id` for recursive
+descendants. `lab_tracker_create_question` accepts `parent_question_ids`; use it
+to place small atomic experimental, method, control, and analysis questions under
+broader motivating questions.
+
 ## Postgres Runtime
 
 For multiple live clients, prefer Postgres:

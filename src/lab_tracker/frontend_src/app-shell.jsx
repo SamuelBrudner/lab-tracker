@@ -88,6 +88,8 @@ function App() {
     questionType: workspaceForms.questionType,
     questionHypothesis: workspaceForms.questionHypothesis,
     setQuestionHypothesis: workspaceForms.setQuestionHypothesis,
+    questionParentIds: workspaceForms.questionParentIds,
+    setQuestionParentIds: workspaceForms.setQuestionParentIds,
   });
   const noteActions = useNoteActions({
     token: auth.token,
@@ -209,6 +211,7 @@ function App() {
               token={auth.token}
               questionId={route.questionId}
               projects={workspaceData.projects}
+              questions={workspaceData.questions}
               navigate={navigate}
               onSetActiveProject={workspaceData.setSelectedProjectId}
             />

@@ -109,6 +109,53 @@ def _draft_patch(project_id: str) -> dict[str, Any]:
     }
 
 
+def _hierarchy_draft_patch(project_id: str) -> dict[str, Any]:
+    return {
+        "summary": "Drafted a broad question with an atomic child.",
+        "operations": [
+            {
+                "client_ref": "broad_question",
+                "op": "create",
+                "entity_type": "question",
+                "target_entity_id": None,
+                "payload_json": json.dumps(
+                    {
+                        "project_id": project_id,
+                        "text": "How does odor timing shape navigation?",
+                        "question_type": "descriptive",
+                        "status": "staged",
+                    }
+                ),
+                "rationale": "The whiteboard frames a broad motivating question.",
+                "confidence": 0.84,
+                "source_refs": [
+                    {"label": "whiteboard", "quote": "odor timing", "region": None}
+                ],
+            },
+            {
+                "client_ref": "atomic_question",
+                "op": "create",
+                "entity_type": "question",
+                "target_entity_id": None,
+                "payload_json": json.dumps(
+                    {
+                        "project_id": project_id,
+                        "text": "Which odor-gap feature changes forward locomotion?",
+                        "question_type": "hypothesis_driven",
+                        "status": "staged",
+                        "parent_question_ids": [{"$ref": "broad_question"}],
+                    }
+                ),
+                "rationale": "The child isolates one testable behavior from the broad question.",
+                "confidence": 0.77,
+                "source_refs": [
+                    {"label": "whiteboard", "quote": "forward locomotion", "region": None}
+                ],
+            },
+        ],
+    }
+
+
 def test_openai_graph_draft_client_sends_responses_image_and_strict_schema() -> None:
     requests: list[dict[str, Any]] = []
 
@@ -142,6 +189,7 @@ def test_openai_graph_draft_client_sends_responses_image_and_strict_schema() -> 
     assert result == {"summary": "ok", "operations": []}
     request = requests[0]
     assert request["model"] == "gpt-test"
+    assert "parent_question_ids" in request["instructions"]
     assert request["input"][0]["content"][1]["type"] == "input_image"
     assert request["input"][0]["content"][1]["image_url"].startswith("data:image/png;base64,")
     assert request["text"]["format"]["type"] == "json_schema"
@@ -379,6 +427,45 @@ def test_edit_accept_and_commit_resolves_refs_into_canonical_records(
     )
     assert notes.status_code == 200
     assert notes.json()["data"][0]["targets"][0]["entity_id"] == question_id
+
+
+def test_commit_resolves_question_parent_refs(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+) -> None:
+    project_id = _project(client, admin_auth_headers)
+    note_id = _image_note(client, admin_auth_headers, project_id)
+    client.app.state.graph_draft_client_factory = lambda settings: FakeDraftClient(
+        _hierarchy_draft_patch(project_id)
+    )
+    draft = client.post(
+        f"/notes/{note_id}/graph-drafts",
+        headers=admin_auth_headers,
+    ).json()["data"]
+    change_set_id = draft["change_set_id"]
+    for operation in draft["operations"]:
+        accepted = client.patch(
+            f"/graph-drafts/{change_set_id}/operations/{operation['operation_id']}",
+            json={"payload": operation["payload"], "status": "accepted"},
+            headers=admin_auth_headers,
+        )
+        assert accepted.status_code == 200
+
+    commit = client.post(
+        f"/graph-drafts/{change_set_id}/commit",
+        json={"message": "Commit question hierarchy"},
+        headers=admin_auth_headers,
+    )
+
+    assert commit.status_code == 200
+    committed = commit.json()["data"]
+    parent_id = committed["operations"][0]["result_entity_id"]
+    child_id = committed["operations"][1]["result_entity_id"]
+
+    child = client.get(f"/questions/{child_id}", headers=admin_auth_headers)
+
+    assert child.status_code == 200
+    assert child.json()["data"]["parent_question_ids"] == [parent_id]
 
 
 def test_operation_payload_edit_validates_without_mutating_canonical_records(
