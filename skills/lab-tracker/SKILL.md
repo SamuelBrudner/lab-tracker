@@ -23,6 +23,8 @@ research-context system, not a generic file manager.
 4. Run `uv run alembic upgrade head` before using a fresh database.
 5. Use `uv run uvicorn lab_tracker.asgi:app --reload` to serve the app at
    `http://127.0.0.1:8000/app`.
+6. To serve one graph to other computers on a LAN or VPN, use
+   `.\scripts\serve-lan.ps1 -UsePostgres` and see `docs/lan-shared-graph.md`.
 
 ## MCP Tools
 
@@ -61,6 +63,10 @@ Use these tools when available:
 Creation tools write through the API, using the configured service account when
 authentication is enabled. Be explicit before creating or mutating research
 records.
+
+For MCP clients on other computers, point `LAB_TRACKER_MCP_BASE_URL` at the
+serving machine, for example `http://<host-ip>:8000`. Use the LAN helper script
+or `docs/lan-shared-graph.md` to find the URL and firewall command.
 
 ## Dolt Mirror
 

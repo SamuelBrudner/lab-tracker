@@ -77,6 +77,18 @@ docker compose up app
 
 SQLite remains the default single-client local fallback.
 
+To serve the same graph to other computers on a LAN or VPN, bind the API to all
+interfaces and use the printed host IP from the serving machine:
+
+```powershell
+.\scripts\serve-lan.ps1 -UsePostgres
+```
+
+Then open `http://<host-ip>:8000/app` from the other computer or set
+`LAB_TRACKER_MCP_BASE_URL=http://<host-ip>:8000` for MCP clients. If remote
+clients time out, Windows Firewall may need an administrator rule for TCP port
+8000. See [`docs/lan-shared-graph.md`](docs/lan-shared-graph.md).
+
 Local development starts with authentication disabled so early testing can use
 the app without creating accounts. Set `LAB_TRACKER_AUTH_ENABLED=true` to test
 the login and role flow. Non-local environments keep authentication enabled by
