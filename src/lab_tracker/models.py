@@ -17,6 +17,8 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, computed_field
 
+NoteMetadataScalar = str | bool | int | float
+
 
 def utc_now() -> datetime:
     return datetime.now(timezone.utc)

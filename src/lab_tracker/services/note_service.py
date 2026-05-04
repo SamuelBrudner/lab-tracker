@@ -12,6 +12,7 @@ from lab_tracker.models import (
     EntityRef,
     EntityType,
     Note,
+    NoteMetadataScalar,
     NoteRawAsset,
     NoteStatus,
     utc_now,
@@ -56,7 +57,7 @@ class NoteServiceMixin:
         raw_asset: NoteRawAsset | None = None,
         transcribed_text: str | None = None,
         targets: Iterable[EntityRef] | None = None,
-        metadata: dict[str, str] | None = None,
+        metadata: dict[str, NoteMetadataScalar] | None = None,
         status: NoteStatus = NoteStatus.STAGED,
         actor: AuthContext | None = None,
     ) -> Note:
@@ -117,7 +118,7 @@ class NoteServiceMixin:
         owns_raw_asset: bool = False,
         transcribed_text: str | None = None,
         targets: Iterable[EntityRef] | None = None,
-        metadata: dict[str, str] | None = None,
+        metadata: dict[str, NoteMetadataScalar] | None = None,
         status: NoteStatus = NoteStatus.STAGED,
         actor: AuthContext | None = None,
     ) -> Note:
@@ -211,7 +212,7 @@ class NoteServiceMixin:
         *,
         transcribed_text: str | None = None,
         targets: Iterable[EntityRef] | None = None,
-        metadata: dict[str, str] | None = None,
+        metadata: dict[str, NoteMetadataScalar] | None = None,
         status: NoteStatus | None = None,
         actor: AuthContext | None = None,
     ) -> Note:

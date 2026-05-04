@@ -53,7 +53,10 @@ Use these tools when available:
 - `lab_tracker_create_question` creates a question in a project; pass
   `parent_question_ids` to place atomic child questions under broader motivating
   questions.
-- `lab_tracker_create_note` creates a text note in a project.
+- `lab_tracker_create_note` creates a text note in a project. Note statuses are
+  `staged`, `committed`, and `archived`; do not use question statuses such as
+  `active`. Metadata values may be strings, numbers, or booleans and are stored
+  as strings; nested metadata objects and arrays are unsupported.
 
 Creation tools write through the API, using the configured service account when
 authentication is enabled. Be explicit before creating or mutating research
@@ -79,7 +82,8 @@ Use `LAB_TRACKER_DOLT_BIN` or `LAB_TRACKER_DOLT_MIRROR_PATH` to override them.
   analysis questions.
 - Sessions capture acquisition activity and can promote outputs into datasets.
 - Notes are raw human records and can target projects, questions, sessions, datasets,
-  analyses, claims, or visualizations.
+  analyses, claims, or visualizations. Notes use `staged`, `committed`, and
+  `archived` status, not question `active` status.
 - Datasets preserve provenance through commit manifests.
 - Analyses, claims, and visualizations should stay linked back to their source
   datasets and questions.

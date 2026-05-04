@@ -20,6 +20,7 @@ from lab_tracker.models import (
     DatasetFile,
     DatasetStatus,
     Note,
+    NoteMetadataScalar,
     Question,
     QuestionLink,
     QuestionLinkRole,
@@ -41,12 +42,18 @@ def _ensure_non_empty(value: str, field_name: str) -> None:
         raise ValidationError(f"{field_name} must not be empty.")
 
 
-def _normalize_note_metadata(metadata: dict[str, str] | None) -> dict[str, str]:
+def _is_note_metadata_scalar(value: object) -> bool:
+    return isinstance(value, (str, bool, int, float))
+
+
+def _normalize_note_metadata(metadata: dict[str, NoteMetadataScalar] | None) -> dict[str, str]:
     if not metadata:
         return {}
     cleaned: dict[str, str] = {}
     for key, value in metadata.items():
         _ensure_non_empty(key, "metadata key")
+        if not _is_note_metadata_scalar(value):
+            raise ValidationError("metadata values must be strings, numbers, or booleans.")
         cleaned_key = str(key).strip()
         cleaned_value = value.strip() if isinstance(value, str) else str(value)
         cleaned[cleaned_key] = cleaned_value

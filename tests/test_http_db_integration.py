@@ -166,13 +166,26 @@ def test_core_entity_crud_routes_use_database_persistence(
 
     note_update_response = client.patch(
         f"/notes/{note_id}",
-        json={"transcribed_text": "transcribed capture", "metadata": {"source": "integration"}},
+        json={
+            "transcribed_text": "transcribed capture",
+            "metadata": {
+                "source": "integration",
+                "run": 7,
+                "verified": True,
+                "score": 1.5,
+            },
+        },
         headers=headers,
     )
     assert note_update_response.status_code == 200
     note_payload = note_update_response.json()["data"]
     assert note_payload["transcribed_text"] == "transcribed capture"
-    assert note_payload["metadata"] == {"source": "integration"}
+    assert note_payload["metadata"] == {
+        "source": "integration",
+        "run": "7",
+        "verified": "True",
+        "score": "1.5",
+    }
 
     note_delete_response = client.delete(f"/notes/{note_id}", headers=headers)
     assert note_delete_response.status_code == 200
@@ -564,7 +577,7 @@ def test_note_multipart_upload_rejects_invalid_metadata_without_leaking_raw_asse
         "/notes/upload-file",
         data={
             "project_id": project_id,
-            "metadata": '{"source": 123}',
+            "metadata": '{"source": {"kind": "camera"}}',
         },
         files={"file": ("capture.txt", b"raw-capture", "text/plain")},
         headers=headers,

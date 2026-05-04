@@ -150,6 +150,99 @@ def test_create_project_uses_api_validation_path() -> None:
     assert [request.url.path for request in requests] == ["/auth/login", "/projects"]
 
 
+def test_create_note_rejects_invalid_status_before_api_request() -> None:
+    requests: list[httpx.Request] = []
+
+    client = mcp_server.LabTrackerAPIClient(
+        mcp_server.MCPSettings(base_url="http://testserver"),
+        transport=httpx.MockTransport(
+            lambda request: requests.append(request)
+            or _json_response(500, {"error": {"message": "unexpected request"}})
+        ),
+    )
+
+    try:
+        with pytest.raises(mcp_server.LabTrackerAPIError, match="Allowed note statuses"):
+            client.create_note(
+                project_id="project-1",
+                raw_content="capture",
+                status="active",
+            )
+    finally:
+        client.close()
+
+    assert requests == []
+
+
+def test_create_note_sends_scalar_metadata_values_to_api() -> None:
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if request.url.path == "/notes":
+            body = json.loads(request.content.decode("utf-8"))
+            assert body == {
+                "project_id": "project-1",
+                "raw_content": "capture",
+                "metadata": {
+                    "source": "mcp",
+                    "trial": 7,
+                    "verified": True,
+                    "score": 1.5,
+                },
+                "status": "staged",
+            }
+            return _json_response(201, {"data": {"note_id": "note-1"}})
+        return _json_response(404, {"error": {"message": "not found"}})
+
+    client = mcp_server.LabTrackerAPIClient(
+        mcp_server.MCPSettings(base_url="http://testserver"),
+        transport=httpx.MockTransport(handler),
+    )
+
+    try:
+        payload = client.create_note(
+            project_id="project-1",
+            raw_content="capture",
+            metadata={
+                "source": "mcp",
+                "trial": 7,
+                "verified": True,
+                "score": 1.5,
+            },
+            status="STAGED",
+        )
+    finally:
+        client.close()
+
+    assert payload == {"data": {"note_id": "note-1"}}
+    assert [request.url.path for request in requests] == ["/notes"]
+
+
+def test_create_note_rejects_nested_metadata_before_api_request() -> None:
+    requests: list[httpx.Request] = []
+
+    client = mcp_server.LabTrackerAPIClient(
+        mcp_server.MCPSettings(base_url="http://testserver"),
+        transport=httpx.MockTransport(
+            lambda request: requests.append(request)
+            or _json_response(500, {"error": {"message": "unexpected request"}})
+        ),
+    )
+
+    try:
+        with pytest.raises(mcp_server.LabTrackerAPIError, match="metadata values"):
+            client.create_note(
+                project_id="project-1",
+                raw_content="capture",
+                metadata={"nested": {"source": "mcp"}},
+            )
+    finally:
+        client.close()
+
+    assert requests == []
+
+
 def test_authenticated_tool_requires_service_credentials_when_api_requires_auth() -> None:
     client = mcp_server.LabTrackerAPIClient(
         mcp_server.MCPSettings(base_url="http://testserver"),

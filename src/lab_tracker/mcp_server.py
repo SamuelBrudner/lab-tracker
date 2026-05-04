@@ -9,11 +9,15 @@ from typing import Any
 import httpx
 from mcp.server.fastmcp import FastMCP
 
+from lab_tracker.models import NoteMetadataScalar, NoteStatus
+
 JsonObject = dict[str, Any]
 
 SERVER_NAME = "lab-tracker-mcp"
 DEFAULT_BASE_URL = "http://127.0.0.1:8000"
 DEFAULT_TIMEOUT_SECONDS = 10.0
+NOTE_STATUS_VALUES = tuple(status.value for status in NoteStatus)
+NOTE_STATUS_TEXT = ", ".join(NOTE_STATUS_VALUES)
 
 
 class LabTrackerAPIError(RuntimeError):
@@ -199,9 +203,11 @@ class LabTrackerAPIClient:
         project_id: str,
         raw_content: str,
         transcribed_text: str | None = None,
-        metadata: dict[str, str] | None = None,
+        metadata: dict[str, NoteMetadataScalar] | None = None,
         status: str | None = None,
     ) -> JsonObject:
+        resolved_status = _validate_note_status(status)
+        resolved_metadata = _validate_note_metadata(metadata)
         return self._request(
             "POST",
             "/notes",
@@ -209,8 +215,8 @@ class LabTrackerAPIClient:
                 "project_id": project_id,
                 "raw_content": raw_content,
                 "transcribed_text": transcribed_text,
-                "metadata": metadata,
-                "status": status,
+                "metadata": resolved_metadata,
+                "status": resolved_status,
             },
         )
 
@@ -285,6 +291,41 @@ def _drop_empty(payload: JsonObject | None) -> JsonObject | None:
     if payload is None:
         return None
     return {key: value for key, value in payload.items() if value is not None}
+
+
+def _is_note_metadata_scalar(value: object) -> bool:
+    return isinstance(value, (str, bool, int, float))
+
+
+def _validate_note_metadata(metadata: object) -> dict[str, NoteMetadataScalar] | None:
+    if metadata is None:
+        return None
+    if not isinstance(metadata, dict):
+        raise LabTrackerAPIError(
+            "Note metadata must be an object with string keys and string, number, "
+            "or boolean values."
+        )
+    validated: dict[str, NoteMetadataScalar] = {}
+    for key, value in metadata.items():
+        if not isinstance(key, str) or not key.strip():
+            raise LabTrackerAPIError("Note metadata keys must be non-empty strings.")
+        if not _is_note_metadata_scalar(value):
+            raise LabTrackerAPIError(
+                "Note metadata values must be strings, numbers, or booleans."
+            )
+        validated[key] = value
+    return validated
+
+
+def _validate_note_status(status: str | None) -> str | None:
+    if status is None:
+        return None
+    cleaned = status.strip().lower()
+    if cleaned not in NOTE_STATUS_VALUES:
+        raise LabTrackerAPIError(
+            f"Invalid note status {status!r}. Allowed note statuses: {NOTE_STATUS_TEXT}."
+        )
+    return cleaned
 
 
 def _response_json(response: httpx.Response) -> JsonObject:
@@ -469,10 +510,10 @@ def lab_tracker_create_note(
     project_id: str,
     raw_content: str,
     transcribed_text: str | None = None,
-    metadata: dict[str, str] | None = None,
+    metadata: dict[str, NoteMetadataScalar] | None = None,
     status: str | None = None,
 ) -> JsonObject:
-    """Create a text note through the Lab Tracker API."""
+    """Create a text note; status must be staged, committed, or archived."""
     client = client_from_env()
     try:
         return client.create_note(
@@ -498,7 +539,9 @@ def lab_tracker_quickstart() -> str:
         "Read and write tools call the running Lab Tracker API, so start the app "
         "and set `LAB_TRACKER_MCP_BASE_URL` in the MCP client environment. "
         "`LAB_TRACKER_MCP_USERNAME` and `LAB_TRACKER_MCP_PASSWORD` are only "
-        "required when API authentication is enabled.\n"
+        "required when API authentication is enabled. Notes use `staged`, "
+        "`committed`, or `archived` status. Note metadata values may be strings, "
+        "numbers, or booleans and are stored as strings.\n"
     )
 
 

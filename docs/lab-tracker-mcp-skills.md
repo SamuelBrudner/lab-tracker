@@ -42,6 +42,12 @@ descendants. `lab_tracker_create_question` accepts `parent_question_ids`; use it
 to place small atomic experimental, method, control, and analysis questions under
 broader motivating questions.
 
+`lab_tracker_create_note` creates text notes. Note status is note-specific:
+allowed values are `staged`, `committed`, and `archived`; do not use question
+statuses such as `active`. Note metadata accepts an object whose values are
+strings, numbers, or booleans, and Lab Tracker normalizes those values to strings
+when storing the note. Nested metadata objects and arrays are not supported.
+
 ## Postgres Runtime
 
 For multiple live clients, prefer Postgres:

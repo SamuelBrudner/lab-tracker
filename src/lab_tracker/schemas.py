@@ -25,6 +25,7 @@ from lab_tracker.models import (
     GraphChangeOperationStatus,
     GraphChangeSetStatus,
     Note,
+    NoteMetadataScalar,
     NoteStatus,
     ProjectStatus,
     Question,
@@ -160,14 +161,14 @@ class NoteCreate(RequestModel):
     raw_content: str = Field(..., min_length=1)
     transcribed_text: str | None = None
     targets: list[EntityRef] | None = None
-    metadata: dict[str, str] | None = None
+    metadata: dict[str, NoteMetadataScalar] | None = None
     status: NoteStatus | None = None
 
 
 class NoteUpdate(RequestModel):
     transcribed_text: str | None = None
     targets: list[EntityRef] | None = None
-    metadata: dict[str, str] | None = None
+    metadata: dict[str, NoteMetadataScalar] | None = None
     status: NoteStatus | None = None
 
 

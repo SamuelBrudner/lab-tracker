@@ -18,6 +18,7 @@ from lab_tracker.models import (
     AnalysisStatus,
     DatasetStatus,
     EntityRef,
+    NoteMetadataScalar,
     NoteStatus,
     ProjectStatus,
     QuestionStatus,
@@ -142,14 +143,20 @@ def parse_entity_refs_form(raw_value: str | None) -> list[EntityRef] | None:
         raise ValidationError("targets contains invalid entity refs.") from exc
 
 
-def parse_metadata_form(raw_value: str | None) -> dict[str, str] | None:
+def _is_metadata_scalar(value: object) -> bool:
+    return isinstance(value, (str, bool, int, float))
+
+
+def parse_metadata_form(raw_value: str | None) -> dict[str, NoteMetadataScalar] | None:
     parsed = parse_json_form_field(raw_value, "metadata")
     if parsed is None:
         return None
     if not isinstance(parsed, dict) or not all(
-        isinstance(key, str) and isinstance(value, str) for key, value in parsed.items()
+        isinstance(key, str) and _is_metadata_scalar(value) for key, value in parsed.items()
     ):
-        raise ValidationError("metadata must decode to an object of string values.")
+        raise ValidationError(
+            "metadata must decode to an object of string, number, or boolean values."
+        )
     return parsed
 
 
