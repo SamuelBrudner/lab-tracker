@@ -59,6 +59,26 @@ def build_graph_drafts_router(api: LabTrackerAPI) -> APIRouter:
                 close()
         return Envelope(data=change_set)
 
+    @router.post(
+        "/notes/{note_id:uuid}/analysis-graph-drafts",
+        response_model=Envelope[GraphChangeSet],
+        status_code=http_status.HTTP_201_CREATED,
+    )
+    def create_analysis_graph_draft(note_id: UUID, request: Request):
+        actor = actor_from_request(request)
+        draft_client = _draft_client_from_request(request)
+        try:
+            change_set = api_from_request(request, api).create_analysis_graph_draft_from_note(
+                note_id,
+                draft_client=draft_client,
+                actor=actor,
+            )
+        finally:
+            close = getattr(draft_client, "close", None)
+            if callable(close):
+                close()
+        return Envelope(data=change_set)
+
     @router.get("/graph-drafts", response_model=ListEnvelope[GraphChangeSet])
     def list_graph_drafts(
         request: Request,

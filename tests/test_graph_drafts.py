@@ -8,7 +8,11 @@ import httpx
 import pytest
 from fastapi.testclient import TestClient
 
-from lab_tracker.graph_drafting import GraphDraftingError, OpenAIGraphDraftClient
+from lab_tracker.graph_drafting import (
+    ANALYSIS_PROMPT_VERSION,
+    GraphDraftingError,
+    OpenAIGraphDraftClient,
+)
 
 
 class FakeDraftClient:
@@ -25,6 +29,7 @@ class FakeDraftClient:
         self.error = error
         self.calls: list[dict[str, Any]] = []
         self.transcription_calls: list[dict[str, Any]] = []
+        self.analysis_calls: list[dict[str, Any]] = []
         self.closed = False
 
     def draft_from_note(
@@ -93,6 +98,22 @@ class FakeDraftClient:
         )
         return {"text": "Fly 12 tracked better after pulse onset."}
 
+    def draft_from_analysis_evidence(
+        self,
+        *,
+        evidence_text: str,
+        project_context: dict[str, Any],
+    ) -> dict[str, Any]:
+        self.analysis_calls.append(
+            {
+                "evidence_text": evidence_text,
+                "project_context": project_context,
+            }
+        )
+        if self.error:
+            raise GraphDraftingError(self.error)
+        return self.patch
+
     def close(self) -> None:
         self.closed = True
 
@@ -108,6 +129,24 @@ def _image_note(client: TestClient, headers: dict[str, str], project_id: str) ->
         "/notes/upload-file",
         data={"project_id": project_id},
         files={"file": ("whiteboard.jpg", b"fake-image-bytes", "image/jpeg")},
+        headers=headers,
+    )
+    assert response.status_code == 201
+    return response.json()["data"]["note_id"]
+
+
+def _analysis_note(client: TestClient, headers: dict[str, str], project_id: str) -> str:
+    response = client.post(
+        "/notes",
+        json={
+            "project_id": project_id,
+            "raw_content": (
+                "Analysis evidence: figure outputs/latency.png shows lower latency after "
+                "the protocol change."
+            ),
+            "metadata": {"source": "ci-analysis"},
+            "status": "committed",
+        },
         headers=headers,
     )
     assert response.status_code == 201
@@ -268,6 +307,93 @@ def test_openai_graph_draft_client_sends_responses_image_and_strict_schema() -> 
     client.close()
 
 
+def test_openai_graph_draft_client_sends_analysis_evidence_and_strict_schema() -> None:
+    requests: list[dict[str, Any]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(request.content.decode("utf-8"))
+        requests.append(payload)
+        return httpx.Response(
+            200,
+            json={"output_text": json.dumps({"summary": "ok", "operations": []})},
+        )
+
+    client = OpenAIGraphDraftClient(
+        api_key="test-key",
+        model="gpt-test",
+        transport=httpx.MockTransport(handler),
+    )
+
+    result = client.draft_from_analysis_evidence(
+        evidence_text="latency dropped in output figure",
+        project_context={"project": {"name": "Context"}},
+    )
+
+    assert result == {"summary": "ok", "operations": []}
+    request = requests[0]
+    assert request["model"] == "gpt-test"
+    assert "analysis evidence" in request["instructions"]
+    assert "confidence field uses a 0 to 100 scale" in request["instructions"]
+    content = request["input"][0]["content"]
+    assert len(content) == 1
+    assert content[0]["type"] == "input_text"
+    assert "latency dropped" in content[0]["text"]
+    assert request["text"]["format"]["type"] == "json_schema"
+    assert request["text"]["format"]["strict"] is True
+    client.close()
+
+
+def test_openai_graph_draft_client_sends_review_report_context_and_schema() -> None:
+    requests: list[dict[str, Any]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(request.content.decode("utf-8"))
+        requests.append(payload)
+        return httpx.Response(
+            200,
+            json={
+                "output_text": json.dumps(
+                    {
+                        "title": "Daily review",
+                        "executive_summary": "One draft needs review.",
+                        "review_priorities": ["Check the claim wording."],
+                        "draft_summaries": [
+                            {
+                                "change_set_id": "draft-1",
+                                "headline": "Latency result",
+                                "interpretation": "Latency appears lower.",
+                                "recommended_action": "Review before approving.",
+                                "risks": [],
+                                "questions_for_reviewer": ["Was n large enough?"],
+                            }
+                        ],
+                    }
+                )
+            },
+        )
+
+    client = OpenAIGraphDraftClient(
+        api_key="test-key",
+        model="gpt-test",
+        transport=httpx.MockTransport(handler),
+    )
+
+    result = client.draft_review_report(
+        review_context={
+            "drafts": [{"change_set_id": "draft-1", "operations": []}],
+        },
+    )
+
+    assert result["title"] == "Daily review"
+    request = requests[0]
+    assert request["model"] == "gpt-test"
+    assert "end-of-day review briefs" in request["instructions"]
+    assert "draft-1" in request["input"][0]["content"][0]["text"]
+    assert request["text"]["format"]["name"] == "lab_tracker_graph_draft_review_report"
+    assert request["text"]["format"]["strict"] is True
+    client.close()
+
+
 def test_openai_graph_draft_client_reports_setup_and_api_errors() -> None:
     missing_key = OpenAIGraphDraftClient(
         api_key="",
@@ -405,6 +531,44 @@ def test_image_note_draft_stores_operations_and_context(
     assert fake_client.calls[0]["source_artifacts"][0]["type"] == "image"
     assert fake_client.calls[0]["user_hint"] is None
     assert fake_client.closed is True
+
+
+def test_analysis_note_draft_stores_operations_and_context(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+) -> None:
+    project_id = _project(client, admin_auth_headers)
+    note_id = _analysis_note(client, admin_auth_headers, project_id)
+    fake_client = FakeDraftClient(_draft_patch(project_id))
+    client.app.state.graph_draft_client_factory = lambda settings: fake_client
+
+    response = client.post(
+        f"/notes/{note_id}/analysis-graph-drafts",
+        headers=admin_auth_headers,
+    )
+
+    assert response.status_code == 201
+    payload = response.json()["data"]
+    assert payload["status"] == "ready"
+    assert payload["prompt_version"] == ANALYSIS_PROMPT_VERSION
+    assert payload["source_note_id"] == note_id
+    assert payload["source_content_type"] == "text/markdown"
+    assert len(payload["source_checksum"]) == 64
+    assert [operation["entity_type"] for operation in payload["operations"]] == [
+        "question",
+        "note",
+    ]
+    assert "lower latency" in fake_client.analysis_calls[0]["evidence_text"]
+    assert fake_client.analysis_calls[0]["project_context"]["project"]["id"] == project_id
+    assert fake_client.calls == []
+    assert fake_client.closed is True
+
+    questions = client.get(
+        f"/questions?project_id={project_id}&limit=50&offset=0",
+        headers=admin_auth_headers,
+    )
+    assert questions.status_code == 200
+    assert questions.json()["data"] == []
 
 
 def test_graph_context_packet_includes_selected_targets_and_recent_neighborhood(
@@ -955,6 +1119,35 @@ def test_gpt_failure_returns_stored_failed_draft(
     assert response.status_code == 201
     payload = response.json()["data"]
     assert payload["status"] == "failed"
+    assert "OPENAI_API_KEY" in payload["error_metadata"]["message"]
+
+    listed = client.get(
+        f"/graph-drafts?source_note_id={note_id}",
+        headers=admin_auth_headers,
+    )
+    assert listed.status_code == 200
+    assert listed.json()["data"][0]["change_set_id"] == payload["change_set_id"]
+
+
+def test_analysis_draft_failure_returns_stored_failed_draft(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+) -> None:
+    project_id = _project(client, admin_auth_headers)
+    note_id = _analysis_note(client, admin_auth_headers, project_id)
+    client.app.state.graph_draft_client_factory = lambda settings: FakeDraftClient(
+        error="LAB_TRACKER_OPENAI_API_KEY must be set before drafting graph changes."
+    )
+
+    response = client.post(
+        f"/notes/{note_id}/analysis-graph-drafts",
+        headers=admin_auth_headers,
+    )
+
+    assert response.status_code == 201
+    payload = response.json()["data"]
+    assert payload["status"] == "failed"
+    assert payload["prompt_version"] == ANALYSIS_PROMPT_VERSION
     assert "OPENAI_API_KEY" in payload["error_metadata"]["message"]
 
     listed = client.get(

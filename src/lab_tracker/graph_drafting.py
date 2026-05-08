@@ -11,6 +11,7 @@ import httpx
 from lab_tracker.config import Settings
 
 PROMPT_VERSION = "multimodal-graph-draft-v1"
+ANALYSIS_PROMPT_VERSION = "analysis-graph-draft-v1"
 PROVIDER = "openai"
 
 SEMANTIC_TYPES = [
@@ -107,6 +108,45 @@ def graph_patch_response_schema() -> dict[str, Any]:
         },
         "additionalProperties": False,
         "required": ["summary", "uncertain_fields", "clarification_requests", "operations"],
+    }
+
+
+def graph_review_report_response_schema() -> dict[str, Any]:
+    draft_summary_schema: dict[str, Any] = {
+        "type": "object",
+        "properties": {
+            "change_set_id": {"type": "string"},
+            "headline": {"type": "string"},
+            "interpretation": {"type": "string"},
+            "recommended_action": {"type": "string"},
+            "risks": {"type": "array", "items": {"type": "string"}},
+            "questions_for_reviewer": {"type": "array", "items": {"type": "string"}},
+        },
+        "additionalProperties": False,
+        "required": [
+            "change_set_id",
+            "headline",
+            "interpretation",
+            "recommended_action",
+            "risks",
+            "questions_for_reviewer",
+        ],
+    }
+    return {
+        "type": "object",
+        "properties": {
+            "title": {"type": "string"},
+            "executive_summary": {"type": "string"},
+            "review_priorities": {"type": "array", "items": {"type": "string"}},
+            "draft_summaries": {"type": "array", "items": draft_summary_schema},
+        },
+        "additionalProperties": False,
+        "required": [
+            "title",
+            "executive_summary",
+            "review_priorities",
+            "draft_summaries",
+        ],
     }
 
 
@@ -219,37 +259,99 @@ class OpenAIGraphDraftClient:
             },
             json={
                 "model": self.model,
-                "instructions": _instructions(),
+                "instructions": _image_instructions(),
                 "input": [
                     {
                         "role": "user",
                         "content": content,
                     }
                 ],
-                "text": {
-                    "format": {
-                        "type": "json_schema",
-                        "name": "lab_tracker_graph_patch",
-                        "schema": graph_patch_response_schema(),
-                        "strict": True,
-                    }
-                },
+                "text": _graph_patch_text_format(),
             },
         )
-        if response.status_code >= 400:
-            raise GraphDraftingError(_response_error(response))
-        payload = _response_json(response)
-        output_text = _extract_output_text(payload)
-        try:
-            parsed = json.loads(output_text)
-        except json.JSONDecodeError as exc:
-            raise GraphDraftingError("GPT returned malformed graph patch JSON.") from exc
-        if not isinstance(parsed, dict):
-            raise GraphDraftingError("GPT returned a non-object graph patch.")
-        operations = parsed.get("operations")
-        if not isinstance(operations, list):
-            raise GraphDraftingError("GPT graph patch did not include an operations list.")
-        return parsed
+        return _graph_patch_from_response(response)
+
+    def draft_from_analysis_evidence(
+        self,
+        *,
+        evidence_text: str,
+        project_context: dict[str, Any],
+    ) -> dict[str, Any]:
+        if not self._api_key:
+            raise GraphDraftingError(
+                "LAB_TRACKER_OPENAI_API_KEY must be set before drafting graph changes."
+            )
+        cleaned_evidence = evidence_text.strip()
+        if not cleaned_evidence:
+            raise GraphDraftingError("Analysis evidence is empty.")
+        response = self._client.post(
+            "/responses",
+            headers={
+                "Authorization": f"Bearer {self._api_key}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "model": self.model,
+                "instructions": _analysis_instructions(),
+                "input": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "input_text",
+                                "text": (
+                                    "Draft Lab Tracker graph updates from this analysis evidence. "
+                                    "Use this current project context:\n"
+                                    f"{json.dumps(project_context, sort_keys=True)}\n\n"
+                                    "Analysis evidence:\n"
+                                    f"{cleaned_evidence}"
+                                ),
+                            }
+                        ],
+                    }
+                ],
+                "text": _graph_patch_text_format(),
+            },
+        )
+        return _graph_patch_from_response(response)
+
+    def draft_review_report(self, *, review_context: dict[str, Any]) -> dict[str, Any]:
+        if not self._api_key:
+            raise GraphDraftingError(
+                "LAB_TRACKER_OPENAI_API_KEY must be set before drafting a review report."
+            )
+        response = self._client.post(
+            "/responses",
+            headers={
+                "Authorization": f"Bearer {self._api_key}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "model": self.model,
+                "instructions": _review_report_instructions(),
+                "input": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "input_text",
+                                "text": (
+                                    "Draft an end-of-day Lab Tracker graph draft review "
+                                    "brief from this context. Return only the requested "
+                                    "structured report object.\n"
+                                    f"{json.dumps(review_context, sort_keys=True)}"
+                                ),
+                            }
+                        ],
+                    }
+                ],
+                "text": _review_report_text_format(),
+            },
+        )
+        return _json_object_from_response(
+            response,
+            malformed_message="GPT returned malformed review report JSON.",
+        )
 
     def transcribe_audio(
         self,
@@ -286,7 +388,58 @@ class OpenAIGraphDraftClient:
         return payload
 
 
-def _instructions() -> str:
+def _graph_patch_text_format() -> dict[str, Any]:
+    return {
+        "format": {
+            "type": "json_schema",
+            "name": "lab_tracker_graph_patch",
+            "schema": graph_patch_response_schema(),
+            "strict": True,
+        }
+    }
+
+
+def _review_report_text_format() -> dict[str, Any]:
+    return {
+        "format": {
+            "type": "json_schema",
+            "name": "lab_tracker_graph_draft_review_report",
+            "schema": graph_review_report_response_schema(),
+            "strict": True,
+        }
+    }
+
+
+def _graph_patch_from_response(response: httpx.Response) -> dict[str, Any]:
+    parsed = _json_object_from_response(
+        response,
+        malformed_message="GPT returned malformed graph patch JSON.",
+    )
+    operations = parsed.get("operations")
+    if not isinstance(operations, list):
+        raise GraphDraftingError("GPT graph patch did not include an operations list.")
+    return parsed
+
+
+def _json_object_from_response(
+    response: httpx.Response,
+    *,
+    malformed_message: str,
+) -> dict[str, Any]:
+    if response.status_code >= 400:
+        raise GraphDraftingError(_response_error(response))
+    payload = _response_json(response)
+    output_text = _extract_output_text(payload)
+    try:
+        parsed = json.loads(output_text)
+    except json.JSONDecodeError as exc:
+        raise GraphDraftingError(malformed_message) from exc
+    if not isinstance(parsed, dict):
+        raise GraphDraftingError("GPT returned a non-object response.")
+    return parsed
+
+
+def _image_instructions() -> str:
     return (
         "You convert lab notebook photos, whiteboard images, voice-note transcripts, "
         "and photo plus voice bundles into proposed Lab Tracker graph changes. Propose "
@@ -314,6 +467,42 @@ def _instructions() -> str:
         "semantic label fits. Never claim a canonical update happened; these are drafts "
         "for human review. Preserve uploaded image and audio notes as provenance sources "
         "and return uncertainty explicitly."
+    )
+
+
+def _analysis_instructions() -> str:
+    return (
+        "You convert analysis evidence into proposed Lab Tracker graph changes. Think "
+        "through the evidence and current context before proposing anything. Propose only "
+        "changes supported by the evidence and context, and prefer updating or linking "
+        "existing entities over creating duplicates. Use create or update operations for "
+        "project, question, note, session, dataset, analysis, claim, or visualization "
+        "entities. Use payload_json as a JSON object string matching the existing Lab "
+        "Tracker API request shape. For analysis entities, include dataset_ids, "
+        "method_hash, code_version, optional environment_hash, and use staged status unless "
+        "the evidence clearly records a completed committed analysis. For claims, remember "
+        "the claim payload confidence field uses a 0 to 100 scale, while the graph "
+        "operation confidence field uses 0 to 1. For visualizations, link to an existing "
+        "or drafted analysis and include the artifact path when evidence provides one. "
+        "For questions, prefer small atomic experimental, method, control, or analysis "
+        "questions linked under broader motivating questions with parent_question_ids. "
+        "For created objects that later operations should reference, set client_ref to a "
+        "short stable name and use {\"$ref\":\"name\"} inside later payload_json fields. "
+        "Use source_refs with short quotes or artifact labels from the evidence. Never "
+        "claim a canonical update happened; these are drafts for human review."
+    )
+
+
+def _review_report_instructions() -> str:
+    return (
+        "You write concise end-of-day review briefs for scientists reviewing Lab Tracker "
+        "graph drafts. Your job is to help the scientist decide what to approve, edit, or "
+        "reject. Use only the provided draft operations, evidence snippets, source notes, "
+        "and artifact summaries. Do not invent results, claims, datasets, or approvals. "
+        "Call out uncertain or risky proposals clearly. Prefer practical review guidance: "
+        "which drafts look straightforward, which need edits, and which evidence should be "
+        "checked before commit. The final HTML renderer will add links and inline media, "
+        "so return structured text only."
     )
 
 

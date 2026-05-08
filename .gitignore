@@ -2,6 +2,7 @@ __pycache__/
 *.py[cod]
 *.egg-info/
 docs/runs/
+graph-draft-review.html
 node_modules/
 lab_tracker.db
 .npm-cache/

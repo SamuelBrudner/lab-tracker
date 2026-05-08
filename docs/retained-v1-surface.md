@@ -21,6 +21,9 @@ research record:
 - On-demand multimodal note-to-graph draft review for uploaded image notes,
   voice-note transcripts, and photo+voice bundles, with human
   edit/accept/reject before commit through normal API validation.
+- On-demand analysis-evidence-to-graph draft review for a single text evidence
+  note, with CI or assistant clients allowed to request drafts but not commit
+  canonical graph changes without human accept/reject review.
 - Sessions and acquisition outputs, including closing sessions and promoting
   eligible sessions into datasets.
 - Dataset staging and direct commit with provenance/manifest capture, without

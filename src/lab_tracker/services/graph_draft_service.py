@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from typing import Any
 from uuid import UUID, uuid4
@@ -10,7 +11,12 @@ from pydantic import ValidationError as PydanticValidationError
 
 from lab_tracker.auth import AuthContext, require_role
 from lab_tracker.errors import NotFoundError, ValidationError
-from lab_tracker.graph_drafting import GraphDraftingError, PROMPT_VERSION, PROVIDER
+from lab_tracker.graph_drafting import (
+    ANALYSIS_PROMPT_VERSION,
+    GraphDraftingError,
+    PROMPT_VERSION,
+    PROVIDER,
+)
 from lab_tracker.models import (
     Analysis,
     AnalysisStatus,
@@ -196,6 +202,63 @@ class GraphDraftServiceMixin:
             self._save_graph_change_set(change_set)
         return change_set
 
+    def create_analysis_graph_draft_from_note(
+        self,
+        note_id: UUID,
+        *,
+        draft_client: Any,
+        actor: AuthContext | None = None,
+    ) -> GraphChangeSet:
+        require_role(actor, WRITE_ROLES)
+        note = self.get_note(note_id)
+        evidence_text = self._analysis_evidence_from_note(note)
+        context_packet = self._build_graph_context_packet(
+            note,
+            source_notes=[note],
+            user_hint=None,
+            actor=actor,
+        )
+        change_set = GraphChangeSet(
+            change_set_id=uuid4(),
+            project_id=note.project_id,
+            source_note_id=note.note_id,
+            source_checksum=_text_checksum(evidence_text),
+            source_content_type="text/markdown",
+            source_filename=(
+                note.raw_asset.filename
+                if note.raw_asset is not None
+                else "analysis-evidence-note.md"
+            ),
+            provider=PROVIDER,
+            model=getattr(draft_client, "model", "unknown"),
+            prompt_version=ANALYSIS_PROMPT_VERSION,
+            draft_mode=GraphDraftMode.GRAPH_CONTEXT,
+            context_packet=context_packet,
+            created_by=_actor_user_id(actor),
+        )
+        self._save_graph_change_set(change_set)
+        try:
+            graph_patch = draft_client.draft_from_analysis_evidence(
+                evidence_text=evidence_text,
+                project_context=context_packet,
+            )
+            _validate_graph_patch_top_level(graph_patch)
+            change_set.operations = self._operations_from_graph_patch(change_set, graph_patch)
+            change_set.summary = str(graph_patch.get("summary") or "")
+            change_set.uncertain_fields = _string_list(graph_patch.get("uncertain_fields"))
+            change_set.clarification_requests = _string_list(
+                graph_patch.get("clarification_requests")
+            )
+            change_set.status = GraphChangeSetStatus.READY
+            change_set.error_metadata = {}
+        except GraphDraftingError as exc:
+            change_set.status = GraphChangeSetStatus.FAILED
+            change_set.error_metadata = {"message": str(exc)}
+        finally:
+            change_set.updated_at = utc_now()
+            self._save_graph_change_set(change_set)
+        return change_set
+
     def get_graph_change_set(self, change_set_id: UUID) -> GraphChangeSet:
         cached = self._get_cached_entity("graph_change_sets", change_set_id)
         if cached is not None:
@@ -322,6 +385,40 @@ class GraphDraftServiceMixin:
     def _save_graph_change_set(self, change_set: GraphChangeSet) -> None:
         self._remember_entity("graph_change_sets", change_set.change_set_id, change_set)
         self._run_repository_write(lambda repository: repository.graph_change_sets.save(change_set))
+
+    def _analysis_evidence_from_note(self, note: Note) -> str:
+        parts: list[str] = []
+        if note.raw_content.strip():
+            parts.append("## Note raw content\n\n" + note.raw_content.strip())
+        if note.transcribed_text and note.transcribed_text.strip():
+            parts.append("## Note transcribed text\n\n" + note.transcribed_text.strip())
+        if note.raw_asset is not None:
+            raw_asset, content = self.download_note_raw(note.note_id)
+            parts.append(
+                "\n".join(
+                    [
+                        "## Raw asset metadata",
+                        "",
+                        f"- filename: {raw_asset.filename}",
+                        f"- content_type: {raw_asset.content_type}",
+                        f"- checksum: {raw_asset.checksum}",
+                        f"- size_bytes: {raw_asset.size_bytes}",
+                    ]
+                )
+            )
+            if _is_text_asset(raw_asset.content_type):
+                try:
+                    raw_text = content.decode("utf-8").strip()
+                except UnicodeDecodeError as exc:
+                    raise ValidationError(
+                        "Analysis graph drafting requires UTF-8 text evidence."
+                    ) from exc
+                if raw_text:
+                    parts.append("## Raw asset text\n\n" + raw_text)
+        evidence_text = "\n\n".join(parts).strip()
+        if not evidence_text:
+            raise ValidationError("Analysis graph drafting requires text evidence on the note.")
+        return evidence_text
 
     def _operations_from_graph_patch(
         self,
@@ -901,6 +998,21 @@ def _payload_from_json(raw_payload: Any) -> dict[str, Any]:
     if not isinstance(parsed, dict):
         raise GraphDraftingError("GPT graph patch payload_json must decode to an object.")
     return parsed
+
+
+def _text_checksum(value: str) -> str:
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+def _is_text_asset(content_type: str) -> bool:
+    normalized = (content_type or "").split(";", 1)[0].strip().lower()
+    return normalized.startswith("text/") or normalized in {
+        "application/json",
+        "application/ld+json",
+        "application/markdown",
+        "application/x-ndjson",
+        "application/xml",
+    }
 
 
 def _validate_graph_patch_operation_shape(item: dict[str, Any]) -> None:
