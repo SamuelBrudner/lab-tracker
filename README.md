@@ -78,17 +78,20 @@ docker compose up app
 
 SQLite remains the default single-client local fallback.
 
-To serve the same graph to other computers on a LAN or VPN, bind the API to all
-interfaces and use the printed host IP from the serving machine:
+To serve the same graph to other computers on a LAN, VPN, or overlay network
+such as Tailscale, bind the API to all interfaces and use the printed host IP
+from the serving machine:
 
 ```powershell
 .\scripts\serve-lan.ps1 -UsePostgres
 ```
 
 Then open `http://<host-ip>:8000/app` from the other computer or set
-`LAB_TRACKER_MCP_BASE_URL=http://<host-ip>:8000` for MCP clients. If remote
-clients time out, Windows Firewall may need an administrator rule for TCP port
-8000. See [`docs/lan-shared-graph.md`](docs/lan-shared-graph.md).
+`LAB_TRACKER_MCP_BASE_URL=http://<host-ip>:8000` for MCP clients. For computers
+on different networks, use a private overlay network or a protected tunnel
+rather than raw public port forwarding. If remote clients time out, Windows
+Firewall may need an administrator rule for TCP port 8000. See
+[`docs/lan-shared-graph.md`](docs/lan-shared-graph.md).
 
 Local development starts with authentication disabled so early testing can use
 the app without creating accounts. Set `LAB_TRACKER_AUTH_ENABLED=true` to test
@@ -142,6 +145,8 @@ development.
 - `LAB_TRACKER_NOTE_STORAGE_PATH`: note storage directory (default: `./note_storage`)
 - `LAB_TRACKER_AUTH_SECRET_KEY`: auth signing secret (default allowed only in `local`)
 - `LAB_TRACKER_AUTH_TOKEN_TTL_MINUTES`: access token lifetime (default: `720`)
+- `LAB_TRACKER_BOOTSTRAP_ADMIN_TOKEN`: one-time token that allows the first
+  admin account to be registered when auth is enabled and no users exist
 - `LAB_TRACKER_AUTH_ENABLED`: enable login and role enforcement (default: `false`
   in `local`, `true` otherwise; non-local environments cannot disable auth)
 - `LAB_TRACKER_OPENAI_API_KEY`: required for graph draft generation and

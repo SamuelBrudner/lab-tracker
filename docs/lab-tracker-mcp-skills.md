@@ -71,6 +71,16 @@ Local development starts with authentication disabled. Set
 `LAB_TRACKER_AUTH_ENABLED=true` when you want to test login, roles, or service
 account credentials.
 
+For MCP clients on other computers, use the reachable shared-server URL instead
+of localhost, for example:
+
+```powershell
+$env:LAB_TRACKER_MCP_BASE_URL = "http://<host-or-tailnet-ip>:8000"
+```
+
+See [`docs/lan-shared-graph.md`](lan-shared-graph.md) for same-LAN, VPN,
+Tailscale, and protected-tunnel access.
+
 ## Dolt Mirror
 
 Dolt is an export-only versioned mirror in v1. The live API database remains the
