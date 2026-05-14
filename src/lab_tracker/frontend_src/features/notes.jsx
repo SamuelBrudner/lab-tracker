@@ -23,10 +23,16 @@ function NotePanel({
   onUploadTranscriptChange,
   activeQuestions,
   notes,
+  navigate,
 }) {
   return (
     <article className="card span-6">
-      <h2>Note Capture</h2>
+      <div className="item-head">
+        <h2>Note Capture</h2>
+        <button type="button" className="btn-secondary" onClick={() => navigate("/app/capture")}>
+          Phone capture
+        </button>
+      </div>
       <form className="form" onSubmit={onCreateTextNote}>
         <h3>Quick text note</h3>
         <label>
@@ -151,7 +157,7 @@ function NoteDetailCard({
     };
   }, [isImage, note, token]);
 
-  async function handleDraftGraphUpdate() {
+  async function handleDraftGraphUpdate(mode = "graph_context") {
     if (!note || !canWrite || !isImage) {
       return;
     }
@@ -159,13 +165,18 @@ function NoteDetailCard({
     setFlash("", "");
     try {
       const draft = await apiRequest(`/notes/${note.note_id}/graph-drafts`, {
+        body: { mode },
         method: "POST",
         token,
       });
       if (draft?.status === "failed") {
         setFlash("", draft.error_metadata?.message || "Graph draft failed.");
       } else {
-        setFlash("Graph draft ready for review.");
+        setFlash(
+          mode === "image_only"
+            ? "Image-only draft ready for review."
+            : "Graph draft ready for review."
+        );
       }
       if (draft?.change_set_id) {
         navigate(`/app/graph-drafts/${draft.change_set_id}`);
@@ -242,9 +253,19 @@ function NoteDetailCard({
             type="button"
             className="btn-primary"
             disabled={!canWrite}
-            onClick={handleDraftGraphUpdate}
+            onClick={() => handleDraftGraphUpdate("graph_context")}
           >
             Draft graph update
+          </button>
+        ) : null}
+        {note && isImage ? (
+          <button
+            type="button"
+            className="btn-secondary"
+            disabled={!canWrite}
+            onClick={() => handleDraftGraphUpdate("image_only")}
+          >
+            Draft image-only
           </button>
         ) : null}
       </div>

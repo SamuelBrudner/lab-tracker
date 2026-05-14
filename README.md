@@ -8,7 +8,7 @@ Lab Tracker keeps the *reasoning* behind experiments connected to the data they 
 - **Sessions and datasets.** Acquisition sessions capture outputs at the rig, are closed when done, and eligible sessions can be promoted into Datasets. Dataset staging and direct commit capture a provenance manifest.
 - **Notes attached to entities.** Manual note capture — text or multipart raw file upload/download — attached to the question, session, dataset, or analysis they describe. Notes stay as the raw human record.
 - **Analysis, claims, visualizations.** Explicit records linking analysis runs back to the datasets and questions they address, with claims and visualizations as first-class artifacts.
-- **Image-to-graph draft review.** Image notes can ask GPT to draft graph changes, then humans edit, accept/reject, and commit those operations through the same API validation as normal writes.
+- **Mobile graph-aware image draft review.** Phone capture stores raw image notes, builds a project-scoped graph context packet, asks GPT for reviewable draft operations, then humans edit, accept/reject, and commit through the same API validation as normal writes.
 - **Search.** Substring search over questions and notes so prior context is findable later.
 
 What ships today is the minimum that preserves the core research record. The supported surface is defined in [`docs/retained-v1-surface.md`](docs/retained-v1-surface.md) — if it and this README disagree, that document wins. The broader vision (meeting-photo question capture, OCR, vector search, PI review gates) lives in [`idea.md`](idea.md) and is explicitly deferred.
@@ -116,8 +116,9 @@ The committed frontend bundle ships without a source map by default.
 Supported workflows in the frontend include:
 - project dashboard
 - question staging, activation, and parent-child hierarchy mapping
+- phone-first image capture at `/app/capture`
 - manual note creation and multipart upload/download handling
-- image note graph draft review with human edit, accept/reject, and commit
+- graph-aware image note draft review with human edit, accept/reject, defer, and commit
 - sessions and acquisition outputs
 - dataset staging, file attachment, and direct commit with provenance capture
 - analysis, claim, and visualization tracking
@@ -161,10 +162,40 @@ uv run alembic upgrade head
 uv run uvicorn lab_tracker.asgi:app --reload
 ```
 
-Open `http://127.0.0.1:8000/app`, upload an image as a note, open the note
-detail page, choose `Draft graph update`, review the operation payload JSON, and
-commit the accepted changes with a message. The uploaded image note remains the
-provenance anchor; GPT drafts are untrusted until reviewed and committed.
+Open `http://127.0.0.1:8000/app/capture` from a phone or desktop browser, take
+or choose an image, select the project and optional question/session/dataset
+targets, add an optional hint, then choose `Upload and draft`. The upload is
+stored first as a raw image note in `LAB_TRACKER_NOTE_STORAGE_PATH`; the draft is
+stored separately as a `GraphChangeSet` linked back to that source note.
+
+Draft mode defaults to `graph_context`. In that mode, Lab Tracker builds and
+stores a compact context packet containing the source note, selected targets,
+project, active/staged questions with parent links, recent notes, sessions,
+datasets, analyses, claims, visualizations, and unresolved recent image
+captures. Context build failures are loud API errors and do not silently fall
+back to OCR or image-only interpretation. Image-only drafting is available only
+when explicitly requested and records `draft_mode=image_only`.
+
+The configured OpenAI-compatible provider receives the uploaded image bytes,
+optional user hint, graph context packet, and strict operation schema. Configure
+that route with `LAB_TRACKER_OPENAI_API_KEY`, `LAB_TRACKER_OPENAI_MODEL`, and
+`LAB_TRACKER_OPENAI_BASE_URL`. Third-party logging, retention, and residency
+depend on the configured provider and base URL. For institutional deployments,
+point `LAB_TRACKER_OPENAI_BASE_URL` at an approved gateway or model endpoint.
+
+Authentication and role checks apply to raw images, drafts, draft edits, and
+commits. Viewer accounts can inspect authorized records; editor/admin roles are
+required for note upload, draft creation, operation edits, and graph commits.
+Raw images and draft operations are not committed automatically. Accepted
+operations still pass through the normal API validation path, and model output
+that references unknown entity IDs or unsupported semantic operations is rejected.
+
+The review screen records enough metadata to compare `graph_context` and
+`image_only` behavior: draft mode, model/provider, context snapshot, uncertainty
+fields, clarification requests, operation statuses, and commit timing. Suggested
+evaluation metrics are accepted/edited/rejected operations, duplicate entity
+proposals, reviewer edit burden, time from capture to commit, and uncertainty
+quality. Offline queued capture is intentionally deferred in this release.
 
 The retained v1 runtime keeps note handling manual and uses direct substring
 search for query flows. Deferred concepts live in

@@ -16,7 +16,9 @@ function statusClass(status) {
 }
 
 function operationTitle(operation) {
-  return `${operation.op} ${operation.entity_type}`;
+  return operation.semantic_type
+    ? operation.semantic_type.replaceAll("_", " ")
+    : `${operation.op} ${operation.entity_type}`;
 }
 
 function payloadText(changeSet) {
@@ -38,6 +40,63 @@ function sourceRefText(ref) {
   const label = ref?.label ? `${ref.label}: ` : "";
   const quote = ref?.quote || "";
   return `${label}${quote}` || "Source reference";
+}
+
+function semanticLinkTargetType(operation) {
+  if (operation.semantic_type === "link_note_to_question") {
+    return "question";
+  }
+  if (operation.semantic_type === "link_note_to_session") {
+    return "session";
+  }
+  if (operation.semantic_type === "link_note_to_dataset") {
+    return "dataset";
+  }
+  if (operation.semantic_type === "link_note_to_analysis") {
+    return "analysis";
+  }
+  return "";
+}
+
+function contextOptions(changeSet, entityType) {
+  const context = changeSet?.context_packet || {};
+  if (entityType === "question") {
+    return context.active_or_staged_questions || [];
+  }
+  if (entityType === "session") {
+    return context.recent_sessions || [];
+  }
+  if (entityType === "dataset") {
+    return context.recent_datasets || [];
+  }
+  if (entityType === "analysis") {
+    return context.recent_analyses || [];
+  }
+  return [];
+}
+
+function payloadTargetId(payload, entityType) {
+  const targets = Array.isArray(payload?.targets) ? payload.targets : [];
+  const match = targets.find((target) => target.entity_type === entityType);
+  return typeof match?.entity_id === "string" ? match.entity_id : "";
+}
+
+function nextPayloadWithTarget(payload, entityType, entityId) {
+  const targets = Array.isArray(payload?.targets) ? [...payload.targets] : [];
+  const filtered = targets.filter((target) => target.entity_type !== entityType);
+  if (entityId) {
+    filtered.push({ entity_id: entityId, entity_type: entityType });
+  }
+  return { ...(payload || {}), targets: filtered };
+}
+
+function parsedPayloadFromText(raw) {
+  try {
+    const parsed = JSON.parse(raw || "{}");
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : null;
+  } catch {
+    return null;
+  }
 }
 
 function GraphDraftDetailCard({ token, changeSetId, navigate, canWrite, setBusy, setFlash }) {
@@ -104,6 +163,16 @@ function GraphDraftDetailCard({ token, changeSetId, navigate, canWrite, setBusy,
 
   function updatePayloadText(operationId, value) {
     setPayloads((current) => ({ ...current, [operationId]: value }));
+  }
+
+  function patchOperationPayload(operation, patcher) {
+    const current = parsedPayloadFromText(payloads[operation.operation_id]);
+    if (!current) {
+      setFlash("", "Operation payload must be valid JSON before using typed controls.");
+      return;
+    }
+    const nextPayload = patcher(current);
+    updatePayloadText(operation.operation_id, JSON.stringify(nextPayload, null, 2));
   }
 
   async function saveOperation(operation, nextStatus = operation.status) {
@@ -194,6 +263,7 @@ function GraphDraftDetailCard({ token, changeSetId, navigate, canWrite, setBusy,
           <section className="review-pane">
             <div className="inline">
               <span className={statusClass(changeSet.status)}>{changeSet.status}</span>
+              <span className="pill">{changeSet.draft_mode || "graph_context"}</span>
               <span className="pill">{changeSet.model}</span>
               <span className="pill">{changeSet.provider}</span>
             </div>
@@ -215,6 +285,40 @@ function GraphDraftDetailCard({ token, changeSetId, navigate, canWrite, setBusy,
               </div>
               {changeSet.error_metadata?.message ? (
                 <p className="flash error">{changeSet.error_metadata.message}</p>
+              ) : null}
+              {changeSet.summary ? (
+                <div>
+                  <div className="subtle">Draft summary</div>
+                  <p>{changeSet.summary}</p>
+                </div>
+              ) : null}
+              {(changeSet.uncertain_fields || []).length > 0 ? (
+                <div>
+                  <div className="subtle">Uncertain fields</div>
+                  <ul className="compact-list">
+                    {changeSet.uncertain_fields.map((item) => (
+                      <li key={item}>{item}</li>
+                    ))}
+                  </ul>
+                </div>
+              ) : null}
+              {(changeSet.clarification_requests || []).length > 0 ? (
+                <div>
+                  <div className="subtle">Clarification requests</div>
+                  <ul className="compact-list">
+                    {changeSet.clarification_requests.map((item) => (
+                      <li key={item}>{item}</li>
+                    ))}
+                  </ul>
+                </div>
+              ) : null}
+              {changeSet.context_packet ? (
+                <details className="context-details">
+                  <summary>Graph context used</summary>
+                  <pre className="manifest-preview">
+                    {JSON.stringify(changeSet.context_packet, null, 2)}
+                  </pre>
+                </details>
               ) : null}
             </div>
           </section>
@@ -253,8 +357,70 @@ function GraphDraftDetailCard({ token, changeSetId, navigate, canWrite, setBusy,
                       {sourceRefText(ref)}
                     </p>
                   ))}
+                  {semanticLinkTargetType(operation) ? (
+                    <label>
+                      Link target
+                      <select
+                        disabled={!canWrite || changeSet.status !== "ready"}
+                        onChange={(event) =>
+                          patchOperationPayload(operation, (payload) =>
+                            nextPayloadWithTarget(
+                              payload,
+                              semanticLinkTargetType(operation),
+                              event.target.value
+                            )
+                          )
+                        }
+                        value={payloadTargetId(
+                          parsedPayloadFromText(payloads[operation.operation_id]) || {},
+                          semanticLinkTargetType(operation)
+                        )}
+                      >
+                        <option value="">No linked {semanticLinkTargetType(operation)}</option>
+                        {contextOptions(changeSet, semanticLinkTargetType(operation)).map((item) => (
+                          <option key={item.id} value={item.id}>
+                            {item.label || item.id}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                  ) : null}
+                  {Object.prototype.hasOwnProperty.call(operation.payload || {}, "text") ? (
+                    <label>
+                      Text
+                      <textarea
+                        value={
+                          parsedPayloadFromText(payloads[operation.operation_id])?.text || ""
+                        }
+                        disabled={!canWrite || changeSet.status !== "ready"}
+                        onChange={(event) =>
+                          patchOperationPayload(operation, (payload) => ({
+                            ...payload,
+                            text: event.target.value,
+                          }))
+                        }
+                      />
+                    </label>
+                  ) : null}
+                  {Object.prototype.hasOwnProperty.call(operation.payload || {}, "raw_content") ? (
+                    <label>
+                      Note text
+                      <textarea
+                        value={
+                          parsedPayloadFromText(payloads[operation.operation_id])?.raw_content || ""
+                        }
+                        disabled={!canWrite || changeSet.status !== "ready"}
+                        onChange={(event) =>
+                          patchOperationPayload(operation, (payload) => ({
+                            ...payload,
+                            raw_content: event.target.value,
+                          }))
+                        }
+                      />
+                    </label>
+                  ) : null}
                   <label>
-                    Payload JSON
+                    Payload JSON (advanced)
                     <textarea
                       className="mono"
                       value={payloads[operation.operation_id] || ""}
@@ -282,7 +448,7 @@ function GraphDraftDetailCard({ token, changeSetId, navigate, canWrite, setBusy,
                       disabled={!canWrite || changeSet.status !== "ready"}
                       onClick={() => saveOperation(operation, "proposed")}
                     >
-                      Save
+                      Defer
                     </button>
                     <button
                       type="button"

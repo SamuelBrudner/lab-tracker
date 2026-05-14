@@ -15,6 +15,7 @@ from lab_tracker.models import GraphChangeSet, GraphChangeSetStatus
 from lab_tracker.schemas import (
     Envelope,
     GraphDraftCommitRequest,
+    GraphDraftCreateRequest,
     GraphDraftOperationUpdate,
     ListEnvelope,
 )
@@ -36,13 +37,20 @@ def build_graph_drafts_router(api: LabTrackerAPI) -> APIRouter:
         response_model=Envelope[GraphChangeSet],
         status_code=http_status.HTTP_201_CREATED,
     )
-    def create_graph_draft(note_id: UUID, request: Request):
+    def create_graph_draft(
+        note_id: UUID,
+        request: Request,
+        payload: GraphDraftCreateRequest | None = None,
+    ):
         actor = actor_from_request(request)
         draft_client = _draft_client_from_request(request)
+        draft_payload = payload or GraphDraftCreateRequest()
         try:
             change_set = api_from_request(request, api).create_graph_draft_from_note(
                 note_id,
                 draft_client=draft_client,
+                mode=draft_payload.mode,
+                user_hint=draft_payload.user_hint,
                 actor=actor,
             )
         finally:

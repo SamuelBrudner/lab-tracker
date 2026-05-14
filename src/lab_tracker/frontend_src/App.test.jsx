@@ -388,15 +388,20 @@ describe("App", () => {
         method: "POST",
         response: apiResponse({
           change_set_id: draftId,
+          clarification_requests: [],
+          context_packet: { mode: "graph_context" },
           created_at: "2026-04-20T00:00:00Z",
+          draft_mode: "graph_context",
           model: "gpt-5.4-mini",
           operations: [],
           project_id: "project-1",
-          prompt_version: "image-graph-draft-v1",
+          prompt_version: "image-graph-draft-v2",
           provider: "openai",
           source_content_type: "image/jpeg",
           source_note_id: noteId,
           status: "ready",
+          summary: "Draft ready",
+          uncertain_fields: [],
           updated_at: "2026-04-20T00:00:00Z",
         }),
       },
@@ -404,15 +409,20 @@ describe("App", () => {
         match: `/graph-drafts/${draftId}`,
         response: apiResponse({
           change_set_id: draftId,
+          clarification_requests: [],
+          context_packet: { mode: "graph_context" },
           created_at: "2026-04-20T00:00:00Z",
+          draft_mode: "graph_context",
           model: "gpt-5.4-mini",
           operations: [],
           project_id: "project-1",
-          prompt_version: "image-graph-draft-v1",
+          prompt_version: "image-graph-draft-v2",
           provider: "openai",
           source_content_type: "image/jpeg",
           source_note_id: noteId,
           status: "ready",
+          summary: "Draft ready",
+          uncertain_fields: [],
           updated_at: "2026-04-20T00:00:00Z",
         }),
       },
@@ -451,6 +461,7 @@ describe("App", () => {
       rationale: "The whiteboard asks this explicitly.",
       result_entity_id: null,
       sequence: 1,
+      semantic_type: "suggest_new_question",
       source_refs: [{ label: "whiteboard", quote: "yield?", region: null }],
       status: "proposed",
       target_entity_id: null,
@@ -458,16 +469,27 @@ describe("App", () => {
     };
     const draftBase = {
       change_set_id: draftId,
+      clarification_requests: ["Confirm whether Fly 12 should be formalized."],
+      context_packet: {
+        active_or_staged_questions: [
+          { id: questionId, label: "Existing question", status: "active" },
+        ],
+        mode: "graph_context",
+        project: { id: "project-1", label: "Project One" },
+      },
       created_at: "2026-04-20T00:00:00Z",
+      draft_mode: "graph_context",
       model: "gpt-5.4-mini",
       operations: [baseOperation],
       project_id: "project-1",
-      prompt_version: "image-graph-draft-v1",
+      prompt_version: "image-graph-draft-v2",
       provider: "openai",
       source_content_type: "image/jpeg",
       source_filename: "whiteboard.jpg",
       source_note_id: noteId,
       status: "ready",
+      summary: "Drafted one question from the whiteboard.",
+      uncertain_fields: ["Exact protocol name"],
       updated_at: "2026-04-20T00:00:00Z",
     };
 
@@ -542,7 +564,11 @@ describe("App", () => {
     render(<App />);
 
     expect(await screen.findByRole("heading", { name: "Graph Draft Review" })).toBeInTheDocument();
-    fireEvent.change(screen.getByLabelText("Payload JSON"), {
+    expect(screen.getByText("Drafted one question from the whiteboard.")).toBeInTheDocument();
+    expect(screen.getByText("Exact protocol name")).toBeInTheDocument();
+    expect(screen.getByText("Confirm whether Fly 12 should be formalized.")).toBeInTheDocument();
+    expect(screen.getByText("suggest new question")).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText(/Payload JSON/), {
       target: {
         value: JSON.stringify({
           project_id: "project-1",
@@ -562,6 +588,202 @@ describe("App", () => {
     expect(await screen.findByText("Graph draft committed.")).toBeInTheDocument();
     expect(await screen.findByText("applied")).toBeInTheDocument();
     expect(await screen.findByText(questionId)).toBeInTheDocument();
+  });
+
+  it("captures a mobile image with context and starts a graph-aware draft", async () => {
+    const noteId = "11111111-1111-4111-8111-111111111111";
+    const draftId = "22222222-2222-4222-8222-222222222222";
+    localStorage.setItem(TOKEN_STORAGE_KEY, "token-mobile-capture");
+    window.history.replaceState({}, "", "/app/capture");
+
+    installFetchMock([
+      {
+        match: "/auth/me",
+        response: apiResponse({ role: "admin", username: "sam" }),
+      },
+      {
+        match: projectsPath,
+        response: apiResponse([project("project-1", "Project One")]),
+      },
+      {
+        match: questionListPath("project-1"),
+        response: paged([
+          question({
+            questionId: "question-1",
+            status: "active",
+            text: "Can flies climb temporal odor gradients?",
+          }),
+        ]),
+      },
+      {
+        match: datasetListPath("project-1"),
+        response: paged([dataset({ datasetId: "dataset-1", commitHash: "dataset-hash" })]),
+      },
+      {
+        match: noteCountPath("project-1"),
+        response: [
+          paged([], { limit: 1, offset: 0, total: 0 }),
+          paged([], { limit: 1, offset: 0, total: 1 }),
+          paged([], { limit: 1, offset: 0, total: 1 }),
+        ],
+      },
+      {
+        match: activeSessionsPath("project-1"),
+        response: paged([
+          session({
+            primaryQuestionId: "question-1",
+            sessionId: "session-1",
+          }),
+        ]),
+      },
+      {
+        match: buildApiPath("/graph-drafts", { project_id: "project-1", limit: 10 }),
+        response: paged([]),
+      },
+      {
+        match: buildApiPath("/notes", { project_id: "project-1", limit: 10 }),
+        response: paged([]),
+      },
+      {
+        match: "/notes/upload-file",
+        method: "POST",
+        response: (request) => {
+          const body = request.init.body;
+          expect(body.get("project_id")).toBe("project-1");
+          expect(body.get("file").name).toBe("phone-capture.jpg");
+          expect(JSON.parse(body.get("metadata"))).toEqual({
+            capture_hint: "Rig 2 Fly 12",
+            capture_review_status: "draft_requested",
+            capture_source: "mobile_capture",
+          });
+          expect(JSON.parse(body.get("targets"))).toEqual([
+            { entity_id: "question-1", entity_type: "question" },
+            { entity_id: "session-1", entity_type: "session" },
+            { entity_id: "dataset-1", entity_type: "dataset" },
+          ]);
+          return apiResponse(
+            note({
+              noteId,
+              rawAsset: {
+                checksum: "abc",
+                content_type: "image/jpeg",
+                filename: "phone-capture.jpg",
+                size_bytes: 12,
+                storage_id: "33333333-3333-4333-8333-333333333333",
+              },
+            }),
+            201
+          );
+        },
+      },
+      {
+        match: questionCountPath("project-1"),
+        response: [
+          paged([], { limit: 1, offset: 0, total: 1 }),
+          paged([], { limit: 1, offset: 0, total: 1 }),
+        ],
+      },
+      {
+        match: datasetCountPath("project-1"),
+        response: [
+          paged([], { limit: 1, offset: 0, total: 1 }),
+          paged([], { limit: 1, offset: 0, total: 1 }),
+        ],
+      },
+      {
+        match: recentNotesPath("project-1"),
+        response: paged([note({ noteId })], { limit: 5, offset: 0, total: 1 }),
+      },
+      {
+        match: `/notes/${noteId}/graph-drafts`,
+        method: "POST",
+        response: (request) => {
+          expect(JSON.parse(request.init.body)).toEqual({
+            mode: "graph_context",
+            user_hint: "Rig 2 Fly 12",
+          });
+          return apiResponse(
+            {
+              change_set_id: draftId,
+              clarification_requests: [],
+              context_packet: { mode: "graph_context" },
+              created_at: "2026-04-20T00:00:00Z",
+              draft_mode: "graph_context",
+              model: "gpt-5.4-mini",
+              operations: [],
+              project_id: "project-1",
+              prompt_version: "image-graph-draft-v2",
+              provider: "openai",
+              source_content_type: "image/jpeg",
+              source_filename: "phone-capture.jpg",
+              source_note_id: noteId,
+              status: "ready",
+              summary: "Mobile capture draft",
+              uncertain_fields: [],
+              updated_at: "2026-04-20T00:00:00Z",
+            },
+            201
+          );
+        },
+      },
+      {
+        match: `/graph-drafts/${draftId}`,
+        response: apiResponse({
+          change_set_id: draftId,
+          clarification_requests: [],
+          context_packet: { mode: "graph_context" },
+          created_at: "2026-04-20T00:00:00Z",
+          draft_mode: "graph_context",
+          model: "gpt-5.4-mini",
+          operations: [],
+          project_id: "project-1",
+          prompt_version: "image-graph-draft-v2",
+          provider: "openai",
+          source_content_type: "image/jpeg",
+          source_filename: "phone-capture.jpg",
+          source_note_id: noteId,
+          status: "ready",
+          summary: "Mobile capture draft",
+          uncertain_fields: [],
+          updated_at: "2026-04-20T00:00:00Z",
+        }),
+      },
+      {
+        match: `/notes/${noteId}/raw`,
+        response: apiResponse({
+          checksum: "abc",
+          content_base64: "aW1n",
+          content_type: "image/jpeg",
+          filename: "phone-capture.jpg",
+          size_bytes: 12,
+          storage_id: "33333333-3333-4333-8333-333333333333",
+        }),
+      },
+    ]);
+
+    render(<App />);
+
+    expect(await screen.findByRole("heading", { name: "Phone Capture" })).toBeInTheDocument();
+    await waitFor(() => expect(screen.getByLabelText("Project")).toHaveValue("project-1"));
+
+    const file = new File(["phone-bytes"], "phone-capture.jpg", { type: "image/jpeg" });
+    fireEvent.change(screen.getByLabelText("Photo"), { target: { files: [file] } });
+    fireEvent.change(screen.getByLabelText("Active question (optional)"), {
+      target: { value: "question-1" },
+    });
+    fireEvent.change(screen.getByLabelText("Session (optional)"), {
+      target: { value: "session-1" },
+    });
+    fireEvent.change(screen.getByLabelText("Dataset (optional)"), {
+      target: { value: "dataset-1" },
+    });
+    fireEvent.change(screen.getByLabelText("Short hint (optional)"), {
+      target: { value: "Rig 2 Fly 12" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Upload and draft" }));
+
+    expect(await screen.findByRole("heading", { name: "Graph Draft Review" })).toBeInTheDocument();
+    expect(await screen.findByText("Mobile capture draft")).toBeInTheDocument();
   });
 
   it("shows a visible restore error when session bootstrap fails", async () => {

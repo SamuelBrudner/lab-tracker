@@ -4,6 +4,7 @@ import { Dashboard } from "./features/dashboard-projects.jsx";
 import { GraphDraftDetailCard } from "./features/graph-drafts.jsx";
 import { VisualizationDetailCard } from "./features/analysis/VisualizationDetailCard.jsx";
 import { DatasetDetailCard } from "./features/datasets/index.js";
+import { MobileCaptureCard } from "./features/mobile-capture.jsx";
 import { NoteDetailCard } from "./features/notes.jsx";
 import { QuestionDetailCard } from "./features/questions/QuestionDetailCard.jsx";
 import { SessionDetailCard } from "./features/sessions/index.js";
@@ -31,6 +32,7 @@ import { useAppRoute } from "./shared/routing.jsx";
 function App() {
   const { navigate, replace, route } = useAppRoute();
   const isHomeRoute = route.kind === "home";
+  const needsProjectData = isHomeRoute || route.kind === "capture";
   const [busy, setBusy] = React.useState(false);
   const [message, setMessage] = React.useState("");
   const [error, setError] = React.useState("");
@@ -44,7 +46,7 @@ function App() {
   const apiEnabled = auth.authChecked && (!auth.authEnabled || Boolean(auth.token));
   const workspaceData = useProjectWorkspaceData({
     enabled: apiEnabled,
-    loadProjectData: isHomeRoute,
+    loadProjectData: needsProjectData,
     token: auth.token,
     setBusy,
     setFlash,
@@ -56,7 +58,7 @@ function App() {
     token: auth.token,
   });
   const sessionData = useProjectSessionData({
-    enabled: isHomeRoute && apiEnabled,
+    enabled: needsProjectData && apiEnabled,
     selectedProjectId: workspaceData.selectedProjectId,
     setFlash,
     token: auth.token,
@@ -205,6 +207,24 @@ function App() {
           ) : (
             <Dashboard {...dashboardProps} />
           )}
+
+          {route.kind === "capture" ? (
+            <MobileCaptureCard
+              token={auth.token}
+              canWrite={auth.canWrite}
+              projects={workspaceData.projects}
+              selectedProjectId={workspaceData.selectedProjectId}
+              onSelectedProjectChange={workspaceData.setSelectedProjectId}
+              questions={workspaceData.questions}
+              datasets={workspaceData.datasets}
+              sessions={sessionData.sessions}
+              navigate={navigate}
+              setBusy={setBusy}
+              setFlash={setFlash}
+              refreshProjectCounts={workspaceData.refreshProjectCounts}
+              refreshRecentNotes={noteData.refreshRecentNotes}
+            />
+          ) : null}
 
           {route.kind === "question" ? (
             <QuestionDetailCard

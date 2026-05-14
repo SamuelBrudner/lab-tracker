@@ -1,6 +1,7 @@
 # Mobile-First, Graph-Aware Image-to-Graph Draft Review
 
-Status: Proposed
+Status: Implemented for the v1 core workflow; offline queued capture remains
+deferred.
 
 Tracking:
 
@@ -502,6 +503,20 @@ mobile-first photo capture + graph-aware AI interpretation + human-approved grap
 ```
 
 ## Implementation Notes
+
+Implemented defaults:
+
+- `/app/capture` is the phone-first capture route.
+- Captures are project-scoped and require a project before upload.
+- Graph context uses explicit links plus bounded recency, not embeddings.
+- Graph-context drafting is the default; image-only drafting is explicit
+  fallback only.
+- Raw image notes remain the provenance anchor in note storage.
+- Draft operations add semantic labels on top of existing create/update commit
+  machinery.
+- Review is hybrid: typed controls for common operations with JSON as the
+  advanced escape hatch.
+- Offline local queued capture is deferred.
 
 ### Suggested Milestones
 

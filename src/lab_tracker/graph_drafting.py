@@ -10,8 +10,22 @@ import httpx
 
 from lab_tracker.config import Settings
 
-PROMPT_VERSION = "image-graph-draft-v1"
+PROMPT_VERSION = "image-graph-draft-v2"
 PROVIDER = "openai"
+
+SEMANTIC_TYPES = [
+    "create_entity",
+    "update_entity",
+    "create_note",
+    "link_note_to_question",
+    "link_note_to_session",
+    "link_note_to_dataset",
+    "link_note_to_analysis",
+    "suggest_new_question",
+    "suggest_new_dataset",
+    "suggest_followup",
+    "request_clarification",
+]
 
 
 class GraphDraftingError(RuntimeError):
@@ -58,6 +72,7 @@ def graph_patch_response_schema() -> dict[str, Any]:
                     "visualization",
                 ],
             },
+            "semantic_type": {"type": "string", "enum": SEMANTIC_TYPES},
             "target_entity_id": {"type": ["string", "null"]},
             "payload_json": {
                 "type": "string",
@@ -74,6 +89,7 @@ def graph_patch_response_schema() -> dict[str, Any]:
             "client_ref",
             "op",
             "entity_type",
+            "semantic_type",
             "target_entity_id",
             "payload_json",
             "rationale",
@@ -85,10 +101,12 @@ def graph_patch_response_schema() -> dict[str, Any]:
         "type": "object",
         "properties": {
             "summary": {"type": "string"},
+            "uncertain_fields": {"type": "array", "items": {"type": "string"}},
+            "clarification_requests": {"type": "array", "items": {"type": "string"}},
             "operations": {"type": "array", "items": operation_schema},
         },
         "additionalProperties": False,
-        "required": ["summary", "operations"],
+        "required": ["summary", "uncertain_fields", "clarification_requests", "operations"],
     }
 
 
@@ -127,7 +145,10 @@ class OpenAIGraphDraftClient:
         *,
         image_bytes: bytes,
         content_type: str,
-        project_context: dict[str, Any],
+        graph_context: dict[str, Any] | None = None,
+        user_hint: str | None = None,
+        draft_mode: str = "graph_context",
+        project_context: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         if not self._api_key:
             raise GraphDraftingError(
@@ -135,6 +156,7 @@ class OpenAIGraphDraftClient:
             )
         if not image_bytes:
             raise GraphDraftingError("Source image is empty.")
+        resolved_context = graph_context if graph_context is not None else project_context or {}
         image_url = _data_url(image_bytes=image_bytes, content_type=content_type)
         response = self._client.post(
             "/responses",
@@ -152,9 +174,11 @@ class OpenAIGraphDraftClient:
                             {
                                 "type": "input_text",
                                 "text": (
-                                    "Draft Lab Tracker graph updates from this image. "
-                                    "Use this current project context:\n"
-                                    f"{json.dumps(project_context, sort_keys=True)}"
+                                    "Draft Lab Tracker graph updates from this image.\n"
+                                    f"Draft mode: {draft_mode}\n"
+                                    f"User hint: {user_hint or '(none)'}\n"
+                                    "Graph context packet:\n"
+                                    f"{json.dumps(resolved_context, sort_keys=True)}"
                                 ),
                             },
                             {"type": "input_image", "image_url": image_url},
@@ -191,6 +215,9 @@ def _instructions() -> str:
     return (
         "You convert lab notebook or whiteboard images into proposed Lab Tracker graph "
         "changes. Propose only changes that are supported by the image and context. "
+        "Use the graph context to resolve ambiguous references. Prefer linking to "
+        "existing entities by their provided IDs over creating duplicates. Do not invent "
+        "IDs. If the context is insufficient, mark uncertainty or request clarification. "
         "Use create or update operations for project, question, note, session, dataset, "
         "analysis, claim, or visualization entities. Use payload_json as a JSON object "
         "string matching the existing Lab Tracker API request shape. For questions, prefer "
@@ -200,8 +227,10 @@ def _instructions() -> str:
         "such as \"parent_question\", then set the child payload's parent_question_ids to "
         "[{\"$ref\":\"parent_question\"}]. For created objects that later operations "
         "should reference, set client_ref to a short stable name and use {\"$ref\":\"name\"} "
-        "inside later payload_json fields. Never claim a canonical update happened; these "
-        "are drafts for human review."
+        "inside later payload_json fields. Set semantic_type to the closest allowed "
+        "semantic operation label. Never claim a canonical update happened; these are "
+        "drafts for human review. Preserve the uploaded image note as the provenance "
+        "source and return uncertainty explicitly."
     )
 
 

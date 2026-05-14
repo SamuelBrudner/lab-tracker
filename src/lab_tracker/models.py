@@ -142,6 +142,25 @@ class GraphChangeOp(str, Enum):
     UPDATE = "update"
 
 
+class GraphDraftMode(str, Enum):
+    GRAPH_CONTEXT = "graph_context"
+    IMAGE_ONLY = "image_only"
+
+
+class GraphDraftSemanticType(str, Enum):
+    CREATE_ENTITY = "create_entity"
+    UPDATE_ENTITY = "update_entity"
+    CREATE_NOTE = "create_note"
+    LINK_NOTE_TO_QUESTION = "link_note_to_question"
+    LINK_NOTE_TO_SESSION = "link_note_to_session"
+    LINK_NOTE_TO_DATASET = "link_note_to_dataset"
+    LINK_NOTE_TO_ANALYSIS = "link_note_to_analysis"
+    SUGGEST_NEW_QUESTION = "suggest_new_question"
+    SUGGEST_NEW_DATASET = "suggest_new_dataset"
+    SUGGEST_FOLLOWUP = "suggest_followup"
+    REQUEST_CLARIFICATION = "request_clarification"
+
+
 class _DomainModel(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -196,6 +215,7 @@ class GraphChangeOperation(_DomainModel):
     sequence: int
     op: GraphChangeOp
     entity_type: EntityType
+    semantic_type: GraphDraftSemanticType | None = None
     payload: dict[str, Any] = Field(default_factory=dict)
     target_entity_id: UUID | None = None
     client_ref: str | None = None
@@ -219,6 +239,11 @@ class GraphChangeSet(_DomainModel):
     provider: str = "openai"
     model: str
     prompt_version: str
+    draft_mode: GraphDraftMode = GraphDraftMode.GRAPH_CONTEXT
+    context_packet: dict[str, Any] = Field(default_factory=dict)
+    summary: str = ""
+    uncertain_fields: list[str] = Field(default_factory=list)
+    clarification_requests: list[str] = Field(default_factory=list)
     status: GraphChangeSetStatus = GraphChangeSetStatus.DRAFTING
     commit_message: str | None = None
     error_metadata: dict[str, Any] = Field(default_factory=dict)

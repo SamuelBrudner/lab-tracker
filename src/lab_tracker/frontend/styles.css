@@ -331,6 +331,43 @@ button:disabled {
   margin-top: 0.9rem;
 }
 
+.capture-card {
+  max-width: 760px;
+  margin: 0 auto;
+}
+
+.capture-head {
+  align-items: flex-start;
+}
+
+.capture-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(260px, 0.7fr);
+  gap: 0.95rem;
+  margin-top: 0.9rem;
+}
+
+.capture-form textarea {
+  min-height: 96px;
+}
+
+.capture-actions {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.55rem;
+}
+
+.capture-actions button {
+  min-height: 44px;
+}
+
+.capture-pending {
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  padding: 0.8rem;
+  background: #fbfbfa;
+}
+
 .dataset-pr-layout {
   display: grid;
   grid-template-columns: minmax(0, 0.9fr) minmax(0, 1.4fr);
@@ -436,6 +473,18 @@ button:disabled {
   font-size: 0.88rem;
   line-height: 1.35;
   white-space: pre-wrap;
+}
+
+.compact-list {
+  margin: 0.4rem 0 0;
+  padding-left: 1.1rem;
+  color: var(--ink-soft);
+  font-size: 0.9rem;
+}
+
+.context-details summary {
+  cursor: pointer;
+  font-weight: 700;
 }
 
 .highlight {
@@ -550,6 +599,14 @@ button:disabled {
   }
 
   .review-layout {
+    grid-template-columns: 1fr;
+  }
+
+  .capture-layout {
+    grid-template-columns: 1fr;
+  }
+
+  .capture-actions {
     grid-template-columns: 1fr;
   }
 

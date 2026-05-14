@@ -112,6 +112,7 @@ function WorkspaceHome({
         }
         activeQuestions={workspaceData.activeQuestions}
         notes={noteData.notes}
+        navigate={navigate}
       />
 
       <DatasetPanel

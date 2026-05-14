@@ -24,6 +24,9 @@ from lab_tracker.models import (
     GraphChangeOperationStatus,
     GraphChangeSet,
     GraphChangeSetStatus,
+    GraphDraftMode,
+    GraphDraftSemanticType,
+    EntityRef,
     Note,
     NoteStatus,
     Project,
@@ -76,6 +79,48 @@ _UPDATE_SCHEMAS = {
     EntityType.CLAIM: ClaimUpdate,
     EntityType.VISUALIZATION: VisualizationUpdate,
 }
+_RECENT_CONTEXT_LIMIT = 10
+_QUESTION_CONTEXT_LIMIT = 50
+_SEMANTIC_ALLOWED_TARGETS = {
+    GraphDraftSemanticType.CREATE_NOTE: {(GraphChangeOp.CREATE, EntityType.NOTE)},
+    GraphDraftSemanticType.LINK_NOTE_TO_QUESTION: {(GraphChangeOp.UPDATE, EntityType.NOTE)},
+    GraphDraftSemanticType.LINK_NOTE_TO_SESSION: {(GraphChangeOp.UPDATE, EntityType.NOTE)},
+    GraphDraftSemanticType.LINK_NOTE_TO_DATASET: {(GraphChangeOp.UPDATE, EntityType.NOTE)},
+    GraphDraftSemanticType.LINK_NOTE_TO_ANALYSIS: {(GraphChangeOp.UPDATE, EntityType.NOTE)},
+    GraphDraftSemanticType.SUGGEST_NEW_QUESTION: {(GraphChangeOp.CREATE, EntityType.QUESTION)},
+    GraphDraftSemanticType.SUGGEST_NEW_DATASET: {(GraphChangeOp.CREATE, EntityType.DATASET)},
+    GraphDraftSemanticType.SUGGEST_FOLLOWUP: {
+        (GraphChangeOp.CREATE, EntityType.NOTE),
+        (GraphChangeOp.CREATE, EntityType.QUESTION),
+    },
+    GraphDraftSemanticType.REQUEST_CLARIFICATION: {
+        (GraphChangeOp.CREATE, EntityType.NOTE),
+        (GraphChangeOp.UPDATE, EntityType.NOTE),
+    },
+}
+_ENTITY_ID_FIELDS = {
+    "project_id": EntityType.PROJECT,
+    "question_id": EntityType.QUESTION,
+    "primary_question_id": EntityType.QUESTION,
+    "linked_question_id": EntityType.QUESTION,
+    "session_id": EntityType.SESSION,
+    "source_session_id": EntityType.SESSION,
+    "dataset_id": EntityType.DATASET,
+    "analysis_id": EntityType.ANALYSIS,
+    "note_id": EntityType.NOTE,
+    "viz_id": EntityType.VISUALIZATION,
+    "visualization_id": EntityType.VISUALIZATION,
+    "claim_id": EntityType.CLAIM,
+}
+_ENTITY_ID_LIST_FIELDS = {
+    "parent_question_ids": EntityType.QUESTION,
+    "secondary_question_ids": EntityType.QUESTION,
+    "dataset_ids": EntityType.DATASET,
+    "supported_by_dataset_ids": EntityType.DATASET,
+    "supported_by_analysis_ids": EntityType.ANALYSIS,
+    "related_claim_ids": EntityType.CLAIM,
+    "note_ids": EntityType.NOTE,
+}
 
 
 class GraphDraftServiceMixin:
@@ -84,15 +129,23 @@ class GraphDraftServiceMixin:
         note_id: UUID,
         *,
         draft_client: Any,
+        mode: GraphDraftMode = GraphDraftMode.GRAPH_CONTEXT,
+        user_hint: str | None = None,
         actor: AuthContext | None = None,
     ) -> GraphChangeSet:
         require_role(actor, WRITE_ROLES)
-        note = self.get_note(note_id)
-        if note.raw_asset is None:
-            raise ValidationError("Graph drafting requires a note with a raw image asset.")
-        if not note.raw_asset.content_type.lower().startswith("image/"):
-            raise ValidationError("Graph drafting only supports image note uploads.")
-        raw_asset, image_bytes = self.download_note_raw(note_id)
+        note, raw_asset, image_bytes = self._prepare_image_note_for_graph_draft(note_id)
+        cleaned_hint = user_hint.strip() if user_hint else None
+        if mode == GraphDraftMode.GRAPH_CONTEXT:
+            context_packet = self._build_graph_context_packet(
+                note,
+                user_hint=cleaned_hint,
+                actor=actor,
+            )
+        elif mode == GraphDraftMode.IMAGE_ONLY:
+            context_packet = self._image_only_context_packet(note, user_hint=cleaned_hint)
+        else:
+            raise ValidationError("Unsupported graph draft mode.")
         change_set = GraphChangeSet(
             change_set_id=uuid4(),
             project_id=note.project_id,
@@ -103,6 +156,8 @@ class GraphDraftServiceMixin:
             provider=PROVIDER,
             model=getattr(draft_client, "model", "unknown"),
             prompt_version=PROMPT_VERSION,
+            draft_mode=mode,
+            context_packet=context_packet,
             created_by=_actor_user_id(actor),
         )
         self._save_graph_change_set(change_set)
@@ -110,9 +165,17 @@ class GraphDraftServiceMixin:
             graph_patch = draft_client.draft_from_image(
                 image_bytes=image_bytes,
                 content_type=raw_asset.content_type,
-                project_context=self._graph_draft_project_context(note.project_id),
+                graph_context=context_packet,
+                user_hint=cleaned_hint,
+                draft_mode=mode.value,
             )
+            _validate_graph_patch_top_level(graph_patch)
             change_set.operations = self._operations_from_graph_patch(change_set, graph_patch)
+            change_set.summary = str(graph_patch.get("summary") or "")
+            change_set.uncertain_fields = _string_list(graph_patch.get("uncertain_fields"))
+            change_set.clarification_requests = _string_list(
+                graph_patch.get("clarification_requests")
+            )
             change_set.status = GraphChangeSetStatus.READY
             change_set.error_metadata = {}
         except GraphDraftingError as exc:
@@ -196,6 +259,8 @@ class GraphDraftServiceMixin:
         else:
             try:
                 _validate_graph_operation_payload(operation, operation.payload)
+                self._ensure_graph_operation_references_exist(operation, operation.payload)
+                _validate_semantic_operation_target(operation)
                 operation.error_metadata = {}
             except ValidationError as exc:
                 operation.error_metadata = {"message": str(exc)}
@@ -271,6 +336,7 @@ class GraphDraftServiceMixin:
                     sequence=index,
                     op=GraphChangeOp(item.get("op")),
                     entity_type=EntityType(item.get("entity_type")),
+                    semantic_type=GraphDraftSemanticType(item.get("semantic_type")),
                     target_entity_id=item.get("target_entity_id"),
                     client_ref=item.get("client_ref"),
                     payload=payload,
@@ -280,6 +346,12 @@ class GraphDraftServiceMixin:
                 )
             except Exception as exc:
                 raise GraphDraftingError("GPT graph patch operation was invalid.") from exc
+            try:
+                _validate_graph_operation_payload(operation, operation.payload)
+                self._ensure_graph_operation_references_exist(operation, operation.payload)
+                _validate_semantic_operation_target(operation)
+            except ValidationError as exc:
+                raise GraphDraftingError(str(exc)) from exc
             operations.append(operation)
         return operations
 
@@ -491,36 +563,194 @@ class GraphDraftServiceMixin:
             )
         raise ValidationError("Unsupported entity type.")
 
-    def _graph_draft_project_context(self, project_id: UUID) -> dict[str, Any]:
-        project = self.get_project(project_id)
-        notes = sorted(
-            self.list_notes(project_id=project_id),
-            key=lambda note: note.created_at,
+    def build_graph_context_for_note(
+        self,
+        note_id: UUID,
+        *,
+        user_hint: str | None = None,
+        actor: AuthContext | None = None,
+    ) -> dict[str, Any]:
+        note, _, _ = self._prepare_image_note_for_graph_draft(note_id)
+        return self._build_graph_context_packet(
+            note,
+            user_hint=user_hint.strip() if user_hint else None,
+            actor=actor,
+        )
+
+    def _prepare_image_note_for_graph_draft(self, note_id: UUID) -> tuple[Note, Any, bytes]:
+        note = self.get_note(note_id)
+        if note.raw_asset is None:
+            raise ValidationError("Graph drafting requires a note with a raw image asset.")
+        if not note.raw_asset.content_type.lower().startswith("image/"):
+            raise ValidationError("Graph drafting only supports image note uploads.")
+        try:
+            raw_asset, image_bytes = self.download_note_raw(note_id)
+        except NotFoundError as exc:
+            raise NotFoundError("Source image file is unavailable.") from exc
+        except ValidationError:
+            raise
+        except Exception as exc:
+            raise ValidationError("Source image file could not be read.") from exc
+        if not image_bytes:
+            raise ValidationError("Source image file is empty.")
+        return note, raw_asset, image_bytes
+
+    def _build_graph_context_packet(
+        self,
+        note: Note,
+        *,
+        user_hint: str | None,
+        actor: AuthContext | None = None,
+    ) -> dict[str, Any]:
+        try:
+            project = self.get_project(note.project_id)
+        except NotFoundError as exc:
+            raise ValidationError(
+                "Graph context cannot be built because the note project does not exist."
+            ) from exc
+        questions = sorted(
+            [
+                question
+                for question in self.list_questions(project_id=note.project_id)
+                if question.status in {QuestionStatus.ACTIVE, QuestionStatus.STAGED}
+            ],
+            key=lambda question: (question.status.value, question.updated_at, question.question_id),
             reverse=True,
-        )[:20]
+        )[:_QUESTION_CONTEXT_LIMIT]
+        recent_notes = [
+            item
+            for item in sorted(
+                self.list_notes(project_id=note.project_id),
+                key=lambda candidate: candidate.created_at,
+                reverse=True,
+            )
+            if item.note_id != note.note_id
+        ][:_RECENT_CONTEXT_LIMIT]
+        recent_sessions = sorted(
+            self.list_sessions(project_id=note.project_id),
+            key=lambda item: item.started_at,
+            reverse=True,
+        )[:_RECENT_CONTEXT_LIMIT]
+        recent_datasets = sorted(
+            self.list_datasets(project_id=note.project_id),
+            key=lambda item: item.created_at,
+            reverse=True,
+        )[:_RECENT_CONTEXT_LIMIT]
+        recent_analyses = sorted(
+            self.list_analyses(project_id=note.project_id),
+            key=lambda item: item.created_at,
+            reverse=True,
+        )[:_RECENT_CONTEXT_LIMIT]
+        recent_claims = sorted(
+            self.list_claims(project_id=note.project_id),
+            key=lambda item: item.created_at,
+            reverse=True,
+        )[:_RECENT_CONTEXT_LIMIT]
+        recent_visualizations = sorted(
+            self.list_visualizations(project_id=note.project_id),
+            key=lambda item: item.created_at,
+            reverse=True,
+        )[:_RECENT_CONTEXT_LIMIT]
         return {
-            "project": project.model_dump(mode="json"),
-            "questions": [
-                item.model_dump(mode="json") for item in self.list_questions(project_id=project_id)
+            "mode": GraphDraftMode.GRAPH_CONTEXT.value,
+            "user_hint": user_hint,
+            "current_user": _compact_actor(actor),
+            "source_note": _compact_note(note, include_raw_asset=True),
+            "selected_targets": [
+                self._compact_target_ref(target, note.project_id) for target in note.targets
             ],
-            "recent_notes": [item.model_dump(mode="json") for item in notes],
-            "sessions": [
-                item.model_dump(mode="json") for item in self.list_sessions(project_id=project_id)
+            "project": {
+                "id": str(project.project_id),
+                "label": project.name,
+                "status": project.status.value,
+            },
+            "active_or_staged_questions": [_compact_question(item) for item in questions],
+            "recent_sessions": [_compact_session(item) for item in recent_sessions],
+            "recent_datasets": [_compact_dataset(item) for item in recent_datasets],
+            "recent_notes": [_compact_note(item) for item in recent_notes],
+            "recent_analyses": [_compact_analysis(item) for item in recent_analyses],
+            "recent_claims": [_compact_claim(item) for item in recent_claims],
+            "recent_visualizations": [
+                _compact_visualization(item) for item in recent_visualizations
             ],
-            "datasets": [
-                item.model_dump(mode="json") for item in self.list_datasets(project_id=project_id)
-            ],
-            "analyses": [
-                item.model_dump(mode="json") for item in self.list_analyses(project_id=project_id)
-            ],
-            "claims": [
-                item.model_dump(mode="json") for item in self.list_claims(project_id=project_id)
-            ],
-            "visualizations": [
-                item.model_dump(mode="json")
-                for item in self.list_visualizations(project_id=project_id)
+            "unresolved_recent_captures": [
+                _compact_note(item)
+                for item in recent_notes
+                if item.raw_asset is not None
+                and item.raw_asset.content_type.lower().startswith("image/")
+                and item.status == NoteStatus.STAGED
             ],
         }
+
+    def _image_only_context_packet(self, note: Note, *, user_hint: str | None) -> dict[str, Any]:
+        return {
+            "mode": GraphDraftMode.IMAGE_ONLY.value,
+            "user_hint": user_hint,
+            "source_note": _compact_note(note, include_raw_asset=True),
+            "warning": "Image-only draft was explicitly requested without graph context.",
+        }
+
+    def _compact_target_ref(self, target: EntityRef, project_id: UUID) -> dict[str, Any]:
+        try:
+            entity = self._get_graph_entity(target.entity_type, target.entity_id)
+        except NotFoundError:
+            return {
+                "entity_type": target.entity_type.value,
+                "entity_id": str(target.entity_id),
+                "label": "(missing)",
+            }
+        if target.entity_type != EntityType.VISUALIZATION and hasattr(entity, "project_id"):
+            if entity.project_id != project_id:
+                raise ValidationError("Target must belong to the same project.")
+        return {
+            "entity_type": target.entity_type.value,
+            "entity_id": str(target.entity_id),
+            "label": _entity_label(target.entity_type, entity),
+            "status": getattr(getattr(entity, "status", None), "value", None),
+        }
+
+    def _get_graph_entity(self, entity_type: EntityType, entity_id: UUID) -> EntityResult:
+        getters = {
+            EntityType.PROJECT: self.get_project,
+            EntityType.QUESTION: self.get_question,
+            EntityType.NOTE: self.get_note,
+            EntityType.SESSION: self.get_session,
+            EntityType.DATASET: self.get_dataset,
+            EntityType.ANALYSIS: self.get_analysis,
+            EntityType.CLAIM: self.get_claim,
+            EntityType.VISUALIZATION: self.get_visualization,
+        }
+        getter = getters.get(entity_type)
+        if getter is None:
+            raise ValidationError("Unsupported entity type.")
+        return getter(entity_id)
+
+    def _ensure_graph_operation_references_exist(
+        self,
+        operation: GraphChangeOperation,
+        payload: dict[str, Any],
+    ) -> None:
+        if operation.op == GraphChangeOp.UPDATE:
+            if operation.target_entity_id is None:
+                raise ValidationError("Update operations require target_entity_id.")
+            try:
+                self._get_graph_entity(operation.entity_type, operation.target_entity_id)
+            except NotFoundError as exc:
+                raise ValidationError(
+                    "Operation references an unknown "
+                    f"{operation.entity_type.value} ID: {operation.target_entity_id}."
+                ) from exc
+        try:
+            refs = _iter_payload_entity_refs(payload)
+        except (TypeError, ValueError) as exc:
+            raise ValidationError("Operation payload references an invalid entity ID.") from exc
+        for entity_type, entity_id in refs:
+            try:
+                self._get_graph_entity(entity_type, entity_id)
+            except NotFoundError as exc:
+                raise ValidationError(
+                    f"Operation references an unknown {entity_type.value} ID: {entity_id}."
+                ) from exc
 
 
 def _payload_from_json(raw_payload: Any) -> dict[str, Any]:
@@ -540,6 +770,7 @@ def _validate_graph_patch_operation_shape(item: dict[str, Any]) -> None:
         "client_ref",
         "op",
         "entity_type",
+        "semantic_type",
         "target_entity_id",
         "payload_json",
         "rationale",
@@ -563,6 +794,15 @@ def _validate_graph_patch_operation_shape(item: dict[str, Any]) -> None:
         raise GraphDraftingError("GPT graph patch confidence must be between 0 and 1.")
     if not isinstance(item["source_refs"], list):
         raise GraphDraftingError("GPT graph patch source_refs must be a list.")
+
+
+def _validate_graph_patch_top_level(graph_patch: dict[str, Any]) -> None:
+    if not isinstance(graph_patch.get("summary"), str):
+        raise GraphDraftingError("GPT graph patch summary must be a string.")
+    if not isinstance(graph_patch.get("uncertain_fields"), list):
+        raise GraphDraftingError("GPT graph patch uncertain_fields must be a list.")
+    if not isinstance(graph_patch.get("clarification_requests"), list):
+        raise GraphDraftingError("GPT graph patch clarification_requests must be a list.")
 
 
 def _resolve_refs(value: Any, ref_map: dict[str, UUID]) -> Any:
@@ -621,6 +861,191 @@ def _validate_payload(schema_type: Any, payload: dict[str, Any]) -> Any:
         return schema_type.model_validate(payload)
     except PydanticValidationError as exc:
         raise ValidationError(_format_pydantic_error(exc)) from exc
+
+
+def _validate_semantic_operation_target(operation: GraphChangeOperation) -> None:
+    if operation.semantic_type is None:
+        return
+    if operation.semantic_type in {
+        GraphDraftSemanticType.CREATE_ENTITY,
+        GraphDraftSemanticType.UPDATE_ENTITY,
+    }:
+        return
+    allowed = _SEMANTIC_ALLOWED_TARGETS.get(operation.semantic_type)
+    if allowed is None:
+        raise ValidationError(f"Unsupported semantic operation: {operation.semantic_type.value}.")
+    candidate = (operation.op, operation.entity_type)
+    if candidate not in allowed:
+        raise ValidationError(
+            f"Semantic operation {operation.semantic_type.value} cannot be used with "
+            f"{operation.op.value} {operation.entity_type.value}."
+        )
+
+
+def _string_list(raw: Any) -> list[str]:
+    if not isinstance(raw, list):
+        return []
+    return [str(item).strip() for item in raw if str(item).strip()]
+
+
+def _compact_actor(actor: AuthContext | None) -> dict[str, Any] | None:
+    if actor is None:
+        return None
+    return {"id": str(actor.user_id), "role": actor.role.value}
+
+
+def _compact_note(note: Note, *, include_raw_asset: bool = False) -> dict[str, Any]:
+    preview = note.transcribed_text or note.raw_content or ""
+    payload: dict[str, Any] = {
+        "id": str(note.note_id),
+        "project_id": str(note.project_id),
+        "status": note.status.value,
+        "created_at": note.created_at.isoformat(),
+        "updated_at": note.updated_at.isoformat(),
+        "preview": preview[:400],
+        "targets": [
+            {"entity_type": target.entity_type.value, "entity_id": str(target.entity_id)}
+            for target in note.targets
+        ],
+        "metadata": dict(note.metadata),
+    }
+    if include_raw_asset and note.raw_asset is not None:
+        payload["raw_asset"] = {
+            "filename": note.raw_asset.filename,
+            "content_type": note.raw_asset.content_type,
+            "size_bytes": note.raw_asset.size_bytes,
+            "checksum": note.raw_asset.checksum,
+        }
+    return payload
+
+
+def _compact_question(question: Question) -> dict[str, Any]:
+    return {
+        "id": str(question.question_id),
+        "label": question.text,
+        "status": question.status.value,
+        "question_type": question.question_type.value,
+        "parent_question_ids": [str(item) for item in question.parent_question_ids],
+        "updated_at": question.updated_at.isoformat(),
+    }
+
+
+def _compact_session(session: Session) -> dict[str, Any]:
+    return {
+        "id": str(session.session_id),
+        "label": f"{session.session_type.value} session {session.started_at.date().isoformat()}",
+        "status": session.status.value,
+        "session_type": session.session_type.value,
+        "primary_question_id": (
+            str(session.primary_question_id) if session.primary_question_id else None
+        ),
+        "started_at": session.started_at.isoformat(),
+        "ended_at": session.ended_at.isoformat() if session.ended_at else None,
+    }
+
+
+def _compact_dataset(dataset: Dataset) -> dict[str, Any]:
+    return {
+        "id": str(dataset.dataset_id),
+        "label": f"Dataset {dataset.commit_hash[:12]}",
+        "status": dataset.status.value,
+        "primary_question_id": str(dataset.primary_question_id),
+        "question_links": [
+            {
+                "question_id": str(link.question_id),
+                "role": link.role.value,
+                "outcome_status": link.outcome_status.value,
+            }
+            for link in dataset.question_links
+        ],
+        "source_session_id": (
+            str(dataset.commit_manifest.source_session_id)
+            if dataset.commit_manifest.source_session_id
+            else None
+        ),
+        "created_at": dataset.created_at.isoformat(),
+    }
+
+
+def _compact_analysis(analysis: Analysis) -> dict[str, Any]:
+    return {
+        "id": str(analysis.analysis_id),
+        "label": analysis.method_hash,
+        "status": analysis.status.value,
+        "dataset_ids": [str(item) for item in analysis.dataset_ids],
+        "code_version": analysis.code_version,
+        "created_at": analysis.created_at.isoformat(),
+    }
+
+
+def _compact_claim(claim: Claim) -> dict[str, Any]:
+    return {
+        "id": str(claim.claim_id),
+        "label": claim.statement[:180],
+        "status": claim.status.value,
+        "confidence": claim.confidence,
+        "supported_by_dataset_ids": [str(item) for item in claim.supported_by_dataset_ids],
+        "supported_by_analysis_ids": [str(item) for item in claim.supported_by_analysis_ids],
+        "created_at": claim.created_at.isoformat(),
+    }
+
+
+def _compact_visualization(visualization: Visualization) -> dict[str, Any]:
+    return {
+        "id": str(visualization.viz_id),
+        "label": visualization.caption or visualization.file_path,
+        "analysis_id": str(visualization.analysis_id),
+        "viz_type": visualization.viz_type,
+        "file_path": visualization.file_path,
+        "related_claim_ids": [str(item) for item in visualization.related_claim_ids],
+        "created_at": visualization.created_at.isoformat(),
+    }
+
+
+def _entity_label(entity_type: EntityType, entity: EntityResult) -> str:
+    if entity_type == EntityType.PROJECT:
+        return entity.name
+    if entity_type == EntityType.QUESTION:
+        return entity.text
+    if entity_type == EntityType.NOTE:
+        return entity.transcribed_text or entity.raw_content or "(binary note)"
+    if entity_type == EntityType.SESSION:
+        return f"{entity.session_type.value} session {entity.started_at.date().isoformat()}"
+    if entity_type == EntityType.DATASET:
+        return f"Dataset {entity.commit_hash[:12]}"
+    if entity_type == EntityType.ANALYSIS:
+        return entity.method_hash
+    if entity_type == EntityType.CLAIM:
+        return entity.statement[:180]
+    if entity_type == EntityType.VISUALIZATION:
+        return entity.caption or entity.file_path
+    return str(_entity_id(entity_type, entity))
+
+
+def _iter_payload_entity_refs(value: Any) -> list[tuple[EntityType, UUID]]:
+    refs: list[tuple[EntityType, UUID]] = []
+    if isinstance(value, list):
+        for item in value:
+            refs.extend(_iter_payload_entity_refs(item))
+        return refs
+    if not isinstance(value, dict):
+        return refs
+    if set(value) == {"$ref"}:
+        return refs
+    entity_type = value.get("entity_type")
+    entity_id = value.get("entity_id")
+    if isinstance(entity_type, str) and isinstance(entity_id, str):
+        refs.append((EntityType(entity_type), UUID(entity_id)))
+    for key, item in value.items():
+        if key in _ENTITY_ID_FIELDS and isinstance(item, str):
+            refs.append((_ENTITY_ID_FIELDS[key], UUID(item)))
+        elif key in _ENTITY_ID_LIST_FIELDS and isinstance(item, list):
+            for list_item in item:
+                if isinstance(list_item, str):
+                    refs.append((_ENTITY_ID_LIST_FIELDS[key], UUID(list_item)))
+        else:
+            refs.extend(_iter_payload_entity_refs(item))
+    return refs
 
 
 def _entity_id(entity_type: EntityType, entity: EntityResult) -> UUID:

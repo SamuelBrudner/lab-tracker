@@ -23,6 +23,7 @@ from lab_tracker.models import (
     DatasetStatus,
     EntityRef,
     GraphChangeOperationStatus,
+    GraphDraftMode,
     GraphChangeSetStatus,
     Note,
     NoteMetadataScalar,
@@ -175,6 +176,11 @@ class NoteUpdate(RequestModel):
 class GraphDraftOperationUpdate(RequestModel):
     payload: dict[str, Any] | None = None
     status: GraphChangeOperationStatus | None = None
+
+
+class GraphDraftCreateRequest(RequestModel):
+    mode: GraphDraftMode = GraphDraftMode.GRAPH_CONTEXT
+    user_hint: str | None = Field(default=None, min_length=1)
 
 
 class GraphDraftCommitRequest(RequestModel):

@@ -14,6 +14,8 @@ from lab_tracker.models import (
     GraphChangeOp,
     GraphChangeOperation,
     GraphChangeOperationStatus,
+    GraphDraftMode,
+    GraphDraftSemanticType,
     GraphChangeSet,
     GraphChangeSetStatus,
 )
@@ -47,6 +49,9 @@ def operation_to_model(operation: GraphChangeOperation) -> GraphChangeOperationM
         sequence=operation.sequence,
         op=operation.op.value,
         entity_type=operation.entity_type.value,
+        semantic_type=(
+            operation.semantic_type.value if operation.semantic_type is not None else None
+        ),
         target_entity_id=_uuid_str(operation.target_entity_id),
         client_ref=operation.client_ref,
         payload=dict(operation.payload),
@@ -68,6 +73,9 @@ def operation_from_model(row: GraphChangeOperationModel) -> GraphChangeOperation
         sequence=row.sequence,
         op=GraphChangeOp(row.op),
         entity_type=EntityType(row.entity_type),
+        semantic_type=(
+            GraphDraftSemanticType(row.semantic_type) if row.semantic_type else None
+        ),
         target_entity_id=_uuid(row.target_entity_id),
         client_ref=row.client_ref,
         payload=_dict(row.payload),
@@ -93,6 +101,11 @@ def change_set_to_model(change_set: GraphChangeSet) -> GraphChangeSetModel:
         provider=change_set.provider,
         model=change_set.model,
         prompt_version=change_set.prompt_version,
+        draft_mode=change_set.draft_mode.value,
+        context_packet=dict(change_set.context_packet),
+        summary=change_set.summary,
+        uncertain_fields=list(change_set.uncertain_fields),
+        clarification_requests=list(change_set.clarification_requests),
         status=change_set.status.value,
         commit_message=change_set.commit_message,
         error_metadata=dict(change_set.error_metadata),
@@ -113,6 +126,11 @@ def apply_change_set_to_model(row: GraphChangeSetModel, change_set: GraphChangeS
     row.provider = change_set.provider
     row.model = change_set.model
     row.prompt_version = change_set.prompt_version
+    row.draft_mode = change_set.draft_mode.value
+    row.context_packet = dict(change_set.context_packet)
+    row.summary = change_set.summary
+    row.uncertain_fields = list(change_set.uncertain_fields)
+    row.clarification_requests = list(change_set.clarification_requests)
     row.status = change_set.status.value
     row.commit_message = change_set.commit_message
     row.error_metadata = dict(change_set.error_metadata)
@@ -138,6 +156,11 @@ def change_set_from_model(
         provider=row.provider,
         model=row.model,
         prompt_version=row.prompt_version,
+        draft_mode=GraphDraftMode(row.draft_mode or GraphDraftMode.GRAPH_CONTEXT.value),
+        context_packet=_dict(row.context_packet),
+        summary=row.summary or "",
+        uncertain_fields=list(row.uncertain_fields or []),
+        clarification_requests=list(row.clarification_requests or []),
         status=GraphChangeSetStatus(row.status),
         commit_message=row.commit_message,
         error_metadata=_dict(row.error_metadata),
@@ -200,6 +223,7 @@ class SQLAlchemyGraphChangeSetRepository(EntityRepository[GraphChangeSet]):
 
     def save(self, entity: GraphChangeSet) -> None:
         entity_id = str(entity.change_set_id)
+        self._session.flush()
         row = self._session.get(GraphChangeSetModel, entity_id)
         if row is None:
             self._session.add(change_set_to_model(entity))

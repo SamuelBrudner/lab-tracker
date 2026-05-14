@@ -15,7 +15,12 @@ class FakeDraftClient:
     model = "fake-gpt"
 
     def __init__(self, patch: dict[str, Any] | None = None, error: str | None = None) -> None:
-        self.patch = patch or {"summary": "empty", "operations": []}
+        self.patch = patch or {
+            "summary": "empty",
+            "uncertain_fields": [],
+            "clarification_requests": [],
+            "operations": [],
+        }
         self.error = error
         self.calls: list[dict[str, Any]] = []
         self.closed = False
@@ -25,13 +30,19 @@ class FakeDraftClient:
         *,
         image_bytes: bytes,
         content_type: str,
-        project_context: dict[str, Any],
+        graph_context: dict[str, Any] | None = None,
+        user_hint: str | None = None,
+        draft_mode: str = "graph_context",
+        project_context: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         self.calls.append(
             {
                 "content_type": content_type,
+                "draft_mode": draft_mode,
+                "graph_context": graph_context,
                 "image_bytes": image_bytes,
                 "project_context": project_context,
+                "user_hint": user_hint,
             }
         )
         if self.error:
@@ -62,11 +73,14 @@ def _image_note(client: TestClient, headers: dict[str, str], project_id: str) ->
 def _draft_patch(project_id: str) -> dict[str, Any]:
     return {
         "summary": "Drafted project updates",
+        "uncertain_fields": [],
+        "clarification_requests": [],
         "operations": [
             {
                 "client_ref": "q1",
                 "op": "create",
                 "entity_type": "question",
+                "semantic_type": "suggest_new_question",
                 "target_entity_id": None,
                 "payload_json": json.dumps(
                     {
@@ -86,6 +100,7 @@ def _draft_patch(project_id: str) -> dict[str, Any]:
                 "client_ref": "note1",
                 "op": "create",
                 "entity_type": "note",
+                "semantic_type": "create_note",
                 "target_entity_id": None,
                 "payload_json": json.dumps(
                     {
@@ -112,11 +127,14 @@ def _draft_patch(project_id: str) -> dict[str, Any]:
 def _hierarchy_draft_patch(project_id: str) -> dict[str, Any]:
     return {
         "summary": "Drafted a broad question with an atomic child.",
+        "uncertain_fields": [],
+        "clarification_requests": [],
         "operations": [
             {
                 "client_ref": "broad_question",
                 "op": "create",
                 "entity_type": "question",
+                "semantic_type": "suggest_new_question",
                 "target_entity_id": None,
                 "payload_json": json.dumps(
                     {
@@ -136,6 +154,7 @@ def _hierarchy_draft_patch(project_id: str) -> dict[str, Any]:
                 "client_ref": "atomic_question",
                 "op": "create",
                 "entity_type": "question",
+                "semantic_type": "suggest_new_question",
                 "target_entity_id": None,
                 "payload_json": json.dumps(
                     {
@@ -168,6 +187,8 @@ def test_openai_graph_draft_client_sends_responses_image_and_strict_schema() -> 
                 "output_text": json.dumps(
                     {
                         "summary": "ok",
+                        "uncertain_fields": [],
+                        "clarification_requests": [],
                         "operations": [],
                     }
                 )
@@ -186,7 +207,12 @@ def test_openai_graph_draft_client_sends_responses_image_and_strict_schema() -> 
         project_context={"project": {"name": "Context"}},
     )
 
-    assert result == {"summary": "ok", "operations": []}
+    assert result == {
+        "summary": "ok",
+        "uncertain_fields": [],
+        "clarification_requests": [],
+        "operations": [],
+    }
     request = requests[0]
     assert request["model"] == "gpt-test"
     assert "parent_question_ids" in request["instructions"]
@@ -281,16 +307,206 @@ def test_image_note_draft_stores_operations_and_context(
     assert response.status_code == 201
     payload = response.json()["data"]
     assert payload["status"] == "ready"
+    assert payload["draft_mode"] == "graph_context"
+    assert payload["summary"] == "Drafted project updates"
+    assert payload["uncertain_fields"] == []
+    assert payload["clarification_requests"] == []
     assert payload["source_note_id"] == note_id
     assert payload["source_content_type"] == "image/jpeg"
+    assert payload["context_packet"]["project"]["id"] == project_id
     assert [operation["entity_type"] for operation in payload["operations"]] == [
         "question",
         "note",
     ]
+    assert [operation["semantic_type"] for operation in payload["operations"]] == [
+        "suggest_new_question",
+        "create_note",
+    ]
     assert payload["operations"][0]["status"] == "proposed"
     assert fake_client.calls[0]["content_type"] == "image/jpeg"
-    assert fake_client.calls[0]["project_context"]["project"]["project_id"] == project_id
+    assert fake_client.calls[0]["draft_mode"] == "graph_context"
+    assert fake_client.calls[0]["graph_context"]["project"]["id"] == project_id
+    assert fake_client.calls[0]["user_hint"] is None
     assert fake_client.closed is True
+
+
+def test_graph_context_packet_includes_selected_targets_and_recent_neighborhood(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+) -> None:
+    project_id = _project(client, admin_auth_headers)
+    parent_question = client.post(
+        "/questions",
+        json={
+            "project_id": project_id,
+            "text": "How do plume statistics shape navigation?",
+            "question_type": "descriptive",
+            "status": "active",
+        },
+        headers=admin_auth_headers,
+    ).json()["data"]
+    child_question = client.post(
+        "/questions",
+        json={
+            "project_id": project_id,
+            "text": "Can flies climb temporal odor gradients?",
+            "question_type": "hypothesis_driven",
+            "status": "active",
+            "parent_question_ids": [parent_question["question_id"]],
+        },
+        headers=admin_auth_headers,
+    ).json()["data"]
+    recent_note = client.post(
+        "/notes",
+        json={
+            "project_id": project_id,
+            "raw_content": "Earlier Rig 2 note about smoother plume condition.",
+        },
+        headers=admin_auth_headers,
+    ).json()["data"]
+    session = client.post(
+        "/sessions",
+        json={
+            "project_id": project_id,
+            "session_type": "operational",
+        },
+        headers=admin_auth_headers,
+    ).json()["data"]
+    dataset = client.post(
+        "/datasets",
+        json={
+            "project_id": project_id,
+            "primary_question_id": child_question["question_id"],
+            "commit_manifest": {"source_session_id": session["session_id"]},
+            "status": "staged",
+        },
+        headers=admin_auth_headers,
+    ).json()["data"]
+    analysis = client.post(
+        "/analyses",
+        json={
+            "project_id": project_id,
+            "dataset_ids": [dataset["dataset_id"]],
+            "method_hash": "turning-after-pulse",
+            "code_version": "abc123",
+            "status": "staged",
+        },
+        headers=admin_auth_headers,
+    ).json()["data"]
+    claim = client.post(
+        "/claims",
+        json={
+            "project_id": project_id,
+            "statement": "Turning appears stronger after pulse onset.",
+            "confidence": 62,
+            "status": "proposed",
+            "supported_by_dataset_ids": [dataset["dataset_id"]],
+            "supported_by_analysis_ids": [analysis["analysis_id"]],
+        },
+        headers=admin_auth_headers,
+    ).json()["data"]
+    visualization = client.post(
+        "/visualizations",
+        json={
+            "analysis_id": analysis["analysis_id"],
+            "viz_type": "timeseries",
+            "file_path": "plots/turning-after-pulse.png",
+            "caption": "Turning after pulse onset.",
+            "related_claim_ids": [claim["claim_id"]],
+        },
+        headers=admin_auth_headers,
+    ).json()["data"]
+    note_upload = client.post(
+        "/notes/upload-file",
+        data={
+            "project_id": project_id,
+            "targets": json.dumps(
+                [
+                    {
+                        "entity_type": "question",
+                        "entity_id": child_question["question_id"],
+                    },
+                    {"entity_type": "session", "entity_id": session["session_id"]},
+                    {"entity_type": "dataset", "entity_id": dataset["dataset_id"]},
+                ]
+            ),
+            "metadata": json.dumps(
+                {
+                    "capture_source": "mobile_capture",
+                    "capture_hint": "Rig 2 Fly 12",
+                }
+            ),
+        },
+        files={"file": ("rig-note.jpg", b"fake-image-bytes", "image/jpeg")},
+        headers=admin_auth_headers,
+    )
+    assert note_upload.status_code == 201
+    note_id = note_upload.json()["data"]["note_id"]
+    fake_client = FakeDraftClient()
+    client.app.state.graph_draft_client_factory = lambda settings: fake_client
+
+    response = client.post(
+        f"/notes/{note_id}/graph-drafts",
+        json={"user_hint": "same gradient protocol as last week"},
+        headers=admin_auth_headers,
+    )
+
+    assert response.status_code == 201
+    context = response.json()["data"]["context_packet"]
+    assert context["mode"] == "graph_context"
+    assert context["user_hint"] == "same gradient protocol as last week"
+    assert context["current_user"]["role"] == "admin"
+    assert context["project"]["id"] == project_id
+    assert context["source_note"]["metadata"]["capture_source"] == "mobile_capture"
+    assert {
+        (target["entity_type"], target["entity_id"]) for target in context["selected_targets"]
+    } == {
+        ("question", child_question["question_id"]),
+        ("session", session["session_id"]),
+        ("dataset", dataset["dataset_id"]),
+    }
+    assert any(
+        item["id"] == child_question["question_id"]
+        and item["parent_question_ids"] == [parent_question["question_id"]]
+        for item in context["active_or_staged_questions"]
+    )
+    assert any(item["id"] == recent_note["note_id"] for item in context["recent_notes"])
+    assert any(item["id"] == session["session_id"] for item in context["recent_sessions"])
+    assert any(item["id"] == dataset["dataset_id"] for item in context["recent_datasets"])
+    assert any(item["id"] == analysis["analysis_id"] for item in context["recent_analyses"])
+    assert any(item["id"] == claim["claim_id"] for item in context["recent_claims"])
+    assert any(
+        item["id"] == visualization["viz_id"] for item in context["recent_visualizations"]
+    )
+    assert fake_client.calls[0]["graph_context"] == context
+    assert fake_client.calls[0]["user_hint"] == "same gradient protocol as last week"
+
+
+def test_image_only_draft_requires_explicit_mode_and_records_warning_context(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+) -> None:
+    project_id = _project(client, admin_auth_headers)
+    note_id = _image_note(client, admin_auth_headers, project_id)
+    fake_client = FakeDraftClient()
+    client.app.state.graph_draft_client_factory = lambda settings: fake_client
+
+    response = client.post(
+        f"/notes/{note_id}/graph-drafts",
+        json={"mode": "image_only", "user_hint": "ignore graph context"},
+        headers=admin_auth_headers,
+    )
+
+    assert response.status_code == 201
+    payload = response.json()["data"]
+    assert payload["status"] == "ready"
+    assert payload["draft_mode"] == "image_only"
+    assert payload["context_packet"]["mode"] == "image_only"
+    assert "explicitly requested" in payload["context_packet"]["warning"]
+    assert "project" not in payload["context_packet"]
+    assert fake_client.calls[0]["draft_mode"] == "image_only"
+    assert fake_client.calls[0]["graph_context"]["mode"] == "image_only"
+    assert fake_client.calls[0]["user_hint"] == "ignore graph context"
 
 
 def test_image_note_draft_rejects_missing_or_non_image_raw_asset(
@@ -353,11 +569,14 @@ def test_malformed_or_unsupported_gpt_patch_returns_stored_failed_draft(
     client.app.state.graph_draft_client_factory = lambda settings: FakeDraftClient(
         {
             "summary": "bad",
+            "uncertain_fields": [],
+            "clarification_requests": [],
             "operations": [
                 {
                     "client_ref": "bad",
                     "op": "delete",
                     "entity_type": "question",
+                    "semantic_type": "suggest_new_question",
                     "target_entity_id": None,
                     "payload_json": "{}",
                     "rationale": "unsupported",
@@ -374,6 +593,51 @@ def test_malformed_or_unsupported_gpt_patch_returns_stored_failed_draft(
     payload = response.json()["data"]
     assert payload["status"] == "failed"
     assert "invalid" in payload["error_metadata"]["message"]
+
+
+def test_model_output_with_unknown_existing_entity_id_returns_stored_failed_draft(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+) -> None:
+    project_id = _project(client, admin_auth_headers)
+    note_id = _image_note(client, admin_auth_headers, project_id)
+    unknown_question_id = "55555555-5555-4555-8555-555555555555"
+    client.app.state.graph_draft_client_factory = lambda settings: FakeDraftClient(
+        {
+            "summary": "bad link",
+            "uncertain_fields": [],
+            "clarification_requests": [],
+            "operations": [
+                {
+                    "client_ref": "link1",
+                    "op": "update",
+                    "entity_type": "note",
+                    "semantic_type": "link_note_to_question",
+                    "target_entity_id": note_id,
+                    "payload_json": json.dumps(
+                        {
+                            "targets": [
+                                {
+                                    "entity_type": "question",
+                                    "entity_id": unknown_question_id,
+                                }
+                            ]
+                        }
+                    ),
+                    "rationale": "The model referenced a question ID not in context.",
+                    "confidence": 0.8,
+                    "source_refs": [],
+                }
+            ],
+        }
+    )
+
+    response = client.post(f"/notes/{note_id}/graph-drafts", headers=admin_auth_headers)
+
+    assert response.status_code == 201
+    payload = response.json()["data"]
+    assert payload["status"] == "failed"
+    assert "unknown question ID" in payload["error_metadata"]["message"]
 
 
 def test_edit_accept_and_commit_resolves_refs_into_canonical_records(
@@ -513,6 +777,7 @@ def test_commit_failure_rolls_back_canonical_changes(
         "client_ref": "dataset1",
         "op": "create",
         "entity_type": "dataset",
+        "semantic_type": "suggest_new_dataset",
         "target_entity_id": None,
         "payload_json": json.dumps(
             {
