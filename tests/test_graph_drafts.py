@@ -729,6 +729,126 @@ def test_photo_voice_bundle_draft_uses_image_and_voice_transcript_context(
     assert fake_client.calls[0]["source_artifacts"] == artifacts
 
 
+def test_saved_photo_voice_bundle_review_transcribes_drafts_and_commits(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+) -> None:
+    project_id = _project(client, admin_auth_headers)
+    bundle_id = "saved-bundle-1"
+    image_note = client.post(
+        "/notes/upload-file",
+        data={
+            "project_id": project_id,
+            "metadata": json.dumps(
+                {
+                    "capture_source": "mobile_capture",
+                    "capture_mode": "bundle",
+                    "capture_kind": "image",
+                    "capture_review_status": "pending_review",
+                    "capture_bundle_id": bundle_id,
+                    "capture_hint": "Rig 2 Fly 12",
+                }
+            ),
+        },
+        files={"file": ("notebook.jpg", b"fake-image-bytes", "image/jpeg")},
+        headers=admin_auth_headers,
+    ).json()["data"]
+    voice_note = client.post(
+        "/notes/upload-file",
+        data={
+            "project_id": project_id,
+            "metadata": json.dumps(
+                {
+                    "capture_source": "mobile_capture",
+                    "capture_mode": "bundle",
+                    "capture_kind": "voice",
+                    "capture_review_status": "pending_review",
+                    "capture_bundle_id": bundle_id,
+                    "voice_note_type": "Observation",
+                    "transcript_status": "pending",
+                }
+            ),
+        },
+        files={"file": ("voice.webm", b"fake-audio-bytes", "audio/webm")},
+        headers=admin_auth_headers,
+    ).json()["data"]
+    fake_client = FakeDraftClient(_draft_patch(project_id))
+    client.app.state.graph_draft_client_factory = lambda settings: fake_client
+
+    blocked = client.post(
+        f"/notes/{image_note['note_id']}/graph-drafts",
+        headers=admin_auth_headers,
+    )
+
+    assert blocked.status_code == 422
+    assert "editable transcript" in blocked.json()["error"]["message"]
+    assert fake_client.calls == []
+
+    transcript = client.post(
+        f"/notes/{voice_note['note_id']}/transcript",
+        json={"prompt": "Rig 2 Fly 12"},
+        headers=admin_auth_headers,
+    )
+
+    assert transcript.status_code == 200
+    assert transcript.json()["data"]["transcribed_text"] == (
+        "Fly 12 tracked better after pulse onset."
+    )
+    assert fake_client.transcription_calls[0]["audio_bytes"] == b"fake-audio-bytes"
+
+    draft = client.post(
+        f"/notes/{image_note['note_id']}/graph-drafts",
+        json={"user_hint": "Same protocol as last week."},
+        headers=admin_auth_headers,
+    )
+
+    assert draft.status_code == 201
+    draft_payload = draft.json()["data"]
+    assert draft_payload["status"] == "ready"
+    assert draft_payload["source_content_type"] == "image/jpeg"
+    artifacts = draft_payload["context_packet"]["source_artifacts"]
+    assert {artifact["type"] for artifact in artifacts} == {"image", "audio"}
+    assert any(
+        artifact["note_id"] == voice_note["note_id"]
+        and artifact["transcript_text"] == "Fly 12 tracked better after pulse onset."
+        and artifact["transcript_is_derived"] is True
+        for artifact in artifacts
+    )
+    assert fake_client.calls[0]["graph_context"] == draft_payload["context_packet"]
+    assert fake_client.calls[0]["source_artifacts"] == artifacts
+    assert fake_client.calls[0]["user_hint"] == "Same protocol as last week."
+
+    change_set_id = draft_payload["change_set_id"]
+    for operation in draft_payload["operations"]:
+        accepted = client.patch(
+            f"/graph-drafts/{change_set_id}/operations/{operation['operation_id']}",
+            json={"payload": operation["payload"], "status": "accepted"},
+            headers=admin_auth_headers,
+        )
+        assert accepted.status_code == 200
+
+    committed = client.post(
+        f"/graph-drafts/{change_set_id}/commit",
+        json={"message": "Commit saved photo and voice bundle"},
+        headers=admin_auth_headers,
+    )
+
+    assert committed.status_code == 200
+    committed_payload = committed.json()["data"]
+    assert committed_payload["status"] == "committed"
+    assert [operation["status"] for operation in committed_payload["operations"]] == [
+        "applied",
+        "applied",
+    ]
+    question_id = committed_payload["operations"][0]["result_entity_id"]
+    linked_notes = client.get(
+        f"/notes?project_id={project_id}&target_entity_type=question&target_entity_id={question_id}",
+        headers=admin_auth_headers,
+    )
+    assert linked_notes.status_code == 200
+    assert linked_notes.json()["data"][0]["targets"][0]["entity_id"] == question_id
+
+
 def test_gpt_failure_returns_stored_failed_draft(
     client: TestClient,
     admin_auth_headers: dict[str, str],
