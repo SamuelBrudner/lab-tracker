@@ -555,6 +555,26 @@ def test_graph_context_packet_includes_selected_targets_and_recent_neighborhood(
     assert any(
         item["id"] == visualization["viz_id"] for item in context["recent_visualizations"]
     )
+    summary = context["context_summary"]
+    assert summary["approximate_size_bytes"] > 0
+    assert summary["counts"]["projects"] == 1
+    assert summary["counts"]["active_or_staged_questions"] == 2
+    assert summary["counts"]["recent_notes"] >= 1
+    assert summary["counts"]["recent_sessions"] >= 1
+    assert summary["counts"]["recent_datasets"] >= 1
+    assert summary["counts"]["recent_analyses"] >= 1
+    assert summary["counts"]["recent_claims"] >= 1
+    assert summary["counts"]["recent_visualizations"] >= 1
+    assert summary["counts"]["known_aliases"] >= 1
+    assert summary["source_artifact_counts"] == {"image": 1}
+    assert {
+        (target["entity_type"], target["entity_id"]) for target in summary["selected_targets"]
+    } == {
+        ("question", child_question["question_id"]),
+        ("session", session["session_id"]),
+        ("dataset", dataset["dataset_id"]),
+    }
+    assert all(target["label"] for target in summary["selected_targets"])
     assert fake_client.calls[0]["graph_context"] == context
     assert fake_client.calls[0]["user_hint"] == "same gradient protocol as last week"
 
@@ -580,6 +600,7 @@ def test_image_only_draft_requires_explicit_mode_and_records_warning_context(
     assert payload["draft_mode"] == "image_only"
     assert payload["context_packet"]["mode"] == "image_only"
     assert "explicitly requested" in payload["context_packet"]["warning"]
+    assert payload["context_packet"]["context_summary"]["counts"]["source_artifacts"] == 1
     assert "project" not in payload["context_packet"]
     assert fake_client.calls[0]["draft_mode"] == "image_only"
     assert fake_client.calls[0]["graph_context"]["mode"] == "image_only"

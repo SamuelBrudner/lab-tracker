@@ -42,6 +42,10 @@ function sourceRefText(ref) {
   return `${label}${quote}` || "Source reference";
 }
 
+function contextCountLabel(key) {
+  return key.replaceAll("_", " ");
+}
+
 function semanticLinkTargetType(operation) {
   if (operation.semantic_type === "link_note_to_question") {
     return "question";
@@ -331,6 +335,51 @@ function GraphDraftDetailCard({ token, changeSetId, navigate, canWrite, setBusy,
                       <li key={item}>{item}</li>
                     ))}
                   </ul>
+                </div>
+              ) : null}
+              {changeSet.context_packet?.context_summary ? (
+                <div>
+                  <div className="subtle">Context summary</div>
+                  <div className="inline">
+                    <span className="pill">
+                      ~{changeSet.context_packet.context_summary.approximate_size_bytes || 0} bytes
+                    </span>
+                    {Object.entries(changeSet.context_packet.context_summary.counts || {}).map(
+                      ([key, value]) => (
+                        <span className="pill" key={key}>
+                          {contextCountLabel(key)}: {value}
+                        </span>
+                      )
+                    )}
+                  </div>
+                  {Object.keys(
+                    changeSet.context_packet.context_summary.source_artifact_counts || {}
+                  ).length > 0 ? (
+                    <p className="subtle">
+                      Source artifacts:{" "}
+                      {Object.entries(
+                        changeSet.context_packet.context_summary.source_artifact_counts
+                      )
+                        .map(([key, value]) => `${key} ${value}`)
+                        .join(", ")}
+                    </p>
+                  ) : null}
+                  {(changeSet.context_packet.context_summary.selected_targets || []).length > 0 ? (
+                    <ul className="compact-list">
+                      {changeSet.context_packet.context_summary.selected_targets.map((target) => (
+                        <li key={`${target.entity_type}-${target.entity_id}`}>
+                          {target.entity_type}: {target.label || target.entity_id}
+                        </li>
+                      ))}
+                    </ul>
+                  ) : null}
+                  {(changeSet.context_packet.context_summary.warnings || []).length > 0 ? (
+                    <ul className="compact-list">
+                      {changeSet.context_packet.context_summary.warnings.map((warning) => (
+                        <li key={warning}>{warning}</li>
+                      ))}
+                    </ul>
+                  ) : null}
                 </div>
               ) : null}
               {changeSet.context_packet ? (

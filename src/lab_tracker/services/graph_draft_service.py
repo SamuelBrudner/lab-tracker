@@ -756,7 +756,7 @@ class GraphDraftServiceMixin:
             key=lambda item: item.created_at,
             reverse=True,
         )[:_RECENT_CONTEXT_LIMIT]
-        return {
+        context_packet = {
             "mode": GraphDraftMode.GRAPH_CONTEXT.value,
             "user_hint": user_hint,
             "current_user": _compact_actor(actor),
@@ -796,6 +796,8 @@ class GraphDraftServiceMixin:
                 and item.status == NoteStatus.STAGED
             ],
         }
+        context_packet["context_summary"] = _graph_context_summary(context_packet)
+        return context_packet
 
     def _image_only_context_packet(
         self,
@@ -804,7 +806,7 @@ class GraphDraftServiceMixin:
         source_notes: list[Note],
         user_hint: str | None,
     ) -> dict[str, Any]:
-        return {
+        context_packet = {
             "mode": GraphDraftMode.IMAGE_ONLY.value,
             "user_hint": user_hint,
             "source_note": _compact_note(note, include_raw_asset=True),
@@ -814,6 +816,8 @@ class GraphDraftServiceMixin:
                 "voice transcript grounding."
             ),
         }
+        context_packet["context_summary"] = _graph_context_summary(context_packet)
+        return context_packet
 
     def _compact_target_ref(self, target: EntityRef, project_id: UUID) -> dict[str, Any]:
         try:
@@ -1014,6 +1018,60 @@ def _string_list(raw: Any) -> list[str]:
     if not isinstance(raw, list):
         return []
     return [str(item).strip() for item in raw if str(item).strip()]
+
+
+def _graph_context_summary(context_packet: dict[str, Any]) -> dict[str, Any]:
+    source_artifacts = [
+        item for item in context_packet.get("source_artifacts", []) if isinstance(item, dict)
+    ]
+    selected_targets = [
+        item for item in context_packet.get("selected_targets", []) if isinstance(item, dict)
+    ]
+    source_artifact_counts: dict[str, int] = {}
+    warnings: list[str] = []
+    for artifact in source_artifacts:
+        artifact_type = str(artifact.get("type") or "unknown")
+        source_artifact_counts[artifact_type] = source_artifact_counts.get(artifact_type, 0) + 1
+        if artifact_type == "audio" and not str(artifact.get("transcript_text") or "").strip():
+            note_id = artifact.get("note_id") or artifact.get("artifact_id") or "unknown"
+            warnings.append(f"audio source {note_id} is missing an editable transcript")
+    if not source_artifacts:
+        warnings.append("no source artifacts were included")
+    if not any(artifact.get("type") == "image" for artifact in source_artifacts):
+        warnings.append("no image source artifact was included")
+    return {
+        "approximate_size_bytes": len(
+            json.dumps(context_packet, sort_keys=True, default=str).encode("utf-8")
+        ),
+        "counts": {
+            "projects": 1 if context_packet.get("project") else 0,
+            "source_artifacts": len(source_artifacts),
+            "selected_targets": len(selected_targets),
+            "active_or_staged_questions": len(
+                context_packet.get("active_or_staged_questions") or []
+            ),
+            "recent_sessions": len(context_packet.get("recent_sessions") or []),
+            "recent_datasets": len(context_packet.get("recent_datasets") or []),
+            "recent_notes": len(context_packet.get("recent_notes") or []),
+            "recent_analyses": len(context_packet.get("recent_analyses") or []),
+            "recent_claims": len(context_packet.get("recent_claims") or []),
+            "recent_visualizations": len(context_packet.get("recent_visualizations") or []),
+            "known_aliases": len(context_packet.get("known_aliases") or []),
+            "unresolved_recent_captures": len(
+                context_packet.get("unresolved_recent_captures") or []
+            ),
+        },
+        "selected_targets": [
+            {
+                "entity_type": item.get("entity_type"),
+                "entity_id": item.get("entity_id"),
+                "label": item.get("label"),
+            }
+            for item in selected_targets
+        ],
+        "source_artifact_counts": source_artifact_counts,
+        "warnings": warnings,
+    }
 
 
 def _compact_actor(actor: AuthContext | None) -> dict[str, Any] | None:

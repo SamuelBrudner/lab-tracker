@@ -503,6 +503,26 @@ describe("App", () => {
         active_or_staged_questions: [
           { id: questionId, label: "Existing question", status: "active" },
         ],
+        context_summary: {
+          approximate_size_bytes: 1234,
+          counts: {
+            active_or_staged_questions: 1,
+            known_aliases: 1,
+            projects: 1,
+            recent_analyses: 0,
+            recent_claims: 0,
+            recent_datasets: 0,
+            recent_notes: 0,
+            recent_sessions: 0,
+            recent_visualizations: 0,
+            selected_targets: 0,
+            source_artifacts: 1,
+            unresolved_recent_captures: 0,
+          },
+          selected_targets: [],
+          source_artifact_counts: { image: 1 },
+          warnings: ["no audio source artifact was included"],
+        },
         mode: "graph_context",
         project: { id: "project-1", label: "Project One" },
       },
@@ -593,7 +613,11 @@ describe("App", () => {
     render(<App />);
 
     expect(await screen.findByRole("heading", { name: "Graph Draft Review" })).toBeInTheDocument();
-    expect(screen.getByText("Drafted one question from the whiteboard.")).toBeInTheDocument();
+    expect(await screen.findByText("Drafted one question from the whiteboard.")).toBeInTheDocument();
+    expect(screen.getByText("Context summary")).toBeInTheDocument();
+    expect(screen.getByText("~1234 bytes")).toBeInTheDocument();
+    expect(screen.getByText("Source artifacts: image 1")).toBeInTheDocument();
+    expect(screen.getByText("no audio source artifact was included")).toBeInTheDocument();
     expect(screen.getByText("Exact protocol name")).toBeInTheDocument();
     expect(screen.getByText("Confirm whether Fly 12 should be formalized.")).toBeInTheDocument();
     expect(screen.getByText("suggest new question")).toBeInTheDocument();
