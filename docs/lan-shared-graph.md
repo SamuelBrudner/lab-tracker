@@ -4,6 +4,10 @@ Use this workflow when one Lab Tracker instance should serve the same live
 backend graph to browsers, Codex, Claude, scripts, or MCP clients on other
 computers, including computers on different networks.
 
+For durable off-campus browser access from this workstation, prefer the HTTPS
+tunnel workflow in [`workstation-https-serving.md`](workstation-https-serving.md).
+This LAN document is still useful for same-network smoke tests.
+
 ## Recommended Shape
 
 - Run one Lab Tracker API server as the shared write path.

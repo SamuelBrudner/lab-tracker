@@ -93,6 +93,10 @@ rather than raw public port forwarding. If remote clients time out, Windows
 Firewall may need an administrator rule for TCP port 8000. See
 [`docs/lan-shared-graph.md`](docs/lan-shared-graph.md).
 
+For a workstation-hosted HTTPS endpoint suitable for off-campus browser access,
+serve Lab Tracker on localhost and publish it through a managed outbound tunnel.
+See [`docs/workstation-https-serving.md`](docs/workstation-https-serving.md).
+
 Local development starts with authentication disabled so early testing can use
 the app without creating accounts. Set `LAB_TRACKER_AUTH_ENABLED=true` to test
 the login and role flow. Non-local environments keep authentication enabled by

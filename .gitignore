@@ -5,9 +5,14 @@ docs/runs/
 graph-draft-review.html
 node_modules/
 lab_tracker.db
+note_storage/
+file_storage/
 .npm-cache/
 .codex/
 .lab-tracker-dolt/
+.env
+.env.*
+!.env.*.example
 
 # Beads / Dolt files (added by bd init)
 .dolt/
