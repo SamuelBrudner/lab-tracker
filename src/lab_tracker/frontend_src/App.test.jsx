@@ -491,7 +491,13 @@ describe("App", () => {
       result_entity_id: null,
       sequence: 1,
       semantic_type: "suggest_new_question",
-      source_refs: [{ label: "whiteboard", quote: "yield?", region: null }],
+      source_refs: [
+        {
+          label: "whiteboard",
+          quote: "yield?",
+          region: { height: 0.2, width: 0.3, x: 0.1, y: 0.2 },
+        },
+      ],
       status: "proposed",
       target_entity_id: null,
       updated_at: "2026-04-20T00:00:00Z",
@@ -621,14 +627,13 @@ describe("App", () => {
     expect(screen.getByText("Exact protocol name")).toBeInTheDocument();
     expect(screen.getByText("Confirm whether Fly 12 should be formalized.")).toBeInTheDocument();
     expect(screen.getByText("suggest new question")).toBeInTheDocument();
-    fireEvent.change(screen.getByLabelText(/Payload JSON/), {
-      target: {
-        value: JSON.stringify({
-          project_id: "project-1",
-          question_type: "descriptive",
-          text: "Edited draft question",
-        }),
-      },
+    expect(screen.getByText("Proposed new question")).toBeInTheDocument();
+    expect(screen.getByText("Model inference")).toBeInTheDocument();
+    expect(screen.getByText("Source evidence")).toBeInTheDocument();
+    expect(screen.getByText("Payload JSON (advanced)")).toBeInTheDocument();
+    expect(await screen.findByLabelText("Source region 1: whiteboard")).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText("Text"), {
+      target: { value: "Edited draft question" },
     });
     fireEvent.click(screen.getByRole("button", { name: "Accept" }));
 

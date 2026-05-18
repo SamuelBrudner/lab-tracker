@@ -21,6 +21,26 @@ function operationTitle(operation) {
     : `${operation.op} ${operation.entity_type}`;
 }
 
+function operationIntent(operation) {
+  const semanticType = operation.semantic_type || "";
+  if (semanticType.startsWith("link_note_to_")) {
+    return `Proposed link to existing ${semanticType.replace("link_note_to_", "")}`;
+  }
+  if (semanticType === "suggest_new_question" || semanticType === "suggest_new_dataset") {
+    return `Proposed new ${operation.entity_type}`;
+  }
+  if (semanticType === "create_note" || semanticType === "suggest_followup") {
+    return "Proposed research note";
+  }
+  if (semanticType === "request_clarification") {
+    return "Clarification request";
+  }
+  if (operation.op === "create") {
+    return `Proposed new ${operation.entity_type}`;
+  }
+  return `Proposed ${operation.entity_type} update`;
+}
+
 function payloadText(changeSet) {
   const entries = {};
   for (const operation of changeSet?.operations || []) {
@@ -34,6 +54,44 @@ function imageDataUrl(raw) {
     return "";
   }
   return `data:${raw.content_type};base64,${raw.content_base64}`;
+}
+
+function sourceRegionStyle(region) {
+  if (!region || typeof region !== "object") {
+    return null;
+  }
+  const { height, width, x, y } = region;
+  const values = [x, y, width, height];
+  if (values.some((value) => typeof value !== "number" || Number.isNaN(value) || value < 0)) {
+    return null;
+  }
+  const multiplier = values.every((value) => value <= 1) ? 100 : 1;
+  const left = x * multiplier;
+  const top = y * multiplier;
+  const boxWidth = width * multiplier;
+  const boxHeight = height * multiplier;
+  if (left > 100 || top > 100 || boxWidth <= 0 || boxHeight <= 0) {
+    return null;
+  }
+  return {
+    height: `${Math.min(boxHeight, 100 - top)}%`,
+    left: `${left}%`,
+    top: `${top}%`,
+    width: `${Math.min(boxWidth, 100 - left)}%`,
+  };
+}
+
+function sourceRegions(changeSet) {
+  const regions = [];
+  for (const operation of changeSet?.operations || []) {
+    for (const ref of operation.source_refs || []) {
+      const style = sourceRegionStyle(ref?.region);
+      if (style) {
+        regions.push({ operation, ref, style });
+      }
+    }
+  }
+  return regions;
 }
 
 function sourceRefText(ref) {
@@ -117,6 +175,7 @@ function GraphDraftDetailCard({ token, changeSetId, navigate, canWrite, setBusy,
         .length,
     [changeSet]
   );
+  const visibleSourceRegions = useMemo(() => sourceRegions(changeSet), [changeSet]);
 
   const loadDraft = useCallback(async () => {
     if (!changeSetId) {
@@ -272,7 +331,26 @@ function GraphDraftDetailCard({ token, changeSetId, navigate, canWrite, setBusy,
               <span className="pill">{changeSet.provider}</span>
             </div>
             {sourceImage ? (
-              <img className="note-image" src={sourceImage} alt={changeSet.source_filename || "Source note"} />
+              <div className="source-image-frame">
+                <img
+                  className="note-image"
+                  src={sourceImage}
+                  alt={changeSet.source_filename || "Source note"}
+                />
+                {visibleSourceRegions.map((region, index) => (
+                  <div
+                    aria-label={`Source region ${index + 1}: ${
+                      region.ref?.label || operationTitle(region.operation)
+                    }`}
+                    className="source-region-box"
+                    key={`${region.operation.operation_id}-${index}`}
+                    style={region.style}
+                    title={sourceRefText(region.ref)}
+                  >
+                    <span>{index + 1}</span>
+                  </div>
+                ))}
+              </div>
             ) : null}
             <div className="stack">
               <div>
@@ -407,12 +485,13 @@ function GraphDraftDetailCard({ token, changeSetId, navigate, canWrite, setBusy,
             </div>
             <div className="stack">
               {(changeSet.operations || []).map((operation) => (
-                <article className="item" key={operation.operation_id}>
+                <article className="item graph-operation-card" key={operation.operation_id}>
                   <div className="item-head">
                     <strong>{operationTitle(operation)}</strong>
                     <span className={statusClass(operation.status)}>{operation.status}</span>
                   </div>
                   <div className="inline">
+                    <span className="pill">{operationIntent(operation)}</span>
                     {operation.client_ref ? <span className="pill">{operation.client_ref}</span> : null}
                     {operation.confidence !== null && operation.confidence !== undefined ? (
                       <span className="pill">{Math.round(operation.confidence * 100)}%</span>
@@ -421,12 +500,22 @@ function GraphDraftDetailCard({ token, changeSetId, navigate, canWrite, setBusy,
                       <span className="pill mono">{operation.result_entity_id}</span>
                     ) : null}
                   </div>
-                  {operation.rationale ? <p>{operation.rationale}</p> : null}
-                  {(operation.source_refs || []).map((ref, index) => (
-                    <p className="source-snippet" key={`${operation.operation_id}-${index}`}>
-                      {sourceRefText(ref)}
-                    </p>
-                  ))}
+                  {operation.rationale ? (
+                    <div>
+                      <div className="subtle">Model inference</div>
+                      <p>{operation.rationale}</p>
+                    </div>
+                  ) : null}
+                  {(operation.source_refs || []).length > 0 ? (
+                    <div>
+                      <div className="subtle">Source evidence</div>
+                      {(operation.source_refs || []).map((ref, index) => (
+                        <p className="source-snippet" key={`${operation.operation_id}-${index}`}>
+                          {sourceRefText(ref)}
+                        </p>
+                      ))}
+                    </div>
+                  ) : null}
                   {semanticLinkTargetType(operation) ? (
                     <label>
                       Link target
@@ -489,17 +578,20 @@ function GraphDraftDetailCard({ token, changeSetId, navigate, canWrite, setBusy,
                       />
                     </label>
                   ) : null}
-                  <label>
-                    Payload JSON (advanced)
-                    <textarea
-                      className="mono"
-                      value={payloads[operation.operation_id] || ""}
-                      onChange={(event) =>
-                        updatePayloadText(operation.operation_id, event.target.value)
-                      }
-                      disabled={!canWrite || changeSet.status !== "ready"}
-                    />
-                  </label>
+                  <details className="context-details advanced-json">
+                    <summary>Payload JSON (advanced)</summary>
+                    <label>
+                      Edit JSON payload
+                      <textarea
+                        className="mono"
+                        value={payloads[operation.operation_id] || ""}
+                        onChange={(event) =>
+                          updatePayloadText(operation.operation_id, event.target.value)
+                        }
+                        disabled={!canWrite || changeSet.status !== "ready"}
+                      />
+                    </label>
+                  </details>
                   {operation.error_metadata?.message ? (
                     <p className="flash error">{operation.error_metadata.message}</p>
                   ) : null}
