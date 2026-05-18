@@ -21,10 +21,27 @@ function Resolve-GitPath {
     )
 
     $raw = git -C $Repo rev-parse --git-path $GitPath
-    if ([System.IO.Path]::IsPathRooted($raw)) {
-        return $raw
+    $path = Convert-GitPathToWindowsPath $raw
+    if ([System.IO.Path]::IsPathRooted($path)) {
+        return $path
     }
-    return Join-Path $Repo $raw
+    return Join-Path $Repo $path
+}
+
+function Convert-GitPathToWindowsPath {
+    param([string]$Path)
+
+    if ($IsWindows -ne $false -and $Path -match "^/mnt/([A-Za-z])/(.*)$") {
+        $drive = $Matches[1].ToUpperInvariant()
+        $tail = $Matches[2].Replace("/", "\")
+        return "${drive}:\$tail"
+    }
+    if ($IsWindows -ne $false -and $Path -match "^/([A-Za-z])/(.*)$") {
+        $drive = $Matches[1].ToUpperInvariant()
+        $tail = $Matches[2].Replace("/", "\")
+        return "${drive}:\$tail"
+    }
+    return $Path
 }
 
 function Convert-ToHookPath {
