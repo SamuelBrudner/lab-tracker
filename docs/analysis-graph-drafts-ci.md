@@ -51,6 +51,19 @@ It can also draft from an existing note:
 python scripts/create-analysis-graph-draft.py --note-id "$NOTE_ID"
 ```
 
+It can also build the evidence bundle directly from a git commit:
+
+```bash
+python scripts/create-analysis-graph-draft.py \
+  --project-id "$PROJECT_ID" \
+  --git-repo /path/to/analysis/repo \
+  --git-commit HEAD
+```
+
+Commit evidence includes the commit metadata, file summary, and a capped textual
+diff. Use `LAB_TRACKER_GIT_MAX_DIFF_LINES` or `--git-max-diff-lines` to adjust
+the diff cap.
+
 Required environment:
 
 - `LAB_TRACKER_BASE_URL` or `LAB_TRACKER_MCP_BASE_URL`
@@ -61,6 +74,29 @@ Required environment:
 
 The model call happens inside the Lab Tracker API process, so that process must have
 `LAB_TRACKER_OPENAI_API_KEY` and related model settings configured.
+
+## Git Post-Commit Hook
+
+For local analysis repositories, install a `post-commit` hook that sends each new
+commit to Lab Tracker as analysis evidence and asks for a reviewable graph draft:
+
+```powershell
+.\scripts\install-git-graph-draft-hook.ps1 `
+  -TargetRepo C:\path\to\analysis-repo `
+  -ProjectId "$PROJECT_ID"
+```
+
+The hook calls `scripts/create-analysis-graph-draft.py --git-commit HEAD` after a
+commit succeeds. It does not block or rewrite the commit: if Lab Tracker is down,
+credentials are missing, or graph drafting fails, the hook prints a warning and
+exits successfully. Set these environment variables to override the installed
+defaults without editing the hook:
+
+- `LAB_TRACKER_GIT_DRAFT_ENABLED=0` disables the hook temporarily
+- `LAB_TRACKER_BASE_URL` points at a different Lab Tracker API
+- `LAB_TRACKER_PROJECT_ID` changes the target project
+- `LAB_TRACKER_ROOT` points at a different Lab Tracker checkout
+- `LAB_TRACKER_PYTHON` chooses the Python interpreter used by the hook
 
 ## GitHub Actions
 

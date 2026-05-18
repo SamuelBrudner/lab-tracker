@@ -222,6 +222,10 @@ the resulting graph changes automatically. The API endpoint is
 `POST /notes/{note_id}/analysis-graph-drafts`, and
 [`scripts/create-analysis-graph-draft.py`](scripts/create-analysis-graph-draft.py)
 can create the source evidence note and request the draft from a CI runner.
+The same script can summarize a git commit with `--git-repo` and `--git-commit`,
+and [`scripts/install-git-graph-draft-hook.ps1`](scripts/install-git-graph-draft-hook.ps1)
+installs a local `post-commit` hook for analysis repositories that should draft
+Lab Tracker graph proposals after each commit.
 End-of-day accumulated draft review reports can be generated with
 [`scripts/create-graph-draft-review-report.py`](scripts/create-graph-draft-review-report.py)
 as standalone HTML with inline evidence/results and links back to Lab Tracker
