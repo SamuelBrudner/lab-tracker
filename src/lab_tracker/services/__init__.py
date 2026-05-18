@@ -2,6 +2,7 @@
 
 from lab_tracker.services.analysis_service import AnalysisServiceMixin
 from lab_tracker.services.claim_service import ClaimServiceMixin
+from lab_tracker.services.daily_review_service import DailyGraphReviewServiceMixin
 from lab_tracker.services.dataset_service import DatasetServiceMixin
 from lab_tracker.services.graph_draft_service import GraphDraftServiceMixin
 from lab_tracker.services.note_service import NoteServiceMixin
@@ -13,6 +14,7 @@ from lab_tracker.services.visualization_service import VisualizationServiceMixin
 __all__ = [
     "AnalysisServiceMixin",
     "ClaimServiceMixin",
+    "DailyGraphReviewServiceMixin",
     "DatasetServiceMixin",
     "GraphDraftServiceMixin",
     "NoteServiceMixin",

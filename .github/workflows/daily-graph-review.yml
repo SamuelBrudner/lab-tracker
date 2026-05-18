@@ -1,0 +1,94 @@
+name: Daily graph review
+
+on:
+  workflow_dispatch:
+    inputs:
+      runner:
+        description: Runner label that can reach the Lab Tracker API.
+        required: true
+        default: self-hosted
+        type: string
+      project_id:
+        description: Project ID to review.
+        required: true
+        type: string
+      output:
+        description: HTML report path.
+        required: false
+        default: daily-graph-review.html
+        type: string
+      window_start:
+        description: Optional ISO-8601 window start.
+        required: false
+        type: string
+      window_end:
+        description: Optional ISO-8601 window end.
+        required: false
+        type: string
+  workflow_call:
+    inputs:
+      runner:
+        required: false
+        default: self-hosted
+        type: string
+      project_id:
+        required: true
+        type: string
+      output:
+        required: false
+        default: daily-graph-review.html
+        type: string
+      window_start:
+        required: false
+        type: string
+      window_end:
+        required: false
+        type: string
+    secrets:
+      LAB_TRACKER_BASE_URL:
+        required: true
+      LAB_TRACKER_TOKEN:
+        required: false
+      LAB_TRACKER_USERNAME:
+        required: false
+      LAB_TRACKER_PASSWORD:
+        required: false
+      LAB_TRACKER_OPENAI_API_KEY:
+        required: false
+
+jobs:
+  daily-review:
+    runs-on: ${{ inputs.runner }}
+    env:
+      LAB_TRACKER_BASE_URL: ${{ secrets.LAB_TRACKER_BASE_URL }}
+      LAB_TRACKER_TOKEN: ${{ secrets.LAB_TRACKER_TOKEN }}
+      LAB_TRACKER_USERNAME: ${{ secrets.LAB_TRACKER_USERNAME }}
+      LAB_TRACKER_PASSWORD: ${{ secrets.LAB_TRACKER_PASSWORD }}
+      LAB_TRACKER_OPENAI_API_KEY: ${{ secrets.LAB_TRACKER_OPENAI_API_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Lab Tracker client dependencies
+        run: python -m pip install -e .
+
+      - name: Create daily graph review
+        shell: bash
+        run: |
+          set -euo pipefail
+          args=(--project-id "${{ inputs.project_id }}" --output "${{ inputs.output }}")
+          if [[ -n "${{ inputs.window_start }}" ]]; then
+            args+=(--window-start "${{ inputs.window_start }}")
+          fi
+          if [[ -n "${{ inputs.window_end }}" ]]; then
+            args+=(--window-end "${{ inputs.window_end }}")
+          fi
+          python scripts/create-daily-graph-review.py "${args[@]}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: daily-graph-review
+          path: ${{ inputs.output }}

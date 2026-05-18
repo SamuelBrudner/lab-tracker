@@ -19,6 +19,7 @@ from lab_tracker.models import (
     Claim,
     ClaimInput,
     ClaimStatus,
+    DailyGraphReviewStatus,
     DatasetCommitManifestInput,
     DatasetStatus,
     EntityRef,
@@ -213,10 +214,25 @@ class GraphDraftCommitRequest(RequestModel):
     message: str = Field(..., min_length=1)
 
 
+class DailyGraphReviewCreate(RequestModel):
+    project_id: UUID
+    window_start: datetime | None = None
+    window_end: datetime | None = None
+
+
+class DailyGraphReviewMarkReviewedRequest(RequestModel):
+    note: str | None = None
+
+
 class GraphDraftListFilters(BaseModel):
     project_id: UUID | None = None
     status: GraphChangeSetStatus | None = None
     source_note_id: UUID | None = None
+
+
+class DailyGraphReviewListFilters(BaseModel):
+    project_id: UUID | None = None
+    status: DailyGraphReviewStatus | None = None
 
 
 class SessionCreate(RequestModel):

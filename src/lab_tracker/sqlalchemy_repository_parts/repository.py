@@ -12,6 +12,7 @@ from lab_tracker.models import (
     AcquisitionOutput,
     Analysis,
     Claim,
+    DailyGraphReview,
     Dataset,
     DatasetFile,
     GraphChangeSet,
@@ -34,6 +35,7 @@ from .core import (
     SQLAlchemyQuestionRefactorRepository,
     SQLAlchemyQuestionRepository,
 )
+from .daily_reviews import SQLAlchemyDailyGraphReviewRepository
 from .datasets import SQLAlchemyDatasetRepository
 from .graph_drafts import SQLAlchemyGraphChangeSetRepository
 from .notes import SQLAlchemyNoteRepository
@@ -56,6 +58,7 @@ class SQLAlchemyLabTrackerRepository(LabTrackerRepository):
         self.claims = SQLAlchemyClaimRepository(session)
         self.visualizations = SQLAlchemyVisualizationRepository(session)
         self.graph_change_sets = SQLAlchemyGraphChangeSetRepository(session)
+        self.daily_graph_reviews = SQLAlchemyDailyGraphReviewRepository(session)
 
     def commit(self) -> None:
         self._session.commit()
@@ -289,6 +292,21 @@ class SQLAlchemyLabTrackerRepository(LabTrackerRepository):
             project_id=project_id,
             status=status,
             source_note_id=source_note_id,
+            limit=limit,
+            offset=offset,
+        )
+
+    def query_daily_graph_reviews(
+        self,
+        *,
+        project_id: UUID | None = None,
+        status: str | None = None,
+        limit: int | None = None,
+        offset: int = 0,
+    ) -> tuple[list[DailyGraphReview], int]:
+        return self.daily_graph_reviews.query(
+            project_id=project_id,
+            status=status,
             limit=limit,
             offset=offset,
         )

@@ -39,6 +39,9 @@ function parseAppRoute(pathname) {
   if (parts.length >= 3 && parts[1] === "graph-drafts" && UUID_RE.test(parts[2] || "")) {
     return { kind: "graph-draft", changeSetId: parts[2] };
   }
+  if (parts.length >= 3 && parts[1] === "daily-reviews" && UUID_RE.test(parts[2] || "")) {
+    return { kind: "daily-review", reviewId: parts[2] };
+  }
   return { kind: "unknown", pathname: `/${parts.join("/")}` };
 }
 

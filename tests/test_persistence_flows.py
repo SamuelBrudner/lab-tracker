@@ -905,6 +905,7 @@ def test_repository_backed_api_rolls_back_failed_writes_from_read_state():
             self.claims = other
             self.visualizations = other
             self.graph_change_sets = other
+            self.daily_graph_reviews = other
 
         def commit(self) -> None:
             return None

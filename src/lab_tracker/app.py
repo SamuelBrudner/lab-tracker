@@ -25,6 +25,7 @@ from lab_tracker.db_models import (
     AcquisitionOutputModel,
     AnalysisModel,
     ClaimModel,
+    DailyGraphReviewModel,
     DatasetModel,
     GraphChangeSetModel,
     NoteModel,
@@ -135,6 +136,7 @@ def _empty_store_counts() -> dict[str, int]:
         "claims": 0,
         "visualizations": 0,
         "graph_change_sets": 0,
+        "daily_graph_reviews": 0,
     }
 
 
@@ -159,6 +161,7 @@ def _store_counts_from_database(
             counts["claims"] = _count_rows(session, ClaimModel)
             counts["visualizations"] = _count_rows(session, VisualizationModel)
             counts["graph_change_sets"] = _count_rows(session, GraphChangeSetModel)
+            counts["daily_graph_reviews"] = _count_rows(session, DailyGraphReviewModel)
     except SQLAlchemyError as exc:
         return _empty_store_counts(), f"{exc.__class__.__name__}: {exc}"
     return counts, None

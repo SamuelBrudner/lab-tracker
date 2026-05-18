@@ -130,6 +130,13 @@ class GraphChangeSetStatus(str, Enum):
     COMMITTED = "committed"
 
 
+class DailyGraphReviewStatus(str, Enum):
+    DRAFTING = "drafting"
+    READY = "ready"
+    REVIEWED = "reviewed"
+    FAILED = "failed"
+
+
 class GraphChangeOperationStatus(str, Enum):
     PROPOSED = "proposed"
     ACCEPTED = "accepted"
@@ -254,6 +261,22 @@ class GraphChangeSet(_DomainModel):
     updated_at: datetime = Field(default_factory=utc_now)
     committed_at: datetime | None = None
     committed_by: str | None = None
+
+
+class DailyGraphReview(_DomainModel):
+    review_id: UUID
+    project_id: UUID
+    window_start: datetime
+    window_end: datetime
+    status: DailyGraphReviewStatus = DailyGraphReviewStatus.DRAFTING
+    summary: str | None = None
+    change_set_ids: list[UUID] = Field(default_factory=list)
+    error_metadata: dict[str, Any] = Field(default_factory=dict)
+    created_at: datetime = Field(default_factory=utc_now)
+    created_by: str | None = None
+    updated_at: datetime = Field(default_factory=utc_now)
+    reviewed_at: datetime | None = None
+    reviewed_by: str | None = None
 
 
 class Project(_DomainModel):

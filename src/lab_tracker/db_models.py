@@ -333,6 +333,66 @@ class GraphChangeOperationModel(Base):
     )
 
 
+class DailyGraphReviewModel(Base):
+    __tablename__ = "daily_graph_reviews"
+    __table_args__ = (
+        UniqueConstraint(
+            "project_id",
+            "window_start",
+            "window_end",
+            name="uq_daily_graph_reviews_project_window",
+        ),
+    )
+
+    review_id: Mapped[str] = mapped_column(
+        String(36),
+        primary_key=True,
+        default=lambda: str(uuid4()),
+    )
+    project_id: Mapped[str] = mapped_column(
+        String(36),
+        ForeignKey("projects.project_id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    window_start: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    window_end: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="drafting")
+    summary: Mapped[str | None] = mapped_column(Text)
+    error_metadata: Mapped[dict[str, object]] = mapped_column(JSON, default=dict)
+    created_by: Mapped[str | None] = mapped_column(String(255))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utc_now)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=_utc_now,
+        onupdate=_utc_now,
+    )
+    reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    reviewed_by: Mapped[str | None] = mapped_column(String(255))
+
+
+class DailyGraphReviewChangeSetModel(Base):
+    __tablename__ = "daily_graph_review_change_sets"
+    __table_args__ = (
+        UniqueConstraint(
+            "review_id",
+            "sequence",
+            name="uq_daily_graph_review_change_sets_review_sequence",
+        ),
+    )
+
+    review_id: Mapped[str] = mapped_column(
+        String(36),
+        ForeignKey("daily_graph_reviews.review_id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    change_set_id: Mapped[str] = mapped_column(
+        String(36),
+        ForeignKey("graph_change_sets.change_set_id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    sequence: Mapped[int] = mapped_column(Integer, nullable=False)
+
+
 class SessionModel(Base):
     __tablename__ = "sessions"
 
@@ -578,6 +638,20 @@ Index(
     "ix_graph_change_operations_change_set_sequence",
     GraphChangeOperationModel.change_set_id,
     GraphChangeOperationModel.sequence,
+)
+Index(
+    "ix_daily_graph_reviews_project_window_end",
+    DailyGraphReviewModel.project_id,
+    DailyGraphReviewModel.window_end,
+)
+Index(
+    "ix_daily_graph_reviews_status_window_end",
+    DailyGraphReviewModel.status,
+    DailyGraphReviewModel.window_end,
+)
+Index(
+    "ix_daily_graph_review_change_sets_change_set_id",
+    DailyGraphReviewChangeSetModel.change_set_id,
 )
 Index(
     "ix_note_targets_entity_lookup",

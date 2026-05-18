@@ -9,6 +9,9 @@ from lab_tracker.sqlalchemy_repository_parts.core import (
     SQLAlchemyProjectRepository,
     SQLAlchemyQuestionRepository,
 )
+from lab_tracker.sqlalchemy_repository_parts.daily_reviews import (
+    SQLAlchemyDailyGraphReviewRepository,
+)
 from lab_tracker.sqlalchemy_repository_parts.datasets import SQLAlchemyDatasetRepository
 from lab_tracker.sqlalchemy_repository_parts.notes import SQLAlchemyNoteRepository
 from lab_tracker.sqlalchemy_repository_parts.repository import SQLAlchemyLabTrackerRepository
@@ -21,6 +24,7 @@ __all__ = [
     "SQLAlchemyAcquisitionOutputRepository",
     "SQLAlchemyAnalysisRepository",
     "SQLAlchemyClaimRepository",
+    "SQLAlchemyDailyGraphReviewRepository",
     "SQLAlchemyDatasetRepository",
     "SQLAlchemyLabTrackerRepository",
     "SQLAlchemyNoteRepository",

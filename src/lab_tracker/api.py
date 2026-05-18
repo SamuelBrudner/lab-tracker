@@ -11,6 +11,7 @@ from lab_tracker.models import (
     AcquisitionOutput,
     Analysis,
     Claim,
+    DailyGraphReview,
     Dataset,
     GraphChangeSet,
     Note,
@@ -26,6 +27,7 @@ from lab_tracker.request_context import LabTrackerRequestContext
 from lab_tracker.services import (
     AnalysisServiceMixin,
     ClaimServiceMixin,
+    DailyGraphReviewServiceMixin,
     DatasetServiceMixin,
     GraphDraftServiceMixin,
     NoteServiceMixin,
@@ -53,6 +55,7 @@ class InMemoryStore:
         self.claims: dict[UUID, Claim] = {}
         self.visualizations: dict[UUID, Visualization] = {}
         self.graph_change_sets: dict[UUID, GraphChangeSet] = {}
+        self.daily_graph_reviews: dict[UUID, DailyGraphReview] = {}
 
 
 class LabTrackerAPI(
@@ -64,6 +67,7 @@ class LabTrackerAPI(
     AnalysisServiceMixin,
     ClaimServiceMixin,
     GraphDraftServiceMixin,
+    DailyGraphReviewServiceMixin,
     VisualizationServiceMixin,
 ):
     def __init__(
@@ -226,6 +230,9 @@ class LabTrackerAPI(
         store.graph_change_sets = {
             change_set.change_set_id: change_set
             for change_set in repository.graph_change_sets.list()
+        }
+        store.daily_graph_reviews = {
+            review.review_id: review for review in repository.daily_graph_reviews.list()
         }
 
     def hydrate_from_repository(

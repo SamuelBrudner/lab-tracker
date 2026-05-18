@@ -10,6 +10,7 @@ Lab Tracker keeps the *reasoning* behind experiments connected to the data they 
 - **Analysis, claims, visualizations.** Explicit records linking analysis runs back to the datasets and questions they address, with claims and visualizations as first-class artifacts.
 - **Mobile multimodal graph-aware draft review.** Phone capture stores raw photo, voice, photo+voice bundle, or text notes, builds a project-scoped graph context packet, asks GPT for reviewable draft operations, then humans edit, accept/reject, and commit through the same API validation as normal writes.
 - **Analysis-to-graph draft review.** CI or assistant clients can submit analysis evidence notes for GPT-backed graph draft proposals, with the same human review boundary before commit.
+- **Daily graph review cadence.** End-of-day review runs gather new note/evidence drafts into one durable review envelope, generate a digest, and link the scientist back to the app for human commit.
 - **Search.** Substring search over questions and notes so prior context is findable later.
 
 What ships today is the minimum that preserves the core research record. The supported surface is defined in [`docs/retained-v1-surface.md`](docs/retained-v1-surface.md) — if it and this README disagree, that document wins. The broader vision (meeting-photo question capture, OCR, vector search, PI review gates) lives in [`idea.md`](idea.md) and is explicitly deferred.
@@ -230,6 +231,20 @@ End-of-day accumulated draft review reports can be generated with
 [`scripts/create-graph-draft-review-report.py`](scripts/create-graph-draft-review-report.py)
 as standalone HTML with inline evidence/results and links back to Lab Tracker
 review pages.
+
+For the researcher-facing daily cadence, create a durable review run and optional
+HTML digest:
+
+```bash
+python scripts/create-daily-graph-review.py \
+  --project-id "$PROJECT_ID" \
+  --output daily-graph-review.html
+```
+
+The daily review stores its source window, links all generated/reused graph drafts,
+and prints an `/app/daily-reviews/{review_id}` URL. Run it from cron, Windows Task
+Scheduler, a self-hosted GitHub Actions runner, or the reusable workflow in
+`.github/workflows/daily-graph-review.yml` at the lab's preferred end-of-day time.
 
 See [`docs/analysis-graph-drafts-ci.md`](docs/analysis-graph-drafts-ci.md) for the
 GitHub Actions workflow and required secrets.

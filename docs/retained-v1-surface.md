@@ -24,6 +24,10 @@ research record:
 - On-demand analysis-evidence-to-graph draft review for a single text evidence
   note, with CI or assistant clients allowed to request drafts but not commit
   canonical graph changes without human accept/reject review.
+- Daily graph review runs that gather note-scoped graph drafts created since the
+  last review window into one end-of-day review envelope for human review and
+  commit. This is a batching cadence over retained graph drafts, not automatic
+  canonical graph mutation.
 - Sessions and acquisition outputs, including closing sessions and promoting
   eligible sessions into datasets.
 - Dataset staging and direct commit with provenance/manifest capture, without

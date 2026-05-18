@@ -13,9 +13,10 @@ The safe workflow is:
 
 CI never calls the graph commit endpoint.
 
-For end-of-day review, generate a single HTML report that summarizes accumulated
-drafts, renders source evidence inline, and links each proposal back to the Lab
-Tracker review page where the scientist can approve, reject, or edit.
+For end-of-day review, create a daily graph review run. The run stores the review
+window, links all generated or reused graph drafts, can render a single HTML
+digest, and links the scientist back to Lab Tracker where they can approve,
+reject, edit, and commit.
 
 ## API
 
@@ -142,9 +143,26 @@ jobs:
       LAB_TRACKER_TOKEN: ${{ secrets.LAB_TRACKER_TOKEN }}
 ```
 
-## End-Of-Day HTML Report
+## Daily Graph Review
 
-Generate a review report for all ready drafts:
+Create an idempotent daily review run and HTML digest:
+
+```bash
+python scripts/create-daily-graph-review.py \
+  --project-id "$PROJECT_ID" \
+  --output daily-graph-review.html
+```
+
+The script:
+
+- creates or reuses the daily review for the requested project/window
+- creates missing note-scoped graph drafts for image notes and text/transcript
+  evidence in the window
+- links generated or reused drafts to `/app/daily-reviews/{review_id}`
+- renders source evidence, proposed operations, and review links into the HTML
+  digest when `--output` is supplied
+
+The lower-level accumulated-draft report is still available when needed:
 
 ```bash
 python scripts/create-graph-draft-review-report.py \
@@ -152,16 +170,7 @@ python scripts/create-graph-draft-review-report.py \
   --output graph-draft-review.html
 ```
 
-The report includes:
-
-- an LLM-written review brief when `LAB_TRACKER_OPENAI_API_KEY` is available
-- every ready graph draft matching the filters
-- proposed operation payloads and rationale
-- source note text, Markdown-ish analysis evidence, raw text assets, and image
-  assets rendered inline when available
-- links to `/app/graph-drafts/{change_set_id}` for approve/edit/reject review
-
-The workflow `.github/workflows/graph-draft-review-report.yml` creates the same
-HTML report and uploads it as an Actions artifact. It is manual/callable by
-default; add a repository-specific `schedule` trigger if the lab wants it to run
-automatically at a fixed end-of-day time.
+The workflow `.github/workflows/daily-graph-review.yml` creates the daily run,
+uploads the HTML digest as an Actions artifact, and is manual/callable by
+default. Add a repository-specific `schedule` trigger, cron entry, or Windows Task
+Scheduler task for the lab's preferred 5pm local handoff.

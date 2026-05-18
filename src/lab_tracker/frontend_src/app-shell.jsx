@@ -1,6 +1,7 @@
 import * as React from "react";
 
 import { Dashboard } from "./features/dashboard-projects.jsx";
+import { DailyGraphReviewCard } from "./features/daily-reviews.jsx";
 import { GraphDraftDetailCard } from "./features/graph-drafts.jsx";
 import { VisualizationDetailCard } from "./features/analysis/VisualizationDetailCard.jsx";
 import { DatasetDetailCard } from "./features/datasets/index.js";
@@ -257,6 +258,17 @@ function App() {
             <GraphDraftDetailCard
               token={auth.token}
               changeSetId={route.changeSetId}
+              navigate={navigate}
+              canWrite={auth.canWrite}
+              setBusy={setBusy}
+              setFlash={setFlash}
+            />
+          ) : null}
+
+          {route.kind === "daily-review" ? (
+            <DailyGraphReviewCard
+              token={auth.token}
+              reviewId={route.reviewId}
               navigate={navigate}
               canWrite={auth.canWrite}
               setBusy={setBusy}

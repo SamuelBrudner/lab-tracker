@@ -1370,6 +1370,86 @@ describe("App", () => {
     expect(await screen.findByText("Pending bundle draft")).toBeInTheDocument();
   });
 
+  it("opens daily graph review pages and marks them reviewed", async () => {
+    const reviewId = "99999999-9999-4999-8999-999999999999";
+    const draftId = "44444444-4444-4444-8444-444444444444";
+    const noteId = "55555555-5555-4555-8555-555555555555";
+    const review = {
+      change_set_ids: [draftId],
+      created_at: "2026-04-20T00:00:00Z",
+      error_metadata: {},
+      project_id: "project-1",
+      review_id: reviewId,
+      status: "ready",
+      summary: "Reviewed 1 evidence note and linked 1 graph draft (1 ready, 0 failed).",
+      updated_at: "2026-04-20T00:00:00Z",
+      window_end: "2026-04-20T21:00:00Z",
+      window_start: "2026-04-20T13:00:00Z",
+    };
+    const draft = {
+      change_set_id: draftId,
+      created_at: "2026-04-20T00:00:00Z",
+      model: "gpt-5.4-mini",
+      operations: [
+        {
+          entity_type: "question",
+          op: "create",
+          operation_id: "66666666-6666-4666-8666-666666666666",
+          status: "proposed",
+        },
+      ],
+      project_id: "project-1",
+      prompt_version: "analysis-graph-draft-v1",
+      provider: "openai",
+      source_content_type: "text/markdown",
+      source_filename: "analysis-evidence-note.md",
+      source_note_id: noteId,
+      status: "ready",
+      updated_at: "2026-04-20T00:00:00Z",
+    };
+
+    localStorage.setItem(TOKEN_STORAGE_KEY, "token-daily-review");
+    window.history.replaceState({}, "", `/app/daily-reviews/${reviewId}`);
+
+    installFetchMock([
+      {
+        match: "/auth/me",
+        response: apiResponse({ role: "admin", username: "sam" }),
+      },
+      {
+        match: projectsPath,
+        response: apiResponse([]),
+      },
+      {
+        match: `/daily-graph-reviews/${reviewId}`,
+        response: apiResponse(review),
+      },
+      {
+        match: `/graph-drafts/${draftId}`,
+        response: apiResponse(draft),
+      },
+      {
+        match: `/daily-graph-reviews/${reviewId}/reviewed`,
+        method: "POST",
+        response: apiResponse({
+          ...review,
+          reviewed_at: "2026-04-20T21:10:00Z",
+          reviewed_by: "sam",
+          status: "reviewed",
+        }),
+      },
+    ]);
+
+    render(<App />);
+
+    expect(await screen.findByRole("heading", { name: "Daily Graph Review" })).toBeInTheDocument();
+    expect(await screen.findByText("1 ready drafts")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Mark reviewed" }));
+
+    expect(await screen.findByText("Daily graph review marked reviewed.")).toBeInTheDocument();
+    expect(await screen.findByText("reviewed")).toBeInTheDocument();
+  });
+
   it("shows a visible restore error when session bootstrap fails", async () => {
     localStorage.setItem(TOKEN_STORAGE_KEY, "token-3");
     installFetchMock([

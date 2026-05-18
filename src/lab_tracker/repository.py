@@ -9,6 +9,7 @@ from lab_tracker.models import (
     AcquisitionOutput,
     Analysis,
     Claim,
+    DailyGraphReview,
     Dataset,
     DatasetFile,
     GraphChangeSet,
@@ -53,6 +54,7 @@ class LabTrackerRepository(Protocol):
     claims: EntityRepository[Claim]
     visualizations: EntityRepository[Visualization]
     graph_change_sets: EntityRepository[GraphChangeSet]
+    daily_graph_reviews: EntityRepository[DailyGraphReview]
 
     def fetch_questions(self, question_ids: list[UUID]) -> list[Question]:
         """Fetch questions in the provided order."""
@@ -189,6 +191,16 @@ class LabTrackerRepository(Protocol):
         offset: int = 0,
     ) -> tuple[list[GraphChangeSet], int]:
         """Query graph draft change sets with filters and pagination."""
+
+    def query_daily_graph_reviews(
+        self,
+        *,
+        project_id: UUID | None = None,
+        status: str | None = None,
+        limit: int | None = None,
+        offset: int = 0,
+    ) -> tuple[list[DailyGraphReview], int]:
+        """Query daily graph review runs with filters and pagination."""
 
     def list_dataset_files(self, dataset_id: UUID) -> list[DatasetFile]:
         """Return all files attached to a dataset."""

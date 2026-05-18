@@ -10,6 +10,7 @@ from lab_tracker.auth import AuthService, TokenService
 from .analyses import build_analyses_router
 from .auth import build_auth_router
 from .claims import build_claims_router
+from .daily_reviews import build_daily_reviews_router
 from .dataset_files import build_dataset_files_router
 from .datasets import build_datasets_router
 from .errors import register_error_handlers
@@ -45,6 +46,7 @@ def register_routes(
     app.include_router(build_dataset_files_router(api))
     app.include_router(build_notes_router(api))
     app.include_router(build_graph_drafts_router(api))
+    app.include_router(build_daily_reviews_router(api))
     app.include_router(build_provenance_router(api))
     app.include_router(build_search_router(api))
     app.include_router(build_sessions_router(api))
