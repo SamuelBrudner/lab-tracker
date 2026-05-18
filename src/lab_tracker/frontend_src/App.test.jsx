@@ -1079,6 +1079,230 @@ describe("App", () => {
     expect(uploadCount).toBe(2);
   });
 
+  it("transcribes a deferred voice capture from pending review before drafting its bundle", async () => {
+    const imageNoteId = "11111111-1111-4111-8111-111111111111";
+    const voiceNoteId = "33333333-3333-4333-8333-333333333333";
+    const draftId = "22222222-2222-4222-8222-222222222222";
+    const bundleId = "bundle-1";
+    const imageCapture = note({
+      metadata: {
+        capture_bundle_id: bundleId,
+        capture_hint: "Rig 2 Fly 12",
+        capture_kind: "image",
+        capture_mode: "bundle",
+        capture_review_status: "pending_review",
+        capture_source: "mobile_capture",
+      },
+      noteId: imageNoteId,
+      rawAsset: {
+        checksum: "image-checksum",
+        content_type: "image/jpeg",
+        filename: "notebook.jpg",
+        size_bytes: 12,
+        storage_id: "44444444-4444-4444-8444-444444444444",
+      },
+      transcribedText: "",
+    });
+    const voiceCapture = note({
+      metadata: {
+        capture_bundle_id: bundleId,
+        capture_kind: "voice",
+        capture_mode: "bundle",
+        capture_review_status: "pending_review",
+        capture_source: "mobile_capture",
+        transcript_status: "pending",
+        voice_note_type: "Observation",
+      },
+      noteId: voiceNoteId,
+      rawAsset: {
+        checksum: "audio-checksum",
+        content_type: "audio/webm",
+        filename: "voice.webm",
+        size_bytes: 11,
+        storage_id: "55555555-5555-4555-8555-555555555555",
+      },
+      transcribedText: "",
+    });
+    const transcribedVoice = {
+      ...voiceCapture,
+      metadata: { ...voiceCapture.metadata, transcript_status: "ready" },
+      transcribed_text: "Fly 12 tracked better after pulse onset.",
+    };
+    localStorage.setItem(TOKEN_STORAGE_KEY, "token-pending-voice");
+    window.history.replaceState({}, "", "/app/capture");
+
+    installFetchMock([
+      {
+        match: "/auth/me",
+        response: apiResponse({ role: "admin", username: "sam" }),
+      },
+      {
+        match: projectsPath,
+        response: apiResponse([project("project-1", "Project One")]),
+      },
+      {
+        match: questionListPath("project-1"),
+        response: paged([]),
+      },
+      {
+        match: datasetListPath("project-1"),
+        response: paged([]),
+      },
+      {
+        match: noteCountPath("project-1"),
+        response: paged([], { limit: 1, offset: 0, total: 2 }),
+      },
+      {
+        match: activeSessionsPath("project-1"),
+        response: paged([]),
+      },
+      {
+        match: buildApiPath("/graph-drafts", { project_id: "project-1", limit: 10 }),
+        response: paged([]),
+      },
+      {
+        match: buildApiPath("/notes", { project_id: "project-1", limit: 10 }),
+        response: paged([imageCapture, voiceCapture]),
+      },
+      {
+        match: captureAnalysesPath("project-1"),
+        response: paged([]),
+      },
+      {
+        match: captureClaimsPath("project-1"),
+        response: paged([]),
+      },
+      {
+        match: `/notes/${voiceNoteId}/transcript`,
+        method: "POST",
+        response: (request) => {
+          expect(JSON.parse(request.init.body)).toEqual({});
+          return apiResponse(transcribedVoice);
+        },
+      },
+      {
+        match: `/notes/${imageNoteId}/graph-drafts`,
+        method: "POST",
+        response: (request) => {
+          expect(JSON.parse(request.init.body)).toEqual({
+            mode: "graph_context",
+            user_hint: "Rig 2 Fly 12",
+          });
+          return apiResponse(
+            {
+              change_set_id: draftId,
+              clarification_requests: [],
+              context_packet: {
+                mode: "graph_context",
+                source_artifacts: [
+                  {
+                    content_type: "image/jpeg",
+                    filename: "notebook.jpg",
+                    note_id: imageNoteId,
+                    type: "image",
+                  },
+                  {
+                    content_type: "audio/webm",
+                    filename: "voice.webm",
+                    note_id: voiceNoteId,
+                    transcript_text: "Fly 12 tracked better after pulse onset.",
+                    type: "audio",
+                  },
+                ],
+              },
+              created_at: "2026-04-20T00:00:00Z",
+              draft_mode: "graph_context",
+              model: "gpt-5.4-mini",
+              operations: [],
+              project_id: "project-1",
+              prompt_version: "multimodal-graph-draft-v1",
+              provider: "openai",
+              source_content_type: "image/jpeg",
+              source_filename: "notebook.jpg",
+              source_note_id: imageNoteId,
+              status: "ready",
+              summary: "Pending bundle draft",
+              uncertain_fields: [],
+              updated_at: "2026-04-20T00:00:00Z",
+            },
+            201
+          );
+        },
+      },
+      {
+        match: `/graph-drafts/${draftId}`,
+        response: apiResponse({
+          change_set_id: draftId,
+          clarification_requests: [],
+          context_packet: {
+            mode: "graph_context",
+            source_artifacts: [
+              {
+                content_type: "image/jpeg",
+                filename: "notebook.jpg",
+                note_id: imageNoteId,
+                type: "image",
+              },
+              {
+                content_type: "audio/webm",
+                filename: "voice.webm",
+                note_id: voiceNoteId,
+                transcript_text: "Fly 12 tracked better after pulse onset.",
+                type: "audio",
+              },
+            ],
+          },
+          created_at: "2026-04-20T00:00:00Z",
+          draft_mode: "graph_context",
+          model: "gpt-5.4-mini",
+          operations: [],
+          project_id: "project-1",
+          prompt_version: "multimodal-graph-draft-v1",
+          provider: "openai",
+          source_content_type: "image/jpeg",
+          source_filename: "notebook.jpg",
+          source_note_id: imageNoteId,
+          status: "ready",
+          summary: "Pending bundle draft",
+          uncertain_fields: [],
+          updated_at: "2026-04-20T00:00:00Z",
+        }),
+      },
+      {
+        match: `/notes/${imageNoteId}/raw`,
+        response: apiResponse({
+          checksum: "image-checksum",
+          content_base64: "aW1n",
+          content_type: "image/jpeg",
+          filename: "notebook.jpg",
+          size_bytes: 12,
+          storage_id: "44444444-4444-4444-8444-444444444444",
+        }),
+      },
+    ]);
+
+    render(<App />);
+
+    expect(await screen.findByRole("heading", { name: "Phone Capture" })).toBeInTheDocument();
+    await waitFor(() => expect(screen.getByLabelText("Project")).toHaveValue("project-1"));
+    const imageRow = (await screen.findByText("notebook.jpg")).closest(".review-queue-item");
+    const voiceRow = (await screen.findByText("voice.webm")).closest(".review-queue-item");
+    expect(within(imageRow).getByText("voice transcript needed")).toBeInTheDocument();
+    expect(within(imageRow).getByRole("button", { name: "Draft" })).toBeDisabled();
+
+    fireEvent.click(within(voiceRow).getByRole("button", { name: "Transcribe" }));
+
+    expect(await screen.findByText("Voice transcript ready.")).toBeInTheDocument();
+    expect(await screen.findByText("Fly 12 tracked better after pulse onset.")).toBeInTheDocument();
+    const readyImageRow = screen.getByText("notebook.jpg").closest(".review-queue-item");
+    expect(within(readyImageRow).getByRole("button", { name: "Draft" })).not.toBeDisabled();
+
+    fireEvent.click(within(readyImageRow).getByRole("button", { name: "Draft" }));
+
+    expect(await screen.findByRole("heading", { name: "Graph Draft Review" })).toBeInTheDocument();
+    expect(await screen.findByText("Pending bundle draft")).toBeInTheDocument();
+  });
+
   it("shows a visible restore error when session bootstrap fails", async () => {
     localStorage.setItem(TOKEN_STORAGE_KEY, "token-3");
     installFetchMock([

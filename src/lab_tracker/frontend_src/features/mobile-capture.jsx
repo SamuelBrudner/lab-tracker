@@ -26,9 +26,35 @@ function captureNotes(notes) {
   return notes.filter((note) => note.metadata?.capture_source === "mobile_capture");
 }
 
+function captureHint(note) {
+  return String(note?.metadata?.capture_hint || "").trim();
+}
+
 function compactLabel(value, fallback = "(untitled)") {
   const text = String(value || fallback);
   return text.length > 90 ? `${text.slice(0, 87)}...` : text;
+}
+
+function isAudioCapture(note) {
+  return Boolean(note?.raw_asset?.content_type?.startsWith("audio/"));
+}
+
+function hasTranscript(note) {
+  return Boolean(String(note?.transcribed_text || "").trim());
+}
+
+function bundleAudioNotes(note, notes) {
+  const bundleId = note?.metadata?.capture_bundle_id;
+  if (!bundleId) {
+    return [];
+  }
+  return notes.filter(
+    (candidate) => candidate.metadata?.capture_bundle_id === bundleId && isAudioCapture(candidate)
+  );
+}
+
+function missingBundleTranscript(note, notes) {
+  return bundleAudioNotes(note, notes).some((candidate) => !hasTranscript(candidate));
 }
 
 function MobileCaptureCard({
@@ -61,6 +87,8 @@ function MobileCaptureCard({
   const [uploadedVoiceNoteId, setUploadedVoiceNoteId] = useState("");
   const [pendingDrafts, setPendingDrafts] = useState([]);
   const [pendingNotes, setPendingNotes] = useState([]);
+  const [pendingActionById, setPendingActionById] = useState({});
+  const [pendingActionErrors, setPendingActionErrors] = useState({});
   const [analyses, setAnalyses] = useState([]);
   const [claims, setClaims] = useState([]);
   const [pendingError, setPendingError] = useState("");
@@ -219,6 +247,97 @@ function MobileCaptureCard({
       method: "POST",
       token,
     });
+  }
+
+  function setPendingAction(noteId, action) {
+    setPendingActionById((current) => ({ ...current, [noteId]: action }));
+    setPendingActionErrors((current) => ({ ...current, [noteId]: "" }));
+  }
+
+  function clearPendingAction(noteId) {
+    setPendingActionById((current) => {
+      const next = { ...current };
+      delete next[noteId];
+      return next;
+    });
+  }
+
+  function replacePendingNote(updatedNote) {
+    if (!updatedNote?.note_id) {
+      return;
+    }
+    setPendingNotes((current) =>
+      current.map((item) => (item.note_id === updatedNote.note_id ? updatedNote : item))
+    );
+  }
+
+  async function transcribePendingNote(note) {
+    if (!note || !canWrite || !isAudioCapture(note)) {
+      return;
+    }
+    setPendingAction(note.note_id, "transcribing");
+    setFlash("", "");
+    try {
+      const updated = await apiRequest(`/notes/${note.note_id}/transcript`, {
+        body: captureHint(note) ? { prompt: captureHint(note) } : {},
+        method: "POST",
+        token,
+      });
+      replacePendingNote(updated);
+      setFlash("Voice transcript ready.");
+    } catch (err) {
+      setPendingActionErrors((current) => ({
+        ...current,
+        [note.note_id]: err.message || "Failed to transcribe voice note.",
+      }));
+      setFlash("", err.message || "Failed to transcribe voice note.");
+    } finally {
+      clearPendingAction(note.note_id);
+    }
+  }
+
+  async function draftPendingNote(note) {
+    if (!note || !canWrite) {
+      return;
+    }
+    if (isAudioCapture(note) && !hasTranscript(note)) {
+      setPendingActionErrors((current) => ({
+        ...current,
+        [note.note_id]: "Transcribe this voice note before drafting.",
+      }));
+      return;
+    }
+    if (missingBundleTranscript(note, pendingNotes)) {
+      setPendingActionErrors((current) => ({
+        ...current,
+        [note.note_id]: "Transcribe the bundled voice note before drafting.",
+      }));
+      return;
+    }
+    setPendingAction(note.note_id, "drafting");
+    setFlash("", "");
+    try {
+      const graphDraft = await apiRequest(`/notes/${note.note_id}/graph-drafts`, {
+        body: {
+          mode: "graph_context",
+          user_hint: captureHint(note) || undefined,
+        },
+        method: "POST",
+        token,
+      });
+      if (graphDraft?.change_set_id) {
+        navigate(`/app/graph-drafts/${graphDraft.change_set_id}`);
+        setFlash("Graph-aware draft ready for review.");
+      }
+    } catch (err) {
+      setPendingActionErrors((current) => ({
+        ...current,
+        [note.note_id]: err.message || "Failed to draft graph update.",
+      }));
+      setFlash("", err.message || "Failed to draft graph update.");
+    } finally {
+      clearPendingAction(note.note_id);
+    }
   }
 
   async function uploadCapture({ draft = false, imageOnly = false } = {}) {
@@ -552,18 +671,77 @@ function MobileCaptureCard({
                 <span className="subtle">{formatDate(draft.created_at)}</span>
               </button>
             ))}
-            {pendingNotes.map((note) => (
-              <button
-                className="review-queue-item"
-                key={note.note_id}
-                onClick={() => navigate(`/app/notes/${note.note_id}`)}
-                type="button"
-              >
-                <span className="pill">{note.metadata?.capture_kind || "capture"}</span>
-                <strong>{note.raw_asset?.filename || note.raw_content || "Captured note"}</strong>
-                <span className="subtle">{formatDate(note.created_at)}</span>
-              </button>
-            ))}
+            {pendingNotes.map((note) => {
+              const action = pendingActionById[note.note_id] || "";
+              const audioCapture = isAudioCapture(note);
+              const transcriptReady = hasTranscript(note);
+              const bundleBlocked = missingBundleTranscript(note, pendingNotes);
+              const draftDisabled =
+                !canWrite ||
+                Boolean(action) ||
+                (audioCapture && !transcriptReady) ||
+                bundleBlocked;
+              return (
+                <article className="review-queue-item" key={note.note_id}>
+                  <div className="inline">
+                    <span className="pill">{note.metadata?.capture_kind || "capture"}</span>
+                    {audioCapture ? (
+                      <span className={transcriptReady ? "pill review-approved" : "pill"}>
+                        {transcriptReady ? "transcript ready" : "needs transcript"}
+                      </span>
+                    ) : null}
+                    {bundleBlocked && !audioCapture ? (
+                      <span className="pill review-pending">voice transcript needed</span>
+                    ) : null}
+                  </div>
+                  <strong>{note.raw_asset?.filename || note.raw_content || "Captured note"}</strong>
+                  <span className="subtle">{formatDate(note.created_at)}</span>
+                  {transcriptReady ? (
+                    <p className="source-snippet">{note.transcribed_text}</p>
+                  ) : null}
+                  {pendingActionErrors[note.note_id] ? (
+                    <p className="flash error">{pendingActionErrors[note.note_id]}</p>
+                  ) : null}
+                  <div className="inline">
+                    {audioCapture && !transcriptReady ? (
+                      <button
+                        className="btn-primary"
+                        disabled={!canWrite || Boolean(action)}
+                        onClick={() => transcribePendingNote(note)}
+                        type="button"
+                      >
+                        {action === "transcribing" ? "Transcribing..." : "Transcribe"}
+                      </button>
+                    ) : null}
+                    {audioCapture ? (
+                      <button
+                        className="btn-secondary"
+                        onClick={() => navigate(`/app/notes/${note.note_id}`)}
+                        type="button"
+                      >
+                        Review transcript
+                      </button>
+                    ) : (
+                      <button
+                        className="btn-secondary"
+                        onClick={() => navigate(`/app/notes/${note.note_id}`)}
+                        type="button"
+                      >
+                        Review
+                      </button>
+                    )}
+                    <button
+                      className="btn-secondary"
+                      disabled={draftDisabled}
+                      onClick={() => draftPendingNote(note)}
+                      type="button"
+                    >
+                      {action === "drafting" ? "Drafting..." : "Draft"}
+                    </button>
+                  </div>
+                </article>
+              );
+            })}
             {pendingDrafts.length === 0 && pendingNotes.length === 0 ? (
               <p className="subtle">No recent captures for this project.</p>
             ) : null}
