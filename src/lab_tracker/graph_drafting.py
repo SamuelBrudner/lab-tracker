@@ -10,7 +10,7 @@ import httpx
 
 from lab_tracker.config import Settings
 
-PROMPT_VERSION = "image-graph-draft-v2"
+PROMPT_VERSION = "multimodal-graph-draft-v1"
 PROVIDER = "openai"
 
 SEMANTIC_TYPES = [
@@ -116,11 +116,13 @@ class OpenAIGraphDraftClient:
         *,
         api_key: str,
         model: str,
+        transcription_model: str = "gpt-4o-mini-transcribe",
         base_url: str = "https://api.openai.com/v1",
         timeout_seconds: float = 60.0,
         transport: httpx.BaseTransport | None = None,
     ) -> None:
         self.model = model
+        self.transcription_model = transcription_model
         self._api_key = api_key.strip()
         self._client = httpx.Client(
             base_url=base_url.rstrip("/"),
@@ -133,6 +135,7 @@ class OpenAIGraphDraftClient:
         return cls(
             api_key=settings.openai_api_key,
             model=settings.openai_model,
+            transcription_model=settings.openai_transcription_model,
             base_url=settings.openai_base_url,
             timeout_seconds=settings.openai_timeout_seconds,
         )
@@ -150,14 +153,64 @@ class OpenAIGraphDraftClient:
         draft_mode: str = "graph_context",
         project_context: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
+        return self.draft_from_note(
+            image_bytes=image_bytes,
+            image_content_type=content_type,
+            graph_context=graph_context,
+            user_hint=user_hint,
+            draft_mode=draft_mode,
+            project_context=project_context,
+            source_artifacts=[
+                {
+                    "type": "image",
+                    "content_type": content_type,
+                    "label": "source image",
+                }
+            ],
+        )
+
+    def draft_from_note(
+        self,
+        *,
+        graph_context: dict[str, Any] | None = None,
+        user_hint: str | None = None,
+        draft_mode: str = "graph_context",
+        project_context: dict[str, Any] | None = None,
+        source_artifacts: list[dict[str, Any]] | None = None,
+        image_bytes: bytes | None = None,
+        image_content_type: str | None = None,
+    ) -> dict[str, Any]:
         if not self._api_key:
             raise GraphDraftingError(
                 "LAB_TRACKER_OPENAI_API_KEY must be set before drafting graph changes."
             )
-        if not image_bytes:
-            raise GraphDraftingError("Source image is empty.")
         resolved_context = graph_context if graph_context is not None else project_context or {}
-        image_url = _data_url(image_bytes=image_bytes, content_type=content_type)
+        artifacts = list(source_artifacts or [])
+        has_text_source = any(
+            str(item.get("transcript_text") or item.get("raw_content_preview") or "").strip()
+            for item in artifacts
+        )
+        if not image_bytes and not has_text_source:
+            raise GraphDraftingError("Source note has no image or transcript text to draft from.")
+        content: list[dict[str, Any]] = [
+            {
+                "type": "input_text",
+                "text": (
+                    "Draft Lab Tracker graph updates from these source artifact(s).\n"
+                    f"Draft mode: {draft_mode}\n"
+                    f"User hint: {user_hint or '(none)'}\n"
+                    "Source artifacts:\n"
+                    f"{json.dumps(artifacts, sort_keys=True)}\n"
+                    "Graph context packet:\n"
+                    f"{json.dumps(resolved_context, sort_keys=True)}"
+                ),
+            }
+        ]
+        if image_bytes:
+            if not image_content_type:
+                raise GraphDraftingError("Source image content type is required.")
+            image_url = _data_url(image_bytes=image_bytes, content_type=image_content_type)
+            content.append({"type": "input_image", "image_url": image_url})
         response = self._client.post(
             "/responses",
             headers={
@@ -170,19 +223,7 @@ class OpenAIGraphDraftClient:
                 "input": [
                     {
                         "role": "user",
-                        "content": [
-                            {
-                                "type": "input_text",
-                                "text": (
-                                    "Draft Lab Tracker graph updates from this image.\n"
-                                    f"Draft mode: {draft_mode}\n"
-                                    f"User hint: {user_hint or '(none)'}\n"
-                                    "Graph context packet:\n"
-                                    f"{json.dumps(resolved_context, sort_keys=True)}"
-                                ),
-                            },
-                            {"type": "input_image", "image_url": image_url},
-                        ],
+                        "content": content,
                     }
                 ],
                 "text": {
@@ -210,11 +251,47 @@ class OpenAIGraphDraftClient:
             raise GraphDraftingError("GPT graph patch did not include an operations list.")
         return parsed
 
+    def transcribe_audio(
+        self,
+        *,
+        audio_bytes: bytes,
+        filename: str,
+        content_type: str,
+        prompt: str | None = None,
+    ) -> dict[str, Any]:
+        if not self._api_key:
+            raise GraphDraftingError(
+                "LAB_TRACKER_OPENAI_API_KEY must be set before transcribing voice notes."
+            )
+        if not audio_bytes:
+            raise GraphDraftingError("Source audio is empty.")
+        data: dict[str, str] = {
+            "model": self.transcription_model,
+            "response_format": "json",
+        }
+        if prompt and prompt.strip():
+            data["prompt"] = prompt.strip()
+        response = self._client.post(
+            "/audio/transcriptions",
+            headers={"Authorization": f"Bearer {self._api_key}"},
+            data=data,
+            files={"file": (filename, audio_bytes, content_type)},
+        )
+        if response.status_code >= 400:
+            raise GraphDraftingError(_response_error(response))
+        payload = _response_json(response)
+        text = payload.get("text")
+        if not isinstance(text, str) or not text.strip():
+            raise GraphDraftingError("Transcription response did not include text.")
+        return payload
+
 
 def _instructions() -> str:
     return (
-        "You convert lab notebook or whiteboard images into proposed Lab Tracker graph "
-        "changes. Propose only changes that are supported by the image and context. "
+        "You convert lab notebook photos, whiteboard images, voice-note transcripts, "
+        "and photo plus voice bundles into proposed Lab Tracker graph changes. Propose "
+        "only changes that are supported by the source artifacts and context. "
+        "Distinguish what was transcribed from what you infer. "
         "Use the graph context to resolve ambiguous references. Prefer linking to "
         "existing entities by their provided IDs over creating duplicates. Do not invent "
         "IDs. If the context is insufficient, mark uncertainty or request clarification. "
@@ -229,8 +306,8 @@ def _instructions() -> str:
         "should reference, set client_ref to a short stable name and use {\"$ref\":\"name\"} "
         "inside later payload_json fields. Set semantic_type to the closest allowed "
         "semantic operation label. Never claim a canonical update happened; these are "
-        "drafts for human review. Preserve the uploaded image note as the provenance "
-        "source and return uncertainty explicitly."
+        "drafts for human review. Preserve uploaded image and audio notes as provenance "
+        "sources and return uncertainty explicitly."
     )
 
 

@@ -81,6 +81,7 @@ _UPDATE_SCHEMAS = {
 }
 _RECENT_CONTEXT_LIMIT = 10
 _QUESTION_CONTEXT_LIMIT = 50
+_CAPTURE_BUNDLE_LIMIT = 6
 _SEMANTIC_ALLOWED_TARGETS = {
     GraphDraftSemanticType.CREATE_NOTE: {(GraphChangeOp.CREATE, EntityType.NOTE)},
     GraphDraftSemanticType.LINK_NOTE_TO_QUESTION: {(GraphChangeOp.UPDATE, EntityType.NOTE)},
@@ -134,25 +135,32 @@ class GraphDraftServiceMixin:
         actor: AuthContext | None = None,
     ) -> GraphChangeSet:
         require_role(actor, WRITE_ROLES)
-        note, raw_asset, image_bytes = self._prepare_image_note_for_graph_draft(note_id)
+        prepared = self._prepare_note_sources_for_graph_draft(note_id, mode=mode)
+        note = prepared["source_note"]
+        raw_asset = prepared["primary_raw_asset"]
         cleaned_hint = user_hint.strip() if user_hint else None
         if mode == GraphDraftMode.GRAPH_CONTEXT:
             context_packet = self._build_graph_context_packet(
                 note,
+                source_notes=prepared["source_notes"],
                 user_hint=cleaned_hint,
                 actor=actor,
             )
         elif mode == GraphDraftMode.IMAGE_ONLY:
-            context_packet = self._image_only_context_packet(note, user_hint=cleaned_hint)
+            context_packet = self._image_only_context_packet(
+                note,
+                source_notes=prepared["source_notes"],
+                user_hint=cleaned_hint,
+            )
         else:
             raise ValidationError("Unsupported graph draft mode.")
         change_set = GraphChangeSet(
             change_set_id=uuid4(),
             project_id=note.project_id,
             source_note_id=note.note_id,
-            source_checksum=raw_asset.checksum,
-            source_content_type=raw_asset.content_type,
-            source_filename=raw_asset.filename,
+            source_checksum=raw_asset.checksum if raw_asset is not None else None,
+            source_content_type=raw_asset.content_type if raw_asset is not None else None,
+            source_filename=raw_asset.filename if raw_asset is not None else None,
             provider=PROVIDER,
             model=getattr(draft_client, "model", "unknown"),
             prompt_version=PROMPT_VERSION,
@@ -162,12 +170,14 @@ class GraphDraftServiceMixin:
         )
         self._save_graph_change_set(change_set)
         try:
-            graph_patch = draft_client.draft_from_image(
-                image_bytes=image_bytes,
-                content_type=raw_asset.content_type,
+            graph_patch = self._draft_graph_patch(
+                draft_client,
                 graph_context=context_packet,
                 user_hint=cleaned_hint,
-                draft_mode=mode.value,
+                draft_mode=mode,
+                source_artifacts=prepared["source_artifacts"],
+                image_bytes=prepared["image_bytes"],
+                image_content_type=prepared["image_content_type"],
             )
             _validate_graph_patch_top_level(graph_patch)
             change_set.operations = self._operations_from_graph_patch(change_set, graph_patch)
@@ -570,35 +580,130 @@ class GraphDraftServiceMixin:
         user_hint: str | None = None,
         actor: AuthContext | None = None,
     ) -> dict[str, Any]:
-        note, _, _ = self._prepare_image_note_for_graph_draft(note_id)
+        prepared = self._prepare_note_sources_for_graph_draft(
+            note_id,
+            mode=GraphDraftMode.GRAPH_CONTEXT,
+        )
         return self._build_graph_context_packet(
-            note,
+            prepared["source_note"],
+            source_notes=prepared["source_notes"],
             user_hint=user_hint.strip() if user_hint else None,
             actor=actor,
         )
 
-    def _prepare_image_note_for_graph_draft(self, note_id: UUID) -> tuple[Note, Any, bytes]:
+    def _prepare_note_sources_for_graph_draft(
+        self,
+        note_id: UUID,
+        *,
+        mode: GraphDraftMode,
+    ) -> dict[str, Any]:
         note = self.get_note(note_id)
-        if note.raw_asset is None:
-            raise ValidationError("Graph drafting requires a note with a raw image asset.")
-        if not note.raw_asset.content_type.lower().startswith("image/"):
-            raise ValidationError("Graph drafting only supports image note uploads.")
-        try:
-            raw_asset, image_bytes = self.download_note_raw(note_id)
-        except NotFoundError as exc:
-            raise NotFoundError("Source image file is unavailable.") from exc
-        except ValidationError:
-            raise
-        except Exception as exc:
-            raise ValidationError("Source image file could not be read.") from exc
-        if not image_bytes:
-            raise ValidationError("Source image file is empty.")
-        return note, raw_asset, image_bytes
+        source_notes = self._source_notes_for_capture(note)
+        audio_notes = [
+            item
+            for item in source_notes
+            if item.raw_asset is not None
+            and item.raw_asset.content_type.lower().startswith("audio/")
+        ]
+        if mode == GraphDraftMode.GRAPH_CONTEXT:
+            missing_transcripts = [item for item in audio_notes if not item.transcribed_text]
+            if missing_transcripts:
+                raise ValidationError(
+                    "Voice notes must have an editable transcript before graph drafting."
+                )
+        image_note = _preferred_image_note(note, source_notes)
+        if mode == GraphDraftMode.IMAGE_ONLY and image_note is None:
+            raise ValidationError("Image-only graph drafting requires a raw image asset.")
+        primary_note = image_note or note
+        primary_raw_asset = primary_note.raw_asset
+        image_bytes: bytes | None = None
+        image_content_type: str | None = None
+        if image_note is not None:
+            try:
+                raw_asset, image_bytes = self.download_note_raw(image_note.note_id)
+            except NotFoundError as exc:
+                raise NotFoundError("Source image file is unavailable.") from exc
+            except ValidationError:
+                raise
+            except Exception as exc:
+                raise ValidationError("Source image file could not be read.") from exc
+            if not image_bytes:
+                raise ValidationError("Source image file is empty.")
+            image_content_type = raw_asset.content_type
+            primary_raw_asset = raw_asset
+        if not image_bytes and not any(
+            item.transcribed_text or item.raw_content for item in source_notes
+        ):
+            if note.raw_asset is None:
+                raise ValidationError(
+                    "Graph drafting requires a note with a raw image asset or transcript text."
+                )
+            raise ValidationError(
+                "Graph drafting requires a raw image asset, text note, or voice transcript."
+            )
+        source_artifacts = [_source_artifact_packet(item) for item in source_notes]
+        return {
+            "source_note": note,
+            "source_notes": source_notes,
+            "source_artifacts": source_artifacts,
+            "primary_raw_asset": primary_raw_asset,
+            "image_bytes": image_bytes,
+            "image_content_type": image_content_type,
+        }
+
+    def _source_notes_for_capture(self, note: Note) -> list[Note]:
+        bundle_id = note.metadata.get("capture_bundle_id")
+        if not bundle_id:
+            return [note]
+        bundle_notes = [
+            item
+            for item in self.list_notes(project_id=note.project_id)
+            if item.metadata.get("capture_bundle_id") == bundle_id
+        ]
+        if not any(item.note_id == note.note_id for item in bundle_notes):
+            bundle_notes.append(note)
+        return sorted(
+            bundle_notes,
+            key=lambda item: (item.created_at, str(item.note_id)),
+        )[:_CAPTURE_BUNDLE_LIMIT]
+
+    def _draft_graph_patch(
+        self,
+        draft_client: Any,
+        *,
+        graph_context: dict[str, Any],
+        user_hint: str | None,
+        draft_mode: GraphDraftMode,
+        source_artifacts: list[dict[str, Any]],
+        image_bytes: bytes | None,
+        image_content_type: str | None,
+    ) -> dict[str, Any]:
+        draft_from_note = getattr(draft_client, "draft_from_note", None)
+        if callable(draft_from_note):
+            return draft_from_note(
+                graph_context=graph_context,
+                user_hint=user_hint,
+                draft_mode=draft_mode.value,
+                source_artifacts=source_artifacts,
+                image_bytes=image_bytes,
+                image_content_type=image_content_type,
+            )
+        draft_from_image = getattr(draft_client, "draft_from_image", None)
+        if callable(draft_from_image) and image_bytes and image_content_type:
+            return draft_from_image(
+                image_bytes=image_bytes,
+                content_type=image_content_type,
+                graph_context=graph_context,
+                user_hint=user_hint,
+                draft_mode=draft_mode.value,
+            )
+        raise GraphDraftingError("Configured draft client does not support this note source.")
 
     def _build_graph_context_packet(
         self,
         note: Note,
         *,
+        source_notes: list[Note],
         user_hint: str | None,
         actor: AuthContext | None = None,
     ) -> dict[str, Any]:
@@ -656,6 +761,7 @@ class GraphDraftServiceMixin:
             "user_hint": user_hint,
             "current_user": _compact_actor(actor),
             "source_note": _compact_note(note, include_raw_asset=True),
+            "source_artifacts": [_source_artifact_packet(item) for item in source_notes],
             "selected_targets": [
                 self._compact_target_ref(target, note.project_id) for target in note.targets
             ],
@@ -673,21 +779,40 @@ class GraphDraftServiceMixin:
             "recent_visualizations": [
                 _compact_visualization(item) for item in recent_visualizations
             ],
+            "known_aliases": _known_aliases(
+                project=project,
+                questions=questions,
+                sessions=recent_sessions,
+                datasets=recent_datasets,
+                analyses=recent_analyses,
+                claims=recent_claims,
+                visualizations=recent_visualizations,
+            ),
             "unresolved_recent_captures": [
                 _compact_note(item)
                 for item in recent_notes
                 if item.raw_asset is not None
-                and item.raw_asset.content_type.lower().startswith("image/")
+                and item.metadata.get("capture_source") == "mobile_capture"
                 and item.status == NoteStatus.STAGED
             ],
         }
 
-    def _image_only_context_packet(self, note: Note, *, user_hint: str | None) -> dict[str, Any]:
+    def _image_only_context_packet(
+        self,
+        note: Note,
+        *,
+        source_notes: list[Note],
+        user_hint: str | None,
+    ) -> dict[str, Any]:
         return {
             "mode": GraphDraftMode.IMAGE_ONLY.value,
             "user_hint": user_hint,
             "source_note": _compact_note(note, include_raw_asset=True),
-            "warning": "Image-only draft was explicitly requested without graph context.",
+            "source_artifacts": [_source_artifact_packet(item) for item in source_notes],
+            "warning": (
+                "Image-only draft was explicitly requested without graph context or "
+                "voice transcript grounding."
+            ),
         }
 
     def _compact_target_ref(self, target: EntityRef, project_id: UUID) -> dict[str, Any]:
@@ -919,6 +1044,60 @@ def _compact_note(note: Note, *, include_raw_asset: bool = False) -> dict[str, A
     return payload
 
 
+def _preferred_image_note(source_note: Note, source_notes: list[Note]) -> Note | None:
+    candidates = [
+        item
+        for item in source_notes
+        if item.raw_asset is not None
+        and item.raw_asset.content_type.lower().startswith("image/")
+    ]
+    if not candidates:
+        return None
+    if any(item.note_id == source_note.note_id for item in candidates):
+        return source_note
+    return sorted(candidates, key=lambda item: (item.created_at, str(item.note_id)))[0]
+
+
+def _source_artifact_type(note: Note) -> str:
+    content_type = note.raw_asset.content_type.lower() if note.raw_asset is not None else ""
+    if content_type.startswith("image/"):
+        return "image"
+    if content_type.startswith("audio/"):
+        return "audio"
+    if note.raw_asset is not None:
+        return "file"
+    return "text"
+
+
+def _source_artifact_packet(note: Note) -> dict[str, Any]:
+    artifact_type = _source_artifact_type(note)
+    payload: dict[str, Any] = {
+        "type": artifact_type,
+        "note_id": str(note.note_id),
+        "project_id": str(note.project_id),
+        "created_at": note.created_at.isoformat(),
+        "status": note.status.value,
+        "metadata": dict(note.metadata),
+        "targets": [
+            {"entity_type": target.entity_type.value, "entity_id": str(target.entity_id)}
+            for target in note.targets
+        ],
+    }
+    if note.raw_asset is not None:
+        payload["artifact_id"] = str(note.raw_asset.storage_id)
+        payload["filename"] = note.raw_asset.filename
+        payload["content_type"] = note.raw_asset.content_type
+        payload["size_bytes"] = note.raw_asset.size_bytes
+        payload["checksum"] = note.raw_asset.checksum
+    if note.transcribed_text:
+        payload["transcript_id"] = f"transcript:{note.note_id}"
+        payload["transcript_text"] = note.transcribed_text
+        payload["transcript_is_derived"] = True
+    if note.raw_content:
+        payload["raw_content_preview"] = note.raw_content[:1000]
+    return payload
+
+
 def _compact_question(question: Question) -> dict[str, Any]:
     return {
         "id": str(question.question_id),
@@ -1000,6 +1179,77 @@ def _compact_visualization(visualization: Visualization) -> dict[str, Any]:
         "related_claim_ids": [str(item) for item in visualization.related_claim_ids],
         "created_at": visualization.created_at.isoformat(),
     }
+
+
+def _known_aliases(
+    *,
+    project: Project,
+    questions: list[Question],
+    sessions: list[Session],
+    datasets: list[Dataset],
+    analyses: list[Analysis],
+    claims: list[Claim],
+    visualizations: list[Visualization],
+) -> list[dict[str, Any]]:
+    aliases: list[dict[str, Any]] = [
+        {
+            "entity_type": EntityType.PROJECT.value,
+            "entity_id": str(project.project_id),
+            "aliases": [project.name],
+        }
+    ]
+    aliases.extend(
+        {
+            "entity_type": EntityType.QUESTION.value,
+            "entity_id": str(item.question_id),
+            "aliases": [item.text],
+        }
+        for item in questions
+    )
+    aliases.extend(
+        {
+            "entity_type": EntityType.SESSION.value,
+            "entity_id": str(item.session_id),
+            "aliases": [
+                f"{item.session_type.value} session {item.started_at.date().isoformat()}",
+                item.link_code,
+            ],
+        }
+        for item in sessions
+    )
+    aliases.extend(
+        {
+            "entity_type": EntityType.DATASET.value,
+            "entity_id": str(item.dataset_id),
+            "aliases": [item.commit_hash, f"Dataset {item.commit_hash[:12]}"],
+        }
+        for item in datasets
+    )
+    aliases.extend(
+        {
+            "entity_type": EntityType.ANALYSIS.value,
+            "entity_id": str(item.analysis_id),
+            "aliases": [item.method_hash, item.code_version],
+        }
+        for item in analyses
+    )
+    aliases.extend(
+        {
+            "entity_type": EntityType.CLAIM.value,
+            "entity_id": str(item.claim_id),
+            "aliases": [item.statement[:180]],
+        }
+        for item in claims
+    )
+    aliases.extend(
+        {
+            "entity_type": EntityType.VISUALIZATION.value,
+            "entity_id": str(item.viz_id),
+            "aliases": [item.caption or item.file_path, item.file_path],
+        }
+        for item in visualizations
+    )
+    return aliases
 
 
 def _entity_label(entity_type: EntityType, entity: EntityResult) -> str:

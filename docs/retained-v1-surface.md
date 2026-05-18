@@ -16,9 +16,11 @@ research record:
 - Simple query/search flows over questions and notes using the built-in
   substring behavior.
 - Manual note capture, including text notes, multipart raw file upload, raw file
-  download, and attaching notes to retained entities.
-- On-demand image-to-graph draft review for a single uploaded image note, with
-  human edit/accept/reject before commit through normal API validation.
+  download, raw voice notes with editable transcripts, and attaching notes to
+  retained entities.
+- On-demand multimodal note-to-graph draft review for uploaded image notes,
+  voice-note transcripts, and photo+voice bundles, with human
+  edit/accept/reject before commit through normal API validation.
 - Sessions and acquisition outputs, including closing sessions and promoting
   eligible sessions into datasets.
 - Dataset staging and direct commit with provenance/manifest capture, without
@@ -39,6 +41,8 @@ The following workflows are explicitly deferred and are being retired from the
 supported product path:
 
 - OCR-based note transcription.
+- Automatic audio transcription on every upload. Voice transcription is an
+  explicit note-scoped action for user-captured voice notes.
 - Automatic question extraction and extraction inbox workflows. The retained
   image-to-graph draft action is explicitly on-demand and note-scoped; it is not
   a standing extraction inbox.

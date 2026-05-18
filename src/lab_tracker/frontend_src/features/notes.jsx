@@ -124,7 +124,11 @@ function NoteDetailCard({
     "Failed to load note."
   );
   const [imagePreview, setImagePreview] = useState("");
+  const [audioPreview, setAudioPreview] = useState("");
+  const [transcriptText, setTranscriptText] = useState("");
   const isImage = Boolean(note?.raw_asset?.content_type?.startsWith("image/"));
+  const isAudio = Boolean(note?.raw_asset?.content_type?.startsWith("audio/"));
+  const canDraft = Boolean(isImage || isAudio || note?.raw_content);
 
   const project = useMemo(() => {
     if (!note) {
@@ -136,7 +140,8 @@ function NoteDetailCard({
   useEffect(() => {
     let canceled = false;
     setImagePreview("");
-    if (!note || !isImage) {
+    setAudioPreview("");
+    if (!note || (!isImage && !isAudio)) {
       return () => {
         canceled = true;
       };
@@ -144,26 +149,102 @@ function NoteDetailCard({
     apiRequest(`/notes/${note.note_id}/raw`, { token })
       .then((raw) => {
         if (!canceled && raw?.content_base64 && raw?.content_type) {
-          setImagePreview(`data:${raw.content_type};base64,${raw.content_base64}`);
+          const dataUrl = `data:${raw.content_type};base64,${raw.content_base64}`;
+          if (raw.content_type.startsWith("image/")) {
+            setImagePreview(dataUrl);
+          }
+          if (raw.content_type.startsWith("audio/")) {
+            setAudioPreview(dataUrl);
+          }
         }
       })
       .catch(() => {
         if (!canceled) {
           setImagePreview("");
+          setAudioPreview("");
         }
       });
     return () => {
       canceled = true;
     };
-  }, [isImage, note, token]);
+  }, [isAudio, isImage, note, token]);
 
-  async function handleDraftGraphUpdate(mode = "graph_context") {
-    if (!note || !canWrite || !isImage) {
+  useEffect(() => {
+    setTranscriptText(note?.transcribed_text || "");
+  }, [note]);
+
+  async function saveTranscript({ silent = false } = {}) {
+    if (!note || !canWrite) {
+      return null;
+    }
+    setBusy(true);
+    if (!silent) {
+      setFlash("", "");
+    }
+    try {
+      const metadata = {
+        ...(note.metadata || {}),
+        transcript_status: transcriptText.trim() ? "ready" : "pending",
+        transcript_edited_at: new Date().toISOString(),
+      };
+      const updated = await apiRequest(`/notes/${note.note_id}`, {
+        body: {
+          metadata,
+          transcribed_text: transcriptText,
+        },
+        method: "PATCH",
+        token,
+      });
+      if (!silent) {
+        setFlash("Transcript saved.");
+      }
+      return updated;
+    } catch (err) {
+      setFlash("", err.message || "Failed to save transcript.");
+      return null;
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function handleTranscribeVoiceNote() {
+    if (!note || !canWrite || !isAudio) {
       return;
     }
     setBusy(true);
     setFlash("", "");
     try {
+      const updated = await apiRequest(`/notes/${note.note_id}/transcript`, {
+        body: {},
+        method: "POST",
+        token,
+      });
+      setTranscriptText(updated?.transcribed_text || "");
+      setFlash("Voice transcript ready.");
+    } catch (err) {
+      setFlash("", err.message || "Failed to transcribe voice note.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function handleDraftGraphUpdate(mode = "graph_context") {
+    if (!note || !canWrite || !canDraft) {
+      return;
+    }
+    if (isAudio && !transcriptText.trim()) {
+      setFlash("", "Transcribe or enter a transcript before drafting from voice.");
+      return;
+    }
+    setBusy(true);
+    setFlash("", "");
+    try {
+      if (isAudio && transcriptText !== (note.transcribed_text || "")) {
+        const updated = await saveTranscript({ silent: true });
+        if (!updated) {
+          return;
+        }
+      }
       const draft = await apiRequest(`/notes/${note.note_id}/graph-drafts`, {
         body: { mode },
         method: "POST",
@@ -209,10 +290,18 @@ function NoteDetailCard({
               alt={note.raw_asset?.filename || "Uploaded note"}
             />
           ) : null}
+          {audioPreview ? (
+            <audio className="note-audio" controls src={audioPreview} />
+          ) : null}
           <div className="stack">
             <div>
               <div className="subtle">Transcribed text</div>
-              <p>{note.transcribed_text || <span className="subtle">(none)</span>}</p>
+              <textarea
+                className="transcript-editor"
+                disabled={!canWrite}
+                onChange={(event) => setTranscriptText(event.target.value)}
+                value={transcriptText}
+              />
             </div>
             <div>
               <div className="subtle">Raw content</div>
@@ -248,7 +337,27 @@ function NoteDetailCard({
             Set active project
           </button>
         ) : null}
-        {note && isImage ? (
+        {note && isAudio ? (
+          <button
+            type="button"
+            className="btn-secondary"
+            disabled={!canWrite}
+            onClick={handleTranscribeVoiceNote}
+          >
+            Transcribe voice
+          </button>
+        ) : null}
+        {note ? (
+          <button
+            type="button"
+            className="btn-secondary"
+            disabled={!canWrite}
+            onClick={() => saveTranscript()}
+          >
+            Save transcript
+          </button>
+        ) : null}
+        {note && canDraft ? (
           <button
             type="button"
             className="btn-primary"

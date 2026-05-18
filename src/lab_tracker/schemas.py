@@ -173,6 +173,10 @@ class NoteUpdate(RequestModel):
     status: NoteStatus | None = None
 
 
+class NoteTranscriptRequest(RequestModel):
+    prompt: str | None = Field(default=None, min_length=1)
+
+
 class GraphDraftOperationUpdate(RequestModel):
     payload: dict[str, Any] | None = None
     status: GraphChangeOperationStatus | None = None

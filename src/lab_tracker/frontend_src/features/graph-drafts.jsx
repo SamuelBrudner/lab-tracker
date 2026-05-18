@@ -279,6 +279,27 @@ function GraphDraftDetailCard({ token, changeSetId, navigate, canWrite, setBusy,
                 <div className="subtle">Source file</div>
                 <div className="mono">{changeSet.source_filename || "(none)"}</div>
               </div>
+              {(changeSet.context_packet?.source_artifacts || []).length > 0 ? (
+                <div>
+                  <div className="subtle">Source artifacts and transcripts</div>
+                  <div className="stack">
+                    {changeSet.context_packet.source_artifacts.map((artifact) => (
+                      <article className="item" key={artifact.note_id || artifact.artifact_id}>
+                        <div className="inline">
+                          <span className="pill">{artifact.type || "source"}</span>
+                          {artifact.content_type ? (
+                            <span className="pill">{artifact.content_type}</span>
+                          ) : null}
+                        </div>
+                        <p className="mono">{artifact.filename || artifact.note_id}</p>
+                        {artifact.transcript_text ? (
+                          <p className="source-snippet">{artifact.transcript_text}</p>
+                        ) : null}
+                      </article>
+                    ))}
+                  </div>
+                </div>
+              ) : null}
               <div>
                 <div className="subtle">Created</div>
                 <div className="mono">{formatDate(changeSet.created_at)}</div>

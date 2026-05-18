@@ -79,6 +79,14 @@ function committedAnalysesRecentPath(projectId, total) {
   });
 }
 
+function captureAnalysesPath(projectId) {
+  return buildApiPath("/analyses", { project_id: projectId, limit: 50 });
+}
+
+function captureClaimsPath(projectId) {
+  return buildApiPath("/claims", { project_id: projectId, limit: 50 });
+}
+
 function datasetFilesPath(datasetId) {
   return buildApiPath(`/datasets/${datasetId}/files`, { limit: 200, offset: 0 });
 }
@@ -211,6 +219,27 @@ function analysis({
     project_id: projectId,
     status,
     updated_at: updatedAt,
+  };
+}
+
+function claim({
+  claimId = "claim-1",
+  confidence = 62,
+  createdAt = "2026-04-20T02:00:00Z",
+  projectId = "project-1",
+  statement = "Turning appears stronger after pulse onset.",
+  status = "proposed",
+} = {}) {
+  return {
+    claim_id: claimId,
+    confidence,
+    created_at: createdAt,
+    project_id: projectId,
+    statement,
+    status,
+    supported_by_analysis_ids: [],
+    supported_by_dataset_ids: [],
+    updated_at: createdAt,
   };
 }
 
@@ -645,6 +674,14 @@ describe("App", () => {
         response: paged([]),
       },
       {
+        match: captureAnalysesPath("project-1"),
+        response: paged([]),
+      },
+      {
+        match: captureClaimsPath("project-1"),
+        response: paged([]),
+      },
+      {
         match: "/notes/upload-file",
         method: "POST",
         response: (request) => {
@@ -653,6 +690,8 @@ describe("App", () => {
           expect(body.get("file").name).toBe("phone-capture.jpg");
           expect(JSON.parse(body.get("metadata"))).toEqual({
             capture_hint: "Rig 2 Fly 12",
+            capture_kind: "image",
+            capture_mode: "photo",
             capture_review_status: "draft_requested",
             capture_source: "mobile_capture",
           });
@@ -767,7 +806,7 @@ describe("App", () => {
     await waitFor(() => expect(screen.getByLabelText("Project")).toHaveValue("project-1"));
 
     const file = new File(["phone-bytes"], "phone-capture.jpg", { type: "image/jpeg" });
-    fireEvent.change(screen.getByLabelText("Photo"), { target: { files: [file] } });
+    fireEvent.change(screen.getByLabelText("Photo file"), { target: { files: [file] } });
     fireEvent.change(screen.getByLabelText("Active question (optional)"), {
       target: { value: "question-1" },
     });
@@ -784,6 +823,260 @@ describe("App", () => {
 
     expect(await screen.findByRole("heading", { name: "Graph Draft Review" })).toBeInTheDocument();
     expect(await screen.findByText("Mobile capture draft")).toBeInTheDocument();
+  });
+
+  it("captures a photo plus voice bundle, transcribes voice, and drafts from the bundle", async () => {
+    const imageNoteId = "11111111-1111-4111-8111-111111111111";
+    const voiceNoteId = "33333333-3333-4333-8333-333333333333";
+    const draftId = "22222222-2222-4222-8222-222222222222";
+    let uploadCount = 0;
+    let bundleId = "";
+    localStorage.setItem(TOKEN_STORAGE_KEY, "token-mobile-bundle");
+    window.history.replaceState({}, "", "/app/capture");
+
+    installFetchMock([
+      {
+        match: "/auth/me",
+        response: apiResponse({ role: "admin", username: "sam" }),
+      },
+      {
+        match: projectsPath,
+        response: apiResponse([project("project-1", "Project One")]),
+      },
+      {
+        match: questionListPath("project-1"),
+        response: paged([]),
+      },
+      {
+        match: datasetListPath("project-1"),
+        response: paged([]),
+      },
+      {
+        match: noteCountPath("project-1"),
+        response: [
+          paged([], { limit: 1, offset: 0, total: 0 }),
+          paged([], { limit: 1, offset: 0, total: 2 }),
+        ],
+      },
+      {
+        match: activeSessionsPath("project-1"),
+        response: paged([]),
+      },
+      {
+        match: buildApiPath("/graph-drafts", { project_id: "project-1", limit: 10 }),
+        response: paged([]),
+      },
+      {
+        match: buildApiPath("/notes", { project_id: "project-1", limit: 10 }),
+        response: paged([]),
+      },
+      {
+        match: captureAnalysesPath("project-1"),
+        response: paged([analysis({ analysisId: "analysis-1", methodHash: "pulse-turning" })]),
+      },
+      {
+        match: captureClaimsPath("project-1"),
+        response: paged([claim({ claimId: "claim-1" })]),
+      },
+      {
+        match: "/notes/upload-file",
+        method: "POST",
+        response: (request) => {
+          uploadCount += 1;
+          const body = request.init.body;
+          const metadata = JSON.parse(body.get("metadata"));
+          expect(body.get("project_id")).toBe("project-1");
+          expect(metadata.capture_mode).toBe("bundle");
+          expect(metadata.capture_review_status).toBe("draft_requested");
+          if (uploadCount === 1) {
+            bundleId = metadata.capture_bundle_id;
+            expect(body.get("file").name).toBe("notebook.jpg");
+            expect(metadata.capture_kind).toBe("image");
+            return apiResponse(
+              note({
+                metadata,
+                noteId: imageNoteId,
+                rawAsset: {
+                  checksum: "image-checksum",
+                  content_type: "image/jpeg",
+                  filename: "notebook.jpg",
+                  size_bytes: 12,
+                  storage_id: "44444444-4444-4444-8444-444444444444",
+                },
+              }),
+              201
+            );
+          }
+          expect(metadata.capture_bundle_id).toBe(bundleId);
+          expect(body.get("file").name).toBe("voice.webm");
+          expect(metadata.capture_kind).toBe("voice");
+          expect(metadata.voice_note_type).toBe("Observation");
+          expect(metadata.transcript_status).toBe("pending");
+          return apiResponse(
+            note({
+              metadata,
+              noteId: voiceNoteId,
+              rawAsset: {
+                checksum: "audio-checksum",
+                content_type: "audio/webm",
+                filename: "voice.webm",
+                size_bytes: 11,
+                storage_id: "55555555-5555-4555-8555-555555555555",
+              },
+            }),
+            201
+          );
+        },
+      },
+      {
+        match: questionCountPath("project-1"),
+        response: paged([], { limit: 1, offset: 0, total: 0 }),
+      },
+      {
+        match: datasetCountPath("project-1"),
+        response: paged([], { limit: 1, offset: 0, total: 0 }),
+      },
+      {
+        match: recentNotesPath("project-1"),
+        response: paged([], { limit: 5, offset: 0, total: 2 }),
+      },
+      {
+        match: `/notes/${voiceNoteId}/transcript`,
+        method: "POST",
+        response: (request) => {
+          expect(JSON.parse(request.init.body)).toEqual({ prompt: "Rig 2 Fly 12" });
+          return apiResponse(
+            note({
+              metadata: { capture_bundle_id: bundleId, capture_kind: "voice" },
+              noteId: voiceNoteId,
+              rawAsset: {
+                checksum: "audio-checksum",
+                content_type: "audio/webm",
+                filename: "voice.webm",
+                size_bytes: 11,
+                storage_id: "55555555-5555-4555-8555-555555555555",
+              },
+              transcribedText: "Fly 12 tracked better after pulse onset.",
+            })
+          );
+        },
+      },
+      {
+        match: `/notes/${imageNoteId}/graph-drafts`,
+        method: "POST",
+        response: apiResponse(
+          {
+            change_set_id: draftId,
+            clarification_requests: [],
+            context_packet: {
+              mode: "graph_context",
+              source_artifacts: [
+                {
+                  content_type: "image/jpeg",
+                  filename: "notebook.jpg",
+                  note_id: imageNoteId,
+                  type: "image",
+                },
+                {
+                  content_type: "audio/webm",
+                  filename: "voice.webm",
+                  note_id: voiceNoteId,
+                  transcript_text: "Fly 12 tracked better after pulse onset.",
+                  type: "audio",
+                },
+              ],
+            },
+            created_at: "2026-04-20T00:00:00Z",
+            draft_mode: "graph_context",
+            model: "gpt-5.4-mini",
+            operations: [],
+            project_id: "project-1",
+            prompt_version: "multimodal-graph-draft-v1",
+            provider: "openai",
+            source_content_type: "image/jpeg",
+            source_filename: "notebook.jpg",
+            source_note_id: imageNoteId,
+            status: "ready",
+            summary: "Bundle draft",
+            uncertain_fields: [],
+            updated_at: "2026-04-20T00:00:00Z",
+          },
+          201
+        ),
+      },
+      {
+        match: `/graph-drafts/${draftId}`,
+        response: apiResponse({
+          change_set_id: draftId,
+          clarification_requests: [],
+          context_packet: {
+            mode: "graph_context",
+            source_artifacts: [
+              {
+                content_type: "image/jpeg",
+                filename: "notebook.jpg",
+                note_id: imageNoteId,
+                type: "image",
+              },
+              {
+                content_type: "audio/webm",
+                filename: "voice.webm",
+                note_id: voiceNoteId,
+                transcript_text: "Fly 12 tracked better after pulse onset.",
+                type: "audio",
+              },
+            ],
+          },
+          created_at: "2026-04-20T00:00:00Z",
+          draft_mode: "graph_context",
+          model: "gpt-5.4-mini",
+          operations: [],
+          project_id: "project-1",
+          prompt_version: "multimodal-graph-draft-v1",
+          provider: "openai",
+          source_content_type: "image/jpeg",
+          source_filename: "notebook.jpg",
+          source_note_id: imageNoteId,
+          status: "ready",
+          summary: "Bundle draft",
+          uncertain_fields: [],
+          updated_at: "2026-04-20T00:00:00Z",
+        }),
+      },
+      {
+        match: `/notes/${imageNoteId}/raw`,
+        response: apiResponse({
+          checksum: "image-checksum",
+          content_base64: "aW1n",
+          content_type: "image/jpeg",
+          filename: "notebook.jpg",
+          size_bytes: 12,
+          storage_id: "44444444-4444-4444-8444-444444444444",
+        }),
+      },
+    ]);
+
+    render(<App />);
+
+    expect(await screen.findByRole("heading", { name: "Phone Capture" })).toBeInTheDocument();
+    await waitFor(() => expect(screen.getByLabelText("Project")).toHaveValue("project-1"));
+
+    fireEvent.click(screen.getByLabelText("Photo + Voice"));
+    fireEvent.change(screen.getByLabelText("Photo file"), {
+      target: { files: [new File(["image"], "notebook.jpg", { type: "image/jpeg" })] },
+    });
+    fireEvent.change(screen.getByLabelText("Voice recording"), {
+      target: { files: [new File(["audio"], "voice.webm", { type: "audio/webm" })] },
+    });
+    fireEvent.change(screen.getByLabelText("Short hint (optional)"), {
+      target: { value: "Rig 2 Fly 12" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Upload and draft" }));
+
+    expect(await screen.findByRole("heading", { name: "Graph Draft Review" })).toBeInTheDocument();
+    expect(await screen.findByText("Bundle draft")).toBeInTheDocument();
+    expect(screen.getByText("Fly 12 tracked better after pulse onset.")).toBeInTheDocument();
+    expect(uploadCount).toBe(2);
   });
 
   it("shows a visible restore error when session bootstrap fails", async () => {

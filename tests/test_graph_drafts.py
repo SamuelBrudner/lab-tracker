@@ -13,6 +13,7 @@ from lab_tracker.graph_drafting import GraphDraftingError, OpenAIGraphDraftClien
 
 class FakeDraftClient:
     model = "fake-gpt"
+    transcription_model = "fake-transcribe"
 
     def __init__(self, patch: dict[str, Any] | None = None, error: str | None = None) -> None:
         self.patch = patch or {
@@ -23,7 +24,32 @@ class FakeDraftClient:
         }
         self.error = error
         self.calls: list[dict[str, Any]] = []
+        self.transcription_calls: list[dict[str, Any]] = []
         self.closed = False
+
+    def draft_from_note(
+        self,
+        *,
+        graph_context: dict[str, Any] | None = None,
+        user_hint: str | None = None,
+        draft_mode: str = "graph_context",
+        source_artifacts: list[dict[str, Any]] | None = None,
+        image_bytes: bytes | None = None,
+        image_content_type: str | None = None,
+    ) -> dict[str, Any]:
+        self.calls.append(
+            {
+                "content_type": image_content_type,
+                "draft_mode": draft_mode,
+                "graph_context": graph_context,
+                "image_bytes": image_bytes,
+                "source_artifacts": source_artifacts or [],
+                "user_hint": user_hint,
+            }
+        )
+        if self.error:
+            raise GraphDraftingError(self.error)
+        return self.patch
 
     def draft_from_image(
         self,
@@ -48,6 +74,24 @@ class FakeDraftClient:
         if self.error:
             raise GraphDraftingError(self.error)
         return self.patch
+
+    def transcribe_audio(
+        self,
+        *,
+        audio_bytes: bytes,
+        filename: str,
+        content_type: str,
+        prompt: str | None = None,
+    ) -> dict[str, Any]:
+        self.transcription_calls.append(
+            {
+                "audio_bytes": audio_bytes,
+                "content_type": content_type,
+                "filename": filename,
+                "prompt": prompt,
+            }
+        )
+        return {"text": "Fly 12 tracked better after pulse onset."}
 
     def close(self) -> None:
         self.closed = True
@@ -293,6 +337,38 @@ def test_openai_graph_draft_client_reports_refusals_and_malformed_json() -> None
     malformed.close()
 
 
+def test_openai_graph_draft_client_transcribes_audio_with_configured_model() -> None:
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        assert request.url.path == "/v1/audio/transcriptions"
+        body = request.content
+        assert b'name="model"' in body
+        assert b"gpt-transcribe-test" in body
+        assert b'name="response_format"' in body
+        assert b"json" in body
+        assert b'name="file"; filename="voice.webm"' in body
+        return httpx.Response(200, json={"text": "Fly 12 tracked well."})
+
+    client = OpenAIGraphDraftClient(
+        api_key="test-key",
+        model="gpt-test",
+        transcription_model="gpt-transcribe-test",
+        transport=httpx.MockTransport(handler),
+    )
+
+    result = client.transcribe_audio(
+        audio_bytes=b"audio",
+        filename="voice.webm",
+        content_type="audio/webm",
+    )
+
+    assert result["text"] == "Fly 12 tracked well."
+    assert requests[0].headers["authorization"] == "Bearer test-key"
+    client.close()
+
+
 def test_image_note_draft_stores_operations_and_context(
     client: TestClient,
     admin_auth_headers: dict[str, str],
@@ -326,6 +402,7 @@ def test_image_note_draft_stores_operations_and_context(
     assert fake_client.calls[0]["content_type"] == "image/jpeg"
     assert fake_client.calls[0]["draft_mode"] == "graph_context"
     assert fake_client.calls[0]["graph_context"]["project"]["id"] == project_id
+    assert fake_client.calls[0]["source_artifacts"][0]["type"] == "image"
     assert fake_client.calls[0]["user_hint"] is None
     assert fake_client.closed is True
 
@@ -509,14 +586,15 @@ def test_image_only_draft_requires_explicit_mode_and_records_warning_context(
     assert fake_client.calls[0]["user_hint"] == "ignore graph context"
 
 
-def test_image_note_draft_rejects_missing_or_non_image_raw_asset(
+def test_graph_draft_rejects_untranscribed_voice_and_unsupported_raw_asset(
     client: TestClient,
     admin_auth_headers: dict[str, str],
 ) -> None:
     project_id = _project(client, admin_auth_headers)
-    text_note = client.post(
-        "/notes",
-        json={"project_id": project_id, "raw_content": "plain note"},
+    voice_upload = client.post(
+        "/notes/upload-file",
+        data={"project_id": project_id},
+        files={"file": ("voice.webm", b"audio", "audio/webm")},
         headers=admin_auth_headers,
     ).json()["data"]["note_id"]
     text_upload = client.post(
@@ -526,13 +604,129 @@ def test_image_note_draft_rejects_missing_or_non_image_raw_asset(
         headers=admin_auth_headers,
     ).json()["data"]["note_id"]
 
-    missing_raw = client.post(f"/notes/{text_note}/graph-drafts", headers=admin_auth_headers)
+    untranscribed_voice = client.post(
+        f"/notes/{voice_upload}/graph-drafts",
+        headers=admin_auth_headers,
+    )
     non_image = client.post(f"/notes/{text_upload}/graph-drafts", headers=admin_auth_headers)
 
-    assert missing_raw.status_code == 422
-    assert "raw image asset" in missing_raw.json()["error"]["message"]
+    assert untranscribed_voice.status_code == 422
+    assert "editable transcript" in untranscribed_voice.json()["error"]["message"]
     assert non_image.status_code == 422
-    assert "only supports image" in non_image.json()["error"]["message"]
+    assert "raw image asset, text note, or voice transcript" in non_image.json()["error"]["message"]
+
+
+def test_voice_note_transcription_stores_editable_transcript(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+) -> None:
+    project_id = _project(client, admin_auth_headers)
+    voice_note = client.post(
+        "/notes/upload-file",
+        data={
+            "project_id": project_id,
+            "metadata": json.dumps(
+                {
+                    "capture_source": "mobile_capture",
+                    "capture_kind": "voice",
+                    "voice_note_type": "Observation",
+                }
+            ),
+        },
+        files={"file": ("voice.webm", b"fake-audio-bytes", "audio/webm")},
+        headers=admin_auth_headers,
+    ).json()["data"]
+    fake_client = FakeDraftClient()
+    client.app.state.graph_draft_client_factory = lambda settings: fake_client
+
+    response = client.post(
+        f"/notes/{voice_note['note_id']}/transcript",
+        json={"prompt": "Rig 2 Fly 12"},
+        headers=admin_auth_headers,
+    )
+
+    assert response.status_code == 200
+    payload = response.json()["data"]
+    assert payload["transcribed_text"] == "Fly 12 tracked better after pulse onset."
+    assert payload["metadata"]["transcript_status"] == "ready"
+    assert payload["metadata"]["transcript_model"] == "fake-transcribe"
+    assert payload["metadata"]["transcript_source_storage_id"] == voice_note["raw_asset"][
+        "storage_id"
+    ]
+    assert fake_client.transcription_calls[0]["audio_bytes"] == b"fake-audio-bytes"
+    assert fake_client.transcription_calls[0]["content_type"] == "audio/webm"
+    assert fake_client.transcription_calls[0]["prompt"] == "Rig 2 Fly 12"
+    assert fake_client.closed is True
+
+    edited = client.patch(
+        f"/notes/{voice_note['note_id']}",
+        json={"transcribed_text": "Edited transcript"},
+        headers=admin_auth_headers,
+    )
+
+    assert edited.status_code == 200
+    assert edited.json()["data"]["transcribed_text"] == "Edited transcript"
+
+
+def test_photo_voice_bundle_draft_uses_image_and_voice_transcript_context(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+) -> None:
+    project_id = _project(client, admin_auth_headers)
+    bundle_id = "bundle-1"
+    image_note = client.post(
+        "/notes/upload-file",
+        data={
+            "project_id": project_id,
+            "metadata": json.dumps(
+                {
+                    "capture_source": "mobile_capture",
+                    "capture_kind": "image",
+                    "capture_bundle_id": bundle_id,
+                }
+            ),
+        },
+        files={"file": ("notebook.jpg", b"fake-image-bytes", "image/jpeg")},
+        headers=admin_auth_headers,
+    ).json()["data"]
+    voice_note = client.post(
+        "/notes/upload-file",
+        data={
+            "project_id": project_id,
+            "transcribed_text": "Same protocol as last week. Fly 12 tracked better.",
+            "metadata": json.dumps(
+                {
+                    "capture_source": "mobile_capture",
+                    "capture_kind": "voice",
+                    "capture_bundle_id": bundle_id,
+                    "voice_note_type": "Observation",
+                }
+            ),
+        },
+        files={"file": ("voice.webm", b"fake-audio-bytes", "audio/webm")},
+        headers=admin_auth_headers,
+    ).json()["data"]
+    fake_client = FakeDraftClient()
+    client.app.state.graph_draft_client_factory = lambda settings: fake_client
+
+    response = client.post(
+        f"/notes/{image_note['note_id']}/graph-drafts",
+        headers=admin_auth_headers,
+    )
+
+    assert response.status_code == 201
+    payload = response.json()["data"]
+    artifacts = payload["context_packet"]["source_artifacts"]
+    assert {artifact["type"] for artifact in artifacts} == {"image", "audio"}
+    assert any(
+        artifact["note_id"] == voice_note["note_id"]
+        and artifact["transcript_text"] == "Same protocol as last week. Fly 12 tracked better."
+        for artifact in artifacts
+    )
+    assert payload["source_content_type"] == "image/jpeg"
+    assert fake_client.calls[0]["image_bytes"] == b"fake-image-bytes"
+    assert fake_client.calls[0]["content_type"] == "image/jpeg"
+    assert fake_client.calls[0]["source_artifacts"] == artifacts
 
 
 def test_gpt_failure_returns_stored_failed_draft(

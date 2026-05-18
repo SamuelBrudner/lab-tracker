@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import logging
-from typing import BinaryIO, Iterable
+from typing import Any, BinaryIO, Iterable
 from uuid import UUID, uuid4
 
 from lab_tracker.auth import AuthContext, require_role
 from lab_tracker.errors import NotFoundError, ValidationError
+from lab_tracker.graph_drafting import GraphDraftingError, PROVIDER
 from lab_tracker.models import (
     EntityRef,
     EntityType,
@@ -156,6 +157,65 @@ class NoteServiceMixin:
             self.run_after_rollback(lambda asset=asset: self._delete_raw_asset(asset))
         return note
 
+    def transcribe_voice_note(
+        self,
+        note_id: UUID,
+        *,
+        transcription_client: Any,
+        prompt: str | None = None,
+        actor: AuthContext | None = None,
+    ) -> Note:
+        require_role(actor, WRITE_ROLES)
+        note = self.get_note(note_id)
+        if note.raw_asset is None:
+            raise ValidationError("Voice transcription requires a note with a raw audio asset.")
+        if not note.raw_asset.content_type.lower().startswith("audio/"):
+            raise ValidationError("Voice transcription only supports audio note uploads.")
+        try:
+            raw_asset, audio_bytes = self.download_note_raw(note_id)
+        except NotFoundError as exc:
+            raise NotFoundError("Source audio file is unavailable.") from exc
+        except ValidationError:
+            raise
+        except Exception as exc:
+            raise ValidationError("Source audio file could not be read.") from exc
+        transcribe_audio = getattr(transcription_client, "transcribe_audio", None)
+        if not callable(transcribe_audio):
+            raise ValidationError("Configured transcription client does not support audio.")
+        try:
+            transcript = transcribe_audio(
+                audio_bytes=audio_bytes,
+                filename=raw_asset.filename,
+                content_type=raw_asset.content_type,
+                prompt=prompt,
+            )
+        except GraphDraftingError as exc:
+            raise ValidationError(f"Voice transcription failed: {exc}") from exc
+        text = _transcript_text(transcript)
+        if not text:
+            raise ValidationError("Voice transcription response did not include text.")
+        metadata = dict(note.metadata)
+        metadata.update(
+            {
+                "transcript_status": "ready",
+                "transcript_provider": PROVIDER,
+                "transcript_model": str(
+                    getattr(
+                        transcription_client,
+                        "transcription_model",
+                        getattr(transcription_client, "model", "unknown"),
+                    )
+                ),
+                "transcript_generated_at": utc_now().isoformat(),
+                "transcript_source_storage_id": str(raw_asset.storage_id),
+            }
+        )
+        note.transcribed_text = text
+        note.metadata = metadata
+        note.updated_at = utc_now()
+        self._run_repository_write(lambda repository: repository.notes.save(note))
+        return note
+
     def get_note(self, note_id: UUID) -> Note:
         return self._get_from_repository_or_store(
             attribute_name="notes",
@@ -275,3 +335,13 @@ class NoteServiceMixin:
             return
         if hasattr(entity, "project_id") and entity.project_id != project_id:
             raise ValidationError("Target must belong to the same project.")
+
+
+def _transcript_text(transcript: Any) -> str:
+    if isinstance(transcript, str):
+        return transcript.strip()
+    if isinstance(transcript, dict):
+        text = transcript.get("text")
+        if isinstance(text, str):
+            return text.strip()
+    return ""

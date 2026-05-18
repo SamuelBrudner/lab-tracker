@@ -11,7 +11,9 @@ from starlette.requests import Request
 from starlette.responses import Response
 
 from lab_tracker.api import LabTrackerAPI
+from lab_tracker.config import get_settings
 from lab_tracker.errors import ValidationError
+from lab_tracker.graph_drafting import OpenAIGraphDraftClient
 from lab_tracker.models import (
     EntityType,
     Note,
@@ -22,6 +24,7 @@ from lab_tracker.schemas import (
     ListEnvelope,
     NoteCreate,
     NoteRawDownloadRead,
+    NoteTranscriptRequest,
     NoteUpdate,
 )
 
@@ -160,6 +163,27 @@ def build_notes_router(api: LabTrackerAPI) -> APIRouter:
         )
         return Envelope(data=note)
 
+    @router.post("/notes/{note_id:uuid}/transcript", response_model=Envelope[Note])
+    def transcribe_note(
+        note_id: UUID,
+        request: Request,
+        payload: NoteTranscriptRequest | None = None,
+    ):
+        actor = actor_from_request(request)
+        transcription_client = _transcription_client_from_request(request)
+        try:
+            note = api_from_request(request, api).transcribe_voice_note(
+                note_id,
+                transcription_client=transcription_client,
+                prompt=payload.prompt if payload else None,
+                actor=actor,
+            )
+        finally:
+            close = getattr(transcription_client, "close", None)
+            if callable(close):
+                close()
+        return Envelope(data=note)
+
     @router.delete("/notes/{note_id:uuid}", response_model=Envelope[Note])
     def delete_note(note_id: UUID, request: Request):
         actor = actor_from_request(request)
@@ -167,3 +191,11 @@ def build_notes_router(api: LabTrackerAPI) -> APIRouter:
         return Envelope(data=note)
 
     return router
+
+
+def _transcription_client_from_request(request: Request):
+    settings = getattr(request.app.state, "settings", None) or get_settings()
+    factory = getattr(request.app.state, "graph_draft_client_factory", None)
+    if callable(factory):
+        return factory(settings)
+    return OpenAIGraphDraftClient.from_settings(settings)

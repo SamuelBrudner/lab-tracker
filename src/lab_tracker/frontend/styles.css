@@ -351,6 +351,33 @@ button:disabled {
   min-height: 96px;
 }
 
+.segmented-control {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  display: grid;
+  gap: 0.45rem;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  margin: 0;
+  padding: 0.6rem;
+}
+
+.segmented-control legend {
+  color: var(--muted);
+  font-size: 0.82rem;
+  font-weight: 700;
+  padding: 0 0.25rem;
+}
+
+.segmented-control label {
+  align-items: center;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  display: flex;
+  gap: 0.45rem;
+  min-height: 42px;
+  padding: 0.45rem 0.55rem;
+}
+
 .capture-actions {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -445,6 +472,14 @@ button:disabled {
   border: 1px solid var(--line);
   box-shadow: 0 10px 20px rgba(21, 23, 30, 0.06);
   margin-bottom: 0.6rem;
+}
+
+.note-audio {
+  width: 100%;
+}
+
+.transcript-editor {
+  min-height: 132px;
 }
 
 .note-text {

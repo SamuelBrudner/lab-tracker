@@ -1,19 +1,27 @@
-# Mobile-First, Graph-Aware Image-to-Graph Draft Review
+# Mobile-First, Multimodal Graph-Aware Note-to-Graph Draft Review
 
-Status: Implemented for the v1 core workflow; offline queued capture remains
-deferred.
+Status: Implemented for the v1 core photo, voice, photo+voice bundle, and text
+capture workflow; offline queued capture remains deferred.
 
 Tracking:
 
 - Documentation task: `lab-tracker-dfr`
 - Implementation feature: `lab-tracker-mgr`
+- Multimodal voice/bundle extension: `lab-tracker-mf7`
+
+This document began as the image-to-graph workflow spec. The current retained
+workflow generalizes the same human-approved review path to voice notes and
+photo+voice bundles: raw image/audio artifacts remain provenance anchors,
+transcripts are editable derived artifacts, graph context is supplied to the
+model before drafting, and accepted operations still commit through normal API
+validation.
 
 ## Summary
 
 Lab Tracker should support a mobile-first capture workflow where a researcher
-can take a photo of notebook pages, whiteboards, bench notes, rig notes,
-meeting notes, or end-of-day summaries from a phone, then have the system
-generate a graph-aware draft entry for human review.
+can take a photo, record a voice note, create a photo+voice bundle, or enter a
+quick text note from a phone, then have the system generate a graph-aware draft
+entry for human review.
 
 The critical design point is that the AI interpreter should not treat the image
 as an isolated document. It should use the existing Lab Tracker graph: active

@@ -6,9 +6,9 @@ Lab Tracker keeps the *reasoning* behind experiments connected to the data they 
 
 - **Questions are first-class.** Projects contain Questions — descriptive, hypothesis-driven, method-development, or other — that are created, staged, activated, maintained explicitly by users, and linked into broad-to-atomic hierarchies with `parent_question_ids`.
 - **Sessions and datasets.** Acquisition sessions capture outputs at the rig, are closed when done, and eligible sessions can be promoted into Datasets. Dataset staging and direct commit capture a provenance manifest.
-- **Notes attached to entities.** Manual note capture — text or multipart raw file upload/download — attached to the question, session, dataset, or analysis they describe. Notes stay as the raw human record.
+- **Notes attached to entities.** Manual note capture — text, multipart raw file upload/download, and raw voice notes with editable transcripts — attached to the project, question, session, dataset, analysis, or claim they describe. Notes stay as the raw human record.
 - **Analysis, claims, visualizations.** Explicit records linking analysis runs back to the datasets and questions they address, with claims and visualizations as first-class artifacts.
-- **Mobile graph-aware image draft review.** Phone capture stores raw image notes, builds a project-scoped graph context packet, asks GPT for reviewable draft operations, then humans edit, accept/reject, and commit through the same API validation as normal writes.
+- **Mobile multimodal graph-aware draft review.** Phone capture stores raw photo, voice, photo+voice bundle, or text notes, builds a project-scoped graph context packet, asks GPT for reviewable draft operations, then humans edit, accept/reject, and commit through the same API validation as normal writes.
 - **Search.** Substring search over questions and notes so prior context is findable later.
 
 What ships today is the minimum that preserves the core research record. The supported surface is defined in [`docs/retained-v1-surface.md`](docs/retained-v1-surface.md) — if it and this README disagree, that document wins. The broader vision (meeting-photo question capture, OCR, vector search, PI review gates) lives in [`idea.md`](idea.md) and is explicitly deferred.
@@ -116,7 +116,7 @@ The committed frontend bundle ships without a source map by default.
 Supported workflows in the frontend include:
 - project dashboard
 - question staging, activation, and parent-child hierarchy mapping
-- phone-first image capture at `/app/capture`
+- phone-first photo, voice, photo+voice bundle, and text capture at `/app/capture`
 - manual note creation and multipart upload/download handling
 - graph-aware image note draft review with human edit, accept/reject, defer, and commit
 - sessions and acquisition outputs
@@ -143,15 +143,18 @@ development.
 - `LAB_TRACKER_AUTH_TOKEN_TTL_MINUTES`: access token lifetime (default: `720`)
 - `LAB_TRACKER_AUTH_ENABLED`: enable login and role enforcement (default: `false`
   in `local`, `true` otherwise; non-local environments cannot disable auth)
-- `LAB_TRACKER_OPENAI_API_KEY`: required for image-to-graph draft generation
+- `LAB_TRACKER_OPENAI_API_KEY`: required for graph draft generation and
+  voice-note transcription
 - `LAB_TRACKER_OPENAI_MODEL`: OpenAI model for graph drafts (default:
   `gpt-5.4-mini`; set `gpt-5.5` or another compatible model to override)
+- `LAB_TRACKER_OPENAI_TRANSCRIPTION_MODEL`: OpenAI model for voice-note
+  transcription (default: `gpt-4o-mini-transcribe`)
 - `LAB_TRACKER_OPENAI_BASE_URL`: OpenAI API base URL (default:
   `https://api.openai.com/v1`)
 - `LAB_TRACKER_OPENAI_TIMEOUT_SECONDS`: graph draft API timeout in seconds
   (default: `60`)
 
-### Image-to-graph draft review
+### Multimodal graph draft review
 
 To try the local image review loop:
 
@@ -162,11 +165,13 @@ uv run alembic upgrade head
 uv run uvicorn lab_tracker.asgi:app --reload
 ```
 
-Open `http://127.0.0.1:8000/app/capture` from a phone or desktop browser, take
-or choose an image, select the project and optional question/session/dataset
-targets, add an optional hint, then choose `Upload and draft`. The upload is
-stored first as a raw image note in `LAB_TRACKER_NOTE_STORAGE_PATH`; the draft is
-stored separately as a `GraphChangeSet` linked back to that source note.
+Open `http://127.0.0.1:8000/app/capture` from a phone or desktop browser, then
+capture a photo, voice note, photo+voice bundle, or text note. Select the
+project and optional question/session/dataset/analysis/claim targets, add an
+optional hint, then choose `Upload and draft`. Raw images and raw audio are
+stored first as note artifacts in `LAB_TRACKER_NOTE_STORAGE_PATH`; voice notes
+receive editable transcripts linked back to the raw audio. The draft is stored
+separately as a `GraphChangeSet` linked back to the source note.
 
 Draft mode defaults to `graph_context`. In that mode, Lab Tracker builds and
 stores a compact context packet containing the source note, selected targets,
@@ -176,12 +181,15 @@ captures. Context build failures are loud API errors and do not silently fall
 back to OCR or image-only interpretation. Image-only drafting is available only
 when explicitly requested and records `draft_mode=image_only`.
 
-The configured OpenAI-compatible provider receives the uploaded image bytes,
-optional user hint, graph context packet, and strict operation schema. Configure
-that route with `LAB_TRACKER_OPENAI_API_KEY`, `LAB_TRACKER_OPENAI_MODEL`, and
-`LAB_TRACKER_OPENAI_BASE_URL`. Third-party logging, retention, and residency
-depend on the configured provider and base URL. For institutional deployments,
-point `LAB_TRACKER_OPENAI_BASE_URL` at an approved gateway or model endpoint.
+The configured OpenAI-compatible provider receives the uploaded image bytes when
+present, editable transcript text when present, optional user hint, graph
+context packet, and strict operation schema. Voice transcription uses the
+configured transcription model before drafting. Configure these routes with
+`LAB_TRACKER_OPENAI_API_KEY`, `LAB_TRACKER_OPENAI_MODEL`,
+`LAB_TRACKER_OPENAI_TRANSCRIPTION_MODEL`, and `LAB_TRACKER_OPENAI_BASE_URL`.
+Third-party logging, retention, and residency depend on the configured provider
+and base URL. For institutional deployments, point `LAB_TRACKER_OPENAI_BASE_URL`
+at an approved gateway or model endpoint.
 
 Authentication and role checks apply to raw images, drafts, draft edits, and
 commits. Viewer accounts can inspect authorized records; editor/admin roles are
