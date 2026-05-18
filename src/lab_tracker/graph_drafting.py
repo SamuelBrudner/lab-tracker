@@ -304,10 +304,12 @@ def _instructions() -> str:
         "such as \"parent_question\", then set the child payload's parent_question_ids to "
         "[{\"$ref\":\"parent_question\"}]. For created objects that later operations "
         "should reference, set client_ref to a short stable name and use {\"$ref\":\"name\"} "
-        "inside later payload_json fields. Set semantic_type to the closest allowed "
-        "semantic operation label. Never claim a canonical update happened; these are "
-        "drafts for human review. Preserve uploaded image and audio notes as provenance "
-        "sources and return uncertainty explicitly."
+        "inside later payload_json fields. Set semantic_type to the closest specific "
+        "allowed semantic operation label. Use create_entity only for generic create "
+        "operations and update_entity only for generic update operations when no narrower "
+        "semantic label fits. Never claim a canonical update happened; these are drafts "
+        "for human review. Preserve uploaded image and audio notes as provenance sources "
+        "and return uncertainty explicitly."
     )
 
 

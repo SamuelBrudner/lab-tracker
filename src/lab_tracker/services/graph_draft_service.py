@@ -991,10 +991,13 @@ def _validate_payload(schema_type: Any, payload: dict[str, Any]) -> Any:
 def _validate_semantic_operation_target(operation: GraphChangeOperation) -> None:
     if operation.semantic_type is None:
         return
-    if operation.semantic_type in {
-        GraphDraftSemanticType.CREATE_ENTITY,
-        GraphDraftSemanticType.UPDATE_ENTITY,
-    }:
+    if operation.semantic_type == GraphDraftSemanticType.CREATE_ENTITY:
+        if operation.op != GraphChangeOp.CREATE:
+            raise ValidationError("Semantic operation create_entity requires create op.")
+        return
+    if operation.semantic_type == GraphDraftSemanticType.UPDATE_ENTITY:
+        if operation.op != GraphChangeOp.UPDATE:
+            raise ValidationError("Semantic operation update_entity requires update op.")
         return
     allowed = _SEMANTIC_ALLOWED_TARGETS.get(operation.semantic_type)
     if allowed is None:

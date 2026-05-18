@@ -789,6 +789,74 @@ def test_malformed_or_unsupported_gpt_patch_returns_stored_failed_draft(
     assert "invalid" in payload["error_metadata"]["message"]
 
 
+def test_generic_semantic_entity_operations_validate_operation_direction(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+) -> None:
+    project_id = _project(client, admin_auth_headers)
+    note_id = _image_note(client, admin_auth_headers, project_id)
+    client.app.state.graph_draft_client_factory = lambda settings: FakeDraftClient(
+        {
+            "summary": "generic create",
+            "uncertain_fields": [],
+            "clarification_requests": [],
+            "operations": [
+                {
+                    "client_ref": "generic_note",
+                    "op": "create",
+                    "entity_type": "note",
+                    "semantic_type": "create_entity",
+                    "target_entity_id": None,
+                    "payload_json": json.dumps(
+                        {
+                            "project_id": project_id,
+                            "raw_content": "Generic note create is still supported.",
+                        }
+                    ),
+                    "rationale": "No narrower semantic label fits.",
+                    "confidence": 0.7,
+                    "source_refs": [],
+                }
+            ],
+        }
+    )
+
+    response = client.post(f"/notes/{note_id}/graph-drafts", headers=admin_auth_headers)
+
+    assert response.status_code == 201
+    payload = response.json()["data"]
+    assert payload["status"] == "ready"
+    assert payload["operations"][0]["semantic_type"] == "create_entity"
+
+    client.app.state.graph_draft_client_factory = lambda settings: FakeDraftClient(
+        {
+            "summary": "bad generic create",
+            "uncertain_fields": [],
+            "clarification_requests": [],
+            "operations": [
+                {
+                    "client_ref": None,
+                    "op": "update",
+                    "entity_type": "note",
+                    "semantic_type": "create_entity",
+                    "target_entity_id": note_id,
+                    "payload_json": json.dumps({"metadata": {"reviewed": True}}),
+                    "rationale": "The semantic label disagrees with the op.",
+                    "confidence": 0.7,
+                    "source_refs": [],
+                }
+            ],
+        }
+    )
+
+    rejected = client.post(f"/notes/{note_id}/graph-drafts", headers=admin_auth_headers)
+
+    assert rejected.status_code == 201
+    failed_payload = rejected.json()["data"]
+    assert failed_payload["status"] == "failed"
+    assert "create_entity requires create op" in failed_payload["error_metadata"]["message"]
+
+
 def test_model_output_with_unknown_existing_entity_id_returns_stored_failed_draft(
     client: TestClient,
     admin_auth_headers: dict[str, str],
