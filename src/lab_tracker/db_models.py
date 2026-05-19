@@ -62,6 +62,14 @@ class QuestionModel(Base):
     question_type: Mapped[str] = mapped_column(String(40), nullable=False)
     hypothesis: Mapped[str | None] = mapped_column(Text)
     status: Mapped[str] = mapped_column(String(20), default="staged")
+    superseded_by_question_id: Mapped[str | None] = mapped_column(
+        String(36),
+        ForeignKey("questions.question_id", ondelete="SET NULL"),
+    )
+    supersedes_question_id: Mapped[str | None] = mapped_column(
+        String(36),
+        ForeignKey("questions.question_id", ondelete="SET NULL"),
+    )
     created_by: Mapped[str | None] = mapped_column(String(255))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utc_now)
     updated_at: Mapped[datetime] = mapped_column(
@@ -84,6 +92,37 @@ class QuestionParentModel(Base):
         ForeignKey("questions.question_id", ondelete="CASCADE"),
         primary_key=True,
     )
+
+
+class QuestionRefactorModel(Base):
+    __tablename__ = "question_refactors"
+
+    refactor_id: Mapped[str] = mapped_column(
+        String(36),
+        primary_key=True,
+        default=lambda: str(uuid4()),
+    )
+    project_id: Mapped[str] = mapped_column(
+        String(36),
+        ForeignKey("projects.project_id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    source_question_id: Mapped[str] = mapped_column(
+        String(36),
+        ForeignKey("questions.question_id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    replacement_question_id: Mapped[str] = mapped_column(
+        String(36),
+        ForeignKey("questions.question_id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    reason: Mapped[str] = mapped_column(Text, nullable=False)
+    source_snapshot: Mapped[dict[str, object]] = mapped_column(JSON, default=dict)
+    replacement_snapshot: Mapped[dict[str, object]] = mapped_column(JSON, default=dict)
+    relationship_changes: Mapped[dict[str, object]] = mapped_column(JSON, default=dict)
+    created_by: Mapped[str | None] = mapped_column(String(255))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utc_now)
 
 
 class DatasetModel(Base):
@@ -505,6 +544,24 @@ class UserModel(Base):
 
 
 Index("ix_questions_project_created_at", QuestionModel.project_id, QuestionModel.created_at)
+Index(
+    "ix_questions_superseded_by_question_id",
+    QuestionModel.superseded_by_question_id,
+)
+Index(
+    "ix_questions_supersedes_question_id",
+    QuestionModel.supersedes_question_id,
+)
+Index(
+    "ix_question_refactors_source_created_at",
+    QuestionRefactorModel.source_question_id,
+    QuestionRefactorModel.created_at,
+)
+Index(
+    "ix_question_refactors_replacement_created_at",
+    QuestionRefactorModel.replacement_question_id,
+    QuestionRefactorModel.created_at,
+)
 Index("ix_datasets_project_created_at", DatasetModel.project_id, DatasetModel.created_at)
 Index("ix_notes_project_created_at", NoteModel.project_id, NoteModel.created_at)
 Index(

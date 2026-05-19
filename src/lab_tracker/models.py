@@ -56,6 +56,7 @@ class QuestionStatus(str, Enum):
     ACTIVE = "active"
     ANSWERED = "answered"
     ABANDONED = "abandoned"
+    SUPERSEDED = "superseded"
 
 
 class QuestionType(str, Enum):
@@ -273,9 +274,24 @@ class Question(_DomainModel):
     hypothesis: str | None = None
     status: QuestionStatus = QuestionStatus.STAGED
     parent_question_ids: list[UUID] = Field(default_factory=list)
+    superseded_by_question_id: UUID | None = None
+    supersedes_question_id: UUID | None = None
     created_at: datetime = Field(default_factory=utc_now)
     created_by: str | None = None
     updated_at: datetime = Field(default_factory=utc_now)
+
+
+class QuestionRefactor(_DomainModel):
+    refactor_id: UUID
+    project_id: UUID
+    source_question_id: UUID
+    replacement_question_id: UUID
+    reason: str
+    source_snapshot: dict[str, Any] = Field(default_factory=dict)
+    replacement_snapshot: dict[str, Any] = Field(default_factory=dict)
+    relationship_changes: dict[str, Any] = Field(default_factory=dict)
+    created_at: datetime = Field(default_factory=utc_now)
+    created_by: str | None = None
 
 
 class Dataset(_DomainModel):

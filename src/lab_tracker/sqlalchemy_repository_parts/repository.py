@@ -18,6 +18,7 @@ from lab_tracker.models import (
     Note,
     Project,
     Question,
+    QuestionRefactor,
     Session,
     Visualization,
 )
@@ -28,7 +29,11 @@ from .analyses import (
     SQLAlchemyClaimRepository,
     SQLAlchemyVisualizationRepository,
 )
-from .core import SQLAlchemyProjectRepository, SQLAlchemyQuestionRepository
+from .core import (
+    SQLAlchemyProjectRepository,
+    SQLAlchemyQuestionRefactorRepository,
+    SQLAlchemyQuestionRepository,
+)
 from .datasets import SQLAlchemyDatasetRepository
 from .graph_drafts import SQLAlchemyGraphChangeSetRepository
 from .notes import SQLAlchemyNoteRepository
@@ -42,6 +47,7 @@ class SQLAlchemyLabTrackerRepository(LabTrackerRepository):
         self._session = session
         self.projects = SQLAlchemyProjectRepository(session)
         self.questions = SQLAlchemyQuestionRepository(session)
+        self.question_refactors = SQLAlchemyQuestionRefactorRepository(session)
         self.datasets = SQLAlchemyDatasetRepository(session)
         self.notes = SQLAlchemyNoteRepository(session)
         self.sessions = SQLAlchemySessionRepository(session)
@@ -123,6 +129,19 @@ class SQLAlchemyLabTrackerRepository(LabTrackerRepository):
             search=search,
             parent_question_id=parent_question_id,
             ancestor_question_id=ancestor_question_id,
+            limit=limit,
+            offset=offset,
+        )
+
+    def query_question_refactors(
+        self,
+        *,
+        question_id: UUID,
+        limit: int | None = None,
+        offset: int = 0,
+    ) -> tuple[list[QuestionRefactor], int]:
+        return self.question_refactors.query(
+            question_id=question_id,
             limit=limit,
             offset=offset,
         )

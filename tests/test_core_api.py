@@ -9,6 +9,8 @@ from lab_tracker.models import (
     DatasetCommitManifestInput,
     DatasetFile,
     DatasetStatus,
+    EntityRef,
+    EntityType,
     QuestionLinkRole,
     QuestionStatus,
     QuestionType,
@@ -227,6 +229,290 @@ def test_dataset_commit_requires_file_attachment():
     )
     with pytest.raises(ValidationError, match="At least one file is required to commit a dataset."):
         api.update_dataset(dataset.dataset_id, status=DatasetStatus.COMMITTED, actor=actor)
+
+
+@pytest.mark.parametrize(
+    ("source_status", "replacement_status"),
+    [
+        (QuestionStatus.STAGED, QuestionStatus.STAGED),
+        (QuestionStatus.ACTIVE, QuestionStatus.STAGED),
+        (QuestionStatus.ACTIVE, QuestionStatus.ACTIVE),
+    ],
+)
+def test_question_refactor_supports_staged_and_active_replacements(
+    source_status: QuestionStatus,
+    replacement_status: QuestionStatus,
+):
+    api = LabTrackerAPI.in_memory()
+    actor = _actor()
+    project = api.create_project("Question Refactor", actor=actor)
+    source = api.create_question(
+        project_id=project.project_id,
+        text="How should the broad question be framed?",
+        question_type=QuestionType.DESCRIPTIVE,
+        status=source_status,
+        actor=actor,
+    )
+
+    result = api.refactor_question(
+        source.question_id,
+        replacement_text="Which experimental contrast is testable this week?",
+        replacement_question_type=QuestionType.HYPOTHESIS_DRIVEN,
+        replacement_status=replacement_status,
+        reason="Make the question testable before project launch.",
+        actor=actor,
+    )
+
+    assert result.source_question.status == QuestionStatus.SUPERSEDED
+    assert (
+        result.source_question.superseded_by_question_id
+        == result.replacement_question.question_id
+    )
+    assert result.replacement_question.status == replacement_status
+    assert result.replacement_question.supersedes_question_id == source.question_id
+    assert result.refactor.source_snapshot["status"] == source_status.value
+    assert result.refactor.replacement_snapshot["status"] == replacement_status.value
+    assert (
+        api.list_question_refactors(source.question_id)[0].refactor_id
+        == result.refactor.refactor_id
+    )
+    assert (
+        api.list_question_refactors(result.replacement_question.question_id)[0].refactor_id
+        == result.refactor.refactor_id
+    )
+
+
+def test_question_refactor_moves_only_selected_children_and_notes():
+    api = LabTrackerAPI.in_memory()
+    actor = _actor()
+    project = api.create_project("Question Refactor Moves", actor=actor)
+    parent = api.create_question(
+        project_id=project.project_id,
+        text="What is the project frame?",
+        question_type=QuestionType.DESCRIPTIVE,
+        status=QuestionStatus.ACTIVE,
+        actor=actor,
+    )
+    source = api.create_question(
+        project_id=project.project_id,
+        text="Does the original leaf question make sense?",
+        question_type=QuestionType.HYPOTHESIS_DRIVEN,
+        status=QuestionStatus.ACTIVE,
+        parent_question_ids=[parent.question_id],
+        actor=actor,
+    )
+    moved_child = api.create_question(
+        project_id=project.project_id,
+        text="Which child should move?",
+        question_type=QuestionType.METHOD_DEV,
+        parent_question_ids=[source.question_id],
+        actor=actor,
+    )
+    retained_child = api.create_question(
+        project_id=project.project_id,
+        text="Which child remains historical?",
+        question_type=QuestionType.METHOD_DEV,
+        parent_question_ids=[source.question_id],
+        actor=actor,
+    )
+    moved_note = api.create_note(
+        project_id=project.project_id,
+        raw_content="Move this note to the refined question.",
+        targets=[EntityRef(entity_type=EntityType.QUESTION, entity_id=source.question_id)],
+        actor=actor,
+    )
+    retained_note = api.create_note(
+        project_id=project.project_id,
+        raw_content="Keep this note on the historical wording.",
+        targets=[EntityRef(entity_type=EntityType.QUESTION, entity_id=source.question_id)],
+        actor=actor,
+    )
+
+    result = api.refactor_question(
+        source.question_id,
+        replacement_text="Does the refined leaf question support a direct assay?",
+        replacement_question_type=QuestionType.HYPOTHESIS_DRIVEN,
+        replacement_status=QuestionStatus.ACTIVE,
+        reason="Separate current testable framing from historical wording.",
+        child_question_ids_to_reparent=[moved_child.question_id],
+        note_ids_to_retarget=[moved_note.note_id],
+        actor=actor,
+    )
+
+    replacement_id = result.replacement_question.question_id
+    assert result.replacement_question.parent_question_ids == [parent.question_id]
+    assert api.get_question(source.question_id).superseded_by_question_id == replacement_id
+    assert api.get_question(moved_child.question_id).parent_question_ids == [replacement_id]
+    assert api.get_question(retained_child.question_id).parent_question_ids == [
+        source.question_id
+    ]
+    assert api.get_note(moved_note.note_id).targets == [
+        EntityRef(entity_type=EntityType.QUESTION, entity_id=replacement_id)
+    ]
+    assert api.get_note(retained_note.note_id).targets == [
+        EntityRef(entity_type=EntityType.QUESTION, entity_id=source.question_id)
+    ]
+    assert result.refactor.relationship_changes == {
+        "child_question_ids_reparented": [str(moved_child.question_id)],
+        "note_ids_retargeted": [str(moved_note.note_id)],
+        "dataset_session_analysis_claim_links_moved": False,
+    }
+
+
+def test_question_refactor_validates_source_status_relationships_and_cycles():
+    api = LabTrackerAPI.in_memory()
+    actor = _actor()
+    project = api.create_project("Question Refactor Validation", actor=actor)
+    other_project = api.create_project("Other Refactor Validation", actor=actor)
+    source = api.create_question(
+        project_id=project.project_id,
+        text="Should this question be refactored?",
+        question_type=QuestionType.DESCRIPTIVE,
+        status=QuestionStatus.ACTIVE,
+        actor=actor,
+    )
+    child = api.create_question(
+        project_id=project.project_id,
+        text="Direct child",
+        question_type=QuestionType.METHOD_DEV,
+        parent_question_ids=[source.question_id],
+        actor=actor,
+    )
+    grandchild = api.create_question(
+        project_id=project.project_id,
+        text="Grandchild",
+        question_type=QuestionType.METHOD_DEV,
+        parent_question_ids=[child.question_id],
+        actor=actor,
+    )
+    other_question = api.create_question(
+        project_id=other_project.project_id,
+        text="Other project question",
+        question_type=QuestionType.DESCRIPTIVE,
+        actor=actor,
+    )
+    other_note = api.create_note(
+        project_id=other_project.project_id,
+        raw_content="Other project note",
+        actor=actor,
+    )
+
+    with pytest.raises(ValidationError, match="reason"):
+        api.refactor_question(
+            source.question_id,
+            replacement_text="Missing reason replacement",
+            replacement_question_type=QuestionType.DESCRIPTIVE,
+            replacement_status=QuestionStatus.STAGED,
+            reason=" ",
+            actor=actor,
+        )
+    with pytest.raises(ValidationError, match="source as a parent"):
+        api.refactor_question(
+            source.question_id,
+            replacement_text="Source parent replacement",
+            replacement_question_type=QuestionType.DESCRIPTIVE,
+            replacement_status=QuestionStatus.STAGED,
+            reason="Reject source-as-parent.",
+            replacement_parent_question_ids=[source.question_id],
+            actor=actor,
+        )
+    with pytest.raises(ValidationError, match="same project"):
+        api.refactor_question(
+            source.question_id,
+            replacement_text="Cross-project parent replacement",
+            replacement_question_type=QuestionType.DESCRIPTIVE,
+            replacement_status=QuestionStatus.STAGED,
+            reason="Reject cross-project parent.",
+            replacement_parent_question_ids=[other_question.question_id],
+            actor=actor,
+        )
+    with pytest.raises(ValidationError, match="same project"):
+        api.refactor_question(
+            source.question_id,
+            replacement_text="Cross-project child replacement",
+            replacement_question_type=QuestionType.DESCRIPTIVE,
+            replacement_status=QuestionStatus.STAGED,
+            reason="Reject cross-project child move.",
+            child_question_ids_to_reparent=[other_question.question_id],
+            actor=actor,
+        )
+    with pytest.raises(ValidationError, match="same project"):
+        api.refactor_question(
+            source.question_id,
+            replacement_text="Cross-project note replacement",
+            replacement_question_type=QuestionType.DESCRIPTIVE,
+            replacement_status=QuestionStatus.STAGED,
+            reason="Reject cross-project note move.",
+            note_ids_to_retarget=[other_note.note_id],
+            actor=actor,
+        )
+    with pytest.raises(ValidationError, match="acyclic"):
+        api.refactor_question(
+            source.question_id,
+            replacement_text="Cyclic replacement",
+            replacement_question_type=QuestionType.DESCRIPTIVE,
+            replacement_status=QuestionStatus.STAGED,
+            reason="Reject cyclic child move.",
+            replacement_parent_question_ids=[grandchild.question_id],
+            child_question_ids_to_reparent=[child.question_id],
+            actor=actor,
+        )
+
+    answered = api.create_question(
+        project_id=project.project_id,
+        text="Answered question",
+        question_type=QuestionType.DESCRIPTIVE,
+        status=QuestionStatus.ACTIVE,
+        actor=actor,
+    )
+    api.update_question(answered.question_id, status=QuestionStatus.ANSWERED, actor=actor)
+    abandoned = api.create_question(
+        project_id=project.project_id,
+        text="Abandoned question",
+        question_type=QuestionType.DESCRIPTIVE,
+        actor=actor,
+    )
+    api.update_question(abandoned.question_id, status=QuestionStatus.ABANDONED, actor=actor)
+    for invalid_source in (answered, abandoned):
+        with pytest.raises(ValidationError, match="staged or active"):
+            api.refactor_question(
+                invalid_source.question_id,
+                replacement_text="Invalid source replacement",
+                replacement_question_type=QuestionType.DESCRIPTIVE,
+                replacement_status=QuestionStatus.STAGED,
+                reason="Reject terminal source.",
+                actor=actor,
+            )
+
+
+def test_question_status_superseded_is_terminal_and_active_to_staged_remains_disallowed():
+    api = LabTrackerAPI.in_memory()
+    actor = _actor()
+    project = api.create_project("Question Status Transitions", actor=actor)
+    active = api.create_question(
+        project_id=project.project_id,
+        text="Active question",
+        question_type=QuestionType.DESCRIPTIVE,
+        status=QuestionStatus.ACTIVE,
+        actor=actor,
+    )
+    with pytest.raises(ValidationError, match="active to staged"):
+        api.update_question(active.question_id, status=QuestionStatus.STAGED, actor=actor)
+
+    result = api.refactor_question(
+        active.question_id,
+        replacement_text="Replacement question",
+        replacement_question_type=QuestionType.DESCRIPTIVE,
+        replacement_status=QuestionStatus.ACTIVE,
+        reason="Retire the old wording.",
+        actor=actor,
+    )
+    with pytest.raises(ValidationError, match="superseded to active"):
+        api.update_question(
+            result.source_question.question_id,
+            status=QuestionStatus.ACTIVE,
+            actor=actor,
+        )
 
 
 def test_session_creation_starts_active_without_end_time():

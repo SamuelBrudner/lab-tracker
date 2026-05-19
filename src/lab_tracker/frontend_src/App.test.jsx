@@ -43,6 +43,20 @@ function recentNotesPath(projectId) {
   return buildApiPath("/notes", { limit: 5, offset: 0, project_id: projectId });
 }
 
+function targetedQuestionNotesPath(projectId, questionId) {
+  return buildApiPath("/notes", {
+    project_id: projectId,
+    target_entity_type: "question",
+    target_entity_id: questionId,
+    limit: 200,
+    offset: 0,
+  });
+}
+
+function questionRefactorsPath(questionId) {
+  return buildApiPath(`/questions/${questionId}/refactors`, { limit: 50, offset: 0 });
+}
+
 function activeSessionsPath(projectId) {
   return buildApiPath("/sessions", {
     project_id: projectId,
@@ -109,20 +123,27 @@ function project(projectId, name) {
 
 function question({
   createdAt = "2026-04-20T00:00:00Z",
+  hypothesis = null,
   parentQuestionIds = [],
   projectId = "project-1",
+  questionType = "descriptive",
   questionId = "question-1",
   status = "active",
+  supersededByQuestionId = null,
+  supersedesQuestionId = null,
   text = "Question",
   updatedAt = "2026-04-20T01:00:00Z",
 } = {}) {
   return {
     created_at: createdAt,
+    hypothesis,
     parent_question_ids: parentQuestionIds,
     project_id: projectId,
     question_id: questionId,
-    question_type: "descriptive",
+    question_type: questionType,
     status,
+    superseded_by_question_id: supersededByQuestionId,
+    supersedes_question_id: supersedesQuestionId,
     text,
     updated_at: updatedAt,
   };
@@ -362,6 +383,23 @@ describe("App", () => {
             text: "How stable is the rig today?",
           })
         ),
+      },
+      {
+        match: questionListPath("project-1"),
+        response: paged([
+          question({
+            questionId,
+            text: "How stable is the rig today?",
+          }),
+        ]),
+      },
+      {
+        match: targetedQuestionNotesPath("project-1", questionId),
+        response: paged([]),
+      },
+      {
+        match: questionRefactorsPath(questionId),
+        response: paged([]),
       },
     ]);
 
@@ -1386,6 +1424,23 @@ describe("App", () => {
           })
         ),
       },
+      {
+        match: questionListPath("project-1"),
+        response: paged([
+          question({
+            questionId,
+            text: "How stable is the rig today?",
+          }),
+        ]),
+      },
+      {
+        match: targetedQuestionNotesPath("project-1", questionId),
+        response: paged([]),
+      },
+      {
+        match: questionRefactorsPath(questionId),
+        response: paged([]),
+      },
     ]);
 
     render(<App />);
@@ -1740,6 +1795,277 @@ describe("App", () => {
     expect(JSON.parse(questionPost[1].body)).toMatchObject({
       parent_question_ids: ["question-root"],
       text: "Which plume gaps change run length?",
+    });
+  });
+
+  it("dims superseded questions in the map and keeps them out of active selectors", async () => {
+    localStorage.setItem(TOKEN_STORAGE_KEY, "token-question-supersession-map");
+
+    const replacementQuestion = question({
+      questionId: "question-current",
+      status: "active",
+      text: "Which ATF4 comparison is testable first?",
+    });
+    const supersededQuestion = question({
+      questionId: "question-old",
+      status: "superseded",
+      supersededByQuestionId: "question-current",
+      text: "Does lifecycle nuance explain the ATF4 phenotype?",
+    });
+
+    installFetchMock([
+      {
+        match: "/auth/me",
+        response: apiResponse({ role: "admin", username: "sam" }),
+      },
+      {
+        match: projectsPath,
+        response: apiResponse([project("project-1", "ATF4 arbitration")]),
+      },
+      {
+        match: questionListPath("project-1"),
+        response: paged([replacementQuestion, supersededQuestion]),
+      },
+      {
+        match: datasetListPath("project-1"),
+        response: paged([]),
+      },
+      {
+        match: noteCountPath("project-1"),
+        response: paged([], { limit: 1, offset: 0, total: 0 }),
+      },
+      {
+        match: recentNotesPath("project-1"),
+        response: paged([]),
+      },
+      {
+        match: activeSessionsPath("project-1"),
+        response: paged([]),
+      },
+      {
+        match: stagedAnalysesPath("project-1"),
+        response: paged([]),
+      },
+      {
+        match: committedAnalysesMetaPath("project-1"),
+        response: paged([], { limit: 1, offset: 0, total: 0 }),
+      },
+    ]);
+
+    render(<App />);
+
+    const questionMap = await screen.findByTestId("question-map");
+    const supersededNode = within(questionMap)
+      .getByText("Does lifecycle nuance explain the ATF4 phenotype?")
+      .closest(".question-node");
+    expect(supersededNode).toHaveClass("question-node-superseded");
+    expect(
+      within(supersededNode).getByRole("button", {
+        name: "superseded by Which ATF4 comparison is testable first?",
+      })
+    ).toBeInTheDocument();
+
+    const activeSelectorLabels = ["Primary question", "Link to active question (optional)"];
+    activeSelectorLabels.forEach((label) => {
+      screen.getAllByLabelText(label).forEach((select) => {
+        const optionValues = Array.from(select.options).map((option) => option.value);
+        expect(optionValues).toContain("question-current");
+        expect(optionValues).not.toContain("question-old");
+      });
+    });
+  });
+
+  it("submits a question refactor with selected child and note moves", async () => {
+    const sourceId = "11111111-1111-4111-8111-111111111111";
+    const replacementId = "22222222-2222-4222-8222-222222222222";
+    const childId = "33333333-3333-4333-8333-333333333333";
+    const noteId = "44444444-4444-4444-8444-444444444444";
+    const sourceQuestion = question({
+      hypothesis: "The old wording is too broad.",
+      questionId: sourceId,
+      status: "active",
+      text: "Does lifecycle nuance explain the ATF4 phenotype?",
+    });
+    const childQuestion = question({
+      parentQuestionIds: [sourceId],
+      questionId: childId,
+      status: "staged",
+      text: "Which assay should be prioritized?",
+    });
+    const replacementQuestion = question({
+      hypothesis: "The refined contrast can be tested first.",
+      questionId: replacementId,
+      questionType: "hypothesis_driven",
+      status: "active",
+      supersedesQuestionId: sourceId,
+      text: "Which ATF4 arbitration comparison is testable first?",
+    });
+
+    localStorage.setItem(TOKEN_STORAGE_KEY, "token-question-refactor");
+    window.history.replaceState({}, "", `/app/questions/${sourceId}`);
+
+    const fetchMock = installFetchMock([
+      {
+        match: "/auth/me",
+        response: apiResponse({ role: "admin", username: "sam" }),
+      },
+      {
+        match: projectsPath,
+        response: apiResponse([project("project-1", "ATF4 arbitration")]),
+      },
+      {
+        match: questionCountPath("project-1"),
+        response: paged([sourceQuestion], { limit: 1, offset: 0, total: 2 }),
+      },
+      {
+        match: datasetCountPath("project-1"),
+        response: paged([], { limit: 1, offset: 0, total: 0 }),
+      },
+      {
+        match: noteCountPath("project-1"),
+        response: paged([], { limit: 1, offset: 0, total: 1 }),
+      },
+      {
+        match: `/questions/${sourceId}`,
+        response: apiResponse(sourceQuestion),
+      },
+      {
+        match: questionListPath("project-1"),
+        response: [
+          paged([sourceQuestion, childQuestion]),
+          paged([
+            question({
+              hypothesis: "The old wording is too broad.",
+              questionId: sourceId,
+              status: "superseded",
+              supersededByQuestionId: replacementId,
+              text: "Does lifecycle nuance explain the ATF4 phenotype?",
+            }),
+            replacementQuestion,
+            question({
+              parentQuestionIds: [replacementId],
+              questionId: childId,
+              status: "staged",
+              text: "Which assay should be prioritized?",
+            }),
+          ]),
+        ],
+      },
+      {
+        match: targetedQuestionNotesPath("project-1", sourceId),
+        response: paged([
+          note({
+            noteId,
+            rawContent: "Old wording note to move.",
+            targets: [{ entity_id: sourceId, entity_type: "question" }],
+            transcribedText: "",
+          }),
+        ]),
+      },
+      {
+        match: questionRefactorsPath(sourceId),
+        response: paged([]),
+      },
+      {
+        match: `/questions/${sourceId}/refactor`,
+        method: "POST",
+        response: apiResponse(
+          {
+            refactor: {
+              created_at: "2026-04-20T02:00:00Z",
+              created_by: "sam",
+              project_id: "project-1",
+              reason: "Make the project framing testable.",
+              refactor_id: "refactor-1",
+              relationship_changes: {
+                child_question_ids_reparented: [childId],
+                dataset_session_analysis_claim_links_moved: false,
+                note_ids_retargeted: [noteId],
+              },
+              replacement_question_id: replacementId,
+              replacement_snapshot: {},
+              source_question_id: sourceId,
+              source_snapshot: {},
+            },
+            replacement_question: replacementQuestion,
+            source_question: {
+              ...sourceQuestion,
+              status: "superseded",
+              superseded_by_question_id: replacementId,
+            },
+          },
+          201
+        ),
+      },
+      {
+        match: `/questions/${replacementId}`,
+        response: apiResponse(replacementQuestion),
+      },
+      {
+        match: targetedQuestionNotesPath("project-1", replacementId),
+        response: paged([]),
+      },
+      {
+        match: questionRefactorsPath(replacementId),
+        response: paged([
+          {
+            created_at: "2026-04-20T02:00:00Z",
+            created_by: "sam",
+            project_id: "project-1",
+            reason: "Make the project framing testable.",
+            refactor_id: "refactor-1",
+            relationship_changes: {},
+            replacement_question_id: replacementId,
+            replacement_snapshot: {},
+            source_question_id: sourceId,
+            source_snapshot: {},
+          },
+        ]),
+      },
+    ]);
+
+    render(<App />);
+
+    expect(await screen.findByRole("heading", { name: "Question Detail" })).toBeInTheDocument();
+    fireEvent.click(await screen.findByRole("button", { name: "Refactor question" }));
+    fireEvent.change(screen.getByLabelText("Replacement question text"), {
+      target: { value: "Which ATF4 arbitration comparison is testable first?" },
+    });
+    fireEvent.change(screen.getByLabelText("Replacement type"), {
+      target: { value: "hypothesis_driven" },
+    });
+    fireEvent.change(screen.getByLabelText("Replacement status"), {
+      target: { value: "active" },
+    });
+    fireEvent.change(screen.getByLabelText("Replacement hypothesis"), {
+      target: { value: "The refined contrast can be tested first." },
+    });
+    fireEvent.change(screen.getByLabelText("Refactor reason"), {
+      target: { value: "Make the project framing testable." },
+    });
+    fireEvent.click(screen.getByLabelText("Which assay should be prioritized?"));
+    fireEvent.click(screen.getByLabelText("Old wording note to move."));
+    fireEvent.click(screen.getByRole("button", { name: "Create replacement" }));
+
+    expect(await screen.findByText("Question refactored.")).toBeInTheDocument();
+    expect(
+      (await screen.findAllByText("Which ATF4 arbitration comparison is testable first?")).length
+    ).toBeGreaterThan(0);
+    expect(await screen.findByText("Does lifecycle nuance explain the ATF4 phenotype?")).toBeInTheDocument();
+    const post = fetchMock.mock.calls.find(
+      ([url, init]) => url === `/questions/${sourceId}/refactor` && init?.method === "POST"
+    );
+    expect(JSON.parse(post[1].body)).toEqual({
+      child_question_ids_to_reparent: [childId],
+      note_ids_to_retarget: [noteId],
+      reason: "Make the project framing testable.",
+      replacement: {
+        hypothesis: "The refined contrast can be tested first.",
+        parent_question_ids: [],
+        question_type: "hypothesis_driven",
+        status: "active",
+        text: "Which ATF4 arbitration comparison is testable first?",
+      },
     });
   });
 

@@ -16,6 +16,7 @@ from lab_tracker.models import (
     Note,
     Project,
     Question,
+    QuestionRefactor,
     Session,
     Visualization,
 )
@@ -43,6 +44,7 @@ class InMemoryStore:
     def __init__(self) -> None:
         self.projects: dict[UUID, Project] = {}
         self.questions: dict[UUID, Question] = {}
+        self.question_refactors: dict[UUID, QuestionRefactor] = {}
         self.datasets: dict[UUID, Dataset] = {}
         self.notes: dict[UUID, Note] = {}
         self.sessions: dict[UUID, Session] = {}
@@ -203,6 +205,9 @@ class LabTrackerAPI(
         store.projects = {project.project_id: project for project in repository.projects.list()}
         store.questions = {
             question.question_id: question for question in repository.questions.list()
+        }
+        store.question_refactors = {
+            refactor.refactor_id: refactor for refactor in repository.question_refactors.list()
         }
         store.datasets = {dataset.dataset_id: dataset for dataset in repository.datasets.list()}
         store.notes = {note.note_id: note for note in repository.notes.list()}

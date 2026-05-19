@@ -579,6 +579,76 @@ def test_graph_context_packet_includes_selected_targets_and_recent_neighborhood(
     assert fake_client.calls[0]["user_hint"] == "same gradient protocol as last week"
 
 
+def test_graph_context_packet_includes_supersession_aliases(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+) -> None:
+    project_id = _project(client, admin_auth_headers)
+    source_question = client.post(
+        "/questions",
+        json={
+            "project_id": project_id,
+            "text": "Does lifecycle nuance explain the ATF4 phenotype?",
+            "question_type": "descriptive",
+            "status": "active",
+        },
+        headers=admin_auth_headers,
+    ).json()["data"]
+    refactor = client.post(
+        f"/questions/{source_question['question_id']}/refactor",
+        json={
+            "replacement": {
+                "text": "Which ATF4 arbitration comparison is testable first?",
+                "question_type": "hypothesis_driven",
+                "status": "active",
+            },
+            "reason": "Use a narrower, testable current framing.",
+        },
+        headers=admin_auth_headers,
+    )
+    assert refactor.status_code == 201
+    replacement_question = refactor.json()["data"]["replacement_question"]
+    note_upload = client.post(
+        "/notes/upload-file",
+        data={
+            "project_id": project_id,
+            "targets": json.dumps(
+                [
+                    {
+                        "entity_type": "question",
+                        "entity_id": source_question["question_id"],
+                    }
+                ]
+            ),
+        },
+        files={"file": ("atf4-note.jpg", b"fake-image-bytes", "image/jpeg")},
+        headers=admin_auth_headers,
+    )
+    assert note_upload.status_code == 201
+    fake_client = FakeDraftClient()
+    client.app.state.graph_draft_client_factory = lambda settings: fake_client
+
+    response = client.post(
+        f"/notes/{note_upload.json()['data']['note_id']}/graph-drafts",
+        headers=admin_auth_headers,
+    )
+
+    assert response.status_code == 201
+    context = response.json()["data"]["context_packet"]
+    active_question_ids = {item["id"] for item in context["active_or_staged_questions"]}
+    assert replacement_question["question_id"] in active_question_ids
+    assert source_question["question_id"] not in active_question_ids
+    assert any(
+        alias["entity_type"] == "question"
+        and alias["entity_id"] == replacement_question["question_id"]
+        and alias.get("superseded_entity_id") == source_question["question_id"]
+        and alias.get("relationship") == "superseded_alias_for_replacement"
+        and source_question["text"] in alias["aliases"]
+        for alias in context["known_aliases"]
+    )
+    assert fake_client.calls[0]["graph_context"] == context
+
+
 def test_image_only_draft_requires_explicit_mode_and_records_warning_context(
     client: TestClient,
     admin_auth_headers: dict[str, str],

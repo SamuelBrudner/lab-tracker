@@ -20,6 +20,7 @@ from lab_tracker.db_models import (
     ProjectModel,
     QuestionModel,
     QuestionParentModel,
+    QuestionRefactorModel,
     SessionModel,
     VisualizationClaimModel,
     VisualizationModel,
@@ -43,6 +44,7 @@ from lab_tracker.models import (
     Project,
     ProjectStatus,
     Question,
+    QuestionRefactor,
     QuestionLink,
     QuestionLinkRole,
     QuestionStatus,
@@ -125,6 +127,16 @@ def question_to_model(question: Question) -> QuestionModel:
         question_type=question.question_type.value,
         hypothesis=question.hypothesis,
         status=question.status.value,
+        superseded_by_question_id=(
+            _uuid_str(question.superseded_by_question_id)
+            if question.superseded_by_question_id is not None
+            else None
+        ),
+        supersedes_question_id=(
+            _uuid_str(question.supersedes_question_id)
+            if question.supersedes_question_id is not None
+            else None
+        ),
         created_by=question.created_by,
         created_at=question.created_at,
         updated_at=question.updated_at,
@@ -144,6 +156,12 @@ def question_from_model(
         hypothesis=row.hypothesis,
         status=QuestionStatus(row.status),
         parent_question_ids=list(parent_question_ids),
+        superseded_by_question_id=(
+            _uuid(row.superseded_by_question_id) if row.superseded_by_question_id else None
+        ),
+        supersedes_question_id=(
+            _uuid(row.supersedes_question_id) if row.supersedes_question_id else None
+        ),
         created_by=row.created_by,
         created_at=_as_utc(row.created_at),
         updated_at=_as_utc(row.updated_at),
@@ -166,9 +184,64 @@ def apply_question_to_model(row: QuestionModel, question: Question) -> None:
     row.question_type = question.question_type.value
     row.hypothesis = question.hypothesis
     row.status = question.status.value
+    row.superseded_by_question_id = (
+        _uuid_str(question.superseded_by_question_id)
+        if question.superseded_by_question_id is not None
+        else None
+    )
+    row.supersedes_question_id = (
+        _uuid_str(question.supersedes_question_id)
+        if question.supersedes_question_id is not None
+        else None
+    )
     row.created_by = question.created_by
     row.created_at = question.created_at
     row.updated_at = question.updated_at
+
+
+def question_refactor_to_model(refactor: QuestionRefactor) -> QuestionRefactorModel:
+    return QuestionRefactorModel(
+        refactor_id=_uuid_str(refactor.refactor_id),
+        project_id=_uuid_str(refactor.project_id),
+        source_question_id=_uuid_str(refactor.source_question_id),
+        replacement_question_id=_uuid_str(refactor.replacement_question_id),
+        reason=refactor.reason,
+        source_snapshot=dict(refactor.source_snapshot),
+        replacement_snapshot=dict(refactor.replacement_snapshot),
+        relationship_changes=dict(refactor.relationship_changes),
+        created_by=refactor.created_by,
+        created_at=refactor.created_at,
+    )
+
+
+def question_refactor_from_model(row: QuestionRefactorModel) -> QuestionRefactor:
+    return QuestionRefactor(
+        refactor_id=_uuid(row.refactor_id),
+        project_id=_uuid(row.project_id),
+        source_question_id=_uuid(row.source_question_id),
+        replacement_question_id=_uuid(row.replacement_question_id),
+        reason=row.reason,
+        source_snapshot=dict(row.source_snapshot or {}),
+        replacement_snapshot=dict(row.replacement_snapshot or {}),
+        relationship_changes=dict(row.relationship_changes or {}),
+        created_by=row.created_by,
+        created_at=_as_utc(row.created_at),
+    )
+
+
+def apply_question_refactor_to_model(
+    row: QuestionRefactorModel,
+    refactor: QuestionRefactor,
+) -> None:
+    row.project_id = _uuid_str(refactor.project_id)
+    row.source_question_id = _uuid_str(refactor.source_question_id)
+    row.replacement_question_id = _uuid_str(refactor.replacement_question_id)
+    row.reason = refactor.reason
+    row.source_snapshot = dict(refactor.source_snapshot)
+    row.replacement_snapshot = dict(refactor.replacement_snapshot)
+    row.relationship_changes = dict(refactor.relationship_changes)
+    row.created_by = refactor.created_by
+    row.created_at = refactor.created_at
 
 
 def dataset_to_model(dataset: Dataset) -> DatasetModel:

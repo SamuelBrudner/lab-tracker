@@ -291,6 +291,11 @@ button:disabled {
   padding: 0.38rem 0 0.38rem 0.6rem;
 }
 
+.question-node-superseded {
+  opacity: 0.68;
+  border-left-color: #d8c9a4;
+}
+
 .question-node-row {
   display: flex;
   flex-wrap: wrap;
@@ -317,6 +322,19 @@ button:disabled {
 .item-staged {
   border-color: #b9e2d4;
   background: #f2fcf8;
+}
+
+.refactor-panel {
+  border-top: 1px solid var(--line);
+  margin-top: 0.25rem;
+  padding-top: 0.7rem;
+}
+
+.checkbox-row {
+  display: flex;
+  gap: 0.45rem;
+  align-items: flex-start;
+  font-weight: 500;
 }
 
 .item-error {

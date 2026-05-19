@@ -428,6 +428,107 @@ def test_question_routes_store_and_filter_hierarchy(
     assert cycle_response.status_code == 422
 
 
+def test_question_refactor_routes_persist_supersession_and_relationship_moves(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+):
+    headers = admin_auth_headers
+    project_id = client.post(
+        "/projects",
+        json={"name": "Question refactor routes"},
+        headers=headers,
+    ).json()["data"]["project_id"]
+    source_id = client.post(
+        "/questions",
+        json={
+            "project_id": project_id,
+            "text": "Does this broad question need refactoring?",
+            "question_type": "descriptive",
+            "status": "active",
+        },
+        headers=headers,
+    ).json()["data"]["question_id"]
+    child_id = client.post(
+        "/questions",
+        json={
+            "project_id": project_id,
+            "text": "Which child should follow the refined question?",
+            "question_type": "method_dev",
+            "parent_question_ids": [source_id],
+        },
+        headers=headers,
+    ).json()["data"]["question_id"]
+    note_id = client.post(
+        "/notes",
+        json={
+            "project_id": project_id,
+            "raw_content": "Move this interpretation to the refined question.",
+            "targets": [{"entity_type": "question", "entity_id": source_id}],
+        },
+        headers=headers,
+    ).json()["data"]["note_id"]
+
+    missing_reason = client.post(
+        f"/questions/{source_id}/refactor",
+        json={
+            "replacement": {
+                "text": "Missing reason replacement",
+                "question_type": "descriptive",
+                "status": "staged",
+            },
+        },
+        headers=headers,
+    )
+    assert missing_reason.status_code == 422
+
+    response = client.post(
+        f"/questions/{source_id}/refactor",
+        json={
+            "replacement": {
+                "text": "Which concrete comparison should this project test?",
+                "question_type": "hypothesis_driven",
+                "status": "active",
+            },
+            "reason": "Make the project question testable before work begins.",
+            "child_question_ids_to_reparent": [child_id],
+            "note_ids_to_retarget": [note_id],
+        },
+        headers=headers,
+    )
+
+    assert response.status_code == 201
+    payload = response.json()["data"]
+    replacement_id = payload["replacement_question"]["question_id"]
+    assert payload["source_question"]["status"] == "superseded"
+    assert payload["source_question"]["superseded_by_question_id"] == replacement_id
+    assert payload["replacement_question"]["supersedes_question_id"] == source_id
+    assert payload["refactor"]["source_question_id"] == source_id
+    assert payload["refactor"]["replacement_question_id"] == replacement_id
+    assert payload["refactor"]["relationship_changes"] == {
+        "child_question_ids_reparented": [child_id],
+        "note_ids_retargeted": [note_id],
+        "dataset_session_analysis_claim_links_moved": False,
+    }
+
+    child = client.get(f"/questions/{child_id}", headers=headers)
+    assert child.status_code == 200
+    assert child.json()["data"]["parent_question_ids"] == [replacement_id]
+    note = client.get(f"/notes/{note_id}", headers=headers)
+    assert note.status_code == 200
+    assert note.json()["data"]["targets"] == [
+        {"entity_type": "question", "entity_id": replacement_id}
+    ]
+    source_history = client.get(f"/questions/{source_id}/refactors", headers=headers)
+    replacement_history = client.get(f"/questions/{replacement_id}/refactors", headers=headers)
+    assert source_history.status_code == 200
+    assert replacement_history.status_code == 200
+    assert source_history.json()["data"][0]["refactor_id"] == payload["refactor"]["refactor_id"]
+    assert (
+        replacement_history.json()["data"][0]["refactor_id"]
+        == payload["refactor"]["refactor_id"]
+    )
+
+
 def test_note_routes_support_target_filters_and_multipart_upload(
     client: TestClient,
     admin_auth_headers: dict[str, str],

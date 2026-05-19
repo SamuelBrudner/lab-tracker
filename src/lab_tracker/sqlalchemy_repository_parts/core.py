@@ -8,16 +8,24 @@ from uuid import UUID
 from sqlalchemy import or_, select
 from sqlalchemy.orm import Session as OrmSession
 
-from lab_tracker.db_models import ProjectModel, QuestionModel, QuestionParentModel
-from lab_tracker.models import Project, Question
+from lab_tracker.db_models import (
+    ProjectModel,
+    QuestionModel,
+    QuestionParentModel,
+    QuestionRefactorModel,
+)
+from lab_tracker.models import Project, Question, QuestionRefactor
 from lab_tracker.repository import EntityRepository
 from lab_tracker.sqlalchemy_mappers import (
+    apply_question_refactor_to_model,
     apply_project_to_model,
     apply_question_to_model,
     project_from_model,
     project_to_model,
     question_from_model,
     question_parent_models,
+    question_refactor_from_model,
+    question_refactor_to_model,
     question_to_model,
 )
 
@@ -189,3 +197,46 @@ class SQLAlchemyQuestionRepository(EntityRepository[Question]):
         if row is not None:
             self._session.delete(row)
         return entity
+
+
+class SQLAlchemyQuestionRefactorRepository(
+    SQLAlchemyModelRepository[QuestionRefactor, QuestionRefactorModel]
+):
+    def __init__(self, session: OrmSession) -> None:
+        super().__init__(
+            session,
+            model_type=QuestionRefactorModel,
+            id_column=QuestionRefactorModel.refactor_id,
+            entity_id_getter=lambda entity: entity.refactor_id,
+            to_model=question_refactor_to_model,
+            from_model=question_refactor_from_model,
+            apply_to_model=apply_question_refactor_to_model,
+        )
+
+    def query(
+        self,
+        *,
+        question_id: UUID,
+        limit: int | None = None,
+        offset: int = 0,
+    ) -> tuple[list[QuestionRefactor], int]:
+        self._session.flush()
+        stmt = select(QuestionRefactorModel).where(
+            or_(
+                QuestionRefactorModel.source_question_id == str(question_id),
+                QuestionRefactorModel.replacement_question_id == str(question_id),
+            )
+        )
+        count_stmt = select(QuestionRefactorModel.refactor_id).where(
+            or_(
+                QuestionRefactorModel.source_question_id == str(question_id),
+                QuestionRefactorModel.replacement_question_id == str(question_id),
+            )
+        )
+        stmt = stmt.order_by(
+            QuestionRefactorModel.created_at,
+            QuestionRefactorModel.refactor_id,
+        )
+        total = count_from_statement(self._session, count_stmt)
+        rows = list(self._session.scalars(apply_pagination(stmt, limit=limit, offset=offset)))
+        return [question_refactor_from_model(row) for row in rows], total

@@ -104,14 +104,21 @@ def _unique_ids(values: Iterable[UUID] | None) -> list[UUID]:
 
 
 _QUESTION_STATUS_TRANSITIONS: dict[QuestionStatus, set[QuestionStatus]] = {
-    QuestionStatus.STAGED: {QuestionStatus.STAGED, QuestionStatus.ACTIVE, QuestionStatus.ABANDONED},
+    QuestionStatus.STAGED: {
+        QuestionStatus.STAGED,
+        QuestionStatus.ACTIVE,
+        QuestionStatus.ABANDONED,
+        QuestionStatus.SUPERSEDED,
+    },
     QuestionStatus.ACTIVE: {
         QuestionStatus.ACTIVE,
         QuestionStatus.ANSWERED,
         QuestionStatus.ABANDONED,
+        QuestionStatus.SUPERSEDED,
     },
     QuestionStatus.ANSWERED: {QuestionStatus.ANSWERED},
     QuestionStatus.ABANDONED: {QuestionStatus.ABANDONED},
+    QuestionStatus.SUPERSEDED: {QuestionStatus.SUPERSEDED},
 }
 
 _ANALYSIS_STATUS_TRANSITIONS: dict[AnalysisStatus, set[AnalysisStatus]] = {

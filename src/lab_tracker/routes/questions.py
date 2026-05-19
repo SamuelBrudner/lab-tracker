@@ -9,8 +9,15 @@ from starlette import status as http_status
 from starlette.requests import Request
 
 from lab_tracker.api import LabTrackerAPI
-from lab_tracker.models import Question, QuestionStatus, QuestionType
-from lab_tracker.schemas import Envelope, ListEnvelope, QuestionCreate, QuestionUpdate
+from lab_tracker.models import Question, QuestionRefactor, QuestionStatus, QuestionType
+from lab_tracker.schemas import (
+    Envelope,
+    ListEnvelope,
+    QuestionCreate,
+    QuestionRefactorRequest,
+    QuestionRefactorResult,
+    QuestionUpdate,
+)
 
 from .shared import (
     api_from_request,
@@ -88,6 +95,58 @@ def build_questions_router(api: LabTrackerAPI) -> APIRouter:
             actor=actor,
         )
         return Envelope(data=question)
+
+    @router.post(
+        "/questions/{question_id}/refactor",
+        response_model=Envelope[QuestionRefactorResult],
+        status_code=http_status.HTTP_201_CREATED,
+    )
+    def refactor_question(question_id: UUID, payload: QuestionRefactorRequest, request: Request):
+        actor = actor_from_request(request)
+        result = api_from_request(request, api).refactor_question(
+            question_id,
+            replacement_text=payload.replacement.text,
+            replacement_question_type=payload.replacement.question_type,
+            replacement_hypothesis=payload.replacement.hypothesis,
+            replacement_status=payload.replacement.status,
+            replacement_parent_question_ids=payload.replacement.parent_question_ids,
+            reason=payload.reason,
+            child_question_ids_to_reparent=payload.child_question_ids_to_reparent,
+            note_ids_to_retarget=payload.note_ids_to_retarget,
+            actor=actor,
+        )
+        return Envelope(
+            data=QuestionRefactorResult(
+                source_question=result.source_question,
+                replacement_question=result.replacement_question,
+                refactor=result.refactor,
+            )
+        )
+
+    @router.get(
+        "/questions/{question_id}/refactors",
+        response_model=ListEnvelope[QuestionRefactor],
+    )
+    def list_question_refactors(
+        question_id: UUID,
+        request: Request,
+        limit: int = 50,
+        offset: int = 0,
+    ):
+        validate_pagination(limit, offset)
+        refactors = api_from_request(request, api).list_question_refactors(
+            question_id,
+            limit=limit,
+            offset=offset,
+        )
+        total = len(
+            api_from_request(request, api).list_question_refactors(
+                question_id,
+                limit=None,
+                offset=0,
+            )
+        )
+        return list_response(refactors, limit=limit, offset=offset, total=total)
 
     @router.delete("/questions/{question_id}", response_model=Envelope[Question])
     def delete_question(question_id: UUID, request: Request):

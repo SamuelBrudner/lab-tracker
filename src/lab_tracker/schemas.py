@@ -30,6 +30,7 @@ from lab_tracker.models import (
     NoteStatus,
     ProjectStatus,
     Question,
+    QuestionRefactor,
     QuestionLink,
     QuestionStatus,
     QuestionType,
@@ -139,6 +140,27 @@ class QuestionUpdate(RequestModel):
     hypothesis: str | None = None
     status: QuestionStatus | None = None
     parent_question_ids: list[UUID] | None = None
+
+
+class QuestionRefactorReplacement(RequestModel):
+    text: str = Field(..., min_length=1)
+    question_type: QuestionType
+    hypothesis: str | None = None
+    status: QuestionStatus
+    parent_question_ids: list[UUID] | None = None
+
+
+class QuestionRefactorRequest(RequestModel):
+    replacement: QuestionRefactorReplacement
+    reason: str = Field(..., min_length=1)
+    child_question_ids_to_reparent: list[UUID] = Field(default_factory=list)
+    note_ids_to_retarget: list[UUID] = Field(default_factory=list)
+
+
+class QuestionRefactorResult(BaseModel):
+    source_question: Question
+    replacement_question: Question
+    refactor: QuestionRefactor
 
 
 class DatasetCreate(RequestModel):

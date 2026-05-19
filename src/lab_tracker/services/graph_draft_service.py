@@ -713,15 +713,23 @@ class GraphDraftServiceMixin:
             raise ValidationError(
                 "Graph context cannot be built because the note project does not exist."
             ) from exc
+        project_questions = self.list_questions(project_id=note.project_id)
         questions = sorted(
             [
                 question
-                for question in self.list_questions(project_id=note.project_id)
+                for question in project_questions
                 if question.status in {QuestionStatus.ACTIVE, QuestionStatus.STAGED}
             ],
             key=lambda question: (question.status.value, question.updated_at, question.question_id),
             reverse=True,
         )[:_QUESTION_CONTEXT_LIMIT]
+        active_context_ids = {question.question_id for question in questions}
+        superseded_questions = [
+            question
+            for question in project_questions
+            if question.status == QuestionStatus.SUPERSEDED
+            and question.superseded_by_question_id in active_context_ids
+        ]
         recent_notes = [
             item
             for item in sorted(
@@ -782,6 +790,7 @@ class GraphDraftServiceMixin:
             "known_aliases": _known_aliases(
                 project=project,
                 questions=questions,
+                superseded_questions=superseded_questions,
                 sessions=recent_sessions,
                 datasets=recent_datasets,
                 analyses=recent_analyses,
@@ -1246,6 +1255,7 @@ def _known_aliases(
     *,
     project: Project,
     questions: list[Question],
+    superseded_questions: list[Question],
     sessions: list[Session],
     datasets: list[Dataset],
     analyses: list[Analysis],
@@ -1266,6 +1276,17 @@ def _known_aliases(
             "aliases": [item.text],
         }
         for item in questions
+    )
+    aliases.extend(
+        {
+            "entity_type": EntityType.QUESTION.value,
+            "entity_id": str(item.superseded_by_question_id),
+            "aliases": [item.text],
+            "superseded_entity_id": str(item.question_id),
+            "relationship": "superseded_alias_for_replacement",
+        }
+        for item in superseded_questions
+        if item.superseded_by_question_id is not None
     )
     aliases.extend(
         {

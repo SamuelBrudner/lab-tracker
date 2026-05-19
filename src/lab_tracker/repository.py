@@ -15,6 +15,7 @@ from lab_tracker.models import (
     Note,
     Project,
     Question,
+    QuestionRefactor,
     Session,
     Visualization,
 )
@@ -43,6 +44,7 @@ class LabTrackerRepository(Protocol):
 
     projects: EntityRepository[Project]
     questions: EntityRepository[Question]
+    question_refactors: EntityRepository[QuestionRefactor]
     datasets: EntityRepository[Dataset]
     notes: EntityRepository[Note]
     sessions: EntityRepository[Session]
@@ -80,6 +82,15 @@ class LabTrackerRepository(Protocol):
         offset: int = 0,
     ) -> tuple[list[Question], int]:
         """Query questions with filters and pagination."""
+
+    def query_question_refactors(
+        self,
+        *,
+        question_id: UUID,
+        limit: int | None = None,
+        offset: int = 0,
+    ) -> tuple[list[QuestionRefactor], int]:
+        """Query refactor history where the question is source or replacement."""
 
     def query_datasets(
         self,

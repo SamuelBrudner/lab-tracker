@@ -9,7 +9,7 @@ from typing import Any
 import httpx
 from mcp.server.fastmcp import FastMCP
 
-from lab_tracker.models import NoteMetadataScalar, NoteStatus
+from lab_tracker.models import NoteMetadataScalar, NoteStatus, QuestionStatus
 
 JsonObject = dict[str, Any]
 
@@ -18,6 +18,8 @@ DEFAULT_BASE_URL = "http://127.0.0.1:8000"
 DEFAULT_TIMEOUT_SECONDS = 10.0
 NOTE_STATUS_VALUES = tuple(status.value for status in NoteStatus)
 NOTE_STATUS_TEXT = ", ".join(NOTE_STATUS_VALUES)
+QUESTION_STATUS_VALUES = tuple(status.value for status in QuestionStatus)
+QUESTION_STATUS_TEXT = ", ".join(QUESTION_STATUS_VALUES)
 
 
 class LabTrackerAPIError(RuntimeError):
@@ -195,6 +197,49 @@ class LabTrackerAPIClient:
                 "status": status,
                 "parent_question_ids": parent_question_ids,
             },
+        )
+
+    def refactor_question(
+        self,
+        *,
+        question_id: str,
+        replacement_text: str,
+        replacement_question_type: str,
+        replacement_status: str,
+        reason: str,
+        replacement_hypothesis: str | None = None,
+        replacement_parent_question_ids: list[str] | None = None,
+        child_question_ids_to_reparent: list[str] | None = None,
+        note_ids_to_retarget: list[str] | None = None,
+    ) -> JsonObject:
+        return self._request(
+            "POST",
+            f"/questions/{question_id}/refactor",
+            json_payload={
+                "replacement": {
+                    "text": replacement_text,
+                    "question_type": replacement_question_type,
+                    "hypothesis": replacement_hypothesis,
+                    "status": replacement_status,
+                    "parent_question_ids": replacement_parent_question_ids,
+                },
+                "reason": reason,
+                "child_question_ids_to_reparent": child_question_ids_to_reparent or [],
+                "note_ids_to_retarget": note_ids_to_retarget or [],
+            },
+        )
+
+    def list_question_refactors(
+        self,
+        *,
+        question_id: str,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> JsonObject:
+        return self._request(
+            "GET",
+            f"/questions/{question_id}/refactors",
+            params={"limit": limit, "offset": offset},
         )
 
     def create_note(
@@ -500,6 +545,59 @@ def lab_tracker_create_question(
             hypothesis=hypothesis,
             status=status,
             parent_question_ids=parent_question_ids,
+        )
+    finally:
+        client.close()
+
+
+@server.tool()
+def lab_tracker_refactor_question(
+    question_id: str,
+    replacement_text: str,
+    replacement_question_type: str = "other",
+    replacement_status: str = "staged",
+    reason: str = "",
+    replacement_hypothesis: str | None = None,
+    replacement_parent_question_ids: list[str] | None = None,
+    child_question_ids_to_reparent: list[str] | None = None,
+    note_ids_to_retarget: list[str] | None = None,
+) -> JsonObject:
+    """Supersede a question with a replacement and optional child/note moves."""
+    if replacement_status not in QUESTION_STATUS_VALUES:
+        raise LabTrackerAPIError(
+            f"Invalid replacement status {replacement_status!r}. "
+            f"Allowed statuses: {QUESTION_STATUS_TEXT}."
+        )
+    client = client_from_env()
+    try:
+        return client.refactor_question(
+            question_id=question_id,
+            replacement_text=replacement_text,
+            replacement_question_type=replacement_question_type,
+            replacement_status=replacement_status,
+            replacement_hypothesis=replacement_hypothesis,
+            replacement_parent_question_ids=replacement_parent_question_ids,
+            reason=reason,
+            child_question_ids_to_reparent=child_question_ids_to_reparent,
+            note_ids_to_retarget=note_ids_to_retarget,
+        )
+    finally:
+        client.close()
+
+
+@server.tool()
+def lab_tracker_list_question_refactors(
+    question_id: str,
+    limit: int = 50,
+    offset: int = 0,
+) -> JsonObject:
+    """List refactor history where a question is the source or replacement."""
+    client = client_from_env()
+    try:
+        return client.list_question_refactors(
+            question_id=question_id,
+            limit=limit,
+            offset=offset,
         )
     finally:
         client.close()

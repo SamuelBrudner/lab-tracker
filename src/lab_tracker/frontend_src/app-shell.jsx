@@ -234,6 +234,9 @@ function App() {
               questions={workspaceData.questions}
               navigate={navigate}
               onSetActiveProject={workspaceData.setSelectedProjectId}
+              canWrite={auth.canWrite}
+              setBusy={setBusy}
+              setFlash={setFlash}
             />
           ) : null}
 

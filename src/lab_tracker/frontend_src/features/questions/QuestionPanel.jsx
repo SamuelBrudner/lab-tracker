@@ -74,9 +74,16 @@ function QuestionMapNode({
   const validParentCount = getParentQuestionIds(question).filter((parentId) =>
     questionById.has(parentId)
   ).length;
+  const isSuperseded = question.status === "superseded";
+  const replacement = question.superseded_by_question_id
+    ? questionById.get(question.superseded_by_question_id)
+    : null;
 
   return (
-    <div className="question-node" style={{ marginLeft: `${depth * 0.85}rem` }}>
+    <div
+      className={`question-node${isSuperseded ? " question-node-superseded" : ""}`}
+      style={{ marginLeft: `${depth * 0.85}rem` }}
+    >
       <div className="question-node-row">
         <button
           className="link question-node-text"
@@ -88,6 +95,15 @@ function QuestionMapNode({
         <span className="pill">{question.question_type}</span>
         <span className="pill">{question.status}</span>
         {validParentCount > 1 ? <span className="pill">also linked elsewhere</span> : null}
+        {replacement ? (
+          <button
+            className="link"
+            type="button"
+            onClick={() => navigate(`/app/questions/${replacement.question_id}`)}
+          >
+            superseded by {replacement.text}
+          </button>
+        ) : null}
       </div>
       <ParentSummary question={question} questionById={questionById} />
       {children.length > 0 ? (

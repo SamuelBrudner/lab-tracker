@@ -896,6 +896,7 @@ def test_repository_backed_api_rolls_back_failed_writes_from_read_state():
             self.projects = _FailingProjects()
             other = _EmptyRepoPart()
             self.questions = other
+            self.question_refactors = other
             self.datasets = other
             self.notes = other
             self.sessions = other
