@@ -16,14 +16,26 @@ graph workstation
   Postgres:           127.0.0.1:5432
   note/file storage:  local workstation disk
       |
-      | cloudflared outbound tunnel
+      | Tailscale Funnel or another outbound HTTPS tunnel
       v
-https://lab-tracker.example.org/app
+https://mwcppc01ysbc155.tail79f9d8.ts.net/app
 ```
 
 Use direct `http://10.x.x.x:8000` only for short Yale-network smoke tests. The
 workstation HTTPS shape should bind Lab Tracker to `127.0.0.1` and let the
 tunnel publish the HTTPS endpoint.
+
+The current no-custom-domain workstation endpoint is:
+
+```text
+https://mwcppc01ysbc155.tail79f9d8.ts.net/app
+```
+
+Use this base URL for remote MCP clients:
+
+```text
+LAB_TRACKER_MCP_BASE_URL=https://mwcppc01ysbc155.tail79f9d8.ts.net
+```
 
 ## One-Time Local Setup
 
@@ -115,6 +127,46 @@ https://<generated>.trycloudflare.com/app
 
 This is a development smoke test. Stop it with `Ctrl+C`.
 
+## Durable Tailscale Funnel
+
+Use Tailscale Funnel when there is no custom domain. This workstation is
+configured with:
+
+```text
+https://mwcppc01ysbc155.tail79f9d8.ts.net
+```
+
+The local Lab Tracker server is kept alive by the Windows scheduled task:
+
+```powershell
+Get-ScheduledTask -TaskName "Lab Tracker Workstation Server"
+```
+
+Check the public proxy:
+
+```powershell
+& "C:\Program Files\Tailscale\tailscale.exe" funnel status
+```
+
+Expected:
+
+```text
+https://mwcppc01ysbc155.tail79f9d8.ts.net (Funnel on)
+|-- / proxy http://127.0.0.1:8000
+```
+
+Re-enable Funnel if needed:
+
+```powershell
+& "C:\Program Files\Tailscale\tailscale.exe" funnel --bg --yes --https=443 http://127.0.0.1:8000
+```
+
+Disable public access:
+
+```powershell
+& "C:\Program Files\Tailscale\tailscale.exe" funnel --https=443 off
+```
+
 ## Durable Cloudflare Tunnel
 
 A durable tunnel needs a Cloudflare account and a domain managed by Cloudflare.
@@ -167,6 +219,8 @@ From any browser:
 ```text
 https://lab-tracker.example.org/health
 https://lab-tracker.example.org/app
+https://mwcppc01ysbc155.tail79f9d8.ts.net/health
+https://mwcppc01ysbc155.tail79f9d8.ts.net/app
 ```
 
 From a shell:
@@ -192,9 +246,11 @@ verify authenticated writes.
   tunnel JSON files.
 - Keep `LAB_TRACKER_AUTH_ENABLED=true` for any tunnel.
 - Prefer Cloudflare Access in front of Lab Tracker for durable external access.
+- For the Tailscale Funnel endpoint, keep Lab Tracker authentication enabled and
+  provision specific service accounts for assistant clients.
 - Use a real admin/editor account instead of the temporary smoke-test account.
-- Remote MCP exposure is a separate milestone; do not assume the browser tunnel
-  is sufficient for hosted AI tool access.
+- The MCP server remains stdio-based. Remote agents should run their own MCP
+  process with `LAB_TRACKER_MCP_BASE_URL` pointed at the HTTPS endpoint above.
 
 ## Rollback
 

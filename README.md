@@ -97,6 +97,9 @@ Firewall may need an administrator rule for TCP port 8000. See
 For a workstation-hosted HTTPS endpoint suitable for off-campus browser access,
 serve Lab Tracker on localhost and publish it through a managed outbound tunnel.
 See [`docs/workstation-https-serving.md`](docs/workstation-https-serving.md).
+The current no-custom-domain workstation endpoint is
+`https://mwcppc01ysbc155.tail79f9d8.ts.net/app`; MCP clients should use the same
+base URL without `/app` as `LAB_TRACKER_MCP_BASE_URL`.
 
 Local development starts with authentication disabled so early testing can use
 the app without creating accounts. Set `LAB_TRACKER_AUTH_ENABLED=true` to test

@@ -20,6 +20,15 @@ LAB_TRACKER_MCP_USERNAME=<service-account-username>
 LAB_TRACKER_MCP_PASSWORD=<service-account-password>
 ```
 
+For agents that are not running on the graph workstation, use the current
+workstation HTTPS base URL:
+
+```bash
+LAB_TRACKER_MCP_BASE_URL=https://mwcppc01ysbc155.tail79f9d8.ts.net
+LAB_TRACKER_MCP_USERNAME=<service-account-username>
+LAB_TRACKER_MCP_PASSWORD=<service-account-password>
+```
+
 The server does not store bearer tokens. It logs in with the configured service
 account and retries once after a 401. The username/password are only required
 when `LAB_TRACKER_AUTH_ENABLED=true`; local auth-disabled testing can omit them.
@@ -78,8 +87,15 @@ of localhost, for example:
 $env:LAB_TRACKER_MCP_BASE_URL = "http://<host-or-tailnet-ip>:8000"
 ```
 
-See [`docs/lan-shared-graph.md`](lan-shared-graph.md) for same-LAN, VPN,
-Tailscale, and protected-tunnel access.
+For off-network agents, prefer the durable Tailscale Funnel endpoint:
+
+```powershell
+$env:LAB_TRACKER_MCP_BASE_URL = "https://mwcppc01ysbc155.tail79f9d8.ts.net"
+```
+
+See [`docs/workstation-https-serving.md`](workstation-https-serving.md) for the
+workstation HTTPS endpoint and [`docs/lan-shared-graph.md`](lan-shared-graph.md)
+for same-LAN, VPN, and tailnet-only access.
 
 ## Dolt Mirror
 
