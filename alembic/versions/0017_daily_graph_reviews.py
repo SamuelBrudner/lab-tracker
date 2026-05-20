@@ -6,8 +6,8 @@ from alembic import op
 import sqlalchemy as sa
 
 
-revision = "0015_daily_graph_reviews"
-down_revision = "0014_graph_draft_review"
+revision = "0017_daily_graph_reviews"
+down_revision = "0016_question_refactors"
 branch_labels = None
 depends_on = None
 

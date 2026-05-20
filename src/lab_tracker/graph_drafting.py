@@ -11,6 +11,7 @@ import httpx
 from lab_tracker.config import Settings
 
 PROMPT_VERSION = "multimodal-graph-draft-v1"
+IMAGE_PROMPT_VERSION = PROMPT_VERSION
 ANALYSIS_PROMPT_VERSION = "analysis-graph-draft-v1"
 PROVIDER = "openai"
 

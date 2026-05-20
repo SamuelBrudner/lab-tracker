@@ -16,18 +16,24 @@ class FakeDraftClient:
         self.analysis_calls: list[dict[str, Any]] = []
         self.closed = False
 
-    def draft_from_image(
+    def draft_from_note(
         self,
         *,
-        image_bytes: bytes,
-        content_type: str,
-        project_context: dict[str, Any],
+        graph_context: dict[str, Any],
+        user_hint: str | None = None,
+        draft_mode: str = "graph_context",
+        source_artifacts: list[dict[str, Any]] | None = None,
+        image_bytes: bytes | None = None,
+        image_content_type: str | None = None,
     ) -> dict[str, Any]:
         self.calls.append(
             {
-                "content_type": content_type,
+                "content_type": image_content_type,
+                "draft_mode": draft_mode,
+                "graph_context": graph_context,
                 "image_bytes": image_bytes,
-                "project_context": project_context,
+                "source_artifacts": source_artifacts or [],
+                "user_hint": user_hint,
             }
         )
         return self.patch
@@ -59,11 +65,14 @@ def _project(client: TestClient, headers: dict[str, str]) -> str:
 def _draft_patch(project_id: str) -> dict[str, Any]:
     return {
         "summary": "Drafted daily update",
+        "uncertain_fields": [],
+        "clarification_requests": [],
         "operations": [
             {
                 "client_ref": "daily_question",
                 "op": "create",
                 "entity_type": "question",
+                "semantic_type": "suggest_new_question",
                 "target_entity_id": None,
                 "payload_json": json.dumps(
                     {
@@ -75,7 +84,9 @@ def _draft_patch(project_id: str) -> dict[str, Any]:
                 ),
                 "rationale": "The day's evidence asks a trackable question.",
                 "confidence": 0.8,
-                "source_refs": [{"label": "daily note", "quote": "preserve context"}],
+                "source_refs": [
+                    {"label": "daily note", "quote": "preserve context", "region": None}
+                ],
             }
         ],
     }
