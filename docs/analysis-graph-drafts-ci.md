@@ -31,7 +31,9 @@ curl -X POST \
 The source note should contain the analysis evidence the model should reason over:
 methods, code version, environment hash, dataset IDs, outputs, figures, metrics, and
 the interpretation brief. The model also receives current project context from Lab
-Tracker before proposing operations.
+Tracker before proposing operations. Created evidence notes include the standard
+source metadata keys documented in
+[`docs/evidence-source-metadata.md`](evidence-source-metadata.md).
 
 The API uses `analysis-graph-draft-v1` as the prompt version. Drafts use the same
 `GraphChangeSet` and `GraphChangeOperation` review model as image graph drafts.

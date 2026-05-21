@@ -115,11 +115,15 @@ def test_alembic_upgrade_head_creates_expected_tables(monkeypatch, tmp_path):
     project_columns = {column["name"] for column in inspector.get_columns("projects")}
     question_columns = {column["name"] for column in inspector.get_columns("questions")}
     dataset_columns = {column["name"] for column in inspector.get_columns("datasets")}
+    daily_review_columns = {
+        column["name"] for column in inspector.get_columns("daily_graph_reviews")
+    }
 
     assert "review_policy" not in project_columns
     assert "created_from" not in question_columns
     assert "source_provenance" not in question_columns
     assert "manifest_extraction_provenance" not in dataset_columns
+    assert "review_brief" in daily_review_columns
     engine.dispose()
 
 

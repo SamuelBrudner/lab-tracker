@@ -33,6 +33,7 @@ def review_to_model(review: DailyGraphReview) -> DailyGraphReviewModel:
         window_end=review.window_end,
         status=review.status.value,
         summary=review.summary,
+        review_brief=dict(review.review_brief),
         error_metadata=dict(review.error_metadata),
         created_by=review.created_by,
         created_at=review.created_at,
@@ -48,6 +49,7 @@ def apply_review_to_model(row: DailyGraphReviewModel, review: DailyGraphReview) 
     row.window_end = review.window_end
     row.status = review.status.value
     row.summary = review.summary
+    row.review_brief = dict(review.review_brief)
     row.error_metadata = dict(review.error_metadata)
     row.created_by = review.created_by
     row.created_at = review.created_at
@@ -68,6 +70,7 @@ def review_from_model(
         window_end=row.window_end,
         status=DailyGraphReviewStatus(row.status),
         summary=row.summary,
+        review_brief=_dict(getattr(row, "review_brief", {}) or {}),
         change_set_ids=list(change_set_ids or []),
         error_metadata=_dict(row.error_metadata),
         created_by=row.created_by,

@@ -54,6 +54,10 @@ def test_git_commit_evidence_includes_commit_context(tmp_path: Path) -> None:
     assert metadata["git_repository_name"] == "analysis-repo"
     assert len(metadata["git_commit"]) == 40
     assert metadata["git_diff_truncated"] is False
+    assert metadata["evidence_source_provider"] == "git"
+    assert metadata["evidence_source_external_id"] == metadata["git_commit"]
+    assert metadata["evidence_capture_kind"] == "git_commit"
+    assert metadata["evidence_content_hash"]
 
 
 def test_truncate_lines_marks_omitted_diff_lines() -> None:

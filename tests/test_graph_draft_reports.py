@@ -41,7 +41,17 @@ def test_review_report_renders_llm_summary_links_operations_and_evidence() -> No
             note_id: {
                 "raw_content": "# Analysis Results\n\n![Latency](outputs/latency.png)",
                 "transcribed_text": "",
-                "metadata": {"source": "ci"},
+                "metadata": {
+                    "source": "ci",
+                    "evidence_source_provider": "github-actions",
+                    "evidence_source_uri": "https://example.test/run/1",
+                    "evidence_source_external_id": "run-1",
+                    "evidence_source_observed_at": "2026-05-08T20:00:00Z",
+                    "evidence_capture_kind": "analysis_evidence",
+                    "evidence_content_hash": "abc123",
+                    "evidence_adapter": "create-analysis-graph-draft",
+                    "evidence_title": "CI analysis evidence",
+                },
             }
         },
         raw_assets={
@@ -78,4 +88,6 @@ def test_review_report_renders_llm_summary_links_operations_and_evidence() -> No
     assert "latency down" in html
     assert '<img src="outputs/latency.png" alt="Latency">' in html
     assert "n = 12" in html
+    assert "Evidence Source" in html
+    assert "github-actions" in html
     assert "Review, approve, or edit in Lab Tracker" in html

@@ -218,6 +218,7 @@ class DailyGraphReviewCreate(RequestModel):
     project_id: UUID
     window_start: datetime | None = None
     window_end: datetime | None = None
+    include_brief: bool = True
 
 
 class DailyGraphReviewMarkReviewedRequest(RequestModel):

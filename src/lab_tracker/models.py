@@ -270,6 +270,7 @@ class DailyGraphReview(_DomainModel):
     window_end: datetime
     status: DailyGraphReviewStatus = DailyGraphReviewStatus.DRAFTING
     summary: str | None = None
+    review_brief: dict[str, Any] = Field(default_factory=dict)
     change_set_ids: list[UUID] = Field(default_factory=list)
     error_metadata: dict[str, Any] = Field(default_factory=dict)
     created_at: datetime = Field(default_factory=utc_now)

@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import argparse
+from datetime import datetime, timezone
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -192,13 +194,23 @@ def _file_evidence(evidence_path: Path) -> tuple[str, dict[str, str]]:
         evidence_text = evidence_path.read_text(encoding="utf-8")
     except (OSError, UnicodeError) as exc:
         _die(f"Could not read evidence file {evidence_path}: {exc}")
-    return evidence_text, _ci_metadata(evidence_path)
+    return evidence_text, _ci_metadata(evidence_path, evidence_text)
 
 
-def _ci_metadata(evidence_path: Path) -> dict[str, str]:
+def _ci_metadata(evidence_path: Path, evidence_text: str) -> dict[str, str]:
+    provider = "github-actions" if os.environ.get("GITHUB_REPOSITORY") else "ci"
+    run_id = os.environ.get("GITHUB_RUN_ID") or str(evidence_path)
     metadata = {
         "source": "ci-analysis-graph-draft",
         "evidence_path": str(evidence_path),
+        "evidence_source_provider": provider,
+        "evidence_source_uri": str(evidence_path),
+        "evidence_source_external_id": run_id,
+        "evidence_source_observed_at": _utc_iso(),
+        "evidence_capture_kind": "analysis_evidence",
+        "evidence_content_hash": _text_hash(evidence_text),
+        "evidence_adapter": "create-analysis-graph-draft",
+        "evidence_title": evidence_path.name,
     }
     for env_name in (
         "GITHUB_REPOSITORY",
@@ -296,10 +308,26 @@ def _git_commit_evidence(
         "git_branch": branch,
         "git_diff_truncated": truncated,
         "git_max_diff_lines": max_diff_lines,
+        "evidence_source_provider": "git",
+        "evidence_source_uri": remote_url or root,
+        "evidence_source_external_id": commit_sha,
+        "evidence_source_observed_at": _utc_iso(),
+        "evidence_capture_kind": "git_commit",
+        "evidence_content_hash": _text_hash(evidence),
+        "evidence_adapter": "create-analysis-graph-draft",
+        "evidence_title": f"{Path(root).name}@{commit_sha[:12]}",
     }
     if remote_url:
         metadata["git_remote_origin_url"] = remote_url
     return evidence, metadata
+
+
+def _utc_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _text_hash(value: str) -> str:
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
 
 def _truncate_lines(text: str, max_lines: int) -> tuple[str, bool]:

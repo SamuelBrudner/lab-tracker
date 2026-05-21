@@ -358,6 +358,7 @@ class DailyGraphReviewModel(Base):
     window_end: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     status: Mapped[str] = mapped_column(String(20), nullable=False, default="drafting")
     summary: Mapped[str | None] = mapped_column(Text)
+    review_brief: Mapped[dict[str, object]] = mapped_column(JSON, default=dict)
     error_metadata: Mapped[dict[str, object]] = mapped_column(JSON, default=dict)
     created_by: Mapped[str | None] = mapped_column(String(255))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utc_now)

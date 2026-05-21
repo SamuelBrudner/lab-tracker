@@ -1380,6 +1380,21 @@ describe("App", () => {
       error_metadata: {},
       project_id: "project-1",
       review_id: reviewId,
+      review_brief: {
+        title: "Daily Review Brief",
+        executive_summary: "One draft looks ready after checking the wording.",
+        review_priorities: ["Check the staged question wording."],
+        draft_summaries: [
+          {
+            change_set_id: draftId,
+            headline: "Question draft",
+            interpretation: "The evidence supports creating a tracking question.",
+            recommended_action: "Review and accept after checking the source note.",
+            risks: ["Question may be too broad."],
+            questions_for_reviewer: ["Should this be a method question?"],
+          },
+        ],
+      },
       status: "ready",
       summary: "Reviewed 1 evidence note and linked 1 graph draft (1 ready, 0 failed).",
       updated_at: "2026-04-20T00:00:00Z",
@@ -1444,6 +1459,10 @@ describe("App", () => {
 
     expect(await screen.findByRole("heading", { name: "Daily Graph Review" })).toBeInTheDocument();
     expect(await screen.findByText("1 ready drafts")).toBeInTheDocument();
+    expect(await screen.findByText("Daily Review Brief")).toBeInTheDocument();
+    expect(await screen.findByText("One draft looks ready after checking the wording.")).toBeInTheDocument();
+    expect(await screen.findByText("Question draft")).toBeInTheDocument();
+    expect(await screen.findByText("Review and accept after checking the source note.")).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Mark reviewed" }));
 
     expect(await screen.findByText("Daily graph review marked reviewed.")).toBeInTheDocument();

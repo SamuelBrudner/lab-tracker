@@ -43,7 +43,7 @@ def main() -> int:
             raw_assets=raw_assets,
             app_base_url=args.app_base_url or base_url,
         )
-        model_report = _draft_model_report(args, context)
+        model_report = _stored_review_brief(review) or _draft_model_report(args, context)
         html = render_review_report_html(context=context, model_report=model_report)
         args.output.write_text(html, encoding="utf-8")
 
@@ -117,13 +117,23 @@ def _parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def _stored_review_brief(review: dict[str, Any]) -> dict[str, Any] | None:
+    brief = review.get("review_brief")
+    if isinstance(brief, dict) and brief:
+        return brief
+    return None
+
+
 def _create_daily_review(
     client: httpx.Client,
     args: argparse.Namespace,
     *,
     headers: dict[str, str],
 ) -> dict[str, Any]:
-    payload: dict[str, Any] = {"project_id": args.project_id}
+    payload: dict[str, Any] = {
+        "project_id": args.project_id,
+        "include_brief": not args.no_llm_report,
+    }
     if args.window_start:
         payload["window_start"] = _iso_datetime(args.window_start, "--window-start")
     if args.window_end:

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime, time, timezone
+from typing import Any
 from uuid import UUID, uuid4
 
 from lab_tracker.auth import AuthContext, require_role
@@ -28,6 +29,7 @@ class DailyGraphReviewServiceMixin:
         window_start: datetime | None = None,
         window_end: datetime | None = None,
         draft_client: object,
+        include_brief: bool = True,
         actor: AuthContext | None = None,
     ) -> DailyGraphReview:
         require_role(actor, WRITE_ROLES)
@@ -47,6 +49,20 @@ class DailyGraphReviewServiceMixin:
             window_end=resolved_window_end,
         )
         if existing is not None:
+            if include_brief and not existing.review_brief:
+                change_sets = self._daily_review_change_sets(existing)
+                source_notes = self._source_notes_for_change_sets(
+                    project_id=existing.project_id,
+                    change_sets=change_sets,
+                )
+                self._apply_daily_review_brief(
+                    existing,
+                    change_sets=change_sets,
+                    source_notes=source_notes,
+                    draft_client=draft_client,
+                )
+                existing.updated_at = utc_now()
+                self._save_daily_graph_review(existing)
             return existing
 
         review = DailyGraphReview(
@@ -84,6 +100,13 @@ class DailyGraphReviewServiceMixin:
         review.summary = _daily_review_summary(notes=notes, change_sets=change_sets)
         if errors:
             review.error_metadata = {"source_errors": errors}
+        if include_brief:
+            self._apply_daily_review_brief(
+                review,
+                change_sets=change_sets,
+                source_notes=notes,
+                draft_client=draft_client,
+            )
         review.updated_at = utc_now()
         self._save_daily_graph_review(review)
         return review
@@ -210,6 +233,59 @@ class DailyGraphReviewServiceMixin:
                 return change_set
         return None
 
+    def _daily_review_change_sets(self, review: DailyGraphReview) -> list[GraphChangeSet]:
+        change_sets_by_id = {
+            change_set.change_set_id: change_set
+            for change_set in self.list_graph_change_sets(project_id=review.project_id)
+        }
+        return [
+            change_sets_by_id[change_set_id]
+            for change_set_id in review.change_set_ids
+            if change_set_id in change_sets_by_id
+        ]
+
+    def _source_notes_for_change_sets(
+        self,
+        *,
+        project_id: UUID,
+        change_sets: list[GraphChangeSet],
+    ) -> list[Note]:
+        notes_by_id = {note.note_id: note for note in self.list_notes(project_id=project_id)}
+        return [
+            notes_by_id[change_set.source_note_id]
+            for change_set in change_sets
+            if change_set.source_note_id in notes_by_id
+        ]
+
+    def _apply_daily_review_brief(
+        self,
+        review: DailyGraphReview,
+        *,
+        change_sets: list[GraphChangeSet],
+        source_notes: list[Note],
+        draft_client: object,
+    ) -> None:
+        try:
+            draft_review_report = getattr(draft_client, "draft_review_report")
+            if not callable(draft_review_report):
+                raise ValidationError("Graph draft client cannot create review briefs.")
+            report = draft_review_report(
+                review_context=_daily_review_brief_context(
+                    review=review,
+                    change_sets=change_sets,
+                    source_notes=source_notes,
+                )
+            )
+            review.review_brief = _normalize_review_brief(report)
+            error_metadata = dict(review.error_metadata)
+            error_metadata.pop("review_brief_error", None)
+            review.error_metadata = error_metadata
+        except Exception as exc:
+            review.review_brief = {}
+            error_metadata = dict(review.error_metadata)
+            error_metadata["review_brief_error"] = str(exc)
+            review.error_metadata = error_metadata
+
     def _find_daily_graph_review_for_window(
         self,
         *,
@@ -255,6 +331,110 @@ def _daily_review_summary(*, notes: list[Note], change_sets: list[GraphChangeSet
         f"{'' if len(change_sets) == 1 else 's'}"
         f" ({ready_count} ready, {failed_count} failed)."
     )
+
+
+def _daily_review_brief_context(
+    *,
+    review: DailyGraphReview,
+    change_sets: list[GraphChangeSet],
+    source_notes: list[Note],
+) -> dict[str, Any]:
+    notes_by_id = {note.note_id: note for note in source_notes}
+    return {
+        "review_id": str(review.review_id),
+        "generated_at": utc_now().isoformat(),
+        "window_start": _as_utc(review.window_start).isoformat(),
+        "window_end": _as_utc(review.window_end).isoformat(),
+        "summary": review.summary or "",
+        "draft_count": len(change_sets),
+        "drafts": [
+            _change_set_brief_context(
+                change_set,
+                source_note=notes_by_id.get(change_set.source_note_id),
+            )
+            for change_set in change_sets
+        ],
+    }
+
+
+def _change_set_brief_context(
+    change_set: GraphChangeSet,
+    *,
+    source_note: Note | None,
+) -> dict[str, Any]:
+    return {
+        "change_set_id": str(change_set.change_set_id),
+        "status": change_set.status.value,
+        "prompt_version": change_set.prompt_version,
+        "source_note_id": str(change_set.source_note_id),
+        "source_filename": change_set.source_filename,
+        "source_content_type": change_set.source_content_type,
+        "source_summary": _source_note_summary(source_note),
+        "source_metadata": dict(source_note.metadata) if source_note is not None else {},
+        "operations": [
+            {
+                "op": operation.op.value,
+                "entity_type": operation.entity_type.value,
+                "status": operation.status.value,
+                "rationale": operation.rationale,
+                "confidence": operation.confidence,
+                "payload": operation.payload,
+                "source_refs": operation.source_refs,
+            }
+            for operation in change_set.operations
+        ],
+    }
+
+
+def _source_note_summary(note: Note | None) -> str:
+    if note is None:
+        return ""
+    parts = [note.raw_content.strip()]
+    if note.transcribed_text and note.transcribed_text.strip():
+        parts.append(f"Transcript:\n{note.transcribed_text.strip()}")
+    if note.raw_asset is not None:
+        parts.append(
+            "\n".join(
+                (
+                    "Raw asset:",
+                    f"- filename: {note.raw_asset.filename}",
+                    f"- content_type: {note.raw_asset.content_type}",
+                    f"- checksum: {note.raw_asset.checksum}",
+                )
+            )
+        )
+    return "\n\n".join(part for part in parts if part)[:4000]
+
+
+def _normalize_review_brief(report: object) -> dict[str, Any]:
+    if not isinstance(report, dict):
+        raise ValidationError("Review brief model returned a non-object response.")
+    draft_summaries: list[dict[str, Any]] = []
+    for item in report.get("draft_summaries") or []:
+        if not isinstance(item, dict):
+            continue
+        draft_summaries.append(
+            {
+                "change_set_id": str(item.get("change_set_id") or ""),
+                "headline": str(item.get("headline") or "Graph draft"),
+                "interpretation": str(item.get("interpretation") or ""),
+                "recommended_action": str(item.get("recommended_action") or ""),
+                "risks": _string_list(item.get("risks")),
+                "questions_for_reviewer": _string_list(item.get("questions_for_reviewer")),
+            }
+        )
+    return {
+        "title": str(report.get("title") or "Daily Graph Review"),
+        "executive_summary": str(report.get("executive_summary") or ""),
+        "review_priorities": _string_list(report.get("review_priorities")),
+        "draft_summaries": draft_summaries,
+    }
+
+
+def _string_list(value: object) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return [str(item) for item in value if str(item).strip()]
 
 
 def _as_utc(value: datetime) -> datetime:

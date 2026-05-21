@@ -396,9 +396,30 @@ def _evidence_html(draft: dict[str, Any]) -> str:
     if raw_text:
         chunks.append("<h3>Raw Asset Text</h3>" + _markdownish_html(raw_text))
     metadata = note.get("metadata") or {}
+    source_metadata = _source_metadata(metadata)
+    if source_metadata:
+        chunks.append(
+            "<h3>Evidence Source</h3><pre>"
+            + _escape(_jsonish(source_metadata))
+            + "</pre>"
+        )
     if metadata:
         chunks.append("<h3>Metadata</h3><pre>" + _escape(_jsonish(metadata)) + "</pre>")
     return "\n".join(chunks) or "<p>No source evidence text or image was available.</p>"
+
+
+def _source_metadata(metadata: dict[str, Any]) -> dict[str, Any]:
+    keys = (
+        "evidence_source_provider",
+        "evidence_source_uri",
+        "evidence_source_external_id",
+        "evidence_source_observed_at",
+        "evidence_capture_kind",
+        "evidence_content_hash",
+        "evidence_adapter",
+        "evidence_title",
+    )
+    return {key: metadata[key] for key in keys if key in metadata}
 
 
 def _markdownish_html(value: str) -> str:

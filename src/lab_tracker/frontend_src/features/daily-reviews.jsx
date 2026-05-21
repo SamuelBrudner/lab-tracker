@@ -40,6 +40,47 @@ function operationCounts(changeSet) {
   return counts;
 }
 
+function hasText(value) {
+  return typeof value === "string" && value.trim().length > 0;
+}
+
+function DraftBrief({ brief }) {
+  if (!brief) {
+    return null;
+  }
+  return (
+    <div>
+      {hasText(brief.headline) ? <strong>{brief.headline}</strong> : null}
+      {hasText(brief.interpretation) ? <p>{brief.interpretation}</p> : null}
+      {hasText(brief.recommended_action) ? (
+        <p>
+          <strong>Recommended action:</strong> {brief.recommended_action}
+        </p>
+      ) : null}
+      {brief.risks?.length ? (
+        <div>
+          <strong>Risks</strong>
+          <ul>
+            {brief.risks.map((risk) => (
+              <li key={risk}>{risk}</li>
+            ))}
+          </ul>
+        </div>
+      ) : null}
+      {brief.questions_for_reviewer?.length ? (
+        <div>
+          <strong>Questions</strong>
+          <ul>
+            {brief.questions_for_reviewer.map((question) => (
+              <li key={question}>{question}</li>
+            ))}
+          </ul>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 function DailyGraphReviewCard({ token, reviewId, navigate, canWrite, setBusy, setFlash }) {
   const [review, setReview] = useState(null);
   const [changeSets, setChangeSets] = useState([]);
@@ -50,6 +91,18 @@ function DailyGraphReviewCard({ token, reviewId, navigate, canWrite, setBusy, se
     () => changeSets.filter((changeSet) => changeSet.status === "ready").length,
     [changeSets]
   );
+  const reviewBrief = review?.review_brief && Object.keys(review.review_brief).length
+    ? review.review_brief
+    : null;
+  const briefByChangeSet = useMemo(() => {
+    const summaries = new Map();
+    for (const summary of review?.review_brief?.draft_summaries || []) {
+      if (summary?.change_set_id) {
+        summaries.set(summary.change_set_id, summary);
+      }
+    }
+    return summaries;
+  }, [review]);
 
   const loadReview = useCallback(async () => {
     if (!reviewId) {
@@ -125,11 +178,40 @@ function DailyGraphReviewCard({ token, reviewId, navigate, canWrite, setBusy, se
                 {review.error_metadata.source_errors.length === 1 ? "" : "s"} could not be drafted.
               </div>
             ) : null}
+            {review.error_metadata?.review_brief_error ? (
+              <div className="flash error">
+                Review brief deferred: {review.error_metadata.review_brief_error}
+              </div>
+            ) : null}
           </section>
+
+          {reviewBrief ? (
+            <section className="item">
+              <div className="item-head">
+                <h3>{reviewBrief.title || "Review Brief"}</h3>
+              </div>
+              {hasText(reviewBrief.executive_summary) ? (
+                <p>{reviewBrief.executive_summary}</p>
+              ) : null}
+              {reviewBrief.review_priorities?.length ? (
+                <div>
+                  <strong>Review priorities</strong>
+                  <ul>
+                    {reviewBrief.review_priorities.map((priority) => (
+                      <li key={priority}>{priority}</li>
+                    ))}
+                  </ul>
+                </div>
+              ) : null}
+            </section>
+          ) : (
+            <p className="subtle">No daily review brief is stored for this review.</p>
+          )}
 
           {changeSets.length ? (
             changeSets.map((changeSet) => {
               const counts = operationCounts(changeSet);
+              const brief = briefByChangeSet.get(changeSet.change_set_id);
               return (
                 <article className="item" key={changeSet.change_set_id}>
                   <div className="item-head">
@@ -148,6 +230,7 @@ function DailyGraphReviewCard({ token, reviewId, navigate, canWrite, setBusy, se
                   {changeSet.error_metadata?.message ? (
                     <p className="flash error">{changeSet.error_metadata.message}</p>
                   ) : null}
+                  <DraftBrief brief={brief} />
                   <div className="inline">
                     <button
                       type="button"

@@ -10,10 +10,19 @@ from fastapi.testclient import TestClient
 class FakeDraftClient:
     model = "fake-gpt"
 
-    def __init__(self, patch: dict[str, Any]) -> None:
+    def __init__(
+        self,
+        patch: dict[str, Any],
+        *,
+        review_report: dict[str, Any] | None = None,
+        review_error: Exception | None = None,
+    ) -> None:
         self.patch = patch
+        self.review_report = review_report
+        self.review_error = review_error
         self.calls: list[dict[str, Any]] = []
         self.analysis_calls: list[dict[str, Any]] = []
+        self.review_calls: list[dict[str, Any]] = []
         self.closed = False
 
     def draft_from_note(
@@ -51,6 +60,27 @@ class FakeDraftClient:
             }
         )
         return self.patch
+
+    def draft_review_report(self, *, review_context: dict[str, Any]) -> dict[str, Any]:
+        self.review_calls.append(review_context)
+        if self.review_error is not None:
+            raise self.review_error
+        return self.review_report or {
+            "title": "Daily review brief",
+            "executive_summary": "Review the day's graph proposals.",
+            "review_priorities": ["Check proposed question wording."],
+            "draft_summaries": [
+                {
+                    "change_set_id": str(draft["change_set_id"]),
+                    "headline": "Draft guidance",
+                    "interpretation": "The evidence supports a draft update.",
+                    "recommended_action": "Review before committing.",
+                    "risks": [],
+                    "questions_for_reviewer": ["Is the wording right?"],
+                }
+                for draft in review_context.get("drafts", [])
+            ],
+        }
 
     def close(self) -> None:
         self.closed = True
@@ -137,7 +167,10 @@ def test_daily_graph_review_generates_and_reuses_note_drafts(
     assert "2 evidence notes" in review["summary"]
     assert len(fake_client.calls) == 1
     assert len(fake_client.analysis_calls) == 1
+    assert len(fake_client.review_calls) == 1
     assert "cells looked healthier" in fake_client.analysis_calls[0]["evidence_text"]
+    assert review["review_brief"]["title"] == "Daily review brief"
+    assert review["review_brief"]["draft_summaries"][0]["headline"] == "Draft guidance"
 
     duplicate = client.post(
         "/daily-graph-reviews",
@@ -153,6 +186,7 @@ def test_daily_graph_review_generates_and_reuses_note_drafts(
     assert duplicate.json()["data"]["review_id"] == review["review_id"]
     assert len(fake_client.calls) == 1
     assert len(fake_client.analysis_calls) == 1
+    assert len(fake_client.review_calls) == 1
 
     listed = client.get(
         f"/daily-graph-reviews?project_id={project_id}&status=ready",
@@ -160,6 +194,48 @@ def test_daily_graph_review_generates_and_reuses_note_drafts(
     )
     assert listed.status_code == 200
     assert listed.json()["data"][0]["review_id"] == review["review_id"]
+    assert listed.json()["data"][0]["review_brief"]["executive_summary"]
+
+
+def test_daily_graph_review_defers_brief_when_model_fails(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+) -> None:
+    project_id = _project(client, admin_auth_headers)
+    text = client.post(
+        "/notes",
+        json={
+            "project_id": project_id,
+            "raw_content": "Analysis evidence: no contamination was detected.",
+            "status": "committed",
+        },
+        headers=admin_auth_headers,
+    )
+    assert text.status_code == 201
+
+    fake_client = FakeDraftClient(
+        _draft_patch(project_id),
+        review_error=RuntimeError("model unavailable"),
+    )
+    client.app.state.graph_draft_client_factory = lambda settings: fake_client
+    window_start = (datetime.now(timezone.utc) - timedelta(minutes=5)).isoformat()
+    window_end = (datetime.now(timezone.utc) + timedelta(minutes=5)).isoformat()
+
+    created = client.post(
+        "/daily-graph-reviews",
+        json={
+            "project_id": project_id,
+            "window_start": window_start,
+            "window_end": window_end,
+        },
+        headers=admin_auth_headers,
+    )
+
+    assert created.status_code == 201
+    review = created.json()["data"]
+    assert review["status"] == "ready"
+    assert review["review_brief"] == {}
+    assert review["error_metadata"]["review_brief_error"] == "model unavailable"
 
 
 def test_daily_graph_review_can_be_marked_reviewed(

@@ -45,6 +45,7 @@ def build_daily_reviews_router(api: LabTrackerAPI) -> APIRouter:
                 window_start=payload.window_start,
                 window_end=payload.window_end,
                 draft_client=draft_client,
+                include_brief=payload.include_brief,
                 actor=actor,
             )
         finally:

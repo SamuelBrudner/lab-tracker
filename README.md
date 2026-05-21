@@ -11,6 +11,7 @@ Lab Tracker keeps the *reasoning* behind experiments connected to the data they 
 - **Mobile multimodal graph-aware draft review.** Phone capture stores raw photo, voice, photo+voice bundle, or text notes, builds a project-scoped graph context packet, asks GPT for reviewable draft operations, then humans edit, accept/reject, and commit through the same API validation as normal writes.
 - **Analysis-to-graph draft review.** CI or assistant clients can submit analysis evidence notes for GPT-backed graph draft proposals, with the same human review boundary before commit.
 - **Daily graph review cadence.** End-of-day review runs gather new note/evidence drafts into one durable review envelope, generate a digest, and link the scientist back to the app for human commit.
+- **External evidence sources.** Generic importers can turn files, text, synced folder items, git commits, CI outputs, or future Google Drive items into evidence notes with standard source metadata; graph changes remain human-reviewed drafts.
 - **Search.** Substring search over questions and notes so prior context is findable later.
 
 What ships today is the minimum that preserves the core research record. The supported surface is defined in [`docs/retained-v1-surface.md`](docs/retained-v1-surface.md) — if it and this README disagree, that document wins. The broader vision (meeting-photo question capture, OCR, vector search, PI review gates) lives in [`idea.md`](idea.md) and is explicitly deferred.
@@ -245,12 +246,15 @@ python scripts/create-daily-graph-review.py \
 ```
 
 The daily review stores its source window, links all generated/reused graph drafts,
-and prints an `/app/daily-reviews/{review_id}` URL. Run it from cron, Windows Task
+stores a model-written review brief when available, and prints an
+`/app/daily-reviews/{review_id}` URL. Run it from cron, Windows Task
 Scheduler, a self-hosted GitHub Actions runner, or the reusable workflow in
 `.github/workflows/daily-graph-review.yml` at the lab's preferred end-of-day time.
 
 See [`docs/analysis-graph-drafts-ci.md`](docs/analysis-graph-drafts-ci.md) for the
 GitHub Actions workflow and required secrets.
+See [`docs/evidence-source-metadata.md`](docs/evidence-source-metadata.md) for the
+generic evidence source metadata contract.
 
 The retained v1 runtime keeps note handling manual and uses direct substring
 search for query flows. Deferred concepts live in
