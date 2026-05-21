@@ -1,20 +1,20 @@
 {
   "mcpServers": {
     "lab-tracker": {
-      "command": "C:\\Users\\snb6\\Documents\\GitHub\\lab-tracker\\.venv\\Scripts\\python.exe",
+      "command": "uv",
       "args": [
+        "run",
+        "python",
         "-m",
         "lab_tracker.mcp_server"
       ],
       "env": {
-        "LAB_TRACKER_MCP_BASE_URL": "http://127.0.0.1:8000"
-      }
-    },
-    "beads": {
-      "command": "C:\\Users\\snb6\\AppData\\Roaming\\Python\\Python313\\Scripts\\beads-mcp.exe",
-      "env": {
-        "BEADS_PATH": "C:\\Users\\snb6\\AppData\\Local\\Programs\\bd\\bd.exe",
-        "BEADS_WORKING_DIR": "C:\\Users\\snb6\\Documents\\GitHub\\lab-tracker"
+        "LAB_TRACKER_MCP_BASE_URL": "https://mwcppc01ysbc155.tail79f9d8.ts.net",
+        "PYTHONPATH": "src",
+        "FASTMCP_NO_BANNER": "1",
+        "FASTMCP_QUIET": "1",
+        "FASTMCP_SILENT": "1",
+        "MCP_QUIET": "1"
       }
     }
   }

@@ -20,6 +20,15 @@ LAB_TRACKER_MCP_USERNAME=<service-account-username>
 LAB_TRACKER_MCP_PASSWORD=<service-account-password>
 ```
 
+For agents that are not running on the graph workstation, use the current
+workstation HTTPS base URL:
+
+```bash
+LAB_TRACKER_MCP_BASE_URL=https://mwcppc01ysbc155.tail79f9d8.ts.net
+LAB_TRACKER_MCP_USERNAME=<service-account-username>
+LAB_TRACKER_MCP_PASSWORD=<service-account-password>
+```
+
 The server does not store bearer tokens. It logs in with the configured service
 account and retries once after a 401. The username/password are only required
 when `LAB_TRACKER_AUTH_ENABLED=true`; local auth-disabled testing can omit them.
@@ -71,6 +80,22 @@ Local development starts with authentication disabled. Set
 `LAB_TRACKER_AUTH_ENABLED=true` when you want to test login, roles, or service
 account credentials.
 
+For MCP clients on other computers, use the reachable shared-server URL instead
+of localhost, for example:
+
+```powershell
+$env:LAB_TRACKER_MCP_BASE_URL = "http://<host-or-tailnet-ip>:8000"
+```
+
+For off-network agents, prefer the durable Tailscale Funnel endpoint:
+
+```powershell
+$env:LAB_TRACKER_MCP_BASE_URL = "https://mwcppc01ysbc155.tail79f9d8.ts.net"
+```
+
+See [`docs/lan-shared-graph.md`](lan-shared-graph.md) for same-LAN, VPN, and
+tailnet-only access.
+
 ## Dolt Mirror
 
 Dolt is an export-only versioned mirror in v1. The live API database remains the
@@ -98,11 +123,12 @@ The skill source lives at:
 skills/lab-tracker/SKILL.md
 ```
 
-On this machine it should be installed into both assistant homes:
+On this machine it should be installed into both assistant homes, preferably as
+symlinks so repo updates are picked up by new agent sessions:
 
 ```text
-C:\Users\snb6\.codex\skills\lab-tracker
-C:\Users\snb6\.claude\skills\lab-tracker
+~/.codex/skills/lab-tracker -> <repo>/skills/lab-tracker
+~/.claude/skills/lab-tracker -> <repo>/skills/lab-tracker
 ```
 
 Restart Codex or Claude after changing MCP or skill config so the new server and
