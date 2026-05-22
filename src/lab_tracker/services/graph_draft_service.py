@@ -82,6 +82,7 @@ _UPDATE_SCHEMAS = {
 _RECENT_CONTEXT_LIMIT = 10
 _QUESTION_CONTEXT_LIMIT = 50
 _CAPTURE_BUNDLE_LIMIT = 6
+_BATCH_NOTE_LIMIT = 100
 _SEMANTIC_ALLOWED_TARGETS = {
     GraphDraftSemanticType.CREATE_NOTE: {(GraphChangeOp.CREATE, EntityType.NOTE)},
     GraphDraftSemanticType.LINK_NOTE_TO_QUESTION: {(GraphChangeOp.UPDATE, EntityType.NOTE)},
@@ -591,6 +592,135 @@ class GraphDraftServiceMixin:
             actor=actor,
         )
 
+    def build_batch_graph_context(
+        self,
+        notes: list[Note],
+        *,
+        window: tuple[Any, Any] | None = None,
+        actor: AuthContext | None = None,
+    ) -> dict[str, Any]:
+        """Assemble a context packet covering a batch of staged notes.
+
+        The batch may span multiple projects; graph context (questions,
+        recent sessions/datasets/notes/analyses/claims/visualizations,
+        known_aliases) is grouped per project. The packet is the input
+        the daily-batch draft generator (lab-tracker-641) consumes.
+
+        Caller is responsible for filtering to staged notes and choosing
+        the window. The batch is capped at _BATCH_NOTE_LIMIT; overflow is
+        reported as truncated_note_count.
+        """
+        truncated_note_count = max(0, len(notes) - _BATCH_NOTE_LIMIT)
+        batch_notes = list(notes[:_BATCH_NOTE_LIMIT])
+
+        notes_by_project: dict[UUID, list[Note]] = {}
+        for note in batch_notes:
+            notes_by_project.setdefault(note.project_id, []).append(note)
+
+        project_blocks: list[dict[str, Any]] = []
+        for project_id, project_notes in notes_by_project.items():
+            try:
+                project = self.get_project(project_id)
+            except NotFoundError:
+                continue
+            project_questions = self.list_questions(project_id=project_id)
+            active_or_staged = sorted(
+                [
+                    q
+                    for q in project_questions
+                    if q.status in {QuestionStatus.ACTIVE, QuestionStatus.STAGED}
+                ],
+                key=lambda q: (q.status.value, q.updated_at, q.question_id),
+                reverse=True,
+            )[:_QUESTION_CONTEXT_LIMIT]
+            active_ids = {q.question_id for q in active_or_staged}
+            superseded = [
+                q
+                for q in project_questions
+                if q.status == QuestionStatus.SUPERSEDED
+                and q.superseded_by_question_id in active_ids
+            ]
+            batch_ids_in_project = {n.note_id for n in project_notes}
+            recent_notes = [
+                item
+                for item in sorted(
+                    self.list_notes(project_id=project_id),
+                    key=lambda candidate: candidate.created_at,
+                    reverse=True,
+                )
+                if item.note_id not in batch_ids_in_project
+            ][:_RECENT_CONTEXT_LIMIT]
+            recent_sessions = sorted(
+                self.list_sessions(project_id=project_id),
+                key=lambda item: item.started_at,
+                reverse=True,
+            )[:_RECENT_CONTEXT_LIMIT]
+            recent_datasets = sorted(
+                self.list_datasets(project_id=project_id),
+                key=lambda item: item.created_at,
+                reverse=True,
+            )[:_RECENT_CONTEXT_LIMIT]
+            recent_analyses = sorted(
+                self.list_analyses(project_id=project_id),
+                key=lambda item: item.created_at,
+                reverse=True,
+            )[:_RECENT_CONTEXT_LIMIT]
+            recent_claims = sorted(
+                self.list_claims(project_id=project_id),
+                key=lambda item: item.created_at,
+                reverse=True,
+            )[:_RECENT_CONTEXT_LIMIT]
+            recent_visualizations = sorted(
+                self.list_visualizations(project_id=project_id),
+                key=lambda item: item.created_at,
+                reverse=True,
+            )[:_RECENT_CONTEXT_LIMIT]
+            project_blocks.append(
+                {
+                    "id": str(project.project_id),
+                    "label": project.name,
+                    "status": project.status.value,
+                    "note_ids_in_batch": [str(n.note_id) for n in project_notes],
+                    "active_or_staged_questions": [
+                        _compact_question(item) for item in active_or_staged
+                    ],
+                    "recent_sessions": [_compact_session(item) for item in recent_sessions],
+                    "recent_datasets": [_compact_dataset(item) for item in recent_datasets],
+                    "recent_notes": [_compact_note(item) for item in recent_notes],
+                    "recent_analyses": [_compact_analysis(item) for item in recent_analyses],
+                    "recent_claims": [_compact_claim(item) for item in recent_claims],
+                    "recent_visualizations": [
+                        _compact_visualization(item) for item in recent_visualizations
+                    ],
+                    "known_aliases": _known_aliases(
+                        project=project,
+                        questions=active_or_staged,
+                        superseded_questions=superseded,
+                        sessions=recent_sessions,
+                        datasets=recent_datasets,
+                        analyses=recent_analyses,
+                        claims=recent_claims,
+                        visualizations=recent_visualizations,
+                    ),
+                }
+            )
+
+        packet: dict[str, Any] = {
+            "mode": "graph_batch",
+            "batch_window": (
+                {"since": window[0].isoformat(), "until": window[1].isoformat()}
+                if window is not None
+                else None
+            ),
+            "current_user": _compact_actor(actor),
+            "batch_notes": [_compact_note(item, include_raw_asset=True) for item in batch_notes],
+            "source_artifacts": [_source_artifact_packet(item) for item in batch_notes],
+            "projects": project_blocks,
+            "truncated_note_count": truncated_note_count,
+        }
+        packet["context_summary"] = _graph_batch_context_summary(packet)
+        return packet
+
     def _prepare_note_sources_for_graph_draft(
         self,
         note_id: UUID,
@@ -1079,6 +1209,51 @@ def _graph_context_summary(context_packet: dict[str, Any]) -> dict[str, Any]:
             for item in selected_targets
         ],
         "source_artifact_counts": source_artifact_counts,
+        "warnings": warnings,
+    }
+
+
+def _graph_batch_context_summary(packet: dict[str, Any]) -> dict[str, Any]:
+    source_artifacts = [
+        item for item in packet.get("source_artifacts", []) if isinstance(item, dict)
+    ]
+    source_artifact_counts: dict[str, int] = {}
+    warnings: list[str] = []
+    for artifact in source_artifacts:
+        artifact_type = str(artifact.get("type") or "unknown")
+        source_artifact_counts[artifact_type] = source_artifact_counts.get(artifact_type, 0) + 1
+        if artifact_type == "audio" and not str(artifact.get("transcript_text") or "").strip():
+            note_id = artifact.get("note_id") or "unknown"
+            warnings.append(f"audio source {note_id} is missing an editable transcript")
+    if not source_artifacts:
+        warnings.append("no source artifacts were included")
+    truncated = int(packet.get("truncated_note_count") or 0)
+    if truncated:
+        warnings.append(f"batch truncated; {truncated} note(s) omitted")
+    projects = packet.get("projects") or []
+    return {
+        "approximate_size_bytes": len(
+            json.dumps(packet, sort_keys=True, default=str).encode("utf-8")
+        ),
+        "counts": {
+            "projects": len(projects),
+            "batch_notes": len(packet.get("batch_notes") or []),
+            "source_artifacts": len(source_artifacts),
+            "active_or_staged_questions": sum(
+                len(p.get("active_or_staged_questions") or []) for p in projects
+            ),
+            "recent_notes": sum(len(p.get("recent_notes") or []) for p in projects),
+            "recent_sessions": sum(len(p.get("recent_sessions") or []) for p in projects),
+            "recent_datasets": sum(len(p.get("recent_datasets") or []) for p in projects),
+            "recent_analyses": sum(len(p.get("recent_analyses") or []) for p in projects),
+            "recent_claims": sum(len(p.get("recent_claims") or []) for p in projects),
+            "recent_visualizations": sum(
+                len(p.get("recent_visualizations") or []) for p in projects
+            ),
+            "known_aliases": sum(len(p.get("known_aliases") or []) for p in projects),
+        },
+        "source_artifact_counts": source_artifact_counts,
+        "truncated_note_count": truncated,
         "warnings": warnings,
     }
 
