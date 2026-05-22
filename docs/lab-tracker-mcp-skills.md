@@ -45,6 +45,11 @@ Available tools:
 - `lab_tracker_create_question`
 - `lab_tracker_create_note`
 
+Planned decision-context tooling for assistant clients is specified in
+[`docs/mcp-decision-context-tooling.md`](mcp-decision-context-tooling.md). That
+tooling will let assistants request bounded graph context before choosing plots,
+analyses, slides, experiment plans, summaries, or research writing.
+
 `lab_tracker_list_questions` can traverse the v1 question hierarchy with
 `parent_question_id` for direct children or `ancestor_question_id` for recursive
 descendants. `lab_tracker_create_question` accepts `parent_question_ids`; use it
