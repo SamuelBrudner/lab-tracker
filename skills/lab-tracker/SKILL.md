@@ -44,12 +44,22 @@ Local auth-disabled testing can omit them.
 
 Use these tools when available:
 
+- `lab_tracker_get_decision_context` returns bounded graph context before
+  research-facing decisions such as choosing plots, analyses, slides, experiment
+  plans, summaries, or research writing.
 - `lab_tracker_health` checks the API health endpoint.
 - `lab_tracker_readiness` checks database and storage readiness.
 - `lab_tracker_list_projects` lists active or archived projects.
 - `lab_tracker_list_questions` filters questions by project, status, type, search text,
   direct parent, or recursive ancestor.
 - `lab_tracker_list_notes` filters notes by project, status, or search text.
+- `lab_tracker_list_sessions` lists sessions by project, status, or type.
+- `lab_tracker_list_datasets` lists datasets by project or status.
+- `lab_tracker_list_analyses` lists analyses by project, dataset, question, or status.
+- `lab_tracker_list_claims` lists claims by project, status, dataset, or analysis.
+- `lab_tracker_list_visualizations` lists visualizations by project, analysis, or claim.
+- `lab_tracker_get_dataset_provenance` returns dataset provenance JSON-LD.
+- `lab_tracker_get_analysis_provenance` returns analysis provenance JSON-LD.
 - `lab_tracker_search` searches questions and notes together.
 - `lab_tracker_create_project` creates a local project.
 - `lab_tracker_create_question` creates a question in a project; pass
@@ -63,6 +73,13 @@ Use these tools when available:
 Creation tools write through the API, using the configured service account when
 authentication is enabled. Be explicit before creating or mutating research
 records.
+
+Before research-facing decisions, use `lab_tracker_get_decision_context` when
+available. This includes choosing variables to plot, analyses to run, figures or
+slides to make, experimental controls to prioritize, summaries to write, and
+research writing such as manuscripts, grants, abstracts, results, discussion
+text, and figure legends. If Lab Tracker is unavailable or ambiguous, state that
+explicitly before proceeding.
 
 For MCP clients on other computers, point `LAB_TRACKER_MCP_BASE_URL` at the
 serving machine, for example `http://<host-ip>:8000` or a Tailscale tailnet URL.

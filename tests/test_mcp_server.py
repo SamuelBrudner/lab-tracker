@@ -20,7 +20,19 @@ def test_fastmcp_registers_lab_tracker_tools() -> None:
     assert "lab_tracker_health" in names
     assert "lab_tracker_readiness" in names
     assert "lab_tracker_search" in names
+    assert "lab_tracker_get_decision_context" in names
+    assert "lab_tracker_list_datasets" in names
+    assert "lab_tracker_list_analyses" in names
+    assert "lab_tracker_list_claims" in names
+    assert "lab_tracker_list_visualizations" in names
     assert "lab_tracker_create_note" in names
+
+
+def test_fastmcp_registers_agent_consultation_policy_resource() -> None:
+    resources = asyncio.run(mcp_server.server.list_resources())
+
+    uris = {str(resource.uri) for resource in resources}
+    assert "lab-tracker://agent-consultation-policy" in uris
 
 
 def test_client_service_login_sends_bearer_auth_to_protected_routes() -> None:
@@ -79,6 +91,301 @@ def test_client_list_questions_sends_hierarchy_filters() -> None:
         client.close()
 
     assert payload["data"] == []
+
+
+def test_client_low_level_read_tools_call_retained_routes() -> None:
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if request.url.path == "/sessions":
+            assert request.url.params["project_id"] == "project-1"
+            assert request.url.params["session_type"] == "scientific"
+            return _json_response(200, {"data": [{"session_id": "session-1"}]})
+        if request.url.path == "/datasets":
+            assert request.url.params["status"] == "committed"
+            return _json_response(200, {"data": [{"dataset_id": "dataset-1"}]})
+        if request.url.path == "/analyses":
+            assert request.url.params["dataset_id"] == "dataset-1"
+            return _json_response(200, {"data": [{"analysis_id": "analysis-1"}]})
+        if request.url.path == "/claims":
+            assert request.url.params["analysis_id"] == "analysis-1"
+            return _json_response(200, {"data": [{"claim_id": "claim-1"}]})
+        if request.url.path == "/visualizations":
+            assert request.url.params["claim_id"] == "claim-1"
+            return _json_response(200, {"data": [{"viz_id": "viz-1"}]})
+        if request.url.path == "/datasets/dataset-1/provenance":
+            return _json_response(200, {"data": {"@id": "dataset-1"}})
+        if request.url.path == "/analyses/analysis-1/provenance":
+            return _json_response(200, {"data": {"@id": "analysis-1"}})
+        return _json_response(404, {"error": {"message": "not found"}})
+
+    client = mcp_server.LabTrackerAPIClient(
+        mcp_server.MCPSettings(base_url="http://testserver"),
+        transport=httpx.MockTransport(handler),
+    )
+
+    try:
+        assert client.list_sessions(
+            project_id="project-1",
+            session_type="scientific",
+        )["data"][0]["session_id"] == "session-1"
+        assert client.list_datasets(status="committed")["data"][0]["dataset_id"] == (
+            "dataset-1"
+        )
+        assert client.list_analyses(dataset_id="dataset-1")["data"][0]["analysis_id"] == (
+            "analysis-1"
+        )
+        assert client.list_claims(analysis_id="analysis-1")["data"][0]["claim_id"] == (
+            "claim-1"
+        )
+        assert client.list_visualizations(claim_id="claim-1")["data"][0]["viz_id"] == (
+            "viz-1"
+        )
+        assert client.get_dataset_provenance("dataset-1")["data"]["@id"] == "dataset-1"
+        assert client.get_analysis_provenance("analysis-1")["data"]["@id"] == (
+            "analysis-1"
+        )
+    finally:
+        client.close()
+
+    assert [request.url.path for request in requests] == [
+        "/sessions",
+        "/datasets",
+        "/analyses",
+        "/claims",
+        "/visualizations",
+        "/datasets/dataset-1/provenance",
+        "/analyses/analysis-1/provenance",
+    ]
+
+
+def test_decision_context_rejects_invalid_task_kind_before_api_request() -> None:
+    requests: list[httpx.Request] = []
+    client = mcp_server.LabTrackerAPIClient(
+        mcp_server.MCPSettings(base_url="http://testserver"),
+        transport=httpx.MockTransport(
+            lambda request: requests.append(request)
+            or _json_response(500, {"error": {"message": "unexpected request"}})
+        ),
+    )
+
+    try:
+        payload = client.get_decision_context(task_kind="figure", query="baseline")
+    finally:
+        client.close()
+
+    assert payload["error"]["code"] == "invalid_task_kind"
+    assert "research_writing" in payload["error"]["allowed_task_kinds"]
+    assert requests == []
+
+
+def test_decision_context_returns_unavailable_when_api_read_fails() -> None:
+    client = mcp_server.LabTrackerAPIClient(
+        mcp_server.MCPSettings(base_url="http://testserver"),
+        transport=httpx.MockTransport(
+            lambda request: _json_response(503, {"error": {"message": "offline"}})
+        ),
+    )
+
+    try:
+        payload = client.get_decision_context(
+            task_kind="research_writing",
+            query="baseline",
+            project_id="project-1",
+        )
+    finally:
+        client.close()
+
+    assert payload["error"]["code"] == "unavailable"
+    assert "offline" in payload["error"]["detail"]
+
+
+def test_decision_context_builds_project_graph_slice() -> None:
+    def list_payload(items: list[dict]) -> dict:
+        return {"data": items, "meta": {"limit": 5, "offset": 0, "total": len(items)}}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if path == "/projects":
+            return _json_response(
+                200,
+                list_payload(
+                    [
+                        {
+                            "project_id": "project-1",
+                            "name": "Decision project",
+                            "status": "active",
+                        }
+                    ]
+                ),
+            )
+        if path == "/search":
+            assert request.url.params["project_id"] == "project-1"
+            return _json_response(
+                200,
+                {
+                    "data": {
+                        "questions": [
+                            {
+                                "question_id": "question-1",
+                                "project_id": "project-1",
+                                "text": "Which baseline controls matter?",
+                                "status": "active",
+                            }
+                        ],
+                        "notes": [
+                            {
+                                "note_id": "note-1",
+                                "project_id": "project-1",
+                                "raw_content": "Baseline control note",
+                                "status": "committed",
+                            }
+                        ],
+                    },
+                    "meta": {"questions_count": 1, "notes_count": 1},
+                },
+            )
+        if path == "/questions":
+            return _json_response(
+                200,
+                list_payload(
+                    [
+                        {
+                            "question_id": "question-1",
+                            "project_id": "project-1",
+                            "text": "Which baseline controls matter?",
+                            "status": "active",
+                        }
+                    ]
+                ),
+            )
+        if path == "/notes":
+            return _json_response(
+                200,
+                list_payload(
+                    [
+                        {
+                            "note_id": "note-1",
+                            "project_id": "project-1",
+                            "raw_content": "Baseline control note",
+                            "status": "committed",
+                        }
+                    ]
+                ),
+            )
+        if path == "/sessions":
+            return _json_response(
+                200,
+                list_payload(
+                    [
+                        {
+                            "session_id": "session-1",
+                            "project_id": "project-1",
+                            "status": "closed",
+                            "link_code": "ABC",
+                        }
+                    ]
+                ),
+            )
+        if path == "/datasets":
+            return _json_response(
+                200,
+                list_payload(
+                    [
+                        {
+                            "dataset_id": "dataset-1",
+                            "project_id": "project-1",
+                            "commit_hash": "hash-1",
+                            "primary_question_id": "question-1",
+                            "question_links": [
+                                {
+                                    "question_id": "question-1",
+                                    "role": "primary",
+                                    "outcome_status": "supports",
+                                }
+                            ],
+                            "status": "committed",
+                        }
+                    ]
+                ),
+            )
+        if path == "/analyses":
+            return _json_response(
+                200,
+                list_payload(
+                    [
+                        {
+                            "analysis_id": "analysis-1",
+                            "project_id": "project-1",
+                            "dataset_ids": ["dataset-1"],
+                            "method_hash": "method-1",
+                            "status": "committed",
+                        }
+                    ]
+                ),
+            )
+        if path == "/claims":
+            return _json_response(
+                200,
+                list_payload(
+                    [
+                        {
+                            "claim_id": "claim-1",
+                            "project_id": "project-1",
+                            "statement": "Baseline controls change behavior.",
+                            "status": "supported",
+                            "supported_by_dataset_ids": ["dataset-1"],
+                            "supported_by_analysis_ids": ["analysis-1"],
+                        }
+                    ]
+                ),
+            )
+        if path == "/visualizations":
+            return _json_response(
+                200,
+                list_payload(
+                    [
+                        {
+                            "viz_id": "viz-1",
+                            "analysis_id": "analysis-1",
+                            "viz_type": "line",
+                            "file_path": "figures/baseline.png",
+                            "caption": "Baseline comparison",
+                            "related_claim_ids": ["claim-1"],
+                        }
+                    ]
+                ),
+            )
+        return _json_response(404, {"error": {"message": "not found"}})
+
+    client = mcp_server.LabTrackerAPIClient(
+        mcp_server.MCPSettings(base_url="http://testserver"),
+        transport=httpx.MockTransport(handler),
+    )
+
+    try:
+        payload = client.get_decision_context(
+            task_kind="research_writing",
+            query="baseline controls",
+            project_id="project-1",
+            limit=5,
+        )
+    finally:
+        client.close()
+
+    data = payload["data"]
+    assert data["task_kind"] == "research_writing"
+    assert data["scope"]["project"]["project_id"] == "project-1"
+    assert data["questions"][0]["relevance_reasons"] == [
+        "search_match",
+        "recent_activity",
+    ]
+    assert data["claims"][0]["relevance_reasons"] == ["recent_activity"]
+    assert data["task_guidance"]["candidate_outputs"][0]["entity_type"] == "claim"
+    assert {
+        item["entity"]["entity_type"] for item in data["evidence_map"]
+    } == {"dataset", "analysis", "claim", "visualization"}
 
 
 def test_client_retries_once_after_expired_token() -> None:

@@ -37,18 +37,33 @@ Available tools:
 
 - `lab_tracker_health`
 - `lab_tracker_readiness`
+- `lab_tracker_get_decision_context`
 - `lab_tracker_list_projects`
 - `lab_tracker_list_questions`
 - `lab_tracker_list_notes`
+- `lab_tracker_list_sessions`
+- `lab_tracker_list_datasets`
+- `lab_tracker_list_analyses`
+- `lab_tracker_list_claims`
+- `lab_tracker_list_visualizations`
+- `lab_tracker_get_dataset_provenance`
+- `lab_tracker_get_analysis_provenance`
 - `lab_tracker_search`
 - `lab_tracker_create_project`
 - `lab_tracker_create_question`
 - `lab_tracker_create_note`
 
-Planned decision-context tooling for assistant clients is specified in
+Decision-context tooling for assistant clients is specified in
 [`docs/mcp-decision-context-tooling.md`](mcp-decision-context-tooling.md). That
-tooling will let assistants request bounded graph context before choosing plots,
+tooling lets assistants request bounded graph context before choosing plots,
 analyses, slides, experiment plans, summaries, or research writing.
+
+`lab_tracker_get_decision_context` accepts `task_kind` values `plot`,
+`analysis`, `slides`, `experiment_plan`, `summary`, and `research_writing`.
+It returns bounded project graph context, task guidance, stable IDs, relevance
+reasons, an evidence map, and truncation metadata. If the request is ambiguous,
+for example because no project can be inferred, it returns a structured error
+instead of guessing.
 
 `lab_tracker_list_questions` can traverse the v1 question hierarchy with
 `parent_question_id` for direct children or `ancestor_question_id` for recursive
