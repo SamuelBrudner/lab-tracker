@@ -37,7 +37,7 @@ def _pair_device(
     return consume.json()["data"]["device_token_id"], consume.json()["data"]["secret"]
 
 
-def test_create_enrollment_returns_offer_with_enrollment_url(
+def test_create_enrollment_returns_offer_with_enrollment_url_and_qr(
     client: TestClient,
     admin_auth_headers: dict[str, str],
 ):
@@ -49,7 +49,30 @@ def test_create_enrollment_returns_offer_with_enrollment_url(
     assert response.status_code == 201
     payload = response.json()["data"]
     assert payload["offer_token"].startswith("lpair_")
-    assert payload["enrollment_url"] == f"/app/enroll?offer={payload['offer_token']}"
+    assert payload["enrollment_url"].endswith(f"/app/enroll?offer={payload['offer_token']}")
+    # Full URL, not relative — phone needs a host it can reach.
+    assert payload["enrollment_url"].startswith("http://") or payload["enrollment_url"].startswith(
+        "https://"
+    )
+    qr_svg = payload["enrollment_qr_svg"]
+    assert qr_svg.startswith("<svg") and "</svg>" in qr_svg
+
+
+def test_enrollment_url_honors_public_base_url_override(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+):
+    client.app.state.settings.public_base_url = "https://lab.example.com"
+    try:
+        response = client.post(
+            "/auth/devices/enrollment",
+            json={},
+            headers=admin_auth_headers,
+        )
+        payload = response.json()["data"]
+        assert payload["enrollment_url"].startswith("https://lab.example.com/app/enroll?offer=")
+    finally:
+        client.app.state.settings.public_base_url = ""
 
 
 def test_consume_enrollment_is_public_and_single_use(

@@ -21,6 +21,7 @@ class Settings(BaseSettings):
     bootstrap_admin_token: str = ""
     auth_enabled: bool | None = None
     graph_draft_provider: str = "openai"
+    public_base_url: str = ""
     openai_api_key: str = ""
     openai_model: str = "gpt-5.4-mini"
     openai_transcription_model: str = "gpt-4o-mini-transcribe"

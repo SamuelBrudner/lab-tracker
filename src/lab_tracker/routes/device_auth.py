@@ -4,11 +4,13 @@ from __future__ import annotations
 
 from uuid import UUID
 
+import segno
 from fastapi import APIRouter
 from starlette import status as http_status
 from starlette.requests import Request
 
 from lab_tracker.auth import DeviceAuthService
+from lab_tracker.config import get_settings
 from lab_tracker.errors import AuthError
 from lab_tracker.schemas import (
     DeviceConsumeRead,
@@ -21,6 +23,32 @@ from lab_tracker.schemas import (
 )
 
 from .shared import actor_from_request
+
+
+def _resolve_public_base_url(request: Request) -> str:
+    """Pick the base URL the paired phone will hit.
+
+    Setting beats inference. Falls back to the request's own host so a
+    desktop browser opened at the laptop's LAN IP automatically generates
+    a phone-reachable URL; only 127.0.0.1/localhost desktops need the
+    explicit LAB_TRACKER_PUBLIC_BASE_URL override.
+    """
+    settings = getattr(request.app.state, "settings", None) or get_settings()
+    configured = (settings.public_base_url or "").strip().rstrip("/")
+    if configured:
+        return configured
+    base = str(request.base_url).rstrip("/")
+    return base
+
+
+def _build_enrollment_qr_svg(url: str) -> str:
+    qr = segno.make(url, error="m")
+    return qr.svg_inline(
+        scale=6,
+        border=2,
+        dark="#0d8b6f",
+        light="#ffffff",
+    )
 
 
 def build_device_auth_router(*, device_auth_service: DeviceAuthService) -> APIRouter:
@@ -37,13 +65,16 @@ def build_device_auth_router(*, device_auth_service: DeviceAuthService) -> APIRo
             raise AuthError("Pairing must be initiated from a logged-in user session.")
         ttl_minutes = payload.ttl_minutes if payload.ttl_minutes is not None else 5
         offer = device_auth_service.create_enrollment(actor.user_id, ttl_minutes=ttl_minutes)
-        enrollment_url = f"/app/enroll?offer={offer.offer_token}"
+        base_url = _resolve_public_base_url(request)
+        enrollment_url = f"{base_url}/app/enroll?offer={offer.offer_token}"
+        qr_svg = _build_enrollment_qr_svg(enrollment_url)
         return Envelope(
             data=DeviceEnrollmentRead(
                 enrollment_id=offer.enrollment_id,
                 offer_token=offer.offer_token,
                 expires_at=offer.expires_at,
                 enrollment_url=enrollment_url,
+                enrollment_qr_svg=qr_svg,
             )
         )
 

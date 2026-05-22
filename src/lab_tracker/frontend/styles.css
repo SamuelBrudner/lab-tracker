@@ -803,3 +803,40 @@ button:disabled {
 .btn-link:hover {
   text-decoration: underline;
 }
+
+.enrollment-offer {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  align-items: flex-start;
+}
+
+.enrollment-qr {
+  display: inline-block;
+  background: #ffffff;
+  border-radius: 11px;
+  padding: 0.6rem;
+  box-shadow: 0 4px 14px rgba(21, 23, 30, 0.06);
+}
+
+.enrollment-qr svg {
+  display: block;
+  width: 220px;
+  height: 220px;
+}
+
+.enrollment-fallback {
+  width: 100%;
+  font-size: 0.88rem;
+}
+
+.enrollment-fallback summary {
+  cursor: pointer;
+  color: var(--ink-soft);
+  padding: 0.3rem 0;
+}
+
+.enroll-card {
+  text-align: center;
+  padding: 1.6rem 1.2rem;
+}

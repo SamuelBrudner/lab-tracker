@@ -3,12 +3,12 @@ import * as React from "react";
 import { apiRequest } from "../shared/api.js";
 import { TOKEN_STORAGE_KEY } from "../shared/constants.js";
 
-const { useEffect, useState } = React;
+const { useEffect, useRef, useState } = React;
 
-function readOfferFromLocation() {
+function readQueryParam(name) {
   try {
     const params = new URLSearchParams(window.location.search || "");
-    return params.get("offer") || "";
+    return params.get(name) || "";
   } catch {
     return "";
   }
@@ -19,11 +19,11 @@ function suggestedLabel() {
     return "Phone";
   }
   const ua = String(navigator.userAgent || "");
-  if (/iPhone/i.test(ua)) {
-    return "iPhone";
-  }
   if (/iPad/i.test(ua)) {
     return "iPad";
+  }
+  if (/iPhone/i.test(ua)) {
+    return "iPhone";
   }
   if (/Android/i.test(ua)) {
     return "Android phone";
@@ -32,87 +32,72 @@ function suggestedLabel() {
 }
 
 function EnrollPage({ replace, setFlash }) {
-  const [offer] = useState(() => readOfferFromLocation());
-  const [label, setLabel] = useState(() => suggestedLabel());
-  const [submitting, setSubmitting] = useState(false);
+  const [offer] = useState(() => readQueryParam("offer"));
+  const [labelOverride] = useState(() => readQueryParam("label"));
+  const [status, setStatus] = useState("pairing"); // pairing | paired | error
   const [error, setError] = useState("");
+  const [pairedLabel, setPairedLabel] = useState("");
+  const attemptedRef = useRef(false);
 
   useEffect(() => {
+    if (attemptedRef.current) {
+      return;
+    }
+    attemptedRef.current = true;
     if (!offer) {
+      setStatus("error");
       setError("This pairing link is missing the offer token. Generate a new one on your desktop.");
-    }
-  }, [offer]);
-
-  async function handleSubmit(event) {
-    event.preventDefault();
-    if (!offer) {
       return;
     }
-    if (!label.trim()) {
-      setError("Choose a name for this device.");
-      return;
-    }
-    setSubmitting(true);
-    setError("");
-    setFlash("", "");
-    try {
-      const payload = await apiRequest("/auth/devices/consume", {
-        body: { offer_token: offer, label: label.trim() },
-        method: "POST",
+    const label = (labelOverride && labelOverride.trim()) || suggestedLabel();
+    apiRequest("/auth/devices/consume", {
+      body: { offer_token: offer, label },
+      method: "POST",
+    })
+      .then((payload) => {
+        try {
+          localStorage.setItem(TOKEN_STORAGE_KEY, payload.secret);
+        } catch {
+          // localStorage may be blocked; the user will see the failure on
+          // the next request rather than here, and can pair again.
+        }
+        setPairedLabel(payload.label || label);
+        setStatus("paired");
+        setFlash(`Device paired as "${payload.label || label}".`);
+        replace("/app/capture");
+        if (typeof window !== "undefined") {
+          // Force a reload so React picks up the new token on browsers that
+          // cache the initial token snapshot in module-level closures.
+          window.location.replace("/app/capture");
+        }
+      })
+      .catch((err) => {
+        setStatus("error");
+        setError(err.message || "Pairing failed. Generate a new offer on your desktop.");
       });
-      try {
-        localStorage.setItem(TOKEN_STORAGE_KEY, payload.secret);
-      } catch {
-        // localStorage may be blocked; the user will see the failure on
-        // the next request rather than here, and can pair again.
-      }
-      setFlash(`Device paired as "${payload.label}".`);
-      replace("/app/capture");
-      // The capture route picks up the new token through useAuthSession.
-      // Force a reload so the React tree re-initializes with it on
-      // browsers that aggressively cache the initial token snapshot.
-      if (typeof window !== "undefined") {
-        window.location.replace("/app/capture");
-      }
-    } catch (err) {
-      setError(err.message || "Pairing failed. Generate a new offer on your desktop.");
-    } finally {
-      setSubmitting(false);
-    }
-  }
+  }, [offer, labelOverride, replace, setFlash]);
 
   return (
-    <article className="card span-12">
-      <div className="item-head">
-        <div>
-          <h2>Pair this device</h2>
-          <p className="subtle">
-            Give this phone a name and tap Pair. After this, captures save to
-            Lab Tracker without a password.
-          </p>
-        </div>
-      </div>
-      <form className="form" onSubmit={handleSubmit}>
-        <label>
-          Device name
-          <input
-            type="text"
-            value={label}
-            disabled={submitting || !offer}
-            onChange={(event) => setLabel(event.target.value)}
-            maxLength={150}
-            autoFocus
-          />
-        </label>
-        {error ? <p className="flash error">{error}</p> : null}
-        <button
-          type="submit"
-          className="btn-primary"
-          disabled={submitting || !offer || !label.trim()}
-        >
-          {submitting ? "Pairing…" : "Pair this device"}
-        </button>
-      </form>
+    <article className="card span-12 enroll-card">
+      {status === "pairing" ? (
+        <>
+          <h2>Pairing this device…</h2>
+          <p className="subtle">Saving credentials, then opening the capture screen.</p>
+        </>
+      ) : null}
+      {status === "paired" ? (
+        <>
+          <h2>Paired as “{pairedLabel}”</h2>
+          <p className="subtle">Opening the capture screen…</p>
+        </>
+      ) : null}
+      {status === "error" ? (
+        <>
+          <h2>Pairing failed</h2>
+          <p className="flash error">{error}</p>
+          <p className="subtle">Generate a new pairing code on your desktop and scan it again.</p>
+        </>
+      ) : null}
     </article>
   );
 }

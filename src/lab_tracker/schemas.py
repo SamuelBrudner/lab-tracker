@@ -113,6 +113,7 @@ class DeviceEnrollmentRead(BaseModel):
     offer_token: str
     expires_at: datetime
     enrollment_url: str
+    enrollment_qr_svg: str
 
 
 class DeviceConsumeRequest(RequestModel):

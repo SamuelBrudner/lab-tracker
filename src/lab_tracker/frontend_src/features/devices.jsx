@@ -65,7 +65,7 @@ function DevicesPage({ token, canWrite, navigate, setFlash }) {
   async function copyEnrollmentUrl(url) {
     if (typeof navigator !== "undefined" && navigator.clipboard) {
       try {
-        await navigator.clipboard.writeText(`${window.location.origin}${url}`);
+        await navigator.clipboard.writeText(url);
         setFlash("Enrollment URL copied. Open it on the phone to finish pairing.");
         return;
       } catch {
@@ -101,33 +101,42 @@ function DevicesPage({ token, canWrite, navigate, setFlash }) {
         </button>
 
         {pendingOffer ? (
-          <div className="card-inset">
-            <h3>Pair this offer on your phone</h3>
+          <div className="card-inset enrollment-offer">
+            <h3>Scan with the phone's camera</h3>
             <p className="subtle">
-              Open this URL on the phone (AirDrop, Messages, or any QR scanner
-              works). The offer expires{" "}
+              Point the phone's camera at this code, tap the pop-up, and the
+              device pairs itself — no typing. The code expires{" "}
               {pendingOffer.expires_at ? formatDate(pendingOffer.expires_at) : "shortly"}.
             </p>
-            <div className="enrollment-url">
-              <code>
-                {window.location.origin}
-                {pendingOffer.enrollment_url}
-              </code>
-              <button
-                type="button"
-                className="btn-secondary"
-                onClick={() => copyEnrollmentUrl(pendingOffer.enrollment_url)}
-              >
-                Copy URL
-              </button>
-              <button
-                type="button"
-                className="btn-link"
-                onClick={() => setPendingOffer(null)}
-              >
-                Dismiss
-              </button>
-            </div>
+            {pendingOffer.enrollment_qr_svg ? (
+              <div
+                className="enrollment-qr"
+                aria-label="Pairing QR code"
+                /* segno returns an inline <svg>; the document already controls
+                   what URL it encodes, so trusted insertion is fine. */
+                dangerouslySetInnerHTML={{ __html: pendingOffer.enrollment_qr_svg }}
+              />
+            ) : null}
+            <details className="enrollment-fallback">
+              <summary>Can't scan? Open this URL on the phone</summary>
+              <div className="enrollment-url">
+                <code>{pendingOffer.enrollment_url}</code>
+                <button
+                  type="button"
+                  className="btn-secondary"
+                  onClick={() => copyEnrollmentUrl(pendingOffer.enrollment_url)}
+                >
+                  Copy URL
+                </button>
+              </div>
+            </details>
+            <button
+              type="button"
+              className="btn-link"
+              onClick={() => setPendingOffer(null)}
+            >
+              Dismiss
+            </button>
           </div>
         ) : null}
       </div>
