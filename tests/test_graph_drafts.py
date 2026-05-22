@@ -620,6 +620,7 @@ def test_graph_context_packet_includes_selected_targets_and_recent_neighborhood(
                 {
                     "capture_source": "mobile_capture",
                     "capture_hint": "Rig 2 Fly 12",
+                    "source_file_last_modified_ms": 1769904000000,
                 }
             ),
         },
@@ -644,6 +645,12 @@ def test_graph_context_packet_includes_selected_targets_and_recent_neighborhood(
     assert context["current_user"]["role"] == "admin"
     assert context["project"]["id"] == project_id
     assert context["source_note"]["metadata"]["capture_source"] == "mobile_capture"
+    assert context["source_note"]["metadata"]["source_file_name"] == "rig-note.jpg"
+    assert (
+        context["source_note"]["metadata"]["source_file_last_modified_at"]
+        == "2026-02-01T00:00:00+00:00"
+    )
+    assert context["source_artifacts"][0]["metadata"]["source_file_name"] == "rig-note.jpg"
     assert {
         (target["entity_type"], target["entity_id"]) for target in context["selected_targets"]
     } == {

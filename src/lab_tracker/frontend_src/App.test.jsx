@@ -761,6 +761,8 @@ describe("App", () => {
             capture_mode: "photo",
             capture_review_status: "draft_requested",
             capture_source: "mobile_capture",
+            source_file_last_modified_at: "2026-02-01T00:00:00.000Z",
+            source_file_last_modified_ms: 1769904000000,
           });
           expect(JSON.parse(body.get("targets"))).toEqual([
             { entity_id: "question-1", entity_type: "question" },
@@ -872,7 +874,10 @@ describe("App", () => {
     expect(await screen.findByRole("heading", { name: "Phone Capture" })).toBeInTheDocument();
     await waitFor(() => expect(screen.getByLabelText("Project")).toHaveValue("project-1"));
 
-    const file = new File(["phone-bytes"], "phone-capture.jpg", { type: "image/jpeg" });
+    const file = new File(["phone-bytes"], "phone-capture.jpg", {
+      lastModified: 1769904000000,
+      type: "image/jpeg",
+    });
     fireEvent.change(screen.getByLabelText("Photo file"), { target: { files: [file] } });
     fireEvent.change(screen.getByLabelText("Active question (optional)"), {
       target: { value: "question-1" },

@@ -240,12 +240,27 @@ function MobileCaptureCard({
     return `capture-${Date.now()}-${Math.random().toString(16).slice(2)}`;
   }
 
-  function baseMetadata({ draft, kind, bundleId = "" }) {
+  function sourceFileMetadata(file) {
+    if (!file) {
+      return {};
+    }
+    const metadata = {};
+    const lastModified = Number(file.lastModified);
+    if (Number.isFinite(lastModified) && lastModified > 0) {
+      const roundedLastModified = Math.round(lastModified);
+      metadata.source_file_last_modified_ms = roundedLastModified;
+      metadata.source_file_last_modified_at = new Date(roundedLastModified).toISOString();
+    }
+    return metadata;
+  }
+
+  function baseMetadata({ draft, kind, bundleId = "", file = null }) {
     const metadata = {
       capture_source: "mobile_capture",
       capture_mode: captureMode,
       capture_kind: kind,
       capture_review_status: draft ? "draft_requested" : "pending_review",
+      ...sourceFileMetadata(file),
     };
     if (bundleId) {
       metadata.capture_bundle_id = bundleId;
@@ -444,7 +459,7 @@ function MobileCaptureCard({
         if (needsPhoto()) {
           const result = await uploadOrQueueRawFile({
             fileToUpload: photoFile,
-            metadata: baseMetadata({ draft, kind: "image", bundleId }),
+            metadata: baseMetadata({ draft, kind: "image", bundleId, file: photoFile }),
           });
           if (result === OFFLINE_QUEUED) {
             queuedOffline = true;
@@ -456,7 +471,7 @@ function MobileCaptureCard({
         if (needsVoice() && !queuedOffline) {
           const result = await uploadOrQueueRawFile({
             fileToUpload: audioFile,
-            metadata: baseMetadata({ draft, kind: "voice", bundleId }),
+            metadata: baseMetadata({ draft, kind: "voice", bundleId, file: audioFile }),
           });
           if (result === OFFLINE_QUEUED) {
             queuedOffline = true;
@@ -477,7 +492,7 @@ function MobileCaptureCard({
         } else if (needsVoice() && queuedOffline) {
           await queueRawFileNoteOffline({
             fileToUpload: audioFile,
-            metadata: baseMetadata({ draft, kind: "voice", bundleId }),
+            metadata: baseMetadata({ draft, kind: "voice", bundleId, file: audioFile }),
           });
         }
         if (needsText() && !queuedOffline) {

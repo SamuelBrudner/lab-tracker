@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+from datetime import datetime, timezone
 from uuid import UUID
 
 from fastapi import APIRouter, File, Form, UploadFile
@@ -17,7 +18,10 @@ from lab_tracker.graph_drafting import make_graph_draft_client
 from lab_tracker.models import (
     EntityType,
     Note,
+    NoteMetadataScalar,
+    NoteRawAsset,
     NoteStatus,
+    utc_now,
 )
 from lab_tracker.schemas import (
     Envelope,
@@ -89,13 +93,14 @@ def build_notes_router(api: LabTrackerAPI) -> APIRouter:
             filename=filename,
             content_type=content_type,
         )
+        enriched_metadata = source_file_metadata(asset, parsed_metadata)
         note = request_api.upload_note_raw(
             project_id=project_id,
             raw_asset=asset,
             owns_raw_asset=True,
             transcribed_text=transcribed_text,
             targets=parsed_targets,
-            metadata=parsed_metadata,
+            metadata=enriched_metadata,
             status=status or note_default_status(),
             actor=actor,
         )
@@ -110,6 +115,7 @@ def build_notes_router(api: LabTrackerAPI) -> APIRouter:
         request: Request,
         file: UploadFile = File(...),
         project_id: UUID = Form(...),
+        metadata: str | None = Form(None),
     ):
         actor = actor_from_request(request)
         request_api = api_from_request(request, api)
@@ -117,15 +123,18 @@ def build_notes_router(api: LabTrackerAPI) -> APIRouter:
         if not filename:
             raise ValidationError("filename must not be empty.")
         content_type = (file.content_type or "application/octet-stream").strip()
+        parsed_metadata = parse_metadata_form(metadata)
         asset = request_api.store_note_raw_asset(
             file.file,
             filename=filename,
             content_type=content_type,
         )
+        enriched_metadata = source_file_metadata(asset, parsed_metadata)
         note = request_api.upload_note_raw(
             project_id=project_id,
             raw_asset=asset,
             owns_raw_asset=True,
+            metadata=enriched_metadata,
             status=NoteStatus.STAGED,
             actor=actor,
         )
@@ -221,6 +230,74 @@ def build_notes_router(api: LabTrackerAPI) -> APIRouter:
         return Envelope(data=note)
 
     return router
+
+
+def source_file_metadata(
+    asset: NoteRawAsset,
+    client_metadata: dict[str, NoteMetadataScalar] | None = None,
+) -> dict[str, NoteMetadataScalar]:
+    """Merge trusted stored-file metadata with optional client file timestamps."""
+
+    metadata: dict[str, NoteMetadataScalar] = dict(client_metadata or {})
+    source_metadata: dict[str, NoteMetadataScalar] = {
+        "source_file_name": asset.filename,
+        "source_file_content_type": asset.content_type,
+        "source_file_size_bytes": asset.size_bytes,
+        "source_file_checksum": asset.checksum,
+        "source_file_ingested_at": utc_now().isoformat(),
+    }
+
+    created_at = _optional_iso_datetime(metadata.get("source_file_created_at"))
+    if created_at is not None:
+        source_metadata["source_file_created_at"] = created_at
+
+    last_modified_at = _optional_iso_datetime(
+        metadata.get("source_file_last_modified_at")
+    )
+    last_modified_ms = _optional_epoch_ms(metadata.get("source_file_last_modified_ms"))
+    if last_modified_ms is not None:
+        source_metadata["source_file_last_modified_ms"] = last_modified_ms
+        if last_modified_at is None:
+            last_modified_at = datetime.fromtimestamp(
+                int(last_modified_ms) / 1000,
+                timezone.utc,
+            ).isoformat()
+    if last_modified_at is not None:
+        source_metadata["source_file_last_modified_at"] = last_modified_at
+
+    metadata.update(source_metadata)
+    return metadata
+
+
+def _optional_iso_datetime(value: object) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    normalized = text[:-1] + "+00:00" if text.endswith("Z") else text
+    try:
+        parsed = datetime.fromisoformat(normalized)
+    except ValueError as exc:
+        raise ValidationError("source file timestamps must be ISO 8601 datetimes.") from exc
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc).isoformat()
+
+
+def _optional_epoch_ms(value: object) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    try:
+        milliseconds = int(float(text))
+    except ValueError as exc:
+        raise ValidationError("source_file_last_modified_ms must be epoch milliseconds.") from exc
+    if milliseconds < 0:
+        raise ValidationError("source_file_last_modified_ms must be non-negative.")
+    return str(milliseconds)
 
 
 def _transcription_client_from_request(request: Request):

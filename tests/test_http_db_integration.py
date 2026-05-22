@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime
 from pathlib import Path
 from uuid import uuid4
 
@@ -12,6 +13,21 @@ from lab_tracker.auth import Role
 
 def _ids(payload: list[dict[str, object]], key: str) -> set[str]:
     return {str(item[key]) for item in payload}
+
+
+def _assert_source_file_metadata(
+    metadata: dict[str, object],
+    *,
+    filename: str,
+    content_type: str,
+    size_bytes: int,
+) -> None:
+    assert metadata["source_file_name"] == filename
+    assert metadata["source_file_content_type"] == content_type
+    assert metadata["source_file_size_bytes"] == str(size_bytes)
+    assert isinstance(metadata["source_file_checksum"], str)
+    assert len(str(metadata["source_file_checksum"])) == 64
+    datetime.fromisoformat(str(metadata["source_file_ingested_at"]))
 
 
 def _admin_headers(client: TestClient) -> dict[str, str]:
@@ -571,7 +587,13 @@ def test_note_routes_support_target_filters_and_multipart_upload(
                     }
                 ]
             ),
-            "metadata": json.dumps({"source": "camera"}),
+            "metadata": json.dumps(
+                {
+                    "source": "camera",
+                    "source_file_created_at": "2026-04-20T01:02:03Z",
+                    "source_file_last_modified_ms": 1769904000000,
+                }
+            ),
         },
         files={"file": ("capture.txt", b"raw-capture", "text/plain")},
         headers=headers,
@@ -579,7 +601,22 @@ def test_note_routes_support_target_filters_and_multipart_upload(
     assert multipart_upload.status_code == 201
     multipart_payload = multipart_upload.json()["data"]
     assert multipart_payload["transcribed_text"] == "typed capture"
-    assert multipart_payload["metadata"] == {"source": "camera"}
+    assert multipart_payload["metadata"]["source"] == "camera"
+    assert (
+        multipart_payload["metadata"]["source_file_created_at"]
+        == "2026-04-20T01:02:03+00:00"
+    )
+    assert multipart_payload["metadata"]["source_file_last_modified_ms"] == "1769904000000"
+    assert (
+        multipart_payload["metadata"]["source_file_last_modified_at"]
+        == "2026-02-01T00:00:00+00:00"
+    )
+    _assert_source_file_metadata(
+        multipart_payload["metadata"],
+        filename="capture.txt",
+        content_type="text/plain",
+        size_bytes=len(b"raw-capture"),
+    )
     assert multipart_payload["raw_asset"]["filename"] == "capture.txt"
     assert multipart_payload["targets"][0]["entity_type"] == "dataset"
     assert multipart_payload["targets"][0]["entity_id"] == dataset_id
@@ -958,6 +995,12 @@ def test_quick_capture_stages_note_with_minimal_payload(
         assert payload["raw_asset"]["content_type"] == content_type
         assert payload["transcribed_text"] is None
         assert payload["targets"] == []
+        _assert_source_file_metadata(
+            payload["metadata"],
+            filename=filename,
+            content_type=content_type,
+            size_bytes=len(content),
+        )
 
         raw_download = client.get(
             f"/notes/{payload['note_id']}/raw",
@@ -993,7 +1036,7 @@ def test_quick_capture_rejects_missing_required_fields(
     assert missing_project.status_code == 422
 
 
-def test_quick_capture_ignores_extra_fields(
+def test_quick_capture_preserves_metadata_but_ignores_workflow_fields(
     client: TestClient,
     admin_auth_headers: dict[str, str],
 ):
@@ -1019,4 +1062,10 @@ def test_quick_capture_ignores_extra_fields(
     payload = response.json()["data"]
     assert payload["status"] == "staged"
     assert payload["transcribed_text"] is None
-    assert payload["metadata"] == {}
+    assert payload["metadata"]["source"] == "camera"
+    _assert_source_file_metadata(
+        payload["metadata"],
+        filename="snap.jpg",
+        content_type="image/jpeg",
+        size_bytes=len(b"jpeg-bytes"),
+    )
