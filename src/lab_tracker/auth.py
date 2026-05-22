@@ -264,6 +264,11 @@ def device_principal_can_access(method: str, path: str) -> bool:
     arbitrary sessions, or escalate.
     """
     method = method.upper()
+    # Device principals may introspect their own session (/auth/me) so the
+    # phone PWA can confirm pairing succeeded without a parallel endpoint;
+    # all other /auth/* surfaces stay off-limits.
+    if path == "/auth/me":
+        return method in {"GET", "HEAD", "OPTIONS"}
     if path.startswith("/auth"):
         return False
     if method in {"GET", "HEAD", "OPTIONS"}:

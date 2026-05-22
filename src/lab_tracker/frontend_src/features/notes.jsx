@@ -29,9 +29,22 @@ function NotePanel({
     <article className="card span-6">
       <div className="item-head">
         <h2>Note Capture</h2>
-        <button type="button" className="btn-secondary" onClick={() => navigate("/app/capture")}>
-          Phone capture
-        </button>
+        <div className="inline">
+          <button
+            type="button"
+            className="btn-secondary"
+            onClick={() => navigate("/app/devices")}
+          >
+            Paired devices
+          </button>
+          <button
+            type="button"
+            className="btn-secondary"
+            onClick={() => navigate("/app/capture")}
+          >
+            Phone capture
+          </button>
+        </div>
       </div>
       <form className="form" onSubmit={onCreateTextNote}>
         <h3>Quick text note</h3>

@@ -21,6 +21,12 @@ function parseAppRoute(pathname) {
   if (parts.length === 2 && parts[1] === "capture") {
     return { kind: "capture" };
   }
+  if (parts.length === 2 && parts[1] === "devices") {
+    return { kind: "devices" };
+  }
+  if (parts.length === 2 && parts[1] === "enroll") {
+    return { kind: "enroll" };
+  }
   if (parts.length >= 3 && parts[1] === "questions" && UUID_RE.test(parts[2] || "")) {
     return { kind: "question", questionId: parts[2] };
   }

@@ -162,6 +162,21 @@ def test_device_token_cannot_read_or_mutate_auth_endpoints(
     assert enroll.status_code == 403
 
 
+def test_device_token_can_introspect_its_own_session(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+):
+    # The PWA needs /auth/me to confirm the device token is live; the
+    # policy whitelists this single endpoint inside /auth/*.
+    _, secret = _pair_device(client, admin_auth_headers, label="iPhone 14")
+
+    me = client.get("/auth/me", headers=_device_headers(secret))
+    assert me.status_code == 200
+    payload = me.json()["data"]
+    # Same user as the paired admin
+    assert payload["role"] == "admin"
+
+
 def test_revoked_device_token_is_rejected(
     client: TestClient,
     admin_auth_headers: dict[str, str],

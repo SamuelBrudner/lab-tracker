@@ -1,6 +1,8 @@
 import * as React from "react";
 
 import { Dashboard } from "./features/dashboard-projects.jsx";
+import { DevicesPage } from "./features/devices.jsx";
+import { EnrollPage } from "./features/enroll.jsx";
 import { GraphDraftDetailCard } from "./features/graph-drafts.jsx";
 import { VisualizationDetailCard } from "./features/analysis/VisualizationDetailCard.jsx";
 import { DatasetDetailCard } from "./features/datasets/index.js";
@@ -172,6 +174,12 @@ function App() {
         <section className="grid">
           <WorkflowCoverageCard />
         </section>
+      ) : route.kind === "enroll" ? (
+        // Pairing happens before the phone has a token; bypass the login form
+        // and the workspace shell, render the enroll page directly.
+        <section className="grid">
+          <EnrollPage replace={replace} setFlash={setFlash} />
+        </section>
       ) : auth.authEnabled && !auth.token ? (
         <section className="grid">
           <AuthForm
@@ -225,6 +233,15 @@ function App() {
               setFlash={setFlash}
               refreshProjectCounts={workspaceData.refreshProjectCounts}
               refreshRecentNotes={noteData.refreshRecentNotes}
+            />
+          ) : null}
+
+          {route.kind === "devices" ? (
+            <DevicesPage
+              token={auth.token}
+              canWrite={auth.canWrite}
+              navigate={navigate}
+              setFlash={setFlash}
             />
           ) : null}
 
