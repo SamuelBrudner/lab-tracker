@@ -11,14 +11,15 @@ import hashlib
 import hmac
 import json
 import os
+import secrets
 from typing import Iterable
 from uuid import UUID, uuid4
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session, sessionmaker
 
-from lab_tracker.db_models import UserModel
-from lab_tracker.errors import AuthError, ConflictError, ValidationError
+from lab_tracker.db_models import DeviceEnrollmentModel, DeviceTokenModel, UserModel
+from lab_tracker.errors import AuthError, ConflictError, NotFoundError, ValidationError
 
 
 def utc_now() -> datetime:
@@ -31,10 +32,21 @@ class Role(str, Enum):
     VIEWER = "viewer"
 
 
+class PrincipalType(str, Enum):
+    USER = "user"
+    DEVICE = "device"
+
+
 @dataclass(frozen=True)
 class AuthContext:
     user_id: UUID
     role: Role
+    principal_type: PrincipalType = PrincipalType.USER
+    device_token_id: UUID | None = None
+
+    @property
+    def is_device(self) -> bool:
+        return self.principal_type == PrincipalType.DEVICE
 
 
 @dataclass
@@ -237,6 +249,192 @@ class TokenService:
 
     def _sign(self, data: bytes) -> bytes:
         return hmac.new(self._secret, data, hashlib.sha256).digest()
+
+
+DEVICE_TOKEN_PREFIX = "ldev_"
+ENROLLMENT_OFFER_PREFIX = "lpair_"
+
+
+@dataclass(frozen=True)
+class DeviceToken:
+    device_token_id: UUID
+    user_id: UUID
+    label: str
+    created_at: datetime
+    last_used_at: datetime | None
+    revoked_at: datetime | None
+
+    @property
+    def revoked(self) -> bool:
+        return self.revoked_at is not None
+
+
+@dataclass(frozen=True)
+class EnrollmentOffer:
+    enrollment_id: UUID
+    user_id: UUID
+    offer_token: str
+    expires_at: datetime
+
+
+@dataclass(frozen=True)
+class IssuedDeviceToken:
+    device_token: DeviceToken
+    secret: str
+
+
+@dataclass(frozen=True)
+class DevicePrincipal:
+    user_id: UUID
+    device_token_id: UUID
+    label: str
+
+
+def _hash_token(token: str) -> str:
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
+def _generate_secret(prefix: str) -> str:
+    return f"{prefix}{secrets.token_urlsafe(32)}"
+
+
+def _device_token_from_model(model: DeviceTokenModel) -> DeviceToken:
+    return DeviceToken(
+        device_token_id=UUID(model.device_token_id),
+        user_id=UUID(model.user_id),
+        label=model.label,
+        created_at=model.created_at,
+        last_used_at=model.last_used_at,
+        revoked_at=model.revoked_at,
+    )
+
+
+class DeviceAuthService:
+    """Issues, verifies, and revokes long-lived per-device tokens.
+
+    Tokens are stored only as SHA-256 hashes; the raw secret is returned
+    exactly once at issuance (or enrollment offer creation) and never
+    persisted. Enrollment offers are short-lived single-use grants the
+    desktop generates so the paired phone can claim a token without ever
+    needing the user's password.
+    """
+
+    def __init__(self, session_factory: sessionmaker[Session]) -> None:
+        if session_factory is None:
+            raise ValidationError("DeviceAuthService requires a session_factory.")
+        self._session_factory = session_factory
+
+    def create_enrollment(
+        self,
+        user_id: UUID,
+        *,
+        ttl_minutes: int = 5,
+    ) -> EnrollmentOffer:
+        if ttl_minutes < 1:
+            raise ValidationError("Enrollment TTL must be at least one minute.")
+        offer_token = _generate_secret(ENROLLMENT_OFFER_PREFIX)
+        offer_hash = _hash_token(offer_token)
+        expires_at = utc_now() + timedelta(minutes=ttl_minutes)
+        enrollment_id = uuid4()
+        with self._session_factory() as session:
+            user = session.get(UserModel, str(user_id))
+            if user is None:
+                raise NotFoundError("User does not exist.")
+            row = DeviceEnrollmentModel(
+                enrollment_id=str(enrollment_id),
+                user_id=str(user_id),
+                offer_token_hash=offer_hash,
+                expires_at=expires_at,
+                created_at=utc_now(),
+            )
+            session.add(row)
+            session.commit()
+        return EnrollmentOffer(
+            enrollment_id=enrollment_id,
+            user_id=user_id,
+            offer_token=offer_token,
+            expires_at=expires_at,
+        )
+
+    def consume_enrollment(self, offer_token: str, *, label: str) -> IssuedDeviceToken:
+        if not offer_token or not offer_token.strip():
+            raise AuthError("Enrollment offer token must not be empty.")
+        if not label or not label.strip():
+            raise ValidationError("Device label must not be empty.")
+        if not offer_token.startswith(ENROLLMENT_OFFER_PREFIX):
+            raise AuthError("Unrecognized enrollment offer token.")
+        offer_hash = _hash_token(offer_token)
+        with self._session_factory() as session:
+            enrollment = session.scalar(
+                select(DeviceEnrollmentModel).where(
+                    DeviceEnrollmentModel.offer_token_hash == offer_hash
+                )
+            )
+            if enrollment is None:
+                raise AuthError("Enrollment offer is invalid.")
+            if enrollment.consumed_at is not None:
+                raise AuthError("Enrollment offer has already been consumed.")
+            if _as_utc(enrollment.expires_at) <= utc_now():
+                raise AuthError("Enrollment offer has expired.")
+            secret = _generate_secret(DEVICE_TOKEN_PREFIX)
+            device_row = DeviceTokenModel(
+                device_token_id=str(uuid4()),
+                user_id=enrollment.user_id,
+                label=label.strip(),
+                token_hash=_hash_token(secret),
+                created_at=utc_now(),
+            )
+            session.add(device_row)
+            session.flush()
+            enrollment.consumed_at = utc_now()
+            enrollment.consumed_device_token_id = device_row.device_token_id
+            session.commit()
+            session.refresh(device_row)
+            return IssuedDeviceToken(
+                device_token=_device_token_from_model(device_row),
+                secret=secret,
+            )
+
+    def list_devices(self, user_id: UUID) -> list[DeviceToken]:
+        with self._session_factory() as session:
+            rows = (
+                session.scalars(
+                    select(DeviceTokenModel)
+                    .where(DeviceTokenModel.user_id == str(user_id))
+                    .order_by(DeviceTokenModel.created_at)
+                )
+                .all()
+            )
+            return [_device_token_from_model(row) for row in rows]
+
+    def revoke_device(self, user_id: UUID, device_token_id: UUID) -> DeviceToken:
+        with self._session_factory() as session:
+            row = session.get(DeviceTokenModel, str(device_token_id))
+            if row is None or row.user_id != str(user_id):
+                raise NotFoundError("Device token does not exist.")
+            if row.revoked_at is None:
+                row.revoked_at = utc_now()
+                session.commit()
+                session.refresh(row)
+            return _device_token_from_model(row)
+
+    def verify_device_token(self, token: str) -> DevicePrincipal | None:
+        if not token or not token.startswith(DEVICE_TOKEN_PREFIX):
+            return None
+        token_hash = _hash_token(token)
+        with self._session_factory() as session:
+            row = session.scalar(
+                select(DeviceTokenModel).where(DeviceTokenModel.token_hash == token_hash)
+            )
+            if row is None or row.revoked_at is not None:
+                return None
+            row.last_used_at = utc_now()
+            session.commit()
+            return DevicePrincipal(
+                user_id=UUID(row.user_id),
+                device_token_id=UUID(row.device_token_id),
+                label=row.label,
+            )
 
 
 def extract_bearer_token(authorization_header: str | None) -> str:
