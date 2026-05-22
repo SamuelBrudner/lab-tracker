@@ -21,6 +21,7 @@ from lab_tracker.models import (
     DatasetStatus,
     Note,
     NoteMetadataScalar,
+    ProjectMembershipRole,
     Question,
     QuestionLink,
     QuestionLinkRole,
@@ -29,6 +30,28 @@ from lab_tracker.models import (
 )
 
 WRITE_ROLES = {Role.ADMIN, Role.EDITOR}
+PROJECT_READ_ROLES = {
+    ProjectMembershipRole.VIEWER,
+    ProjectMembershipRole.CONTRIBUTOR,
+    ProjectMembershipRole.OWNER,
+}
+PROJECT_CONTRIBUTOR_ROLES = {
+    ProjectMembershipRole.CONTRIBUTOR,
+    ProjectMembershipRole.OWNER,
+}
+PROJECT_OWNER_ROLES = {ProjectMembershipRole.OWNER}
+
+
+def has_global_project_read(actor: AuthContext | None) -> bool:
+    return actor is not None and actor.role == Role.ADMIN
+
+
+def has_global_project_write(actor: AuthContext | None) -> bool:
+    return actor is not None and actor.role == Role.ADMIN
+
+
+def has_global_project_admin(actor: AuthContext | None) -> bool:
+    return actor is not None and actor.role == Role.ADMIN
 
 
 def _actor_user_id(actor: AuthContext | None) -> str | None:

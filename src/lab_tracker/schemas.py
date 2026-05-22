@@ -28,6 +28,8 @@ from lab_tracker.models import (
     Note,
     NoteMetadataScalar,
     NoteStatus,
+    ProjectMembership,
+    ProjectMembershipRole,
     ProjectStatus,
     Question,
     QuestionRefactor,
@@ -157,6 +159,19 @@ class ProjectUpdate(RequestModel):
     status: ProjectStatus | None = None
 
 
+class ProjectMembershipCreate(RequestModel):
+    user_id: UUID | None = None
+    username: str | None = Field(default=None, min_length=1)
+    role: ProjectMembershipRole
+
+
+class ProjectMembershipUpdate(RequestModel):
+    role: ProjectMembershipRole
+
+
+ProjectMembershipRead = ProjectMembership
+
+
 class QuestionCreate(RequestModel):
     project_id: UUID
     text: str = Field(..., min_length=1)
@@ -243,6 +258,11 @@ class GraphDraftCreateRequest(RequestModel):
 
 class GraphDraftCommitRequest(RequestModel):
     message: str = Field(..., min_length=1)
+
+
+class GraphDraftReviewRequest(RequestModel):
+    status: GraphChangeSetStatus
+    note: str | None = Field(default=None, min_length=1)
 
 
 class GraphDraftListFilters(BaseModel):

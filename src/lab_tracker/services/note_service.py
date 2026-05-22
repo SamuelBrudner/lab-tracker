@@ -6,7 +6,7 @@ import logging
 from typing import Any, BinaryIO, Iterable
 from uuid import UUID, uuid4
 
-from lab_tracker.auth import AuthContext, require_role
+from lab_tracker.auth import AuthContext
 from lab_tracker.errors import NotFoundError, ValidationError
 from lab_tracker.graph_drafting import GraphDraftingError, PROVIDER
 from lab_tracker.models import (
@@ -19,7 +19,6 @@ from lab_tracker.models import (
     utc_now,
 )
 from lab_tracker.services.shared import (
-    WRITE_ROLES,
     _actor_user_id,
     _normalize_note_metadata,
 )
@@ -62,7 +61,7 @@ class NoteServiceMixin:
         status: NoteStatus = NoteStatus.STAGED,
         actor: AuthContext | None = None,
     ) -> Note:
-        require_role(actor, WRITE_ROLES)
+        self.require_project_contributor(project_id, actor=actor)
         self.get_project(project_id)
         raw_text = raw_content.strip() if raw_content else ""
         if not raw_text and raw_asset is None:
@@ -123,7 +122,6 @@ class NoteServiceMixin:
         status: NoteStatus = NoteStatus.STAGED,
         actor: AuthContext | None = None,
     ) -> Note:
-        require_role(actor, WRITE_ROLES)
         if self._raw_storage is None:
             raise ValidationError("Raw storage backend is not configured.")
         asset = raw_asset
@@ -165,8 +163,8 @@ class NoteServiceMixin:
         prompt: str | None = None,
         actor: AuthContext | None = None,
     ) -> Note:
-        require_role(actor, WRITE_ROLES)
         note = self.get_note(note_id)
+        self.require_project_contributor(note.project_id, actor=actor)
         if note.raw_asset is None:
             raise ValidationError("Voice transcription requires a note with a raw audio asset.")
         if not note.raw_asset.content_type.lower().startswith("audio/"):
@@ -276,8 +274,8 @@ class NoteServiceMixin:
         status: NoteStatus | None = None,
         actor: AuthContext | None = None,
     ) -> Note:
-        require_role(actor, WRITE_ROLES)
         note = self.get_note(note_id)
+        self.require_project_contributor(note.project_id, actor=actor)
         if transcribed_text is not None:
             note.transcribed_text = transcribed_text.strip() if transcribed_text else None
         if targets is not None:
@@ -303,8 +301,8 @@ class NoteServiceMixin:
         return note.raw_asset, content
 
     def delete_note(self, note_id: UUID, *, actor: AuthContext | None = None) -> Note:
-        require_role(actor, WRITE_ROLES)
         note = self.get_note(note_id)
+        self.require_project_contributor(note.project_id, actor=actor)
         self._forget_entity("notes", note_id)
         self._run_repository_write(lambda repository: repository.notes.delete(note_id))
         if note.raw_asset is not None:

@@ -23,7 +23,10 @@ from .shared import (
     actor_from_request,
     analysis_default_status,
     api_from_request,
+    ensure_project_read,
+    filter_project_scoped_items,
     list_response,
+    paginate,
     repository_from_request,
     validate_pagination,
 )
@@ -61,24 +64,31 @@ def build_analyses_router(api: LabTrackerAPI) -> APIRouter:
         offset: int = 0,
     ):
         validate_pagination(limit, offset)
-        analyses, total = repository_from_request(request).query_analyses(
+        if project_id is not None:
+            ensure_project_read(request, project_id)
+        analyses, _ = repository_from_request(request).query_analyses(
             project_id=project_id,
             dataset_id=dataset_id,
             question_id=question_id,
             status=status.value if status is not None else None,
-            limit=limit,
-            offset=offset,
+            limit=None,
+            offset=0,
         )
-        return list_response(analyses, limit=limit, offset=offset, total=total)
+        visible = filter_project_scoped_items(request, analyses)
+        items, total = paginate(visible, limit, offset)
+        return list_response(items, limit=limit, offset=offset, total=total)
 
     @router.get("/analyses/{analysis_id}", response_model=Envelope[Analysis])
     def get_analysis(analysis_id: UUID, request: Request):
         analysis = api_from_request(request, api).get_analysis(analysis_id)
+        ensure_project_read(request, analysis.project_id)
         return Envelope(data=analysis)
 
     @router.patch("/analyses/{analysis_id}", response_model=Envelope[Analysis])
     def update_analysis(analysis_id: UUID, payload: AnalysisUpdate, request: Request):
         actor = actor_from_request(request)
+        existing = api_from_request(request, api).get_analysis(analysis_id)
+        ensure_project_read(request, existing.project_id)
         analysis = api_from_request(request, api).update_analysis(
             analysis_id,
             status=payload.status,
@@ -90,6 +100,8 @@ def build_analyses_router(api: LabTrackerAPI) -> APIRouter:
     @router.post("/analyses/{analysis_id}/commit", response_model=Envelope[AnalysisCommitResult])
     def commit_analysis(analysis_id: UUID, payload: AnalysisCommitRequest, request: Request):
         actor = actor_from_request(request)
+        existing = api_from_request(request, api).get_analysis(analysis_id)
+        ensure_project_read(request, existing.project_id)
         analysis, claims, visualizations = api_from_request(request, api).commit_analysis(
             analysis_id,
             environment_hash=payload.environment_hash,
@@ -108,6 +120,8 @@ def build_analyses_router(api: LabTrackerAPI) -> APIRouter:
     @router.delete("/analyses/{analysis_id}", response_model=Envelope[Analysis])
     def delete_analysis(analysis_id: UUID, request: Request):
         actor = actor_from_request(request)
+        existing = api_from_request(request, api).get_analysis(analysis_id)
+        ensure_project_read(request, existing.project_id)
         analysis = api_from_request(request, api).delete_analysis(analysis_id, actor=actor)
         return Envelope(data=analysis)
 

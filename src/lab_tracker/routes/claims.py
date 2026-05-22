@@ -15,7 +15,10 @@ from lab_tracker.schemas import ClaimCreate, ClaimUpdate, Envelope, ListEnvelope
 from .shared import (
     actor_from_request,
     api_from_request,
+    ensure_project_read,
+    filter_project_scoped_items,
     list_response,
+    paginate,
     repository_from_request,
     validate_pagination,
 )
@@ -53,24 +56,31 @@ def build_claims_router(api: LabTrackerAPI) -> APIRouter:
         offset: int = 0,
     ):
         validate_pagination(limit, offset)
-        claims, total = repository_from_request(request).query_claims(
+        if project_id is not None:
+            ensure_project_read(request, project_id)
+        claims, _ = repository_from_request(request).query_claims(
             project_id=project_id,
             status=status.value if status is not None else None,
             dataset_id=dataset_id,
             analysis_id=analysis_id,
-            limit=limit,
-            offset=offset,
+            limit=None,
+            offset=0,
         )
-        return list_response(claims, limit=limit, offset=offset, total=total)
+        visible = filter_project_scoped_items(request, claims)
+        items, total = paginate(visible, limit, offset)
+        return list_response(items, limit=limit, offset=offset, total=total)
 
     @router.get("/claims/{claim_id}", response_model=Envelope[Claim])
     def get_claim(claim_id: UUID, request: Request):
         claim = api_from_request(request, api).get_claim(claim_id)
+        ensure_project_read(request, claim.project_id)
         return Envelope(data=claim)
 
     @router.patch("/claims/{claim_id}", response_model=Envelope[Claim])
     def update_claim(claim_id: UUID, payload: ClaimUpdate, request: Request):
         actor = actor_from_request(request)
+        existing = api_from_request(request, api).get_claim(claim_id)
+        ensure_project_read(request, existing.project_id)
         claim = api_from_request(request, api).update_claim(
             claim_id,
             statement=payload.statement,
@@ -85,6 +95,8 @@ def build_claims_router(api: LabTrackerAPI) -> APIRouter:
     @router.delete("/claims/{claim_id}", response_model=Envelope[Claim])
     def delete_claim(claim_id: UUID, request: Request):
         actor = actor_from_request(request)
+        existing = api_from_request(request, api).get_claim(claim_id)
+        ensure_project_read(request, existing.project_id)
         claim = api_from_request(request, api).delete_claim(claim_id, actor=actor)
         return Envelope(data=claim)
 

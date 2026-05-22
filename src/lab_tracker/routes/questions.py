@@ -23,6 +23,9 @@ from .shared import (
     api_from_request,
     actor_from_request,
     list_response,
+    ensure_project_read,
+    filter_project_scoped_items,
+    paginate,
     question_default_status,
     repository_from_request,
     validate_pagination,
@@ -65,26 +68,33 @@ def build_questions_router(api: LabTrackerAPI) -> APIRouter:
     ):
         validate_pagination(limit, offset)
         resolved_search = search or q
-        questions, total = repository_from_request(request).query_questions(
+        if project_id is not None:
+            ensure_project_read(request, project_id)
+        questions, _ = repository_from_request(request).query_questions(
             project_id=project_id,
             status=status.value if status is not None else None,
             question_type=question_type.value if question_type is not None else None,
             search=resolved_search,
             parent_question_id=parent_question_id,
             ancestor_question_id=ancestor_question_id,
-            limit=limit,
-            offset=offset,
+            limit=None,
+            offset=0,
         )
-        return list_response(questions, limit=limit, offset=offset, total=total)
+        visible = filter_project_scoped_items(request, questions)
+        items, total = paginate(visible, limit, offset)
+        return list_response(items, limit=limit, offset=offset, total=total)
 
     @router.get("/questions/{question_id}", response_model=Envelope[Question])
     def get_question(question_id: UUID, request: Request):
         question = api_from_request(request, api).get_question(question_id)
+        ensure_project_read(request, question.project_id)
         return Envelope(data=question)
 
     @router.patch("/questions/{question_id}", response_model=Envelope[Question])
     def update_question(question_id: UUID, payload: QuestionUpdate, request: Request):
         actor = actor_from_request(request)
+        existing = api_from_request(request, api).get_question(question_id)
+        ensure_project_read(request, existing.project_id)
         question = api_from_request(request, api).update_question(
             question_id,
             text=payload.text,
@@ -103,6 +113,8 @@ def build_questions_router(api: LabTrackerAPI) -> APIRouter:
     )
     def refactor_question(question_id: UUID, payload: QuestionRefactorRequest, request: Request):
         actor = actor_from_request(request)
+        source = api_from_request(request, api).get_question(question_id)
+        ensure_project_read(request, source.project_id)
         result = api_from_request(request, api).refactor_question(
             question_id,
             replacement_text=payload.replacement.text,
@@ -134,6 +146,8 @@ def build_questions_router(api: LabTrackerAPI) -> APIRouter:
         offset: int = 0,
     ):
         validate_pagination(limit, offset)
+        question = api_from_request(request, api).get_question(question_id)
+        ensure_project_read(request, question.project_id)
         refactors = api_from_request(request, api).list_question_refactors(
             question_id,
             limit=limit,
@@ -151,6 +165,8 @@ def build_questions_router(api: LabTrackerAPI) -> APIRouter:
     @router.delete("/questions/{question_id}", response_model=Envelope[Question])
     def delete_question(question_id: UUID, request: Request):
         actor = actor_from_request(request)
+        existing = api_from_request(request, api).get_question(question_id)
+        ensure_project_read(request, existing.project_id)
         question = api_from_request(request, api).delete_question(question_id, actor=actor)
         return Envelope(data=question)
 

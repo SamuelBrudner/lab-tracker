@@ -19,8 +19,11 @@ from .shared import (
     actor_from_request,
     dataset_default_status,
     db_session_from_request,
+    ensure_project_read,
+    filter_project_scoped_items,
     file_storage_from_request,
     list_response,
+    paginate,
     repository_from_request,
     validate_pagination,
 )
@@ -57,22 +60,29 @@ def build_datasets_router(api: LabTrackerAPI) -> APIRouter:
         offset: int = 0,
     ):
         validate_pagination(limit, offset)
-        datasets, total = repository_from_request(request).query_datasets(
+        if project_id is not None:
+            ensure_project_read(request, project_id)
+        datasets, _ = repository_from_request(request).query_datasets(
             project_id=project_id,
             status=status.value if status is not None else None,
-            limit=limit,
-            offset=offset,
+            limit=None,
+            offset=0,
         )
-        return list_response(datasets, limit=limit, offset=offset, total=total)
+        visible = filter_project_scoped_items(request, datasets)
+        items, total = paginate(visible, limit, offset)
+        return list_response(items, limit=limit, offset=offset, total=total)
 
     @router.get("/datasets/{dataset_id}", response_model=Envelope[Dataset])
     def get_dataset(dataset_id: UUID, request: Request):
         dataset = api_from_request(request, api).get_dataset(dataset_id)
+        ensure_project_read(request, dataset.project_id)
         return Envelope(data=dataset)
 
     @router.patch("/datasets/{dataset_id}", response_model=Envelope[Dataset])
     def update_dataset(dataset_id: UUID, payload: DatasetUpdate, request: Request):
         actor = actor_from_request(request)
+        existing = api_from_request(request, api).get_dataset(dataset_id)
+        ensure_project_read(request, existing.project_id)
         dataset = api_from_request(request, api).update_dataset(
             dataset_id,
             status=payload.status,
@@ -87,6 +97,8 @@ def build_datasets_router(api: LabTrackerAPI) -> APIRouter:
     def delete_dataset(dataset_id: UUID, request: Request):
         request_api = api_from_request(request, api)
         actor = actor_from_request(request)
+        existing = request_api.get_dataset(dataset_id)
+        ensure_project_read(request, existing.project_id)
         db_session = db_session_from_request(request)
         storage_backend = file_storage_from_request(request)
         storage_ids = [

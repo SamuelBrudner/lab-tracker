@@ -14,6 +14,7 @@ from lab_tracker.models import (
     GraphChangeSet,
     Note,
     Project,
+    ProjectMembership,
     Question,
     QuestionRefactor,
     Session,
@@ -43,6 +44,7 @@ class LabTrackerRepository(Protocol):
     """Repository surface expected by the Lab Tracker domain layer."""
 
     projects: EntityRepository[Project]
+    project_memberships: EntityRepository[ProjectMembership]
     questions: EntityRepository[Question]
     question_refactors: EntityRepository[QuestionRefactor]
     datasets: EntityRepository[Dataset]
@@ -68,6 +70,24 @@ class LabTrackerRepository(Protocol):
         offset: int = 0,
     ) -> tuple[list[Project], int]:
         """Query projects with filters and pagination."""
+
+    def query_project_memberships(
+        self,
+        *,
+        project_id: UUID | None = None,
+        user_id: UUID | None = None,
+        limit: int | None = None,
+        offset: int = 0,
+    ) -> tuple[list[ProjectMembership], int]:
+        """Query project memberships with optional project/user filters."""
+
+    def get_project_membership(
+        self,
+        *,
+        project_id: UUID,
+        user_id: UUID,
+    ) -> ProjectMembership | None:
+        """Return one project membership by project and user."""
 
     def query_questions(
         self,

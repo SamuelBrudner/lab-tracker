@@ -253,9 +253,12 @@ def _configure_auth_middleware(app: FastAPI) -> None:
                     return _device_forbidden_response(
                         "This action is not permitted for paired devices."
                     )
+                user = app.state.auth_service.get_user_by_id(principal.user_id)
+                if user is None:
+                    raise AuthError("Invalid device token.")
                 request.state.auth_context = AuthContext(
                     user_id=principal.user_id,
-                    role=Role.EDITOR,
+                    role=user.role,
                     principal_type=PrincipalType.DEVICE,
                     device_token_id=principal.device_token_id,
                 )

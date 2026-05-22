@@ -104,6 +104,7 @@ def test_alembic_upgrade_head_creates_expected_tables(monkeypatch, tmp_path):
         "visualization_claims",
         "graph_change_sets",
         "graph_change_operations",
+        "project_memberships",
     }
     assert expected.issubset(table_names)
     assert "dataset_reviews" not in table_names
@@ -113,11 +114,25 @@ def test_alembic_upgrade_head_creates_expected_tables(monkeypatch, tmp_path):
     project_columns = {column["name"] for column in inspector.get_columns("projects")}
     question_columns = {column["name"] for column in inspector.get_columns("questions")}
     dataset_columns = {column["name"] for column in inspector.get_columns("datasets")}
+    graph_change_columns = {
+        column["name"] for column in inspector.get_columns("graph_change_sets")
+    }
+    membership_columns = {
+        column["name"] for column in inspector.get_columns("project_memberships")
+    }
 
     assert "review_policy" not in project_columns
     assert "created_from" not in question_columns
     assert "source_provenance" not in question_columns
     assert "manifest_extraction_provenance" not in dataset_columns
+    assert {
+        "submitted_at",
+        "submitted_by",
+        "reviewed_at",
+        "reviewed_by",
+        "review_note",
+    }.issubset(graph_change_columns)
+    assert {"project_id", "user_id", "role"}.issubset(membership_columns)
     engine.dispose()
 
 

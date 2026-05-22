@@ -9,17 +9,27 @@ from sqlalchemy import or_, select
 from sqlalchemy.orm import Session as OrmSession
 
 from lab_tracker.db_models import (
+    ProjectMembershipModel,
     ProjectModel,
     QuestionModel,
     QuestionParentModel,
     QuestionRefactorModel,
+    UserModel,
 )
-from lab_tracker.models import Project, Question, QuestionRefactor
+from lab_tracker.models import (
+    Project,
+    ProjectMembership,
+    ProjectMembershipRole,
+    Question,
+    QuestionRefactor,
+)
 from lab_tracker.repository import EntityRepository
 from lab_tracker.sqlalchemy_mappers import (
+    apply_project_membership_to_model,
     apply_question_refactor_to_model,
     apply_project_to_model,
     apply_question_to_model,
+    project_membership_to_model,
     project_from_model,
     project_to_model,
     question_from_model,
@@ -67,6 +77,109 @@ class SQLAlchemyProjectRepository(SQLAlchemyModelRepository[Project, ProjectMode
         total = count_from_statement(self._session, count_stmt)
         rows = list(self._session.scalars(apply_pagination(stmt, limit=limit, offset=offset)))
         return [project_from_model(row) for row in rows], total
+
+
+class SQLAlchemyProjectMembershipRepository(EntityRepository[ProjectMembership]):
+    def __init__(self, session: OrmSession) -> None:
+        self._session = session
+
+    def _from_row(
+        self,
+        row: ProjectMembershipModel,
+        user: UserModel | None = None,
+    ) -> ProjectMembership:
+        return ProjectMembership(
+            membership_id=UUID(row.membership_id),
+            project_id=UUID(row.project_id),
+            user_id=UUID(row.user_id),
+            role=ProjectMembershipRole(row.role),
+            username=user.username if user is not None else None,
+            user_global_role=user.role if user is not None else None,
+            created_by=row.created_by,
+            created_at=row.created_at,
+            updated_at=row.updated_at,
+        )
+
+    def get(self, entity_id: UUID) -> ProjectMembership | None:
+        self._session.flush()
+        row = self._session.get(ProjectMembershipModel, str(entity_id))
+        if row is None:
+            return None
+        user = self._session.get(UserModel, row.user_id)
+        return self._from_row(row, user)
+
+    def list(self) -> list[ProjectMembership]:
+        self._session.flush()
+        rows = list(
+            self._session.execute(
+                select(ProjectMembershipModel, UserModel)
+                .join(UserModel, UserModel.user_id == ProjectMembershipModel.user_id)
+                .order_by(ProjectMembershipModel.project_id, UserModel.username)
+            )
+        )
+        return [self._from_row(row, user) for row, user in rows]
+
+    def save(self, entity: ProjectMembership) -> None:
+        entity_id = str(entity.membership_id)
+        row = self._session.get(ProjectMembershipModel, entity_id)
+        if row is None:
+            self._session.add(project_membership_to_model(entity))
+            return
+        apply_project_membership_to_model(row, entity)
+
+    def delete(self, entity_id: UUID) -> ProjectMembership | None:
+        entity = self.get(entity_id)
+        if entity is None:
+            return None
+        row = self._session.get(ProjectMembershipModel, str(entity_id))
+        if row is not None:
+            self._session.delete(row)
+        return entity
+
+    def query(
+        self,
+        *,
+        project_id: UUID | None = None,
+        user_id: UUID | None = None,
+        limit: int | None = None,
+        offset: int = 0,
+    ) -> tuple[list[ProjectMembership], int]:
+        self._session.flush()
+        stmt = select(ProjectMembershipModel, UserModel).join(
+            UserModel,
+            UserModel.user_id == ProjectMembershipModel.user_id,
+        )
+        count_stmt = select(ProjectMembershipModel.membership_id)
+        if project_id is not None:
+            stmt = stmt.where(ProjectMembershipModel.project_id == str(project_id))
+            count_stmt = count_stmt.where(ProjectMembershipModel.project_id == str(project_id))
+        if user_id is not None:
+            stmt = stmt.where(ProjectMembershipModel.user_id == str(user_id))
+            count_stmt = count_stmt.where(ProjectMembershipModel.user_id == str(user_id))
+        stmt = stmt.order_by(ProjectMembershipModel.project_id, UserModel.username)
+        total = count_from_statement(self._session, count_stmt)
+        rows = list(self._session.execute(apply_pagination(stmt, limit=limit, offset=offset)))
+        return [self._from_row(row, user) for row, user in rows], total
+
+    def get_by_project_user(
+        self,
+        *,
+        project_id: UUID,
+        user_id: UUID,
+    ) -> ProjectMembership | None:
+        self._session.flush()
+        result = self._session.execute(
+            select(ProjectMembershipModel, UserModel)
+            .join(UserModel, UserModel.user_id == ProjectMembershipModel.user_id)
+            .where(
+                ProjectMembershipModel.project_id == str(project_id),
+                ProjectMembershipModel.user_id == str(user_id),
+            )
+        ).first()
+        if result is None:
+            return None
+        row, user = result
+        return self._from_row(row, user)
 
 
 class SQLAlchemyQuestionRepository(EntityRepository[Question]):

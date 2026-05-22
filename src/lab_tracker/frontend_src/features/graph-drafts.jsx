@@ -161,13 +161,22 @@ function parsedPayloadFromText(raw) {
   }
 }
 
-function GraphDraftDetailCard({ token, changeSetId, navigate, canWrite, setBusy, setFlash }) {
+function GraphDraftDetailCard({
+  token,
+  changeSetId,
+  navigate,
+  canWrite,
+  canManageGraph = false,
+  setBusy,
+  setFlash,
+}) {
   const [changeSet, setChangeSet] = useState(null);
   const [payloads, setPayloads] = useState({});
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [sourceImage, setSourceImage] = useState("");
   const [commitMessage, setCommitMessage] = useState("");
+  const [reviewNote, setReviewNote] = useState("");
 
   const acceptedCount = useMemo(
     () =>
@@ -176,6 +185,13 @@ function GraphDraftDetailCard({ token, changeSetId, navigate, canWrite, setBusy,
     [changeSet]
   );
   const visibleSourceRegions = useMemo(() => sourceRegions(changeSet), [changeSet]);
+  const canEditDraft =
+    canWrite && ["ready", "changes_requested"].includes(changeSet?.status || "");
+  const canSubmitDraft =
+    canWrite && ["ready", "changes_requested"].includes(changeSet?.status || "");
+  const canReviewDraft = canManageGraph && changeSet?.status === "submitted";
+  const canCommitDraft =
+    canManageGraph && ["ready", "submitted"].includes(changeSet?.status || "");
 
   const loadDraft = useCallback(async () => {
     if (!changeSetId) {
@@ -188,6 +204,7 @@ function GraphDraftDetailCard({ token, changeSetId, navigate, canWrite, setBusy,
       setChangeSet(nextChangeSet);
       setPayloads(payloadText(nextChangeSet));
       setCommitMessage(nextChangeSet?.commit_message || "");
+      setReviewNote(nextChangeSet?.review_note || "");
     } catch (err) {
       setError(err.message || "Failed to load graph draft.");
     } finally {
@@ -288,7 +305,7 @@ function GraphDraftDetailCard({ token, changeSetId, navigate, canWrite, setBusy,
 
   async function commitDraft(event) {
     event.preventDefault();
-    if (!changeSet || !canWrite) {
+    if (!changeSet || !canCommitDraft) {
       return;
     }
     if (!commitMessage.trim()) {
@@ -308,6 +325,47 @@ function GraphDraftDetailCard({ token, changeSetId, navigate, canWrite, setBusy,
       setFlash("Graph draft committed.");
     } catch (err) {
       setFlash("", err.message || "Failed to commit graph draft.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function submitDraft() {
+    if (!changeSet || !canSubmitDraft) {
+      return;
+    }
+    setBusy(true);
+    setFlash("", "");
+    try {
+      const nextChangeSet = await apiRequest(`/graph-drafts/${changeSet.change_set_id}/submit`, {
+        method: "POST",
+        token,
+      });
+      setChangeSet(nextChangeSet);
+      setFlash("Graph draft submitted for review.");
+    } catch (err) {
+      setFlash("", err.message || "Failed to submit graph draft.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function reviewDraft(status) {
+    if (!changeSet || !canReviewDraft) {
+      return;
+    }
+    setBusy(true);
+    setFlash("", "");
+    try {
+      const nextChangeSet = await apiRequest(`/graph-drafts/${changeSet.change_set_id}/review`, {
+        body: { status, note: reviewNote.trim() || null },
+        method: "POST",
+        token,
+      });
+      setChangeSet(nextChangeSet);
+      setFlash(status === "rejected" ? "Graph draft rejected." : "Changes requested.");
+    } catch (err) {
+      setFlash("", err.message || "Failed to review graph draft.");
     } finally {
       setBusy(false);
     }
@@ -384,7 +442,54 @@ function GraphDraftDetailCard({ token, changeSetId, navigate, canWrite, setBusy,
               ) : null}
               <div>
                 <div className="subtle">Created</div>
-                <div className="mono">{formatDate(changeSet.created_at)}</div>
+                <div className="mono">
+                  {formatDate(changeSet.created_at)}
+                  {changeSet.created_by_username ? ` by ${changeSet.created_by_username}` : ""}
+                </div>
+              </div>
+              {changeSet.submitted_at ? (
+                <div>
+                  <div className="subtle">Submitted</div>
+                  <div className="mono">
+                    {formatDate(changeSet.submitted_at)}
+                    {changeSet.submitted_by_username
+                      ? ` by ${changeSet.submitted_by_username}`
+                      : ""}
+                  </div>
+                </div>
+              ) : null}
+              {changeSet.reviewed_at ? (
+                <div>
+                  <div className="subtle">Reviewed</div>
+                  <div className="mono">
+                    {formatDate(changeSet.reviewed_at)}
+                    {changeSet.reviewed_by_username
+                      ? ` by ${changeSet.reviewed_by_username}`
+                      : ""}
+                  </div>
+                  {changeSet.review_note ? <p>{changeSet.review_note}</p> : null}
+                </div>
+              ) : null}
+              {changeSet.committed_at ? (
+                <div>
+                  <div className="subtle">Committed</div>
+                  <div className="mono">
+                    {formatDate(changeSet.committed_at)}
+                    {changeSet.committed_by_username
+                      ? ` by ${changeSet.committed_by_username}`
+                      : ""}
+                  </div>
+                </div>
+              ) : null}
+              <div className="inline">
+                <button
+                  type="button"
+                  className="btn-secondary"
+                  disabled={!canSubmitDraft}
+                  onClick={submitDraft}
+                >
+                  Submit for review
+                </button>
               </div>
               {changeSet.error_metadata?.message ? (
                 <p className="flash error">{changeSet.error_metadata.message}</p>
@@ -477,7 +582,7 @@ function GraphDraftDetailCard({ token, changeSetId, navigate, canWrite, setBusy,
               <button
                 type="button"
                 className="btn-secondary"
-                disabled={!canWrite || changeSet.status !== "ready"}
+                disabled={!canEditDraft}
                 onClick={acceptAll}
               >
                 Accept all
@@ -520,7 +625,7 @@ function GraphDraftDetailCard({ token, changeSetId, navigate, canWrite, setBusy,
                     <label>
                       Link target
                       <select
-                        disabled={!canWrite || changeSet.status !== "ready"}
+                        disabled={!canEditDraft}
                         onChange={(event) =>
                           patchOperationPayload(operation, (payload) =>
                             nextPayloadWithTarget(
@@ -551,7 +656,7 @@ function GraphDraftDetailCard({ token, changeSetId, navigate, canWrite, setBusy,
                         value={
                           parsedPayloadFromText(payloads[operation.operation_id])?.text || ""
                         }
-                        disabled={!canWrite || changeSet.status !== "ready"}
+                        disabled={!canEditDraft}
                         onChange={(event) =>
                           patchOperationPayload(operation, (payload) => ({
                             ...payload,
@@ -568,7 +673,7 @@ function GraphDraftDetailCard({ token, changeSetId, navigate, canWrite, setBusy,
                         value={
                           parsedPayloadFromText(payloads[operation.operation_id])?.raw_content || ""
                         }
-                        disabled={!canWrite || changeSet.status !== "ready"}
+                        disabled={!canEditDraft}
                         onChange={(event) =>
                           patchOperationPayload(operation, (payload) => ({
                             ...payload,
@@ -588,7 +693,7 @@ function GraphDraftDetailCard({ token, changeSetId, navigate, canWrite, setBusy,
                         onChange={(event) =>
                           updatePayloadText(operation.operation_id, event.target.value)
                         }
-                        disabled={!canWrite || changeSet.status !== "ready"}
+                        disabled={!canEditDraft}
                       />
                     </label>
                   </details>
@@ -599,7 +704,7 @@ function GraphDraftDetailCard({ token, changeSetId, navigate, canWrite, setBusy,
                     <button
                       type="button"
                       className="btn-primary"
-                      disabled={!canWrite || changeSet.status !== "ready"}
+                      disabled={!canEditDraft}
                       onClick={() => saveOperation(operation, "accepted")}
                     >
                       Accept
@@ -607,7 +712,7 @@ function GraphDraftDetailCard({ token, changeSetId, navigate, canWrite, setBusy,
                     <button
                       type="button"
                       className="btn-secondary"
-                      disabled={!canWrite || changeSet.status !== "ready"}
+                      disabled={!canEditDraft}
                       onClick={() => saveOperation(operation, "proposed")}
                     >
                       Defer
@@ -615,7 +720,7 @@ function GraphDraftDetailCard({ token, changeSetId, navigate, canWrite, setBusy,
                     <button
                       type="button"
                       className="btn-danger"
-                      disabled={!canWrite || changeSet.status !== "ready"}
+                      disabled={!canEditDraft}
                       onClick={() => saveOperation(operation, "rejected")}
                     >
                       Reject
@@ -626,17 +731,44 @@ function GraphDraftDetailCard({ token, changeSetId, navigate, canWrite, setBusy,
             </div>
 
             <form className="form" onSubmit={commitDraft}>
+              {canReviewDraft ? (
+                <label>
+                  Review note
+                  <textarea
+                    value={reviewNote}
+                    onChange={(event) => setReviewNote(event.target.value)}
+                  />
+                </label>
+              ) : null}
+              {canReviewDraft ? (
+                <div className="inline">
+                  <button
+                    type="button"
+                    className="btn-secondary"
+                    onClick={() => reviewDraft("changes_requested")}
+                  >
+                    Request changes
+                  </button>
+                  <button
+                    type="button"
+                    className="btn-danger"
+                    onClick={() => reviewDraft("rejected")}
+                  >
+                    Reject draft
+                  </button>
+                </div>
+              ) : null}
               <label>
                 Commit message
                 <input
                   value={commitMessage}
                   onChange={(event) => setCommitMessage(event.target.value)}
-                  disabled={!canWrite || changeSet.status !== "ready"}
+                  disabled={!canCommitDraft}
                 />
               </label>
               <button
                 className="btn-primary"
-                disabled={!canWrite || changeSet.status !== "ready" || acceptedCount === 0}
+                disabled={!canCommitDraft || acceptedCount === 0}
               >
                 Commit accepted changes
               </button>

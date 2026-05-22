@@ -30,7 +30,10 @@ from lab_tracker.schemas import (
 from .shared import (
     actor_from_request,
     api_from_request,
+    ensure_project_read,
+    filter_project_scoped_items,
     list_response,
+    paginate,
     repository_from_request,
     validate_pagination,
 )
@@ -64,28 +67,36 @@ def build_sessions_router(api: LabTrackerAPI) -> APIRouter:
         offset: int = 0,
     ):
         validate_pagination(limit, offset)
-        sessions, total = repository_from_request(request).query_sessions(
+        if project_id is not None:
+            ensure_project_read(request, project_id)
+        sessions, _ = repository_from_request(request).query_sessions(
             project_id=project_id,
             status=status.value if status is not None else None,
             session_type=session_type.value if session_type is not None else None,
-            limit=limit,
-            offset=offset,
+            limit=None,
+            offset=0,
         )
-        return list_response(sessions, limit=limit, offset=offset, total=total)
+        visible = filter_project_scoped_items(request, sessions)
+        items, total = paginate(visible, limit, offset)
+        return list_response(items, limit=limit, offset=offset, total=total)
 
     @router.get("/sessions/by-link/{link_code}", response_model=Envelope[Session])
     def get_session_by_link_code(link_code: str, request: Request):
         session = api_from_request(request, api).get_session_by_link_code(link_code)
+        ensure_project_read(request, session.project_id)
         return Envelope(data=session)
 
     @router.get("/sessions/{session_id}", response_model=Envelope[Session])
     def get_session(session_id: UUID, request: Request):
         session = api_from_request(request, api).get_session(session_id)
+        ensure_project_read(request, session.project_id)
         return Envelope(data=session)
 
     @router.patch("/sessions/{session_id}", response_model=Envelope[Session])
     def update_session(session_id: UUID, payload: SessionUpdate, request: Request):
         actor = actor_from_request(request)
+        existing = api_from_request(request, api).get_session(session_id)
+        ensure_project_read(request, existing.project_id)
         session = api_from_request(request, api).update_session(
             session_id,
             status=payload.status,
@@ -102,6 +113,8 @@ def build_sessions_router(api: LabTrackerAPI) -> APIRouter:
         offset: int = 0,
     ):
         validate_pagination(limit, offset)
+        session = api_from_request(request, api).get_session(session_id)
+        ensure_project_read(request, session.project_id)
         outputs, total = repository_from_request(request).query_acquisition_outputs(
             session_id=session_id,
             limit=limit,
@@ -120,6 +133,8 @@ def build_sessions_router(api: LabTrackerAPI) -> APIRouter:
         request: Request,
     ):
         actor = actor_from_request(request)
+        session = api_from_request(request, api).get_session(session_id)
+        ensure_project_read(request, session.project_id)
         output = api_from_request(request, api).register_acquisition_output(
             session_id,
             file_path=payload.file_path,
@@ -132,6 +147,8 @@ def build_sessions_router(api: LabTrackerAPI) -> APIRouter:
     @router.delete("/sessions/{session_id}", response_model=Envelope[Session])
     def delete_session(session_id: UUID, request: Request):
         actor = actor_from_request(request)
+        existing = api_from_request(request, api).get_session(session_id)
+        ensure_project_read(request, existing.project_id)
         session = api_from_request(request, api).delete_session(session_id, actor=actor)
         return Envelope(data=session)
 
@@ -142,6 +159,8 @@ def build_sessions_router(api: LabTrackerAPI) -> APIRouter:
         request: Request,
     ):
         actor = actor_from_request(request)
+        existing = api_from_request(request, api).get_session(session_id)
+        ensure_project_read(request, existing.project_id)
         session = api_from_request(request, api).promote_operational_session(
             session_id,
             primary_question_id=payload.primary_question_id,
@@ -160,6 +179,8 @@ def build_sessions_router(api: LabTrackerAPI) -> APIRouter:
         request: Request,
     ):
         actor = actor_from_request(request)
+        existing = api_from_request(request, api).get_session(session_id)
+        ensure_project_read(request, existing.project_id)
         dataset = api_from_request(request, api).promote_operational_session_to_dataset(
             session_id,
             primary_question_id=payload.primary_question_id,

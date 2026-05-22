@@ -8,7 +8,7 @@ from uuid import UUID
 from sqlalchemy import select
 from sqlalchemy.orm import Session as OrmSession
 
-from lab_tracker.db_models import GraphChangeOperationModel, GraphChangeSetModel
+from lab_tracker.db_models import GraphChangeOperationModel, GraphChangeSetModel, UserModel
 from lab_tracker.models import (
     EntityType,
     GraphChangeOp,
@@ -112,6 +112,11 @@ def change_set_to_model(change_set: GraphChangeSet) -> GraphChangeSetModel:
         created_by=change_set.created_by,
         created_at=change_set.created_at,
         updated_at=change_set.updated_at,
+        submitted_at=change_set.submitted_at,
+        submitted_by=change_set.submitted_by,
+        reviewed_at=change_set.reviewed_at,
+        reviewed_by=change_set.reviewed_by,
+        review_note=change_set.review_note,
         committed_at=change_set.committed_at,
         committed_by=change_set.committed_by,
     )
@@ -137,6 +142,11 @@ def apply_change_set_to_model(row: GraphChangeSetModel, change_set: GraphChangeS
     row.created_by = change_set.created_by
     row.created_at = change_set.created_at
     row.updated_at = change_set.updated_at
+    row.submitted_at = change_set.submitted_at
+    row.submitted_by = change_set.submitted_by
+    row.reviewed_at = change_set.reviewed_at
+    row.reviewed_by = change_set.reviewed_by
+    row.review_note = change_set.review_note
     row.committed_at = change_set.committed_at
     row.committed_by = change_set.committed_by
 
@@ -145,7 +155,9 @@ def change_set_from_model(
     row: GraphChangeSetModel,
     *,
     operations: Iterable[GraphChangeOperation] = (),
+    usernames: dict[str, str] | None = None,
 ) -> GraphChangeSet:
+    resolved_usernames = usernames or {}
     return GraphChangeSet(
         change_set_id=UUID(row.change_set_id),
         project_id=UUID(row.project_id),
@@ -166,10 +178,19 @@ def change_set_from_model(
         error_metadata=_dict(row.error_metadata),
         operations=list(operations),
         created_by=row.created_by,
+        created_by_username=resolved_usernames.get(row.created_by or ""),
         created_at=row.created_at,
         updated_at=row.updated_at,
+        submitted_at=row.submitted_at,
+        submitted_by=row.submitted_by,
+        submitted_by_username=resolved_usernames.get(row.submitted_by or ""),
+        reviewed_at=row.reviewed_at,
+        reviewed_by=row.reviewed_by,
+        reviewed_by_username=resolved_usernames.get(row.reviewed_by or ""),
+        review_note=row.review_note,
         committed_at=row.committed_at,
         committed_by=row.committed_by,
+        committed_by_username=resolved_usernames.get(row.committed_by or ""),
     )
 
 
@@ -197,8 +218,31 @@ class SQLAlchemyGraphChangeSetRepository(EntityRepository[GraphChangeSet]):
 
     def _from_rows(self, rows: list[GraphChangeSetModel]) -> list[GraphChangeSet]:
         operation_map = self._operations_for([row.change_set_id for row in rows])
+        user_ids = sorted(
+            {
+                user_id
+                for row in rows
+                for user_id in (
+                    row.created_by,
+                    row.submitted_by,
+                    row.reviewed_by,
+                    row.committed_by,
+                )
+                if user_id
+            }
+        )
+        usernames: dict[str, str] = {}
+        if user_ids:
+            user_rows = list(
+                self._session.scalars(select(UserModel).where(UserModel.user_id.in_(user_ids)))
+            )
+            usernames = {row.user_id: row.username for row in user_rows}
         return [
-            change_set_from_model(row, operations=operation_map.get(row.change_set_id, []))
+            change_set_from_model(
+                row,
+                operations=operation_map.get(row.change_set_id, []),
+                usernames=usernames,
+            )
             for row in rows
         ]
 

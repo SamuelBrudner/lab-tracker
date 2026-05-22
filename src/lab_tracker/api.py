@@ -15,6 +15,7 @@ from lab_tracker.models import (
     GraphChangeSet,
     Note,
     Project,
+    ProjectMembership,
     Question,
     QuestionRefactor,
     Session,
@@ -43,6 +44,7 @@ EntityT = TypeVar("EntityT")
 class InMemoryStore:
     def __init__(self) -> None:
         self.projects: dict[UUID, Project] = {}
+        self.project_memberships: dict[UUID, ProjectMembership] = {}
         self.questions: dict[UUID, Question] = {}
         self.question_refactors: dict[UUID, QuestionRefactor] = {}
         self.datasets: dict[UUID, Dataset] = {}
@@ -203,6 +205,12 @@ class LabTrackerAPI(
         repository: LabTrackerRepository,
     ) -> None:
         store.projects = {project.project_id: project for project in repository.projects.list()}
+        project_memberships = getattr(repository, "project_memberships", None)
+        if project_memberships is not None:
+            store.project_memberships = {
+                membership.membership_id: membership
+                for membership in project_memberships.list()
+            }
         store.questions = {
             question.question_id: question for question in repository.questions.list()
         }

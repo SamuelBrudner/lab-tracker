@@ -290,6 +290,11 @@ class GraphChangeSetModel(Base):
     )
     committed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     committed_by: Mapped[str | None] = mapped_column(String(255))
+    submitted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    submitted_by: Mapped[str | None] = mapped_column(String(255))
+    reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    reviewed_by: Mapped[str | None] = mapped_column(String(255))
+    review_note: Mapped[str | None] = mapped_column(Text)
 
 
 class GraphChangeOperationModel(Base):
@@ -543,6 +548,37 @@ class UserModel(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utc_now)
 
 
+class ProjectMembershipModel(Base):
+    __tablename__ = "project_memberships"
+    __table_args__ = (
+        UniqueConstraint("project_id", "user_id", name="uq_project_memberships_project_user"),
+    )
+
+    membership_id: Mapped[str] = mapped_column(
+        String(36),
+        primary_key=True,
+        default=lambda: str(uuid4()),
+    )
+    project_id: Mapped[str] = mapped_column(
+        String(36),
+        ForeignKey("projects.project_id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    user_id: Mapped[str] = mapped_column(
+        String(36),
+        ForeignKey("users.user_id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    role: Mapped[str] = mapped_column(String(30), nullable=False)
+    created_by: Mapped[str | None] = mapped_column(String(255))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utc_now)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=_utc_now,
+        onupdate=_utc_now,
+    )
+
+
 class DeviceTokenModel(Base):
     __tablename__ = "device_tokens"
     __table_args__ = (
@@ -628,6 +664,16 @@ Index(
     "ix_graph_change_operations_change_set_sequence",
     GraphChangeOperationModel.change_set_id,
     GraphChangeOperationModel.sequence,
+)
+Index(
+    "ix_project_memberships_user_project",
+    ProjectMembershipModel.user_id,
+    ProjectMembershipModel.project_id,
+)
+Index(
+    "ix_project_memberships_project_role",
+    ProjectMembershipModel.project_id,
+    ProjectMembershipModel.role,
 )
 Index(
     "ix_note_targets_entity_lookup",

@@ -8,7 +8,7 @@ from uuid import UUID, uuid4
 
 from pydantic import ValidationError as PydanticValidationError
 
-from lab_tracker.auth import AuthContext, require_role
+from lab_tracker.auth import AuthContext
 from lab_tracker.errors import NotFoundError, ValidationError
 from lab_tracker.graph_drafting import GraphDraftingError, PROMPT_VERSION, PROVIDER
 from lab_tracker.models import (
@@ -55,7 +55,7 @@ from lab_tracker.schemas import (
     VisualizationCreate,
     VisualizationUpdate,
 )
-from lab_tracker.services.shared import WRITE_ROLES, _actor_user_id
+from lab_tracker.services.shared import _actor_user_id, has_global_project_write
 
 EntityResult = Project | Question | Note | Session | Dataset | Analysis | Claim | Visualization
 _REF_VALIDATION_PLACEHOLDER = "00000000-0000-0000-0000-000000000001"
@@ -135,9 +135,9 @@ class GraphDraftServiceMixin:
         user_hint: str | None = None,
         actor: AuthContext | None = None,
     ) -> GraphChangeSet:
-        require_role(actor, WRITE_ROLES)
         prepared = self._prepare_note_sources_for_graph_draft(note_id, mode=mode)
         note = prepared["source_note"]
+        self.require_project_contributor(note.project_id, actor=actor)
         raw_asset = prepared["primary_raw_asset"]
         cleaned_hint = user_hint.strip() if user_hint else None
         if mode == GraphDraftMode.GRAPH_CONTEXT:
@@ -247,10 +247,8 @@ class GraphDraftServiceMixin:
         status: GraphChangeOperationStatus | None = None,
         actor: AuthContext | None = None,
     ) -> GraphChangeSet:
-        require_role(actor, WRITE_ROLES)
         change_set = self.get_graph_change_set(change_set_id)
-        if change_set.status == GraphChangeSetStatus.COMMITTED:
-            raise ValidationError("Committed graph drafts cannot be edited.")
+        self._ensure_graph_change_set_editable(change_set, actor=actor)
         operation = self._find_graph_operation(change_set, operation_id)
         if payload is not None:
             if not isinstance(payload, dict):
@@ -282,6 +280,58 @@ class GraphDraftServiceMixin:
         self._save_graph_change_set(change_set)
         return change_set
 
+    def submit_graph_change_set(
+        self,
+        change_set_id: UUID,
+        *,
+        actor: AuthContext | None = None,
+    ) -> GraphChangeSet:
+        change_set = self.get_graph_change_set(change_set_id)
+        self.require_project_contributor(change_set.project_id, actor=actor)
+        if not self._is_graph_change_set_author(change_set, actor) and not has_global_project_write(
+            actor
+        ):
+            raise ValidationError("Only the graph draft author can submit this draft.")
+        if change_set.status not in {
+            GraphChangeSetStatus.READY,
+            GraphChangeSetStatus.CHANGES_REQUESTED,
+        }:
+            raise ValidationError("Only ready or changes-requested graph drafts can be submitted.")
+        change_set.status = GraphChangeSetStatus.SUBMITTED
+        change_set.submitted_at = utc_now()
+        change_set.submitted_by = _actor_user_id(actor)
+        change_set.reviewed_at = None
+        change_set.reviewed_by = None
+        change_set.review_note = None
+        change_set.updated_at = change_set.submitted_at
+        self._save_graph_change_set(change_set)
+        return change_set
+
+    def review_graph_change_set(
+        self,
+        change_set_id: UUID,
+        *,
+        status: GraphChangeSetStatus,
+        note: str | None = None,
+        actor: AuthContext | None = None,
+    ) -> GraphChangeSet:
+        change_set = self.get_graph_change_set(change_set_id)
+        self.require_project_owner(change_set.project_id, actor=actor)
+        if status not in {
+            GraphChangeSetStatus.CHANGES_REQUESTED,
+            GraphChangeSetStatus.REJECTED,
+        }:
+            raise ValidationError("Review status must be changes_requested or rejected.")
+        if change_set.status != GraphChangeSetStatus.SUBMITTED:
+            raise ValidationError("Only submitted graph drafts can be reviewed.")
+        change_set.status = status
+        change_set.reviewed_at = utc_now()
+        change_set.reviewed_by = _actor_user_id(actor)
+        change_set.review_note = note.strip() if note else None
+        change_set.updated_at = change_set.reviewed_at
+        self._save_graph_change_set(change_set)
+        return change_set
+
     def commit_graph_change_set(
         self,
         change_set_id: UUID,
@@ -289,12 +339,15 @@ class GraphDraftServiceMixin:
         message: str,
         actor: AuthContext | None = None,
     ) -> GraphChangeSet:
-        require_role(actor, WRITE_ROLES)
         if not message or not message.strip():
             raise ValidationError("message must not be empty.")
         change_set = self.get_graph_change_set(change_set_id)
-        if change_set.status != GraphChangeSetStatus.READY:
-            raise ValidationError("Only ready graph drafts can be committed.")
+        self.require_project_owner(change_set.project_id, actor=actor)
+        if change_set.status not in {
+            GraphChangeSetStatus.READY,
+            GraphChangeSetStatus.SUBMITTED,
+        }:
+            raise ValidationError("Only ready or submitted graph drafts can be committed.")
         ref_map: dict[str, UUID] = {}
         accepted = [
             operation
@@ -319,6 +372,36 @@ class GraphDraftServiceMixin:
         change_set.updated_at = change_set.committed_at
         self._save_graph_change_set(change_set)
         return change_set
+
+    def _is_graph_change_set_author(
+        self,
+        change_set: GraphChangeSet,
+        actor: AuthContext | None,
+    ) -> bool:
+        return actor is not None and change_set.created_by == str(actor.user_id)
+
+    def _ensure_graph_change_set_editable(
+        self,
+        change_set: GraphChangeSet,
+        *,
+        actor: AuthContext | None,
+    ) -> None:
+        if change_set.status in {
+            GraphChangeSetStatus.COMMITTED,
+            GraphChangeSetStatus.REJECTED,
+            GraphChangeSetStatus.FAILED,
+        }:
+            raise ValidationError("This graph draft cannot be edited.")
+        if has_global_project_write(actor):
+            return
+        self.require_project_contributor(change_set.project_id, actor=actor)
+        if not self._is_graph_change_set_author(change_set, actor):
+            raise ValidationError("Only the graph draft author can edit this draft.")
+        if change_set.status not in {
+            GraphChangeSetStatus.READY,
+            GraphChangeSetStatus.CHANGES_REQUESTED,
+        }:
+            raise ValidationError("Submitted graph drafts cannot be edited by contributors.")
 
     def _save_graph_change_set(self, change_set: GraphChangeSet) -> None:
         self._remember_entity("graph_change_sets", change_set.change_set_id, change_set)

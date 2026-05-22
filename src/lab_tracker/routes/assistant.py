@@ -13,6 +13,7 @@ from lab_tracker.decision_context import (
 from lab_tracker.schemas import AssistantDecisionContextRequest
 
 from .shared import repository_from_request
+from .shared import accessible_project_ids_from_request, ensure_project_read
 
 
 def build_assistant_router() -> APIRouter:
@@ -24,12 +25,21 @@ def build_assistant_router() -> APIRouter:
         request: Request,
     ) -> JsonObject:
         """Build bounded graph context before research-facing assistant decisions."""
-        reader = RepositoryDecisionContextReader(repository_from_request(request))
+        accessible_project_ids = accessible_project_ids_from_request(request)
+        resolved_project_id = payload.project_id
+        if resolved_project_id is not None:
+            ensure_project_read(request, resolved_project_id)
+        elif accessible_project_ids is not None and len(accessible_project_ids) == 1:
+            resolved_project_id = next(iter(accessible_project_ids))
+        reader = RepositoryDecisionContextReader(
+            repository_from_request(request),
+            accessible_project_ids=accessible_project_ids,
+        )
         return build_decision_context(
             reader,
             task_kind=payload.task_kind,
             query=payload.query,
-            project_id=str(payload.project_id) if payload.project_id else None,
+            project_id=str(resolved_project_id) if resolved_project_id else None,
             question_id=str(payload.question_id) if payload.question_id else None,
             dataset_id=str(payload.dataset_id) if payload.dataset_id else None,
             analysis_id=str(payload.analysis_id) if payload.analysis_id else None,

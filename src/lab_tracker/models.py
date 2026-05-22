@@ -51,6 +51,13 @@ class ProjectStatus(str, Enum):
     ACTIVE = "active"
     ARCHIVED = "archived"
 
+
+class ProjectMembershipRole(str, Enum):
+    VIEWER = "viewer"
+    CONTRIBUTOR = "contributor"
+    OWNER = "owner"
+
+
 class QuestionStatus(str, Enum):
     STAGED = "staged"
     ACTIVE = "active"
@@ -126,6 +133,9 @@ class EntityType(str, Enum):
 class GraphChangeSetStatus(str, Enum):
     DRAFTING = "drafting"
     READY = "ready"
+    SUBMITTED = "submitted"
+    CHANGES_REQUESTED = "changes_requested"
+    REJECTED = "rejected"
     FAILED = "failed"
     COMMITTED = "committed"
 
@@ -251,9 +261,18 @@ class GraphChangeSet(_DomainModel):
     operations: list[GraphChangeOperation] = Field(default_factory=list)
     created_at: datetime = Field(default_factory=utc_now)
     created_by: str | None = None
+    created_by_username: str | None = None
     updated_at: datetime = Field(default_factory=utc_now)
+    submitted_at: datetime | None = None
+    submitted_by: str | None = None
+    submitted_by_username: str | None = None
+    reviewed_at: datetime | None = None
+    reviewed_by: str | None = None
+    reviewed_by_username: str | None = None
+    review_note: str | None = None
     committed_at: datetime | None = None
     committed_by: str | None = None
+    committed_by_username: str | None = None
 
 
 class Project(_DomainModel):
@@ -261,6 +280,18 @@ class Project(_DomainModel):
     name: str
     description: str = ""
     status: ProjectStatus = ProjectStatus.ACTIVE
+    created_at: datetime = Field(default_factory=utc_now)
+    created_by: str | None = None
+    updated_at: datetime = Field(default_factory=utc_now)
+
+
+class ProjectMembership(_DomainModel):
+    membership_id: UUID
+    project_id: UUID
+    user_id: UUID
+    role: ProjectMembershipRole
+    username: str | None = None
+    user_global_role: str | None = None
     created_at: datetime = Field(default_factory=utc_now)
     created_by: str | None = None
     updated_at: datetime = Field(default_factory=utc_now)

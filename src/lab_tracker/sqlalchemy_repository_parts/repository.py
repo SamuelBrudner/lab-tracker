@@ -30,6 +30,7 @@ from .analyses import (
     SQLAlchemyVisualizationRepository,
 )
 from .core import (
+    SQLAlchemyProjectMembershipRepository,
     SQLAlchemyProjectRepository,
     SQLAlchemyQuestionRefactorRepository,
     SQLAlchemyQuestionRepository,
@@ -46,6 +47,7 @@ class SQLAlchemyLabTrackerRepository(LabTrackerRepository):
     def __init__(self, session: OrmSession) -> None:
         self._session = session
         self.projects = SQLAlchemyProjectRepository(session)
+        self.project_memberships = SQLAlchemyProjectMembershipRepository(session)
         self.questions = SQLAlchemyQuestionRepository(session)
         self.question_refactors = SQLAlchemyQuestionRefactorRepository(session)
         self.datasets = SQLAlchemyDatasetRepository(session)
@@ -109,6 +111,32 @@ class SQLAlchemyLabTrackerRepository(LabTrackerRepository):
         offset: int = 0,
     ) -> tuple[list[Project], int]:
         return self.projects.query(status=status, limit=limit, offset=offset)
+
+    def query_project_memberships(
+        self,
+        *,
+        project_id: UUID | None = None,
+        user_id: UUID | None = None,
+        limit: int | None = None,
+        offset: int = 0,
+    ):
+        return self.project_memberships.query(
+            project_id=project_id,
+            user_id=user_id,
+            limit=limit,
+            offset=offset,
+        )
+
+    def get_project_membership(
+        self,
+        *,
+        project_id: UUID,
+        user_id: UUID,
+    ):
+        return self.project_memberships.get_by_project_user(
+            project_id=project_id,
+            user_id=user_id,
+        )
 
     def query_questions(
         self,

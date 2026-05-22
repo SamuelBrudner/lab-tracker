@@ -24,6 +24,7 @@ from .shared import (
     actor_from_request,
     api_from_request,
     db_session_from_request,
+    ensure_project_read,
     file_storage_from_request,
     list_response,
     repository_from_request,
@@ -71,6 +72,7 @@ def build_dataset_files_router(api: LabTrackerAPI) -> APIRouter:
         dataset_row = db_session.get(DatasetModel, str(dataset_id))
         if dataset_row is None:
             raise NotFoundError("Dataset does not exist.")
+        ensure_project_read(request, UUID(dataset_row.project_id))
         if dataset_row.status != DatasetStatus.STAGED.value:
             raise ValidationError("Files can only be attached while dataset status is staged.")
 
@@ -155,6 +157,7 @@ def build_dataset_files_router(api: LabTrackerAPI) -> APIRouter:
         dataset_row = db_session.get(DatasetModel, str(dataset_id))
         if dataset_row is None:
             raise NotFoundError("Dataset does not exist.")
+        ensure_project_read(request, UUID(dataset_row.project_id))
 
         files, total = repository_from_request(request).query_dataset_files(
             dataset_id=dataset_id,
@@ -177,6 +180,7 @@ def build_dataset_files_router(api: LabTrackerAPI) -> APIRouter:
         dataset_row = db_session.get(DatasetModel, str(dataset_id))
         if dataset_row is None:
             raise NotFoundError("Dataset does not exist.")
+        ensure_project_read(request, UUID(dataset_row.project_id))
 
         row = db_session.get(DatasetFileModel, str(file_id))
         if row is None or row.dataset_id != str(dataset_id):
@@ -210,6 +214,7 @@ def build_dataset_files_router(api: LabTrackerAPI) -> APIRouter:
         dataset_row = db_session.get(DatasetModel, str(dataset_id))
         if dataset_row is None:
             raise NotFoundError("Dataset does not exist.")
+        ensure_project_read(request, UUID(dataset_row.project_id))
         if dataset_row.status != DatasetStatus.STAGED.value:
             raise ValidationError("Files can only be attached while dataset status is staged.")
 

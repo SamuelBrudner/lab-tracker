@@ -31,6 +31,7 @@ import {
 } from "./shared/ui.jsx";
 import { useAppRoute } from "./shared/routing.jsx";
 import { PendingUploadsBadge } from "./shared/upload-status.jsx";
+import { apiListRequest, apiRequest, buildApiPath } from "./shared/api.js";
 
 function App() {
   const { navigate, replace, route } = useAppRoute();
@@ -47,6 +48,9 @@ function App() {
 
   const auth = useAuthSession({ replace, setBusy, setFlash });
   const apiEnabled = auth.authChecked && (!auth.authEnabled || Boolean(auth.token));
+  const [projectMembers, setProjectMembers] = React.useState([]);
+  const [memberUsername, setMemberUsername] = React.useState("");
+  const [memberRole, setMemberRole] = React.useState("contributor");
   const workspaceData = useProjectWorkspaceData({
     enabled: apiEnabled,
     loadProjectData: needsProjectData,
@@ -69,6 +73,100 @@ function App() {
   const workspaceForms = useProjectWorkspaceForms({
     questions: workspaceData.questions,
   });
+  const refreshProjectMembers = React.useCallback(async () => {
+    if (!apiEnabled || !workspaceData.selectedProjectId) {
+      setProjectMembers([]);
+      return;
+    }
+    try {
+      const { data } = await apiListRequest(
+        buildApiPath(`/projects/${workspaceData.selectedProjectId}/members`, { limit: 200 }),
+        { token: auth.token }
+      );
+      setProjectMembers(data);
+    } catch {
+      setProjectMembers([]);
+    }
+  }, [apiEnabled, auth.token, workspaceData.selectedProjectId]);
+
+  React.useEffect(() => {
+    refreshProjectMembers();
+  }, [refreshProjectMembers]);
+
+  const selectedProjectMembership = React.useMemo(
+    () => projectMembers.find((member) => member.user_id === auth.user?.user_id) || null,
+    [auth.user, projectMembers]
+  );
+  const selectedProjectRole = selectedProjectMembership?.role || "";
+  const canContributeToProject =
+    auth.user?.role === "admin" ||
+    selectedProjectRole === "contributor" ||
+    selectedProjectRole === "owner";
+  const canManageProjectMembers = auth.user?.role === "admin" || selectedProjectRole === "owner";
+
+  async function handleAddProjectMember(event) {
+    event.preventDefault();
+    if (!canManageProjectMembers || !workspaceData.selectedProjectId || !memberUsername.trim()) {
+      return;
+    }
+    setBusy(true);
+    setFlash("", "");
+    try {
+      await apiRequest(`/projects/${workspaceData.selectedProjectId}/members`, {
+        body: { username: memberUsername.trim(), role: memberRole },
+        method: "POST",
+        token: auth.token,
+      });
+      setMemberUsername("");
+      await refreshProjectMembers();
+      setFlash("Project member updated.");
+    } catch (err) {
+      setFlash("", err.message || "Failed to update project member.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function handleUpdateProjectMember(userId, role) {
+    if (!canManageProjectMembers || !workspaceData.selectedProjectId) {
+      return;
+    }
+    setBusy(true);
+    setFlash("", "");
+    try {
+      await apiRequest(`/projects/${workspaceData.selectedProjectId}/members/${userId}`, {
+        body: { role },
+        method: "PATCH",
+        token: auth.token,
+      });
+      await refreshProjectMembers();
+      setFlash("Project member updated.");
+    } catch (err) {
+      setFlash("", err.message || "Failed to update project member.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function handleRemoveProjectMember(userId) {
+    if (!canManageProjectMembers || !workspaceData.selectedProjectId) {
+      return;
+    }
+    setBusy(true);
+    setFlash("", "");
+    try {
+      await apiRequest(`/projects/${workspaceData.selectedProjectId}/members/${userId}`, {
+        method: "DELETE",
+        token: auth.token,
+      });
+      await refreshProjectMembers();
+      setFlash("Project member removed.");
+    } catch (err) {
+      setFlash("", err.message || "Failed to remove project member.");
+    } finally {
+      setBusy(false);
+    }
+  }
   const projectActions = useProjectActions({
     token: auth.token,
     canWrite: auth.canWrite,
@@ -98,7 +196,7 @@ function App() {
   });
   const noteActions = useNoteActions({
     token: auth.token,
-    canWrite: auth.canWrite,
+    canWrite: canContributeToProject,
     selectedProjectId: workspaceData.selectedProjectId,
     refreshProjectCounts: workspaceData.refreshProjectCounts,
     refreshRecentNotes: noteData.refreshRecentNotes,
@@ -157,6 +255,15 @@ function App() {
     onProjectDescriptionChange: (event) =>
       workspaceForms.setProjectDescription(event.target.value),
     onCreateProject: projectActions.handleCreateProject,
+    projectMembers,
+    canManageProjectMembers,
+    memberUsername,
+    memberRole,
+    onMemberUsernameChange: (event) => setMemberUsername(event.target.value),
+    onMemberRoleChange: (event) => setMemberRole(event.target.value),
+    onAddProjectMember: handleAddProjectMember,
+    onUpdateProjectMember: handleUpdateProjectMember,
+    onRemoveProjectMember: handleRemoveProjectMember,
   };
 
   return (
@@ -213,6 +320,19 @@ function App() {
               sessionData={sessionData}
               dataset={dataset}
               analysis={analysis}
+              projectMembers={projectMembers}
+              projectAccess={{
+                canContribute: canContributeToProject,
+                canManageMembers: canManageProjectMembers,
+                memberRole,
+                memberUsername,
+                onAddMember: handleAddProjectMember,
+                onMemberRoleChange: (event) => setMemberRole(event.target.value),
+                onMemberUsernameChange: (event) => setMemberUsername(event.target.value),
+                onRemoveMember: handleRemoveProjectMember,
+                onUpdateMember: handleUpdateProjectMember,
+                role: selectedProjectRole,
+              }}
             />
           ) : (
             <Dashboard {...dashboardProps} />
@@ -221,7 +341,7 @@ function App() {
           {route.kind === "capture" ? (
             <MobileCaptureCard
               token={auth.token}
-              canWrite={auth.canWrite}
+              canWrite={canContributeToProject}
               projects={workspaceData.projects}
               selectedProjectId={workspaceData.selectedProjectId}
               onSelectedProjectChange={workspaceData.setSelectedProjectId}
@@ -266,7 +386,7 @@ function App() {
               projects={workspaceData.projects}
               navigate={navigate}
               onSetActiveProject={workspaceData.setSelectedProjectId}
-              canWrite={auth.canWrite}
+              canWrite={canContributeToProject}
               setBusy={setBusy}
               setFlash={setFlash}
             />
@@ -277,7 +397,8 @@ function App() {
               token={auth.token}
               changeSetId={route.changeSetId}
               navigate={navigate}
-              canWrite={auth.canWrite}
+              canWrite={canContributeToProject}
+              canManageGraph={canManageProjectMembers}
               setBusy={setBusy}
               setFlash={setFlash}
             />

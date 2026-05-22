@@ -35,8 +35,12 @@ from lab_tracker.schemas import (
 from .shared import (
     api_from_request,
     actor_from_request,
+    ensure_project_contributor,
+    ensure_project_read,
+    filter_project_scoped_items,
     list_response,
     note_default_status,
+    paginate,
     parse_entity_refs_form,
     parse_metadata_form,
     repository_from_request,
@@ -55,6 +59,7 @@ def build_notes_router(api: LabTrackerAPI) -> APIRouter:
     )
     def create_note(payload: NoteCreate, request: Request):
         actor = actor_from_request(request)
+        ensure_project_contributor(request, payload.project_id)
         note = api_from_request(request, api).create_note(
             project_id=payload.project_id,
             raw_content=payload.raw_content,
@@ -81,6 +86,7 @@ def build_notes_router(api: LabTrackerAPI) -> APIRouter:
         status: NoteStatus | None = Form(None),
     ):
         actor = actor_from_request(request)
+        ensure_project_contributor(request, project_id)
         request_api = api_from_request(request, api)
         filename = (file.filename or "").strip()
         if not filename:
@@ -151,23 +157,30 @@ def build_notes_router(api: LabTrackerAPI) -> APIRouter:
         offset: int = 0,
     ):
         validate_pagination(limit, offset)
-        notes, total = repository_from_request(request).query_notes(
+        if project_id is not None:
+            ensure_project_read(request, project_id)
+        notes, _ = repository_from_request(request).query_notes(
             project_id=project_id,
             status=status.value if status is not None else None,
             target_entity_type=target_entity_type.value if target_entity_type is not None else None,
             target_entity_id=target_entity_id,
-            limit=limit,
-            offset=offset,
+            limit=None,
+            offset=0,
         )
-        return list_response(notes, limit=limit, offset=offset, total=total)
+        visible = filter_project_scoped_items(request, notes)
+        items, total = paginate(visible, limit, offset)
+        return list_response(items, limit=limit, offset=offset, total=total)
 
     @router.get("/notes/{note_id:uuid}", response_model=Envelope[Note])
     def get_note(note_id: UUID, request: Request):
         note = api_from_request(request, api).get_note(note_id)
+        ensure_project_read(request, note.project_id)
         return Envelope(data=note)
 
     @router.get("/notes/{note_id:uuid}/raw")
     def download_note_raw(note_id: UUID, request: Request):
+        note = api_from_request(request, api).get_note(note_id)
+        ensure_project_read(request, note.project_id)
         raw_asset, content = api_from_request(request, api).download_note_raw(note_id)
         accept = (request.headers.get("accept") or "").lower()
         if "application/json" not in accept:
@@ -192,6 +205,8 @@ def build_notes_router(api: LabTrackerAPI) -> APIRouter:
     @router.patch("/notes/{note_id:uuid}", response_model=Envelope[Note])
     def update_note(note_id: UUID, payload: NoteUpdate, request: Request):
         actor = actor_from_request(request)
+        note = api_from_request(request, api).get_note(note_id)
+        ensure_project_contributor(request, note.project_id)
         note = api_from_request(request, api).update_note(
             note_id,
             transcribed_text=payload.transcribed_text,
@@ -209,6 +224,8 @@ def build_notes_router(api: LabTrackerAPI) -> APIRouter:
         payload: NoteTranscriptRequest | None = None,
     ):
         actor = actor_from_request(request)
+        note = api_from_request(request, api).get_note(note_id)
+        ensure_project_contributor(request, note.project_id)
         transcription_client = _transcription_client_from_request(request)
         try:
             note = api_from_request(request, api).transcribe_voice_note(
@@ -226,6 +243,8 @@ def build_notes_router(api: LabTrackerAPI) -> APIRouter:
     @router.delete("/notes/{note_id:uuid}", response_model=Envelope[Note])
     def delete_note(note_id: UUID, request: Request):
         actor = actor_from_request(request)
+        note = api_from_request(request, api).get_note(note_id)
+        ensure_project_contributor(request, note.project_id)
         note = api_from_request(request, api).delete_note(note_id, actor=actor)
         return Envelope(data=note)
 

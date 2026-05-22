@@ -17,12 +17,15 @@ from lab_tracker.schemas import (
     GraphDraftCommitRequest,
     GraphDraftCreateRequest,
     GraphDraftOperationUpdate,
+    GraphDraftReviewRequest,
     ListEnvelope,
 )
 
 from .shared import (
     actor_from_request,
     api_from_request,
+    ensure_project_read,
+    filter_project_scoped_items,
     list_response,
     paginate,
     validate_pagination,
@@ -57,7 +60,7 @@ def build_graph_drafts_router(api: LabTrackerAPI) -> APIRouter:
             close = getattr(draft_client, "close", None)
             if callable(close):
                 close()
-        return Envelope(data=change_set)
+        return Envelope(data=_attach_graph_usernames(request, change_set))
 
     @router.get("/graph-drafts", response_model=ListEnvelope[GraphChangeSet])
     def list_graph_drafts(
@@ -69,18 +72,27 @@ def build_graph_drafts_router(api: LabTrackerAPI) -> APIRouter:
         offset: int = 0,
     ):
         validate_pagination(limit, offset)
+        if project_id is not None:
+            ensure_project_read(request, project_id)
         change_sets = api_from_request(request, api).list_graph_change_sets(
             project_id=project_id,
             status=status,
             source_note_id=source_note_id,
         )
-        items, total = paginate(change_sets, limit, offset)
-        return list_response(items, limit=limit, offset=offset, total=total)
+        visible = filter_project_scoped_items(request, change_sets)
+        items, total = paginate(visible, limit, offset)
+        return list_response(
+            [_attach_graph_usernames(request, item) for item in items],
+            limit=limit,
+            offset=offset,
+            total=total,
+        )
 
     @router.get("/graph-drafts/{change_set_id:uuid}", response_model=Envelope[GraphChangeSet])
     def get_graph_draft(change_set_id: UUID, request: Request):
         change_set = api_from_request(request, api).get_graph_change_set(change_set_id)
-        return Envelope(data=change_set)
+        ensure_project_read(request, change_set.project_id)
+        return Envelope(data=_attach_graph_usernames(request, change_set))
 
     @router.patch(
         "/graph-drafts/{change_set_id:uuid}/operations/{operation_id:uuid}",
@@ -93,6 +105,8 @@ def build_graph_drafts_router(api: LabTrackerAPI) -> APIRouter:
         request: Request,
     ):
         actor = actor_from_request(request)
+        change_set = api_from_request(request, api).get_graph_change_set(change_set_id)
+        ensure_project_read(request, change_set.project_id)
         change_set = api_from_request(request, api).update_graph_change_operation(
             change_set_id,
             operation_id,
@@ -100,7 +114,37 @@ def build_graph_drafts_router(api: LabTrackerAPI) -> APIRouter:
             status=payload.status,
             actor=actor,
         )
-        return Envelope(data=change_set)
+        return Envelope(data=_attach_graph_usernames(request, change_set))
+
+    @router.post(
+        "/graph-drafts/{change_set_id:uuid}/submit",
+        response_model=Envelope[GraphChangeSet],
+    )
+    def submit_graph_draft(change_set_id: UUID, request: Request):
+        actor = actor_from_request(request)
+        change_set = api_from_request(request, api).submit_graph_change_set(
+            change_set_id,
+            actor=actor,
+        )
+        return Envelope(data=_attach_graph_usernames(request, change_set))
+
+    @router.post(
+        "/graph-drafts/{change_set_id:uuid}/review",
+        response_model=Envelope[GraphChangeSet],
+    )
+    def review_graph_draft(
+        change_set_id: UUID,
+        payload: GraphDraftReviewRequest,
+        request: Request,
+    ):
+        actor = actor_from_request(request)
+        change_set = api_from_request(request, api).review_graph_change_set(
+            change_set_id,
+            status=payload.status,
+            note=payload.note,
+            actor=actor,
+        )
+        return Envelope(data=_attach_graph_usernames(request, change_set))
 
     @router.post(
         "/graph-drafts/{change_set_id:uuid}/commit",
@@ -117,7 +161,7 @@ def build_graph_drafts_router(api: LabTrackerAPI) -> APIRouter:
             message=payload.message,
             actor=actor,
         )
-        return Envelope(data=change_set)
+        return Envelope(data=_attach_graph_usernames(request, change_set))
 
     return router
 
@@ -128,3 +172,23 @@ def _draft_client_from_request(request: Request):
     if callable(factory):
         return factory(settings)
     return make_graph_draft_client(settings)
+
+
+def _attach_graph_usernames(request: Request, change_set: GraphChangeSet) -> GraphChangeSet:
+    auth_service = request.app.state.auth_service
+    for id_field, username_field in (
+        ("created_by", "created_by_username"),
+        ("submitted_by", "submitted_by_username"),
+        ("reviewed_by", "reviewed_by_username"),
+        ("committed_by", "committed_by_username"),
+    ):
+        user_id = getattr(change_set, id_field, None)
+        if not user_id or getattr(change_set, username_field, None):
+            continue
+        try:
+            user = auth_service.get_user_by_id(UUID(str(user_id)))
+        except Exception:
+            user = None
+        if user is not None:
+            setattr(change_set, username_field, user.username)
+    return change_set

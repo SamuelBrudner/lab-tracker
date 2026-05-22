@@ -22,7 +22,10 @@ function WorkspaceHome({
   sessionData,
   dataset,
   analysis,
+  projectMembers = [],
+  projectAccess = {},
 }) {
+  const canContribute = Boolean(projectAccess.canContribute);
   return (
     <>
       <Dashboard
@@ -41,6 +44,15 @@ function WorkspaceHome({
           workspaceForms.setProjectDescription(event.target.value)
         }
         onCreateProject={projectActions.handleCreateProject}
+        projectMembers={projectMembers}
+        canManageProjectMembers={projectAccess.canManageMembers}
+        memberUsername={projectAccess.memberUsername || ""}
+        memberRole={projectAccess.memberRole || "contributor"}
+        onMemberUsernameChange={projectAccess.onMemberUsernameChange}
+        onMemberRoleChange={projectAccess.onMemberRoleChange}
+        onAddProjectMember={projectAccess.onAddMember}
+        onUpdateProjectMember={projectAccess.onUpdateMember}
+        onRemoveProjectMember={projectAccess.onRemoveMember}
       />
 
       <QuestionPanel
@@ -92,7 +104,7 @@ function WorkspaceHome({
       />
 
       <NotePanel
-        canWrite={auth.canWrite}
+        canWrite={canContribute}
         busy={busy}
         error={noteData.error}
         loading={noteData.loading}

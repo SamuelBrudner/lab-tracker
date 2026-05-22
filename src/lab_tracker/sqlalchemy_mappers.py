@@ -17,6 +17,7 @@ from lab_tracker.db_models import (
     DatasetQuestionLinkModel,
     NoteModel,
     NoteTargetModel,
+    ProjectMembershipModel,
     ProjectModel,
     QuestionModel,
     QuestionParentModel,
@@ -42,6 +43,8 @@ from lab_tracker.models import (
     NoteStatus,
     OutcomeStatus,
     Project,
+    ProjectMembership,
+    ProjectMembershipRole,
     ProjectStatus,
     Question,
     QuestionRefactor,
@@ -117,6 +120,46 @@ def apply_project_to_model(row: ProjectModel, project: Project) -> None:
     row.created_by = project.created_by
     row.created_at = project.created_at
     row.updated_at = project.updated_at
+
+
+def project_membership_to_model(membership: ProjectMembership) -> ProjectMembershipModel:
+    return ProjectMembershipModel(
+        membership_id=_uuid_str(membership.membership_id),
+        project_id=_uuid_str(membership.project_id),
+        user_id=_uuid_str(membership.user_id),
+        role=membership.role.value,
+        created_by=membership.created_by,
+        created_at=membership.created_at,
+        updated_at=membership.updated_at,
+    )
+
+
+def project_membership_from_model(row: ProjectMembershipModel) -> ProjectMembership:
+    username = getattr(row, "username", None)
+    user_global_role = getattr(row, "user_global_role", None)
+    return ProjectMembership(
+        membership_id=_uuid(row.membership_id),
+        project_id=_uuid(row.project_id),
+        user_id=_uuid(row.user_id),
+        role=ProjectMembershipRole(row.role),
+        username=username,
+        user_global_role=user_global_role,
+        created_by=row.created_by,
+        created_at=_as_utc(row.created_at),
+        updated_at=_as_utc(row.updated_at),
+    )
+
+
+def apply_project_membership_to_model(
+    row: ProjectMembershipModel,
+    membership: ProjectMembership,
+) -> None:
+    row.project_id = _uuid_str(membership.project_id)
+    row.user_id = _uuid_str(membership.user_id)
+    row.role = membership.role.value
+    row.created_by = membership.created_by
+    row.created_at = membership.created_at
+    row.updated_at = membership.updated_at
 
 
 def question_to_model(question: Question) -> QuestionModel:

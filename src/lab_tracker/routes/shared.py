@@ -66,6 +66,33 @@ def actor_from_request(request: Request | None) -> AuthContext:
     return actor
 
 
+def accessible_project_ids_from_request(request: Request) -> set[Any] | None:
+    actor = actor_from_request(request)
+    return api_from_request(request).accessible_project_ids(actor)
+
+
+def ensure_project_read(request: Request, project_id: Any) -> None:
+    actor = actor_from_request(request)
+    api_from_request(request).require_project_read(project_id, actor=actor)
+
+
+def ensure_project_contributor(request: Request, project_id: Any) -> None:
+    actor = actor_from_request(request)
+    api_from_request(request).require_project_contributor(project_id, actor=actor)
+
+
+def ensure_project_owner(request: Request, project_id: Any) -> None:
+    actor = actor_from_request(request)
+    api_from_request(request).require_project_owner(project_id, actor=actor)
+
+
+def filter_project_scoped_items(request: Request, items: list[Any]) -> list[Any]:
+    allowed = accessible_project_ids_from_request(request)
+    if allowed is None:
+        return items
+    return [item for item in items if getattr(item, "project_id", None) in allowed]
+
+
 def api_from_request(request: Request, fallback: LabTrackerAPI | None = None) -> LabTrackerAPI:
     api = getattr(request.state, "lab_tracker_api", None)
     if api is not None:
