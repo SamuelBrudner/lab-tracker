@@ -1,9 +1,11 @@
-/* Offline-aware upload queue for /notes/quick-capture.
+/* Offline-aware upload queue for capture multipart POSTs.
  *
  * The queue stores failed (or offline-initiated) capture payloads in IndexedDB
  * and replays them when the network returns. Logic is split from storage so
  * the queue can be unit-tested against an in-memory adapter without pulling in
- * an IndexedDB shim.
+ * an IndexedDB shim. The queue is endpoint-agnostic: each item carries its own
+ * target path so the same queue serves /notes/upload-file (full-form capture),
+ * /notes/quick-capture (share target), and any future capture variants.
  */
 
 const DB_NAME = "lab-tracker-upload-queue";
@@ -11,6 +13,7 @@ const DB_VERSION = 1;
 const STORE = "pending";
 
 const QUICK_CAPTURE_PATH = "/notes/quick-capture";
+const UPLOAD_FILE_PATH = "/notes/upload-file";
 
 function openIndexedDb() {
   return new Promise((resolve, reject) => {
@@ -101,16 +104,20 @@ function createUploadQueue({ storage, fetch: fetchImpl = globalThis.fetch, now =
     });
   }
 
-  async function enqueue({ projectId, file, token = "" }) {
-    if (!projectId) {
-      throw new Error("enqueue requires projectId");
+  async function enqueue({ endpoint, file, fields = {}, token = "" }) {
+    if (!endpoint) {
+      throw new Error("enqueue requires endpoint");
     }
     if (!file) {
       throw new Error("enqueue requires a file");
     }
+    if (!fields.project_id) {
+      throw new Error("enqueue requires fields.project_id");
+    }
     const record = {
-      projectId,
+      endpoint,
       file,
+      fields: { ...fields },
       filename: file.name || "capture",
       contentType: file.type || "application/octet-stream",
       token,
@@ -135,12 +142,19 @@ function createUploadQueue({ storage, fetch: fetchImpl = globalThis.fetch, now =
     const results = { uploaded: [], stillQueued: [] };
     for (const item of items) {
       const payload = new FormData();
-      payload.append("project_id", item.projectId);
       payload.append("file", item.file, item.filename);
+      const fields = item.fields || { project_id: item.projectId };
+      for (const [key, value] of Object.entries(fields)) {
+        if (value === undefined || value === null) {
+          continue;
+        }
+        payload.append(key, value);
+      }
       const headers = item.token ? { Authorization: `Bearer ${item.token}` } : {};
+      const endpoint = item.endpoint || QUICK_CAPTURE_PATH;
       let response;
       try {
-        response = await fetchImpl(QUICK_CAPTURE_PATH, {
+        response = await fetchImpl(endpoint, {
           method: "POST",
           headers,
           body: payload,
@@ -175,6 +189,7 @@ function createUploadQueue({ storage, fetch: fetchImpl = globalThis.fetch, now =
 
 export {
   QUICK_CAPTURE_PATH,
+  UPLOAD_FILE_PATH,
   createIndexedDbStorage,
   createMemoryStorage,
   createUploadQueue,

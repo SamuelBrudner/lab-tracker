@@ -2,8 +2,12 @@ import * as React from "react";
 
 import { apiListRequest, apiRequest, buildApiPath } from "../shared/api.js";
 import { formatDate } from "../shared/formatters.js";
+import { getUploadQueue } from "../shared/register-sw.js";
+import { UPLOAD_FILE_PATH } from "../shared/upload-queue.js";
 
 const { useEffect, useMemo, useState } = React;
+
+const OFFLINE_QUEUED = Symbol("offline-queued");
 
 const CAPTURE_MODES = [
   { label: "Photo", value: "photo" },
@@ -236,6 +240,45 @@ function MobileCaptureCard({
     });
   }
 
+  async function queueRawFileNoteOffline({ fileToUpload, metadata }) {
+    const queue = getUploadQueue();
+    if (!queue) {
+      return false;
+    }
+    const fields = {
+      project_id: selectedProjectId,
+      metadata: JSON.stringify(metadata),
+    };
+    const targets = selectedTargets();
+    if (targets.length > 0) {
+      fields.targets = JSON.stringify(targets);
+    }
+    await queue.enqueue({
+      endpoint: UPLOAD_FILE_PATH,
+      file: fileToUpload,
+      fields,
+      token,
+    });
+    return true;
+  }
+
+  async function uploadOrQueueRawFile({ fileToUpload, metadata }) {
+    try {
+      return await uploadRawFileNote({ fileToUpload, metadata });
+    } catch (err) {
+      // err.status is set by apiFetch for server-rejected responses; absence
+      // means the fetch itself failed (offline, DNS, CORS, etc.). Only queue
+      // in that case — real validation/auth errors must surface as before.
+      if (err && err.status === undefined) {
+        const queued = await queueRawFileNoteOffline({ fileToUpload, metadata });
+        if (queued) {
+          return OFFLINE_QUEUED;
+        }
+      }
+      throw err;
+    }
+  }
+
   async function createTextCapture({ draft }) {
     return apiRequest("/notes", {
       body: {
@@ -356,38 +399,61 @@ function MobileCaptureCard({
     setFlash("", "");
     try {
       let noteId = uploadedNoteId;
+      let queuedOffline = false;
       if (!noteId) {
         const bundleId = captureMode === "bundle" ? newBundleId() : "";
         let photoNote = null;
         let voiceNote = null;
         let textCapture = null;
         if (needsPhoto()) {
-          photoNote = await uploadRawFileNote({
+          const result = await uploadOrQueueRawFile({
             fileToUpload: photoFile,
             metadata: baseMetadata({ draft, kind: "image", bundleId }),
           });
-          noteId = photoNote.note_id;
+          if (result === OFFLINE_QUEUED) {
+            queuedOffline = true;
+          } else {
+            photoNote = result;
+            noteId = photoNote.note_id;
+          }
         }
-        if (needsVoice()) {
-          voiceNote = await uploadRawFileNote({
+        if (needsVoice() && !queuedOffline) {
+          const result = await uploadOrQueueRawFile({
             fileToUpload: audioFile,
             metadata: baseMetadata({ draft, kind: "voice", bundleId }),
           });
-          setUploadedVoiceNoteId(voiceNote.note_id);
-          if (!noteId) {
-            noteId = voiceNote.note_id;
+          if (result === OFFLINE_QUEUED) {
+            queuedOffline = true;
+          } else {
+            voiceNote = result;
+            setUploadedVoiceNoteId(voiceNote.note_id);
+            if (!noteId) {
+              noteId = voiceNote.note_id;
+            }
+            if (draft) {
+              voiceNote = await apiRequest(`/notes/${voiceNote.note_id}/transcript`, {
+                body: hint.trim() ? { prompt: hint.trim() } : {},
+                method: "POST",
+                token,
+              });
+            }
           }
-          if (draft) {
-            voiceNote = await apiRequest(`/notes/${voiceNote.note_id}/transcript`, {
-              body: hint.trim() ? { prompt: hint.trim() } : {},
-              method: "POST",
-              token,
-            });
-          }
+        } else if (needsVoice() && queuedOffline) {
+          await queueRawFileNoteOffline({
+            fileToUpload: audioFile,
+            metadata: baseMetadata({ draft, kind: "voice", bundleId }),
+          });
         }
-        if (needsText()) {
+        if (needsText() && !queuedOffline) {
           textCapture = await createTextCapture({ draft });
           noteId = textCapture.note_id;
+        }
+        if (queuedOffline) {
+          setFlash("Capture queued — will upload when you're back online.");
+          setPhotoFile(null);
+          setAudioFile(null);
+          setTextNote("");
+          return;
         }
         setUploadedNoteId(noteId);
         await Promise.all([
