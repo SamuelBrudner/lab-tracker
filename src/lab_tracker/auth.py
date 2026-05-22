@@ -255,6 +255,29 @@ DEVICE_TOKEN_PREFIX = "ldev_"
 ENROLLMENT_OFFER_PREFIX = "lpair_"
 
 
+def device_principal_can_access(method: str, path: str) -> bool:
+    """Coarse-grained policy for paired-device principals.
+
+    Devices can read everything (the data is the user's own anyway) but
+    can only write to capture endpoints. /auth/* is off-limits in both
+    directions so a stolen device cannot enumerate other devices, refresh
+    arbitrary sessions, or escalate.
+    """
+    method = method.upper()
+    if path.startswith("/auth"):
+        return False
+    if method in {"GET", "HEAD", "OPTIONS"}:
+        return True
+    if method != "POST":
+        return False
+    if path in {"/notes", "/notes/upload-file", "/notes/quick-capture"}:
+        return True
+    segments = [segment for segment in path.split("/") if segment]
+    if len(segments) == 3 and segments[0] == "notes" and segments[2] == "transcript":
+        return True
+    return False
+
+
 @dataclass(frozen=True)
 class DeviceToken:
     device_token_id: UUID

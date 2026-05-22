@@ -104,6 +104,37 @@ class AuthLoginRequest(RequestModel):
     password: str = Field(..., min_length=1)
 
 
+class DeviceEnrollmentCreate(RequestModel):
+    ttl_minutes: int | None = Field(default=None, ge=1, le=60)
+
+
+class DeviceEnrollmentRead(BaseModel):
+    enrollment_id: UUID
+    offer_token: str
+    expires_at: datetime
+    enrollment_url: str
+
+
+class DeviceConsumeRequest(RequestModel):
+    offer_token: str = Field(..., min_length=1)
+    label: str = Field(..., min_length=1, max_length=150)
+
+
+class DeviceTokenRead(BaseModel):
+    device_token_id: UUID
+    label: str
+    created_at: datetime
+    last_used_at: datetime | None = None
+    revoked_at: datetime | None = None
+
+
+class DeviceConsumeRead(BaseModel):
+    device_token_id: UUID
+    secret: str
+    label: str
+    created_at: datetime
+
+
 class NoteRawDownloadRead(BaseModel):
     storage_id: UUID
     filename: str

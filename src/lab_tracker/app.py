@@ -18,7 +18,17 @@ from sqlalchemy.orm import Session, sessionmaker
 from starlette.responses import FileResponse, JSONResponse, RedirectResponse
 
 from lab_tracker.api import LabTrackerAPI
-from lab_tracker.auth import AuthContext, AuthService, Role, TokenService, extract_bearer_token
+from lab_tracker.auth import (
+    DEVICE_TOKEN_PREFIX,
+    AuthContext,
+    AuthService,
+    DeviceAuthService,
+    PrincipalType,
+    Role,
+    TokenService,
+    device_principal_can_access,
+    extract_bearer_token,
+)
 from lab_tracker.config import get_settings
 from lab_tracker.db import get_engine, get_session_factory
 from lab_tracker.db_models import (
@@ -57,6 +67,7 @@ _PUBLIC_PATHS = frozenset(
         "/readiness",
         "/auth/login",
         "/auth/register",
+        "/auth/devices/consume",
         "/openapi.json",
         "/docs",
         "/redoc",
@@ -203,6 +214,11 @@ def _auth_error_response(message: str) -> JSONResponse:
     return JSONResponse(status_code=401, content=payload.model_dump())
 
 
+def _device_forbidden_response(message: str) -> JSONResponse:
+    payload = ErrorEnvelope(error=ErrorInfo(code="device_forbidden", message=message))
+    return JSONResponse(status_code=403, content=payload.model_dump())
+
+
 def local_auth_context() -> AuthContext:
     return AuthContext(user_id=_LOCAL_AUTH_USER_ID, role=Role.ADMIN)
 
@@ -229,11 +245,26 @@ def _configure_auth_middleware(app: FastAPI) -> None:
             return await call_next(request)
         try:
             token = extract_bearer_token(request.headers.get("Authorization"))
-            claims = app.state.token_service.verify_access_token(token)
-            user = app.state.auth_service.get_user_by_id(claims.user_id)
-            if user is None:
-                raise AuthError("Invalid token.")
-            request.state.auth_context = AuthContext(user_id=user.user_id, role=user.role)
+            if token.startswith(DEVICE_TOKEN_PREFIX):
+                principal = app.state.device_auth_service.verify_device_token(token)
+                if principal is None:
+                    raise AuthError("Invalid device token.")
+                if not device_principal_can_access(request.method, request.url.path):
+                    return _device_forbidden_response(
+                        "This action is not permitted for paired devices."
+                    )
+                request.state.auth_context = AuthContext(
+                    user_id=principal.user_id,
+                    role=Role.EDITOR,
+                    principal_type=PrincipalType.DEVICE,
+                    device_token_id=principal.device_token_id,
+                )
+            else:
+                claims = app.state.token_service.verify_access_token(token)
+                user = app.state.auth_service.get_user_by_id(claims.user_id)
+                if user is None:
+                    raise AuthError("Invalid token.")
+                request.state.auth_context = AuthContext(user_id=user.user_id, role=user.role)
         except AuthError as exc:
             return _auth_error_response(str(exc))
         return await call_next(request)
@@ -323,6 +354,7 @@ def create_app() -> FastAPI:
     engine = get_engine(settings)
     session_factory = get_session_factory(engine=engine)
     auth_service = AuthService(session_factory=session_factory)
+    device_auth_service = DeviceAuthService(session_factory=session_factory)
     token_service = TokenService(
         settings.auth_secret_key,
         ttl_minutes=settings.auth_token_ttl_minutes,
@@ -347,6 +379,7 @@ def create_app() -> FastAPI:
     app.state.db_engine = engine
     app.state.db_session_factory = session_factory
     app.state.auth_service = auth_service
+    app.state.device_auth_service = device_auth_service
     app.state.auth_enabled = settings.is_auth_enabled()
     app.state.settings = settings
     app.state.token_service = token_service
@@ -394,6 +427,7 @@ def create_app() -> FastAPI:
         app.state.lab_tracker_api,
         auth_service=auth_service,
         token_service=token_service,
+        device_auth_service=device_auth_service,
         bootstrap_admin_token=settings.bootstrap_admin_token,
     )
 

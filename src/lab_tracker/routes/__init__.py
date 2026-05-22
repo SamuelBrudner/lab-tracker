@@ -5,7 +5,7 @@ from __future__ import annotations
 from fastapi import FastAPI
 
 from lab_tracker.api import LabTrackerAPI
-from lab_tracker.auth import AuthService, TokenService
+from lab_tracker.auth import AuthService, DeviceAuthService, TokenService
 
 from .analyses import build_analyses_router
 from .assistant import build_assistant_router
@@ -13,6 +13,7 @@ from .auth import build_auth_router
 from .claims import build_claims_router
 from .dataset_files import build_dataset_files_router
 from .datasets import build_datasets_router
+from .device_auth import build_device_auth_router
 from .errors import register_error_handlers
 from .graph_drafts import build_graph_drafts_router
 from .notes import build_notes_router
@@ -30,6 +31,7 @@ def register_routes(
     *,
     auth_service: AuthService,
     token_service: TokenService,
+    device_auth_service: DeviceAuthService,
     bootstrap_admin_token: str | None = None,
 ) -> None:
     register_error_handlers(app)
@@ -39,6 +41,9 @@ def register_routes(
             token_service=token_service,
             bootstrap_admin_token=bootstrap_admin_token,
         )
+    )
+    app.include_router(
+        build_device_auth_router(device_auth_service=device_auth_service)
     )
     app.include_router(build_projects_router(api))
     app.include_router(build_questions_router(api))
