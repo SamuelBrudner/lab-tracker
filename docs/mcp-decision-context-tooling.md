@@ -1,6 +1,6 @@
 # MCP Decision Context Tooling Product Spec
 
-Status: draft
+Status: first implementation slice shipped
 
 Owner: Lab Tracker
 
@@ -381,7 +381,7 @@ Recommended implementation sequence:
 1. Extract reusable graph context compaction helpers from the graph-draft service
    or create a new context service that can be used by both graph drafting and
    decision context.
-2. Add a read-only API endpoint, for example:
+2. Add a read-only API endpoint:
 
    ```text
    POST /assistant/decision-context

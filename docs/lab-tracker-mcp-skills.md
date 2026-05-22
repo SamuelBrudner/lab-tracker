@@ -65,6 +65,10 @@ reasons, an evidence map, and truncation metadata. If the request is ambiguous,
 for example because no project can be inferred, it returns a structured error
 instead of guessing.
 
+The MCP tool calls the Lab Tracker API endpoint `POST /assistant/decision-context`;
+the API remains the single context-building path for browser users, MCP clients,
+scripts, and future workers.
+
 `lab_tracker_list_questions` can traverse the v1 question hierarchy with
 `parent_question_id` for direct children or `ancestor_question_id` for recursive
 descendants. `lab_tracker_create_question` accepts `parent_question_ids`; use it

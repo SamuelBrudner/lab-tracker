@@ -160,24 +160,47 @@ def test_client_low_level_read_tools_call_retained_routes() -> None:
     ]
 
 
-def test_decision_context_rejects_invalid_task_kind_before_api_request() -> None:
+def test_decision_context_posts_to_api_route() -> None:
     requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        assert request.url.path == "/assistant/decision-context"
+        body = json.loads(request.content.decode("utf-8"))
+        assert body == {
+            "task_kind": "research_writing",
+            "query": "baseline controls",
+            "project_id": "project-1",
+            "limit": 5,
+        }
+        return _json_response(
+            200,
+            {
+                "data": {
+                    "task_kind": "research_writing",
+                    "query": "baseline controls",
+                },
+                "meta": {"limit": 5},
+            },
+        )
+
     client = mcp_server.LabTrackerAPIClient(
         mcp_server.MCPSettings(base_url="http://testserver"),
-        transport=httpx.MockTransport(
-            lambda request: requests.append(request)
-            or _json_response(500, {"error": {"message": "unexpected request"}})
-        ),
+        transport=httpx.MockTransport(handler),
     )
 
     try:
-        payload = client.get_decision_context(task_kind="figure", query="baseline")
+        payload = client.get_decision_context(
+            task_kind="research_writing",
+            query="baseline controls",
+            project_id="project-1",
+            limit=5,
+        )
     finally:
         client.close()
 
-    assert payload["error"]["code"] == "invalid_task_kind"
-    assert "research_writing" in payload["error"]["allowed_task_kinds"]
-    assert requests == []
+    assert payload["data"]["task_kind"] == "research_writing"
+    assert len(requests) == 1
 
 
 def test_decision_context_returns_unavailable_when_api_read_fails() -> None:
@@ -199,193 +222,6 @@ def test_decision_context_returns_unavailable_when_api_read_fails() -> None:
 
     assert payload["error"]["code"] == "unavailable"
     assert "offline" in payload["error"]["detail"]
-
-
-def test_decision_context_builds_project_graph_slice() -> None:
-    def list_payload(items: list[dict]) -> dict:
-        return {"data": items, "meta": {"limit": 5, "offset": 0, "total": len(items)}}
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        path = request.url.path
-        if path == "/projects":
-            return _json_response(
-                200,
-                list_payload(
-                    [
-                        {
-                            "project_id": "project-1",
-                            "name": "Decision project",
-                            "status": "active",
-                        }
-                    ]
-                ),
-            )
-        if path == "/search":
-            assert request.url.params["project_id"] == "project-1"
-            return _json_response(
-                200,
-                {
-                    "data": {
-                        "questions": [
-                            {
-                                "question_id": "question-1",
-                                "project_id": "project-1",
-                                "text": "Which baseline controls matter?",
-                                "status": "active",
-                            }
-                        ],
-                        "notes": [
-                            {
-                                "note_id": "note-1",
-                                "project_id": "project-1",
-                                "raw_content": "Baseline control note",
-                                "status": "committed",
-                            }
-                        ],
-                    },
-                    "meta": {"questions_count": 1, "notes_count": 1},
-                },
-            )
-        if path == "/questions":
-            return _json_response(
-                200,
-                list_payload(
-                    [
-                        {
-                            "question_id": "question-1",
-                            "project_id": "project-1",
-                            "text": "Which baseline controls matter?",
-                            "status": "active",
-                        }
-                    ]
-                ),
-            )
-        if path == "/notes":
-            return _json_response(
-                200,
-                list_payload(
-                    [
-                        {
-                            "note_id": "note-1",
-                            "project_id": "project-1",
-                            "raw_content": "Baseline control note",
-                            "status": "committed",
-                        }
-                    ]
-                ),
-            )
-        if path == "/sessions":
-            return _json_response(
-                200,
-                list_payload(
-                    [
-                        {
-                            "session_id": "session-1",
-                            "project_id": "project-1",
-                            "status": "closed",
-                            "link_code": "ABC",
-                        }
-                    ]
-                ),
-            )
-        if path == "/datasets":
-            return _json_response(
-                200,
-                list_payload(
-                    [
-                        {
-                            "dataset_id": "dataset-1",
-                            "project_id": "project-1",
-                            "commit_hash": "hash-1",
-                            "primary_question_id": "question-1",
-                            "question_links": [
-                                {
-                                    "question_id": "question-1",
-                                    "role": "primary",
-                                    "outcome_status": "supports",
-                                }
-                            ],
-                            "status": "committed",
-                        }
-                    ]
-                ),
-            )
-        if path == "/analyses":
-            return _json_response(
-                200,
-                list_payload(
-                    [
-                        {
-                            "analysis_id": "analysis-1",
-                            "project_id": "project-1",
-                            "dataset_ids": ["dataset-1"],
-                            "method_hash": "method-1",
-                            "status": "committed",
-                        }
-                    ]
-                ),
-            )
-        if path == "/claims":
-            return _json_response(
-                200,
-                list_payload(
-                    [
-                        {
-                            "claim_id": "claim-1",
-                            "project_id": "project-1",
-                            "statement": "Baseline controls change behavior.",
-                            "status": "supported",
-                            "supported_by_dataset_ids": ["dataset-1"],
-                            "supported_by_analysis_ids": ["analysis-1"],
-                        }
-                    ]
-                ),
-            )
-        if path == "/visualizations":
-            return _json_response(
-                200,
-                list_payload(
-                    [
-                        {
-                            "viz_id": "viz-1",
-                            "analysis_id": "analysis-1",
-                            "viz_type": "line",
-                            "file_path": "figures/baseline.png",
-                            "caption": "Baseline comparison",
-                            "related_claim_ids": ["claim-1"],
-                        }
-                    ]
-                ),
-            )
-        return _json_response(404, {"error": {"message": "not found"}})
-
-    client = mcp_server.LabTrackerAPIClient(
-        mcp_server.MCPSettings(base_url="http://testserver"),
-        transport=httpx.MockTransport(handler),
-    )
-
-    try:
-        payload = client.get_decision_context(
-            task_kind="research_writing",
-            query="baseline controls",
-            project_id="project-1",
-            limit=5,
-        )
-    finally:
-        client.close()
-
-    data = payload["data"]
-    assert data["task_kind"] == "research_writing"
-    assert data["scope"]["project"]["project_id"] == "project-1"
-    assert data["questions"][0]["relevance_reasons"] == [
-        "search_match",
-        "recent_activity",
-    ]
-    assert data["claims"][0]["relevance_reasons"] == ["recent_activity"]
-    assert data["task_guidance"]["candidate_outputs"][0]["entity_type"] == "claim"
-    assert {
-        item["entity"]["entity_type"] for item in data["evidence_map"]
-    } == {"dataset", "analysis", "claim", "visualization"}
 
 
 def test_client_retries_once_after_expired_token() -> None:

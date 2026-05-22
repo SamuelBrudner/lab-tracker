@@ -219,6 +219,18 @@ class GraphDraftListFilters(BaseModel):
     source_note_id: UUID | None = None
 
 
+class AssistantDecisionContextRequest(RequestModel):
+    task_kind: str
+    query: str
+    project_id: UUID | None = None
+    question_id: UUID | None = None
+    dataset_id: UUID | None = None
+    analysis_id: UUID | None = None
+    claim_id: UUID | None = None
+    visualization_id: UUID | None = None
+    limit: int = Field(default=20, ge=1, le=100)
+
+
 class SessionCreate(RequestModel):
     project_id: UUID
     session_type: SessionType
