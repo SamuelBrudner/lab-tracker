@@ -101,6 +101,36 @@ def build_notes_router(api: LabTrackerAPI) -> APIRouter:
         )
         return Envelope(data=note)
 
+    @router.post(
+        "/notes/quick-capture",
+        response_model=Envelope[Note],
+        status_code=http_status.HTTP_202_ACCEPTED,
+    )
+    async def quick_capture_note(
+        request: Request,
+        file: UploadFile = File(...),
+        project_id: UUID = Form(...),
+    ):
+        actor = actor_from_request(request)
+        request_api = api_from_request(request, api)
+        filename = (file.filename or "").strip()
+        if not filename:
+            raise ValidationError("filename must not be empty.")
+        content_type = (file.content_type or "application/octet-stream").strip()
+        asset = request_api.store_note_raw_asset(
+            file.file,
+            filename=filename,
+            content_type=content_type,
+        )
+        note = request_api.upload_note_raw(
+            project_id=project_id,
+            raw_asset=asset,
+            owns_raw_asset=True,
+            status=NoteStatus.STAGED,
+            actor=actor,
+        )
+        return Envelope(data=note)
+
     @router.get("/notes", response_model=ListEnvelope[Note])
     def list_notes(
         request: Request,

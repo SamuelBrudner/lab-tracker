@@ -1,3 +1,5 @@
+import json
+
 from fastapi.testclient import TestClient
 
 from lab_tracker.app import create_app
@@ -13,7 +15,7 @@ def test_frontend_routes_and_assets_are_served():
     app_response = client.get("/app")
     assert app_response.status_code == 200
     assert "text/html" in app_response.headers.get("content-type", "")
-    assert "Lab Tracker MVP" in app_response.text
+    assert "<title>Lab Tracker</title>" in app_response.text
     assert 'id="app-root"' in app_response.text
 
     js_response = client.get("/app/static/app.js")
@@ -27,3 +29,33 @@ def test_frontend_routes_and_assets_are_served():
 
     assert "unpkg.com" not in app_response.text
     assert "text/babel" not in app_response.text
+
+
+def test_pwa_manifest_and_icons_are_served():
+    client = TestClient(create_app())
+
+    app_response = client.get("/app")
+    assert '<link rel="manifest" href="/app/static/manifest.json" />' in app_response.text
+    assert '<link rel="apple-touch-icon" href="/app/static/icon-180.png" />' in app_response.text
+    assert '<meta name="theme-color" content="#0d8b6f" />' in app_response.text
+    assert '<meta name="apple-mobile-web-app-capable" content="yes" />' in app_response.text
+
+    manifest_response = client.get("/app/static/manifest.json")
+    assert manifest_response.status_code == 200
+    manifest = json.loads(manifest_response.content)
+    assert manifest["name"] == "Lab Tracker"
+    assert manifest["start_url"] == "/app/capture"
+    assert manifest["display"] == "standalone"
+    icon_srcs = {icon["src"] for icon in manifest["icons"]}
+    assert "/app/static/icon-192.png" in icon_srcs
+    assert "/app/static/icon-512.png" in icon_srcs
+
+    for path in (
+        "/app/static/icon-180.png",
+        "/app/static/icon-192.png",
+        "/app/static/icon-512.png",
+    ):
+        icon_response = client.get(path)
+        assert icon_response.status_code == 200, path
+        assert icon_response.headers["content-type"] == "image/png"
+        assert icon_response.content.startswith(b"\x89PNG\r\n\x1a\n")

@@ -926,3 +926,97 @@ def test_note_raw_download_sanitizes_attachment_filename(
     assert raw_download.headers["content-disposition"] == (
         'attachment; filename="bad\'__name.txt"'
     )
+
+
+def test_quick_capture_stages_note_with_minimal_payload(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+):
+    headers = admin_auth_headers
+    project_id = client.post(
+        "/projects",
+        json={"name": "Quick capture"},
+        headers=headers,
+    ).json()["data"]["project_id"]
+
+    for filename, content, content_type in (
+        ("snap.jpg", b"jpeg-bytes", "image/jpeg"),
+        ("memo.m4a", b"audio-bytes", "audio/mp4"),
+        ("note.txt", b"plain text capture", "text/plain"),
+    ):
+        response = client.post(
+            "/notes/quick-capture",
+            data={"project_id": project_id},
+            files={"file": (filename, content, content_type)},
+            headers=headers,
+        )
+        assert response.status_code == 202, response.text
+        payload = response.json()["data"]
+        assert payload["status"] == "staged"
+        assert payload["project_id"] == project_id
+        assert payload["raw_asset"]["filename"] == filename
+        assert payload["raw_asset"]["content_type"] == content_type
+        assert payload["transcribed_text"] is None
+        assert payload["targets"] == []
+
+        raw_download = client.get(
+            f"/notes/{payload['note_id']}/raw",
+            headers=headers,
+        )
+        assert raw_download.status_code == 200
+        assert raw_download.content == content
+
+
+def test_quick_capture_rejects_missing_required_fields(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+):
+    headers = admin_auth_headers
+    project_id = client.post(
+        "/projects",
+        json={"name": "Quick capture validation"},
+        headers=headers,
+    ).json()["data"]["project_id"]
+
+    missing_file = client.post(
+        "/notes/quick-capture",
+        data={"project_id": project_id},
+        headers=headers,
+    )
+    assert missing_file.status_code == 422
+
+    missing_project = client.post(
+        "/notes/quick-capture",
+        files={"file": ("snap.jpg", b"jpeg-bytes", "image/jpeg")},
+        headers=headers,
+    )
+    assert missing_project.status_code == 422
+
+
+def test_quick_capture_ignores_extra_fields(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+):
+    headers = admin_auth_headers
+    project_id = client.post(
+        "/projects",
+        json={"name": "Quick capture extras"},
+        headers=headers,
+    ).json()["data"]["project_id"]
+
+    response = client.post(
+        "/notes/quick-capture",
+        data={
+            "project_id": project_id,
+            "status": "committed",
+            "transcribed_text": "should be ignored",
+            "metadata": json.dumps({"source": "camera"}),
+        },
+        files={"file": ("snap.jpg", b"jpeg-bytes", "image/jpeg")},
+        headers=headers,
+    )
+    assert response.status_code == 202, response.text
+    payload = response.json()["data"]
+    assert payload["status"] == "staged"
+    assert payload["transcribed_text"] is None
+    assert payload["metadata"] == {}

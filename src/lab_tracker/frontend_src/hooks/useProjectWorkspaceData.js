@@ -4,6 +4,32 @@ import { apiListRequest, buildApiPath, fetchAllPages } from "../shared/api.js";
 
 const { useCallback, useEffect, useMemo, useRef, useState } = React;
 
+const LAST_PROJECT_STORAGE_KEY = "lab-tracker:last-used-project-id";
+
+function readStoredProjectId() {
+  try {
+    return globalThis.localStorage?.getItem(LAST_PROJECT_STORAGE_KEY) || "";
+  } catch {
+    return "";
+  }
+}
+
+function writeStoredProjectId(value) {
+  try {
+    const storage = globalThis.localStorage;
+    if (!storage) {
+      return;
+    }
+    if (value) {
+      storage.setItem(LAST_PROJECT_STORAGE_KEY, value);
+    } else {
+      storage.removeItem(LAST_PROJECT_STORAGE_KEY);
+    }
+  } catch {
+    // localStorage may be unavailable (private mode, quota); fail silently.
+  }
+}
+
 function useProjectWorkspaceData({
   token,
   setBusy,
@@ -12,7 +38,17 @@ function useProjectWorkspaceData({
   loadProjectData = true,
 }) {
   const [projects, setProjects] = useState([]);
-  const [selectedProjectId, setSelectedProjectId] = useState("");
+  const [selectedProjectId, setSelectedProjectId] = useState(() => readStoredProjectId());
+
+  useEffect(() => {
+    // Only persist real selections; an empty value means "no projects loaded
+    // yet" or "signed out" — keep the previous value so the next session can
+    // restore it. Self-healing happens when refreshProjects picks a fallback
+    // and that gets written here.
+    if (selectedProjectId) {
+      writeStoredProjectId(selectedProjectId);
+    }
+  }, [selectedProjectId]);
   const [questions, setQuestions] = useState([]);
   const [datasets, setDatasets] = useState([]);
   const [projectCounts, setProjectCounts] = useState({
