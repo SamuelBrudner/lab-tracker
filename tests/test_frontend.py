@@ -41,8 +41,35 @@ def test_service_worker_is_served_with_app_scope():
     assert "lab-tracker-shell-" in body
     assert "/app/static/app.js" in body
     assert "/app/static/manifest.json" in body
+    assert "/app/share-target" in body
     # The route must beat the /app/{path} catch-all that serves index.html.
     assert "<!doctype html>" not in body.lower()
+
+
+def test_share_target_post_falls_back_to_capture_redirect():
+    client = TestClient(create_app())
+
+    response = client.post(
+        "/app/share-target",
+        files={"file": ("snap.jpg", b"image-bytes", "image/jpeg")},
+        follow_redirects=False,
+    )
+    assert response.status_code == 303
+    assert response.headers["location"] == "/app/capture"
+
+
+def test_manifest_declares_web_share_target():
+    client = TestClient(create_app())
+
+    manifest = client.get("/app/static/manifest.json").json()
+    share_target = manifest["share_target"]
+    assert share_target["action"] == "/app/share-target"
+    assert share_target["method"] == "POST"
+    assert share_target["enctype"] == "multipart/form-data"
+    file_param = share_target["params"]["files"][0]
+    assert file_param["name"] == "file"
+    assert "image/*" in file_param["accept"]
+    assert "audio/*" in file_param["accept"]
 
 
 def test_pwa_manifest_and_icons_are_served():

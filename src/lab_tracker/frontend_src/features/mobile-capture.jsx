@@ -3,6 +3,7 @@ import * as React from "react";
 import { apiListRequest, apiRequest, buildApiPath } from "../shared/api.js";
 import { formatDate } from "../shared/formatters.js";
 import { getUploadQueue } from "../shared/register-sw.js";
+import { migrateIncomingShares } from "../shared/share-target-inbox.js";
 import { UPLOAD_FILE_PATH } from "../shared/upload-queue.js";
 
 const { useEffect, useMemo, useState } = React;
@@ -145,6 +146,41 @@ function MobileCaptureCard({
       canceled = true;
     };
   }, [selectedProjectId, token]);
+
+  useEffect(() => {
+    // Pick up anything the OS share sheet handed off via the service worker
+    // and route it through the standard offline upload queue. Runs only once
+    // a project is selected so the migrated shares get attached to a real
+    // project. IndexedDB-less environments (jsdom in unit tests) silently
+    // no-op via the queue's null check.
+    if (!selectedProjectId) {
+      return undefined;
+    }
+    const queue = getUploadQueue();
+    if (!queue) {
+      return undefined;
+    }
+    let canceled = false;
+    migrateIncomingShares({ projectId: selectedProjectId, token, uploadQueue: queue })
+      .then((result) => {
+        if (canceled || result.migrated === 0) {
+          return undefined;
+        }
+        setFlash(
+          result.migrated === 1
+            ? "1 shared capture queued — uploading now."
+            : `${result.migrated} shared captures queued — uploading now.`
+        );
+        return queue.drain().catch(() => undefined);
+      })
+      .catch(() => {
+        // Migration failures shouldn't block the rest of the capture UI;
+        // the shares stay in the inbox for the next attempt.
+      });
+    return () => {
+      canceled = true;
+    };
+  }, [selectedProjectId, token, setFlash]);
 
   function selectedTargets() {
     const targets = [];

@@ -301,6 +301,16 @@ def _configure_frontend_routes(app: FastAPI) -> None:
             headers={"Cache-Control": "no-cache"},
         )
 
+    @app.post("/app/share-target", include_in_schema=False)
+    def share_target_fallback():
+        # The active service worker intercepts this POST and parks the file
+        # in the share-target inbox before redirecting. This server-side
+        # handler exists only as a graceful fallback for the brief window
+        # between install and first activation, or for browsers without
+        # service worker support. The shared payload is lost in that path;
+        # we still redirect the user into the app so the failure is visible.
+        return RedirectResponse(url="/app/capture", status_code=303)
+
     @app.get("/app", include_in_schema=False)
     @app.get("/app/{_path:path}", include_in_schema=False)
     def frontend_index(_path: str = ""):

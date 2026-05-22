@@ -9,7 +9,7 @@
  * one place.
  */
 
-const CACHE_VERSION = "v1";
+const CACHE_VERSION = "v2";
 const CACHE_NAME = `lab-tracker-shell-${CACHE_VERSION}`;
 const SHELL_ASSETS = [
   "/app",
@@ -20,6 +20,10 @@ const SHELL_ASSETS = [
   "/app/static/icon-192.png",
   "/app/static/icon-512.png",
 ];
+
+const SHARE_TARGET_PATH = "/app/share-target";
+const SHARE_INBOX_DB = "lab-tracker-share-inbox";
+const SHARE_INBOX_STORE = "pending";
 
 self.addEventListener("install", (event) => {
   event.waitUntil(
@@ -45,11 +49,22 @@ self.addEventListener("activate", (event) => {
 
 self.addEventListener("fetch", (event) => {
   const request = event.request;
-  if (request.method !== "GET") {
-    return;
-  }
   const url = new URL(request.url);
   if (url.origin !== self.location.origin) {
+    return;
+  }
+
+  // OS share-sheet submissions land here. We intentionally don't forward the
+  // POST to the API: the OS process has no auth context. Instead the file is
+  // parked in a small IndexedDB inbox and the page picks it up on next load
+  // (see shared/share-target-inbox.js), enqueueing it through the same
+  // offline upload queue as in-app captures.
+  if (request.method === "POST" && url.pathname === SHARE_TARGET_PATH) {
+    event.respondWith(handleShareTarget(request));
+    return;
+  }
+
+  if (request.method !== "GET") {
     return;
   }
 
@@ -80,3 +95,57 @@ self.addEventListener("fetch", (event) => {
     );
   }
 });
+
+async function handleShareTarget(request) {
+  try {
+    const formData = await request.formData();
+    const files = formData.getAll("file");
+    const title = formData.get("title") || "";
+    const text = formData.get("text") || "";
+    for (const file of files) {
+      if (file && (file instanceof File || file instanceof Blob)) {
+        await storeIncomingShare({
+          file,
+          filename: file.name || "shared",
+          contentType: file.type || "application/octet-stream",
+          title: String(title || ""),
+          text: String(text || ""),
+          receivedAt: Date.now(),
+        });
+      }
+    }
+  } catch (error) {
+    // Stashing failed; we still navigate the user into the app so they see
+    // that something happened. The lost-share case is rare and visible.
+    console.warn("share-target inbox write failed", error);
+  }
+  return Response.redirect("/app/capture?from-share=1", 303);
+}
+
+function openShareInbox() {
+  return new Promise((resolve, reject) => {
+    const request = indexedDB.open(SHARE_INBOX_DB, 1);
+    request.onupgradeneeded = () => {
+      const db = request.result;
+      if (!db.objectStoreNames.contains(SHARE_INBOX_STORE)) {
+        db.createObjectStore(SHARE_INBOX_STORE, { keyPath: "id", autoIncrement: true });
+      }
+    };
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error);
+  });
+}
+
+async function storeIncomingShare(record) {
+  const db = await openShareInbox();
+  try {
+    return await new Promise((resolve, reject) => {
+      const tx = db.transaction(SHARE_INBOX_STORE, "readwrite");
+      const req = tx.objectStore(SHARE_INBOX_STORE).add(record);
+      req.onsuccess = () => resolve(req.result);
+      req.onerror = () => reject(req.error);
+    });
+  } finally {
+    db.close();
+  }
+}
