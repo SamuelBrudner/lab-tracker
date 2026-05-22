@@ -616,6 +616,26 @@ button:disabled {
   background: var(--danger-soft);
 }
 
+.pending-uploads-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  align-self: flex-start;
+  margin: 0.2rem 0 0.6rem;
+  padding: 0.35rem 0.7rem;
+  border-radius: 999px;
+  border: 1px solid #ecdcb0;
+  background: #fff8e5;
+  color: #5a4a17;
+  font-size: 0.82rem;
+}
+
+.pending-uploads-badge span[aria-hidden="true"] {
+  color: #b9892b;
+  font-size: 1.1em;
+  line-height: 1;
+}
+
 .warn {
   border: 1px solid #e6d2a0;
   background: #fff3d2;

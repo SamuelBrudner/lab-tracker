@@ -28,6 +28,7 @@ import {
   WorkflowCoverageCard,
 } from "./shared/ui.jsx";
 import { useAppRoute } from "./shared/routing.jsx";
+import { PendingUploadsBadge } from "./shared/upload-status.jsx";
 
 function App() {
   const { navigate, replace, route } = useAppRoute();
@@ -165,6 +166,7 @@ function App() {
       />
 
       <FlashMessages message={message} error={error} />
+      <PendingUploadsBadge />
 
       {!auth.authChecked ? (
         <section className="grid">

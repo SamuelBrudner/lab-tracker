@@ -31,6 +31,20 @@ def test_frontend_routes_and_assets_are_served():
     assert "text/babel" not in app_response.text
 
 
+def test_service_worker_is_served_with_app_scope():
+    client = TestClient(create_app())
+
+    response = client.get("/app/sw.js")
+    assert response.status_code == 200
+    assert "javascript" in response.headers["content-type"]
+    body = response.text
+    assert "lab-tracker-shell-" in body
+    assert "/app/static/app.js" in body
+    assert "/app/static/manifest.json" in body
+    # The route must beat the /app/{path} catch-all that serves index.html.
+    assert "<!doctype html>" not in body.lower()
+
+
 def test_pwa_manifest_and_icons_are_served():
     client = TestClient(create_app())
 

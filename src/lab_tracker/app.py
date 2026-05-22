@@ -289,6 +289,18 @@ def _configure_frontend_routes(app: FastAPI) -> None:
     def root_redirect():
         return RedirectResponse(url="/app")
 
+    sw_file = _FRONTEND_DIR / "sw.js"
+
+    @app.get("/app/sw.js", include_in_schema=False)
+    def service_worker():
+        # Served at /app/sw.js so its registration scope can default to /app/
+        # without setting a Service-Worker-Allowed header.
+        return FileResponse(
+            sw_file,
+            media_type="application/javascript",
+            headers={"Cache-Control": "no-cache"},
+        )
+
     @app.get("/app", include_in_schema=False)
     @app.get("/app/{_path:path}", include_in_schema=False)
     def frontend_index(_path: str = ""):
