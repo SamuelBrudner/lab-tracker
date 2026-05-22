@@ -20,6 +20,7 @@ class Settings(BaseSettings):
     auth_token_ttl_minutes: int = 60 * 12
     bootstrap_admin_token: str = ""
     auth_enabled: bool | None = None
+    graph_draft_provider: str = "openai"
     openai_api_key: str = ""
     openai_model: str = "gpt-5.4-mini"
     openai_transcription_model: str = "gpt-4o-mini-transcribe"

@@ -10,7 +10,7 @@ from starlette.requests import Request
 
 from lab_tracker.api import LabTrackerAPI
 from lab_tracker.config import get_settings
-from lab_tracker.graph_drafting import OpenAIGraphDraftClient
+from lab_tracker.graph_drafting import make_graph_draft_client
 from lab_tracker.models import GraphChangeSet, GraphChangeSetStatus
 from lab_tracker.schemas import (
     Envelope,
@@ -127,4 +127,4 @@ def _draft_client_from_request(request: Request):
     factory = getattr(request.app.state, "graph_draft_client_factory", None)
     if callable(factory):
         return factory(settings)
-    return OpenAIGraphDraftClient.from_settings(settings)
+    return make_graph_draft_client(settings)

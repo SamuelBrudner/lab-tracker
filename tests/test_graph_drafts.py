@@ -8,7 +8,12 @@ import httpx
 import pytest
 from fastapi.testclient import TestClient
 
-from lab_tracker.graph_drafting import GraphDraftingError, OpenAIGraphDraftClient
+from lab_tracker.config import Settings
+from lab_tracker.graph_drafting import (
+    GraphDraftingError,
+    OpenAIGraphDraftClient,
+    make_graph_draft_client,
+)
 
 
 class FakeDraftClient:
@@ -367,6 +372,110 @@ def test_openai_graph_draft_client_transcribes_audio_with_configured_model() -> 
     assert result["text"] == "Fly 12 tracked well."
     assert requests[0].headers["authorization"] == "Bearer test-key"
     client.close()
+
+
+def test_openai_graph_draft_client_drafts_from_batch_sends_packet() -> None:
+    requests: list[dict[str, Any]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/v1/responses"
+        payload = json.loads(request.content.decode("utf-8"))
+        requests.append(payload)
+        return httpx.Response(
+            200,
+            json={
+                "output_text": json.dumps(
+                    {
+                        "summary": "batch ok",
+                        "uncertain_fields": [],
+                        "clarification_requests": [],
+                        "operations": [],
+                    }
+                )
+            },
+        )
+
+    client = OpenAIGraphDraftClient(
+        api_key="test-key",
+        model="gpt-batch-test",
+        transport=httpx.MockTransport(handler),
+    )
+
+    batch_context = {
+        "mode": "graph_batch",
+        "batch_notes": [
+            {"id": "11111111-1111-1111-1111-111111111111", "preview": "fly 12"},
+            {"id": "22222222-2222-2222-2222-222222222222", "preview": "fly 13"},
+        ],
+        "projects": [],
+    }
+    result = client.draft_from_batch(
+        batch_context=batch_context,
+        user_hint="prefer linking over creating",
+    )
+
+    assert result["summary"] == "batch ok"
+    request = requests[0]
+    assert request["model"] == "gpt-batch-test"
+    assert "daily batch" in request["instructions"]
+    user_text = request["input"][0]["content"][0]["text"]
+    assert "Batch size: 2 notes" in user_text
+    assert "prefer linking over creating" in user_text
+    assert "graph_batch" in user_text
+    assert request["text"]["format"]["schema"]["additionalProperties"] is False
+    client.close()
+
+
+def test_openai_graph_draft_client_draft_from_batch_requires_notes() -> None:
+    client = OpenAIGraphDraftClient(
+        api_key="test-key",
+        model="gpt-batch-test",
+        transport=httpx.MockTransport(lambda request: httpx.Response(200, json={})),
+    )
+
+    with pytest.raises(GraphDraftingError, match="no notes"):
+        client.draft_from_batch(batch_context={"mode": "graph_batch", "batch_notes": []})
+    client.close()
+
+
+def test_openai_graph_draft_client_draft_from_batch_requires_api_key() -> None:
+    client = OpenAIGraphDraftClient(
+        api_key="",
+        model="gpt-batch-test",
+        transport=httpx.MockTransport(lambda request: httpx.Response(200, json={})),
+    )
+
+    with pytest.raises(GraphDraftingError, match="OPENAI_API_KEY"):
+        client.draft_from_batch(
+            batch_context={"mode": "graph_batch", "batch_notes": [{"id": "x"}]}
+        )
+    client.close()
+
+
+def test_make_graph_draft_client_returns_openai_by_default() -> None:
+    settings = Settings(
+        environment="local",
+        auth_enabled=False,
+        graph_draft_provider="openai",
+        openai_api_key="test-key",
+        openai_model="gpt-test",
+    )
+    client = make_graph_draft_client(settings)
+    try:
+        assert isinstance(client, OpenAIGraphDraftClient)
+        assert client.model == "gpt-test"
+    finally:
+        client.close()
+
+
+def test_make_graph_draft_client_rejects_unknown_provider() -> None:
+    settings = Settings(
+        environment="local",
+        auth_enabled=False,
+        graph_draft_provider="palantir",
+    )
+    with pytest.raises(GraphDraftingError, match="palantir"):
+        make_graph_draft_client(settings)
 
 
 def test_image_note_draft_stores_operations_and_context(

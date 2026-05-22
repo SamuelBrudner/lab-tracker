@@ -13,7 +13,7 @@ from starlette.responses import Response
 from lab_tracker.api import LabTrackerAPI
 from lab_tracker.config import get_settings
 from lab_tracker.errors import ValidationError
-from lab_tracker.graph_drafting import OpenAIGraphDraftClient
+from lab_tracker.graph_drafting import make_graph_draft_client
 from lab_tracker.models import (
     EntityType,
     Note,
@@ -228,4 +228,4 @@ def _transcription_client_from_request(request: Request):
     factory = getattr(request.app.state, "graph_draft_client_factory", None)
     if callable(factory):
         return factory(settings)
-    return OpenAIGraphDraftClient.from_settings(settings)
+    return make_graph_draft_client(settings)

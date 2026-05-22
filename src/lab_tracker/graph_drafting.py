@@ -1,16 +1,25 @@
-"""GPT-backed graph draft generation."""
+"""Graph draft generation clients and provider factory.
+
+The ``GraphDraftClient`` protocol defines the surface every model provider
+implements; ``make_graph_draft_client`` picks the active implementation
+from ``settings.graph_draft_provider``. The existing OpenAI-backed client
+is the default. Anthropic and Google variants are tracked as separate
+beads (lab-tracker-dvt, lab-tracker-z66) and slot in by registering a new
+branch in the factory.
+"""
 
 from __future__ import annotations
 
 import base64
 import json
-from typing import Any
+from typing import Any, Protocol, runtime_checkable
 
 import httpx
 
 from lab_tracker.config import Settings
 
 PROMPT_VERSION = "multimodal-graph-draft-v1"
+BATCH_PROMPT_VERSION = "daily-batch-graph-draft-v1"
 PROVIDER = "openai"
 
 SEMANTIC_TYPES = [
@@ -108,6 +117,52 @@ def graph_patch_response_schema() -> dict[str, Any]:
         "additionalProperties": False,
         "required": ["summary", "uncertain_fields", "clarification_requests", "operations"],
     }
+
+
+@runtime_checkable
+class GraphDraftClient(Protocol):
+    """Provider-agnostic surface for graph draft generation.
+
+    Implementations: OpenAI (this file). Anthropic and Google are tracked
+    as separate beads. ``transcribe_audio`` is optional on providers that
+    do not natively expose transcription; if so, the implementation should
+    raise ``GraphDraftingError`` with a clear message so callers fall back
+    to a configured transcription provider.
+    """
+
+    def draft_from_note(
+        self,
+        *,
+        graph_context: dict[str, Any] | None = ...,
+        user_hint: str | None = ...,
+        draft_mode: str = ...,
+        project_context: dict[str, Any] | None = ...,
+        source_artifacts: list[dict[str, Any]] | None = ...,
+        image_bytes: bytes | None = ...,
+        image_content_type: str | None = ...,
+    ) -> dict[str, Any]:
+        ...
+
+    def draft_from_batch(
+        self,
+        *,
+        batch_context: dict[str, Any],
+        user_hint: str | None = ...,
+    ) -> dict[str, Any]:
+        ...
+
+    def transcribe_audio(
+        self,
+        *,
+        audio_bytes: bytes,
+        filename: str,
+        content_type: str,
+        prompt: str | None = ...,
+    ) -> dict[str, Any]:
+        ...
+
+    def close(self) -> None:
+        ...
 
 
 class OpenAIGraphDraftClient:
@@ -251,6 +306,66 @@ class OpenAIGraphDraftClient:
             raise GraphDraftingError("GPT graph patch did not include an operations list.")
         return parsed
 
+    def draft_from_batch(
+        self,
+        *,
+        batch_context: dict[str, Any],
+        user_hint: str | None = None,
+    ) -> dict[str, Any]:
+        if not self._api_key:
+            raise GraphDraftingError(
+                "LAB_TRACKER_OPENAI_API_KEY must be set before drafting batch graph changes."
+            )
+        batch_notes = batch_context.get("batch_notes") or []
+        if not batch_notes:
+            raise GraphDraftingError("Batch context contains no notes to draft from.")
+        content: list[dict[str, Any]] = [
+            {
+                "type": "input_text",
+                "text": (
+                    "Draft Lab Tracker graph updates for the staged notes in this batch.\n"
+                    f"Batch size: {len(batch_notes)} notes\n"
+                    f"User hint: {user_hint or '(none)'}\n"
+                    "Batch context packet:\n"
+                    f"{json.dumps(batch_context, sort_keys=True)}"
+                ),
+            }
+        ]
+        response = self._client.post(
+            "/responses",
+            headers={
+                "Authorization": f"Bearer {self._api_key}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "model": self.model,
+                "instructions": _batch_instructions(),
+                "input": [{"role": "user", "content": content}],
+                "text": {
+                    "format": {
+                        "type": "json_schema",
+                        "name": "lab_tracker_graph_patch",
+                        "schema": graph_patch_response_schema(),
+                        "strict": True,
+                    }
+                },
+            },
+        )
+        if response.status_code >= 400:
+            raise GraphDraftingError(_response_error(response))
+        payload = _response_json(response)
+        output_text = _extract_output_text(payload)
+        try:
+            parsed = json.loads(output_text)
+        except json.JSONDecodeError as exc:
+            raise GraphDraftingError("GPT returned malformed graph patch JSON.") from exc
+        if not isinstance(parsed, dict):
+            raise GraphDraftingError("GPT returned a non-object graph patch.")
+        operations = parsed.get("operations")
+        if not isinstance(operations, list):
+            raise GraphDraftingError("GPT graph patch did not include an operations list.")
+        return parsed
+
     def transcribe_audio(
         self,
         *,
@@ -284,6 +399,33 @@ class OpenAIGraphDraftClient:
         if not isinstance(text, str) or not text.strip():
             raise GraphDraftingError("Transcription response did not include text.")
         return payload
+
+
+def make_graph_draft_client(settings: Settings) -> GraphDraftClient:
+    """Return the active graph-draft client for ``settings.graph_draft_provider``.
+
+    Raises ``GraphDraftingError`` for unknown providers so misconfiguration
+    fails fast at app startup rather than at first model call.
+    """
+    provider = (settings.graph_draft_provider or "openai").strip().lower()
+    if provider == "openai":
+        return OpenAIGraphDraftClient.from_settings(settings)
+    raise GraphDraftingError(
+        f"Unknown graph_draft_provider '{provider}'. Configured providers: openai."
+    )
+
+
+def _batch_instructions() -> str:
+    return _instructions() + (
+        "\n\nThe input is a daily batch of staged notes the user has already "
+        "captured, grouped per project. Treat the batch as a whole: propose "
+        "linkages between notes and existing questions/sessions/datasets where "
+        "the evidence supports it; when several notes describe the same "
+        "observation, propose a single consolidated note rather than duplicates; "
+        "and surface ambiguities via uncertain_fields or clarification_requests "
+        "rather than guessing. Every operation is a draft for human review; "
+        "nothing commits without explicit acceptance."
+    )
 
 
 def _instructions() -> str:
