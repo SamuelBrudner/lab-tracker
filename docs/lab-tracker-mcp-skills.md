@@ -52,6 +52,10 @@ Available tools:
 - `lab_tracker_create_project`
 - `lab_tracker_create_question`
 - `lab_tracker_create_note`
+- `lab_tracker_create_dataset`
+- `lab_tracker_create_analysis`
+- `lab_tracker_create_claim`
+- `lab_tracker_create_visualization`
 
 Decision-context tooling for assistant clients is specified in
 [`docs/mcp-decision-context-tooling.md`](mcp-decision-context-tooling.md). That
@@ -79,7 +83,31 @@ broader motivating questions.
 allowed values are `staged`, `committed`, and `archived`; do not use question
 statuses such as `active`. Note metadata accepts an object whose values are
 strings, numbers, or booleans, and Lab Tracker normalizes those values to strings
-when storing the note. Nested metadata objects and arrays are not supported.
+when storing the note. Nested metadata objects and arrays are not supported. Pass
+`targets` as a list of `{entity_type, entity_id}` objects to attach a source note
+to the most specific relevant graph record.
+
+## Evidence Authoring
+
+Agents should read existing questions, datasets, analyses, claims,
+visualizations, and notes before creating evidence records. Reuse existing
+records when they already represent the source, analysis, claim, or figure.
+
+Create or reuse datasets before analyses. Create analyses before supported claims
+or visualizations. Attach source notes to the most specific relevant entity, such
+as a claim or visualization instead of only the project. Use `supported` claim
+status only when `supported_by_dataset_ids` or `supported_by_analysis_ids` is
+present; use `proposed` for human interpretation without concrete supporting
+records. Verify the final graph with the list tools.
+
+For retrospective literature evidence, staged datasets are acceptable
+placeholders for source collections such as dissertation analyses or published
+recording sets. Prefer real method hashes and code versions when available; use
+stable publication labels such as `publication:eLife-2021-vae-feature-space` and
+`published-pdf:elife-67855-v2` when source hashes are unavailable. Prefer real
+local artifact paths for visualization `file_path`; use DOI or PDF figure
+locators such as `doi:10.1371/journal.pcbi.1011051#fig5` only when no local plot
+file exists.
 
 ## Postgres Runtime
 

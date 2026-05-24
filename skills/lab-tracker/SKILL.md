@@ -67,12 +67,48 @@ Use these tools when available:
   questions.
 - `lab_tracker_create_note` creates a text note in a project. Note statuses are
   `staged`, `committed`, and `archived`; do not use question statuses such as
-  `active`. Metadata values may be strings, numbers, or booleans and are stored
-  as strings; nested metadata objects and arrays are unsupported.
+  `active`. Pass `targets` to attach notes to projects, questions, sessions,
+  datasets, analyses, claims, or visualizations. Metadata values may be strings,
+  numbers, or booleans and are stored as strings; nested metadata objects and
+  arrays are unsupported.
+- `lab_tracker_create_dataset` creates a dataset linked to a primary question
+  and optional secondary questions.
+- `lab_tracker_create_analysis` creates an analysis linked to one or more
+  datasets.
+- `lab_tracker_create_claim` creates a claim, optionally linked to supporting
+  datasets or analyses.
+- `lab_tracker_create_visualization` creates a visualization linked to an
+  analysis and optional related claims.
 
 Creation tools write through the API, using the configured service account when
 authentication is enabled. Be explicit before creating or mutating research
 records.
+
+## Evidence Authoring
+
+Before creating evidence records, read the existing questions, datasets,
+analyses, claims, visualizations, and notes for the project. Reuse existing graph
+records when they already represent the source or result.
+
+Author evidence in this order:
+
+1. Create or reuse datasets before creating analyses.
+2. Create analyses before creating supported claims or visualizations.
+3. Attach source notes to the most specific relevant entity, such as a claim or
+   visualization rather than only the project.
+4. Use `supported` claim status only when `supported_by_dataset_ids` or
+   `supported_by_analysis_ids` is present. Use `proposed` for human
+   interpretation without a concrete supporting record.
+5. Prefer real local artifact paths for visualization `file_path`. For
+   retrospective paper figures, use DOI or PDF locators such as
+   `doi:10.1371/journal.pcbi.1011051#fig5` only when no local plot file exists.
+6. Verify the final graph with list tools.
+
+For retrospective literature evidence, staged datasets are acceptable placeholders
+for source collections such as dissertation analyses or published-recording
+sets. Prefer real method hashes and code versions when available; otherwise use
+stable publication labels such as `publication:eLife-2021-vae-feature-space` and
+`published-pdf:elife-67855-v2`.
 
 Before research-facing decisions, use `lab_tracker_get_decision_context` when
 available. This includes choosing variables to plot, analyses to run, figures or

@@ -314,6 +314,257 @@ def test_analysis_commit_route_is_atomic_on_failure(
     assert visualizations_get.json()["data"] == []
 
 
+def test_evidence_authoring_routes_create_and_filter_graph_records(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+):
+    headers = admin_auth_headers
+
+    project_id = client.post(
+        "/projects",
+        json={"name": "Evidence authoring"},
+        headers=headers,
+    ).json()["data"]["project_id"]
+    primary_question_id = client.post(
+        "/questions",
+        json={
+            "project_id": project_id,
+            "text": "Which result should be preserved?",
+            "question_type": "descriptive",
+        },
+        headers=headers,
+    ).json()["data"]["question_id"]
+    secondary_question_id = client.post(
+        "/questions",
+        json={
+            "project_id": project_id,
+            "text": "Which control supports the result?",
+            "question_type": "method_dev",
+        },
+        headers=headers,
+    ).json()["data"]["question_id"]
+
+    dataset_response = client.post(
+        "/datasets",
+        json={
+            "project_id": project_id,
+            "primary_question_id": primary_question_id,
+            "secondary_question_ids": [secondary_question_id],
+            "status": "staged",
+        },
+        headers=headers,
+    )
+    assert dataset_response.status_code == 201
+    dataset_payload = dataset_response.json()["data"]
+    dataset_id = dataset_payload["dataset_id"]
+    assert dataset_payload["status"] == "staged"
+    assert {
+        (link["question_id"], link["role"]) for link in dataset_payload["question_links"]
+    } == {
+        (primary_question_id, "primary"),
+        (secondary_question_id, "secondary"),
+    }
+
+    analysis_response = client.post(
+        "/analyses",
+        json={
+            "project_id": project_id,
+            "dataset_ids": [dataset_id],
+            "method_hash": "publication:eLife-2021-vae-feature-space",
+            "code_version": "published-pdf:elife-67855-v2",
+        },
+        headers=headers,
+    )
+    assert analysis_response.status_code == 201
+    analysis_id = analysis_response.json()["data"]["analysis_id"]
+
+    proposed_claim_response = client.post(
+        "/claims",
+        json={
+            "project_id": project_id,
+            "statement": "Juvenile song syllables occupy a structured feature space.",
+            "confidence": 65.0,
+            "status": "proposed",
+        },
+        headers=headers,
+    )
+    assert proposed_claim_response.status_code == 201
+    proposed_claim_id = proposed_claim_response.json()["data"]["claim_id"]
+
+    supported_claim_response = client.post(
+        "/claims",
+        json={
+            "project_id": project_id,
+            "statement": "The analysis supports the retained figure interpretation.",
+            "confidence": 86.0,
+            "status": "supported",
+            "supported_by_analysis_ids": [analysis_id],
+        },
+        headers=headers,
+    )
+    assert supported_claim_response.status_code == 201
+    supported_claim_id = supported_claim_response.json()["data"]["claim_id"]
+
+    visualization_response = client.post(
+        "/visualizations",
+        json={
+            "analysis_id": analysis_id,
+            "viz_type": "paper_figure",
+            "file_path": "doi:10.1371/journal.pcbi.1011051#fig5",
+            "caption": "Published figure locator for retrospective evidence.",
+            "related_claim_ids": [supported_claim_id],
+        },
+        headers=headers,
+    )
+    assert visualization_response.status_code == 201
+    visualization_id = visualization_response.json()["data"]["viz_id"]
+
+    claim_note_response = client.post(
+        "/notes",
+        json={
+            "project_id": project_id,
+            "raw_content": "Source note for supported claim.",
+            "targets": [{"entity_type": "claim", "entity_id": supported_claim_id}],
+        },
+        headers=headers,
+    )
+    assert claim_note_response.status_code == 201
+    visualization_note_response = client.post(
+        "/notes",
+        json={
+            "project_id": project_id,
+            "raw_content": "Source note for visualization.",
+            "targets": [
+                {"entity_type": "visualization", "entity_id": visualization_id}
+            ],
+        },
+        headers=headers,
+    )
+    assert visualization_note_response.status_code == 201
+
+    datasets = client.get(
+        "/datasets",
+        params={"project_id": project_id, "status": "staged"},
+        headers=headers,
+    )
+    analyses = client.get(
+        "/analyses",
+        params={"project_id": project_id, "dataset_id": dataset_id},
+        headers=headers,
+    )
+    claims = client.get("/claims", params={"project_id": project_id}, headers=headers)
+    visualizations = client.get(
+        "/visualizations",
+        params={"project_id": project_id, "claim_id": supported_claim_id},
+        headers=headers,
+    )
+    claim_notes = client.get(
+        "/notes",
+        params={
+            "project_id": project_id,
+            "target_entity_type": "claim",
+            "target_entity_id": supported_claim_id,
+        },
+        headers=headers,
+    )
+    visualization_notes = client.get(
+        "/notes",
+        params={
+            "project_id": project_id,
+            "target_entity_type": "visualization",
+            "target_entity_id": visualization_id,
+        },
+        headers=headers,
+    )
+
+    assert dataset_id in _ids(datasets.json()["data"], "dataset_id")
+    assert analysis_id in _ids(analyses.json()["data"], "analysis_id")
+    assert {proposed_claim_id, supported_claim_id}.issubset(
+        _ids(claims.json()["data"], "claim_id")
+    )
+    assert visualization_id in _ids(visualizations.json()["data"], "viz_id")
+    assert claim_notes.json()["data"][0]["targets"] == [
+        {"entity_type": "claim", "entity_id": supported_claim_id}
+    ]
+    assert visualization_notes.json()["data"][0]["targets"] == [
+        {"entity_type": "visualization", "entity_id": visualization_id}
+    ]
+
+
+def test_evidence_authoring_routes_reject_invalid_graph_writes(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+):
+    headers = admin_auth_headers
+
+    project_id = client.post(
+        "/projects",
+        json={"name": "Evidence validation"},
+        headers=headers,
+    ).json()["data"]["project_id"]
+    question_id = client.post(
+        "/questions",
+        json={
+            "project_id": project_id,
+            "text": "Which invalid writes are rejected?",
+            "question_type": "descriptive",
+        },
+        headers=headers,
+    ).json()["data"]["question_id"]
+    dataset_id = client.post(
+        "/datasets",
+        json={"project_id": project_id, "primary_question_id": question_id},
+        headers=headers,
+    ).json()["data"]["dataset_id"]
+    analysis_id = client.post(
+        "/analyses",
+        json={
+            "project_id": project_id,
+            "dataset_ids": [dataset_id],
+            "method_hash": "method-1",
+            "code_version": "v1",
+        },
+        headers=headers,
+    ).json()["data"]["analysis_id"]
+
+    supported_without_evidence = client.post(
+        "/claims",
+        json={
+            "project_id": project_id,
+            "statement": "Unsupported supported claim",
+            "confidence": 80.0,
+            "status": "supported",
+        },
+        headers=headers,
+    )
+    assert supported_without_evidence.status_code == 422
+    assert "Supported claims require" in supported_without_evidence.json()["error"]["message"]
+
+    visualization_with_unknown_claim = client.post(
+        "/visualizations",
+        json={
+            "analysis_id": analysis_id,
+            "viz_type": "line",
+            "file_path": "figs/line.png",
+            "related_claim_ids": ["11111111-1111-1111-1111-111111111111"],
+        },
+        headers=headers,
+    )
+    assert visualization_with_unknown_claim.status_code == 404
+
+    committed_dataset_without_files = client.post(
+        "/datasets",
+        json={
+            "project_id": project_id,
+            "primary_question_id": question_id,
+            "status": "committed",
+        },
+        headers=headers,
+    )
+    assert committed_dataset_without_files.status_code == 422
+    assert "At least one file" in committed_dataset_without_files.json()["error"]["message"]
+
+
 def test_question_list_paginates_beyond_200_records(
     client: TestClient,
     admin_auth_headers: dict[str, str],

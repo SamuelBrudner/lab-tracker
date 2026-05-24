@@ -26,6 +26,10 @@ def test_fastmcp_registers_lab_tracker_tools() -> None:
     assert "lab_tracker_list_claims" in names
     assert "lab_tracker_list_visualizations" in names
     assert "lab_tracker_create_note" in names
+    assert "lab_tracker_create_dataset" in names
+    assert "lab_tracker_create_analysis" in names
+    assert "lab_tracker_create_claim" in names
+    assert "lab_tracker_create_visualization" in names
 
 
 def test_fastmcp_registers_agent_consultation_policy_resource() -> None:
@@ -360,6 +364,209 @@ def test_create_note_sends_scalar_metadata_values_to_api() -> None:
 
     assert payload == {"data": {"note_id": "note-1"}}
     assert [request.url.path for request in requests] == ["/notes"]
+
+
+def test_create_note_sends_targets_to_api() -> None:
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if request.url.path == "/notes":
+            body = json.loads(request.content.decode("utf-8"))
+            assert body == {
+                "project_id": "project-1",
+                "raw_content": "claim source",
+                "targets": [
+                    {"entity_type": "claim", "entity_id": "claim-1"},
+                    {"entity_type": "visualization", "entity_id": "viz-1"},
+                ],
+            }
+            return _json_response(201, {"data": {"note_id": "note-1"}})
+        return _json_response(404, {"error": {"message": "not found"}})
+
+    client = mcp_server.LabTrackerAPIClient(
+        mcp_server.MCPSettings(base_url="http://testserver"),
+        transport=httpx.MockTransport(handler),
+    )
+
+    try:
+        payload = client.create_note(
+            project_id="project-1",
+            raw_content="claim source",
+            targets=[
+                {"entity_type": "claim", "entity_id": "claim-1"},
+                {"entity_type": "visualization", "entity_id": "viz-1"},
+            ],
+        )
+    finally:
+        client.close()
+
+    assert payload == {"data": {"note_id": "note-1"}}
+    assert [request.url.path for request in requests] == ["/notes"]
+
+
+def test_client_create_evidence_tools_send_api_payloads() -> None:
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        body = json.loads(request.content.decode("utf-8"))
+        if request.url.path == "/datasets":
+            assert body == {
+                "project_id": "project-1",
+                "primary_question_id": "question-1",
+                "secondary_question_ids": ["question-2"],
+                "commit_manifest": {"metadata": {"source": "paper"}},
+                "commit_hash": "hash-1",
+                "status": "staged",
+            }
+            return _json_response(201, {"data": {"dataset_id": "dataset-1"}})
+        if request.url.path == "/analyses":
+            assert body == {
+                "project_id": "project-1",
+                "dataset_ids": ["dataset-1"],
+                "method_hash": "publication:method",
+                "code_version": "published-pdf:v1",
+                "environment_hash": "env-1",
+                "status": "staged",
+            }
+            return _json_response(201, {"data": {"analysis_id": "analysis-1"}})
+        if request.url.path == "/claims":
+            if body["statement"] == "Interpretation only":
+                assert body == {
+                    "project_id": "project-1",
+                    "statement": "Interpretation only",
+                    "confidence": 55.0,
+                    "status": "proposed",
+                }
+            else:
+                assert body == {
+                    "project_id": "project-1",
+                    "statement": "Analysis supports the effect",
+                    "confidence": 82.5,
+                    "status": "supported",
+                    "supported_by_analysis_ids": ["analysis-1"],
+                }
+            return _json_response(201, {"data": {"claim_id": "claim-1"}})
+        if request.url.path == "/visualizations":
+            assert body == {
+                "analysis_id": "analysis-1",
+                "viz_type": "figure",
+                "file_path": "doi:10.1371/journal.pcbi.1011051#fig5",
+                "caption": "Paper figure 5",
+                "related_claim_ids": ["claim-1"],
+            }
+            return _json_response(201, {"data": {"viz_id": "viz-1"}})
+        return _json_response(404, {"error": {"message": "not found"}})
+
+    client = mcp_server.LabTrackerAPIClient(
+        mcp_server.MCPSettings(base_url="http://testserver"),
+        transport=httpx.MockTransport(handler),
+    )
+
+    try:
+        assert client.create_dataset(
+            project_id="project-1",
+            primary_question_id="question-1",
+            secondary_question_ids=["question-2"],
+            commit_manifest={"metadata": {"source": "paper"}},
+            commit_hash="hash-1",
+            status="STAGED",
+        )["data"]["dataset_id"] == "dataset-1"
+        assert client.create_analysis(
+            project_id="project-1",
+            dataset_ids=["dataset-1"],
+            method_hash="publication:method",
+            code_version="published-pdf:v1",
+            environment_hash="env-1",
+        )["data"]["analysis_id"] == "analysis-1"
+        assert client.create_claim(
+            project_id="project-1",
+            statement="Interpretation only",
+            confidence=55.0,
+        )["data"]["claim_id"] == "claim-1"
+        assert client.create_claim(
+            project_id="project-1",
+            statement="Analysis supports the effect",
+            confidence=82.5,
+            status="SUPPORTED",
+            supported_by_analysis_ids=["analysis-1"],
+        )["data"]["claim_id"] == "claim-1"
+        assert client.create_visualization(
+            analysis_id="analysis-1",
+            viz_type="figure",
+            file_path="doi:10.1371/journal.pcbi.1011051#fig5",
+            caption="Paper figure 5",
+            related_claim_ids=["claim-1"],
+        )["data"]["viz_id"] == "viz-1"
+    finally:
+        client.close()
+
+    assert [request.url.path for request in requests] == [
+        "/datasets",
+        "/analyses",
+        "/claims",
+        "/claims",
+        "/visualizations",
+    ]
+
+
+@pytest.mark.parametrize(
+    ("method_name", "kwargs", "message"),
+    [
+        (
+            "create_dataset",
+            {
+                "project_id": "project-1",
+                "primary_question_id": "question-1",
+                "status": "active",
+            },
+            "Allowed dataset statuses",
+        ),
+        (
+            "create_analysis",
+            {
+                "project_id": "project-1",
+                "dataset_ids": ["dataset-1"],
+                "method_hash": "method-1",
+                "code_version": "v1",
+                "status": "active",
+            },
+            "Allowed analysis statuses",
+        ),
+        (
+            "create_claim",
+            {
+                "project_id": "project-1",
+                "statement": "claim",
+                "confidence": 50.0,
+                "status": "archived",
+            },
+            "Allowed claim statuses",
+        ),
+    ],
+)
+def test_create_evidence_tools_reject_invalid_status_before_api_request(
+    method_name: str,
+    kwargs: dict[str, object],
+    message: str,
+) -> None:
+    requests: list[httpx.Request] = []
+    client = mcp_server.LabTrackerAPIClient(
+        mcp_server.MCPSettings(base_url="http://testserver"),
+        transport=httpx.MockTransport(
+            lambda request: requests.append(request)
+            or _json_response(500, {"error": {"message": "unexpected request"}})
+        ),
+    )
+
+    try:
+        with pytest.raises(mcp_server.LabTrackerAPIError, match=message):
+            getattr(client, method_name)(**kwargs)
+    finally:
+        client.close()
+
+    assert requests == []
 
 
 def test_create_note_rejects_nested_metadata_before_api_request() -> None:
