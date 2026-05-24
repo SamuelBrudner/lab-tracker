@@ -10,7 +10,14 @@ import httpx
 from mcp.server.fastmcp import FastMCP
 
 from lab_tracker.decision_context import AGENT_CONSULTATION_POLICY
-from lab_tracker.models import NoteMetadataScalar, NoteStatus, QuestionStatus
+from lab_tracker.models import (
+    AnalysisStatus,
+    ClaimStatus,
+    DatasetStatus,
+    NoteMetadataScalar,
+    NoteStatus,
+    QuestionStatus,
+)
 
 JsonObject = dict[str, Any]
 
@@ -21,6 +28,12 @@ NOTE_STATUS_VALUES = tuple(status.value for status in NoteStatus)
 NOTE_STATUS_TEXT = ", ".join(NOTE_STATUS_VALUES)
 QUESTION_STATUS_VALUES = tuple(status.value for status in QuestionStatus)
 QUESTION_STATUS_TEXT = ", ".join(QUESTION_STATUS_VALUES)
+DATASET_STATUS_VALUES = tuple(status.value for status in DatasetStatus)
+DATASET_STATUS_TEXT = ", ".join(DATASET_STATUS_VALUES)
+ANALYSIS_STATUS_VALUES = tuple(status.value for status in AnalysisStatus)
+ANALYSIS_STATUS_TEXT = ", ".join(ANALYSIS_STATUS_VALUES)
+CLAIM_STATUS_VALUES = tuple(status.value for status in ClaimStatus)
+CLAIM_STATUS_TEXT = ", ".join(CLAIM_STATUS_VALUES)
 
 
 class LabTrackerAPIError(RuntimeError):
@@ -398,6 +411,7 @@ class LabTrackerAPIClient:
         project_id: str,
         raw_content: str,
         transcribed_text: str | None = None,
+        targets: list[dict[str, str]] | None = None,
         metadata: dict[str, NoteMetadataScalar] | None = None,
         status: str | None = None,
     ) -> JsonObject:
@@ -410,8 +424,102 @@ class LabTrackerAPIClient:
                 "project_id": project_id,
                 "raw_content": raw_content,
                 "transcribed_text": transcribed_text,
+                "targets": targets,
                 "metadata": resolved_metadata,
                 "status": resolved_status,
+            },
+        )
+
+    def create_dataset(
+        self,
+        *,
+        project_id: str,
+        primary_question_id: str,
+        secondary_question_ids: list[str] | None = None,
+        commit_manifest: JsonObject | None = None,
+        commit_hash: str | None = None,
+        status: str | None = "staged",
+    ) -> JsonObject:
+        resolved_status = _validate_dataset_status(status)
+        return self._request(
+            "POST",
+            "/datasets",
+            json_payload={
+                "project_id": project_id,
+                "primary_question_id": primary_question_id,
+                "secondary_question_ids": secondary_question_ids,
+                "commit_manifest": commit_manifest,
+                "commit_hash": commit_hash,
+                "status": resolved_status,
+            },
+        )
+
+    def create_analysis(
+        self,
+        *,
+        project_id: str,
+        dataset_ids: list[str],
+        method_hash: str,
+        code_version: str,
+        environment_hash: str | None = None,
+        status: str | None = "staged",
+    ) -> JsonObject:
+        resolved_status = _validate_analysis_status(status)
+        return self._request(
+            "POST",
+            "/analyses",
+            json_payload={
+                "project_id": project_id,
+                "dataset_ids": dataset_ids,
+                "method_hash": method_hash,
+                "code_version": code_version,
+                "environment_hash": environment_hash,
+                "status": resolved_status,
+            },
+        )
+
+    def create_claim(
+        self,
+        *,
+        project_id: str,
+        statement: str,
+        confidence: float,
+        status: str | None = "proposed",
+        supported_by_dataset_ids: list[str] | None = None,
+        supported_by_analysis_ids: list[str] | None = None,
+    ) -> JsonObject:
+        resolved_status = _validate_claim_status(status)
+        return self._request(
+            "POST",
+            "/claims",
+            json_payload={
+                "project_id": project_id,
+                "statement": statement,
+                "confidence": confidence,
+                "status": resolved_status,
+                "supported_by_dataset_ids": supported_by_dataset_ids,
+                "supported_by_analysis_ids": supported_by_analysis_ids,
+            },
+        )
+
+    def create_visualization(
+        self,
+        *,
+        analysis_id: str,
+        viz_type: str,
+        file_path: str,
+        caption: str | None = None,
+        related_claim_ids: list[str] | None = None,
+    ) -> JsonObject:
+        return self._request(
+            "POST",
+            "/visualizations",
+            json_payload={
+                "analysis_id": analysis_id,
+                "viz_type": viz_type,
+                "file_path": file_path,
+                "caption": caption,
+                "related_claim_ids": related_claim_ids,
             },
         )
 
@@ -513,12 +621,55 @@ def _validate_note_metadata(metadata: object) -> dict[str, NoteMetadataScalar] |
 
 
 def _validate_note_status(status: str | None) -> str | None:
+    return _validate_status(
+        status,
+        label="note status",
+        allowed_values=NOTE_STATUS_VALUES,
+        allowed_text=NOTE_STATUS_TEXT,
+    )
+
+
+def _validate_dataset_status(status: str | None) -> str | None:
+    return _validate_status(
+        status,
+        label="dataset status",
+        allowed_values=DATASET_STATUS_VALUES,
+        allowed_text=DATASET_STATUS_TEXT,
+    )
+
+
+def _validate_analysis_status(status: str | None) -> str | None:
+    return _validate_status(
+        status,
+        label="analysis status",
+        allowed_values=ANALYSIS_STATUS_VALUES,
+        allowed_text=ANALYSIS_STATUS_TEXT,
+    )
+
+
+def _validate_claim_status(status: str | None) -> str | None:
+    return _validate_status(
+        status,
+        label="claim status",
+        allowed_values=CLAIM_STATUS_VALUES,
+        allowed_text=CLAIM_STATUS_TEXT,
+    )
+
+
+def _validate_status(
+    status: str | None,
+    *,
+    label: str,
+    allowed_values: tuple[str, ...],
+    allowed_text: str,
+) -> str | None:
     if status is None:
         return None
     cleaned = status.strip().lower()
-    if cleaned not in NOTE_STATUS_VALUES:
+    if cleaned not in allowed_values:
+        plural_label = label.replace("status", "statuses")
         raise LabTrackerAPIError(
-            f"Invalid note status {status!r}. Allowed note statuses: {NOTE_STATUS_TEXT}."
+            f"Invalid {label} {status!r}. Allowed {plural_label}: {allowed_text}."
         )
     return cleaned
 
@@ -926,18 +1077,114 @@ def lab_tracker_create_note(
     project_id: str,
     raw_content: str,
     transcribed_text: str | None = None,
+    targets: list[dict[str, str]] | None = None,
     metadata: dict[str, NoteMetadataScalar] | None = None,
     status: str | None = None,
 ) -> JsonObject:
-    """Create a text note; status must be staged, committed, or archived."""
+    """Create a text note, optionally targeting graph entities."""
     client = client_from_env()
     try:
         return client.create_note(
             project_id=project_id,
             raw_content=raw_content,
             transcribed_text=transcribed_text,
+            targets=targets,
             metadata=metadata,
             status=status,
+        )
+    finally:
+        client.close()
+
+
+@server.tool()
+def lab_tracker_create_dataset(
+    project_id: str,
+    primary_question_id: str,
+    secondary_question_ids: list[str] | None = None,
+    commit_manifest: JsonObject | None = None,
+    commit_hash: str | None = None,
+    status: str | None = "staged",
+) -> JsonObject:
+    """Create a Lab Tracker dataset through the API."""
+    client = client_from_env()
+    try:
+        return client.create_dataset(
+            project_id=project_id,
+            primary_question_id=primary_question_id,
+            secondary_question_ids=secondary_question_ids,
+            commit_manifest=commit_manifest,
+            commit_hash=commit_hash,
+            status=status,
+        )
+    finally:
+        client.close()
+
+
+@server.tool()
+def lab_tracker_create_analysis(
+    project_id: str,
+    dataset_ids: list[str],
+    method_hash: str,
+    code_version: str,
+    environment_hash: str | None = None,
+    status: str | None = "staged",
+) -> JsonObject:
+    """Create a Lab Tracker analysis through the API."""
+    client = client_from_env()
+    try:
+        return client.create_analysis(
+            project_id=project_id,
+            dataset_ids=dataset_ids,
+            method_hash=method_hash,
+            code_version=code_version,
+            environment_hash=environment_hash,
+            status=status,
+        )
+    finally:
+        client.close()
+
+
+@server.tool()
+def lab_tracker_create_claim(
+    project_id: str,
+    statement: str,
+    confidence: float,
+    status: str | None = "proposed",
+    supported_by_dataset_ids: list[str] | None = None,
+    supported_by_analysis_ids: list[str] | None = None,
+) -> JsonObject:
+    """Create a Lab Tracker claim through the API."""
+    client = client_from_env()
+    try:
+        return client.create_claim(
+            project_id=project_id,
+            statement=statement,
+            confidence=confidence,
+            status=status,
+            supported_by_dataset_ids=supported_by_dataset_ids,
+            supported_by_analysis_ids=supported_by_analysis_ids,
+        )
+    finally:
+        client.close()
+
+
+@server.tool()
+def lab_tracker_create_visualization(
+    analysis_id: str,
+    viz_type: str,
+    file_path: str,
+    caption: str | None = None,
+    related_claim_ids: list[str] | None = None,
+) -> JsonObject:
+    """Create a Lab Tracker visualization through the API."""
+    client = client_from_env()
+    try:
+        return client.create_visualization(
+            analysis_id=analysis_id,
+            viz_type=viz_type,
+            file_path=file_path,
+            caption=caption,
+            related_claim_ids=related_claim_ids,
         )
     finally:
         client.close()
@@ -960,7 +1207,11 @@ def lab_tracker_quickstart() -> str:
         "`LAB_TRACKER_MCP_USERNAME` and `LAB_TRACKER_MCP_PASSWORD` are only "
         "required when API authentication is enabled. Notes use `staged`, "
         "`committed`, or `archived` status. Note metadata values may be strings, "
-        "numbers, or booleans and are stored as strings.\n"
+        "numbers, or booleans and are stored as strings. Evidence authoring "
+        "uses first-class create tools for datasets, analyses, claims, and "
+        "visualizations; create or reuse datasets before analyses, analyses "
+        "before supported claims or visualizations, and verify the graph with "
+        "list tools.\n"
     )
 
 
