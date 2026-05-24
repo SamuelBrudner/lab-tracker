@@ -3,7 +3,12 @@ __pycache__/
 *.egg-info/
 docs/runs/
 node_modules/
+.env
+.env.*
+!.env.example
+note_storage/
 lab_tracker.db
+lab_tracker.db.backup-*
 .npm-cache/
 .codex/
 .lab-tracker-dolt/

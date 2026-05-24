@@ -37,6 +37,14 @@ def _ordered_revisions(config: Config) -> list[str]:
 
 
 def _current_revision(database_url: str) -> str | None:
+    revisions = _current_revisions(database_url)
+    if not revisions:
+        return None
+    assert len(revisions) == 1
+    return next(iter(revisions))
+
+
+def _current_revisions(database_url: str) -> set[str]:
     engine = create_engine(
         database_url,
         future=True,
@@ -45,10 +53,10 @@ def _current_revision(database_url: str) -> str | None:
     try:
         inspector = inspect(engine)
         if "alembic_version" not in inspector.get_table_names():
-            return None
+            return set()
         with engine.connect() as connection:
-            row = connection.execute(text("SELECT version_num FROM alembic_version")).one_or_none()
-        return str(row[0]) if row else None
+            rows = connection.execute(text("SELECT version_num FROM alembic_version")).fetchall()
+        return {str(row[0]) for row in rows}
     finally:
         engine.dispose()
 
@@ -70,7 +78,8 @@ def test_alembic_upgrade_chain_from_empty_to_head(monkeypatch, tmp_path):
     assert revisions
     for revision in revisions:
         command.upgrade(config, revision)
-        assert _current_revision(database_url) == revision
+        assert revision in _current_revisions(database_url)
+    assert _current_revision(database_url) == "0019_merge_daily_reviews_and_project_collaboration"
 
 
 def test_alembic_upgrade_head_creates_expected_tables(monkeypatch, tmp_path):
@@ -104,6 +113,8 @@ def test_alembic_upgrade_head_creates_expected_tables(monkeypatch, tmp_path):
         "visualization_claims",
         "graph_change_sets",
         "graph_change_operations",
+        "daily_graph_reviews",
+        "daily_graph_review_change_sets",
         "project_memberships",
     }
     assert expected.issubset(table_names)
@@ -133,6 +144,35 @@ def test_alembic_upgrade_head_creates_expected_tables(monkeypatch, tmp_path):
         "review_note",
     }.issubset(graph_change_columns)
     assert {"project_id", "user_id", "role"}.issubset(membership_columns)
+    engine.dispose()
+
+
+def test_database_at_daily_review_branch_upgrades_to_current_head(monkeypatch, tmp_path):
+    db_path = tmp_path / "daily-review-branch.db"
+    database_url = f"sqlite+pysqlite:///{db_path}"
+    config = _alembic_config()
+    _set_database_url(monkeypatch, database_url)
+
+    command.upgrade(config, "0017_daily_graph_reviews")
+    assert _current_revision(database_url) == "0017_daily_graph_reviews"
+
+    command.upgrade(config, "head")
+    assert _current_revision(database_url) == "0019_merge_daily_reviews_and_project_collaboration"
+
+    engine = create_engine(
+        database_url,
+        future=True,
+        connect_args={"check_same_thread": False},
+    )
+    inspector = inspect(engine)
+    table_names = set(inspector.get_table_names())
+    assert {
+        "daily_graph_reviews",
+        "daily_graph_review_change_sets",
+        "device_tokens",
+        "device_enrollments",
+        "project_memberships",
+    }.issubset(table_names)
     engine.dispose()
 
 
