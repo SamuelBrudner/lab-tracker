@@ -5,6 +5,8 @@ from __future__ import annotations
 import pytest
 from fastapi.testclient import TestClient
 
+from lab_tracker.app import create_app
+
 
 def _device_headers(secret: str) -> dict[str, str]:
     return {"Authorization": f"Bearer {secret}"}
@@ -118,6 +120,41 @@ def test_list_and_revoke_device_round_trip(
     )
     assert revoked.status_code == 200
     assert revoked.json()["data"]["revoked_at"] is not None
+
+
+def test_local_auth_disabled_can_list_and_pair_devices(
+    monkeypatch,
+    migrated_sqlite_database_url: str,
+):
+    monkeypatch.setenv("LAB_TRACKER_AUTH_ENABLED", "false")
+
+    with TestClient(create_app()) as client:
+        me = client.get("/auth/me")
+        assert me.status_code == 200
+        assert me.json()["data"]["username"] == "local-tester"
+
+        empty_list = client.get("/auth/devices")
+        assert empty_list.status_code == 200, empty_list.text
+        assert empty_list.json()["data"] == []
+        assert empty_list.json()["meta"]["total"] == 0
+        assert empty_list.json()["meta"]["limit"] >= 1
+
+        enrollment = client.post("/auth/devices/enrollment", json={})
+        assert enrollment.status_code == 201, enrollment.text
+        offer_token = enrollment.json()["data"]["offer_token"]
+
+        consume = client.post(
+            "/auth/devices/consume",
+            json={"offer_token": offer_token, "label": "Local phone"},
+        )
+        assert consume.status_code == 201, consume.text
+        device_token_id = consume.json()["data"]["device_token_id"]
+
+        listed = client.get("/auth/devices")
+        assert listed.status_code == 200, listed.text
+        assert [device["device_token_id"] for device in listed.json()["data"]] == [
+            device_token_id
+        ]
 
 
 def test_device_token_can_post_captures(

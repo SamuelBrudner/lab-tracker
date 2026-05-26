@@ -22,6 +22,11 @@ from lab_tracker.db_models import DeviceEnrollmentModel, DeviceTokenModel, UserM
 from lab_tracker.errors import AuthError, ConflictError, NotFoundError, ValidationError
 
 
+LOCAL_AUTH_USER_ID = UUID("00000000-0000-4000-8000-000000000001")
+LOCAL_AUTH_USERNAME = "local-tester"
+LOCAL_AUTH_PASSWORD_HASH = "local-auth-disabled"
+
+
 def utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
@@ -176,6 +181,34 @@ class AuthService:
         if not username or not username.strip():
             raise ValidationError("Username must not be empty.")
         return username.strip()
+
+
+def ensure_local_auth_user(session_factory: sessionmaker[Session]) -> User:
+    """Persist the synthetic local-auth user for DB-backed features.
+
+    Auth-disabled local mode still needs a user row for foreign-keyed surfaces
+    such as paired device tokens. The placeholder password hash is intentionally
+    not a valid PasswordHasher value, so this account cannot log in if auth is
+    later enabled against the same local database.
+    """
+
+    with session_factory() as session:
+        row = session.get(UserModel, str(LOCAL_AUTH_USER_ID))
+        if row is None:
+            row = UserModel(
+                user_id=str(LOCAL_AUTH_USER_ID),
+                username=LOCAL_AUTH_USERNAME,
+                password_hash=LOCAL_AUTH_PASSWORD_HASH,
+                role=Role.ADMIN.value,
+                created_at=utc_now(),
+            )
+            session.add(row)
+        else:
+            row.username = LOCAL_AUTH_USERNAME
+            row.password_hash = LOCAL_AUTH_PASSWORD_HASH
+            row.role = Role.ADMIN.value
+        session.commit()
+        return _user_from_model(row)
 
 
 @dataclass(frozen=True)

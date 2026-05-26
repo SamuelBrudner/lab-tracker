@@ -10,7 +10,7 @@ from fastapi import APIRouter
 from starlette import status as http_status
 from starlette.requests import Request
 
-from lab_tracker.auth import AuthService, Role, TokenService
+from lab_tracker.auth import LOCAL_AUTH_USERNAME, AuthService, Role, TokenService
 from lab_tracker.errors import AuthError
 from lab_tracker.schemas import (
     AuthLoginRequest,
@@ -26,9 +26,6 @@ from .shared import (
     auth_token_read,
     auth_user_read,
 )
-
-_LOCAL_AUTH_USERNAME = "local-tester"
-
 
 def build_auth_router(
     *,
@@ -93,7 +90,7 @@ def build_auth_router(
         if not request.app.state.auth_enabled:
             user = AuthUserRead(
                 user_id=UUID(str(actor.user_id)),
-                username=_LOCAL_AUTH_USERNAME,
+                username=LOCAL_AUTH_USERNAME,
                 role=actor.role,
                 created_at=datetime.now(timezone.utc),
             )

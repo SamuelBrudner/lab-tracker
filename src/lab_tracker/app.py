@@ -8,7 +8,6 @@ import logging
 import os
 from pathlib import Path
 from typing import Any
-from uuid import UUID
 
 from fastapi import FastAPI, Request
 from fastapi.staticfiles import StaticFiles
@@ -20,6 +19,7 @@ from starlette.responses import FileResponse, JSONResponse, RedirectResponse
 from lab_tracker.api import LabTrackerAPI
 from lab_tracker.auth import (
     DEVICE_TOKEN_PREFIX,
+    LOCAL_AUTH_USER_ID,
     AuthContext,
     AuthService,
     DeviceAuthService,
@@ -27,6 +27,7 @@ from lab_tracker.auth import (
     Role,
     TokenService,
     device_principal_can_access,
+    ensure_local_auth_user,
     extract_bearer_token,
 )
 from lab_tracker.config import get_settings
@@ -55,7 +56,6 @@ from lab_tracker.sqlalchemy_repository import SQLAlchemyLabTrackerRepository
 
 _START_TIME = datetime.now(timezone.utc)
 _FRONTEND_DIR = Path(__file__).resolve().parent / "frontend"
-_LOCAL_AUTH_USER_ID = UUID("00000000-0000-4000-8000-000000000001")
 _logger = logging.getLogger(__name__)
 _PUBLIC_PATHS = frozenset(
     {
@@ -220,7 +220,7 @@ def _device_forbidden_response(message: str) -> JSONResponse:
 
 
 def local_auth_context() -> AuthContext:
-    return AuthContext(user_id=_LOCAL_AUTH_USER_ID, role=Role.ADMIN)
+    return AuthContext(user_id=LOCAL_AUTH_USER_ID, role=Role.ADMIN)
 
 
 def _is_public_path(path: str) -> bool:
@@ -356,6 +356,12 @@ def create_app() -> FastAPI:
     configure_logging(settings.log_level)
     engine = get_engine(settings)
     session_factory = get_session_factory(engine=engine)
+    auth_enabled = settings.is_auth_enabled()
+    if not auth_enabled:
+        try:
+            ensure_local_auth_user(session_factory)
+        except SQLAlchemyError as exc:
+            _logger.warning("Local auth user bootstrap skipped: %s", exc)
     auth_service = AuthService(session_factory=session_factory)
     device_auth_service = DeviceAuthService(session_factory=session_factory)
     token_service = TokenService(
@@ -383,7 +389,7 @@ def create_app() -> FastAPI:
     app.state.db_session_factory = session_factory
     app.state.auth_service = auth_service
     app.state.device_auth_service = device_auth_service
-    app.state.auth_enabled = settings.is_auth_enabled()
+    app.state.auth_enabled = auth_enabled
     app.state.settings = settings
     app.state.token_service = token_service
     app.state.file_storage_backend = file_storage_backend

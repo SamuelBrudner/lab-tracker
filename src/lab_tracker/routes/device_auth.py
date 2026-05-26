@@ -118,7 +118,7 @@ def build_device_auth_router(*, device_auth_service: DeviceAuthService) -> APIRo
         ]
         return ListEnvelope(
             data=items,
-            meta={"limit": len(items), "offset": 0, "total": len(items)},
+            meta={"limit": max(len(items), 1), "offset": 0, "total": len(items)},
         )
 
     @router.delete(
