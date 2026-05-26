@@ -79,6 +79,10 @@ Use these tools when available:
   datasets or analyses.
 - `lab_tracker_create_visualization` creates a visualization linked to an
   analysis and optional related claims.
+- `lab_tracker_upload_visualization_file` uploads a local file into managed Lab
+  Tracker storage for a visualization node. Use this when a plot or extracted
+  figure exists on disk and should be available to remote clients through the
+  API rather than only by local filesystem path.
 
 Creation tools write through the API, using the configured service account when
 authentication is enabled. Be explicit before creating or mutating research
@@ -99,9 +103,12 @@ Author evidence in this order:
 4. Use `supported` claim status only when `supported_by_dataset_ids` or
    `supported_by_analysis_ids` is present. Use `proposed` for human
    interpretation without a concrete supporting record.
-5. Prefer real local artifact paths for visualization `file_path`. For
-   retrospective paper figures, use DOI or PDF locators such as
-   `doi:10.1371/journal.pcbi.1011051#fig5` only when no local plot file exists.
+5. Prefer managed visualization uploads for plot or figure assets that exist on
+   disk. Keep `file_path` as a source locator when useful, then call
+   `lab_tracker_upload_visualization_file` so the graph node exposes an API
+   download path and checksum. For retrospective paper figures, use DOI or PDF
+   locators such as `doi:10.1371/journal.pcbi.1011051#fig5` only when no local
+   plot file exists.
 6. Verify the final graph with list tools.
 
 For retrospective literature evidence, staged datasets are acceptable placeholders

@@ -5,10 +5,12 @@ from __future__ import annotations
 from uuid import UUID
 
 from fastapi import APIRouter
+from sqlalchemy import select
 from starlette import status as http_status
 from starlette.requests import Request
 
 from lab_tracker.api import LabTrackerAPI
+from lab_tracker.db_models import VisualizationModel
 from lab_tracker.models import Analysis, AnalysisStatus
 from lab_tracker.schemas import (
     AnalysisCommitRequest,
@@ -23,13 +25,16 @@ from .shared import (
     actor_from_request,
     analysis_default_status,
     api_from_request,
+    db_session_from_request,
     ensure_project_read,
+    file_storage_from_request,
     filter_project_scoped_items,
     list_response,
     paginate,
     repository_from_request,
     validate_pagination,
 )
+from .visualizations import _delete_stored_visualization_file
 
 
 def build_analyses_router(api: LabTrackerAPI) -> APIRouter:
@@ -119,10 +124,30 @@ def build_analyses_router(api: LabTrackerAPI) -> APIRouter:
 
     @router.delete("/analyses/{analysis_id}", response_model=Envelope[Analysis])
     def delete_analysis(analysis_id: UUID, request: Request):
+        request_api = api_from_request(request, api)
         actor = actor_from_request(request)
-        existing = api_from_request(request, api).get_analysis(analysis_id)
+        existing = request_api.get_analysis(analysis_id)
         ensure_project_read(request, existing.project_id)
-        analysis = api_from_request(request, api).delete_analysis(analysis_id, actor=actor)
+        db_session = db_session_from_request(request)
+        storage_backend = file_storage_from_request(request)
+        storage_ids = [
+            UUID(value)
+            for value in db_session.scalars(
+                select(VisualizationModel.asset_storage_id).where(
+                    VisualizationModel.analysis_id == str(analysis_id),
+                    VisualizationModel.asset_storage_id.is_not(None),
+                )
+            )
+        ]
+        analysis = request_api.delete_analysis(analysis_id, actor=actor)
+        db_session.flush()
+        for storage_id in storage_ids:
+            request_api.run_after_commit(
+                lambda storage_id=storage_id: _delete_stored_visualization_file(
+                    storage_backend,
+                    storage_id,
+                )
+            )
         return Envelope(data=analysis)
 
     return router

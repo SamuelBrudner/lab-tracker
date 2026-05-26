@@ -16,6 +16,7 @@ from lab_tracker.models import (
     QuestionLink,
     QuestionLinkRole,
     Visualization,
+    VisualizationAsset,
 )
 from lab_tracker.provenance import (
     build_analysis_provenance_document,
@@ -179,6 +180,13 @@ def test_analysis_provenance_omits_optional_fields_and_preserves_support_links()
         viz_type="line",
         file_path="figs/signal.png",
         related_claim_ids=[claim_id],
+        asset=VisualizationAsset(
+            storage_id=uuid4(),
+            filename="signal.png",
+            content_type="image/png",
+            size_bytes=128,
+            checksum="abc123",
+        ),
     )
 
     document = build_analysis_provenance_document(
@@ -221,4 +229,12 @@ def test_analysis_provenance_omits_optional_fields_and_preserves_support_links()
     assert viz_node["relatedClaim"] == [
         {"@id": "http://example.test/claims/77777777-7777-7777-7777-777777777777"}
     ]
+    assert viz_node["contentUrl"] == (
+        "http://example.test/visualizations/"
+        "88888888-8888-8888-8888-888888888888/file/download"
+    )
+    assert viz_node["fileName"] == "signal.png"
+    assert viz_node["encodingFormat"] == "image/png"
+    assert viz_node["contentSize"] == 128
+    assert viz_node["sha256"] == "abc123"
     assert "caption" not in viz_node

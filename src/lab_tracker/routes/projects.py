@@ -11,7 +11,13 @@ from starlette import status as http_status
 from starlette.requests import Request
 
 from lab_tracker.api import LabTrackerAPI
-from lab_tracker.db_models import DatasetFileModel, DatasetModel, NoteModel
+from lab_tracker.db_models import (
+    AnalysisModel,
+    DatasetFileModel,
+    DatasetModel,
+    NoteModel,
+    VisualizationModel,
+)
 from lab_tracker.errors import NotFoundError
 from lab_tracker.models import Project, ProjectMembership, ProjectStatus
 from lab_tracker.schemas import (
@@ -134,6 +140,20 @@ def build_projects_router(api: LabTrackerAPI) -> APIRouter:
                 )
             )
         ]
+        visualization_storage_ids = [
+            UUID(value)
+            for value in db_session.scalars(
+                select(VisualizationModel.asset_storage_id)
+                .join(
+                    AnalysisModel,
+                    AnalysisModel.analysis_id == VisualizationModel.analysis_id,
+                )
+                .where(
+                    AnalysisModel.project_id == str(project_id),
+                    VisualizationModel.asset_storage_id.is_not(None),
+                )
+            )
+        ]
         project = request_api.delete_project(project_id, actor=actor)
         db_session.flush()
         for storage_id in dataset_file_storage_ids:
@@ -147,6 +167,13 @@ def build_projects_router(api: LabTrackerAPI) -> APIRouter:
             request_api.run_after_commit(
                 lambda storage_id=storage_id: _delete_stored_file(
                     raw_note_storage,
+                    storage_id,
+                )
+            )
+        for storage_id in visualization_storage_ids:
+            request_api.run_after_commit(
+                lambda storage_id=storage_id: _delete_stored_file(
+                    file_storage_backend,
                     storage_id,
                 )
             )

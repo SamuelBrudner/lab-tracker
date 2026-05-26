@@ -2,6 +2,7 @@ import * as React from "react";
 
 import { formatDate } from "../../shared/formatters.js";
 import { useApiResource } from "../../hooks/useApiResource.js";
+import { downloadProtectedResource } from "../../shared/api.js";
 
 function VisualizationDetailCard({ token, vizId, navigate }) {
   const { data: viz, error, loading } = useApiResource(
@@ -9,6 +10,57 @@ function VisualizationDetailCard({ token, vizId, navigate }) {
     token,
     "Failed to load visualization."
   );
+  const [assetPreview, setAssetPreview] = React.useState("");
+  const isImageAsset = Boolean(viz?.asset?.content_type?.startsWith("image/"));
+
+  React.useEffect(() => {
+    let canceled = false;
+    let objectUrl = "";
+    setAssetPreview("");
+    if (!viz?.asset_download_path || !isImageAsset) {
+      return () => {
+        canceled = true;
+      };
+    }
+    const headers = token ? { Authorization: `Bearer ${token}` } : {};
+    fetch(viz.asset_download_path, { headers })
+      .then((response) => {
+        if (!response.ok) {
+          throw new Error("Unable to load visualization asset.");
+        }
+        return response.blob();
+      })
+      .then((blob) => {
+        objectUrl = URL.createObjectURL(blob);
+        if (canceled) {
+          URL.revokeObjectURL(objectUrl);
+          return;
+        }
+        setAssetPreview(objectUrl);
+      })
+      .catch(() => {
+        if (!canceled) {
+          setAssetPreview("");
+        }
+      });
+    return () => {
+      canceled = true;
+      if (objectUrl) {
+        URL.revokeObjectURL(objectUrl);
+      }
+    };
+  }, [isImageAsset, token, viz?.asset_download_path]);
+
+  async function handleDownloadAsset() {
+    if (!viz?.asset_download_path) {
+      return;
+    }
+    await downloadProtectedResource({
+      path: viz.asset_download_path,
+      token,
+      filename: viz.asset?.filename || "visualization",
+    });
+  }
 
   return (
     <article className="card span-8">
@@ -30,6 +82,32 @@ function VisualizationDetailCard({ token, vizId, navigate }) {
             <div className="mono">{viz.analysis_id}</div>
             <div className="subtle">File path</div>
             <div className="mono">{viz.file_path}</div>
+            <div className="subtle">Managed asset</div>
+            {viz.asset ? (
+              <div className="stack">
+                {assetPreview ? (
+                  <img
+                    className="note-image"
+                    src={assetPreview}
+                    alt={viz.asset.filename || "Visualization asset"}
+                  />
+                ) : null}
+                <div className="mono">{viz.asset.filename}</div>
+                <div className="mono">
+                  {viz.asset.content_type} - {viz.asset.size_bytes} bytes
+                </div>
+                <div className="mono">sha256: {viz.asset.checksum}</div>
+                <button
+                  type="button"
+                  className="btn-secondary"
+                  onClick={handleDownloadAsset}
+                >
+                  Download asset
+                </button>
+              </div>
+            ) : (
+              <div className="subtle">(none)</div>
+            )}
             <div className="subtle">Caption</div>
             <div>{viz.caption || <span className="subtle">(none)</span>}</div>
             <div className="subtle">Related claim IDs</div>

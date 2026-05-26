@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import mimetypes
 import os
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -523,6 +525,27 @@ class LabTrackerAPIClient:
             },
         )
 
+    def upload_visualization_file(
+        self,
+        *,
+        viz_id: str,
+        file_path: str,
+        content_type: str | None = None,
+    ) -> JsonObject:
+        path = Path(file_path).expanduser()
+        if not path.is_file():
+            raise LabTrackerAPIError(f"Visualization file does not exist: {file_path}")
+        resolved_content_type = (
+            content_type
+            or mimetypes.guess_type(path.name)[0]
+            or "application/octet-stream"
+        )
+        return self._request(
+            "POST",
+            f"/visualizations/{viz_id}/file",
+            files={"file": (path.name, path.read_bytes(), resolved_content_type)},
+        )
+
     def _request(
         self,
         method: str,
@@ -531,6 +554,7 @@ class LabTrackerAPIClient:
         authenticated: bool = True,
         params: JsonObject | None = None,
         json_payload: JsonObject | None = None,
+        files: dict[str, Any] | None = None,
         retry_on_unauthorized: bool = True,
     ) -> JsonObject:
         headers: dict[str, str] = {}
@@ -541,6 +565,7 @@ class LabTrackerAPIClient:
             path,
             params=_drop_empty(params),
             json=_drop_empty(json_payload),
+            files=files,
             headers=headers,
         )
         if response.status_code == 401 and authenticated and retry_on_unauthorized:
@@ -556,6 +581,7 @@ class LabTrackerAPIClient:
                 path,
                 params=_drop_empty(params),
                 json=_drop_empty(json_payload),
+                files=files,
                 headers=headers,
             )
         if response.status_code >= 400:
@@ -1190,6 +1216,24 @@ def lab_tracker_create_visualization(
         client.close()
 
 
+@server.tool()
+def lab_tracker_upload_visualization_file(
+    viz_id: str,
+    file_path: str,
+    content_type: str | None = None,
+) -> JsonObject:
+    """Upload a local file into managed storage for a visualization node."""
+    client = client_from_env()
+    try:
+        return client.upload_visualization_file(
+            viz_id=viz_id,
+            file_path=file_path,
+            content_type=content_type,
+        )
+    finally:
+        client.close()
+
+
 @server.resource(
     "lab-tracker://quickstart",
     name="Lab Tracker MCP Quickstart",
@@ -1210,8 +1254,9 @@ def lab_tracker_quickstart() -> str:
         "numbers, or booleans and are stored as strings. Evidence authoring "
         "uses first-class create tools for datasets, analyses, claims, and "
         "visualizations; create or reuse datasets before analyses, analyses "
-        "before supported claims or visualizations, and verify the graph with "
-        "list tools.\n"
+        "before supported claims or visualizations, upload visualization files "
+        "into managed storage when local figure assets exist, and verify the "
+        "graph with list tools.\n"
     )
 
 

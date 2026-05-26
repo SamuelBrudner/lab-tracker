@@ -424,6 +424,14 @@ class VisualizationInput(_DomainModel):
     related_claim_ids: list[UUID] = Field(default_factory=list)
 
 
+class VisualizationAsset(_DomainModel):
+    storage_id: UUID
+    filename: str
+    content_type: str
+    size_bytes: int
+    checksum: str
+
+
 class Visualization(_DomainModel):
     viz_id: UUID
     analysis_id: UUID
@@ -431,5 +439,13 @@ class Visualization(_DomainModel):
     file_path: str
     caption: str | None = None
     related_claim_ids: list[UUID] = Field(default_factory=list)
+    asset: VisualizationAsset | None = None
     created_at: datetime = Field(default_factory=utc_now)
     updated_at: datetime = Field(default_factory=utc_now)
+
+    @computed_field(return_type=str | None)
+    @property
+    def asset_download_path(self) -> str | None:
+        if self.asset is None:
+            return None
+        return f"/visualizations/{self.viz_id}/file/download"

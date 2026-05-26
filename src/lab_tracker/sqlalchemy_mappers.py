@@ -56,6 +56,7 @@ from lab_tracker.models import (
     SessionStatus,
     SessionType,
     Visualization,
+    VisualizationAsset,
 )
 
 
@@ -684,6 +685,19 @@ def visualization_to_model(visualization: Visualization) -> VisualizationModel:
         viz_type=visualization.viz_type,
         file_path=visualization.file_path,
         caption=visualization.caption,
+        asset_storage_id=(
+            _uuid_str(visualization.asset.storage_id)
+            if visualization.asset is not None
+            else None
+        ),
+        asset_filename=visualization.asset.filename if visualization.asset is not None else None,
+        asset_content_type=(
+            visualization.asset.content_type if visualization.asset is not None else None
+        ),
+        asset_size_bytes=(
+            visualization.asset.size_bytes if visualization.asset is not None else None
+        ),
+        asset_checksum=visualization.asset.checksum if visualization.asset is not None else None,
         created_at=visualization.created_at,
         updated_at=visualization.updated_at,
     )
@@ -694,6 +708,15 @@ def visualization_from_model(
     *,
     related_claim_ids: Iterable[UUID] = (),
 ) -> Visualization:
+    asset = None
+    if row.asset_storage_id:
+        asset = VisualizationAsset(
+            storage_id=_uuid(row.asset_storage_id),
+            filename=row.asset_filename or "",
+            content_type=row.asset_content_type or "",
+            size_bytes=row.asset_size_bytes or 0,
+            checksum=row.asset_checksum or "",
+        )
     return Visualization(
         viz_id=_uuid(row.viz_id),
         analysis_id=_uuid(row.analysis_id),
@@ -701,6 +724,7 @@ def visualization_from_model(
         file_path=row.file_path,
         caption=row.caption,
         related_claim_ids=list(related_claim_ids),
+        asset=asset,
         created_at=_as_utc(row.created_at),
         updated_at=_as_utc(row.updated_at),
     )
@@ -721,5 +745,16 @@ def apply_visualization_to_model(row: VisualizationModel, visualization: Visuali
     row.viz_type = visualization.viz_type
     row.file_path = visualization.file_path
     row.caption = visualization.caption
+    row.asset_storage_id = (
+        _uuid_str(visualization.asset.storage_id) if visualization.asset is not None else None
+    )
+    row.asset_filename = visualization.asset.filename if visualization.asset is not None else None
+    row.asset_content_type = (
+        visualization.asset.content_type if visualization.asset is not None else None
+    )
+    row.asset_size_bytes = (
+        visualization.asset.size_bytes if visualization.asset is not None else None
+    )
+    row.asset_checksum = visualization.asset.checksum if visualization.asset is not None else None
     row.created_at = visualization.created_at
     row.updated_at = visualization.updated_at

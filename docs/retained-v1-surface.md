@@ -25,7 +25,8 @@ research record:
   eligible sessions into datasets.
 - Dataset staging and direct commit with provenance/manifest capture, without
   an approval gate.
-- Analysis, claim, and visualization records as explicit user-driven flows.
+- Analysis, claim, and visualization records as explicit user-driven flows,
+  including managed file storage for visualization assets.
 
 Anything not listed above is out of the retained v1 surface and should not
 shape the default runtime, supported docs, or simplified architecture.

@@ -510,6 +510,11 @@ class VisualizationModel(Base):
     viz_type: Mapped[str] = mapped_column(String(40), nullable=False)
     file_path: Mapped[str] = mapped_column(String(1000), nullable=False)
     caption: Mapped[str | None] = mapped_column(Text)
+    asset_storage_id: Mapped[str | None] = mapped_column(String(36))
+    asset_filename: Mapped[str | None] = mapped_column(String(255))
+    asset_content_type: Mapped[str | None] = mapped_column(String(255))
+    asset_size_bytes: Mapped[int | None] = mapped_column(Integer)
+    asset_checksum: Mapped[str | None] = mapped_column(String(64))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utc_now)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),

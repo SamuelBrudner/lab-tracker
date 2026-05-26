@@ -246,6 +246,14 @@ def _visualization_node(base_url: str, visualization: Visualization) -> dict[str
     }
     if visualization.caption:
         node["caption"] = visualization.caption
+    if visualization.asset is not None:
+        node["contentUrl"] = (
+            f"{_resource_iri(base_url, 'visualizations', visualization.viz_id)}/file/download"
+        )
+        node["fileName"] = visualization.asset.filename
+        node["encodingFormat"] = visualization.asset.content_type
+        node["contentSize"] = visualization.asset.size_bytes
+        node["sha256"] = visualization.asset.checksum
     if visualization.related_claim_ids:
         node["relatedClaim"] = [
             {"@id": _resource_iri(base_url, "claims", claim_id)}

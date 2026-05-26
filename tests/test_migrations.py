@@ -79,7 +79,7 @@ def test_alembic_upgrade_chain_from_empty_to_head(monkeypatch, tmp_path):
     for revision in revisions:
         command.upgrade(config, revision)
         assert revision in _current_revisions(database_url)
-    assert _current_revision(database_url) == "0019_merge_daily_reviews_and_project_collaboration"
+    assert _current_revision(database_url) == "0020_visualization_assets"
 
 
 def test_alembic_upgrade_head_creates_expected_tables(monkeypatch, tmp_path):
@@ -131,6 +131,9 @@ def test_alembic_upgrade_head_creates_expected_tables(monkeypatch, tmp_path):
     membership_columns = {
         column["name"] for column in inspector.get_columns("project_memberships")
     }
+    visualization_columns = {
+        column["name"] for column in inspector.get_columns("visualizations")
+    }
 
     assert "review_policy" not in project_columns
     assert "created_from" not in question_columns
@@ -144,6 +147,13 @@ def test_alembic_upgrade_head_creates_expected_tables(monkeypatch, tmp_path):
         "review_note",
     }.issubset(graph_change_columns)
     assert {"project_id", "user_id", "role"}.issubset(membership_columns)
+    assert {
+        "asset_storage_id",
+        "asset_filename",
+        "asset_content_type",
+        "asset_size_bytes",
+        "asset_checksum",
+    }.issubset(visualization_columns)
     engine.dispose()
 
 
@@ -157,7 +167,7 @@ def test_database_at_daily_review_branch_upgrades_to_current_head(monkeypatch, t
     assert _current_revision(database_url) == "0017_daily_graph_reviews"
 
     command.upgrade(config, "head")
-    assert _current_revision(database_url) == "0019_merge_daily_reviews_and_project_collaboration"
+    assert _current_revision(database_url) == "0020_visualization_assets"
 
     engine = create_engine(
         database_url,

@@ -30,6 +30,7 @@ def test_fastmcp_registers_lab_tracker_tools() -> None:
     assert "lab_tracker_create_analysis" in names
     assert "lab_tracker_create_claim" in names
     assert "lab_tracker_create_visualization" in names
+    assert "lab_tracker_upload_visualization_file" in names
 
 
 def test_fastmcp_registers_agent_consultation_policy_resource() -> None:
@@ -509,6 +510,45 @@ def test_client_create_evidence_tools_send_api_payloads() -> None:
         "/claims",
         "/visualizations",
     ]
+
+
+def test_client_upload_visualization_file_posts_multipart(tmp_path) -> None:
+    figure_path = tmp_path / "figure.png"
+    figure_path.write_bytes(b"figure-bytes")
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        assert request.method == "POST"
+        assert request.url.path == "/visualizations/viz-1/file"
+        assert request.headers["content-type"].startswith("multipart/form-data")
+        assert b"figure.png" in request.content
+        assert b"figure-bytes" in request.content
+        return _json_response(
+            201,
+            {
+                "data": {
+                    "viz_id": "viz-1",
+                    "asset": {"filename": "figure.png"},
+                }
+            },
+        )
+
+    client = mcp_server.LabTrackerAPIClient(
+        mcp_server.MCPSettings(base_url="http://testserver"),
+        transport=httpx.MockTransport(handler),
+    )
+
+    try:
+        payload = client.upload_visualization_file(
+            viz_id="viz-1",
+            file_path=str(figure_path),
+        )
+    finally:
+        client.close()
+
+    assert payload["data"]["asset"]["filename"] == "figure.png"
+    assert [request.url.path for request in seen] == ["/visualizations/viz-1/file"]
 
 
 @pytest.mark.parametrize(
