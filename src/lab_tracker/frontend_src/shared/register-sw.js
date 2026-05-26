@@ -31,11 +31,36 @@ export function resetUploadQueueForTests() {
   cachedQueue = null;
 }
 
-export function registerServiceWorker(scriptUrl = "/app/sw.js") {
+export function registerServiceWorker(
+  scriptUrl = "/app/sw.js",
+  { reloadOnControllerChange = true, reloadWindow = () => window.location.reload() } = {}
+) {
   if (!hasServiceWorker()) {
     return Promise.resolve(null);
   }
-  return navigator.serviceWorker.register(scriptUrl).catch(() => null);
+  const serviceWorker = navigator.serviceWorker;
+  const shouldReloadOnUpdate = reloadOnControllerChange && Boolean(serviceWorker.controller);
+  let reloadingForUpdate = false;
+  if (shouldReloadOnUpdate) {
+    serviceWorker.addEventListener(
+      "controllerchange",
+      () => {
+        if (reloadingForUpdate) {
+          return;
+        }
+        reloadingForUpdate = true;
+        reloadWindow();
+      },
+      { once: true }
+    );
+  }
+  return serviceWorker
+    .register(scriptUrl, { updateViaCache: "none" })
+    .then((registration) => {
+      registration.update?.().catch(() => {});
+      return registration;
+    })
+    .catch(() => null);
 }
 
 export function installOfflineRetry({ queue = getUploadQueue() } = {}) {
