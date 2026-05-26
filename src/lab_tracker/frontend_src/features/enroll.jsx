@@ -64,11 +64,12 @@ function EnrollPage({ replace, setFlash }) {
         setPairedLabel(payload.label || label);
         setStatus("paired");
         setFlash(`Device paired as "${payload.label || label}".`);
-        replace("/app/capture");
+        const captureInstallPath = "/app/capture?install=1";
+        replace(captureInstallPath);
         if (typeof window !== "undefined") {
           // Force a reload so React picks up the new token on browsers that
           // cache the initial token snapshot in module-level closures.
-          window.location.replace("/app/capture");
+          window.location.replace(captureInstallPath);
         }
       })
       .catch((err) => {

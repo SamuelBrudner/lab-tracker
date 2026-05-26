@@ -101,6 +101,14 @@ function isPhoneSizedBrowser() {
   );
 }
 
+function readInstallIntent() {
+  try {
+    return new URLSearchParams(window.location.search || "").get("install") === "1";
+  } catch {
+    return false;
+  }
+}
+
 function MobileInstallPrompt() {
   const [dismissed, setDismissed] = useState(() => readInstallPromptDismissed());
   const [visible, setVisible] = useState(false);
@@ -109,7 +117,11 @@ function MobileInstallPrompt() {
 
   useEffect(() => {
     function refreshVisibility() {
-      setVisible(!readInstallPromptDismissed() && !isStandaloneApp() && isPhoneSizedBrowser());
+      setVisible(
+        !readInstallPromptDismissed() &&
+          !isStandaloneApp() &&
+          (readInstallIntent() || isPhoneSizedBrowser())
+      );
     }
 
     function handleBeforeInstallPrompt(event) {
@@ -686,6 +698,7 @@ function MobileCaptureCard({
 
   return (
     <article className="card span-12 capture-card">
+      <MobileInstallPrompt />
       <div className="item-head capture-head">
         <div>
           <h2>Phone Capture</h2>
@@ -695,7 +708,6 @@ function MobileCaptureCard({
           Workspace
         </button>
       </div>
-      <MobileInstallPrompt />
 
       <div className="capture-layout">
         <form className="form capture-form" onSubmit={(event) => event.preventDefault()}>
