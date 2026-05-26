@@ -24,6 +24,11 @@ from lab_tracker.schemas import (
 
 from .shared import actor_from_request
 
+_ENROLLMENT_QR_SCALE = 10
+_ENROLLMENT_QR_BORDER = 6
+_ENROLLMENT_QR_DARK = "#000000"
+_ENROLLMENT_QR_LIGHT = "#ffffff"
+
 
 def _resolve_public_base_url(request: Request) -> str:
     """Pick the base URL the paired phone will hit.
@@ -44,10 +49,10 @@ def _resolve_public_base_url(request: Request) -> str:
 def _build_enrollment_qr_svg(url: str) -> str:
     qr = segno.make(url, error="m")
     return qr.svg_inline(
-        scale=6,
-        border=2,
-        dark="#0d8b6f",
-        light="#ffffff",
+        scale=_ENROLLMENT_QR_SCALE,
+        border=_ENROLLMENT_QR_BORDER,
+        dark=_ENROLLMENT_QR_DARK,
+        light=_ENROLLMENT_QR_LIGHT,
     )
 
 

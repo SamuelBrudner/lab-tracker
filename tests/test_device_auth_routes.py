@@ -6,6 +6,13 @@ import pytest
 from fastapi.testclient import TestClient
 
 from lab_tracker.app import create_app
+from lab_tracker.routes.device_auth import (
+    _ENROLLMENT_QR_BORDER,
+    _ENROLLMENT_QR_DARK,
+    _ENROLLMENT_QR_LIGHT,
+    _ENROLLMENT_QR_SCALE,
+    _build_enrollment_qr_svg,
+)
 
 
 def _device_headers(secret: str) -> dict[str, str]:
@@ -58,6 +65,20 @@ def test_create_enrollment_returns_offer_with_enrollment_url_and_qr(
     )
     qr_svg = payload["enrollment_qr_svg"]
     assert qr_svg.startswith("<svg") and "</svg>" in qr_svg
+
+
+def test_enrollment_qr_is_phone_scanner_friendly():
+    qr_svg = _build_enrollment_qr_svg(
+        "https://lab.example.com/app/enroll?offer=lpair_test"
+    )
+
+    assert _ENROLLMENT_QR_DARK == "#000000"
+    assert _ENROLLMENT_QR_LIGHT == "#ffffff"
+    assert _ENROLLMENT_QR_SCALE >= 10
+    assert _ENROLLMENT_QR_BORDER >= 4
+    assert 'stroke="#000"' in qr_svg
+    assert 'fill="#fff"' in qr_svg
+    assert "#0d8b6f" not in qr_svg
 
 
 def test_enrollment_url_honors_public_base_url_override(
