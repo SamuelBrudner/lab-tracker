@@ -865,6 +865,76 @@ describe("App", () => {
     expect(await screen.findByText(questionId)).toBeInTheDocument();
   });
 
+  it("puts capture actions before upload details on the mobile capture route", async () => {
+    localStorage.setItem(TOKEN_STORAGE_KEY, "token-mobile-capture-order");
+    window.history.replaceState({}, "", "/app/capture?install=1");
+
+    installFetchMock([
+      {
+        match: "/auth/me",
+        response: apiResponse({ role: "admin", username: "sam" }),
+      },
+      {
+        match: projectsPath,
+        response: apiResponse([project("project-1", "Project One")]),
+      },
+      {
+        match: questionListPath("project-1"),
+        response: paged([]),
+      },
+      {
+        match: datasetListPath("project-1"),
+        response: paged([]),
+      },
+      {
+        match: noteCountPath("project-1"),
+        response: paged([], { limit: 1, offset: 0, total: 0 }),
+      },
+      {
+        match: activeSessionsPath("project-1"),
+        response: paged([]),
+      },
+      {
+        match: buildApiPath("/graph-drafts", { project_id: "project-1", limit: 10 }),
+        response: paged([]),
+      },
+      {
+        match: buildApiPath("/notes", { project_id: "project-1", limit: 10 }),
+        response: paged([]),
+      },
+      {
+        match: captureAnalysesPath("project-1"),
+        response: paged([]),
+      },
+      {
+        match: captureClaimsPath("project-1"),
+        response: paged([]),
+      },
+    ]);
+
+    render(<App />);
+
+    const installPrompt = await screen.findByRole("status");
+    const captureHeading = await screen.findByRole("heading", { name: "Capture" });
+    const uploadButton = screen.getByRole("button", { name: "Upload and draft" });
+    const detailsHeading = screen.getByRole("heading", { name: "Upload details" });
+    const projectSelect = screen.getByLabelText("Project");
+
+    expect(
+      Boolean(
+        installPrompt.compareDocumentPosition(captureHeading) & Node.DOCUMENT_POSITION_FOLLOWING
+      )
+    ).toBe(true);
+    expect(screen.getByLabelText("Photo")).toBeInTheDocument();
+    expect(screen.getByLabelText("Photo file")).toBeInTheDocument();
+    expect(
+      Boolean(uploadButton.compareDocumentPosition(detailsHeading) & Node.DOCUMENT_POSITION_FOLLOWING)
+    ).toBe(true);
+    expect(
+      Boolean(uploadButton.compareDocumentPosition(projectSelect) & Node.DOCUMENT_POSITION_FOLLOWING)
+    ).toBe(true);
+  });
+
   it("captures a mobile image with context and starts a graph-aware draft", async () => {
     const noteId = "11111111-1111-4111-8111-111111111111";
     const draftId = "22222222-2222-4222-8222-222222222222";
@@ -1050,7 +1120,7 @@ describe("App", () => {
 
     render(<App />);
 
-    expect(await screen.findByRole("heading", { name: "Phone Capture" })).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "Capture" })).toBeInTheDocument();
     await waitFor(() => expect(screen.getByLabelText("Project")).toHaveValue("project-1"));
 
     const file = new File(["phone-bytes"], "phone-capture.jpg", {
@@ -1309,7 +1379,7 @@ describe("App", () => {
 
     render(<App />);
 
-    expect(await screen.findByRole("heading", { name: "Phone Capture" })).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "Capture" })).toBeInTheDocument();
     await waitFor(() => expect(screen.getByLabelText("Project")).toHaveValue("project-1"));
 
     fireEvent.click(screen.getByLabelText("Photo + Voice"));
@@ -1534,7 +1604,7 @@ describe("App", () => {
 
     render(<App />);
 
-    expect(await screen.findByRole("heading", { name: "Phone Capture" })).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "Capture" })).toBeInTheDocument();
     await waitFor(() => expect(screen.getByLabelText("Project")).toHaveValue("project-1"));
     const imageRow = (await screen.findByText("notebook.jpg")).closest(".review-queue-item");
     const voiceRow = (await screen.findByText("voice.webm")).closest(".review-queue-item");

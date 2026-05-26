@@ -12,10 +12,10 @@ const OFFLINE_QUEUED = Symbol("offline-queued");
 const INSTALL_PROMPT_DISMISSED_KEY = "lab-tracker-install-prompt-dismissed";
 
 const CAPTURE_MODES = [
-  { label: "Photo", value: "photo" },
-  { label: "Voice", value: "voice" },
-  { label: "Photo + Voice", value: "bundle" },
-  { label: "Text note", value: "text" },
+  { description: "Camera or file", icon: "photo", label: "Photo", value: "photo" },
+  { description: "Mic or file", icon: "voice", label: "Voice", value: "voice" },
+  { description: "Image plus audio", icon: "bundle", label: "Photo + Voice", value: "bundle" },
+  { description: "Typed note", icon: "text", label: "Text note", value: "text" },
 ];
 
 const VOICE_NOTE_TYPES = [
@@ -107,6 +107,50 @@ function readInstallIntent() {
   } catch {
     return false;
   }
+}
+
+function CaptureIcon({ kind }) {
+  if (kind === "voice") {
+    return (
+      <svg aria-hidden="true" className="capture-icon" viewBox="0 0 24 24">
+        <rect height="11" rx="4" width="7" x="8.5" y="3.5" />
+        <path d="M5.5 11.5v1.2a6.5 6.5 0 0 0 13 0v-1.2" />
+        <path d="M12 19.2v2.3" />
+        <path d="M8.4 21.5h7.2" />
+      </svg>
+    );
+  }
+  if (kind === "bundle") {
+    return (
+      <svg aria-hidden="true" className="capture-icon" viewBox="0 0 24 24">
+        <rect height="9.5" rx="2" width="11" x="3.5" y="6.5" />
+        <path d="M6.5 6.5l1.2-2h2.8l1.2 2" />
+        <circle cx="9" cy="11.4" r="2.4" />
+        <rect height="8.5" rx="3" width="5.5" x="16" y="5" />
+        <path d="M14.8 14.5a4 4 0 0 0 8 0" />
+        <path d="M18.8 18.5v2" />
+      </svg>
+    );
+  }
+  if (kind === "text") {
+    return (
+      <svg aria-hidden="true" className="capture-icon" viewBox="0 0 24 24">
+        <path d="M5 5.5h14" />
+        <path d="M12 5.5v13" />
+        <path d="M8 18.5h8" />
+        <path d="M5.5 9h5" />
+        <path d="M13.5 9h5" />
+      </svg>
+    );
+  }
+  return (
+    <svg aria-hidden="true" className="capture-icon" viewBox="0 0 24 24">
+      <rect height="11.5" rx="2.2" width="17" x="3.5" y="7" />
+      <path d="M7.2 7l1.5-2.3h6.6L16.8 7" />
+      <circle cx="12" cy="12.8" r="3.2" />
+      <path d="M17.3 9.8h.1" />
+    </svg>
+  );
 }
 
 function MobileInstallPrompt() {
@@ -367,6 +411,10 @@ function MobileCaptureCard({
     if (!selectedProjectId) {
       return false;
     }
+    return readyToCapture();
+  }
+
+  function readyToCapture() {
     if (uploadedNoteId) {
       return true;
     }
@@ -699,69 +747,107 @@ function MobileCaptureCard({
   return (
     <article className="card span-12 capture-card">
       <MobileInstallPrompt />
-      <div className="item-head capture-head">
-        <div>
-          <h2>Phone Capture</h2>
-          <p className="subtle">Capture photo, voice, bundle, or text notes for later review.</p>
-        </div>
-        <button type="button" className="btn-secondary" onClick={() => navigate("/app")}>
-          Workspace
-        </button>
-      </div>
 
       <div className="capture-layout">
         <form className="form capture-form" onSubmit={(event) => event.preventDefault()}>
-          <fieldset className="segmented-control">
-            <legend>Capture</legend>
-            {CAPTURE_MODES.map((mode) => (
-              <label key={mode.value}>
-                <input
-                  checked={captureMode === mode.value}
-                  disabled={!canWrite}
-                  name="capture-mode"
-                  onChange={() => {
-                    setCaptureMode(mode.value);
-                    setUploadedNoteId("");
-                    setUploadedVoiceNoteId("");
-                  }}
-                  type="radio"
-                />
-                <span>{mode.label}</span>
-              </label>
-            ))}
-          </fieldset>
-          {needsPhoto() ? (
-            <label>
-              Photo file
-              <input
-                accept="image/*"
-                capture="environment"
-                disabled={!canWrite}
-                onChange={(event) => {
-                  setUploadedNoteId("");
-                  setUploadedVoiceNoteId("");
-                  setPhotoFile(event.target.files?.[0] || null);
-                }}
-                type="file"
-              />
-            </label>
-          ) : null}
-          {needsVoice() ? (
-            <>
-              <label>
-                Voice recording
-                <input
-                  accept="audio/*"
-                  capture
-                  disabled={!canWrite}
-                  onChange={(event) => {
-                    setUploadedNoteId("");
-                    setUploadedVoiceNoteId("");
-                    setAudioFile(event.target.files?.[0] || null);
-                  }}
-                  type="file"
-                />
-              </label>
+          <section className="capture-primary" aria-labelledby="capture-primary-title">
+            <div className="capture-section-head capture-section-toolbar">
+              <h2 id="capture-primary-title">Capture</h2>
+              <button type="button" className="btn-secondary" onClick={() => navigate("/app")}>
+                Workspace
+              </button>
+            </div>
+            <fieldset className="capture-mode-grid">
+              <legend className="sr-only">Capture type</legend>
+              {CAPTURE_MODES.map((mode) => (
+                <label
+                  className={`capture-mode-tile${captureMode === mode.value ? " selected" : ""}`}
+                  key={mode.value}
+                >
+                  <input
+                    aria-label={mode.label}
+                    checked={captureMode === mode.value}
+                    disabled={!canWrite}
+                    name="capture-mode"
+                    onChange={() => {
+                      setCaptureMode(mode.value);
+                      setUploadedNoteId("");
+                      setUploadedVoiceNoteId("");
+                    }}
+                    type="radio"
+                  />
+                  <CaptureIcon kind={mode.icon} />
+                  <span>
+                    <strong>{mode.label}</strong>
+                    <small>{mode.description}</small>
+                  </span>
+                </label>
+              ))}
+            </fieldset>
+            <div className="capture-source-grid">
+              {needsPhoto() ? (
+                <label className={`capture-source-card${photoFile ? " selected" : ""}`}>
+                  <input
+                    accept="image/*"
+                    aria-label="Photo file"
+                    capture="environment"
+                    className="sr-only"
+                    disabled={!canWrite}
+                    onChange={(event) => {
+                      setUploadedNoteId("");
+                      setUploadedVoiceNoteId("");
+                      setPhotoFile(event.target.files?.[0] || null);
+                    }}
+                    type="file"
+                  />
+                  <CaptureIcon kind="photo" />
+                  <span>
+                    <strong>Photo file</strong>
+                    <small>{photoFile?.name || "Take photo or choose file"}</small>
+                  </span>
+                </label>
+              ) : null}
+              {needsVoice() ? (
+                <label className={`capture-source-card${audioFile ? " selected" : ""}`}>
+                  <input
+                    accept="audio/*"
+                    aria-label="Voice recording"
+                    capture
+                    className="sr-only"
+                    disabled={!canWrite}
+                    onChange={(event) => {
+                      setUploadedNoteId("");
+                      setUploadedVoiceNoteId("");
+                      setAudioFile(event.target.files?.[0] || null);
+                    }}
+                    type="file"
+                  />
+                  <CaptureIcon kind="voice" />
+                  <span>
+                    <strong>Voice recording</strong>
+                    <small>{audioFile?.name || "Record or choose audio"}</small>
+                  </span>
+                </label>
+              ) : null}
+              {needsText() ? (
+                <label className="capture-text-card">
+                  <span className="capture-input-heading">
+                    <CaptureIcon kind="text" />
+                    <span>
+                      <strong>Text note</strong>
+                      <small>Type a quick observation</small>
+                    </span>
+                  </span>
+                  <textarea
+                    aria-label="Text note"
+                    disabled={!canWrite}
+                    onChange={(event) => setTextNote(event.target.value)}
+                    value={textNote}
+                  />
+                </label>
+              ) : null}
+            </div>
+            {needsVoice() ? (
               <label>
                 Voice note type
                 <select
@@ -776,148 +862,144 @@ function MobileCaptureCard({
                   ))}
                 </select>
               </label>
-            </>
-          ) : null}
-          {needsText() ? (
-            <label>
-              Text note
-              <textarea
-                disabled={!canWrite}
-                onChange={(event) => setTextNote(event.target.value)}
-                value={textNote}
-              />
-            </label>
-          ) : null}
-          <label>
-            Project
-            <select
-              disabled={!canWrite}
-              onChange={(event) => onSelectedProjectChange(event.target.value)}
-              value={selectedProjectId}
-            >
-              <option value="">Choose project</option>
-              {projects.map((project) => (
-                <option key={project.project_id} value={project.project_id}>
-                  {project.name}
-                </option>
-              ))}
-            </select>
-          </label>
-          <label>
-            Active question (optional)
-            <select
-              disabled={!canWrite || !selectedProjectId}
-              onChange={(event) => setQuestionId(event.target.value)}
-              value={questionId}
-            >
-              <option value="">No question link</option>
-              {activeQuestions.map((question) => (
-                <option key={question.question_id} value={question.question_id}>
-                  {compactLabel(question.text)}
-                </option>
-              ))}
-            </select>
-          </label>
-          <label>
-            Session (optional)
-            <select
-              disabled={!canWrite || !selectedProjectId}
-              onChange={(event) => setSessionId(event.target.value)}
-              value={sessionId}
-            >
-              <option value="">No session link</option>
-              {sessions.map((session) => (
-                <option key={session.session_id} value={session.session_id}>
-                  {session.session_type} {formatDate(session.started_at)}
-                </option>
-              ))}
-            </select>
-          </label>
-          <label>
-            Dataset (optional)
-            <select
-              disabled={!canWrite || !selectedProjectId}
-              onChange={(event) => setDatasetId(event.target.value)}
-              value={datasetId}
-            >
-              <option value="">No dataset link</option>
-              {datasets.map((dataset) => (
-                <option key={dataset.dataset_id} value={dataset.dataset_id}>
-                  {dataset.commit_hash || dataset.dataset_id}
-                </option>
-              ))}
-            </select>
-          </label>
-          <label>
-            Short hint (optional)
-            <textarea
-              disabled={!canWrite}
-              onChange={(event) => setHint(event.target.value)}
-              placeholder="e.g. Rig 2, Fly 12, same gradient protocol as last week"
-              value={hint}
-            />
-          </label>
-          <details className="context-details">
-            <summary>More context</summary>
-            <label>
-              Analysis (optional)
-              <select
-                disabled={!canWrite || !selectedProjectId}
-                onChange={(event) => setAnalysisId(event.target.value)}
-                value={analysisId}
-              >
-                <option value="">No analysis link</option>
-                {analyses.map((analysis) => (
-                  <option key={analysis.analysis_id} value={analysis.analysis_id}>
-                    {compactLabel(analysis.method_hash || analysis.analysis_id)}
-                  </option>
-                ))}
-              </select>
-            </label>
-            <label>
-              Claim (optional)
-              <select
-                disabled={!canWrite || !selectedProjectId}
-                onChange={(event) => setClaimId(event.target.value)}
-                value={claimId}
-              >
-                <option value="">No claim link</option>
-                {claims.map((claim) => (
-                  <option key={claim.claim_id} value={claim.claim_id}>
-                    {compactLabel(claim.statement || claim.claim_id)}
-                  </option>
-                ))}
-              </select>
-            </label>
-          </details>
-          <div className="capture-actions">
-            <button
-              className="btn-secondary"
-              disabled={!canWrite || !readyToUpload()}
-              onClick={() => uploadCapture()}
-              type="button"
-            >
-              Save for later
-            </button>
-            <button
-              className="btn-primary"
-              disabled={!canWrite || !readyToUpload()}
-              onClick={() => uploadCapture({ draft: true })}
-              type="button"
-            >
-              Upload and draft
-            </button>
-            {uploadedNoteId ? (
+            ) : null}
+            <div className="capture-actions">
               <button
                 className="btn-secondary"
-                disabled={!canWrite || captureMode !== "photo"}
-                onClick={() => uploadCapture({ draft: true, imageOnly: true })}
+                disabled={!canWrite || !readyToCapture()}
+                onClick={() => uploadCapture()}
                 type="button"
               >
-                Draft image-only
+                Save for later
               </button>
-            ) : null}
-          </div>
+              <button
+                className="btn-primary"
+                disabled={!canWrite || !readyToCapture()}
+                onClick={() => uploadCapture({ draft: true })}
+                type="button"
+              >
+                Upload and draft
+              </button>
+              {uploadedNoteId ? (
+                <button
+                  className="btn-secondary"
+                  disabled={!canWrite || captureMode !== "photo"}
+                  onClick={() => uploadCapture({ draft: true, imageOnly: true })}
+                  type="button"
+                >
+                  Draft image-only
+                </button>
+              ) : null}
+            </div>
+          </section>
+
+          <section className="capture-context-fields" aria-labelledby="capture-context-title">
+            <div className="capture-section-head">
+              <h3 id="capture-context-title">Upload details</h3>
+            </div>
+            <label>
+              Project
+              <select
+                disabled={!canWrite}
+                onChange={(event) => onSelectedProjectChange(event.target.value)}
+                value={selectedProjectId}
+              >
+                <option value="">Choose project</option>
+                {projects.map((project) => (
+                  <option key={project.project_id} value={project.project_id}>
+                    {project.name}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label>
+              Active question (optional)
+              <select
+                disabled={!canWrite || !selectedProjectId}
+                onChange={(event) => setQuestionId(event.target.value)}
+                value={questionId}
+              >
+                <option value="">No question link</option>
+                {activeQuestions.map((question) => (
+                  <option key={question.question_id} value={question.question_id}>
+                    {compactLabel(question.text)}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label>
+              Session (optional)
+              <select
+                disabled={!canWrite || !selectedProjectId}
+                onChange={(event) => setSessionId(event.target.value)}
+                value={sessionId}
+              >
+                <option value="">No session link</option>
+                {sessions.map((session) => (
+                  <option key={session.session_id} value={session.session_id}>
+                    {session.session_type} {formatDate(session.started_at)}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label>
+              Dataset (optional)
+              <select
+                disabled={!canWrite || !selectedProjectId}
+                onChange={(event) => setDatasetId(event.target.value)}
+                value={datasetId}
+              >
+                <option value="">No dataset link</option>
+                {datasets.map((dataset) => (
+                  <option key={dataset.dataset_id} value={dataset.dataset_id}>
+                    {dataset.commit_hash || dataset.dataset_id}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label>
+              Short hint (optional)
+              <textarea
+                disabled={!canWrite}
+                onChange={(event) => setHint(event.target.value)}
+                placeholder="e.g. Rig 2, Fly 12, same gradient protocol as last week"
+                value={hint}
+              />
+            </label>
+            <details className="context-details">
+              <summary>More context</summary>
+              <label>
+                Analysis (optional)
+                <select
+                  disabled={!canWrite || !selectedProjectId}
+                  onChange={(event) => setAnalysisId(event.target.value)}
+                  value={analysisId}
+                >
+                  <option value="">No analysis link</option>
+                  {analyses.map((analysis) => (
+                    <option key={analysis.analysis_id} value={analysis.analysis_id}>
+                      {compactLabel(analysis.method_hash || analysis.analysis_id)}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label>
+                Claim (optional)
+                <select
+                  disabled={!canWrite || !selectedProjectId}
+                  onChange={(event) => setClaimId(event.target.value)}
+                  value={claimId}
+                >
+                  <option value="">No claim link</option>
+                  {claims.map((claim) => (
+                    <option key={claim.claim_id} value={claim.claim_id}>
+                      {compactLabel(claim.statement || claim.claim_id)}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            </details>
+          </section>
         </form>
 
         <section className="capture-pending">

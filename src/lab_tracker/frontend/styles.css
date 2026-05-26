@@ -79,6 +79,18 @@ h1 {
   font-size: 0.92rem;
 }
 
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
 .pill {
   border: 1px solid var(--line);
   border-radius: 999px;
@@ -402,10 +414,6 @@ button:disabled {
   margin: 0 auto;
 }
 
-.capture-head {
-  align-items: flex-start;
-}
-
 .capture-layout {
   display: grid;
   grid-template-columns: minmax(0, 1fr) minmax(260px, 0.7fr);
@@ -415,6 +423,138 @@ button:disabled {
 
 .capture-form textarea {
   min-height: 96px;
+}
+
+.capture-primary,
+.capture-context-fields {
+  display: grid;
+  gap: 0.68rem;
+}
+
+.capture-context-fields {
+  border-top: 1px solid var(--line);
+  margin-top: 0.25rem;
+  padding-top: 0.85rem;
+}
+
+.capture-section-head h2,
+.capture-section-head h3 {
+  margin: 0;
+}
+
+.capture-section-toolbar {
+  align-items: center;
+  display: flex;
+  gap: 0.7rem;
+  justify-content: space-between;
+}
+
+.capture-section-toolbar button {
+  flex: 0 0 auto;
+}
+
+.capture-mode-grid,
+.capture-source-grid {
+  display: grid;
+  gap: 0.55rem;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.capture-mode-grid {
+  border: 0;
+  margin: 0;
+  padding: 0;
+}
+
+.capture-mode-tile,
+.capture-source-card {
+  align-items: center;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  color: var(--ink);
+  cursor: pointer;
+  display: grid;
+  gap: 0.55rem;
+  grid-template-columns: auto minmax(0, 1fr);
+  min-height: 72px;
+  min-width: 0;
+  padding: 0.65rem;
+  position: relative;
+}
+
+.capture-mode-tile input {
+  cursor: pointer;
+  height: 100%;
+  inset: 0;
+  margin: 0;
+  opacity: 0;
+  position: absolute;
+  width: 100%;
+}
+
+.capture-mode-tile.selected,
+.capture-source-card.selected {
+  background: var(--accent-soft);
+  border-color: #70bca6;
+}
+
+.capture-mode-tile:has(input:focus-visible),
+.capture-source-card:focus-within,
+.capture-text-card:focus-within {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.capture-mode-tile span,
+.capture-source-card span,
+.capture-input-heading span {
+  display: grid;
+  gap: 0.1rem;
+  min-width: 0;
+}
+
+.capture-mode-tile strong,
+.capture-source-card strong,
+.capture-input-heading strong {
+  font-size: 0.9rem;
+  line-height: 1.12;
+  overflow-wrap: anywhere;
+}
+
+.capture-mode-tile small,
+.capture-source-card small,
+.capture-input-heading small {
+  color: var(--ink-soft);
+  font-size: 0.73rem;
+  line-height: 1.15;
+  overflow-wrap: anywhere;
+}
+
+.capture-icon {
+  fill: none;
+  flex: 0 0 auto;
+  height: 32px;
+  stroke: currentColor;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 1.8;
+  width: 32px;
+}
+
+.capture-text-card {
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  display: grid;
+  gap: 0.55rem;
+  padding: 0.65rem;
+}
+
+.capture-input-heading {
+  align-items: center;
+  color: var(--ink);
+  display: grid;
+  gap: 0.55rem;
+  grid-template-columns: auto minmax(0, 1fr);
 }
 
 .install-nudge {
@@ -440,45 +580,6 @@ button:disabled {
   display: flex;
   flex-wrap: wrap;
   gap: 0.45rem;
-}
-
-.segmented-control {
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  display: grid;
-  gap: 0.45rem;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  margin: 0;
-  padding: 0.6rem;
-}
-
-.segmented-control legend {
-  color: var(--muted);
-  font-size: 0.82rem;
-  font-weight: 700;
-  padding: 0 0.25rem;
-}
-
-.segmented-control label {
-  align-items: center;
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  display: flex;
-  gap: 0.45rem;
-  min-height: 42px;
-  min-width: 0;
-  padding: 0.45rem 0.55rem;
-}
-
-.segmented-control input {
-  flex: 0 0 auto;
-  margin: 0;
-  width: auto;
-}
-
-.segmented-control span {
-  min-width: 0;
-  overflow-wrap: anywhere;
 }
 
 .capture-actions {
@@ -815,8 +916,9 @@ button:disabled {
     grid-template-columns: 1fr;
   }
 
-  .segmented-control {
-    grid-template-columns: 1fr;
+  .capture-mode-grid,
+  .capture-source-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
   .install-actions button {
