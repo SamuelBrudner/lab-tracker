@@ -26,7 +26,7 @@ function Dashboard({
   onRemoveProjectMember = () => {},
 }) {
   return (
-    <article className="card span-4">
+    <article className="card span-4 dashboard-card">
       <h2>Dashboard</h2>
       <div className="inline">
         <div className="kpi">

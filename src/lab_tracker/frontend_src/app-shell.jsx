@@ -267,8 +267,10 @@ function App() {
     onRemoveProjectMember: handleRemoveProjectMember,
   };
 
+  const isCaptureRoute = route.kind === "capture";
+
   return (
-    <div className="app-shell">
+    <div className={`app-shell${isCaptureRoute ? " capture-app-shell" : ""}`}>
       <AppHeader
         authEnabled={auth.authEnabled}
         user={auth.user}
@@ -306,6 +308,24 @@ function App() {
         </section>
       ) : (
         <section className="grid">
+          {isCaptureRoute ? (
+            <MobileCaptureCard
+              token={auth.token}
+              canWrite={canContributeToProject}
+              projects={workspaceData.projects}
+              selectedProjectId={workspaceData.selectedProjectId}
+              onSelectedProjectChange={workspaceData.setSelectedProjectId}
+              questions={workspaceData.questions}
+              datasets={workspaceData.datasets}
+              sessions={sessionData.sessions}
+              navigate={navigate}
+              setBusy={setBusy}
+              setFlash={setFlash}
+              refreshProjectCounts={workspaceData.refreshProjectCounts}
+              refreshRecentNotes={noteData.refreshRecentNotes}
+            />
+          ) : null}
+
           {isHomeRoute ? (
             <WorkspaceHome
               auth={auth}
@@ -338,24 +358,6 @@ function App() {
           ) : (
             <Dashboard {...dashboardProps} />
           )}
-
-          {route.kind === "capture" ? (
-            <MobileCaptureCard
-              token={auth.token}
-              canWrite={canContributeToProject}
-              projects={workspaceData.projects}
-              selectedProjectId={workspaceData.selectedProjectId}
-              onSelectedProjectChange={workspaceData.setSelectedProjectId}
-              questions={workspaceData.questions}
-              datasets={workspaceData.datasets}
-              sessions={sessionData.sessions}
-              navigate={navigate}
-              setBusy={setBusy}
-              setFlash={setFlash}
-              refreshProjectCounts={workspaceData.refreshProjectCounts}
-              refreshRecentNotes={noteData.refreshRecentNotes}
-            />
-          ) : null}
 
           {route.kind === "devices" ? (
             <DevicesPage

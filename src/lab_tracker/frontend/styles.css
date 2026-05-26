@@ -900,6 +900,18 @@ button:disabled {
     position: static;
   }
 
+  .capture-app-shell {
+    padding: 0.45rem;
+  }
+
+  .capture-app-shell .hero {
+    display: none;
+  }
+
+  .capture-app-shell .grid {
+    margin-top: 0;
+  }
+
   .search-row {
     grid-template-columns: 1fr;
   }

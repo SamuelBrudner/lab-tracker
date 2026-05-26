@@ -912,17 +912,25 @@ describe("App", () => {
       },
     ]);
 
-    render(<App />);
+    const { container } = render(<App />);
 
     const installPrompt = await screen.findByRole("status");
     const captureHeading = await screen.findByRole("heading", { name: "Capture" });
     const uploadButton = screen.getByRole("button", { name: "Upload and draft" });
     const detailsHeading = screen.getByRole("heading", { name: "Upload details" });
+    const dashboardHeading = screen.getByRole("heading", { name: "Dashboard" });
     const projectSelect = screen.getByLabelText("Project");
 
+    expect(container.querySelector(".app-shell")).toHaveClass("capture-app-shell");
     expect(
       Boolean(
         installPrompt.compareDocumentPosition(captureHeading) & Node.DOCUMENT_POSITION_FOLLOWING
+      )
+    ).toBe(true);
+    expect(
+      Boolean(
+        captureHeading.compareDocumentPosition(dashboardHeading) &
+          Node.DOCUMENT_POSITION_FOLLOWING
       )
     ).toBe(true);
     expect(screen.getByLabelText("Photo")).toBeInTheDocument();
