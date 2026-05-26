@@ -57,6 +57,11 @@ from lab_tracker.sqlalchemy_repository import SQLAlchemyLabTrackerRepository
 _START_TIME = datetime.now(timezone.utc)
 _FRONTEND_DIR = Path(__file__).resolve().parent / "frontend"
 _logger = logging.getLogger(__name__)
+_APP_SHELL_CACHE_HEADERS = {
+    "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+    "Expires": "0",
+    "Pragma": "no-cache",
+}
 _PUBLIC_PATHS = frozenset(
     {
         "/",
@@ -332,7 +337,7 @@ def _configure_frontend_routes(app: FastAPI) -> None:
         return FileResponse(
             sw_file,
             media_type="application/javascript",
-            headers={"Cache-Control": "no-cache"},
+            headers=_APP_SHELL_CACHE_HEADERS,
         )
 
     @app.post("/app/share-target", include_in_schema=False)
@@ -348,7 +353,7 @@ def _configure_frontend_routes(app: FastAPI) -> None:
     @app.get("/app", include_in_schema=False)
     @app.get("/app/{_path:path}", include_in_schema=False)
     def frontend_index(_path: str = ""):
-        return FileResponse(index_file)
+        return FileResponse(index_file, headers=_APP_SHELL_CACHE_HEADERS)
 
 
 def create_app() -> FastAPI:

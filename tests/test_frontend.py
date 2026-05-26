@@ -15,8 +15,14 @@ def test_frontend_routes_and_assets_are_served():
     app_response = client.get("/app")
     assert app_response.status_code == 200
     assert "text/html" in app_response.headers.get("content-type", "")
+    assert "no-store" in app_response.headers["cache-control"]
+    assert "no-cache" in app_response.headers["cache-control"]
     assert "<title>Lab Tracker</title>" in app_response.text
     assert 'id="app-root"' in app_response.text
+
+    capture_response = client.get("/app/capture")
+    assert capture_response.status_code == 200
+    assert "no-store" in capture_response.headers["cache-control"]
 
     js_response = client.get("/app/static/app.js")
     assert js_response.status_code == 200
@@ -37,6 +43,7 @@ def test_service_worker_is_served_with_app_scope():
     response = client.get("/app/sw.js")
     assert response.status_code == 200
     assert "javascript" in response.headers["content-type"]
+    assert "no-store" in response.headers["cache-control"]
     body = response.text
     assert "lab-tracker-shell-" in body
     assert "/app/static/app.js" in body
