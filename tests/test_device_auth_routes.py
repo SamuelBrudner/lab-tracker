@@ -9,8 +9,9 @@ from lab_tracker.app import create_app
 from lab_tracker.routes.device_auth import (
     _ENROLLMENT_QR_BORDER,
     _ENROLLMENT_QR_DARK,
+    _ENROLLMENT_QR_ERROR,
     _ENROLLMENT_QR_LIGHT,
-    _ENROLLMENT_QR_SCALE,
+    _ENROLLMENT_QR_MODULE_SIZE,
     _build_enrollment_qr_svg,
 )
 
@@ -74,10 +75,15 @@ def test_enrollment_qr_is_phone_scanner_friendly():
 
     assert _ENROLLMENT_QR_DARK == "#000000"
     assert _ENROLLMENT_QR_LIGHT == "#ffffff"
-    assert _ENROLLMENT_QR_SCALE >= 10
+    assert _ENROLLMENT_QR_ERROR == "l"
+    assert _ENROLLMENT_QR_MODULE_SIZE >= 7
     assert _ENROLLMENT_QR_BORDER >= 4
-    assert 'stroke="#000"' in qr_svg
-    assert 'fill="#fff"' in qr_svg
+    assert 'shape-rendering="crispEdges"' in qr_svg
+    assert 'fill="#000000"' in qr_svg
+    assert 'fill="#ffffff"' in qr_svg
+    assert "<rect" in qr_svg
+    assert "stroke=" not in qr_svg
+    assert "qrline" not in qr_svg
     assert "#0d8b6f" not in qr_svg
 
 

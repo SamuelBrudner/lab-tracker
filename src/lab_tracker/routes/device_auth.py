@@ -24,7 +24,8 @@ from lab_tracker.schemas import (
 
 from .shared import actor_from_request
 
-_ENROLLMENT_QR_SCALE = 10
+_ENROLLMENT_QR_ERROR = "l"
+_ENROLLMENT_QR_MODULE_SIZE = 8
 _ENROLLMENT_QR_BORDER = 6
 _ENROLLMENT_QR_DARK = "#000000"
 _ENROLLMENT_QR_LIGHT = "#ffffff"
@@ -47,12 +48,35 @@ def _resolve_public_base_url(request: Request) -> str:
 
 
 def _build_enrollment_qr_svg(url: str) -> str:
-    qr = segno.make(url, error="m")
-    return qr.svg_inline(
-        scale=_ENROLLMENT_QR_SCALE,
-        border=_ENROLLMENT_QR_BORDER,
-        dark=_ENROLLMENT_QR_DARK,
-        light=_ENROLLMENT_QR_LIGHT,
+    qr = segno.make(url, error=_ENROLLMENT_QR_ERROR)
+    module_size = _ENROLLMENT_QR_MODULE_SIZE
+    border = _ENROLLMENT_QR_BORDER
+    matrix = tuple(tuple(row) for row in qr.matrix)
+    matrix_size = len(matrix)
+    svg_size = (matrix_size + (border * 2)) * module_size
+    dark_rects: list[str] = []
+    for y, row in enumerate(matrix):
+        run_start: int | None = None
+        for x, module in enumerate((*row, 0)):
+            if module and run_start is None:
+                run_start = x
+            if not module and run_start is not None:
+                rect_x = (run_start + border) * module_size
+                rect_y = (y + border) * module_size
+                rect_width = (x - run_start) * module_size
+                dark_rects.append(
+                    f'<rect x="{rect_x}" y="{rect_y}" '
+                    f'width="{rect_width}" height="{module_size}" />'
+                )
+                run_start = None
+    dark_markup = "".join(dark_rects)
+    return (
+        f'<svg xmlns="http://www.w3.org/2000/svg" width="{svg_size}" '
+        f'height="{svg_size}" viewBox="0 0 {svg_size} {svg_size}" '
+        'shape-rendering="crispEdges">'
+        f'<rect width="{svg_size}" height="{svg_size}" fill="{_ENROLLMENT_QR_LIGHT}" />'
+        f'<g fill="{_ENROLLMENT_QR_DARK}">{dark_markup}</g>'
+        "</svg>"
     )
 
 

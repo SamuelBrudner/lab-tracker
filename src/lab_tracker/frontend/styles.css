@@ -866,14 +866,15 @@ button:disabled {
   box-sizing: border-box;
   max-width: 100%;
   padding: 1rem;
-  width: min(380px, 100%);
+  width: fit-content;
   box-shadow: 0 4px 14px rgba(21, 23, 30, 0.06);
 }
 
 .enrollment-qr svg {
   display: block;
   height: auto;
-  width: 100%;
+  max-width: 100%;
+  width: auto;
 }
 
 .enrollment-fallback {
