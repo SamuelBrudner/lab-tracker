@@ -417,6 +417,31 @@ button:disabled {
   min-height: 96px;
 }
 
+.install-nudge {
+  border: 1px solid #b9e2d4;
+  border-radius: 12px;
+  background: var(--accent-soft);
+  display: grid;
+  gap: 0.6rem;
+  margin-top: 0.9rem;
+  padding: 0.8rem;
+}
+
+.install-nudge h3 {
+  margin: 0;
+}
+
+.install-steps {
+  margin: 0;
+  padding-left: 1.25rem;
+}
+
+.install-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.45rem;
+}
+
 .segmented-control {
   border: 1px solid var(--line);
   border-radius: 8px;
@@ -792,6 +817,10 @@ button:disabled {
 
   .segmented-control {
     grid-template-columns: 1fr;
+  }
+
+  .install-actions button {
+    flex: 1 1 150px;
   }
 
   .dataset-pr-layout {
