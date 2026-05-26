@@ -4,6 +4,7 @@ import { Dashboard } from "./features/dashboard-projects.jsx";
 import { DevicesPage } from "./features/devices.jsx";
 import { EnrollPage } from "./features/enroll.jsx";
 import { GraphDraftDetailCard } from "./features/graph-drafts.jsx";
+import { ProjectGraphExplorer } from "./features/project-graph.jsx";
 import { VisualizationDetailCard } from "./features/analysis/VisualizationDetailCard.jsx";
 import { DatasetDetailCard } from "./features/datasets/index.js";
 import { MobileCaptureCard } from "./features/mobile-capture.jsx";
@@ -360,6 +361,19 @@ function App() {
             <DevicesPage
               token={auth.token}
               canWrite={auth.canWrite}
+              navigate={navigate}
+              setFlash={setFlash}
+            />
+          ) : null}
+
+          {route.kind === "graph" ? (
+            <ProjectGraphExplorer
+              token={auth.token}
+              projects={workspaceData.projects}
+              selectedProjectId={workspaceData.selectedProjectId}
+              onSelectedProjectChange={(event) =>
+                workspaceData.setSelectedProjectId(event.target.value)
+              }
               navigate={navigate}
               setFlash={setFlash}
             />

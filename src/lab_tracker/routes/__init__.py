@@ -18,6 +18,7 @@ from .errors import register_error_handlers
 from .graph_drafts import build_graph_drafts_router
 from .notes import build_notes_router
 from .projects import build_projects_router
+from .project_graph import build_project_graph_router
 from .provenance import build_provenance_router
 from .questions import build_questions_router
 from .search import build_search_router
@@ -46,6 +47,7 @@ def register_routes(
         build_device_auth_router(device_auth_service=device_auth_service)
     )
     app.include_router(build_projects_router(api))
+    app.include_router(build_project_graph_router(api))
     app.include_router(build_questions_router(api))
     app.include_router(build_datasets_router(api))
     app.include_router(build_dataset_files_router(api))

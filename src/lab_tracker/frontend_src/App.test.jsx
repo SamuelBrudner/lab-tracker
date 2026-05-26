@@ -5,7 +5,7 @@ import { fireEvent, render, screen, waitFor, within } from "@testing-library/rea
 import { App } from "./app-shell.jsx";
 import { buildApiPath } from "./shared/api.js";
 import { TOKEN_STORAGE_KEY } from "./shared/constants.js";
-import { apiResponse, errorResponse, installFetchMock } from "./test/utils.js";
+import { apiResponse, errorResponse, installFetchMock, textResponse } from "./test/utils.js";
 
 const projectsPath = buildApiPath("/projects", { limit: 200, offset: 0 });
 
@@ -111,6 +111,18 @@ function visualizationsPath(analysisId) {
     limit: 200,
     offset: 0,
   });
+}
+
+function projectMembersPath(projectId) {
+  return buildApiPath(`/projects/${projectId}/members`, { limit: 200 });
+}
+
+function projectGraphPath(projectId, view = "evidence") {
+  return buildApiPath(`/projects/${projectId}/graph`, { view });
+}
+
+function projectGraphMermaidPath(projectId, view = "evidence") {
+  return buildApiPath(`/projects/${projectId}/graph/mermaid`, { view });
 }
 
 function paged(data, { limit = 200, offset = 0, total = data.length } = {}) {
@@ -280,6 +292,50 @@ function visualization({
   };
 }
 
+function projectGraph({
+  edges = [],
+  nodes = [],
+  projectId = "project-1",
+  view = "evidence",
+} = {}) {
+  return {
+    edges,
+    nodes,
+    project_id: projectId,
+    view,
+  };
+}
+
+function graphNode({
+  detail = null,
+  entityId,
+  entityType,
+  label,
+  route = null,
+  status = null,
+} = {}) {
+  return {
+    detail,
+    entity_id: entityId,
+    entity_type: entityType,
+    id: `${entityType}:${entityId}`,
+    label,
+    metadata: {},
+    route,
+    status,
+  };
+}
+
+function graphEdge({ label, relationship, source, target } = {}) {
+  return {
+    id: `${relationship}:${source}->${target}`,
+    label,
+    relationship,
+    source,
+    target,
+  };
+}
+
 function requestedUrls(fetchMock) {
   return fetchMock.mock.calls.map(([input]) => (typeof input === "string" ? input : input.url));
 }
@@ -407,6 +463,129 @@ describe("App", () => {
 
     expect(await screen.findByRole("heading", { name: "Question Detail" })).toBeInTheDocument();
     expect(await screen.findByText("How stable is the rig today?")).toBeInTheDocument();
+  });
+
+  it("renders the project graph route, switches views, exports Mermaid, and navigates nodes", async () => {
+    window.history.replaceState({}, "", "/app/graph");
+    const datasetId = "11111111-1111-4111-8111-111111111111";
+    const questionId = "22222222-2222-4222-8222-222222222222";
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: { writeText },
+    });
+    const evidenceGraph = projectGraph({
+      nodes: [
+        graphNode({
+          entityId: questionId,
+          entityType: "question",
+          label: "Can we see evidence?",
+          route: `/app/questions/${questionId}`,
+          status: "active",
+        }),
+        graphNode({
+          entityId: datasetId,
+          entityType: "dataset",
+          label: "Dataset commit-1",
+          route: `/app/datasets/${datasetId}`,
+          status: "committed",
+        }),
+      ],
+      edges: [
+        graphEdge({
+          label: "primary question",
+          relationship: "dataset_question_primary",
+          source: `question:${questionId}`,
+          target: `dataset:${datasetId}`,
+        }),
+      ],
+    });
+    const questionsGraph = projectGraph({
+      view: "questions",
+      nodes: [
+        graphNode({
+          entityId: questionId,
+          entityType: "question",
+          label: "Can we see evidence?",
+          route: `/app/questions/${questionId}`,
+          status: "active",
+        }),
+      ],
+    });
+
+    const fetchMock = installFetchMock([
+      {
+        match: "/auth/me",
+        response: apiResponse(
+          { role: "admin", username: "local-tester" },
+          200,
+          { auth_enabled: false }
+        ),
+      },
+      {
+        match: projectsPath,
+        response: apiResponse([project("project-1", "Temporal odor project")]),
+      },
+      {
+        match: questionCountPath("project-1"),
+        response: paged([], { limit: 1, offset: 0, total: 1 }),
+      },
+      {
+        match: datasetCountPath("project-1"),
+        response: paged([], { limit: 1, offset: 0, total: 1 }),
+      },
+      {
+        match: noteCountPath("project-1"),
+        response: paged([], { limit: 1, offset: 0, total: 0 }),
+      },
+      {
+        match: projectMembersPath("project-1"),
+        response: paged([]),
+      },
+      {
+        match: projectGraphPath("project-1", "evidence"),
+        response: apiResponse(evidenceGraph),
+      },
+      {
+        match: projectGraphPath("project-1", "questions"),
+        response: apiResponse(questionsGraph),
+      },
+      {
+        match: projectGraphMermaidPath("project-1", "questions"),
+        response: textResponse("graph LR\n  n0[\"question\"]\n", 200, "text/vnd.mermaid"),
+      },
+      {
+        match: `/datasets/${datasetId}`,
+        response: apiResponse(
+          dataset({
+            datasetId,
+            status: "committed",
+          })
+        ),
+      },
+    ]);
+
+    render(<App />);
+
+    expect(await screen.findByRole("heading", { name: "Project Graph" })).toBeInTheDocument();
+    expect(await screen.findByTestId("react-flow")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Dataset commit-1" })).toBeInTheDocument();
+    expect(requestedUrls(fetchMock)).toContain(projectGraphPath("project-1", "evidence"));
+
+    fireEvent.click(screen.getByRole("tab", { name: "Questions" }));
+    await waitFor(() =>
+      expect(requestedUrls(fetchMock)).toContain(projectGraphPath("project-1", "questions"))
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Copy Mermaid" }));
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith("graph LR\n  n0[\"question\"]\n"));
+    expect(await screen.findByText("Mermaid graph copied.")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("tab", { name: "Evidence" }));
+    await screen.findByRole("button", { name: "Dataset commit-1" });
+    fireEvent.click(screen.getByRole("button", { name: "Dataset commit-1" }));
+    await waitFor(() => expect(window.location.pathname).toBe(`/app/datasets/${datasetId}`));
+    expect(await screen.findByRole("heading", { name: "Dataset Detail" })).toBeInTheDocument();
   });
 
   it("previews an image note and starts a graph draft", async () => {

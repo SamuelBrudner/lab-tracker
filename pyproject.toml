@@ -39,6 +39,7 @@ include = ["lab_tracker", "lab_tracker.*"]
 lab_tracker = [
   "frontend/index.html",
   "frontend/app.js",
+  "frontend/app.css",
   "frontend/styles.css",
 ]
 

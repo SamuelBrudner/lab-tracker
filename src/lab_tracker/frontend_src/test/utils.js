@@ -53,6 +53,13 @@ function binaryResponse({
   });
 }
 
+function textResponse(body, status = 200, contentType = "text/plain") {
+  return createResponse(status, null, {
+    contentType,
+    text: body,
+  });
+}
+
 function matchesRoute(route, method, url) {
   if ((route.method || "GET").toUpperCase() !== method) {
     return false;
@@ -94,4 +101,4 @@ function installFetchMock(routes) {
   return fetchMock;
 }
 
-export { apiResponse, binaryResponse, errorResponse, installFetchMock };
+export { apiResponse, binaryResponse, errorResponse, installFetchMock, textResponse };

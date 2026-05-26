@@ -23,5 +23,8 @@
     "react": "^18.2.0",
     "react-dom": "^18.2.0",
     "vitest": "^4.1.5"
+  },
+  "dependencies": {
+    "@xyflow/react": "^12.10.2"
   }
 }

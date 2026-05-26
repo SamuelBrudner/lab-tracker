@@ -87,6 +87,22 @@ async function apiRequest(path, options = {}) {
   return payload.data;
 }
 
+async function apiTextRequest(path, options = {}) {
+  const { method = "GET", token = "", body = null, accept = "text/plain" } = options;
+  const { headers, isFormData } = buildRequestHeaders({ accept, body, token });
+  const response = await fetch(path, {
+    method,
+    headers,
+    body: body === null ? undefined : isFormData ? body : JSON.stringify(body),
+  });
+
+  if (!response.ok) {
+    await throwApiError(response);
+  }
+
+  return response.text();
+}
+
 async function apiListRequest(path, options = {}) {
   const payload = await apiFetch(path, options);
   const data = Array.isArray(payload?.data) ? payload.data : [];
@@ -200,6 +216,7 @@ async function downloadProtectedResource({ path, token = "", filename = "" }) {
 export {
   apiFetch,
   apiRequest,
+  apiTextRequest,
   apiListRequest,
   buildApiPath,
   downloadProtectedResource,

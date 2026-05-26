@@ -314,6 +314,54 @@ button:disabled {
   margin-top: 0.35rem;
 }
 
+.tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  margin: 0.7rem 0;
+}
+
+.tab {
+  border-color: var(--line);
+  background: #f9f7f4;
+}
+
+.tab.active {
+  background: var(--accent);
+  color: #fff;
+}
+
+.project-graph-card {
+  min-height: 620px;
+}
+
+.project-graph-project-picker {
+  max-width: 360px;
+}
+
+.project-graph-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.42rem;
+  margin-bottom: 0.55rem;
+}
+
+.project-graph-canvas {
+  width: 100%;
+  height: min(68vh, 720px);
+  min-height: 520px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  overflow: hidden;
+  background: #fbfbfa;
+}
+
+.project-graph-canvas .react-flow__node {
+  border-radius: 8px;
+  font-size: 0.78rem;
+  line-height: 1.25;
+}
+
 .item-rejected {
   opacity: 0.72;
   background: #f6f2eb;

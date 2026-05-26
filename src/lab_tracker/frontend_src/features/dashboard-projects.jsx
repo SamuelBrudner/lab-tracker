@@ -14,6 +14,7 @@ function Dashboard({
   onProjectNameChange,
   onProjectDescriptionChange,
   onCreateProject,
+  onOpenGraph = () => {},
   projectMembers = [],
   canManageProjectMembers = false,
   memberUsername = "",
@@ -57,6 +58,14 @@ function Dashboard({
           ))}
         </select>
       </label>
+      <button
+        type="button"
+        className="btn-secondary"
+        disabled={!selectedProjectId}
+        onClick={onOpenGraph}
+      >
+        Open graph
+      </button>
 
       <form className="form" onSubmit={onCreateProject}>
         <h3>New Project</h3>

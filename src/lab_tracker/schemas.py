@@ -7,7 +7,7 @@ Envelope/ListEnvelope wrappers. Request payloads use purpose-built schemas below
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any, Generic, TypeVar
+from typing import Any, Generic, Literal, TypeVar
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -357,6 +357,35 @@ class VisualizationUpdate(RequestModel):
     file_path: str | None = Field(None, min_length=1)
     caption: str | None = None
     related_claim_ids: list[UUID] | None = None
+
+
+ProjectGraphView = Literal["evidence", "questions", "full"]
+
+
+class ProjectGraphNode(BaseModel):
+    id: str
+    entity_type: str
+    entity_id: str
+    label: str
+    detail: str | None = None
+    status: str | None = None
+    route: str | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class ProjectGraphEdge(BaseModel):
+    id: str
+    source: str
+    target: str
+    label: str
+    relationship: str
+
+
+class ProjectGraphRead(BaseModel):
+    project_id: UUID
+    view: ProjectGraphView
+    nodes: list[ProjectGraphNode]
+    edges: list[ProjectGraphEdge]
 
 
 class SearchResults(BaseModel):

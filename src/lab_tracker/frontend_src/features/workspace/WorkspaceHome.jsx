@@ -44,6 +44,7 @@ function WorkspaceHome({
           workspaceForms.setProjectDescription(event.target.value)
         }
         onCreateProject={projectActions.handleCreateProject}
+        onOpenGraph={() => navigate("/app/graph")}
         projectMembers={projectMembers}
         canManageProjectMembers={projectAccess.canManageMembers}
         memberUsername={projectAccess.memberUsername || ""}
