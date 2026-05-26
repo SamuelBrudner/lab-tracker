@@ -36,6 +36,8 @@ services:
       POSTGRES_DB: ${POSTGRES_DB:-lab_tracker}
       POSTGRES_USER: ${POSTGRES_USER:-lab_tracker}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-lab_tracker}
+    ports:
+      - "127.0.0.1:5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
     restart: unless-stopped
