@@ -441,7 +441,19 @@ button:disabled {
   display: flex;
   gap: 0.45rem;
   min-height: 42px;
+  min-width: 0;
   padding: 0.45rem 0.55rem;
+}
+
+.segmented-control input {
+  flex: 0 0 auto;
+  margin: 0;
+  width: auto;
+}
+
+.segmented-control span {
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 
 .capture-actions {
@@ -775,6 +787,10 @@ button:disabled {
   }
 
   .capture-actions {
+    grid-template-columns: 1fr;
+  }
+
+  .segmented-control {
     grid-template-columns: 1fr;
   }
 
