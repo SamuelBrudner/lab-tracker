@@ -28,12 +28,20 @@ def upgrade() -> None:
         )
 
     # Backfill from the legacy boolean flag added in 0007_dataset_reviews.
-    op.execute(
-        "UPDATE projects SET review_policy = CASE "
-        "WHEN dataset_review_required = 1 THEN 'all' "
-        "ELSE 'none' "
-        "END"
-    )
+    if op.get_bind().dialect.name == "postgresql":
+        op.execute(
+            "UPDATE projects SET review_policy = CASE "
+            "WHEN dataset_review_required IS TRUE THEN 'all' "
+            "ELSE 'none' "
+            "END"
+        )
+    else:
+        op.execute(
+            "UPDATE projects SET review_policy = CASE "
+            "WHEN dataset_review_required = 1 THEN 'all' "
+            "ELSE 'none' "
+            "END"
+        )
 
     with op.batch_alter_table("projects") as batch_op:
         batch_op.drop_column("dataset_review_required")
@@ -50,12 +58,20 @@ def downgrade() -> None:
             )
         )
 
-    op.execute(
-        "UPDATE projects SET dataset_review_required = CASE "
-        "WHEN review_policy = 'all' THEN 1 "
-        "ELSE 0 "
-        "END"
-    )
+    if op.get_bind().dialect.name == "postgresql":
+        op.execute(
+            "UPDATE projects SET dataset_review_required = CASE "
+            "WHEN review_policy = 'all' THEN TRUE "
+            "ELSE FALSE "
+            "END"
+        )
+    else:
+        op.execute(
+            "UPDATE projects SET dataset_review_required = CASE "
+            "WHEN review_policy = 'all' THEN 1 "
+            "ELSE 0 "
+            "END"
+        )
 
     with op.batch_alter_table("projects") as batch_op:
         batch_op.drop_column("review_policy")
