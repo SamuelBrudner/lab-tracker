@@ -933,8 +933,10 @@ describe("App", () => {
           Node.DOCUMENT_POSITION_FOLLOWING
       )
     ).toBe(true);
-    expect(screen.getByLabelText("Photo")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Add attachment" })).toBeInTheDocument();
+    expect(screen.getByLabelText("Message or hint")).toBeInTheDocument();
     expect(screen.getByLabelText("Photo file")).toBeInTheDocument();
+    expect(screen.getByLabelText("Voice recording")).toBeInTheDocument();
     expect(
       Boolean(uploadButton.compareDocumentPosition(detailsHeading) & Node.DOCUMENT_POSITION_FOLLOWING)
     ).toBe(true);
@@ -1390,7 +1392,8 @@ describe("App", () => {
     expect(await screen.findByRole("heading", { name: "Capture" })).toBeInTheDocument();
     await waitFor(() => expect(screen.getByLabelText("Project")).toHaveValue("project-1"));
 
-    fireEvent.click(screen.getByLabelText("Photo + Voice"));
+    fireEvent.click(screen.getByRole("button", { name: "Add attachment" }));
+    fireEvent.click(screen.getByRole("button", { name: "Photo + voice" }));
     fireEvent.change(screen.getByLabelText("Photo file"), {
       target: { files: [new File(["image"], "notebook.jpg", { type: "image/jpeg" })] },
     });

@@ -11,13 +11,6 @@ const { useEffect, useMemo, useState } = React;
 const OFFLINE_QUEUED = Symbol("offline-queued");
 const INSTALL_PROMPT_DISMISSED_KEY = "lab-tracker-install-prompt-dismissed";
 
-const CAPTURE_MODES = [
-  { description: "Camera or file", icon: "photo", label: "Photo", value: "photo" },
-  { description: "Mic or file", icon: "voice", label: "Voice", value: "voice" },
-  { description: "Image plus audio", icon: "bundle", label: "Photo + Voice", value: "bundle" },
-  { description: "Typed note", icon: "text", label: "Text note", value: "text" },
-];
-
 const VOICE_NOTE_TYPES = [
   "Observation",
   "End-of-day summary",
@@ -270,7 +263,8 @@ function MobileCaptureCard({
   refreshProjectCounts,
   refreshRecentNotes,
 }) {
-  const [captureMode, setCaptureMode] = useState("photo");
+  const [captureMode, setCaptureMode] = useState("text");
+  const [attachmentMenuOpen, setAttachmentMenuOpen] = useState(false);
   const [photoFile, setPhotoFile] = useState(null);
   const [audioFile, setAudioFile] = useState(null);
   const [textNote, setTextNote] = useState("");
@@ -395,6 +389,12 @@ function MobileCaptureCard({
     return targets;
   }
 
+  function chooseCaptureMode(mode) {
+    setCaptureMode(mode);
+    setUploadedNoteId("");
+    setUploadedVoiceNoteId("");
+  }
+
   function needsPhoto() {
     return captureMode === "photo" || captureMode === "bundle";
   }
@@ -405,6 +405,96 @@ function MobileCaptureCard({
 
   function needsText() {
     return captureMode === "text";
+  }
+
+  function composerTextValue() {
+    return photoFile || audioFile ? hint : textNote;
+  }
+
+  function handleComposerTextChange(event) {
+    const value = event.target.value;
+    setUploadedNoteId("");
+    setUploadedVoiceNoteId("");
+    if (photoFile || audioFile) {
+      setHint(value);
+      return;
+    }
+    if (captureMode !== "text") {
+      setCaptureMode("text");
+    }
+    setTextNote(value);
+  }
+
+  function handlePhotoFileChange(event) {
+    const file = event.target.files?.[0] || null;
+    setUploadedNoteId("");
+    setUploadedVoiceNoteId("");
+    setPhotoFile(file);
+    if (file) {
+      if (textNote.trim() && !hint.trim()) {
+        setHint(textNote.trim());
+        setTextNote("");
+      }
+      setCaptureMode(audioFile ? "bundle" : "photo");
+      setAttachmentMenuOpen(false);
+    }
+  }
+
+  function handleAudioFileChange(event) {
+    const file = event.target.files?.[0] || null;
+    setUploadedNoteId("");
+    setUploadedVoiceNoteId("");
+    setAudioFile(file);
+    if (file) {
+      if (textNote.trim() && !hint.trim()) {
+        setHint(textNote.trim());
+        setTextNote("");
+      }
+      setCaptureMode(photoFile ? "bundle" : "voice");
+      setAttachmentMenuOpen(false);
+    }
+  }
+
+  function clearPhotoFile() {
+    setPhotoFile(null);
+    setUploadedNoteId("");
+    setUploadedVoiceNoteId("");
+    if (audioFile) {
+      setCaptureMode("voice");
+      return;
+    }
+    if (hint.trim() && !textNote.trim()) {
+      setTextNote(hint.trim());
+      setHint("");
+    }
+    setCaptureMode("text");
+  }
+
+  function clearAudioFile() {
+    setAudioFile(null);
+    setUploadedNoteId("");
+    setUploadedVoiceNoteId("");
+    if (photoFile) {
+      setCaptureMode("photo");
+      return;
+    }
+    if (hint.trim() && !textNote.trim()) {
+      setTextNote(hint.trim());
+      setHint("");
+    }
+    setCaptureMode("text");
+  }
+
+  function startTextCapture() {
+    chooseCaptureMode("text");
+    setPhotoFile(null);
+    setAudioFile(null);
+    setAttachmentMenuOpen(false);
+  }
+
+  function startBundleCapture() {
+    chooseCaptureMode("bundle");
+    setAttachmentMenuOpen(false);
   }
 
   function readyToUpload() {
@@ -757,93 +847,154 @@ function MobileCaptureCard({
                 Workspace
               </button>
             </div>
-            <fieldset className="capture-mode-grid">
-              <legend className="sr-only">Capture type</legend>
-              {CAPTURE_MODES.map((mode) => (
-                <label
-                  className={`capture-mode-tile${captureMode === mode.value ? " selected" : ""}`}
-                  key={mode.value}
-                >
-                  <input
-                    aria-label={mode.label}
-                    checked={captureMode === mode.value}
-                    disabled={!canWrite}
-                    name="capture-mode"
-                    onChange={() => {
-                      setCaptureMode(mode.value);
-                      setUploadedNoteId("");
-                      setUploadedVoiceNoteId("");
-                    }}
-                    type="radio"
-                  />
-                  <CaptureIcon kind={mode.icon} />
-                  <span>
-                    <strong>{mode.label}</strong>
-                    <small>{mode.description}</small>
-                  </span>
-                </label>
-              ))}
-            </fieldset>
-            <div className="capture-source-grid">
-              {needsPhoto() ? (
-                <label className={`capture-source-card${photoFile ? " selected" : ""}`}>
-                  <input
-                    accept="image/*"
-                    aria-label="Photo file"
-                    capture="environment"
-                    className="sr-only"
-                    disabled={!canWrite}
-                    onChange={(event) => {
-                      setUploadedNoteId("");
-                      setUploadedVoiceNoteId("");
-                      setPhotoFile(event.target.files?.[0] || null);
-                    }}
-                    type="file"
-                  />
+            <input
+              accept="image/*"
+              aria-label="Photo file"
+              capture="environment"
+              className="sr-only"
+              disabled={!canWrite}
+              id="capture-photo-input"
+              onChange={handlePhotoFileChange}
+              type="file"
+            />
+            <input
+              accept="audio/*"
+              aria-label="Voice recording"
+              capture
+              className="sr-only"
+              disabled={!canWrite}
+              id="capture-audio-input"
+              onChange={handleAudioFileChange}
+              type="file"
+            />
+            <div className="capture-composer">
+              <button
+                aria-controls="capture-attachment-menu"
+                aria-expanded={attachmentMenuOpen}
+                aria-label="Add attachment"
+                className="capture-composer-icon"
+                disabled={!canWrite}
+                onClick={() => setAttachmentMenuOpen((current) => !current)}
+                type="button"
+              >
+                <span aria-hidden="true">+</span>
+              </button>
+              <label className="sr-only" htmlFor="capture-composer-text">
+                Message or hint
+              </label>
+              <textarea
+                className="capture-composer-input"
+                disabled={!canWrite}
+                id="capture-composer-text"
+                onChange={handleComposerTextChange}
+                placeholder={photoFile || audioFile ? "Add context" : "Lab note"}
+                rows={1}
+                value={composerTextValue()}
+              />
+              <label
+                aria-disabled={!canWrite}
+                className={`capture-composer-icon capture-composer-mic${
+                  canWrite ? "" : " disabled"
+                }`}
+                htmlFor="capture-audio-input"
+              >
+                <CaptureIcon kind="voice" />
+              </label>
+              <button
+                aria-label="Upload and draft"
+                className="capture-composer-send"
+                disabled={!canWrite || !readyToCapture()}
+                onClick={() => uploadCapture({ draft: true })}
+                title="Upload and draft"
+                type="button"
+              >
+                <svg aria-hidden="true" viewBox="0 0 24 24">
+                  <path d="M5 12h13" />
+                  <path d="m13 6 6 6-6 6" />
+                </svg>
+              </button>
+            </div>
+            {attachmentMenuOpen ? (
+              <div
+                aria-label="Attachment options"
+                className="capture-attachment-menu"
+                id="capture-attachment-menu"
+              >
+                <label className="capture-attachment-option" htmlFor="capture-photo-input">
                   <CaptureIcon kind="photo" />
                   <span>
-                    <strong>Photo file</strong>
-                    <small>{photoFile?.name || "Take photo or choose file"}</small>
+                    <strong>Photo or camera</strong>
+                    <small>{photoFile?.name || "Image file"}</small>
                   </span>
                 </label>
-              ) : null}
-              {needsVoice() ? (
-                <label className={`capture-source-card${audioFile ? " selected" : ""}`}>
-                  <input
-                    accept="audio/*"
-                    aria-label="Voice recording"
-                    capture
-                    className="sr-only"
-                    disabled={!canWrite}
-                    onChange={(event) => {
-                      setUploadedNoteId("");
-                      setUploadedVoiceNoteId("");
-                      setAudioFile(event.target.files?.[0] || null);
-                    }}
-                    type="file"
-                  />
+                <label className="capture-attachment-option" htmlFor="capture-audio-input">
                   <CaptureIcon kind="voice" />
                   <span>
-                    <strong>Voice recording</strong>
-                    <small>{audioFile?.name || "Record or choose audio"}</small>
+                    <strong>Voice file</strong>
+                    <small>{audioFile?.name || "Audio file"}</small>
                   </span>
                 </label>
-              ) : null}
-              {needsText() ? (
-                <label className="capture-text-card">
-                  <span className="capture-input-heading">
-                    <CaptureIcon kind="text" />
-                    <span>
-                      <strong>Text note</strong>
-                      <small>Type a quick observation</small>
-                    </span>
+                <button
+                  aria-label="Photo + voice"
+                  className={`capture-attachment-option${
+                    captureMode === "bundle" ? " selected" : ""
+                  }`}
+                  disabled={!canWrite}
+                  onClick={startBundleCapture}
+                  type="button"
+                >
+                  <CaptureIcon kind="bundle" />
+                  <span>
+                    <strong>Photo + voice</strong>
+                    <small>Bundle</small>
                   </span>
-                  <textarea
-                    aria-label="Text note"
-                    disabled={!canWrite}
-                    onChange={(event) => setTextNote(event.target.value)}
-                    value={textNote}
-                  />
+                </button>
+                <button
+                  aria-label="Text note"
+                  className={`capture-attachment-option${
+                    captureMode === "text" ? " selected" : ""
+                  }`}
+                  disabled={!canWrite}
+                  onClick={startTextCapture}
+                  type="button"
+                >
+                  <CaptureIcon kind="text" />
+                  <span>
+                    <strong>Text note</strong>
+                    <small>Typed</small>
+                  </span>
+                </button>
+              </div>
+            ) : null}
+            <div className="capture-attachment-strip" aria-live="polite">
+              {photoFile ? (
+                <span className="capture-attachment-chip">
+                  <CaptureIcon kind="photo" />
+                  <span>{photoFile.name}</span>
+                  <button aria-label="Remove photo" onClick={clearPhotoFile} type="button">
+                    x
+                  </button>
+                </span>
+              ) : null}
+              {audioFile ? (
+                <span className="capture-attachment-chip">
+                  <CaptureIcon kind="voice" />
+                  <span>{audioFile.name}</span>
+                  <button aria-label="Remove voice recording" onClick={clearAudioFile} type="button">
+                    x
+                  </button>
+                </span>
+              ) : null}
+              {captureMode === "bundle" && !photoFile ? (
+                <label className="capture-attachment-chip missing" htmlFor="capture-photo-input">
+                  <CaptureIcon kind="photo" />
+                  <span>Photo needed</span>
+                </label>
+              ) : null}
+              {captureMode === "bundle" && !audioFile ? (
+                <label className="capture-attachment-chip missing" htmlFor="capture-audio-input">
+                  <CaptureIcon kind="voice" />
+                  <span>Voice needed</span>
                 </label>
               ) : null}
             </div>
@@ -871,14 +1022,6 @@ function MobileCaptureCard({
                 type="button"
               >
                 Save for later
-              </button>
-              <button
-                className="btn-primary"
-                disabled={!canWrite || !readyToCapture()}
-                onClick={() => uploadCapture({ draft: true })}
-                type="button"
-              >
-                Upload and draft
               </button>
               {uploadedNoteId ? (
                 <button

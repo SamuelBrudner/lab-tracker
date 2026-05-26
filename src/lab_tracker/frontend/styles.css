@@ -453,77 +453,139 @@ button:disabled {
   flex: 0 0 auto;
 }
 
-.capture-mode-grid,
-.capture-source-grid {
+.capture-composer {
+  align-items: end;
+  background: #f2f2ef;
+  border: 1px solid var(--line);
+  border-radius: 24px;
   display: grid;
-  gap: 0.55rem;
+  gap: 0.42rem;
+  grid-template-columns: 44px minmax(0, 1fr) 44px 44px;
+  padding: 0.35rem;
+}
+
+.capture-composer:focus-within {
+  border-color: #70bca6;
+  box-shadow: 0 0 0 3px rgba(13, 139, 111, 0.15);
+}
+
+.capture-composer-icon,
+.capture-composer-send {
+  align-items: center;
+  aspect-ratio: 1;
+  border: 0;
+  border-radius: 50%;
+  cursor: pointer;
+  display: inline-flex;
+  height: 44px;
+  justify-content: center;
+  min-width: 44px;
+}
+
+.capture-composer-icon {
+  background: #ffffff;
+  color: var(--ink);
+  font-size: 1.6rem;
+  line-height: 1;
+}
+
+.capture-composer-icon:hover,
+.capture-composer-icon:focus-visible {
+  background: var(--accent-soft);
+}
+
+.capture-composer-mic {
+  color: var(--accent);
+}
+
+.capture-composer-icon .capture-icon {
+  height: 22px;
+  width: 22px;
+}
+
+.capture-composer-send {
+  background: var(--accent);
+  color: #ffffff;
+}
+
+.capture-composer-send:disabled,
+.capture-composer-icon:disabled,
+.capture-composer-icon.disabled {
+  cursor: not-allowed;
+  opacity: 0.48;
+}
+
+.capture-composer-send svg {
+  fill: none;
+  height: 22px;
+  stroke: currentColor;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 2.2;
+  width: 22px;
+}
+
+.capture-composer-input {
+  background: #ffffff;
+  border: 1px solid #e4e0d8;
+  border-radius: 18px;
+  color: var(--ink);
+  font: inherit;
+  line-height: 1.35;
+  max-height: 132px;
+  min-height: 44px;
+  min-width: 0;
+  padding: 0.7rem 0.8rem;
+  resize: vertical;
+  width: 100%;
+}
+
+.capture-composer-input:focus {
+  outline: none;
+}
+
+.capture-attachment-menu {
+  display: grid;
+  gap: 0.5rem;
   grid-template-columns: repeat(2, minmax(0, 1fr));
 }
 
-.capture-mode-grid {
-  border: 0;
-  margin: 0;
-  padding: 0;
-}
-
-.capture-mode-tile,
-.capture-source-card {
+.capture-attachment-option {
   align-items: center;
+  background: #ffffff;
   border: 1px solid var(--line);
-  border-radius: 10px;
+  border-radius: 14px;
   color: var(--ink);
   cursor: pointer;
   display: grid;
   gap: 0.55rem;
   grid-template-columns: auto minmax(0, 1fr);
-  min-height: 72px;
+  min-height: 64px;
   min-width: 0;
-  padding: 0.65rem;
-  position: relative;
+  padding: 0.62rem;
+  text-align: left;
 }
 
-.capture-mode-tile input {
-  cursor: pointer;
-  height: 100%;
-  inset: 0;
-  margin: 0;
-  opacity: 0;
-  position: absolute;
-  width: 100%;
-}
-
-.capture-mode-tile.selected,
-.capture-source-card.selected {
+.capture-attachment-option:hover,
+.capture-attachment-option:focus-visible,
+.capture-attachment-option.selected {
   background: var(--accent-soft);
   border-color: #70bca6;
 }
 
-.capture-mode-tile:has(input:focus-visible),
-.capture-source-card:focus-within,
-.capture-text-card:focus-within {
-  outline: 2px solid var(--accent);
-  outline-offset: 2px;
-}
-
-.capture-mode-tile span,
-.capture-source-card span,
-.capture-input-heading span {
+.capture-attachment-option span {
   display: grid;
   gap: 0.1rem;
   min-width: 0;
 }
 
-.capture-mode-tile strong,
-.capture-source-card strong,
-.capture-input-heading strong {
+.capture-attachment-option strong {
   font-size: 0.9rem;
   line-height: 1.12;
   overflow-wrap: anywhere;
 }
 
-.capture-mode-tile small,
-.capture-source-card small,
-.capture-input-heading small {
+.capture-attachment-option small {
   color: var(--ink-soft);
   font-size: 0.73rem;
   line-height: 1.15;
@@ -541,20 +603,59 @@ button:disabled {
   width: 32px;
 }
 
-.capture-text-card {
-  border: 1px solid var(--line);
-  border-radius: 10px;
-  display: grid;
-  gap: 0.55rem;
-  padding: 0.65rem;
+.capture-attachment-strip {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.45rem;
+  min-height: 0;
 }
 
-.capture-input-heading {
+.capture-attachment-chip {
   align-items: center;
+  background: #ffffff;
+  border: 1px solid var(--line);
+  border-radius: 999px;
   color: var(--ink);
-  display: grid;
-  gap: 0.55rem;
+  display: inline-grid;
+  gap: 0.35rem;
+  grid-auto-flow: column;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  max-width: 100%;
+  min-height: 36px;
+  padding: 0.22rem 0.38rem 0.22rem 0.48rem;
+}
+
+.capture-attachment-chip.missing {
+  border-style: dashed;
+  cursor: pointer;
   grid-template-columns: auto minmax(0, 1fr);
+}
+
+.capture-attachment-chip span {
+  font-size: 0.82rem;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.capture-attachment-chip .capture-icon {
+  height: 18px;
+  width: 18px;
+}
+
+.capture-attachment-chip button {
+  align-items: center;
+  background: #f2f2ef;
+  border: 0;
+  border-radius: 50%;
+  color: var(--ink-soft);
+  cursor: pointer;
+  display: inline-flex;
+  height: 24px;
+  justify-content: center;
+  width: 24px;
 }
 
 .install-nudge {
@@ -584,7 +685,7 @@ button:disabled {
 
 .capture-actions {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
   gap: 0.55rem;
 }
 
@@ -928,9 +1029,19 @@ button:disabled {
     grid-template-columns: 1fr;
   }
 
-  .capture-mode-grid,
-  .capture-source-grid {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
+  .capture-composer {
+    grid-template-columns: 40px minmax(0, 1fr) 40px 40px;
+    padding: 0.3rem;
+  }
+
+  .capture-composer-icon,
+  .capture-composer-send {
+    height: 40px;
+    min-width: 40px;
+  }
+
+  .capture-attachment-menu {
+    grid-template-columns: 1fr;
   }
 
   .install-actions button {
