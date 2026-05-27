@@ -33,7 +33,7 @@ package-dir = {"" = "src"}
 
 [tool.setuptools.packages.find]
 where = ["src"]
-include = ["lab_tracker", "lab_tracker.*"]
+include = ["lab_tracker", "lab_tracker.*", "lab_tracker_client", "lab_tracker_client.*"]
 
 [tool.setuptools.package-data]
 lab_tracker = [
