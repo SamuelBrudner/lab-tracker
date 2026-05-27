@@ -256,6 +256,7 @@ function App() {
     onProjectDescriptionChange: (event) =>
       workspaceForms.setProjectDescription(event.target.value),
     onCreateProject: projectActions.handleCreateProject,
+    onOpenGraph: () => navigate("/app/graph"),
     projectMembers,
     canManageProjectMembers,
     memberUsername,

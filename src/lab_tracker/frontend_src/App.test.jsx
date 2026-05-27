@@ -910,6 +910,10 @@ describe("App", () => {
         match: captureClaimsPath("project-1"),
         response: paged([]),
       },
+      {
+        match: projectGraphPath("project-1", "evidence"),
+        response: apiResponse(projectGraph()),
+      },
     ]);
 
     const { container } = render(<App />);
@@ -943,6 +947,10 @@ describe("App", () => {
     expect(
       Boolean(uploadButton.compareDocumentPosition(projectSelect) & Node.DOCUMENT_POSITION_FOLLOWING)
     ).toBe(true);
+
+    fireEvent.click(screen.getByRole("button", { name: "Open graph" }));
+    await waitFor(() => expect(window.location.pathname).toBe("/app/graph"));
+    expect(await screen.findByRole("heading", { name: "Project Graph" })).toBeInTheDocument();
   });
 
   it("captures a mobile image with context and starts a graph-aware draft", async () => {
