@@ -28,6 +28,9 @@ lint = [
   "ruff",
 ]
 
+[project.scripts]
+lt-mcp = "lab_tracker.mcp_server:main"
+
 [tool.setuptools]
 package-dir = {"" = "src"}
 

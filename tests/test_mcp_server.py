@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+from pathlib import Path
+import tomllib
 
 import httpx
 import pytest
@@ -38,6 +40,13 @@ def test_fastmcp_registers_agent_consultation_policy_resource() -> None:
 
     uris = {str(resource.uri) for resource in resources}
     assert "lab-tracker://agent-consultation-policy" in uris
+
+
+def test_lt_mcp_console_entrypoint_is_packaged() -> None:
+    pyproject = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))
+
+    assert pyproject["project"]["scripts"]["lt-mcp"] == "lab_tracker.mcp_server:main"
+    assert callable(mcp_server.main)
 
 
 def test_client_service_login_sends_bearer_auth_to_protected_routes() -> None:

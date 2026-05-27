@@ -9,8 +9,12 @@ and point assistant MCP clients at the running API.
 Run the MCP server with:
 
 ```bash
-python -m lab_tracker.mcp_server
+lt-mcp
 ```
+
+The installed `lt-mcp` console script is the canonical portable launch command.
+`python -m lab_tracker.mcp_server` remains supported for source checkouts and
+manual debugging.
 
 Environment for read/write tools:
 
@@ -32,6 +36,42 @@ LAB_TRACKER_MCP_PASSWORD=<service-account-password>
 The server does not store bearer tokens. It logs in with the configured service
 account and retries once after a 401. The username/password are only required
 when `LAB_TRACKER_AUTH_ENABLED=true`; local auth-disabled testing can omit them.
+
+Portable consumer `.mcp.json` files should use the console entry point rather
+than a hardcoded absolute Python path:
+
+```json
+{
+  "mcpServers": {
+    "lab-tracker": {
+      "command": "lt-mcp",
+      "env": {
+        "LAB_TRACKER_MCP_BASE_URL": "http://127.0.0.1:8000",
+        "LAB_TRACKER_MCP_USERNAME": "<service-account-username>",
+        "LAB_TRACKER_MCP_PASSWORD": "<service-account-password>"
+      }
+    }
+  }
+}
+```
+
+For clients that deliberately launch from a source checkout instead of an
+installed environment, keep the path portable by using an environment-provided
+interpreter:
+
+```json
+{
+  "mcpServers": {
+    "lab-tracker": {
+      "command": "${LAB_TRACKER_PYTHON:-python}",
+      "args": ["-m", "lab_tracker.mcp_server"],
+      "env": {
+        "LAB_TRACKER_MCP_BASE_URL": "http://127.0.0.1:8000"
+      }
+    }
+  }
+}
+```
 
 Available tools:
 

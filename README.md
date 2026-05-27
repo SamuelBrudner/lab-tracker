@@ -241,8 +241,12 @@ Lab Tracker ships an API-backed MCP server for assistants:
 LAB_TRACKER_MCP_BASE_URL=http://127.0.0.1:8000
 LAB_TRACKER_MCP_USERNAME=<service-account-username>
 LAB_TRACKER_MCP_PASSWORD=<service-account-password>
-python -m lab_tracker.mcp_server
+lt-mcp
 ```
+
+`python -m lab_tracker.mcp_server` is still supported for source checkouts. For
+portable consumer repo MCP config, prefer the installed `lt-mcp` entry point so
+`.mcp.json` does not embed a workstation-specific Python path.
 
 The MCP username/password are only required when `LAB_TRACKER_AUTH_ENABLED=true`.
 
