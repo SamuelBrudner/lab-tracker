@@ -351,11 +351,75 @@ button:disabled {
   max-width: 360px;
 }
 
+.project-graph-guide {
+  display: grid;
+  gap: 0.55rem;
+  margin-bottom: 0.65rem;
+}
+
+.project-graph-axis {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.45rem 0.6rem;
+}
+
+.project-graph-axis-label {
+  color: var(--muted);
+  font-size: 0.82rem;
+  font-weight: 700;
+  letter-spacing: 0;
+  text-transform: uppercase;
+}
+
+.project-graph-axis-steps {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.28rem;
+}
+
+.project-graph-axis-step {
+  background: #f9f7f4;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  color: var(--ink);
+  font-size: 0.82rem;
+  font-weight: 700;
+  padding: 0.22rem 0.55rem;
+}
+
+.project-graph-axis-arrow {
+  color: var(--muted);
+  font-weight: 700;
+}
+
 .project-graph-legend {
   display: flex;
   flex-wrap: wrap;
   gap: 0.42rem;
-  margin-bottom: 0.55rem;
+}
+
+.project-graph-legend-item {
+  align-items: center;
+  background: #fff;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  color: var(--muted);
+  display: inline-flex;
+  font-size: 0.82rem;
+  font-weight: 600;
+  gap: 0.35rem;
+  min-height: 2rem;
+  padding: 0.24rem 0.62rem 0.24rem 0.4rem;
+}
+
+.project-graph-legend-swatch {
+  border: 1px solid;
+  border-radius: 999px;
+  display: inline-block;
+  height: 0.8rem;
+  width: 0.8rem;
 }
 
 .project-graph-canvas {

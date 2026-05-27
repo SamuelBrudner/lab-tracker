@@ -569,6 +569,9 @@ describe("App", () => {
 
     expect(await screen.findByRole("heading", { name: "Project Graph" })).toBeInTheDocument();
     expect(await screen.findByTestId("react-flow")).toBeInTheDocument();
+    expect(screen.getByText("Evidence flow")).toBeInTheDocument();
+    expect(screen.getByText("Question: 1")).toBeInTheDocument();
+    expect(screen.getByText("Dataset: 1")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Dataset commit-1" })).toBeInTheDocument();
     expect(requestedUrls(fetchMock)).toContain(projectGraphPath("project-1", "evidence"));
 
@@ -576,6 +579,7 @@ describe("App", () => {
     await waitFor(() =>
       expect(requestedUrls(fetchMock)).toContain(projectGraphPath("project-1", "questions"))
     );
+    expect(await screen.findByText("Question links")).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: "Copy Mermaid" }));
     await waitFor(() => expect(writeText).toHaveBeenCalledWith("graph LR\n  n0[\"question\"]\n"));

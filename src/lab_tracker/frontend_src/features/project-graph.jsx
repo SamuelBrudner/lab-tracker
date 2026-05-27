@@ -10,6 +10,16 @@ const GRAPH_VIEWS = [
   { id: "full", label: "Full Graph" },
 ];
 
+const TYPE_LABELS = {
+  analysis: "Analysis",
+  claim: "Claim",
+  dataset: "Dataset",
+  note: "Note",
+  question: "Question",
+  session: "Session",
+  visualization: "Visualization",
+};
+
 const TYPE_LAYER_BY_VIEW = {
   evidence: {
     question: 0,
@@ -40,6 +50,18 @@ const TYPE_STYLES = {
   question: { background: "#f6f2eb", borderColor: "#b8a77d" },
   session: { background: "#edf4f5", borderColor: "#75a8b0" },
   visualization: { background: "#f1eef8", borderColor: "#9a8bc7" },
+};
+
+const VIEW_AXIS_LABELS = {
+  evidence: "Evidence flow",
+  full: "Full graph flow",
+  questions: "Question links",
+};
+
+const VIEW_AXIS_TYPES = {
+  evidence: ["question", "dataset", "analysis", "claim", "visualization"],
+  full: ["note", "question", "session", "dataset", "analysis", "claim", "visualization"],
+  questions: ["question"],
 };
 
 function groupByType(nodes) {
@@ -98,6 +120,14 @@ function buildFlowGraph(graph, view) {
       graphNodeToFlowNode(node, indexByType, layerByType)
     ),
   };
+}
+
+function legendTypesForView(view, nodeGroups) {
+  const viewTypes = VIEW_AXIS_TYPES[view] || VIEW_AXIS_TYPES.evidence;
+  const extraTypes = Object.keys(nodeGroups)
+    .filter((entityType) => !viewTypes.includes(entityType))
+    .sort();
+  return [...viewTypes, ...extraTypes];
 }
 
 function downloadTextFile({ contents, filename }) {
@@ -163,6 +193,10 @@ function ProjectGraphExplorer({
 
   const flowGraph = React.useMemo(() => buildFlowGraph(graph, view), [graph, view]);
   const nodeGroups = React.useMemo(() => groupByType(graph?.nodes || []), [graph]);
+  const legendTypes = React.useMemo(
+    () => legendTypesForView(view, nodeGroups),
+    [nodeGroups, view]
+  );
   const selectedProject = projects.find((project) => project.project_id === selectedProjectId);
 
   async function loadMermaid() {
@@ -279,14 +313,41 @@ function ProjectGraphExplorer({
 
       {selectedProjectId && !loading && !error && graph?.nodes?.length > 0 ? (
         <>
-          <div className="project-graph-legend">
-            {Object.keys(nodeGroups)
-              .sort()
-              .map((entityType) => (
-                <span className="pill" key={entityType}>
-                  {entityType}: {nodeGroups[entityType].length}
-                </span>
-              ))}
+          <div className="project-graph-guide">
+            <div className="project-graph-axis" aria-label="Graph layout axis">
+              <span className="project-graph-axis-label">{VIEW_AXIS_LABELS[view]}</span>
+              <div className="project-graph-axis-steps">
+                {legendTypes.map((entityType, index) => (
+                  <React.Fragment key={entityType}>
+                    <span className="project-graph-axis-step">
+                      {TYPE_LABELS[entityType] || entityType}
+                    </span>
+                    {index < legendTypes.length - 1 ? (
+                      <span className="project-graph-axis-arrow" aria-hidden="true">
+                        →
+                      </span>
+                    ) : null}
+                  </React.Fragment>
+                ))}
+              </div>
+            </div>
+            <div className="project-graph-legend" aria-label="Node color legend">
+              {legendTypes.map((entityType) => {
+                const style = TYPE_STYLES[entityType] || {};
+                return (
+                  <span className="project-graph-legend-item" key={entityType}>
+                    <span
+                      className="project-graph-legend-swatch"
+                      style={{
+                        background: style.background,
+                        borderColor: style.borderColor,
+                      }}
+                    />
+                    {TYPE_LABELS[entityType] || entityType}: {nodeGroups[entityType]?.length || 0}
+                  </span>
+                );
+              })}
+            </div>
           </div>
           <div className="project-graph-canvas">
             <ReactFlow
