@@ -23,7 +23,6 @@ from lab_tracker.services.shared import (
     _ensure_non_empty,
     _ensure_question_parents_dag,
     _ensure_question_status_transition,
-    _is_question_ancestor,
     question_matches_substring,
     _unique_ids,
 )
@@ -45,17 +44,13 @@ class QuestionRefactorResult:
 class QuestionServiceMixin:
     def _question_graph(self, project_id: UUID) -> dict[UUID, Question]:
         questions = self._query_from_repository(
-            attribute_name="questions",
             loader=lambda repository: repository.query_questions(
                 project_id=project_id,
                 limit=None,
                 offset=0,
             ),
-            entity_id_getter=lambda question: question.question_id,
         )
-        if questions is not None:
-            return {question.question_id: question for question in questions}
-        return self._store.questions
+        return {question.question_id: question for question in questions}
 
     def create_question(
         self,
@@ -92,13 +87,11 @@ class QuestionServiceMixin:
             parent_question_ids=parent_ids,
             created_by=_actor_user_id(actor),
         )
-        self._remember_entity("questions", question.question_id, question)
         self._run_repository_write(lambda repository: repository.questions.save(question))
         return question
 
     def get_question(self, question_id: UUID) -> Question:
-        return self._get_from_repository_or_store(
-            attribute_name="questions",
+        return self._get_from_repository(
             entity_id=question_id,
             label="Question",
             loader=lambda repository: repository.questions.get(question_id),
@@ -134,7 +127,6 @@ class QuestionServiceMixin:
         ancestor_question_id: UUID | None = None,
     ) -> list[Question]:
         questions = self._query_from_repository(
-            attribute_name="questions",
             loader=lambda repository: repository.query_questions(
                 project_id=project_id,
                 status=status.value if status is not None else None,
@@ -145,40 +137,7 @@ class QuestionServiceMixin:
                 limit=None,
                 offset=0,
             ),
-            entity_id_getter=lambda question: question.question_id,
         )
-        if questions is None:
-            if project_id is None:
-                questions = list(self._store.questions.values())
-            else:
-                questions = [
-                    question
-                    for question in self._store.questions.values()
-                    if question.project_id == project_id
-                ]
-            if status is not None:
-                questions = [question for question in questions if question.status == status]
-            if question_type is not None:
-                questions = [
-                    question for question in questions if question.question_type == question_type
-                ]
-            if parent_question_id is not None:
-                questions = [
-                    question
-                    for question in questions
-                    if parent_question_id in question.parent_question_ids
-                ]
-            if ancestor_question_id is not None:
-                questions = [
-                    question
-                    for question in questions
-                    if question.question_id != ancestor_question_id
-                    and _is_question_ancestor(
-                        question.question_id,
-                        ancestor_question_id,
-                        self._store.questions,
-                    )
-                ]
         if search is not None and search.strip():
             questions = [
                 question for question in questions if question_matches_substring(question, search)
@@ -232,24 +191,13 @@ class QuestionServiceMixin:
         offset: int = 0,
     ) -> list[QuestionRefactor]:
         refactors = self._query_from_repository(
-            attribute_name="question_refactors",
             loader=lambda repository: repository.query_question_refactors(
                 question_id=question_id,
                 limit=limit,
                 offset=offset,
             ),
-            entity_id_getter=lambda refactor: refactor.refactor_id,
         )
-        if refactors is not None:
-            return refactors
-        items = [
-            refactor
-            for refactor in self._store.question_refactors.values()
-            if refactor.source_question_id == question_id
-            or refactor.replacement_question_id == question_id
-        ]
-        items.sort(key=lambda refactor: (refactor.created_at, refactor.refactor_id))
-        return self._slice_entities(items, limit=limit, offset=offset)
+        return refactors
 
     def refactor_question(
         self,
@@ -344,14 +292,6 @@ class QuestionServiceMixin:
             created_by=_actor_user_id(actor),
         )
 
-        self._remember_entity("questions", source.question_id, source)
-        self._remember_entity("questions", replacement.question_id, replacement)
-        self._remember_entity("question_refactors", refactor.refactor_id, refactor)
-        for child in children:
-            self._remember_entity("questions", child.question_id, child)
-        for note in notes:
-            self._remember_entity("notes", note.note_id, note)
-
         def _persist(repository) -> None:  # noqa: ANN001
             repository.questions.save(source)
             repository.questions.save(replacement)
@@ -412,7 +352,6 @@ class QuestionServiceMixin:
     def delete_question(self, question_id: UUID, *, actor: AuthContext | None = None) -> Question:
         require_role(actor, WRITE_ROLES)
         question = self.get_question(question_id)
-        self._forget_entity("questions", question_id)
         self._run_repository_write(lambda repository: repository.questions.delete(question_id))
         return question
 

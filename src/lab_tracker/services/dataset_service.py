@@ -31,17 +31,11 @@ from lab_tracker.services.shared import (
 
 
 def _load_attached_files(self, dataset_id: UUID) -> list[DatasetFile] | None:
-    repository = self._active_repository()
-    if repository is None or self._allow_in_memory:
-        return None
-    return repository.list_dataset_files(dataset_id)
+    return self._active_repository().list_dataset_files(dataset_id)
 
 
 def _load_dataset_note_targets(self, dataset_id: UUID) -> list[UUID] | None:
-    repository = self._active_repository()
-    if repository is None or self._allow_in_memory:
-        return None
-    return repository.list_dataset_note_target_ids(dataset_id)
+    return self._active_repository().list_dataset_note_target_ids(dataset_id)
 
 
 def _merge_unique_ids(base: list[UUID], additions: Iterable[UUID]) -> list[UUID]:
@@ -113,33 +107,24 @@ class DatasetServiceMixin:
         )
         if commit_requested:
             _ensure_primary_question_active(primary_question)
-        self._remember_entity("datasets", dataset.dataset_id, dataset)
         self._run_repository_write(lambda repository: repository.datasets.save(dataset))
         return dataset
 
     def get_dataset(self, dataset_id: UUID) -> Dataset:
-        return self._get_from_repository_or_store(
-            attribute_name="datasets",
+        return self._get_from_repository(
             entity_id=dataset_id,
             label="Dataset",
             loader=lambda repository: repository.datasets.get(dataset_id),
         )
 
     def list_datasets(self, *, project_id: UUID | None = None) -> list[Dataset]:
-        datasets = self._query_from_repository(
-            attribute_name="datasets",
+        return self._query_from_repository(
             loader=lambda repository: repository.query_datasets(
                 project_id=project_id,
                 limit=None,
                 offset=0,
             ),
-            entity_id_getter=lambda dataset: dataset.dataset_id,
         )
-        if datasets is not None:
-            return datasets
-        if project_id is None:
-            return list(self._store.datasets.values())
-        return [d for d in self._store.datasets.values() if d.project_id == project_id]
 
     def update_dataset(
         self,
@@ -196,10 +181,7 @@ class DatasetServiceMixin:
 
             if commit_requested:
                 attached_files = _load_attached_files(self, dataset.dataset_id)
-                if attached_files is None:
-                    files = list(base_manifest.files)
-                else:
-                    files = attached_files
+                files = attached_files or list(base_manifest.files)
                 if not files:
                     raise ValidationError("At least one file is required to commit a dataset.")
 
@@ -239,6 +221,5 @@ class DatasetServiceMixin:
     def delete_dataset(self, dataset_id: UUID, *, actor: AuthContext | None = None) -> Dataset:
         require_role(actor, WRITE_ROLES)
         dataset = self.get_dataset(dataset_id)
-        self._forget_entity("datasets", dataset_id)
         self._run_repository_write(lambda repository: repository.datasets.delete(dataset_id))
         return dataset

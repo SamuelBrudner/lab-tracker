@@ -68,13 +68,11 @@ class AnalysisServiceMixin:
             status=status,
             executed_by=_actor_user_id(actor),
         )
-        self._remember_entity("analyses", analysis.analysis_id, analysis)
         self._run_repository_write(lambda repository: repository.analyses.save(analysis))
         return analysis
 
     def get_analysis(self, analysis_id: UUID) -> Analysis:
-        return self._get_from_repository_or_store(
-            attribute_name="analyses",
+        return self._get_from_repository(
             entity_id=analysis_id,
             label="Analysis",
             loader=lambda repository: repository.analyses.get(analysis_id),
@@ -88,7 +86,6 @@ class AnalysisServiceMixin:
         question_id: UUID | None = None,
     ) -> list[Analysis]:
         analyses = self._query_from_repository(
-            attribute_name="analyses",
             loader=lambda repository: repository.query_analyses(
                 project_id=project_id,
                 dataset_id=dataset_id,
@@ -96,13 +93,7 @@ class AnalysisServiceMixin:
                 limit=None,
                 offset=0,
             ),
-            entity_id_getter=lambda analysis: analysis.analysis_id,
         )
-        if analyses is None:
-            if project_id is None:
-                analyses = list(self._store.analyses.values())
-            else:
-                analyses = [a for a in self._store.analyses.values() if a.project_id == project_id]
         if project_id is not None:
             analyses = [analysis for analysis in analyses if analysis.project_id == project_id]
         if dataset_id is not None:
@@ -149,7 +140,6 @@ class AnalysisServiceMixin:
     def delete_analysis(self, analysis_id: UUID, *, actor: AuthContext | None = None) -> Analysis:
         require_role(actor, WRITE_ROLES)
         analysis = self.get_analysis(analysis_id)
-        self._forget_entity("analyses", analysis_id)
         self._run_repository_write(lambda repository: repository.analyses.delete(analysis_id))
         return analysis
 

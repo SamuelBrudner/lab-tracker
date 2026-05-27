@@ -116,6 +116,7 @@ class SQLAlchemyAnalysisRepository(EntityRepository[Analysis]):
         stmt = select(AnalysisModel)
         count_stmt = select(AnalysisModel.analysis_id)
         distinct_required = False
+        joined_analysis_datasets = False
         if project_id is not None:
             stmt = stmt.where(AnalysisModel.project_id == str(project_id))
             count_stmt = count_stmt.where(AnalysisModel.project_id == str(project_id))
@@ -128,19 +129,23 @@ class SQLAlchemyAnalysisRepository(EntityRepository[Analysis]):
                 AnalysisDatasetModel,
                 AnalysisDatasetModel.analysis_id == AnalysisModel.analysis_id,
             ).where(AnalysisDatasetModel.dataset_id == str(dataset_id))
+            joined_analysis_datasets = True
         if question_id is not None:
             distinct_required = True
+            if not joined_analysis_datasets:
+                stmt = stmt.join(
+                    AnalysisDatasetModel,
+                    AnalysisDatasetModel.analysis_id == AnalysisModel.analysis_id,
+                )
+                count_stmt = count_stmt.join(
+                    AnalysisDatasetModel,
+                    AnalysisDatasetModel.analysis_id == AnalysisModel.analysis_id,
+                )
             stmt = stmt.join(
-                AnalysisDatasetModel,
-                AnalysisDatasetModel.analysis_id == AnalysisModel.analysis_id,
-            ).join(
                 DatasetQuestionLinkModel,
                 DatasetQuestionLinkModel.dataset_id == AnalysisDatasetModel.dataset_id,
             ).where(DatasetQuestionLinkModel.question_id == str(question_id))
             count_stmt = count_stmt.join(
-                AnalysisDatasetModel,
-                AnalysisDatasetModel.analysis_id == AnalysisModel.analysis_id,
-            ).join(
                 DatasetQuestionLinkModel,
                 DatasetQuestionLinkModel.dataset_id == AnalysisDatasetModel.dataset_id,
             ).where(DatasetQuestionLinkModel.question_id == str(question_id))

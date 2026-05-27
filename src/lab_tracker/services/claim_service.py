@@ -53,13 +53,11 @@ class ClaimServiceMixin:
             supported_by_dataset_ids=dataset_ids,
             supported_by_analysis_ids=analysis_ids,
         )
-        self._remember_entity("claims", claim.claim_id, claim)
         self._run_repository_write(lambda repository: repository.claims.save(claim))
         return claim
 
     def get_claim(self, claim_id: UUID) -> Claim:
-        return self._get_from_repository_or_store(
-            attribute_name="claims",
+        return self._get_from_repository(
             entity_id=claim_id,
             label="Claim",
             loader=lambda repository: repository.claims.get(claim_id),
@@ -73,8 +71,7 @@ class ClaimServiceMixin:
         dataset_id: UUID | None = None,
         analysis_id: UUID | None = None,
     ) -> list[Claim]:
-        claims = self._query_from_repository(
-            attribute_name="claims",
+        return self._query_from_repository(
             loader=lambda repository: repository.query_claims(
                 project_id=project_id,
                 status=status.value if status is not None else None,
@@ -83,21 +80,7 @@ class ClaimServiceMixin:
                 limit=None,
                 offset=0,
             ),
-            entity_id_getter=lambda claim: claim.claim_id,
         )
-        if claims is not None:
-            return claims
-        if project_id is None:
-            claims = list(self._store.claims.values())
-        else:
-            claims = [c for c in self._store.claims.values() if c.project_id == project_id]
-        if status is not None:
-            claims = [claim for claim in claims if claim.status == status]
-        if dataset_id is not None:
-            claims = [claim for claim in claims if dataset_id in claim.supported_by_dataset_ids]
-        if analysis_id is not None:
-            claims = [claim for claim in claims if analysis_id in claim.supported_by_analysis_ids]
-        return claims
 
     def update_claim(
         self,
@@ -148,7 +131,6 @@ class ClaimServiceMixin:
     def delete_claim(self, claim_id: UUID, *, actor: AuthContext | None = None) -> Claim:
         require_role(actor, WRITE_ROLES)
         claim = self.get_claim(claim_id)
-        self._forget_entity("claims", claim_id)
         self._run_repository_write(lambda repository: repository.claims.delete(claim_id))
         return claim
 

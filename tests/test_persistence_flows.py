@@ -6,6 +6,8 @@ from fastapi.testclient import TestClient
 import pytest
 from sqlalchemy import create_engine
 
+from api_helpers import repository_backed_api
+
 from lab_tracker.api import LabTrackerAPI
 from lab_tracker.app import create_app
 from lab_tracker.auth import AuthContext, Role
@@ -484,11 +486,11 @@ def test_repository_backed_api_list_helpers_delegate_to_repository_queries(tmp_p
     engine.dispose()
 
 
-def test_in_memory_list_helpers_preserve_filtered_results():
-    api = LabTrackerAPI.in_memory()
+def test_repository_list_helpers_preserve_filtered_results():
+    api = repository_backed_api()
     actor = _actor()
 
-    project = api.create_project("In-memory Project", actor=actor)
+    project = api.create_project("Repository Project", actor=actor)
     question = api.create_question(
         project_id=project.project_id,
         text="Primary question",

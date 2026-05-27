@@ -198,16 +198,10 @@ class GraphDraftServiceMixin:
         return change_set
 
     def get_graph_change_set(self, change_set_id: UUID) -> GraphChangeSet:
-        cached = self._get_cached_entity("graph_change_sets", change_set_id)
-        if cached is not None:
-            return cached
-        repository = self._active_repository()
-        if repository is not None and not self._allow_in_memory:
-            change_set = repository.graph_change_sets.get(change_set_id)
-            if change_set is None:
-                raise NotFoundError("Graph draft does not exist.")
-            return self._cache_entity("graph_change_sets", change_set_id, change_set)
-        raise NotFoundError("Graph draft does not exist.")
+        change_set = self._active_repository().graph_change_sets.get(change_set_id)
+        if change_set is None:
+            raise NotFoundError("Graph draft does not exist.")
+        return change_set
 
     def list_graph_change_sets(
         self,
@@ -216,8 +210,7 @@ class GraphDraftServiceMixin:
         status: GraphChangeSetStatus | None = None,
         source_note_id: UUID | None = None,
     ) -> list[GraphChangeSet]:
-        change_sets = self._query_from_repository(
-            attribute_name="graph_change_sets",
+        return self._query_from_repository(
             loader=lambda repository: repository.query_graph_change_sets(
                 project_id=project_id,
                 status=status.value if status is not None else None,
@@ -225,18 +218,7 @@ class GraphDraftServiceMixin:
                 limit=None,
                 offset=0,
             ),
-            entity_id_getter=lambda change_set: change_set.change_set_id,
         )
-        if change_sets is not None:
-            return change_sets
-        values = list(self._store.graph_change_sets.values())
-        if project_id is not None:
-            values = [item for item in values if item.project_id == project_id]
-        if status is not None:
-            values = [item for item in values if item.status == status]
-        if source_note_id is not None:
-            values = [item for item in values if item.source_note_id == source_note_id]
-        return sorted(values, key=lambda item: (item.created_at, item.change_set_id), reverse=True)
 
     def update_graph_change_operation(
         self,
@@ -404,7 +386,6 @@ class GraphDraftServiceMixin:
             raise ValidationError("Submitted graph drafts cannot be edited by contributors.")
 
     def _save_graph_change_set(self, change_set: GraphChangeSet) -> None:
-        self._remember_entity("graph_change_sets", change_set.change_set_id, change_set)
         self._run_repository_write(lambda repository: repository.graph_change_sets.save(change_set))
 
     def _operations_from_graph_patch(

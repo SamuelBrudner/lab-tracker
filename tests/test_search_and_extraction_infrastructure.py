@@ -2,7 +2,8 @@ from __future__ import annotations
 
 from uuid import uuid4
 
-from lab_tracker.api import LabTrackerAPI
+from api_helpers import repository_backed_api
+
 from lab_tracker.auth import AuthContext, Role
 from lab_tracker.models import Note, Question, QuestionType
 from lab_tracker.services.shared import note_matches_substring, question_matches_substring
@@ -38,7 +39,7 @@ def test_direct_substring_matchers_casefold_and_scope_fields():
 
 
 def test_api_search_uses_direct_substring_matching_and_pagination():
-    api = LabTrackerAPI.in_memory()
+    api = repository_backed_api()
     actor = _actor()
     project = api.create_project("Project", actor=actor)
     q1 = api.create_question(

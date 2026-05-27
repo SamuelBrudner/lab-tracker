@@ -2,7 +2,8 @@ from uuid import uuid4
 
 import pytest
 
-from lab_tracker.api import LabTrackerAPI
+from api_helpers import repository_backed_api
+
 from lab_tracker.auth import AuthContext, AuthService, Role
 from lab_tracker.errors import AuthError, ValidationError
 from lab_tracker.models import (
@@ -24,7 +25,7 @@ def _actor(role: Role = Role.ADMIN) -> AuthContext:
 
 
 def test_project_question_dataset_flow():
-    api = LabTrackerAPI.in_memory()
+    api = repository_backed_api()
     actor = _actor()
     project = api.create_project("Neuro Project", actor=actor)
     question = api.create_question(
@@ -45,7 +46,7 @@ def test_project_question_dataset_flow():
 
 
 def test_dataset_requires_primary_question():
-    api = LabTrackerAPI.in_memory()
+    api = repository_backed_api()
     actor = _actor()
     project = api.create_project("Neuro Project", actor=actor)
     with pytest.raises(ValidationError):
@@ -57,7 +58,7 @@ def test_dataset_requires_primary_question():
 
 
 def test_commit_hash_is_content_addressed():
-    api = LabTrackerAPI.in_memory()
+    api = repository_backed_api()
     actor = _actor()
     project = api.create_project("Neuro Project", actor=actor)
     question = api.create_question(
@@ -100,7 +101,7 @@ def test_commit_hash_is_content_addressed():
 
 
 def test_dataset_commit_manifest_preserves_nwb_metadata_keys():
-    api = LabTrackerAPI.in_memory()
+    api = repository_backed_api()
     actor = _actor()
     project = api.create_project("Neuro Project", actor=actor)
     question = api.create_question(
@@ -126,7 +127,7 @@ def test_dataset_commit_manifest_preserves_nwb_metadata_keys():
 
 
 def test_dataset_commit_manifest_preserves_bids_metadata_keys():
-    api = LabTrackerAPI.in_memory()
+    api = repository_backed_api()
     actor = _actor()
     project = api.create_project("Neuro Project", actor=actor)
     question = api.create_question(
@@ -149,7 +150,7 @@ def test_dataset_commit_manifest_preserves_bids_metadata_keys():
 
 
 def test_dataset_commit_manifest_does_not_split_prefixed_metadata():
-    api = LabTrackerAPI.in_memory()
+    api = repository_backed_api()
     actor = _actor()
     project = api.create_project("Neuro Project", actor=actor)
     question = api.create_question(
@@ -188,7 +189,7 @@ def test_dataset_commit_manifest_does_not_split_prefixed_metadata():
 
 
 def test_dataset_commit_requires_active_question():
-    api = LabTrackerAPI.in_memory()
+    api = repository_backed_api()
     actor = _actor()
     project = api.create_project("Neuro Project", actor=actor)
     question = api.create_question(
@@ -212,7 +213,7 @@ def test_dataset_commit_requires_active_question():
 
 
 def test_dataset_commit_requires_file_attachment():
-    api = LabTrackerAPI.in_memory()
+    api = repository_backed_api()
     actor = _actor()
     project = api.create_project("Neuro Project", actor=actor)
     question = api.create_question(
@@ -243,7 +244,7 @@ def test_question_refactor_supports_staged_and_active_replacements(
     source_status: QuestionStatus,
     replacement_status: QuestionStatus,
 ):
-    api = LabTrackerAPI.in_memory()
+    api = repository_backed_api()
     actor = _actor()
     project = api.create_project("Question Refactor", actor=actor)
     source = api.create_question(
@@ -283,7 +284,7 @@ def test_question_refactor_supports_staged_and_active_replacements(
 
 
 def test_question_refactor_moves_only_selected_children_and_notes():
-    api = LabTrackerAPI.in_memory()
+    api = repository_backed_api()
     actor = _actor()
     project = api.create_project("Question Refactor Moves", actor=actor)
     parent = api.create_question(
@@ -360,7 +361,7 @@ def test_question_refactor_moves_only_selected_children_and_notes():
 
 
 def test_question_refactor_validates_source_status_relationships_and_cycles():
-    api = LabTrackerAPI.in_memory()
+    api = repository_backed_api()
     actor = _actor()
     project = api.create_project("Question Refactor Validation", actor=actor)
     other_project = api.create_project("Other Refactor Validation", actor=actor)
@@ -486,7 +487,7 @@ def test_question_refactor_validates_source_status_relationships_and_cycles():
 
 
 def test_question_status_superseded_is_terminal_and_active_to_staged_remains_disallowed():
-    api = LabTrackerAPI.in_memory()
+    api = repository_backed_api()
     actor = _actor()
     project = api.create_project("Question Status Transitions", actor=actor)
     active = api.create_question(
@@ -516,7 +517,7 @@ def test_question_status_superseded_is_terminal_and_active_to_staged_remains_dis
 
 
 def test_session_creation_starts_active_without_end_time():
-    api = LabTrackerAPI.in_memory()
+    api = repository_backed_api()
     actor = _actor(Role.EDITOR)
     project = api.create_project("Neuro Project", actor=actor)
 
@@ -531,7 +532,7 @@ def test_session_creation_starts_active_without_end_time():
 
 
 def test_committed_dataset_is_immutable():
-    api = LabTrackerAPI.in_memory()
+    api = repository_backed_api()
     actor = _actor()
     project = api.create_project("Neuro Project", actor=actor)
     question = api.create_question(
@@ -571,7 +572,7 @@ def test_committed_dataset_is_immutable():
 
 
 def test_promote_operational_session_to_dataset():
-    api = LabTrackerAPI.in_memory()
+    api = repository_backed_api()
     actor = _actor()
     project = api.create_project("Neuro Project", actor=actor)
     question = api.create_question(
@@ -599,7 +600,7 @@ def test_promote_operational_session_to_dataset():
 
 
 def test_promote_operational_session_to_scientific():
-    api = LabTrackerAPI.in_memory()
+    api = repository_backed_api()
     actor = _actor()
     project = api.create_project("Neuro Project", actor=actor)
     question = api.create_question(
@@ -627,7 +628,7 @@ def test_promote_operational_session_to_scientific():
 
 
 def test_closed_operational_session_cannot_be_promoted():
-    api = LabTrackerAPI.in_memory()
+    api = repository_backed_api()
     actor = _actor()
     project = api.create_project("Neuro Project", actor=actor)
     question = api.create_question(
@@ -663,7 +664,7 @@ def test_closed_operational_session_cannot_be_promoted():
 
 
 def test_session_cannot_be_reopened_after_closing():
-    api = LabTrackerAPI.in_memory()
+    api = repository_backed_api()
     actor = _actor()
     project = api.create_project("Neuro Project", actor=actor)
     session = api.create_session(
@@ -678,7 +679,7 @@ def test_session_cannot_be_reopened_after_closing():
 
 
 def test_active_session_cannot_set_end_time_without_closing():
-    api = LabTrackerAPI.in_memory()
+    api = repository_backed_api()
     actor = _actor()
     project = api.create_project("Neuro Project", actor=actor)
     session = api.create_session(
@@ -696,7 +697,7 @@ def test_active_session_cannot_set_end_time_without_closing():
 
 
 def test_archived_dataset_cannot_be_recommitted():
-    api = LabTrackerAPI.in_memory()
+    api = repository_backed_api()
     actor = _actor()
     project = api.create_project("Neuro Project", actor=actor)
     question = api.create_question(
@@ -721,7 +722,7 @@ def test_archived_dataset_cannot_be_recommitted():
 
 
 def test_session_link_code_roundtrip():
-    api = LabTrackerAPI.in_memory()
+    api = repository_backed_api()
     actor = _actor()
     project = api.create_project("Neuro Project", actor=actor)
     session = api.create_session(
@@ -746,14 +747,14 @@ def test_auth_service_register_and_authenticate():
 
 
 def test_role_required_for_writes():
-    api = LabTrackerAPI.in_memory()
+    api = repository_backed_api()
     viewer = _actor(Role.VIEWER)
     with pytest.raises(AuthError):
         api.create_project("Nope", actor=viewer)
 
 
 def test_scientific_session_requires_question():
-    api = LabTrackerAPI.in_memory()
+    api = repository_backed_api()
     actor = _actor()
     project = api.create_project("Neuro Project", actor=actor)
     with pytest.raises(ValidationError):
@@ -765,7 +766,7 @@ def test_scientific_session_requires_question():
 
 
 def test_operational_session_disallows_primary_question():
-    api = LabTrackerAPI.in_memory()
+    api = repository_backed_api()
     actor = _actor()
     project = api.create_project("Neuro Project", actor=actor)
     question = api.create_question(

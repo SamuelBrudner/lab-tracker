@@ -38,19 +38,16 @@ class SessionServiceMixin:
         session_id: UUID,
         file_path: str,
     ) -> AcquisitionOutput | None:
-        repository = self._active_repository()
-        if repository is not None and not self._allow_in_memory:
-            outputs, _ = repository.query_acquisition_outputs(
-                session_id=session_id,
-                limit=None,
-                offset=0,
-            )
-            return _find_acquisition_output(
-                {output.output_id: output for output in outputs},
-                session_id,
-                file_path,
-            )
-        return _find_acquisition_output(self._store.acquisition_outputs, session_id, file_path)
+        outputs, _ = self._active_repository().query_acquisition_outputs(
+            session_id=session_id,
+            limit=None,
+            offset=0,
+        )
+        return _find_acquisition_output(
+            {output.output_id: output for output in outputs},
+            session_id,
+            file_path,
+        )
 
     def create_session(
         self,
@@ -82,13 +79,11 @@ class SessionServiceMixin:
             primary_question_id=primary_question_id,
             created_by=_actor_user_id(actor),
         )
-        self._remember_entity("sessions", session.session_id, session)
         self._run_repository_write(lambda repository: repository.sessions.save(session))
         return session
 
     def get_session(self, session_id: UUID) -> Session:
-        return self._get_from_repository_or_store(
-            attribute_name="sessions",
+        return self._get_from_repository(
             entity_id=session_id,
             label="Session",
             loader=lambda repository: repository.sessions.get(session_id),
@@ -103,20 +98,13 @@ class SessionServiceMixin:
         return self.get_session(session_id)
 
     def list_sessions(self, *, project_id: UUID | None = None) -> list[Session]:
-        sessions = self._query_from_repository(
-            attribute_name="sessions",
+        return self._query_from_repository(
             loader=lambda repository: repository.query_sessions(
                 project_id=project_id,
                 limit=None,
                 offset=0,
             ),
-            entity_id_getter=lambda session: session.session_id,
         )
-        if sessions is not None:
-            return sessions
-        if project_id is None:
-            return list(self._store.sessions.values())
-        return [s for s in self._store.sessions.values() if s.project_id == project_id]
 
     def update_session(
         self,
@@ -146,7 +134,6 @@ class SessionServiceMixin:
     def delete_session(self, session_id: UUID, *, actor: AuthContext | None = None) -> Session:
         require_role(actor, WRITE_ROLES)
         session = self.get_session(session_id)
-        self._forget_entity("sessions", session_id)
         self._run_repository_write(lambda repository: repository.sessions.delete(session_id))
         return session
 
@@ -189,7 +176,6 @@ class SessionServiceMixin:
             checksum=cleaned_checksum,
             size_bytes=size_bytes,
         )
-        self._remember_entity("acquisition_outputs", output.output_id, output)
         self._run_repository_write(lambda repository: repository.acquisition_outputs.save(output))
         return output
 
@@ -198,33 +184,23 @@ class SessionServiceMixin:
         *,
         session_id: UUID | None = None,
     ) -> list[AcquisitionOutput]:
-        outputs = self._query_from_repository(
-            attribute_name="acquisition_outputs",
+        return self._query_from_repository(
             loader=lambda repository: repository.query_acquisition_outputs(
                 session_id=session_id,
                 limit=None,
                 offset=0,
             ),
-            entity_id_getter=lambda output: output.output_id,
         )
-        if outputs is not None:
-            return outputs
-        outputs = list(self._store.acquisition_outputs.values())
-        if session_id is None:
-            return outputs
-        return [output for output in outputs if output.session_id == session_id]
 
     def delete_acquisition_output(
         self, output_id: UUID, *, actor: AuthContext | None = None
     ) -> AcquisitionOutput:
         require_role(actor, WRITE_ROLES)
-        output = self._get_from_repository_or_store(
-            attribute_name="acquisition_outputs",
+        output = self._get_from_repository(
             entity_id=output_id,
             label="Acquisition output",
             loader=lambda repository: repository.acquisition_outputs.get(output_id),
         )
-        self._forget_entity("acquisition_outputs", output_id)
         self._run_repository_write(
             lambda repository: repository.acquisition_outputs.delete(output_id)
         )

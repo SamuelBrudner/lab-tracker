@@ -1,5 +1,7 @@
 from uuid import uuid4
 
+from api_helpers import repository_backed_api
+
 from lab_tracker.acquisition_watcher import AcquisitionOutputWatcher
 from lab_tracker.api import LabTrackerAPI
 from lab_tracker.auth import AuthContext, Role
@@ -27,7 +29,7 @@ def _operational_session(api: LabTrackerAPI, actor: AuthContext):
 
 
 def test_register_acquisition_output_accepts_scientific_session():
-    api = LabTrackerAPI.in_memory()
+    api = repository_backed_api()
     actor = _actor()
     project = api.create_project("Neuro Project", actor=actor)
     question = api.create_question(
@@ -53,7 +55,7 @@ def test_register_acquisition_output_accepts_scientific_session():
 
 
 def test_promote_operational_session_merges_outputs():
-    api = LabTrackerAPI.in_memory()
+    api = repository_backed_api()
     actor = _actor()
     project, session = _operational_session(api, actor)
     question = api.create_question(
@@ -91,7 +93,7 @@ def test_promote_operational_session_merges_outputs():
 
 
 def test_register_acquisition_output_updates_existing():
-    api = LabTrackerAPI.in_memory()
+    api = repository_backed_api()
     actor = _actor()
     _, session = _operational_session(api, actor)
     output = api.register_acquisition_output(
@@ -111,7 +113,7 @@ def test_register_acquisition_output_updates_existing():
 
 
 def test_acquisition_output_watcher_registers_outputs(tmp_path):
-    api = LabTrackerAPI.in_memory()
+    api = repository_backed_api()
     actor = _actor()
     _, session = _operational_session(api, actor)
     output_path = tmp_path / "output.bin"

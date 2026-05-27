@@ -3,7 +3,8 @@ from uuid import uuid4
 
 import pytest
 
-from lab_tracker.api import LabTrackerAPI
+from api_helpers import repository_backed_api
+
 from lab_tracker.auth import AuthContext, Role
 from lab_tracker.errors import NotFoundError
 from lab_tracker.models import EntityRef, EntityType
@@ -15,7 +16,7 @@ def _actor(role: Role = Role.ADMIN) -> AuthContext:
 
 
 def test_upload_note_raw_persists_and_downloads(tmp_path):
-    api = LabTrackerAPI.in_memory(raw_storage=LocalNoteStorage(tmp_path))
+    api = repository_backed_api(raw_storage=LocalNoteStorage(tmp_path))
     actor = _actor()
     project = api.create_project("Neuro Project", actor=actor)
     target = EntityRef(entity_type=EntityType.PROJECT, entity_id=project.project_id)
@@ -48,7 +49,7 @@ def test_upload_note_raw_persists_and_downloads(tmp_path):
 
 
 def test_upload_note_raw_preserves_manual_transcript(tmp_path):
-    api = LabTrackerAPI.in_memory(raw_storage=LocalNoteStorage(tmp_path))
+    api = repository_backed_api(raw_storage=LocalNoteStorage(tmp_path))
     actor = _actor()
     project = api.create_project("Neuro Project", actor=actor)
 
@@ -65,7 +66,7 @@ def test_upload_note_raw_preserves_manual_transcript(tmp_path):
 
 
 def test_upload_note_raw_rolls_back_raw_asset_when_note_creation_fails(tmp_path):
-    api = LabTrackerAPI.in_memory(raw_storage=LocalNoteStorage(tmp_path))
+    api = repository_backed_api(raw_storage=LocalNoteStorage(tmp_path))
     actor = _actor()
 
     with pytest.raises(NotFoundError, match="Project does not exist."):
@@ -81,7 +82,7 @@ def test_upload_note_raw_rolls_back_raw_asset_when_note_creation_fails(tmp_path)
 
 
 def test_delete_note_removes_stored_raw_asset(tmp_path):
-    api = LabTrackerAPI.in_memory(raw_storage=LocalNoteStorage(tmp_path))
+    api = repository_backed_api(raw_storage=LocalNoteStorage(tmp_path))
     actor = _actor()
     project = api.create_project("Neuro Project", actor=actor)
 

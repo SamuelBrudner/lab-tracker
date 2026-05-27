@@ -81,7 +81,6 @@ class NoteServiceMixin:
             status=status,
             created_by=_actor_user_id(actor),
         )
-        self._remember_entity("notes", note.note_id, note)
         self._run_repository_write(lambda repository: repository.notes.save(note))
         return note
 
@@ -215,8 +214,7 @@ class NoteServiceMixin:
         return note
 
     def get_note(self, note_id: UUID) -> Note:
-        return self._get_from_repository_or_store(
-            attribute_name="notes",
+        return self._get_from_repository(
             entity_id=note_id,
             label="Note",
             loader=lambda repository: repository.notes.get(note_id),
@@ -230,8 +228,7 @@ class NoteServiceMixin:
         target_entity_type: EntityType | None = None,
         target_entity_id: UUID | None = None,
     ) -> list[Note]:
-        notes = self._query_from_repository(
-            attribute_name="notes",
+        return self._query_from_repository(
             loader=lambda repository: repository.query_notes(
                 project_id=project_id,
                 status=status.value if status is not None else None,
@@ -242,27 +239,7 @@ class NoteServiceMixin:
                 limit=None,
                 offset=0,
             ),
-            entity_id_getter=lambda note: note.note_id,
         )
-        if notes is not None:
-            return notes
-        if project_id is None:
-            notes = list(self._store.notes.values())
-        else:
-            notes = [n for n in self._store.notes.values() if n.project_id == project_id]
-        if status is not None:
-            notes = [note for note in notes if note.status == status]
-        if target_entity_type is not None and target_entity_id is not None:
-            notes = [
-                note
-                for note in notes
-                if any(
-                    target.entity_type == target_entity_type
-                    and target.entity_id == target_entity_id
-                    for target in note.targets
-                )
-            ]
-        return notes
 
     def update_note(
         self,
@@ -303,7 +280,6 @@ class NoteServiceMixin:
     def delete_note(self, note_id: UUID, *, actor: AuthContext | None = None) -> Note:
         note = self.get_note(note_id)
         self.require_project_contributor(note.project_id, actor=actor)
-        self._forget_entity("notes", note_id)
         self._run_repository_write(lambda repository: repository.notes.delete(note_id))
         if note.raw_asset is not None:
             self.run_after_commit(

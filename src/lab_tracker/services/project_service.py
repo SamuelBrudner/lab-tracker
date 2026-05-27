@@ -44,7 +44,6 @@ class ProjectServiceMixin:
             status=status,
             created_by=_actor_user_id(actor),
         )
-        self._remember_entity("projects", project.project_id, project)
         self._run_repository_write(lambda repository: repository.projects.save(project))
         if actor is not None and not has_global_project_admin(actor):
             membership = ProjectMembership(
@@ -54,29 +53,21 @@ class ProjectServiceMixin:
                 role=ProjectMembershipRole.OWNER,
                 created_by=_actor_user_id(actor),
             )
-            self._remember_entity(
-                "project_memberships",
-                membership.membership_id,
-                membership,
-            )
             self._run_repository_write(
                 lambda repository: repository.project_memberships.save(membership)
             )
         return project
 
     def get_project(self, project_id: UUID) -> Project:
-        return self._get_from_repository_or_store(
-            attribute_name="projects",
+        return self._get_from_repository(
             entity_id=project_id,
             label="Project",
             loader=lambda repository: repository.projects.get(project_id),
         )
 
     def list_projects(self) -> list[Project]:
-        return self._list_from_repository_or_store(
-            attribute_name="projects",
+        return self._list_from_repository(
             loader=lambda repository: repository.projects.list(),
-            entity_id_getter=lambda project: project.project_id,
         )
 
     def update_project(
@@ -104,13 +95,11 @@ class ProjectServiceMixin:
     def delete_project(self, project_id: UUID, *, actor: AuthContext | None = None) -> Project:
         require_role(actor, WRITE_ROLES)
         project = self.get_project(project_id)
-        self._forget_entity("projects", project_id)
         self._run_repository_write(lambda repository: repository.projects.delete(project_id))
         return project
 
     def get_project_membership(self, membership_id: UUID) -> ProjectMembership:
-        return self._get_from_repository_or_store(
-            attribute_name="project_memberships",
+        return self._get_from_repository(
             entity_id=membership_id,
             label="Project membership",
             loader=lambda repository: repository.project_memberships.get(membership_id),
@@ -121,13 +110,10 @@ class ProjectServiceMixin:
         project_id: UUID,
         user_id: UUID,
     ) -> ProjectMembership | None:
-        repository = self._active_repository()
-        if repository is not None and not self._allow_in_memory:
-            return repository.get_project_membership(project_id=project_id, user_id=user_id)
-        for membership in self._store.project_memberships.values():
-            if membership.project_id == project_id and membership.user_id == user_id:
-                return membership
-        return None
+        return self._active_repository().get_project_membership(
+            project_id=project_id,
+            user_id=user_id,
+        )
 
     def list_project_memberships(
         self,
@@ -136,27 +122,13 @@ class ProjectServiceMixin:
         user_id: UUID | None = None,
     ) -> list[ProjectMembership]:
         memberships = self._query_from_repository(
-            attribute_name="project_memberships",
             loader=lambda repository: repository.query_project_memberships(
                 project_id=project_id,
                 user_id=user_id,
                 limit=None,
                 offset=0,
             ),
-            entity_id_getter=lambda membership: membership.membership_id,
         )
-        if memberships is None:
-            memberships = list(self._store.project_memberships.values())
-        if project_id is not None:
-            memberships = [
-                membership
-                for membership in memberships
-                if membership.project_id == project_id
-            ]
-        if user_id is not None:
-            memberships = [
-                membership for membership in memberships if membership.user_id == user_id
-            ]
         return sorted(memberships, key=lambda item: (item.project_id, item.created_at))
 
     def upsert_project_membership(
@@ -182,7 +154,6 @@ class ProjectServiceMixin:
             membership = existing
             membership.role = role
             membership.updated_at = utc_now()
-        self._remember_entity("project_memberships", membership.membership_id, membership)
         self._run_repository_write(
             lambda repository: repository.project_memberships.save(membership)
         )
@@ -206,7 +177,6 @@ class ProjectServiceMixin:
         )
         if membership.role == ProjectMembershipRole.OWNER and owner_count <= 1:
             raise ValidationError("Projects must keep at least one owner.")
-        self._forget_entity("project_memberships", membership.membership_id)
         self._run_repository_write(
             lambda repository: repository.project_memberships.delete(membership.membership_id)
         )

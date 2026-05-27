@@ -2,6 +2,8 @@ from uuid import uuid4
 
 import pytest
 
+from api_helpers import repository_backed_api
+
 from lab_tracker.api import LabTrackerAPI
 from lab_tracker.auth import AuthContext, Role
 from lab_tracker.errors import ValidationError
@@ -35,7 +37,7 @@ def _setup_project_with_question(api: LabTrackerAPI, actor: AuthContext):
 
 
 def test_analysis_commit_requires_committed_datasets():
-    api = LabTrackerAPI.in_memory()
+    api = repository_backed_api()
     actor = _actor()
     project, question = _setup_project_with_question(api, actor)
     dataset = api.create_dataset(
@@ -81,7 +83,7 @@ def test_analysis_commit_requires_committed_datasets():
 
 
 def test_analysis_cannot_be_created_as_committed_with_staged_datasets():
-    api = LabTrackerAPI.in_memory()
+    api = repository_backed_api()
     actor = _actor()
     project, question = _setup_project_with_question(api, actor)
     dataset = api.create_dataset(
@@ -121,7 +123,7 @@ def test_analysis_cannot_be_created_as_committed_with_staged_datasets():
 
 
 def test_claim_status_transitions_and_edits():
-    api = LabTrackerAPI.in_memory()
+    api = repository_backed_api()
     actor = _actor()
     project, question = _setup_project_with_question(api, actor)
     dataset = api.create_dataset(
@@ -149,7 +151,7 @@ def test_claim_status_transitions_and_edits():
 
 
 def test_visualization_filters_and_analysis_question_links():
-    api = LabTrackerAPI.in_memory()
+    api = repository_backed_api()
     actor = _actor()
     project, question = _setup_project_with_question(api, actor)
     dataset = api.create_dataset(

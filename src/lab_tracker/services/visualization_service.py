@@ -43,13 +43,11 @@ class VisualizationServiceMixin:
             caption=caption.strip() if caption else None,
             related_claim_ids=claim_ids,
         )
-        self._remember_entity("visualizations", visualization.viz_id, visualization)
         self._run_repository_write(lambda repository: repository.visualizations.save(visualization))
         return visualization
 
     def get_visualization(self, viz_id: UUID) -> Visualization:
-        return self._get_from_repository_or_store(
-            attribute_name="visualizations",
+        return self._get_from_repository(
             entity_id=viz_id,
             label="Visualization",
             loader=lambda repository: repository.visualizations.get(viz_id),
@@ -62,8 +60,7 @@ class VisualizationServiceMixin:
         analysis_id: UUID | None = None,
         claim_id: UUID | None = None,
     ) -> list[Visualization]:
-        visualizations = self._query_from_repository(
-            attribute_name="visualizations",
+        return self._query_from_repository(
             loader=lambda repository: repository.query_visualizations(
                 project_id=project_id,
                 analysis_id=analysis_id,
@@ -71,23 +68,7 @@ class VisualizationServiceMixin:
                 limit=None,
                 offset=0,
             ),
-            entity_id_getter=lambda visualization: visualization.viz_id,
         )
-        if visualizations is not None:
-            return visualizations
-        if project_id is None:
-            visualizations = list(self._store.visualizations.values())
-        else:
-            visualizations = [
-                viz
-                for viz in self._store.visualizations.values()
-                if self.get_analysis(viz.analysis_id).project_id == project_id
-            ]
-        if analysis_id is not None:
-            visualizations = [viz for viz in visualizations if viz.analysis_id == analysis_id]
-        if claim_id is not None:
-            visualizations = [viz for viz in visualizations if claim_id in viz.related_claim_ids]
-        return visualizations
 
     def update_visualization(
         self,
@@ -129,6 +110,5 @@ class VisualizationServiceMixin:
     ) -> Visualization:
         require_role(actor, WRITE_ROLES)
         visualization = self.get_visualization(viz_id)
-        self._forget_entity("visualizations", viz_id)
         self._run_repository_write(lambda repository: repository.visualizations.delete(viz_id))
         return visualization
