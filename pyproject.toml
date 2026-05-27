@@ -29,6 +29,9 @@ lint = [
 ]
 
 [project.scripts]
+lab-tracker = "lab_tracker.cli:main"
+lab_tracker = "lab_tracker.cli:main"
+lt = "lab_tracker_client.cli:main"
 lt-mcp = "lab_tracker.mcp_server:main"
 
 [tool.setuptools]

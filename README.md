@@ -250,6 +250,16 @@ portable consumer repo MCP config, prefer the installed `lt-mcp` entry point so
 
 The MCP username/password are only required when `LAB_TRACKER_AUTH_ENABLED=true`.
 
+Consumer repositories can scaffold the standard integration files in one step:
+
+```bash
+lab_tracker init --target /path/to/consumer-repo --project-name "My Project"
+```
+
+This creates a portable `.mcp.json`, a thin `scripts/lt.py` shim backed by
+`lab_tracker_client`, an `AGENTS.lt.md` fragment, and an `lt_ids.json`
+placeholder. Existing files are skipped unless `--force` is passed.
+
 Dolt is an export-only versioned mirror in v1:
 
 ```bash
