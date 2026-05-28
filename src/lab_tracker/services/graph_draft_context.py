@@ -1,0 +1,820 @@
+"""Graph draft context packet assembly."""
+
+from __future__ import annotations
+
+import json
+from typing import Any
+from uuid import UUID
+
+from lab_tracker.auth import AuthContext
+from lab_tracker.errors import NotFoundError, ValidationError
+from lab_tracker.models import (
+    Analysis,
+    Claim,
+    Dataset,
+    EntityRef,
+    EntityType,
+    GraphDraftMode,
+    Note,
+    NoteStatus,
+    Project,
+    Question,
+    QuestionStatus,
+    Session,
+    Visualization,
+)
+from lab_tracker.services.analysis_service import AnalysisService
+from lab_tracker.services.claim_service import ClaimService
+from lab_tracker.services.dataset_service import DatasetService
+from lab_tracker.services.note_service import NoteService
+from lab_tracker.services.project_service import ProjectService
+from lab_tracker.services.question_service import QuestionService
+from lab_tracker.services.session_service import SessionService
+from lab_tracker.services.visualization_service import VisualizationService
+
+EntityResult = Project | Question | Note | Session | Dataset | Analysis | Claim | Visualization
+_RECENT_CONTEXT_LIMIT = 10
+_QUESTION_CONTEXT_LIMIT = 50
+_CAPTURE_BUNDLE_LIMIT = 6
+
+
+class GraphContextBuilder:
+    def __init__(
+        self,
+        *,
+        projects: ProjectService,
+        questions: QuestionService,
+        notes: NoteService,
+        sessions: SessionService,
+        datasets: DatasetService,
+        analyses: AnalysisService,
+        claims: ClaimService,
+        visualizations: VisualizationService,
+    ) -> None:
+        self.projects = projects
+        self.questions = questions
+        self.notes = notes
+        self.sessions = sessions
+        self.datasets = datasets
+        self.analyses = analyses
+        self.claims = claims
+        self.visualizations = visualizations
+
+    def build_batch_graph_context(
+        self,
+        notes: list[Note],
+        *,
+        window: tuple[Any, Any] | None = None,
+        actor: AuthContext | None = None,
+        batch_note_limit: int = 100,
+    ) -> dict[str, Any]:
+        """Assemble a context packet covering a batch of staged notes.
+
+        The batch may span multiple projects; graph context (questions,
+        recent sessions/datasets/notes/analyses/claims/visualizations,
+        known_aliases) is grouped per project. The packet is the input
+        the daily-batch draft generator (lab-tracker-641) consumes.
+
+        Caller is responsible for filtering to staged notes and choosing
+        the window. The batch is capped at batch_note_limit; overflow is
+        reported as truncated_note_count.
+        """
+        truncated_note_count = max(0, len(notes) - batch_note_limit)
+        batch_notes = list(notes[:batch_note_limit])
+
+        notes_by_project: dict[UUID, list[Note]] = {}
+        for note in batch_notes:
+            notes_by_project.setdefault(note.project_id, []).append(note)
+
+        project_blocks: list[dict[str, Any]] = []
+        for project_id, project_notes in notes_by_project.items():
+            try:
+                project = self.projects.get_project(project_id)
+            except NotFoundError:
+                continue
+            project_questions = self.questions.list_questions(project_id=project_id)
+            active_or_staged = sorted(
+                [
+                    q
+                    for q in project_questions
+                    if q.status in {QuestionStatus.ACTIVE, QuestionStatus.STAGED}
+                ],
+                key=lambda q: (q.status.value, q.updated_at, q.question_id),
+                reverse=True,
+            )[:_QUESTION_CONTEXT_LIMIT]
+            active_ids = {q.question_id for q in active_or_staged}
+            superseded = [
+                q
+                for q in project_questions
+                if q.status == QuestionStatus.SUPERSEDED
+                and q.superseded_by_question_id in active_ids
+            ]
+            batch_ids_in_project = {n.note_id for n in project_notes}
+            recent_notes = [
+                item
+                for item in sorted(
+                    self.notes.list_notes(project_id=project_id),
+                    key=lambda candidate: candidate.created_at,
+                    reverse=True,
+                )
+                if item.note_id not in batch_ids_in_project
+            ][:_RECENT_CONTEXT_LIMIT]
+            recent_sessions = sorted(
+                self.sessions.list_sessions(project_id=project_id),
+                key=lambda item: item.started_at,
+                reverse=True,
+            )[:_RECENT_CONTEXT_LIMIT]
+            recent_datasets = sorted(
+                self.datasets.list_datasets(project_id=project_id),
+                key=lambda item: item.created_at,
+                reverse=True,
+            )[:_RECENT_CONTEXT_LIMIT]
+            recent_analyses = sorted(
+                self.analyses.list_analyses(project_id=project_id),
+                key=lambda item: item.created_at,
+                reverse=True,
+            )[:_RECENT_CONTEXT_LIMIT]
+            recent_claims = sorted(
+                self.claims.list_claims(project_id=project_id),
+                key=lambda item: item.created_at,
+                reverse=True,
+            )[:_RECENT_CONTEXT_LIMIT]
+            recent_visualizations = sorted(
+                self.visualizations.list_visualizations(project_id=project_id),
+                key=lambda item: item.created_at,
+                reverse=True,
+            )[:_RECENT_CONTEXT_LIMIT]
+            project_blocks.append(
+                {
+                    "id": str(project.project_id),
+                    "label": project.name,
+                    "status": project.status.value,
+                    "note_ids_in_batch": [str(n.note_id) for n in project_notes],
+                    "active_or_staged_questions": [
+                        _compact_question(item) for item in active_or_staged
+                    ],
+                    "recent_sessions": [_compact_session(item) for item in recent_sessions],
+                    "recent_datasets": [_compact_dataset(item) for item in recent_datasets],
+                    "recent_notes": [_compact_note(item) for item in recent_notes],
+                    "recent_analyses": [_compact_analysis(item) for item in recent_analyses],
+                    "recent_claims": [_compact_claim(item) for item in recent_claims],
+                    "recent_visualizations": [
+                        _compact_visualization(item) for item in recent_visualizations
+                    ],
+                    "known_aliases": _known_aliases(
+                        project=project,
+                        questions=active_or_staged,
+                        superseded_questions=superseded,
+                        sessions=recent_sessions,
+                        datasets=recent_datasets,
+                        analyses=recent_analyses,
+                        claims=recent_claims,
+                        visualizations=recent_visualizations,
+                    ),
+                }
+            )
+
+        packet: dict[str, Any] = {
+            "mode": "graph_batch",
+            "batch_window": (
+                {"since": window[0].isoformat(), "until": window[1].isoformat()}
+                if window is not None
+                else None
+            ),
+            "current_user": _compact_actor(actor),
+            "batch_notes": [_compact_note(item, include_raw_asset=True) for item in batch_notes],
+            "source_artifacts": [_source_artifact_packet(item) for item in batch_notes],
+            "projects": project_blocks,
+            "truncated_note_count": truncated_note_count,
+        }
+        packet["context_summary"] = _graph_batch_context_summary(packet)
+        return packet
+
+    def prepare_note_sources_for_graph_draft(
+        self,
+        note_id: UUID,
+        *,
+        mode: GraphDraftMode,
+    ) -> dict[str, Any]:
+        note = self.notes.get_note(note_id)
+        source_notes = self._source_notes_for_capture(note)
+        audio_notes = [
+            item
+            for item in source_notes
+            if item.raw_asset is not None
+            and item.raw_asset.content_type.lower().startswith("audio/")
+        ]
+        if mode == GraphDraftMode.GRAPH_CONTEXT:
+            missing_transcripts = [item for item in audio_notes if not item.transcribed_text]
+            if missing_transcripts:
+                raise ValidationError(
+                    "Voice notes must have an editable transcript before graph drafting."
+                )
+        image_note = _preferred_image_note(note, source_notes)
+        if mode == GraphDraftMode.IMAGE_ONLY and image_note is None:
+            raise ValidationError("Image-only graph drafting requires a raw image asset.")
+        primary_note = image_note or note
+        primary_raw_asset = primary_note.raw_asset
+        image_bytes: bytes | None = None
+        image_content_type: str | None = None
+        if image_note is not None:
+            try:
+                raw_asset, image_bytes = self.notes.download_note_raw(image_note.note_id)
+            except NotFoundError as exc:
+                raise NotFoundError("Source image file is unavailable.") from exc
+            except ValidationError:
+                raise
+            except Exception as exc:
+                raise ValidationError("Source image file could not be read.") from exc
+            if not image_bytes:
+                raise ValidationError("Source image file is empty.")
+            image_content_type = raw_asset.content_type
+            primary_raw_asset = raw_asset
+        if not image_bytes and not any(
+            item.transcribed_text or item.raw_content for item in source_notes
+        ):
+            if note.raw_asset is None:
+                raise ValidationError(
+                    "Graph drafting requires a note with a raw image asset or transcript text."
+                )
+            raise ValidationError(
+                "Graph drafting requires a raw image asset, text note, or voice transcript."
+            )
+        source_artifacts = [_source_artifact_packet(item) for item in source_notes]
+        return {
+            "source_note": note,
+            "source_notes": source_notes,
+            "source_artifacts": source_artifacts,
+            "primary_raw_asset": primary_raw_asset,
+            "image_bytes": image_bytes,
+            "image_content_type": image_content_type,
+        }
+
+    def _source_notes_for_capture(self, note: Note) -> list[Note]:
+        bundle_id = note.metadata.get("capture_bundle_id")
+        if not bundle_id:
+            return [note]
+        bundle_notes = [
+            item
+            for item in self.notes.list_notes(project_id=note.project_id)
+            if item.metadata.get("capture_bundle_id") == bundle_id
+        ]
+        if not any(item.note_id == note.note_id for item in bundle_notes):
+            bundle_notes.append(note)
+        return sorted(
+            bundle_notes,
+            key=lambda item: (item.created_at, str(item.note_id)),
+        )[:_CAPTURE_BUNDLE_LIMIT]
+
+    def build_graph_context_packet(
+        self,
+        note: Note,
+        *,
+        source_notes: list[Note],
+        user_hint: str | None,
+        actor: AuthContext | None = None,
+    ) -> dict[str, Any]:
+        try:
+            project = self.projects.get_project(note.project_id)
+        except NotFoundError as exc:
+            raise ValidationError(
+                "Graph context cannot be built because the note project does not exist."
+            ) from exc
+        project_questions = self.questions.list_questions(project_id=note.project_id)
+        questions = sorted(
+            [
+                question
+                for question in project_questions
+                if question.status in {QuestionStatus.ACTIVE, QuestionStatus.STAGED}
+            ],
+            key=lambda question: (question.status.value, question.updated_at, question.question_id),
+            reverse=True,
+        )[:_QUESTION_CONTEXT_LIMIT]
+        active_context_ids = {question.question_id for question in questions}
+        superseded_questions = [
+            question
+            for question in project_questions
+            if question.status == QuestionStatus.SUPERSEDED
+            and question.superseded_by_question_id in active_context_ids
+        ]
+        recent_notes = [
+            item
+            for item in sorted(
+                self.notes.list_notes(project_id=note.project_id),
+                key=lambda candidate: candidate.created_at,
+                reverse=True,
+            )
+            if item.note_id != note.note_id
+        ][:_RECENT_CONTEXT_LIMIT]
+        recent_sessions = sorted(
+            self.sessions.list_sessions(project_id=note.project_id),
+            key=lambda item: item.started_at,
+            reverse=True,
+        )[:_RECENT_CONTEXT_LIMIT]
+        recent_datasets = sorted(
+            self.datasets.list_datasets(project_id=note.project_id),
+            key=lambda item: item.created_at,
+            reverse=True,
+        )[:_RECENT_CONTEXT_LIMIT]
+        recent_analyses = sorted(
+            self.analyses.list_analyses(project_id=note.project_id),
+            key=lambda item: item.created_at,
+            reverse=True,
+        )[:_RECENT_CONTEXT_LIMIT]
+        recent_claims = sorted(
+            self.claims.list_claims(project_id=note.project_id),
+            key=lambda item: item.created_at,
+            reverse=True,
+        )[:_RECENT_CONTEXT_LIMIT]
+        recent_visualizations = sorted(
+            self.visualizations.list_visualizations(project_id=note.project_id),
+            key=lambda item: item.created_at,
+            reverse=True,
+        )[:_RECENT_CONTEXT_LIMIT]
+        context_packet = {
+            "mode": GraphDraftMode.GRAPH_CONTEXT.value,
+            "user_hint": user_hint,
+            "current_user": _compact_actor(actor),
+            "source_note": _compact_note(note, include_raw_asset=True),
+            "source_artifacts": [_source_artifact_packet(item) for item in source_notes],
+            "selected_targets": [
+                self._compact_target_ref(target, note.project_id) for target in note.targets
+            ],
+            "project": {
+                "id": str(project.project_id),
+                "label": project.name,
+                "status": project.status.value,
+            },
+            "active_or_staged_questions": [_compact_question(item) for item in questions],
+            "recent_sessions": [_compact_session(item) for item in recent_sessions],
+            "recent_datasets": [_compact_dataset(item) for item in recent_datasets],
+            "recent_notes": [_compact_note(item) for item in recent_notes],
+            "recent_analyses": [_compact_analysis(item) for item in recent_analyses],
+            "recent_claims": [_compact_claim(item) for item in recent_claims],
+            "recent_visualizations": [
+                _compact_visualization(item) for item in recent_visualizations
+            ],
+            "known_aliases": _known_aliases(
+                project=project,
+                questions=questions,
+                superseded_questions=superseded_questions,
+                sessions=recent_sessions,
+                datasets=recent_datasets,
+                analyses=recent_analyses,
+                claims=recent_claims,
+                visualizations=recent_visualizations,
+            ),
+            "unresolved_recent_captures": [
+                _compact_note(item)
+                for item in recent_notes
+                if item.raw_asset is not None
+                and item.metadata.get("capture_source") == "mobile_capture"
+                and item.status == NoteStatus.STAGED
+            ],
+        }
+        context_packet["context_summary"] = _graph_context_summary(context_packet)
+        return context_packet
+
+    def image_only_context_packet(
+        self,
+        note: Note,
+        *,
+        source_notes: list[Note],
+        user_hint: str | None,
+    ) -> dict[str, Any]:
+        context_packet = {
+            "mode": GraphDraftMode.IMAGE_ONLY.value,
+            "user_hint": user_hint,
+            "source_note": _compact_note(note, include_raw_asset=True),
+            "source_artifacts": [_source_artifact_packet(item) for item in source_notes],
+            "warning": (
+                "Image-only draft was explicitly requested without graph context or "
+                "voice transcript grounding."
+            ),
+        }
+        context_packet["context_summary"] = _graph_context_summary(context_packet)
+        return context_packet
+
+    def _compact_target_ref(self, target: EntityRef, project_id: UUID) -> dict[str, Any]:
+        try:
+            entity = self.get_graph_entity(target.entity_type, target.entity_id)
+        except NotFoundError:
+            return {
+                "entity_type": target.entity_type.value,
+                "entity_id": str(target.entity_id),
+                "label": "(missing)",
+            }
+        if target.entity_type != EntityType.VISUALIZATION and hasattr(entity, "project_id"):
+            if entity.project_id != project_id:
+                raise ValidationError("Target must belong to the same project.")
+        return {
+            "entity_type": target.entity_type.value,
+            "entity_id": str(target.entity_id),
+            "label": _entity_label(target.entity_type, entity),
+            "status": getattr(getattr(entity, "status", None), "value", None),
+        }
+
+    def get_graph_entity(self, entity_type: EntityType, entity_id: UUID) -> EntityResult:
+        getters = {
+            EntityType.PROJECT: self.projects.get_project,
+            EntityType.QUESTION: self.questions.get_question,
+            EntityType.NOTE: self.notes.get_note,
+            EntityType.SESSION: self.sessions.get_session,
+            EntityType.DATASET: self.datasets.get_dataset,
+            EntityType.ANALYSIS: self.analyses.get_analysis,
+            EntityType.CLAIM: self.claims.get_claim,
+            EntityType.VISUALIZATION: self.visualizations.get_visualization,
+        }
+        getter = getters.get(entity_type)
+        if getter is None:
+            raise ValidationError("Unsupported entity type.")
+        return getter(entity_id)
+
+
+def _graph_context_summary(context_packet: dict[str, Any]) -> dict[str, Any]:
+    source_artifacts = [
+        item for item in context_packet.get("source_artifacts", []) if isinstance(item, dict)
+    ]
+    selected_targets = [
+        item for item in context_packet.get("selected_targets", []) if isinstance(item, dict)
+    ]
+    source_artifact_counts: dict[str, int] = {}
+    warnings: list[str] = []
+    for artifact in source_artifacts:
+        artifact_type = str(artifact.get("type") or "unknown")
+        source_artifact_counts[artifact_type] = source_artifact_counts.get(artifact_type, 0) + 1
+        if artifact_type == "audio" and not str(artifact.get("transcript_text") or "").strip():
+            note_id = artifact.get("note_id") or artifact.get("artifact_id") or "unknown"
+            warnings.append(f"audio source {note_id} is missing an editable transcript")
+    if not source_artifacts:
+        warnings.append("no source artifacts were included")
+    if not any(artifact.get("type") == "image" for artifact in source_artifacts):
+        warnings.append("no image source artifact was included")
+    return {
+        "approximate_size_bytes": len(
+            json.dumps(context_packet, sort_keys=True, default=str).encode("utf-8")
+        ),
+        "counts": {
+            "projects": 1 if context_packet.get("project") else 0,
+            "source_artifacts": len(source_artifacts),
+            "selected_targets": len(selected_targets),
+            "active_or_staged_questions": len(
+                context_packet.get("active_or_staged_questions") or []
+            ),
+            "recent_sessions": len(context_packet.get("recent_sessions") or []),
+            "recent_datasets": len(context_packet.get("recent_datasets") or []),
+            "recent_notes": len(context_packet.get("recent_notes") or []),
+            "recent_analyses": len(context_packet.get("recent_analyses") or []),
+            "recent_claims": len(context_packet.get("recent_claims") or []),
+            "recent_visualizations": len(context_packet.get("recent_visualizations") or []),
+            "known_aliases": len(context_packet.get("known_aliases") or []),
+            "unresolved_recent_captures": len(
+                context_packet.get("unresolved_recent_captures") or []
+            ),
+        },
+        "selected_targets": [
+            {
+                "entity_type": item.get("entity_type"),
+                "entity_id": item.get("entity_id"),
+                "label": item.get("label"),
+            }
+            for item in selected_targets
+        ],
+        "source_artifact_counts": source_artifact_counts,
+        "warnings": warnings,
+    }
+
+
+def _graph_batch_context_summary(packet: dict[str, Any]) -> dict[str, Any]:
+    source_artifacts = [
+        item for item in packet.get("source_artifacts", []) if isinstance(item, dict)
+    ]
+    source_artifact_counts: dict[str, int] = {}
+    warnings: list[str] = []
+    for artifact in source_artifacts:
+        artifact_type = str(artifact.get("type") or "unknown")
+        source_artifact_counts[artifact_type] = source_artifact_counts.get(artifact_type, 0) + 1
+        if artifact_type == "audio" and not str(artifact.get("transcript_text") or "").strip():
+            note_id = artifact.get("note_id") or "unknown"
+            warnings.append(f"audio source {note_id} is missing an editable transcript")
+    if not source_artifacts:
+        warnings.append("no source artifacts were included")
+    truncated = int(packet.get("truncated_note_count") or 0)
+    if truncated:
+        warnings.append(f"batch truncated; {truncated} note(s) omitted")
+    projects = packet.get("projects") or []
+    return {
+        "approximate_size_bytes": len(
+            json.dumps(packet, sort_keys=True, default=str).encode("utf-8")
+        ),
+        "counts": {
+            "projects": len(projects),
+            "batch_notes": len(packet.get("batch_notes") or []),
+            "source_artifacts": len(source_artifacts),
+            "active_or_staged_questions": sum(
+                len(p.get("active_or_staged_questions") or []) for p in projects
+            ),
+            "recent_notes": sum(len(p.get("recent_notes") or []) for p in projects),
+            "recent_sessions": sum(len(p.get("recent_sessions") or []) for p in projects),
+            "recent_datasets": sum(len(p.get("recent_datasets") or []) for p in projects),
+            "recent_analyses": sum(len(p.get("recent_analyses") or []) for p in projects),
+            "recent_claims": sum(len(p.get("recent_claims") or []) for p in projects),
+            "recent_visualizations": sum(
+                len(p.get("recent_visualizations") or []) for p in projects
+            ),
+            "known_aliases": sum(len(p.get("known_aliases") or []) for p in projects),
+        },
+        "source_artifact_counts": source_artifact_counts,
+        "truncated_note_count": truncated,
+        "warnings": warnings,
+    }
+
+
+def _compact_actor(actor: AuthContext | None) -> dict[str, Any] | None:
+    if actor is None:
+        return None
+    return {"id": str(actor.user_id), "role": actor.role.value}
+
+
+def _compact_note(note: Note, *, include_raw_asset: bool = False) -> dict[str, Any]:
+    preview = note.transcribed_text or note.raw_content or ""
+    payload: dict[str, Any] = {
+        "id": str(note.note_id),
+        "project_id": str(note.project_id),
+        "status": note.status.value,
+        "created_at": note.created_at.isoformat(),
+        "updated_at": note.updated_at.isoformat(),
+        "preview": preview[:400],
+        "targets": [
+            {"entity_type": target.entity_type.value, "entity_id": str(target.entity_id)}
+            for target in note.targets
+        ],
+        "metadata": dict(note.metadata),
+    }
+    if include_raw_asset and note.raw_asset is not None:
+        payload["raw_asset"] = {
+            "filename": note.raw_asset.filename,
+            "content_type": note.raw_asset.content_type,
+            "size_bytes": note.raw_asset.size_bytes,
+            "checksum": note.raw_asset.checksum,
+        }
+    return payload
+
+
+def _preferred_image_note(source_note: Note, source_notes: list[Note]) -> Note | None:
+    candidates = [
+        item
+        for item in source_notes
+        if item.raw_asset is not None
+        and item.raw_asset.content_type.lower().startswith("image/")
+    ]
+    if not candidates:
+        return None
+    if any(item.note_id == source_note.note_id for item in candidates):
+        return source_note
+    return sorted(candidates, key=lambda item: (item.created_at, str(item.note_id)))[0]
+
+
+def _source_artifact_type(note: Note) -> str:
+    content_type = note.raw_asset.content_type.lower() if note.raw_asset is not None else ""
+    if content_type.startswith("image/"):
+        return "image"
+    if content_type.startswith("audio/"):
+        return "audio"
+    if note.raw_asset is not None:
+        return "file"
+    return "text"
+
+
+def _source_artifact_packet(note: Note) -> dict[str, Any]:
+    artifact_type = _source_artifact_type(note)
+    payload: dict[str, Any] = {
+        "type": artifact_type,
+        "note_id": str(note.note_id),
+        "project_id": str(note.project_id),
+        "created_at": note.created_at.isoformat(),
+        "status": note.status.value,
+        "metadata": dict(note.metadata),
+        "targets": [
+            {"entity_type": target.entity_type.value, "entity_id": str(target.entity_id)}
+            for target in note.targets
+        ],
+    }
+    if note.raw_asset is not None:
+        payload["artifact_id"] = str(note.raw_asset.storage_id)
+        payload["filename"] = note.raw_asset.filename
+        payload["content_type"] = note.raw_asset.content_type
+        payload["size_bytes"] = note.raw_asset.size_bytes
+        payload["checksum"] = note.raw_asset.checksum
+    if note.transcribed_text:
+        payload["transcript_id"] = f"transcript:{note.note_id}"
+        payload["transcript_text"] = note.transcribed_text
+        payload["transcript_is_derived"] = True
+    if note.raw_content:
+        payload["raw_content_preview"] = note.raw_content[:1000]
+    return payload
+
+
+def _compact_question(question: Question) -> dict[str, Any]:
+    return {
+        "id": str(question.question_id),
+        "label": question.text,
+        "status": question.status.value,
+        "question_type": question.question_type.value,
+        "parent_question_ids": [str(item) for item in question.parent_question_ids],
+        "updated_at": question.updated_at.isoformat(),
+    }
+
+
+def _compact_session(session: Session) -> dict[str, Any]:
+    return {
+        "id": str(session.session_id),
+        "label": f"{session.session_type.value} session {session.started_at.date().isoformat()}",
+        "status": session.status.value,
+        "session_type": session.session_type.value,
+        "primary_question_id": (
+            str(session.primary_question_id) if session.primary_question_id else None
+        ),
+        "started_at": session.started_at.isoformat(),
+        "ended_at": session.ended_at.isoformat() if session.ended_at else None,
+    }
+
+
+def _compact_dataset(dataset: Dataset) -> dict[str, Any]:
+    return {
+        "id": str(dataset.dataset_id),
+        "label": f"Dataset {dataset.commit_hash[:12]}",
+        "status": dataset.status.value,
+        "primary_question_id": str(dataset.primary_question_id),
+        "question_links": [
+            {
+                "question_id": str(link.question_id),
+                "role": link.role.value,
+                "outcome_status": link.outcome_status.value,
+            }
+            for link in dataset.question_links
+        ],
+        "source_session_id": (
+            str(dataset.commit_manifest.source_session_id)
+            if dataset.commit_manifest.source_session_id
+            else None
+        ),
+        "created_at": dataset.created_at.isoformat(),
+    }
+
+
+def _compact_analysis(analysis: Analysis) -> dict[str, Any]:
+    return {
+        "id": str(analysis.analysis_id),
+        "label": analysis.method_hash,
+        "status": analysis.status.value,
+        "dataset_ids": [str(item) for item in analysis.dataset_ids],
+        "code_version": analysis.code_version,
+        "created_at": analysis.created_at.isoformat(),
+    }
+
+
+def _compact_claim(claim: Claim) -> dict[str, Any]:
+    return {
+        "id": str(claim.claim_id),
+        "label": claim.statement[:180],
+        "status": claim.status.value,
+        "confidence": claim.confidence,
+        "supported_by_dataset_ids": [str(item) for item in claim.supported_by_dataset_ids],
+        "supported_by_analysis_ids": [str(item) for item in claim.supported_by_analysis_ids],
+        "created_at": claim.created_at.isoformat(),
+    }
+
+
+def _compact_visualization(visualization: Visualization) -> dict[str, Any]:
+    return {
+        "id": str(visualization.viz_id),
+        "label": visualization.caption or visualization.file_path,
+        "analysis_id": str(visualization.analysis_id),
+        "viz_type": visualization.viz_type,
+        "file_path": visualization.file_path,
+        "related_claim_ids": [str(item) for item in visualization.related_claim_ids],
+        "created_at": visualization.created_at.isoformat(),
+    }
+
+
+def _known_aliases(
+    *,
+    project: Project,
+    questions: list[Question],
+    superseded_questions: list[Question],
+    sessions: list[Session],
+    datasets: list[Dataset],
+    analyses: list[Analysis],
+    claims: list[Claim],
+    visualizations: list[Visualization],
+) -> list[dict[str, Any]]:
+    aliases: list[dict[str, Any]] = [
+        {
+            "entity_type": EntityType.PROJECT.value,
+            "entity_id": str(project.project_id),
+            "aliases": [project.name],
+        }
+    ]
+    aliases.extend(
+        {
+            "entity_type": EntityType.QUESTION.value,
+            "entity_id": str(item.question_id),
+            "aliases": [item.text],
+        }
+        for item in questions
+    )
+    aliases.extend(
+        {
+            "entity_type": EntityType.QUESTION.value,
+            "entity_id": str(item.superseded_by_question_id),
+            "aliases": [item.text],
+            "superseded_entity_id": str(item.question_id),
+            "relationship": "superseded_alias_for_replacement",
+        }
+        for item in superseded_questions
+        if item.superseded_by_question_id is not None
+    )
+    aliases.extend(
+        {
+            "entity_type": EntityType.SESSION.value,
+            "entity_id": str(item.session_id),
+            "aliases": [
+                f"{item.session_type.value} session {item.started_at.date().isoformat()}",
+                item.link_code,
+            ],
+        }
+        for item in sessions
+    )
+    aliases.extend(
+        {
+            "entity_type": EntityType.DATASET.value,
+            "entity_id": str(item.dataset_id),
+            "aliases": [item.commit_hash, f"Dataset {item.commit_hash[:12]}"],
+        }
+        for item in datasets
+    )
+    aliases.extend(
+        {
+            "entity_type": EntityType.ANALYSIS.value,
+            "entity_id": str(item.analysis_id),
+            "aliases": [item.method_hash, item.code_version],
+        }
+        for item in analyses
+    )
+    aliases.extend(
+        {
+            "entity_type": EntityType.CLAIM.value,
+            "entity_id": str(item.claim_id),
+            "aliases": [item.statement[:180]],
+        }
+        for item in claims
+    )
+    aliases.extend(
+        {
+            "entity_type": EntityType.VISUALIZATION.value,
+            "entity_id": str(item.viz_id),
+            "aliases": [item.caption or item.file_path, item.file_path],
+        }
+        for item in visualizations
+    )
+    return aliases
+
+
+def _entity_label(entity_type: EntityType, entity: EntityResult) -> str:
+    if entity_type == EntityType.PROJECT:
+        return entity.name
+    if entity_type == EntityType.QUESTION:
+        return entity.text
+    if entity_type == EntityType.NOTE:
+        return entity.transcribed_text or entity.raw_content or "(binary note)"
+    if entity_type == EntityType.SESSION:
+        return f"{entity.session_type.value} session {entity.started_at.date().isoformat()}"
+    if entity_type == EntityType.DATASET:
+        return f"Dataset {entity.commit_hash[:12]}"
+    if entity_type == EntityType.ANALYSIS:
+        return entity.method_hash
+    if entity_type == EntityType.CLAIM:
+        return entity.statement[:180]
+    if entity_type == EntityType.VISUALIZATION:
+        return entity.caption or entity.file_path
+    return str(entity_id(entity_type, entity))
+
+def entity_id(entity_type: EntityType, entity: EntityResult) -> UUID:
+    if entity_type == EntityType.PROJECT:
+        return entity.project_id
+    if entity_type == EntityType.QUESTION:
+        return entity.question_id
+    if entity_type == EntityType.NOTE:
+        return entity.note_id
+    if entity_type == EntityType.SESSION:
+        return entity.session_id
+    if entity_type == EntityType.DATASET:
+        return entity.dataset_id
+    if entity_type == EntityType.ANALYSIS:
+        return entity.analysis_id
+    if entity_type == EntityType.CLAIM:
+        return entity.claim_id
+    if entity_type == EntityType.VISUALIZATION:
+        return entity.viz_id
+    raise ValidationError("Unsupported entity type.")
