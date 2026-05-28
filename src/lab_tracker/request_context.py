@@ -14,15 +14,20 @@ class LabTrackerRequestContext:
     after_commit_actions: list[Callable[[], None]] = field(default_factory=list)
     after_rollback_actions: list[Callable[[], None]] = field(default_factory=list)
 
-    def finish(
+    def complete_commit(
         self,
         *,
-        committed: bool,
         run_deferred_actions: Callable[[list[Callable[[], None]] | None, str], None],
     ) -> None:
-        if committed:
-            run_deferred_actions(self.after_commit_actions, "after_commit")
-        else:
-            run_deferred_actions(self.after_rollback_actions, "after_rollback")
+        run_deferred_actions(self.after_commit_actions, "after_commit")
+        self.after_commit_actions.clear()
+        self.after_rollback_actions.clear()
+
+    def complete_rollback(
+        self,
+        *,
+        run_deferred_actions: Callable[[list[Callable[[], None]] | None, str], None],
+    ) -> None:
+        run_deferred_actions(self.after_rollback_actions, "after_rollback")
         self.after_commit_actions.clear()
         self.after_rollback_actions.clear()

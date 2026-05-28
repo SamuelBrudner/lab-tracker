@@ -289,25 +289,10 @@ def _configure_database_session_middleware(
         request.state.db_session = db_session
         repository = SQLAlchemyLabTrackerRepository(db_session)
         request.state.lab_tracker_repository = repository
-        request_api = api.for_request(repository)
-        request.state.lab_tracker_api = request_api
-        committed = False
-        try:
+        with api.request_scope(repository, close=db_session.close) as request_scope:
+            request.state.lab_tracker_api = request_scope.api
             response = await call_next(request)
-            if response.status_code >= 400:
-                db_session.rollback()
-            else:
-                db_session.commit()
-                committed = True
-            return response
-        except Exception:
-            db_session.rollback()
-            raise
-        finally:
-            try:
-                request_api.finish_request(committed=committed)
-            finally:
-                db_session.close()
+            return request_scope.complete_response(response)
 
 
 def _configure_frontend_routes(app: FastAPI) -> None:

@@ -125,3 +125,21 @@ def test_db_session_middleware_runs_after_rollback_actions_on_error_response():
 
     assert response.status_code == 409
     assert events == ["rollback"]
+
+
+def test_db_session_middleware_runs_after_rollback_actions_on_exception():
+    app = create_app()
+    events: list[str] = []
+
+    @app.get("/_test/after-rollback-exception")
+    def after_rollback_exception_probe(request: Request):
+        request_api = request.state.lab_tracker_api
+        request_api.run_after_commit(lambda: events.append("commit"))
+        request_api.run_after_rollback(lambda: events.append("rollback"))
+        raise ValueError("intentional failure")
+
+    with TestClient(app, raise_server_exceptions=False) as client:
+        response = client.get("/_test/after-rollback-exception")
+
+    assert response.status_code == 500
+    assert events == ["rollback"]

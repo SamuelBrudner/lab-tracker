@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from types import TracebackType
 from typing import Callable, TypeVar
 from uuid import UUID
 
@@ -28,6 +29,7 @@ from lab_tracker.services import (
 
 _logger = logging.getLogger(__name__)
 EntityT = TypeVar("EntityT")
+ResponseT = TypeVar("ResponseT")
 
 
 class LabTrackerAPI(
@@ -53,11 +55,25 @@ class LabTrackerAPI(
         self._request_context = request_context
 
     def for_request(self, repository: LabTrackerRepository) -> "LabTrackerAPI":
+        return self._for_request_context(LabTrackerRequestContext(repository=repository))
+
+    def _for_request_context(
+        self,
+        request_context: LabTrackerRequestContext,
+    ) -> "LabTrackerAPI":
         return self.__class__(
             raw_storage=self._raw_storage,
-            repository=repository,
-            request_context=LabTrackerRequestContext(repository=repository),
+            repository=request_context.repository,
+            request_context=request_context,
         )
+
+    def request_scope(
+        self,
+        repository: LabTrackerRepository,
+        *,
+        close: Callable[[], None] | None = None,
+    ) -> "LabTrackerRequestScope":
+        return LabTrackerRequestScope(root_api=self, repository=repository, close=close)
 
     def _active_repository(self) -> LabTrackerRepository:
         if self._request_context is not None:
@@ -120,17 +136,6 @@ class LabTrackerAPI(
             return
         self._request_context.after_rollback_actions.append(action)
 
-    def finish_request(self, *, committed: bool) -> None:
-        if self._request_context is None:
-            return
-        self._request_context.finish(
-            committed=committed,
-            run_deferred_actions=lambda actions, label: self._run_deferred_actions(
-                actions,
-                label=label,
-            ),
-        )
-
     def _run_repository_write(
         self,
         operation: Callable[[LabTrackerRepository], None],
@@ -175,5 +180,80 @@ class LabTrackerAPI(
                 search=query,
                 limit=limit,
                 offset=offset,
+            ),
+        )
+
+
+class LabTrackerRequestScope:
+    def __init__(
+        self,
+        *,
+        root_api: LabTrackerAPI,
+        repository: LabTrackerRepository,
+        close: Callable[[], None] | None = None,
+    ) -> None:
+        self._root_api = root_api
+        self._context = LabTrackerRequestContext(repository=repository)
+        self._close = close
+        self._completed = False
+        self.api = root_api._for_request_context(self._context)
+
+    def __enter__(self) -> "LabTrackerRequestScope":
+        return self
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> None:
+        try:
+            if not self._completed:
+                self.rollback()
+        finally:
+            if self._close is not None:
+                self._close()
+
+    def complete_response(self, response: ResponseT) -> ResponseT:
+        if response.status_code >= 400:
+            self.rollback()
+        else:
+            self.commit()
+        return response
+
+    def commit(self) -> None:
+        if self._completed:
+            return
+        try:
+            self._context.repository.commit()
+        except Exception:
+            self._context.repository.rollback()
+            self._complete_rollback()
+            raise
+        self._complete_commit()
+
+    def rollback(self) -> None:
+        if self._completed:
+            return
+        try:
+            self._context.repository.rollback()
+        finally:
+            self._complete_rollback()
+
+    def _complete_commit(self) -> None:
+        self._completed = True
+        self._context.complete_commit(
+            run_deferred_actions=lambda actions, label: self._root_api._run_deferred_actions(
+                actions,
+                label=label,
+            ),
+        )
+
+    def _complete_rollback(self) -> None:
+        self._completed = True
+        self._context.complete_rollback(
+            run_deferred_actions=lambda actions, label: self._root_api._run_deferred_actions(
+                actions,
+                label=label,
             ),
         )
