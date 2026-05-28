@@ -1,4 +1,4 @@
-"""Note domain service mixin."""
+"""Note domain service."""
 
 from __future__ import annotations
 
@@ -22,15 +22,44 @@ from lab_tracker.services.shared import (
     _actor_user_id,
     _normalize_note_metadata,
 )
+from lab_tracker.services.analysis_service import AnalysisService
+from lab_tracker.services.base import BaseService, ServiceContext
+from lab_tracker.services.claim_service import ClaimService
+from lab_tracker.services.dataset_service import DatasetService
+from lab_tracker.services.project_service import ProjectService
+from lab_tracker.services.question_service import QuestionService
+from lab_tracker.services.session_service import SessionService
+from lab_tracker.services.visualization_service import VisualizationService
 
 _logger = logging.getLogger(__name__)
 
 
-class NoteServiceMixin:
+class NoteService(BaseService):
+    def __init__(
+        self,
+        context: ServiceContext,
+        *,
+        projects: ProjectService,
+        questions: QuestionService,
+        datasets: DatasetService,
+        sessions: SessionService,
+        analyses: AnalysisService,
+        claims: ClaimService,
+        visualizations: VisualizationService,
+    ) -> None:
+        super().__init__(context)
+        self.projects = projects
+        self.questions = questions
+        self.datasets = datasets
+        self.sessions = sessions
+        self.analyses = analyses
+        self.claims = claims
+        self.visualizations = visualizations
+
     def _delete_raw_asset(self, raw_asset: NoteRawAsset | None) -> None:
-        if raw_asset is None or self._raw_storage is None:
+        if raw_asset is None or self.raw_storage is None:
             return
-        delete = getattr(self._raw_storage, "delete", None)
+        delete = getattr(self.raw_storage, "delete", None)
         if not callable(delete):
             _logger.warning(
                 "Raw storage backend does not support deletion for %s.",
@@ -61,8 +90,8 @@ class NoteServiceMixin:
         status: NoteStatus = NoteStatus.STAGED,
         actor: AuthContext | None = None,
     ) -> Note:
-        self.require_project_contributor(project_id, actor=actor)
-        self.get_project(project_id)
+        self.projects.require_project_contributor(project_id, actor=actor)
+        self.projects.get_project(project_id)
         raw_text = raw_content.strip() if raw_content else ""
         if not raw_text and raw_asset is None:
             raise ValidationError("raw_content or raw_asset must be provided.")
@@ -81,7 +110,8 @@ class NoteServiceMixin:
             status=status,
             created_by=_actor_user_id(actor),
         )
-        self._run_repository_write(lambda repository: repository.notes.save(note))
+        with self.unit_of_work() as repository:
+            repository.notes.save(note)
         return note
 
     def store_note_raw_asset(
@@ -91,16 +121,16 @@ class NoteServiceMixin:
         filename: str,
         content_type: str,
     ) -> NoteRawAsset:
-        if self._raw_storage is None:
+        if self.raw_storage is None:
             raise ValidationError("Raw storage backend is not configured.")
-        store_stream = getattr(self._raw_storage, "store_stream", None)
+        store_stream = getattr(self.raw_storage, "store_stream", None)
         if callable(store_stream):
             return store_stream(
                 stream,
                 filename=filename,
                 content_type=content_type,
             )
-        return self._raw_storage.store(
+        return self.raw_storage.store(
             stream.read(),
             filename=filename,
             content_type=content_type,
@@ -121,14 +151,14 @@ class NoteServiceMixin:
         status: NoteStatus = NoteStatus.STAGED,
         actor: AuthContext | None = None,
     ) -> Note:
-        if self._raw_storage is None:
+        if self.raw_storage is None:
             raise ValidationError("Raw storage backend is not configured.")
         asset = raw_asset
         created_asset = False
         if asset is None:
             if content is None:
                 raise ValidationError("content must not be empty.")
-            asset = self._raw_storage.store(
+            asset = self.raw_storage.store(
                 content,
                 filename=(filename or "").strip(),
                 content_type=(content_type or "").strip(),
@@ -163,7 +193,7 @@ class NoteServiceMixin:
         actor: AuthContext | None = None,
     ) -> Note:
         note = self.get_note(note_id)
-        self.require_project_contributor(note.project_id, actor=actor)
+        self.projects.require_project_contributor(note.project_id, actor=actor)
         if note.raw_asset is None:
             raise ValidationError("Voice transcription requires a note with a raw audio asset.")
         if not note.raw_asset.content_type.lower().startswith("audio/"):
@@ -210,11 +240,12 @@ class NoteServiceMixin:
         note.transcribed_text = text
         note.metadata = metadata
         note.updated_at = utc_now()
-        self._run_repository_write(lambda repository: repository.notes.save(note))
+        with self.unit_of_work() as repository:
+            repository.notes.save(note)
         return note
 
     def get_note(self, note_id: UUID) -> Note:
-        return self._get_from_repository(
+        return self.get_from_repository(
             entity_id=note_id,
             label="Note",
             loader=lambda repository: repository.notes.get(note_id),
@@ -228,7 +259,7 @@ class NoteServiceMixin:
         target_entity_type: EntityType | None = None,
         target_entity_id: UUID | None = None,
     ) -> list[Note]:
-        return self._query_from_repository(
+        return self.query_from_repository(
             loader=lambda repository: repository.query_notes(
                 project_id=project_id,
                 status=status.value if status is not None else None,
@@ -252,7 +283,7 @@ class NoteServiceMixin:
         actor: AuthContext | None = None,
     ) -> Note:
         note = self.get_note(note_id)
-        self.require_project_contributor(note.project_id, actor=actor)
+        self.projects.require_project_contributor(note.project_id, actor=actor)
         if transcribed_text is not None:
             note.transcribed_text = transcribed_text.strip() if transcribed_text else None
         if targets is not None:
@@ -265,22 +296,24 @@ class NoteServiceMixin:
         if status is not None:
             note.status = status
         note.updated_at = utc_now()
-        self._run_repository_write(lambda repository: repository.notes.save(note))
+        with self.unit_of_work() as repository:
+            repository.notes.save(note)
         return note
 
     def download_note_raw(self, note_id: UUID) -> tuple[NoteRawAsset, bytes]:
         note = self.get_note(note_id)
         if note.raw_asset is None:
             raise NotFoundError("Note does not have raw content.")
-        if self._raw_storage is None:
+        if self.raw_storage is None:
             raise ValidationError("Raw storage backend is not configured.")
-        content = self._raw_storage.read(note.raw_asset.storage_id)
+        content = self.raw_storage.read(note.raw_asset.storage_id)
         return note.raw_asset, content
 
     def delete_note(self, note_id: UUID, *, actor: AuthContext | None = None) -> Note:
         note = self.get_note(note_id)
-        self.require_project_contributor(note.project_id, actor=actor)
-        self._run_repository_write(lambda repository: repository.notes.delete(note_id))
+        self.projects.require_project_contributor(note.project_id, actor=actor)
+        with self.unit_of_work() as repository:
+            repository.notes.delete(note_id)
         if note.raw_asset is not None:
             self.run_after_commit(
                 lambda raw_asset=note.raw_asset: self._delete_raw_asset(raw_asset)
@@ -289,21 +322,21 @@ class NoteServiceMixin:
 
     def _ensure_target_exists(self, target: EntityRef, project_id: UUID) -> None:
         entity_getters = {
-            EntityType.PROJECT: self.get_project,
-            EntityType.QUESTION: self.get_question,
-            EntityType.DATASET: self.get_dataset,
+            EntityType.PROJECT: self.projects.get_project,
+            EntityType.QUESTION: self.questions.get_question,
+            EntityType.DATASET: self.datasets.get_dataset,
             EntityType.NOTE: self.get_note,
-            EntityType.SESSION: self.get_session,
-            EntityType.ANALYSIS: self.get_analysis,
-            EntityType.CLAIM: self.get_claim,
-            EntityType.VISUALIZATION: self.get_visualization,
+            EntityType.SESSION: self.sessions.get_session,
+            EntityType.ANALYSIS: self.analyses.get_analysis,
+            EntityType.CLAIM: self.claims.get_claim,
+            EntityType.VISUALIZATION: self.visualizations.get_visualization,
         }
         getter = entity_getters.get(target.entity_type)
         if getter is None:
             raise ValidationError("Unsupported target entity type.")
         entity = getter(target.entity_id)
         if target.entity_type == EntityType.VISUALIZATION:
-            analysis = self.get_analysis(entity.analysis_id)
+            analysis = self.analyses.get_analysis(entity.analysis_id)
             if analysis.project_id != project_id:
                 raise ValidationError("Target must belong to the same project.")
             return

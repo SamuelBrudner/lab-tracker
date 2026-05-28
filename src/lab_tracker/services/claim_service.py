@@ -1,8 +1,8 @@
-"""Claim domain service mixin."""
+"""Claim domain service."""
 
 from __future__ import annotations
 
-from typing import Iterable
+from typing import Callable, Iterable, TYPE_CHECKING
 from uuid import UUID, uuid4
 
 from lab_tracker.auth import AuthContext, require_role
@@ -20,9 +20,32 @@ from lab_tracker.services.shared import (
     _ensure_non_empty,
     _unique_ids,
 )
+from lab_tracker.services.base import BaseService, ServiceContext
+from lab_tracker.services.dataset_service import DatasetService
+from lab_tracker.services.project_service import ProjectService
+
+if TYPE_CHECKING:
+    from lab_tracker.services.analysis_service import AnalysisService
 
 
-class ClaimServiceMixin:
+class ClaimService(BaseService):
+    def __init__(
+        self,
+        context: ServiceContext,
+        *,
+        projects: ProjectService,
+        datasets: DatasetService,
+        analyses_provider: Callable[[], "AnalysisService"],
+    ) -> None:
+        super().__init__(context)
+        self.projects = projects
+        self.datasets = datasets
+        self._analyses_provider = analyses_provider
+
+    @property
+    def analyses(self) -> "AnalysisService":
+        return self._analyses_provider()
+
     def create_claim(
         self,
         project_id: UUID,
@@ -35,7 +58,7 @@ class ClaimServiceMixin:
         actor: AuthContext | None = None,
     ) -> Claim:
         require_role(actor, WRITE_ROLES)
-        self.get_project(project_id)
+        self.projects.get_project(project_id)
         _ensure_non_empty(statement, "statement")
         _ensure_claim_confidence(confidence)
         dataset_ids, analysis_ids = self._resolve_claim_support_links(
@@ -53,11 +76,12 @@ class ClaimServiceMixin:
             supported_by_dataset_ids=dataset_ids,
             supported_by_analysis_ids=analysis_ids,
         )
-        self._run_repository_write(lambda repository: repository.claims.save(claim))
+        with self.unit_of_work() as repository:
+            repository.claims.save(claim)
         return claim
 
     def get_claim(self, claim_id: UUID) -> Claim:
-        return self._get_from_repository(
+        return self.get_from_repository(
             entity_id=claim_id,
             label="Claim",
             loader=lambda repository: repository.claims.get(claim_id),
@@ -71,7 +95,7 @@ class ClaimServiceMixin:
         dataset_id: UUID | None = None,
         analysis_id: UUID | None = None,
     ) -> list[Claim]:
-        return self._query_from_repository(
+        return self.query_from_repository(
             loader=lambda repository: repository.query_claims(
                 project_id=project_id,
                 status=status.value if status is not None else None,
@@ -125,13 +149,15 @@ class ClaimServiceMixin:
         if status is not None:
             claim.status = status
         claim.updated_at = utc_now()
-        self._run_repository_write(lambda repository: repository.claims.save(claim))
+        with self.unit_of_work() as repository:
+            repository.claims.save(claim)
         return claim
 
     def delete_claim(self, claim_id: UUID, *, actor: AuthContext | None = None) -> Claim:
         require_role(actor, WRITE_ROLES)
         claim = self.get_claim(claim_id)
-        self._run_repository_write(lambda repository: repository.claims.delete(claim_id))
+        with self.unit_of_work() as repository:
+            repository.claims.delete(claim_id)
         return claim
 
     def _resolve_claim_support_links(
@@ -143,11 +169,11 @@ class ClaimServiceMixin:
         resolved_dataset_ids = _unique_ids(dataset_ids)
         resolved_analysis_ids = _unique_ids(analysis_ids)
         for dataset_id in resolved_dataset_ids:
-            dataset = self.get_dataset(dataset_id)
+            dataset = self.datasets.get_dataset(dataset_id)
             if dataset.project_id != project_id:
                 raise ValidationError("Supporting datasets must belong to the same project.")
         for analysis_id in resolved_analysis_ids:
-            analysis = self.get_analysis(analysis_id)
+            analysis = self.analyses.get_analysis(analysis_id)
             if analysis.project_id != project_id:
                 raise ValidationError("Supporting analyses must belong to the same project.")
         return resolved_dataset_ids, resolved_analysis_ids

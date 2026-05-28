@@ -1,8 +1,8 @@
-"""Dataset domain service mixin."""
+"""Dataset domain service."""
 
 from __future__ import annotations
 
-from typing import Iterable
+from typing import Callable, Iterable, TYPE_CHECKING
 from uuid import UUID, uuid4
 
 from lab_tracker.auth import AuthContext, require_role
@@ -15,6 +15,7 @@ from lab_tracker.models import (
     DatasetStatus,
     QuestionLink,
     QuestionLinkRole,
+    SessionType,
     utc_now,
 )
 from lab_tracker.services.shared import (
@@ -28,14 +29,20 @@ from lab_tracker.services.shared import (
     _unique_ids,
     _validate_commit_hash,
 )
+from lab_tracker.services.base import BaseService, ServiceContext
+from lab_tracker.services.project_service import ProjectService
+from lab_tracker.services.question_service import QuestionService
+
+if TYPE_CHECKING:
+    from lab_tracker.services.session_service import SessionService
 
 
 def _load_attached_files(self, dataset_id: UUID) -> list[DatasetFile] | None:
-    return self._active_repository().list_dataset_files(dataset_id)
+    return self.repository.list_dataset_files(dataset_id)
 
 
 def _load_dataset_note_targets(self, dataset_id: UUID) -> list[UUID] | None:
-    return self._active_repository().list_dataset_note_target_ids(dataset_id)
+    return self.repository.list_dataset_note_target_ids(dataset_id)
 
 
 def _merge_unique_ids(base: list[UUID], additions: Iterable[UUID]) -> list[UUID]:
@@ -49,7 +56,24 @@ def _merge_unique_ids(base: list[UUID], additions: Iterable[UUID]) -> list[UUID]
     return merged
 
 
-class DatasetServiceMixin:
+class DatasetService(BaseService):
+    def __init__(
+        self,
+        context: ServiceContext,
+        *,
+        projects: ProjectService,
+        questions: QuestionService,
+        sessions_provider: Callable[[], "SessionService"],
+    ) -> None:
+        super().__init__(context)
+        self.projects = projects
+        self.questions = questions
+        self._sessions_provider = sessions_provider
+
+    @property
+    def sessions(self) -> "SessionService":
+        return self._sessions_provider()
+
     def create_dataset(
         self,
         project_id: UUID,
@@ -62,17 +86,17 @@ class DatasetServiceMixin:
         actor: AuthContext | None = None,
     ) -> Dataset:
         require_role(actor, WRITE_ROLES)
-        self.get_project(project_id)
+        self.projects.get_project(project_id)
         if primary_question_id is None:
             raise ValidationError("primary_question_id is required.")
-        primary_question = self.get_question(primary_question_id)
+        primary_question = self.questions.get_question(primary_question_id)
         if primary_question.project_id != project_id:
             raise ValidationError("Primary question must belong to the same project.")
         secondary_ids = _unique_ids(secondary_question_ids)
         if primary_question_id in secondary_ids:
             raise ValidationError("Primary question cannot be secondary.")
         for question_id in secondary_ids:
-            question = self.get_question(question_id)
+            question = self.questions.get_question(question_id)
             if question.project_id != project_id:
                 raise ValidationError("Secondary questions must belong to the same project.")
 
@@ -107,18 +131,19 @@ class DatasetServiceMixin:
         )
         if commit_requested:
             _ensure_primary_question_active(primary_question)
-        self._run_repository_write(lambda repository: repository.datasets.save(dataset))
+        with self.unit_of_work() as repository:
+            repository.datasets.save(dataset)
         return dataset
 
     def get_dataset(self, dataset_id: UUID) -> Dataset:
-        return self._get_from_repository(
+        return self.get_from_repository(
             entity_id=dataset_id,
             label="Dataset",
             loader=lambda repository: repository.datasets.get(dataset_id),
         )
 
     def list_datasets(self, *, project_id: UUID | None = None) -> list[Dataset]:
-        return self._query_from_repository(
+        return self.query_from_repository(
             loader=lambda repository: repository.query_datasets(
                 project_id=project_id,
                 limit=None,
@@ -154,7 +179,7 @@ class DatasetServiceMixin:
                 if link.question_id in seen:
                     raise ValidationError("Duplicate question link.")
                 seen.add(link.question_id)
-                question = self.get_question(link.question_id)
+                question = self.questions.get_question(link.question_id)
                 if question.project_id != dataset.project_id:
                     raise ValidationError("Question links must belong to the same project.")
             dataset.question_links = links
@@ -165,7 +190,7 @@ class DatasetServiceMixin:
         )
 
         if commit_requested:
-            primary_question = self.get_question(dataset.primary_question_id)
+            primary_question = self.questions.get_question(dataset.primary_question_id)
             _ensure_primary_question_active(primary_question)
 
         should_refresh_manifest = (
@@ -215,11 +240,24 @@ class DatasetServiceMixin:
         if status is not None:
             dataset.status = status
         dataset.updated_at = utc_now()
-        self._run_repository_write(lambda repository: repository.datasets.save(dataset))
+        with self.unit_of_work() as repository:
+            repository.datasets.save(dataset)
         return dataset
 
     def delete_dataset(self, dataset_id: UUID, *, actor: AuthContext | None = None) -> Dataset:
         require_role(actor, WRITE_ROLES)
         dataset = self.get_dataset(dataset_id)
-        self._run_repository_write(lambda repository: repository.datasets.delete(dataset_id))
+        with self.unit_of_work() as repository:
+            repository.datasets.delete(dataset_id)
         return dataset
+
+    def _ensure_source_session_valid(
+        self, source_session_id: UUID | None, project_id: UUID
+    ) -> None:
+        if source_session_id is None:
+            return
+        session = self.sessions.get_session(source_session_id)
+        if session.project_id != project_id:
+            raise ValidationError("Source session must belong to the same project.")
+        if session.session_type != SessionType.OPERATIONAL:
+            raise ValidationError("Only operational sessions can be promoted to datasets.")

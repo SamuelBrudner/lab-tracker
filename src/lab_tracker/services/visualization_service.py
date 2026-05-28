@@ -1,4 +1,4 @@
-"""Visualization domain service mixin."""
+"""Visualization domain service."""
 
 from __future__ import annotations
 
@@ -13,9 +13,23 @@ from lab_tracker.services.shared import (
     _ensure_non_empty,
     _unique_ids,
 )
+from lab_tracker.services.base import BaseService, ServiceContext
+from lab_tracker.services.analysis_service import AnalysisService
+from lab_tracker.services.claim_service import ClaimService
 
 
-class VisualizationServiceMixin:
+class VisualizationService(BaseService):
+    def __init__(
+        self,
+        context: ServiceContext,
+        *,
+        analyses: AnalysisService,
+        claims: ClaimService,
+    ) -> None:
+        super().__init__(context)
+        self.analyses = analyses
+        self.claims = claims
+
     def create_visualization(
         self,
         analysis_id: UUID,
@@ -27,12 +41,12 @@ class VisualizationServiceMixin:
         actor: AuthContext | None = None,
     ) -> Visualization:
         require_role(actor, WRITE_ROLES)
-        analysis = self.get_analysis(analysis_id)
+        analysis = self.analyses.get_analysis(analysis_id)
         _ensure_non_empty(viz_type, "viz_type")
         _ensure_non_empty(file_path, "file_path")
         claim_ids = _unique_ids(related_claim_ids)
         for claim_id in claim_ids:
-            claim = self.get_claim(claim_id)
+            claim = self.claims.get_claim(claim_id)
             if claim.project_id != analysis.project_id:
                 raise ValidationError("Related claims must belong to the same project.")
         visualization = Visualization(
@@ -43,11 +57,12 @@ class VisualizationServiceMixin:
             caption=caption.strip() if caption else None,
             related_claim_ids=claim_ids,
         )
-        self._run_repository_write(lambda repository: repository.visualizations.save(visualization))
+        with self.unit_of_work() as repository:
+            repository.visualizations.save(visualization)
         return visualization
 
     def get_visualization(self, viz_id: UUID) -> Visualization:
-        return self._get_from_repository(
+        return self.get_from_repository(
             entity_id=viz_id,
             label="Visualization",
             loader=lambda repository: repository.visualizations.get(viz_id),
@@ -60,7 +75,7 @@ class VisualizationServiceMixin:
         analysis_id: UUID | None = None,
         claim_id: UUID | None = None,
     ) -> list[Visualization]:
-        return self._query_from_repository(
+        return self.query_from_repository(
             loader=lambda repository: repository.query_visualizations(
                 project_id=project_id,
                 analysis_id=analysis_id,
@@ -92,14 +107,15 @@ class VisualizationServiceMixin:
             visualization.caption = caption.strip() if caption else None
         if related_claim_ids is not None:
             claim_ids = _unique_ids(related_claim_ids)
-            analysis = self.get_analysis(visualization.analysis_id)
+            analysis = self.analyses.get_analysis(visualization.analysis_id)
             for claim_id in claim_ids:
-                claim = self.get_claim(claim_id)
+                claim = self.claims.get_claim(claim_id)
                 if claim.project_id != analysis.project_id:
                     raise ValidationError("Related claims must belong to the same project.")
             visualization.related_claim_ids = claim_ids
         visualization.updated_at = utc_now()
-        self._run_repository_write(lambda repository: repository.visualizations.save(visualization))
+        with self.unit_of_work() as repository:
+            repository.visualizations.save(visualization)
         return visualization
 
     def delete_visualization(
@@ -110,5 +126,6 @@ class VisualizationServiceMixin:
     ) -> Visualization:
         require_role(actor, WRITE_ROLES)
         visualization = self.get_visualization(viz_id)
-        self._run_repository_write(lambda repository: repository.visualizations.delete(viz_id))
+        with self.unit_of_work() as repository:
+            repository.visualizations.delete(viz_id)
         return visualization

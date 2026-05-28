@@ -1,8 +1,8 @@
-"""Question domain service mixin."""
+"""Question domain service."""
 
 from __future__ import annotations
 
-from typing import Iterable
+from typing import Callable, Iterable, TYPE_CHECKING
 from uuid import UUID, uuid4
 
 from lab_tracker.auth import AuthContext, require_role
@@ -26,6 +26,11 @@ from lab_tracker.services.shared import (
     question_matches_substring,
     _unique_ids,
 )
+from lab_tracker.services.base import BaseService, ServiceContext
+from lab_tracker.services.project_service import ProjectService
+
+if TYPE_CHECKING:
+    from lab_tracker.services.note_service import NoteService
 
 
 class QuestionRefactorResult:
@@ -41,9 +46,24 @@ class QuestionRefactorResult:
         self.refactor = refactor
 
 
-class QuestionServiceMixin:
+class QuestionService(BaseService):
+    def __init__(
+        self,
+        context: ServiceContext,
+        *,
+        projects: ProjectService,
+        notes_provider: Callable[[], "NoteService"],
+    ) -> None:
+        super().__init__(context)
+        self.projects = projects
+        self._notes_provider = notes_provider
+
+    @property
+    def notes(self) -> "NoteService":
+        return self._notes_provider()
+
     def _question_graph(self, project_id: UUID) -> dict[UUID, Question]:
-        questions = self._query_from_repository(
+        questions = self.query_from_repository(
             loader=lambda repository: repository.query_questions(
                 project_id=project_id,
                 limit=None,
@@ -64,7 +84,7 @@ class QuestionServiceMixin:
         actor: AuthContext | None = None,
     ) -> Question:
         require_role(actor, WRITE_ROLES)
-        self.get_project(project_id)
+        self.projects.get_project(project_id)
         _ensure_non_empty(text, "text")
         question_id = uuid4()
         parent_ids = _unique_ids(parent_question_ids)
@@ -87,11 +107,12 @@ class QuestionServiceMixin:
             parent_question_ids=parent_ids,
             created_by=_actor_user_id(actor),
         )
-        self._run_repository_write(lambda repository: repository.questions.save(question))
+        with self.unit_of_work() as repository:
+            repository.questions.save(question)
         return question
 
     def get_question(self, question_id: UUID) -> Question:
-        return self._get_from_repository(
+        return self.get_from_repository(
             entity_id=question_id,
             label="Question",
             loader=lambda repository: repository.questions.get(question_id),
@@ -126,7 +147,7 @@ class QuestionServiceMixin:
         parent_question_id: UUID | None = None,
         ancestor_question_id: UUID | None = None,
     ) -> list[Question]:
-        questions = self._query_from_repository(
+        questions = self.query_from_repository(
             loader=lambda repository: repository.query_questions(
                 project_id=project_id,
                 status=status.value if status is not None else None,
@@ -180,7 +201,8 @@ class QuestionServiceMixin:
             )
             question.parent_question_ids = parent_ids
         question.updated_at = utc_now()
-        self._run_repository_write(lambda repository: repository.questions.save(question))
+        with self.unit_of_work() as repository:
+            repository.questions.save(question)
         return question
 
     def list_question_refactors(
@@ -190,7 +212,7 @@ class QuestionServiceMixin:
         limit: int | None = None,
         offset: int = 0,
     ) -> list[QuestionRefactor]:
-        refactors = self._query_from_repository(
+        refactors = self.query_from_repository(
             loader=lambda repository: repository.query_question_refactors(
                 question_id=question_id,
                 limit=limit,
@@ -301,7 +323,8 @@ class QuestionServiceMixin:
                 repository.notes.save(note)
             repository.question_refactors.save(refactor)
 
-        self._run_repository_write(_persist)
+        with self.unit_of_work() as repository:
+            _persist(repository)
         return QuestionRefactorResult(
             source_question=source,
             replacement_question=replacement,
@@ -339,7 +362,7 @@ class QuestionServiceMixin:
     ) -> list[Note]:
         notes: list[Note] = []
         for note_id in note_ids:
-            note = self.get_note(note_id)
+            note = self.notes.get_note(note_id)
             if note.project_id != source.project_id:
                 raise ValidationError("Note must belong to the same project.")
             if not _targets_question(note.targets, source.question_id):
@@ -352,7 +375,8 @@ class QuestionServiceMixin:
     def delete_question(self, question_id: UUID, *, actor: AuthContext | None = None) -> Question:
         require_role(actor, WRITE_ROLES)
         question = self.get_question(question_id)
-        self._run_repository_write(lambda repository: repository.questions.delete(question_id))
+        with self.unit_of_work() as repository:
+            repository.questions.delete(question_id)
         return question
 
 

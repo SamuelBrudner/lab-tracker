@@ -1,9 +1,9 @@
-"""Session and acquisition-output service mixin."""
+"""Session and acquisition-output service."""
 
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Iterable
+from typing import Callable, Iterable, TYPE_CHECKING
 from uuid import UUID, uuid4
 
 from lab_tracker.auth import AuthContext, require_role
@@ -30,15 +30,38 @@ from lab_tracker.services.shared import (
     _manifest_input_with_source,
     _merge_acquisition_outputs,
 )
+from lab_tracker.services.base import BaseService, ServiceContext
+from lab_tracker.services.project_service import ProjectService
+from lab_tracker.services.question_service import QuestionService
+
+if TYPE_CHECKING:
+    from lab_tracker.services.dataset_service import DatasetService
 
 
-class SessionServiceMixin:
+class SessionService(BaseService):
+    def __init__(
+        self,
+        context: ServiceContext,
+        *,
+        projects: ProjectService,
+        questions: QuestionService,
+        datasets_provider: Callable[[], "DatasetService"],
+    ) -> None:
+        super().__init__(context)
+        self.projects = projects
+        self.questions = questions
+        self._datasets_provider = datasets_provider
+
+    @property
+    def datasets(self) -> "DatasetService":
+        return self._datasets_provider()
+
     def _find_existing_acquisition_output(
         self,
         session_id: UUID,
         file_path: str,
     ) -> AcquisitionOutput | None:
-        outputs, _ = self._active_repository().query_acquisition_outputs(
+        outputs, _ = self.repository.query_acquisition_outputs(
             session_id=session_id,
             limit=None,
             offset=0,
@@ -58,7 +81,7 @@ class SessionServiceMixin:
         actor: AuthContext | None = None,
     ) -> Session:
         require_role(actor, WRITE_ROLES)
-        self.get_project(project_id)
+        self.projects.get_project(project_id)
         if session_type == SessionType.SCIENTIFIC:
             if primary_question_id is None:
                 raise ValidationError("Scientific sessions require a primary question.")
@@ -66,7 +89,7 @@ class SessionServiceMixin:
             if primary_question_id is not None:
                 raise ValidationError("Operational sessions cannot have a primary question.")
         if primary_question_id is not None:
-            question = self.get_question(primary_question_id)
+            question = self.questions.get_question(primary_question_id)
             if question.project_id != project_id:
                 raise ValidationError("Primary question must belong to the same project.")
             if session_type == SessionType.SCIENTIFIC and question.status != QuestionStatus.ACTIVE:
@@ -79,11 +102,12 @@ class SessionServiceMixin:
             primary_question_id=primary_question_id,
             created_by=_actor_user_id(actor),
         )
-        self._run_repository_write(lambda repository: repository.sessions.save(session))
+        with self.unit_of_work() as repository:
+            repository.sessions.save(session)
         return session
 
     def get_session(self, session_id: UUID) -> Session:
-        return self._get_from_repository(
+        return self.get_from_repository(
             entity_id=session_id,
             label="Session",
             loader=lambda repository: repository.sessions.get(session_id),
@@ -98,7 +122,7 @@ class SessionServiceMixin:
         return self.get_session(session_id)
 
     def list_sessions(self, *, project_id: UUID | None = None) -> list[Session]:
-        return self._query_from_repository(
+        return self.query_from_repository(
             loader=lambda repository: repository.query_sessions(
                 project_id=project_id,
                 limit=None,
@@ -128,13 +152,15 @@ class SessionServiceMixin:
         elif ended_at is not None:
             session.ended_at = ended_at
         session.updated_at = utc_now()
-        self._run_repository_write(lambda repository: repository.sessions.save(session))
+        with self.unit_of_work() as repository:
+            repository.sessions.save(session)
         return session
 
     def delete_session(self, session_id: UUID, *, actor: AuthContext | None = None) -> Session:
         require_role(actor, WRITE_ROLES)
         session = self.get_session(session_id)
-        self._run_repository_write(lambda repository: repository.sessions.delete(session_id))
+        with self.unit_of_work() as repository:
+            repository.sessions.delete(session_id)
         return session
 
     def register_acquisition_output(
@@ -165,9 +191,8 @@ class SessionServiceMixin:
                 updated = True
             if updated:
                 existing.updated_at = utc_now()
-                self._run_repository_write(
-                    lambda repository: repository.acquisition_outputs.save(existing)
-                )
+                with self.unit_of_work() as repository:
+                    repository.acquisition_outputs.save(existing)
             return existing
         output = AcquisitionOutput(
             output_id=uuid4(),
@@ -176,7 +201,8 @@ class SessionServiceMixin:
             checksum=cleaned_checksum,
             size_bytes=size_bytes,
         )
-        self._run_repository_write(lambda repository: repository.acquisition_outputs.save(output))
+        with self.unit_of_work() as repository:
+            repository.acquisition_outputs.save(output)
         return output
 
     def list_acquisition_outputs(
@@ -184,7 +210,7 @@ class SessionServiceMixin:
         *,
         session_id: UUID | None = None,
     ) -> list[AcquisitionOutput]:
-        return self._query_from_repository(
+        return self.query_from_repository(
             loader=lambda repository: repository.query_acquisition_outputs(
                 session_id=session_id,
                 limit=None,
@@ -196,14 +222,13 @@ class SessionServiceMixin:
         self, output_id: UUID, *, actor: AuthContext | None = None
     ) -> AcquisitionOutput:
         require_role(actor, WRITE_ROLES)
-        output = self._get_from_repository(
+        output = self.get_from_repository(
             entity_id=output_id,
             label="Acquisition output",
             loader=lambda repository: repository.acquisition_outputs.get(output_id),
         )
-        self._run_repository_write(
-            lambda repository: repository.acquisition_outputs.delete(output_id)
-        )
+        with self.unit_of_work() as repository:
+            repository.acquisition_outputs.delete(output_id)
         return output
 
     def promote_operational_session(
@@ -221,7 +246,7 @@ class SessionServiceMixin:
             )
         if session.status != SessionStatus.ACTIVE:
             raise ValidationError("Only active operational sessions can be promoted.")
-        question = self.get_question(primary_question_id)
+        question = self.questions.get_question(primary_question_id)
         if question.project_id != session.project_id:
             raise ValidationError("Primary question must belong to the same project.")
         if question.status != QuestionStatus.ACTIVE:
@@ -229,7 +254,8 @@ class SessionServiceMixin:
         session.session_type = SessionType.SCIENTIFIC
         session.primary_question_id = primary_question_id
         session.updated_at = utc_now()
-        self._run_repository_write(lambda repository: repository.sessions.save(session))
+        with self.unit_of_work() as repository:
+            repository.sessions.save(session)
         return session
 
     def promote_operational_session_to_dataset(
@@ -251,7 +277,7 @@ class SessionServiceMixin:
         outputs = self.list_acquisition_outputs(session_id=session.session_id)
         merged_manifest = _merge_acquisition_outputs(commit_manifest, outputs)
         manifest_with_session = _manifest_input_with_source(merged_manifest, session.session_id)
-        return self.create_dataset(
+        return self.datasets.create_dataset(
             project_id=session.project_id,
             primary_question_id=primary_question_id,
             secondary_question_ids=secondary_question_ids,
@@ -259,14 +285,3 @@ class SessionServiceMixin:
             commit_manifest=manifest_with_session,
             actor=actor,
         )
-
-    def _ensure_source_session_valid(
-        self, source_session_id: UUID | None, project_id: UUID
-    ) -> None:
-        if source_session_id is None:
-            return
-        session = self.get_session(source_session_id)
-        if session.project_id != project_id:
-            raise ValidationError("Source session must belong to the same project.")
-        if session.session_type != SessionType.OPERATIONAL:
-            raise ValidationError("Only operational sessions can be promoted to datasets.")

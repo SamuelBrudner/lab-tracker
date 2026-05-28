@@ -1,4 +1,4 @@
-"""Graph draft review service mixin."""
+"""Graph draft review service."""
 
 from __future__ import annotations
 
@@ -55,7 +55,16 @@ from lab_tracker.schemas import (
     VisualizationCreate,
     VisualizationUpdate,
 )
+from lab_tracker.services.analysis_service import AnalysisService
+from lab_tracker.services.base import BaseService, ServiceContext
+from lab_tracker.services.claim_service import ClaimService
+from lab_tracker.services.dataset_service import DatasetService
+from lab_tracker.services.note_service import NoteService
+from lab_tracker.services.project_service import ProjectService
+from lab_tracker.services.question_service import QuestionService
 from lab_tracker.services.shared import _actor_user_id, has_global_project_write
+from lab_tracker.services.session_service import SessionService
+from lab_tracker.services.visualization_service import VisualizationService
 
 EntityResult = Project | Question | Note | Session | Dataset | Analysis | Claim | Visualization
 _REF_VALIDATION_PLACEHOLDER = "00000000-0000-0000-0000-000000000001"
@@ -125,7 +134,30 @@ _ENTITY_ID_LIST_FIELDS = {
 }
 
 
-class GraphDraftServiceMixin:
+class GraphDraftService(BaseService):
+    def __init__(
+        self,
+        context: ServiceContext,
+        *,
+        projects: ProjectService,
+        questions: QuestionService,
+        notes: NoteService,
+        sessions: SessionService,
+        datasets: DatasetService,
+        analyses: AnalysisService,
+        claims: ClaimService,
+        visualizations: VisualizationService,
+    ) -> None:
+        super().__init__(context)
+        self.projects = projects
+        self.questions = questions
+        self.notes = notes
+        self.sessions = sessions
+        self.datasets = datasets
+        self.analyses = analyses
+        self.claims = claims
+        self.visualizations = visualizations
+
     def create_graph_draft_from_note(
         self,
         note_id: UUID,
@@ -137,7 +169,7 @@ class GraphDraftServiceMixin:
     ) -> GraphChangeSet:
         prepared = self._prepare_note_sources_for_graph_draft(note_id, mode=mode)
         note = prepared["source_note"]
-        self.require_project_contributor(note.project_id, actor=actor)
+        self.projects.require_project_contributor(note.project_id, actor=actor)
         raw_asset = prepared["primary_raw_asset"]
         cleaned_hint = user_hint.strip() if user_hint else None
         if mode == GraphDraftMode.GRAPH_CONTEXT:
@@ -198,7 +230,7 @@ class GraphDraftServiceMixin:
         return change_set
 
     def get_graph_change_set(self, change_set_id: UUID) -> GraphChangeSet:
-        change_set = self._active_repository().graph_change_sets.get(change_set_id)
+        change_set = self.repository.graph_change_sets.get(change_set_id)
         if change_set is None:
             raise NotFoundError("Graph draft does not exist.")
         return change_set
@@ -210,7 +242,7 @@ class GraphDraftServiceMixin:
         status: GraphChangeSetStatus | None = None,
         source_note_id: UUID | None = None,
     ) -> list[GraphChangeSet]:
-        return self._query_from_repository(
+        return self.query_from_repository(
             loader=lambda repository: repository.query_graph_change_sets(
                 project_id=project_id,
                 status=status.value if status is not None else None,
@@ -269,7 +301,7 @@ class GraphDraftServiceMixin:
         actor: AuthContext | None = None,
     ) -> GraphChangeSet:
         change_set = self.get_graph_change_set(change_set_id)
-        self.require_project_contributor(change_set.project_id, actor=actor)
+        self.projects.require_project_contributor(change_set.project_id, actor=actor)
         if not self._is_graph_change_set_author(change_set, actor) and not has_global_project_write(
             actor
         ):
@@ -298,7 +330,7 @@ class GraphDraftServiceMixin:
         actor: AuthContext | None = None,
     ) -> GraphChangeSet:
         change_set = self.get_graph_change_set(change_set_id)
-        self.require_project_owner(change_set.project_id, actor=actor)
+        self.projects.require_project_owner(change_set.project_id, actor=actor)
         if status not in {
             GraphChangeSetStatus.CHANGES_REQUESTED,
             GraphChangeSetStatus.REJECTED,
@@ -324,7 +356,7 @@ class GraphDraftServiceMixin:
         if not message or not message.strip():
             raise ValidationError("message must not be empty.")
         change_set = self.get_graph_change_set(change_set_id)
-        self.require_project_owner(change_set.project_id, actor=actor)
+        self.projects.require_project_owner(change_set.project_id, actor=actor)
         if change_set.status not in {
             GraphChangeSetStatus.READY,
             GraphChangeSetStatus.SUBMITTED,
@@ -376,7 +408,7 @@ class GraphDraftServiceMixin:
             raise ValidationError("This graph draft cannot be edited.")
         if has_global_project_write(actor):
             return
-        self.require_project_contributor(change_set.project_id, actor=actor)
+        self.projects.require_project_contributor(change_set.project_id, actor=actor)
         if not self._is_graph_change_set_author(change_set, actor):
             raise ValidationError("Only the graph draft author can edit this draft.")
         if change_set.status not in {
@@ -386,7 +418,8 @@ class GraphDraftServiceMixin:
             raise ValidationError("Submitted graph drafts cannot be edited by contributors.")
 
     def _save_graph_change_set(self, change_set: GraphChangeSet) -> None:
-        self._run_repository_write(lambda repository: repository.graph_change_sets.save(change_set))
+        with self.unit_of_work() as repository:
+            repository.graph_change_sets.save(change_set)
 
     def _operations_from_graph_patch(
         self,
@@ -470,7 +503,7 @@ class GraphDraftServiceMixin:
     ) -> EntityResult:
         if entity_type == EntityType.PROJECT:
             data = _validate_payload(ProjectCreate, payload)
-            return self.create_project(
+            return self.projects.create_project(
                 data.name,
                 description=data.description or "",
                 status=data.status or ProjectStatus.ACTIVE,
@@ -478,7 +511,7 @@ class GraphDraftServiceMixin:
             )
         if entity_type == EntityType.QUESTION:
             data = _validate_payload(QuestionCreate, payload)
-            return self.create_question(
+            return self.questions.create_question(
                 project_id=data.project_id,
                 text=data.text,
                 question_type=data.question_type,
@@ -489,7 +522,7 @@ class GraphDraftServiceMixin:
             )
         if entity_type == EntityType.NOTE:
             data = _validate_payload(NoteCreate, payload)
-            return self.create_note(
+            return self.notes.create_note(
                 project_id=data.project_id,
                 raw_content=data.raw_content,
                 transcribed_text=data.transcribed_text,
@@ -500,7 +533,7 @@ class GraphDraftServiceMixin:
             )
         if entity_type == EntityType.SESSION:
             data = _validate_payload(SessionCreate, payload)
-            return self.create_session(
+            return self.sessions.create_session(
                 project_id=data.project_id,
                 session_type=data.session_type,
                 primary_question_id=data.primary_question_id,
@@ -508,7 +541,7 @@ class GraphDraftServiceMixin:
             )
         if entity_type == EntityType.DATASET:
             data = _validate_payload(DatasetCreate, payload)
-            return self.create_dataset(
+            return self.datasets.create_dataset(
                 project_id=data.project_id,
                 primary_question_id=data.primary_question_id,
                 secondary_question_ids=data.secondary_question_ids,
@@ -519,7 +552,7 @@ class GraphDraftServiceMixin:
             )
         if entity_type == EntityType.ANALYSIS:
             data = _validate_payload(AnalysisCreate, payload)
-            return self.create_analysis(
+            return self.analyses.create_analysis(
                 project_id=data.project_id,
                 dataset_ids=data.dataset_ids,
                 method_hash=data.method_hash,
@@ -530,7 +563,7 @@ class GraphDraftServiceMixin:
             )
         if entity_type == EntityType.CLAIM:
             data = _validate_payload(ClaimCreate, payload)
-            return self.create_claim(
+            return self.claims.create_claim(
                 project_id=data.project_id,
                 statement=data.statement,
                 confidence=data.confidence,
@@ -541,7 +574,7 @@ class GraphDraftServiceMixin:
             )
         if entity_type == EntityType.VISUALIZATION:
             data = _validate_payload(VisualizationCreate, payload)
-            return self.create_visualization(
+            return self.visualizations.create_visualization(
                 analysis_id=data.analysis_id,
                 viz_type=data.viz_type,
                 file_path=data.file_path,
@@ -561,7 +594,7 @@ class GraphDraftServiceMixin:
     ) -> EntityResult:
         if entity_type == EntityType.PROJECT:
             data = _validate_payload(ProjectUpdate, payload)
-            return self.update_project(
+            return self.projects.update_project(
                 entity_id,
                 name=data.name,
                 description=data.description,
@@ -570,7 +603,7 @@ class GraphDraftServiceMixin:
             )
         if entity_type == EntityType.QUESTION:
             data = _validate_payload(QuestionUpdate, payload)
-            return self.update_question(
+            return self.questions.update_question(
                 entity_id,
                 text=data.text,
                 question_type=data.question_type,
@@ -581,7 +614,7 @@ class GraphDraftServiceMixin:
             )
         if entity_type == EntityType.NOTE:
             data = _validate_payload(NoteUpdate, payload)
-            return self.update_note(
+            return self.notes.update_note(
                 entity_id,
                 transcribed_text=data.transcribed_text,
                 targets=data.targets,
@@ -591,7 +624,7 @@ class GraphDraftServiceMixin:
             )
         if entity_type == EntityType.SESSION:
             data = _validate_payload(SessionUpdate, payload)
-            return self.update_session(
+            return self.sessions.update_session(
                 entity_id,
                 status=data.status,
                 ended_at=data.ended_at,
@@ -599,7 +632,7 @@ class GraphDraftServiceMixin:
             )
         if entity_type == EntityType.DATASET:
             data = _validate_payload(DatasetUpdate, payload)
-            return self.update_dataset(
+            return self.datasets.update_dataset(
                 entity_id,
                 status=data.status,
                 question_links=data.question_links,
@@ -609,7 +642,7 @@ class GraphDraftServiceMixin:
             )
         if entity_type == EntityType.ANALYSIS:
             data = _validate_payload(AnalysisUpdate, payload)
-            return self.update_analysis(
+            return self.analyses.update_analysis(
                 entity_id,
                 status=data.status,
                 environment_hash=data.environment_hash,
@@ -617,7 +650,7 @@ class GraphDraftServiceMixin:
             )
         if entity_type == EntityType.CLAIM:
             data = _validate_payload(ClaimUpdate, payload)
-            return self.update_claim(
+            return self.claims.update_claim(
                 entity_id,
                 statement=data.statement,
                 confidence=data.confidence,
@@ -628,7 +661,7 @@ class GraphDraftServiceMixin:
             )
         if entity_type == EntityType.VISUALIZATION:
             data = _validate_payload(VisualizationUpdate, payload)
-            return self.update_visualization(
+            return self.visualizations.update_visualization(
                 entity_id,
                 viz_type=data.viz_type,
                 file_path=data.file_path,
@@ -684,10 +717,10 @@ class GraphDraftServiceMixin:
         project_blocks: list[dict[str, Any]] = []
         for project_id, project_notes in notes_by_project.items():
             try:
-                project = self.get_project(project_id)
+                project = self.projects.get_project(project_id)
             except NotFoundError:
                 continue
-            project_questions = self.list_questions(project_id=project_id)
+            project_questions = self.questions.list_questions(project_id=project_id)
             active_or_staged = sorted(
                 [
                     q
@@ -708,34 +741,34 @@ class GraphDraftServiceMixin:
             recent_notes = [
                 item
                 for item in sorted(
-                    self.list_notes(project_id=project_id),
+                    self.notes.list_notes(project_id=project_id),
                     key=lambda candidate: candidate.created_at,
                     reverse=True,
                 )
                 if item.note_id not in batch_ids_in_project
             ][:_RECENT_CONTEXT_LIMIT]
             recent_sessions = sorted(
-                self.list_sessions(project_id=project_id),
+                self.sessions.list_sessions(project_id=project_id),
                 key=lambda item: item.started_at,
                 reverse=True,
             )[:_RECENT_CONTEXT_LIMIT]
             recent_datasets = sorted(
-                self.list_datasets(project_id=project_id),
+                self.datasets.list_datasets(project_id=project_id),
                 key=lambda item: item.created_at,
                 reverse=True,
             )[:_RECENT_CONTEXT_LIMIT]
             recent_analyses = sorted(
-                self.list_analyses(project_id=project_id),
+                self.analyses.list_analyses(project_id=project_id),
                 key=lambda item: item.created_at,
                 reverse=True,
             )[:_RECENT_CONTEXT_LIMIT]
             recent_claims = sorted(
-                self.list_claims(project_id=project_id),
+                self.claims.list_claims(project_id=project_id),
                 key=lambda item: item.created_at,
                 reverse=True,
             )[:_RECENT_CONTEXT_LIMIT]
             recent_visualizations = sorted(
-                self.list_visualizations(project_id=project_id),
+                self.visualizations.list_visualizations(project_id=project_id),
                 key=lambda item: item.created_at,
                 reverse=True,
             )[:_RECENT_CONTEXT_LIMIT]
@@ -791,7 +824,7 @@ class GraphDraftServiceMixin:
         *,
         mode: GraphDraftMode,
     ) -> dict[str, Any]:
-        note = self.get_note(note_id)
+        note = self.notes.get_note(note_id)
         source_notes = self._source_notes_for_capture(note)
         audio_notes = [
             item
@@ -814,7 +847,7 @@ class GraphDraftServiceMixin:
         image_content_type: str | None = None
         if image_note is not None:
             try:
-                raw_asset, image_bytes = self.download_note_raw(image_note.note_id)
+                raw_asset, image_bytes = self.notes.download_note_raw(image_note.note_id)
             except NotFoundError as exc:
                 raise NotFoundError("Source image file is unavailable.") from exc
             except ValidationError:
@@ -851,7 +884,7 @@ class GraphDraftServiceMixin:
             return [note]
         bundle_notes = [
             item
-            for item in self.list_notes(project_id=note.project_id)
+            for item in self.notes.list_notes(project_id=note.project_id)
             if item.metadata.get("capture_bundle_id") == bundle_id
         ]
         if not any(item.note_id == note.note_id for item in bundle_notes):
@@ -902,12 +935,12 @@ class GraphDraftServiceMixin:
         actor: AuthContext | None = None,
     ) -> dict[str, Any]:
         try:
-            project = self.get_project(note.project_id)
+            project = self.projects.get_project(note.project_id)
         except NotFoundError as exc:
             raise ValidationError(
                 "Graph context cannot be built because the note project does not exist."
             ) from exc
-        project_questions = self.list_questions(project_id=note.project_id)
+        project_questions = self.questions.list_questions(project_id=note.project_id)
         questions = sorted(
             [
                 question
@@ -927,34 +960,34 @@ class GraphDraftServiceMixin:
         recent_notes = [
             item
             for item in sorted(
-                self.list_notes(project_id=note.project_id),
+                self.notes.list_notes(project_id=note.project_id),
                 key=lambda candidate: candidate.created_at,
                 reverse=True,
             )
             if item.note_id != note.note_id
         ][:_RECENT_CONTEXT_LIMIT]
         recent_sessions = sorted(
-            self.list_sessions(project_id=note.project_id),
+            self.sessions.list_sessions(project_id=note.project_id),
             key=lambda item: item.started_at,
             reverse=True,
         )[:_RECENT_CONTEXT_LIMIT]
         recent_datasets = sorted(
-            self.list_datasets(project_id=note.project_id),
+            self.datasets.list_datasets(project_id=note.project_id),
             key=lambda item: item.created_at,
             reverse=True,
         )[:_RECENT_CONTEXT_LIMIT]
         recent_analyses = sorted(
-            self.list_analyses(project_id=note.project_id),
+            self.analyses.list_analyses(project_id=note.project_id),
             key=lambda item: item.created_at,
             reverse=True,
         )[:_RECENT_CONTEXT_LIMIT]
         recent_claims = sorted(
-            self.list_claims(project_id=note.project_id),
+            self.claims.list_claims(project_id=note.project_id),
             key=lambda item: item.created_at,
             reverse=True,
         )[:_RECENT_CONTEXT_LIMIT]
         recent_visualizations = sorted(
-            self.list_visualizations(project_id=note.project_id),
+            self.visualizations.list_visualizations(project_id=note.project_id),
             key=lambda item: item.created_at,
             reverse=True,
         )[:_RECENT_CONTEXT_LIMIT]
@@ -1043,14 +1076,14 @@ class GraphDraftServiceMixin:
 
     def _get_graph_entity(self, entity_type: EntityType, entity_id: UUID) -> EntityResult:
         getters = {
-            EntityType.PROJECT: self.get_project,
-            EntityType.QUESTION: self.get_question,
-            EntityType.NOTE: self.get_note,
-            EntityType.SESSION: self.get_session,
-            EntityType.DATASET: self.get_dataset,
-            EntityType.ANALYSIS: self.get_analysis,
-            EntityType.CLAIM: self.get_claim,
-            EntityType.VISUALIZATION: self.get_visualization,
+            EntityType.PROJECT: self.projects.get_project,
+            EntityType.QUESTION: self.questions.get_question,
+            EntityType.NOTE: self.notes.get_note,
+            EntityType.SESSION: self.sessions.get_session,
+            EntityType.DATASET: self.datasets.get_dataset,
+            EntityType.ANALYSIS: self.analyses.get_analysis,
+            EntityType.CLAIM: self.claims.get_claim,
+            EntityType.VISUALIZATION: self.visualizations.get_visualization,
         }
         getter = getters.get(entity_type)
         if getter is None:

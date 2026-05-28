@@ -4,45 +4,31 @@ from __future__ import annotations
 
 import logging
 from types import TracebackType
-from typing import Callable, TypeVar
+from typing import Any, Callable, TypeVar
 from uuid import UUID
 
-from lab_tracker.errors import NotFoundError
-from lab_tracker.models import (
-    Note,
-    Question,
-)
+from lab_tracker.models import Note, Question
 from lab_tracker.note_storage import LocalNoteStorage
 from lab_tracker.repository import LabTrackerRepository
 from lab_tracker.request_context import LabTrackerRequestContext
 from lab_tracker.services import (
-    AnalysisServiceMixin,
-    ClaimServiceMixin,
-    DatasetServiceMixin,
-    GraphDraftServiceMixin,
-    NoteServiceMixin,
-    ProjectServiceMixin,
-    QuestionServiceMixin,
-    SessionServiceMixin,
-    VisualizationServiceMixin,
+    AnalysisService,
+    ClaimService,
+    DatasetService,
+    GraphDraftService,
+    NoteService,
+    ProjectService,
+    QuestionService,
+    ServiceContext,
+    SessionService,
+    VisualizationService,
 )
 
 _logger = logging.getLogger(__name__)
-EntityT = TypeVar("EntityT")
 ResponseT = TypeVar("ResponseT")
 
 
-class LabTrackerAPI(
-    ProjectServiceMixin,
-    QuestionServiceMixin,
-    DatasetServiceMixin,
-    NoteServiceMixin,
-    SessionServiceMixin,
-    AnalysisServiceMixin,
-    ClaimServiceMixin,
-    GraphDraftServiceMixin,
-    VisualizationServiceMixin,
-):
+class LabTrackerAPI:
     def __init__(
         self,
         *,
@@ -53,6 +39,72 @@ class LabTrackerAPI(
         self._raw_storage = raw_storage
         self._repository = repository
         self._request_context = request_context
+        self._service_context = ServiceContext(
+            raw_storage=raw_storage,
+            repository=repository,
+            request_context=request_context,
+        )
+        self._compose_services()
+
+    def _compose_services(self) -> None:
+        context = self._service_context
+        self.projects: ProjectService = ProjectService(context)
+        self.questions: QuestionService = QuestionService(
+            context,
+            projects=self.projects,
+            notes_provider=lambda: self.notes,
+        )
+        self.datasets: DatasetService = DatasetService(
+            context,
+            projects=self.projects,
+            questions=self.questions,
+            sessions_provider=lambda: self.sessions,
+        )
+        self.sessions: SessionService = SessionService(
+            context,
+            projects=self.projects,
+            questions=self.questions,
+            datasets_provider=lambda: self.datasets,
+        )
+        self.analyses: AnalysisService = AnalysisService(
+            context,
+            projects=self.projects,
+            datasets=self.datasets,
+            claims_provider=lambda: self.claims,
+            visualizations_provider=lambda: self.visualizations,
+        )
+        self.claims: ClaimService = ClaimService(
+            context,
+            projects=self.projects,
+            datasets=self.datasets,
+            analyses_provider=lambda: self.analyses,
+        )
+        self.visualizations: VisualizationService = VisualizationService(
+            context,
+            analyses=self.analyses,
+            claims=self.claims,
+        )
+        self.notes: NoteService = NoteService(
+            context,
+            projects=self.projects,
+            questions=self.questions,
+            datasets=self.datasets,
+            sessions=self.sessions,
+            analyses=self.analyses,
+            claims=self.claims,
+            visualizations=self.visualizations,
+        )
+        self.graph_drafts: GraphDraftService = GraphDraftService(
+            context,
+            projects=self.projects,
+            questions=self.questions,
+            notes=self.notes,
+            sessions=self.sessions,
+            datasets=self.datasets,
+            analyses=self.analyses,
+            claims=self.claims,
+            visualizations=self.visualizations,
+        )
 
     def for_request(self, repository: LabTrackerRepository) -> "LabTrackerAPI":
         return self._for_request_context(LabTrackerRequestContext(repository=repository))
@@ -74,44 +126,6 @@ class LabTrackerAPI(
         close: Callable[[], None] | None = None,
     ) -> "LabTrackerRequestScope":
         return LabTrackerRequestScope(root_api=self, repository=repository, close=close)
-
-    def _active_repository(self) -> LabTrackerRepository:
-        if self._request_context is not None:
-            return self._request_context.repository
-        if self._repository is None:
-            raise RuntimeError("Lab Tracker repository is not available.")
-        return self._repository
-
-    def _get_from_repository(
-        self,
-        *,
-        entity_id: UUID,
-        label: str,
-        loader: Callable[[LabTrackerRepository], object | None],
-    ):
-        entity = loader(self._active_repository())
-        if entity is None:
-            raise NotFoundError(f"{label} does not exist.")
-        return entity
-
-    def _list_from_repository(
-        self,
-        *,
-        loader: Callable[[LabTrackerRepository], list[object]],
-    ) -> list[object]:
-        return loader(self._active_repository())
-
-    def _query_from_repository(
-        self,
-        *,
-        loader: Callable[[LabTrackerRepository], tuple[list[EntityT], int]],
-    ) -> list[EntityT]:
-        repository = self._active_repository()
-        entities, _ = loader(repository)
-        return entities
-
-    def _is_request_managed(self) -> bool:
-        return self._request_context is not None
 
     def _run_deferred_actions(
         self,
@@ -136,18 +150,224 @@ class LabTrackerAPI(
             return
         self._request_context.after_rollback_actions.append(action)
 
-    def _run_repository_write(
-        self,
-        operation: Callable[[LabTrackerRepository], None],
-    ) -> None:
-        resolved_repository = self._active_repository()
-        try:
-            operation(resolved_repository)
-            if not self._is_request_managed():
-                resolved_repository.commit()
-        except Exception:
-            resolved_repository.rollback()
-            raise
+    def create_project(self, *args: Any, **kwargs: Any) -> Any:
+        return self.projects.create_project(*args, **kwargs)
+
+    def get_project(self, *args: Any, **kwargs: Any) -> Any:
+        return self.projects.get_project(*args, **kwargs)
+
+    def list_projects(self, *args: Any, **kwargs: Any) -> Any:
+        return self.projects.list_projects(*args, **kwargs)
+
+    def update_project(self, *args: Any, **kwargs: Any) -> Any:
+        return self.projects.update_project(*args, **kwargs)
+
+    def delete_project(self, *args: Any, **kwargs: Any) -> Any:
+        return self.projects.delete_project(*args, **kwargs)
+
+    def get_project_membership(self, *args: Any, **kwargs: Any) -> Any:
+        return self.projects.get_project_membership(*args, **kwargs)
+
+    def get_project_membership_for_user(self, *args: Any, **kwargs: Any) -> Any:
+        return self.projects.get_project_membership_for_user(*args, **kwargs)
+
+    def list_project_memberships(self, *args: Any, **kwargs: Any) -> Any:
+        return self.projects.list_project_memberships(*args, **kwargs)
+
+    def upsert_project_membership(self, *args: Any, **kwargs: Any) -> Any:
+        return self.projects.upsert_project_membership(*args, **kwargs)
+
+    def delete_project_membership(self, *args: Any, **kwargs: Any) -> Any:
+        return self.projects.delete_project_membership(*args, **kwargs)
+
+    def accessible_project_ids(self, *args: Any, **kwargs: Any) -> Any:
+        return self.projects.accessible_project_ids(*args, **kwargs)
+
+    def project_membership_role(self, *args: Any, **kwargs: Any) -> Any:
+        return self.projects.project_membership_role(*args, **kwargs)
+
+    def require_project_read(self, *args: Any, **kwargs: Any) -> Any:
+        return self.projects.require_project_read(*args, **kwargs)
+
+    def require_project_contributor(self, *args: Any, **kwargs: Any) -> Any:
+        return self.projects.require_project_contributor(*args, **kwargs)
+
+    def require_project_owner(self, *args: Any, **kwargs: Any) -> Any:
+        return self.projects.require_project_owner(*args, **kwargs)
+
+    def create_question(self, *args: Any, **kwargs: Any) -> Any:
+        return self.questions.create_question(*args, **kwargs)
+
+    def get_question(self, *args: Any, **kwargs: Any) -> Any:
+        return self.questions.get_question(*args, **kwargs)
+
+    def list_questions(self, *args: Any, **kwargs: Any) -> Any:
+        return self.questions.list_questions(*args, **kwargs)
+
+    def list_questions_filtered(self, *args: Any, **kwargs: Any) -> Any:
+        return self.questions.list_questions_filtered(*args, **kwargs)
+
+    def update_question(self, *args: Any, **kwargs: Any) -> Any:
+        return self.questions.update_question(*args, **kwargs)
+
+    def list_question_refactors(self, *args: Any, **kwargs: Any) -> Any:
+        return self.questions.list_question_refactors(*args, **kwargs)
+
+    def refactor_question(self, *args: Any, **kwargs: Any) -> Any:
+        return self.questions.refactor_question(*args, **kwargs)
+
+    def delete_question(self, *args: Any, **kwargs: Any) -> Any:
+        return self.questions.delete_question(*args, **kwargs)
+
+    def create_dataset(self, *args: Any, **kwargs: Any) -> Any:
+        return self.datasets.create_dataset(*args, **kwargs)
+
+    def get_dataset(self, *args: Any, **kwargs: Any) -> Any:
+        return self.datasets.get_dataset(*args, **kwargs)
+
+    def list_datasets(self, *args: Any, **kwargs: Any) -> Any:
+        return self.datasets.list_datasets(*args, **kwargs)
+
+    def update_dataset(self, *args: Any, **kwargs: Any) -> Any:
+        return self.datasets.update_dataset(*args, **kwargs)
+
+    def delete_dataset(self, *args: Any, **kwargs: Any) -> Any:
+        return self.datasets.delete_dataset(*args, **kwargs)
+
+    def create_session(self, *args: Any, **kwargs: Any) -> Any:
+        return self.sessions.create_session(*args, **kwargs)
+
+    def get_session(self, *args: Any, **kwargs: Any) -> Any:
+        return self.sessions.get_session(*args, **kwargs)
+
+    def get_session_by_link_code(self, *args: Any, **kwargs: Any) -> Any:
+        return self.sessions.get_session_by_link_code(*args, **kwargs)
+
+    def list_sessions(self, *args: Any, **kwargs: Any) -> Any:
+        return self.sessions.list_sessions(*args, **kwargs)
+
+    def update_session(self, *args: Any, **kwargs: Any) -> Any:
+        return self.sessions.update_session(*args, **kwargs)
+
+    def delete_session(self, *args: Any, **kwargs: Any) -> Any:
+        return self.sessions.delete_session(*args, **kwargs)
+
+    def register_acquisition_output(self, *args: Any, **kwargs: Any) -> Any:
+        return self.sessions.register_acquisition_output(*args, **kwargs)
+
+    def list_acquisition_outputs(self, *args: Any, **kwargs: Any) -> Any:
+        return self.sessions.list_acquisition_outputs(*args, **kwargs)
+
+    def delete_acquisition_output(self, *args: Any, **kwargs: Any) -> Any:
+        return self.sessions.delete_acquisition_output(*args, **kwargs)
+
+    def promote_operational_session(self, *args: Any, **kwargs: Any) -> Any:
+        return self.sessions.promote_operational_session(*args, **kwargs)
+
+    def promote_operational_session_to_dataset(self, *args: Any, **kwargs: Any) -> Any:
+        return self.sessions.promote_operational_session_to_dataset(*args, **kwargs)
+
+    def create_note(self, *args: Any, **kwargs: Any) -> Any:
+        return self.notes.create_note(*args, **kwargs)
+
+    def store_note_raw_asset(self, *args: Any, **kwargs: Any) -> Any:
+        return self.notes.store_note_raw_asset(*args, **kwargs)
+
+    def upload_note_raw(self, *args: Any, **kwargs: Any) -> Any:
+        return self.notes.upload_note_raw(*args, **kwargs)
+
+    def transcribe_voice_note(self, *args: Any, **kwargs: Any) -> Any:
+        return self.notes.transcribe_voice_note(*args, **kwargs)
+
+    def get_note(self, *args: Any, **kwargs: Any) -> Any:
+        return self.notes.get_note(*args, **kwargs)
+
+    def list_notes(self, *args: Any, **kwargs: Any) -> Any:
+        return self.notes.list_notes(*args, **kwargs)
+
+    def update_note(self, *args: Any, **kwargs: Any) -> Any:
+        return self.notes.update_note(*args, **kwargs)
+
+    def download_note_raw(self, *args: Any, **kwargs: Any) -> Any:
+        return self.notes.download_note_raw(*args, **kwargs)
+
+    def delete_note(self, *args: Any, **kwargs: Any) -> Any:
+        return self.notes.delete_note(*args, **kwargs)
+
+    def create_analysis(self, *args: Any, **kwargs: Any) -> Any:
+        return self.analyses.create_analysis(*args, **kwargs)
+
+    def get_analysis(self, *args: Any, **kwargs: Any) -> Any:
+        return self.analyses.get_analysis(*args, **kwargs)
+
+    def list_analyses(self, *args: Any, **kwargs: Any) -> Any:
+        return self.analyses.list_analyses(*args, **kwargs)
+
+    def update_analysis(self, *args: Any, **kwargs: Any) -> Any:
+        return self.analyses.update_analysis(*args, **kwargs)
+
+    def delete_analysis(self, *args: Any, **kwargs: Any) -> Any:
+        return self.analyses.delete_analysis(*args, **kwargs)
+
+    def commit_analysis(self, *args: Any, **kwargs: Any) -> Any:
+        return self.analyses.commit_analysis(*args, **kwargs)
+
+    def create_claim(self, *args: Any, **kwargs: Any) -> Any:
+        return self.claims.create_claim(*args, **kwargs)
+
+    def get_claim(self, *args: Any, **kwargs: Any) -> Any:
+        return self.claims.get_claim(*args, **kwargs)
+
+    def list_claims(self, *args: Any, **kwargs: Any) -> Any:
+        return self.claims.list_claims(*args, **kwargs)
+
+    def update_claim(self, *args: Any, **kwargs: Any) -> Any:
+        return self.claims.update_claim(*args, **kwargs)
+
+    def delete_claim(self, *args: Any, **kwargs: Any) -> Any:
+        return self.claims.delete_claim(*args, **kwargs)
+
+    def create_visualization(self, *args: Any, **kwargs: Any) -> Any:
+        return self.visualizations.create_visualization(*args, **kwargs)
+
+    def get_visualization(self, *args: Any, **kwargs: Any) -> Any:
+        return self.visualizations.get_visualization(*args, **kwargs)
+
+    def list_visualizations(self, *args: Any, **kwargs: Any) -> Any:
+        return self.visualizations.list_visualizations(*args, **kwargs)
+
+    def update_visualization(self, *args: Any, **kwargs: Any) -> Any:
+        return self.visualizations.update_visualization(*args, **kwargs)
+
+    def delete_visualization(self, *args: Any, **kwargs: Any) -> Any:
+        return self.visualizations.delete_visualization(*args, **kwargs)
+
+    def create_graph_draft_from_note(self, *args: Any, **kwargs: Any) -> Any:
+        return self.graph_drafts.create_graph_draft_from_note(*args, **kwargs)
+
+    def get_graph_change_set(self, *args: Any, **kwargs: Any) -> Any:
+        return self.graph_drafts.get_graph_change_set(*args, **kwargs)
+
+    def list_graph_change_sets(self, *args: Any, **kwargs: Any) -> Any:
+        return self.graph_drafts.list_graph_change_sets(*args, **kwargs)
+
+    def update_graph_change_operation(self, *args: Any, **kwargs: Any) -> Any:
+        return self.graph_drafts.update_graph_change_operation(*args, **kwargs)
+
+    def submit_graph_change_set(self, *args: Any, **kwargs: Any) -> Any:
+        return self.graph_drafts.submit_graph_change_set(*args, **kwargs)
+
+    def review_graph_change_set(self, *args: Any, **kwargs: Any) -> Any:
+        return self.graph_drafts.review_graph_change_set(*args, **kwargs)
+
+    def commit_graph_change_set(self, *args: Any, **kwargs: Any) -> Any:
+        return self.graph_drafts.commit_graph_change_set(*args, **kwargs)
+
+    def build_graph_context_for_note(self, *args: Any, **kwargs: Any) -> Any:
+        return self.graph_drafts.build_graph_context_for_note(*args, **kwargs)
+
+    def build_batch_graph_context(self, *args: Any, **kwargs: Any) -> Any:
+        return self.graph_drafts.build_batch_graph_context(*args, **kwargs)
 
     def search_questions(
         self,
@@ -157,14 +377,14 @@ class LabTrackerAPI(
         limit: int | None = None,
         offset: int = 0,
     ) -> list[Question]:
-        return self._query_from_repository(
-            loader=lambda repository: repository.query_questions(
-                project_id=project_id,
-                search=query,
-                limit=limit,
-                offset=offset,
-            ),
+        repository = self._service_context.active_repository()
+        questions, _ = repository.query_questions(
+            project_id=project_id,
+            search=query,
+            limit=limit,
+            offset=offset,
         )
+        return questions
 
     def search_notes(
         self,
@@ -174,14 +394,14 @@ class LabTrackerAPI(
         limit: int | None = None,
         offset: int = 0,
     ) -> list[Note]:
-        return self._query_from_repository(
-            loader=lambda repository: repository.query_notes(
-                project_id=project_id,
-                search=query,
-                limit=limit,
-                offset=offset,
-            ),
+        repository = self._service_context.active_repository()
+        notes, _ = repository.query_notes(
+            project_id=project_id,
+            search=query,
+            limit=limit,
+            offset=offset,
         )
+        return notes
 
 
 class LabTrackerRequestScope:

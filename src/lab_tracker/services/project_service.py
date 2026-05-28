@@ -1,4 +1,4 @@
-"""Project domain service mixin."""
+"""Project domain service."""
 
 from __future__ import annotations
 
@@ -24,9 +24,10 @@ from lab_tracker.services.shared import (
     has_global_project_read,
     has_global_project_write,
 )
+from lab_tracker.services.base import BaseService
 
 
-class ProjectServiceMixin:
+class ProjectService(BaseService):
     def create_project(
         self,
         name: str,
@@ -44,7 +45,8 @@ class ProjectServiceMixin:
             status=status,
             created_by=_actor_user_id(actor),
         )
-        self._run_repository_write(lambda repository: repository.projects.save(project))
+        with self.unit_of_work() as repository:
+            repository.projects.save(project)
         if actor is not None and not has_global_project_admin(actor):
             membership = ProjectMembership(
                 membership_id=uuid4(),
@@ -53,20 +55,19 @@ class ProjectServiceMixin:
                 role=ProjectMembershipRole.OWNER,
                 created_by=_actor_user_id(actor),
             )
-            self._run_repository_write(
-                lambda repository: repository.project_memberships.save(membership)
-            )
+            with self.unit_of_work() as repository:
+                repository.project_memberships.save(membership)
         return project
 
     def get_project(self, project_id: UUID) -> Project:
-        return self._get_from_repository(
+        return self.get_from_repository(
             entity_id=project_id,
             label="Project",
             loader=lambda repository: repository.projects.get(project_id),
         )
 
     def list_projects(self) -> list[Project]:
-        return self._list_from_repository(
+        return self.list_from_repository(
             loader=lambda repository: repository.projects.list(),
         )
 
@@ -89,17 +90,19 @@ class ProjectServiceMixin:
         if status is not None:
             project.status = status
         project.updated_at = utc_now()
-        self._run_repository_write(lambda repository: repository.projects.save(project))
+        with self.unit_of_work() as repository:
+            repository.projects.save(project)
         return project
 
     def delete_project(self, project_id: UUID, *, actor: AuthContext | None = None) -> Project:
         require_role(actor, WRITE_ROLES)
         project = self.get_project(project_id)
-        self._run_repository_write(lambda repository: repository.projects.delete(project_id))
+        with self.unit_of_work() as repository:
+            repository.projects.delete(project_id)
         return project
 
     def get_project_membership(self, membership_id: UUID) -> ProjectMembership:
-        return self._get_from_repository(
+        return self.get_from_repository(
             entity_id=membership_id,
             label="Project membership",
             loader=lambda repository: repository.project_memberships.get(membership_id),
@@ -110,7 +113,7 @@ class ProjectServiceMixin:
         project_id: UUID,
         user_id: UUID,
     ) -> ProjectMembership | None:
-        return self._active_repository().get_project_membership(
+        return self.repository.get_project_membership(
             project_id=project_id,
             user_id=user_id,
         )
@@ -121,7 +124,7 @@ class ProjectServiceMixin:
         project_id: UUID | None = None,
         user_id: UUID | None = None,
     ) -> list[ProjectMembership]:
-        memberships = self._query_from_repository(
+        memberships = self.query_from_repository(
             loader=lambda repository: repository.query_project_memberships(
                 project_id=project_id,
                 user_id=user_id,
@@ -154,9 +157,8 @@ class ProjectServiceMixin:
             membership = existing
             membership.role = role
             membership.updated_at = utc_now()
-        self._run_repository_write(
-            lambda repository: repository.project_memberships.save(membership)
-        )
+        with self.unit_of_work() as repository:
+            repository.project_memberships.save(membership)
         return membership
 
     def delete_project_membership(
@@ -177,9 +179,8 @@ class ProjectServiceMixin:
         )
         if membership.role == ProjectMembershipRole.OWNER and owner_count <= 1:
             raise ValidationError("Projects must keep at least one owner.")
-        self._run_repository_write(
-            lambda repository: repository.project_memberships.delete(membership.membership_id)
-        )
+        with self.unit_of_work() as repository:
+            repository.project_memberships.delete(membership.membership_id)
         return membership
 
     def accessible_project_ids(self, actor: AuthContext | None) -> set[UUID] | None:
