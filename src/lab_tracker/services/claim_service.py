@@ -21,8 +21,8 @@ from lab_tracker.services.shared import (
     _ensure_claim_confidence,
     _ensure_claim_status_transition,
     _ensure_claim_support_links,
-    _ensure_non_empty,
-    _unique_ids,
+    ensure_non_empty,
+    unique_ids,
 )
 
 if TYPE_CHECKING:
@@ -60,7 +60,7 @@ class ClaimService(BaseService):
     ) -> Claim:
         require_role(actor, WRITE_ROLES)
         self.projects.get_project(project_id)
-        _ensure_non_empty(statement, "statement")
+        ensure_non_empty(statement, "statement")
         _ensure_claim_confidence(confidence)
         dataset_ids, analysis_ids = self._resolve_claim_support_links(
             project_id,
@@ -130,7 +130,7 @@ class ClaimService(BaseService):
         ):
             raise ValidationError("Only proposed claims can be edited.")
         if statement is not None:
-            _ensure_non_empty(statement, "statement")
+            ensure_non_empty(statement, "statement")
             claim.statement = statement.strip()
         if confidence is not None:
             _ensure_claim_confidence(confidence)
@@ -166,8 +166,8 @@ class ClaimService(BaseService):
         dataset_ids: Iterable[UUID] | None,
         analysis_ids: Iterable[UUID] | None,
     ) -> tuple[list[UUID], list[UUID]]:
-        resolved_dataset_ids = _unique_ids(dataset_ids)
-        resolved_analysis_ids = _unique_ids(analysis_ids)
+        resolved_dataset_ids = unique_ids(dataset_ids)
+        resolved_analysis_ids = unique_ids(analysis_ids)
         for dataset_id in resolved_dataset_ids:
             dataset = self.datasets.get_dataset(dataset_id)
             if dataset.project_id != project_id:

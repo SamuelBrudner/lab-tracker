@@ -27,12 +27,12 @@ from lab_tracker.services.project_service import ProjectService
 from lab_tracker.services.question_service import QuestionService
 from lab_tracker.services.shared import (
     WRITE_ROLES,
-    _actor_user_id,
-    _ensure_non_empty,
     _ensure_session_status_transition,
     _find_acquisition_output,
     _manifest_input_with_source,
     _merge_acquisition_outputs,
+    actor_user_id,
+    ensure_non_empty,
 )
 
 if TYPE_CHECKING:
@@ -100,7 +100,7 @@ class SessionService(BaseService):
             session_type=session_type,
             status=SessionStatus.ACTIVE,
             primary_question_id=primary_question_id,
-            created_by=_actor_user_id(actor),
+            created_by=actor_user_id(actor),
         )
         with self.unit_of_work() as repository:
             repository.sessions.save(session)
@@ -114,7 +114,7 @@ class SessionService(BaseService):
         )
 
     def get_session_by_link_code(self, link_code: str) -> Session:
-        _ensure_non_empty(link_code, "link_code")
+        ensure_non_empty(link_code, "link_code")
         try:
             session_id = decode_session_link_code(link_code)
         except ValueError as exc:
@@ -174,8 +174,8 @@ class SessionService(BaseService):
     ) -> AcquisitionOutput:
         require_role(actor, WRITE_ROLES)
         self.get_session(session_id)
-        _ensure_non_empty(file_path, "file_path")
-        _ensure_non_empty(checksum, "checksum")
+        ensure_non_empty(file_path, "file_path")
+        ensure_non_empty(checksum, "checksum")
         if size_bytes is not None and size_bytes < 0:
             raise ValidationError("size_bytes must be 0 or greater.")
         cleaned_path = file_path.strip()

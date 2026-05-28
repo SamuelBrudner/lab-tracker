@@ -34,13 +34,13 @@ WRITE_ROLES = {Role.ADMIN, Role.EDITOR}
 StatusT = TypeVar("StatusT", bound=Enum)
 
 
-def _actor_user_id(actor: AuthContext | None) -> str | None:
+def actor_user_id(actor: AuthContext | None) -> str | None:
     if actor is None:
         return None
     return str(actor.user_id)
 
 
-def _ensure_non_empty(value: str, field_name: str) -> None:
+def ensure_non_empty(value: str, field_name: str) -> None:
     if not value or not str(value).strip():
         raise ValidationError(f"{field_name} must not be empty.")
 
@@ -49,12 +49,12 @@ def _is_note_metadata_scalar(value: object) -> bool:
     return isinstance(value, (str, bool, int, float))
 
 
-def _normalize_note_metadata(metadata: dict[str, NoteMetadataScalar] | None) -> dict[str, str]:
+def normalize_note_metadata(metadata: dict[str, NoteMetadataScalar] | None) -> dict[str, str]:
     if not metadata:
         return {}
     cleaned: dict[str, str] = {}
     for key, value in metadata.items():
-        _ensure_non_empty(key, "metadata key")
+        ensure_non_empty(key, "metadata key")
         if not _is_note_metadata_scalar(value):
             raise ValidationError("metadata values must be strings, numbers, or booleans.")
         cleaned_key = str(key).strip()
@@ -93,7 +93,7 @@ def _get_or_raise(store: dict[UUID, object], entity_id: UUID, label: str):
         raise NotFoundError(f"{label} does not exist.") from exc
 
 
-def _unique_ids(values: Iterable[UUID] | None) -> list[UUID]:
+def unique_ids(values: Iterable[UUID] | None) -> list[UUID]:
     if not values:
         return []
     seen: set[UUID] = set()
@@ -301,8 +301,8 @@ def _normalize_dataset_files(files: Iterable[DatasetFile]) -> list[DatasetFile]:
     normalized: list[DatasetFile] = []
     seen: set[str] = set()
     for file in files:
-        _ensure_non_empty(file.path, "file.path")
-        _ensure_non_empty(file.checksum, "file.checksum")
+        ensure_non_empty(file.path, "file.path")
+        ensure_non_empty(file.checksum, "file.checksum")
         path = file.path.strip()
         checksum = file.checksum.strip()
         if path in seen:
@@ -361,7 +361,7 @@ def _normalize_commit_metadata(metadata: dict[str, str] | None) -> dict[str, str
         return {}
     cleaned: dict[str, str] = {}
     for key, value in metadata.items():
-        _ensure_non_empty(key, "metadata key")
+        ensure_non_empty(key, "metadata key")
         cleaned_key = str(key).strip()
         cleaned_value = value.strip() if isinstance(value, str) else str(value)
         cleaned[cleaned_key] = cleaned_value
@@ -420,7 +420,7 @@ def _build_commit_manifest(
         metadata=base_metadata,
         nwb_metadata=nwb_metadata,
         bids_metadata=bids_metadata,
-        note_ids=_unique_ids(manifest_input.note_ids),
+        note_ids=unique_ids(manifest_input.note_ids),
         question_links=list(question_links),
         source_session_id=manifest_input.source_session_id,
     )
@@ -429,7 +429,7 @@ def _build_commit_manifest(
 def _validate_commit_hash(provided: str | None, expected: str) -> None:
     if provided is None:
         return
-    _ensure_non_empty(provided, "commit_hash")
+    ensure_non_empty(provided, "commit_hash")
     if provided.strip() != expected:
         raise ValidationError("commit_hash must match content-addressed manifest hash.")
 

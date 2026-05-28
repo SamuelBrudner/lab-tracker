@@ -34,7 +34,7 @@ from lab_tracker.services.project_authorization import ProjectAuthorizationPolic
 from lab_tracker.services.project_service import ProjectService
 from lab_tracker.services.question_service import QuestionService
 from lab_tracker.services.session_service import SessionService
-from lab_tracker.services.shared import _actor_user_id
+from lab_tracker.services.shared import actor_user_id
 from lab_tracker.services.visualization_service import VisualizationService
 
 _BATCH_NOTE_LIMIT = 100
@@ -130,7 +130,7 @@ class GraphDraftService(BaseService):
             prompt_version=PROMPT_VERSION,
             draft_mode=mode,
             context_packet=context_packet,
-            created_by=_actor_user_id(actor),
+            created_by=actor_user_id(actor),
         )
         self._save_graph_change_set(change_set)
         try:
@@ -245,7 +245,7 @@ class GraphDraftService(BaseService):
             raise ValidationError("Only ready or changes-requested graph drafts can be submitted.")
         change_set.status = GraphChangeSetStatus.SUBMITTED
         change_set.submitted_at = utc_now()
-        change_set.submitted_by = _actor_user_id(actor)
+        change_set.submitted_by = actor_user_id(actor)
         change_set.reviewed_at = None
         change_set.reviewed_by = None
         change_set.review_note = None
@@ -272,7 +272,7 @@ class GraphDraftService(BaseService):
             raise ValidationError("Only submitted graph drafts can be reviewed.")
         change_set.status = status
         change_set.reviewed_at = utc_now()
-        change_set.reviewed_by = _actor_user_id(actor)
+        change_set.reviewed_by = actor_user_id(actor)
         change_set.review_note = note.strip() if note else None
         change_set.updated_at = change_set.reviewed_at
         self._save_graph_change_set(change_set)
@@ -318,7 +318,7 @@ class GraphDraftService(BaseService):
         change_set.status = GraphChangeSetStatus.COMMITTED
         change_set.commit_message = message.strip()
         change_set.committed_at = utc_now()
-        change_set.committed_by = _actor_user_id(actor)
+        change_set.committed_by = actor_user_id(actor)
         change_set.updated_at = change_set.committed_at
         self._save_graph_change_set(change_set)
         return change_set

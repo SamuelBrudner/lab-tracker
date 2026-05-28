@@ -24,14 +24,14 @@ from lab_tracker.services.project_service import ProjectService
 from lab_tracker.services.question_service import QuestionService
 from lab_tracker.services.shared import (
     WRITE_ROLES,
-    _actor_user_id,
     _build_commit_manifest,
     _compute_commit_hash,
     _ensure_dataset_status_transition,
     _ensure_primary_question_active,
     _manifest_input_from_commit,
-    _unique_ids,
     _validate_commit_hash,
+    actor_user_id,
+    unique_ids,
 )
 
 if TYPE_CHECKING:
@@ -93,7 +93,7 @@ class DatasetService(BaseService):
         primary_question = self.questions.get_question(primary_question_id)
         if primary_question.project_id != project_id:
             raise ValidationError("Primary question must belong to the same project.")
-        secondary_ids = _unique_ids(secondary_question_ids)
+        secondary_ids = unique_ids(secondary_question_ids)
         if primary_question_id in secondary_ids:
             raise ValidationError("Primary question cannot be secondary.")
         for question_id in secondary_ids:
@@ -128,7 +128,7 @@ class DatasetService(BaseService):
             question_links=question_links,
             commit_manifest=resolved_manifest,
             status=status,
-            created_by=_actor_user_id(actor),
+            created_by=actor_user_id(actor),
         )
         if commit_requested:
             _ensure_primary_question_active(primary_question)

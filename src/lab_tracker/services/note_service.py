@@ -28,8 +28,8 @@ from lab_tracker.services.project_service import ProjectService
 from lab_tracker.services.question_service import QuestionService
 from lab_tracker.services.session_service import SessionService
 from lab_tracker.services.shared import (
-    _actor_user_id,
-    _normalize_note_metadata,
+    actor_user_id,
+    normalize_note_metadata,
 )
 from lab_tracker.services.visualization_service import VisualizationService
 
@@ -102,7 +102,7 @@ class NoteService(BaseService):
         resolved_targets = list(targets or [])
         for target in resolved_targets:
             self._ensure_target_exists(target, project_id)
-        resolved_metadata = _normalize_note_metadata(metadata)
+        resolved_metadata = normalize_note_metadata(metadata)
         note = Note(
             note_id=uuid4(),
             project_id=project_id,
@@ -112,7 +112,7 @@ class NoteService(BaseService):
             targets=resolved_targets,
             metadata=resolved_metadata,
             status=status,
-            created_by=_actor_user_id(actor),
+            created_by=actor_user_id(actor),
         )
         with self.unit_of_work() as repository:
             repository.notes.save(note)
@@ -296,7 +296,7 @@ class NoteService(BaseService):
                 self._ensure_target_exists(target, note.project_id)
             note.targets = resolved_targets
         if metadata is not None:
-            note.metadata = _normalize_note_metadata(metadata)
+            note.metadata = normalize_note_metadata(metadata)
         if status is not None:
             note.status = status
         note.updated_at = utc_now()

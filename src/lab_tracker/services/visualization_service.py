@@ -13,8 +13,8 @@ from lab_tracker.services.base import BaseService, ServiceContext
 from lab_tracker.services.claim_service import ClaimService
 from lab_tracker.services.shared import (
     WRITE_ROLES,
-    _ensure_non_empty,
-    _unique_ids,
+    ensure_non_empty,
+    unique_ids,
 )
 
 
@@ -42,9 +42,9 @@ class VisualizationService(BaseService):
     ) -> Visualization:
         require_role(actor, WRITE_ROLES)
         analysis = self.analyses.get_analysis(analysis_id)
-        _ensure_non_empty(viz_type, "viz_type")
-        _ensure_non_empty(file_path, "file_path")
-        claim_ids = _unique_ids(related_claim_ids)
+        ensure_non_empty(viz_type, "viz_type")
+        ensure_non_empty(file_path, "file_path")
+        claim_ids = unique_ids(related_claim_ids)
         for claim_id in claim_ids:
             claim = self.claims.get_claim(claim_id)
             if claim.project_id != analysis.project_id:
@@ -98,15 +98,15 @@ class VisualizationService(BaseService):
         require_role(actor, WRITE_ROLES)
         visualization = self.get_visualization(viz_id)
         if viz_type is not None:
-            _ensure_non_empty(viz_type, "viz_type")
+            ensure_non_empty(viz_type, "viz_type")
             visualization.viz_type = viz_type.strip()
         if file_path is not None:
-            _ensure_non_empty(file_path, "file_path")
+            ensure_non_empty(file_path, "file_path")
             visualization.file_path = file_path.strip()
         if caption is not None:
             visualization.caption = caption.strip() if caption else None
         if related_claim_ids is not None:
-            claim_ids = _unique_ids(related_claim_ids)
+            claim_ids = unique_ids(related_claim_ids)
             analysis = self.analyses.get_analysis(visualization.analysis_id)
             for claim_id in claim_ids:
                 claim = self.claims.get_claim(claim_id)

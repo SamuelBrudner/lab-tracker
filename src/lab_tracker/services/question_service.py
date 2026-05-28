@@ -22,12 +22,12 @@ from lab_tracker.services.base import BaseService, ServiceContext
 from lab_tracker.services.project_service import ProjectService
 from lab_tracker.services.shared import (
     WRITE_ROLES,
-    _actor_user_id,
-    _ensure_non_empty,
     _ensure_question_parents_dag,
     _ensure_question_status_transition,
-    _unique_ids,
+    actor_user_id,
+    ensure_non_empty,
     question_matches_substring,
+    unique_ids,
 )
 
 if TYPE_CHECKING:
@@ -86,9 +86,9 @@ class QuestionService(BaseService):
     ) -> Question:
         require_role(actor, WRITE_ROLES)
         self.projects.get_project(project_id)
-        _ensure_non_empty(text, "text")
+        ensure_non_empty(text, "text")
         question_id = uuid4()
-        parent_ids = _unique_ids(parent_question_ids)
+        parent_ids = unique_ids(parent_question_ids)
         for parent_id in parent_ids:
             parent = self.get_question(parent_id)
             if parent.project_id != project_id:
@@ -106,7 +106,7 @@ class QuestionService(BaseService):
             hypothesis=hypothesis.strip() if hypothesis else None,
             status=status,
             parent_question_ids=parent_ids,
-            created_by=_actor_user_id(actor),
+            created_by=actor_user_id(actor),
         )
         with self.unit_of_work() as repository:
             repository.questions.save(question)
@@ -180,7 +180,7 @@ class QuestionService(BaseService):
         require_role(actor, WRITE_ROLES)
         question = self.get_question(question_id)
         if text is not None:
-            _ensure_non_empty(text, "text")
+            ensure_non_empty(text, "text")
             question.text = text.strip()
         if question_type is not None:
             question.question_type = question_type
@@ -190,7 +190,7 @@ class QuestionService(BaseService):
             _ensure_question_status_transition(question.status, status)
             question.status = status
         if parent_question_ids is not None:
-            parent_ids = _unique_ids(parent_question_ids)
+            parent_ids = unique_ids(parent_question_ids)
             for parent_id in parent_ids:
                 parent = self.get_question(parent_id)
                 if parent.project_id != question.project_id:
@@ -244,12 +244,12 @@ class QuestionService(BaseService):
             raise ValidationError("Question has already been superseded.")
         if replacement_status not in {QuestionStatus.STAGED, QuestionStatus.ACTIVE}:
             raise ValidationError("Replacement question status must be staged or active.")
-        _ensure_non_empty(replacement_text, "replacement.text")
-        _ensure_non_empty(reason, "reason")
+        ensure_non_empty(replacement_text, "replacement.text")
+        ensure_non_empty(reason, "reason")
         parent_ids = (
             list(source.parent_question_ids)
             if replacement_parent_question_ids is None
-            else _unique_ids(replacement_parent_question_ids)
+            else unique_ids(replacement_parent_question_ids)
         )
         if source.question_id in parent_ids:
             raise ValidationError("Replacement question cannot use the source as a parent.")
@@ -267,14 +267,14 @@ class QuestionService(BaseService):
             status=replacement_status,
             parent_question_ids=parent_ids,
             supersedes_question_id=source.question_id,
-            created_by=_actor_user_id(actor),
+            created_by=actor_user_id(actor),
         )
         graph = self._question_graph(source.project_id)
         graph[replacement.question_id] = replacement
         _ensure_question_parents_dag(replacement.question_id, parent_ids, graph)
 
-        child_ids = _unique_ids(child_question_ids_to_reparent)
-        note_ids = _unique_ids(note_ids_to_retarget)
+        child_ids = unique_ids(child_question_ids_to_reparent)
+        note_ids = unique_ids(note_ids_to_retarget)
         children = self._children_to_reparent(source, replacement, child_ids, graph)
         notes = self._notes_to_retarget(source, replacement, note_ids)
 
@@ -312,7 +312,7 @@ class QuestionService(BaseService):
             source_snapshot=source_snapshot,
             replacement_snapshot=replacement.model_dump(mode="json"),
             relationship_changes=relationship_changes,
-            created_by=_actor_user_id(actor),
+            created_by=actor_user_id(actor),
         )
 
         def _persist(repository) -> None:  # noqa: ANN001

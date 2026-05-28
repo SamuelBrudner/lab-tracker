@@ -12,12 +12,17 @@ Each HTTP request gets an explicit `LabTrackerRequestContext` in
 The lifecycle is:
 
 1. The database middleware creates a request-scoped SQLAlchemy repository.
-2. `LabTrackerAPI.build_request_context(...)` creates a context that owns:
+2. `LabTrackerAPI.request_scope(...)` enters a `LabTrackerRequestScope` that owns:
    - the active repository
    - deferred `after_commit` and `after_rollback` actions
-3. `LabTrackerAPI.bind_request_context(...)` attaches that context to the request-local API instance.
+   - commit/rollback completion
+   - session cleanup
+3. The middleware attaches `scope.api` to `request.state.lab_tracker_api`.
 4. Route handlers use `request.state.lab_tracker_api` via `api_from_request(...)`.
-5. On exit, middleware commits or rolls back the SQLAlchemy session, then calls `request_context.finish(...)` to run the matching deferred side effects.
+5. On exit, `scope.complete_response(...)` commits successful responses and rolls back
+   error responses. Unhandled exceptions roll back in `LabTrackerRequestScope.__exit__`.
+6. Deferred side effects run only from the matching explicit scope outcome. Failures
+   are logged and do not reverse the already-decided commit or rollback result.
 
 Service logic should not depend on hidden globals or `ContextVar` state for request orchestration.
 
@@ -35,6 +40,16 @@ The SQLAlchemy repository is now split into focused modules under
 - `repository.py`: the top-level `SQLAlchemyLabTrackerRepository` query surface
 
 [`src/lab_tracker/sqlalchemy_repository.py`](../src/lab_tracker/sqlalchemy_repository.py) remains as the import-stable compatibility barrel.
+It is intentionally retained for existing callers; new internal code may import focused
+repository modules directly when that makes ownership clearer.
+
+## Database Artifacts
+
+Root-level SQLite files such as `lab_tracker.db`, `*.db`, and
+`lab_tracker.db.backup-*` are local runtime artifacts and are ignored by Git.
+Committed database files should only exist when they are intentional fixtures under
+`tests/fixtures/`, with nearby test documentation explaining why a binary fixture is
+needed instead of migrations or factory setup.
 
 ## Route Layout
 

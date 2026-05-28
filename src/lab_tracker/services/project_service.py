@@ -17,8 +17,8 @@ from lab_tracker.services.base import BaseService, ServiceContext
 from lab_tracker.services.project_authorization import ProjectAuthorizationPolicy
 from lab_tracker.services.shared import (
     WRITE_ROLES,
-    _actor_user_id,
-    _ensure_non_empty,
+    actor_user_id,
+    ensure_non_empty,
 )
 
 
@@ -41,13 +41,13 @@ class ProjectService(BaseService):
         actor: AuthContext | None = None,
     ) -> Project:
         require_role(actor, WRITE_ROLES)
-        _ensure_non_empty(name, "name")
+        ensure_non_empty(name, "name")
         project = Project(
             project_id=uuid4(),
             name=name.strip(),
             description=description.strip(),
             status=status,
-            created_by=_actor_user_id(actor),
+            created_by=actor_user_id(actor),
         )
         with self.unit_of_work() as repository:
             repository.projects.save(project)
@@ -57,7 +57,7 @@ class ProjectService(BaseService):
                 project_id=project.project_id,
                 user_id=actor.user_id,
                 role=ProjectMembershipRole.OWNER,
-                created_by=_actor_user_id(actor),
+                created_by=actor_user_id(actor),
             )
             with self.unit_of_work() as repository:
                 repository.project_memberships.save(membership)
@@ -87,7 +87,7 @@ class ProjectService(BaseService):
         require_role(actor, WRITE_ROLES)
         project = self.get_project(project_id)
         if name is not None:
-            _ensure_non_empty(name, "name")
+            ensure_non_empty(name, "name")
             project.name = name.strip()
         if description is not None:
             project.description = description.strip()
@@ -155,7 +155,7 @@ class ProjectService(BaseService):
                 project_id=project_id,
                 user_id=user_id,
                 role=role,
-                created_by=_actor_user_id(actor),
+                created_by=actor_user_id(actor),
             )
         else:
             membership = existing

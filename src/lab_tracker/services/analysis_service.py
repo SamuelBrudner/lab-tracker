@@ -23,11 +23,11 @@ from lab_tracker.services.dataset_service import DatasetService
 from lab_tracker.services.project_service import ProjectService
 from lab_tracker.services.shared import (
     WRITE_ROLES,
-    _actor_user_id,
     _analysis_has_question_link,
     _ensure_analysis_status_transition,
-    _ensure_non_empty,
-    _unique_ids,
+    actor_user_id,
+    ensure_non_empty,
+    unique_ids,
 )
 
 if TYPE_CHECKING:
@@ -72,7 +72,7 @@ class AnalysisService(BaseService):
     ) -> Analysis:
         require_role(actor, WRITE_ROLES)
         self.projects.get_project(project_id)
-        dataset_id_list = _unique_ids(dataset_ids)
+        dataset_id_list = unique_ids(dataset_ids)
         if not dataset_id_list:
             raise ValidationError("Analysis must reference at least one dataset.")
         datasets = []
@@ -81,8 +81,8 @@ class AnalysisService(BaseService):
             if dataset.project_id != project_id:
                 raise ValidationError("Datasets must belong to the same project.")
             datasets.append(dataset)
-        _ensure_non_empty(method_hash, "method_hash")
-        _ensure_non_empty(code_version, "code_version")
+        ensure_non_empty(method_hash, "method_hash")
+        ensure_non_empty(code_version, "code_version")
         if status == AnalysisStatus.COMMITTED:
             for dataset in datasets:
                 if dataset.status != DatasetStatus.COMMITTED:
@@ -97,7 +97,7 @@ class AnalysisService(BaseService):
             code_version=code_version.strip(),
             environment_hash=environment_hash.strip() if environment_hash else None,
             status=status,
-            executed_by=_actor_user_id(actor),
+            executed_by=actor_user_id(actor),
         )
         with self.unit_of_work() as repository:
             repository.analyses.save(analysis)

@@ -147,6 +147,8 @@ class LabTrackerAPI:
             try:
                 action()
             except Exception as exc:
+                # Deferred cleanup should not reverse an already-decided request outcome.
+                # Log and continue so independent cleanup actions still get a chance to run.
                 _logger.warning("Deferred %s action failed: %s", label, exc, exc_info=True)
 
     def run_after_commit(self, action: Callable[[], None]) -> None:
