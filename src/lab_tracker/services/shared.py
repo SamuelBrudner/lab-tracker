@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import hashlib
 import json
-from typing import Iterable
+from enum import Enum
+from typing import Iterable, Mapping, TypeVar
 from uuid import UUID
 
 from lab_tracker.auth import AuthContext, Role
@@ -29,6 +30,7 @@ from lab_tracker.models import (
 )
 
 WRITE_ROLES = {Role.ADMIN, Role.EDITOR}
+StatusT = TypeVar("StatusT", bound=Enum)
 
 
 def _actor_user_id(actor: AuthContext | None) -> str | None:
@@ -153,59 +155,79 @@ _CLAIM_STATUS_TRANSITIONS: dict[ClaimStatus, set[ClaimStatus]] = {
 }
 
 
+def _ensure_status_transition(
+    current_status: StatusT,
+    next_status: StatusT,
+    transitions: Mapping[StatusT, set[StatusT]],
+    *,
+    entity_name: str,
+) -> None:
+    allowed = transitions.get(current_status, {current_status})
+    if next_status not in allowed:
+        raise ValidationError(
+            f"{entity_name} status cannot transition "
+            f"from {current_status.value} to {next_status.value}."
+        )
+
+
 def _ensure_question_status_transition(
     current_status: QuestionStatus,
     next_status: QuestionStatus,
 ) -> None:
-    allowed = _QUESTION_STATUS_TRANSITIONS.get(current_status, {current_status})
-    if next_status not in allowed:
-        raise ValidationError(
-            f"Question status cannot transition from {current_status.value} to {next_status.value}."
-        )
+    _ensure_status_transition(
+        current_status,
+        next_status,
+        _QUESTION_STATUS_TRANSITIONS,
+        entity_name="Question",
+    )
 
 
 def _ensure_analysis_status_transition(
     current_status: AnalysisStatus,
     next_status: AnalysisStatus,
 ) -> None:
-    allowed = _ANALYSIS_STATUS_TRANSITIONS.get(current_status, {current_status})
-    if next_status not in allowed:
-        raise ValidationError(
-            f"Analysis status cannot transition from {current_status.value} to {next_status.value}."
-        )
+    _ensure_status_transition(
+        current_status,
+        next_status,
+        _ANALYSIS_STATUS_TRANSITIONS,
+        entity_name="Analysis",
+    )
 
 
 def _ensure_dataset_status_transition(
     current_status: DatasetStatus,
     next_status: DatasetStatus,
 ) -> None:
-    allowed = _DATASET_STATUS_TRANSITIONS.get(current_status, {current_status})
-    if next_status not in allowed:
-        raise ValidationError(
-            f"Dataset status cannot transition from {current_status.value} to {next_status.value}."
-        )
+    _ensure_status_transition(
+        current_status,
+        next_status,
+        _DATASET_STATUS_TRANSITIONS,
+        entity_name="Dataset",
+    )
 
 
 def _ensure_session_status_transition(
     current_status: SessionStatus,
     next_status: SessionStatus,
 ) -> None:
-    allowed = _SESSION_STATUS_TRANSITIONS.get(current_status, {current_status})
-    if next_status not in allowed:
-        raise ValidationError(
-            f"Session status cannot transition from {current_status.value} to {next_status.value}."
-        )
+    _ensure_status_transition(
+        current_status,
+        next_status,
+        _SESSION_STATUS_TRANSITIONS,
+        entity_name="Session",
+    )
 
 
 def _ensure_claim_status_transition(
     current_status: ClaimStatus,
     next_status: ClaimStatus,
 ) -> None:
-    allowed = _CLAIM_STATUS_TRANSITIONS.get(current_status, {current_status})
-    if next_status not in allowed:
-        raise ValidationError(
-            f"Claim status cannot transition from {current_status.value} to {next_status.value}."
-        )
+    _ensure_status_transition(
+        current_status,
+        next_status,
+        _CLAIM_STATUS_TRANSITIONS,
+        entity_name="Claim",
+    )
 
 
 def _ensure_question_parents_dag(
