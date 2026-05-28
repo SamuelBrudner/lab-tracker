@@ -289,9 +289,9 @@ List/search endpoints use `limit` between 1 and 200 and `offset` of 0 or greater
 - `dataset_id` (optional): string(uuid) | null
 - `limit` (optional): integer; minimum 1.0, maximum 100.0, default 20
 - `project_id` (optional): string(uuid) | null
-- `query` (required): string
+- `query` (required): string; min length 1
 - `question_id` (optional): string(uuid) | null
-- `task_kind` (required): string
+- `task_kind` (required): string; min length 1
 - `visualization_id` (optional): string(uuid) | null
 
 ### List/Search Query Parameters

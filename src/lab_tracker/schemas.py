@@ -7,10 +7,10 @@ Envelope/ListEnvelope wrappers. Request payloads use purpose-built schemas below
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any, Generic, Literal, TypeVar
+from typing import Annotated, Any, Generic, Literal, TypeVar
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import AfterValidator, BaseModel, ConfigDict, Field, field_validator
 
 from lab_tracker.auth import Role
 from lab_tracker.models import (
@@ -43,6 +43,37 @@ from lab_tracker.models import (
 )
 
 T = TypeVar("T")
+
+
+def _non_blank_string(value: str) -> str:
+    if not value.strip():
+        raise ValueError("must not be empty")
+    return value
+
+
+NonBlankStr = Annotated[str, Field(min_length=1), AfterValidator(_non_blank_string)]
+
+
+def _unique_uuid_list(value: list[UUID] | None) -> list[UUID] | None:
+    if value is None:
+        return None
+    if len(set(value)) != len(value):
+        raise ValueError("Duplicate id in list.")
+    return value
+
+
+def _normalize_note_metadata_for_request(
+    metadata: dict[str, NoteMetadataScalar] | None,
+) -> dict[str, str] | None:
+    if metadata is None:
+        return None
+    cleaned: dict[str, str] = {}
+    for key, value in metadata.items():
+        cleaned_key = str(key).strip()
+        if not cleaned_key:
+            raise ValueError("metadata key must not be empty")
+        cleaned[cleaned_key] = value.strip() if isinstance(value, str) else str(value)
+    return cleaned
 
 
 class RequestModel(BaseModel):
@@ -95,15 +126,15 @@ class AuthTokenRead(BaseModel):
 
 
 class AuthRegisterRequest(RequestModel):
-    username: str = Field(..., min_length=1)
-    password: str = Field(..., min_length=1)
+    username: NonBlankStr
+    password: NonBlankStr
     role: Role = Role.VIEWER
-    bootstrap_token: str | None = Field(default=None, min_length=1)
+    bootstrap_token: NonBlankStr | None = None
 
 
 class AuthLoginRequest(RequestModel):
-    username: str = Field(..., min_length=1)
-    password: str = Field(..., min_length=1)
+    username: NonBlankStr
+    password: NonBlankStr
 
 
 class DeviceEnrollmentCreate(RequestModel):
@@ -119,8 +150,8 @@ class DeviceEnrollmentRead(BaseModel):
 
 
 class DeviceConsumeRequest(RequestModel):
-    offer_token: str = Field(..., min_length=1)
-    label: str = Field(..., min_length=1, max_length=150)
+    offer_token: NonBlankStr
+    label: Annotated[str, Field(min_length=1, max_length=150), AfterValidator(_non_blank_string)]
 
 
 class DeviceTokenRead(BaseModel):
@@ -148,13 +179,13 @@ class NoteRawDownloadRead(BaseModel):
 
 
 class ProjectCreate(RequestModel):
-    name: str = Field(..., min_length=1)
+    name: NonBlankStr
     description: str | None = None
     status: ProjectStatus | None = None
 
 
 class ProjectUpdate(RequestModel):
-    name: str | None = None
+    name: NonBlankStr | None = None
     description: str | None = None
     status: ProjectStatus | None = None
 
@@ -174,34 +205,54 @@ ProjectMembershipRead = ProjectMembership
 
 class QuestionCreate(RequestModel):
     project_id: UUID
-    text: str = Field(..., min_length=1)
+    text: NonBlankStr
     question_type: QuestionType
     hypothesis: str | None = None
     status: QuestionStatus | None = None
     parent_question_ids: list[UUID] | None = None
 
+    @field_validator("parent_question_ids")
+    @classmethod
+    def _parent_question_ids_unique(cls, value: list[UUID] | None) -> list[UUID] | None:
+        return _unique_uuid_list(value)
+
 
 class QuestionUpdate(RequestModel):
-    text: str | None = None
+    text: NonBlankStr | None = None
     question_type: QuestionType | None = None
     hypothesis: str | None = None
     status: QuestionStatus | None = None
     parent_question_ids: list[UUID] | None = None
 
+    @field_validator("parent_question_ids")
+    @classmethod
+    def _parent_question_ids_unique(cls, value: list[UUID] | None) -> list[UUID] | None:
+        return _unique_uuid_list(value)
+
 
 class QuestionRefactorReplacement(RequestModel):
-    text: str = Field(..., min_length=1)
+    text: NonBlankStr
     question_type: QuestionType
     hypothesis: str | None = None
     status: QuestionStatus
     parent_question_ids: list[UUID] | None = None
 
+    @field_validator("parent_question_ids")
+    @classmethod
+    def _parent_question_ids_unique(cls, value: list[UUID] | None) -> list[UUID] | None:
+        return _unique_uuid_list(value)
+
 
 class QuestionRefactorRequest(RequestModel):
     replacement: QuestionRefactorReplacement
-    reason: str = Field(..., min_length=1)
+    reason: NonBlankStr
     child_question_ids_to_reparent: list[UUID] = Field(default_factory=list)
     note_ids_to_retarget: list[UUID] = Field(default_factory=list)
+
+    @field_validator("child_question_ids_to_reparent", "note_ids_to_retarget")
+    @classmethod
+    def _target_ids_unique(cls, value: list[UUID]) -> list[UUID]:
+        return _unique_uuid_list(value) or []
 
 
 class QuestionRefactorResult(BaseModel):
@@ -218,6 +269,11 @@ class DatasetCreate(RequestModel):
     secondary_question_ids: list[UUID] | None = None
     status: DatasetStatus | None = None
 
+    @field_validator("secondary_question_ids")
+    @classmethod
+    def _secondary_question_ids_unique(cls, value: list[UUID] | None) -> list[UUID] | None:
+        return _unique_uuid_list(value)
+
 
 class DatasetUpdate(RequestModel):
     commit_manifest: DatasetCommitManifestInput | None = None
@@ -228,11 +284,19 @@ class DatasetUpdate(RequestModel):
 
 class NoteCreate(RequestModel):
     project_id: UUID
-    raw_content: str = Field(..., min_length=1)
+    raw_content: NonBlankStr
     transcribed_text: str | None = None
     targets: list[EntityRef] | None = None
     metadata: dict[str, NoteMetadataScalar] | None = None
     status: NoteStatus | None = None
+
+    @field_validator("metadata")
+    @classmethod
+    def _metadata_normalized(
+        cls,
+        value: dict[str, NoteMetadataScalar] | None,
+    ) -> dict[str, str] | None:
+        return _normalize_note_metadata_for_request(value)
 
 
 class NoteUpdate(RequestModel):
@@ -241,9 +305,17 @@ class NoteUpdate(RequestModel):
     metadata: dict[str, NoteMetadataScalar] | None = None
     status: NoteStatus | None = None
 
+    @field_validator("metadata")
+    @classmethod
+    def _metadata_normalized(
+        cls,
+        value: dict[str, NoteMetadataScalar] | None,
+    ) -> dict[str, str] | None:
+        return _normalize_note_metadata_for_request(value)
+
 
 class NoteTranscriptRequest(RequestModel):
-    prompt: str | None = Field(default=None, min_length=1)
+    prompt: NonBlankStr | None = None
 
 
 class GraphDraftOperationUpdate(RequestModel):
@@ -253,16 +325,16 @@ class GraphDraftOperationUpdate(RequestModel):
 
 class GraphDraftCreateRequest(RequestModel):
     mode: GraphDraftMode = GraphDraftMode.GRAPH_CONTEXT
-    user_hint: str | None = Field(default=None, min_length=1)
+    user_hint: NonBlankStr | None = None
 
 
 class GraphDraftCommitRequest(RequestModel):
-    message: str = Field(..., min_length=1)
+    message: NonBlankStr
 
 
 class GraphDraftReviewRequest(RequestModel):
     status: GraphChangeSetStatus
-    note: str | None = Field(default=None, min_length=1)
+    note: NonBlankStr | None = None
 
 
 class GraphDraftListFilters(BaseModel):
@@ -272,8 +344,8 @@ class GraphDraftListFilters(BaseModel):
 
 
 class AssistantDecisionContextRequest(RequestModel):
-    task_kind: str
-    query: str
+    task_kind: NonBlankStr
+    query: NonBlankStr
     project_id: UUID | None = None
     question_id: UUID | None = None
     dataset_id: UUID | None = None
@@ -306,20 +378,30 @@ class SessionDatasetPromotionRequest(RequestModel):
     commit_manifest: DatasetCommitManifestInput | None = None
     status: DatasetStatus | None = None
 
+    @field_validator("secondary_question_ids")
+    @classmethod
+    def _secondary_question_ids_unique(cls, value: list[UUID] | None) -> list[UUID] | None:
+        return _unique_uuid_list(value)
+
 
 class AcquisitionOutputCreate(RequestModel):
-    file_path: str = Field(..., min_length=1)
-    checksum: str = Field(..., min_length=1)
+    file_path: NonBlankStr
+    checksum: NonBlankStr
     size_bytes: int | None = Field(default=None, ge=0)
 
 
 class AnalysisCreate(RequestModel):
     project_id: UUID
     dataset_ids: list[UUID] = Field(..., min_length=1)
-    method_hash: str = Field(..., min_length=1)
-    code_version: str = Field(..., min_length=1)
+    method_hash: NonBlankStr
+    code_version: NonBlankStr
     environment_hash: str | None = None
     status: AnalysisStatus | None = None
+
+    @field_validator("dataset_ids")
+    @classmethod
+    def _dataset_ids_unique(cls, value: list[UUID]) -> list[UUID]:
+        return _unique_uuid_list(value) or []
 
 
 class AnalysisUpdate(RequestModel):
@@ -329,34 +411,54 @@ class AnalysisUpdate(RequestModel):
 
 class ClaimCreate(RequestModel):
     project_id: UUID
-    statement: str = Field(..., min_length=1)
+    statement: NonBlankStr
     confidence: float = Field(..., ge=0.0, le=100.0)
     status: ClaimStatus | None = None
     supported_by_dataset_ids: list[UUID] | None = None
     supported_by_analysis_ids: list[UUID] | None = None
 
+    @field_validator("supported_by_dataset_ids", "supported_by_analysis_ids")
+    @classmethod
+    def _support_ids_unique(cls, value: list[UUID] | None) -> list[UUID] | None:
+        return _unique_uuid_list(value)
+
 
 class ClaimUpdate(RequestModel):
-    statement: str | None = Field(None, min_length=1)
+    statement: NonBlankStr | None = None
     confidence: float | None = Field(None, ge=0.0, le=100.0)
     status: ClaimStatus | None = None
     supported_by_dataset_ids: list[UUID] | None = None
     supported_by_analysis_ids: list[UUID] | None = None
 
+    @field_validator("supported_by_dataset_ids", "supported_by_analysis_ids")
+    @classmethod
+    def _support_ids_unique(cls, value: list[UUID] | None) -> list[UUID] | None:
+        return _unique_uuid_list(value)
+
 
 class VisualizationCreate(RequestModel):
     analysis_id: UUID
-    viz_type: str = Field(..., min_length=1)
-    file_path: str = Field(..., min_length=1)
+    viz_type: NonBlankStr
+    file_path: NonBlankStr
     caption: str | None = None
     related_claim_ids: list[UUID] | None = None
+
+    @field_validator("related_claim_ids")
+    @classmethod
+    def _related_claim_ids_unique(cls, value: list[UUID] | None) -> list[UUID] | None:
+        return _unique_uuid_list(value)
 
 
 class VisualizationUpdate(RequestModel):
-    viz_type: str | None = Field(None, min_length=1)
-    file_path: str | None = Field(None, min_length=1)
+    viz_type: NonBlankStr | None = None
+    file_path: NonBlankStr | None = None
     caption: str | None = None
     related_claim_ids: list[UUID] | None = None
+
+    @field_validator("related_claim_ids")
+    @classmethod
+    def _related_claim_ids_unique(cls, value: list[UUID] | None) -> list[UUID] | None:
+        return _unique_uuid_list(value)
 
 
 ProjectGraphView = Literal["evidence", "questions", "full"]
