@@ -1,6 +1,8 @@
 from datetime import datetime, timezone
 from uuid import UUID, uuid4
 
+from lab_tracker import sqlalchemy_mappers
+from lab_tracker.db_models import ProjectModel
 from lab_tracker.models import (
     Dataset,
     DatasetCommitManifest,
@@ -17,6 +19,12 @@ from lab_tracker.models import (
     QuestionStatus,
     QuestionType,
 )
+from lab_tracker.schemas import Envelope, ProjectCreate
+from lab_tracker.sqlalchemy_mapper_parts.projects import (
+    apply_project_to_model,
+    project_from_model,
+    project_to_model,
+)
 from lab_tracker.sqlalchemy_mappers import (
     dataset_from_model,
     dataset_question_link_from_model,
@@ -26,8 +34,6 @@ from lab_tracker.sqlalchemy_mappers import (
     note_from_model,
     note_target_models,
     note_to_model,
-    project_from_model,
-    project_to_model,
     question_from_model,
     question_parent_models,
     question_to_model,
@@ -51,6 +57,42 @@ def test_project_mapper_round_trip():
     row = project_to_model(project)
     mapped = project_from_model(row)
     assert mapped == project
+
+
+def test_project_mapper_pilot_preserves_compatibility_barrel():
+    assert sqlalchemy_mappers.project_to_model is project_to_model
+    assert sqlalchemy_mappers.project_from_model is project_from_model
+    assert sqlalchemy_mappers.apply_project_to_model is apply_project_to_model
+
+
+def test_project_mapper_pilot_keeps_schema_domain_and_orm_boundaries():
+    payload = ProjectCreate(
+        name="Neural Mapping",
+        description="wire input",
+        status=ProjectStatus.ACTIVE,
+    )
+    project = Project(
+        project_id=uuid4(),
+        name=payload.name,
+        description=payload.description or "",
+        status=payload.status or ProjectStatus.ACTIVE,
+        created_by="scientist@example.com",
+        created_at=_ts(),
+        updated_at=_ts(),
+    )
+
+    row = project_to_model(project)
+    response_payload = Envelope[Project](data=project).model_dump(mode="json")
+
+    assert isinstance(row, ProjectModel)
+    assert row.project_id == str(project.project_id)
+    assert project_from_model(row) == project
+    assert response_payload["data"]["project_id"] == str(project.project_id)
+    assert response_payload["data"]["status"] == "active"
+
+    updated = project.model_copy(update={"name": "Neural Mapping Updated"})
+    apply_project_to_model(row, updated)
+    assert project_from_model(row) == updated
 
 
 def test_question_mapper_round_trip_with_parent_links():

@@ -24,14 +24,16 @@ from lab_tracker.models import (
     QuestionRefactor,
 )
 from lab_tracker.repository import EntityRepository
+from lab_tracker.sqlalchemy_mapper_parts.projects import (
+    apply_project_to_model,
+    project_from_model,
+    project_to_model,
+)
 from lab_tracker.sqlalchemy_mappers import (
     apply_project_membership_to_model,
     apply_question_refactor_to_model,
-    apply_project_to_model,
     apply_question_to_model,
     project_membership_to_model,
-    project_from_model,
-    project_to_model,
     question_from_model,
     question_parent_models,
     question_refactor_from_model,

@@ -18,7 +18,6 @@ from lab_tracker.db_models import (
     NoteModel,
     NoteTargetModel,
     ProjectMembershipModel,
-    ProjectModel,
     QuestionModel,
     QuestionParentModel,
     QuestionRefactorModel,
@@ -42,10 +41,8 @@ from lab_tracker.models import (
     NoteRawAsset,
     NoteStatus,
     OutcomeStatus,
-    Project,
     ProjectMembership,
     ProjectMembershipRole,
-    ProjectStatus,
     Question,
     QuestionRefactor,
     QuestionLink,
@@ -57,6 +54,11 @@ from lab_tracker.models import (
     SessionType,
     Visualization,
     VisualizationAsset,
+)
+from lab_tracker.sqlalchemy_mapper_parts.projects import (
+    apply_project_to_model as apply_project_to_model,
+    project_from_model as project_from_model,
+    project_to_model as project_to_model,
 )
 
 
@@ -88,39 +90,6 @@ def _dataset_files_from_json(raw_files: Iterable[object] | None) -> list[Dataset
     if not raw_files:
         return []
     return [DatasetFile.model_validate(item) for item in raw_files]
-
-
-def project_to_model(project: Project) -> ProjectModel:
-    return ProjectModel(
-        project_id=_uuid_str(project.project_id),
-        name=project.name,
-        description=project.description,
-        status=project.status.value,
-        created_by=project.created_by,
-        created_at=project.created_at,
-        updated_at=project.updated_at,
-    )
-
-
-def project_from_model(row: ProjectModel) -> Project:
-    return Project(
-        project_id=_uuid(row.project_id),
-        name=row.name,
-        description=row.description,
-        status=ProjectStatus(row.status),
-        created_by=row.created_by,
-        created_at=_as_utc(row.created_at),
-        updated_at=_as_utc(row.updated_at),
-    )
-
-
-def apply_project_to_model(row: ProjectModel, project: Project) -> None:
-    row.name = project.name
-    row.description = project.description
-    row.status = project.status.value
-    row.created_by = project.created_by
-    row.created_at = project.created_at
-    row.updated_at = project.updated_at
 
 
 def project_membership_to_model(membership: ProjectMembership) -> ProjectMembershipModel:

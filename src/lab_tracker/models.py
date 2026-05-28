@@ -1,8 +1,8 @@
 """Core domain models for lab tracker.
 
-The project intentionally keeps a single "domain model" representation that is used
-throughout the in-memory API layer and for API responses (Pydantic models). SQLAlchemy
-models remain the persistence representation.
+Domain models are the service/repository contract and the response payload type for
+retained-v1 routes. SQLAlchemy models remain persistence rows, and request schemas
+remain explicit Pydantic wire/input models.
 """
 
 from __future__ import annotations
