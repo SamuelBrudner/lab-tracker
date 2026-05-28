@@ -16,6 +16,7 @@ from lab_tracker.services import (
     DatasetService,
     GraphDraftService,
     NoteService,
+    ProjectAuthorizationPolicy,
     ProjectService,
     QuestionService,
     ServiceContext,
@@ -69,6 +70,7 @@ def test_api_no_longer_subclasses_service_classes() -> None:
 def test_api_composes_named_service_instances() -> None:
     api = repository_backed_api()
 
+    assert isinstance(api.project_authorization, ProjectAuthorizationPolicy)
     assert isinstance(api.projects, ProjectService)
     assert isinstance(api.questions, QuestionService)
     assert isinstance(api.datasets, DatasetService)
@@ -81,10 +83,15 @@ def test_api_composes_named_service_instances() -> None:
     assert api.questions.projects is api.projects
     assert api.datasets.sessions is api.sessions
     assert api.graph_drafts.notes is api.notes
+    assert api.projects.authorization is api.project_authorization
+    assert api.notes.authorization is api.project_authorization
+    assert api.graph_drafts.authorization is api.project_authorization
 
 
 def test_project_service_can_run_without_api_facade() -> None:
-    service = ProjectService(ServiceContext(repository=_repository()))
+    context = ServiceContext(repository=_repository())
+    authorization = ProjectAuthorizationPolicy(context)
+    service = ProjectService(context, authorization=authorization)
     project = service.create_project("Standalone service", actor=_actor())
 
     assert service.get_project(project.project_id).name == "Standalone service"

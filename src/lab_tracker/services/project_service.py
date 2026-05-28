@@ -5,7 +5,7 @@ from __future__ import annotations
 from uuid import UUID, uuid4
 
 from lab_tracker.auth import AuthContext, require_role
-from lab_tracker.errors import AuthError, NotFoundError, ValidationError
+from lab_tracker.errors import NotFoundError, ValidationError
 from lab_tracker.models import (
     Project,
     ProjectMembership,
@@ -13,21 +13,25 @@ from lab_tracker.models import (
     ProjectStatus,
     utc_now,
 )
+from lab_tracker.services.base import BaseService, ServiceContext
+from lab_tracker.services.project_authorization import ProjectAuthorizationPolicy
 from lab_tracker.services.shared import (
-    PROJECT_CONTRIBUTOR_ROLES,
-    PROJECT_OWNER_ROLES,
-    PROJECT_READ_ROLES,
     WRITE_ROLES,
     _actor_user_id,
     _ensure_non_empty,
-    has_global_project_admin,
-    has_global_project_read,
-    has_global_project_write,
 )
-from lab_tracker.services.base import BaseService
 
 
 class ProjectService(BaseService):
+    def __init__(
+        self,
+        context: ServiceContext,
+        *,
+        authorization: ProjectAuthorizationPolicy,
+    ) -> None:
+        super().__init__(context)
+        self.authorization = authorization
+
     def create_project(
         self,
         name: str,
@@ -47,7 +51,7 @@ class ProjectService(BaseService):
         )
         with self.unit_of_work() as repository:
             repository.projects.save(project)
-        if actor is not None and not has_global_project_admin(actor):
+        if actor is not None and not self.authorization.has_global_admin(actor):
             membership = ProjectMembership(
                 membership_id=uuid4(),
                 project_id=project.project_id,
@@ -142,7 +146,7 @@ class ProjectService(BaseService):
         *,
         actor: AuthContext | None = None,
     ) -> ProjectMembership:
-        self.require_project_owner(project_id, actor=actor)
+        self.authorization.require_owner(project_id, actor=actor)
         self.get_project(project_id)
         existing = self.get_project_membership_for_user(project_id, user_id)
         if existing is None:
@@ -168,7 +172,7 @@ class ProjectService(BaseService):
         *,
         actor: AuthContext | None = None,
     ) -> ProjectMembership:
-        self.require_project_owner(project_id, actor=actor)
+        self.authorization.require_owner(project_id, actor=actor)
         membership = self.get_project_membership_for_user(project_id, user_id)
         if membership is None:
             raise NotFoundError("Project membership does not exist.")
@@ -184,26 +188,14 @@ class ProjectService(BaseService):
         return membership
 
     def accessible_project_ids(self, actor: AuthContext | None) -> set[UUID] | None:
-        if has_global_project_read(actor):
-            return None
-        if actor is None:
-            raise AuthError("Authentication required.")
-        return {
-            membership.project_id
-            for membership in self.list_project_memberships(user_id=actor.user_id)
-        }
+        return self.authorization.accessible_project_ids(actor)
 
     def project_membership_role(
         self,
         project_id: UUID,
         actor: AuthContext | None,
     ) -> ProjectMembershipRole | None:
-        if actor is None:
-            raise AuthError("Authentication required.")
-        if has_global_project_read(actor):
-            return ProjectMembershipRole.OWNER
-        membership = self.get_project_membership_for_user(project_id, actor.user_id)
-        return membership.role if membership is not None else None
+        return self.authorization.membership_role(project_id, actor)
 
     def require_project_read(
         self,
@@ -211,9 +203,7 @@ class ProjectService(BaseService):
         *,
         actor: AuthContext | None = None,
     ) -> None:
-        role = self.project_membership_role(project_id, actor)
-        if role not in PROJECT_READ_ROLES:
-            raise AuthError("Project access required.")
+        self.authorization.require_read(project_id, actor=actor)
 
     def require_project_contributor(
         self,
@@ -221,11 +211,7 @@ class ProjectService(BaseService):
         *,
         actor: AuthContext | None = None,
     ) -> None:
-        if has_global_project_write(actor):
-            return
-        role = self.project_membership_role(project_id, actor)
-        if role not in PROJECT_CONTRIBUTOR_ROLES:
-            raise AuthError("Project contributor access required.")
+        self.authorization.require_contributor(project_id, actor=actor)
 
     def require_project_owner(
         self,
@@ -233,11 +219,4 @@ class ProjectService(BaseService):
         *,
         actor: AuthContext | None = None,
     ) -> None:
-        if has_global_project_admin(actor):
-            return
-        if actor is None:
-            raise AuthError("Authentication required.")
-        membership = self.get_project_membership_for_user(project_id, actor.user_id)
-        role = membership.role if membership is not None else None
-        if role not in PROJECT_OWNER_ROLES:
-            raise AuthError("Project owner access required.")
+        self.authorization.require_owner(project_id, actor=actor)

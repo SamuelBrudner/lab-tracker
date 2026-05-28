@@ -60,9 +60,10 @@ from lab_tracker.services.base import BaseService, ServiceContext
 from lab_tracker.services.claim_service import ClaimService
 from lab_tracker.services.dataset_service import DatasetService
 from lab_tracker.services.note_service import NoteService
+from lab_tracker.services.project_authorization import ProjectAuthorizationPolicy
 from lab_tracker.services.project_service import ProjectService
 from lab_tracker.services.question_service import QuestionService
-from lab_tracker.services.shared import _actor_user_id, has_global_project_write
+from lab_tracker.services.shared import _actor_user_id
 from lab_tracker.services.session_service import SessionService
 from lab_tracker.services.visualization_service import VisualizationService
 
@@ -147,6 +148,7 @@ class GraphDraftService(BaseService):
         analyses: AnalysisService,
         claims: ClaimService,
         visualizations: VisualizationService,
+        authorization: ProjectAuthorizationPolicy,
     ) -> None:
         super().__init__(context)
         self.projects = projects
@@ -157,6 +159,7 @@ class GraphDraftService(BaseService):
         self.analyses = analyses
         self.claims = claims
         self.visualizations = visualizations
+        self.authorization = authorization
 
     def create_graph_draft_from_note(
         self,
@@ -169,7 +172,7 @@ class GraphDraftService(BaseService):
     ) -> GraphChangeSet:
         prepared = self._prepare_note_sources_for_graph_draft(note_id, mode=mode)
         note = prepared["source_note"]
-        self.projects.require_project_contributor(note.project_id, actor=actor)
+        self.authorization.require_contributor(note.project_id, actor=actor)
         raw_asset = prepared["primary_raw_asset"]
         cleaned_hint = user_hint.strip() if user_hint else None
         if mode == GraphDraftMode.GRAPH_CONTEXT:
@@ -301,10 +304,10 @@ class GraphDraftService(BaseService):
         actor: AuthContext | None = None,
     ) -> GraphChangeSet:
         change_set = self.get_graph_change_set(change_set_id)
-        self.projects.require_project_contributor(change_set.project_id, actor=actor)
-        if not self._is_graph_change_set_author(change_set, actor) and not has_global_project_write(
-            actor
-        ):
+        self.authorization.require_contributor(change_set.project_id, actor=actor)
+        if not self._is_graph_change_set_author(
+            change_set, actor
+        ) and not self.authorization.has_global_write(actor):
             raise ValidationError("Only the graph draft author can submit this draft.")
         if change_set.status not in {
             GraphChangeSetStatus.READY,
@@ -330,7 +333,7 @@ class GraphDraftService(BaseService):
         actor: AuthContext | None = None,
     ) -> GraphChangeSet:
         change_set = self.get_graph_change_set(change_set_id)
-        self.projects.require_project_owner(change_set.project_id, actor=actor)
+        self.authorization.require_owner(change_set.project_id, actor=actor)
         if status not in {
             GraphChangeSetStatus.CHANGES_REQUESTED,
             GraphChangeSetStatus.REJECTED,
@@ -356,7 +359,7 @@ class GraphDraftService(BaseService):
         if not message or not message.strip():
             raise ValidationError("message must not be empty.")
         change_set = self.get_graph_change_set(change_set_id)
-        self.projects.require_project_owner(change_set.project_id, actor=actor)
+        self.authorization.require_owner(change_set.project_id, actor=actor)
         if change_set.status not in {
             GraphChangeSetStatus.READY,
             GraphChangeSetStatus.SUBMITTED,
@@ -406,9 +409,9 @@ class GraphDraftService(BaseService):
             GraphChangeSetStatus.FAILED,
         }:
             raise ValidationError("This graph draft cannot be edited.")
-        if has_global_project_write(actor):
+        if self.authorization.has_global_write(actor):
             return
-        self.projects.require_project_contributor(change_set.project_id, actor=actor)
+        self.authorization.require_contributor(change_set.project_id, actor=actor)
         if not self._is_graph_change_set_author(change_set, actor):
             raise ValidationError("Only the graph draft author can edit this draft.")
         if change_set.status not in {

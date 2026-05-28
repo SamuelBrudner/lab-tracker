@@ -17,6 +17,7 @@ from lab_tracker.services import (
     DatasetService,
     GraphDraftService,
     NoteService,
+    ProjectAuthorizationPolicy,
     ProjectService,
     QuestionService,
     ServiceContext,
@@ -48,7 +49,13 @@ class LabTrackerAPI:
 
     def _compose_services(self) -> None:
         context = self._service_context
-        self.projects: ProjectService = ProjectService(context)
+        self.project_authorization: ProjectAuthorizationPolicy = ProjectAuthorizationPolicy(
+            context
+        )
+        self.projects: ProjectService = ProjectService(
+            context,
+            authorization=self.project_authorization,
+        )
         self.questions: QuestionService = QuestionService(
             context,
             projects=self.projects,
@@ -93,6 +100,7 @@ class LabTrackerAPI:
             analyses=self.analyses,
             claims=self.claims,
             visualizations=self.visualizations,
+            authorization=self.project_authorization,
         )
         self.graph_drafts: GraphDraftService = GraphDraftService(
             context,
@@ -104,6 +112,7 @@ class LabTrackerAPI:
             analyses=self.analyses,
             claims=self.claims,
             visualizations=self.visualizations,
+            authorization=self.project_authorization,
         )
 
     def for_request(self, repository: LabTrackerRepository) -> "LabTrackerAPI":
@@ -181,19 +190,19 @@ class LabTrackerAPI:
         return self.projects.delete_project_membership(*args, **kwargs)
 
     def accessible_project_ids(self, *args: Any, **kwargs: Any) -> Any:
-        return self.projects.accessible_project_ids(*args, **kwargs)
+        return self.project_authorization.accessible_project_ids(*args, **kwargs)
 
     def project_membership_role(self, *args: Any, **kwargs: Any) -> Any:
-        return self.projects.project_membership_role(*args, **kwargs)
+        return self.project_authorization.membership_role(*args, **kwargs)
 
     def require_project_read(self, *args: Any, **kwargs: Any) -> Any:
-        return self.projects.require_project_read(*args, **kwargs)
+        return self.project_authorization.require_read(*args, **kwargs)
 
     def require_project_contributor(self, *args: Any, **kwargs: Any) -> Any:
-        return self.projects.require_project_contributor(*args, **kwargs)
+        return self.project_authorization.require_contributor(*args, **kwargs)
 
     def require_project_owner(self, *args: Any, **kwargs: Any) -> Any:
-        return self.projects.require_project_owner(*args, **kwargs)
+        return self.project_authorization.require_owner(*args, **kwargs)
 
     def create_question(self, *args: Any, **kwargs: Any) -> Any:
         return self.questions.create_question(*args, **kwargs)

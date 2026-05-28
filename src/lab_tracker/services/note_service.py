@@ -26,6 +26,7 @@ from lab_tracker.services.analysis_service import AnalysisService
 from lab_tracker.services.base import BaseService, ServiceContext
 from lab_tracker.services.claim_service import ClaimService
 from lab_tracker.services.dataset_service import DatasetService
+from lab_tracker.services.project_authorization import ProjectAuthorizationPolicy
 from lab_tracker.services.project_service import ProjectService
 from lab_tracker.services.question_service import QuestionService
 from lab_tracker.services.session_service import SessionService
@@ -46,6 +47,7 @@ class NoteService(BaseService):
         analyses: AnalysisService,
         claims: ClaimService,
         visualizations: VisualizationService,
+        authorization: ProjectAuthorizationPolicy,
     ) -> None:
         super().__init__(context)
         self.projects = projects
@@ -55,6 +57,7 @@ class NoteService(BaseService):
         self.analyses = analyses
         self.claims = claims
         self.visualizations = visualizations
+        self.authorization = authorization
 
     def _delete_raw_asset(self, raw_asset: NoteRawAsset | None) -> None:
         if raw_asset is None or self.raw_storage is None:
@@ -90,7 +93,7 @@ class NoteService(BaseService):
         status: NoteStatus = NoteStatus.STAGED,
         actor: AuthContext | None = None,
     ) -> Note:
-        self.projects.require_project_contributor(project_id, actor=actor)
+        self.authorization.require_contributor(project_id, actor=actor)
         self.projects.get_project(project_id)
         raw_text = raw_content.strip() if raw_content else ""
         if not raw_text and raw_asset is None:
@@ -193,7 +196,7 @@ class NoteService(BaseService):
         actor: AuthContext | None = None,
     ) -> Note:
         note = self.get_note(note_id)
-        self.projects.require_project_contributor(note.project_id, actor=actor)
+        self.authorization.require_contributor(note.project_id, actor=actor)
         if note.raw_asset is None:
             raise ValidationError("Voice transcription requires a note with a raw audio asset.")
         if not note.raw_asset.content_type.lower().startswith("audio/"):
@@ -283,7 +286,7 @@ class NoteService(BaseService):
         actor: AuthContext | None = None,
     ) -> Note:
         note = self.get_note(note_id)
-        self.projects.require_project_contributor(note.project_id, actor=actor)
+        self.authorization.require_contributor(note.project_id, actor=actor)
         if transcribed_text is not None:
             note.transcribed_text = transcribed_text.strip() if transcribed_text else None
         if targets is not None:
@@ -311,7 +314,7 @@ class NoteService(BaseService):
 
     def delete_note(self, note_id: UUID, *, actor: AuthContext | None = None) -> Note:
         note = self.get_note(note_id)
-        self.projects.require_project_contributor(note.project_id, actor=actor)
+        self.authorization.require_contributor(note.project_id, actor=actor)
         with self.unit_of_work() as repository:
             repository.notes.delete(note_id)
         if note.raw_asset is not None:
