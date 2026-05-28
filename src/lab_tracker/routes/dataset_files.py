@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import logging
+from contextlib import suppress
+from typing import Annotated
 from uuid import UUID
 
 from fastapi import APIRouter, File, UploadFile
@@ -60,7 +62,7 @@ def build_dataset_files_router(api: LabTrackerAPI) -> APIRouter:
     async def upload_dataset_file(
         dataset_id: UUID,
         request: Request,
-        file: UploadFile = File(...),
+        file: Annotated[UploadFile, File()],
     ):
         request_api = api_from_request(request, api)
         actor = actor_from_request(request)
@@ -99,10 +101,8 @@ def build_dataset_files_router(api: LabTrackerAPI) -> APIRouter:
         )
         storage_id = metadata.storage_id
         if metadata.size_bytes <= 0:
-            try:
+            with suppress(Exception):
                 storage_backend.delete(storage_id)
-            except Exception:
-                pass
             raise ValidationError("file must not be empty.")
         try:
             row = DatasetFileModel(
@@ -117,16 +117,12 @@ def build_dataset_files_router(api: LabTrackerAPI) -> APIRouter:
             db_session.add(row)
             db_session.flush()
         except IntegrityError as exc:
-            try:
+            with suppress(Exception):
                 storage_backend.delete(storage_id)
-            except Exception:
-                pass
             raise ConflictError("Dataset file could not be registered.") from exc
         except Exception:
-            try:
+            with suppress(Exception):
                 storage_backend.delete(storage_id)
-            except Exception:
-                pass
             raise
         request_api.run_after_rollback(
             lambda storage_id=storage_id: _delete_stored_dataset_file(

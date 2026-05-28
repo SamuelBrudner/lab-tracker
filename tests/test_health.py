@@ -1,5 +1,6 @@
-from lab_tracker.app import create_app
 from fastapi.testclient import TestClient
+
+from lab_tracker.app import create_app
 
 
 def test_health_endpoint():

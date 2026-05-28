@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-from alembic import op
 import sqlalchemy as sa
 
+from alembic import op
 
 revision = "0015_graph_context_draft_metadata"
 down_revision = "0014_graph_draft_review"

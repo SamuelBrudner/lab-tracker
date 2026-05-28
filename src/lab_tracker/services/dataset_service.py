@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from typing import Callable, Iterable, TYPE_CHECKING
+from collections.abc import Callable, Iterable
+from typing import TYPE_CHECKING
 from uuid import UUID, uuid4
 
 from lab_tracker.auth import AuthContext, require_role
@@ -18,6 +19,9 @@ from lab_tracker.models import (
     SessionType,
     utc_now,
 )
+from lab_tracker.services.base import BaseService, ServiceContext
+from lab_tracker.services.project_service import ProjectService
+from lab_tracker.services.question_service import QuestionService
 from lab_tracker.services.shared import (
     WRITE_ROLES,
     _actor_user_id,
@@ -29,9 +33,6 @@ from lab_tracker.services.shared import (
     _unique_ids,
     _validate_commit_hash,
 )
-from lab_tracker.services.base import BaseService, ServiceContext
-from lab_tracker.services.project_service import ProjectService
-from lab_tracker.services.question_service import QuestionService
 
 if TYPE_CHECKING:
     from lab_tracker.services.session_service import SessionService
@@ -63,7 +64,7 @@ class DatasetService(BaseService):
         *,
         projects: ProjectService,
         questions: QuestionService,
-        sessions_provider: Callable[[], "SessionService"],
+        sessions_provider: Callable[[], SessionService],
     ) -> None:
         super().__init__(context)
         self.projects = projects
@@ -71,7 +72,7 @@ class DatasetService(BaseService):
         self._sessions_provider = sessions_provider
 
     @property
-    def sessions(self) -> "SessionService":
+    def sessions(self) -> SessionService:
         return self._sessions_provider()
 
     def create_dataset(
@@ -166,9 +167,10 @@ class DatasetService(BaseService):
         if status is not None:
             _ensure_dataset_status_transition(dataset.status, status)
         was_committed = dataset.status == DatasetStatus.COMMITTED
-        if was_committed:
-            if commit_hash is not None or question_links is not None or commit_manifest is not None:
-                raise ValidationError("Committed datasets are immutable.")
+        if was_committed and (
+            commit_hash is not None or question_links is not None or commit_manifest is not None
+        ):
+            raise ValidationError("Committed datasets are immutable.")
         if question_links is not None:
             links = list(question_links)
             primary_links = [link for link in links if link.role == QuestionLinkRole.PRIMARY]

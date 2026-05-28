@@ -5,11 +5,11 @@ from __future__ import annotations
 from typing import Any
 
 from lab_tracker.mcp_api_client import (
+    QUESTION_STATUS_TEXT,
+    QUESTION_STATUS_VALUES,
     JsonObject,
     LabTrackerAPIError,
     NoteMetadataScalar,
-    QUESTION_STATUS_TEXT,
-    QUESTION_STATUS_VALUES,
     client_from_env,
 )
 

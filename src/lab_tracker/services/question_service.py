@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from typing import Callable, Iterable, TYPE_CHECKING
+from collections.abc import Callable, Iterable
+from typing import TYPE_CHECKING
 from uuid import UUID, uuid4
 
 from lab_tracker.auth import AuthContext, require_role
@@ -17,17 +18,17 @@ from lab_tracker.models import (
     QuestionType,
     utc_now,
 )
+from lab_tracker.services.base import BaseService, ServiceContext
+from lab_tracker.services.project_service import ProjectService
 from lab_tracker.services.shared import (
     WRITE_ROLES,
     _actor_user_id,
     _ensure_non_empty,
     _ensure_question_parents_dag,
     _ensure_question_status_transition,
-    question_matches_substring,
     _unique_ids,
+    question_matches_substring,
 )
-from lab_tracker.services.base import BaseService, ServiceContext
-from lab_tracker.services.project_service import ProjectService
 
 if TYPE_CHECKING:
     from lab_tracker.services.note_service import NoteService
@@ -52,14 +53,14 @@ class QuestionService(BaseService):
         context: ServiceContext,
         *,
         projects: ProjectService,
-        notes_provider: Callable[[], "NoteService"],
+        notes_provider: Callable[[], NoteService],
     ) -> None:
         super().__init__(context)
         self.projects = projects
         self._notes_provider = notes_provider
 
     @property
-    def notes(self) -> "NoteService":
+    def notes(self) -> NoteService:
         return self._notes_provider()
 
     def _question_graph(self, project_id: UUID) -> dict[UUID, Question]:

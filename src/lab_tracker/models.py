@@ -9,9 +9,9 @@ from __future__ import annotations
 
 import base64
 import binascii
+import re
 from datetime import datetime, timezone
 from enum import Enum
-import re
 from typing import Any
 from uuid import UUID
 

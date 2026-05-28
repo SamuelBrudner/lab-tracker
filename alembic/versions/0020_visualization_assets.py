@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-from alembic import op
 import sqlalchemy as sa
 
+from alembic import op
 
 revision = "0020_visualization_assets"
 down_revision = "0019_merge_daily_reviews_and_project_collaboration"

@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from typing import Callable, Iterable, TYPE_CHECKING
+from collections.abc import Callable, Iterable
+from typing import TYPE_CHECKING
 from uuid import UUID, uuid4
 
 from lab_tracker.auth import AuthContext, require_role
@@ -17,17 +18,17 @@ from lab_tracker.models import (
     VisualizationInput,
     utc_now,
 )
+from lab_tracker.services.base import BaseService, ServiceContext
+from lab_tracker.services.dataset_service import DatasetService
+from lab_tracker.services.project_service import ProjectService
 from lab_tracker.services.shared import (
     WRITE_ROLES,
-    _analysis_has_question_link,
     _actor_user_id,
+    _analysis_has_question_link,
     _ensure_analysis_status_transition,
     _ensure_non_empty,
     _unique_ids,
 )
-from lab_tracker.services.base import BaseService, ServiceContext
-from lab_tracker.services.dataset_service import DatasetService
-from lab_tracker.services.project_service import ProjectService
 
 if TYPE_CHECKING:
     from lab_tracker.services.claim_service import ClaimService
@@ -41,8 +42,8 @@ class AnalysisService(BaseService):
         *,
         projects: ProjectService,
         datasets: DatasetService,
-        claims_provider: Callable[[], "ClaimService"],
-        visualizations_provider: Callable[[], "VisualizationService"],
+        claims_provider: Callable[[], ClaimService],
+        visualizations_provider: Callable[[], VisualizationService],
     ) -> None:
         super().__init__(context)
         self.projects = projects
@@ -51,11 +52,11 @@ class AnalysisService(BaseService):
         self._visualizations_provider = visualizations_provider
 
     @property
-    def claims(self) -> "ClaimService":
+    def claims(self) -> ClaimService:
         return self._claims_provider()
 
     @property
-    def visualizations(self) -> "VisualizationService":
+    def visualizations(self) -> VisualizationService:
         return self._visualizations_provider()
 
     def create_analysis(

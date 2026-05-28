@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from typing import Callable, Iterable, TYPE_CHECKING
+from collections.abc import Callable, Iterable
+from typing import TYPE_CHECKING
 from uuid import UUID, uuid4
 
 from lab_tracker.auth import AuthContext, require_role
@@ -12,6 +13,9 @@ from lab_tracker.models import (
     ClaimStatus,
     utc_now,
 )
+from lab_tracker.services.base import BaseService, ServiceContext
+from lab_tracker.services.dataset_service import DatasetService
+from lab_tracker.services.project_service import ProjectService
 from lab_tracker.services.shared import (
     WRITE_ROLES,
     _ensure_claim_confidence,
@@ -20,9 +24,6 @@ from lab_tracker.services.shared import (
     _ensure_non_empty,
     _unique_ids,
 )
-from lab_tracker.services.base import BaseService, ServiceContext
-from lab_tracker.services.dataset_service import DatasetService
-from lab_tracker.services.project_service import ProjectService
 
 if TYPE_CHECKING:
     from lab_tracker.services.analysis_service import AnalysisService
@@ -35,7 +36,7 @@ class ClaimService(BaseService):
         *,
         projects: ProjectService,
         datasets: DatasetService,
-        analyses_provider: Callable[[], "AnalysisService"],
+        analyses_provider: Callable[[], AnalysisService],
     ) -> None:
         super().__init__(context)
         self.projects = projects
@@ -43,7 +44,7 @@ class ClaimService(BaseService):
         self._analyses_provider = analyses_provider
 
     @property
-    def analyses(self) -> "AnalysisService":
+    def analyses(self) -> AnalysisService:
         return self._analyses_provider()
 
     def create_claim(
@@ -121,14 +122,13 @@ class ClaimService(BaseService):
         claim = self.get_claim(claim_id)
         next_status = status or claim.status
         _ensure_claim_status_transition(claim.status, next_status)
-        if claim.status != ClaimStatus.PROPOSED:
-            if (
-                statement is not None
-                or confidence is not None
-                or supported_by_dataset_ids is not None
-                or supported_by_analysis_ids is not None
-            ):
-                raise ValidationError("Only proposed claims can be edited.")
+        if claim.status != ClaimStatus.PROPOSED and (
+            statement is not None
+            or confidence is not None
+            or supported_by_dataset_ids is not None
+            or supported_by_analysis_ids is not None
+        ):
+            raise ValidationError("Only proposed claims can be edited.")
         if statement is not None:
             _ensure_non_empty(statement, "statement")
             claim.statement = statement.strip()

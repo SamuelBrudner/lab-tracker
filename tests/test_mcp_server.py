@@ -3,10 +3,10 @@ from __future__ import annotations
 import asyncio
 import json
 from pathlib import Path
-import tomllib
 
 import httpx
 import pytest
+import tomllib
 
 from lab_tracker import mcp_server
 

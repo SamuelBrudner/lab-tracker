@@ -5,7 +5,6 @@ from __future__ import annotations
 from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-
 DEFAULT_AUTH_SECRET_KEY = "dev-only-change-me"
 
 

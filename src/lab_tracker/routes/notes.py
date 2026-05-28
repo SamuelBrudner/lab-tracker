@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 from datetime import datetime, timezone
+from typing import Annotated
 from uuid import UUID
 
 from fastapi import APIRouter, File, Form, UploadFile
@@ -33,8 +34,8 @@ from lab_tracker.schemas import (
 )
 
 from .shared import (
-    api_from_request,
     actor_from_request,
+    api_from_request,
     ensure_project_contributor,
     ensure_project_read,
     filter_project_scoped_items,
@@ -78,12 +79,12 @@ def build_notes_router(api: LabTrackerAPI) -> APIRouter:
     )
     async def upload_note_file(
         request: Request,
-        file: UploadFile = File(...),
-        project_id: UUID = Form(...),
-        transcribed_text: str | None = Form(None),
-        targets: str | None = Form(None),
-        metadata: str | None = Form(None),
-        status: NoteStatus | None = Form(None),
+        file: Annotated[UploadFile, File()],
+        project_id: Annotated[UUID, Form()],
+        transcribed_text: Annotated[str | None, Form()] = None,
+        targets: Annotated[str | None, Form()] = None,
+        metadata: Annotated[str | None, Form()] = None,
+        status: Annotated[NoteStatus | None, Form()] = None,
     ):
         actor = actor_from_request(request)
         ensure_project_contributor(request, project_id)
@@ -119,9 +120,9 @@ def build_notes_router(api: LabTrackerAPI) -> APIRouter:
     )
     async def quick_capture_note(
         request: Request,
-        file: UploadFile = File(...),
-        project_id: UUID = Form(...),
-        metadata: str | None = Form(None),
+        file: Annotated[UploadFile, File()],
+        project_id: Annotated[UUID, Form()],
+        metadata: Annotated[str | None, Form()] = None,
     ):
         actor = actor_from_request(request)
         request_api = api_from_request(request, api)

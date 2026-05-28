@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections.abc import Iterable, Mapping
 from enum import Enum
-from typing import Iterable, Mapping, TypeVar
+from typing import TypeVar
 from uuid import UUID
 
 from lab_tracker.auth import AuthContext, Role

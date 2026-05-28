@@ -7,7 +7,7 @@ from uuid import UUID, uuid4
 
 from lab_tracker.auth import AuthContext
 from lab_tracker.errors import NotFoundError, ValidationError
-from lab_tracker.graph_drafting import GraphDraftingError, PROMPT_VERSION, PROVIDER
+from lab_tracker.graph_drafting import PROMPT_VERSION, PROVIDER, GraphDraftingError
 from lab_tracker.models import (
     GraphChangeOperation,
     GraphChangeOperationStatus,
@@ -24,6 +24,8 @@ from lab_tracker.services.dataset_service import DatasetService
 from lab_tracker.services.graph_draft_applier import GraphPatchApplier
 from lab_tracker.services.graph_draft_context import (
     GraphContextBuilder,
+)
+from lab_tracker.services.graph_draft_context import (
     entity_id as graph_entity_id,
 )
 from lab_tracker.services.graph_draft_validation import GraphPatchValidator, string_list
@@ -31,8 +33,8 @@ from lab_tracker.services.note_service import NoteService
 from lab_tracker.services.project_authorization import ProjectAuthorizationPolicy
 from lab_tracker.services.project_service import ProjectService
 from lab_tracker.services.question_service import QuestionService
-from lab_tracker.services.shared import _actor_user_id
 from lab_tracker.services.session_service import SessionService
+from lab_tracker.services.shared import _actor_user_id
 from lab_tracker.services.visualization_service import VisualizationService
 
 _BATCH_NOTE_LIMIT = 100

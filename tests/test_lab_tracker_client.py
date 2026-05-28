@@ -7,8 +7,8 @@ import pytest
 
 from lab_tracker_client import (
     EntityRef,
-    LTValidationError,
     LabTracker,
+    LTValidationError,
     first_line_marker,
 )
 

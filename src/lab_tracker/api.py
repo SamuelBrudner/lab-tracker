@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from types import TracebackType
-from typing import Any, Callable, TypeVar
+from typing import Any, TypeVar
 from uuid import UUID
 
 from lab_tracker.models import Note, Question
@@ -115,13 +116,13 @@ class LabTrackerAPI:
             authorization=self.project_authorization,
         )
 
-    def for_request(self, repository: LabTrackerRepository) -> "LabTrackerAPI":
+    def for_request(self, repository: LabTrackerRepository) -> LabTrackerAPI:
         return self._for_request_context(LabTrackerRequestContext(repository=repository))
 
     def _for_request_context(
         self,
         request_context: LabTrackerRequestContext,
-    ) -> "LabTrackerAPI":
+    ) -> LabTrackerAPI:
         return self.__class__(
             raw_storage=self._raw_storage,
             repository=request_context.repository,
@@ -133,7 +134,7 @@ class LabTrackerAPI:
         repository: LabTrackerRepository,
         *,
         close: Callable[[], None] | None = None,
-    ) -> "LabTrackerRequestScope":
+    ) -> LabTrackerRequestScope:
         return LabTrackerRequestScope(root_api=self, repository=repository, close=close)
 
     def _run_deferred_actions(
@@ -427,7 +428,7 @@ class LabTrackerRequestScope:
         self._completed = False
         self.api = root_api._for_request_context(self._context)
 
-    def __enter__(self) -> "LabTrackerRequestScope":
+    def __enter__(self) -> LabTrackerRequestScope:
         return self
 
     def __exit__(

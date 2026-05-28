@@ -5,9 +5,9 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from uuid import uuid4
 
-from alembic import op
 import sqlalchemy as sa
 
+from alembic import op
 
 revision = "0018_project_memberships_graph_review"
 down_revision = "0017_device_tokens"

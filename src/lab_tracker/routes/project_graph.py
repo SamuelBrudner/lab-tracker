@@ -5,8 +5,8 @@ from __future__ import annotations
 from uuid import UUID
 
 from fastapi import APIRouter
-from starlette.responses import PlainTextResponse
 from starlette.requests import Request
+from starlette.responses import PlainTextResponse
 
 from lab_tracker.api import LabTrackerAPI
 from lab_tracker.project_graph import build_project_graph, project_graph_to_mermaid

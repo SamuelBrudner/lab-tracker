@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable, Iterable
 from datetime import datetime
-from typing import Callable, Iterable, TYPE_CHECKING
+from typing import TYPE_CHECKING
 from uuid import UUID, uuid4
 
 from lab_tracker.auth import AuthContext, require_role
@@ -21,6 +22,9 @@ from lab_tracker.models import (
     decode_session_link_code,
     utc_now,
 )
+from lab_tracker.services.base import BaseService, ServiceContext
+from lab_tracker.services.project_service import ProjectService
+from lab_tracker.services.question_service import QuestionService
 from lab_tracker.services.shared import (
     WRITE_ROLES,
     _actor_user_id,
@@ -30,9 +34,6 @@ from lab_tracker.services.shared import (
     _manifest_input_with_source,
     _merge_acquisition_outputs,
 )
-from lab_tracker.services.base import BaseService, ServiceContext
-from lab_tracker.services.project_service import ProjectService
-from lab_tracker.services.question_service import QuestionService
 
 if TYPE_CHECKING:
     from lab_tracker.services.dataset_service import DatasetService
@@ -45,7 +46,7 @@ class SessionService(BaseService):
         *,
         projects: ProjectService,
         questions: QuestionService,
-        datasets_provider: Callable[[], "DatasetService"],
+        datasets_provider: Callable[[], DatasetService],
     ) -> None:
         super().__init__(context)
         self.projects = projects
@@ -53,7 +54,7 @@ class SessionService(BaseService):
         self._datasets_provider = datasets_provider
 
     @property
-    def datasets(self) -> "DatasetService":
+    def datasets(self) -> DatasetService:
         return self._datasets_provider()
 
     def _find_existing_acquisition_output(
@@ -85,9 +86,8 @@ class SessionService(BaseService):
         if session_type == SessionType.SCIENTIFIC:
             if primary_question_id is None:
                 raise ValidationError("Scientific sessions require a primary question.")
-        elif session_type == SessionType.OPERATIONAL:
-            if primary_question_id is not None:
-                raise ValidationError("Operational sessions cannot have a primary question.")
+        elif session_type == SessionType.OPERATIONAL and primary_question_id is not None:
+            raise ValidationError("Operational sessions cannot have a primary question.")
         if primary_question_id is not None:
             question = self.questions.get_question(primary_question_id)
             if question.project_id != project_id:

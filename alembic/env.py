@@ -2,12 +2,12 @@ from __future__ import annotations
 
 from logging.config import fileConfig
 
-from alembic import context
 from sqlalchemy import engine_from_config, pool
 
+from alembic import context
+from lab_tracker import db_models  # noqa: F401
 from lab_tracker.config import get_settings
 from lab_tracker.db import Base
-from lab_tracker import db_models  # noqa: F401
 
 config = context.config
 

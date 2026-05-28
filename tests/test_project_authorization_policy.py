@@ -3,8 +3,8 @@ from __future__ import annotations
 from uuid import uuid4
 
 import pytest
-
 from api_helpers import repository_backed_api
+
 from lab_tracker.auth import AuthContext, Role
 from lab_tracker.db_models import UserModel
 from lab_tracker.errors import AuthError

@@ -2,20 +2,20 @@
 
 from __future__ import annotations
 
-from typing import Iterable
+from collections.abc import Iterable
 from uuid import UUID, uuid4
 
 from lab_tracker.auth import AuthContext, require_role
 from lab_tracker.errors import ValidationError
 from lab_tracker.models import Visualization, utc_now
+from lab_tracker.services.analysis_service import AnalysisService
+from lab_tracker.services.base import BaseService, ServiceContext
+from lab_tracker.services.claim_service import ClaimService
 from lab_tracker.services.shared import (
     WRITE_ROLES,
     _ensure_non_empty,
     _unique_ids,
 )
-from lab_tracker.services.base import BaseService, ServiceContext
-from lab_tracker.services.analysis_service import AnalysisService
-from lab_tracker.services.claim_service import ClaimService
 
 
 class VisualizationService(BaseService):

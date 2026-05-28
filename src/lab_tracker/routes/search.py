@@ -10,8 +10,12 @@ from starlette.requests import Request
 from lab_tracker.api import LabTrackerAPI
 from lab_tracker.schemas import Envelope, SearchResults
 
-from .shared import repository_from_request, validate_pagination
-from .shared import accessible_project_ids_from_request, ensure_project_read
+from .shared import (
+    accessible_project_ids_from_request,
+    ensure_project_read,
+    repository_from_request,
+    validate_pagination,
+)
 
 
 def build_search_router(api: LabTrackerAPI) -> APIRouter:

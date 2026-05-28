@@ -2,11 +2,11 @@ from __future__ import annotations
 
 from uuid import uuid4
 
+from api_helpers import repository_backed_api
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
-from api_helpers import repository_backed_api
 from lab_tracker.api import LabTrackerAPI
 from lab_tracker.auth import AuthContext, Role
 from lab_tracker.db import Base
@@ -24,7 +24,6 @@ from lab_tracker.services import (
     VisualizationService,
 )
 from lab_tracker.sqlalchemy_repository import SQLAlchemyLabTrackerRepository
-
 
 SERVICE_TYPES = (
     ProjectService,

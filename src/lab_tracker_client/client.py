@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
 import json
 import os
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -138,7 +138,7 @@ class LabTracker:
         )
 
     @classmethod
-    def from_env(cls) -> "LabTracker":
+    def from_env(cls) -> LabTracker:
         """Build a client from environment variables used by consumer repos."""
 
         return cls(
@@ -161,7 +161,7 @@ class LabTracker:
     def close(self) -> None:
         self._client.close()
 
-    def __enter__(self) -> "LabTracker":
+    def __enter__(self) -> LabTracker:
         return self
 
     def __exit__(self, *_: object) -> None:

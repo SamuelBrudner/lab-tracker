@@ -186,7 +186,7 @@ class OpenAIGraphDraftClient:
         )
 
     @classmethod
-    def from_settings(cls, settings: Settings) -> "OpenAIGraphDraftClient":
+    def from_settings(cls, settings: Settings) -> OpenAIGraphDraftClient:
         return cls(
             api_key=settings.openai_api_key,
             model=settings.openai_model,

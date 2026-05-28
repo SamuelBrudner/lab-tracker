@@ -4,10 +4,10 @@ from __future__ import annotations
 
 import hashlib
 import time
+from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
 from threading import Event
-from typing import Iterable
 from uuid import UUID
 
 from lab_tracker.api import LabTrackerAPI

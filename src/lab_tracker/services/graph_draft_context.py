@@ -404,9 +404,12 @@ class GraphContextBuilder:
                 "entity_id": str(target.entity_id),
                 "label": "(missing)",
             }
-        if target.entity_type != EntityType.VISUALIZATION and hasattr(entity, "project_id"):
-            if entity.project_id != project_id:
-                raise ValidationError("Target must belong to the same project.")
+        if (
+            target.entity_type != EntityType.VISUALIZATION
+            and hasattr(entity, "project_id")
+            and entity.project_id != project_id
+        ):
+            raise ValidationError("Target must belong to the same project.")
         return {
             "entity_type": target.entity_type.value,
             "entity_id": str(target.entity_id),

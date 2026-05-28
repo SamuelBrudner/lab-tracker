@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import logging
-from typing import Any, BinaryIO, Iterable
+from collections.abc import Iterable
+from typing import Any, BinaryIO
 from uuid import UUID, uuid4
 
 from lab_tracker.auth import AuthContext
 from lab_tracker.errors import NotFoundError, ValidationError
-from lab_tracker.graph_drafting import GraphDraftingError, PROVIDER
+from lab_tracker.graph_drafting import PROVIDER, GraphDraftingError
 from lab_tracker.models import (
     EntityRef,
     EntityType,
@@ -18,10 +19,6 @@ from lab_tracker.models import (
     NoteStatus,
     utc_now,
 )
-from lab_tracker.services.shared import (
-    _actor_user_id,
-    _normalize_note_metadata,
-)
 from lab_tracker.services.analysis_service import AnalysisService
 from lab_tracker.services.base import BaseService, ServiceContext
 from lab_tracker.services.claim_service import ClaimService
@@ -30,6 +27,10 @@ from lab_tracker.services.project_authorization import ProjectAuthorizationPolic
 from lab_tracker.services.project_service import ProjectService
 from lab_tracker.services.question_service import QuestionService
 from lab_tracker.services.session_service import SessionService
+from lab_tracker.services.shared import (
+    _actor_user_id,
+    _normalize_note_metadata,
+)
 from lab_tracker.services.visualization_service import VisualizationService
 
 _logger = logging.getLogger(__name__)

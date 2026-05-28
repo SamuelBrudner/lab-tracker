@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-from alembic import op
 import sqlalchemy as sa
 
+from alembic import op
 
 revision = "0013_retained_v1_cleanup"
 down_revision = "0012_manifest_and_note_metadata"

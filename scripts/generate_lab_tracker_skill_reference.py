@@ -6,7 +6,6 @@ import argparse
 from pathlib import Path
 from typing import Any
 
-
 BEGIN_MARKER = "<!-- BEGIN GENERATED API REFERENCE -->"
 END_MARKER = "<!-- END GENERATED API REFERENCE -->"
 

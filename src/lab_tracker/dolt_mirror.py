@@ -4,13 +4,13 @@ from __future__ import annotations
 
 import argparse
 import csv
-from dataclasses import dataclass
-from datetime import date, datetime
 import json
 import os
-from pathlib import Path
 import shutil
 import subprocess
+from dataclasses import dataclass
+from datetime import date, datetime
+from pathlib import Path
 from typing import Any
 
 from sqlalchemy import Table, select

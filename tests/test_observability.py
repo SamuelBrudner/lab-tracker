@@ -1,7 +1,7 @@
-from lab_tracker.app import create_app
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
 
+from lab_tracker.app import create_app
 from lab_tracker.db import Base
 from lab_tracker.db_models import ProjectModel
 

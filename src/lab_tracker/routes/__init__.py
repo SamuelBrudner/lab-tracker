@@ -17,8 +17,8 @@ from .device_auth import build_device_auth_router
 from .errors import register_error_handlers
 from .graph_drafts import build_graph_drafts_router
 from .notes import build_notes_router
-from .projects import build_projects_router
 from .project_graph import build_project_graph_router
+from .projects import build_projects_router
 from .provenance import build_provenance_router
 from .questions import build_questions_router
 from .search import build_search_router

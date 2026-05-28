@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-
 revision = "0019_merge_daily_reviews_and_project_collaboration"
 down_revision = (
     "0017_daily_graph_reviews",

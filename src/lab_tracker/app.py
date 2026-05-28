@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-from contextlib import asynccontextmanager
-from datetime import datetime, timezone
 import logging
 import os
+from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -49,10 +49,9 @@ from lab_tracker.file_storage import LocalFileStorageBackend
 from lab_tracker.graph_drafting import make_graph_draft_client
 from lab_tracker.logging import configure_logging
 from lab_tracker.note_storage import LocalNoteStorage
-from lab_tracker.schemas import ErrorEnvelope, ErrorInfo
 from lab_tracker.routes import register_routes
+from lab_tracker.schemas import ErrorEnvelope, ErrorInfo
 from lab_tracker.sqlalchemy_repository import SQLAlchemyLabTrackerRepository
-
 
 _START_TIME = datetime.now(timezone.utc)
 _FRONTEND_DIR = Path(__file__).resolve().parent / "frontend"

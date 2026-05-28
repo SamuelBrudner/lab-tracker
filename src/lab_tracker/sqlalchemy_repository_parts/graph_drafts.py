@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from typing import Any, Iterable
+from collections.abc import Iterable
+from typing import Any
 from uuid import UUID
 
 from sqlalchemy import select
@@ -14,10 +15,10 @@ from lab_tracker.models import (
     GraphChangeOp,
     GraphChangeOperation,
     GraphChangeOperationStatus,
-    GraphDraftMode,
-    GraphDraftSemanticType,
     GraphChangeSet,
     GraphChangeSetStatus,
+    GraphDraftMode,
+    GraphDraftSemanticType,
 )
 from lab_tracker.repository import EntityRepository
 

@@ -2,7 +2,6 @@ import hashlib
 from uuid import uuid4
 
 import pytest
-
 from api_helpers import repository_backed_api
 
 from lab_tracker.auth import AuthContext, Role

@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 from sqlalchemy import create_engine
-from sqlalchemy.pool import StaticPool
 from sqlalchemy.orm import sessionmaker
+from sqlalchemy.pool import StaticPool
 
 from lab_tracker.api import LabTrackerAPI
 from lab_tracker.db import Base

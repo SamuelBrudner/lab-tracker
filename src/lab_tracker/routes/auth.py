@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
 import hmac
+from datetime import datetime, timezone
 from uuid import UUID
 
 from fastapi import APIRouter
@@ -26,6 +26,7 @@ from .shared import (
     auth_token_read,
     auth_user_read,
 )
+
 
 def build_auth_router(
     *,

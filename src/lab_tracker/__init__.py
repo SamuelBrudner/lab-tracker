@@ -1,8 +1,8 @@
 """Lab tracker package."""
 
+from lab_tracker.acquisition_watcher import AcquisitionOutputWatcher
 from lab_tracker.api import LabTrackerAPI
 from lab_tracker.auth import AuthContext, AuthService, Role, require_role
-from lab_tracker.acquisition_watcher import AcquisitionOutputWatcher
 from lab_tracker.errors import (
     AuthError,
     ConflictError,
@@ -29,9 +29,9 @@ from lab_tracker.models import (
     ProjectMembershipRole,
     ProjectStatus,
     Question,
-    QuestionRefactor,
     QuestionLink,
     QuestionLinkRole,
+    QuestionRefactor,
     QuestionStatus,
     QuestionType,
     Session,

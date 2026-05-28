@@ -2,11 +2,10 @@ from __future__ import annotations
 
 from uuid import uuid4
 
-from fastapi.testclient import TestClient
 import pytest
-from sqlalchemy import create_engine
-
 from api_helpers import repository_backed_api
+from fastapi.testclient import TestClient
+from sqlalchemy import create_engine
 
 from lab_tracker.api import LabTrackerAPI
 from lab_tracker.app import create_app
@@ -17,8 +16,8 @@ from lab_tracker.errors import ValidationError
 from lab_tracker.models import (
     AnalysisStatus,
     ClaimStatus,
-    DatasetStatus,
     DatasetCommitManifestInput,
+    DatasetStatus,
     QuestionStatus,
     QuestionType,
     SessionType,

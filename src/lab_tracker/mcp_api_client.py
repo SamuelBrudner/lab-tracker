@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 import mimetypes
 import os
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 import httpx
+
 from lab_tracker.models import (
     AnalysisStatus,
     ClaimStatus,
@@ -47,7 +48,7 @@ class MCPSettings:
     timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS
 
     @classmethod
-    def from_env(cls) -> "MCPSettings":
+    def from_env(cls) -> MCPSettings:
         return cls(
             base_url=os.getenv("LAB_TRACKER_MCP_BASE_URL", DEFAULT_BASE_URL).rstrip("/"),
             username=os.getenv("LAB_TRACKER_MCP_USERNAME"),

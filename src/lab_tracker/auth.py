@@ -4,15 +4,15 @@ from __future__ import annotations
 
 import base64
 import binascii
-from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
-from enum import Enum
 import hashlib
 import hmac
 import json
 import os
 import secrets
-from typing import Iterable
+from collections.abc import Iterable
+from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
+from enum import Enum
 from uuid import UUID, uuid4
 
 from sqlalchemy import select
@@ -20,7 +20,6 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from lab_tracker.db_models import DeviceEnrollmentModel, DeviceTokenModel, UserModel
 from lab_tracker.errors import AuthError, ConflictError, NotFoundError, ValidationError
-
 
 LOCAL_AUTH_USER_ID = UUID("00000000-0000-4000-8000-000000000001")
 LOCAL_AUTH_USERNAME = "local-tester"
@@ -248,7 +247,7 @@ class TokenService:
         }
         header_segment = _b64url_encode_json(header)
         payload_segment = _b64url_encode_json(payload)
-        signature = self._sign(f"{header_segment}.{payload_segment}".encode("utf-8"))
+        signature = self._sign(f"{header_segment}.{payload_segment}".encode())
         token = f"{header_segment}.{payload_segment}.{_b64url_encode(signature)}"
         return AccessToken(token=token, expires_at=expires_at)
 
@@ -258,7 +257,7 @@ class TokenService:
         if len(parts) != 3:
             raise AuthError("Invalid token.")
         header_segment, payload_segment, signature_segment = parts
-        signing_input = f"{header_segment}.{payload_segment}".encode("utf-8")
+        signing_input = f"{header_segment}.{payload_segment}".encode()
         expected_signature = self._sign(signing_input)
         provided_signature = _b64url_decode(signature_segment)
         if not hmac.compare_digest(expected_signature, provided_signature):
@@ -311,9 +310,7 @@ def device_principal_can_access(method: str, path: str) -> bool:
     if path in {"/notes", "/notes/upload-file", "/notes/quick-capture"}:
         return True
     segments = [segment for segment in path.split("/") if segment]
-    if len(segments) == 3 and segments[0] == "notes" and segments[2] == "transcript":
-        return True
-    return False
+    return len(segments) == 3 and segments[0] == "notes" and segments[2] == "transcript"
 
 
 @dataclass(frozen=True)

@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from datetime import datetime, timezone
-from typing import Iterable
 from uuid import UUID
 
 from lab_tracker.db_models import (
@@ -44,9 +44,9 @@ from lab_tracker.models import (
     ProjectMembership,
     ProjectMembershipRole,
     Question,
-    QuestionRefactor,
     QuestionLink,
     QuestionLinkRole,
+    QuestionRefactor,
     QuestionStatus,
     QuestionType,
     Session,
@@ -57,7 +57,11 @@ from lab_tracker.models import (
 )
 from lab_tracker.sqlalchemy_mapper_parts.projects import (
     apply_project_to_model as apply_project_to_model,
+)
+from lab_tracker.sqlalchemy_mapper_parts.projects import (
     project_from_model as project_from_model,
+)
+from lab_tracker.sqlalchemy_mapper_parts.projects import (
     project_to_model as project_to_model,
 )
 

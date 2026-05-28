@@ -12,8 +12,11 @@ from lab_tracker.decision_context import (
 )
 from lab_tracker.schemas import AssistantDecisionContextRequest
 
-from .shared import repository_from_request
-from .shared import accessible_project_ids_from_request, ensure_project_read
+from .shared import (
+    accessible_project_ids_from_request,
+    ensure_project_read,
+    repository_from_request,
+)
 
 
 def build_assistant_router() -> APIRouter:

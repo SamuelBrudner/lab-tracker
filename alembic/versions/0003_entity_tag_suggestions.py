@@ -7,8 +7,9 @@ Create Date: 2026-01-29 20:20:00.000000
 
 from __future__ import annotations
 
-from alembic import op
 import sqlalchemy as sa
+
+from alembic import op
 
 revision = "0003_entity_tag_suggestions"
 down_revision = "0002_core_entities"

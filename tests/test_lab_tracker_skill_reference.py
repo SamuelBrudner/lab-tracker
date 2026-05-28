@@ -5,6 +5,8 @@ from pathlib import Path
 from scripts.generate_lab_tracker_skill_reference import (
     build_openapi_schema,
     generate_reference,
+)
+from scripts.generate_lab_tracker_skill_reference import (
     main as generate_skill_reference,
 )
 
