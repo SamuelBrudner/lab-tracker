@@ -22,6 +22,12 @@ from lab_tracker.provenance import (
     build_analysis_provenance_document,
     build_dataset_provenance_document,
 )
+from lab_tracker.provenance_ingestion import (
+    EXTERNAL_ARTIFACTS_METADATA_KEY,
+    ExternalArtifactReference,
+    dataset_manifest_from_external_artifact,
+    external_artifacts_from_metadata,
+)
 
 
 def _node_by_id(document: dict[str, object], node_id: str) -> dict[str, object]:
@@ -137,6 +143,85 @@ def test_dataset_provenance_uses_stable_synthetic_ids():
     assert commit_node["@type"] == "prov:Activity"
     assert commit_node["prov:used"] == [{"@id": file_node["@id"]}]
     assert commit_node["questionLink"] == [{"@id": question_link_node["@id"]}]
+
+
+def test_external_dataset_artifact_round_trips_through_dataset_provenance():
+    dataset_id = UUID("aaaaaaaa-1111-1111-1111-aaaaaaaaaaaa")
+    question_id = UUID("bbbbbbbb-2222-2222-2222-bbbbbbbbbbbb")
+    artifact = ExternalArtifactReference(
+        source_system="datalad",
+        uri="datalad://lab/plume-navigation?commit=abc123",
+        content_hash="sha256:manifest123",
+        metadata={
+            "dataset": "plume-navigation",
+            "commit": "abc123",
+            "file_count": 1,
+            "labels": ["nwb", "behavior"],
+            "native": {"annex": True},
+        },
+    )
+    manifest_input = dataset_manifest_from_external_artifact(
+        artifact,
+        files=[
+            DatasetFile(
+                path="sub-001/behavior.nwb",
+                checksum="sha256:file456",
+                size_bytes=2048,
+            )
+        ],
+        metadata={"imported_by": "lab-tracker"},
+    )
+    decoded_artifacts = external_artifacts_from_metadata(manifest_input.metadata)
+
+    assert decoded_artifacts == [artifact]
+    assert EXTERNAL_ARTIFACTS_METADATA_KEY in manifest_input.metadata
+
+    dataset = Dataset(
+        dataset_id=dataset_id,
+        project_id=uuid4(),
+        commit_hash="commit-external",
+        primary_question_id=question_id,
+        question_links=[
+            QuestionLink(question_id=question_id, role=QuestionLinkRole.PRIMARY)
+        ],
+        commit_manifest=DatasetCommitManifest(
+            files=manifest_input.files,
+            metadata=manifest_input.metadata,
+            question_links=[
+                QuestionLink(
+                    question_id=question_id,
+                    role=QuestionLinkRole.PRIMARY,
+                    outcome_status=OutcomeStatus.SUPPORTS,
+                )
+            ],
+        ),
+        status=DatasetStatus.COMMITTED,
+    )
+
+    document = build_dataset_provenance_document("http://example.test", dataset)
+
+    commit_node = _node_by_id(
+        document,
+        "http://example.test/datasets/aaaaaaaa-1111-1111-1111-aaaaaaaaaaaa/provenance/commit",
+    )
+    artifact_node = _node_by_id(document, artifact.uri)
+    question_link_node = _node_by_id(
+        document,
+        "http://example.test/datasets/aaaaaaaa-1111-1111-1111-aaaaaaaaaaaa/provenance/question-links/bbbbbbbb-2222-2222-2222-bbbbbbbbbbbb",
+    )
+
+    assert {"@id": artifact.uri} in commit_node["prov:used"]
+    assert commit_node["questionLink"] == [{"@id": question_link_node["@id"]}]
+    assert artifact_node["@type"] == "prov:Entity"
+    assert artifact_node["externalSourceSystem"] == "datalad"
+    assert artifact_node["externalContentHash"] == "sha256:manifest123"
+    assert artifact_node["externalMetadata"] == {
+        "commit": "abc123",
+        "dataset": "plume-navigation",
+        "file_count": 1,
+        "labels": ["nwb", "behavior"],
+        "native": {"annex": True},
+    }
 
 
 def test_analysis_provenance_omits_optional_fields_and_preserves_support_links():

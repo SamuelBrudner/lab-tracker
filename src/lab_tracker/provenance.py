@@ -14,6 +14,11 @@ from lab_tracker.models import (
     QuestionLinkRole,
     Visualization,
 )
+from lab_tracker.provenance_ingestion import (
+    ExternalArtifactKind,
+    ExternalArtifactReference,
+    external_artifacts_from_metadata,
+)
 
 
 def _normalize_base_url(base_url: str) -> str:
@@ -47,6 +52,11 @@ def _context(base_url: str) -> dict[str, object]:
         "contentType": "lab:contentType",
         "environmentHash": "lab:environmentHash",
         "executedAt": "lab:executedAt",
+        "externalArtifact": {"@id": "lab:externalArtifact", "@type": "@id"},
+        "externalContentHash": "lab:externalContentHash",
+        "externalMetadata": {"@id": "lab:externalMetadata", "@type": "@json"},
+        "externalSourceSystem": "lab:externalSourceSystem",
+        "externalUri": {"@id": "lab:externalUri", "@type": "@id"},
         "filePath": "lab:filePath",
         "filename": "lab:filename",
         "metadata": {"@id": "lab:metadata", "@type": "@json"},
@@ -125,6 +135,21 @@ def _dataset_file_node(base_url: str, dataset: Dataset, file: DatasetFile) -> di
     return node
 
 
+def _external_artifact_node(artifact: ExternalArtifactReference) -> dict[str, object]:
+    node: dict[str, object] = {
+        "@id": artifact.uri,
+        "@type": "prov:Entity"
+        if artifact.kind == ExternalArtifactKind.ENTITY
+        else "prov:Activity",
+        "externalSourceSystem": artifact.source_system,
+        "externalUri": artifact.uri,
+        "externalContentHash": artifact.content_hash,
+    }
+    if artifact.metadata:
+        node["externalMetadata"] = artifact.metadata
+    return node
+
+
 def _dataset_question_link_node(base_url: str, dataset: Dataset, link) -> dict[str, object]:
     return {
         "@id": _question_link_id(base_url, dataset, link.question_id),
@@ -140,6 +165,7 @@ def build_dataset_provenance_document(base_url: str, dataset: Dataset) -> dict[s
     files = _sorted_dataset_files(dataset.commit_manifest.files)
     question_links = _sorted_question_links(dataset.commit_manifest.question_links)
     notes = sorted(dataset.commit_manifest.note_ids, key=str)
+    external_artifacts = external_artifacts_from_metadata(dataset.commit_manifest.metadata)
     graph: list[dict[str, object]] = []
 
     dataset_node: dict[str, object] = {
@@ -160,8 +186,22 @@ def build_dataset_provenance_document(base_url: str, dataset: Dataset) -> dict[s
         {"@id": _file_entity_id(base_url, dataset, file)}
         for file in files
     ]
-    if used_files:
-        commit_node["prov:used"] = used_files
+    used_external_entities = [
+        {"@id": artifact.uri}
+        for artifact in external_artifacts
+        if artifact.kind == ExternalArtifactKind.ENTITY
+    ]
+    used_entities = [*used_files, *used_external_entities]
+    if used_entities:
+        commit_node["prov:used"] = used_entities
+
+    informed_by = [
+        {"@id": artifact.uri}
+        for artifact in external_artifacts
+        if artifact.kind == ExternalArtifactKind.ACTIVITY
+    ]
+    if informed_by:
+        commit_node["prov:wasInformedBy"] = informed_by
 
     question_link_refs = [
         {"@id": _question_link_id(base_url, dataset, link.question_id)}
@@ -195,6 +235,7 @@ def build_dataset_provenance_document(base_url: str, dataset: Dataset) -> dict[s
 
     graph.append(commit_node)
     graph.extend(_dataset_file_node(base_url, dataset, file) for file in files)
+    graph.extend(_external_artifact_node(artifact) for artifact in external_artifacts)
     graph.extend(
         _dataset_question_link_node(base_url, dataset, link)
         for link in question_links

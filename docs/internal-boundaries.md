@@ -43,6 +43,28 @@ The SQLAlchemy repository is now split into focused modules under
 It is intentionally retained for existing callers; new internal code may import focused
 repository modules directly when that makes ownership clearer.
 
+## PROV-O Ingestion Seam
+
+[`src/lab_tracker/provenance.py`](../src/lab_tracker/provenance.py) exports
+retained-v1 dataset and analysis records as PROV-O / JSON-LD. The symmetric
+ingestion seam lives in
+[`src/lab_tracker/provenance_ingestion.py`](../src/lab_tracker/provenance_ingestion.py).
+
+External tools should enter Lab Tracker through references, not reimplemented
+workflows. An external artifact reference records:
+
+- `kind`: `entity` or `activity`
+- `source_system`: source tool name
+- `uri`: canonical external URI
+- `content_hash`: stable digest of the artifact or manifest
+- `metadata`: tool-native metadata needed for traceability
+
+For retained-v1 datasets, references are encoded in
+`DatasetCommitManifest.metadata["external_artifacts"]`. The provenance exporter
+turns them into first-class `prov:Entity` or `prov:Activity` nodes and links them
+to the dataset commit activity. This keeps adapters optional and thin while
+preserving semantic edges to questions and claims in Lab Tracker.
+
 ## Database Artifacts
 
 Root-level SQLite files such as `lab_tracker.db`, `*.db`, and

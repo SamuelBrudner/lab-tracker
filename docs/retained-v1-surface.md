@@ -69,6 +69,27 @@ Follow these rules in sibling cleanup work:
   speculative abstractions created for deferred workflows.
 - New work should preserve durable data and invariants, not deferred feature
   surfaces.
+- Build-vs-buy boundaries are recorded in
+  [`docs/build-vs-buy-boundaries.md`](build-vs-buy-boundaries.md). Adjacent
+  commodity responsibilities should use pointer-not-reimplementation: keep
+  external artifact references plus semantic graph edges, not the external
+  tool's workflow or UI.
+
+## Build-vs-Buy Boundaries
+
+Retained v1 keeps the current local auth, local storage, dataset manifest, and
+analysis record implementations as working defaults, but those are not the
+long-term product moat. The long-term ownership boundary is:
+
+- Build and keep in-house: questions, claims, human-gated graph changes, and the
+  PROV-O semantic provenance spine.
+- Integrate via adapters: dataset/versioning substrates, experiment trackers,
+  ELNs, and object storage.
+- Offload where practical later: credential/session/device-grant plumbing.
+- Defer: semantic/vector search and standing extraction inboxes.
+
+Do not expand retained-v1 features toward becoming an identity provider, object
+store, data-versioning system, experiment tracker, or ELN.
 
 ## Restoration Ledger
 
