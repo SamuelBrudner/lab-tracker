@@ -1,0 +1,447 @@
+{
+  "schema_version": 1,
+  "deck_id": "lab-tracker-research-group-presentation",
+  "pptx_path": "outputs/019e93bf-5861-7ba2-af6a-d3677b8793cd/presentations/lab-tracker-research-group/output/lab-tracker-research-group-presentation.pptx",
+  "backend_alignment": {
+    "node_entity_type_source": "lab_tracker.models.EntityType",
+    "edge_relationship_source": "lab_tracker.project_graph.ProjectGraphEdge.relationship",
+    "operation_semantic_type_source": "lab_tracker.models.GraphDraftSemanticType",
+    "project_graph_view": "full"
+  },
+  "graphs": [
+    {
+      "diagram_id": "rg-title-reasoning-spine",
+      "slide_number": 1,
+      "title": "Questions -> evidence -> claims -> figures",
+      "graph_kind": "project_graph",
+      "backend_view": "evidence",
+      "visible_labels": ["question", "evidence", "claim", "figure"],
+      "nodes": [
+        {"id": "question:motivating", "label": "question", "entity_type": "question"},
+        {"id": "dataset:evidence", "label": "evidence", "entity_type": "dataset"},
+        {"id": "claim:claim", "label": "claim", "entity_type": "claim"},
+        {"id": "visualization:figure", "label": "figure", "entity_type": "visualization"}
+      ],
+      "edges": [
+        {"id": "e1", "source": "question:motivating", "target": "dataset:evidence", "relationship": "dataset_question_primary", "label": "primary question", "state": "present"},
+        {"id": "e2", "source": "dataset:evidence", "target": "claim:claim", "relationship": "claim_dataset_support", "label": "supports", "state": "present"},
+        {"id": "e3", "source": "claim:claim", "target": "visualization:figure", "relationship": "visualization_claim", "label": "related claim", "state": "present"}
+      ]
+    },
+    {
+      "diagram_id": "rg-core-premise-record",
+      "slide_number": 2,
+      "title": "A useful record includes why an experiment was done",
+      "graph_kind": "project_graph",
+      "backend_view": "full",
+      "visible_labels": ["what happened", "why it happened", "what it supports"],
+      "nodes": [
+        {"id": "session:experiment", "label": "what happened", "entity_type": "session"},
+        {"id": "question:why", "label": "why it happened", "entity_type": "question"},
+        {"id": "dataset:experiment_dataset", "label": "what happened dataset", "entity_type": "dataset", "visible": false},
+        {"id": "claim:supported", "label": "what it supports", "entity_type": "claim"}
+      ],
+      "edges": [
+        {"id": "e1", "source": "question:why", "target": "session:experiment", "relationship": "session_question", "label": "session question", "state": "present"},
+        {"id": "e2", "source": "session:experiment", "target": "dataset:experiment_dataset", "relationship": "dataset_source_session", "label": "produces", "state": "implicit"},
+        {"id": "e3", "source": "question:why", "target": "dataset:experiment_dataset", "relationship": "dataset_question_primary", "label": "answers", "state": "present"},
+        {"id": "e4", "source": "dataset:experiment_dataset", "target": "claim:supported", "relationship": "claim_dataset_support", "label": "supports", "state": "present"}
+      ],
+      "notes": "The visible slide compresses session, question, and claim into three blocks; the invisible dataset node records the backend path from session to claim."
+    },
+    {
+      "diagram_id": "rg-problem-map",
+      "slide_number": 3,
+      "title": "The argument has three linked problems",
+      "graph_kind": "argument",
+      "visible_labels": ["Problem 1", "Problem 2", "Problem 3"],
+      "nodes": [
+        {"id": "argument:problem_1", "label": "record loses rationale"},
+        {"id": "argument:problem_2", "label": "assistant lacks goals"},
+        {"id": "argument:problem_3", "label": "manual upkeep fails"}
+      ],
+      "edges": [
+        {"id": "e1", "source": "argument:problem_1", "target": "argument:problem_2", "relationship": "leads_to", "label": "same missing context", "state": "present"},
+        {"id": "e2", "source": "argument:problem_2", "target": "argument:problem_3", "relationship": "leads_to", "label": "requires current graph", "state": "present"}
+      ]
+    },
+    {
+      "diagram_id": "rg-problem-1-missing-question-edge",
+      "slide_number": 4,
+      "title": "The record loses the question an experiment answered",
+      "graph_kind": "project_graph",
+      "backend_view": "full",
+      "visible_labels": ["motivating question", "notebook note", "session_0427.zarr", "analysis notebook", "figure draft", "missing: answered"],
+      "nodes": [
+        {"id": "question:motivating", "label": "motivating question", "entity_type": "question"},
+        {"id": "note:notebook_note", "label": "notebook note", "entity_type": "note"},
+        {"id": "session:session_0427", "label": "session_0427.zarr", "entity_type": "session"},
+        {"id": "dataset:session_0427_dataset", "label": "promoted dataset", "entity_type": "dataset", "visible": false},
+        {"id": "analysis:analysis_notebook", "label": "analysis notebook", "entity_type": "analysis"},
+        {"id": "visualization:figure_draft", "label": "figure draft", "entity_type": "visualization"}
+      ],
+      "edges": [
+        {"id": "missing_note_question", "source": "note:notebook_note", "target": "question:motivating", "relationship": "note_target_question", "label": "targets", "state": "missing", "rationale": "The note exists but is not attached to the question it records."},
+        {"id": "missing_session_question", "source": "question:motivating", "target": "session:session_0427", "relationship": "session_question", "label": "session question", "state": "missing", "rationale": "The session can be identified but its motivating question is absent."},
+        {"id": "missing_dataset_question", "source": "question:motivating", "target": "dataset:session_0427_dataset", "relationship": "dataset_question_primary", "label": "primary question", "state": "missing", "rationale": "A promoted dataset should carry the question link forward."},
+        {"id": "session_dataset", "source": "session:session_0427", "target": "dataset:session_0427_dataset", "relationship": "dataset_source_session", "label": "source session", "state": "implicit"},
+        {"id": "dataset_analysis", "source": "dataset:session_0427_dataset", "target": "analysis:analysis_notebook", "relationship": "analysis_dataset", "label": "used by", "state": "present"},
+        {"id": "analysis_figure", "source": "analysis:analysis_notebook", "target": "visualization:figure_draft", "relationship": "visualization_analysis", "label": "generates", "state": "present"}
+      ]
+    },
+    {
+      "diagram_id": "rg-problem-2-missing-context",
+      "slide_number": 5,
+      "title": "Assistants inherit the missing context",
+      "graph_kind": "context_packet",
+      "backend_view": "full",
+      "visible_labels": ["prompt + files", "model", "plausible output", "project goal", "question hierarchy", "prior claims", "not in the prompt"],
+      "nodes": [
+        {"id": "note:prompt_files", "label": "prompt + files", "entity_type": "note"},
+        {"id": "agent:model", "label": "model"},
+        {"id": "agent:output", "label": "plausible output"},
+        {"id": "question:project_goal", "label": "project goal", "entity_type": "question"},
+        {"id": "question:active_question", "label": "active question", "entity_type": "question", "visible": false},
+        {"id": "claim:prior_claim", "label": "prior claims", "entity_type": "claim"},
+        {"id": "analysis:prior_analysis", "label": "prior analysis", "entity_type": "analysis", "visible": false}
+      ],
+      "edges": [
+        {"id": "goal_active_question", "source": "question:project_goal", "target": "question:active_question", "relationship": "question_parent", "label": "parent", "state": "context_required"},
+        {"id": "prior_analysis_claim", "source": "analysis:prior_analysis", "target": "claim:prior_claim", "relationship": "claim_analysis_support", "label": "supports", "state": "context_required"},
+        {"id": "prompt_question_target", "source": "note:prompt_files", "target": "question:active_question", "relationship": "note_target_question", "label": "targets", "state": "missing"}
+      ],
+      "notes": "The assistant output is not a backend entity; the missing backend graph context is represented by context_required and missing edges."
+    },
+    {
+      "diagram_id": "rg-problem-3-manual-upkeep",
+      "slide_number": 6,
+      "title": "Complete context is not maintainable by manual bookkeeping",
+      "graph_kind": "graph_draft",
+      "backend_view": "full",
+      "visible_labels": ["new note", "new analysis", "link note -> question", "link dataset -> question", "link claim -> evidence", "current graph"],
+      "nodes": [
+        {"id": "note:new_note", "label": "new note", "entity_type": "note"},
+        {"id": "analysis:new_analysis", "label": "new analysis", "entity_type": "analysis"},
+        {"id": "question:target_question", "label": "target question", "entity_type": "question", "visible": false},
+        {"id": "dataset:target_dataset", "label": "target dataset", "entity_type": "dataset", "visible": false},
+        {"id": "claim:target_claim", "label": "target claim", "entity_type": "claim", "visible": false}
+      ],
+      "edges": [
+        {"id": "note_question", "source": "note:new_note", "target": "question:target_question", "relationship": "note_target_question", "label": "targets", "state": "proposed"},
+        {"id": "dataset_question", "source": "question:target_question", "target": "dataset:target_dataset", "relationship": "dataset_question_primary", "label": "primary question", "state": "proposed"},
+        {"id": "analysis_claim", "source": "analysis:new_analysis", "target": "claim:target_claim", "relationship": "claim_analysis_support", "label": "supports", "state": "proposed"}
+      ],
+      "operations": [
+        {"semantic_type": "link_note_to_question", "op": "update", "entity_type": "note", "target_node": "note:new_note", "payload_template": {"targets": [{"entity_type": "question", "entity_id": "$question:target_question"}]}, "rationale": "Attach the note to the question it records."},
+        {"semantic_type": "update_entity", "op": "update", "entity_type": "dataset", "target_node": "dataset:target_dataset", "payload_template": {"primary_question_id": "$question:target_question"}, "rationale": "Preserve the dataset's primary question link."},
+        {"semantic_type": "update_entity", "op": "update", "entity_type": "claim", "target_node": "claim:target_claim", "payload_template": {"supported_by_analysis_ids": ["$analysis:new_analysis"]}, "rationale": "Make evidence support explicit before treating a claim as supported."}
+      ]
+    },
+    {
+      "diagram_id": "rg-resolution-review-rationale",
+      "slide_number": 7,
+      "title": "A shared graph preserves rationale for later review",
+      "graph_kind": "project_graph",
+      "backend_view": "full",
+      "visible_labels": ["motivating question", "session_0427.zarr", "analysis", "figure", "question addressed", "later review"],
+      "nodes": [
+        {"id": "question:motivating", "label": "motivating question", "entity_type": "question"},
+        {"id": "session:session_0427", "label": "session_0427.zarr", "entity_type": "session"},
+        {"id": "dataset:session_0427_dataset", "label": "dataset", "entity_type": "dataset", "visible": false},
+        {"id": "analysis:analysis", "label": "analysis", "entity_type": "analysis"},
+        {"id": "visualization:figure", "label": "figure", "entity_type": "visualization"}
+      ],
+      "edges": [
+        {"id": "question_session", "source": "question:motivating", "target": "session:session_0427", "relationship": "session_question", "label": "session question", "state": "present"},
+        {"id": "session_dataset", "source": "session:session_0427", "target": "dataset:session_0427_dataset", "relationship": "dataset_source_session", "label": "source session", "state": "implicit"},
+        {"id": "question_dataset", "source": "question:motivating", "target": "dataset:session_0427_dataset", "relationship": "dataset_question_primary", "label": "primary question", "state": "present"},
+        {"id": "dataset_analysis", "source": "dataset:session_0427_dataset", "target": "analysis:analysis", "relationship": "analysis_dataset", "label": "used by", "state": "present"},
+        {"id": "analysis_figure", "source": "analysis:analysis", "target": "visualization:figure", "relationship": "visualization_analysis", "label": "generates", "state": "present"}
+      ]
+    },
+    {
+      "diagram_id": "rg-resolution-assistant-context-packet",
+      "slide_number": 8,
+      "title": "The same graph can supply an assistant context packet",
+      "graph_kind": "context_packet",
+      "backend_view": "full",
+      "visible_labels": ["motivating question", "session_0427.zarr", "analysis", "figure", "model", "context packet"],
+      "nodes": [
+        {"id": "question:motivating", "label": "motivating question", "entity_type": "question"},
+        {"id": "dataset:session_0427_dataset", "label": "session_0427.zarr", "entity_type": "dataset"},
+        {"id": "analysis:analysis", "label": "analysis", "entity_type": "analysis"},
+        {"id": "claim:prior_claim", "label": "prior claims", "entity_type": "claim"},
+        {"id": "visualization:figure", "label": "figure", "entity_type": "visualization"},
+        {"id": "agent:context_packet", "label": "context packet"}
+      ],
+      "edges": [
+        {"id": "question_dataset", "source": "question:motivating", "target": "dataset:session_0427_dataset", "relationship": "dataset_question_primary", "label": "primary question", "state": "context_required"},
+        {"id": "dataset_analysis", "source": "dataset:session_0427_dataset", "target": "analysis:analysis", "relationship": "analysis_dataset", "label": "used by", "state": "context_required"},
+        {"id": "analysis_claim", "source": "analysis:analysis", "target": "claim:prior_claim", "relationship": "claim_analysis_support", "label": "supports", "state": "context_required"},
+        {"id": "analysis_figure", "source": "analysis:analysis", "target": "visualization:figure", "relationship": "visualization_analysis", "label": "generates", "state": "context_required"}
+      ],
+      "notes": "The context packet node is not persisted; it is assembled from the listed backend graph neighborhood."
+    },
+    {
+      "diagram_id": "rg-resolution-draft-operations",
+      "slide_number": 9,
+      "title": "Capture proposes graph updates for human review",
+      "graph_kind": "graph_draft",
+      "backend_view": "full",
+      "visible_labels": ["raw note", "draft operations", "link note -> question", "attach evidence", "human review"],
+      "nodes": [
+        {"id": "note:raw_note", "label": "raw note", "entity_type": "note"},
+        {"id": "question:motivating", "label": "motivating question", "entity_type": "question"},
+        {"id": "analysis:analysis", "label": "analysis", "entity_type": "analysis"},
+        {"id": "claim:claim", "label": "claim", "entity_type": "claim", "visible": false}
+      ],
+      "edges": [
+        {"id": "note_question", "source": "note:raw_note", "target": "question:motivating", "relationship": "note_target_question", "label": "targets", "state": "proposed"},
+        {"id": "analysis_claim", "source": "analysis:analysis", "target": "claim:claim", "relationship": "claim_analysis_support", "label": "supports", "state": "proposed"}
+      ],
+      "operations": [
+        {"semantic_type": "link_note_to_question", "op": "update", "entity_type": "note", "target_node": "note:raw_note", "payload_template": {"targets": [{"entity_type": "question", "entity_id": "$question:motivating"}]}, "rationale": "Make the raw note's question target explicit."},
+        {"semantic_type": "update_entity", "op": "update", "entity_type": "claim", "target_node": "claim:claim", "payload_template": {"supported_by_analysis_ids": ["$analysis:analysis"]}, "rationale": "Attach evidence before claim support is accepted."}
+      ]
+    },
+    {
+      "diagram_id": "rg-what-it-is-semantic-edges",
+      "slide_number": 10,
+      "title": "Lab Tracker records semantic edges among existing lab artifacts",
+      "graph_kind": "project_graph",
+      "backend_view": "full",
+      "visible_labels": ["ELN note", "data file", "question addressed", "evidence for claim", "analysis", "figure"],
+      "nodes": [
+        {"id": "note:eln_note", "label": "ELN note", "entity_type": "note"},
+        {"id": "dataset:data_file", "label": "data file", "entity_type": "dataset"},
+        {"id": "question:addressed", "label": "question addressed", "entity_type": "question"},
+        {"id": "claim:evidence_claim", "label": "evidence for claim", "entity_type": "claim"},
+        {"id": "analysis:analysis", "label": "analysis", "entity_type": "analysis"},
+        {"id": "visualization:figure", "label": "figure", "entity_type": "visualization"}
+      ],
+      "edges": [
+        {"id": "note_question", "source": "note:eln_note", "target": "question:addressed", "relationship": "note_target_question", "label": "targets", "state": "present"},
+        {"id": "question_dataset", "source": "question:addressed", "target": "dataset:data_file", "relationship": "dataset_question_primary", "label": "primary question", "state": "present"},
+        {"id": "dataset_analysis", "source": "dataset:data_file", "target": "analysis:analysis", "relationship": "analysis_dataset", "label": "used by", "state": "present"},
+        {"id": "dataset_claim", "source": "dataset:data_file", "target": "claim:evidence_claim", "relationship": "claim_dataset_support", "label": "supports", "state": "present"},
+        {"id": "analysis_figure", "source": "analysis:analysis", "target": "visualization:figure", "relationship": "visualization_analysis", "label": "generates", "state": "present"}
+      ]
+    },
+    {
+      "diagram_id": "rg-question-build-1-motivating-question",
+      "slide_number": 11,
+      "title": "Begin with a motivating question",
+      "graph_kind": "project_graph",
+      "backend_view": "questions",
+      "visible_labels": ["motivating question"],
+      "nodes": [
+        {"id": "question:motivating", "label": "motivating question", "entity_type": "question"}
+      ],
+      "edges": []
+    },
+    {
+      "diagram_id": "rg-question-build-2-answerable-question",
+      "slide_number": 12,
+      "title": "Decompose it into answerable questions",
+      "graph_kind": "project_graph",
+      "backend_view": "questions",
+      "visible_labels": ["motivating question", "answerable question"],
+      "nodes": [
+        {"id": "question:motivating", "label": "motivating question", "entity_type": "question"},
+        {"id": "question:answerable", "label": "answerable question", "entity_type": "question"}
+      ],
+      "edges": [
+        {"id": "question_parent", "source": "question:motivating", "target": "question:answerable", "relationship": "question_parent", "label": "parent", "state": "present"}
+      ]
+    },
+    {
+      "diagram_id": "rg-question-build-3-dataset-link",
+      "slide_number": 13,
+      "title": "Link datasets to the questions they address",
+      "graph_kind": "project_graph",
+      "backend_view": "evidence",
+      "visible_labels": ["motivating question", "answerable question", "dataset"],
+      "nodes": [
+        {"id": "question:motivating", "label": "motivating question", "entity_type": "question"},
+        {"id": "question:answerable", "label": "answerable question", "entity_type": "question"},
+        {"id": "dataset:dataset", "label": "dataset", "entity_type": "dataset"}
+      ],
+      "edges": [
+        {"id": "question_parent", "source": "question:motivating", "target": "question:answerable", "relationship": "question_parent", "label": "parent", "state": "present"},
+        {"id": "dataset_question", "source": "question:answerable", "target": "dataset:dataset", "relationship": "dataset_question_primary", "label": "primary question", "state": "present"}
+      ]
+    },
+    {
+      "diagram_id": "rg-question-build-4-analysis-link",
+      "slide_number": 14,
+      "title": "Link analyses to their source data and question",
+      "graph_kind": "project_graph",
+      "backend_view": "evidence",
+      "visible_labels": ["motivating question", "answerable question", "dataset", "analysis"],
+      "nodes": [
+        {"id": "question:motivating", "label": "motivating question", "entity_type": "question"},
+        {"id": "question:answerable", "label": "answerable question", "entity_type": "question"},
+        {"id": "dataset:dataset", "label": "dataset", "entity_type": "dataset"},
+        {"id": "analysis:analysis", "label": "analysis", "entity_type": "analysis"}
+      ],
+      "edges": [
+        {"id": "question_parent", "source": "question:motivating", "target": "question:answerable", "relationship": "question_parent", "label": "parent", "state": "present"},
+        {"id": "dataset_question", "source": "question:answerable", "target": "dataset:dataset", "relationship": "dataset_question_primary", "label": "primary question", "state": "present"},
+        {"id": "analysis_dataset", "source": "dataset:dataset", "target": "analysis:analysis", "relationship": "analysis_dataset", "label": "used by", "state": "present"}
+      ]
+    },
+    {
+      "diagram_id": "rg-question-build-5-supported-claim-figure",
+      "slide_number": 15,
+      "title": "Treat claims as supported only when evidence is attached",
+      "graph_kind": "project_graph",
+      "backend_view": "evidence",
+      "visible_labels": ["motivating question", "answerable question", "dataset", "analysis", "supported claim + figure"],
+      "nodes": [
+        {"id": "question:motivating", "label": "motivating question", "entity_type": "question"},
+        {"id": "question:answerable", "label": "answerable question", "entity_type": "question"},
+        {"id": "dataset:dataset", "label": "dataset", "entity_type": "dataset"},
+        {"id": "analysis:analysis", "label": "analysis", "entity_type": "analysis"},
+        {"id": "claim:supported", "label": "supported claim", "entity_type": "claim"},
+        {"id": "visualization:figure", "label": "figure", "entity_type": "visualization"}
+      ],
+      "edges": [
+        {"id": "question_parent", "source": "question:motivating", "target": "question:answerable", "relationship": "question_parent", "label": "parent", "state": "present"},
+        {"id": "dataset_question", "source": "question:answerable", "target": "dataset:dataset", "relationship": "dataset_question_primary", "label": "primary question", "state": "present"},
+        {"id": "analysis_dataset", "source": "dataset:dataset", "target": "analysis:analysis", "relationship": "analysis_dataset", "label": "used by", "state": "present"},
+        {"id": "claim_analysis", "source": "analysis:analysis", "target": "claim:supported", "relationship": "claim_analysis_support", "label": "supports", "state": "present"},
+        {"id": "analysis_figure", "source": "analysis:analysis", "target": "visualization:figure", "relationship": "visualization_analysis", "label": "generates", "state": "present"},
+        {"id": "claim_figure", "source": "claim:supported", "target": "visualization:figure", "relationship": "visualization_claim", "label": "related claim", "state": "present"}
+      ]
+    },
+    {
+      "diagram_id": "rg-worked-example-figure-trace",
+      "slide_number": 16,
+      "title": "A figure should remain traceable to the question it addresses",
+      "graph_kind": "project_graph",
+      "backend_view": "evidence",
+      "visible_labels": ["figure", "supported claim", "question addressed"],
+      "nodes": [
+        {"id": "question:addressed", "label": "question addressed", "entity_type": "question"},
+        {"id": "dataset:evidence", "label": "evidence", "entity_type": "dataset", "visible": false},
+        {"id": "analysis:analysis", "label": "analysis", "entity_type": "analysis", "visible": false},
+        {"id": "claim:supported", "label": "supported claim", "entity_type": "claim"},
+        {"id": "visualization:figure", "label": "figure", "entity_type": "visualization"}
+      ],
+      "edges": [
+        {"id": "question_dataset", "source": "question:addressed", "target": "dataset:evidence", "relationship": "dataset_question_primary", "label": "primary question", "state": "implicit"},
+        {"id": "analysis_dataset", "source": "dataset:evidence", "target": "analysis:analysis", "relationship": "analysis_dataset", "label": "used by", "state": "implicit"},
+        {"id": "claim_analysis", "source": "analysis:analysis", "target": "claim:supported", "relationship": "claim_analysis_support", "label": "supports", "state": "present"},
+        {"id": "analysis_figure", "source": "analysis:analysis", "target": "visualization:figure", "relationship": "visualization_analysis", "label": "generates", "state": "present"},
+        {"id": "claim_figure", "source": "claim:supported", "target": "visualization:figure", "relationship": "visualization_claim", "label": "related claim", "state": "present"}
+      ]
+    },
+    {
+      "diagram_id": "rg-capture-1-raw-note",
+      "slide_number": 17,
+      "title": "Capture begins with the raw note",
+      "graph_kind": "graph_draft",
+      "backend_view": "full",
+      "visible_labels": ["raw note"],
+      "nodes": [
+        {"id": "note:raw_note", "label": "raw note", "entity_type": "note"}
+      ],
+      "edges": [],
+      "operations": [
+        {"semantic_type": "create_note", "op": "create", "entity_type": "note", "target_node": "note:raw_note", "payload_template": {"raw_content": "$raw_human_note"}, "rationale": "Preserve the raw human note before interpretation."}
+      ]
+    },
+    {
+      "diagram_id": "rg-capture-2-context-packet",
+      "slide_number": 18,
+      "title": "Graph context is added before model interpretation",
+      "graph_kind": "context_packet",
+      "backend_view": "full",
+      "visible_labels": ["raw note", "context packet"],
+      "nodes": [
+        {"id": "note:raw_note", "label": "raw note", "entity_type": "note"},
+        {"id": "question:active_question", "label": "active question", "entity_type": "question"},
+        {"id": "dataset:recent_dataset", "label": "recent dataset", "entity_type": "dataset"},
+        {"id": "analysis:recent_analysis", "label": "recent analysis", "entity_type": "analysis"}
+      ],
+      "edges": [
+        {"id": "note_question", "source": "note:raw_note", "target": "question:active_question", "relationship": "note_target_question", "label": "targets", "state": "context_required"},
+        {"id": "dataset_question", "source": "question:active_question", "target": "dataset:recent_dataset", "relationship": "dataset_question_primary", "label": "primary question", "state": "context_required"},
+        {"id": "analysis_dataset", "source": "dataset:recent_dataset", "target": "analysis:recent_analysis", "relationship": "analysis_dataset", "label": "used by", "state": "context_required"}
+      ],
+      "notes": "This is the bounded graph context packet supplied to drafting."
+    },
+    {
+      "diagram_id": "rg-capture-3-proposed-operations",
+      "slide_number": 19,
+      "title": "The model returns proposed graph operations",
+      "graph_kind": "graph_draft",
+      "backend_view": "full",
+      "visible_labels": ["raw note", "context packet", "proposed operations", "link note -> question", "link dataset", "attach evidence"],
+      "nodes": [
+        {"id": "note:raw_note", "label": "raw note", "entity_type": "note"},
+        {"id": "question:active_question", "label": "active question", "entity_type": "question"},
+        {"id": "dataset:candidate_dataset", "label": "candidate dataset", "entity_type": "dataset"},
+        {"id": "analysis:candidate_analysis", "label": "candidate analysis", "entity_type": "analysis"},
+        {"id": "claim:candidate_claim", "label": "candidate claim", "entity_type": "claim"}
+      ],
+      "edges": [
+        {"id": "note_question", "source": "note:raw_note", "target": "question:active_question", "relationship": "note_target_question", "label": "targets", "state": "proposed"},
+        {"id": "dataset_question", "source": "question:active_question", "target": "dataset:candidate_dataset", "relationship": "dataset_question_primary", "label": "primary question", "state": "proposed"},
+        {"id": "analysis_dataset", "source": "dataset:candidate_dataset", "target": "analysis:candidate_analysis", "relationship": "analysis_dataset", "label": "used by", "state": "proposed"},
+        {"id": "claim_analysis", "source": "analysis:candidate_analysis", "target": "claim:candidate_claim", "relationship": "claim_analysis_support", "label": "supports", "state": "proposed"}
+      ],
+      "operations": [
+        {"semantic_type": "link_note_to_question", "op": "update", "entity_type": "note", "target_node": "note:raw_note", "payload_template": {"targets": [{"entity_type": "question", "entity_id": "$question:active_question"}]}, "rationale": "Attach the note to the active question."},
+        {"semantic_type": "suggest_new_dataset", "op": "create", "entity_type": "dataset", "target_node": "dataset:candidate_dataset", "payload_template": {"primary_question_id": "$question:active_question", "status": "staged"}, "rationale": "Stage a dataset if the note identifies one."},
+        {"semantic_type": "update_entity", "op": "update", "entity_type": "claim", "target_node": "claim:candidate_claim", "payload_template": {"supported_by_analysis_ids": ["$analysis:candidate_analysis"]}, "rationale": "Attach evidence to the candidate claim."}
+      ]
+    },
+    {
+      "diagram_id": "rg-capture-4-reviewer-decision",
+      "slide_number": 20,
+      "title": "The reviewer decides what enters the record",
+      "graph_kind": "graph_draft",
+      "backend_view": "full",
+      "visible_labels": ["raw note", "context packet", "proposed operations", "reviewer decision"],
+      "nodes": [
+        {"id": "note:raw_note", "label": "raw note", "entity_type": "note"},
+        {"id": "question:active_question", "label": "active question", "entity_type": "question"},
+        {"id": "dataset:candidate_dataset", "label": "candidate dataset", "entity_type": "dataset"},
+        {"id": "analysis:candidate_analysis", "label": "candidate analysis", "entity_type": "analysis"},
+        {"id": "claim:candidate_claim", "label": "candidate claim", "entity_type": "claim"}
+      ],
+      "edges": [
+        {"id": "note_question", "source": "note:raw_note", "target": "question:active_question", "relationship": "note_target_question", "label": "targets", "state": "proposed"},
+        {"id": "dataset_question", "source": "question:active_question", "target": "dataset:candidate_dataset", "relationship": "dataset_question_primary", "label": "primary question", "state": "proposed"},
+        {"id": "analysis_dataset", "source": "dataset:candidate_dataset", "target": "analysis:candidate_analysis", "relationship": "analysis_dataset", "label": "used by", "state": "proposed"},
+        {"id": "claim_analysis", "source": "analysis:candidate_analysis", "target": "claim:candidate_claim", "relationship": "claim_analysis_support", "label": "supports", "state": "proposed"}
+      ],
+      "operations": [
+        {"semantic_type": "link_note_to_question", "op": "update", "entity_type": "note", "target_node": "note:raw_note", "payload_template": {"targets": [{"entity_type": "question", "entity_id": "$question:active_question"}]}, "rationale": "Accepted operations become graph writes; rejected operations remain out of the record."}
+      ]
+    },
+    {
+      "diagram_id": "rg-first-use-case-one-project-one-result",
+      "slide_number": 21,
+      "title": "One project, its question hierarchy, and one result",
+      "graph_kind": "project_graph",
+      "backend_view": "evidence",
+      "visible_labels": ["one project", "question hierarchy", "one result"],
+      "nodes": [
+        {"id": "question:motivating", "label": "motivating question", "entity_type": "question"},
+        {"id": "question:answerable", "label": "answerable question", "entity_type": "question"},
+        {"id": "dataset:result_dataset", "label": "result dataset", "entity_type": "dataset"},
+        {"id": "analysis:result_analysis", "label": "result analysis", "entity_type": "analysis"},
+        {"id": "visualization:one_result", "label": "one result", "entity_type": "visualization"}
+      ],
+      "edges": [
+        {"id": "question_parent", "source": "question:motivating", "target": "question:answerable", "relationship": "question_parent", "label": "parent", "state": "present"},
+        {"id": "dataset_question", "source": "question:answerable", "target": "dataset:result_dataset", "relationship": "dataset_question_primary", "label": "primary question", "state": "present"},
+        {"id": "analysis_dataset", "source": "dataset:result_dataset", "target": "analysis:result_analysis", "relationship": "analysis_dataset", "label": "used by", "state": "present"},
+        {"id": "analysis_result", "source": "analysis:result_analysis", "target": "visualization:one_result", "relationship": "visualization_analysis", "label": "generates", "state": "present"}
+      ],
+      "notes": "The project itself is represented by project_id scope in the backend graph projection."
+    }
+  ]
+}
