@@ -132,6 +132,7 @@ def _create_graph_fixture(
             "status": "supported",
             "supported_by_dataset_ids": [dataset_id],
             "supported_by_analysis_ids": [analysis_id],
+            "answers_question_ids": [child_question_id],
         },
         headers=headers,
     ).json()["data"]["claim_id"]
@@ -228,6 +229,7 @@ def test_project_graph_evidence_and_full_views_include_expected_links(
         f"analysis_dataset:dataset:{ids['dataset_id']}->analysis:{ids['analysis_id']}",
         f"claim_dataset_support:dataset:{ids['dataset_id']}->claim:{ids['claim_id']}",
         f"claim_analysis_support:analysis:{ids['analysis_id']}->claim:{ids['claim_id']}",
+        f"claim_question_answers:claim:{ids['claim_id']}->question:{ids['child_question_id']}",
         f"visualization_analysis:analysis:{ids['analysis_id']}->visualization:{ids['viz_id']}",
         f"visualization_claim:claim:{ids['claim_id']}->visualization:{ids['viz_id']}",
     }.issubset(_edge_ids(evidence["edges"]))

@@ -401,6 +401,7 @@ class ClaimInput(_DomainModel):
     status: ClaimStatus = ClaimStatus.PROPOSED
     supported_by_dataset_ids: list[UUID] = Field(default_factory=list)
     supported_by_analysis_ids: list[UUID] = Field(default_factory=list)
+    answers_question_ids: list[UUID] = Field(default_factory=list)
 
 
 class Claim(_DomainModel):
@@ -411,6 +412,7 @@ class Claim(_DomainModel):
     status: ClaimStatus = ClaimStatus.PROPOSED
     supported_by_dataset_ids: list[UUID] = Field(default_factory=list)
     supported_by_analysis_ids: list[UUID] = Field(default_factory=list)
+    answers_question_ids: list[UUID] = Field(default_factory=list)
     created_at: datetime = Field(default_factory=utc_now)
     updated_at: datetime = Field(default_factory=utc_now)
 

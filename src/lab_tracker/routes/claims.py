@@ -41,6 +41,7 @@ def build_claims_router(api: LabTrackerAPI) -> APIRouter:
             status=payload.status or ClaimStatus.PROPOSED,
             supported_by_dataset_ids=payload.supported_by_dataset_ids,
             supported_by_analysis_ids=payload.supported_by_analysis_ids,
+            answers_question_ids=payload.answers_question_ids,
             actor=actor,
         )
         return Envelope(data=claim)
@@ -88,6 +89,7 @@ def build_claims_router(api: LabTrackerAPI) -> APIRouter:
             status=payload.status,
             supported_by_dataset_ids=payload.supported_by_dataset_ids,
             supported_by_analysis_ids=payload.supported_by_analysis_ids,
+            answers_question_ids=payload.answers_question_ids,
             actor=actor,
         )
         return Envelope(data=claim)

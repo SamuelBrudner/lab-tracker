@@ -494,6 +494,21 @@ class ClaimAnalysisModel(Base):
     )
 
 
+class ClaimQuestionModel(Base):
+    __tablename__ = "claim_questions"
+
+    claim_id: Mapped[str] = mapped_column(
+        String(36),
+        ForeignKey("claims.claim_id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    question_id: Mapped[str] = mapped_column(
+        String(36),
+        ForeignKey("questions.question_id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+
+
 class VisualizationModel(Base):
     __tablename__ = "visualizations"
 

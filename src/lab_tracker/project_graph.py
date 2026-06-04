@@ -375,6 +375,13 @@ def _add_evidence_edges(
                 "supports",
                 "claim_analysis_support",
             )
+        for question_id in sorted(claim.answers_question_ids, key=str):
+            builder.add_edge(
+                claim_id,
+                _entity_node_id("question", question_id),
+                "answers",
+                "claim_question_answers",
+            )
     for visualization in _sort_entities(visualizations, "viz_id", _visualization_label):
         visualization_id = _entity_node_id("visualization", visualization.viz_id)
         builder.add_edge(

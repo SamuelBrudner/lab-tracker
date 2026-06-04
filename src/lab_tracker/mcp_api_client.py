@@ -487,6 +487,7 @@ class LabTrackerAPIClient:
         status: str | None = "proposed",
         supported_by_dataset_ids: list[str] | None = None,
         supported_by_analysis_ids: list[str] | None = None,
+        answers_question_ids: list[str] | None = None,
     ) -> JsonObject:
         resolved_status = _validate_claim_status(status)
         return self._request(
@@ -499,6 +500,7 @@ class LabTrackerAPIClient:
                 "status": resolved_status,
                 "supported_by_dataset_ids": supported_by_dataset_ids,
                 "supported_by_analysis_ids": supported_by_analysis_ids,
+                "answers_question_ids": answers_question_ids,
             },
         )
 

@@ -14,6 +14,7 @@ from lab_tracker.db_models import (
     ClaimAnalysisModel,
     ClaimDatasetModel,
     ClaimModel,
+    ClaimQuestionModel,
     DatasetQuestionLinkModel,
     VisualizationClaimModel,
     VisualizationModel,
@@ -30,6 +31,7 @@ from lab_tracker.sqlalchemy_mappers import (
     claim_analysis_models,
     claim_dataset_models,
     claim_from_model,
+    claim_question_models,
     claim_to_model,
     visualization_claim_models,
     visualization_from_model,
@@ -187,15 +189,28 @@ class SQLAlchemyClaimRepository(EntityRepository[Claim]):
             analysis_map[row.claim_id].append(UUID(row.analysis_id))
         return analysis_map
 
+    def question_map(self, claim_ids: list[str]) -> dict[str, list[UUID]]:
+        question_map: dict[str, list[UUID]] = defaultdict(list)
+        if not claim_ids:
+            return question_map
+        rows = self._session.scalars(
+            select(ClaimQuestionModel).where(ClaimQuestionModel.claim_id.in_(claim_ids))
+        )
+        for row in rows:
+            question_map[row.claim_id].append(UUID(row.question_id))
+        return question_map
+
     def claims_from_rows(self, rows: list[ClaimModel]) -> list[Claim]:
         claim_ids = [row.claim_id for row in rows]
         dataset_map = self.dataset_map(claim_ids)
         analysis_map = self.analysis_map(claim_ids)
+        question_map = self.question_map(claim_ids)
         return [
             claim_from_model(
                 row,
                 supported_by_dataset_ids=dataset_map.get(row.claim_id, []),
                 supported_by_analysis_ids=analysis_map.get(row.claim_id, []),
+                answers_question_ids=question_map.get(row.claim_id, []),
             )
             for row in rows
         ]
@@ -236,6 +251,13 @@ class SQLAlchemyClaimRepository(EntityRepository[Claim]):
             ClaimAnalysisModel.claim_id,
             entity_id,
             claim_analysis_models(entity),
+        )
+        replace_child_rows(
+            self._session,
+            ClaimQuestionModel,
+            ClaimQuestionModel.claim_id,
+            entity_id,
+            claim_question_models(entity),
         )
 
     def delete(self, entity_id: UUID) -> Claim | None:

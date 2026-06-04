@@ -177,6 +177,7 @@ def lab_tracker_create_claim(
     status: str | None = "proposed",
     supported_by_dataset_ids: list[str] | None = None,
     supported_by_analysis_ids: list[str] | None = None,
+    answers_question_ids: list[str] | None = None,
 ) -> JsonObject:
     """Create a Lab Tracker claim through the API."""
     client = client_from_env()
@@ -188,6 +189,7 @@ def lab_tracker_create_claim(
             status=status,
             supported_by_dataset_ids=supported_by_dataset_ids,
             supported_by_analysis_ids=supported_by_analysis_ids,
+            answers_question_ids=answers_question_ids,
         )
     finally:
         client.close()

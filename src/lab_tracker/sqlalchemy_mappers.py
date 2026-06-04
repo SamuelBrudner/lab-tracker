@@ -13,6 +13,7 @@ from lab_tracker.db_models import (
     ClaimAnalysisModel,
     ClaimDatasetModel,
     ClaimModel,
+    ClaimQuestionModel,
     DatasetModel,
     DatasetQuestionLinkModel,
     NoteModel,
@@ -608,6 +609,7 @@ def claim_from_model(
     *,
     supported_by_dataset_ids: Iterable[UUID] = (),
     supported_by_analysis_ids: Iterable[UUID] = (),
+    answers_question_ids: Iterable[UUID] = (),
 ) -> Claim:
     return Claim(
         claim_id=_uuid(row.claim_id),
@@ -617,6 +619,7 @@ def claim_from_model(
         status=ClaimStatus(row.status),
         supported_by_dataset_ids=list(supported_by_dataset_ids),
         supported_by_analysis_ids=list(supported_by_analysis_ids),
+        answers_question_ids=list(answers_question_ids),
         created_at=_as_utc(row.created_at),
         updated_at=_as_utc(row.updated_at),
     )
@@ -639,6 +642,16 @@ def claim_analysis_models(claim: Claim) -> list[ClaimAnalysisModel]:
             analysis_id=_uuid_str(analysis_id),
         )
         for analysis_id in claim.supported_by_analysis_ids
+    ]
+
+
+def claim_question_models(claim: Claim) -> list[ClaimQuestionModel]:
+    return [
+        ClaimQuestionModel(
+            claim_id=_uuid_str(claim.claim_id),
+            question_id=_uuid_str(question_id),
+        )
+        for question_id in claim.answers_question_ids
     ]
 
 

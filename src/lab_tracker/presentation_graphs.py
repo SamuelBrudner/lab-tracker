@@ -18,6 +18,7 @@ PROJECT_GRAPH_RELATIONSHIP_ENDPOINTS = {
     "analysis_dataset": ("dataset", "analysis"),
     "claim_analysis_support": ("analysis", "claim"),
     "claim_dataset_support": ("dataset", "claim"),
+    "claim_question_answers": ("claim", "question"),
     "dataset_question_primary": ("question", "dataset"),
     "dataset_question_secondary": ("question", "dataset"),
     "dataset_source_session": ("session", "dataset"),

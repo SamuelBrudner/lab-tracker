@@ -149,6 +149,31 @@ def test_claim_status_transitions_and_edits():
         api.update_claim(claim.claim_id, statement="Updated statement", actor=actor)
 
 
+def test_claim_answers_question_links_round_trip_and_project_scope():
+    api = repository_backed_api()
+    actor = _actor()
+    project, question = _setup_project_with_question(api, actor)
+    claim = api.create_claim(
+        project_id=project.project_id,
+        statement="Baseline distribution is stable",
+        confidence=45.0,
+        answers_question_ids=[question.question_id],
+        actor=actor,
+    )
+    assert claim.answers_question_ids == [question.question_id]
+    assert api.get_claim(claim.claim_id).answers_question_ids == [question.question_id]
+
+    _, foreign_question = _setup_project_with_question(api, actor)
+    with pytest.raises(ValidationError):
+        api.create_claim(
+            project_id=project.project_id,
+            statement="Answers a question from another project",
+            confidence=10.0,
+            answers_question_ids=[foreign_question.question_id],
+            actor=actor,
+        )
+
+
 def test_visualization_filters_and_analysis_question_links():
     api = repository_backed_api()
     actor = _actor()

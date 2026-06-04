@@ -167,6 +167,7 @@ class GraphPatchApplier:
                 status=data.status or ClaimStatus.PROPOSED,
                 supported_by_dataset_ids=data.supported_by_dataset_ids,
                 supported_by_analysis_ids=data.supported_by_analysis_ids,
+                answers_question_ids=data.answers_question_ids,
                 actor=actor,
             )
         if entity_type == EntityType.VISUALIZATION:
@@ -254,6 +255,7 @@ class GraphPatchApplier:
                 status=data.status,
                 supported_by_dataset_ids=data.supported_by_dataset_ids,
                 supported_by_analysis_ids=data.supported_by_analysis_ids,
+                answers_question_ids=data.answers_question_ids,
                 actor=actor,
             )
         if entity_type == EntityType.VISUALIZATION:

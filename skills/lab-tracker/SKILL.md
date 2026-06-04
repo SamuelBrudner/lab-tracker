@@ -262,6 +262,7 @@ List/search endpoints use `limit` between 1 and 200 and `offset` of 0 or greater
 
 #### Claims: `ClaimCreate`
 - Required: `project_id`, `statement`, `confidence`
+- `answers_question_ids` (optional): list[string(uuid)] | null
 - `confidence` (required): number; minimum 0.0, maximum 100.0
 - `project_id` (required): string(uuid)
 - `statement` (required): string; min length 1

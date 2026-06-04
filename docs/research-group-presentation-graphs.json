@@ -224,7 +224,8 @@
         {"id": "question_dataset", "source": "question:addressed", "target": "dataset:data_file", "relationship": "dataset_question_primary", "label": "primary question", "state": "present"},
         {"id": "dataset_analysis", "source": "dataset:data_file", "target": "analysis:analysis", "relationship": "analysis_dataset", "label": "used by", "state": "present"},
         {"id": "dataset_claim", "source": "dataset:data_file", "target": "claim:evidence_claim", "relationship": "claim_dataset_support", "label": "supports", "state": "present"},
-        {"id": "analysis_figure", "source": "analysis:analysis", "target": "visualization:figure", "relationship": "visualization_analysis", "label": "generates", "state": "present"}
+        {"id": "analysis_figure", "source": "analysis:analysis", "target": "visualization:figure", "relationship": "visualization_analysis", "label": "generates", "state": "present"},
+        {"id": "claim_question", "source": "claim:evidence_claim", "target": "question:addressed", "relationship": "claim_question_answers", "label": "answers", "state": "present"}
       ]
     },
     {
@@ -311,18 +312,19 @@
         {"id": "analysis_dataset", "source": "dataset:dataset", "target": "analysis:analysis", "relationship": "analysis_dataset", "label": "used by", "state": "present"},
         {"id": "claim_analysis", "source": "analysis:analysis", "target": "claim:supported", "relationship": "claim_analysis_support", "label": "supports", "state": "present"},
         {"id": "analysis_figure", "source": "analysis:analysis", "target": "visualization:figure", "relationship": "visualization_analysis", "label": "generates", "state": "present"},
-        {"id": "claim_figure", "source": "claim:supported", "target": "visualization:figure", "relationship": "visualization_claim", "label": "related claim", "state": "present"}
+        {"id": "claim_figure", "source": "claim:supported", "target": "visualization:figure", "relationship": "visualization_claim", "label": "related claim", "state": "present"},
+        {"id": "claim_question", "source": "claim:supported", "target": "question:answerable", "relationship": "claim_question_answers", "label": "answers", "state": "present"}
       ]
     },
     {
       "diagram_id": "rg-worked-example-figure-trace",
       "slide_number": 16,
-      "title": "A figure should remain traceable to the question it addresses",
+      "title": "A figure traces back to the question its claim answers",
       "graph_kind": "project_graph",
       "backend_view": "evidence",
-      "visible_labels": ["figure", "supported claim", "question addressed"],
+      "visible_labels": ["figure", "supported claim", "question answered"],
       "nodes": [
-        {"id": "question:addressed", "label": "question addressed", "entity_type": "question"},
+        {"id": "question:addressed", "label": "question answered", "entity_type": "question"},
         {"id": "dataset:evidence", "label": "evidence", "entity_type": "dataset", "visible": false},
         {"id": "analysis:analysis", "label": "analysis", "entity_type": "analysis", "visible": false},
         {"id": "claim:supported", "label": "supported claim", "entity_type": "claim"},
@@ -333,7 +335,8 @@
         {"id": "analysis_dataset", "source": "dataset:evidence", "target": "analysis:analysis", "relationship": "analysis_dataset", "label": "used by", "state": "implicit"},
         {"id": "claim_analysis", "source": "analysis:analysis", "target": "claim:supported", "relationship": "claim_analysis_support", "label": "supports", "state": "present"},
         {"id": "analysis_figure", "source": "analysis:analysis", "target": "visualization:figure", "relationship": "visualization_analysis", "label": "generates", "state": "present"},
-        {"id": "claim_figure", "source": "claim:supported", "target": "visualization:figure", "relationship": "visualization_claim", "label": "related claim", "state": "present"}
+        {"id": "claim_figure", "source": "claim:supported", "target": "visualization:figure", "relationship": "visualization_claim", "label": "related claim", "state": "present"},
+        {"id": "claim_question", "source": "claim:supported", "target": "question:addressed", "relationship": "claim_question_answers", "label": "answers", "state": "present"}
       ]
     },
     {

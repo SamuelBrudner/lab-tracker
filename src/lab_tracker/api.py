@@ -85,6 +85,7 @@ class LabTrackerAPI:
             context,
             projects=self.projects,
             datasets=self.datasets,
+            questions=self.questions,
             analyses_provider=lambda: self.analyses,
         )
         self.visualizations: VisualizationService = VisualizationService(

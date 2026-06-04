@@ -44,6 +44,7 @@ def _context(base_url: str) -> dict[str, object]:
     return {
         "prov": "http://www.w3.org/ns/prov#",
         "lab": _terms_iri(base_url),
+        "answersQuestion": {"@id": "lab:answersQuestion", "@type": "@id"},
         "caption": "lab:caption",
         "checksum": "lab:checksum",
         "codeVersion": "lab:codeVersion",
@@ -271,6 +272,11 @@ def _claim_node(base_url: str, claim: Claim) -> dict[str, object]:
         node["supportsAnalysis"] = [
             {"@id": _resource_iri(base_url, "analyses", analysis_id)}
             for analysis_id in claim.supported_by_analysis_ids
+        ]
+    if claim.answers_question_ids:
+        node["answersQuestion"] = [
+            {"@id": _resource_iri(base_url, "questions", question_id)}
+            for question_id in claim.answers_question_ids
         ]
     return node
 

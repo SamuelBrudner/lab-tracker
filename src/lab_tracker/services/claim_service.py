@@ -16,6 +16,7 @@ from lab_tracker.models import (
 from lab_tracker.services.base import BaseService, ServiceContext
 from lab_tracker.services.dataset_service import DatasetService
 from lab_tracker.services.project_service import ProjectService
+from lab_tracker.services.question_service import QuestionService
 from lab_tracker.services.shared import (
     WRITE_ROLES,
     _ensure_claim_confidence,
@@ -36,11 +37,13 @@ class ClaimService(BaseService):
         *,
         projects: ProjectService,
         datasets: DatasetService,
+        questions: QuestionService,
         analyses_provider: Callable[[], AnalysisService],
     ) -> None:
         super().__init__(context)
         self.projects = projects
         self.datasets = datasets
+        self.questions = questions
         self._analyses_provider = analyses_provider
 
     @property
@@ -56,6 +59,7 @@ class ClaimService(BaseService):
         status: ClaimStatus = ClaimStatus.PROPOSED,
         supported_by_dataset_ids: Iterable[UUID] | None = None,
         supported_by_analysis_ids: Iterable[UUID] | None = None,
+        answers_question_ids: Iterable[UUID] | None = None,
         actor: AuthContext | None = None,
     ) -> Claim:
         require_role(actor, WRITE_ROLES)
@@ -67,6 +71,7 @@ class ClaimService(BaseService):
             supported_by_dataset_ids,
             supported_by_analysis_ids,
         )
+        question_ids = self._resolve_claim_question_links(project_id, answers_question_ids)
         _ensure_claim_support_links(status, dataset_ids, analysis_ids)
         claim = Claim(
             claim_id=uuid4(),
@@ -76,6 +81,7 @@ class ClaimService(BaseService):
             status=status,
             supported_by_dataset_ids=dataset_ids,
             supported_by_analysis_ids=analysis_ids,
+            answers_question_ids=question_ids,
         )
         with self.unit_of_work() as repository:
             repository.claims.save(claim)
@@ -116,6 +122,7 @@ class ClaimService(BaseService):
         status: ClaimStatus | None = None,
         supported_by_dataset_ids: Iterable[UUID] | None = None,
         supported_by_analysis_ids: Iterable[UUID] | None = None,
+        answers_question_ids: Iterable[UUID] | None = None,
         actor: AuthContext | None = None,
     ) -> Claim:
         require_role(actor, WRITE_ROLES)
@@ -127,6 +134,7 @@ class ClaimService(BaseService):
             or confidence is not None
             or supported_by_dataset_ids is not None
             or supported_by_analysis_ids is not None
+            or answers_question_ids is not None
         ):
             raise ValidationError("Only proposed claims can be edited.")
         if statement is not None:
@@ -143,6 +151,10 @@ class ClaimService(BaseService):
             )
             claim.supported_by_dataset_ids = dataset_ids
             claim.supported_by_analysis_ids = analysis_ids
+        if answers_question_ids is not None:
+            claim.answers_question_ids = self._resolve_claim_question_links(
+                claim.project_id, answers_question_ids
+            )
         _ensure_claim_support_links(
             next_status, claim.supported_by_dataset_ids, claim.supported_by_analysis_ids
         )
@@ -177,3 +189,15 @@ class ClaimService(BaseService):
             if analysis.project_id != project_id:
                 raise ValidationError("Supporting analyses must belong to the same project.")
         return resolved_dataset_ids, resolved_analysis_ids
+
+    def _resolve_claim_question_links(
+        self,
+        project_id: UUID,
+        question_ids: Iterable[UUID] | None,
+    ) -> list[UUID]:
+        resolved_question_ids = unique_ids(question_ids)
+        for question_id in resolved_question_ids:
+            question = self.questions.get_question(question_id)
+            if question.project_id != project_id:
+                raise ValidationError("Answered questions must belong to the same project.")
+        return resolved_question_ids
