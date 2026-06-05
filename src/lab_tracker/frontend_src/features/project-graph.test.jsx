@@ -101,4 +101,31 @@ describe("buildFlowGraph edge dedupe", () => {
     expect(nodes[1].position.y).toBe(118);
     expect(nodes[0].position.x).toBe(nodes[1].position.x);
   });
+
+  it("anchors a downstream node to its source's row, not the top of the column", () => {
+    const graph = {
+      nodes: [
+        q("R", "root"),
+        q("S", "sub"),
+        { id: "D", entity_type: "dataset", label: "dataset" },
+        { id: "A", entity_type: "analysis", label: "analysis" },
+      ],
+      edges: [
+        edge("e1", "R", "S", "question_parent"),
+        edge("e2", "S", "D", "dataset_question_primary"),
+        edge("e3", "D", "A", "analysis_dataset"),
+      ],
+    };
+    const byId = Object.fromEntries(
+      buildFlowGraph(graph, "evidence").nodes.map((n) => [n.id, n]),
+    );
+    // The sub-question S sits below the root R; the dataset and analysis follow
+    // S's row rather than floating at the top of their columns.
+    expect(byId.S.position.y).toBeGreaterThan(byId.R.position.y);
+    expect(byId.D.position.y).toBe(byId.S.position.y);
+    expect(byId.A.position.y).toBe(byId.D.position.y);
+    // ...and they sit in successive columns to the right.
+    expect(byId.D.position.x).toBeGreaterThan(byId.S.position.x);
+    expect(byId.A.position.x).toBeGreaterThan(byId.D.position.x);
+  });
 });

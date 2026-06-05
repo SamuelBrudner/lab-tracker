@@ -29,7 +29,11 @@ def test_research_group_presentation_graph_manifest_validates() -> None:
 
     assert isinstance(manifest, PresentationGraphManifest)
     assert manifest.deck_id == "lab-tracker-research-group-presentation"
-    assert {graph.slide_number for graph in manifest.graphs} == set(range(1, 20))
+    # Slides 1 (title) and 2 (premise statement) carry no diagram, so the
+    # manifest documents the diagram-bearing slides 3..19.
+    slide_numbers = sorted(graph.slide_number for graph in manifest.graphs)
+    assert len(slide_numbers) == len(set(slide_numbers))
+    assert slide_numbers == list(range(3, 20))
     assert {graph.diagram_id for graph in manifest.graphs} >= {
         "rg-problem-1-missing-question-edge",
         "rg-problem-2-missing-context",

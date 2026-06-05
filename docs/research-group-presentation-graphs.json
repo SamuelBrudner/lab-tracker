@@ -10,46 +10,6 @@
   },
   "graphs": [
     {
-      "diagram_id": "rg-title-reasoning-spine",
-      "slide_number": 1,
-      "title": "Questions -> evidence -> claims -> figures",
-      "graph_kind": "project_graph",
-      "backend_view": "evidence",
-      "visible_labels": ["Does lateral inhibition normalize PN output?", "2025_12_10_Rig2_session001.nwb", "Background odor scales PN gain ~0.6x", "Fig 3b - PN gain vs background"],
-      "nodes": [
-        {"id": "question:lateral_inhib", "label": "Does lateral inhibition normalize PN output?", "entity_type": "question"},
-        {"id": "dataset:nwb_1210", "label": "2025_12_10_Rig2_session001.nwb", "entity_type": "dataset"},
-        {"id": "claim:norm", "label": "Background odor scales PN gain ~0.6x (n=18)", "entity_type": "claim"},
-        {"id": "visualization:fig_norm", "label": "Fig 3b - PN gain vs background", "entity_type": "visualization"}
-      ],
-      "edges": [
-        {"id": "e1", "source": "question:lateral_inhib", "target": "dataset:nwb_1210", "relationship": "dataset_question_primary", "label": "primary question", "state": "present"},
-        {"id": "e2", "source": "dataset:nwb_1210", "target": "claim:norm", "relationship": "claim_dataset_support", "label": "supports", "state": "present"},
-        {"id": "e3", "source": "claim:norm", "target": "visualization:fig_norm", "relationship": "visualization_claim", "label": "related claim", "state": "present"}
-      ]
-    },
-    {
-      "diagram_id": "rg-core-premise-record",
-      "slide_number": 2,
-      "title": "A useful record includes why an experiment was done",
-      "graph_kind": "project_graph",
-      "backend_view": "full",
-      "visible_labels": ["what happened", "why it happened", "what it supports"],
-      "nodes": [
-        {"id": "session:rig2_1210", "label": "Rig2 - 2025-12-10 - fly07", "entity_type": "session"},
-        {"id": "question:lateral_inhib", "label": "Does lateral inhibition normalize PN output?", "entity_type": "question"},
-        {"id": "dataset:nwb_1210", "label": "2025_12_10_Rig2_session001.nwb", "entity_type": "dataset", "visible": false},
-        {"id": "claim:norm", "label": "Background odor scales PN gain ~0.6x (n=18)", "entity_type": "claim"}
-      ],
-      "edges": [
-        {"id": "e1", "source": "question:lateral_inhib", "target": "session:rig2_1210", "relationship": "session_question", "label": "session question", "state": "present"},
-        {"id": "e2", "source": "session:rig2_1210", "target": "dataset:nwb_1210", "relationship": "dataset_source_session", "label": "produces", "state": "implicit"},
-        {"id": "e3", "source": "question:lateral_inhib", "target": "dataset:nwb_1210", "relationship": "dataset_question_primary", "label": "answers", "state": "implicit"},
-        {"id": "e4", "source": "dataset:nwb_1210", "target": "claim:norm", "relationship": "claim_dataset_support", "label": "supports", "state": "implicit"}
-      ],
-      "notes": "Three visible blocks (session, question, claim) compress the backend path; the hidden dataset bridges session->claim, so its incident edges are implicit, not present."
-    },
-    {
       "diagram_id": "rg-problem-map",
       "slide_number": 3,
       "title": "The argument has three linked problems",

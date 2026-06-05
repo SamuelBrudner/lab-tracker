@@ -160,31 +160,88 @@ export function computeQuestionLayout(nodes, edges) {
   return { qids, depth, row, preIndex };
 }
 
-function graphNodeToFlowNode(node, indexByType, layerByType, view, qLayout) {
-  const layer = layerByType[node.entity_type] ?? 0;
-  const style = TYPE_STYLES[node.entity_type] || {};
-  let position;
-  if (node.entity_type === "question" && qLayout.qids.has(node.id)) {
+function nodeLayer(node, layerByType) {
+  return layerByType[node.entity_type] ?? 0;
+}
+
+// Compute an (x, y) for every node. Questions use the tree layout (questions
+// view) or an ordered entity-type column (evidence / full). Every other node is
+// anchored to the row of its upstream source(s) — the dataset to its primary
+// question, the analysis to its dataset, and so on — so each chain reads
+// horizontally and a node never appears to hang off a question it is not linked
+// to. Unanchored nodes fall back to stacking from the top of their column.
+function computeNodePositions(nodes, edges, view, layerByType, qLayout) {
+  const positions = new Map();
+  const nodesById = new Map((nodes || []).map((node) => [node.id, node]));
+  const isTreeQuestion = (node) =>
+    node.entity_type === "question" && qLayout.qids.has(node.id);
+
+  (nodes || []).filter(isTreeQuestion).forEach((node) => {
     if (view === "questions") {
-      // Dedicated all-questions view: render the hierarchy as a tree.
-      position = {
+      positions.set(node.id, {
         x: (qLayout.depth.get(node.id) ?? 0) * Q_TREE_COL,
         y: (qLayout.row.get(node.id) ?? 0) * Q_TREE_ROW,
-      };
+      });
     } else {
-      // Shared entity-type column: keep questions in their column (no x-indent,
-      // which would overlap the next column) but order them by tree preorder so
-      // parents read above their children.
-      position = {
-        x: layer * COL_WIDTH,
+      positions.set(node.id, {
+        x: nodeLayer(node, layerByType) * COL_WIDTH,
         y: (qLayout.preIndex.get(node.id) ?? 0) * ROW_HEIGHT,
-      };
+      });
     }
-  } else {
-    const typeIndex = indexByType[node.entity_type] || 0;
-    indexByType[node.entity_type] = typeIndex + 1;
-    position = { x: layer * COL_WIDTH, y: typeIndex * ROW_HEIGHT };
-  }
+  });
+
+  const incoming = new Map();
+  (edges || []).forEach((edge) => {
+    if (!incoming.has(edge.target)) incoming.set(edge.target, []);
+    incoming.get(edge.target).push(edge.source);
+  });
+
+  const nonQuestion = (nodes || [])
+    .filter((node) => !isTreeQuestion(node))
+    .map((node, index) => ({ node, index }))
+    .sort(
+      (a, b) =>
+        nodeLayer(a.node, layerByType) - nodeLayer(b.node, layerByType) ||
+        a.index - b.index,
+    )
+    .map((entry) => entry.node);
+
+  const fallbackByLayer = new Map();
+  const usedYByLayer = new Map();
+  nonQuestion.forEach((node) => {
+    const layer = nodeLayer(node, layerByType);
+    const sourceYs = (incoming.get(node.id) || [])
+      .map((sourceId) => ({
+        pos: positions.get(sourceId),
+        src: nodesById.get(sourceId),
+      }))
+      .filter(
+        (entry) =>
+          entry.pos && entry.src && nodeLayer(entry.src, layerByType) < layer,
+      )
+      .map((entry) => entry.pos.y);
+    let y;
+    if (sourceYs.length) {
+      y = sourceYs.reduce((sum, value) => sum + value, 0) / sourceYs.length;
+    } else {
+      const count = fallbackByLayer.get(layer) || 0;
+      fallbackByLayer.set(layer, count + 1);
+      y = count * ROW_HEIGHT;
+    }
+    const used = usedYByLayer.get(layer) || [];
+    while (used.some((other) => Math.abs(other - y) < ROW_HEIGHT * 0.75)) {
+      y += ROW_HEIGHT;
+    }
+    used.push(y);
+    usedYByLayer.set(layer, used);
+    positions.set(node.id, { x: layer * COL_WIDTH, y });
+  });
+
+  return positions;
+}
+
+function graphNodeToFlowNode(node, positions) {
+  const style = TYPE_STYLES[node.entity_type] || {};
   return {
     id: node.id,
     data: {
@@ -194,7 +251,7 @@ function graphNodeToFlowNode(node, indexByType, layerByType, view, qLayout) {
       route: node.route,
       status: node.status,
     },
-    position,
+    position: positions.get(node.id) || { x: 0, y: 0 },
     style: {
       ...style,
       borderWidth: 1,
@@ -220,9 +277,15 @@ function graphEdgeToFlowEdge(edge) {
 }
 
 export function buildFlowGraph(graph, view) {
-  const indexByType = {};
   const layerByType = TYPE_LAYER_BY_VIEW[view] || TYPE_LAYER_BY_VIEW.evidence;
   const qLayout = computeQuestionLayout(graph?.nodes || [], graph?.edges || []);
+  const positions = computeNodePositions(
+    graph?.nodes || [],
+    graph?.edges || [],
+    view,
+    layerByType,
+    qLayout,
+  );
   // Collapse mutual A<->B pairs (e.g. question_superseded_by + its reverse
   // question_supersedes) to one directed edge so arrowheads don't render two
   // opposing arrows. Process "downward" relationships first so the surviving
@@ -240,9 +303,7 @@ export function buildFlowGraph(graph, view) {
   });
   return {
     edges: dedupedEdges.map(graphEdgeToFlowEdge),
-    nodes: (graph?.nodes || []).map((node) =>
-      graphNodeToFlowNode(node, indexByType, layerByType, view, qLayout)
-    ),
+    nodes: (graph?.nodes || []).map((node) => graphNodeToFlowNode(node, positions)),
   };
 }
 
