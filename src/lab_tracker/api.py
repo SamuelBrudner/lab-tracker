@@ -373,6 +373,9 @@ class LabTrackerAPI:
     def review_graph_change_set(self, *args: Any, **kwargs: Any) -> Any:
         return self.graph_drafts.review_graph_change_set(*args, **kwargs)
 
+    def revise_graph_change_set(self, *args: Any, **kwargs: Any) -> Any:
+        return self.graph_drafts.revise_graph_change_set(*args, **kwargs)
+
     def commit_graph_change_set(self, *args: Any, **kwargs: Any) -> Any:
         return self.graph_drafts.commit_graph_change_set(*args, **kwargs)
 

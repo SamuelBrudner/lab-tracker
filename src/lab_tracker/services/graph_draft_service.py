@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from typing import Any
 from uuid import UUID, uuid4
 
@@ -277,6 +278,113 @@ class GraphDraftService(BaseService):
         change_set.updated_at = change_set.reviewed_at
         self._save_graph_change_set(change_set)
         return change_set
+
+    def revise_graph_change_set(
+        self,
+        change_set_id: UUID,
+        *,
+        feedback: str,
+        draft_client: Any,
+        actor: AuthContext | None = None,
+    ) -> GraphChangeSet:
+        """Regenerate the whole proposed operation set from reviewer feedback.
+
+        Reuses the same model + validation + persistence path as the initial
+        draft, but seeds the model with the current operations and the reviewer's
+        feedback. A model/validation failure leaves the existing draft intact.
+        """
+        change_set = self.get_graph_change_set(change_set_id)
+        self._ensure_graph_change_set_editable(change_set, actor=actor)
+        cleaned = (feedback or "").strip()
+        if not cleaned:
+            raise ValidationError("Reviewer feedback is required to revise a draft.")
+        mode = change_set.draft_mode
+        prepared = self.context_builder.prepare_note_sources_for_graph_draft(
+            change_set.source_note_id,
+            mode=mode,
+        )
+        note = prepared["source_note"]
+        revise_hint = self._compose_revise_hint(change_set.operations, cleaned)
+        if mode == GraphDraftMode.GRAPH_CONTEXT:
+            context_packet = self.context_builder.build_graph_context_packet(
+                note,
+                source_notes=prepared["source_notes"],
+                user_hint=revise_hint,
+                actor=actor,
+            )
+        elif mode == GraphDraftMode.IMAGE_ONLY:
+            context_packet = self.context_builder.image_only_context_packet(
+                note,
+                source_notes=prepared["source_notes"],
+                user_hint=revise_hint,
+            )
+        else:
+            raise ValidationError("Unsupported graph draft mode.")
+        try:
+            graph_patch = self._draft_graph_patch(
+                draft_client,
+                graph_context=context_packet,
+                user_hint=revise_hint,
+                draft_mode=mode,
+                source_artifacts=prepared["source_artifacts"],
+                image_bytes=prepared["image_bytes"],
+                image_content_type=prepared["image_content_type"],
+            )
+            self.patch_validator.validate_top_level(graph_patch)
+            # Build the new operations before mutating change_set so a model or
+            # validation failure does not destroy the existing draft.
+            new_operations = self.patch_validator.operations_from_graph_patch(
+                change_set,
+                graph_patch,
+            )
+        except GraphDraftingError as exc:
+            raise ValidationError(f"Could not revise the draft: {exc}") from exc
+        revisions: list[dict[str, Any]] = []
+        if isinstance(change_set.context_packet, dict):
+            revisions = list(change_set.context_packet.get("reviewer_revisions") or [])
+        revisions.append({"feedback": cleaned, "at": utc_now().isoformat()})
+        change_set.operations = new_operations
+        change_set.summary = str(graph_patch.get("summary") or "")
+        change_set.uncertain_fields = string_list(graph_patch.get("uncertain_fields"))
+        change_set.clarification_requests = string_list(
+            graph_patch.get("clarification_requests")
+        )
+        change_set.context_packet = context_packet
+        if isinstance(change_set.context_packet, dict):
+            change_set.context_packet["reviewer_revisions"] = revisions
+        change_set.status = GraphChangeSetStatus.READY
+        change_set.error_metadata = {}
+        change_set.updated_at = utc_now()
+        self._save_graph_change_set(change_set)
+        return change_set
+
+    @staticmethod
+    def _compose_revise_hint(
+        operations: list[GraphChangeOperation],
+        feedback: str,
+    ) -> str:
+        lines = []
+        for operation in operations:
+            semantic = (
+                operation.semantic_type.value
+                if operation.semantic_type
+                else operation.op.value
+            )
+            try:
+                payload_text = json.dumps(operation.payload, default=str)
+            except (TypeError, ValueError):
+                payload_text = str(operation.payload)
+            lines.append(
+                f"- [{operation.status.value}] {semantic} "
+                f"on {operation.entity_type.value}: {payload_text}"
+            )
+        prior = "\n".join(lines) if lines else "(none)"
+        return (
+            "REVISION REQUEST. You previously proposed the graph operations below. "
+            "Return a complete, corrected operation set (not a diff) that honors the "
+            "reviewer's feedback while staying grounded in the note and graph context."
+            f"\n\nPreviously proposed operations:\n{prior}\n\nReviewer feedback: {feedback}"
+        )
 
     def commit_graph_change_set(
         self,

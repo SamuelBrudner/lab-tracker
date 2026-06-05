@@ -18,6 +18,7 @@ from lab_tracker.schemas import (
     GraphDraftCreateRequest,
     GraphDraftOperationUpdate,
     GraphDraftReviewRequest,
+    GraphDraftReviseRequest,
     ListEnvelope,
 )
 
@@ -144,6 +145,30 @@ def build_graph_drafts_router(api: LabTrackerAPI) -> APIRouter:
             note=payload.note,
             actor=actor,
         )
+        return Envelope(data=_attach_graph_usernames(request, change_set))
+
+    @router.post(
+        "/graph-drafts/{change_set_id:uuid}/revise",
+        response_model=Envelope[GraphChangeSet],
+    )
+    def revise_graph_draft(
+        change_set_id: UUID,
+        payload: GraphDraftReviseRequest,
+        request: Request,
+    ):
+        actor = actor_from_request(request)
+        draft_client = _draft_client_from_request(request)
+        try:
+            change_set = api_from_request(request, api).revise_graph_change_set(
+                change_set_id,
+                feedback=payload.feedback,
+                draft_client=draft_client,
+                actor=actor,
+            )
+        finally:
+            close = getattr(draft_client, "close", None)
+            if callable(close):
+                close()
         return Envelope(data=_attach_graph_usernames(request, change_set))
 
     @router.post(

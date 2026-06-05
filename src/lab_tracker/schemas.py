@@ -337,6 +337,10 @@ class GraphDraftReviewRequest(RequestModel):
     note: NonBlankStr | None = None
 
 
+class GraphDraftReviseRequest(RequestModel):
+    feedback: NonBlankStr
+
+
 class GraphDraftListFilters(BaseModel):
     project_id: UUID | None = None
     status: GraphChangeSetStatus | None = None

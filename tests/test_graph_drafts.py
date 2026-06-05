@@ -1406,3 +1406,105 @@ def test_commit_failure_rolls_back_canonical_changes(
     )
     assert questions.status_code == 200
     assert questions.json()["data"] == []
+
+
+def _revised_draft_patch(project_id: str) -> dict[str, Any]:
+    """A revised patch with a single operation (was two), to prove regeneration."""
+    return {
+        "summary": "Revised per reviewer: keep only the protocol question.",
+        "uncertain_fields": [],
+        "clarification_requests": [],
+        "operations": [_draft_patch(project_id)["operations"][0]],
+    }
+
+
+def test_revise_graph_draft_regenerates_operations_from_feedback(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+) -> None:
+    project_id = _project(client, admin_auth_headers)
+    note_id = _image_note(client, admin_auth_headers, project_id)
+    initial = FakeDraftClient(_draft_patch(project_id))
+    client.app.state.graph_draft_client_factory = lambda settings: initial
+    created = client.post(
+        f"/notes/{note_id}/graph-drafts", headers=admin_auth_headers
+    ).json()["data"]
+    change_set_id = created["change_set_id"]
+    assert len(created["operations"]) == 2
+
+    revised_client = FakeDraftClient(_revised_draft_patch(project_id))
+    client.app.state.graph_draft_client_factory = lambda settings: revised_client
+    feedback = "Drop the note operation; keep only the protocol question."
+    response = client.post(
+        f"/graph-drafts/{change_set_id}/revise",
+        json={"feedback": feedback},
+        headers=admin_auth_headers,
+    )
+
+    assert response.status_code == 200
+    body = response.json()["data"]
+    assert body["change_set_id"] == change_set_id
+    assert body["status"] == "ready"
+    assert len(body["operations"]) == 1
+    assert all(op["status"] == "proposed" for op in body["operations"])
+    assert body["summary"].startswith("Revised per reviewer")
+
+    # The model was seeded with the feedback AND the prior operations.
+    hint = revised_client.calls[0]["user_hint"]
+    assert "REVISION REQUEST" in hint
+    assert feedback in hint
+    assert "Previously proposed operations" in hint
+    assert "suggest_new_question" in hint
+
+
+def test_revise_graph_draft_requires_feedback(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+) -> None:
+    project_id = _project(client, admin_auth_headers)
+    note_id = _image_note(client, admin_auth_headers, project_id)
+    client.app.state.graph_draft_client_factory = lambda settings: FakeDraftClient(
+        _draft_patch(project_id)
+    )
+    change_set_id = client.post(
+        f"/notes/{note_id}/graph-drafts", headers=admin_auth_headers
+    ).json()["data"]["change_set_id"]
+
+    response = client.post(
+        f"/graph-drafts/{change_set_id}/revise",
+        json={"feedback": "   "},
+        headers=admin_auth_headers,
+    )
+    assert response.status_code == 422
+
+
+def test_revise_graph_draft_keeps_draft_on_model_failure(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+) -> None:
+    project_id = _project(client, admin_auth_headers)
+    note_id = _image_note(client, admin_auth_headers, project_id)
+    client.app.state.graph_draft_client_factory = lambda settings: FakeDraftClient(
+        _draft_patch(project_id)
+    )
+    created = client.post(
+        f"/notes/{note_id}/graph-drafts", headers=admin_auth_headers
+    ).json()["data"]
+    change_set_id = created["change_set_id"]
+    assert len(created["operations"]) == 2
+
+    failing = FakeDraftClient(error="model exploded")
+    client.app.state.graph_draft_client_factory = lambda settings: failing
+    response = client.post(
+        f"/graph-drafts/{change_set_id}/revise",
+        json={"feedback": "Try again with fewer operations."},
+        headers=admin_auth_headers,
+    )
+    assert response.status_code == 422
+
+    # The existing draft is left intact (operations + ready status preserved).
+    after = client.get(
+        f"/graph-drafts/{change_set_id}", headers=admin_auth_headers
+    ).json()["data"]
+    assert len(after["operations"]) == 2
+    assert after["status"] == "ready"

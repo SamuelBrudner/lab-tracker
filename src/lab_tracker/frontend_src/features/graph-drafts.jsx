@@ -177,6 +177,7 @@ function GraphDraftDetailCard({
   const [sourceImage, setSourceImage] = useState("");
   const [commitMessage, setCommitMessage] = useState("");
   const [reviewNote, setReviewNote] = useState("");
+  const [reviseFeedback, setReviseFeedback] = useState("");
 
   const acceptedCount = useMemo(
     () =>
@@ -366,6 +367,33 @@ function GraphDraftDetailCard({
       setFlash(status === "rejected" ? "Graph draft rejected." : "Changes requested.");
     } catch (err) {
       setFlash("", err.message || "Failed to review graph draft.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function reviseDraft() {
+    if (!changeSet || !canEditDraft) {
+      return;
+    }
+    if (!reviseFeedback.trim()) {
+      setFlash("", "Enter feedback for the AI to revise the draft.");
+      return;
+    }
+    setBusy(true);
+    setFlash("", "");
+    try {
+      const nextChangeSet = await apiRequest(`/graph-drafts/${changeSet.change_set_id}/revise`, {
+        body: { feedback: reviseFeedback.trim() },
+        method: "POST",
+        token,
+      });
+      setChangeSet(nextChangeSet);
+      setPayloads(payloadText(nextChangeSet));
+      setReviseFeedback("");
+      setFlash("Draft revised from your feedback.");
+    } catch (err) {
+      setFlash("", err.message || "Failed to revise graph draft.");
     } finally {
       setBusy(false);
     }
@@ -588,6 +616,29 @@ function GraphDraftDetailCard({
                 Accept all
               </button>
             </div>
+            <div className="ai-revise">
+              <div className="subtle">Revise with AI</div>
+              <textarea
+                className="ai-revise-input"
+                rows={2}
+                placeholder="Tell the AI how to revise these proposals — e.g. 'drop the dataset link; the claim isn't supported yet, make it a clarification instead'."
+                value={reviseFeedback}
+                disabled={!canEditDraft}
+                onChange={(event) => setReviseFeedback(event.target.value)}
+              />
+              <button
+                type="button"
+                className="btn-secondary"
+                disabled={!canEditDraft || !reviseFeedback.trim()}
+                onClick={reviseDraft}
+              >
+                Revise with AI
+              </button>
+              <p className="subtle">
+                Re-runs the model with your feedback and the current proposals, then
+                replaces the operation list for you to review again.
+              </p>
+            </div>
             <div className="stack">
               {(changeSet.operations || []).map((operation) => (
                 <article className="item graph-operation-card" key={operation.operation_id}>
@@ -701,6 +752,15 @@ function GraphDraftDetailCard({
                     <p className="flash error">{operation.error_metadata.message}</p>
                   ) : null}
                   <div className="inline">
+                    <button
+                      type="button"
+                      className="btn-secondary"
+                      disabled={!canEditDraft}
+                      onClick={() => saveOperation(operation)}
+                      title="Save your edits to this operation without changing its decision"
+                    >
+                      Save edit
+                    </button>
                     <button
                       type="button"
                       className="btn-primary"
