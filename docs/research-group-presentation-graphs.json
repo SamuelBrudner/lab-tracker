@@ -267,21 +267,6 @@
       ]
     },
     {
-      "diagram_id": "rg-capture-1-raw-note",
-      "slide_number": 15,
-      "title": "Capture begins with the raw note",
-      "graph_kind": "graph_draft",
-      "backend_view": "full",
-      "visible_labels": ["raw note"],
-      "nodes": [
-        {"id": "note:raw_note", "label": "raw note", "entity_type": "note"}
-      ],
-      "edges": [],
-      "operations": [
-        {"semantic_type": "create_note", "op": "create", "entity_type": "note", "target_node": "note:raw_note", "payload_template": {"raw_content": "$raw_human_note"}, "rationale": "Preserve the raw human note before interpretation."}
-      ]
-    },
-    {
       "diagram_id": "rg-capture-2-context-packet",
       "slide_number": 16,
       "title": "Graph context is added before model interpretation",
@@ -300,83 +285,6 @@
         {"id": "analysis_dataset", "source": "dataset:recent_dataset", "target": "analysis:recent_analysis", "relationship": "analysis_dataset", "label": "used by", "state": "context_required"}
       ],
       "notes": "This is the bounded graph context packet supplied to drafting."
-    },
-    {
-      "diagram_id": "rg-capture-3-proposed-operations",
-      "slide_number": 17,
-      "title": "The model returns proposed graph operations",
-      "graph_kind": "graph_draft",
-      "backend_view": "full",
-      "visible_labels": ["raw note", "context packet", "proposed operations", "link note -> question", "link dataset", "attach evidence"],
-      "nodes": [
-        {"id": "note:raw_note", "label": "raw note", "entity_type": "note"},
-        {"id": "question:active_question", "label": "active question", "entity_type": "question"},
-        {"id": "dataset:candidate_dataset", "label": "candidate dataset", "entity_type": "dataset"},
-        {"id": "analysis:candidate_analysis", "label": "candidate analysis", "entity_type": "analysis"},
-        {"id": "claim:candidate_claim", "label": "candidate claim", "entity_type": "claim"}
-      ],
-      "edges": [
-        {"id": "note_question", "source": "note:raw_note", "target": "question:active_question", "relationship": "note_target_question", "label": "targets", "state": "proposed"},
-        {"id": "dataset_question", "source": "question:active_question", "target": "dataset:candidate_dataset", "relationship": "dataset_question_primary", "label": "primary question", "state": "proposed"},
-        {"id": "analysis_dataset", "source": "dataset:candidate_dataset", "target": "analysis:candidate_analysis", "relationship": "analysis_dataset", "label": "used by", "state": "proposed"},
-        {"id": "claim_analysis", "source": "analysis:candidate_analysis", "target": "claim:candidate_claim", "relationship": "claim_analysis_support", "label": "supports", "state": "proposed"}
-      ],
-      "operations": [
-        {"semantic_type": "link_note_to_question", "op": "update", "entity_type": "note", "target_node": "note:raw_note", "payload_template": {"targets": [{"entity_type": "question", "entity_id": "$question:active_question"}]}, "rationale": "Attach the note to the active question."},
-        {"semantic_type": "suggest_new_dataset", "op": "create", "entity_type": "dataset", "target_node": "dataset:candidate_dataset", "payload_template": {"primary_question_id": "$question:active_question", "status": "staged"}, "rationale": "Stage a dataset if the note identifies one."},
-        {"semantic_type": "update_entity", "op": "update", "entity_type": "claim", "target_node": "claim:candidate_claim", "payload_template": {"supported_by_analysis_ids": ["$analysis:candidate_analysis"]}, "rationale": "Attach evidence to the candidate claim."}
-      ]
-    },
-    {
-      "diagram_id": "rg-capture-4-reviewer-decision",
-      "slide_number": 18,
-      "title": "The reviewer decides what enters the record",
-      "graph_kind": "graph_draft",
-      "backend_view": "full",
-      "visible_labels": ["raw note", "accepted", "deferred", "rejected"],
-      "nodes": [
-        {"id": "note:raw_note", "label": "raw note", "entity_type": "note"},
-        {"id": "question:active_question", "label": "active question", "entity_type": "question"},
-        {"id": "dataset:candidate_dataset", "label": "candidate dataset", "entity_type": "dataset"},
-        {"id": "analysis:candidate_analysis", "label": "candidate analysis", "entity_type": "analysis"},
-        {"id": "claim:candidate_claim", "label": "candidate claim", "entity_type": "claim"}
-      ],
-      "edges": [
-        {"id": "note_question", "source": "note:raw_note", "target": "question:active_question", "relationship": "note_target_question", "label": "targets", "state": "present", "rationale": "Accepted: this link becomes a graph write."},
-        {"id": "dataset_question", "source": "question:active_question", "target": "dataset:candidate_dataset", "relationship": "dataset_question_primary", "label": "primary question", "state": "proposed", "rationale": "Deferred: left pending for a later decision."},
-        {"id": "analysis_dataset", "source": "dataset:candidate_dataset", "target": "analysis:candidate_analysis", "relationship": "analysis_dataset", "label": "used by", "state": "proposed", "rationale": "Deferred: left pending for a later decision."},
-        {"id": "claim_analysis", "source": "analysis:candidate_analysis", "target": "claim:candidate_claim", "relationship": "claim_analysis_support", "label": "supports", "state": "rejected", "rationale": "Rejected: evidence was judged insufficient, so the claim stays unsupported."}
-      ],
-      "operations": [
-        {"semantic_type": "link_note_to_question", "op": "update", "entity_type": "note", "target_node": "note:raw_note", "payload_template": {"targets": [{"entity_type": "question", "entity_id": "$question:active_question"}]}, "rationale": "Only the accepted operation becomes a graph write; the rejected claim support stays out, and the deferred links remain proposed."}
-      ],
-      "notes": "Unlike slide 17 (all proposed), the reviewer's decision is visible in edge state: accepted -> present, deferred -> proposed, rejected -> rejected."
-    },
-    {
-      "diagram_id": "rg-first-use-case-one-project-one-result",
-      "slide_number": 19,
-      "title": "One project, its question hierarchy, and one result",
-      "graph_kind": "project_graph",
-      "backend_view": "evidence",
-      "visible_labels": ["superseded -> current question", "two sub-questions", "one result"],
-      "nodes": [
-        {"id": "question:al_interneurons_old", "label": "Do antennal-lobe interneurons matter?", "entity_type": "question"},
-        {"id": "question:al_gain", "label": "How does the antennal lobe control gain?", "entity_type": "question"},
-        {"id": "question:lateral_inhib", "label": "Does lateral inhibition normalize PN output?", "entity_type": "question"},
-        {"id": "question:odor_identity", "label": "Does normalization depend on odor identity?", "entity_type": "question"},
-        {"id": "dataset:nwb_1210", "label": "2025_12_10_Rig2_session001.nwb", "entity_type": "dataset"},
-        {"id": "analysis:norm_fit", "label": "divisive-norm fit (PN dose-response)", "entity_type": "analysis"},
-        {"id": "visualization:fig_norm", "label": "Fig 3b - PN gain vs background", "entity_type": "visualization"}
-      ],
-      "edges": [
-        {"id": "question_superseded", "source": "question:al_interneurons_old", "target": "question:al_gain", "relationship": "question_superseded_by", "label": "superseded by", "state": "present"},
-        {"id": "question_parent_li", "source": "question:al_gain", "target": "question:lateral_inhib", "relationship": "question_parent", "label": "parent", "state": "present"},
-        {"id": "question_parent_oi", "source": "question:al_gain", "target": "question:odor_identity", "relationship": "question_parent", "label": "parent", "state": "present"},
-        {"id": "dataset_question", "source": "question:lateral_inhib", "target": "dataset:nwb_1210", "relationship": "dataset_question_primary", "label": "primary question", "state": "present"},
-        {"id": "analysis_dataset", "source": "dataset:nwb_1210", "target": "analysis:norm_fit", "relationship": "analysis_dataset", "label": "used by", "state": "present"},
-        {"id": "analysis_result", "source": "analysis:norm_fit", "target": "visualization:fig_norm", "relationship": "visualization_analysis", "label": "generates", "state": "present"}
-      ],
-      "notes": "One project: an earlier question superseded by the current motivating question, which branches into two sub-questions; the lateral-inhibition branch resolves to one result while the odor-identity branch stays open. The project itself is the project_id scope of the projection."
     }
   ]
 }

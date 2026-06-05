@@ -29,18 +29,19 @@ def test_research_group_presentation_graph_manifest_validates() -> None:
 
     assert isinstance(manifest, PresentationGraphManifest)
     assert manifest.deck_id == "lab-tracker-research-group-presentation"
-    # Slides 1 (title) and 2 (premise statement) carry no diagram, so the
-    # manifest documents the diagram-bearing slides 3..19.
+    # The manifest documents only slides with a backend-aligned *native* diagram.
+    # Slides 1-2 (title, premise) and the slides that now embed a UI screenshot
+    # (capture + first-use-case) carry no native diagram, so the manifest is a
+    # subset of the diagram-bearing slides between 3 and 19.
     slide_numbers = sorted(graph.slide_number for graph in manifest.graphs)
     assert len(slide_numbers) == len(set(slide_numbers))
-    assert slide_numbers == list(range(3, 20))
+    assert slide_numbers and min(slide_numbers) >= 3 and max(slide_numbers) <= 19
     assert {graph.diagram_id for graph in manifest.graphs} >= {
         "rg-problem-1-missing-question-edge",
         "rg-problem-2-missing-context",
         "rg-problem-3-manual-upkeep",
         "rg-resolution-assistant-context-packet",
         "rg-resolution-draft-operations",
-        "rg-capture-3-proposed-operations",
     }
 
 
@@ -56,7 +57,9 @@ def test_presentation_graph_manifest_aligns_with_current_pptx_slide_count() -> N
             ]
         )
 
-    assert max(graph.slide_number for graph in manifest.graphs) == slide_count
+    # Every documented diagram maps to a real slide in the current deck.
+    assert max(graph.slide_number for graph in manifest.graphs) <= slide_count
+    assert all(graph.slide_number <= slide_count for graph in manifest.graphs)
 
 
 def test_problem_and_capture_graphs_encode_backend_relevant_edges() -> None:
@@ -80,16 +83,6 @@ def test_problem_and_capture_graphs_encode_backend_relevant_edges() -> None:
     }
     assert problem_3_operations == {
         "link_note_to_question",
-        "update_entity",
-    }
-
-    capture_operations = {
-        operation.semantic_type.value
-        for operation in graphs["rg-capture-3-proposed-operations"].operations
-    }
-    assert capture_operations == {
-        "link_note_to_question",
-        "suggest_new_dataset",
         "update_entity",
     }
 
