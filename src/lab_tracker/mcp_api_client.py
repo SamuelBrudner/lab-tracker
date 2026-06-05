@@ -14,6 +14,9 @@ from lab_tracker.models import (
     AnalysisStatus,
     ClaimStatus,
     DatasetStatus,
+    GoalLinkStatus,
+    GoalStatus,
+    GoalType,
     NoteMetadataScalar,
     NoteStatus,
     QuestionStatus,
@@ -34,6 +37,12 @@ ANALYSIS_STATUS_VALUES = tuple(status.value for status in AnalysisStatus)
 ANALYSIS_STATUS_TEXT = ", ".join(ANALYSIS_STATUS_VALUES)
 CLAIM_STATUS_VALUES = tuple(status.value for status in ClaimStatus)
 CLAIM_STATUS_TEXT = ", ".join(CLAIM_STATUS_VALUES)
+GOAL_STATUS_VALUES = tuple(status.value for status in GoalStatus)
+GOAL_STATUS_TEXT = ", ".join(GOAL_STATUS_VALUES)
+GOAL_TYPE_VALUES = tuple(goal_type.value for goal_type in GoalType)
+GOAL_TYPE_TEXT = ", ".join(GOAL_TYPE_VALUES)
+GOAL_LINK_STATUS_VALUES = tuple(status.value for status in GoalLinkStatus)
+GOAL_LINK_STATUS_TEXT = ", ".join(GOAL_LINK_STATUS_VALUES)
 
 
 class LabTrackerAPIError(RuntimeError):
@@ -157,6 +166,7 @@ class LabTrackerAPIClient:
         query: str,
         *,
         project_id: str | None = None,
+        goal_id: str | None = None,
         include: str | None = None,
         limit: int = 20,
         offset: int = 0,
@@ -167,6 +177,7 @@ class LabTrackerAPIClient:
             params={
                 "q": query,
                 "project_id": project_id,
+                "goal_id": goal_id,
                 "include": include,
                 "limit": limit,
                 "offset": offset,
@@ -279,6 +290,29 @@ class LabTrackerAPIClient:
                 "offset": offset,
             },
         )
+
+    def list_goals(
+        self,
+        *,
+        project_id: str,
+        goal_type: str | None = None,
+        status: str | None = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> JsonObject:
+        return self._request(
+            "GET",
+            f"/projects/{project_id}/goals",
+            params={
+                "goal_type": _validate_goal_type(goal_type),
+                "status": _validate_goal_status(status),
+                "limit": limit,
+                "offset": offset,
+            },
+        )
+
+    def get_goal(self, goal_id: str) -> JsonObject:
+        return self._request("GET", f"/goals/{goal_id}")
 
     def get_dataset_provenance(self, dataset_id: str) -> JsonObject:
         return self._request("GET", f"/datasets/{dataset_id}/provenance")
@@ -525,6 +559,95 @@ class LabTrackerAPIClient:
             },
         )
 
+    def create_goal(
+        self,
+        *,
+        project_id: str,
+        goal_type: str,
+        title: str,
+        summary: str | None = None,
+        status: str | None = "planned",
+        target_date: str | None = None,
+        external_ref: str | None = None,
+        attributes: JsonObject | None = None,
+    ) -> JsonObject:
+        return self._request(
+            "POST",
+            f"/projects/{project_id}/goals",
+            json_payload={
+                "goal_type": _validate_goal_type(goal_type),
+                "title": title,
+                "summary": summary,
+                "status": _validate_goal_status(status),
+                "target_date": target_date,
+                "external_ref": external_ref,
+                "attributes": attributes,
+            },
+        )
+
+    def update_goal(
+        self,
+        *,
+        goal_id: str,
+        goal_type: str | None = None,
+        title: str | None = None,
+        summary: str | None = None,
+        status: str | None = None,
+        target_date: str | None = None,
+        external_ref: str | None = None,
+        attributes: JsonObject | None = None,
+    ) -> JsonObject:
+        return self._request(
+            "PATCH",
+            f"/goals/{goal_id}",
+            json_payload={
+                "goal_type": _validate_goal_type(goal_type),
+                "title": title,
+                "summary": summary,
+                "status": _validate_goal_status(status),
+                "target_date": target_date,
+                "external_ref": external_ref,
+                "attributes": attributes,
+            },
+        )
+
+    def link_node_to_goal(
+        self,
+        *,
+        goal_id: str,
+        entity_type: str,
+        entity_id: str,
+        relation: str,
+        link_status: str | None = "candidate",
+        slot: str | None = None,
+    ) -> JsonObject:
+        return self._request(
+            "POST",
+            f"/goals/{goal_id}/links",
+            json_payload={
+                "entity_type": entity_type,
+                "entity_id": entity_id,
+                "relation": relation,
+                "link_status": _validate_goal_link_status(link_status),
+                "slot": slot,
+            },
+        )
+
+    def list_node_goals(
+        self,
+        *,
+        project_id: str,
+        entity_type: str,
+        entity_id: str,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> JsonObject:
+        return self._request(
+            "GET",
+            f"/projects/{project_id}/nodes/{entity_type}/{entity_id}/goals",
+            params={"limit": limit, "offset": offset},
+        )
+
     def upload_visualization_file(
         self,
         *,
@@ -679,6 +802,33 @@ def _validate_claim_status(status: str | None) -> str | None:
         label="claim status",
         allowed_values=CLAIM_STATUS_VALUES,
         allowed_text=CLAIM_STATUS_TEXT,
+    )
+
+
+def _validate_goal_status(status: str | None) -> str | None:
+    return _validate_status(
+        status,
+        label="goal status",
+        allowed_values=GOAL_STATUS_VALUES,
+        allowed_text=GOAL_STATUS_TEXT,
+    )
+
+
+def _validate_goal_type(goal_type: str | None) -> str | None:
+    return _validate_status(
+        goal_type,
+        label="goal type",
+        allowed_values=GOAL_TYPE_VALUES,
+        allowed_text=GOAL_TYPE_TEXT,
+    )
+
+
+def _validate_goal_link_status(status: str | None) -> str | None:
+    return _validate_status(
+        status,
+        label="goal link status",
+        allowed_values=GOAL_LINK_STATUS_VALUES,
+        allowed_text=GOAL_LINK_STATUS_TEXT,
     )
 
 

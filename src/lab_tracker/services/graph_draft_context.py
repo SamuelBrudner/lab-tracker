@@ -14,6 +14,7 @@ from lab_tracker.models import (
     Dataset,
     EntityRef,
     EntityType,
+    Goal,
     GraphDraftMode,
     Note,
     NoteStatus,
@@ -26,13 +27,16 @@ from lab_tracker.models import (
 from lab_tracker.services.analysis_service import AnalysisService
 from lab_tracker.services.claim_service import ClaimService
 from lab_tracker.services.dataset_service import DatasetService
+from lab_tracker.services.goal_service import GoalService
 from lab_tracker.services.note_service import NoteService
 from lab_tracker.services.project_service import ProjectService
 from lab_tracker.services.question_service import QuestionService
 from lab_tracker.services.session_service import SessionService
 from lab_tracker.services.visualization_service import VisualizationService
 
-EntityResult = Project | Question | Note | Session | Dataset | Analysis | Claim | Visualization
+EntityResult = (
+    Project | Question | Note | Session | Dataset | Analysis | Claim | Visualization | Goal
+)
 _RECENT_CONTEXT_LIMIT = 10
 _QUESTION_CONTEXT_LIMIT = 50
 _CAPTURE_BUNDLE_LIMIT = 6
@@ -50,6 +54,7 @@ class GraphContextBuilder:
         analyses: AnalysisService,
         claims: ClaimService,
         visualizations: VisualizationService,
+        goals: GoalService | None = None,
     ) -> None:
         self.projects = projects
         self.questions = questions
@@ -59,6 +64,7 @@ class GraphContextBuilder:
         self.analyses = analyses
         self.claims = claims
         self.visualizations = visualizations
+        self.goals = goals
 
     def build_batch_graph_context(
         self,
@@ -144,6 +150,7 @@ class GraphContextBuilder:
                 key=lambda item: item.created_at,
                 reverse=True,
             )[:_RECENT_CONTEXT_LIMIT]
+            recent_goals = self._recent_goals(project_id)
             project_blocks.append(
                 {
                     "id": str(project.project_id),
@@ -161,6 +168,7 @@ class GraphContextBuilder:
                     "recent_visualizations": [
                         _compact_visualization(item) for item in recent_visualizations
                     ],
+                    "recent_goals": [_compact_goal(item) for item in recent_goals],
                     "known_aliases": _known_aliases(
                         project=project,
                         questions=active_or_staged,
@@ -170,6 +178,7 @@ class GraphContextBuilder:
                         analyses=recent_analyses,
                         claims=recent_claims,
                         visualizations=recent_visualizations,
+                        goals=recent_goals,
                     ),
                 }
             )
@@ -331,6 +340,7 @@ class GraphContextBuilder:
             key=lambda item: item.created_at,
             reverse=True,
         )[:_RECENT_CONTEXT_LIMIT]
+        recent_goals = self._recent_goals(note.project_id)
         context_packet = {
             "mode": GraphDraftMode.GRAPH_CONTEXT.value,
             "user_hint": user_hint,
@@ -354,6 +364,7 @@ class GraphContextBuilder:
             "recent_visualizations": [
                 _compact_visualization(item) for item in recent_visualizations
             ],
+            "recent_goals": [_compact_goal(item) for item in recent_goals],
             "known_aliases": _known_aliases(
                 project=project,
                 questions=questions,
@@ -363,6 +374,7 @@ class GraphContextBuilder:
                 analyses=recent_analyses,
                 claims=recent_claims,
                 visualizations=recent_visualizations,
+                goals=recent_goals,
             ),
             "unresolved_recent_captures": [
                 _compact_note(item)
@@ -428,10 +440,21 @@ class GraphContextBuilder:
             EntityType.CLAIM: self.claims.get_claim,
             EntityType.VISUALIZATION: self.visualizations.get_visualization,
         }
+        if self.goals is not None:
+            getters[EntityType.GOAL] = self.goals.get_goal
         getter = getters.get(entity_type)
         if getter is None:
             raise ValidationError("Unsupported entity type.")
         return getter(entity_id)
+
+    def _recent_goals(self, project_id: UUID) -> list[Goal]:
+        if self.goals is None:
+            return []
+        return sorted(
+            self.goals.list_goals(project_id=project_id),
+            key=lambda item: item.created_at,
+            reverse=True,
+        )[:_RECENT_CONTEXT_LIMIT]
 
 
 def _graph_context_summary(context_packet: dict[str, Any]) -> dict[str, Any]:
@@ -470,6 +493,7 @@ def _graph_context_summary(context_packet: dict[str, Any]) -> dict[str, Any]:
             "recent_analyses": len(context_packet.get("recent_analyses") or []),
             "recent_claims": len(context_packet.get("recent_claims") or []),
             "recent_visualizations": len(context_packet.get("recent_visualizations") or []),
+            "recent_goals": len(context_packet.get("recent_goals") or []),
             "known_aliases": len(context_packet.get("known_aliases") or []),
             "unresolved_recent_captures": len(
                 context_packet.get("unresolved_recent_captures") or []
@@ -525,6 +549,7 @@ def _graph_batch_context_summary(packet: dict[str, Any]) -> dict[str, Any]:
             "recent_visualizations": sum(
                 len(p.get("recent_visualizations") or []) for p in projects
             ),
+            "recent_goals": sum(len(p.get("recent_goals") or []) for p in projects),
             "known_aliases": sum(len(p.get("known_aliases") or []) for p in projects),
         },
         "source_artifact_counts": source_artifact_counts,
@@ -701,6 +726,29 @@ def _compact_visualization(visualization: Visualization) -> dict[str, Any]:
     }
 
 
+def _compact_goal(goal: Goal) -> dict[str, Any]:
+    return {
+        "id": str(goal.goal_id),
+        "label": goal.title,
+        "goal_type": goal.goal_type.value,
+        "status": goal.status.value,
+        "target_date": goal.target_date.isoformat() if goal.target_date else None,
+        "external_ref": goal.external_ref,
+        "attributes": dict(goal.attributes),
+        "links": [
+            {
+                "entity_type": link.target.entity_type.value,
+                "entity_id": str(link.target.entity_id),
+                "relation": link.relation.value,
+                "link_status": link.link_status.value,
+                "slot": link.slot,
+            }
+            for link in goal.links
+        ],
+        "created_at": goal.created_at.isoformat(),
+    }
+
+
 def _known_aliases(
     *,
     project: Project,
@@ -711,6 +759,7 @@ def _known_aliases(
     analyses: list[Analysis],
     claims: list[Claim],
     visualizations: list[Visualization],
+    goals: list[Goal],
 ) -> list[dict[str, Any]]:
     aliases: list[dict[str, Any]] = [
         {
@@ -781,6 +830,14 @@ def _known_aliases(
         }
         for item in visualizations
     )
+    aliases.extend(
+        {
+            "entity_type": EntityType.GOAL.value,
+            "entity_id": str(item.goal_id),
+            "aliases": [item.title],
+        }
+        for item in goals
+    )
     return aliases
 
 
@@ -801,7 +858,10 @@ def _entity_label(entity_type: EntityType, entity: EntityResult) -> str:
         return entity.statement[:180]
     if entity_type == EntityType.VISUALIZATION:
         return entity.caption or entity.file_path
+    if entity_type == EntityType.GOAL:
+        return entity.title
     return str(entity_id(entity_type, entity))
+
 
 def entity_id(entity_type: EntityType, entity: EntityResult) -> UUID:
     if entity_type == EntityType.PROJECT:
@@ -820,4 +880,6 @@ def entity_id(entity_type: EntityType, entity: EntityResult) -> UUID:
         return entity.claim_id
     if entity_type == EntityType.VISUALIZATION:
         return entity.viz_id
+    if entity_type == EntityType.GOAL:
+        return entity.goal_id
     raise ValidationError("Unsupported entity type.")

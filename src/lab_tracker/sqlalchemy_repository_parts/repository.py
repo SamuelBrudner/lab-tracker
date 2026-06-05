@@ -14,6 +14,8 @@ from lab_tracker.models import (
     Claim,
     Dataset,
     DatasetFile,
+    Goal,
+    GoalLink,
     GraphChangeSet,
     Note,
     Project,
@@ -36,6 +38,7 @@ from .core import (
     SQLAlchemyQuestionRepository,
 )
 from .datasets import SQLAlchemyDatasetRepository
+from .goals import SQLAlchemyGoalRepository
 from .graph_drafts import SQLAlchemyGraphChangeSetRepository
 from .notes import SQLAlchemyNoteRepository
 from .sessions import SQLAlchemyAcquisitionOutputRepository, SQLAlchemySessionRepository
@@ -56,6 +59,7 @@ class SQLAlchemyLabTrackerRepository(LabTrackerRepository):
         self.acquisition_outputs = SQLAlchemyAcquisitionOutputRepository(session)
         self.analyses = SQLAlchemyAnalysisRepository(session)
         self.claims = SQLAlchemyClaimRepository(session)
+        self.goals = SQLAlchemyGoalRepository(session)
         self.visualizations = SQLAlchemyVisualizationRepository(session)
         self.graph_change_sets = SQLAlchemyGraphChangeSetRepository(session)
 
@@ -283,6 +287,46 @@ class SQLAlchemyLabTrackerRepository(LabTrackerRepository):
             status=status,
             dataset_id=dataset_id,
             analysis_id=analysis_id,
+            limit=limit,
+            offset=offset,
+        )
+
+    def query_goals(
+        self,
+        *,
+        project_id: UUID | None = None,
+        goal_type: str | None = None,
+        status: str | None = None,
+        target_entity_type: str | None = None,
+        target_entity_id: UUID | None = None,
+        limit: int | None = None,
+        offset: int = 0,
+    ) -> tuple[list[Goal], int]:
+        return self.goals.query(
+            project_id=project_id,
+            goal_type=goal_type,
+            status=status,
+            target_entity_type=target_entity_type,
+            target_entity_id=target_entity_id,
+            limit=limit,
+            offset=offset,
+        )
+
+    def query_goal_links(
+        self,
+        *,
+        goal_id: UUID | None = None,
+        entity_type: str | None = None,
+        entity_id: UUID | None = None,
+        link_status: str | None = None,
+        limit: int | None = None,
+        offset: int = 0,
+    ) -> tuple[list[GoalLink], int]:
+        return self.goals.query_links(
+            goal_id=goal_id,
+            entity_type=entity_type,
+            entity_id=entity_id,
+            link_status=link_status,
             limit=limit,
             offset=offset,
         )

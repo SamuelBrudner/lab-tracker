@@ -11,9 +11,13 @@ from lab_tracker.models import (
     AnalysisStatus,
     ClaimStatus,
     DatasetStatus,
+    EntityRef,
     EntityType,
+    GoalLinkStatus,
+    GoalStatus,
     GraphChangeOp,
     GraphChangeOperation,
+    GraphDraftSemanticType,
     NoteStatus,
     ProjectStatus,
     QuestionStatus,
@@ -25,6 +29,8 @@ from lab_tracker.schemas import (
     ClaimUpdate,
     DatasetCreate,
     DatasetUpdate,
+    GoalCreate,
+    GoalUpdate,
     NoteCreate,
     NoteUpdate,
     ProjectCreate,
@@ -39,6 +45,7 @@ from lab_tracker.schemas import (
 from lab_tracker.services.analysis_service import AnalysisService
 from lab_tracker.services.claim_service import ClaimService
 from lab_tracker.services.dataset_service import DatasetService
+from lab_tracker.services.goal_service import GoalLinkSpec, GoalService
 from lab_tracker.services.graph_draft_context import EntityResult
 from lab_tracker.services.graph_draft_validation import resolve_refs, validate_payload
 from lab_tracker.services.note_service import NoteService
@@ -60,6 +67,7 @@ class GraphPatchApplier:
         analyses: AnalysisService,
         claims: ClaimService,
         visualizations: VisualizationService,
+        goals: GoalService | None = None,
     ) -> None:
         self.projects = projects
         self.questions = questions
@@ -69,6 +77,7 @@ class GraphPatchApplier:
         self.analyses = analyses
         self.claims = claims
         self.visualizations = visualizations
+        self.goals = goals
 
     def apply_graph_operation(
         self,
@@ -88,6 +97,7 @@ class GraphPatchApplier:
             operation.entity_type,
             operation.target_entity_id,
             payload,
+            operation_semantic=operation.semantic_type,
             actor=actor,
         )
 
@@ -170,6 +180,21 @@ class GraphPatchApplier:
                 answers_question_ids=data.answers_question_ids,
                 actor=actor,
             )
+        if entity_type == EntityType.GOAL:
+            if self.goals is None:
+                raise ValidationError("Goal service is not configured.")
+            data = validate_payload(GoalCreate, payload)
+            return self.goals.create_goal(
+                project_id=data.project_id,
+                goal_type=data.goal_type,
+                title=data.title,
+                summary=data.summary,
+                status=data.status or GoalStatus.PLANNED,
+                target_date=data.target_date,
+                external_ref=data.external_ref,
+                attributes=data.attributes,
+                actor=actor,
+            )
         if entity_type == EntityType.VISUALIZATION:
             data = validate_payload(VisualizationCreate, payload)
             return self.visualizations.create_visualization(
@@ -188,6 +213,7 @@ class GraphPatchApplier:
         entity_id: UUID,
         payload: dict[str, Any],
         *,
+        operation_semantic: GraphDraftSemanticType | None,
         actor: AuthContext | None,
     ) -> EntityResult:
         if entity_type == EntityType.PROJECT:
@@ -258,6 +284,36 @@ class GraphPatchApplier:
                 answers_question_ids=data.answers_question_ids,
                 actor=actor,
             )
+        if entity_type == EntityType.GOAL:
+            if self.goals is None:
+                raise ValidationError("Goal service is not configured.")
+            data = validate_payload(GoalUpdate, payload)
+            return self.goals.update_goal(
+                entity_id,
+                goal_type=data.goal_type,
+                title=data.title,
+                summary=data.summary,
+                status=data.status,
+                target_date=data.target_date,
+                external_ref=data.external_ref,
+                attributes=data.attributes,
+                links=[
+                    GoalLinkSpec(
+                        target=EntityRef(
+                            entity_type=link.entity_type,
+                            entity_id=link.entity_id,
+                        ),
+                        relation=link.relation,
+                        link_status=_applied_goal_link_status(
+                            operation_semantic=operation_semantic,
+                            payload_status=link.link_status,
+                        ),
+                        slot=link.slot,
+                    )
+                    for link in data.links or []
+                ],
+                actor=actor,
+            )
         if entity_type == EntityType.VISUALIZATION:
             data = validate_payload(VisualizationUpdate, payload)
             return self.visualizations.update_visualization(
@@ -269,3 +325,16 @@ class GraphPatchApplier:
                 actor=actor,
             )
         raise ValidationError("Unsupported entity type.")
+
+
+def _applied_goal_link_status(
+    *,
+    operation_semantic: GraphDraftSemanticType | None,
+    payload_status: GoalLinkStatus | None,
+) -> GoalLinkStatus | None:
+    if (
+        operation_semantic == GraphDraftSemanticType.LINK_NODE_TO_GOAL
+        and payload_status in {None, GoalLinkStatus.CANDIDATE}
+    ):
+        return GoalLinkStatus.COMMITTED
+    return payload_status

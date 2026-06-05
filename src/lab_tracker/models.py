@@ -10,7 +10,7 @@ from __future__ import annotations
 import base64
 import binascii
 import re
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from enum import Enum
 from typing import Any
 from uuid import UUID
@@ -107,6 +107,36 @@ class ClaimStatus(str, Enum):
     REJECTED = "rejected"
 
 
+class GoalType(str, Enum):
+    PAPER = "paper"
+    GRANT = "grant"
+    TALK = "talk"
+    OTHER = "other"
+
+
+class GoalStatus(str, Enum):
+    PLANNED = "planned"
+    IN_PROGRESS = "in_progress"
+    SUBMITTED = "submitted"
+    ACCEPTED = "accepted"
+    ABANDONED = "abandoned"
+
+
+class GoalRelation(str, Enum):
+    CONTRIBUTES_TO = "contributes_to"
+    ADDRESSES = "addresses"
+    CANDIDATE_FIGURE = "candidate_figure"
+    SUPPORTING_EVIDENCE = "supporting_evidence"
+    BACKGROUND = "background"
+    METHODS = "methods"
+
+
+class GoalLinkStatus(str, Enum):
+    CANDIDATE = "candidate"
+    COMMITTED = "committed"
+    DROPPED = "dropped"
+
+
 class QuestionLinkRole(str, Enum):
     PRIMARY = "primary"
     SECONDARY = "secondary"
@@ -128,6 +158,7 @@ class EntityType(str, Enum):
     ANALYSIS = "analysis"
     CLAIM = "claim"
     VISUALIZATION = "visualization"
+    GOAL = "goal"
 
 
 class GraphChangeSetStatus(str, Enum):
@@ -168,6 +199,9 @@ class GraphDraftSemanticType(str, Enum):
     LINK_NOTE_TO_ANALYSIS = "link_note_to_analysis"
     SUGGEST_NEW_QUESTION = "suggest_new_question"
     SUGGEST_NEW_DATASET = "suggest_new_dataset"
+    SUGGEST_NEW_GOAL = "suggest_new_goal"
+    LINK_NODE_TO_GOAL = "link_node_to_goal"
+    UPDATE_GOAL = "update_goal"
     SUGGEST_FOLLOWUP = "suggest_followup"
     REQUEST_CLARIFICATION = "request_clarification"
 
@@ -414,6 +448,33 @@ class Claim(_DomainModel):
     supported_by_analysis_ids: list[UUID] = Field(default_factory=list)
     answers_question_ids: list[UUID] = Field(default_factory=list)
     created_at: datetime = Field(default_factory=utc_now)
+    updated_at: datetime = Field(default_factory=utc_now)
+
+
+class GoalLink(_DomainModel):
+    link_id: UUID
+    goal_id: UUID
+    target: EntityRef
+    relation: GoalRelation
+    link_status: GoalLinkStatus = GoalLinkStatus.CANDIDATE
+    slot: str | None = None
+    created_at: datetime = Field(default_factory=utc_now)
+    created_by: str | None = None
+
+
+class Goal(_DomainModel):
+    goal_id: UUID
+    project_id: UUID
+    goal_type: GoalType
+    title: str
+    summary: str = ""
+    status: GoalStatus = GoalStatus.PLANNED
+    target_date: date | None = None
+    external_ref: str | None = None
+    attributes: dict[str, Any] = Field(default_factory=dict)
+    links: list[GoalLink] = Field(default_factory=list)
+    created_at: datetime = Field(default_factory=utc_now)
+    created_by: str | None = None
     updated_at: datetime = Field(default_factory=utc_now)
 
 

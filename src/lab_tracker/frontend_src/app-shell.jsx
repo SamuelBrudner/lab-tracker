@@ -4,6 +4,7 @@ import { Dashboard } from "./features/dashboard-projects.jsx";
 import { DevicesPage } from "./features/devices.jsx";
 import { EnrollPage } from "./features/enroll.jsx";
 import { GraphDraftDetailCard } from "./features/graph-drafts.jsx";
+import { GoalDetailCard } from "./features/goals/GoalDetailCard.jsx";
 import { ProjectGraphExplorer } from "./features/project-graph.jsx";
 import { VisualizationDetailCard } from "./features/analysis/VisualizationDetailCard.jsx";
 import { DatasetDetailCard } from "./features/datasets/index.js";
@@ -450,6 +451,10 @@ function App() {
               vizId={route.vizId}
               navigate={navigate}
             />
+          ) : null}
+
+          {route.kind === "goal" ? (
+            <GoalDetailCard token={auth.token} goalId={route.goalId} navigate={navigate} />
           ) : null}
 
           {route.kind === "unknown" ? (

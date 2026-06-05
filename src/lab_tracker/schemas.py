@@ -6,13 +6,14 @@ Envelope/ListEnvelope wrappers. Request payloads use purpose-built schemas below
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime
 from typing import Annotated, Any, Generic, Literal, TypeVar
 from uuid import UUID
 
-from pydantic import AfterValidator, BaseModel, ConfigDict, Field, field_validator
+from pydantic import AfterValidator, BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from lab_tracker.auth import Role
+from lab_tracker.goals_attributes import validate_goal_attributes
 from lab_tracker.models import (
     Analysis,
     AnalysisStatus,
@@ -22,6 +23,13 @@ from lab_tracker.models import (
     DatasetCommitManifestInput,
     DatasetStatus,
     EntityRef,
+    EntityType,
+    Goal,
+    GoalLink,
+    GoalLinkStatus,
+    GoalRelation,
+    GoalStatus,
+    GoalType,
     GraphChangeOperationStatus,
     GraphChangeSetStatus,
     GraphDraftMode,
@@ -444,6 +452,60 @@ class ClaimUpdate(RequestModel):
     @classmethod
     def _claim_ids_unique(cls, value: list[UUID] | None) -> list[UUID] | None:
         return _unique_uuid_list(value)
+
+
+class GoalCreateFields(RequestModel):
+    goal_type: GoalType
+    title: NonBlankStr
+    summary: str | None = None
+    status: GoalStatus | None = None
+    target_date: date | None = None
+    external_ref: str | None = None
+    attributes: dict[str, Any] | None = None
+
+    @model_validator(mode="after")
+    def _attributes_match_goal_type(self) -> GoalCreateFields:
+        self.attributes = validate_goal_attributes(self.goal_type, self.attributes)
+        return self
+
+
+class GoalCreate(GoalCreateFields):
+    project_id: UUID
+
+
+class GoalLinkCreate(RequestModel):
+    entity_type: EntityType
+    entity_id: UUID
+    relation: GoalRelation
+    link_status: GoalLinkStatus | None = None
+    slot: str | None = Field(default=None, max_length=120)
+
+
+class GoalUpdate(RequestModel):
+    goal_type: GoalType | None = None
+    title: NonBlankStr | None = None
+    summary: str | None = None
+    status: GoalStatus | None = None
+    target_date: date | None = None
+    external_ref: str | None = None
+    attributes: dict[str, Any] | None = None
+    links: list[GoalLinkCreate] | None = None
+
+    @model_validator(mode="after")
+    def _attributes_match_goal_type(self) -> GoalUpdate:
+        if self.goal_type is not None and self.attributes is not None:
+            self.attributes = validate_goal_attributes(self.goal_type, self.attributes)
+        return self
+
+
+class GoalLinkUpdate(RequestModel):
+    relation: GoalRelation | None = None
+    link_status: GoalLinkStatus | None = None
+    slot: str | None = Field(default=None, max_length=120)
+
+
+GoalRead = Goal
+GoalLinkRead = GoalLink
 
 
 class VisualizationCreate(RequestModel):

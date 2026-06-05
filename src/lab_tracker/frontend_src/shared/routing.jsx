@@ -45,6 +45,9 @@ function parseAppRoute(pathname) {
   if (parts.length >= 3 && parts[1] === "visualizations" && UUID_RE.test(parts[2] || "")) {
     return { kind: "visualization", vizId: parts[2] };
   }
+  if (parts.length >= 3 && parts[1] === "goals" && UUID_RE.test(parts[2] || "")) {
+    return { kind: "goal", goalId: parts[2] };
+  }
   if (parts.length >= 3 && parts[1] === "graph-drafts" && UUID_RE.test(parts[2] || "")) {
     return { kind: "graph-draft", changeSetId: parts[2] };
   }

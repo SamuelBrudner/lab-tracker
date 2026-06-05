@@ -8,10 +8,13 @@ from fastapi import APIRouter
 from starlette.requests import Request
 
 from lab_tracker.api import LabTrackerAPI
+from lab_tracker.errors import ValidationError
+from lab_tracker.models import EntityType
 from lab_tracker.schemas import Envelope, SearchResults
 
 from .shared import (
     accessible_project_ids_from_request,
+    api_from_request,
     ensure_project_read,
     repository_from_request,
     validate_pagination,
@@ -26,6 +29,7 @@ def build_search_router(api: LabTrackerAPI) -> APIRouter:
         request: Request,
         q: str,
         project_id: UUID | None = None,
+        goal_id: UUID | None = None,
         include: str | None = None,
         limit: int = 20,
         offset: int = 0,
@@ -43,14 +47,43 @@ def build_search_router(api: LabTrackerAPI) -> APIRouter:
         project_ids = [project_id] if project_id is not None else None
         if project_ids is None and allowed_project_ids is not None:
             project_ids = sorted(allowed_project_ids)
+        linked_question_ids: set[UUID] | None = None
+        linked_note_ids: set[UUID] | None = None
+        if goal_id is not None:
+            goal = api_from_request(request, api).get_goal(goal_id)
+            ensure_project_read(request, goal.project_id)
+            if project_id is not None and goal.project_id != project_id:
+                raise ValidationError("goal_id must belong to project_id.")
+            project_ids = [goal.project_id]
+            links, _ = repository.query_goal_links(goal_id=goal_id, limit=None, offset=0)
+            linked_question_ids = {
+                link.target.entity_id
+                for link in links
+                if link.target.entity_type == EntityType.QUESTION
+            }
+            linked_note_ids = {
+                link.target.entity_id
+                for link in links
+                if link.target.entity_type == EntityType.NOTE
+            }
         if project_ids is None:
             questions = (
-                repository.query_questions(project_id=None, search=q, limit=limit, offset=offset)[0]
+                repository.query_questions(
+                    project_id=None,
+                    search=q,
+                    limit=None if linked_question_ids is not None else limit,
+                    offset=0 if linked_question_ids is not None else offset,
+                )[0]
                 if not include_set or "questions" in include_set
                 else []
             )
             notes = (
-                repository.query_notes(project_id=None, search=q, limit=limit, offset=offset)[0]
+                repository.query_notes(
+                    project_id=None,
+                    search=q,
+                    limit=None if linked_note_ids is not None else limit,
+                    offset=0 if linked_note_ids is not None else offset,
+                )[0]
                 if not include_set or "notes" in include_set
                 else []
             )
@@ -63,7 +96,7 @@ def build_search_router(api: LabTrackerAPI) -> APIRouter:
                         repository.query_questions(
                             project_id=scoped_project_id,
                             search=q,
-                            limit=limit,
+                            limit=None if linked_question_ids is not None else limit,
                             offset=0,
                         )[0]
                     )
@@ -72,10 +105,15 @@ def build_search_router(api: LabTrackerAPI) -> APIRouter:
                         repository.query_notes(
                             project_id=scoped_project_id,
                             search=q,
-                            limit=limit,
+                            limit=None if linked_note_ids is not None else limit,
                             offset=0,
                         )[0]
                     )
+        if linked_question_ids is not None:
+            questions = [item for item in questions if item.question_id in linked_question_ids]
+        if linked_note_ids is not None:
+            notes = [item for item in notes if item.note_id in linked_note_ids]
+        if project_ids is not None:
             questions = questions[offset : offset + limit]
             notes = notes[offset : offset + limit]
         return Envelope(

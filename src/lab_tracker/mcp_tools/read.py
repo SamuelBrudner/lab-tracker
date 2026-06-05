@@ -91,6 +91,7 @@ def lab_tracker_list_notes(
 def lab_tracker_search(
     query: str,
     project_id: str | None = None,
+    goal_id: str | None = None,
     include: str | None = None,
     limit: int = 20,
     offset: int = 0,
@@ -101,6 +102,7 @@ def lab_tracker_search(
         return client.search(
             query,
             project_id=project_id,
+            goal_id=goal_id,
             include=include,
             limit=limit,
             offset=offset,
@@ -216,6 +218,57 @@ def lab_tracker_list_visualizations(
         client.close()
 
 
+def lab_tracker_list_goals(
+    project_id: str,
+    goal_type: str | None = None,
+    status: str | None = None,
+    limit: int = 50,
+    offset: int = 0,
+) -> JsonObject:
+    """List Lab Tracker goals for a project."""
+    client = client_from_env()
+    try:
+        return client.list_goals(
+            project_id=project_id,
+            goal_type=goal_type,
+            status=status,
+            limit=limit,
+            offset=offset,
+        )
+    finally:
+        client.close()
+
+
+def lab_tracker_get_goal(goal_id: str) -> JsonObject:
+    """Get a Lab Tracker goal with its node links."""
+    client = client_from_env()
+    try:
+        return client.get_goal(goal_id)
+    finally:
+        client.close()
+
+
+def lab_tracker_list_node_goals(
+    project_id: str,
+    entity_type: str,
+    entity_id: str,
+    limit: int = 50,
+    offset: int = 0,
+) -> JsonObject:
+    """List goals linked to one project graph node."""
+    client = client_from_env()
+    try:
+        return client.list_node_goals(
+            project_id=project_id,
+            entity_type=entity_type,
+            entity_id=entity_id,
+            limit=limit,
+            offset=offset,
+        )
+    finally:
+        client.close()
+
+
 def lab_tracker_get_dataset_provenance(dataset_id: str) -> JsonObject:
     """Get dataset provenance JSON-LD through the API."""
     client = client_from_env()
@@ -274,6 +327,9 @@ READ_TOOLS = (
     lab_tracker_list_analyses,
     lab_tracker_list_claims,
     lab_tracker_list_visualizations,
+    lab_tracker_list_goals,
+    lab_tracker_get_goal,
+    lab_tracker_list_node_goals,
     lab_tracker_get_dataset_provenance,
     lab_tracker_get_analysis_provenance,
     lab_tracker_get_decision_context,

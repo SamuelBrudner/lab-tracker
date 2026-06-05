@@ -11,6 +11,8 @@ from lab_tracker.models import (
     Claim,
     Dataset,
     DatasetFile,
+    Goal,
+    GoalLink,
     GraphChangeSet,
     Note,
     Project,
@@ -53,6 +55,7 @@ class LabTrackerRepository(Protocol):
     acquisition_outputs: EntityRepository[AcquisitionOutput]
     analyses: EntityRepository[Analysis]
     claims: EntityRepository[Claim]
+    goals: EntityRepository[Goal]
     visualizations: EntityRepository[Visualization]
     graph_change_sets: EntityRepository[GraphChangeSet]
 
@@ -187,6 +190,31 @@ class LabTrackerRepository(Protocol):
         offset: int = 0,
     ) -> tuple[list[Claim], int]:
         """Query claims with filters and pagination."""
+
+    def query_goals(
+        self,
+        *,
+        project_id: UUID | None = None,
+        goal_type: str | None = None,
+        status: str | None = None,
+        target_entity_type: str | None = None,
+        target_entity_id: UUID | None = None,
+        limit: int | None = None,
+        offset: int = 0,
+    ) -> tuple[list[Goal], int]:
+        """Query goals with filters and optional reverse node lookup."""
+
+    def query_goal_links(
+        self,
+        *,
+        goal_id: UUID | None = None,
+        entity_type: str | None = None,
+        entity_id: UUID | None = None,
+        link_status: str | None = None,
+        limit: int | None = None,
+        offset: int = 0,
+    ) -> tuple[list[GoalLink], int]:
+        """Query goal links with filters and pagination."""
 
     def query_visualizations(
         self,

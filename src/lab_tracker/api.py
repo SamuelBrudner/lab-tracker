@@ -16,6 +16,7 @@ from lab_tracker.services import (
     AnalysisService,
     ClaimService,
     DatasetService,
+    GoalService,
     GraphDraftService,
     NoteService,
     ProjectAuthorizationPolicy,
@@ -93,6 +94,18 @@ class LabTrackerAPI:
             analyses=self.analyses,
             claims=self.claims,
         )
+        self.goals: GoalService = GoalService(
+            context,
+            projects=self.projects,
+            questions=self.questions,
+            datasets=self.datasets,
+            sessions_provider=lambda: self.sessions,
+            analyses_provider=lambda: self.analyses,
+            claims_provider=lambda: self.claims,
+            visualizations_provider=lambda: self.visualizations,
+            notes_provider=lambda: self.notes,
+            authorization=self.project_authorization,
+        )
         self.notes: NoteService = NoteService(
             context,
             projects=self.projects,
@@ -102,6 +115,7 @@ class LabTrackerAPI:
             analyses=self.analyses,
             claims=self.claims,
             visualizations=self.visualizations,
+            goals_provider=lambda: self.goals,
             authorization=self.project_authorization,
         )
         self.graph_drafts: GraphDraftService = GraphDraftService(
@@ -114,6 +128,7 @@ class LabTrackerAPI:
             analyses=self.analyses,
             claims=self.claims,
             visualizations=self.visualizations,
+            goals=self.goals,
             authorization=self.project_authorization,
         )
 
@@ -339,6 +354,33 @@ class LabTrackerAPI:
 
     def delete_claim(self, *args: Any, **kwargs: Any) -> Any:
         return self.claims.delete_claim(*args, **kwargs)
+
+    def create_goal(self, *args: Any, **kwargs: Any) -> Any:
+        return self.goals.create_goal(*args, **kwargs)
+
+    def get_goal(self, *args: Any, **kwargs: Any) -> Any:
+        return self.goals.get_goal(*args, **kwargs)
+
+    def list_goals(self, *args: Any, **kwargs: Any) -> Any:
+        return self.goals.list_goals(*args, **kwargs)
+
+    def update_goal(self, *args: Any, **kwargs: Any) -> Any:
+        return self.goals.update_goal(*args, **kwargs)
+
+    def delete_goal(self, *args: Any, **kwargs: Any) -> Any:
+        return self.goals.delete_goal(*args, **kwargs)
+
+    def link_node_to_goal(self, *args: Any, **kwargs: Any) -> Any:
+        return self.goals.link_node_to_goal(*args, **kwargs)
+
+    def update_goal_link(self, *args: Any, **kwargs: Any) -> Any:
+        return self.goals.update_goal_link(*args, **kwargs)
+
+    def delete_goal_link(self, *args: Any, **kwargs: Any) -> Any:
+        return self.goals.delete_goal_link(*args, **kwargs)
+
+    def list_node_goals(self, *args: Any, **kwargs: Any) -> Any:
+        return self.goals.list_node_goals(*args, **kwargs)
 
     def create_visualization(self, *args: Any, **kwargs: Any) -> Any:
         return self.visualizations.create_visualization(*args, **kwargs)

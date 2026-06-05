@@ -11,6 +11,7 @@ from lab_tracker.models import (
     Claim,
     Dataset,
     EntityType,
+    Goal,
     Note,
     Question,
     QuestionLink,
@@ -34,6 +35,7 @@ _NODE_TYPE_ORDER = {
     "analysis": 4,
     "claim": 5,
     "visualization": 6,
+    "goal": 7,
 }
 _QUESTION_LINK_ROLE_ORDER = {"primary": 0, "secondary": 1}
 
@@ -56,8 +58,11 @@ def build_project_graph(
         limit=None,
         offset=0,
     )
+    goals: list[Goal] = []
     notes: list[Note] = []
     sessions: list[Session] = []
+    if view_value in {"evidence", "full"}:
+        goals, _ = repository.query_goals(project_id=project_id, limit=None, offset=0)
     if view_value == "full":
         notes, _ = repository.query_notes(project_id=project_id, limit=None, offset=0)
         sessions, _ = repository.query_sessions(project_id=project_id, limit=None, offset=0)
@@ -79,10 +84,12 @@ def build_project_graph(
             builder.add_node(_claim_node(claim))
         for visualization in _sort_entities(visualizations, "viz_id", _visualization_label):
             builder.add_node(_visualization_node(visualization))
+        for goal in _sort_entities(goals, "goal_id", _goal_label):
+            builder.add_node(_goal_node(goal))
 
     _add_question_edges(builder, questions)
     if view_value in {"evidence", "full"}:
-        _add_evidence_edges(builder, datasets, analyses, claims, visualizations)
+        _add_evidence_edges(builder, datasets, analyses, claims, visualizations, goals)
     if view_value == "full":
         _add_full_edges(builder, notes, sessions, datasets)
 
@@ -207,6 +214,10 @@ def _visualization_label(visualization: Visualization) -> str:
     return visualization.caption or visualization.viz_type
 
 
+def _goal_label(goal: Goal) -> str:
+    return goal.title
+
+
 def _note_label(note: Note) -> str:
     if note.transcribed_text:
         return note.transcribed_text
@@ -284,6 +295,22 @@ def _visualization_node(visualization: Visualization) -> ProjectGraphNode:
     )
 
 
+def _goal_node(goal: Goal) -> ProjectGraphNode:
+    return ProjectGraphNode(
+        id=_entity_node_id("goal", goal.goal_id),
+        entity_type="goal",
+        entity_id=str(goal.goal_id),
+        label=goal.title,
+        detail=_enum_value(goal.goal_type),
+        status=_enum_value(goal.status),
+        route=f"/app/goals/{goal.goal_id}",
+        metadata={
+            "target_date": goal.target_date.isoformat() if goal.target_date else "",
+            "external_ref": goal.external_ref or "",
+        },
+    )
+
+
 def _note_node(note: Note) -> ProjectGraphNode:
     return ProjectGraphNode(
         id=_entity_node_id("note", note.note_id),
@@ -339,6 +366,7 @@ def _add_evidence_edges(
     analyses: list[Analysis],
     claims: list[Claim],
     visualizations: list[Visualization],
+    goals: list[Goal],
 ) -> None:
     for dataset in _sort_entities(datasets, "dataset_id", _dataset_label):
         dataset_id = _entity_node_id("dataset", dataset.dataset_id)
@@ -396,6 +424,28 @@ def _add_evidence_edges(
                 visualization_id,
                 "related claim",
                 "visualization_claim",
+            )
+    for goal in _sort_entities(goals, "goal_id", _goal_label):
+        goal_id = _entity_node_id("goal", goal.goal_id)
+        for link in sorted(
+            goal.links,
+            key=lambda item: (
+                _enum_value(item.target.entity_type) or "",
+                str(item.target.entity_id),
+                _enum_value(item.relation) or "",
+                item.slot or "",
+            ),
+        ):
+            relation = _enum_value(link.relation) or "linked"
+            status = _enum_value(link.link_status) or "candidate"
+            label = relation.replace("_", " ")
+            if link.slot:
+                label = f"{label}: {link.slot}"
+            builder.add_edge(
+                _entity_node_id(_entity_type_value(link.target.entity_type), link.target.entity_id),
+                goal_id,
+                label,
+                f"goal_{relation}_{status}",
             )
 
 

@@ -22,6 +22,7 @@ from lab_tracker.services.analysis_service import AnalysisService
 from lab_tracker.services.base import BaseService, ServiceContext
 from lab_tracker.services.claim_service import ClaimService
 from lab_tracker.services.dataset_service import DatasetService
+from lab_tracker.services.goal_service import GoalService
 from lab_tracker.services.graph_draft_applier import GraphPatchApplier
 from lab_tracker.services.graph_draft_context import (
     GraphContextBuilder,
@@ -54,6 +55,7 @@ class GraphDraftService(BaseService):
         analyses: AnalysisService,
         claims: ClaimService,
         visualizations: VisualizationService,
+        goals: GoalService,
         authorization: ProjectAuthorizationPolicy,
     ) -> None:
         super().__init__(context)
@@ -65,6 +67,7 @@ class GraphDraftService(BaseService):
         self.analyses = analyses
         self.claims = claims
         self.visualizations = visualizations
+        self.goals = goals
         self.authorization = authorization
         self.context_builder = GraphContextBuilder(
             projects=projects,
@@ -75,6 +78,7 @@ class GraphDraftService(BaseService):
             analyses=analyses,
             claims=claims,
             visualizations=visualizations,
+            goals=goals,
         )
         self.patch_validator = GraphPatchValidator(
             get_graph_entity=self.context_builder.get_graph_entity,
@@ -88,6 +92,7 @@ class GraphDraftService(BaseService):
             analyses=analyses,
             claims=claims,
             visualizations=visualizations,
+            goals=goals,
         )
 
     def create_graph_draft_from_note(

@@ -16,6 +16,8 @@ from lab_tracker.db_models import (
     ClaimQuestionModel,
     DatasetModel,
     DatasetQuestionLinkModel,
+    GoalLinkModel,
+    GoalModel,
     NoteModel,
     NoteTargetModel,
     ProjectMembershipModel,
@@ -38,6 +40,12 @@ from lab_tracker.models import (
     DatasetStatus,
     EntityRef,
     EntityType,
+    Goal,
+    GoalLink,
+    GoalLinkStatus,
+    GoalRelation,
+    GoalStatus,
+    GoalType,
     Note,
     NoteRawAsset,
     NoteStatus,
@@ -662,6 +670,93 @@ def apply_claim_to_model(row: ClaimModel, claim: Claim) -> None:
     row.status = claim.status.value
     row.created_at = claim.created_at
     row.updated_at = claim.updated_at
+
+
+def goal_to_model(goal: Goal) -> GoalModel:
+    return GoalModel(
+        goal_id=_uuid_str(goal.goal_id),
+        project_id=_uuid_str(goal.project_id),
+        goal_type=goal.goal_type.value,
+        title=goal.title,
+        summary=goal.summary,
+        status=goal.status.value,
+        target_date=goal.target_date,
+        external_ref=goal.external_ref,
+        attributes=dict(goal.attributes),
+        created_by=goal.created_by,
+        created_at=goal.created_at,
+        updated_at=goal.updated_at,
+    )
+
+
+def goal_from_model(
+    row: GoalModel,
+    *,
+    links: Iterable[GoalLink] = (),
+) -> Goal:
+    return Goal(
+        goal_id=_uuid(row.goal_id),
+        project_id=_uuid(row.project_id),
+        goal_type=GoalType(row.goal_type),
+        title=row.title,
+        summary=row.summary or "",
+        status=GoalStatus(row.status),
+        target_date=row.target_date,
+        external_ref=row.external_ref,
+        attributes=dict(row.attributes or {}),
+        links=list(links),
+        created_by=row.created_by,
+        created_at=_as_utc(row.created_at),
+        updated_at=_as_utc(row.updated_at),
+    )
+
+
+def apply_goal_to_model(row: GoalModel, goal: Goal) -> None:
+    row.project_id = _uuid_str(goal.project_id)
+    row.goal_type = goal.goal_type.value
+    row.title = goal.title
+    row.summary = goal.summary
+    row.status = goal.status.value
+    row.target_date = goal.target_date
+    row.external_ref = goal.external_ref
+    row.attributes = dict(goal.attributes)
+    row.created_by = goal.created_by
+    row.created_at = goal.created_at
+    row.updated_at = goal.updated_at
+
+
+def goal_link_from_model(row: GoalLinkModel) -> GoalLink:
+    return GoalLink(
+        link_id=_uuid(row.link_id),
+        goal_id=_uuid(row.goal_id),
+        target=EntityRef(
+            entity_type=EntityType(row.entity_type),
+            entity_id=_uuid(row.entity_id),
+        ),
+        relation=GoalRelation(row.relation),
+        link_status=GoalLinkStatus(row.link_status),
+        slot=row.slot,
+        created_by=row.created_by,
+        created_at=_as_utc(row.created_at),
+    )
+
+
+def goal_link_to_model(link: GoalLink) -> GoalLinkModel:
+    return GoalLinkModel(
+        link_id=_uuid_str(link.link_id),
+        goal_id=_uuid_str(link.goal_id),
+        entity_type=link.target.entity_type.value,
+        entity_id=_uuid_str(link.target.entity_id),
+        relation=link.relation.value,
+        link_status=link.link_status.value,
+        slot=link.slot,
+        created_by=link.created_by,
+        created_at=link.created_at,
+    )
+
+
+def goal_link_models(goal: Goal) -> list[GoalLinkModel]:
+    return [goal_link_to_model(link) for link in goal.links]
 
 
 def visualization_to_model(visualization: Visualization) -> VisualizationModel:

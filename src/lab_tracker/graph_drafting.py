@@ -32,6 +32,9 @@ SEMANTIC_TYPES = [
     "link_note_to_analysis",
     "suggest_new_question",
     "suggest_new_dataset",
+    "suggest_new_goal",
+    "link_node_to_goal",
+    "update_goal",
     "suggest_followup",
     "request_clarification",
 ]
@@ -79,6 +82,7 @@ def graph_patch_response_schema() -> dict[str, Any]:
                     "analysis",
                     "claim",
                     "visualization",
+                    "goal",
                 ],
             },
             "semantic_type": {"type": "string", "enum": SEMANTIC_TYPES},
@@ -442,7 +446,7 @@ def _instructions() -> str:
         "when a replacement is provided. If the context is insufficient, mark uncertainty "
         "or request clarification. "
         "Use create or update operations for project, question, note, session, dataset, "
-        "analysis, claim, or visualization entities. Use payload_json as a JSON object "
+        "analysis, claim, visualization, or goal entities. Use payload_json as a JSON object "
         "string matching the existing Lab Tracker API request shape. For questions, prefer "
         "small atomic experimental, method, control, or analysis questions linked under "
         "broader motivating questions with parent_question_ids. If the image supports a "
@@ -453,7 +457,10 @@ def _instructions() -> str:
         "inside later payload_json fields. Set semantic_type to the closest specific "
         "allowed semantic operation label. Use create_entity only for generic create "
         "operations and update_entity only for generic update operations when no narrower "
-        "semantic label fits. Never claim a canonical update happened; these are drafts "
+        "semantic label fits. Goals represent aspirational outputs such as papers, grants, "
+        "or talks; keep their attributes to pointers and light metadata, and use "
+        "link_node_to_goal to tag existing graph nodes as candidate or committed evidence "
+        "for a goal. Never claim a canonical update happened; these are drafts "
         "for human review. Preserve uploaded image and audio notes as provenance sources "
         "and return uncertainty explicitly."
     )

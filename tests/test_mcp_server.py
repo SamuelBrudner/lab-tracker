@@ -27,11 +27,17 @@ def test_fastmcp_registers_lab_tracker_tools() -> None:
     assert "lab_tracker_list_analyses" in names
     assert "lab_tracker_list_claims" in names
     assert "lab_tracker_list_visualizations" in names
+    assert "lab_tracker_list_goals" in names
+    assert "lab_tracker_get_goal" in names
+    assert "lab_tracker_list_node_goals" in names
     assert "lab_tracker_create_note" in names
     assert "lab_tracker_create_dataset" in names
     assert "lab_tracker_create_analysis" in names
     assert "lab_tracker_create_claim" in names
     assert "lab_tracker_create_visualization" in names
+    assert "lab_tracker_create_goal" in names
+    assert "lab_tracker_update_goal" in names
+    assert "lab_tracker_link_node_to_goal" in names
     assert "lab_tracker_upload_visualization_file" in names
 
 

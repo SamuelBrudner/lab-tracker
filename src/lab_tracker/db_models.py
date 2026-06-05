@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from uuid import uuid4
 
 from sqlalchemy import (
     JSON,
+    Date,
     DateTime,
     Float,
     ForeignKey,
@@ -509,6 +510,67 @@ class ClaimQuestionModel(Base):
     )
 
 
+class GoalModel(Base):
+    __tablename__ = "goals"
+
+    goal_id: Mapped[str] = mapped_column(
+        String(36),
+        primary_key=True,
+        default=lambda: str(uuid4()),
+    )
+    project_id: Mapped[str] = mapped_column(
+        String(36),
+        ForeignKey("projects.project_id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    goal_type: Mapped[str] = mapped_column(String(40), nullable=False)
+    title: Mapped[str] = mapped_column(String(255), nullable=False)
+    summary: Mapped[str] = mapped_column(Text, default="")
+    status: Mapped[str] = mapped_column(String(20), default="planned")
+    target_date: Mapped[date | None] = mapped_column(Date)
+    external_ref: Mapped[str | None] = mapped_column(String(1000))
+    attributes: Mapped[dict[str, object]] = mapped_column(JSON, default=dict)
+    created_by: Mapped[str | None] = mapped_column(String(255))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utc_now)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=_utc_now,
+        onupdate=_utc_now,
+    )
+
+
+class GoalLinkModel(Base):
+    __tablename__ = "goal_links"
+    __table_args__ = (
+        UniqueConstraint(
+            "goal_id",
+            "entity_type",
+            "entity_id",
+            "relation",
+            "slot",
+            name="uq_goal_links_goal_entity_relation_slot",
+        ),
+    )
+
+    link_id: Mapped[str] = mapped_column(
+        String(36),
+        primary_key=True,
+        default=lambda: str(uuid4()),
+    )
+    goal_id: Mapped[str] = mapped_column(
+        String(36),
+        ForeignKey("goals.goal_id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    entity_type: Mapped[str] = mapped_column(String(30), nullable=False)
+    entity_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    relation: Mapped[str] = mapped_column(String(40), nullable=False)
+    link_status: Mapped[str] = mapped_column(String(20), default="candidate")
+    slot: Mapped[str | None] = mapped_column(String(120))
+    created_by: Mapped[str | None] = mapped_column(String(255))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utc_now)
+
+
 class VisualizationModel(Base):
     __tablename__ = "visualizations"
 
@@ -708,6 +770,14 @@ Index("ix_claim_datasets_dataset_id", ClaimDatasetModel.dataset_id)
 Index("ix_claim_analyses_analysis_id", ClaimAnalysisModel.analysis_id)
 Index("ix_claims_project_created_at", ClaimModel.project_id, ClaimModel.created_at)
 Index("ix_dataset_question_links_question_id", DatasetQuestionLinkModel.question_id)
+Index("ix_goals_project_created_at", GoalModel.project_id, GoalModel.created_at)
+Index(
+    "ix_goal_links_entity_lookup",
+    GoalLinkModel.entity_type,
+    GoalLinkModel.entity_id,
+    GoalLinkModel.goal_id,
+)
+Index("ix_goal_links_goal_status", GoalLinkModel.goal_id, GoalLinkModel.link_status)
 Index(
     "ix_visualizations_analysis_created_at",
     VisualizationModel.analysis_id,

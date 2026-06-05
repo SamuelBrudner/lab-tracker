@@ -25,6 +25,8 @@ from lab_tracker.schemas import (
     ClaimUpdate,
     DatasetCreate,
     DatasetUpdate,
+    GoalCreate,
+    GoalUpdate,
     NoteCreate,
     NoteUpdate,
     ProjectCreate,
@@ -48,6 +50,7 @@ _CREATE_SCHEMAS = {
     EntityType.ANALYSIS: AnalysisCreate,
     EntityType.CLAIM: ClaimCreate,
     EntityType.VISUALIZATION: VisualizationCreate,
+    EntityType.GOAL: GoalCreate,
 }
 _UPDATE_SCHEMAS = {
     EntityType.PROJECT: ProjectUpdate,
@@ -58,6 +61,7 @@ _UPDATE_SCHEMAS = {
     EntityType.ANALYSIS: AnalysisUpdate,
     EntityType.CLAIM: ClaimUpdate,
     EntityType.VISUALIZATION: VisualizationUpdate,
+    EntityType.GOAL: GoalUpdate,
 }
 _SEMANTIC_ALLOWED_TARGETS = {
     GraphDraftSemanticType.CREATE_NOTE: {(GraphChangeOp.CREATE, EntityType.NOTE)},
@@ -67,6 +71,9 @@ _SEMANTIC_ALLOWED_TARGETS = {
     GraphDraftSemanticType.LINK_NOTE_TO_ANALYSIS: {(GraphChangeOp.UPDATE, EntityType.NOTE)},
     GraphDraftSemanticType.SUGGEST_NEW_QUESTION: {(GraphChangeOp.CREATE, EntityType.QUESTION)},
     GraphDraftSemanticType.SUGGEST_NEW_DATASET: {(GraphChangeOp.CREATE, EntityType.DATASET)},
+    GraphDraftSemanticType.SUGGEST_NEW_GOAL: {(GraphChangeOp.CREATE, EntityType.GOAL)},
+    GraphDraftSemanticType.LINK_NODE_TO_GOAL: {(GraphChangeOp.UPDATE, EntityType.GOAL)},
+    GraphDraftSemanticType.UPDATE_GOAL: {(GraphChangeOp.UPDATE, EntityType.GOAL)},
     GraphDraftSemanticType.SUGGEST_FOLLOWUP: {
         (GraphChangeOp.CREATE, EntityType.NOTE),
         (GraphChangeOp.CREATE, EntityType.QUESTION),
@@ -89,6 +96,7 @@ _ENTITY_ID_FIELDS = {
     "viz_id": EntityType.VISUALIZATION,
     "visualization_id": EntityType.VISUALIZATION,
     "claim_id": EntityType.CLAIM,
+    "goal_id": EntityType.GOAL,
 }
 _ENTITY_ID_LIST_FIELDS = {
     "parent_question_ids": EntityType.QUESTION,

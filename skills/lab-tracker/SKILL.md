@@ -270,6 +270,16 @@ List/search endpoints use `limit` between 1 and 200 and `offset` of 0 or greater
 - `supported_by_analysis_ids` (optional): list[string(uuid)] | null
 - `supported_by_dataset_ids` (optional): list[string(uuid)] | null
 
+#### Goals: `GoalCreateFields`
+- Required: `goal_type`, `title`
+- `attributes` (optional): object | null
+- `external_ref` (optional): string | null
+- `goal_type` (required): GoalType enum: paper, grant, talk, other
+- `status` (optional): GoalStatus enum: planned, in_progress, submitted, accepted, abandoned | null
+- `summary` (optional): string | null
+- `target_date` (optional): string(date) | null
+- `title` (required): string; min length 1
+
 #### Visualizations: `VisualizationCreate`
 - Required: `analysis_id`, `viz_type`, `file_path`
 - `analysis_id` (required): string(uuid)
@@ -316,7 +326,7 @@ List/search endpoints use `limit` between 1 and 200 and `offset` of 0 or greater
 #### `GET /notes`
 - `project_id` (optional): string(uuid) | null
 - `status` (optional): NoteStatus enum: staged, committed, archived | null
-- `target_entity_type` (optional): EntityType enum: project, question, dataset, note, session, analysis, claim, visualization | null
+- `target_entity_type` (optional): EntityType enum: project, question, dataset, note, session, analysis, claim, visualization, goal | null
 - `target_entity_id` (optional): string(uuid) | null
 - `limit` (optional): integer; default 50; maximum 200 from shared route validation
 - `offset` (optional): integer; default 0; minimum 0 from shared route validation
@@ -350,6 +360,13 @@ List/search endpoints use `limit` between 1 and 200 and `offset` of 0 or greater
 - `limit` (optional): integer; default 50; maximum 200 from shared route validation
 - `offset` (optional): integer; default 0; minimum 0 from shared route validation
 
+#### `GET /projects/{project_id}/goals`
+- `project_id` (required): string(uuid)
+- `goal_type` (optional): GoalType enum: paper, grant, talk, other | null
+- `status` (optional): GoalStatus enum: planned, in_progress, submitted, accepted, abandoned | null
+- `limit` (optional): integer; default 50; maximum 200 from shared route validation
+- `offset` (optional): integer; default 0; minimum 0 from shared route validation
+
 #### `GET /visualizations`
 - `project_id` (optional): string(uuid) | null
 - `analysis_id` (optional): string(uuid) | null
@@ -367,6 +384,7 @@ List/search endpoints use `limit` between 1 and 200 and `offset` of 0 or greater
 #### `GET /search`
 - `q` (required): string
 - `project_id` (optional): string(uuid) | null
+- `goal_id` (optional): string(uuid) | null
 - `include` (optional): string | null
 - `limit` (optional): integer; default 20; maximum 200 from shared route validation
 - `offset` (optional): integer; default 0; minimum 0 from shared route validation

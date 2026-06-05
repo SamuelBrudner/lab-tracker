@@ -14,6 +14,7 @@ const TYPE_LABELS = {
   analysis: "Analysis",
   claim: "Claim",
   dataset: "Dataset",
+  goal: "Goal",
   note: "Note",
   question: "Question",
   session: "Session",
@@ -27,6 +28,7 @@ const TYPE_LAYER_BY_VIEW = {
     analysis: 2,
     claim: 3,
     visualization: 4,
+    goal: 5,
   },
   questions: {
     question: 0,
@@ -39,6 +41,7 @@ const TYPE_LAYER_BY_VIEW = {
     analysis: 4,
     claim: 5,
     visualization: 6,
+    goal: 7,
   },
 };
 
@@ -46,6 +49,7 @@ const TYPE_STYLES = {
   analysis: { background: "#eef3f9", borderColor: "#8ba3c7" },
   claim: { background: "#f7f0f4", borderColor: "#c98da9" },
   dataset: { background: "#edf5ed", borderColor: "#85aa83" },
+  goal: { background: "#fff4cf", borderColor: "#c99724" },
   note: { background: "#fbf3e7", borderColor: "#d3a96b" },
   question: { background: "#f6f2eb", borderColor: "#b8a77d" },
   session: { background: "#edf4f5", borderColor: "#75a8b0" },
@@ -59,8 +63,8 @@ const VIEW_AXIS_LABELS = {
 };
 
 const VIEW_AXIS_TYPES = {
-  evidence: ["question", "dataset", "analysis", "claim", "visualization"],
-  full: ["note", "question", "session", "dataset", "analysis", "claim", "visualization"],
+  evidence: ["question", "dataset", "analysis", "claim", "visualization", "goal"],
+  full: ["note", "question", "session", "dataset", "analysis", "claim", "visualization", "goal"],
   questions: ["question"],
 };
 
@@ -242,6 +246,10 @@ function computeNodePositions(nodes, edges, view, layerByType, qLayout) {
 
 function graphNodeToFlowNode(node, positions) {
   const style = TYPE_STYLES[node.entity_type] || {};
+  const goalShape =
+    node.entity_type === "goal"
+      ? { clipPath: "polygon(8% 0, 92% 0, 100% 50%, 92% 100%, 8% 100%, 0 50%)" }
+      : {};
   return {
     id: node.id,
     data: {
@@ -256,6 +264,7 @@ function graphNodeToFlowNode(node, positions) {
       ...style,
       borderWidth: 1,
       color: "#1f2933",
+      ...goalShape,
       maxWidth: 220,
       width: 220,
     },
@@ -263,6 +272,7 @@ function graphNodeToFlowNode(node, positions) {
 }
 
 function graphEdgeToFlowEdge(edge) {
+  const isCandidate = String(edge.relationship || "").endsWith("_candidate");
   // Graph edges are directed (parent -> child, dataset -> analysis, ...), so
   // render an arrowhead at the target end.
   return {
@@ -272,7 +282,7 @@ function graphEdgeToFlowEdge(edge) {
     target: edge.target,
     type: "smoothstep",
     markerEnd: { type: "arrowclosed", width: 22, height: 22, color: "#6b7280" },
-    style: { stroke: "#9aa3ad" },
+    style: { stroke: "#9aa3ad", strokeDasharray: isCandidate ? "5 5" : undefined },
   };
 }
 

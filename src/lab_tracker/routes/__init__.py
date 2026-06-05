@@ -15,6 +15,7 @@ from .dataset_files import build_dataset_files_router
 from .datasets import build_datasets_router
 from .device_auth import build_device_auth_router
 from .errors import register_error_handlers
+from .goals import build_goals_router
 from .graph_drafts import build_graph_drafts_router
 from .notes import build_notes_router
 from .project_graph import build_project_graph_router
@@ -59,6 +60,7 @@ def register_routes(
     app.include_router(build_sessions_router(api))
     app.include_router(build_analyses_router(api))
     app.include_router(build_claims_router(api))
+    app.include_router(build_goals_router(api))
     app.include_router(build_visualizations_router(api))
 
 

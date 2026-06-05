@@ -216,6 +216,83 @@ def lab_tracker_create_visualization(
         client.close()
 
 
+def lab_tracker_create_goal(
+    project_id: str,
+    goal_type: str,
+    title: str,
+    summary: str | None = None,
+    status: str | None = "planned",
+    target_date: str | None = None,
+    external_ref: str | None = None,
+    attributes: JsonObject | None = None,
+) -> JsonObject:
+    """Create a Lab Tracker goal/output for a project."""
+    client = client_from_env()
+    try:
+        return client.create_goal(
+            project_id=project_id,
+            goal_type=goal_type,
+            title=title,
+            summary=summary,
+            status=status,
+            target_date=target_date,
+            external_ref=external_ref,
+            attributes=attributes,
+        )
+    finally:
+        client.close()
+
+
+def lab_tracker_update_goal(
+    goal_id: str,
+    goal_type: str | None = None,
+    title: str | None = None,
+    summary: str | None = None,
+    status: str | None = None,
+    target_date: str | None = None,
+    external_ref: str | None = None,
+    attributes: JsonObject | None = None,
+) -> JsonObject:
+    """Update a Lab Tracker goal/output."""
+    client = client_from_env()
+    try:
+        return client.update_goal(
+            goal_id=goal_id,
+            goal_type=goal_type,
+            title=title,
+            summary=summary,
+            status=status,
+            target_date=target_date,
+            external_ref=external_ref,
+            attributes=attributes,
+        )
+    finally:
+        client.close()
+
+
+def lab_tracker_link_node_to_goal(
+    goal_id: str,
+    entity_type: str,
+    entity_id: str,
+    relation: str,
+    link_status: str | None = "candidate",
+    slot: str | None = None,
+) -> JsonObject:
+    """Tag an existing graph node in relation to a goal/output."""
+    client = client_from_env()
+    try:
+        return client.link_node_to_goal(
+            goal_id=goal_id,
+            entity_type=entity_type,
+            entity_id=entity_id,
+            relation=relation,
+            link_status=link_status,
+            slot=slot,
+        )
+    finally:
+        client.close()
+
+
 def lab_tracker_upload_visualization_file(
     viz_id: str,
     file_path: str,
@@ -242,6 +319,9 @@ WRITE_TOOLS = (
     lab_tracker_create_analysis,
     lab_tracker_create_claim,
     lab_tracker_create_visualization,
+    lab_tracker_create_goal,
+    lab_tracker_update_goal,
+    lab_tracker_link_node_to_goal,
     lab_tracker_upload_visualization_file,
 )
 

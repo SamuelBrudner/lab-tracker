@@ -128,4 +128,25 @@ describe("buildFlowGraph edge dedupe", () => {
     expect(byId.D.position.x).toBeGreaterThan(byId.S.position.x);
     expect(byId.A.position.x).toBeGreaterThan(byId.D.position.x);
   });
+
+  it("places goals at the right edge and dashes candidate goal edges", () => {
+    const graph = {
+      nodes: [
+        q("Q", "question"),
+        { id: "V", entity_type: "visualization", label: "figure" },
+        { id: "G", entity_type: "goal", label: "paper" },
+      ],
+      edges: [
+        edge("e1", "Q", "V", "visualization_claim"),
+        edge("e2", "V", "G", "goal_candidate_figure_candidate", "candidate figure"),
+      ],
+    };
+    const result = buildFlowGraph(graph, "evidence");
+    const byId = Object.fromEntries(result.nodes.map((node) => [node.id, node]));
+    const goalEdge = result.edges.find((item) => item.id === "e2");
+
+    expect(byId.G.position.x).toBeGreaterThan(byId.V.position.x);
+    expect(byId.G.style.clipPath).toContain("polygon");
+    expect(goalEdge.style.strokeDasharray).toBe("5 5");
+  });
 });

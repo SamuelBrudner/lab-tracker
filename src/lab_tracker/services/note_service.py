@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 import logging
-from collections.abc import Iterable
-from typing import Any, BinaryIO
+from collections.abc import Callable, Iterable
+from typing import TYPE_CHECKING, Any, BinaryIO
 from uuid import UUID, uuid4
 
 from lab_tracker.auth import AuthContext
@@ -33,6 +33,9 @@ from lab_tracker.services.shared import (
 )
 from lab_tracker.services.visualization_service import VisualizationService
 
+if TYPE_CHECKING:
+    from lab_tracker.services.goal_service import GoalService
+
 _logger = logging.getLogger(__name__)
 
 
@@ -48,6 +51,7 @@ class NoteService(BaseService):
         analyses: AnalysisService,
         claims: ClaimService,
         visualizations: VisualizationService,
+        goals_provider: Callable[[], GoalService] | None = None,
         authorization: ProjectAuthorizationPolicy,
     ) -> None:
         super().__init__(context)
@@ -58,7 +62,14 @@ class NoteService(BaseService):
         self.analyses = analyses
         self.claims = claims
         self.visualizations = visualizations
+        self._goals_provider = goals_provider
         self.authorization = authorization
+
+    @property
+    def goals(self) -> GoalService:
+        if self._goals_provider is None:
+            raise ValidationError("Goal service is not configured.")
+        return self._goals_provider()
 
     def _delete_raw_asset(self, raw_asset: NoteRawAsset | None) -> None:
         if raw_asset is None or self.raw_storage is None:
@@ -335,6 +346,8 @@ class NoteService(BaseService):
             EntityType.CLAIM: self.claims.get_claim,
             EntityType.VISUALIZATION: self.visualizations.get_visualization,
         }
+        if self._goals_provider is not None:
+            entity_getters[EntityType.GOAL] = self.goals.get_goal
         getter = entity_getters.get(target.entity_type)
         if getter is None:
             raise ValidationError("Unsupported target entity type.")

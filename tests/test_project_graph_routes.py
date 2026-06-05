@@ -147,11 +147,31 @@ def _create_graph_fixture(
         },
         headers=headers,
     ).json()["data"]["viz_id"]
+    goal_id = client.post(
+        f"/projects/{project_id}/goals",
+        json={
+            "goal_type": "paper",
+            "title": "Graph paper",
+            "attributes": {"target_venue": "Neuron"},
+        },
+        headers=headers,
+    ).json()["data"]["goal_id"]
+    client.post(
+        f"/goals/{goal_id}/links",
+        json={
+            "entity_type": "visualization",
+            "entity_id": viz_id,
+            "relation": "candidate_figure",
+            "slot": "Figure 3",
+        },
+        headers=headers,
+    )
     return {
         "analysis_id": analysis_id,
         "child_question_id": child_question_id,
         "claim_id": claim_id,
         "dataset_id": dataset_id,
+        "goal_id": goal_id,
         "note_id": note_id,
         "project_id": project_id,
         "replacement_question_id": replacement_question_id,
@@ -232,8 +252,10 @@ def test_project_graph_evidence_and_full_views_include_expected_links(
         f"claim_question_answers:claim:{ids['claim_id']}->question:{ids['child_question_id']}",
         f"visualization_analysis:analysis:{ids['analysis_id']}->visualization:{ids['viz_id']}",
         f"visualization_claim:claim:{ids['claim_id']}->visualization:{ids['viz_id']}",
+        f"goal_candidate_figure_candidate:visualization:{ids['viz_id']}->goal:{ids['goal_id']}",
     }.issubset(_edge_ids(evidence["edges"]))
 
+    assert f"goal:{ids['goal_id']}" in _ids(evidence["nodes"])
     assert f"note:{ids['note_id']}" in _ids(full["nodes"])
     assert f"session:{ids['scientific_session_id']}" in _ids(full["nodes"])
     assert f"session:{ids['source_session_id']}" in _ids(full["nodes"])
