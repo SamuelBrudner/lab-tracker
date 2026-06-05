@@ -15,17 +15,17 @@
       "title": "Questions -> evidence -> claims -> figures",
       "graph_kind": "project_graph",
       "backend_view": "evidence",
-      "visible_labels": ["question", "evidence", "claim", "figure"],
+      "visible_labels": ["Does running raise L2/3 tuning gain?", "2025_12_10_Rig2_session001.nwb", "Running raises L2/3 gain ~1.4x", "Fig 2c - gain, sit vs run"],
       "nodes": [
-        {"id": "question:motivating", "label": "question", "entity_type": "question"},
-        {"id": "dataset:evidence", "label": "evidence", "entity_type": "dataset"},
-        {"id": "claim:claim", "label": "claim", "entity_type": "claim"},
-        {"id": "visualization:figure", "label": "figure", "entity_type": "visualization"}
+        {"id": "question:running_gain", "label": "Does running raise L2/3 tuning gain?", "entity_type": "question"},
+        {"id": "dataset:nwb_1210", "label": "2025_12_10_Rig2_session001.nwb", "entity_type": "dataset"},
+        {"id": "claim:gain_up", "label": "Running raises L2/3 gain ~1.4x (n=212)", "entity_type": "claim"},
+        {"id": "visualization:fig_gain", "label": "Fig 2c - gain, sit vs run", "entity_type": "visualization"}
       ],
       "edges": [
-        {"id": "e1", "source": "question:motivating", "target": "dataset:evidence", "relationship": "dataset_question_primary", "label": "primary question", "state": "present"},
-        {"id": "e2", "source": "dataset:evidence", "target": "claim:claim", "relationship": "claim_dataset_support", "label": "supports", "state": "present"},
-        {"id": "e3", "source": "claim:claim", "target": "visualization:figure", "relationship": "visualization_claim", "label": "related claim", "state": "present"}
+        {"id": "e1", "source": "question:running_gain", "target": "dataset:nwb_1210", "relationship": "dataset_question_primary", "label": "primary question", "state": "present"},
+        {"id": "e2", "source": "dataset:nwb_1210", "target": "claim:gain_up", "relationship": "claim_dataset_support", "label": "supports", "state": "present"},
+        {"id": "e3", "source": "claim:gain_up", "target": "visualization:fig_gain", "relationship": "visualization_claim", "label": "related claim", "state": "present"}
       ]
     },
     {
@@ -36,18 +36,18 @@
       "backend_view": "full",
       "visible_labels": ["what happened", "why it happened", "what it supports"],
       "nodes": [
-        {"id": "session:experiment", "label": "what happened", "entity_type": "session"},
-        {"id": "question:why", "label": "why it happened", "entity_type": "question"},
-        {"id": "dataset:experiment_dataset", "label": "what happened dataset", "entity_type": "dataset", "visible": false},
-        {"id": "claim:supported", "label": "what it supports", "entity_type": "claim"}
+        {"id": "session:rig2_1210", "label": "Rig2 - 2025-12-10 - M317", "entity_type": "session"},
+        {"id": "question:running_gain", "label": "Does running raise L2/3 tuning gain?", "entity_type": "question"},
+        {"id": "dataset:nwb_1210", "label": "2025_12_10_Rig2_session001.nwb", "entity_type": "dataset", "visible": false},
+        {"id": "claim:gain_up", "label": "Running raises L2/3 gain ~1.4x (n=212)", "entity_type": "claim"}
       ],
       "edges": [
-        {"id": "e1", "source": "question:why", "target": "session:experiment", "relationship": "session_question", "label": "session question", "state": "present"},
-        {"id": "e2", "source": "session:experiment", "target": "dataset:experiment_dataset", "relationship": "dataset_source_session", "label": "produces", "state": "implicit"},
-        {"id": "e3", "source": "question:why", "target": "dataset:experiment_dataset", "relationship": "dataset_question_primary", "label": "answers", "state": "present"},
-        {"id": "e4", "source": "dataset:experiment_dataset", "target": "claim:supported", "relationship": "claim_dataset_support", "label": "supports", "state": "present"}
+        {"id": "e1", "source": "question:running_gain", "target": "session:rig2_1210", "relationship": "session_question", "label": "session question", "state": "present"},
+        {"id": "e2", "source": "session:rig2_1210", "target": "dataset:nwb_1210", "relationship": "dataset_source_session", "label": "produces", "state": "implicit"},
+        {"id": "e3", "source": "question:running_gain", "target": "dataset:nwb_1210", "relationship": "dataset_question_primary", "label": "answers", "state": "implicit"},
+        {"id": "e4", "source": "dataset:nwb_1210", "target": "claim:gain_up", "relationship": "claim_dataset_support", "label": "supports", "state": "implicit"}
       ],
-      "notes": "The visible slide compresses session, question, and claim into three blocks; the invisible dataset node records the backend path from session to claim."
+      "notes": "Three visible blocks (session, question, claim) compress the backend path; the hidden dataset bridges session->claim, so its incident edges are implicit, not present."
     },
     {
       "diagram_id": "rg-problem-map",
@@ -71,22 +71,22 @@
       "title": "The record loses the question an experiment answered",
       "graph_kind": "project_graph",
       "backend_view": "full",
-      "visible_labels": ["motivating question", "notebook note", "session_0427.zarr", "analysis notebook", "figure draft", "missing: answered"],
+      "visible_labels": ["Does running raise L2/3 tuning gain?", "bench note", "Rig2 - 2025-12-10 - M317", "2025_12_10_Rig2_session001.nwb", "ori-tuning gain", "Fig 2c (draft)", "missing: the question it answered"],
       "nodes": [
-        {"id": "question:motivating", "label": "motivating question", "entity_type": "question"},
-        {"id": "note:notebook_note", "label": "notebook note", "entity_type": "note"},
-        {"id": "session:session_0427", "label": "session_0427.zarr", "entity_type": "session"},
-        {"id": "dataset:session_0427_dataset", "label": "promoted dataset", "entity_type": "dataset", "visible": false},
-        {"id": "analysis:analysis_notebook", "label": "analysis notebook", "entity_type": "analysis"},
-        {"id": "visualization:figure_draft", "label": "figure draft", "entity_type": "visualization"}
+        {"id": "question:running_gain", "label": "Does running raise L2/3 tuning gain?", "entity_type": "question"},
+        {"id": "note:bench_1210", "label": "bench note: M317, 2 blocks dropped", "entity_type": "note"},
+        {"id": "session:rig2_1210", "label": "Rig2 - 2025-12-10 - M317", "entity_type": "session"},
+        {"id": "dataset:nwb_1210", "label": "2025_12_10_Rig2_session001.nwb", "entity_type": "dataset"},
+        {"id": "analysis:tuning_gain", "label": "ori-tuning gain by run state", "entity_type": "analysis"},
+        {"id": "visualization:fig_gain", "label": "Fig 2c - gain, sit vs run (draft)", "entity_type": "visualization"}
       ],
       "edges": [
-        {"id": "missing_note_question", "source": "note:notebook_note", "target": "question:motivating", "relationship": "note_target_question", "label": "targets", "state": "missing", "rationale": "The note exists but is not attached to the question it records."},
-        {"id": "missing_session_question", "source": "question:motivating", "target": "session:session_0427", "relationship": "session_question", "label": "session question", "state": "missing", "rationale": "The session can be identified but its motivating question is absent."},
-        {"id": "missing_dataset_question", "source": "question:motivating", "target": "dataset:session_0427_dataset", "relationship": "dataset_question_primary", "label": "primary question", "state": "missing", "rationale": "A promoted dataset should carry the question link forward."},
-        {"id": "session_dataset", "source": "session:session_0427", "target": "dataset:session_0427_dataset", "relationship": "dataset_source_session", "label": "source session", "state": "implicit"},
-        {"id": "dataset_analysis", "source": "dataset:session_0427_dataset", "target": "analysis:analysis_notebook", "relationship": "analysis_dataset", "label": "used by", "state": "present"},
-        {"id": "analysis_figure", "source": "analysis:analysis_notebook", "target": "visualization:figure_draft", "relationship": "visualization_analysis", "label": "generates", "state": "present"}
+        {"id": "missing_note_question", "source": "note:bench_1210", "target": "question:running_gain", "relationship": "note_target_question", "label": "targets", "state": "missing", "rationale": "The bench note records the result but is not attached to the question it answers."},
+        {"id": "missing_session_question", "source": "question:running_gain", "target": "session:rig2_1210", "relationship": "session_question", "label": "session question", "state": "missing", "rationale": "The session file can be identified, but its motivating question is absent."},
+        {"id": "missing_dataset_question", "source": "question:running_gain", "target": "dataset:nwb_1210", "relationship": "dataset_question_primary", "label": "primary question", "state": "missing", "rationale": "The promoted dataset should carry the question link forward, but does not."},
+        {"id": "session_dataset", "source": "session:rig2_1210", "target": "dataset:nwb_1210", "relationship": "dataset_source_session", "label": "source session", "state": "present"},
+        {"id": "dataset_analysis", "source": "dataset:nwb_1210", "target": "analysis:tuning_gain", "relationship": "analysis_dataset", "label": "used by", "state": "present"},
+        {"id": "analysis_figure", "source": "analysis:tuning_gain", "target": "visualization:fig_gain", "relationship": "visualization_analysis", "label": "generates", "state": "present"}
       ]
     },
     {
@@ -98,8 +98,6 @@
       "visible_labels": ["prompt + files", "model", "plausible output", "project goal", "question hierarchy", "prior claims", "not in the prompt"],
       "nodes": [
         {"id": "note:prompt_files", "label": "prompt + files", "entity_type": "note"},
-        {"id": "agent:model", "label": "model"},
-        {"id": "agent:output", "label": "plausible output"},
         {"id": "question:project_goal", "label": "project goal", "entity_type": "question"},
         {"id": "question:active_question", "label": "active question", "entity_type": "question", "visible": false},
         {"id": "claim:prior_claim", "label": "prior claims", "entity_type": "claim"},
@@ -143,20 +141,24 @@
       "title": "A shared graph preserves rationale for later review",
       "graph_kind": "project_graph",
       "backend_view": "full",
-      "visible_labels": ["motivating question", "session_0427.zarr", "analysis", "figure", "question addressed", "later review"],
+      "visible_labels": ["motivating question", "Rig2 - 2025-12-10 - M317", "ori-tuning gain", "supported claim", "Fig 2c", "question answered"],
       "nodes": [
-        {"id": "question:motivating", "label": "motivating question", "entity_type": "question"},
-        {"id": "session:session_0427", "label": "session_0427.zarr", "entity_type": "session"},
-        {"id": "dataset:session_0427_dataset", "label": "dataset", "entity_type": "dataset", "visible": false},
-        {"id": "analysis:analysis", "label": "analysis", "entity_type": "analysis"},
-        {"id": "visualization:figure", "label": "figure", "entity_type": "visualization"}
+        {"id": "question:running_gain", "label": "Does running raise L2/3 tuning gain?", "entity_type": "question"},
+        {"id": "session:rig2_1210", "label": "Rig2 - 2025-12-10 - M317", "entity_type": "session"},
+        {"id": "dataset:nwb_1210", "label": "2025_12_10_Rig2_session001.nwb", "entity_type": "dataset"},
+        {"id": "analysis:tuning_gain", "label": "ori-tuning gain by run state", "entity_type": "analysis"},
+        {"id": "claim:gain_up", "label": "Running raises L2/3 gain ~1.4x (n=212)", "entity_type": "claim"},
+        {"id": "visualization:fig_gain", "label": "Fig 2c - gain, sit vs run", "entity_type": "visualization"}
       ],
       "edges": [
-        {"id": "question_session", "source": "question:motivating", "target": "session:session_0427", "relationship": "session_question", "label": "session question", "state": "present"},
-        {"id": "session_dataset", "source": "session:session_0427", "target": "dataset:session_0427_dataset", "relationship": "dataset_source_session", "label": "source session", "state": "implicit"},
-        {"id": "question_dataset", "source": "question:motivating", "target": "dataset:session_0427_dataset", "relationship": "dataset_question_primary", "label": "primary question", "state": "present"},
-        {"id": "dataset_analysis", "source": "dataset:session_0427_dataset", "target": "analysis:analysis", "relationship": "analysis_dataset", "label": "used by", "state": "present"},
-        {"id": "analysis_figure", "source": "analysis:analysis", "target": "visualization:figure", "relationship": "visualization_analysis", "label": "generates", "state": "present"}
+        {"id": "question_session", "source": "question:running_gain", "target": "session:rig2_1210", "relationship": "session_question", "label": "session question", "state": "present"},
+        {"id": "session_dataset", "source": "session:rig2_1210", "target": "dataset:nwb_1210", "relationship": "dataset_source_session", "label": "source session", "state": "implicit"},
+        {"id": "question_dataset", "source": "question:running_gain", "target": "dataset:nwb_1210", "relationship": "dataset_question_primary", "label": "primary question", "state": "present"},
+        {"id": "dataset_analysis", "source": "dataset:nwb_1210", "target": "analysis:tuning_gain", "relationship": "analysis_dataset", "label": "used by", "state": "present"},
+        {"id": "analysis_claim", "source": "analysis:tuning_gain", "target": "claim:gain_up", "relationship": "claim_analysis_support", "label": "supports", "state": "present"},
+        {"id": "analysis_figure", "source": "analysis:tuning_gain", "target": "visualization:fig_gain", "relationship": "visualization_analysis", "label": "generates", "state": "present"},
+        {"id": "claim_figure", "source": "claim:gain_up", "target": "visualization:fig_gain", "relationship": "visualization_claim", "label": "related claim", "state": "present"},
+        {"id": "claim_question", "source": "claim:gain_up", "target": "question:running_gain", "relationship": "claim_question_answers", "label": "answers", "state": "present"}
       ]
     },
     {
@@ -165,22 +167,22 @@
       "title": "The same graph can supply an assistant context packet",
       "graph_kind": "context_packet",
       "backend_view": "full",
-      "visible_labels": ["motivating question", "session_0427.zarr", "analysis", "figure", "model", "context packet"],
+      "visible_labels": ["Does running raise L2/3 gain?", "2025_12_10_Rig2_session001.nwb", "ori-tuning gain", "prior claim", "Fig 2c", "context packet"],
       "nodes": [
-        {"id": "question:motivating", "label": "motivating question", "entity_type": "question"},
-        {"id": "dataset:session_0427_dataset", "label": "session_0427.zarr", "entity_type": "dataset"},
-        {"id": "analysis:analysis", "label": "analysis", "entity_type": "analysis"},
-        {"id": "claim:prior_claim", "label": "prior claims", "entity_type": "claim"},
-        {"id": "visualization:figure", "label": "figure", "entity_type": "visualization"},
-        {"id": "agent:context_packet", "label": "context packet"}
+        {"id": "question:running_gain", "label": "Does running raise L2/3 tuning gain?", "entity_type": "question"},
+        {"id": "dataset:nwb_1210", "label": "2025_12_10_Rig2_session001.nwb", "entity_type": "dataset"},
+        {"id": "analysis:tuning_gain", "label": "ori-tuning gain by run state", "entity_type": "analysis"},
+        {"id": "claim:gain_up", "label": "Running raises L2/3 gain ~1.4x (n=212)", "entity_type": "claim"},
+        {"id": "visualization:fig_gain", "label": "Fig 2c - gain, sit vs run", "entity_type": "visualization"}
       ],
       "edges": [
-        {"id": "question_dataset", "source": "question:motivating", "target": "dataset:session_0427_dataset", "relationship": "dataset_question_primary", "label": "primary question", "state": "context_required"},
-        {"id": "dataset_analysis", "source": "dataset:session_0427_dataset", "target": "analysis:analysis", "relationship": "analysis_dataset", "label": "used by", "state": "context_required"},
-        {"id": "analysis_claim", "source": "analysis:analysis", "target": "claim:prior_claim", "relationship": "claim_analysis_support", "label": "supports", "state": "context_required"},
-        {"id": "analysis_figure", "source": "analysis:analysis", "target": "visualization:figure", "relationship": "visualization_analysis", "label": "generates", "state": "context_required"}
+        {"id": "question_dataset", "source": "question:running_gain", "target": "dataset:nwb_1210", "relationship": "dataset_question_primary", "label": "primary question", "state": "context_required"},
+        {"id": "dataset_analysis", "source": "dataset:nwb_1210", "target": "analysis:tuning_gain", "relationship": "analysis_dataset", "label": "used by", "state": "context_required"},
+        {"id": "analysis_claim", "source": "analysis:tuning_gain", "target": "claim:gain_up", "relationship": "claim_analysis_support", "label": "supports", "state": "context_required"},
+        {"id": "analysis_figure", "source": "analysis:tuning_gain", "target": "visualization:fig_gain", "relationship": "visualization_analysis", "label": "generates", "state": "context_required"},
+        {"id": "claim_question", "source": "claim:gain_up", "target": "question:running_gain", "relationship": "claim_question_answers", "label": "answers", "state": "context_required"}
       ],
-      "notes": "The context packet node is not persisted; it is assembled from the listed backend graph neighborhood."
+      "notes": "The context packet is not a node; like slide 18 it is the bounded backend neighborhood (the context_required edges) assembled for the model."
     },
     {
       "diagram_id": "rg-resolution-draft-operations",
@@ -210,22 +212,27 @@
       "title": "Lab Tracker records semantic edges among existing lab artifacts",
       "graph_kind": "project_graph",
       "backend_view": "full",
-      "visible_labels": ["ELN note", "data file", "question addressed", "evidence for claim", "analysis", "figure"],
+      "visible_labels": ["bench note", "Rig2 session", "data file", "primary question", "control question", "supported claim", "analysis", "figure"],
       "nodes": [
-        {"id": "note:eln_note", "label": "ELN note", "entity_type": "note"},
-        {"id": "dataset:data_file", "label": "data file", "entity_type": "dataset"},
-        {"id": "question:addressed", "label": "question addressed", "entity_type": "question"},
-        {"id": "claim:evidence_claim", "label": "evidence for claim", "entity_type": "claim"},
-        {"id": "analysis:analysis", "label": "analysis", "entity_type": "analysis"},
-        {"id": "visualization:figure", "label": "figure", "entity_type": "visualization"}
+        {"id": "note:bench_1210", "label": "bench note: M317, 2 blocks dropped", "entity_type": "note"},
+        {"id": "session:rig2_1210", "label": "Rig2 - 2025-12-10 - M317", "entity_type": "session"},
+        {"id": "dataset:nwb_1210", "label": "2025_12_10_Rig2_session001.nwb", "entity_type": "dataset"},
+        {"id": "question:running_gain", "label": "Does running raise L2/3 tuning gain?", "entity_type": "question"},
+        {"id": "question:arousal", "label": "Explained by pupil arousal?", "entity_type": "question"},
+        {"id": "claim:gain_up", "label": "Running raises L2/3 gain ~1.4x (n=212)", "entity_type": "claim"},
+        {"id": "analysis:tuning_gain", "label": "ori-tuning gain by run state", "entity_type": "analysis"},
+        {"id": "visualization:fig_gain", "label": "Fig 2c - gain, sit vs run", "entity_type": "visualization"}
       ],
       "edges": [
-        {"id": "note_question", "source": "note:eln_note", "target": "question:addressed", "relationship": "note_target_question", "label": "targets", "state": "present"},
-        {"id": "question_dataset", "source": "question:addressed", "target": "dataset:data_file", "relationship": "dataset_question_primary", "label": "primary question", "state": "present"},
-        {"id": "dataset_analysis", "source": "dataset:data_file", "target": "analysis:analysis", "relationship": "analysis_dataset", "label": "used by", "state": "present"},
-        {"id": "dataset_claim", "source": "dataset:data_file", "target": "claim:evidence_claim", "relationship": "claim_dataset_support", "label": "supports", "state": "present"},
-        {"id": "analysis_figure", "source": "analysis:analysis", "target": "visualization:figure", "relationship": "visualization_analysis", "label": "generates", "state": "present"},
-        {"id": "claim_question", "source": "claim:evidence_claim", "target": "question:addressed", "relationship": "claim_question_answers", "label": "answers", "state": "present"}
+        {"id": "note_question", "source": "note:bench_1210", "target": "question:running_gain", "relationship": "note_target_question", "label": "targets", "state": "present"},
+        {"id": "note_session", "source": "note:bench_1210", "target": "session:rig2_1210", "relationship": "note_target_session", "label": "targets", "state": "present"},
+        {"id": "session_dataset", "source": "session:rig2_1210", "target": "dataset:nwb_1210", "relationship": "dataset_source_session", "label": "source session", "state": "present"},
+        {"id": "question_dataset_primary", "source": "question:running_gain", "target": "dataset:nwb_1210", "relationship": "dataset_question_primary", "label": "primary question", "state": "present"},
+        {"id": "question_dataset_secondary", "source": "question:arousal", "target": "dataset:nwb_1210", "relationship": "dataset_question_secondary", "label": "secondary question", "state": "present"},
+        {"id": "dataset_analysis", "source": "dataset:nwb_1210", "target": "analysis:tuning_gain", "relationship": "analysis_dataset", "label": "used by", "state": "present"},
+        {"id": "dataset_claim", "source": "dataset:nwb_1210", "target": "claim:gain_up", "relationship": "claim_dataset_support", "label": "supports", "state": "present"},
+        {"id": "analysis_figure", "source": "analysis:tuning_gain", "target": "visualization:fig_gain", "relationship": "visualization_analysis", "label": "generates", "state": "present"},
+        {"id": "claim_question", "source": "claim:gain_up", "target": "question:running_gain", "relationship": "claim_question_answers", "label": "answers", "state": "present"}
       ]
     },
     {
@@ -322,21 +329,21 @@
       "title": "A figure traces back to the question its claim answers",
       "graph_kind": "project_graph",
       "backend_view": "evidence",
-      "visible_labels": ["figure", "supported claim", "question answered"],
+      "visible_labels": ["Fig 2c - gain, sit vs run", "supported claim", "question answered"],
       "nodes": [
-        {"id": "question:addressed", "label": "question answered", "entity_type": "question"},
-        {"id": "dataset:evidence", "label": "evidence", "entity_type": "dataset", "visible": false},
-        {"id": "analysis:analysis", "label": "analysis", "entity_type": "analysis", "visible": false},
-        {"id": "claim:supported", "label": "supported claim", "entity_type": "claim"},
-        {"id": "visualization:figure", "label": "figure", "entity_type": "visualization"}
+        {"id": "question:running_gain", "label": "Does running raise L2/3 tuning gain?", "entity_type": "question"},
+        {"id": "dataset:nwb_1210", "label": "2025_12_10_Rig2_session001.nwb", "entity_type": "dataset", "visible": false},
+        {"id": "analysis:tuning_gain", "label": "ori-tuning gain by run state", "entity_type": "analysis", "visible": false},
+        {"id": "claim:gain_up", "label": "Running raises L2/3 gain ~1.4x (n=212)", "entity_type": "claim"},
+        {"id": "visualization:fig_gain", "label": "Fig 2c - gain, sit vs run", "entity_type": "visualization"}
       ],
       "edges": [
-        {"id": "question_dataset", "source": "question:addressed", "target": "dataset:evidence", "relationship": "dataset_question_primary", "label": "primary question", "state": "implicit"},
-        {"id": "analysis_dataset", "source": "dataset:evidence", "target": "analysis:analysis", "relationship": "analysis_dataset", "label": "used by", "state": "implicit"},
-        {"id": "claim_analysis", "source": "analysis:analysis", "target": "claim:supported", "relationship": "claim_analysis_support", "label": "supports", "state": "present"},
-        {"id": "analysis_figure", "source": "analysis:analysis", "target": "visualization:figure", "relationship": "visualization_analysis", "label": "generates", "state": "present"},
-        {"id": "claim_figure", "source": "claim:supported", "target": "visualization:figure", "relationship": "visualization_claim", "label": "related claim", "state": "present"},
-        {"id": "claim_question", "source": "claim:supported", "target": "question:addressed", "relationship": "claim_question_answers", "label": "answers", "state": "present"}
+        {"id": "question_dataset", "source": "question:running_gain", "target": "dataset:nwb_1210", "relationship": "dataset_question_primary", "label": "primary question", "state": "implicit"},
+        {"id": "analysis_dataset", "source": "dataset:nwb_1210", "target": "analysis:tuning_gain", "relationship": "analysis_dataset", "label": "used by", "state": "implicit"},
+        {"id": "claim_analysis", "source": "analysis:tuning_gain", "target": "claim:gain_up", "relationship": "claim_analysis_support", "label": "supports", "state": "implicit"},
+        {"id": "analysis_figure", "source": "analysis:tuning_gain", "target": "visualization:fig_gain", "relationship": "visualization_analysis", "label": "generates", "state": "implicit"},
+        {"id": "claim_figure", "source": "claim:gain_up", "target": "visualization:fig_gain", "relationship": "visualization_claim", "label": "related claim", "state": "present"},
+        {"id": "claim_question", "source": "claim:gain_up", "target": "question:running_gain", "relationship": "claim_question_answers", "label": "answers", "state": "present"}
       ]
     },
     {
@@ -406,7 +413,7 @@
       "title": "The reviewer decides what enters the record",
       "graph_kind": "graph_draft",
       "backend_view": "full",
-      "visible_labels": ["raw note", "context packet", "proposed operations", "reviewer decision"],
+      "visible_labels": ["raw note", "accepted", "deferred", "rejected"],
       "nodes": [
         {"id": "note:raw_note", "label": "raw note", "entity_type": "note"},
         {"id": "question:active_question", "label": "active question", "entity_type": "question"},
@@ -415,14 +422,15 @@
         {"id": "claim:candidate_claim", "label": "candidate claim", "entity_type": "claim"}
       ],
       "edges": [
-        {"id": "note_question", "source": "note:raw_note", "target": "question:active_question", "relationship": "note_target_question", "label": "targets", "state": "proposed"},
-        {"id": "dataset_question", "source": "question:active_question", "target": "dataset:candidate_dataset", "relationship": "dataset_question_primary", "label": "primary question", "state": "proposed"},
-        {"id": "analysis_dataset", "source": "dataset:candidate_dataset", "target": "analysis:candidate_analysis", "relationship": "analysis_dataset", "label": "used by", "state": "proposed"},
-        {"id": "claim_analysis", "source": "analysis:candidate_analysis", "target": "claim:candidate_claim", "relationship": "claim_analysis_support", "label": "supports", "state": "proposed"}
+        {"id": "note_question", "source": "note:raw_note", "target": "question:active_question", "relationship": "note_target_question", "label": "targets", "state": "present", "rationale": "Accepted: this link becomes a graph write."},
+        {"id": "dataset_question", "source": "question:active_question", "target": "dataset:candidate_dataset", "relationship": "dataset_question_primary", "label": "primary question", "state": "proposed", "rationale": "Deferred: left pending for a later decision."},
+        {"id": "analysis_dataset", "source": "dataset:candidate_dataset", "target": "analysis:candidate_analysis", "relationship": "analysis_dataset", "label": "used by", "state": "proposed", "rationale": "Deferred: left pending for a later decision."},
+        {"id": "claim_analysis", "source": "analysis:candidate_analysis", "target": "claim:candidate_claim", "relationship": "claim_analysis_support", "label": "supports", "state": "rejected", "rationale": "Rejected: evidence was judged insufficient, so the claim stays unsupported."}
       ],
       "operations": [
-        {"semantic_type": "link_note_to_question", "op": "update", "entity_type": "note", "target_node": "note:raw_note", "payload_template": {"targets": [{"entity_type": "question", "entity_id": "$question:active_question"}]}, "rationale": "Accepted operations become graph writes; rejected operations remain out of the record."}
-      ]
+        {"semantic_type": "link_note_to_question", "op": "update", "entity_type": "note", "target_node": "note:raw_note", "payload_template": {"targets": [{"entity_type": "question", "entity_id": "$question:active_question"}]}, "rationale": "Only the accepted operation becomes a graph write; the rejected claim support stays out, and the deferred links remain proposed."}
+      ],
+      "notes": "Unlike slide 19 (all proposed), the reviewer's decision is visible in edge state: accepted -> present, deferred -> proposed, rejected -> rejected."
     },
     {
       "diagram_id": "rg-first-use-case-one-project-one-result",
@@ -430,21 +438,25 @@
       "title": "One project, its question hierarchy, and one result",
       "graph_kind": "project_graph",
       "backend_view": "evidence",
-      "visible_labels": ["one project", "question hierarchy", "one result"],
+      "visible_labels": ["superseded -> current question", "two sub-questions", "one result"],
       "nodes": [
-        {"id": "question:motivating", "label": "motivating question", "entity_type": "question"},
-        {"id": "question:answerable", "label": "answerable question", "entity_type": "question"},
-        {"id": "dataset:result_dataset", "label": "result dataset", "entity_type": "dataset"},
-        {"id": "analysis:result_analysis", "label": "result analysis", "entity_type": "analysis"},
-        {"id": "visualization:one_result", "label": "one result", "entity_type": "visualization"}
+        {"id": "question:state_v1_old", "label": "Does behavioral state affect V1?", "entity_type": "question"},
+        {"id": "question:locomotion_v1", "label": "How does locomotion modulate V1 coding?", "entity_type": "question"},
+        {"id": "question:running_gain", "label": "Does running raise L2/3 tuning gain?", "entity_type": "question"},
+        {"id": "question:sf_tuning", "label": "Does running shift spatial-frequency tuning?", "entity_type": "question"},
+        {"id": "dataset:nwb_1210", "label": "2025_12_10_Rig2_session001.nwb", "entity_type": "dataset"},
+        {"id": "analysis:tuning_gain", "label": "ori-tuning gain by run state", "entity_type": "analysis"},
+        {"id": "visualization:fig_gain", "label": "Fig 2c - gain, sit vs run", "entity_type": "visualization"}
       ],
       "edges": [
-        {"id": "question_parent", "source": "question:motivating", "target": "question:answerable", "relationship": "question_parent", "label": "parent", "state": "present"},
-        {"id": "dataset_question", "source": "question:answerable", "target": "dataset:result_dataset", "relationship": "dataset_question_primary", "label": "primary question", "state": "present"},
-        {"id": "analysis_dataset", "source": "dataset:result_dataset", "target": "analysis:result_analysis", "relationship": "analysis_dataset", "label": "used by", "state": "present"},
-        {"id": "analysis_result", "source": "analysis:result_analysis", "target": "visualization:one_result", "relationship": "visualization_analysis", "label": "generates", "state": "present"}
+        {"id": "question_superseded", "source": "question:state_v1_old", "target": "question:locomotion_v1", "relationship": "question_superseded_by", "label": "superseded by", "state": "present"},
+        {"id": "question_parent_gain", "source": "question:locomotion_v1", "target": "question:running_gain", "relationship": "question_parent", "label": "parent", "state": "present"},
+        {"id": "question_parent_sf", "source": "question:locomotion_v1", "target": "question:sf_tuning", "relationship": "question_parent", "label": "parent", "state": "present"},
+        {"id": "dataset_question", "source": "question:running_gain", "target": "dataset:nwb_1210", "relationship": "dataset_question_primary", "label": "primary question", "state": "present"},
+        {"id": "analysis_dataset", "source": "dataset:nwb_1210", "target": "analysis:tuning_gain", "relationship": "analysis_dataset", "label": "used by", "state": "present"},
+        {"id": "analysis_result", "source": "analysis:tuning_gain", "target": "visualization:fig_gain", "relationship": "visualization_analysis", "label": "generates", "state": "present"}
       ],
-      "notes": "The project itself is represented by project_id scope in the backend graph projection."
+      "notes": "One project: an earlier question superseded by the current motivating question, which branches into two sub-questions; the running-gain branch resolves to one result while the spatial-frequency branch stays open. The project itself is the project_id scope of the projection."
     }
   ]
 }

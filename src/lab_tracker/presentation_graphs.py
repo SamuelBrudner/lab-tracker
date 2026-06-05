@@ -37,7 +37,9 @@ PROJECT_GRAPH_RELATIONSHIP_ENDPOINTS = {
 }
 PROJECT_GRAPH_RELATIONSHIPS = frozenset(PROJECT_GRAPH_RELATIONSHIP_ENDPOINTS)
 PRESENTATION_ONLY_RELATIONSHIPS = frozenset({"leads_to"})
-EDGE_STATES = frozenset({"context_required", "implicit", "missing", "present", "proposed"})
+EDGE_STATES = frozenset(
+    {"context_required", "implicit", "missing", "present", "proposed", "rejected"}
+)
 
 PresentationGraphKind = Literal["argument", "context_packet", "graph_draft", "project_graph"]
 
