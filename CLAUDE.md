@@ -79,6 +79,18 @@ npm run build
 
 Run the API with `uv run uvicorn lab_tracker.asgi:app --reload`; the app is served at `http://127.0.0.1:8000/app`.
 
+### Database migrations
+
+Alembic owns the schema. Filename prefixes (`NNNN_`) are **decorative** — Alembic chains on the `revision`/`down_revision` strings, not the number, and revision IDs are immutable once deployed (they are recorded in each database's `alembic_version`). So never renumber an existing migration, and never assume the highest-numbered file is the head — branches exist (e.g. the `0017_*` fork reconciled by `0019_merge_*`).
+
+Before adding a migration:
+
+```bash
+uv run alembic heads   # must print exactly one; set your down_revision to it
+```
+
+If two heads ever appear, reconcile them with `uv run alembic merge` rather than editing existing revisions. The `test_alembic_has_single_head` test enforces a single head.
+
 ## Architecture Overview
 
 Lab Tracker is a FastAPI and SQLAlchemy app for preserving the reasoning around lab work: projects, questions, acquisition sessions, datasets, notes, analyses, claims, and visualizations. Alembic owns database migrations. The frontend source lives in `src/lab_tracker/frontend_src`, and the committed bundle served by the API lives in `src/lab_tracker/frontend`.

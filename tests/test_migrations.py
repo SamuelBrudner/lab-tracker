@@ -81,6 +81,18 @@ def test_alembic_upgrade_chain_from_empty_to_head(monkeypatch, tmp_path):
     assert _current_revision(database_url) == "0021_claim_questions"
 
 
+def test_alembic_has_single_head() -> None:
+    script = ScriptDirectory.from_config(_alembic_config())
+    heads = script.get_heads()
+    assert len(heads) == 1, (
+        f"Expected exactly one Alembic head, found {sorted(heads)}. "
+        "Migration filename prefixes (NNNN_) are decorative; Alembic chains on the "
+        "revision/down_revision strings, not the number. A new migration must set "
+        "down_revision to the current head (run `uv run alembic heads`). If two "
+        "branches each added a head, reconcile them with `uv run alembic merge`."
+    )
+
+
 def test_alembic_upgrade_head_creates_expected_tables(monkeypatch, tmp_path):
     db_path = tmp_path / "migrations-smoke.db"
     database_url = f"sqlite+pysqlite:///{db_path}"
