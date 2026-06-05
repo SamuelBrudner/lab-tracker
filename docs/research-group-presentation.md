@@ -1,68 +1,68 @@
 # Lab Tracker — Research Group Presentation
 
 **Length:** ~15 min content + Q&A. Slides-first.
-**Structure:** the problem, one resolution that addresses it, how it works (by example), how to try it.
+**Structure:** the problem, one resolution that addresses it, how it works (by example), and how to adopt it.
 
-> This is the tight 15-minute cut for a research-group slot. It preserves the
-> original talk's spine and message at one-to-two beats per idea. The longer
-> ~25-minute treatment (separate problem slides per failure mode, a live demo,
-> an "under the hood" stack tour) can be restored if the slot grows.
+> This is the condensed 15-minute version for a research-group slot. It preserves
+> the original talk's structure and argument at one to two points per idea. The
+> fuller ~25-minute treatment (a separate slide per failure mode, a live demo,
+> and an architecture overview) can be restored if the slot allows.
 
 ---
 
 ## 1. Title — *0.5 min*
 
-- Title, name, date. Tagline: keeping the *reasoning* behind experiments, not just the files.
+- Title, name, date. Tagline: preserving the reasoning behind experiments, not only the resulting files.
 
-## 2. The record loses the *why* — *2 min*
+## 2. The record loses experimental rationale — *2 min*
 
-- Lead concretely: data files record *when / where / what*, not *why*. `2025_12_10_Rig2_session001.nwb` tells you nothing about what was expected, why it was collected, or what was observed at the bench. That context lives in notebooks, whiteboards, and memory — and is lost when people leave.
-- Two problems compound from the same gap; name them, don't belabor them:
-  - **AI assistants inherit the missing context.** Without grounding, the assistant starts from zero each session — proposing analyses the lab already ruled out, asserting unsupported claims, or producing work that is plausible but drifts from the question actually being asked (the costly one, because it looks productive).
-  - **The structured record that would fix this is too costly to maintain.** Spreadsheets, wikis, ELNs, and lab-meeting slides go stale within weeks. The more useful the structure, the more there is to maintain by hand — and hand-maintained structure decays.
+- Lead concretely: data files record when, where, and what was acquired, but not why. `2025_12_10_Rig2_session001.nwb` conveys nothing about what was expected, why it was collected, or what was observed at the bench. That context resides in notebooks, on whiteboards, and in individual memory, and it is lost when people leave the group.
+- Two further problems follow from the same gap; state each concisely:
+  - **AI assistants inherit the missing context.** Without grounding, an assistant begins each session without the lab's context — proposing analyses the group has already excluded, asserting unsupported claims, or producing work that is plausible but unrelated to the question under study. The last failure is the most costly, because it appears productive.
+  - **The structured record that would resolve this is too costly to maintain.** Shared spreadsheets, wikis, ELNs, and lab-meeting slides become outdated within weeks. The more useful the structure, the greater the manual effort it requires, and manually maintained structure is not sustained.
 
 ## 3. One AI-maintained graph — *2 min*
 
-- A single structured graph of questions with attached data and analyses is exactly the record the third problem describes wanting. The same graph addresses all three:
-  - Humans read it to recover rationale, onboard, and retain context after people leave → the *why* is preserved.
-  - The agent reads it through its harness for grounded, on-target output.
-  - The agent also writes to it through human-gated capture, so most upkeep shifts off people.
-- These reinforce each other: AI-assisted capture keeps the graph current, and a current graph is what keeps the AI grounded. It is a research-context graph — human-readable, agent-readable, AI-maintained — **not** a file manager or document store. The human benefit does not depend on using AI; the AI benefit scales with how much each person uses it.
+- A single structured graph of questions, with attached data and analyses, is precisely the record the third problem identifies as desirable. The same graph addresses all three problems:
+  - Researchers read it to recover rationale, onboard, and retain context after colleagues leave; the reasoning is preserved.
+  - The agent reads it through its harness to produce grounded, on-target output.
+  - The agent also writes to it through human-gated capture, so most maintenance no longer falls to individuals.
+- These effects reinforce one another: AI-assisted capture keeps the graph current, and a current graph keeps the agent grounded. It is a research-context graph — human-readable, agent-readable, and AI-maintained — **not** a file manager or document store. The benefit to researchers does not depend on using AI; the benefit to AI-assisted work scales with adoption.
 
 ## 4. The graph, by example — *4 min*
 
-- Two design points, shown through one real thread rather than stated abstractly:
-  - **Questions are first-class**, linked broad → atomic: a motivating question sits above the specific experimental, control, and analysis questions under it. This records *why* before *what*.
-  - **Claims are "supported" only when backed by a dataset or analysis**; otherwise "proposed." Evidence discipline is enforced by the model, for human- and AI-authored claims alike.
-- Trace one result end to end:
-  - Activate the question *"Does lateral inhibition normalize PN output?"* → run a Rig2 session and capture a bench note → promote it into the committed dataset `2025_12_10_Rig2_session001.nwb` with a provenance manifest → record the *divisive-norm fit* linked to that dataset and question → make the supported claim *"background odor scales PN gain ~0.6× (n=18)"* → attach **Fig 3b**.
-  - Then traverse backward: from Fig 3b to every dataset, note, and decision behind it. The figure is not just an output — it is evidence for a claim about a question.
+- Two design principles, shown through one concrete thread rather than stated abstractly:
+  - **Questions are first-class** and linked from broad to atomic: a motivating question sits above the specific experimental, control, and analysis questions beneath it. This records rationale before result.
+  - **Claims are "supported" only when backed by a dataset or analysis**; otherwise they remain "proposed." The model enforces this evidence discipline for human- and AI-authored claims alike.
+- Trace one result from end to end:
+  - Activate the question *"Does lateral inhibition normalize PN output?"*; run a Rig2 session and capture a bench note; promote it into the committed dataset `2025_12_10_Rig2_session001.nwb` with a provenance manifest; record the *divisive-normalization fit* linked to that dataset and question; assert the supported claim *"background odor scales PN gain ~0.6× (n = 18)"*; and attach **Figure 3b**.
+  - Then traverse backward: from Figure 3b to every dataset, note, and decision behind it. The figure is not merely an output; it is evidence for a claim about a question.
 
-## 5. Capture keeps it current — *2 min*
+## 5. Capture keeps the graph current — *2 min*
 
-- This is the mechanism that lowers the upkeep cost. At `/app/capture`: capture photo / voice / photo+voice / text → the system builds a project-scoped context packet → the model returns reviewable draft operations → the user edits, accepts, rejects, or defers → committed through the same validation as any manual write.
-- Upkeep becomes the model drafting the structured entry from a photo or voice note; the person's job is to approve it.
-- Guarantees: nothing auto-commits; drafts referencing unknown entities are rejected; the human is always the gate.
+- This is the mechanism that reduces the maintenance cost. At `/app/capture`, a researcher captures a photo, voice note, photo-and-voice pair, or text; the system assembles a project-scoped context packet; the model returns reviewable draft operations; the researcher edits, accepts, rejects, or defers them; and the result is committed through the same validation as any manual entry.
+- Maintenance becomes the model drafting the structured entry from a photo or voice note, with the researcher reviewing and approving it.
+- Guarantees: nothing is committed automatically; drafts that reference unknown entities are rejected; and human approval is always required.
 
-## 6. The AI-harness payoff — *1.5 min*
+## 6. The AI-harness role — *1.5 min*
 
-- **Retrieval:** agents pull bounded decision context through the MCP server before research-facing work — selecting variables to plot, analyses to run, figure legends, manuscript text — grounded in the lab's real questions, datasets, and claims.
-- **On-target:** because the graph encodes the broad → atomic question hierarchy, the harness keeps suggestions tied to the actual scientific goal. Generic retrieval over files does not do this.
-- **Write-back** is the same human-gated capture from §5 — proposals only, validated, human-approved — and it is also what maintains the graph.
+- **Retrieval:** before research-facing work — selecting variables to plot, analyses to run, figure legends, or manuscript text — agents retrieve bounded decision context through the MCP server, grounded in the lab's actual questions, datasets, and claims.
+- **Relevance:** because the graph encodes the broad-to-atomic question hierarchy, the harness keeps suggestions tied to the actual scientific goal; generic retrieval over files does not.
+- **Write-back** is the same human-gated capture described in §5 — proposals only, validated and human-approved — and it is also what keeps the graph current.
 
-## 7. Try it — *1 min*
+## 7. Adoption — *1 min*
 
-- One concrete ask: pick one active project and log its questions. App URL (`/app`); who to contact.
-- *Not in v1* (one line): OCR on uploads, automatic question extraction, semantic/vector search, PI approval gates — deferred to ship the durable core first.
+- One concrete request: select one active project and record its questions. Application URL (`/app`); point of contact.
+- *Not in v1* (briefly): OCR on uploads, automatic question extraction, semantic/vector search, and PI approval gates — deferred in order to deliver the durable core first.
 
 ## 8. Discussion / Q&A — *remaining time*
 
-- Prompts: which project to pilot; what capture friction would block adoption; for AI users, what context they re-paste most.
-- Objection prep:
-  - *vs. an ELN / Benchling / shared drive* — questions-first, evidence-linked claims, and an agent-readable graph, not file storage.
-  - *Won't it go stale like past attempts* — that is the upkeep problem; AI-assisted capture is the specific mechanism that lowers it.
-  - *Don't use / trust AI* — the human benefit is unconditional; AI is opt-in and always human-gated.
+- Prompts: which project to pilot; what capture friction would impede adoption; and, for those who use AI, which context they most often re-enter.
+- Anticipated objections:
+  - *Relative to an ELN, Benchling, or a shared drive* — Lab Tracker is questions-first, with evidence-linked claims and an agent-readable graph, not file storage.
+  - *Whether it will become outdated, as past attempts did* — that is precisely the maintenance problem; AI-assisted capture is the specific mechanism that reduces it.
+  - *Reservations about using or trusting AI* — the benefit to researchers is unconditional; AI assistance is optional and always human-gated.
 
 ---
 
-**Timing:** ~13–14 min core leaves buffer to land at 15. Cut §6 to a single sentence if running long; never cut §4 (the worked example) or §7 (the ask).
+**Timing:** ~13–14 min of core content leaves a buffer to finish at 15. Condense §6 to a single sentence if time is short; do not cut §4 (the worked example) or §7 (the request).
