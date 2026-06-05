@@ -15,17 +15,17 @@
       "title": "Questions -> evidence -> claims -> figures",
       "graph_kind": "project_graph",
       "backend_view": "evidence",
-      "visible_labels": ["Does running raise L2/3 tuning gain?", "2025_12_10_Rig2_session001.nwb", "Running raises L2/3 gain ~1.4x", "Fig 2c - gain, sit vs run"],
+      "visible_labels": ["Does lateral inhibition normalize PN output?", "2025_12_10_Rig2_session001.nwb", "Background odor scales PN gain ~0.6x", "Fig 3b - PN gain vs background"],
       "nodes": [
-        {"id": "question:running_gain", "label": "Does running raise L2/3 tuning gain?", "entity_type": "question"},
+        {"id": "question:lateral_inhib", "label": "Does lateral inhibition normalize PN output?", "entity_type": "question"},
         {"id": "dataset:nwb_1210", "label": "2025_12_10_Rig2_session001.nwb", "entity_type": "dataset"},
-        {"id": "claim:gain_up", "label": "Running raises L2/3 gain ~1.4x (n=212)", "entity_type": "claim"},
-        {"id": "visualization:fig_gain", "label": "Fig 2c - gain, sit vs run", "entity_type": "visualization"}
+        {"id": "claim:norm", "label": "Background odor scales PN gain ~0.6x (n=18)", "entity_type": "claim"},
+        {"id": "visualization:fig_norm", "label": "Fig 3b - PN gain vs background", "entity_type": "visualization"}
       ],
       "edges": [
-        {"id": "e1", "source": "question:running_gain", "target": "dataset:nwb_1210", "relationship": "dataset_question_primary", "label": "primary question", "state": "present"},
-        {"id": "e2", "source": "dataset:nwb_1210", "target": "claim:gain_up", "relationship": "claim_dataset_support", "label": "supports", "state": "present"},
-        {"id": "e3", "source": "claim:gain_up", "target": "visualization:fig_gain", "relationship": "visualization_claim", "label": "related claim", "state": "present"}
+        {"id": "e1", "source": "question:lateral_inhib", "target": "dataset:nwb_1210", "relationship": "dataset_question_primary", "label": "primary question", "state": "present"},
+        {"id": "e2", "source": "dataset:nwb_1210", "target": "claim:norm", "relationship": "claim_dataset_support", "label": "supports", "state": "present"},
+        {"id": "e3", "source": "claim:norm", "target": "visualization:fig_norm", "relationship": "visualization_claim", "label": "related claim", "state": "present"}
       ]
     },
     {
@@ -36,16 +36,16 @@
       "backend_view": "full",
       "visible_labels": ["what happened", "why it happened", "what it supports"],
       "nodes": [
-        {"id": "session:rig2_1210", "label": "Rig2 - 2025-12-10 - M317", "entity_type": "session"},
-        {"id": "question:running_gain", "label": "Does running raise L2/3 tuning gain?", "entity_type": "question"},
+        {"id": "session:rig2_1210", "label": "Rig2 - 2025-12-10 - fly07", "entity_type": "session"},
+        {"id": "question:lateral_inhib", "label": "Does lateral inhibition normalize PN output?", "entity_type": "question"},
         {"id": "dataset:nwb_1210", "label": "2025_12_10_Rig2_session001.nwb", "entity_type": "dataset", "visible": false},
-        {"id": "claim:gain_up", "label": "Running raises L2/3 gain ~1.4x (n=212)", "entity_type": "claim"}
+        {"id": "claim:norm", "label": "Background odor scales PN gain ~0.6x (n=18)", "entity_type": "claim"}
       ],
       "edges": [
-        {"id": "e1", "source": "question:running_gain", "target": "session:rig2_1210", "relationship": "session_question", "label": "session question", "state": "present"},
+        {"id": "e1", "source": "question:lateral_inhib", "target": "session:rig2_1210", "relationship": "session_question", "label": "session question", "state": "present"},
         {"id": "e2", "source": "session:rig2_1210", "target": "dataset:nwb_1210", "relationship": "dataset_source_session", "label": "produces", "state": "implicit"},
-        {"id": "e3", "source": "question:running_gain", "target": "dataset:nwb_1210", "relationship": "dataset_question_primary", "label": "answers", "state": "implicit"},
-        {"id": "e4", "source": "dataset:nwb_1210", "target": "claim:gain_up", "relationship": "claim_dataset_support", "label": "supports", "state": "implicit"}
+        {"id": "e3", "source": "question:lateral_inhib", "target": "dataset:nwb_1210", "relationship": "dataset_question_primary", "label": "answers", "state": "implicit"},
+        {"id": "e4", "source": "dataset:nwb_1210", "target": "claim:norm", "relationship": "claim_dataset_support", "label": "supports", "state": "implicit"}
       ],
       "notes": "Three visible blocks (session, question, claim) compress the backend path; the hidden dataset bridges session->claim, so its incident edges are implicit, not present."
     },
@@ -71,22 +71,22 @@
       "title": "The record loses the question an experiment answered",
       "graph_kind": "project_graph",
       "backend_view": "full",
-      "visible_labels": ["Does running raise L2/3 tuning gain?", "bench note", "Rig2 - 2025-12-10 - M317", "2025_12_10_Rig2_session001.nwb", "ori-tuning gain", "Fig 2c (draft)", "missing: the question it answered"],
+      "visible_labels": ["Does lateral inhibition normalize PN output?", "bench note", "Rig2 - 2025-12-10 - fly07", "2025_12_10_Rig2_session001.nwb", "divisive-norm fit", "Fig 3b (draft)", "missing: the question it answered"],
       "nodes": [
-        {"id": "question:running_gain", "label": "Does running raise L2/3 tuning gain?", "entity_type": "question"},
-        {"id": "note:bench_1210", "label": "bench note: M317, 2 blocks dropped", "entity_type": "note"},
-        {"id": "session:rig2_1210", "label": "Rig2 - 2025-12-10 - M317", "entity_type": "session"},
+        {"id": "question:lateral_inhib", "label": "Does lateral inhibition normalize PN output?", "entity_type": "question"},
+        {"id": "note:bench_1210", "label": "bench note: fly07, 2 odor blocks tossed", "entity_type": "note"},
+        {"id": "session:rig2_1210", "label": "Rig2 - 2025-12-10 - fly07", "entity_type": "session"},
         {"id": "dataset:nwb_1210", "label": "2025_12_10_Rig2_session001.nwb", "entity_type": "dataset"},
-        {"id": "analysis:tuning_gain", "label": "ori-tuning gain by run state", "entity_type": "analysis"},
-        {"id": "visualization:fig_gain", "label": "Fig 2c - gain, sit vs run (draft)", "entity_type": "visualization"}
+        {"id": "analysis:norm_fit", "label": "divisive-norm fit (PN dose-response)", "entity_type": "analysis"},
+        {"id": "visualization:fig_norm", "label": "Fig 3b - PN gain vs background (draft)", "entity_type": "visualization"}
       ],
       "edges": [
-        {"id": "missing_note_question", "source": "note:bench_1210", "target": "question:running_gain", "relationship": "note_target_question", "label": "targets", "state": "missing", "rationale": "The bench note records the result but is not attached to the question it answers."},
-        {"id": "missing_session_question", "source": "question:running_gain", "target": "session:rig2_1210", "relationship": "session_question", "label": "session question", "state": "missing", "rationale": "The session file can be identified, but its motivating question is absent."},
-        {"id": "missing_dataset_question", "source": "question:running_gain", "target": "dataset:nwb_1210", "relationship": "dataset_question_primary", "label": "primary question", "state": "missing", "rationale": "The promoted dataset should carry the question link forward, but does not."},
+        {"id": "missing_note_question", "source": "note:bench_1210", "target": "question:lateral_inhib", "relationship": "note_target_question", "label": "targets", "state": "missing", "rationale": "The bench note records the result but is not attached to the question it answers."},
+        {"id": "missing_session_question", "source": "question:lateral_inhib", "target": "session:rig2_1210", "relationship": "session_question", "label": "session question", "state": "missing", "rationale": "The session file can be identified, but its motivating question is absent."},
+        {"id": "missing_dataset_question", "source": "question:lateral_inhib", "target": "dataset:nwb_1210", "relationship": "dataset_question_primary", "label": "primary question", "state": "missing", "rationale": "The promoted dataset should carry the question link forward, but does not."},
         {"id": "session_dataset", "source": "session:rig2_1210", "target": "dataset:nwb_1210", "relationship": "dataset_source_session", "label": "source session", "state": "present"},
-        {"id": "dataset_analysis", "source": "dataset:nwb_1210", "target": "analysis:tuning_gain", "relationship": "analysis_dataset", "label": "used by", "state": "present"},
-        {"id": "analysis_figure", "source": "analysis:tuning_gain", "target": "visualization:fig_gain", "relationship": "visualization_analysis", "label": "generates", "state": "present"}
+        {"id": "dataset_analysis", "source": "dataset:nwb_1210", "target": "analysis:norm_fit", "relationship": "analysis_dataset", "label": "used by", "state": "present"},
+        {"id": "analysis_figure", "source": "analysis:norm_fit", "target": "visualization:fig_norm", "relationship": "visualization_analysis", "label": "generates", "state": "present"}
       ]
     },
     {
@@ -141,24 +141,24 @@
       "title": "A shared graph preserves rationale for later review",
       "graph_kind": "project_graph",
       "backend_view": "full",
-      "visible_labels": ["motivating question", "Rig2 - 2025-12-10 - M317", "ori-tuning gain", "supported claim", "Fig 2c", "question answered"],
+      "visible_labels": ["motivating question", "Rig2 - 2025-12-10 - fly07", "divisive-norm fit", "supported claim", "Fig 3b", "question answered"],
       "nodes": [
-        {"id": "question:running_gain", "label": "Does running raise L2/3 tuning gain?", "entity_type": "question"},
-        {"id": "session:rig2_1210", "label": "Rig2 - 2025-12-10 - M317", "entity_type": "session"},
+        {"id": "question:lateral_inhib", "label": "Does lateral inhibition normalize PN output?", "entity_type": "question"},
+        {"id": "session:rig2_1210", "label": "Rig2 - 2025-12-10 - fly07", "entity_type": "session"},
         {"id": "dataset:nwb_1210", "label": "2025_12_10_Rig2_session001.nwb", "entity_type": "dataset"},
-        {"id": "analysis:tuning_gain", "label": "ori-tuning gain by run state", "entity_type": "analysis"},
-        {"id": "claim:gain_up", "label": "Running raises L2/3 gain ~1.4x (n=212)", "entity_type": "claim"},
-        {"id": "visualization:fig_gain", "label": "Fig 2c - gain, sit vs run", "entity_type": "visualization"}
+        {"id": "analysis:norm_fit", "label": "divisive-norm fit (PN dose-response)", "entity_type": "analysis"},
+        {"id": "claim:norm", "label": "Background odor scales PN gain ~0.6x (n=18)", "entity_type": "claim"},
+        {"id": "visualization:fig_norm", "label": "Fig 3b - PN gain vs background", "entity_type": "visualization"}
       ],
       "edges": [
-        {"id": "question_session", "source": "question:running_gain", "target": "session:rig2_1210", "relationship": "session_question", "label": "session question", "state": "present"},
+        {"id": "question_session", "source": "question:lateral_inhib", "target": "session:rig2_1210", "relationship": "session_question", "label": "session question", "state": "present"},
         {"id": "session_dataset", "source": "session:rig2_1210", "target": "dataset:nwb_1210", "relationship": "dataset_source_session", "label": "source session", "state": "implicit"},
-        {"id": "question_dataset", "source": "question:running_gain", "target": "dataset:nwb_1210", "relationship": "dataset_question_primary", "label": "primary question", "state": "present"},
-        {"id": "dataset_analysis", "source": "dataset:nwb_1210", "target": "analysis:tuning_gain", "relationship": "analysis_dataset", "label": "used by", "state": "present"},
-        {"id": "analysis_claim", "source": "analysis:tuning_gain", "target": "claim:gain_up", "relationship": "claim_analysis_support", "label": "supports", "state": "present"},
-        {"id": "analysis_figure", "source": "analysis:tuning_gain", "target": "visualization:fig_gain", "relationship": "visualization_analysis", "label": "generates", "state": "present"},
-        {"id": "claim_figure", "source": "claim:gain_up", "target": "visualization:fig_gain", "relationship": "visualization_claim", "label": "related claim", "state": "present"},
-        {"id": "claim_question", "source": "claim:gain_up", "target": "question:running_gain", "relationship": "claim_question_answers", "label": "answers", "state": "present"}
+        {"id": "question_dataset", "source": "question:lateral_inhib", "target": "dataset:nwb_1210", "relationship": "dataset_question_primary", "label": "primary question", "state": "present"},
+        {"id": "dataset_analysis", "source": "dataset:nwb_1210", "target": "analysis:norm_fit", "relationship": "analysis_dataset", "label": "used by", "state": "present"},
+        {"id": "analysis_claim", "source": "analysis:norm_fit", "target": "claim:norm", "relationship": "claim_analysis_support", "label": "supports", "state": "present"},
+        {"id": "analysis_figure", "source": "analysis:norm_fit", "target": "visualization:fig_norm", "relationship": "visualization_analysis", "label": "generates", "state": "present"},
+        {"id": "claim_figure", "source": "claim:norm", "target": "visualization:fig_norm", "relationship": "visualization_claim", "label": "related claim", "state": "present"},
+        {"id": "claim_question", "source": "claim:norm", "target": "question:lateral_inhib", "relationship": "claim_question_answers", "label": "answers", "state": "present"}
       ]
     },
     {
@@ -167,20 +167,20 @@
       "title": "The same graph can supply an assistant context packet",
       "graph_kind": "context_packet",
       "backend_view": "full",
-      "visible_labels": ["Does running raise L2/3 gain?", "2025_12_10_Rig2_session001.nwb", "ori-tuning gain", "prior claim", "Fig 2c", "context packet"],
+      "visible_labels": ["Does lateral inhibition normalize PN output?", "2025_12_10_Rig2_session001.nwb", "divisive-norm fit", "prior claim", "Fig 3b", "context packet"],
       "nodes": [
-        {"id": "question:running_gain", "label": "Does running raise L2/3 tuning gain?", "entity_type": "question"},
+        {"id": "question:lateral_inhib", "label": "Does lateral inhibition normalize PN output?", "entity_type": "question"},
         {"id": "dataset:nwb_1210", "label": "2025_12_10_Rig2_session001.nwb", "entity_type": "dataset"},
-        {"id": "analysis:tuning_gain", "label": "ori-tuning gain by run state", "entity_type": "analysis"},
-        {"id": "claim:gain_up", "label": "Running raises L2/3 gain ~1.4x (n=212)", "entity_type": "claim"},
-        {"id": "visualization:fig_gain", "label": "Fig 2c - gain, sit vs run", "entity_type": "visualization"}
+        {"id": "analysis:norm_fit", "label": "divisive-norm fit (PN dose-response)", "entity_type": "analysis"},
+        {"id": "claim:norm", "label": "Background odor scales PN gain ~0.6x (n=18)", "entity_type": "claim"},
+        {"id": "visualization:fig_norm", "label": "Fig 3b - PN gain vs background", "entity_type": "visualization"}
       ],
       "edges": [
-        {"id": "question_dataset", "source": "question:running_gain", "target": "dataset:nwb_1210", "relationship": "dataset_question_primary", "label": "primary question", "state": "context_required"},
-        {"id": "dataset_analysis", "source": "dataset:nwb_1210", "target": "analysis:tuning_gain", "relationship": "analysis_dataset", "label": "used by", "state": "context_required"},
-        {"id": "analysis_claim", "source": "analysis:tuning_gain", "target": "claim:gain_up", "relationship": "claim_analysis_support", "label": "supports", "state": "context_required"},
-        {"id": "analysis_figure", "source": "analysis:tuning_gain", "target": "visualization:fig_gain", "relationship": "visualization_analysis", "label": "generates", "state": "context_required"},
-        {"id": "claim_question", "source": "claim:gain_up", "target": "question:running_gain", "relationship": "claim_question_answers", "label": "answers", "state": "context_required"}
+        {"id": "question_dataset", "source": "question:lateral_inhib", "target": "dataset:nwb_1210", "relationship": "dataset_question_primary", "label": "primary question", "state": "context_required"},
+        {"id": "dataset_analysis", "source": "dataset:nwb_1210", "target": "analysis:norm_fit", "relationship": "analysis_dataset", "label": "used by", "state": "context_required"},
+        {"id": "analysis_claim", "source": "analysis:norm_fit", "target": "claim:norm", "relationship": "claim_analysis_support", "label": "supports", "state": "context_required"},
+        {"id": "analysis_figure", "source": "analysis:norm_fit", "target": "visualization:fig_norm", "relationship": "visualization_analysis", "label": "generates", "state": "context_required"},
+        {"id": "claim_question", "source": "claim:norm", "target": "question:lateral_inhib", "relationship": "claim_question_answers", "label": "answers", "state": "context_required"}
       ],
       "notes": "The context packet is not a node; like slide 18 it is the bounded backend neighborhood (the context_required edges) assembled for the model."
     },
@@ -214,25 +214,25 @@
       "backend_view": "full",
       "visible_labels": ["bench note", "Rig2 session", "data file", "primary question", "control question", "supported claim", "analysis", "figure"],
       "nodes": [
-        {"id": "note:bench_1210", "label": "bench note: M317, 2 blocks dropped", "entity_type": "note"},
-        {"id": "session:rig2_1210", "label": "Rig2 - 2025-12-10 - M317", "entity_type": "session"},
+        {"id": "note:bench_1210", "label": "bench note: fly07, 2 odor blocks tossed", "entity_type": "note"},
+        {"id": "session:rig2_1210", "label": "Rig2 - 2025-12-10 - fly07", "entity_type": "session"},
         {"id": "dataset:nwb_1210", "label": "2025_12_10_Rig2_session001.nwb", "entity_type": "dataset"},
-        {"id": "question:running_gain", "label": "Does running raise L2/3 tuning gain?", "entity_type": "question"},
-        {"id": "question:arousal", "label": "Explained by pupil arousal?", "entity_type": "question"},
-        {"id": "claim:gain_up", "label": "Running raises L2/3 gain ~1.4x (n=212)", "entity_type": "claim"},
-        {"id": "analysis:tuning_gain", "label": "ori-tuning gain by run state", "entity_type": "analysis"},
-        {"id": "visualization:fig_gain", "label": "Fig 2c - gain, sit vs run", "entity_type": "visualization"}
+        {"id": "question:lateral_inhib", "label": "Does lateral inhibition normalize PN output?", "entity_type": "question"},
+        {"id": "question:presynaptic", "label": "Is the suppression presynaptic on ORNs?", "entity_type": "question"},
+        {"id": "claim:norm", "label": "Background odor scales PN gain ~0.6x (n=18)", "entity_type": "claim"},
+        {"id": "analysis:norm_fit", "label": "divisive-norm fit (PN dose-response)", "entity_type": "analysis"},
+        {"id": "visualization:fig_norm", "label": "Fig 3b - PN gain vs background", "entity_type": "visualization"}
       ],
       "edges": [
-        {"id": "note_question", "source": "note:bench_1210", "target": "question:running_gain", "relationship": "note_target_question", "label": "targets", "state": "present"},
+        {"id": "note_question", "source": "note:bench_1210", "target": "question:lateral_inhib", "relationship": "note_target_question", "label": "targets", "state": "present"},
         {"id": "note_session", "source": "note:bench_1210", "target": "session:rig2_1210", "relationship": "note_target_session", "label": "targets", "state": "present"},
         {"id": "session_dataset", "source": "session:rig2_1210", "target": "dataset:nwb_1210", "relationship": "dataset_source_session", "label": "source session", "state": "present"},
-        {"id": "question_dataset_primary", "source": "question:running_gain", "target": "dataset:nwb_1210", "relationship": "dataset_question_primary", "label": "primary question", "state": "present"},
-        {"id": "question_dataset_secondary", "source": "question:arousal", "target": "dataset:nwb_1210", "relationship": "dataset_question_secondary", "label": "secondary question", "state": "present"},
-        {"id": "dataset_analysis", "source": "dataset:nwb_1210", "target": "analysis:tuning_gain", "relationship": "analysis_dataset", "label": "used by", "state": "present"},
-        {"id": "dataset_claim", "source": "dataset:nwb_1210", "target": "claim:gain_up", "relationship": "claim_dataset_support", "label": "supports", "state": "present"},
-        {"id": "analysis_figure", "source": "analysis:tuning_gain", "target": "visualization:fig_gain", "relationship": "visualization_analysis", "label": "generates", "state": "present"},
-        {"id": "claim_question", "source": "claim:gain_up", "target": "question:running_gain", "relationship": "claim_question_answers", "label": "answers", "state": "present"}
+        {"id": "question_dataset_primary", "source": "question:lateral_inhib", "target": "dataset:nwb_1210", "relationship": "dataset_question_primary", "label": "primary question", "state": "present"},
+        {"id": "question_dataset_secondary", "source": "question:presynaptic", "target": "dataset:nwb_1210", "relationship": "dataset_question_secondary", "label": "secondary question", "state": "present"},
+        {"id": "dataset_analysis", "source": "dataset:nwb_1210", "target": "analysis:norm_fit", "relationship": "analysis_dataset", "label": "used by", "state": "present"},
+        {"id": "dataset_claim", "source": "dataset:nwb_1210", "target": "claim:norm", "relationship": "claim_dataset_support", "label": "supports", "state": "present"},
+        {"id": "analysis_figure", "source": "analysis:norm_fit", "target": "visualization:fig_norm", "relationship": "visualization_analysis", "label": "generates", "state": "present"},
+        {"id": "claim_question", "source": "claim:norm", "target": "question:lateral_inhib", "relationship": "claim_question_answers", "label": "answers", "state": "present"}
       ]
     },
     {
@@ -329,21 +329,21 @@
       "title": "A figure traces back to the question its claim answers",
       "graph_kind": "project_graph",
       "backend_view": "evidence",
-      "visible_labels": ["Fig 2c - gain, sit vs run", "supported claim", "question answered"],
+      "visible_labels": ["Fig 3b - PN gain vs background", "supported claim", "question answered"],
       "nodes": [
-        {"id": "question:running_gain", "label": "Does running raise L2/3 tuning gain?", "entity_type": "question"},
+        {"id": "question:lateral_inhib", "label": "Does lateral inhibition normalize PN output?", "entity_type": "question"},
         {"id": "dataset:nwb_1210", "label": "2025_12_10_Rig2_session001.nwb", "entity_type": "dataset", "visible": false},
-        {"id": "analysis:tuning_gain", "label": "ori-tuning gain by run state", "entity_type": "analysis", "visible": false},
-        {"id": "claim:gain_up", "label": "Running raises L2/3 gain ~1.4x (n=212)", "entity_type": "claim"},
-        {"id": "visualization:fig_gain", "label": "Fig 2c - gain, sit vs run", "entity_type": "visualization"}
+        {"id": "analysis:norm_fit", "label": "divisive-norm fit (PN dose-response)", "entity_type": "analysis", "visible": false},
+        {"id": "claim:norm", "label": "Background odor scales PN gain ~0.6x (n=18)", "entity_type": "claim"},
+        {"id": "visualization:fig_norm", "label": "Fig 3b - PN gain vs background", "entity_type": "visualization"}
       ],
       "edges": [
-        {"id": "question_dataset", "source": "question:running_gain", "target": "dataset:nwb_1210", "relationship": "dataset_question_primary", "label": "primary question", "state": "implicit"},
-        {"id": "analysis_dataset", "source": "dataset:nwb_1210", "target": "analysis:tuning_gain", "relationship": "analysis_dataset", "label": "used by", "state": "implicit"},
-        {"id": "claim_analysis", "source": "analysis:tuning_gain", "target": "claim:gain_up", "relationship": "claim_analysis_support", "label": "supports", "state": "implicit"},
-        {"id": "analysis_figure", "source": "analysis:tuning_gain", "target": "visualization:fig_gain", "relationship": "visualization_analysis", "label": "generates", "state": "implicit"},
-        {"id": "claim_figure", "source": "claim:gain_up", "target": "visualization:fig_gain", "relationship": "visualization_claim", "label": "related claim", "state": "present"},
-        {"id": "claim_question", "source": "claim:gain_up", "target": "question:running_gain", "relationship": "claim_question_answers", "label": "answers", "state": "present"}
+        {"id": "question_dataset", "source": "question:lateral_inhib", "target": "dataset:nwb_1210", "relationship": "dataset_question_primary", "label": "primary question", "state": "implicit"},
+        {"id": "analysis_dataset", "source": "dataset:nwb_1210", "target": "analysis:norm_fit", "relationship": "analysis_dataset", "label": "used by", "state": "implicit"},
+        {"id": "claim_analysis", "source": "analysis:norm_fit", "target": "claim:norm", "relationship": "claim_analysis_support", "label": "supports", "state": "implicit"},
+        {"id": "analysis_figure", "source": "analysis:norm_fit", "target": "visualization:fig_norm", "relationship": "visualization_analysis", "label": "generates", "state": "implicit"},
+        {"id": "claim_figure", "source": "claim:norm", "target": "visualization:fig_norm", "relationship": "visualization_claim", "label": "related claim", "state": "present"},
+        {"id": "claim_question", "source": "claim:norm", "target": "question:lateral_inhib", "relationship": "claim_question_answers", "label": "answers", "state": "present"}
       ]
     },
     {
@@ -440,23 +440,23 @@
       "backend_view": "evidence",
       "visible_labels": ["superseded -> current question", "two sub-questions", "one result"],
       "nodes": [
-        {"id": "question:state_v1_old", "label": "Does behavioral state affect V1?", "entity_type": "question"},
-        {"id": "question:locomotion_v1", "label": "How does locomotion modulate V1 coding?", "entity_type": "question"},
-        {"id": "question:running_gain", "label": "Does running raise L2/3 tuning gain?", "entity_type": "question"},
-        {"id": "question:sf_tuning", "label": "Does running shift spatial-frequency tuning?", "entity_type": "question"},
+        {"id": "question:al_interneurons_old", "label": "Do antennal-lobe interneurons matter?", "entity_type": "question"},
+        {"id": "question:al_gain", "label": "How does the antennal lobe control gain?", "entity_type": "question"},
+        {"id": "question:lateral_inhib", "label": "Does lateral inhibition normalize PN output?", "entity_type": "question"},
+        {"id": "question:odor_identity", "label": "Does normalization depend on odor identity?", "entity_type": "question"},
         {"id": "dataset:nwb_1210", "label": "2025_12_10_Rig2_session001.nwb", "entity_type": "dataset"},
-        {"id": "analysis:tuning_gain", "label": "ori-tuning gain by run state", "entity_type": "analysis"},
-        {"id": "visualization:fig_gain", "label": "Fig 2c - gain, sit vs run", "entity_type": "visualization"}
+        {"id": "analysis:norm_fit", "label": "divisive-norm fit (PN dose-response)", "entity_type": "analysis"},
+        {"id": "visualization:fig_norm", "label": "Fig 3b - PN gain vs background", "entity_type": "visualization"}
       ],
       "edges": [
-        {"id": "question_superseded", "source": "question:state_v1_old", "target": "question:locomotion_v1", "relationship": "question_superseded_by", "label": "superseded by", "state": "present"},
-        {"id": "question_parent_gain", "source": "question:locomotion_v1", "target": "question:running_gain", "relationship": "question_parent", "label": "parent", "state": "present"},
-        {"id": "question_parent_sf", "source": "question:locomotion_v1", "target": "question:sf_tuning", "relationship": "question_parent", "label": "parent", "state": "present"},
-        {"id": "dataset_question", "source": "question:running_gain", "target": "dataset:nwb_1210", "relationship": "dataset_question_primary", "label": "primary question", "state": "present"},
-        {"id": "analysis_dataset", "source": "dataset:nwb_1210", "target": "analysis:tuning_gain", "relationship": "analysis_dataset", "label": "used by", "state": "present"},
-        {"id": "analysis_result", "source": "analysis:tuning_gain", "target": "visualization:fig_gain", "relationship": "visualization_analysis", "label": "generates", "state": "present"}
+        {"id": "question_superseded", "source": "question:al_interneurons_old", "target": "question:al_gain", "relationship": "question_superseded_by", "label": "superseded by", "state": "present"},
+        {"id": "question_parent_li", "source": "question:al_gain", "target": "question:lateral_inhib", "relationship": "question_parent", "label": "parent", "state": "present"},
+        {"id": "question_parent_oi", "source": "question:al_gain", "target": "question:odor_identity", "relationship": "question_parent", "label": "parent", "state": "present"},
+        {"id": "dataset_question", "source": "question:lateral_inhib", "target": "dataset:nwb_1210", "relationship": "dataset_question_primary", "label": "primary question", "state": "present"},
+        {"id": "analysis_dataset", "source": "dataset:nwb_1210", "target": "analysis:norm_fit", "relationship": "analysis_dataset", "label": "used by", "state": "present"},
+        {"id": "analysis_result", "source": "analysis:norm_fit", "target": "visualization:fig_norm", "relationship": "visualization_analysis", "label": "generates", "state": "present"}
       ],
-      "notes": "One project: an earlier question superseded by the current motivating question, which branches into two sub-questions; the running-gain branch resolves to one result while the spatial-frequency branch stays open. The project itself is the project_id scope of the projection."
+      "notes": "One project: an earlier question superseded by the current motivating question, which branches into two sub-questions; the lateral-inhibition branch resolves to one result while the odor-identity branch stays open. The project itself is the project_id scope of the projection."
     }
   ]
 }
