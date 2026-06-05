@@ -4,7 +4,7 @@
   "pptx_path": "outputs/019e93bf-5861-7ba2-af6a-d3677b8793cd/presentations/lab-tracker-research-group/output/lab-tracker-research-group-presentation.pptx",
   "backend_alignment": {
     "node_entity_type_source": "lab_tracker.models.EntityType",
-    "edge_relationship_source": "lab_tracker.project_graph.ProjectGraphEdge.relationship",
+    "edge_relationship_source": "lab_tracker.presentation_graphs.PROJECT_GRAPH_RELATIONSHIP_ENDPOINTS",
     "operation_semantic_type_source": "lab_tracker.models.GraphDraftSemanticType",
     "project_graph_view": "full"
   },
@@ -131,7 +131,7 @@
       ],
       "operations": [
         {"semantic_type": "link_note_to_question", "op": "update", "entity_type": "note", "target_node": "note:new_note", "payload_template": {"targets": [{"entity_type": "question", "entity_id": "$question:target_question"}]}, "rationale": "Attach the note to the question it records."},
-        {"semantic_type": "update_entity", "op": "update", "entity_type": "dataset", "target_node": "dataset:target_dataset", "payload_template": {"primary_question_id": "$question:target_question"}, "rationale": "Preserve the dataset's primary question link."},
+        {"semantic_type": "update_entity", "op": "update", "entity_type": "dataset", "target_node": "dataset:target_dataset", "payload_template": {"question_links": [{"question_id": "$question:target_question", "role": "primary"}]}, "rationale": "Preserve the dataset's primary question link."},
         {"semantic_type": "update_entity", "op": "update", "entity_type": "claim", "target_node": "claim:target_claim", "payload_template": {"supported_by_analysis_ids": ["$analysis:new_analysis"]}, "rationale": "Make evidence support explicit before treating a claim as supported."}
       ]
     },
@@ -182,7 +182,7 @@
         {"id": "analysis_figure", "source": "analysis:norm_fit", "target": "visualization:fig_norm", "relationship": "visualization_analysis", "label": "generates", "state": "context_required"},
         {"id": "claim_question", "source": "claim:norm", "target": "question:lateral_inhib", "relationship": "claim_question_answers", "label": "answers", "state": "context_required"}
       ],
-      "notes": "The context packet is not a node; like slide 18 it is the bounded backend neighborhood (the context_required edges) assembled for the model."
+      "notes": "The context packet is not a node; like slide 16 it is the bounded backend neighborhood (the context_required edges) assembled for the model."
     },
     {
       "diagram_id": "rg-resolution-draft-operations",
@@ -230,7 +230,7 @@
         {"id": "question_dataset_primary", "source": "question:lateral_inhib", "target": "dataset:nwb_1210", "relationship": "dataset_question_primary", "label": "primary question", "state": "present"},
         {"id": "question_dataset_secondary", "source": "question:presynaptic", "target": "dataset:nwb_1210", "relationship": "dataset_question_secondary", "label": "secondary question", "state": "present"},
         {"id": "dataset_analysis", "source": "dataset:nwb_1210", "target": "analysis:norm_fit", "relationship": "analysis_dataset", "label": "used by", "state": "present"},
-        {"id": "dataset_claim", "source": "dataset:nwb_1210", "target": "claim:norm", "relationship": "claim_dataset_support", "label": "supports", "state": "present"},
+        {"id": "analysis_claim", "source": "analysis:norm_fit", "target": "claim:norm", "relationship": "claim_analysis_support", "label": "supports", "state": "present"},
         {"id": "analysis_figure", "source": "analysis:norm_fit", "target": "visualization:fig_norm", "relationship": "visualization_analysis", "label": "generates", "state": "present"},
         {"id": "claim_question", "source": "claim:norm", "target": "question:lateral_inhib", "relationship": "claim_question_answers", "label": "answers", "state": "present"}
       ]
@@ -263,26 +263,9 @@
       ]
     },
     {
-      "diagram_id": "rg-question-build-3-dataset-link",
-      "slide_number": 13,
-      "title": "Link datasets to the questions they address",
-      "graph_kind": "project_graph",
-      "backend_view": "evidence",
-      "visible_labels": ["motivating question", "answerable question", "dataset"],
-      "nodes": [
-        {"id": "question:motivating", "label": "motivating question", "entity_type": "question"},
-        {"id": "question:answerable", "label": "answerable question", "entity_type": "question"},
-        {"id": "dataset:dataset", "label": "dataset", "entity_type": "dataset"}
-      ],
-      "edges": [
-        {"id": "question_parent", "source": "question:motivating", "target": "question:answerable", "relationship": "question_parent", "label": "parent", "state": "present"},
-        {"id": "dataset_question", "source": "question:answerable", "target": "dataset:dataset", "relationship": "dataset_question_primary", "label": "primary question", "state": "present"}
-      ]
-    },
-    {
       "diagram_id": "rg-question-build-4-analysis-link",
-      "slide_number": 14,
-      "title": "Link analyses to their source data and question",
+      "slide_number": 13,
+      "title": "Link datasets and analyses to their questions",
       "graph_kind": "project_graph",
       "backend_view": "evidence",
       "visible_labels": ["motivating question", "answerable question", "dataset", "analysis"],
@@ -300,7 +283,7 @@
     },
     {
       "diagram_id": "rg-question-build-5-supported-claim-figure",
-      "slide_number": 15,
+      "slide_number": 14,
       "title": "Treat claims as supported only when evidence is attached",
       "graph_kind": "project_graph",
       "backend_view": "evidence",
@@ -324,31 +307,8 @@
       ]
     },
     {
-      "diagram_id": "rg-worked-example-figure-trace",
-      "slide_number": 16,
-      "title": "A figure traces back to the question its claim answers",
-      "graph_kind": "project_graph",
-      "backend_view": "evidence",
-      "visible_labels": ["Fig 3b - PN gain vs background", "supported claim", "question answered"],
-      "nodes": [
-        {"id": "question:lateral_inhib", "label": "Does lateral inhibition normalize PN output?", "entity_type": "question"},
-        {"id": "dataset:nwb_1210", "label": "2025_12_10_Rig2_session001.nwb", "entity_type": "dataset", "visible": false},
-        {"id": "analysis:norm_fit", "label": "divisive-norm fit (PN dose-response)", "entity_type": "analysis", "visible": false},
-        {"id": "claim:norm", "label": "Background odor scales PN gain ~0.6x (n=18)", "entity_type": "claim"},
-        {"id": "visualization:fig_norm", "label": "Fig 3b - PN gain vs background", "entity_type": "visualization"}
-      ],
-      "edges": [
-        {"id": "question_dataset", "source": "question:lateral_inhib", "target": "dataset:nwb_1210", "relationship": "dataset_question_primary", "label": "primary question", "state": "implicit"},
-        {"id": "analysis_dataset", "source": "dataset:nwb_1210", "target": "analysis:norm_fit", "relationship": "analysis_dataset", "label": "used by", "state": "implicit"},
-        {"id": "claim_analysis", "source": "analysis:norm_fit", "target": "claim:norm", "relationship": "claim_analysis_support", "label": "supports", "state": "implicit"},
-        {"id": "analysis_figure", "source": "analysis:norm_fit", "target": "visualization:fig_norm", "relationship": "visualization_analysis", "label": "generates", "state": "implicit"},
-        {"id": "claim_figure", "source": "claim:norm", "target": "visualization:fig_norm", "relationship": "visualization_claim", "label": "related claim", "state": "present"},
-        {"id": "claim_question", "source": "claim:norm", "target": "question:lateral_inhib", "relationship": "claim_question_answers", "label": "answers", "state": "present"}
-      ]
-    },
-    {
       "diagram_id": "rg-capture-1-raw-note",
-      "slide_number": 17,
+      "slide_number": 15,
       "title": "Capture begins with the raw note",
       "graph_kind": "graph_draft",
       "backend_view": "full",
@@ -363,7 +323,7 @@
     },
     {
       "diagram_id": "rg-capture-2-context-packet",
-      "slide_number": 18,
+      "slide_number": 16,
       "title": "Graph context is added before model interpretation",
       "graph_kind": "context_packet",
       "backend_view": "full",
@@ -383,7 +343,7 @@
     },
     {
       "diagram_id": "rg-capture-3-proposed-operations",
-      "slide_number": 19,
+      "slide_number": 17,
       "title": "The model returns proposed graph operations",
       "graph_kind": "graph_draft",
       "backend_view": "full",
@@ -409,7 +369,7 @@
     },
     {
       "diagram_id": "rg-capture-4-reviewer-decision",
-      "slide_number": 20,
+      "slide_number": 18,
       "title": "The reviewer decides what enters the record",
       "graph_kind": "graph_draft",
       "backend_view": "full",
@@ -430,11 +390,11 @@
       "operations": [
         {"semantic_type": "link_note_to_question", "op": "update", "entity_type": "note", "target_node": "note:raw_note", "payload_template": {"targets": [{"entity_type": "question", "entity_id": "$question:active_question"}]}, "rationale": "Only the accepted operation becomes a graph write; the rejected claim support stays out, and the deferred links remain proposed."}
       ],
-      "notes": "Unlike slide 19 (all proposed), the reviewer's decision is visible in edge state: accepted -> present, deferred -> proposed, rejected -> rejected."
+      "notes": "Unlike slide 17 (all proposed), the reviewer's decision is visible in edge state: accepted -> present, deferred -> proposed, rejected -> rejected."
     },
     {
       "diagram_id": "rg-first-use-case-one-project-one-result",
-      "slide_number": 21,
+      "slide_number": 19,
       "title": "One project, its question hierarchy, and one result",
       "graph_kind": "project_graph",
       "backend_view": "evidence",
