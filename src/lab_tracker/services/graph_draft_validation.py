@@ -10,6 +10,7 @@ from uuid import UUID, uuid4
 from pydantic import ValidationError as PydanticValidationError
 
 from lab_tracker.errors import NotFoundError, ValidationError
+from lab_tracker.goals_attributes import validate_goal_attributes
 from lab_tracker.graph_drafting import GraphDraftingError
 from lab_tracker.models import (
     EntityType,
@@ -127,6 +128,7 @@ class GraphPatchValidator:
     ) -> None:
         _validate_graph_operation_payload(operation, payload)
         self.ensure_operation_references_exist(operation, payload)
+        self._validate_goal_update_payload(operation, payload)
         _validate_semantic_operation_target(operation)
 
     def operations_from_graph_patch(
@@ -195,6 +197,27 @@ class GraphPatchValidator:
                 raise ValidationError(
                     f"Operation references an unknown {entity_type.value} ID: {entity_id}."
                 ) from exc
+
+    def _validate_goal_update_payload(
+        self,
+        operation: GraphChangeOperation,
+        payload: dict[str, Any],
+    ) -> None:
+        if operation.op != GraphChangeOp.UPDATE or operation.entity_type != EntityType.GOAL:
+            return
+        if operation.target_entity_id is None:
+            return
+        has_attribute_update = "attributes" in payload and payload.get("attributes") is not None
+        has_type_update = payload.get("goal_type") is not None
+        if not has_attribute_update and not has_type_update:
+            return
+        goal = self._get_graph_entity(EntityType.GOAL, operation.target_entity_id)
+        goal_type = payload.get("goal_type") or goal.goal_type
+        attributes = payload["attributes"] if has_attribute_update else goal.attributes
+        try:
+            validate_goal_attributes(goal_type, attributes)
+        except (PydanticValidationError, ValueError) as exc:
+            raise ValidationError(f"Goal attributes are invalid: {exc}") from exc
 
 
 def _payload_from_json(raw_payload: Any) -> dict[str, Any]:

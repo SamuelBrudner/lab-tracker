@@ -735,7 +735,7 @@ def goal_link_from_model(row: GoalLinkModel) -> GoalLink:
         ),
         relation=GoalRelation(row.relation),
         link_status=GoalLinkStatus(row.link_status),
-        slot=row.slot,
+        slot=row.slot or None,
         created_by=row.created_by,
         created_at=_as_utc(row.created_at),
     )
@@ -749,7 +749,7 @@ def goal_link_to_model(link: GoalLink) -> GoalLinkModel:
         entity_id=_uuid_str(link.target.entity_id),
         relation=link.relation.value,
         link_status=link.link_status.value,
-        slot=link.slot,
+        slot=link.slot or "",
         created_by=link.created_by,
         created_at=link.created_at,
     )

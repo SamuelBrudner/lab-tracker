@@ -566,7 +566,7 @@ class GoalLinkModel(Base):
     entity_id: Mapped[str] = mapped_column(String(36), nullable=False)
     relation: Mapped[str] = mapped_column(String(40), nullable=False)
     link_status: Mapped[str] = mapped_column(String(20), default="candidate")
-    slot: Mapped[str | None] = mapped_column(String(120))
+    slot: Mapped[str] = mapped_column(String(120), nullable=False, default="")
     created_by: Mapped[str | None] = mapped_column(String(255))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utc_now)
 

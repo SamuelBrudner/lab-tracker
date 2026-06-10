@@ -6,8 +6,10 @@ import pytest
 from api_helpers import repository_backed_api
 from fastapi.testclient import TestClient
 from pydantic import ValidationError as PydanticValidationError
+from sqlalchemy.exc import IntegrityError
 
 from lab_tracker.auth import AuthContext, Role
+from lab_tracker.db_models import GoalLinkModel
 from lab_tracker.errors import ValidationError
 from lab_tracker.goals_attributes import validate_goal_attributes
 from lab_tracker.models import (
@@ -79,12 +81,44 @@ def test_goals_round_trip_links_and_reverse_lookup_through_repository():
     assert reloaded.attributes == {"target_venue": "Cell"}
     assert reloaded.links[0].link_id == link.link_id
     assert reloaded.links[0].link_status == GoalLinkStatus.CANDIDATE
+    assert reloaded.links[0].slot is None
 
     reverse = api.list_node_goals(
         project_id=project.project_id,
         target=EntityRef(entity_type=EntityType.QUESTION, entity_id=question.question_id),
     )
     assert [item.goal_id for item in reverse] == [goal.goal_id]
+
+
+def test_goal_links_use_empty_db_slot_to_enforce_unslotted_uniqueness():
+    api, actor, project, question = _api_project_question()
+    goal = api.create_goal(
+        project.project_id,
+        goal_type=GoalType.PAPER,
+        title="Unique link paper",
+        actor=actor,
+    )
+    api.link_node_to_goal(
+        goal.goal_id,
+        target=EntityRef(entity_type=EntityType.QUESTION, entity_id=question.question_id),
+        relation=GoalRelation.ADDRESSES,
+        actor=actor,
+    )
+    _, session = api._test_resources  # type: ignore[attr-defined]
+    session.add(
+        GoalLinkModel(
+            link_id=str(uuid4()),
+            goal_id=str(goal.goal_id),
+            entity_type=EntityType.QUESTION.value,
+            entity_id=str(question.question_id),
+            relation=GoalRelation.ADDRESSES.value,
+            link_status=GoalLinkStatus.CANDIDATE.value,
+            slot="",
+        )
+    )
+    with pytest.raises(IntegrityError):
+        session.flush()
+    session.rollback()
 
 
 def test_goal_routes_create_link_reverse_lookup_and_goal_scoped_search(
@@ -221,3 +255,60 @@ def test_graph_draft_goal_operations_validate_and_apply_committed_links():
     reloaded = api.get_goal(goal.goal_id)
     assert reloaded.links[0].link_status == GoalLinkStatus.COMMITTED
     assert reloaded.links[0].target.entity_id == question.question_id
+
+
+def test_graph_draft_goal_update_validation_uses_existing_goal_type():
+    api, actor, project, _question = _api_project_question()
+    goal = api.create_goal(
+        project.project_id,
+        goal_type=GoalType.PAPER,
+        title="Draftable paper",
+        attributes={"target_venue": "Cell"},
+        actor=actor,
+    )
+    invalid_attributes = GraphChangeOperation(
+        operation_id=uuid4(),
+        change_set_id=uuid4(),
+        sequence=1,
+        op=GraphChangeOp.UPDATE,
+        entity_type=EntityType.GOAL,
+        semantic_type=GraphDraftSemanticType.UPDATE_GOAL,
+        target_entity_id=goal.goal_id,
+        payload={"attributes": {"typo_field": "blocked"}},
+    )
+    with pytest.raises(ValidationError, match="Goal attributes are invalid"):
+        api.graph_drafts.patch_validator.validate_operation(
+            invalid_attributes,
+            invalid_attributes.payload,
+        )
+
+    invalid_type_change = GraphChangeOperation(
+        operation_id=uuid4(),
+        change_set_id=uuid4(),
+        sequence=2,
+        op=GraphChangeOp.UPDATE,
+        entity_type=EntityType.GOAL,
+        semantic_type=GraphDraftSemanticType.UPDATE_GOAL,
+        target_entity_id=goal.goal_id,
+        payload={"goal_type": "grant"},
+    )
+    with pytest.raises(ValidationError, match="Goal attributes are invalid"):
+        api.graph_drafts.patch_validator.validate_operation(
+            invalid_type_change,
+            invalid_type_change.payload,
+        )
+
+    valid_type_change = GraphChangeOperation(
+        operation_id=uuid4(),
+        change_set_id=uuid4(),
+        sequence=3,
+        op=GraphChangeOp.UPDATE,
+        entity_type=EntityType.GOAL,
+        semantic_type=GraphDraftSemanticType.UPDATE_GOAL,
+        target_entity_id=goal.goal_id,
+        payload={"goal_type": "grant", "attributes": {"funding_agency": "NIH"}},
+    )
+    api.graph_drafts.patch_validator.validate_operation(
+        valid_type_change,
+        valid_type_change.payload,
+    )

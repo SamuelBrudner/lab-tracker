@@ -78,7 +78,7 @@ def test_alembic_upgrade_chain_from_empty_to_head(monkeypatch, tmp_path):
     for revision in revisions:
         command.upgrade(config, revision)
         assert revision in _current_revisions(database_url)
-    assert _current_revision(database_url) == "0022_goals"
+    assert _current_revision(database_url) == "0023_goal_link_slot_not_null"
 
 
 def test_alembic_has_single_head() -> None:
@@ -148,6 +148,9 @@ def test_alembic_upgrade_head_creates_expected_tables(monkeypatch, tmp_path):
     visualization_columns = {
         column["name"] for column in inspector.get_columns("visualizations")
     }
+    goal_link_columns = {
+        column["name"]: column for column in inspector.get_columns("goal_links")
+    }
 
     assert "review_policy" not in project_columns
     assert "created_from" not in question_columns
@@ -168,6 +171,7 @@ def test_alembic_upgrade_head_creates_expected_tables(monkeypatch, tmp_path):
         "asset_size_bytes",
         "asset_checksum",
     }.issubset(visualization_columns)
+    assert goal_link_columns["slot"]["nullable"] is False
     engine.dispose()
 
 
@@ -181,7 +185,7 @@ def test_database_at_daily_review_branch_upgrades_to_current_head(monkeypatch, t
     assert _current_revision(database_url) == "0017_daily_graph_reviews"
 
     command.upgrade(config, "head")
-    assert _current_revision(database_url) == "0022_goals"
+    assert _current_revision(database_url) == "0023_goal_link_slot_not_null"
 
     engine = create_engine(
         database_url,
