@@ -975,6 +975,13 @@ button:disabled {
   background: var(--accent-soft);
 }
 
+.batch-banner {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.6rem;
+}
+
 .flash.error {
   border-color: #e3b7bd;
   background: var(--danger-soft);

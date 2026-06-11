@@ -32,6 +32,7 @@ from lab_tracker.models import (
     GoalType,
     GraphChangeOperationStatus,
     GraphChangeSetStatus,
+    GraphDraftBatchRunStatus,
     GraphDraftMode,
     Note,
     NoteMetadataScalar,
@@ -329,6 +330,7 @@ class NoteTranscriptRequest(RequestModel):
 class GraphDraftOperationUpdate(RequestModel):
     payload: dict[str, Any] | None = None
     status: GraphChangeOperationStatus | None = None
+    review_note: str | None = None
 
 
 class GraphDraftCreateRequest(RequestModel):
@@ -353,6 +355,25 @@ class GraphDraftListFilters(BaseModel):
     project_id: UUID | None = None
     status: GraphChangeSetStatus | None = None
     source_note_id: UUID | None = None
+
+
+class GraphDraftBatchSettingsUpdate(RequestModel):
+    enabled: bool | None = None
+    cadence_minutes: int | None = Field(default=None, ge=60)
+    run_at_local_time: str | None = None
+    timezone_name: str | None = None
+
+
+class GraphDraftBatchRunRequest(RequestModel):
+    project_id: UUID
+    since: datetime | None = None
+    until: datetime | None = None
+    user_hint: str | None = None
+
+
+class GraphDraftBatchRunFilters(BaseModel):
+    project_id: UUID | None = None
+    status: GraphDraftBatchRunStatus | None = None
 
 
 class AssistantDecisionContextRequest(RequestModel):

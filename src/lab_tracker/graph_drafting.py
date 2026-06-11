@@ -170,6 +170,8 @@ class GraphDraftClient(Protocol):
 
 
 class OpenAIGraphDraftClient:
+    provider = "openai"
+
     def __init__(
         self,
         *,
@@ -405,6 +407,303 @@ class OpenAIGraphDraftClient:
         return payload
 
 
+class AnthropicGraphDraftClient:
+    provider = "anthropic"
+
+    def __init__(
+        self,
+        *,
+        api_key: str,
+        model: str,
+        base_url: str = "https://api.anthropic.com/v1",
+        timeout_seconds: float = 60.0,
+        transport: httpx.BaseTransport | None = None,
+    ) -> None:
+        self.model = model
+        self._api_key = api_key.strip()
+        self._client = httpx.Client(
+            base_url=base_url.rstrip("/"),
+            timeout=timeout_seconds,
+            transport=transport,
+        )
+
+    @classmethod
+    def from_settings(cls, settings: Settings) -> AnthropicGraphDraftClient:
+        return cls(
+            api_key=settings.anthropic_api_key,
+            model=settings.anthropic_model,
+            base_url=settings.anthropic_base_url,
+            timeout_seconds=settings.anthropic_timeout_seconds,
+        )
+
+    def close(self) -> None:
+        self._client.close()
+
+    def draft_from_note(
+        self,
+        *,
+        graph_context: dict[str, Any] | None = None,
+        user_hint: str | None = None,
+        draft_mode: str = "graph_context",
+        project_context: dict[str, Any] | None = None,
+        source_artifacts: list[dict[str, Any]] | None = None,
+        image_bytes: bytes | None = None,
+        image_content_type: str | None = None,
+    ) -> dict[str, Any]:
+        if not self._api_key:
+            raise GraphDraftingError(
+                "LAB_TRACKER_ANTHROPIC_API_KEY must be set before drafting graph changes."
+            )
+        resolved_context = graph_context if graph_context is not None else project_context or {}
+        artifacts = list(source_artifacts or [])
+        if not image_bytes and not _has_text_source(artifacts):
+            raise GraphDraftingError("Source note has no image or transcript text to draft from.")
+        content: list[dict[str, Any]] = [
+            {
+                "type": "text",
+                "text": _note_prompt_text(
+                    draft_mode=draft_mode,
+                    user_hint=user_hint,
+                    source_artifacts=artifacts,
+                    context=resolved_context,
+                ),
+            }
+        ]
+        if image_bytes:
+            if not image_content_type:
+                raise GraphDraftingError("Source image content type is required.")
+            content.append(
+                {
+                    "type": "image",
+                    "source": {
+                        "type": "base64",
+                        "media_type": image_content_type,
+                        "data": base64.b64encode(image_bytes).decode("ascii"),
+                    },
+                }
+            )
+        return self._messages_graph_patch(content=content, instructions=_instructions())
+
+    def draft_from_batch(
+        self,
+        *,
+        batch_context: dict[str, Any],
+        user_hint: str | None = None,
+    ) -> dict[str, Any]:
+        if not self._api_key:
+            raise GraphDraftingError(
+                "LAB_TRACKER_ANTHROPIC_API_KEY must be set before drafting batch graph changes."
+            )
+        batch_notes = batch_context.get("batch_notes") or []
+        if not batch_notes:
+            raise GraphDraftingError("Batch context contains no notes to draft from.")
+        content = [
+            {
+                "type": "text",
+                "text": _batch_prompt_text(
+                    batch_context=batch_context,
+                    user_hint=user_hint,
+                ),
+            }
+        ]
+        return self._messages_graph_patch(content=content, instructions=_batch_instructions())
+
+    def transcribe_audio(
+        self,
+        *,
+        audio_bytes: bytes,
+        filename: str,
+        content_type: str,
+        prompt: str | None = None,
+    ) -> dict[str, Any]:
+        raise GraphDraftingError(
+            "Anthropic graph drafting does not support native audio transcription; "
+            "configure a separate transcription provider before transcribing voice notes."
+        )
+
+    def _messages_graph_patch(
+        self,
+        *,
+        content: list[dict[str, Any]],
+        instructions: str,
+    ) -> dict[str, Any]:
+        response = self._client.post(
+            "/messages",
+            headers={
+                "x-api-key": self._api_key,
+                "anthropic-version": "2023-06-01",
+                "Content-Type": "application/json",
+            },
+            json={
+                "model": self.model,
+                "max_tokens": 4096,
+                "system": instructions
+                + "\nReturn only valid JSON matching this schema: "
+                + json.dumps(graph_patch_response_schema(), sort_keys=True),
+                "messages": [{"role": "user", "content": content}],
+            },
+        )
+        if response.status_code >= 400:
+            raise GraphDraftingError(_provider_response_error(response, "Anthropic"))
+        payload = _provider_response_json(response, "Anthropic")
+        output_text = _anthropic_output_text(payload)
+        return _parse_graph_patch_text(output_text, "Anthropic")
+
+
+class GoogleGraphDraftClient:
+    provider = "google"
+
+    def __init__(
+        self,
+        *,
+        api_key: str,
+        model: str,
+        base_url: str = "https://generativelanguage.googleapis.com/v1beta",
+        timeout_seconds: float = 60.0,
+        transport: httpx.BaseTransport | None = None,
+    ) -> None:
+        self.model = model
+        self._api_key = api_key.strip()
+        self._client = httpx.Client(
+            base_url=base_url.rstrip("/"),
+            timeout=timeout_seconds,
+            transport=transport,
+        )
+
+    @classmethod
+    def from_settings(cls, settings: Settings) -> GoogleGraphDraftClient:
+        return cls(
+            api_key=settings.google_api_key,
+            model=settings.google_model,
+            base_url=settings.google_base_url,
+            timeout_seconds=settings.google_timeout_seconds,
+        )
+
+    def close(self) -> None:
+        self._client.close()
+
+    def draft_from_note(
+        self,
+        *,
+        graph_context: dict[str, Any] | None = None,
+        user_hint: str | None = None,
+        draft_mode: str = "graph_context",
+        project_context: dict[str, Any] | None = None,
+        source_artifacts: list[dict[str, Any]] | None = None,
+        image_bytes: bytes | None = None,
+        image_content_type: str | None = None,
+    ) -> dict[str, Any]:
+        if not self._api_key:
+            raise GraphDraftingError(
+                "LAB_TRACKER_GOOGLE_API_KEY must be set before drafting graph changes."
+            )
+        resolved_context = graph_context if graph_context is not None else project_context or {}
+        artifacts = list(source_artifacts or [])
+        if not image_bytes and not _has_text_source(artifacts):
+            raise GraphDraftingError("Source note has no image or transcript text to draft from.")
+        parts: list[dict[str, Any]] = [
+            {
+                "text": _note_prompt_text(
+                    draft_mode=draft_mode,
+                    user_hint=user_hint,
+                    source_artifacts=artifacts,
+                    context=resolved_context,
+                )
+            }
+        ]
+        if image_bytes:
+            if not image_content_type:
+                raise GraphDraftingError("Source image content type is required.")
+            parts.append(_gemini_inline_data(image_bytes, image_content_type))
+        return self._generate_graph_patch(parts=parts, instructions=_instructions())
+
+    def draft_from_batch(
+        self,
+        *,
+        batch_context: dict[str, Any],
+        user_hint: str | None = None,
+    ) -> dict[str, Any]:
+        if not self._api_key:
+            raise GraphDraftingError(
+                "LAB_TRACKER_GOOGLE_API_KEY must be set before drafting batch graph changes."
+            )
+        batch_notes = batch_context.get("batch_notes") or []
+        if not batch_notes:
+            raise GraphDraftingError("Batch context contains no notes to draft from.")
+        return self._generate_graph_patch(
+            parts=[{"text": _batch_prompt_text(batch_context=batch_context, user_hint=user_hint)}],
+            instructions=_batch_instructions(),
+        )
+
+    def transcribe_audio(
+        self,
+        *,
+        audio_bytes: bytes,
+        filename: str,
+        content_type: str,
+        prompt: str | None = None,
+    ) -> dict[str, Any]:
+        if not self._api_key:
+            raise GraphDraftingError(
+                "LAB_TRACKER_GOOGLE_API_KEY must be set before transcribing voice notes."
+            )
+        if not audio_bytes:
+            raise GraphDraftingError("Source audio is empty.")
+        response = self._client.post(
+            f"/{_gemini_model_path(self.model)}:generateContent",
+            params={"key": self._api_key},
+            json={
+                "contents": [
+                    {
+                        "role": "user",
+                        "parts": [
+                            {
+                                "text": prompt
+                                or "Transcribe this lab voice note. Return only the transcript."
+                            },
+                            _gemini_inline_data(audio_bytes, content_type),
+                        ],
+                    }
+                ]
+            },
+        )
+        if response.status_code >= 400:
+            raise GraphDraftingError(_provider_response_error(response, "Google"))
+        payload = _provider_response_json(response, "Google")
+        text = _gemini_output_text(payload)
+        if not text.strip():
+            raise GraphDraftingError("Google transcription response did not include text.")
+        return {"text": text, "filename": filename, "content_type": content_type}
+
+    def _generate_graph_patch(
+        self,
+        *,
+        parts: list[dict[str, Any]],
+        instructions: str,
+    ) -> dict[str, Any]:
+        response = self._client.post(
+            f"/{_gemini_model_path(self.model)}:generateContent",
+            params={"key": self._api_key},
+            json={
+                "systemInstruction": {
+                    "parts": [
+                        {
+                            "text": instructions
+                            + "\nReturn only valid JSON matching this schema: "
+                            + json.dumps(graph_patch_response_schema(), sort_keys=True)
+                        }
+                    ]
+                },
+                "contents": [{"role": "user", "parts": parts}],
+                "generationConfig": {"response_mime_type": "application/json"},
+            },
+        )
+        if response.status_code >= 400:
+            raise GraphDraftingError(_provider_response_error(response, "Google"))
+        payload = _provider_response_json(response, "Google")
+        return _parse_graph_patch_text(_gemini_output_text(payload), "Google")
+
+
 def make_graph_draft_client(settings: Settings) -> GraphDraftClient:
     """Return the active graph-draft client for ``settings.graph_draft_provider``.
 
@@ -414,8 +713,13 @@ def make_graph_draft_client(settings: Settings) -> GraphDraftClient:
     provider = (settings.graph_draft_provider or "openai").strip().lower()
     if provider == "openai":
         return OpenAIGraphDraftClient.from_settings(settings)
+    if provider in {"anthropic", "claude"}:
+        return AnthropicGraphDraftClient.from_settings(settings)
+    if provider in {"google", "gemini"}:
+        return GoogleGraphDraftClient.from_settings(settings)
     raise GraphDraftingError(
-        f"Unknown graph_draft_provider '{provider}'. Configured providers: openai."
+        "Unknown graph_draft_provider "
+        f"'{provider}'. Configured providers: openai, anthropic, google."
     )
 
 
@@ -469,6 +773,123 @@ def _instructions() -> str:
 def _data_url(*, image_bytes: bytes, content_type: str) -> str:
     encoded = base64.b64encode(image_bytes).decode("ascii")
     return f"data:{content_type};base64,{encoded}"
+
+
+def _has_text_source(artifacts: list[dict[str, Any]]) -> bool:
+    return any(
+        str(item.get("transcript_text") or item.get("raw_content_preview") or "").strip()
+        for item in artifacts
+    )
+
+
+def _note_prompt_text(
+    *,
+    draft_mode: str,
+    user_hint: str | None,
+    source_artifacts: list[dict[str, Any]],
+    context: dict[str, Any],
+) -> str:
+    return (
+        "Draft Lab Tracker graph updates from these source artifact(s).\n"
+        f"Draft mode: {draft_mode}\n"
+        f"User hint: {user_hint or '(none)'}\n"
+        "Source artifacts:\n"
+        f"{json.dumps(source_artifacts, sort_keys=True)}\n"
+        "Graph context packet:\n"
+        f"{json.dumps(context, sort_keys=True)}"
+    )
+
+
+def _batch_prompt_text(
+    *,
+    batch_context: dict[str, Any],
+    user_hint: str | None,
+) -> str:
+    batch_notes = batch_context.get("batch_notes") or []
+    return (
+        "Draft Lab Tracker graph updates for the staged notes in this batch.\n"
+        f"Batch size: {len(batch_notes)} notes\n"
+        f"User hint: {user_hint or '(none)'}\n"
+        "Batch context packet:\n"
+        f"{json.dumps(batch_context, sort_keys=True)}"
+    )
+
+
+def _parse_graph_patch_text(output_text: str, provider_name: str) -> dict[str, Any]:
+    try:
+        parsed = json.loads(output_text)
+    except json.JSONDecodeError as exc:
+        raise GraphDraftingError(f"{provider_name} returned malformed graph patch JSON.") from exc
+    if not isinstance(parsed, dict):
+        raise GraphDraftingError(f"{provider_name} returned a non-object graph patch.")
+    operations = parsed.get("operations")
+    if not isinstance(operations, list):
+        raise GraphDraftingError(f"{provider_name} graph patch did not include an operations list.")
+    return parsed
+
+
+def _provider_response_json(response: httpx.Response, provider_name: str) -> dict[str, Any]:
+    try:
+        payload = response.json()
+    except ValueError as exc:
+        raise GraphDraftingError(f"{provider_name} returned non-JSON content.") from exc
+    if not isinstance(payload, dict):
+        raise GraphDraftingError(f"{provider_name} returned a non-object response.")
+    return payload
+
+
+def _provider_response_error(response: httpx.Response, provider_name: str) -> str:
+    try:
+        payload = response.json()
+    except ValueError:
+        return f"{provider_name} returned HTTP {response.status_code}: {response.text}"
+    if isinstance(payload, dict):
+        error = payload.get("error")
+        if isinstance(error, dict) and error.get("message"):
+            return str(error["message"])
+        if isinstance(error, str) and error:
+            return error
+    return f"{provider_name} returned HTTP {response.status_code}: {payload}"
+
+
+def _anthropic_output_text(payload: dict[str, Any]) -> str:
+    for item in payload.get("content", []) or []:
+        if not isinstance(item, dict):
+            continue
+        text = item.get("text")
+        if isinstance(text, str) and text.strip():
+            return text
+    raise GraphDraftingError("Anthropic response did not include graph patch text.")
+
+
+def _gemini_model_path(model: str) -> str:
+    cleaned = model.strip().strip("/")
+    return cleaned if cleaned.startswith("models/") else f"models/{cleaned}"
+
+
+def _gemini_inline_data(data: bytes, content_type: str) -> dict[str, Any]:
+    return {
+        "inline_data": {
+            "mime_type": content_type,
+            "data": base64.b64encode(data).decode("ascii"),
+        }
+    }
+
+
+def _gemini_output_text(payload: dict[str, Any]) -> str:
+    for candidate in payload.get("candidates", []) or []:
+        if not isinstance(candidate, dict):
+            continue
+        content = candidate.get("content")
+        if not isinstance(content, dict):
+            continue
+        for part in content.get("parts", []) or []:
+            if not isinstance(part, dict):
+                continue
+            text = part.get("text")
+            if isinstance(text, str) and text.strip():
+                return text
+    raise GraphDraftingError("Google response did not include graph patch text.")
 
 
 def _response_json(response: httpx.Response) -> dict[str, Any]:

@@ -10,6 +10,8 @@ from fastapi.testclient import TestClient
 
 from lab_tracker.config import Settings
 from lab_tracker.graph_drafting import (
+    AnthropicGraphDraftClient,
+    GoogleGraphDraftClient,
     GraphDraftingError,
     OpenAIGraphDraftClient,
     make_graph_draft_client,
@@ -466,6 +468,181 @@ def test_make_graph_draft_client_returns_openai_by_default() -> None:
         assert client.model == "gpt-test"
     finally:
         client.close()
+
+
+def test_anthropic_graph_draft_client_drafts_note_and_batch() -> None:
+    requests: list[dict[str, Any]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/v1/messages"
+        requests.append(json.loads(request.content.decode("utf-8")))
+        return httpx.Response(
+            200,
+            json={
+                "content": [
+                    {
+                        "type": "text",
+                        "text": json.dumps(
+                            {
+                                "summary": "anthropic ok",
+                                "uncertain_fields": [],
+                                "clarification_requests": [],
+                                "operations": [],
+                            }
+                        ),
+                    }
+                ]
+            },
+        )
+
+    client = AnthropicGraphDraftClient(
+        api_key="anthropic-key",
+        model="claude-test",
+        transport=httpx.MockTransport(handler),
+    )
+
+    note_result = client.draft_from_note(
+        graph_context={"project": {"id": "p1"}},
+        source_artifacts=[{"type": "text", "raw_content_preview": "fly 12"}],
+    )
+    batch_result = client.draft_from_batch(
+        batch_context={"mode": "graph_batch", "batch_notes": [{"id": "note-1"}]},
+    )
+
+    assert note_result["summary"] == "anthropic ok"
+    assert batch_result["summary"] == "anthropic ok"
+    assert requests[0]["model"] == "claude-test"
+    assert "json" in requests[0]["system"].lower()
+    assert "daily batch" in requests[1]["system"]
+    with pytest.raises(GraphDraftingError, match="does not support native audio"):
+        client.transcribe_audio(
+            audio_bytes=b"audio",
+            filename="voice.webm",
+            content_type="audio/webm",
+        )
+    client.close()
+
+
+def test_google_graph_draft_client_drafts_and_transcribes() -> None:
+    requests: list[dict[str, Any]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/v1beta/models/gemini-test:generateContent"
+        requests.append(json.loads(request.content.decode("utf-8")))
+        if len(requests) == 3:
+            return httpx.Response(
+                200,
+                json={
+                    "candidates": [
+                        {"content": {"parts": [{"text": "Fly 12 tracked cleanly."}]}}
+                    ]
+                },
+            )
+        return httpx.Response(
+            200,
+            json={
+                "candidates": [
+                    {
+                        "content": {
+                            "parts": [
+                                {
+                                    "text": json.dumps(
+                                        {
+                                            "summary": "google ok",
+                                            "uncertain_fields": [],
+                                            "clarification_requests": [],
+                                            "operations": [],
+                                        }
+                                    )
+                                }
+                            ]
+                        }
+                    }
+                ]
+            },
+        )
+
+    client = GoogleGraphDraftClient(
+        api_key="google-key",
+        model="gemini-test",
+        transport=httpx.MockTransport(handler),
+    )
+
+    note_result = client.draft_from_note(
+        graph_context={"project": {"id": "p1"}},
+        source_artifacts=[{"type": "text", "raw_content_preview": "fly 12"}],
+    )
+    batch_result = client.draft_from_batch(
+        batch_context={"mode": "graph_batch", "batch_notes": [{"id": "note-1"}]},
+    )
+    transcript = client.transcribe_audio(
+        audio_bytes=b"audio",
+        filename="voice.webm",
+        content_type="audio/webm",
+    )
+
+    assert note_result["summary"] == "google ok"
+    assert batch_result["summary"] == "google ok"
+    assert transcript["text"] == "Fly 12 tracked cleanly."
+    assert requests[0]["generationConfig"]["response_mime_type"] == "application/json"
+    assert requests[2]["contents"][0]["parts"][1]["inline_data"]["mime_type"] == "audio/webm"
+    client.close()
+
+
+def test_provider_factory_returns_anthropic_and_google_clients() -> None:
+    anthropic = make_graph_draft_client(
+        Settings(
+            environment="local",
+            auth_enabled=False,
+            graph_draft_provider="anthropic",
+            anthropic_api_key="anthropic-key",
+            anthropic_model="claude-test",
+        )
+    )
+    google = make_graph_draft_client(
+        Settings(
+            environment="local",
+            auth_enabled=False,
+            graph_draft_provider="google",
+            google_api_key="google-key",
+            google_model="gemini-test",
+        )
+    )
+    try:
+        assert isinstance(anthropic, AnthropicGraphDraftClient)
+        assert anthropic.model == "claude-test"
+        assert isinstance(google, GoogleGraphDraftClient)
+        assert google.model == "gemini-test"
+    finally:
+        anthropic.close()
+        google.close()
+
+
+def test_anthropic_and_google_clients_report_api_errors() -> None:
+    anthropic = AnthropicGraphDraftClient(
+        api_key="anthropic-key",
+        model="claude-test",
+        transport=httpx.MockTransport(
+            lambda request: httpx.Response(429, json={"error": {"message": "slow down"}})
+        ),
+    )
+    google = GoogleGraphDraftClient(
+        api_key="google-key",
+        model="gemini-test",
+        transport=httpx.MockTransport(
+            lambda request: httpx.Response(500, json={"error": {"message": "boom"}})
+        ),
+    )
+    with pytest.raises(GraphDraftingError, match="slow down"):
+        anthropic.draft_from_batch(
+            batch_context={"mode": "graph_batch", "batch_notes": [{"id": "note-1"}]}
+        )
+    with pytest.raises(GraphDraftingError, match="boom"):
+        google.draft_from_batch(
+            batch_context={"mode": "graph_batch", "batch_notes": [{"id": "note-1"}]}
+        )
+    anthropic.close()
+    google.close()
 
 
 def test_make_graph_draft_client_rejects_unknown_provider() -> None:

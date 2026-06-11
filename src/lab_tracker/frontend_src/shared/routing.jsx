@@ -30,6 +30,12 @@ function parseAppRoute(pathname) {
   if (parts.length === 2 && parts[1] === "graph") {
     return { kind: "graph" };
   }
+  if (parts.length === 2 && parts[1] === "batches") {
+    return { kind: "batches" };
+  }
+  if (parts.length >= 3 && parts[1] === "batches" && UUID_RE.test(parts[2] || "")) {
+    return { kind: "batch", changeSetId: parts[2] };
+  }
   if (parts.length >= 3 && parts[1] === "questions" && UUID_RE.test(parts[2] || "")) {
     return { kind: "question", questionId: parts[2] };
   }

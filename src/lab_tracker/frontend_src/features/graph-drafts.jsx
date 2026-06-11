@@ -49,6 +49,14 @@ function payloadText(changeSet) {
   return entries;
 }
 
+function operationReviewNoteText(changeSet) {
+  const entries = {};
+  for (const operation of changeSet?.operations || []) {
+    entries[operation.operation_id] = operation.review_note || "";
+  }
+  return entries;
+}
+
 function imageDataUrl(raw) {
   if (!raw || !raw.content_base64 || !raw.content_type) {
     return "";
@@ -122,17 +130,20 @@ function semanticLinkTargetType(operation) {
 
 function contextOptions(changeSet, entityType) {
   const context = changeSet?.context_packet || {};
+  const batchProjects = Array.isArray(context.projects) ? context.projects : [];
+  const batchValues = (field) =>
+    batchProjects.flatMap((project) => (Array.isArray(project[field]) ? project[field] : []));
   if (entityType === "question") {
-    return context.active_or_staged_questions || [];
+    return context.active_or_staged_questions || batchValues("active_or_staged_questions");
   }
   if (entityType === "session") {
-    return context.recent_sessions || [];
+    return context.recent_sessions || batchValues("recent_sessions");
   }
   if (entityType === "dataset") {
-    return context.recent_datasets || [];
+    return context.recent_datasets || batchValues("recent_datasets");
   }
   if (entityType === "analysis") {
-    return context.recent_analyses || [];
+    return context.recent_analyses || batchValues("recent_analyses");
   }
   return [];
 }
@@ -169,9 +180,11 @@ function GraphDraftDetailCard({
   canManageGraph = false,
   setBusy,
   setFlash,
+  backPath = "/app",
 }) {
   const [changeSet, setChangeSet] = useState(null);
   const [payloads, setPayloads] = useState({});
+  const [operationReviewNotes, setOperationReviewNotes] = useState({});
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [sourceImage, setSourceImage] = useState("");
@@ -204,6 +217,7 @@ function GraphDraftDetailCard({
       const nextChangeSet = await apiRequest(`/graph-drafts/${changeSetId}`, { token });
       setChangeSet(nextChangeSet);
       setPayloads(payloadText(nextChangeSet));
+      setOperationReviewNotes(operationReviewNoteText(nextChangeSet));
       setCommitMessage(nextChangeSet?.commit_message || "");
       setReviewNote(nextChangeSet?.review_note || "");
     } catch (err) {
@@ -246,6 +260,10 @@ function GraphDraftDetailCard({
     setPayloads((current) => ({ ...current, [operationId]: value }));
   }
 
+  function updateOperationReviewNote(operationId, value) {
+    setOperationReviewNotes((current) => ({ ...current, [operationId]: value }));
+  }
+
   function patchOperationPayload(operation, patcher) {
     const current = parsedPayloadFromText(payloads[operation.operation_id]);
     if (!current) {
@@ -276,6 +294,7 @@ function GraphDraftDetailCard({
         {
           body: {
             payload: parsedPayload,
+            review_note: operationReviewNotes[operation.operation_id]?.trim() || null,
             status: nextStatus,
           },
           method: "PATCH",
@@ -284,6 +303,7 @@ function GraphDraftDetailCard({
       );
       setChangeSet(nextChangeSet);
       setPayloads(payloadText(nextChangeSet));
+      setOperationReviewNotes(operationReviewNoteText(nextChangeSet));
       setFlash("Graph draft operation updated.");
     } catch (err) {
       setFlash("", err.message || "Failed to update graph draft operation.");
@@ -323,6 +343,7 @@ function GraphDraftDetailCard({
       });
       setChangeSet(nextChangeSet);
       setPayloads(payloadText(nextChangeSet));
+      setOperationReviewNotes(operationReviewNoteText(nextChangeSet));
       setFlash("Graph draft committed.");
     } catch (err) {
       setFlash("", err.message || "Failed to commit graph draft.");
@@ -390,6 +411,7 @@ function GraphDraftDetailCard({
       });
       setChangeSet(nextChangeSet);
       setPayloads(payloadText(nextChangeSet));
+      setOperationReviewNotes(operationReviewNoteText(nextChangeSet));
       setReviseFeedback("");
       setFlash("Draft revised from your feedback.");
     } catch (err) {
@@ -443,6 +465,18 @@ function GraphDraftDetailCard({
                 <div className="subtle">Source note</div>
                 <div className="mono">{changeSet.source_note_id}</div>
               </div>
+              {(changeSet.source_note_ids || []).length > 1 ? (
+                <div>
+                  <div className="subtle">Batch notes</div>
+                  <div className="inline">
+                    {(changeSet.source_note_ids || []).map((noteId) => (
+                      <span className="pill mono" key={noteId}>
+                        {noteId}
+                      </span>
+                    ))}
+                  </div>
+                </div>
+              ) : null}
               <div>
                 <div className="subtle">Source file</div>
                 <div className="mono">{changeSet.source_filename || "(none)"}</div>
@@ -748,6 +782,16 @@ function GraphDraftDetailCard({
                       />
                     </label>
                   </details>
+                  <label>
+                    Decision note
+                    <textarea
+                      value={operationReviewNotes[operation.operation_id] || ""}
+                      disabled={!canEditDraft}
+                      onChange={(event) =>
+                        updateOperationReviewNote(operation.operation_id, event.target.value)
+                      }
+                    />
+                  </label>
                   {operation.error_metadata?.message ? (
                     <p className="flash error">{operation.error_metadata.message}</p>
                   ) : null}
@@ -838,7 +882,7 @@ function GraphDraftDetailCard({
       ) : null}
 
       <div className="inline detail-actions">
-        <button type="button" className="btn-secondary" onClick={() => navigate("/app")}>
+        <button type="button" className="btn-secondary" onClick={() => navigate(backPath)}>
           Back
         </button>
       </div>

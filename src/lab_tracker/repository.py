@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Generic, Protocol, TypeVar
 from uuid import UUID
 
@@ -14,6 +15,8 @@ from lab_tracker.models import (
     Goal,
     GoalLink,
     GraphChangeSet,
+    GraphDraftBatchRun,
+    GraphDraftBatchSettings,
     Note,
     Project,
     ProjectMembership,
@@ -58,6 +61,8 @@ class LabTrackerRepository(Protocol):
     goals: EntityRepository[Goal]
     visualizations: EntityRepository[Visualization]
     graph_change_sets: EntityRepository[GraphChangeSet]
+    graph_draft_batch_settings: EntityRepository[GraphDraftBatchSettings]
+    graph_draft_batch_runs: EntityRepository[GraphDraftBatchRun]
 
     def fetch_questions(self, question_ids: list[UUID]) -> list[Question]:
         """Fetch questions in the provided order."""
@@ -233,10 +238,43 @@ class LabTrackerRepository(Protocol):
         project_id: UUID | None = None,
         status: str | None = None,
         source_note_id: UUID | None = None,
+        draft_mode: str | None = None,
+        batch_key: str | None = None,
         limit: int | None = None,
         offset: int = 0,
     ) -> tuple[list[GraphChangeSet], int]:
         """Query graph draft change sets with filters and pagination."""
+
+    def get_graph_draft_batch_settings_by_project(
+        self,
+        project_id: UUID,
+    ) -> GraphDraftBatchSettings | None:
+        """Return graph draft batch settings for a project."""
+
+    def list_due_graph_draft_batch_settings(
+        self,
+        now: datetime,
+    ) -> list[GraphDraftBatchSettings]:
+        """Return batch settings whose next_run_at is due."""
+
+    def get_graph_draft_batch_run_by_key(self, batch_key: str) -> GraphDraftBatchRun | None:
+        """Return one batch run by idempotency key."""
+
+    def latest_successful_graph_draft_batch_run(
+        self,
+        project_id: UUID,
+    ) -> GraphDraftBatchRun | None:
+        """Return the latest successful/skipped batch run for a project."""
+
+    def query_graph_draft_batch_runs(
+        self,
+        *,
+        project_id: UUID | None = None,
+        status: str | None = None,
+        limit: int | None = None,
+        offset: int = 0,
+    ) -> tuple[list[GraphDraftBatchRun], int]:
+        """Query graph draft batch run history."""
 
     def list_dataset_files(self, dataset_id: UUID) -> list[DatasetFile]:
         """Return all files attached to a dataset."""

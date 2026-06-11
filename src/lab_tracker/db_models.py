@@ -7,6 +7,7 @@ from uuid import uuid4
 
 from sqlalchemy import (
     JSON,
+    Boolean,
     Date,
     DateTime,
     Float,
@@ -252,6 +253,9 @@ class NoteTargetModel(Base):
 
 class GraphChangeSetModel(Base):
     __tablename__ = "graph_change_sets"
+    __table_args__ = (
+        UniqueConstraint("batch_key", name="uq_graph_change_sets_batch_key"),
+    )
 
     change_set_id: Mapped[str] = mapped_column(
         String(36),
@@ -268,9 +272,13 @@ class GraphChangeSetModel(Base):
         ForeignKey("notes.note_id", ondelete="CASCADE"),
         nullable=False,
     )
+    source_note_ids: Mapped[list[str]] = mapped_column(JSON, default=list)
     source_checksum: Mapped[str | None] = mapped_column(String(64))
     source_content_type: Mapped[str | None] = mapped_column(String(255))
     source_filename: Mapped[str | None] = mapped_column(String(255))
+    batch_key: Mapped[str | None] = mapped_column(String(120))
+    batch_window_start: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    batch_window_end: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     provider: Mapped[str] = mapped_column(String(40), nullable=False)
     model: Mapped[str] = mapped_column(String(100), nullable=False)
     prompt_version: Mapped[str] = mapped_column(String(80), nullable=False)
@@ -329,6 +337,7 @@ class GraphChangeOperationModel(Base):
     confidence: Mapped[float | None] = mapped_column(Float)
     source_refs: Mapped[list[dict[str, object]]] = mapped_column(JSON, default=list)
     status: Mapped[str] = mapped_column(String(20), nullable=False, default="proposed")
+    review_note: Mapped[str | None] = mapped_column(Text)
     result_entity_id: Mapped[str | None] = mapped_column(String(36))
     error_metadata: Mapped[dict[str, object]] = mapped_column(JSON, default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utc_now)
@@ -337,6 +346,79 @@ class GraphChangeOperationModel(Base):
         default=_utc_now,
         onupdate=_utc_now,
     )
+
+
+class GraphDraftBatchSettingsModel(Base):
+    __tablename__ = "graph_draft_batch_settings"
+    __table_args__ = (
+        UniqueConstraint("project_id", name="uq_graph_draft_batch_settings_project"),
+    )
+
+    settings_id: Mapped[str] = mapped_column(
+        String(36),
+        primary_key=True,
+        default=lambda: str(uuid4()),
+    )
+    project_id: Mapped[str] = mapped_column(
+        String(36),
+        ForeignKey("projects.project_id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    cadence_minutes: Mapped[int] = mapped_column(Integer, nullable=False, default=24 * 60)
+    run_at_local_time: Mapped[str] = mapped_column(String(5), nullable=False, default="06:00")
+    timezone_name: Mapped[str] = mapped_column(
+        String(100),
+        nullable=False,
+        default="America/New_York",
+    )
+    next_run_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utc_now)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=_utc_now,
+        onupdate=_utc_now,
+    )
+    updated_by: Mapped[str | None] = mapped_column(String(255))
+
+
+class GraphDraftBatchRunModel(Base):
+    __tablename__ = "graph_draft_batch_runs"
+    __table_args__ = (
+        UniqueConstraint("batch_key", name="uq_graph_draft_batch_runs_batch_key"),
+    )
+
+    run_id: Mapped[str] = mapped_column(
+        String(36),
+        primary_key=True,
+        default=lambda: str(uuid4()),
+    )
+    project_id: Mapped[str] = mapped_column(
+        String(36),
+        ForeignKey("projects.project_id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    trigger: Mapped[str] = mapped_column(String(20), nullable=False, default="scheduled")
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="running")
+    window_start: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    window_end: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    note_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    batch_key: Mapped[str] = mapped_column(String(120), nullable=False)
+    change_set_id: Mapped[str | None] = mapped_column(
+        String(36),
+        ForeignKey("graph_change_sets.change_set_id", ondelete="SET NULL"),
+    )
+    summary: Mapped[str] = mapped_column(Text, default="")
+    error_metadata: Mapped[dict[str, object]] = mapped_column(JSON, default=dict)
+    created_by: Mapped[str | None] = mapped_column(String(255))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utc_now)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=_utc_now,
+        onupdate=_utc_now,
+    )
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utc_now)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class SessionModel(Base):

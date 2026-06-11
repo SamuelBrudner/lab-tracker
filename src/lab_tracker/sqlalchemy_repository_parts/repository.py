@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from uuid import UUID
 
 from sqlalchemy import select
@@ -17,6 +18,8 @@ from lab_tracker.models import (
     Goal,
     GoalLink,
     GraphChangeSet,
+    GraphDraftBatchRun,
+    GraphDraftBatchSettings,
     Note,
     Project,
     Question,
@@ -39,6 +42,10 @@ from .core import (
 )
 from .datasets import SQLAlchemyDatasetRepository
 from .goals import SQLAlchemyGoalRepository
+from .graph_batches import (
+    SQLAlchemyGraphDraftBatchRunRepository,
+    SQLAlchemyGraphDraftBatchSettingsRepository,
+)
 from .graph_drafts import SQLAlchemyGraphChangeSetRepository
 from .notes import SQLAlchemyNoteRepository
 from .sessions import SQLAlchemyAcquisitionOutputRepository, SQLAlchemySessionRepository
@@ -62,6 +69,8 @@ class SQLAlchemyLabTrackerRepository(LabTrackerRepository):
         self.goals = SQLAlchemyGoalRepository(session)
         self.visualizations = SQLAlchemyVisualizationRepository(session)
         self.graph_change_sets = SQLAlchemyGraphChangeSetRepository(session)
+        self.graph_draft_batch_settings = SQLAlchemyGraphDraftBatchSettingsRepository(session)
+        self.graph_draft_batch_runs = SQLAlchemyGraphDraftBatchRunRepository(session)
 
     def commit(self) -> None:
         self._session.commit()
@@ -354,6 +363,8 @@ class SQLAlchemyLabTrackerRepository(LabTrackerRepository):
         project_id: UUID | None = None,
         status: str | None = None,
         source_note_id: UUID | None = None,
+        draft_mode: str | None = None,
+        batch_key: str | None = None,
         limit: int | None = None,
         offset: int = 0,
     ) -> tuple[list[GraphChangeSet], int]:
@@ -361,6 +372,44 @@ class SQLAlchemyLabTrackerRepository(LabTrackerRepository):
             project_id=project_id,
             status=status,
             source_note_id=source_note_id,
+            draft_mode=draft_mode,
+            batch_key=batch_key,
+            limit=limit,
+            offset=offset,
+        )
+
+    def get_graph_draft_batch_settings_by_project(
+        self,
+        project_id: UUID,
+    ) -> GraphDraftBatchSettings | None:
+        return self.graph_draft_batch_settings.get_by_project(project_id)
+
+    def list_due_graph_draft_batch_settings(
+        self,
+        now: datetime,
+    ) -> list[GraphDraftBatchSettings]:
+        return self.graph_draft_batch_settings.list_due(now)
+
+    def get_graph_draft_batch_run_by_key(self, batch_key: str) -> GraphDraftBatchRun | None:
+        return self.graph_draft_batch_runs.get_by_batch_key(batch_key)
+
+    def latest_successful_graph_draft_batch_run(
+        self,
+        project_id: UUID,
+    ) -> GraphDraftBatchRun | None:
+        return self.graph_draft_batch_runs.latest_successful_for_project(project_id)
+
+    def query_graph_draft_batch_runs(
+        self,
+        *,
+        project_id: UUID | None = None,
+        status: str | None = None,
+        limit: int | None = None,
+        offset: int = 0,
+    ) -> tuple[list[GraphDraftBatchRun], int]:
+        return self.graph_draft_batch_runs.query(
+            project_id=project_id,
+            status=status,
             limit=limit,
             offset=offset,
         )

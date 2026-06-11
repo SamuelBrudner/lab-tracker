@@ -78,7 +78,7 @@ def test_alembic_upgrade_chain_from_empty_to_head(monkeypatch, tmp_path):
     for revision in revisions:
         command.upgrade(config, revision)
         assert revision in _current_revisions(database_url)
-    assert _current_revision(database_url) == "0023_goal_link_slot_not_null"
+    assert _current_revision(database_url) == "0024_graph_draft_batches"
 
 
 def test_alembic_has_single_head() -> None:
@@ -129,6 +129,8 @@ def test_alembic_upgrade_head_creates_expected_tables(monkeypatch, tmp_path):
         "graph_change_operations",
         "daily_graph_reviews",
         "daily_graph_review_change_sets",
+        "graph_draft_batch_settings",
+        "graph_draft_batch_runs",
         "project_memberships",
     }
     assert expected.issubset(table_names)
@@ -162,7 +164,14 @@ def test_alembic_upgrade_head_creates_expected_tables(monkeypatch, tmp_path):
         "reviewed_at",
         "reviewed_by",
         "review_note",
+        "source_note_ids",
+        "batch_key",
+        "batch_window_start",
+        "batch_window_end",
     }.issubset(graph_change_columns)
+    operation_columns = {
+        column["name"] for column in inspector.get_columns("graph_change_operations")
+    }
     assert {"project_id", "user_id", "role"}.issubset(membership_columns)
     assert {
         "asset_storage_id",
@@ -171,6 +180,7 @@ def test_alembic_upgrade_head_creates_expected_tables(monkeypatch, tmp_path):
         "asset_size_bytes",
         "asset_checksum",
     }.issubset(visualization_columns)
+    assert "review_note" in operation_columns
     assert goal_link_columns["slot"]["nullable"] is False
     engine.dispose()
 
@@ -185,7 +195,7 @@ def test_database_at_daily_review_branch_upgrades_to_current_head(monkeypatch, t
     assert _current_revision(database_url) == "0017_daily_graph_reviews"
 
     command.upgrade(config, "head")
-    assert _current_revision(database_url) == "0023_goal_link_slot_not_null"
+    assert _current_revision(database_url) == "0024_graph_draft_batches"
 
     engine = create_engine(
         database_url,
@@ -200,6 +210,8 @@ def test_database_at_daily_review_branch_upgrades_to_current_head(monkeypatch, t
         "device_tokens",
         "device_enrollments",
         "project_memberships",
+        "graph_draft_batch_settings",
+        "graph_draft_batch_runs",
     }.issubset(table_names)
     engine.dispose()
 

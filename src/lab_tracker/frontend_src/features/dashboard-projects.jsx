@@ -15,6 +15,7 @@ function Dashboard({
   onProjectDescriptionChange,
   onCreateProject,
   onOpenGraph = () => {},
+  onOpenBatches = () => {},
   projectMembers = [],
   canManageProjectMembers = false,
   memberUsername = "",
@@ -58,14 +59,19 @@ function Dashboard({
           ))}
         </select>
       </label>
-      <button
-        type="button"
-        className="btn-secondary"
-        disabled={!selectedProjectId}
-        onClick={onOpenGraph}
-      >
-        Open graph
-      </button>
+      <div className="inline">
+        <button
+          type="button"
+          className="btn-secondary"
+          disabled={!selectedProjectId}
+          onClick={onOpenGraph}
+        >
+          Open graph
+        </button>
+        <button type="button" className="btn-secondary" onClick={onOpenBatches}>
+          Open batches
+        </button>
+      </div>
 
       <form className="form" onSubmit={onCreateProject}>
         <h3>New Project</h3>

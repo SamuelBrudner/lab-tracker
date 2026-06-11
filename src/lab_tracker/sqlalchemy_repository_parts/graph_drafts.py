@@ -60,6 +60,7 @@ def operation_to_model(operation: GraphChangeOperation) -> GraphChangeOperationM
         confidence=operation.confidence,
         source_refs=[dict(item) for item in operation.source_refs],
         status=operation.status.value,
+        review_note=operation.review_note,
         result_entity_id=_uuid_str(operation.result_entity_id),
         error_metadata=dict(operation.error_metadata),
         created_at=operation.created_at,
@@ -84,6 +85,7 @@ def operation_from_model(row: GraphChangeOperationModel) -> GraphChangeOperation
         confidence=row.confidence,
         source_refs=_list(row.source_refs),
         status=GraphChangeOperationStatus(row.status),
+        review_note=row.review_note,
         result_entity_id=_uuid(row.result_entity_id),
         error_metadata=_dict(row.error_metadata),
         created_at=row.created_at,
@@ -96,9 +98,13 @@ def change_set_to_model(change_set: GraphChangeSet) -> GraphChangeSetModel:
         change_set_id=str(change_set.change_set_id),
         project_id=str(change_set.project_id),
         source_note_id=str(change_set.source_note_id),
+        source_note_ids=[str(note_id) for note_id in change_set.source_note_ids],
         source_checksum=change_set.source_checksum,
         source_content_type=change_set.source_content_type,
         source_filename=change_set.source_filename,
+        batch_key=change_set.batch_key,
+        batch_window_start=change_set.batch_window_start,
+        batch_window_end=change_set.batch_window_end,
         provider=change_set.provider,
         model=change_set.model,
         prompt_version=change_set.prompt_version,
@@ -126,9 +132,13 @@ def change_set_to_model(change_set: GraphChangeSet) -> GraphChangeSetModel:
 def apply_change_set_to_model(row: GraphChangeSetModel, change_set: GraphChangeSet) -> None:
     row.project_id = str(change_set.project_id)
     row.source_note_id = str(change_set.source_note_id)
+    row.source_note_ids = [str(note_id) for note_id in change_set.source_note_ids]
     row.source_checksum = change_set.source_checksum
     row.source_content_type = change_set.source_content_type
     row.source_filename = change_set.source_filename
+    row.batch_key = change_set.batch_key
+    row.batch_window_start = change_set.batch_window_start
+    row.batch_window_end = change_set.batch_window_end
     row.provider = change_set.provider
     row.model = change_set.model
     row.prompt_version = change_set.prompt_version
@@ -163,9 +173,15 @@ def change_set_from_model(
         change_set_id=UUID(row.change_set_id),
         project_id=UUID(row.project_id),
         source_note_id=UUID(row.source_note_id),
+        source_note_ids=[
+            UUID(str(note_id)) for note_id in (row.source_note_ids or [row.source_note_id])
+        ],
         source_checksum=row.source_checksum,
         source_content_type=row.source_content_type,
         source_filename=row.source_filename,
+        batch_key=row.batch_key,
+        batch_window_start=row.batch_window_start,
+        batch_window_end=row.batch_window_end,
         provider=row.provider,
         model=row.model,
         prompt_version=row.prompt_version,
@@ -297,6 +313,8 @@ class SQLAlchemyGraphChangeSetRepository(EntityRepository[GraphChangeSet]):
         project_id: UUID | None = None,
         status: str | None = None,
         source_note_id: UUID | None = None,
+        draft_mode: str | None = None,
+        batch_key: str | None = None,
         limit: int | None = None,
         offset: int = 0,
     ) -> tuple[list[GraphChangeSet], int]:
@@ -312,6 +330,12 @@ class SQLAlchemyGraphChangeSetRepository(EntityRepository[GraphChangeSet]):
         if source_note_id is not None:
             stmt = stmt.where(GraphChangeSetModel.source_note_id == str(source_note_id))
             count_stmt = count_stmt.where(GraphChangeSetModel.source_note_id == str(source_note_id))
+        if draft_mode is not None:
+            stmt = stmt.where(GraphChangeSetModel.draft_mode == draft_mode)
+            count_stmt = count_stmt.where(GraphChangeSetModel.draft_mode == draft_mode)
+        if batch_key is not None:
+            stmt = stmt.where(GraphChangeSetModel.batch_key == batch_key)
+            count_stmt = count_stmt.where(GraphChangeSetModel.batch_key == batch_key)
         stmt = stmt.order_by(
             GraphChangeSetModel.created_at.desc(),
             GraphChangeSetModel.change_set_id,

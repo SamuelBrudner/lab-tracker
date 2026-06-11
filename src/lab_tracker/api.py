@@ -400,11 +400,17 @@ class LabTrackerAPI:
     def create_graph_draft_from_note(self, *args: Any, **kwargs: Any) -> Any:
         return self.graph_drafts.create_graph_draft_from_note(*args, **kwargs)
 
+    def create_batch_graph_draft(self, *args: Any, **kwargs: Any) -> Any:
+        return self.graph_drafts.create_batch_graph_draft(*args, **kwargs)
+
     def get_graph_change_set(self, *args: Any, **kwargs: Any) -> Any:
         return self.graph_drafts.get_graph_change_set(*args, **kwargs)
 
     def list_graph_change_sets(self, *args: Any, **kwargs: Any) -> Any:
         return self.graph_drafts.list_graph_change_sets(*args, **kwargs)
+
+    def list_batch_graph_drafts(self, *args: Any, **kwargs: Any) -> Any:
+        return self.graph_drafts.list_batch_graph_drafts(*args, **kwargs)
 
     def update_graph_change_operation(self, *args: Any, **kwargs: Any) -> Any:
         return self.graph_drafts.update_graph_change_operation(*args, **kwargs)
@@ -426,6 +432,21 @@ class LabTrackerAPI:
 
     def build_batch_graph_context(self, *args: Any, **kwargs: Any) -> Any:
         return self.graph_drafts.build_batch_graph_context(*args, **kwargs)
+
+    def get_graph_draft_batch_settings(self, *args: Any, **kwargs: Any) -> Any:
+        return self.graph_drafts.get_graph_draft_batch_settings(*args, **kwargs)
+
+    def update_graph_draft_batch_settings(self, *args: Any, **kwargs: Any) -> Any:
+        return self.graph_drafts.update_graph_draft_batch_settings(*args, **kwargs)
+
+    def run_graph_draft_batch_for_project(self, *args: Any, **kwargs: Any) -> Any:
+        return self.graph_drafts.run_graph_draft_batch_for_project(*args, **kwargs)
+
+    def run_due_graph_draft_batches(self, *args: Any, **kwargs: Any) -> Any:
+        return self.graph_drafts.run_due_graph_draft_batches(*args, **kwargs)
+
+    def list_graph_draft_batch_runs(self, *args: Any, **kwargs: Any) -> Any:
+        return self.graph_drafts.list_graph_draft_batch_runs(*args, **kwargs)
 
     def search_questions(
         self,

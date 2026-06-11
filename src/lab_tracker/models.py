@@ -187,6 +187,19 @@ class GraphChangeOp(str, Enum):
 class GraphDraftMode(str, Enum):
     GRAPH_CONTEXT = "graph_context"
     IMAGE_ONLY = "image_only"
+    GRAPH_BATCH = "graph_batch"
+
+
+class GraphDraftBatchRunStatus(str, Enum):
+    RUNNING = "running"
+    SKIPPED = "skipped"
+    READY = "ready"
+    FAILED = "failed"
+
+
+class GraphDraftBatchTrigger(str, Enum):
+    SCHEDULED = "scheduled"
+    MANUAL = "manual"
 
 
 class GraphDraftSemanticType(str, Enum):
@@ -268,6 +281,7 @@ class GraphChangeOperation(_DomainModel):
     confidence: float | None = Field(default=None, ge=0.0, le=1.0)
     source_refs: list[dict[str, Any]] = Field(default_factory=list)
     status: GraphChangeOperationStatus = GraphChangeOperationStatus.PROPOSED
+    review_note: str | None = None
     result_entity_id: UUID | None = None
     error_metadata: dict[str, Any] = Field(default_factory=dict)
     created_at: datetime = Field(default_factory=utc_now)
@@ -278,9 +292,13 @@ class GraphChangeSet(_DomainModel):
     change_set_id: UUID
     project_id: UUID
     source_note_id: UUID
+    source_note_ids: list[UUID] = Field(default_factory=list)
     source_checksum: str | None = None
     source_content_type: str | None = None
     source_filename: str | None = None
+    batch_key: str | None = None
+    batch_window_start: datetime | None = None
+    batch_window_end: datetime | None = None
     provider: str = "openai"
     model: str
     prompt_version: str
@@ -307,6 +325,43 @@ class GraphChangeSet(_DomainModel):
     committed_at: datetime | None = None
     committed_by: str | None = None
     committed_by_username: str | None = None
+
+    @computed_field
+    @property
+    def source_note_count(self) -> int:
+        return len(self.source_note_ids or [self.source_note_id])
+
+
+class GraphDraftBatchSettings(_DomainModel):
+    settings_id: UUID
+    project_id: UUID
+    enabled: bool = True
+    cadence_minutes: int = 24 * 60
+    run_at_local_time: str = "06:00"
+    timezone_name: str = "America/New_York"
+    next_run_at: datetime | None = None
+    created_at: datetime = Field(default_factory=utc_now)
+    updated_at: datetime = Field(default_factory=utc_now)
+    updated_by: str | None = None
+
+
+class GraphDraftBatchRun(_DomainModel):
+    run_id: UUID
+    project_id: UUID
+    trigger: GraphDraftBatchTrigger = GraphDraftBatchTrigger.SCHEDULED
+    status: GraphDraftBatchRunStatus = GraphDraftBatchRunStatus.RUNNING
+    window_start: datetime
+    window_end: datetime
+    note_count: int = 0
+    batch_key: str
+    change_set_id: UUID | None = None
+    summary: str = ""
+    error_metadata: dict[str, Any] = Field(default_factory=dict)
+    created_at: datetime = Field(default_factory=utc_now)
+    updated_at: datetime = Field(default_factory=utc_now)
+    started_at: datetime = Field(default_factory=utc_now)
+    finished_at: datetime | None = None
+    created_by: str | None = None
 
 
 class Project(_DomainModel):

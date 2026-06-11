@@ -113,6 +113,7 @@ def build_graph_drafts_router(api: LabTrackerAPI) -> APIRouter:
             operation_id,
             payload=payload.payload,
             status=payload.status,
+            review_note=payload.review_note,
             actor=actor,
         )
         return Envelope(data=_attach_graph_usernames(request, change_set))
@@ -217,3 +218,6 @@ def _attach_graph_usernames(request: Request, change_set: GraphChangeSet) -> Gra
         if user is not None:
             setattr(change_set, username_field, user.username)
     return change_set
+
+
+attach_graph_usernames = _attach_graph_usernames

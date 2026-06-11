@@ -1,6 +1,7 @@
 import * as React from "react";
 
 import { Dashboard } from "./features/dashboard-projects.jsx";
+import { BatchReviewPage, PendingBatchBanner } from "./features/batches.jsx";
 import { DevicesPage } from "./features/devices.jsx";
 import { EnrollPage } from "./features/enroll.jsx";
 import { GraphDraftDetailCard } from "./features/graph-drafts.jsx";
@@ -38,7 +39,7 @@ import { apiListRequest, apiRequest, buildApiPath } from "./shared/api.js";
 function App() {
   const { navigate, replace, route } = useAppRoute();
   const isHomeRoute = route.kind === "home";
-  const needsProjectData = isHomeRoute || route.kind === "capture";
+  const needsProjectData = isHomeRoute || route.kind === "capture" || route.kind === "batches";
   const [busy, setBusy] = React.useState(false);
   const [message, setMessage] = React.useState("");
   const [error, setError] = React.useState("");
@@ -258,6 +259,7 @@ function App() {
       workspaceForms.setProjectDescription(event.target.value),
     onCreateProject: projectActions.handleCreateProject,
     onOpenGraph: () => navigate("/app/graph"),
+    onOpenBatches: () => navigate("/app/batches"),
     projectMembers,
     canManageProjectMembers,
     memberUsername,
@@ -281,6 +283,7 @@ function App() {
 
       <FlashMessages message={message} error={error} />
       <PendingUploadsBadge />
+      <PendingBatchBanner enabled={apiEnabled} token={auth.token} navigate={navigate} />
 
       {!auth.authChecked ? (
         <section className="grid">
@@ -383,6 +386,21 @@ function App() {
             />
           ) : null}
 
+          {route.kind === "batches" ? (
+            <BatchReviewPage
+              token={auth.token}
+              projects={workspaceData.projects}
+              selectedProjectId={workspaceData.selectedProjectId}
+              onSelectedProjectChange={(event) =>
+                workspaceData.setSelectedProjectId(event.target.value)
+              }
+              navigate={navigate}
+              canManageGraph={canManageProjectMembers}
+              setBusy={setBusy}
+              setFlash={setFlash}
+            />
+          ) : null}
+
           {route.kind === "question" ? (
             <QuestionDetailCard
               token={auth.token}
@@ -419,6 +437,19 @@ function App() {
               canManageGraph={canManageProjectMembers}
               setBusy={setBusy}
               setFlash={setFlash}
+            />
+          ) : null}
+
+          {route.kind === "batch" ? (
+            <GraphDraftDetailCard
+              token={auth.token}
+              changeSetId={route.changeSetId}
+              navigate={navigate}
+              canWrite={canContributeToProject}
+              canManageGraph={canManageProjectMembers}
+              setBusy={setBusy}
+              setFlash={setFlash}
+              backPath="/app/batches"
             />
           ) : null}
 

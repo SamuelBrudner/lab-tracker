@@ -1,10 +1,15 @@
 import { rm } from "node:fs/promises";
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 
 import { build } from "esbuild";
 
+const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+
 await build({
-  entryPoints: ["src/lab_tracker/frontend_src/app.jsx"],
-  outfile: "src/lab_tracker/frontend/app.js",
+  absWorkingDir: repoRoot,
+  entryPoints: ["././src/lab_tracker/frontend_src/app.jsx"],
+  outfile: resolve(repoRoot, "src/lab_tracker/frontend/app.js"),
   bundle: true,
   minify: true,
   sourcemap: false,
@@ -18,4 +23,4 @@ await build({
   },
 });
 
-await rm("src/lab_tracker/frontend/app.js.map", { force: true });
+await rm(resolve(repoRoot, "src/lab_tracker/frontend/app.js.map"), { force: true });
