@@ -50,14 +50,16 @@ An external artifact reference has this shape:
 - `metadata`: tool-native metadata as a JSON-compatible object
 
 For retained-v1, dataset ingestion stores these references in
-`DatasetCommitManifest.metadata["external_artifacts"]` as encoded JSON. The
-PROV-O exporter materializes them as `prov:Entity` or `prov:Activity` nodes and
-links them from the dataset commit activity using `prov:used` or
-`prov:wasInformedBy`.
+`DatasetCommitManifest.external_artifacts`. The older
+`DatasetCommitManifest.metadata["external_artifacts"]` encoded JSON shape is a
+legacy read/export fallback for existing rows. The PROV-O exporter materializes
+both shapes as `prov:Entity` or `prov:Activity` nodes and links them from the
+dataset commit activity using `prov:used` or `prov:wasInformedBy`.
 
-This keeps the database shape stable while making the ingestion seam explicit.
-Future adapters may add richer typed storage once repeated integrations prove
-the need.
+This lets Lab Tracker track 1TB-scale acquisition runs through canonical URIs,
+manifest/content hashes, and semantic graph edges while leaving byte durability,
+transfer, lifecycle, and browsing to object stores or data-versioning
+substrates.
 
 ## Anti-Scope Guardrails
 
@@ -116,4 +118,3 @@ decisions:
 - eLabFTW, Benchling, RSpace, and LabArchives remain active ELN references:
   https://doc.elabftw.net/, https://www.benchling.com/notebook,
   https://www.researchspace.com/features, and https://www.labarchives.com/
-

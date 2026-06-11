@@ -135,6 +135,52 @@ def test_dataset_provenance_route_exports_json_ld_graph(
     assert secondary_question_link["role"] == "secondary"
 
 
+def test_dataset_route_accepts_external_artifact_manifest_without_files(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+):
+    headers = admin_auth_headers
+    project_id = client.post(
+        "/projects",
+        json={"name": "External artifact project"},
+        headers=headers,
+    ).json()["data"]["project_id"]
+    question_id = client.post(
+        "/questions",
+        json={
+            "project_id": project_id,
+            "text": "Can the large acquisition run be tracked by URI?",
+            "question_type": "descriptive",
+            "status": "active",
+        },
+        headers=headers,
+    ).json()["data"]["question_id"]
+    artifact = {
+        "kind": "entity",
+        "source_system": "s3",
+        "uri": "s3://lab-bucket/acquisitions/run-001/manifest.json",
+        "content_hash": "sha256:manifest001",
+        "metadata": {"file_count": 12, "total_size_bytes": 1024},
+    }
+
+    response = client.post(
+        "/datasets",
+        json={
+            "project_id": project_id,
+            "primary_question_id": question_id,
+            "status": "committed",
+            "commit_manifest": {"external_artifacts": [artifact]},
+        },
+        headers=headers,
+    )
+
+    assert response.status_code == 201
+    dataset = response.json()["data"]
+    assert dataset["status"] == "committed"
+    assert dataset["commit_manifest"]["files"] == []
+    assert dataset["commit_manifest"]["external_artifacts"] == [artifact]
+
+
 def test_analysis_provenance_route_exports_related_entities(
     client: TestClient,
     admin_auth_headers: dict[str, str],

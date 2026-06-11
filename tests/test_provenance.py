@@ -12,6 +12,8 @@ from lab_tracker.models import (
     DatasetCommitManifest,
     DatasetFile,
     DatasetStatus,
+    ExternalArtifactKind,
+    ExternalArtifactReference,
     OutcomeStatus,
     QuestionLink,
     QuestionLinkRole,
@@ -24,8 +26,8 @@ from lab_tracker.provenance import (
 )
 from lab_tracker.provenance_ingestion import (
     EXTERNAL_ARTIFACTS_METADATA_KEY,
-    ExternalArtifactReference,
     dataset_manifest_from_external_artifact,
+    encode_external_artifacts,
     external_artifacts_from_metadata,
 )
 
@@ -160,6 +162,13 @@ def test_external_dataset_artifact_round_trips_through_dataset_provenance():
             "native": {"annex": True},
         },
     )
+    activity = ExternalArtifactReference(
+        kind=ExternalArtifactKind.ACTIVITY,
+        source_system="acquisition-daemon",
+        uri="urn:lab:acquisition-run:run-001",
+        content_hash="sha256:activity456",
+        metadata={"rig": "rig-2"},
+    )
     manifest_input = dataset_manifest_from_external_artifact(
         artifact,
         files=[
@@ -171,10 +180,10 @@ def test_external_dataset_artifact_round_trips_through_dataset_provenance():
         ],
         metadata={"imported_by": "lab-tracker"},
     )
-    decoded_artifacts = external_artifacts_from_metadata(manifest_input.metadata)
 
-    assert decoded_artifacts == [artifact]
-    assert EXTERNAL_ARTIFACTS_METADATA_KEY in manifest_input.metadata
+    assert manifest_input.external_artifacts == [artifact]
+    assert external_artifacts_from_metadata(manifest_input.metadata) == []
+    assert EXTERNAL_ARTIFACTS_METADATA_KEY not in manifest_input.metadata
 
     dataset = Dataset(
         dataset_id=dataset_id,
@@ -186,6 +195,7 @@ def test_external_dataset_artifact_round_trips_through_dataset_provenance():
         ],
         commit_manifest=DatasetCommitManifest(
             files=manifest_input.files,
+            external_artifacts=[*manifest_input.external_artifacts, activity],
             metadata=manifest_input.metadata,
             question_links=[
                 QuestionLink(
@@ -205,12 +215,14 @@ def test_external_dataset_artifact_round_trips_through_dataset_provenance():
         "http://example.test/datasets/aaaaaaaa-1111-1111-1111-aaaaaaaaaaaa/provenance/commit",
     )
     artifact_node = _node_by_id(document, artifact.uri)
+    activity_node = _node_by_id(document, activity.uri)
     question_link_node = _node_by_id(
         document,
         "http://example.test/datasets/aaaaaaaa-1111-1111-1111-aaaaaaaaaaaa/provenance/question-links/bbbbbbbb-2222-2222-2222-bbbbbbbbbbbb",
     )
 
     assert {"@id": artifact.uri} in commit_node["prov:used"]
+    assert commit_node["prov:wasInformedBy"] == [{"@id": activity.uri}]
     assert commit_node["questionLink"] == [{"@id": question_link_node["@id"]}]
     assert artifact_node["@type"] == "prov:Entity"
     assert artifact_node["externalSourceSystem"] == "datalad"
@@ -222,6 +234,44 @@ def test_external_dataset_artifact_round_trips_through_dataset_provenance():
         "labels": ["nwb", "behavior"],
         "native": {"annex": True},
     }
+    assert activity_node["@type"] == "prov:Activity"
+    assert activity_node["externalSourceSystem"] == "acquisition-daemon"
+
+
+def test_legacy_external_artifact_metadata_still_exports_dataset_provenance():
+    dataset_id = UUID("aaaaaaaa-3333-3333-3333-aaaaaaaaaaaa")
+    question_id = UUID("bbbbbbbb-4444-4444-4444-bbbbbbbbbbbb")
+    artifact = ExternalArtifactReference(
+        source_system="dvc",
+        uri="dvc://lab/run-legacy.dvc",
+        content_hash="sha256:legacy-manifest",
+    )
+    dataset = Dataset(
+        dataset_id=dataset_id,
+        project_id=uuid4(),
+        commit_hash="commit-legacy-external",
+        primary_question_id=question_id,
+        question_links=[
+            QuestionLink(question_id=question_id, role=QuestionLinkRole.PRIMARY)
+        ],
+        commit_manifest=DatasetCommitManifest(
+            metadata={EXTERNAL_ARTIFACTS_METADATA_KEY: encode_external_artifacts([artifact])},
+            question_links=[
+                QuestionLink(question_id=question_id, role=QuestionLinkRole.PRIMARY)
+            ],
+        ),
+        status=DatasetStatus.COMMITTED,
+    )
+
+    document = build_dataset_provenance_document("http://example.test", dataset)
+    commit_node = _node_by_id(
+        document,
+        "http://example.test/datasets/aaaaaaaa-3333-3333-3333-aaaaaaaaaaaa/provenance/commit",
+    )
+    artifact_node = _node_by_id(document, artifact.uri)
+
+    assert {"@id": artifact.uri} in commit_node["prov:used"]
+    assert artifact_node["externalContentHash"] == "sha256:legacy-manifest"
 
 
 def test_analysis_provenance_omits_optional_fields_and_preserves_support_links():

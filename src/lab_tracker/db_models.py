@@ -147,6 +147,10 @@ class DatasetModel(Base):
         nullable=False,
     )
     manifest_files: Mapped[list[dict[str, object]]] = mapped_column(JSON, default=list)
+    manifest_external_artifacts: Mapped[list[dict[str, object]]] = mapped_column(
+        JSON,
+        default=list,
+    )
     manifest_metadata: Mapped[dict[str, str]] = mapped_column(JSON, default=dict)
     manifest_nwb_metadata: Mapped[dict[str, str]] = mapped_column(JSON, default=dict)
     manifest_bids_metadata: Mapped[dict[str, str]] = mapped_column(JSON, default=dict)

@@ -21,6 +21,7 @@ from lab_tracker.models import (
     DatasetCommitManifestInput,
     DatasetFile,
     DatasetStatus,
+    ExternalArtifactReference,
     Note,
     NoteMetadataScalar,
     Question,
@@ -29,6 +30,7 @@ from lab_tracker.models import (
     QuestionStatus,
     SessionStatus,
 )
+from lab_tracker.provenance_ingestion import external_artifacts_from_metadata
 
 WRITE_ROLES = {Role.ADMIN, Role.EDITOR}
 StatusT = TypeVar("StatusT", bound=Enum)
@@ -348,6 +350,7 @@ def _merge_acquisition_outputs(
             raise ValidationError("Acquisition output checksum conflict for file path.")
     return DatasetCommitManifestInput(
         files=merged_files,
+        external_artifacts=manifest_input.external_artifacts,
         metadata=manifest_input.metadata,
         nwb_metadata=manifest_input.nwb_metadata,
         bids_metadata=manifest_input.bids_metadata,
@@ -368,9 +371,54 @@ def _normalize_commit_metadata(metadata: dict[str, str] | None) -> dict[str, str
     return cleaned
 
 
+def _legacy_external_artifacts(metadata: dict[str, str]) -> list[ExternalArtifactReference]:
+    try:
+        return external_artifacts_from_metadata(metadata)
+    except ValueError as exc:
+        raise ValidationError(str(exc)) from exc
+
+
+def _normalize_external_artifacts(
+    artifacts: Iterable[ExternalArtifactReference],
+) -> list[ExternalArtifactReference]:
+    normalized: list[ExternalArtifactReference] = []
+    seen: set[tuple[str, str, str]] = set()
+    for artifact in artifacts:
+        item = ExternalArtifactReference.model_validate(artifact)
+        key = _external_artifact_key(item)
+        if key in seen:
+            raise ValidationError("Duplicate external artifact reference in commit manifest.")
+        seen.add(key)
+        normalized.append(item)
+    return normalized
+
+
+def _merge_external_artifacts(
+    artifacts: Iterable[ExternalArtifactReference],
+    legacy_artifacts: Iterable[ExternalArtifactReference],
+) -> list[ExternalArtifactReference]:
+    merged: list[ExternalArtifactReference] = []
+    seen: dict[tuple[str, str, str], ExternalArtifactReference] = {}
+    for artifact in [*legacy_artifacts, *artifacts]:
+        item = ExternalArtifactReference.model_validate(artifact)
+        key = _external_artifact_key(item)
+        if key in seen:
+            if seen[key] != item:
+                raise ValidationError("Conflicting external artifact reference in commit manifest.")
+            continue
+        seen[key] = item
+        merged.append(item)
+    return _normalize_external_artifacts(merged)
+
+
+def _external_artifact_key(artifact: ExternalArtifactReference) -> tuple[str, str, str]:
+    return (artifact.kind.value, artifact.source_system, artifact.uri)
+
+
 def _manifest_input_from_commit(manifest: DatasetCommitManifest) -> DatasetCommitManifestInput:
     return DatasetCommitManifestInput(
         files=list(manifest.files),
+        external_artifacts=list(manifest.external_artifacts),
         metadata=dict(manifest.metadata),
         nwb_metadata=dict(manifest.nwb_metadata),
         bids_metadata=dict(manifest.bids_metadata),
@@ -396,6 +444,7 @@ def _manifest_input_with_source(
         raise ValidationError("commit_manifest source_session_id does not match session.")
     return DatasetCommitManifestInput(
         files=manifest_input.files,
+        external_artifacts=manifest_input.external_artifacts,
         metadata=manifest_input.metadata,
         nwb_metadata=manifest_input.nwb_metadata,
         bids_metadata=manifest_input.bids_metadata,
@@ -415,8 +464,17 @@ def _build_commit_manifest(
     base_metadata = _normalize_commit_metadata(manifest_input.metadata)
     nwb_metadata = _normalize_commit_metadata(manifest_input.nwb_metadata)
     bids_metadata = _normalize_commit_metadata(manifest_input.bids_metadata)
+    legacy_external_artifacts = _legacy_external_artifacts(base_metadata)
+    explicit_external_artifacts = _normalize_external_artifacts(
+        manifest_input.external_artifacts
+    )
+    external_artifacts = _merge_external_artifacts(
+        explicit_external_artifacts,
+        legacy_external_artifacts,
+    )
     return DatasetCommitManifest(
         files=_normalize_dataset_files(manifest_input.files),
+        external_artifacts=external_artifacts,
         metadata=base_metadata,
         nwb_metadata=nwb_metadata,
         bids_metadata=bids_metadata,
@@ -442,6 +500,7 @@ def _manifest_payload(manifest: DatasetCommitManifest) -> dict[str, object]:
         ({"path": file.path, "checksum": file.checksum} for file in manifest.files),
         key=lambda item: (item["path"], item["checksum"]),
     )
+    external_artifacts = _external_artifacts_payload(manifest.external_artifacts)
     links = sorted(
         (
             {
@@ -457,7 +516,7 @@ def _manifest_payload(manifest: DatasetCommitManifest) -> dict[str, object]:
     metadata = {key: manifest.metadata[key] for key in sorted(manifest.metadata)}
     nwb_metadata = {key: manifest.nwb_metadata[key] for key in sorted(manifest.nwb_metadata)}
     bids_metadata = {key: manifest.bids_metadata[key] for key in sorted(manifest.bids_metadata)}
-    return {
+    payload: dict[str, object] = {
         "files": files,
         "metadata": metadata,
         "nwb_metadata": nwb_metadata,
@@ -468,6 +527,29 @@ def _manifest_payload(manifest: DatasetCommitManifest) -> dict[str, object]:
         if manifest.source_session_id
         else None,
     }
+    legacy_external_artifacts = _external_artifacts_payload(
+        _legacy_external_artifacts(manifest.metadata)
+    )
+    if external_artifacts and external_artifacts != legacy_external_artifacts:
+        payload["external_artifacts"] = external_artifacts
+    return payload
+
+
+def _external_artifacts_payload(
+    artifacts: Iterable[ExternalArtifactReference],
+) -> list[dict[str, object]]:
+    return sorted(
+        (
+            artifact.model_dump(mode="json", exclude_none=True)
+            for artifact in artifacts
+        ),
+        key=lambda item: (
+            str(item.get("kind", "")),
+            str(item.get("source_system", "")),
+            str(item.get("uri", "")),
+            str(item.get("content_hash", "")),
+        ),
+    )
 
 
 def _compute_commit_hash(manifest: DatasetCommitManifest) -> str:

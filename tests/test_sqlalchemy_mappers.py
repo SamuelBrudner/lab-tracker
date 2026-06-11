@@ -8,6 +8,7 @@ from lab_tracker.models import (
     DatasetCommitManifest,
     EntityRef,
     EntityType,
+    ExternalArtifactReference,
     Note,
     NoteStatus,
     OutcomeStatus,
@@ -18,6 +19,10 @@ from lab_tracker.models import (
     QuestionLinkRole,
     QuestionStatus,
     QuestionType,
+)
+from lab_tracker.provenance_ingestion import (
+    EXTERNAL_ARTIFACTS_METADATA_KEY,
+    encode_external_artifacts,
 )
 from lab_tracker.schemas import Envelope, ProjectCreate
 from lab_tracker.sqlalchemy_mapper_parts.projects import (
@@ -132,6 +137,12 @@ def test_dataset_mapper_round_trip_preserves_manifest_fields():
             outcome_status=OutcomeStatus.INCONCLUSIVE,
         ),
     ]
+    artifact = ExternalArtifactReference(
+        source_system="s3",
+        uri="s3://lab-bucket/acquisitions/run-001/manifest.json",
+        content_hash="sha256:manifest001",
+        metadata={"file_count": 12},
+    )
     dataset = Dataset(
         dataset_id=uuid4(),
         project_id=uuid4(),
@@ -140,6 +151,7 @@ def test_dataset_mapper_round_trip_preserves_manifest_fields():
         question_links=links,
         commit_manifest=DatasetCommitManifest(
             question_links=links,
+            external_artifacts=[artifact],
             metadata={"run": "7"},
             bids_metadata={"Name": "Example"},
             nwb_metadata={"Session Description": "baseline"},
@@ -157,11 +169,37 @@ def test_dataset_mapper_round_trip_preserves_manifest_fields():
     assert mapped.question_links == links
     assert mapped.commit_manifest.question_links == links
     assert mapped.commit_manifest.files == []
+    assert mapped.commit_manifest.external_artifacts == [artifact]
     assert mapped.commit_manifest.metadata == {"run": "7"}
     assert mapped.commit_manifest.bids_metadata == {"Name": "Example"}
     assert mapped.commit_manifest.nwb_metadata == {"Session Description": "baseline"}
     assert mapped.commit_manifest.note_ids == dataset.commit_manifest.note_ids
     assert mapped.commit_manifest.source_session_id == dataset.commit_manifest.source_session_id
+
+
+def test_dataset_mapper_reads_legacy_external_artifact_metadata():
+    artifact = ExternalArtifactReference(
+        source_system="datalad",
+        uri="datalad://lab/plume-navigation?commit=abc123",
+        content_hash="sha256:manifest123",
+    )
+    dataset = Dataset(
+        dataset_id=uuid4(),
+        project_id=uuid4(),
+        commit_hash="legacy-hash",
+        primary_question_id=uuid4(),
+        question_links=[],
+        commit_manifest=DatasetCommitManifest(
+            metadata={EXTERNAL_ARTIFACTS_METADATA_KEY: encode_external_artifacts([artifact])},
+        ),
+    )
+    row = dataset_to_model(dataset)
+    row.manifest_external_artifacts = []
+
+    mapped = dataset_from_model(row)
+
+    assert mapped.commit_manifest.external_artifacts == [artifact]
+    assert mapped.commit_manifest.metadata == dataset.commit_manifest.metadata
 
 
 def test_note_mapper_round_trip_for_supported_fields():

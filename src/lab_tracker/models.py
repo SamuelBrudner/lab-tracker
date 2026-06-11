@@ -9,13 +9,15 @@ from __future__ import annotations
 
 import base64
 import binascii
+import math
 import re
+from collections.abc import Mapping
 from datetime import date, datetime, timezone
 from enum import Enum
 from typing import Any
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, computed_field
+from pydantic import BaseModel, ConfigDict, Field, computed_field, field_validator
 
 NoteMetadataScalar = str | bool | int | float
 
@@ -240,8 +242,65 @@ class DatasetFile(_DomainModel):
     size_bytes: int | None = None
 
 
+class ExternalArtifactKind(str, Enum):
+    ENTITY = "entity"
+    ACTIVITY = "activity"
+
+
+def _normalize_external_json_value(value: Any) -> Any:
+    if value is None or isinstance(value, str | bool | int):
+        return value
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            raise ValueError("External artifact metadata floats must be finite.")
+        return value
+    if isinstance(value, list):
+        return [_normalize_external_json_value(item) for item in value]
+    if isinstance(value, dict):
+        return _normalize_external_metadata_mapping(value)
+    raise ValueError("External artifact metadata values must be JSON-compatible.")
+
+
+def _normalize_external_metadata_mapping(value: Mapping[object, Any]) -> dict[str, Any]:
+    cleaned: dict[str, Any] = {}
+    for key, metadata_value in value.items():
+        cleaned_key = str(key).strip()
+        if not cleaned_key:
+            raise ValueError("External artifact metadata keys must not be blank.")
+        cleaned[cleaned_key] = _normalize_external_json_value(metadata_value)
+    return cleaned
+
+
+class ExternalArtifactReference(_DomainModel):
+    """Pointer to an artifact owned by an external storage or versioning substrate."""
+
+    model_config = ConfigDict(from_attributes=True, frozen=True)
+
+    kind: ExternalArtifactKind = ExternalArtifactKind.ENTITY
+    source_system: str
+    uri: str
+    content_hash: str
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+    @field_validator("source_system", "uri", "content_hash")
+    @classmethod
+    def _require_nonblank(cls, value: str) -> str:
+        cleaned = value.strip()
+        if not cleaned:
+            raise ValueError("External artifact reference fields must not be blank.")
+        return cleaned
+
+    @field_validator("metadata", mode="before")
+    @classmethod
+    def _normalize_metadata(cls, value: Mapping[object, Any] | None) -> dict[str, Any]:
+        if value is None:
+            return {}
+        return _normalize_external_metadata_mapping(value)
+
+
 class DatasetCommitManifestInput(_DomainModel):
     files: list[DatasetFile] = Field(default_factory=list)
+    external_artifacts: list[ExternalArtifactReference] = Field(default_factory=list)
     metadata: dict[str, str] = Field(default_factory=dict)
     nwb_metadata: dict[str, str] = Field(default_factory=dict)
     bids_metadata: dict[str, str] = Field(default_factory=dict)
@@ -251,6 +310,7 @@ class DatasetCommitManifestInput(_DomainModel):
 
 class DatasetCommitManifest(_DomainModel):
     files: list[DatasetFile] = Field(default_factory=list)
+    external_artifacts: list[ExternalArtifactReference] = Field(default_factory=list)
     metadata: dict[str, str] = Field(default_factory=dict)
     nwb_metadata: dict[str, str] = Field(default_factory=dict)
     bids_metadata: dict[str, str] = Field(default_factory=dict)

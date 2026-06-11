@@ -40,6 +40,7 @@ from lab_tracker.models import (
     DatasetStatus,
     EntityRef,
     EntityType,
+    ExternalArtifactReference,
     Goal,
     GoalLink,
     GoalLinkStatus,
@@ -64,6 +65,7 @@ from lab_tracker.models import (
     Visualization,
     VisualizationAsset,
 )
+from lab_tracker.provenance_ingestion import external_artifacts_from_metadata
 from lab_tracker.sqlalchemy_mapper_parts.projects import (
     apply_project_to_model as apply_project_to_model,
 )
@@ -103,6 +105,20 @@ def _dataset_files_from_json(raw_files: Iterable[object] | None) -> list[Dataset
     if not raw_files:
         return []
     return [DatasetFile.model_validate(item) for item in raw_files]
+
+
+def _external_artifacts_to_json(
+    artifacts: Iterable[ExternalArtifactReference],
+) -> list[dict[str, object]]:
+    return [artifact.model_dump(mode="json", exclude_none=True) for artifact in artifacts]
+
+
+def _external_artifacts_from_json(
+    raw_artifacts: Iterable[object] | None,
+) -> list[ExternalArtifactReference]:
+    if not raw_artifacts:
+        return []
+    return [ExternalArtifactReference.model_validate(item) for item in raw_artifacts]
 
 
 def project_membership_to_model(membership: ProjectMembership) -> ProjectMembershipModel:
@@ -278,6 +294,7 @@ def dataset_to_model(dataset: Dataset) -> DatasetModel:
         commit_hash=dataset.commit_hash,
         primary_question_id=_uuid_str(dataset.primary_question_id),
         manifest_files=_dataset_files_to_json(manifest.files),
+        manifest_external_artifacts=_external_artifacts_to_json(manifest.external_artifacts),
         manifest_metadata=dict(manifest.metadata),
         manifest_nwb_metadata=dict(manifest.nwb_metadata),
         manifest_bids_metadata=dict(manifest.bids_metadata),
@@ -308,9 +325,16 @@ def dataset_from_model(
                 role=QuestionLinkRole.PRIMARY,
             ),
         )
+    metadata = dict(getattr(row, "manifest_metadata", {}) or {})
+    external_artifacts = _external_artifacts_from_json(
+        getattr(row, "manifest_external_artifacts", None)
+    )
+    if not external_artifacts:
+        external_artifacts = external_artifacts_from_metadata(metadata)
     manifest = DatasetCommitManifest(
         files=_dataset_files_from_json(getattr(row, "manifest_files", None)),
-        metadata=dict(getattr(row, "manifest_metadata", {}) or {}),
+        external_artifacts=external_artifacts,
+        metadata=metadata,
         nwb_metadata=dict(getattr(row, "manifest_nwb_metadata", {}) or {}),
         bids_metadata=dict(getattr(row, "manifest_bids_metadata", {}) or {}),
         note_ids=[_uuid(note_id) for note_id in getattr(row, "manifest_note_ids", []) or []],
@@ -361,6 +385,7 @@ def apply_dataset_to_model(row: DatasetModel, dataset: Dataset) -> None:
     row.commit_hash = dataset.commit_hash
     row.primary_question_id = _uuid_str(dataset.primary_question_id)
     row.manifest_files = _dataset_files_to_json(manifest.files)
+    row.manifest_external_artifacts = _external_artifacts_to_json(manifest.external_artifacts)
     row.manifest_metadata = dict(manifest.metadata)
     row.manifest_nwb_metadata = dict(manifest.nwb_metadata)
     row.manifest_bids_metadata = dict(manifest.bids_metadata)

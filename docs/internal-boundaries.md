@@ -59,11 +59,13 @@ workflows. An external artifact reference records:
 - `content_hash`: stable digest of the artifact or manifest
 - `metadata`: tool-native metadata needed for traceability
 
-For retained-v1 datasets, references are encoded in
-`DatasetCommitManifest.metadata["external_artifacts"]`. The provenance exporter
-turns them into first-class `prov:Entity` or `prov:Activity` nodes and links them
-to the dataset commit activity. This keeps adapters optional and thin while
-preserving semantic edges to questions and claims in Lab Tracker.
+For retained-v1 datasets, references live in
+`DatasetCommitManifest.external_artifacts`. Older rows that encoded references
+in `DatasetCommitManifest.metadata["external_artifacts"]` remain readable as a
+legacy compatibility path. The provenance exporter turns both shapes into
+first-class `prov:Entity` or `prov:Activity` nodes and links them to the dataset
+commit activity. This keeps adapters optional and thin while preserving semantic
+edges to questions and claims in Lab Tracker.
 
 ## Database Artifacts
 

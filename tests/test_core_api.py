@@ -11,6 +11,7 @@ from lab_tracker.models import (
     DatasetStatus,
     EntityRef,
     EntityType,
+    ExternalArtifactReference,
     QuestionLinkRole,
     QuestionStatus,
     QuestionType,
@@ -21,6 +22,18 @@ from lab_tracker.models import (
 
 def _actor(role: Role = Role.ADMIN) -> AuthContext:
     return AuthContext(user_id=uuid4(), role=role)
+
+
+def _external_artifact(
+    uri: str = "s3://lab-bucket/acquisitions/run-001/manifest.json",
+    content_hash: str = "sha256:manifest001",
+) -> ExternalArtifactReference:
+    return ExternalArtifactReference(
+        source_system="s3",
+        uri=uri,
+        content_hash=content_hash,
+        metadata={"file_count": 12, "total_size_bytes": 1024},
+    )
 
 
 def test_project_question_dataset_flow():
@@ -97,6 +110,60 @@ def test_commit_hash_is_content_addressed():
         actor=actor,
     )
     assert updated.commit_hash != original_hash
+
+
+def test_external_artifacts_are_content_addressed_deterministically():
+    api = repository_backed_api()
+    actor = _actor()
+    project = api.create_project("Neuro Project", actor=actor)
+    question = api.create_question(
+        project_id=project.project_id,
+        text="What is the external run identity?",
+        question_type=QuestionType.DESCRIPTIVE,
+        actor=actor,
+    )
+    first_artifact = _external_artifact(
+        uri="s3://lab-bucket/acquisitions/run-001/manifest.json",
+        content_hash="sha256:manifest001",
+    )
+    second_artifact = _external_artifact(
+        uri="datalad://lab/run-001?commit=abc123",
+        content_hash="sha256:manifest002",
+    )
+
+    first = api.create_dataset(
+        project_id=project.project_id,
+        primary_question_id=question.question_id,
+        commit_manifest=DatasetCommitManifestInput(
+            external_artifacts=[second_artifact, first_artifact]
+        ),
+        actor=actor,
+    )
+    reordered = api.create_dataset(
+        project_id=project.project_id,
+        primary_question_id=question.question_id,
+        commit_manifest=DatasetCommitManifestInput(
+            external_artifacts=[first_artifact, second_artifact]
+        ),
+        actor=actor,
+    )
+    changed = api.create_dataset(
+        project_id=project.project_id,
+        primary_question_id=question.question_id,
+        commit_manifest=DatasetCommitManifestInput(
+            external_artifacts=[
+                first_artifact,
+                _external_artifact(
+                    uri=second_artifact.uri,
+                    content_hash="sha256:changed",
+                ),
+            ]
+        ),
+        actor=actor,
+    )
+
+    assert reordered.commit_hash == first.commit_hash
+    assert changed.commit_hash != first.commit_hash
 
 
 def test_dataset_commit_manifest_preserves_nwb_metadata_keys():
@@ -211,7 +278,7 @@ def test_dataset_commit_requires_active_question():
     assert committed.status == DatasetStatus.COMMITTED
 
 
-def test_dataset_commit_requires_file_attachment():
+def test_dataset_commit_requires_evidence_source():
     api = repository_backed_api()
     actor = _actor()
     project = api.create_project("Neuro Project", actor=actor)
@@ -227,8 +294,59 @@ def test_dataset_commit_requires_file_attachment():
         primary_question_id=question.question_id,
         actor=actor,
     )
-    with pytest.raises(ValidationError, match="At least one file is required to commit a dataset."):
+    with pytest.raises(
+        ValidationError,
+        match="At least one file or external artifact is required to commit a dataset.",
+    ):
         api.update_dataset(dataset.dataset_id, status=DatasetStatus.COMMITTED, actor=actor)
+
+
+def test_dataset_commit_accepts_external_artifact_without_file_attachment():
+    api = repository_backed_api()
+    actor = _actor()
+    project = api.create_project("Neuro Project", actor=actor)
+    question = api.create_question(
+        project_id=project.project_id,
+        text="Can large external runs be committed by reference?",
+        question_type=QuestionType.DESCRIPTIVE,
+        status=QuestionStatus.ACTIVE,
+        actor=actor,
+    )
+
+    dataset = api.create_dataset(
+        project_id=project.project_id,
+        primary_question_id=question.question_id,
+        status=DatasetStatus.COMMITTED,
+        commit_manifest=DatasetCommitManifestInput(external_artifacts=[_external_artifact()]),
+        actor=actor,
+    )
+
+    assert dataset.status == DatasetStatus.COMMITTED
+    assert dataset.commit_manifest.files == []
+    assert dataset.commit_manifest.external_artifacts == [_external_artifact()]
+
+
+def test_dataset_manifest_rejects_duplicate_external_artifact_reference():
+    api = repository_backed_api()
+    actor = _actor()
+    project = api.create_project("Neuro Project", actor=actor)
+    question = api.create_question(
+        project_id=project.project_id,
+        text="Can duplicate external references be rejected?",
+        question_type=QuestionType.DESCRIPTIVE,
+        actor=actor,
+    )
+    artifact = _external_artifact()
+
+    with pytest.raises(ValidationError, match="Duplicate external artifact reference"):
+        api.create_dataset(
+            project_id=project.project_id,
+            primary_question_id=question.question_id,
+            commit_manifest=DatasetCommitManifestInput(
+                external_artifacts=[artifact, artifact]
+            ),
+            actor=actor,
+        )
 
 
 @pytest.mark.parametrize(

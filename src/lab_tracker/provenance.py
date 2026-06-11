@@ -9,16 +9,15 @@ from lab_tracker.models import (
     Analysis,
     Claim,
     Dataset,
+    DatasetCommitManifest,
     DatasetFile,
+    ExternalArtifactKind,
+    ExternalArtifactReference,
     QuestionLink,
     QuestionLinkRole,
     Visualization,
 )
-from lab_tracker.provenance_ingestion import (
-    ExternalArtifactKind,
-    ExternalArtifactReference,
-    external_artifacts_from_metadata,
-)
+from lab_tracker.provenance_ingestion import external_artifacts_from_metadata
 
 
 def _normalize_base_url(base_url: str) -> str:
@@ -136,6 +135,14 @@ def _dataset_file_node(base_url: str, dataset: Dataset, file: DatasetFile) -> di
     return node
 
 
+def _manifest_external_artifacts(
+    manifest: DatasetCommitManifest,
+) -> list[ExternalArtifactReference]:
+    if manifest.external_artifacts:
+        return list(manifest.external_artifacts)
+    return external_artifacts_from_metadata(manifest.metadata)
+
+
 def _external_artifact_node(artifact: ExternalArtifactReference) -> dict[str, object]:
     node: dict[str, object] = {
         "@id": artifact.uri,
@@ -166,7 +173,7 @@ def build_dataset_provenance_document(base_url: str, dataset: Dataset) -> dict[s
     files = _sorted_dataset_files(dataset.commit_manifest.files)
     question_links = _sorted_question_links(dataset.commit_manifest.question_links)
     notes = sorted(dataset.commit_manifest.note_ids, key=str)
-    external_artifacts = external_artifacts_from_metadata(dataset.commit_manifest.metadata)
+    external_artifacts = _manifest_external_artifacts(dataset.commit_manifest)
     graph: list[dict[str, object]] = []
 
     dataset_node: dict[str, object] = {
