@@ -9,6 +9,8 @@ from lab_tracker_client import (
     EntityRef,
     LabTracker,
     LTValidationError,
+    build_evidence_metadata,
+    file_sha256,
     first_line_marker,
 )
 
@@ -181,6 +183,114 @@ def test_quick_capture_posts_text_as_multipart_file() -> None:
 
     assert note.id == "note-quick"
     assert len(seen) == 1
+
+
+def test_upload_note_file_posts_staged_evidence_multipart(tmp_path) -> None:
+    evidence_path = tmp_path / "bench.md"
+    evidence_path.write_text("bench observation", encoding="utf-8")
+    metadata = build_evidence_metadata(
+        source_provider="local-folder",
+        source_uri=evidence_path.resolve().as_uri(),
+        source_external_id="bench.md",
+        content_hash=file_sha256(evidence_path),
+        capture_kind="file",
+        adapter="test-adapter",
+        title="bench.md",
+        observed_at="2026-06-11T12:00:00+00:00",
+    )
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        body = request.content
+        assert request.method == "POST"
+        assert request.url.path == "/notes/upload-file"
+        assert b"bench observation" in body
+        assert b"bench.md" in body
+        assert b"staged" in body
+        assert b"evidence_source_provider" in body
+        assert b"local-folder" in body
+        assert b"evidence_content_hash" in body
+        return _json_response(
+            201,
+            {
+                "data": {
+                    "note_id": "note-file",
+                    "project_id": "project-1",
+                    "status": "staged",
+                    "metadata": metadata,
+                }
+            },
+        )
+
+    with LabTracker(base_url="http://testserver", transport=httpx.MockTransport(handler)) as lt:
+        note = lt.upload_note_file(
+            project_id="project-1",
+            file_path=evidence_path,
+            metadata=metadata,
+        )
+
+    assert note.id == "note-file"
+    assert len(seen) == 1
+
+
+def test_import_evidence_file_skips_duplicate_and_imports_changed_content(tmp_path) -> None:
+    evidence_path = tmp_path / "bench.md"
+    evidence_path.write_text("bench observation", encoding="utf-8")
+    original_hash = file_sha256(evidence_path)
+    notes = [
+        {
+            "note_id": "note-existing",
+            "project_id": "project-1",
+            "metadata": {
+                "evidence_source_provider": "local-folder",
+                "evidence_source_external_id": "bench.md",
+                "evidence_content_hash": original_hash,
+            },
+        }
+    ]
+    post_count = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal post_count
+        if request.method == "GET" and request.url.path == "/notes":
+            return _json_response(
+                200,
+                {"data": notes, "meta": {"limit": 200, "offset": 0, "total": len(notes)}},
+            )
+        if request.method == "POST" and request.url.path == "/notes/upload-file":
+            post_count += 1
+            return _json_response(
+                201,
+                {
+                    "data": {
+                        "note_id": "note-new",
+                        "project_id": "project-1",
+                        "metadata": {},
+                    }
+                },
+            )
+        return _json_response(404, {"error": {"message": "not found"}})
+
+    with LabTracker(base_url="http://testserver", transport=httpx.MockTransport(handler)) as lt:
+        duplicate = lt.import_evidence_file(
+            project_id="project-1",
+            file_path=evidence_path,
+            source_external_id="bench.md",
+        )
+        evidence_path.write_text("changed observation", encoding="utf-8")
+        changed = lt.import_evidence_file(
+            project_id="project-1",
+            file_path=evidence_path,
+            source_external_id="bench.md",
+        )
+
+    assert duplicate.action == "skipped"
+    assert duplicate.reason == "duplicate"
+    assert duplicate.note and duplicate.note.id == "note-existing"
+    assert changed.action == "imported"
+    assert changed.note and changed.note.id == "note-new"
+    assert post_count == 1
 
 
 def test_auth_login_and_retry_after_unauthorized() -> None:

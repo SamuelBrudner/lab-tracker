@@ -9,6 +9,7 @@ Lab Tracker keeps the *reasoning* behind experiments connected to the data they 
 - **Notes attached to entities.** Manual note capture — text, multipart raw file upload/download, and raw voice notes with editable transcripts — attached to the project, question, session, dataset, analysis, or claim they describe. Notes stay as the raw human record.
 - **Analysis, claims, visualizations.** Explicit records linking analysis runs back to the datasets and questions they address, with claims and visualizations as first-class artifacts.
 - **Mobile multimodal graph-aware draft review.** Phone capture stores raw photo, voice, photo+voice bundle, or text notes, builds a project-scoped graph context packet, asks GPT for reviewable draft operations, then humans edit, accept/reject, and commit through the same API validation as normal writes.
+- **External evidence inboxes.** Synced local folders can be imported as staged evidence notes with source metadata; graph changes remain human-reviewed drafts.
 - **Search.** Substring search over questions and notes so prior context is findable later.
 
 What ships today is the minimum that preserves the core research record. The supported surface is defined in [`docs/retained-v1-surface.md`](docs/retained-v1-surface.md) — if it and this README disagree, that document wins. The broader vision (meeting-photo question capture, OCR, vector search, PI review gates) lives in [`idea.md`](idea.md) and is explicitly deferred.
@@ -204,6 +205,23 @@ fields, clarification requests, operation statuses, and commit timing. Suggested
 evaluation metrics are accepted/edited/rejected operations, duplicate entity
 proposals, reviewer edit burden, time from capture to commit, and uncertainty
 quality. Offline queued capture is intentionally deferred in this release.
+
+### Local evidence inbox imports
+
+Use `lt import-folder` to turn files from a local or synced folder into staged
+evidence notes. This works for folders synced by Google Drive, Dropbox, OneDrive,
+or similar tools without adding a provider-specific OAuth workflow:
+
+```bash
+LAB_TRACKER_BASE_URL=http://127.0.0.1:8000 \
+LAB_TRACKER_PROJECT_ID=<project-id> \
+lt import-folder --project "$LAB_TRACKER_PROJECT_ID" --root /path/to/lab-inbox
+```
+
+The adapter records `evidence_source_*` metadata, skips duplicates by source ID
+and content hash, and never commits graph changes. Scheduled graph-draft batches
+can later propose reviewable graph updates from the staged notes. See
+[`docs/evidence-source-metadata.md`](docs/evidence-source-metadata.md).
 
 The retained v1 runtime keeps note handling manual and uses direct substring
 search for query flows. Deferred concepts live in

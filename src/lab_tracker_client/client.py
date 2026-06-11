@@ -2,10 +2,14 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
+import mimetypes
 import os
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from contextlib import suppress
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -54,6 +58,17 @@ _ID_FIELDS = (
     "project_id",
 )
 
+EVIDENCE_METADATA_KEYS = (
+    "evidence_source_provider",
+    "evidence_source_uri",
+    "evidence_source_external_id",
+    "evidence_source_observed_at",
+    "evidence_capture_kind",
+    "evidence_content_hash",
+    "evidence_adapter",
+    "evidence_title",
+)
+
 
 class LTError(RuntimeError):
     """Base exception for Lab Tracker client failures."""
@@ -85,6 +100,40 @@ class LTRecord(dict[str, Any]):
 
     def to_dict(self) -> dict[str, Any]:
         return dict(self)
+
+
+@dataclass(frozen=True)
+class EvidenceImportResult:
+    """Outcome from importing one external evidence source item."""
+
+    action: str
+    path: str
+    source_external_id: str
+    source_uri: str
+    content_hash: str
+    metadata: dict[str, NoteMetadataScalar]
+    note: LTRecord | None = None
+    reason: str = ""
+    errors: list[str] = field(default_factory=list)
+
+    def to_dict(self) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "action": self.action,
+            "path": self.path,
+            "source_external_id": self.source_external_id,
+            "source_uri": self.source_uri,
+            "evidence_content_hash": self.content_hash,
+            "metadata": dict(self.metadata),
+        }
+        if self.note is not None:
+            payload["note"] = self.note.to_dict()
+            with suppress(AttributeError):
+                payload["note_id"] = self.note.id
+        if self.reason:
+            payload["reason"] = self.reason
+        if self.errors:
+            payload["errors"] = list(self.errors)
+        return payload
 
 
 @dataclass(frozen=True)
@@ -469,6 +518,27 @@ class LabTracker:
                 return note
         return None
 
+    def find_evidence_note(
+        self,
+        *,
+        project_id: str,
+        source_provider: str,
+        source_external_id: str,
+        content_hash: str,
+    ) -> LTRecord | None:
+        provider = _require_non_empty(source_provider, "source_provider")
+        external_id = _require_non_empty(source_external_id, "source_external_id")
+        digest = _require_non_empty(content_hash, "content_hash")
+        for note in self.list_notes(project_id=str(project_id)):
+            if evidence_note_matches(
+                note,
+                source_provider=provider,
+                source_external_id=external_id,
+                content_hash=digest,
+            ):
+                return note
+        return None
+
     def upsert_note(
         self,
         *,
@@ -540,6 +610,126 @@ class LabTracker:
                 data=data,
                 files={"file": (_require_non_empty(filename, "filename"), body, content_type)},
             )
+        )
+
+    def upload_note_file(
+        self,
+        *,
+        project_id: str,
+        file_path: str | Path,
+        metadata: Mapping[str, NoteMetadataScalar] | None = None,
+        status: str = NoteStatus.STAGED.value,
+        content_type: str | None = None,
+        transcribed_text: str | None = None,
+    ) -> LTRecord:
+        path = Path(file_path).expanduser()
+        try:
+            payload = path.read_bytes()
+        except OSError as exc:
+            raise LTValidationError(f"Could not read note file {path}: {exc}") from exc
+        if not payload:
+            raise LTValidationError("file_path must point to a non-empty file.")
+        resolved_status = _validate_enum(
+            status,
+            field_name="note status",
+            allowed_values=NOTE_STATUS_VALUES,
+        )
+        resolved_metadata = _validate_metadata(metadata)
+        resolved_content_type = (
+            content_type
+            or mimetypes.guess_type(path.name)[0]
+            or "application/octet-stream"
+        )
+        data: dict[str, str] = {
+            "project_id": _require_non_empty(str(project_id), "project_id"),
+            "status": resolved_status,
+        }
+        if resolved_metadata:
+            data["metadata"] = json.dumps(resolved_metadata, sort_keys=True)
+        if transcribed_text:
+            data["transcribed_text"] = transcribed_text
+        return self._data_record(
+            self._request(
+                "POST",
+                "/notes/upload-file",
+                data=data,
+                files={"file": (path.name, payload, resolved_content_type)},
+            )
+        )
+
+    def import_evidence_file(
+        self,
+        *,
+        project_id: str,
+        file_path: str | Path,
+        source_provider: str = "local-folder",
+        source_external_id: str | None = None,
+        source_uri: str | None = None,
+        adapter: str = "lt-import-folder",
+        title: str | None = None,
+        metadata: Mapping[str, NoteMetadataScalar] | None = None,
+        status: str = NoteStatus.STAGED.value,
+        content_type: str | None = None,
+        dry_run: bool = False,
+    ) -> EvidenceImportResult:
+        path = Path(file_path).expanduser().resolve()
+        if not path.is_file():
+            raise LTValidationError(f"Evidence path is not a file: {path}")
+        content_hash = file_sha256(path)
+        resolved_source_uri = source_uri or path.as_uri()
+        resolved_external_id = source_external_id or resolved_source_uri
+        evidence_metadata = build_evidence_metadata(
+            source_provider=source_provider,
+            source_uri=resolved_source_uri,
+            source_external_id=resolved_external_id,
+            content_hash=content_hash,
+            capture_kind="file",
+            adapter=adapter,
+            title=title or path.name,
+            metadata=metadata,
+        )
+        existing = self.find_evidence_note(
+            project_id=project_id,
+            source_provider=source_provider,
+            source_external_id=resolved_external_id,
+            content_hash=content_hash,
+        )
+        if existing is not None:
+            return EvidenceImportResult(
+                action="skipped",
+                path=str(path),
+                source_external_id=resolved_external_id,
+                source_uri=resolved_source_uri,
+                content_hash=content_hash,
+                metadata=evidence_metadata,
+                note=existing,
+                reason="duplicate",
+            )
+        if dry_run:
+            return EvidenceImportResult(
+                action="skipped",
+                path=str(path),
+                source_external_id=resolved_external_id,
+                source_uri=resolved_source_uri,
+                content_hash=content_hash,
+                metadata=evidence_metadata,
+                reason="dry_run",
+            )
+        note = self.upload_note_file(
+            project_id=project_id,
+            file_path=path,
+            metadata=evidence_metadata,
+            status=status,
+            content_type=content_type,
+        )
+        return EvidenceImportResult(
+            action="imported",
+            path=str(path),
+            source_external_id=resolved_external_id,
+            source_uri=resolved_source_uri,
+            content_hash=content_hash,
+            metadata=evidence_metadata,
+            note=note,
         )
 
     def _list_all(
@@ -666,6 +856,79 @@ def first_line_marker(content: str) -> str:
     return ""
 
 
+def file_sha256(path: str | Path) -> str:
+    digest = hashlib.sha256()
+    resolved = Path(path).expanduser()
+    try:
+        with resolved.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(chunk)
+    except OSError as exc:
+        raise LTValidationError(f"Could not read evidence file {resolved}: {exc}") from exc
+    return digest.hexdigest()
+
+
+def build_evidence_metadata(
+    *,
+    source_provider: str,
+    source_uri: str,
+    source_external_id: str,
+    content_hash: str,
+    capture_kind: str,
+    adapter: str,
+    title: str,
+    observed_at: str | datetime | None = None,
+    metadata: Mapping[str, NoteMetadataScalar] | None = None,
+) -> dict[str, NoteMetadataScalar]:
+    resolved_metadata = dict(_validate_metadata(metadata) or {})
+    observed = observed_at
+    if isinstance(observed, datetime):
+        if observed.tzinfo is None:
+            observed = observed.replace(tzinfo=timezone.utc)
+        observed = observed.astimezone(timezone.utc).isoformat()
+    elif observed is None:
+        observed = datetime.now(timezone.utc).isoformat()
+    resolved_metadata.update(
+        {
+            "evidence_source_provider": _require_non_empty(
+                source_provider,
+                "source_provider",
+            ),
+            "evidence_source_uri": _require_non_empty(source_uri, "source_uri"),
+            "evidence_source_external_id": _require_non_empty(
+                source_external_id,
+                "source_external_id",
+            ),
+            "evidence_source_observed_at": _require_non_empty(
+                str(observed),
+                "observed_at",
+            ),
+            "evidence_capture_kind": _require_non_empty(capture_kind, "capture_kind"),
+            "evidence_content_hash": _require_non_empty(content_hash, "content_hash"),
+            "evidence_adapter": _require_non_empty(adapter, "adapter"),
+            "evidence_title": _require_non_empty(title, "title"),
+        }
+    )
+    return resolved_metadata
+
+
+def evidence_note_matches(
+    note: Mapping[str, Any],
+    *,
+    source_provider: str,
+    source_external_id: str,
+    content_hash: str,
+) -> bool:
+    metadata = note.get("metadata")
+    if not isinstance(metadata, Mapping):
+        return False
+    return (
+        str(metadata.get("evidence_source_provider") or "") == source_provider
+        and str(metadata.get("evidence_source_external_id") or "") == source_external_id
+        and str(metadata.get("evidence_content_hash") or "") == content_hash
+    )
+
+
 def ids(path: str | Path = "lt_ids.json") -> dict[str, str]:
     resolved = Path(path)
     try:
@@ -753,6 +1016,18 @@ def upsert_note(**kwargs: Any) -> LTRecord:
 
 def quick_capture(text: str | bytes, **kwargs: Any) -> LTRecord:
     return client.quick_capture(text, **kwargs)
+
+
+def find_evidence_note(**kwargs: Any) -> LTRecord | None:
+    return client.find_evidence_note(**kwargs)
+
+
+def upload_note_file(**kwargs: Any) -> LTRecord:
+    return client.upload_note_file(**kwargs)
+
+
+def import_evidence_file(**kwargs: Any) -> EvidenceImportResult:
+    return client.import_evidence_file(**kwargs)
 
 
 def _record(payload: Any) -> LTRecord:

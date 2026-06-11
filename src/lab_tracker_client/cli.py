@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import fnmatch
 import json
 from pathlib import Path
 from typing import Any
@@ -10,6 +11,7 @@ from typing import Any
 from lab_tracker_client.client import (
     NOTE_STATUS_VALUES,
     EntityRef,
+    EvidenceImportResult,
     LabTracker,
     ids,
 )
@@ -64,6 +66,52 @@ def _build_parser() -> argparse.ArgumentParser:
     quick_parser.add_argument("--source")
     quick_parser.set_defaults(func=_cmd_quick)
 
+    import_folder_parser = subcommands.add_parser(
+        "import-folder",
+        help="Import files from a local or synced folder as staged evidence notes.",
+    )
+    import_folder_parser.add_argument("--project", required=True, help="Project UUID.")
+    import_folder_parser.add_argument("--root", required=True, help="Folder to scan.")
+    import_folder_parser.add_argument(
+        "--provider",
+        default="local-folder",
+        help="Evidence source provider name. Defaults to local-folder.",
+    )
+    import_folder_parser.add_argument(
+        "--include",
+        action="append",
+        default=[],
+        help="Glob for relative paths to include. Repeatable. Defaults to all files.",
+    )
+    import_folder_parser.add_argument(
+        "--exclude",
+        action="append",
+        default=[],
+        help="Glob for relative paths to exclude. Repeatable.",
+    )
+    import_folder_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Report what would be imported without creating notes.",
+    )
+    import_folder_parser.add_argument(
+        "--limit",
+        type=int,
+        help="Maximum number of matched files to process.",
+    )
+    import_folder_parser.add_argument(
+        "--adapter-name",
+        default="lt-import-folder",
+        help="Adapter identifier recorded in evidence metadata.",
+    )
+    import_folder_parser.add_argument(
+        "--status",
+        choices=NOTE_STATUS_VALUES,
+        default="staged",
+        help="Note status for imported files. Defaults to staged.",
+    )
+    import_folder_parser.set_defaults(func=_cmd_import_folder)
+
     questions_parser = subcommands.add_parser("list-questions")
     questions_parser.add_argument("--project", required=True)
     questions_parser.add_argument("--status")
@@ -94,6 +142,63 @@ def _cmd_quick(client: LabTracker, args: argparse.Namespace) -> Any:
     return client.quick_capture(args.text, project_id=args.project, source=args.source)
 
 
+def _cmd_import_folder(client: LabTracker, args: argparse.Namespace) -> Any:
+    root = Path(args.root).expanduser().resolve()
+    if not root.is_dir():
+        raise SystemExit(f"--root must be an existing directory: {root}")
+    if args.limit is not None and args.limit < 0:
+        raise SystemExit("--limit must be 0 or greater.")
+    candidates = _discover_import_files(
+        root,
+        include_patterns=args.include or ["*"],
+        exclude_patterns=args.exclude,
+    )
+    matched_count = len(candidates)
+    if args.limit is not None:
+        candidates = candidates[: args.limit]
+    summary: dict[str, Any] = {
+        "root": str(root),
+        "project_id": args.project,
+        "provider": args.provider,
+        "adapter": args.adapter_name,
+        "dry_run": bool(args.dry_run),
+        "matched": matched_count,
+        "processed": len(candidates),
+        "imported": [],
+        "skipped": [],
+        "errors": [],
+    }
+    for path in candidates:
+        relative_path = path.relative_to(root).as_posix()
+        try:
+            result = client.import_evidence_file(
+                project_id=args.project,
+                file_path=path,
+                source_provider=args.provider,
+                source_external_id=relative_path,
+                source_uri=path.as_uri(),
+                adapter=args.adapter_name,
+                title=path.name,
+                status=args.status,
+                dry_run=args.dry_run,
+            )
+        except Exception as exc:  # noqa: BLE001 - continue importing remaining inbox files.
+            summary["errors"].append(
+                {
+                    "path": str(path),
+                    "source_external_id": relative_path,
+                    "error": str(exc),
+                }
+            )
+            continue
+        item = result.to_dict()
+        if result.action == "imported":
+            summary["imported"].append(item)
+        else:
+            summary["skipped"].append(item)
+    return summary
+
+
 def _cmd_list_questions(client: LabTracker, args: argparse.Namespace) -> Any:
     return client.list_questions(
         project_id=args.project,
@@ -113,7 +218,34 @@ def _target(value: str) -> EntityRef:
     return EntityRef(entity_type, entity_id)
 
 
+def _discover_import_files(
+    root: Path,
+    *,
+    include_patterns: list[str],
+    exclude_patterns: list[str],
+) -> list[Path]:
+    files = [path for path in root.rglob("*") if path.is_file()]
+    return [
+        path
+        for path in sorted(files, key=lambda item: item.relative_to(root).as_posix())
+        if _matches_any(path, root=root, patterns=include_patterns)
+        and not _matches_any(path, root=root, patterns=exclude_patterns)
+    ]
+
+
+def _matches_any(path: Path, *, root: Path, patterns: list[str]) -> bool:
+    if not patterns:
+        return False
+    relative_path = path.relative_to(root).as_posix()
+    return any(
+        fnmatch.fnmatch(relative_path, pattern) or fnmatch.fnmatch(path.name, pattern)
+        for pattern in patterns
+    )
+
+
 def _jsonable(value: Any) -> Any:
+    if isinstance(value, EvidenceImportResult):
+        return value.to_dict()
     if isinstance(value, dict):
         return dict(value)
     if isinstance(value, list):
