@@ -5,6 +5,7 @@
  */
 
 import { createUploadQueue } from "./upload-queue.js";
+import { TOKEN_STORAGE_KEY } from "./constants.js";
 
 let cachedQueue = null;
 
@@ -29,6 +30,40 @@ export function getUploadQueue() {
 
 export function resetUploadQueueForTests() {
   cachedQueue = null;
+}
+
+function storedToken() {
+  try {
+    return globalThis.localStorage?.getItem(TOKEN_STORAGE_KEY) || "";
+  } catch {
+    return "";
+  }
+}
+
+export function droppedUploadsMessage(dropped) {
+  const count = Array.isArray(dropped) ? dropped.length : 0;
+  if (count <= 0) {
+    return "";
+  }
+  return count === 1
+    ? "1 queued capture could not be uploaded. Please capture it again."
+    : `${count} queued captures could not be uploaded. Please capture them again.`;
+}
+
+function readToken(getToken) {
+  try {
+    return getToken?.() || "";
+  } catch {
+    return "";
+  }
+}
+
+function surfaceDroppedUploads(result, onDropped) {
+  const dropped = result?.dropped || [];
+  if (dropped.length === 0 || typeof onDropped !== "function") {
+    return;
+  }
+  onDropped(dropped, result);
 }
 
 export function registerServiceWorker(
@@ -63,15 +98,25 @@ export function registerServiceWorker(
     .catch(() => null);
 }
 
-export function installOfflineRetry({ queue = getUploadQueue() } = {}) {
+export function installOfflineRetry({
+  queue = getUploadQueue(),
+  getToken = storedToken,
+  onDropped = () => {},
+} = {}) {
   if (!queue || typeof window === "undefined") {
     return () => {};
   }
   const handleOnline = () => {
-    queue.drain().catch(() => {});
+    queue
+      .drain({ token: readToken(getToken) })
+      .then((result) => surfaceDroppedUploads(result, onDropped))
+      .catch(() => {});
   };
   window.addEventListener("online", handleOnline);
   // Drain at boot too, in case the app was relaunched after going offline.
-  queue.drain().catch(() => {});
+  queue
+    .drain({ token: readToken(getToken) })
+    .then((result) => surfaceDroppedUploads(result, onDropped))
+    .catch(() => {});
   return () => window.removeEventListener("online", handleOnline);
 }

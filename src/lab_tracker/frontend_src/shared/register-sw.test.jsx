@@ -1,6 +1,10 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { registerServiceWorker } from "./register-sw.js";
+import {
+  droppedUploadsMessage,
+  installOfflineRetry,
+  registerServiceWorker,
+} from "./register-sw.js";
 
 const originalServiceWorker = navigator.serviceWorker;
 
@@ -66,5 +70,38 @@ describe("registerServiceWorker", () => {
     await registerServiceWorker("/app/sw.js", { reloadWindow: vi.fn() });
 
     expect(serviceWorker.addEventListener).not.toHaveBeenCalled();
+  });
+});
+
+describe("installOfflineRetry", () => {
+  it("drains with the current token and surfaces dropped uploads", async () => {
+    const dropped = [{ id: 1, rejectedStatus: 422 }];
+    const queue = {
+      drain: vi.fn(async () => ({ dropped, uploaded: [], stillQueued: [] })),
+    };
+    const onDropped = vi.fn();
+
+    const cleanup = installOfflineRetry({
+      queue,
+      getToken: () => "fresh-token",
+      onDropped,
+    });
+
+    await Promise.resolve();
+
+    expect(queue.drain).toHaveBeenCalledWith({ token: "fresh-token" });
+    expect(onDropped).toHaveBeenCalledWith(dropped, {
+      dropped,
+      uploaded: [],
+      stillQueued: [],
+    });
+
+    cleanup();
+  });
+
+  it("formats dropped upload messages", () => {
+    expect(droppedUploadsMessage([{ id: 1 }])).toContain("1 queued capture");
+    expect(droppedUploadsMessage([{ id: 1 }, { id: 2 }])).toContain("2 queued captures");
+    expect(droppedUploadsMessage([])).toBe("");
   });
 });

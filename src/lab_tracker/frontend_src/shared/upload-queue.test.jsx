@@ -138,7 +138,25 @@ describe("createUploadQueue", () => {
     expect(await queue.pendingCount()).toBe(0);
   });
 
-  it.each([401, 408, 429])("keeps retryable %i responses queued", async (status) => {
+  it.each([401, 403])("keeps auth %i responses queued without burning retries", async (status) => {
+    const storage = createMemoryStorage();
+    const fetchImpl = vi.fn(async () => ({ ok: false, status }));
+    const queue = createUploadQueue({ storage, fetch: fetchImpl, now: () => 1234 });
+
+    await queue.enqueue({
+      endpoint: UPLOAD_FILE_PATH,
+      file: makeFile(),
+      fields: { project_id: "proj-a" },
+    });
+    const result = await queue.drain();
+    expect(result.dropped).toHaveLength(0);
+    expect(result.stillQueued).toHaveLength(1);
+    expect(result.stillQueued[0].lastStatus).toBe(status);
+    expect(result.stillQueued[0].retryCount).toBeUndefined();
+    expect(await queue.pendingCount()).toBe(1);
+  });
+
+  it.each([408, 429])("keeps retryable %i responses queued with a retry cap", async (status) => {
     const storage = createMemoryStorage();
     const fetchImpl = vi.fn(async () => ({ ok: false, status }));
     const queue = createUploadQueue({ storage, fetch: fetchImpl, now: () => 1234 });
@@ -153,6 +171,44 @@ describe("createUploadQueue", () => {
     expect(result.stillQueued).toHaveLength(1);
     expect(result.stillQueued[0].lastStatus).toBe(status);
     expect(result.stillQueued[0].retryCount).toBe(1);
+    expect(await queue.pendingCount()).toBe(1);
+  });
+
+  it("uses the live drain token instead of the enqueue-time token", async () => {
+    const storage = createMemoryStorage();
+    const fetchImpl = vi.fn(async () => ({ ok: true, status: 201 }));
+    const queue = createUploadQueue({ storage, fetch: fetchImpl });
+
+    await queue.enqueue({
+      endpoint: UPLOAD_FILE_PATH,
+      file: makeFile(),
+      fields: { project_id: "proj-a" },
+      token: "expired-token",
+    });
+
+    await queue.drain({ token: "fresh-token" });
+
+    expect(fetchImpl.mock.calls[0][1].headers.Authorization).toBe("Bearer fresh-token");
+  });
+
+  it("does not drop auth failures after repeated drains", async () => {
+    const storage = createMemoryStorage();
+    const fetchImpl = vi.fn(async () => ({ ok: false, status: 401 }));
+    const queue = createUploadQueue({ storage, fetch: fetchImpl });
+
+    await queue.enqueue({
+      endpoint: UPLOAD_FILE_PATH,
+      file: makeFile(),
+      fields: { project_id: "proj-a" },
+    });
+
+    let result = null;
+    for (let attempt = 0; attempt < MAX_RETRY_ATTEMPTS + 2; attempt += 1) {
+      result = await queue.drain();
+    }
+
+    expect(result.dropped).toHaveLength(0);
+    expect(result.stillQueued).toHaveLength(1);
     expect(await queue.pendingCount()).toBe(1);
   });
 
@@ -218,6 +274,38 @@ describe("createUploadQueue", () => {
       fields: { project_id: "proj-a" },
     });
     expect(listener).toHaveBeenCalledTimes(2);
+  });
+
+  it("serializes overlapping drains", async () => {
+    const storage = createMemoryStorage();
+    let resolveFetch = null;
+    const fetchImpl = vi.fn(
+      () =>
+        new Promise((resolve) => {
+          resolveFetch = resolve;
+        })
+    );
+    const queue = createUploadQueue({ storage, fetch: fetchImpl });
+
+    await queue.enqueue({
+      endpoint: UPLOAD_FILE_PATH,
+      file: makeFile(),
+      fields: { project_id: "proj-a" },
+    });
+
+    const firstDrain = queue.drain();
+    const secondDrain = queue.drain();
+    for (let tick = 0; tick < 5 && fetchImpl.mock.calls.length === 0; tick += 1) {
+      await Promise.resolve();
+    }
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+
+    resolveFetch({ ok: true, status: 201 });
+    const [firstResult, secondResult] = await Promise.all([firstDrain, secondDrain]);
+
+    expect(firstResult.uploaded).toHaveLength(1);
+    expect(secondResult.uploaded).toHaveLength(1);
+    expect(await queue.pendingCount()).toBe(0);
   });
 
   it("waits for IndexedDB transaction completion when adding records", async () => {

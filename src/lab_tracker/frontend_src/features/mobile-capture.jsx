@@ -2,7 +2,7 @@ import * as React from "react";
 
 import { apiListRequest, apiRequest, buildApiPath } from "../shared/api.js";
 import { formatDate } from "../shared/formatters.js";
-import { getUploadQueue } from "../shared/register-sw.js";
+import { droppedUploadsMessage, getUploadQueue } from "../shared/register-sw.js";
 import { migrateIncomingShares } from "../shared/share-target-inbox.js";
 import { UPLOAD_FILE_PATH } from "../shared/upload-queue.js";
 
@@ -358,7 +358,15 @@ function MobileCaptureCard({
             ? "1 shared capture queued — uploading now."
             : `${result.migrated} shared captures queued — uploading now.`
         );
-        return queue.drain().catch(() => undefined);
+        return queue
+          .drain({ token })
+          .then((drainResult) => {
+            if (drainResult.dropped.length > 0) {
+              setFlash("", droppedUploadsMessage(drainResult.dropped));
+            }
+            return drainResult;
+          })
+          .catch(() => undefined);
       })
       .catch(() => {
         // Migration failures shouldn't block the rest of the capture UI;

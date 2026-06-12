@@ -9,12 +9,12 @@
  * one place.
  */
 
-const CACHE_VERSION = "v16";
+const CACHE_VERSION = "v18";
 const CACHE_NAME = `lab-tracker-shell-${CACHE_VERSION}`;
 const SHELL_ASSETS = [
   "/app",
-  "/app/static/app.js?v=17",
-  "/app/static/styles.css?v=17",
+  "/app/static/app.js?v=18",
+  "/app/static/styles.css?v=18",
   "/app/static/manifest.json",
   "/app/static/icon-180.png",
   "/app/static/icon-192.png",
@@ -142,8 +142,14 @@ async function storeIncomingShare(record) {
     return await new Promise((resolve, reject) => {
       const tx = db.transaction(SHARE_INBOX_STORE, "readwrite");
       const req = tx.objectStore(SHARE_INBOX_STORE).add(record);
-      req.onsuccess = () => resolve(req.result);
+      let insertedId = null;
+      req.onsuccess = () => {
+        insertedId = req.result;
+      };
       req.onerror = () => reject(req.error);
+      tx.oncomplete = () => resolve(insertedId);
+      tx.onerror = () => reject(tx.error);
+      tx.onabort = () => reject(tx.error || new Error("IndexedDB transaction aborted."));
     });
   } finally {
     db.close();

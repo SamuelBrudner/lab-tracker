@@ -109,6 +109,41 @@ def test_owner_membership_can_read_contribute_and_own() -> None:
     api.project_authorization.require_owner(project.project_id, actor=owner)
 
 
+def test_project_owner_membership_can_update_and_delete_project() -> None:
+    api, admin, project = _project_with_admin()
+    owner = _registered_actor(api, Role.VIEWER)
+    api.upsert_project_membership(
+        project.project_id,
+        owner.user_id,
+        ProjectMembershipRole.OWNER,
+        actor=admin,
+    )
+
+    updated = api.update_project(project.project_id, name="Owned project", actor=owner)
+
+    assert updated.name == "Owned project"
+
+    deletable = api.create_project("Owned deletion project", actor=admin)
+    api.upsert_project_membership(
+        deletable.project_id,
+        owner.user_id,
+        ProjectMembershipRole.OWNER,
+        actor=admin,
+    )
+
+    deleted = api.delete_project(deletable.project_id, actor=owner)
+
+    assert deleted.project_id == deletable.project_id
+
+
+def test_global_editor_without_project_membership_cannot_update_project() -> None:
+    api, _, project = _project_with_admin()
+    editor = _registered_actor(api, Role.EDITOR)
+
+    with pytest.raises(AuthError, match="Project owner access required."):
+        api.update_project(project.project_id, name="Forbidden", actor=editor)
+
+
 def test_unauthenticated_and_unrelated_actors_are_denied() -> None:
     api, _, project = _project_with_admin()
     unrelated = _registered_actor(api, Role.VIEWER)

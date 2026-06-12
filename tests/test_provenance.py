@@ -274,6 +274,35 @@ def test_legacy_external_artifact_metadata_still_exports_dataset_provenance():
     assert artifact_node["externalContentHash"] == "sha256:legacy-manifest"
 
 
+def test_malformed_legacy_external_artifact_metadata_is_ignored_in_provenance():
+    dataset_id = UUID("aaaaaaaa-5555-5555-5555-aaaaaaaaaaaa")
+    question_id = UUID("bbbbbbbb-6666-6666-6666-bbbbbbbbbbbb")
+    dataset = Dataset(
+        dataset_id=dataset_id,
+        project_id=uuid4(),
+        commit_hash="commit-malformed-legacy-external",
+        primary_question_id=question_id,
+        question_links=[
+            QuestionLink(question_id=question_id, role=QuestionLinkRole.PRIMARY)
+        ],
+        commit_manifest=DatasetCommitManifest(
+            metadata={EXTERNAL_ARTIFACTS_METADATA_KEY: "not-json"},
+            question_links=[
+                QuestionLink(question_id=question_id, role=QuestionLinkRole.PRIMARY)
+            ],
+        ),
+        status=DatasetStatus.COMMITTED,
+    )
+
+    document = build_dataset_provenance_document("http://example.test", dataset)
+    commit_node = _node_by_id(
+        document,
+        "http://example.test/datasets/aaaaaaaa-5555-5555-5555-aaaaaaaaaaaa/provenance/commit",
+    )
+
+    assert "prov:used" not in commit_node
+
+
 def test_analysis_provenance_omits_optional_fields_and_preserves_support_links():
     analysis_id = UUID("55555555-5555-5555-5555-555555555555")
     dataset_id = UUID("66666666-6666-6666-6666-666666666666")
@@ -331,6 +360,14 @@ def test_analysis_provenance_omits_optional_fields_and_preserves_support_links()
         claims=[claim],
         visualizations=[visualization],
     )
+
+    context = document["@context"]
+    assert isinstance(context, dict)
+    assert context["contentUrl"] == {"@id": "lab:contentUrl", "@type": "@id"}
+    assert context["fileName"] == "lab:fileName"
+    assert context["encodingFormat"] == "lab:encodingFormat"
+    assert context["contentSize"] == "lab:contentSize"
+    assert context["sha256"] == "lab:sha256"
 
     analysis_node = _node_by_id(
         document,

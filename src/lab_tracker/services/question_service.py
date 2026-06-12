@@ -378,12 +378,12 @@ class QuestionService(BaseService):
     def delete_question(self, question_id: UUID, *, actor: AuthContext | None = None) -> Question:
         question = self.get_question(question_id)
         self.authorization.require_contributor(question.project_id, actor=actor)
-        self._ensure_question_not_primary_reference(question)
+        self._ensure_question_not_referenced(question)
         with self.unit_of_work() as repository:
             repository.questions.delete(question_id)
         return question
 
-    def _ensure_question_not_primary_reference(self, question: Question) -> None:
+    def _ensure_question_not_referenced(self, question: Question) -> None:
         datasets = self.query_from_repository(
             loader=lambda repository: repository.query_datasets(
                 project_id=question.project_id,
@@ -395,6 +395,14 @@ class QuestionService(BaseService):
             raise ValidationError(
                 "Question cannot be deleted while datasets use it as their primary question."
             )
+        if any(
+            link.question_id == question.question_id
+            for dataset in datasets
+            for link in dataset.question_links
+        ):
+            raise ValidationError(
+                "Question cannot be deleted while datasets link to it."
+            )
         sessions = self.query_from_repository(
             loader=lambda repository: repository.query_sessions(
                 project_id=question.project_id,
@@ -405,6 +413,17 @@ class QuestionService(BaseService):
         if any(session.primary_question_id == question.question_id for session in sessions):
             raise ValidationError(
                 "Question cannot be deleted while sessions use it as their primary question."
+            )
+        claims = self.query_from_repository(
+            loader=lambda repository: repository.query_claims(
+                project_id=question.project_id,
+                limit=None,
+                offset=0,
+            ),
+        )
+        if any(question.question_id in claim.answers_question_ids for claim in claims):
+            raise ValidationError(
+                "Question cannot be deleted while claims answer it."
             )
 
 

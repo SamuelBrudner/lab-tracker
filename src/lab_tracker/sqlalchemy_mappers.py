@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Iterable
 from datetime import datetime, timezone
 from uuid import UUID
@@ -76,6 +77,8 @@ from lab_tracker.sqlalchemy_mapper_parts.projects import (
     project_to_model as project_to_model,
 )
 
+_logger = logging.getLogger(__name__)
+
 
 def _uuid(raw: str) -> UUID:
     return UUID(raw)
@@ -119,6 +122,19 @@ def _external_artifacts_from_json(
     if not raw_artifacts:
         return []
     return [ExternalArtifactReference.model_validate(item) for item in raw_artifacts]
+
+
+def _legacy_external_artifacts_from_metadata(
+    metadata: dict[str, str],
+) -> list[ExternalArtifactReference]:
+    try:
+        return external_artifacts_from_metadata(metadata)
+    except ValueError as exc:
+        _logger.warning(
+            "Ignoring malformed legacy external_artifacts dataset metadata: %s",
+            exc,
+        )
+        return []
 
 
 def project_membership_to_model(membership: ProjectMembership) -> ProjectMembershipModel:
@@ -330,7 +346,7 @@ def dataset_from_model(
         getattr(row, "manifest_external_artifacts", None)
     )
     if not external_artifacts:
-        external_artifacts = external_artifacts_from_metadata(metadata)
+        external_artifacts = _legacy_external_artifacts_from_metadata(metadata)
     manifest = DatasetCommitManifest(
         files=_dataset_files_from_json(getattr(row, "manifest_files", None)),
         external_artifacts=external_artifacts,

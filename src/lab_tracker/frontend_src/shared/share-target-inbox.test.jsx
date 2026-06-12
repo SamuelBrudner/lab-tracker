@@ -1,6 +1,7 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
+  createIndexedDbShareStorage,
   createMemoryShareStorage,
   migrateIncomingShares,
 } from "./share-target-inbox.js";
@@ -20,6 +21,10 @@ function makeQueue() {
     fetch: vi.fn(),
   });
 }
+
+afterEach(() => {
+  vi.restoreAllMocks();
+});
 
 describe("migrateIncomingShares", () => {
   it("attaches project + token and hands each share to the upload queue", async () => {
@@ -106,5 +111,52 @@ describe("migrateIncomingShares", () => {
 
     expect(result.migrated).toBe(0);
     expect(await storage.list()).toHaveLength(0);
+  });
+
+  it("waits for IndexedDB transaction completion when removing shares", async () => {
+    let activeTx = null;
+    const fakeDb = {
+      close: vi.fn(),
+      objectStoreNames: {
+        contains: () => true,
+      },
+      transaction: vi.fn(() => {
+        activeTx = {
+          error: null,
+          objectStore: () => ({
+            delete: () => {
+              const request = { result: undefined };
+              queueMicrotask(() => request.onsuccess?.());
+              return request;
+            },
+          }),
+        };
+        return activeTx;
+      }),
+    };
+    vi.stubGlobal("indexedDB", {
+      open: vi.fn(() => {
+        const request = { result: fakeDb };
+        queueMicrotask(() => request.onsuccess?.());
+        return request;
+      }),
+    });
+
+    const storage = createIndexedDbShareStorage();
+    let settled = false;
+    const removePromise = storage.remove(7).then(() => {
+      settled = true;
+    });
+
+    for (let tick = 0; tick < 5 && typeof activeTx?.oncomplete !== "function"; tick += 1) {
+      await Promise.resolve();
+    }
+    expect(settled).toBe(false);
+    expect(typeof activeTx.oncomplete).toBe("function");
+
+    activeTx.oncomplete();
+
+    await expect(removePromise).resolves.toBeUndefined();
+    expect(fakeDb.close).toHaveBeenCalled();
   });
 });

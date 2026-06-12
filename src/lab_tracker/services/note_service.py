@@ -327,6 +327,7 @@ class NoteService(BaseService):
     def delete_note(self, note_id: UUID, *, actor: AuthContext | None = None) -> Note:
         note = self.get_note(note_id)
         self.authorization.require_contributor(note.project_id, actor=actor)
+        self._ensure_note_can_be_deleted(note)
         with self.unit_of_work() as repository:
             repository.notes.delete(note_id)
         if note.raw_asset is not None:
@@ -334,6 +335,23 @@ class NoteService(BaseService):
                 lambda raw_asset=note.raw_asset: self._delete_raw_asset(raw_asset)
             )
         return note
+
+    def _ensure_note_can_be_deleted(self, note: Note) -> None:
+        change_sets = self.query_from_repository(
+            loader=lambda repository: repository.query_graph_change_sets(
+                project_id=note.project_id,
+                limit=None,
+                offset=0,
+            ),
+        )
+        if any(
+            change_set.source_note_id == note.note_id
+            or note.note_id in change_set.source_note_ids
+            for change_set in change_sets
+        ):
+            raise ValidationError(
+                "Note cannot be deleted while graph drafts reference it."
+            )
 
     def _ensure_target_exists(self, target: EntityRef, project_id: UUID) -> None:
         entity_getters = {

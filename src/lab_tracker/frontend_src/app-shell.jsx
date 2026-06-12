@@ -33,6 +33,7 @@ import {
   WorkflowCoverageCard,
 } from "./shared/ui.jsx";
 import { useAppRoute } from "./shared/routing.jsx";
+import { droppedUploadsMessage, installOfflineRetry } from "./shared/register-sw.js";
 import { PendingUploadsBadge } from "./shared/upload-status.jsx";
 import { apiListRequest, apiRequest, buildApiPath } from "./shared/api.js";
 
@@ -51,6 +52,17 @@ function App() {
 
   const auth = useAuthSession({ replace, setBusy, setFlash });
   const apiEnabled = auth.authChecked && (!auth.authEnabled || Boolean(auth.token));
+  React.useEffect(() => {
+    if (!auth.authChecked) {
+      return undefined;
+    }
+    return installOfflineRetry({
+      getToken: () => auth.token,
+      onDropped: (dropped) => {
+        setFlash("", droppedUploadsMessage(dropped));
+      },
+    });
+  }, [auth.authChecked, auth.token, setFlash]);
   const [projectMembers, setProjectMembers] = React.useState([]);
   const [memberUsername, setMemberUsername] = React.useState("");
   const [memberRole, setMemberRole] = React.useState("contributor");

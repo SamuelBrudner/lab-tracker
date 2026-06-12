@@ -15,6 +15,7 @@ const STORE = "pending";
 const QUICK_CAPTURE_PATH = "/notes/quick-capture";
 const UPLOAD_FILE_PATH = "/notes/upload-file";
 const MAX_RETRY_ATTEMPTS = 5;
+const AUTH_RETRY_STATUSES = new Set([401, 403]);
 const PERMANENT_CLIENT_REJECTION_STATUSES = new Set([400, 404, 409, 410, 413, 415, 422]);
 
 function openIndexedDb() {
@@ -143,9 +144,21 @@ async function keepQueuedForRetry(adapter, item, { status, now }) {
   return { ...item, ...patch };
 }
 
+async function keepQueuedForAuth(adapter, item, { status, now }) {
+  const patch = {
+    lastAttemptAt: now(),
+    lastStatus: status,
+  };
+  if (typeof adapter.update === "function") {
+    return (await adapter.update(item.id, patch)) || { ...item, ...patch };
+  }
+  return { ...item, ...patch };
+}
+
 function createUploadQueue({ storage, fetch: fetchImpl = globalThis.fetch, now = () => Date.now() } = {}) {
   const adapter = storage || createIndexedDbStorage();
   const listeners = new Set();
+  let activeDrain = null;
 
   function notify() {
     listeners.forEach((listener) => {
@@ -190,7 +203,7 @@ function createUploadQueue({ storage, fetch: fetchImpl = globalThis.fetch, now =
     return adapter.list();
   }
 
-  async function drain() {
+  async function drainOnce({ token = "" } = {}) {
     const items = await adapter.list();
     const results = { dropped: [], uploaded: [], stillQueued: [] };
     for (const item of items) {
@@ -203,7 +216,8 @@ function createUploadQueue({ storage, fetch: fetchImpl = globalThis.fetch, now =
         }
         payload.append(key, value);
       }
-      const headers = item.token ? { Authorization: `Bearer ${item.token}` } : {};
+      const bearerToken = token || item.token || "";
+      const headers = bearerToken ? { Authorization: `Bearer ${bearerToken}` } : {};
       const endpoint = item.endpoint || QUICK_CAPTURE_PATH;
       let response;
       try {
@@ -220,7 +234,15 @@ function createUploadQueue({ storage, fetch: fetchImpl = globalThis.fetch, now =
         await adapter.remove(item.id);
         results.uploaded.push(item);
       } else if (response && response.status >= 400 && response.status < 500) {
-        // Keep retryable auth/rate-limit failures queued; drop permanent validation failures.
+        if (AUTH_RETRY_STATUSES.has(response.status)) {
+          const queuedItem = await keepQueuedForAuth(adapter, item, {
+            now,
+            status: response.status,
+          });
+          results.stillQueued.push(queuedItem);
+          continue;
+        }
+        // Keep retryable timeout/rate-limit failures queued; drop permanent validation failures.
         if (isPermanentClientRejection(response.status)) {
           await adapter.remove(item.id);
           results.dropped.push({ ...item, rejectedStatus: response.status });
@@ -248,6 +270,16 @@ function createUploadQueue({ storage, fetch: fetchImpl = globalThis.fetch, now =
     return results;
   }
 
+  async function drain(options = {}) {
+    if (activeDrain) {
+      return activeDrain;
+    }
+    activeDrain = drainOnce(options).finally(() => {
+      activeDrain = null;
+    });
+    return activeDrain;
+  }
+
   function subscribe(listener) {
     listeners.add(listener);
     return () => listeners.delete(listener);
@@ -257,6 +289,7 @@ function createUploadQueue({ storage, fetch: fetchImpl = globalThis.fetch, now =
 }
 
 export {
+  AUTH_RETRY_STATUSES,
   MAX_RETRY_ATTEMPTS,
   QUICK_CAPTURE_PATH,
   UPLOAD_FILE_PATH,

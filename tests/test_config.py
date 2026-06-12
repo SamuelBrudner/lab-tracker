@@ -72,6 +72,17 @@ def test_non_local_environment_rejects_placeholder_auth_secret(monkeypatch):
         _settings_from_environment()
 
 
+def test_non_local_environment_rejects_example_random_secret_placeholder(monkeypatch):
+    _clear_auth_env(monkeypatch)
+    monkeypatch.setenv("LAB_TRACKER_ENVIRONMENT", "production")
+    monkeypatch.setenv(
+        "LAB_TRACKER_AUTH_SECRET_KEY",
+        "replace-with-a-strong-random-secret",
+    )
+    with pytest.raises(ValidationError, match="strong non-placeholder"):
+        _settings_from_environment()
+
+
 def test_non_local_environment_accepts_custom_auth_secret(monkeypatch):
     _clear_auth_env(monkeypatch)
     monkeypatch.setenv("LAB_TRACKER_ENVIRONMENT", "production")

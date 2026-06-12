@@ -12,6 +12,8 @@ from lab_tracker.models import (
     EntityRef,
     EntityType,
     ExternalArtifactReference,
+    GraphChangeSet,
+    GraphChangeSetStatus,
     QuestionLinkRole,
     QuestionStatus,
     QuestionType,
@@ -724,6 +726,86 @@ def test_delete_question_rejects_primary_dataset_and_session_references():
 
     with pytest.raises(ValidationError, match="sessions use"):
         api.delete_question(session_question.question_id, actor=actor)
+
+
+def test_delete_question_rejects_secondary_dataset_links():
+    api = repository_backed_api()
+    actor = _actor()
+    project = api.create_project("Question secondary delete guards", actor=actor)
+    primary_question = api.create_question(
+        project_id=project.project_id,
+        text="Primary committed dataset question",
+        question_type=QuestionType.DESCRIPTIVE,
+        status=QuestionStatus.ACTIVE,
+        actor=actor,
+    )
+    secondary_question = api.create_question(
+        project_id=project.project_id,
+        text="Secondary committed dataset question",
+        question_type=QuestionType.DESCRIPTIVE,
+        actor=actor,
+    )
+    api.create_dataset(
+        project_id=project.project_id,
+        primary_question_id=primary_question.question_id,
+        secondary_question_ids=[secondary_question.question_id],
+        status=DatasetStatus.COMMITTED,
+        commit_manifest=DatasetCommitManifestInput(
+            files=[DatasetFile(path="data.csv", checksum="abc123")]
+        ),
+        actor=actor,
+    )
+
+    with pytest.raises(ValidationError, match="datasets link"):
+        api.delete_question(secondary_question.question_id, actor=actor)
+
+
+def test_delete_question_rejects_claim_answer_links():
+    api = repository_backed_api()
+    actor = _actor()
+    project = api.create_project("Question claim delete guards", actor=actor)
+    question = api.create_question(
+        project_id=project.project_id,
+        text="Question answered by a claim",
+        question_type=QuestionType.DESCRIPTIVE,
+        actor=actor,
+    )
+    api.create_claim(
+        project_id=project.project_id,
+        statement="This claim answers the question.",
+        confidence=0.8,
+        answers_question_ids=[question.question_id],
+        actor=actor,
+    )
+
+    with pytest.raises(ValidationError, match="claims answer"):
+        api.delete_question(question.question_id, actor=actor)
+
+
+def test_delete_note_rejects_graph_draft_references():
+    api = repository_backed_api()
+    actor = _actor()
+    project = api.create_project("Note delete graph guard", actor=actor)
+    note = api.create_note(
+        project_id=project.project_id,
+        raw_content="Raw observation for graph review.",
+        actor=actor,
+    )
+    api.graph_drafts._save_graph_change_set(  # noqa: SLF001
+        GraphChangeSet(
+            change_set_id=uuid4(),
+            project_id=project.project_id,
+            source_note_id=note.note_id,
+            source_note_ids=[note.note_id],
+            provider="test",
+            model="test-model",
+            prompt_version="test-prompt",
+            status=GraphChangeSetStatus.COMMITTED,
+        )
+    )
+
+    with pytest.raises(ValidationError, match="graph drafts reference"):
+        api.delete_note(note.note_id, actor=actor)
 
 
 def test_delete_dataset_rejects_committed_and_referenced_datasets():

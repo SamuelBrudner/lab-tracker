@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from datetime import datetime
 from urllib.parse import quote
 
@@ -18,6 +19,8 @@ from lab_tracker.models import (
     Visualization,
 )
 from lab_tracker.provenance_ingestion import external_artifacts_from_metadata
+
+_logger = logging.getLogger(__name__)
 
 
 def _normalize_base_url(base_url: str) -> str:
@@ -49,7 +52,10 @@ def _context(base_url: str) -> dict[str, object]:
         "codeVersion": "lab:codeVersion",
         "commitHash": "lab:commitHash",
         "confidence": "lab:confidence",
+        "contentSize": "lab:contentSize",
+        "contentUrl": {"@id": "lab:contentUrl", "@type": "@id"},
         "contentType": "lab:contentType",
+        "encodingFormat": "lab:encodingFormat",
         "environmentHash": "lab:environmentHash",
         "executedAt": "lab:executedAt",
         "externalArtifact": {"@id": "lab:externalArtifact", "@type": "@id"},
@@ -57,6 +63,7 @@ def _context(base_url: str) -> dict[str, object]:
         "externalMetadata": {"@id": "lab:externalMetadata", "@type": "@json"},
         "externalSourceSystem": "lab:externalSourceSystem",
         "externalUri": {"@id": "lab:externalUri", "@type": "@id"},
+        "fileName": "lab:fileName",
         "filePath": "lab:filePath",
         "filename": "lab:filename",
         "metadata": {"@id": "lab:metadata", "@type": "@json"},
@@ -74,6 +81,7 @@ def _context(base_url: str) -> dict[str, object]:
         "status": "lab:status",
         "supportsAnalysis": {"@id": "lab:supportsAnalysis", "@type": "@id"},
         "supportsDataset": {"@id": "lab:supportsDataset", "@type": "@id"},
+        "sha256": "lab:sha256",
         "userId": "lab:userId",
         "vizType": "lab:vizType",
         "bidsMetadata": {"@id": "lab:bidsMetadata", "@type": "@json"},
@@ -140,7 +148,14 @@ def _manifest_external_artifacts(
 ) -> list[ExternalArtifactReference]:
     if manifest.external_artifacts:
         return list(manifest.external_artifacts)
-    return external_artifacts_from_metadata(manifest.metadata)
+    try:
+        return external_artifacts_from_metadata(manifest.metadata)
+    except ValueError as exc:
+        _logger.warning(
+            "Ignoring malformed legacy external_artifacts provenance metadata: %s",
+            exc,
+        )
+        return []
 
 
 def _external_artifact_node(artifact: ExternalArtifactReference) -> dict[str, object]:

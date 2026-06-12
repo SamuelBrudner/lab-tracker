@@ -13,6 +13,7 @@ from scripts.generate_lab_tracker_skill_reference import (
 
 def test_repo_owned_lab_tracker_skill_has_current_generated_reference(monkeypatch) -> None:
     monkeypatch.setenv("LAB_TRACKER_AUTH_ENABLED", "true")
+    monkeypatch.setenv("LAB_TRACKER_AUTH_SECRET_KEY", "test-skill-reference-secret")
     monkeypatch.setenv("LAB_TRACKER_DATABASE_URL", "sqlite+pysqlite:///:memory:")
     monkeypatch.setenv("LAB_TRACKER_FILE_STORAGE_PATH", ".test-file-storage")
     monkeypatch.setenv("LAB_TRACKER_NOTE_STORAGE_PATH", ".test-note-storage")
@@ -30,6 +31,7 @@ def test_repo_owned_lab_tracker_skill_has_current_generated_reference(monkeypatc
 
 def test_skill_reference_check_mode_passes(monkeypatch) -> None:
     monkeypatch.setenv("LAB_TRACKER_AUTH_ENABLED", "true")
+    monkeypatch.setenv("LAB_TRACKER_AUTH_SECRET_KEY", "test-skill-reference-secret")
     monkeypatch.setenv("LAB_TRACKER_DATABASE_URL", "sqlite+pysqlite:///:memory:")
 
     assert generate_skill_reference(["--check"]) == 0

@@ -202,6 +202,26 @@ def test_dataset_mapper_reads_legacy_external_artifact_metadata():
     assert mapped.commit_manifest.metadata == dataset.commit_manifest.metadata
 
 
+def test_dataset_mapper_ignores_malformed_legacy_external_artifact_metadata():
+    dataset = Dataset(
+        dataset_id=uuid4(),
+        project_id=uuid4(),
+        commit_hash="legacy-hash",
+        primary_question_id=uuid4(),
+        question_links=[],
+        commit_manifest=DatasetCommitManifest(
+            metadata={EXTERNAL_ARTIFACTS_METADATA_KEY: "not-json"},
+        ),
+    )
+    row = dataset_to_model(dataset)
+    row.manifest_external_artifacts = []
+
+    mapped = dataset_from_model(row)
+
+    assert mapped.commit_manifest.external_artifacts == []
+    assert mapped.commit_manifest.metadata == dataset.commit_manifest.metadata
+
+
 def test_note_mapper_round_trip_for_supported_fields():
     targets = [EntityRef(entity_type=EntityType.QUESTION, entity_id=uuid4())]
     note = Note(

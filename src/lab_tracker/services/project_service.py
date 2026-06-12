@@ -84,7 +84,7 @@ class ProjectService(BaseService):
         status: ProjectStatus | None = None,
         actor: AuthContext | None = None,
     ) -> Project:
-        require_role(actor, WRITE_ROLES)
+        self.authorization.require_owner(project_id, actor=actor)
         project = self.get_project(project_id)
         if name is not None:
             ensure_non_empty(name, "name")
@@ -99,7 +99,7 @@ class ProjectService(BaseService):
         return project
 
     def delete_project(self, project_id: UUID, *, actor: AuthContext | None = None) -> Project:
-        require_role(actor, WRITE_ROLES)
+        self.authorization.require_owner(project_id, actor=actor)
         project = self.get_project(project_id)
         with self.unit_of_work() as repository:
             repository.projects.delete(project_id)

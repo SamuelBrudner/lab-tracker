@@ -35,6 +35,14 @@ function runRequest(request) {
   });
 }
 
+function txDone(tx) {
+  return new Promise((resolve, reject) => {
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+    tx.onabort = () => reject(tx.error || new Error("IndexedDB transaction aborted."));
+  });
+}
+
 function createIndexedDbShareStorage() {
   return {
     async list() {
@@ -51,7 +59,7 @@ function createIndexedDbShareStorage() {
       try {
         const tx = db.transaction(STORE, "readwrite");
         await runRequest(tx.objectStore(STORE).delete(id));
-        await runRequest(tx);
+        await txDone(tx);
       } finally {
         db.close();
       }

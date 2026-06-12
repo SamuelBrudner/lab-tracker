@@ -9,6 +9,7 @@ DEFAULT_AUTH_SECRET_KEY = "dev-only-change-me"
 INSECURE_AUTH_SECRET_KEYS = {
     DEFAULT_AUTH_SECRET_KEY,
     "replace-with-a-strong-secret",
+    "replace-with-a-strong-random-secret",
     "change-me",
     "changeme",
 }
