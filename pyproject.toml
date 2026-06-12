@@ -43,10 +43,7 @@ include = ["lab_tracker", "lab_tracker.*", "lab_tracker_client", "lab_tracker_cl
 
 [tool.setuptools.package-data]
 lab_tracker = [
-  "frontend/index.html",
-  "frontend/app.js",
-  "frontend/app.css",
-  "frontend/styles.css",
+  "frontend/*",
 ]
 
 [tool.codex_orchestrator]

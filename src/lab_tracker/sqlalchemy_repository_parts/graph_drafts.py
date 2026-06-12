@@ -290,6 +290,7 @@ class SQLAlchemyGraphChangeSetRepository(EntityRepository[GraphChangeSet]):
             self._session.add(change_set_to_model(entity))
         else:
             apply_change_set_to_model(row, entity)
+        self._session.flush()
         replace_child_rows(
             self._session,
             GraphChangeOperationModel,

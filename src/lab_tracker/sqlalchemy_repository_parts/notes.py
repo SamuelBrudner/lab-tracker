@@ -70,6 +70,7 @@ class SQLAlchemyNoteRepository(EntityRepository[Note]):
             self._session.add(note_to_model(entity))
         else:
             apply_note_to_model(row, entity)
+        self._session.flush()
         replace_child_rows(
             self._session,
             NoteTargetModel,

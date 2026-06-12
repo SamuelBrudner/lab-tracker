@@ -6,7 +6,7 @@ from collections.abc import Callable, Iterable
 from typing import TYPE_CHECKING
 from uuid import UUID, uuid4
 
-from lab_tracker.auth import AuthContext, require_role
+from lab_tracker.auth import AuthContext
 from lab_tracker.errors import ValidationError
 from lab_tracker.models import (
     Claim,
@@ -15,10 +15,10 @@ from lab_tracker.models import (
 )
 from lab_tracker.services.base import BaseService, ServiceContext
 from lab_tracker.services.dataset_service import DatasetService
+from lab_tracker.services.project_authorization import ProjectAuthorizationPolicy
 from lab_tracker.services.project_service import ProjectService
 from lab_tracker.services.question_service import QuestionService
 from lab_tracker.services.shared import (
-    WRITE_ROLES,
     _ensure_claim_confidence,
     _ensure_claim_status_transition,
     _ensure_claim_support_links,
@@ -39,12 +39,14 @@ class ClaimService(BaseService):
         datasets: DatasetService,
         questions: QuestionService,
         analyses_provider: Callable[[], AnalysisService],
+        authorization: ProjectAuthorizationPolicy,
     ) -> None:
         super().__init__(context)
         self.projects = projects
         self.datasets = datasets
         self.questions = questions
         self._analyses_provider = analyses_provider
+        self.authorization = authorization
 
     @property
     def analyses(self) -> AnalysisService:
@@ -62,7 +64,7 @@ class ClaimService(BaseService):
         answers_question_ids: Iterable[UUID] | None = None,
         actor: AuthContext | None = None,
     ) -> Claim:
-        require_role(actor, WRITE_ROLES)
+        self.authorization.require_contributor(project_id, actor=actor)
         self.projects.get_project(project_id)
         ensure_non_empty(statement, "statement")
         _ensure_claim_confidence(confidence)
@@ -125,8 +127,8 @@ class ClaimService(BaseService):
         answers_question_ids: Iterable[UUID] | None = None,
         actor: AuthContext | None = None,
     ) -> Claim:
-        require_role(actor, WRITE_ROLES)
         claim = self.get_claim(claim_id)
+        self.authorization.require_contributor(claim.project_id, actor=actor)
         next_status = status or claim.status
         _ensure_claim_status_transition(claim.status, next_status)
         if claim.status != ClaimStatus.PROPOSED and (
@@ -166,8 +168,8 @@ class ClaimService(BaseService):
         return claim
 
     def delete_claim(self, claim_id: UUID, *, actor: AuthContext | None = None) -> Claim:
-        require_role(actor, WRITE_ROLES)
         claim = self.get_claim(claim_id)
+        self.authorization.require_contributor(claim.project_id, actor=actor)
         with self.unit_of_work() as repository:
             repository.claims.delete(claim_id)
         return claim

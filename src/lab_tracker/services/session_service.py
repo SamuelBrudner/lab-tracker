@@ -7,7 +7,7 @@ from datetime import datetime
 from typing import TYPE_CHECKING
 from uuid import UUID, uuid4
 
-from lab_tracker.auth import AuthContext, require_role
+from lab_tracker.auth import AuthContext
 from lab_tracker.errors import ValidationError
 from lab_tracker.models import (
     AcquisitionOutput,
@@ -23,10 +23,10 @@ from lab_tracker.models import (
     utc_now,
 )
 from lab_tracker.services.base import BaseService, ServiceContext
+from lab_tracker.services.project_authorization import ProjectAuthorizationPolicy
 from lab_tracker.services.project_service import ProjectService
 from lab_tracker.services.question_service import QuestionService
 from lab_tracker.services.shared import (
-    WRITE_ROLES,
     _ensure_session_status_transition,
     _find_acquisition_output,
     _manifest_input_with_source,
@@ -47,11 +47,13 @@ class SessionService(BaseService):
         projects: ProjectService,
         questions: QuestionService,
         datasets_provider: Callable[[], DatasetService],
+        authorization: ProjectAuthorizationPolicy,
     ) -> None:
         super().__init__(context)
         self.projects = projects
         self.questions = questions
         self._datasets_provider = datasets_provider
+        self.authorization = authorization
 
     @property
     def datasets(self) -> DatasetService:
@@ -81,7 +83,7 @@ class SessionService(BaseService):
         primary_question_id: UUID | None = None,
         actor: AuthContext | None = None,
     ) -> Session:
-        require_role(actor, WRITE_ROLES)
+        self.authorization.require_contributor(project_id, actor=actor)
         self.projects.get_project(project_id)
         if session_type == SessionType.SCIENTIFIC:
             if primary_question_id is None:
@@ -138,8 +140,8 @@ class SessionService(BaseService):
         ended_at: datetime | None = None,
         actor: AuthContext | None = None,
     ) -> Session:
-        require_role(actor, WRITE_ROLES)
         session = self.get_session(session_id)
+        self.authorization.require_contributor(session.project_id, actor=actor)
         next_status = status or session.status
         if status is not None:
             _ensure_session_status_transition(session.status, status)
@@ -157,8 +159,8 @@ class SessionService(BaseService):
         return session
 
     def delete_session(self, session_id: UUID, *, actor: AuthContext | None = None) -> Session:
-        require_role(actor, WRITE_ROLES)
         session = self.get_session(session_id)
+        self.authorization.require_contributor(session.project_id, actor=actor)
         with self.unit_of_work() as repository:
             repository.sessions.delete(session_id)
         return session
@@ -172,8 +174,8 @@ class SessionService(BaseService):
         size_bytes: int | None = None,
         actor: AuthContext | None = None,
     ) -> AcquisitionOutput:
-        require_role(actor, WRITE_ROLES)
-        self.get_session(session_id)
+        session = self.get_session(session_id)
+        self.authorization.require_contributor(session.project_id, actor=actor)
         ensure_non_empty(file_path, "file_path")
         ensure_non_empty(checksum, "checksum")
         if size_bytes is not None and size_bytes < 0:
@@ -221,12 +223,13 @@ class SessionService(BaseService):
     def delete_acquisition_output(
         self, output_id: UUID, *, actor: AuthContext | None = None
     ) -> AcquisitionOutput:
-        require_role(actor, WRITE_ROLES)
         output = self.get_from_repository(
             entity_id=output_id,
             label="Acquisition output",
             loader=lambda repository: repository.acquisition_outputs.get(output_id),
         )
+        session = self.get_session(output.session_id)
+        self.authorization.require_contributor(session.project_id, actor=actor)
         with self.unit_of_work() as repository:
             repository.acquisition_outputs.delete(output_id)
         return output
@@ -238,8 +241,8 @@ class SessionService(BaseService):
         *,
         actor: AuthContext | None = None,
     ) -> Session:
-        require_role(actor, WRITE_ROLES)
         session = self.get_session(session_id)
+        self.authorization.require_contributor(session.project_id, actor=actor)
         if session.session_type != SessionType.OPERATIONAL:
             raise ValidationError(
                 "Only operational sessions can be promoted to scientific sessions."
@@ -268,8 +271,8 @@ class SessionService(BaseService):
         commit_manifest: DatasetCommitManifestInput | DatasetCommitManifest | None = None,
         actor: AuthContext | None = None,
     ) -> Dataset:
-        require_role(actor, WRITE_ROLES)
         session = self.get_session(session_id)
+        self.authorization.require_contributor(session.project_id, actor=actor)
         if session.session_type != SessionType.OPERATIONAL:
             raise ValidationError("Only operational sessions can be promoted to datasets.")
         if session.status != SessionStatus.ACTIVE:

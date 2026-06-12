@@ -6,13 +6,14 @@ from collections.abc import Callable, Iterable
 from typing import TYPE_CHECKING
 from uuid import UUID, uuid4
 
-from lab_tracker.auth import AuthContext, require_role
+from lab_tracker.auth import AuthContext
 from lab_tracker.errors import ValidationError
 from lab_tracker.models import (
     Analysis,
     AnalysisStatus,
     Claim,
     ClaimInput,
+    ClaimStatus,
     DatasetStatus,
     Visualization,
     VisualizationInput,
@@ -20,9 +21,9 @@ from lab_tracker.models import (
 )
 from lab_tracker.services.base import BaseService, ServiceContext
 from lab_tracker.services.dataset_service import DatasetService
+from lab_tracker.services.project_authorization import ProjectAuthorizationPolicy
 from lab_tracker.services.project_service import ProjectService
 from lab_tracker.services.shared import (
-    WRITE_ROLES,
     _analysis_has_question_link,
     _ensure_analysis_status_transition,
     actor_user_id,
@@ -44,12 +45,14 @@ class AnalysisService(BaseService):
         datasets: DatasetService,
         claims_provider: Callable[[], ClaimService],
         visualizations_provider: Callable[[], VisualizationService],
+        authorization: ProjectAuthorizationPolicy,
     ) -> None:
         super().__init__(context)
         self.projects = projects
         self.datasets = datasets
         self._claims_provider = claims_provider
         self._visualizations_provider = visualizations_provider
+        self.authorization = authorization
 
     @property
     def claims(self) -> ClaimService:
@@ -70,7 +73,7 @@ class AnalysisService(BaseService):
         status: AnalysisStatus = AnalysisStatus.STAGED,
         actor: AuthContext | None = None,
     ) -> Analysis:
-        require_role(actor, WRITE_ROLES)
+        self.authorization.require_contributor(project_id, actor=actor)
         self.projects.get_project(project_id)
         dataset_id_list = unique_ids(dataset_ids)
         if not dataset_id_list:
@@ -153,8 +156,8 @@ class AnalysisService(BaseService):
         environment_hash: str | None = None,
         actor: AuthContext | None = None,
     ) -> Analysis:
-        require_role(actor, WRITE_ROLES)
         analysis = self.get_analysis(analysis_id)
+        self.authorization.require_contributor(analysis.project_id, actor=actor)
         if analysis.status == AnalysisStatus.COMMITTED:
             if environment_hash is not None:
                 raise ValidationError("Committed analyses are immutable.")
@@ -173,8 +176,9 @@ class AnalysisService(BaseService):
         return analysis
 
     def delete_analysis(self, analysis_id: UUID, *, actor: AuthContext | None = None) -> Analysis:
-        require_role(actor, WRITE_ROLES)
         analysis = self.get_analysis(analysis_id)
+        self.authorization.require_contributor(analysis.project_id, actor=actor)
+        self._ensure_analysis_can_be_deleted(analysis)
         with self.unit_of_work() as repository:
             repository.analyses.delete(analysis_id)
         return analysis
@@ -188,8 +192,8 @@ class AnalysisService(BaseService):
         visualizations: Iterable[VisualizationInput] | None = None,
         actor: AuthContext | None = None,
     ) -> tuple[Analysis, list[Claim], list[Visualization]]:
-        require_role(actor, WRITE_ROLES)
         analysis = self.get_analysis(analysis_id)
+        self.authorization.require_contributor(analysis.project_id, actor=actor)
         _ensure_analysis_status_transition(analysis.status, AnalysisStatus.COMMITTED)
         if analysis.status == AnalysisStatus.COMMITTED and environment_hash is not None:
             raise ValidationError("Committed analyses are immutable.")
@@ -236,3 +240,25 @@ class AnalysisService(BaseService):
             dataset = self.datasets.get_dataset(dataset_id)
             if dataset.status != DatasetStatus.COMMITTED:
                 raise ValidationError("Analyses can only be committed with committed datasets.")
+
+    def _ensure_analysis_can_be_deleted(self, analysis: Analysis) -> None:
+        claims = self.query_from_repository(
+            loader=lambda repository: repository.query_claims(
+                analysis_id=analysis.analysis_id,
+                limit=None,
+                offset=0,
+            ),
+        )
+        for claim in claims:
+            if claim.status == ClaimStatus.PROPOSED:
+                continue
+            remaining_analysis_ids = [
+                analysis_id
+                for analysis_id in claim.supported_by_analysis_ids
+                if analysis_id != analysis.analysis_id
+            ]
+            if not claim.supported_by_dataset_ids and not remaining_analysis_ids:
+                raise ValidationError(
+                    "Analysis cannot be deleted while it is the last support link "
+                    "for a non-proposed claim."
+                )

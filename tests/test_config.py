@@ -24,10 +24,19 @@ def test_local_environment_allows_default_auth_secret(monkeypatch):
     assert settings.is_auth_enabled() is False
 
 
-def test_local_environment_can_enable_auth(monkeypatch):
+def test_local_environment_rejects_default_auth_secret_when_auth_enabled(monkeypatch):
     _clear_auth_env(monkeypatch)
     monkeypatch.setenv("LAB_TRACKER_ENVIRONMENT", "local")
     monkeypatch.setenv("LAB_TRACKER_AUTH_ENABLED", "true")
+    with pytest.raises(ValidationError, match="strong non-placeholder"):
+        _settings_from_environment()
+
+
+def test_local_environment_can_enable_auth_with_custom_secret(monkeypatch):
+    _clear_auth_env(monkeypatch)
+    monkeypatch.setenv("LAB_TRACKER_ENVIRONMENT", "local")
+    monkeypatch.setenv("LAB_TRACKER_AUTH_ENABLED", "true")
+    monkeypatch.setenv("LAB_TRACKER_AUTH_SECRET_KEY", "custom-local-secret")
     settings = _settings_from_environment()
     assert settings.is_auth_enabled() is True
 
@@ -51,7 +60,15 @@ def test_dotenv_ignores_non_lab_tracker_keys(tmp_path, monkeypatch):
 def test_non_local_environment_rejects_default_auth_secret(monkeypatch):
     _clear_auth_env(monkeypatch)
     monkeypatch.setenv("LAB_TRACKER_ENVIRONMENT", "production")
-    with pytest.raises(ValidationError, match="LAB_TRACKER_AUTH_SECRET_KEY must be set"):
+    with pytest.raises(ValidationError, match="strong non-placeholder"):
+        _settings_from_environment()
+
+
+def test_non_local_environment_rejects_placeholder_auth_secret(monkeypatch):
+    _clear_auth_env(monkeypatch)
+    monkeypatch.setenv("LAB_TRACKER_ENVIRONMENT", "production")
+    monkeypatch.setenv("LAB_TRACKER_AUTH_SECRET_KEY", "replace-with-a-strong-secret")
+    with pytest.raises(ValidationError, match="strong non-placeholder"):
         _settings_from_environment()
 
 

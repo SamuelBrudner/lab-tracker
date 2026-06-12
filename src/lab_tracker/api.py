@@ -62,18 +62,21 @@ class LabTrackerAPI:
             context,
             projects=self.projects,
             notes_provider=lambda: self.notes,
+            authorization=self.project_authorization,
         )
         self.datasets: DatasetService = DatasetService(
             context,
             projects=self.projects,
             questions=self.questions,
             sessions_provider=lambda: self.sessions,
+            authorization=self.project_authorization,
         )
         self.sessions: SessionService = SessionService(
             context,
             projects=self.projects,
             questions=self.questions,
             datasets_provider=lambda: self.datasets,
+            authorization=self.project_authorization,
         )
         self.analyses: AnalysisService = AnalysisService(
             context,
@@ -81,6 +84,7 @@ class LabTrackerAPI:
             datasets=self.datasets,
             claims_provider=lambda: self.claims,
             visualizations_provider=lambda: self.visualizations,
+            authorization=self.project_authorization,
         )
         self.claims: ClaimService = ClaimService(
             context,
@@ -88,11 +92,13 @@ class LabTrackerAPI:
             datasets=self.datasets,
             questions=self.questions,
             analyses_provider=lambda: self.analyses,
+            authorization=self.project_authorization,
         )
         self.visualizations: VisualizationService = VisualizationService(
             context,
             analyses=self.analyses,
             claims=self.claims,
+            authorization=self.project_authorization,
         )
         self.goals: GoalService = GoalService(
             context,

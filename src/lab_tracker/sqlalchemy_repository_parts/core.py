@@ -296,6 +296,7 @@ class SQLAlchemyQuestionRepository(EntityRepository[Question]):
             self._session.add(question_to_model(entity))
         else:
             apply_question_to_model(row, entity)
+        self._session.flush()
         replace_child_rows(
             self._session,
             QuestionParentModel,

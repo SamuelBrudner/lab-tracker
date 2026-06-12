@@ -14,6 +14,8 @@ const STORE = "pending";
 
 const QUICK_CAPTURE_PATH = "/notes/quick-capture";
 const UPLOAD_FILE_PATH = "/notes/upload-file";
+const MAX_RETRY_ATTEMPTS = 5;
+const PERMANENT_CLIENT_REJECTION_STATUSES = new Set([400, 404, 409, 410, 413, 415, 422]);
 
 function openIndexedDb() {
   return new Promise((resolve, reject) => {
@@ -36,6 +38,14 @@ function runRequest(request) {
   });
 }
 
+function txDone(tx) {
+  return new Promise((resolve, reject) => {
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+    tx.onabort = () => reject(tx.error || new Error("IndexedDB transaction aborted."));
+  });
+}
+
 function createIndexedDbStorage() {
   return {
     async add(record) {
@@ -44,7 +54,7 @@ function createIndexedDbStorage() {
         const tx = db.transaction(STORE, "readwrite");
         const store = tx.objectStore(STORE);
         const id = await runRequest(store.add(record));
-        await runRequest(tx);
+        await txDone(tx);
         return id;
       } finally {
         db.close();
@@ -64,7 +74,24 @@ function createIndexedDbStorage() {
       try {
         const tx = db.transaction(STORE, "readwrite");
         await runRequest(tx.objectStore(STORE).delete(id));
-        await runRequest(tx);
+        await txDone(tx);
+      } finally {
+        db.close();
+      }
+    },
+    async update(id, patch) {
+      const db = await openIndexedDb();
+      try {
+        const tx = db.transaction(STORE, "readwrite");
+        const store = tx.objectStore(STORE);
+        const existing = await runRequest(store.get(id));
+        if (!existing) {
+          return null;
+        }
+        const next = { ...existing, ...patch, id };
+        await runRequest(store.put(next));
+        await txDone(tx);
+        return next;
       } finally {
         db.close();
       }
@@ -87,7 +114,33 @@ function createMemoryStorage() {
     async remove(id) {
       items.delete(id);
     },
+    async update(id, patch) {
+      const existing = items.get(id);
+      if (!existing) {
+        return null;
+      }
+      const next = { ...existing, ...patch, id };
+      items.set(id, next);
+      return next;
+    },
   };
+}
+
+function isPermanentClientRejection(status) {
+  return PERMANENT_CLIENT_REJECTION_STATUSES.has(status);
+}
+
+async function keepQueuedForRetry(adapter, item, { status, now }) {
+  const retryCount = Number(item.retryCount || 0) + 1;
+  const patch = {
+    lastAttemptAt: now(),
+    lastStatus: status,
+    retryCount,
+  };
+  if (typeof adapter.update === "function") {
+    return (await adapter.update(item.id, patch)) || { ...item, ...patch };
+  }
+  return { ...item, ...patch };
 }
 
 function createUploadQueue({ storage, fetch: fetchImpl = globalThis.fetch, now = () => Date.now() } = {}) {
@@ -139,7 +192,7 @@ function createUploadQueue({ storage, fetch: fetchImpl = globalThis.fetch, now =
 
   async function drain() {
     const items = await adapter.list();
-    const results = { uploaded: [], stillQueued: [] };
+    const results = { dropped: [], uploaded: [], stillQueued: [] };
     for (const item of items) {
       const payload = new FormData();
       payload.append("file", item.file, item.filename);
@@ -167,10 +220,26 @@ function createUploadQueue({ storage, fetch: fetchImpl = globalThis.fetch, now =
         await adapter.remove(item.id);
         results.uploaded.push(item);
       } else if (response && response.status >= 400 && response.status < 500) {
-        // Client-side rejection: dropping the item is the right call —
-        // retrying will not change the outcome. Surface for diagnostics.
-        await adapter.remove(item.id);
-        results.uploaded.push({ ...item, rejectedStatus: response.status });
+        // Keep retryable auth/rate-limit failures queued; drop permanent validation failures.
+        if (isPermanentClientRejection(response.status)) {
+          await adapter.remove(item.id);
+          results.dropped.push({ ...item, rejectedStatus: response.status });
+          continue;
+        }
+        const queuedItem = await keepQueuedForRetry(adapter, item, {
+          now,
+          status: response.status,
+        });
+        if (queuedItem.retryCount >= MAX_RETRY_ATTEMPTS) {
+          await adapter.remove(item.id);
+          results.dropped.push({
+            ...queuedItem,
+            rejectedStatus: response.status,
+            dropReason: "retry_limit",
+          });
+        } else {
+          results.stillQueued.push(queuedItem);
+        }
       } else {
         results.stillQueued.push(item);
       }
@@ -188,6 +257,7 @@ function createUploadQueue({ storage, fetch: fetchImpl = globalThis.fetch, now =
 }
 
 export {
+  MAX_RETRY_ATTEMPTS,
   QUICK_CAPTURE_PATH,
   UPLOAD_FILE_PATH,
   createIndexedDbStorage,

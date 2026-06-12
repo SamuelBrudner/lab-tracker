@@ -119,6 +119,117 @@ def test_project_membership_scopes_reads_and_contributor_notes(
     assert context.json()["data"]["scope"]["project"]["project_id"] == temporal_project
 
 
+def test_project_contributor_can_use_core_write_routes(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+):
+    contributor_headers = _auth_headers(_register_user(client, "core-contributor"))
+    viewer_headers = _auth_headers(_register_user(client, "core-viewer"))
+    project_id = _create_project(client, admin_auth_headers, "Contributor write surface")
+
+    add_contributor = client.post(
+        f"/projects/{project_id}/members",
+        json={"username": "core-contributor", "role": "contributor"},
+        headers=admin_auth_headers,
+    )
+    assert add_contributor.status_code == 201
+    add_viewer = client.post(
+        f"/projects/{project_id}/members",
+        json={"username": "core-viewer", "role": "viewer"},
+        headers=admin_auth_headers,
+    )
+    assert add_viewer.status_code == 201
+
+    denied_question = client.post(
+        "/questions",
+        json={
+            "project_id": project_id,
+            "text": "Can viewers mutate project records?",
+            "question_type": "descriptive",
+        },
+        headers=viewer_headers,
+    )
+    assert denied_question.status_code == 401
+
+    question = client.post(
+        "/questions",
+        json={
+            "project_id": project_id,
+            "text": "Can project contributors write retained records?",
+            "question_type": "descriptive",
+        },
+        headers=contributor_headers,
+    )
+    assert question.status_code == 201
+    question_id = question.json()["data"]["question_id"]
+
+    session = client.post(
+        "/sessions",
+        json={"project_id": project_id, "session_type": "operational"},
+        headers=contributor_headers,
+    )
+    assert session.status_code == 201
+
+    dataset = client.post(
+        "/datasets",
+        json={"project_id": project_id, "primary_question_id": question_id},
+        headers=contributor_headers,
+    )
+    assert dataset.status_code == 201
+    dataset_id = dataset.json()["data"]["dataset_id"]
+
+    file_upload = client.post(
+        f"/datasets/{dataset_id}/files",
+        files={"file": ("capture.bin", b"capture-bytes", "application/octet-stream")},
+        headers=contributor_headers,
+    )
+    assert file_upload.status_code == 201
+
+    analysis = client.post(
+        "/analyses",
+        json={
+            "project_id": project_id,
+            "dataset_ids": [dataset_id],
+            "method_hash": "method-1",
+            "code_version": "v1",
+        },
+        headers=contributor_headers,
+    )
+    assert analysis.status_code == 201
+    analysis_id = analysis.json()["data"]["analysis_id"]
+
+    claim = client.post(
+        "/claims",
+        json={
+            "project_id": project_id,
+            "statement": "Contributor-created claim.",
+            "confidence": 0.5,
+            "supported_by_analysis_ids": [analysis_id],
+        },
+        headers=contributor_headers,
+    )
+    assert claim.status_code == 201
+
+    visualization = client.post(
+        "/visualizations",
+        json={
+            "analysis_id": analysis_id,
+            "viz_type": "figure",
+            "file_path": "figures/contributor.png",
+        },
+        headers=contributor_headers,
+    )
+    assert visualization.status_code == 201
+    viz_id = visualization.json()["data"]["viz_id"]
+
+    viz_upload = client.post(
+        f"/visualizations/{viz_id}/file",
+        files={"file": ("figure.png", b"figure-bytes", "image/png")},
+        headers=contributor_headers,
+    )
+    assert viz_upload.status_code == 201
+
+
 def test_contributor_submits_graph_change_set_for_admin_review(
     client: TestClient,
     admin_auth_headers: dict[str, str],

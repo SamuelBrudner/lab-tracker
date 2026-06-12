@@ -15,17 +15,16 @@ from starlette.requests import Request
 from starlette.responses import StreamingResponse
 
 from lab_tracker.api import LabTrackerAPI
-from lab_tracker.auth import require_role
 from lab_tracker.db_models import DatasetFileModel, DatasetModel
 from lab_tracker.errors import ConflictError, NotFoundError, ValidationError
 from lab_tracker.models import DatasetFile, DatasetStatus
 from lab_tracker.schemas import Envelope, ListEnvelope
-from lab_tracker.services.shared import WRITE_ROLES
 
 from .shared import (
     actor_from_request,
     api_from_request,
     db_session_from_request,
+    ensure_project_contributor,
     ensure_project_read,
     file_storage_from_request,
     list_response,
@@ -65,8 +64,6 @@ def build_dataset_files_router(api: LabTrackerAPI) -> APIRouter:
         file: Annotated[UploadFile, File()],
     ):
         request_api = api_from_request(request, api)
-        actor = actor_from_request(request)
-        require_role(actor, WRITE_ROLES)
 
         db_session = db_session_from_request(request)
         storage_backend = file_storage_from_request(request)
@@ -74,7 +71,7 @@ def build_dataset_files_router(api: LabTrackerAPI) -> APIRouter:
         dataset_row = db_session.get(DatasetModel, str(dataset_id))
         if dataset_row is None:
             raise NotFoundError("Dataset does not exist.")
-        ensure_project_read(request, UUID(dataset_row.project_id))
+        ensure_project_contributor(request, UUID(dataset_row.project_id))
         if dataset_row.status != DatasetStatus.STAGED.value:
             raise ValidationError("Files can only be attached while dataset status is staged.")
 
@@ -201,8 +198,6 @@ def build_dataset_files_router(api: LabTrackerAPI) -> APIRouter:
         request: Request,
     ):
         request_api = api_from_request(request, api)
-        actor = actor_from_request(request)
-        require_role(actor, WRITE_ROLES)
 
         db_session = db_session_from_request(request)
         storage_backend = file_storage_from_request(request)
@@ -210,7 +205,7 @@ def build_dataset_files_router(api: LabTrackerAPI) -> APIRouter:
         dataset_row = db_session.get(DatasetModel, str(dataset_id))
         if dataset_row is None:
             raise NotFoundError("Dataset does not exist.")
-        ensure_project_read(request, UUID(dataset_row.project_id))
+        ensure_project_contributor(request, UUID(dataset_row.project_id))
         if dataset_row.status != DatasetStatus.STAGED.value:
             raise ValidationError("Files can only be attached while dataset status is staged.")
 

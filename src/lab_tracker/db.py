@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, event
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 
@@ -21,12 +21,27 @@ def _connect_args(database_url: str) -> dict[str, object]:
 
 def get_engine(settings: Settings | None = None) -> Engine:
     resolved = settings or get_settings()
-    return create_engine(
+    engine = create_engine(
         resolved.database_url,
         future=True,
         pool_pre_ping=True,
         connect_args=_connect_args(resolved.database_url),
     )
+    if resolved.database_url.startswith("sqlite"):
+        _configure_sqlite_engine(engine)
+    return engine
+
+
+def _configure_sqlite_engine(engine: Engine) -> None:
+    @event.listens_for(engine, "connect")
+    def _set_sqlite_pragmas(dbapi_connection, _connection_record) -> None:  # noqa: ANN001
+        cursor = dbapi_connection.cursor()
+        try:
+            cursor.execute("PRAGMA foreign_keys=ON")
+            cursor.execute("PRAGMA journal_mode=WAL")
+            cursor.execute("PRAGMA busy_timeout=5000")
+        finally:
+            cursor.close()
 
 
 def get_session_factory(

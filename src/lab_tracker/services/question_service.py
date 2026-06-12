@@ -6,7 +6,7 @@ from collections.abc import Callable, Iterable
 from typing import TYPE_CHECKING
 from uuid import UUID, uuid4
 
-from lab_tracker.auth import AuthContext, require_role
+from lab_tracker.auth import AuthContext
 from lab_tracker.errors import ValidationError
 from lab_tracker.models import (
     EntityRef,
@@ -19,9 +19,9 @@ from lab_tracker.models import (
     utc_now,
 )
 from lab_tracker.services.base import BaseService, ServiceContext
+from lab_tracker.services.project_authorization import ProjectAuthorizationPolicy
 from lab_tracker.services.project_service import ProjectService
 from lab_tracker.services.shared import (
-    WRITE_ROLES,
     _ensure_question_parents_dag,
     _ensure_question_status_transition,
     actor_user_id,
@@ -54,10 +54,12 @@ class QuestionService(BaseService):
         *,
         projects: ProjectService,
         notes_provider: Callable[[], NoteService],
+        authorization: ProjectAuthorizationPolicy,
     ) -> None:
         super().__init__(context)
         self.projects = projects
         self._notes_provider = notes_provider
+        self.authorization = authorization
 
     @property
     def notes(self) -> NoteService:
@@ -84,7 +86,7 @@ class QuestionService(BaseService):
         parent_question_ids: Iterable[UUID] | None = None,
         actor: AuthContext | None = None,
     ) -> Question:
-        require_role(actor, WRITE_ROLES)
+        self.authorization.require_contributor(project_id, actor=actor)
         self.projects.get_project(project_id)
         ensure_non_empty(text, "text")
         question_id = uuid4()
@@ -177,8 +179,8 @@ class QuestionService(BaseService):
         parent_question_ids: Iterable[UUID] | None = None,
         actor: AuthContext | None = None,
     ) -> Question:
-        require_role(actor, WRITE_ROLES)
         question = self.get_question(question_id)
+        self.authorization.require_contributor(question.project_id, actor=actor)
         if text is not None:
             ensure_non_empty(text, "text")
             question.text = text.strip()
@@ -236,8 +238,8 @@ class QuestionService(BaseService):
         note_ids_to_retarget: Iterable[UUID] | None = None,
         actor: AuthContext | None = None,
     ) -> QuestionRefactorResult:
-        require_role(actor, WRITE_ROLES)
         source = self.get_question(question_id)
+        self.authorization.require_contributor(source.project_id, actor=actor)
         if source.status not in {QuestionStatus.STAGED, QuestionStatus.ACTIVE}:
             raise ValidationError("Only staged or active questions can be refactored.")
         if source.superseded_by_question_id is not None:
@@ -316,8 +318,8 @@ class QuestionService(BaseService):
         )
 
         def _persist(repository) -> None:  # noqa: ANN001
-            repository.questions.save(source)
             repository.questions.save(replacement)
+            repository.questions.save(source)
             for child in children:
                 repository.questions.save(child)
             for note in notes:
@@ -374,11 +376,36 @@ class QuestionService(BaseService):
         return notes
 
     def delete_question(self, question_id: UUID, *, actor: AuthContext | None = None) -> Question:
-        require_role(actor, WRITE_ROLES)
         question = self.get_question(question_id)
+        self.authorization.require_contributor(question.project_id, actor=actor)
+        self._ensure_question_not_primary_reference(question)
         with self.unit_of_work() as repository:
             repository.questions.delete(question_id)
         return question
+
+    def _ensure_question_not_primary_reference(self, question: Question) -> None:
+        datasets = self.query_from_repository(
+            loader=lambda repository: repository.query_datasets(
+                project_id=question.project_id,
+                limit=None,
+                offset=0,
+            ),
+        )
+        if any(dataset.primary_question_id == question.question_id for dataset in datasets):
+            raise ValidationError(
+                "Question cannot be deleted while datasets use it as their primary question."
+            )
+        sessions = self.query_from_repository(
+            loader=lambda repository: repository.query_sessions(
+                project_id=question.project_id,
+                limit=None,
+                offset=0,
+            ),
+        )
+        if any(session.primary_question_id == question.question_id for session in sessions):
+            raise ValidationError(
+                "Question cannot be deleted while sessions use it as their primary question."
+            )
 
 
 def _targets_question(targets: Iterable[EntityRef], question_id: UUID) -> bool:

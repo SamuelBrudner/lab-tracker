@@ -5,14 +5,14 @@ from __future__ import annotations
 from collections.abc import Iterable
 from uuid import UUID, uuid4
 
-from lab_tracker.auth import AuthContext, require_role
+from lab_tracker.auth import AuthContext
 from lab_tracker.errors import ValidationError
 from lab_tracker.models import Visualization, utc_now
 from lab_tracker.services.analysis_service import AnalysisService
 from lab_tracker.services.base import BaseService, ServiceContext
 from lab_tracker.services.claim_service import ClaimService
+from lab_tracker.services.project_authorization import ProjectAuthorizationPolicy
 from lab_tracker.services.shared import (
-    WRITE_ROLES,
     ensure_non_empty,
     unique_ids,
 )
@@ -25,10 +25,12 @@ class VisualizationService(BaseService):
         *,
         analyses: AnalysisService,
         claims: ClaimService,
+        authorization: ProjectAuthorizationPolicy,
     ) -> None:
         super().__init__(context)
         self.analyses = analyses
         self.claims = claims
+        self.authorization = authorization
 
     def create_visualization(
         self,
@@ -40,8 +42,8 @@ class VisualizationService(BaseService):
         related_claim_ids: Iterable[UUID] | None = None,
         actor: AuthContext | None = None,
     ) -> Visualization:
-        require_role(actor, WRITE_ROLES)
         analysis = self.analyses.get_analysis(analysis_id)
+        self.authorization.require_contributor(analysis.project_id, actor=actor)
         ensure_non_empty(viz_type, "viz_type")
         ensure_non_empty(file_path, "file_path")
         claim_ids = unique_ids(related_claim_ids)
@@ -95,8 +97,9 @@ class VisualizationService(BaseService):
         related_claim_ids: Iterable[UUID] | None = None,
         actor: AuthContext | None = None,
     ) -> Visualization:
-        require_role(actor, WRITE_ROLES)
         visualization = self.get_visualization(viz_id)
+        analysis = self.analyses.get_analysis(visualization.analysis_id)
+        self.authorization.require_contributor(analysis.project_id, actor=actor)
         if viz_type is not None:
             ensure_non_empty(viz_type, "viz_type")
             visualization.viz_type = viz_type.strip()
@@ -107,7 +110,6 @@ class VisualizationService(BaseService):
             visualization.caption = caption.strip() if caption else None
         if related_claim_ids is not None:
             claim_ids = unique_ids(related_claim_ids)
-            analysis = self.analyses.get_analysis(visualization.analysis_id)
             for claim_id in claim_ids:
                 claim = self.claims.get_claim(claim_id)
                 if claim.project_id != analysis.project_id:
@@ -124,8 +126,9 @@ class VisualizationService(BaseService):
         *,
         actor: AuthContext | None = None,
     ) -> Visualization:
-        require_role(actor, WRITE_ROLES)
         visualization = self.get_visualization(viz_id)
+        analysis = self.analyses.get_analysis(visualization.analysis_id)
+        self.authorization.require_contributor(analysis.project_id, actor=actor)
         with self.unit_of_work() as repository:
             repository.visualizations.delete(viz_id)
         return visualization

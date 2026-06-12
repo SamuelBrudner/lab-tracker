@@ -1,8 +1,10 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
+  MAX_RETRY_ATTEMPTS,
   QUICK_CAPTURE_PATH,
   UPLOAD_FILE_PATH,
+  createIndexedDbStorage,
   createMemoryStorage,
   createUploadQueue,
 } from "./upload-queue.js";
@@ -120,7 +122,7 @@ describe("createUploadQueue", () => {
     expect(await queue.pendingCount()).toBe(1);
   });
 
-  it("drops items the server rejects with a 4xx response", async () => {
+  it("drops items the server rejects with a permanent 4xx response", async () => {
     const storage = createMemoryStorage();
     const fetchImpl = vi.fn(async () => ({ ok: false, status: 422 }));
     const queue = createUploadQueue({ storage, fetch: fetchImpl });
@@ -131,8 +133,48 @@ describe("createUploadQueue", () => {
       fields: { project_id: "proj-a" },
     });
     const result = await queue.drain();
-    expect(result.uploaded).toHaveLength(1);
-    expect(result.uploaded[0].rejectedStatus).toBe(422);
+    expect(result.dropped).toHaveLength(1);
+    expect(result.dropped[0].rejectedStatus).toBe(422);
+    expect(await queue.pendingCount()).toBe(0);
+  });
+
+  it.each([401, 408, 429])("keeps retryable %i responses queued", async (status) => {
+    const storage = createMemoryStorage();
+    const fetchImpl = vi.fn(async () => ({ ok: false, status }));
+    const queue = createUploadQueue({ storage, fetch: fetchImpl, now: () => 1234 });
+
+    await queue.enqueue({
+      endpoint: UPLOAD_FILE_PATH,
+      file: makeFile(),
+      fields: { project_id: "proj-a" },
+    });
+    const result = await queue.drain();
+    expect(result.dropped).toHaveLength(0);
+    expect(result.stillQueued).toHaveLength(1);
+    expect(result.stillQueued[0].lastStatus).toBe(status);
+    expect(result.stillQueued[0].retryCount).toBe(1);
+    expect(await queue.pendingCount()).toBe(1);
+  });
+
+  it("drops retryable rejections only after the retry cap", async () => {
+    const storage = createMemoryStorage();
+    const fetchImpl = vi.fn(async () => ({ ok: false, status: 429 }));
+    const queue = createUploadQueue({ storage, fetch: fetchImpl });
+
+    await queue.enqueue({
+      endpoint: UPLOAD_FILE_PATH,
+      file: makeFile(),
+      fields: { project_id: "proj-a" },
+    });
+
+    let result = null;
+    for (let attempt = 0; attempt < MAX_RETRY_ATTEMPTS; attempt += 1) {
+      result = await queue.drain();
+    }
+
+    expect(result.dropped).toHaveLength(1);
+    expect(result.dropped[0].dropReason).toBe("retry_limit");
+    expect(result.dropped[0].retryCount).toBe(MAX_RETRY_ATTEMPTS);
     expect(await queue.pendingCount()).toBe(0);
   });
 
@@ -176,5 +218,59 @@ describe("createUploadQueue", () => {
       fields: { project_id: "proj-a" },
     });
     expect(listener).toHaveBeenCalledTimes(2);
+  });
+
+  it("waits for IndexedDB transaction completion when adding records", async () => {
+    let activeTx = null;
+    const fakeDb = {
+      close: vi.fn(),
+      objectStoreNames: {
+        contains: () => true,
+      },
+      transaction: vi.fn(() => {
+        activeTx = {
+          error: null,
+          objectStore: () => ({
+            add: () => {
+              const request = { result: 42 };
+              queueMicrotask(() => request.onsuccess?.());
+              return request;
+            },
+          }),
+        };
+        return activeTx;
+      }),
+    };
+    vi.stubGlobal("indexedDB", {
+      open: vi.fn(() => {
+        const request = { result: fakeDb };
+        queueMicrotask(() => request.onsuccess?.());
+        return request;
+      }),
+    });
+
+    const storage = createIndexedDbStorage();
+    let settled = false;
+    const addPromise = storage
+      .add({
+        endpoint: UPLOAD_FILE_PATH,
+        fields: { project_id: "proj-a" },
+        file: makeFile(),
+      })
+      .then((id) => {
+        settled = true;
+        return id;
+      });
+
+    for (let tick = 0; tick < 5 && typeof activeTx?.oncomplete !== "function"; tick += 1) {
+      await Promise.resolve();
+    }
+    expect(settled).toBe(false);
+    expect(typeof activeTx.oncomplete).toBe("function");
+
+    activeTx.oncomplete();
+
+    await expect(addPromise).resolves.toBe(42);
+    expect(fakeDb.close).toHaveBeenCalled();
   });
 });

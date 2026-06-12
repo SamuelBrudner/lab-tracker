@@ -6,7 +6,7 @@ from collections.abc import Callable, Iterable
 from typing import TYPE_CHECKING
 from uuid import UUID, uuid4
 
-from lab_tracker.auth import AuthContext, require_role
+from lab_tracker.auth import AuthContext
 from lab_tracker.errors import ValidationError
 from lab_tracker.models import (
     Dataset,
@@ -20,10 +20,10 @@ from lab_tracker.models import (
     utc_now,
 )
 from lab_tracker.services.base import BaseService, ServiceContext
+from lab_tracker.services.project_authorization import ProjectAuthorizationPolicy
 from lab_tracker.services.project_service import ProjectService
 from lab_tracker.services.question_service import QuestionService
 from lab_tracker.services.shared import (
-    WRITE_ROLES,
     _build_commit_manifest,
     _compute_commit_hash,
     _ensure_dataset_status_transition,
@@ -65,11 +65,13 @@ class DatasetService(BaseService):
         projects: ProjectService,
         questions: QuestionService,
         sessions_provider: Callable[[], SessionService],
+        authorization: ProjectAuthorizationPolicy,
     ) -> None:
         super().__init__(context)
         self.projects = projects
         self.questions = questions
         self._sessions_provider = sessions_provider
+        self.authorization = authorization
 
     @property
     def sessions(self) -> SessionService:
@@ -86,7 +88,7 @@ class DatasetService(BaseService):
         commit_hash: str | None = None,
         actor: AuthContext | None = None,
     ) -> Dataset:
-        require_role(actor, WRITE_ROLES)
+        self.authorization.require_contributor(project_id, actor=actor)
         self.projects.get_project(project_id)
         if primary_question_id is None:
             raise ValidationError("primary_question_id is required.")
@@ -168,8 +170,8 @@ class DatasetService(BaseService):
         commit_hash: str | None = None,
         actor: AuthContext | None = None,
     ) -> Dataset:
-        require_role(actor, WRITE_ROLES)
         dataset = self.get_dataset(dataset_id)
+        self.authorization.require_contributor(dataset.project_id, actor=actor)
         if status is not None:
             _ensure_dataset_status_transition(dataset.status, status)
         was_committed = dataset.status == DatasetStatus.COMMITTED
@@ -256,11 +258,36 @@ class DatasetService(BaseService):
         return dataset
 
     def delete_dataset(self, dataset_id: UUID, *, actor: AuthContext | None = None) -> Dataset:
-        require_role(actor, WRITE_ROLES)
         dataset = self.get_dataset(dataset_id)
+        self.authorization.require_contributor(dataset.project_id, actor=actor)
+        self._ensure_dataset_can_be_deleted(dataset)
         with self.unit_of_work() as repository:
             repository.datasets.delete(dataset_id)
         return dataset
+
+    def _ensure_dataset_can_be_deleted(self, dataset: Dataset) -> None:
+        if dataset.status != DatasetStatus.STAGED:
+            raise ValidationError(
+                "Only staged, unreferenced datasets can be deleted; archive committed datasets."
+            )
+        claims = self.query_from_repository(
+            loader=lambda repository: repository.query_claims(
+                dataset_id=dataset.dataset_id,
+                limit=None,
+                offset=0,
+            ),
+        )
+        if claims:
+            raise ValidationError("Dataset cannot be deleted while claims reference it.")
+        analyses = self.query_from_repository(
+            loader=lambda repository: repository.query_analyses(
+                dataset_id=dataset.dataset_id,
+                limit=None,
+                offset=0,
+            ),
+        )
+        if analyses:
+            raise ValidationError("Dataset cannot be deleted while analyses reference it.")
 
     def _ensure_source_session_valid(
         self, source_session_id: UUID | None, project_id: UUID

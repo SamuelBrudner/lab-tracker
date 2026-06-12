@@ -68,6 +68,7 @@ class SQLAlchemyGoalRepository(EntityRepository[Goal]):
             self._session.add(goal_to_model(entity))
         else:
             apply_goal_to_model(row, entity)
+        self._session.flush()
         replace_child_rows(
             self._session,
             GoalLinkModel,

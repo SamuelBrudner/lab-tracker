@@ -13,17 +13,16 @@ from starlette.requests import Request
 from starlette.responses import StreamingResponse
 
 from lab_tracker.api import LabTrackerAPI
-from lab_tracker.auth import require_role
 from lab_tracker.db_models import VisualizationModel
 from lab_tracker.errors import AuthError, NotFoundError, ValidationError
 from lab_tracker.models import Visualization, utc_now
 from lab_tracker.schemas import Envelope, ListEnvelope, VisualizationCreate, VisualizationUpdate
-from lab_tracker.services.shared import WRITE_ROLES
 
 from .shared import (
     actor_from_request,
     api_from_request,
     db_session_from_request,
+    ensure_project_contributor,
     ensure_project_read,
     file_storage_from_request,
     list_response,
@@ -111,8 +110,6 @@ def build_visualizations_router(api: LabTrackerAPI) -> APIRouter:
         file: Annotated[UploadFile, File()],
     ):
         request_api = api_from_request(request, api)
-        actor = actor_from_request(request)
-        require_role(actor, WRITE_ROLES)
 
         db_session = db_session_from_request(request)
         storage_backend = file_storage_from_request(request)
@@ -122,7 +119,7 @@ def build_visualizations_router(api: LabTrackerAPI) -> APIRouter:
             raise NotFoundError("Visualization does not exist.")
         visualization = request_api.get_visualization(viz_id)
         analysis = request_api.get_analysis(visualization.analysis_id)
-        ensure_project_read(request, analysis.project_id)
+        ensure_project_contributor(request, analysis.project_id)
 
         filename = (file.filename or "").strip()
         if not filename:

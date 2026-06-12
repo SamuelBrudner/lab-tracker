@@ -51,9 +51,11 @@ function useAuthSession({ replace, setBusy, setFlash }) {
         if (!canceled) {
           setAuthEnabled(true);
           setUser(null);
-          if (token) {
+          if (token && (err.status === 401 || err.status === 403)) {
             setToken("");
             setFlash("", err.message || "Failed to restore session.");
+          } else if (token) {
+            setFlash("", err.message || "Could not verify the saved session.");
           }
         }
       })

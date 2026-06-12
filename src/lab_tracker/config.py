@@ -6,6 +6,12 @@ from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 DEFAULT_AUTH_SECRET_KEY = "dev-only-change-me"
+INSECURE_AUTH_SECRET_KEYS = {
+    DEFAULT_AUTH_SECRET_KEY,
+    "replace-with-a-strong-secret",
+    "change-me",
+    "changeme",
+}
 
 
 class Settings(BaseSettings):
@@ -43,19 +49,17 @@ class Settings(BaseSettings):
     @model_validator(mode="after")
     def _validate_auth_secret_key(self) -> Settings:
         is_local = self.environment.strip().lower() == "local"
+        auth_secret_key = self.auth_secret_key.strip()
+        self.auth_secret_key = auth_secret_key
         if not is_local and not self.is_auth_enabled():
             raise ValueError(
                 "LAB_TRACKER_AUTH_ENABLED=false is only allowed when "
                 "LAB_TRACKER_ENVIRONMENT is 'local'."
             )
-        if (
-            not is_local
-            and self.is_auth_enabled()
-            and self.auth_secret_key == DEFAULT_AUTH_SECRET_KEY
-        ):
+        if self.is_auth_enabled() and auth_secret_key in INSECURE_AUTH_SECRET_KEYS:
             raise ValueError(
-                "LAB_TRACKER_AUTH_SECRET_KEY must be set when "
-                "LAB_TRACKER_ENVIRONMENT is not 'local'."
+                "LAB_TRACKER_AUTH_SECRET_KEY must be set to a strong "
+                "non-placeholder value when authentication is enabled."
             )
         return self
 

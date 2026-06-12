@@ -87,6 +87,7 @@ class SQLAlchemyAnalysisRepository(EntityRepository[Analysis]):
             self._session.add(analysis_to_model(entity))
         else:
             apply_analysis_to_model(row, entity)
+        self._session.flush()
         replace_child_rows(
             self._session,
             AnalysisDatasetModel,
@@ -238,6 +239,7 @@ class SQLAlchemyClaimRepository(EntityRepository[Claim]):
             self._session.add(claim_to_model(entity))
         else:
             apply_claim_to_model(row, entity)
+        self._session.flush()
         replace_child_rows(
             self._session,
             ClaimDatasetModel,
@@ -369,6 +371,7 @@ class SQLAlchemyVisualizationRepository(EntityRepository[Visualization]):
             self._session.add(visualization_to_model(entity))
         else:
             apply_visualization_to_model(row, entity)
+        self._session.flush()
         replace_child_rows(
             self._session,
             VisualizationClaimModel,

@@ -83,7 +83,13 @@ def test_api_composes_named_service_instances() -> None:
     assert api.datasets.sessions is api.sessions
     assert api.graph_drafts.notes is api.notes
     assert api.projects.authorization is api.project_authorization
+    assert api.questions.authorization is api.project_authorization
+    assert api.datasets.authorization is api.project_authorization
+    assert api.sessions.authorization is api.project_authorization
     assert api.notes.authorization is api.project_authorization
+    assert api.analyses.authorization is api.project_authorization
+    assert api.claims.authorization is api.project_authorization
+    assert api.visualizations.authorization is api.project_authorization
     assert api.graph_drafts.authorization is api.project_authorization
 
 

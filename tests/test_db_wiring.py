@@ -1,10 +1,17 @@
 from __future__ import annotations
 
+from uuid import uuid4
+
 from fastapi import Request
 from fastapi.testclient import TestClient
+from sqlalchemy import delete, select
+from sqlalchemy.orm import Session
 from starlette.responses import JSONResponse
 
 from lab_tracker.app import create_app
+from lab_tracker.config import Settings
+from lab_tracker.db import Base, get_engine
+from lab_tracker.db_models import ProjectModel, QuestionModel
 from lab_tracker.sqlalchemy_repository import SQLAlchemyLabTrackerRepository
 
 
@@ -89,6 +96,46 @@ def test_global_repository_dependency_is_wired():
     assert response.status_code == 200
     assert payload["has_repository"] is True
     assert payload["shares_session"] is True
+
+
+def test_sqlite_engine_enforces_foreign_keys_and_busy_wal_pragmas(tmp_path):
+    settings = Settings(
+        database_url=f"sqlite+pysqlite:///{tmp_path / 'sqlite-pragmas.db'}",
+        environment="local",
+        auth_enabled=False,
+        _env_file=None,
+    )
+    engine = get_engine(settings)
+    Base.metadata.create_all(bind=engine)
+
+    with engine.connect() as connection:
+        assert connection.exec_driver_sql("PRAGMA foreign_keys").scalar_one() == 1
+        assert connection.exec_driver_sql("PRAGMA busy_timeout").scalar_one() == 5000
+        assert connection.exec_driver_sql("PRAGMA journal_mode").scalar_one() == "wal"
+
+    project_id = str(uuid4())
+    question_id = str(uuid4())
+    with Session(engine) as session:
+        session.add(ProjectModel(project_id=project_id, name="Cascade project"))
+        session.add(
+            QuestionModel(
+                question_id=question_id,
+                project_id=project_id,
+                text="Does SQLite enforce cascades?",
+                question_type="descriptive",
+            )
+        )
+        session.commit()
+
+        session.execute(delete(ProjectModel).where(ProjectModel.project_id == project_id))
+        session.commit()
+
+        assert (
+            session.scalar(
+                select(QuestionModel).where(QuestionModel.question_id == question_id)
+            )
+            is None
+        )
 
 
 def test_db_session_middleware_runs_after_commit_actions_once():

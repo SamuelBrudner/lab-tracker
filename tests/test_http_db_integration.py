@@ -208,12 +208,48 @@ def test_core_entity_crud_routes_use_database_persistence(
     assert client.get(f"/notes/{note_id}", headers=headers).status_code == 404
 
     dataset_delete_response = client.delete(f"/datasets/{dataset_id}", headers=headers)
-    assert dataset_delete_response.status_code == 200
-    assert client.get(f"/datasets/{dataset_id}", headers=headers).status_code == 404
+    assert dataset_delete_response.status_code == 422
+    assert client.get(f"/datasets/{dataset_id}", headers=headers).status_code == 200
 
     question_delete_response = client.delete(f"/questions/{question_id}", headers=headers)
+    assert question_delete_response.status_code == 422
+    assert client.get(f"/questions/{question_id}", headers=headers).status_code == 200
+
+    disposable_question_response = client.post(
+        "/questions",
+        json={
+            "project_id": project_id,
+            "text": "Can staged records still be deleted?",
+            "question_type": "descriptive",
+        },
+        headers=headers,
+    )
+    assert disposable_question_response.status_code == 201
+    disposable_question_id = disposable_question_response.json()["data"]["question_id"]
+    disposable_dataset_response = client.post(
+        "/datasets",
+        json={
+            "project_id": project_id,
+            "primary_question_id": disposable_question_id,
+        },
+        headers=headers,
+    )
+    assert disposable_dataset_response.status_code == 201
+    disposable_dataset_id = disposable_dataset_response.json()["data"]["dataset_id"]
+
+    staged_dataset_delete_response = client.delete(
+        f"/datasets/{disposable_dataset_id}",
+        headers=headers,
+    )
+    assert staged_dataset_delete_response.status_code == 200
+    assert client.get(f"/datasets/{disposable_dataset_id}", headers=headers).status_code == 404
+
+    question_delete_response = client.delete(
+        f"/questions/{disposable_question_id}",
+        headers=headers,
+    )
     assert question_delete_response.status_code == 200
-    assert client.get(f"/questions/{question_id}", headers=headers).status_code == 404
+    assert client.get(f"/questions/{disposable_question_id}", headers=headers).status_code == 404
 
     project_delete_response = client.delete(f"/projects/{project_id}", headers=headers)
     assert project_delete_response.status_code == 200

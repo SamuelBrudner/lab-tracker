@@ -635,7 +635,7 @@ def test_question_status_superseded_is_terminal_and_active_to_staged_remains_dis
 
 def test_session_creation_starts_active_without_end_time():
     api = repository_backed_api()
-    actor = _actor(Role.EDITOR)
+    actor = _actor()
     project = api.create_project("Neuro Project", actor=actor)
 
     session = api.create_session(
@@ -686,6 +686,98 @@ def test_committed_dataset_is_immutable():
         api.update_dataset(dataset.dataset_id, commit_hash="deadbeef", actor=actor)
     archived = api.update_dataset(dataset.dataset_id, status=DatasetStatus.ARCHIVED, actor=actor)
     assert archived.status == DatasetStatus.ARCHIVED
+
+
+def test_delete_question_rejects_primary_dataset_and_session_references():
+    api = repository_backed_api()
+    actor = _actor()
+    project = api.create_project("Question delete guards", actor=actor)
+    dataset_question = api.create_question(
+        project_id=project.project_id,
+        text="Primary dataset question",
+        question_type=QuestionType.DESCRIPTIVE,
+        status=QuestionStatus.ACTIVE,
+        actor=actor,
+    )
+    api.create_dataset(
+        project_id=project.project_id,
+        primary_question_id=dataset_question.question_id,
+        actor=actor,
+    )
+
+    with pytest.raises(ValidationError, match="datasets use"):
+        api.delete_question(dataset_question.question_id, actor=actor)
+
+    session_question = api.create_question(
+        project_id=project.project_id,
+        text="Primary session question",
+        question_type=QuestionType.DESCRIPTIVE,
+        status=QuestionStatus.ACTIVE,
+        actor=actor,
+    )
+    api.create_session(
+        project_id=project.project_id,
+        session_type=SessionType.SCIENTIFIC,
+        primary_question_id=session_question.question_id,
+        actor=actor,
+    )
+
+    with pytest.raises(ValidationError, match="sessions use"):
+        api.delete_question(session_question.question_id, actor=actor)
+
+
+def test_delete_dataset_rejects_committed_and_referenced_datasets():
+    api = repository_backed_api()
+    actor = _actor()
+    project = api.create_project("Dataset delete guards", actor=actor)
+    question = api.create_question(
+        project_id=project.project_id,
+        text="Which datasets should remain durable?",
+        question_type=QuestionType.DESCRIPTIVE,
+        status=QuestionStatus.ACTIVE,
+        actor=actor,
+    )
+    committed = api.create_dataset(
+        project_id=project.project_id,
+        primary_question_id=question.question_id,
+        status=DatasetStatus.COMMITTED,
+        commit_manifest=DatasetCommitManifestInput(
+            files=[DatasetFile(path="data.csv", checksum="abc123")]
+        ),
+        actor=actor,
+    )
+    with pytest.raises(ValidationError, match="Only staged"):
+        api.delete_dataset(committed.dataset_id, actor=actor)
+
+    analysis_dataset = api.create_dataset(
+        project_id=project.project_id,
+        primary_question_id=question.question_id,
+        actor=actor,
+    )
+    api.create_analysis(
+        project_id=project.project_id,
+        dataset_ids=[analysis_dataset.dataset_id],
+        method_hash="method-1",
+        code_version="v1",
+        actor=actor,
+    )
+    with pytest.raises(ValidationError, match="analyses reference"):
+        api.delete_dataset(analysis_dataset.dataset_id, actor=actor)
+
+    claim_dataset = api.create_dataset(
+        project_id=project.project_id,
+        primary_question_id=question.question_id,
+        actor=actor,
+    )
+    api.create_claim(
+        project_id=project.project_id,
+        statement="This dataset is cited by a claim.",
+        confidence=0.7,
+        supported_by_dataset_ids=[claim_dataset.dataset_id],
+        actor=actor,
+    )
+    with pytest.raises(ValidationError, match="claims reference"):
+        api.delete_dataset(claim_dataset.dataset_id, actor=actor)
 
 
 def test_promote_operational_session_to_dataset():

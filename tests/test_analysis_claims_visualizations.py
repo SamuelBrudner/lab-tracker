@@ -210,3 +210,37 @@ def test_visualization_filters_and_analysis_question_links():
     assert any(viz.viz_id == visualization.viz_id for viz in by_analysis)
     by_question = api.list_analyses(question_id=question.question_id)
     assert any(item.analysis_id == analysis.analysis_id for item in by_question)
+
+
+def test_delete_analysis_rejects_last_support_for_non_proposed_claim():
+    api = repository_backed_api()
+    actor = _actor()
+    project, question = _setup_project_with_question(api, actor)
+    dataset = api.create_dataset(
+        project_id=project.project_id,
+        primary_question_id=question.question_id,
+        status=DatasetStatus.COMMITTED,
+        commit_manifest=DatasetCommitManifestInput(
+            files=[DatasetFile(path="data.csv", checksum="abc123")]
+        ),
+        actor=actor,
+    )
+    analysis = api.create_analysis(
+        project_id=project.project_id,
+        dataset_ids=[dataset.dataset_id],
+        method_hash="method-guard",
+        code_version="v1",
+        status=AnalysisStatus.COMMITTED,
+        actor=actor,
+    )
+    api.create_claim(
+        project_id=project.project_id,
+        statement="Analysis supports the conclusion.",
+        confidence=0.9,
+        status=ClaimStatus.SUPPORTED,
+        supported_by_analysis_ids=[analysis.analysis_id],
+        actor=actor,
+    )
+
+    with pytest.raises(ValidationError, match="last support link"):
+        api.delete_analysis(analysis.analysis_id, actor=actor)
