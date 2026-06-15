@@ -93,7 +93,7 @@ def _summary_for_project(
             project_id,
             (DatasetStatus.COMMITTED.value,),
         ),
-        running_analysis_count=_count_statuses(
+        staged_analysis_count=_count_statuses(
             repository.query_analyses,
             project_id,
             (AnalysisStatus.STAGED.value,),

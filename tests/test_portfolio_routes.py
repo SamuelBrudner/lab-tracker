@@ -220,7 +220,7 @@ def test_portfolio_summary_aggregates_project_health_rows(
     assert row["open_question_count"] == 2
     assert row["draft_dataset_count"] == 1
     assert row["committed_dataset_count"] == 1
-    assert row["running_analysis_count"] == 1
+    assert row["staged_analysis_count"] == 1
     assert row["unreviewed_claim_count"] == 1
     assert row["last_activity_at"] is not None
     assert row["owners"] == [
