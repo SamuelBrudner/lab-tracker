@@ -6,7 +6,7 @@ from sqlalchemy import create_engine, event
 from sqlalchemy.orm import sessionmaker
 
 from lab_tracker.db import Base
-from lab_tracker.db_models import DatasetFileModel
+from lab_tracker.db_models import DatasetFileModel, UserModel
 from lab_tracker.models import (
     AcquisitionOutput,
     Analysis,
@@ -18,10 +18,14 @@ from lab_tracker.models import (
     DatasetStatus,
     EntityRef,
     EntityType,
+    GroupMembership,
     Note,
     NoteStatus,
     OutcomeStatus,
     Project,
+    ProjectGroup,
+    ProjectGroupKind,
+    ProjectMembershipRole,
     ProjectStatus,
     Question,
     QuestionLink,
@@ -72,6 +76,74 @@ def test_project_repository_crud(db_session):
     repo.commit()
     assert deleted == project
     assert repo.projects.get(project.project_id) is None
+
+
+def test_project_group_repository_crud_and_membership_queries(db_session):
+    repo = SQLAlchemyLabTrackerRepository(db_session)
+    user_id = uuid4()
+    db_session.add(
+        UserModel(
+            user_id=str(user_id),
+            username="pi-user",
+            password_hash="unused",
+            role="viewer",
+        )
+    )
+    group = ProjectGroup(
+        group_id=uuid4(),
+        name="Neural systems lab",
+        description="PI portfolio container",
+        kind=ProjectGroupKind.LAB,
+        group_read_all=True,
+        created_by="operator-1",
+        created_at=_ts(),
+        updated_at=_ts(),
+    )
+    project = Project(
+        project_id=uuid4(),
+        group_id=group.group_id,
+        name="Grouped project",
+        status=ProjectStatus.ACTIVE,
+        created_at=_ts(1),
+        updated_at=_ts(1),
+    )
+    membership = GroupMembership(
+        membership_id=uuid4(),
+        group_id=group.group_id,
+        user_id=user_id,
+        role=ProjectMembershipRole.OWNER,
+        created_by="operator-1",
+        created_at=_ts(2),
+        updated_at=_ts(2),
+    )
+
+    repo.project_groups.save(group)
+    repo.projects.save(project)
+    repo.group_memberships.save(membership)
+    repo.commit()
+
+    expected_membership = membership.model_copy(
+        update={"username": "pi-user", "user_global_role": "viewer"}
+    )
+    assert repo.project_groups.get(group.group_id) == group
+    assert repo.projects.get(project.project_id) == project
+    assert repo.group_memberships.get(membership.membership_id) == expected_membership
+    assert repo.get_group_membership(group_id=group.group_id, user_id=user_id) == (
+        expected_membership
+    )
+    assert repo.query_project_groups(kind=ProjectGroupKind.LAB.value) == ([group], 1)
+    assert repo.query_projects(group_id=group.group_id) == ([project], 1)
+    assert repo.query_group_memberships(group_id=group.group_id) == ([expected_membership], 1)
+    assert repo.query_group_memberships(user_id=user_id) == ([expected_membership], 1)
+
+    updated = group.model_copy(update={"name": "Renamed lab", "group_read_all": False})
+    repo.project_groups.save(updated)
+    repo.commit()
+
+    assert repo.project_groups.get(group.group_id) == updated
+    assert repo.project_groups.delete(group.group_id) == updated
+    repo.commit()
+    assert repo.project_groups.get(group.group_id) is None
 
 
 def test_question_repository_persists_parent_links(db_session):

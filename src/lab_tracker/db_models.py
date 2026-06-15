@@ -27,6 +27,27 @@ def _utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
 
+class ProjectGroupModel(Base):
+    __tablename__ = "project_groups"
+
+    group_id: Mapped[str] = mapped_column(
+        String(36),
+        primary_key=True,
+        default=lambda: str(uuid4()),
+    )
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    description: Mapped[str] = mapped_column(String(1000), default="")
+    kind: Mapped[str] = mapped_column(String(30), nullable=False, default="lab")
+    group_read_all: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    created_by: Mapped[str | None] = mapped_column(String(255))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utc_now)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=_utc_now,
+        onupdate=_utc_now,
+    )
+
+
 class ProjectModel(Base):
     __tablename__ = "projects"
 
@@ -34,6 +55,10 @@ class ProjectModel(Base):
         String(36),
         primary_key=True,
         default=lambda: str(uuid4()),
+    )
+    group_id: Mapped[str | None] = mapped_column(
+        String(36),
+        ForeignKey("project_groups.group_id", ondelete="SET NULL"),
     )
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     description: Mapped[str] = mapped_column(String(1000), default="")
@@ -747,6 +772,37 @@ class ProjectMembershipModel(Base):
     )
 
 
+class GroupMembershipModel(Base):
+    __tablename__ = "group_memberships"
+    __table_args__ = (
+        UniqueConstraint("group_id", "user_id", name="uq_group_memberships_group_user"),
+    )
+
+    membership_id: Mapped[str] = mapped_column(
+        String(36),
+        primary_key=True,
+        default=lambda: str(uuid4()),
+    )
+    group_id: Mapped[str] = mapped_column(
+        String(36),
+        ForeignKey("project_groups.group_id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    user_id: Mapped[str] = mapped_column(
+        String(36),
+        ForeignKey("users.user_id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    role: Mapped[str] = mapped_column(String(30), nullable=False)
+    created_by: Mapped[str | None] = mapped_column(String(255))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utc_now)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=_utc_now,
+        onupdate=_utc_now,
+    )
+
+
 class DeviceTokenModel(Base):
     __tablename__ = "device_tokens"
     __table_args__ = (
@@ -798,6 +854,7 @@ class DeviceEnrollmentModel(Base):
 
 
 Index("ix_questions_project_created_at", QuestionModel.project_id, QuestionModel.created_at)
+Index("ix_projects_group_id", ProjectModel.group_id)
 Index(
     "ix_questions_superseded_by_question_id",
     QuestionModel.superseded_by_question_id,
@@ -842,6 +899,16 @@ Index(
     "ix_project_memberships_project_role",
     ProjectMembershipModel.project_id,
     ProjectMembershipModel.role,
+)
+Index(
+    "ix_group_memberships_user_group",
+    GroupMembershipModel.user_id,
+    GroupMembershipModel.group_id,
+)
+Index(
+    "ix_group_memberships_group_role",
+    GroupMembershipModel.group_id,
+    GroupMembershipModel.role,
 )
 Index(
     "ix_note_targets_entity_lookup",

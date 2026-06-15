@@ -60,6 +60,10 @@ class ProjectMembershipRole(str, Enum):
     OWNER = "owner"
 
 
+class ProjectGroupKind(str, Enum):
+    LAB = "lab"
+
+
 class QuestionStatus(str, Enum):
     STAGED = "staged"
     ACTIVE = "active"
@@ -426,6 +430,7 @@ class GraphDraftBatchRun(_DomainModel):
 
 class Project(_DomainModel):
     project_id: UUID
+    group_id: UUID | None = None
     name: str
     description: str = ""
     status: ProjectStatus = ProjectStatus.ACTIVE
@@ -434,9 +439,32 @@ class Project(_DomainModel):
     updated_at: datetime = Field(default_factory=utc_now)
 
 
+class ProjectGroup(_DomainModel):
+    group_id: UUID
+    name: str
+    description: str = ""
+    kind: ProjectGroupKind = ProjectGroupKind.LAB
+    group_read_all: bool = False
+    created_at: datetime = Field(default_factory=utc_now)
+    created_by: str | None = None
+    updated_at: datetime = Field(default_factory=utc_now)
+
+
 class ProjectMembership(_DomainModel):
     membership_id: UUID
     project_id: UUID
+    user_id: UUID
+    role: ProjectMembershipRole
+    username: str | None = None
+    user_global_role: str | None = None
+    created_at: datetime = Field(default_factory=utc_now)
+    created_by: str | None = None
+    updated_at: datetime = Field(default_factory=utc_now)
+
+
+class GroupMembership(_DomainModel):
+    membership_id: UUID
+    group_id: UUID
     user_id: UUID
     role: ProjectMembershipRole
     username: str | None = None

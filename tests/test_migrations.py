@@ -78,7 +78,7 @@ def test_alembic_upgrade_chain_from_empty_to_head(monkeypatch, tmp_path):
     for revision in revisions:
         command.upgrade(config, revision)
         assert revision in _current_revisions(database_url)
-    assert _current_revision(database_url) == "0025_dataset_external_artifacts"
+    assert _current_revision(database_url) == "0026_project_groups"
 
 
 def test_alembic_has_single_head() -> None:
@@ -132,6 +132,8 @@ def test_alembic_upgrade_head_creates_expected_tables(monkeypatch, tmp_path):
         "graph_draft_batch_settings",
         "graph_draft_batch_runs",
         "project_memberships",
+        "project_groups",
+        "group_memberships",
     }
     assert expected.issubset(table_names)
     assert "dataset_reviews" not in table_names
@@ -139,6 +141,9 @@ def test_alembic_upgrade_head_creates_expected_tables(monkeypatch, tmp_path):
     assert "note_tag_suggestions" not in table_names
 
     project_columns = {column["name"] for column in inspector.get_columns("projects")}
+    project_group_columns = {
+        column["name"] for column in inspector.get_columns("project_groups")
+    }
     question_columns = {column["name"] for column in inspector.get_columns("questions")}
     dataset_columns = {column["name"] for column in inspector.get_columns("datasets")}
     graph_change_columns = {
@@ -146,6 +151,9 @@ def test_alembic_upgrade_head_creates_expected_tables(monkeypatch, tmp_path):
     }
     membership_columns = {
         column["name"] for column in inspector.get_columns("project_memberships")
+    }
+    group_membership_columns = {
+        column["name"] for column in inspector.get_columns("group_memberships")
     }
     visualization_columns = {
         column["name"] for column in inspector.get_columns("visualizations")
@@ -155,6 +163,14 @@ def test_alembic_upgrade_head_creates_expected_tables(monkeypatch, tmp_path):
     }
 
     assert "review_policy" not in project_columns
+    assert "group_id" in project_columns
+    assert {
+        "group_id",
+        "name",
+        "description",
+        "kind",
+        "group_read_all",
+    }.issubset(project_group_columns)
     assert "created_from" not in question_columns
     assert "source_provenance" not in question_columns
     assert "manifest_extraction_provenance" not in dataset_columns
@@ -174,6 +190,7 @@ def test_alembic_upgrade_head_creates_expected_tables(monkeypatch, tmp_path):
         column["name"] for column in inspector.get_columns("graph_change_operations")
     }
     assert {"project_id", "user_id", "role"}.issubset(membership_columns)
+    assert {"group_id", "user_id", "role"}.issubset(group_membership_columns)
     assert {
         "asset_storage_id",
         "asset_filename",
@@ -196,7 +213,7 @@ def test_database_at_daily_review_branch_upgrades_to_current_head(monkeypatch, t
     assert _current_revision(database_url) == "0017_daily_graph_reviews"
 
     command.upgrade(config, "head")
-    assert _current_revision(database_url) == "0025_dataset_external_artifacts"
+    assert _current_revision(database_url) == "0026_project_groups"
 
     engine = create_engine(
         database_url,
@@ -213,6 +230,8 @@ def test_database_at_daily_review_branch_upgrades_to_current_head(monkeypatch, t
         "project_memberships",
         "graph_draft_batch_settings",
         "graph_draft_batch_runs",
+        "project_groups",
+        "group_memberships",
     }.issubset(table_names)
     engine.dispose()
 

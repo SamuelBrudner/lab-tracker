@@ -17,8 +17,10 @@ from lab_tracker.models import (
     GraphChangeSet,
     GraphDraftBatchRun,
     GraphDraftBatchSettings,
+    GroupMembership,
     Note,
     Project,
+    ProjectGroup,
     ProjectMembership,
     Question,
     QuestionRefactor,
@@ -49,7 +51,9 @@ class LabTrackerRepository(Protocol):
     """Repository surface expected by the Lab Tracker domain layer."""
 
     projects: EntityRepository[Project]
+    project_groups: EntityRepository[ProjectGroup]
     project_memberships: EntityRepository[ProjectMembership]
+    group_memberships: EntityRepository[GroupMembership]
     questions: EntityRepository[Question]
     question_refactors: EntityRepository[QuestionRefactor]
     datasets: EntityRepository[Dataset]
@@ -73,11 +77,21 @@ class LabTrackerRepository(Protocol):
     def query_projects(
         self,
         *,
+        group_id: UUID | None = None,
         status: str | None = None,
         limit: int | None = None,
         offset: int = 0,
     ) -> tuple[list[Project], int]:
         """Query projects with filters and pagination."""
+
+    def query_project_groups(
+        self,
+        *,
+        kind: str | None = None,
+        limit: int | None = None,
+        offset: int = 0,
+    ) -> tuple[list[ProjectGroup], int]:
+        """Query project groups with filters and pagination."""
 
     def query_project_memberships(
         self,
@@ -96,6 +110,24 @@ class LabTrackerRepository(Protocol):
         user_id: UUID,
     ) -> ProjectMembership | None:
         """Return one project membership by project and user."""
+
+    def query_group_memberships(
+        self,
+        *,
+        group_id: UUID | None = None,
+        user_id: UUID | None = None,
+        limit: int | None = None,
+        offset: int = 0,
+    ) -> tuple[list[GroupMembership], int]:
+        """Query group memberships with optional group/user filters."""
+
+    def get_group_membership(
+        self,
+        *,
+        group_id: UUID,
+        user_id: UUID,
+    ) -> GroupMembership | None:
+        """Return one group membership by group and user."""
 
     def query_questions(
         self,

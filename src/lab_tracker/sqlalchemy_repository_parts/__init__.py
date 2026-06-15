@@ -6,6 +6,9 @@ from lab_tracker.sqlalchemy_repository_parts.analyses import (
     SQLAlchemyVisualizationRepository,
 )
 from lab_tracker.sqlalchemy_repository_parts.core import (
+    SQLAlchemyGroupMembershipRepository,
+    SQLAlchemyProjectGroupRepository,
+    SQLAlchemyProjectMembershipRepository,
     SQLAlchemyProjectRepository,
     SQLAlchemyQuestionRepository,
 )
@@ -24,8 +27,11 @@ __all__ = [
     "SQLAlchemyClaimRepository",
     "SQLAlchemyDatasetRepository",
     "SQLAlchemyGoalRepository",
+    "SQLAlchemyGroupMembershipRepository",
     "SQLAlchemyLabTrackerRepository",
     "SQLAlchemyNoteRepository",
+    "SQLAlchemyProjectGroupRepository",
+    "SQLAlchemyProjectMembershipRepository",
     "SQLAlchemyProjectRepository",
     "SQLAlchemyQuestionRepository",
     "SQLAlchemySessionRepository",

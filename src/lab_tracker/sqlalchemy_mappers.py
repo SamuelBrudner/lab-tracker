@@ -68,10 +68,19 @@ from lab_tracker.models import (
 )
 from lab_tracker.provenance_ingestion import external_artifacts_from_metadata
 from lab_tracker.sqlalchemy_mapper_parts.projects import (
+    apply_project_group_to_model as apply_project_group_to_model,
+)
+from lab_tracker.sqlalchemy_mapper_parts.projects import (
     apply_project_to_model as apply_project_to_model,
 )
 from lab_tracker.sqlalchemy_mapper_parts.projects import (
     project_from_model as project_from_model,
+)
+from lab_tracker.sqlalchemy_mapper_parts.projects import (
+    project_group_from_model as project_group_from_model,
+)
+from lab_tracker.sqlalchemy_mapper_parts.projects import (
+    project_group_to_model as project_group_to_model,
 )
 from lab_tracker.sqlalchemy_mapper_parts.projects import (
     project_to_model as project_to_model,

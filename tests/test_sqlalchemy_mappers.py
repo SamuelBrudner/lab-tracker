@@ -13,6 +13,8 @@ from lab_tracker.models import (
     NoteStatus,
     OutcomeStatus,
     Project,
+    ProjectGroup,
+    ProjectGroupKind,
     ProjectStatus,
     Question,
     QuestionLink,
@@ -26,8 +28,11 @@ from lab_tracker.provenance_ingestion import (
 )
 from lab_tracker.schemas import Envelope, ProjectCreate
 from lab_tracker.sqlalchemy_mapper_parts.projects import (
+    apply_project_group_to_model,
     apply_project_to_model,
     project_from_model,
+    project_group_from_model,
+    project_group_to_model,
     project_to_model,
 )
 from lab_tracker.sqlalchemy_mappers import (
@@ -50,8 +55,10 @@ def _ts() -> datetime:
 
 
 def test_project_mapper_round_trip():
+    group_id = uuid4()
     project = Project(
         project_id=uuid4(),
+        group_id=group_id,
         name="Neural Mapping",
         description="Parent persistence milestone",
         status=ProjectStatus.ARCHIVED,
@@ -64,10 +71,34 @@ def test_project_mapper_round_trip():
     assert mapped == project
 
 
+def test_project_group_mapper_round_trip():
+    group = ProjectGroup(
+        group_id=uuid4(),
+        name="Fly navigation lab",
+        description="Shared PI oversight container",
+        kind=ProjectGroupKind.LAB,
+        group_read_all=True,
+        created_by="scientist@example.com",
+        created_at=_ts(),
+        updated_at=_ts(),
+    )
+    row = project_group_to_model(group)
+    mapped = project_group_from_model(row)
+
+    assert mapped == group
+
+    updated = group.model_copy(update={"name": "Updated lab", "group_read_all": False})
+    apply_project_group_to_model(row, updated)
+    assert project_group_from_model(row) == updated
+
+
 def test_project_mapper_pilot_preserves_compatibility_barrel():
     assert sqlalchemy_mappers.project_to_model is project_to_model
     assert sqlalchemy_mappers.project_from_model is project_from_model
     assert sqlalchemy_mappers.apply_project_to_model is apply_project_to_model
+    assert sqlalchemy_mappers.project_group_to_model is project_group_to_model
+    assert sqlalchemy_mappers.project_group_from_model is project_group_from_model
+    assert sqlalchemy_mappers.apply_project_group_to_model is apply_project_group_to_model
 
 
 def test_project_mapper_pilot_keeps_schema_domain_and_orm_boundaries():

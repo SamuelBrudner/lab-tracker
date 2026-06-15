@@ -20,8 +20,10 @@ from lab_tracker.models import (
     GraphChangeSet,
     GraphDraftBatchRun,
     GraphDraftBatchSettings,
+    GroupMembership,
     Note,
     Project,
+    ProjectGroup,
     Question,
     QuestionRefactor,
     Session,
@@ -35,6 +37,8 @@ from .analyses import (
     SQLAlchemyVisualizationRepository,
 )
 from .core import (
+    SQLAlchemyGroupMembershipRepository,
+    SQLAlchemyProjectGroupRepository,
     SQLAlchemyProjectMembershipRepository,
     SQLAlchemyProjectRepository,
     SQLAlchemyQuestionRefactorRepository,
@@ -57,7 +61,9 @@ class SQLAlchemyLabTrackerRepository(LabTrackerRepository):
     def __init__(self, session: OrmSession) -> None:
         self._session = session
         self.projects = SQLAlchemyProjectRepository(session)
+        self.project_groups = SQLAlchemyProjectGroupRepository(session)
         self.project_memberships = SQLAlchemyProjectMembershipRepository(session)
+        self.group_memberships = SQLAlchemyGroupMembershipRepository(session)
         self.questions = SQLAlchemyQuestionRepository(session)
         self.question_refactors = SQLAlchemyQuestionRefactorRepository(session)
         self.datasets = SQLAlchemyDatasetRepository(session)
@@ -119,11 +125,26 @@ class SQLAlchemyLabTrackerRepository(LabTrackerRepository):
     def query_projects(
         self,
         *,
+        group_id: UUID | None = None,
         status: str | None = None,
         limit: int | None = None,
         offset: int = 0,
     ) -> tuple[list[Project], int]:
-        return self.projects.query(status=status, limit=limit, offset=offset)
+        return self.projects.query(
+            group_id=group_id,
+            status=status,
+            limit=limit,
+            offset=offset,
+        )
+
+    def query_project_groups(
+        self,
+        *,
+        kind: str | None = None,
+        limit: int | None = None,
+        offset: int = 0,
+    ) -> tuple[list[ProjectGroup], int]:
+        return self.project_groups.query(kind=kind, limit=limit, offset=offset)
 
     def query_project_memberships(
         self,
@@ -148,6 +169,32 @@ class SQLAlchemyLabTrackerRepository(LabTrackerRepository):
     ):
         return self.project_memberships.get_by_project_user(
             project_id=project_id,
+            user_id=user_id,
+        )
+
+    def query_group_memberships(
+        self,
+        *,
+        group_id: UUID | None = None,
+        user_id: UUID | None = None,
+        limit: int | None = None,
+        offset: int = 0,
+    ) -> tuple[list[GroupMembership], int]:
+        return self.group_memberships.query(
+            group_id=group_id,
+            user_id=user_id,
+            limit=limit,
+            offset=offset,
+        )
+
+    def get_group_membership(
+        self,
+        *,
+        group_id: UUID,
+        user_id: UUID,
+    ) -> GroupMembership | None:
+        return self.group_memberships.get_by_group_user(
+            group_id=group_id,
             user_id=user_id,
         )
 

@@ -9,6 +9,8 @@ from sqlalchemy import or_, select
 from sqlalchemy.orm import Session as OrmSession
 
 from lab_tracker.db_models import (
+    GroupMembershipModel,
+    ProjectGroupModel,
     ProjectMembershipModel,
     ProjectModel,
     QuestionModel,
@@ -17,16 +19,22 @@ from lab_tracker.db_models import (
     UserModel,
 )
 from lab_tracker.models import (
+    GroupMembership,
     Project,
+    ProjectGroup,
     ProjectMembership,
     ProjectMembershipRole,
     Question,
     QuestionRefactor,
 )
 from lab_tracker.repository import EntityRepository
+from lab_tracker.sqlalchemy_mapper_parts.common import as_utc, uuid_from_db, uuid_to_db
 from lab_tracker.sqlalchemy_mapper_parts.projects import (
+    apply_project_group_to_model,
     apply_project_to_model,
     project_from_model,
+    project_group_from_model,
+    project_group_to_model,
     project_to_model,
 )
 from lab_tracker.sqlalchemy_mappers import (
@@ -65,6 +73,7 @@ class SQLAlchemyProjectRepository(SQLAlchemyModelRepository[Project, ProjectMode
     def query(
         self,
         *,
+        group_id: UUID | None = None,
         status: str | None = None,
         limit: int | None = None,
         offset: int = 0,
@@ -72,6 +81,9 @@ class SQLAlchemyProjectRepository(SQLAlchemyModelRepository[Project, ProjectMode
         self._session.flush()
         stmt = select(ProjectModel)
         count_stmt = select(ProjectModel.project_id)
+        if group_id is not None:
+            stmt = stmt.where(ProjectModel.group_id == str(group_id))
+            count_stmt = count_stmt.where(ProjectModel.group_id == str(group_id))
         if status is not None:
             stmt = stmt.where(ProjectModel.status == status)
             count_stmt = count_stmt.where(ProjectModel.status == status)
@@ -79,6 +91,39 @@ class SQLAlchemyProjectRepository(SQLAlchemyModelRepository[Project, ProjectMode
         total = count_from_statement(self._session, count_stmt)
         rows = list(self._session.scalars(apply_pagination(stmt, limit=limit, offset=offset)))
         return [project_from_model(row) for row in rows], total
+
+
+class SQLAlchemyProjectGroupRepository(
+    SQLAlchemyModelRepository[ProjectGroup, ProjectGroupModel]
+):
+    def __init__(self, session: OrmSession) -> None:
+        super().__init__(
+            session,
+            model_type=ProjectGroupModel,
+            id_column=ProjectGroupModel.group_id,
+            entity_id_getter=lambda entity: entity.group_id,
+            to_model=project_group_to_model,
+            from_model=project_group_from_model,
+            apply_to_model=apply_project_group_to_model,
+        )
+
+    def query(
+        self,
+        *,
+        kind: str | None = None,
+        limit: int | None = None,
+        offset: int = 0,
+    ) -> tuple[list[ProjectGroup], int]:
+        self._session.flush()
+        stmt = select(ProjectGroupModel)
+        count_stmt = select(ProjectGroupModel.group_id)
+        if kind is not None:
+            stmt = stmt.where(ProjectGroupModel.kind == kind)
+            count_stmt = count_stmt.where(ProjectGroupModel.kind == kind)
+        stmt = stmt.order_by(ProjectGroupModel.created_at, ProjectGroupModel.group_id)
+        total = count_from_statement(self._session, count_stmt)
+        rows = list(self._session.scalars(apply_pagination(stmt, limit=limit, offset=offset)))
+        return [project_group_from_model(row) for row in rows], total
 
 
 class SQLAlchemyProjectMembershipRepository(EntityRepository[ProjectMembership]):
@@ -98,8 +143,8 @@ class SQLAlchemyProjectMembershipRepository(EntityRepository[ProjectMembership])
             username=user.username if user is not None else None,
             user_global_role=user.role if user is not None else None,
             created_by=row.created_by,
-            created_at=row.created_at,
-            updated_at=row.updated_at,
+            created_at=as_utc(row.created_at),
+            updated_at=as_utc(row.updated_at),
         )
 
     def get(self, entity_id: UUID) -> ProjectMembership | None:
@@ -176,6 +221,128 @@ class SQLAlchemyProjectMembershipRepository(EntityRepository[ProjectMembership])
             .where(
                 ProjectMembershipModel.project_id == str(project_id),
                 ProjectMembershipModel.user_id == str(user_id),
+            )
+        ).first()
+        if result is None:
+            return None
+        row, user = result
+        return self._from_row(row, user)
+
+
+class SQLAlchemyGroupMembershipRepository(EntityRepository[GroupMembership]):
+    def __init__(self, session: OrmSession) -> None:
+        self._session = session
+
+    def _from_row(
+        self,
+        row: GroupMembershipModel,
+        user: UserModel | None = None,
+    ) -> GroupMembership:
+        return GroupMembership(
+            membership_id=uuid_from_db(row.membership_id),
+            group_id=uuid_from_db(row.group_id),
+            user_id=uuid_from_db(row.user_id),
+            role=ProjectMembershipRole(row.role),
+            username=user.username if user is not None else None,
+            user_global_role=user.role if user is not None else None,
+            created_by=row.created_by,
+            created_at=as_utc(row.created_at),
+            updated_at=as_utc(row.updated_at),
+        )
+
+    def _to_model(self, membership: GroupMembership) -> GroupMembershipModel:
+        return GroupMembershipModel(
+            membership_id=uuid_to_db(membership.membership_id),
+            group_id=uuid_to_db(membership.group_id),
+            user_id=uuid_to_db(membership.user_id),
+            role=membership.role.value,
+            created_by=membership.created_by,
+            created_at=membership.created_at,
+            updated_at=membership.updated_at,
+        )
+
+    def _apply_to_model(self, row: GroupMembershipModel, membership: GroupMembership) -> None:
+        row.group_id = uuid_to_db(membership.group_id)
+        row.user_id = uuid_to_db(membership.user_id)
+        row.role = membership.role.value
+        row.created_by = membership.created_by
+        row.created_at = membership.created_at
+        row.updated_at = membership.updated_at
+
+    def get(self, entity_id: UUID) -> GroupMembership | None:
+        self._session.flush()
+        row = self._session.get(GroupMembershipModel, str(entity_id))
+        if row is None:
+            return None
+        user = self._session.get(UserModel, row.user_id)
+        return self._from_row(row, user)
+
+    def list(self) -> list[GroupMembership]:
+        self._session.flush()
+        rows = list(
+            self._session.execute(
+                select(GroupMembershipModel, UserModel)
+                .join(UserModel, UserModel.user_id == GroupMembershipModel.user_id)
+                .order_by(GroupMembershipModel.group_id, UserModel.username)
+            )
+        )
+        return [self._from_row(row, user) for row, user in rows]
+
+    def save(self, entity: GroupMembership) -> None:
+        entity_id = str(entity.membership_id)
+        row = self._session.get(GroupMembershipModel, entity_id)
+        if row is None:
+            self._session.add(self._to_model(entity))
+            return
+        self._apply_to_model(row, entity)
+
+    def delete(self, entity_id: UUID) -> GroupMembership | None:
+        entity = self.get(entity_id)
+        if entity is None:
+            return None
+        row = self._session.get(GroupMembershipModel, str(entity_id))
+        if row is not None:
+            self._session.delete(row)
+        return entity
+
+    def query(
+        self,
+        *,
+        group_id: UUID | None = None,
+        user_id: UUID | None = None,
+        limit: int | None = None,
+        offset: int = 0,
+    ) -> tuple[list[GroupMembership], int]:
+        self._session.flush()
+        stmt = select(GroupMembershipModel, UserModel).join(
+            UserModel,
+            UserModel.user_id == GroupMembershipModel.user_id,
+        )
+        count_stmt = select(GroupMembershipModel.membership_id)
+        if group_id is not None:
+            stmt = stmt.where(GroupMembershipModel.group_id == str(group_id))
+            count_stmt = count_stmt.where(GroupMembershipModel.group_id == str(group_id))
+        if user_id is not None:
+            stmt = stmt.where(GroupMembershipModel.user_id == str(user_id))
+            count_stmt = count_stmt.where(GroupMembershipModel.user_id == str(user_id))
+        stmt = stmt.order_by(GroupMembershipModel.group_id, UserModel.username)
+        total = count_from_statement(self._session, count_stmt)
+        rows = list(self._session.execute(apply_pagination(stmt, limit=limit, offset=offset)))
+        return [self._from_row(row, user) for row, user in rows], total
+
+    def get_by_group_user(
+        self,
+        *,
+        group_id: UUID,
+        user_id: UUID,
+    ) -> GroupMembership | None:
+        self._session.flush()
+        result = self._session.execute(
+            select(GroupMembershipModel, UserModel)
+            .join(UserModel, UserModel.user_id == GroupMembershipModel.user_id)
+            .where(
+                GroupMembershipModel.group_id == str(group_id),
+                GroupMembershipModel.user_id == str(user_id),
             )
         ).first()
         if result is None:
