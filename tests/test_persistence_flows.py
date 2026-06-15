@@ -62,6 +62,24 @@ class _AttributionDraftClient:
         return self.draft_from_note()
 
 
+_ATTRIBUTION_COLUMN_PAIRS = (
+    ("project_groups", "created_by", "created_by_user_id"),
+    ("projects", "created_by", "created_by_user_id"),
+    ("group_memberships", "created_by", "created_by_user_id"),
+    ("project_memberships", "created_by", "created_by_user_id"),
+    ("questions", "created_by", "created_by_user_id"),
+    ("question_refactors", "created_by", "created_by_user_id"),
+    ("datasets", "created_by", "created_by_user_id"),
+    ("notes", "created_by", "created_by_user_id"),
+    ("sessions", "created_by", "created_by_user_id"),
+    ("analyses", "executed_by", "executed_by_user_id"),
+    ("goals", "created_by", "created_by_user_id"),
+    ("goal_links", "created_by", "created_by_user_id"),
+    ("graph_change_sets", "created_by", "created_by_user_id"),
+    ("graph_draft_batch_runs", "created_by", "created_by_user_id"),
+)
+
+
 def _insert_user(session, user_id, username, role=Role.ADMIN):
     session.add(
         UserModel(
@@ -94,6 +112,20 @@ def _assert_attribution_row(
     ).mappings().one()
     assert row[legacy_column] == expected_legacy
     assert row[fk_column] == expected_fk
+
+
+def _assert_no_attribution_divergence(session):
+    for table_name, legacy_column, fk_column in _ATTRIBUTION_COLUMN_PAIRS:
+        divergent_count = session.execute(
+            text(
+                f"SELECT COUNT(*) "
+                f"FROM {table_name} "
+                f"WHERE {legacy_column} IS NOT NULL "
+                f"AND {fk_column} IS NOT NULL "
+                f"AND {legacy_column} != {fk_column}"
+            )
+        ).scalar_one()
+        assert divergent_count == 0, table_name
 
 
 class _SpySearchRepository(SQLAlchemyLabTrackerRepository):
@@ -359,6 +391,7 @@ def test_repository_backed_api_dual_writes_attribution_user_fk_columns(tmp_path)
             expected_legacy=expected_user,
             expected_fk=expected_user,
         )
+        _assert_no_attribution_divergence(session)
 
     engine.dispose()
 
