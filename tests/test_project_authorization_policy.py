@@ -7,8 +7,8 @@ from api_helpers import repository_backed_api
 
 from lab_tracker.auth import AuthContext, Role
 from lab_tracker.db_models import UserModel
-from lab_tracker.errors import AuthError
-from lab_tracker.models import ProjectMembershipRole
+from lab_tracker.errors import AuthError, ValidationError
+from lab_tracker.models import GroupMembership, ProjectGroup, ProjectMembershipRole
 
 
 def _actor(role: Role = Role.VIEWER) -> AuthContext:
@@ -35,6 +35,32 @@ def _project_with_admin():
     admin = _actor(Role.ADMIN)
     project = api.create_project("Policy project", actor=admin)
     return api, admin, project
+
+
+def _create_group(api, *, name: str = "Policy group", group_read_all: bool = False):
+    group = ProjectGroup(group_id=uuid4(), name=name, group_read_all=group_read_all)
+    api._repository.project_groups.save(group)  # type: ignore[attr-defined]
+    api._repository.commit()  # type: ignore[attr-defined]
+    return group
+
+
+def _assign_project_group(api, project, group):
+    grouped_project = project.model_copy(update={"group_id": group.group_id})
+    api._repository.projects.save(grouped_project)  # type: ignore[attr-defined]
+    api._repository.commit()  # type: ignore[attr-defined]
+    return grouped_project
+
+
+def _add_group_membership(api, group, actor: AuthContext, role: ProjectMembershipRole):
+    membership = GroupMembership(
+        membership_id=uuid4(),
+        group_id=group.group_id,
+        user_id=actor.user_id,
+        role=role,
+    )
+    api._repository.group_memberships.save(membership)  # type: ignore[attr-defined]
+    api._repository.commit()  # type: ignore[attr-defined]
+    return membership
 
 
 def test_admin_has_global_project_access_without_membership() -> None:
@@ -161,3 +187,113 @@ def test_unauthenticated_and_unrelated_actors_are_denied() -> None:
         api.project_authorization.require_contributor(project.project_id, actor=unrelated)
     with pytest.raises(AuthError, match="Project owner access required."):
         api.project_authorization.require_owner(project.project_id, actor=unrelated)
+
+
+def test_group_owner_inherits_owner_access_to_child_projects() -> None:
+    api, admin, first_project = _project_with_admin()
+    second_project = api.create_project("Second grouped project", actor=admin)
+    group = _create_group(api)
+    first_project = _assign_project_group(api, first_project, group)
+    second_project = _assign_project_group(api, second_project, group)
+    group_owner = _registered_actor(api, Role.VIEWER)
+    _add_group_membership(api, group, group_owner, ProjectMembershipRole.OWNER)
+
+    assert api.project_authorization.accessible_project_ids(group_owner) == {
+        first_project.project_id,
+        second_project.project_id,
+    }
+    assert (
+        api.project_authorization.membership_role(first_project.project_id, group_owner)
+        == ProjectMembershipRole.OWNER
+    )
+    api.project_authorization.require_read(first_project.project_id, actor=group_owner)
+    api.project_authorization.require_contributor(first_project.project_id, actor=group_owner)
+    api.project_authorization.require_owner(first_project.project_id, actor=group_owner)
+    updated = api.update_project(
+        second_project.project_id,
+        name="Updated through group ownership",
+        actor=group_owner,
+    )
+    assert updated.name == "Updated through group ownership"
+
+
+def test_group_viewer_and_contributor_do_not_inherit_project_read_by_default() -> None:
+    api, admin, project = _project_with_admin()
+    group = _create_group(api, group_read_all=False)
+    project = _assign_project_group(api, project, group)
+    viewer = _registered_actor(api, Role.VIEWER)
+    contributor = _registered_actor(api, Role.VIEWER)
+    _add_group_membership(api, group, viewer, ProjectMembershipRole.VIEWER)
+    _add_group_membership(api, group, contributor, ProjectMembershipRole.CONTRIBUTOR)
+
+    for actor in (viewer, contributor):
+        assert api.project_authorization.accessible_project_ids(actor) == set()
+        assert api.project_authorization.membership_role(project.project_id, actor) is None
+        with pytest.raises(AuthError, match="Project access required."):
+            api.project_authorization.require_read(project.project_id, actor=actor)
+
+
+def test_group_read_all_grants_read_only_access_to_non_owner_group_members() -> None:
+    api, admin, project = _project_with_admin()
+    group = _create_group(api, group_read_all=True)
+    project = _assign_project_group(api, project, group)
+    viewer = _registered_actor(api, Role.VIEWER)
+    contributor = _registered_actor(api, Role.VIEWER)
+    _add_group_membership(api, group, viewer, ProjectMembershipRole.VIEWER)
+    _add_group_membership(api, group, contributor, ProjectMembershipRole.CONTRIBUTOR)
+
+    for actor in (viewer, contributor):
+        assert api.project_authorization.accessible_project_ids(actor) == {project.project_id}
+        assert (
+            api.project_authorization.membership_role(project.project_id, actor)
+            == ProjectMembershipRole.VIEWER
+        )
+        api.project_authorization.require_read(project.project_id, actor=actor)
+        with pytest.raises(AuthError, match="Project contributor access required."):
+            api.project_authorization.require_contributor(project.project_id, actor=actor)
+        with pytest.raises(AuthError, match="Project owner access required."):
+            api.project_authorization.require_owner(project.project_id, actor=actor)
+
+
+def test_direct_project_membership_takes_precedence_over_group_inheritance() -> None:
+    api, admin, project = _project_with_admin()
+    group = _create_group(api)
+    project = _assign_project_group(api, project, group)
+    group_owner = _registered_actor(api, Role.VIEWER)
+    _add_group_membership(api, group, group_owner, ProjectMembershipRole.OWNER)
+    api.upsert_project_membership(
+        project.project_id,
+        group_owner.user_id,
+        ProjectMembershipRole.VIEWER,
+        actor=admin,
+    )
+
+    assert (
+        api.project_authorization.membership_role(project.project_id, group_owner)
+        == ProjectMembershipRole.VIEWER
+    )
+    api.project_authorization.require_read(project.project_id, actor=group_owner)
+    with pytest.raises(AuthError, match="Project owner access required."):
+        api.project_authorization.require_owner(project.project_id, actor=group_owner)
+
+
+def test_group_owner_cannot_remove_the_last_direct_project_owner() -> None:
+    api, admin, project = _project_with_admin()
+    group = _create_group(api)
+    project = _assign_project_group(api, project, group)
+    group_owner = _registered_actor(api, Role.VIEWER)
+    direct_owner = _registered_actor(api, Role.VIEWER)
+    _add_group_membership(api, group, group_owner, ProjectMembershipRole.OWNER)
+    api.upsert_project_membership(
+        project.project_id,
+        direct_owner.user_id,
+        ProjectMembershipRole.OWNER,
+        actor=admin,
+    )
+
+    with pytest.raises(ValidationError, match="Projects must keep at least one owner."):
+        api.delete_project_membership(
+            project.project_id,
+            direct_owner.user_id,
+            actor=group_owner,
+        )

@@ -39,7 +39,7 @@ class ProjectAuthorizationPolicy(BaseService):
             return None
         if actor is None:
             raise AuthError("Authentication required.")
-        memberships = self.query_from_repository(
+        direct_memberships = self.query_from_repository(
             loader=lambda repository: repository.query_project_memberships(
                 project_id=None,
                 user_id=actor.user_id,
@@ -47,7 +47,34 @@ class ProjectAuthorizationPolicy(BaseService):
                 offset=0,
             ),
         )
-        return {membership.project_id for membership in memberships}
+        project_ids = {membership.project_id for membership in direct_memberships}
+        group_memberships = self.query_from_repository(
+            loader=lambda repository: repository.query_group_memberships(
+                group_id=None,
+                user_id=actor.user_id,
+                limit=None,
+                offset=0,
+            ),
+        )
+        for group_membership in group_memberships:
+            group = self.repository.project_groups.get(group_membership.group_id)
+            if group is None:
+                continue
+            inherits_read = (
+                group_membership.role == ProjectMembershipRole.OWNER or group.group_read_all
+            )
+            if not inherits_read:
+                continue
+            group_id = group_membership.group_id
+            projects = self.query_from_repository(
+                loader=lambda repository, group_id=group_id: repository.query_projects(
+                    group_id=group_id,
+                    limit=None,
+                    offset=0,
+                ),
+            )
+            project_ids.update(project.project_id for project in projects)
+        return project_ids
 
     def membership_role(
         self,
@@ -62,7 +89,23 @@ class ProjectAuthorizationPolicy(BaseService):
             project_id=project_id,
             user_id=actor.user_id,
         )
-        return membership.role if membership is not None else None
+        if membership is not None:
+            return membership.role
+        project = self.repository.projects.get(project_id)
+        if project is None or project.group_id is None:
+            return None
+        group_membership = self.repository.get_group_membership(
+            group_id=project.group_id,
+            user_id=actor.user_id,
+        )
+        if group_membership is None:
+            return None
+        if group_membership.role == ProjectMembershipRole.OWNER:
+            return ProjectMembershipRole.OWNER
+        group = self.repository.project_groups.get(project.group_id)
+        if group is not None and group.group_read_all:
+            return ProjectMembershipRole.VIEWER
+        return None
 
     def require_read(
         self,
