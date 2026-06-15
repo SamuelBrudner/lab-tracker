@@ -75,6 +75,7 @@ def build_projects_router(api: LabTrackerAPI) -> APIRouter:
             name=payload.name,
             description=payload.description or "",
             status=payload.status or project_default_status(),
+            group_id=payload.group_id,
             actor=actor,
         )
         return Envelope(data=project)
@@ -106,12 +107,17 @@ def build_projects_router(api: LabTrackerAPI) -> APIRouter:
     def update_project(project_id: UUID, payload: ProjectUpdate, request: Request):
         actor = actor_from_request(request)
         ensure_project_owner(request, project_id)
+        update_kwargs = {
+            "name": payload.name,
+            "description": payload.description,
+            "status": payload.status,
+            "actor": actor,
+        }
+        if "group_id" in payload.model_fields_set:
+            update_kwargs["group_id"] = payload.group_id
         project = api_from_request(request, api).update_project(
             project_id,
-            name=payload.name,
-            description=payload.description,
-            status=payload.status,
-            actor=actor,
+            **update_kwargs,
         )
         return Envelope(data=project)
 

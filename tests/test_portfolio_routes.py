@@ -24,8 +24,19 @@ def _auth_headers(token: str) -> dict[str, str]:
     return {"Authorization": f"Bearer {token}"}
 
 
-def _register_user(client: TestClient, username: str, password: str = "secret") -> str:
-    response = client.post("/auth/register", json={"username": username, "password": password})
+def _register_user(
+    client: TestClient,
+    username: str,
+    password: str = "secret",
+    *,
+    role: str = "viewer",
+    headers: dict[str, str] | None = None,
+) -> str:
+    response = client.post(
+        "/auth/register",
+        json={"username": username, "password": password, "role": role},
+        headers=headers or {},
+    )
     assert response.status_code == 201
     return response.json()["data"]["access_token"]
 
@@ -118,6 +129,14 @@ def _parse_utc_timestamp(raw: str) -> datetime:
     return datetime.fromisoformat(raw.replace("Z", "+00:00")).astimezone(timezone.utc)
 
 
+def _portfolio_projects(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    return [
+        project
+        for project_group in payload["data"]
+        for project in project_group["projects"]
+    ]
+
+
 def test_portfolio_summary_aggregates_project_health_rows(
     client: TestClient,
     admin_auth_headers: dict[str, str],
@@ -192,7 +211,9 @@ def test_portfolio_summary_aggregates_project_health_rows(
     assert response.status_code == 200
     payload = response.json()
     assert payload["meta"]["total"] == 1
-    row = payload["data"][0]
+    assert payload["data"][0]["project_group"] is None
+    assert payload["data"][0]["project_count"] == 1
+    row = payload["data"][0]["projects"][0]
     assert row["project_id"] == project_id
     assert row["name"] == "Portfolio project"
     assert row["status"] == "active"
@@ -243,14 +264,68 @@ def test_portfolio_summary_is_scoped_to_accessible_projects(
     admin_response = client.get("/portfolio/summary", headers=admin_auth_headers)
 
     assert scoped_response.status_code == 200
-    assert [item["project_id"] for item in scoped_response.json()["data"]] == [
+    assert [item["project_id"] for item in _portfolio_projects(scoped_response.json())] == [
         visible_project_id
     ]
     assert scoped_response.json()["meta"]["total"] == 1
 
     assert admin_response.status_code == 200
-    admin_project_ids = {item["project_id"] for item in admin_response.json()["data"]}
+    admin_project_ids = {
+        item["project_id"] for item in _portfolio_projects(admin_response.json())
+    }
     assert {visible_project_id, hidden_project_id}.issubset(admin_project_ids)
+
+
+def test_portfolio_summary_groups_projects_by_project_group(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+):
+    owner_headers = _auth_headers(
+        _register_user(
+            client,
+            "portfolio-group-owner",
+            role="editor",
+            headers=admin_auth_headers,
+        )
+    )
+    group_response = client.post(
+        "/groups",
+        json={"name": "Olfaction lab"},
+        headers=owner_headers,
+    )
+    assert group_response.status_code == 201
+    group = group_response.json()["data"]
+    grouped_project_ids = [
+        _create_project(client, admin_auth_headers, "Grouped portfolio A"),
+        _create_project(client, admin_auth_headers, "Grouped portfolio B"),
+    ]
+    ungrouped_project_id = _create_project(
+        client,
+        admin_auth_headers,
+        "Ungrouped portfolio",
+    )
+    for project_id in grouped_project_ids:
+        assign_response = client.patch(
+            f"/projects/{project_id}",
+            json={"group_id": group["group_id"]},
+            headers=admin_auth_headers,
+        )
+        assert assign_response.status_code == 200
+
+    response = client.get("/portfolio/summary", headers=owner_headers)
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["meta"]["total"] == 2
+    assert len(payload["data"]) == 1
+    bucket = payload["data"][0]
+    assert bucket["project_group"]["group_id"] == group["group_id"]
+    assert bucket["project_group"]["name"] == "Olfaction lab"
+    assert bucket["project_count"] == 2
+    assert {item["project_id"] for item in bucket["projects"]} == set(grouped_project_ids)
+    assert ungrouped_project_id not in {
+        item["project_id"] for item in _portfolio_projects(payload)
+    }
 
 
 def test_portfolio_summary_normalizes_graph_change_set_activity(
@@ -277,7 +352,7 @@ def test_portfolio_summary_normalizes_graph_change_set_activity(
     response = client.get("/portfolio/summary", headers=admin_auth_headers)
 
     assert response.status_code == 200
-    rows = response.json()["data"]
+    rows = _portfolio_projects(response.json())
     row = next(item for item in rows if item["project_id"] == project_id)
     assert _parse_utc_timestamp(row["last_activity_at"]) == _parse_utc_timestamp(
         draft_response.json()["data"]["updated_at"]

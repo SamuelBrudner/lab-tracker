@@ -23,6 +23,7 @@ from lab_tracker.models import (
 from lab_tracker.repository import LabTrackerRepository
 from lab_tracker.schemas import (
     ListEnvelope,
+    PortfolioProjectGroupSummary,
     PortfolioProjectOwner,
     PortfolioProjectSummary,
 )
@@ -42,7 +43,10 @@ QueryCount = Callable[..., tuple[list[Any], int]]
 def build_portfolio_router(api: LabTrackerAPI) -> APIRouter:
     router = APIRouter()
 
-    @router.get("/portfolio/summary", response_model=ListEnvelope[PortfolioProjectSummary])
+    @router.get(
+        "/portfolio/summary",
+        response_model=ListEnvelope[PortfolioProjectGroupSummary],
+    )
     def portfolio_summary(
         request: Request,
         status: ProjectStatus | None = None,
@@ -58,8 +62,9 @@ def build_portfolio_router(api: LabTrackerAPI) -> APIRouter:
         )
         visible_projects = filter_project_scoped_items(request, projects)
         page_projects, total = paginate(visible_projects, limit, offset)
-        rows = [_summary_for_project(repository, project) for project in page_projects]
-        return list_response(rows, limit=limit, offset=offset, total=total)
+        summaries = [_summary_for_project(repository, project) for project in page_projects]
+        groups = _group_project_summaries(repository, page_projects, summaries)
+        return list_response(groups, limit=limit, offset=offset, total=total)
 
     return router
 
@@ -101,6 +106,30 @@ def _summary_for_project(
         last_activity_at=_latest_activity_at(repository, project),
         owners=_owners_for_project(repository, project_id),
     )
+
+
+def _group_project_summaries(
+    repository: LabTrackerRepository,
+    projects: list[Project],
+    summaries: list[PortfolioProjectSummary],
+) -> list[PortfolioProjectGroupSummary]:
+    project_groups: dict[UUID | None, list[PortfolioProjectSummary]] = {}
+    group_order: list[UUID | None] = []
+    for project, summary in zip(projects, summaries, strict=True):
+        if project.group_id not in project_groups:
+            project_groups[project.group_id] = []
+            group_order.append(project.group_id)
+        project_groups[project.group_id].append(summary)
+    return [
+        PortfolioProjectGroupSummary(
+            project_group=repository.project_groups.get(group_id)
+            if group_id is not None
+            else None,
+            project_count=len(project_groups[group_id]),
+            projects=project_groups[group_id],
+        )
+        for group_id in group_order
+    ]
 
 
 def _count_statuses(

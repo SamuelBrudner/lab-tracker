@@ -194,12 +194,14 @@ class ProjectCreate(RequestModel):
     name: NonBlankStr
     description: str | None = None
     status: ProjectStatus | None = None
+    group_id: UUID | None = None
 
 
 class ProjectUpdate(RequestModel):
     name: NonBlankStr | None = None
     description: str | None = None
     status: ProjectStatus | None = None
+    group_id: UUID | None = None
 
 
 class ProjectGroupCreate(RequestModel):
@@ -635,6 +637,12 @@ class PortfolioProjectSummary(BaseModel):
     unreviewed_claim_count: int = Field(..., ge=0)
     last_activity_at: datetime | None = None
     owners: list[PortfolioProjectOwner] = Field(default_factory=list)
+
+
+class PortfolioProjectGroupSummary(BaseModel):
+    project_group: ProjectGroup | None = None
+    project_count: int = Field(..., ge=0)
+    projects: list[PortfolioProjectSummary] = Field(default_factory=list)
 
 
 class AnalysisCommitRequest(RequestModel):

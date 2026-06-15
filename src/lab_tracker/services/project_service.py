@@ -24,6 +24,8 @@ from lab_tracker.services.shared import (
     ensure_non_empty,
 )
 
+_GROUP_ID_UNSET = object()
+
 
 class ProjectService(BaseService):
     def __init__(
@@ -40,13 +42,18 @@ class ProjectService(BaseService):
         name: str,
         description: str = "",
         status: ProjectStatus = ProjectStatus.ACTIVE,
+        group_id: UUID | None = None,
         *,
         actor: AuthContext | None = None,
     ) -> Project:
         require_role(actor, WRITE_ROLES)
+        if group_id is not None:
+            self.authorization.require_group_owner(group_id, actor=actor)
+            self.get_project_group(group_id)
         ensure_non_empty(name, "name")
         project = Project(
             project_id=uuid4(),
+            group_id=group_id,
             name=name.strip(),
             description=description.strip(),
             status=status,
@@ -85,10 +92,16 @@ class ProjectService(BaseService):
         name: str | None = None,
         description: str | None = None,
         status: ProjectStatus | None = None,
+        group_id: UUID | None | object = _GROUP_ID_UNSET,
         actor: AuthContext | None = None,
     ) -> Project:
         self.authorization.require_owner(project_id, actor=actor)
         project = self.get_project(project_id)
+        if group_id is not _GROUP_ID_UNSET:
+            if group_id is not None:
+                self.authorization.require_group_owner(group_id, actor=actor)
+                self.get_project_group(group_id)
+            project.group_id = group_id
         if name is not None:
             ensure_non_empty(name, "name")
             project.name = name.strip()
