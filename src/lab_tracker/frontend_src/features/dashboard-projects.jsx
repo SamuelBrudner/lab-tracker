@@ -16,6 +16,7 @@ function Dashboard({
   onCreateProject,
   onOpenGraph = () => {},
   onOpenBatches = () => {},
+  onOpenReviewQueue = () => {},
   projectMembers = [],
   canManageProjectMembers = false,
   memberUsername = "",
@@ -70,6 +71,9 @@ function Dashboard({
         </button>
         <button type="button" className="btn-secondary" onClick={onOpenBatches}>
           Open batches
+        </button>
+        <button type="button" className="btn-secondary" onClick={onOpenReviewQueue}>
+          Review queue
         </button>
       </div>
 

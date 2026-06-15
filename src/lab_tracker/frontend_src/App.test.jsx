@@ -1081,6 +1081,115 @@ describe("App", () => {
     await waitFor(() => expect(window.location.pathname).toBe(`/app/batches/${batchId}`));
   });
 
+  it("shows the lab-wide graph-draft review queue grouped by project and submitter", async () => {
+    const firstDraftId = "22222222-2222-4222-8222-222222222222";
+    const secondDraftId = "33333333-3333-4333-8333-333333333333";
+    localStorage.setItem(TOKEN_STORAGE_KEY, "token-review-queue");
+    localStorage.setItem("lab-tracker:last-used-project-id", "project-1");
+    window.history.replaceState({}, "", "/app/review");
+    const submittedDrafts = [
+      {
+        change_set_id: firstDraftId,
+        created_at: "2026-06-12T10:00:00Z",
+        created_by: "user-maya",
+        created_by_username: "maya",
+        draft_mode: "graph_context",
+        model: "fake-review-model",
+        operations: [{ operation_id: "44444444-4444-4444-8444-444444444444" }],
+        project_id: "project-1",
+        provider: "fake",
+        source_filename: "maya-note.jpg",
+        status: "submitted",
+        submitted_at: "2026-06-12T11:00:00Z",
+        submitted_by: "user-maya",
+        submitted_by_username: "maya",
+        summary: "Needs PI review",
+        updated_at: "2026-06-12T11:00:00Z",
+      },
+      {
+        change_set_id: secondDraftId,
+        created_at: "2026-06-12T09:00:00Z",
+        created_by: "user-lee",
+        created_by_username: "lee",
+        draft_mode: "graph_batch",
+        model: "fake-review-model",
+        operations: [
+          { operation_id: "55555555-5555-4555-8555-555555555555" },
+          { operation_id: "66666666-6666-4666-8666-666666666666" },
+        ],
+        project_id: "project-2",
+        provider: "fake",
+        source_filename: "lee-batch.txt",
+        status: "submitted",
+        submitted_at: "2026-06-12T10:30:00Z",
+        submitted_by: "user-lee",
+        submitted_by_username: "lee",
+        summary: "Cross-project note",
+        updated_at: "2026-06-12T10:30:00Z",
+      },
+    ];
+
+    const fetchMock = installFetchMock([
+      {
+        match: "/auth/me",
+        response: apiResponse({ role: "admin", user_id: "admin-1", username: "sam" }),
+      },
+      {
+        match: projectsPath,
+        response: apiResponse([project("project-1", "Project One"), project("project-2", "Project Two")]),
+      },
+      {
+        match: questionCountPath("project-1"),
+        response: paged([], { limit: 1, offset: 0, total: 0 }),
+      },
+      {
+        match: datasetCountPath("project-1"),
+        response: paged([], { limit: 1, offset: 0, total: 0 }),
+      },
+      {
+        match: noteCountPath("project-1"),
+        response: paged([], { limit: 1, offset: 0, total: 0 }),
+      },
+      {
+        match: projectMembersPath("project-1"),
+        response: paged([
+          {
+            membership_id: "membership-1",
+            project_id: "project-1",
+            role: "owner",
+            user_id: "admin-1",
+            username: "sam",
+          },
+        ]),
+      },
+      {
+        match: buildApiPath("/batches", { limit: 5 }),
+        response: paged([], { limit: 5, offset: 0, total: 0 }),
+      },
+      {
+        match: buildApiPath("/graph-drafts", { status: "submitted", limit: 100 }),
+        response: paged(submittedDrafts, { limit: 100, offset: 0, total: 2 }),
+      },
+    ]);
+
+    render(<App />);
+
+    expect(await screen.findByRole("heading", { name: "Lab Review Queue" })).toBeInTheDocument();
+    expect(screen.getByText("Pending Review")).toBeInTheDocument();
+    expect(screen.getByText("Needs PI review")).toBeInTheDocument();
+    expect(screen.getByText("Cross-project note")).toBeInTheDocument();
+    expect(screen.getByText("maya")).toBeInTheDocument();
+    expect(screen.getByText("lee")).toBeInTheDocument();
+    expect(screen.getAllByText("Project One").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("Project Two").length).toBeGreaterThan(0);
+    expect(requestedUrls(fetchMock)).toContain(
+      buildApiPath("/graph-drafts", { status: "submitted", limit: 100 })
+    );
+
+    fireEvent.click(screen.getAllByRole("button", { name: "Review draft" })[0]);
+    await waitFor(() => expect(window.location.pathname).toBe(`/app/graph-drafts/${firstDraftId}`));
+  });
+
   it("captures a mobile image with context and starts a graph-aware draft", async () => {
     const noteId = "11111111-1111-4111-8111-111111111111";
     const draftId = "22222222-2222-4222-8222-222222222222";

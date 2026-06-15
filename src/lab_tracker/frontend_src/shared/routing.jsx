@@ -33,6 +33,9 @@ function parseAppRoute(pathname) {
   if (parts.length === 2 && parts[1] === "batches") {
     return { kind: "batches" };
   }
+  if (parts.length === 2 && parts[1] === "review") {
+    return { kind: "review" };
+  }
   if (parts.length >= 3 && parts[1] === "batches" && UUID_RE.test(parts[2] || "")) {
     return { kind: "batch", changeSetId: parts[2] };
   }

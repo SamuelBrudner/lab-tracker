@@ -7,6 +7,7 @@ import { EnrollPage } from "./features/enroll.jsx";
 import { GraphDraftDetailCard } from "./features/graph-drafts.jsx";
 import { GoalDetailCard } from "./features/goals/GoalDetailCard.jsx";
 import { ProjectGraphExplorer } from "./features/project-graph.jsx";
+import { ReviewQueuePage } from "./features/review-queue.jsx";
 import { VisualizationDetailCard } from "./features/analysis/VisualizationDetailCard.jsx";
 import { DatasetDetailCard } from "./features/datasets/index.js";
 import { MobileCaptureCard } from "./features/mobile-capture.jsx";
@@ -272,6 +273,7 @@ function App() {
     onCreateProject: projectActions.handleCreateProject,
     onOpenGraph: () => navigate("/app/graph"),
     onOpenBatches: () => navigate("/app/batches"),
+    onOpenReviewQueue: () => navigate("/app/review"),
     projectMembers,
     canManageProjectMembers,
     memberUsername,
@@ -409,6 +411,15 @@ function App() {
               navigate={navigate}
               canManageGraph={canManageProjectMembers}
               setBusy={setBusy}
+              setFlash={setFlash}
+            />
+          ) : null}
+
+          {route.kind === "review" ? (
+            <ReviewQueuePage
+              token={auth.token}
+              projects={workspaceData.projects}
+              navigate={navigate}
               setFlash={setFlash}
             />
           ) : null}
