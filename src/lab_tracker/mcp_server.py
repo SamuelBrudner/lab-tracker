@@ -20,6 +20,7 @@ from lab_tracker.mcp_tools import (
     register_write_tools,
 )
 from lab_tracker.mcp_tools.read import (
+    lab_tracker_describe_schema,
     lab_tracker_get_analysis_provenance,
     lab_tracker_get_dataset_provenance,
     lab_tracker_get_decision_context,
@@ -87,6 +88,7 @@ __all__ = [
     "lab_tracker_create_project",
     "lab_tracker_create_question",
     "lab_tracker_create_visualization",
+    "lab_tracker_describe_schema",
     "lab_tracker_get_analysis_provenance",
     "lab_tracker_get_dataset_provenance",
     "lab_tracker_get_decision_context",

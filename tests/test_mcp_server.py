@@ -21,6 +21,7 @@ def test_fastmcp_registers_lab_tracker_tools() -> None:
     names = {tool.name for tool in tools}
     assert "lab_tracker_health" in names
     assert "lab_tracker_readiness" in names
+    assert "lab_tracker_describe_schema" in names
     assert "lab_tracker_search" in names
     assert "lab_tracker_get_decision_context" in names
     assert "lab_tracker_list_datasets" in names
@@ -178,6 +179,47 @@ def test_client_low_level_read_tools_call_retained_routes() -> None:
         "/datasets/dataset-1/provenance",
         "/analyses/analysis-1/provenance",
     ]
+
+
+def test_client_describe_schema_calls_api_discovery_route() -> None:
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if request.url.path == "/schema/describe":
+            assert request.url.params["entity_type"] == "claim"
+            return _json_response(
+                200,
+                {
+                    "data": {
+                        "entities": {
+                            "claim": {
+                                "status": {
+                                    "allowed_values": ["proposed", "supported", "rejected"]
+                                }
+                            }
+                        }
+                    }
+                },
+            )
+        return _json_response(404, {"error": {"message": "not found"}})
+
+    client = mcp_server.LabTrackerAPIClient(
+        mcp_server.MCPSettings(base_url="http://testserver"),
+        transport=httpx.MockTransport(handler),
+    )
+
+    try:
+        payload = client.describe_schema(entity_type="claim")
+    finally:
+        client.close()
+
+    assert payload["data"]["entities"]["claim"]["status"]["allowed_values"] == [
+        "proposed",
+        "supported",
+        "rejected",
+    ]
+    assert [request.url.path for request in requests] == ["/schema/describe"]
 
 
 def test_decision_context_posts_to_api_route() -> None:

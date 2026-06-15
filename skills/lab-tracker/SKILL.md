@@ -72,6 +72,8 @@ Use these tools when available:
   plans, summaries, or research writing.
 - `lab_tracker_health` checks the API health endpoint.
 - `lab_tracker_readiness` checks database and storage readiness.
+- `lab_tracker_describe_schema` returns source-derived create/update fields,
+  required fields, allowed enum values, and known status lifecycle transitions.
 - `lab_tracker_list_projects` lists active or archived projects.
 - `lab_tracker_list_questions` filters questions by project, status, type,
   search text, direct parent, or recursive ancestor.

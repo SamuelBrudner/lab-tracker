@@ -25,6 +25,15 @@ def lab_tracker_readiness() -> JsonObject:
         client.close()
 
 
+def lab_tracker_describe_schema(entity_type: str | None = None) -> JsonObject:
+    """Describe Lab Tracker fields, allowed enum values, and status lifecycles."""
+    client = client_from_env()
+    try:
+        return client.describe_schema(entity_type=entity_type)
+    finally:
+        client.close()
+
+
 def lab_tracker_list_projects(
     status: str | None = None,
     limit: int = 50,
@@ -318,6 +327,7 @@ def lab_tracker_get_decision_context(
 READ_TOOLS = (
     lab_tracker_health,
     lab_tracker_readiness,
+    lab_tracker_describe_schema,
     lab_tracker_list_projects,
     lab_tracker_list_questions,
     lab_tracker_list_notes,

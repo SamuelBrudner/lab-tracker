@@ -25,6 +25,7 @@ from .project_graph import build_project_graph_router
 from .projects import build_projects_router
 from .provenance import build_provenance_router
 from .questions import build_questions_router
+from .schema import build_schema_router
 from .search import build_search_router
 from .sessions import build_sessions_router
 from .visualizations import build_visualizations_router
@@ -62,6 +63,7 @@ def register_routes(
     app.include_router(build_graph_batches_router(api))
     app.include_router(build_provenance_router(api))
     app.include_router(build_search_router(api))
+    app.include_router(build_schema_router())
     app.include_router(build_assistant_router())
     app.include_router(build_sessions_router(api))
     app.include_router(build_analyses_router(api))

@@ -77,6 +77,7 @@ Available tools:
 
 - `lab_tracker_health`
 - `lab_tracker_readiness`
+- `lab_tracker_describe_schema`
 - `lab_tracker_get_decision_context`
 - `lab_tracker_list_projects`
 - `lab_tracker_list_questions`
@@ -112,6 +113,12 @@ instead of guessing.
 The MCP tool calls the Lab Tracker API endpoint `POST /assistant/decision-context`;
 the API remains the single context-building path for browser users, MCP clients,
 scripts, and future workers.
+
+`lab_tracker_describe_schema` calls `GET /schema/describe` and returns
+source-derived metadata for entity create/update fields, required fields,
+allowed enum values, and known status lifecycle transitions. Pass `entity_type`
+such as `question`, `dataset`, `claim`, `visualization`, or `goal` to filter the
+response.
 
 `lab_tracker_list_questions` can traverse the v1 question hierarchy with
 `parent_question_id` for direct children or `ancestor_question_id` for recursive
