@@ -12,6 +12,7 @@ from lab_tracker.mcp_api_client import (
     NoteMetadataScalar,
     client_from_env,
 )
+from lab_tracker.mcp_evidence_bundle import record_evidence_bundle
 
 
 def lab_tracker_create_project(
@@ -309,6 +310,42 @@ def lab_tracker_upload_visualization_file(
     finally:
         client.close()
 
+
+def lab_tracker_record_evidence_bundle(
+    project_id: str,
+    primary_question_id: str | None = None,
+    dataset: JsonObject | None = None,
+    analysis: JsonObject | None = None,
+    claim: JsonObject | None = None,
+    visualization: JsonObject | None = None,
+    source_note: JsonObject | None = None,
+    dry_run: bool = True,
+    idempotency_key: str | None = None,
+) -> JsonObject:
+    """Preview or record a dataset-analysis-claim-visualization evidence bundle.
+
+    dry_run defaults to true. With dry_run=false, this tool still writes only
+    through the existing strict create/upload API endpoints and returns created
+    or reused stable IDs.
+    """
+    client = client_from_env()
+    try:
+        return record_evidence_bundle(
+            client,
+            project_id=project_id,
+            primary_question_id=primary_question_id,
+            dataset=dataset,
+            analysis=analysis,
+            claim=claim,
+            visualization=visualization,
+            source_note=source_note,
+            dry_run=dry_run,
+            idempotency_key=idempotency_key,
+        )
+    finally:
+        client.close()
+
+
 WRITE_TOOLS = (
     lab_tracker_create_project,
     lab_tracker_create_question,
@@ -323,6 +360,7 @@ WRITE_TOOLS = (
     lab_tracker_update_goal,
     lab_tracker_link_node_to_goal,
     lab_tracker_upload_visualization_file,
+    lab_tracker_record_evidence_bundle,
 )
 
 

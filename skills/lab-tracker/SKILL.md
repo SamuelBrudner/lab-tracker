@@ -115,6 +115,10 @@ Use these tools when available:
   Tracker storage for a visualization node. Use this when a plot or extracted
   figure exists on disk and should be available to remote clients through the
   API rather than only by local filesystem path.
+- `lab_tracker_record_evidence_bundle` plans or records one result across
+  dataset, analysis, claim, visualization, and optional source note records.
+  `dry_run` defaults to true; use an `idempotency_key` and concrete provenance
+  values so retries reuse existing records instead of creating duplicates.
 
 Creation tools write through the API, using the configured service account when
 authentication is enabled. Be explicit before creating or mutating research

@@ -44,6 +44,7 @@ def test_fastmcp_registers_lab_tracker_tools() -> None:
     assert "lab_tracker_update_goal" in names
     assert "lab_tracker_link_node_to_goal" in names
     assert "lab_tracker_upload_visualization_file" in names
+    assert "lab_tracker_record_evidence_bundle" in names
 
 
 def test_fastmcp_registers_agent_consultation_policy_resource() -> None:

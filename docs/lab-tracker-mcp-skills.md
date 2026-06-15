@@ -97,6 +97,7 @@ Available tools:
 - `lab_tracker_create_analysis`
 - `lab_tracker_create_claim`
 - `lab_tracker_create_visualization`
+- `lab_tracker_record_evidence_bundle`
 
 Decision-context tooling for assistant clients is specified in
 [`docs/mcp-decision-context-tooling.md`](mcp-decision-context-tooling.md). That
@@ -157,6 +158,15 @@ stable publication labels such as `publication:eLife-2021-vae-feature-space` and
 local artifact paths for visualization `file_path`; use DOI or PDF figure
 locators such as `doi:10.1371/journal.pcbi.1011051#fig5` only when no local plot
 file exists.
+
+`lab_tracker_record_evidence_bundle` is the composite MCP authoring helper for
+one result. `dry_run` defaults to `true` and returns a reviewable plan with
+proposed creates, reused records, warnings, and idempotency behavior. With
+`dry_run=false`, it still writes only through existing strict API create/upload
+endpoints. Provide `idempotency_key` plus concrete dataset manifest/hash,
+analysis `method_hash`/`code_version`, claim text/confidence, and visualization
+path or upload details; the tool will reuse matching existing records on retry
+instead of creating duplicates.
 
 ## Postgres Runtime
 
