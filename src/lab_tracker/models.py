@@ -695,3 +695,20 @@ class Visualization(_DomainModel):
         if self.asset is None:
             return None
         return f"/visualizations/{self.viz_id}/file/download"
+
+
+class RecordExportRecords(_DomainModel):
+    questions: list[Question] = Field(default_factory=list)
+    datasets: list[Dataset] = Field(default_factory=list)
+    analyses: list[Analysis] = Field(default_factory=list)
+    claims: list[Claim] = Field(default_factory=list)
+    notes: list[Note] = Field(default_factory=list)
+
+
+class RecordExport(_DomainModel):
+    user_id: UUID
+    group_id: UUID | None = None
+    project_ids: list[UUID] = Field(default_factory=list)
+    generated_at: datetime = Field(default_factory=utc_now)
+    records: RecordExportRecords
+    provenance: dict[str, Any] = Field(default_factory=dict)

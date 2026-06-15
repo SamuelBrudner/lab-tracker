@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime
+from typing import Any
 from urllib.parse import quote
 from uuid import UUID
 
@@ -15,8 +16,11 @@ from lab_tracker.models import (
     DatasetFile,
     ExternalArtifactKind,
     ExternalArtifactReference,
+    Note,
+    Question,
     QuestionLink,
     QuestionLinkRole,
+    RecordExportRecords,
     SupervisionEdge,
     Visualization,
 )
@@ -58,8 +62,11 @@ def _context(base_url: str) -> dict[str, object]:
         "contentSize": "lab:contentSize",
         "contentUrl": {"@id": "lab:contentUrl", "@type": "@id"},
         "contentType": "lab:contentType",
+        "createdAt": "lab:createdAt",
         "encodingFormat": "lab:encodingFormat",
         "environmentHash": "lab:environmentHash",
+        "entityId": "lab:entityId",
+        "entityType": "lab:entityType",
         "executedAt": "lab:executedAt",
         "externalArtifact": {"@id": "lab:externalArtifact", "@type": "@id"},
         "externalContentHash": "lab:externalContentHash",
@@ -76,6 +83,8 @@ def _context(base_url: str) -> dict[str, object]:
         "outcomeStatus": "lab:outcomeStatus",
         "question": {"@id": "lab:question", "@type": "@id"},
         "questionLink": {"@id": "lab:questionLink", "@type": "@id"},
+        "questionType": "lab:questionType",
+        "rawContent": "lab:rawContent",
         "relatedClaim": {"@id": "lab:relatedClaim", "@type": "@id"},
         "role": "lab:role",
         "sizeBytes": "lab:sizeBytes",
@@ -87,6 +96,9 @@ def _context(base_url: str) -> dict[str, object]:
         "sha256": "lab:sha256",
         "supervisionEndedAt": "lab:supervisionEndedAt",
         "supervisionStartedAt": "lab:supervisionStartedAt",
+        "target": {"@id": "lab:target", "@type": "@id"},
+        "text": "lab:text",
+        "transcribedText": "lab:transcribedText",
         "userId": "lab:userId",
         "vizType": "lab:vizType",
         "wasAttributedTo": {"@id": "prov:wasAttributedTo", "@type": "@id"},
@@ -611,3 +623,214 @@ def build_analysis_provenance_document(
     graph.extend(people[user_id] for user_id in sorted(people))
 
     return {"@context": _context(base_url), "@graph": graph}
+
+
+def _merge_graph_nodes(
+    merged: dict[str, dict[str, Any]],
+    graph: list[dict[str, object]],
+) -> None:
+    for node in graph:
+        node_id = node.get("@id")
+        if isinstance(node_id, str):
+            merged.setdefault(node_id, dict(node))
+
+
+def _question_node(
+    base_url: str,
+    question: Question,
+    *,
+    people: dict[str, dict[str, object]],
+    supervision_edges: list[SupervisionEdge],
+) -> dict[str, object]:
+    node: dict[str, object] = {
+        "@id": _resource_iri(base_url, "questions", question.question_id),
+        "@type": "prov:Entity",
+        "text": question.text,
+        "questionType": question.question_type.value,
+        "status": question.status.value,
+        "createdAt": _isoformat(question.created_at),
+    }
+    creator_user_id = _creator_user_id(question.created_by_user_id, question.created_by)
+    if creator_user_id is not None:
+        node["prov:wasAttributedTo"] = {"@id": _agent_iri(base_url, creator_user_id)}
+        _add_person_with_supervision(
+            people,
+            base_url,
+            creator_user_id,
+            activity_time=question.created_at,
+            supervision_edges=supervision_edges,
+        )
+    return node
+
+
+def _note_node(
+    base_url: str,
+    note: Note,
+    *,
+    people: dict[str, dict[str, object]],
+    supervision_edges: list[SupervisionEdge],
+) -> dict[str, object]:
+    node: dict[str, object] = {
+        "@id": _resource_iri(base_url, "notes", note.note_id),
+        "@type": "prov:Entity",
+        "rawContent": note.raw_content,
+        "status": note.status.value,
+        "createdAt": _isoformat(note.created_at),
+    }
+    if note.transcribed_text:
+        node["transcribedText"] = note.transcribed_text
+    if note.targets:
+        node["target"] = [
+            {
+                "@id": _resource_iri(
+                    base_url,
+                    _entity_resource_name(target.entity_type.value),
+                    target.entity_id,
+                ),
+                "entityType": target.entity_type.value,
+                "entityId": str(target.entity_id),
+            }
+            for target in note.targets
+        ]
+    creator_user_id = _creator_user_id(note.created_by_user_id, note.created_by)
+    if creator_user_id is not None:
+        node["prov:wasAttributedTo"] = {"@id": _agent_iri(base_url, creator_user_id)}
+        _add_person_with_supervision(
+            people,
+            base_url,
+            creator_user_id,
+            activity_time=note.created_at,
+            supervision_edges=supervision_edges,
+        )
+    return node
+
+
+_ENTITY_RESOURCE_NAMES = {
+    "analysis": "analyses",
+    "claim": "claims",
+    "dataset": "datasets",
+    "goal": "goals",
+    "note": "notes",
+    "project": "projects",
+    "question": "questions",
+    "session": "sessions",
+    "visualization": "visualizations",
+}
+
+
+def _entity_resource_name(entity_type: object) -> str:
+    value = str(entity_type)
+    return _ENTITY_RESOURCE_NAMES.get(value, f"{value}s")
+
+
+def build_record_export_provenance_document(
+    base_url: str,
+    records: RecordExportRecords,
+    *,
+    supervision_edges: list[SupervisionEdge] | None = None,
+) -> dict[str, object]:
+    supervision_edges = supervision_edges or []
+    people: dict[str, dict[str, object]] = {}
+    merged: dict[str, dict[str, Any]] = {}
+    datasets_by_id = {dataset.dataset_id: dataset for dataset in records.datasets}
+
+    for question in records.questions:
+        node = _question_node(
+            base_url,
+            question,
+            people=people,
+            supervision_edges=supervision_edges,
+        )
+        merged.setdefault(str(node["@id"]), node)
+
+    for note in records.notes:
+        node = _note_node(
+            base_url,
+            note,
+            people=people,
+            supervision_edges=supervision_edges,
+        )
+        merged.setdefault(str(node["@id"]), node)
+
+    for dataset in records.datasets:
+        document = build_dataset_provenance_document(
+            base_url,
+            dataset,
+            supervision_edges=supervision_edges,
+        )
+        graph = document.get("@graph", [])
+        if isinstance(graph, list):
+            _merge_graph_nodes(merged, graph)
+
+    for analysis in records.analyses:
+        analysis_datasets = [
+            datasets_by_id[dataset_id]
+            for dataset_id in analysis.dataset_ids
+            if dataset_id in datasets_by_id
+        ]
+        analysis_claims = [
+            claim
+            for claim in records.claims
+            if analysis.analysis_id in claim.supported_by_analysis_ids
+        ]
+        document = build_analysis_provenance_document(
+            base_url,
+            analysis,
+            datasets=analysis_datasets,
+            claims=analysis_claims,
+            visualizations=[],
+            supervision_edges=supervision_edges,
+        )
+        graph = document.get("@graph", [])
+        if isinstance(graph, list):
+            _merge_graph_nodes(merged, graph)
+
+    covered_claim_ids = {
+        claim.claim_id
+        for analysis in records.analyses
+        for claim in records.claims
+        if analysis.analysis_id in claim.supported_by_analysis_ids
+    }
+    dataset_attribution = {
+        dataset.dataset_id: _creator_user_id(dataset.created_by_user_id, dataset.created_by)
+        for dataset in records.datasets
+    }
+    analysis_attribution = {
+        analysis.analysis_id: _creator_user_id(analysis.executed_by_user_id, analysis.executed_by)
+        for analysis in records.analyses
+    }
+    for claim in records.claims:
+        if claim.claim_id in covered_claim_ids:
+            continue
+        attributed_user_ids = _unique_user_ids(
+            [
+                *[
+                    dataset_attribution.get(dataset_id)
+                    for dataset_id in claim.supported_by_dataset_ids
+                ],
+                *[
+                    analysis_attribution.get(analysis_id)
+                    for analysis_id in claim.supported_by_analysis_ids
+                ],
+            ]
+        )
+        for user_id in attributed_user_ids:
+            _add_person_with_supervision(
+                people,
+                base_url,
+                user_id,
+                activity_time=claim.created_at,
+                supervision_edges=supervision_edges,
+            )
+        node = _claim_node(
+            base_url,
+            claim,
+            attributed_user_ids=attributed_user_ids,
+        )
+        merged.setdefault(str(node["@id"]), node)
+
+    for user_id in sorted(people):
+        person = people[user_id]
+        merged[str(person["@id"])] = person
+
+    return {"@context": _context(base_url), "@graph": list(merged.values())}

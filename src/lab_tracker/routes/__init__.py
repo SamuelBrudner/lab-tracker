@@ -26,6 +26,7 @@ from .project_graph import build_project_graph_router
 from .projects import build_projects_router
 from .provenance import build_provenance_router
 from .questions import build_questions_router
+from .record_exports import build_record_exports_router
 from .schema import build_schema_router
 from .search import build_search_router
 from .sessions import build_sessions_router
@@ -57,6 +58,7 @@ def register_routes(
     app.include_router(build_groups_router(api))
     app.include_router(build_supervision_router(api))
     app.include_router(build_ownership_router(api))
+    app.include_router(build_record_exports_router(api))
     app.include_router(build_portfolio_router(api))
     app.include_router(build_project_graph_router(api))
     app.include_router(build_questions_router(api))

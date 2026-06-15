@@ -23,6 +23,7 @@ from lab_tracker.services import (
     ProjectAuthorizationPolicy,
     ProjectService,
     QuestionService,
+    RecordExportService,
     ServiceContext,
     SessionService,
     SupervisionService,
@@ -63,6 +64,10 @@ class LabTrackerAPI:
         self.supervision: SupervisionService = SupervisionService(context)
         self.ownership_reassignments: OwnershipReassignmentService = (
             OwnershipReassignmentService(context)
+        )
+        self.record_exports: RecordExportService = RecordExportService(
+            context,
+            authorization=self.project_authorization,
         )
         self.questions: QuestionService = QuestionService(
             context,
@@ -285,6 +290,9 @@ class LabTrackerAPI:
             *args,
             **kwargs,
         )
+
+    def export_user_records(self, *args: Any, **kwargs: Any) -> Any:
+        return self.record_exports.export_user_records(*args, **kwargs)
 
     def project_membership_role(self, *args: Any, **kwargs: Any) -> Any:
         return self.project_authorization.membership_role(*args, **kwargs)
