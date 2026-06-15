@@ -24,9 +24,10 @@ from lab_tracker.db_models import (
     ProjectModel,
     QuestionModel,
     QuestionRefactorModel,
+    RecordExportEventModel,
     SessionModel,
 )
-from lab_tracker.models import OwnershipReassignment
+from lab_tracker.models import OwnershipReassignment, RecordExportEvent
 from lab_tracker.repository import EntityRepository
 from lab_tracker.sqlalchemy_mapper_parts.common import as_utc, uuid_from_db, uuid_to_db
 
@@ -106,6 +107,115 @@ def ownership_reassignment_from_model(
         ),
         created_at=as_utc(row.created_at),
     )
+
+
+def record_export_event_from_model(row: RecordExportEventModel) -> RecordExportEvent:
+    return RecordExportEvent(
+        export_id=uuid_from_db(row.export_id),
+        user_id=uuid_from_db(row.user_id),
+        group_id=uuid_from_db(row.group_id) if row.group_id is not None else None,
+        project_ids=[uuid_from_db(project_id) for project_id in (row.project_ids or [])],
+        record_counts={key: int(value) for key, value in (row.record_counts or {}).items()},
+        created_by=row.created_by,
+        created_by_user_id=(
+            uuid_from_db(row.created_by_user_id)
+            if row.created_by_user_id is not None
+            else None
+        ),
+        created_at=as_utc(row.created_at),
+    )
+
+
+class SQLAlchemyRecordExportEventRepository(EntityRepository[RecordExportEvent]):
+    def __init__(self, session: OrmSession) -> None:
+        self._session = session
+
+    def get(self, entity_id: UUID) -> RecordExportEvent | None:
+        self._session.flush()
+        row = self._session.get(RecordExportEventModel, uuid_to_db(entity_id))
+        if row is None:
+            return None
+        return record_export_event_from_model(row)
+
+    def list(self) -> list[RecordExportEvent]:
+        self._session.flush()
+        rows = list(
+            self._session.scalars(
+                select(RecordExportEventModel).order_by(
+                    RecordExportEventModel.created_at.desc(),
+                    RecordExportEventModel.export_id,
+                )
+            )
+        )
+        return [record_export_event_from_model(row) for row in rows]
+
+    def save(self, entity: RecordExportEvent) -> None:
+        entity_id = uuid_to_db(entity.export_id)
+        row = self._session.get(RecordExportEventModel, entity_id)
+        if row is None:
+            self._session.add(
+                RecordExportEventModel(
+                    export_id=entity_id,
+                    user_id=uuid_to_db(entity.user_id),
+                    group_id=uuid_to_db(entity.group_id)
+                    if entity.group_id is not None
+                    else None,
+                    project_ids=[uuid_to_db(project_id) for project_id in entity.project_ids],
+                    record_counts=dict(entity.record_counts),
+                    created_by=entity.created_by,
+                    created_by_user_id=(
+                        uuid_to_db(entity.created_by_user_id)
+                        if entity.created_by_user_id is not None
+                        else None
+                    ),
+                    created_at=entity.created_at,
+                )
+            )
+            return
+        row.project_ids = [uuid_to_db(project_id) for project_id in entity.project_ids]
+        row.record_counts = dict(entity.record_counts)
+        row.created_by = entity.created_by
+        row.created_by_user_id = (
+            uuid_to_db(entity.created_by_user_id)
+            if entity.created_by_user_id is not None
+            else None
+        )
+
+    def delete(self, entity_id: UUID) -> RecordExportEvent | None:
+        entity = self.get(entity_id)
+        if entity is None:
+            return None
+        row = self._session.get(RecordExportEventModel, uuid_to_db(entity_id))
+        if row is not None:
+            self._session.delete(row)
+        return entity
+
+    def query(
+        self,
+        *,
+        user_id: UUID | None = None,
+        group_id: UUID | None = None,
+        limit: int | None = None,
+        offset: int = 0,
+    ) -> tuple[list[RecordExportEvent], int]:
+        self._session.flush()
+        stmt = select(RecordExportEventModel)
+        count_stmt = select(RecordExportEventModel.export_id)
+        if user_id is not None:
+            user = uuid_to_db(user_id)
+            stmt = stmt.where(RecordExportEventModel.user_id == user)
+            count_stmt = count_stmt.where(RecordExportEventModel.user_id == user)
+        if group_id is not None:
+            group = uuid_to_db(group_id)
+            stmt = stmt.where(RecordExportEventModel.group_id == group)
+            count_stmt = count_stmt.where(RecordExportEventModel.group_id == group)
+        stmt = stmt.order_by(
+            RecordExportEventModel.created_at.desc(),
+            RecordExportEventModel.export_id,
+        )
+        total = count_from_statement(self._session, count_stmt)
+        rows = list(self._session.scalars(apply_pagination(stmt, limit=limit, offset=offset)))
+        return [record_export_event_from_model(row) for row in rows], total
 
 
 class SQLAlchemyOwnershipReassignmentRepository(EntityRepository[OwnershipReassignment]):

@@ -27,6 +27,7 @@ from lab_tracker.models import (
     ProjectGroup,
     Question,
     QuestionRefactor,
+    RecordExportEvent,
     Session,
     SupervisionEdge,
     Visualization,
@@ -54,7 +55,10 @@ from .graph_batches import (
 )
 from .graph_drafts import SQLAlchemyGraphChangeSetRepository
 from .notes import SQLAlchemyNoteRepository
-from .ownership import SQLAlchemyOwnershipReassignmentRepository
+from .ownership import (
+    SQLAlchemyOwnershipReassignmentRepository,
+    SQLAlchemyRecordExportEventRepository,
+)
 from .sessions import SQLAlchemyAcquisitionOutputRepository, SQLAlchemySessionRepository
 from .supervision import SQLAlchemySupervisionEdgeRepository
 
@@ -70,6 +74,7 @@ class SQLAlchemyLabTrackerRepository(LabTrackerRepository):
         self.group_memberships = SQLAlchemyGroupMembershipRepository(session)
         self.supervision_edges = SQLAlchemySupervisionEdgeRepository(session)
         self.ownership_reassignments = SQLAlchemyOwnershipReassignmentRepository(session)
+        self.record_export_events = SQLAlchemyRecordExportEventRepository(session)
         self.questions = SQLAlchemyQuestionRepository(session)
         self.question_refactors = SQLAlchemyQuestionRefactorRepository(session)
         self.datasets = SQLAlchemyDatasetRepository(session)
@@ -260,6 +265,21 @@ class SQLAlchemyLabTrackerRepository(LabTrackerRepository):
             created_by=created_by,
             created_by_user_id=created_by_user_id,
             created_at=created_at,
+        )
+
+    def query_record_export_events(
+        self,
+        *,
+        user_id: UUID | None = None,
+        group_id: UUID | None = None,
+        limit: int | None = None,
+        offset: int = 0,
+    ) -> tuple[list[RecordExportEvent], int]:
+        return self.record_export_events.query(
+            user_id=user_id,
+            group_id=group_id,
+            limit=limit,
+            offset=offset,
         )
 
     def query_questions(

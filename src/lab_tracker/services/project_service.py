@@ -330,6 +330,8 @@ class ProjectService(BaseService):
         )
         if membership.role == ProjectMembershipRole.OWNER and owner_count <= 1:
             raise ValidationError("Groups must keep at least one owner.")
+        project_ids = self._project_ids_for_group(group_id)
+        self._ensure_offboarding_records_released(user_id, project_ids)
         with self.unit_of_work() as repository:
             repository.group_memberships.delete(membership.membership_id)
         return membership
@@ -422,6 +424,10 @@ class ProjectService(BaseService):
                 "Cannot remove the last owner from projects: "
                 f"{project_list}."
             )
+        self._ensure_offboarding_records_released(
+            user_id,
+            {project.project_id for project in projects},
+        )
         with self.unit_of_work() as repository:
             for membership in memberships:
                 repository.project_memberships.delete(membership.membership_id)
@@ -489,9 +495,67 @@ class ProjectService(BaseService):
         )
         if membership.role == ProjectMembershipRole.OWNER and owner_count <= 1:
             raise ValidationError("Projects must keep at least one owner.")
+        self._ensure_offboarding_records_released(user_id, {project_id})
         with self.unit_of_work() as repository:
             repository.project_memberships.delete(membership.membership_id)
         return membership
+
+    def _project_ids_for_group(self, group_id: UUID) -> set[UUID]:
+        projects, _ = self.repository.query_projects(
+            group_id=group_id,
+            limit=None,
+            offset=0,
+        )
+        return {project.project_id for project in projects}
+
+    def _ensure_offboarding_records_released(
+        self,
+        user_id: UUID,
+        candidate_project_ids: set[UUID],
+    ) -> None:
+        record_project_ids = self._attributed_record_project_ids(
+            user_id,
+            candidate_project_ids,
+        )
+        if not record_project_ids:
+            return
+        export_events, _ = self.repository.query_record_export_events(
+            user_id=user_id,
+            limit=None,
+            offset=0,
+        )
+        for event in export_events:
+            if record_project_ids.issubset(set(event.project_ids)):
+                return
+        project_list = ", ".join(str(project_id) for project_id in sorted(record_project_ids))
+        raise ValidationError(
+            "Export or reassign this user's records before revoking membership "
+            f"for projects: {project_list}."
+        )
+
+    def _attributed_record_project_ids(
+        self,
+        user_id: UUID,
+        candidate_project_ids: set[UUID],
+    ) -> set[UUID]:
+        if not candidate_project_ids:
+            return set()
+        user_id_filter = str(user_id)
+        record_project_ids: set[UUID] = set()
+        for query in (
+            self.repository.query_questions,
+            self.repository.query_datasets,
+            self.repository.query_notes,
+            self.repository.query_analyses,
+            self.repository.query_claims,
+        ):
+            records, _ = query(created_by=user_id_filter, limit=None, offset=0)
+            record_project_ids.update(
+                record.project_id
+                for record in records
+                if record.project_id in candidate_project_ids
+            )
+        return record_project_ids
 
     def accessible_project_ids(self, actor: AuthContext | None) -> set[UUID] | None:
         return self.authorization.accessible_project_ids(actor)

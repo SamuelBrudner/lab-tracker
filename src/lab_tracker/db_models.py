@@ -844,6 +844,33 @@ class OwnershipReassignmentModel(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utc_now)
 
 
+class RecordExportEventModel(Base):
+    __tablename__ = "record_export_events"
+
+    export_id: Mapped[str] = mapped_column(
+        String(36),
+        primary_key=True,
+        default=lambda: str(uuid4()),
+    )
+    user_id: Mapped[str] = mapped_column(
+        String(36),
+        ForeignKey("users.user_id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    group_id: Mapped[str | None] = mapped_column(
+        String(36),
+        ForeignKey("project_groups.group_id", ondelete="SET NULL"),
+    )
+    project_ids: Mapped[list[str]] = mapped_column(JSON, default=list)
+    record_counts: Mapped[dict[str, int]] = mapped_column(JSON, default=dict)
+    created_by: Mapped[str | None] = mapped_column(String(255))
+    created_by_user_id: Mapped[str | None] = mapped_column(
+        String(36),
+        ForeignKey("users.user_id", ondelete="SET NULL"),
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utc_now)
+
+
 class ProjectMembershipModel(Base):
     __tablename__ = "project_memberships"
     __table_args__ = (
@@ -1058,6 +1085,20 @@ Index(
 Index(
     "ix_ownership_reassignments_created_by_user_id",
     OwnershipReassignmentModel.created_by_user_id,
+)
+Index(
+    "ix_record_export_events_user_created",
+    RecordExportEventModel.user_id,
+    RecordExportEventModel.created_at,
+)
+Index(
+    "ix_record_export_events_group_created",
+    RecordExportEventModel.group_id,
+    RecordExportEventModel.created_at,
+)
+Index(
+    "ix_record_export_events_created_by_user_id",
+    RecordExportEventModel.created_by_user_id,
 )
 Index(
     "uq_supervision_edges_active_pair",

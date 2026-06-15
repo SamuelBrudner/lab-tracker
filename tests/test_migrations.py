@@ -78,7 +78,7 @@ def test_alembic_upgrade_chain_from_empty_to_head(monkeypatch, tmp_path):
     for revision in revisions:
         command.upgrade(config, revision)
         assert revision in _current_revisions(database_url)
-    assert _current_revision(database_url) == "0031_ownership_reassignments"
+    assert _current_revision(database_url) == "0032_record_export_events"
 
 
 def test_alembic_has_single_head() -> None:
@@ -136,6 +136,7 @@ def test_alembic_upgrade_head_creates_expected_tables(monkeypatch, tmp_path):
         "group_memberships",
         "supervision_edges",
         "ownership_reassignments",
+        "record_export_events",
     }
     assert expected.issubset(table_names)
     assert "dataset_reviews" not in table_names
@@ -163,6 +164,9 @@ def test_alembic_upgrade_head_creates_expected_tables(monkeypatch, tmp_path):
     }
     ownership_columns = {
         column["name"] for column in inspector.get_columns("ownership_reassignments")
+    }
+    record_export_columns = {
+        column["name"] for column in inspector.get_columns("record_export_events")
     }
     visualization_columns = {
         column["name"] for column in inspector.get_columns("visualizations")
@@ -297,6 +301,49 @@ def test_alembic_upgrade_head_creates_expected_tables(monkeypatch, tmp_path):
         "ix_ownership_reassignments_created_by_user_id",
     )
     assert {
+        "export_id",
+        "user_id",
+        "group_id",
+        "project_ids",
+        "record_counts",
+        "created_by",
+        "created_by_user_id",
+        "created_at",
+    }.issubset(record_export_columns)
+    _assert_fk(
+        inspector,
+        "record_export_events",
+        column="user_id",
+        referred_table="users",
+    )
+    _assert_fk(
+        inspector,
+        "record_export_events",
+        column="group_id",
+        referred_table="project_groups",
+    )
+    _assert_fk(
+        inspector,
+        "record_export_events",
+        column="created_by_user_id",
+        referred_table="users",
+    )
+    _assert_index(
+        inspector,
+        "record_export_events",
+        "ix_record_export_events_user_created",
+    )
+    _assert_index(
+        inspector,
+        "record_export_events",
+        "ix_record_export_events_group_created",
+    )
+    _assert_index(
+        inspector,
+        "record_export_events",
+        "ix_record_export_events_created_by_user_id",
+    )
+    assert {
         "asset_storage_id",
         "asset_filename",
         "asset_content_type",
@@ -319,7 +366,7 @@ def test_database_at_daily_review_branch_upgrades_to_current_head(monkeypatch, t
     assert _current_revision(database_url) == "0017_daily_graph_reviews"
 
     command.upgrade(config, "head")
-    assert _current_revision(database_url) == "0031_ownership_reassignments"
+    assert _current_revision(database_url) == "0032_record_export_events"
 
     engine = create_engine(
         database_url,
@@ -340,6 +387,7 @@ def test_database_at_daily_review_branch_upgrades_to_current_head(monkeypatch, t
         "group_memberships",
         "supervision_edges",
         "ownership_reassignments",
+        "record_export_events",
     }.issubset(table_names)
     engine.dispose()
 

@@ -705,7 +705,19 @@ class RecordExportRecords(_DomainModel):
     notes: list[Note] = Field(default_factory=list)
 
 
+class RecordExportEvent(_DomainModel):
+    export_id: UUID
+    user_id: UUID
+    group_id: UUID | None = None
+    project_ids: list[UUID] = Field(default_factory=list)
+    record_counts: dict[str, int] = Field(default_factory=dict)
+    created_at: datetime = Field(default_factory=utc_now)
+    created_by: str | None = None
+    created_by_user_id: UUID | None = None
+
+
 class RecordExport(_DomainModel):
+    export_event_id: UUID | None = None
     user_id: UUID
     group_id: UUID | None = None
     project_ids: list[UUID] = Field(default_factory=list)

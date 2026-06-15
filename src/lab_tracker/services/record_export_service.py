@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from lab_tracker.auth import AuthContext, Role, require_role
 from lab_tracker.errors import NotFoundError
@@ -13,12 +13,14 @@ from lab_tracker.models import (
     Note,
     Question,
     RecordExport,
+    RecordExportEvent,
     RecordExportRecords,
     utc_now,
 )
 from lab_tracker.provenance import build_record_export_provenance_document
 from lab_tracker.services.base import BaseService, ServiceContext
 from lab_tracker.services.project_authorization import ProjectAuthorizationPolicy
+from lab_tracker.services.shared import actor_user_fk, actor_user_id
 
 ADMIN_ROLES = {Role.ADMIN}
 
@@ -53,11 +55,25 @@ class RecordExportService(BaseService):
             records,
             supervision_edges=supervision_edges,
         )
-        return RecordExport(
+        generated_at = utc_now()
+        event = RecordExportEvent(
+            export_id=uuid4(),
             user_id=user_id,
             group_id=group_id,
             project_ids=exported_project_ids,
-            generated_at=utc_now(),
+            record_counts=self._record_counts(records),
+            created_by=actor_user_id(actor),
+            created_by_user_id=actor_user_fk(actor, repository),
+            created_at=generated_at,
+        )
+        with self.unit_of_work() as unit_repository:
+            unit_repository.record_export_events.save(event)
+        return RecordExport(
+            export_event_id=event.export_id,
+            user_id=user_id,
+            group_id=group_id,
+            project_ids=exported_project_ids,
+            generated_at=generated_at,
             records=records,
             provenance=provenance,
         )
@@ -144,3 +160,12 @@ class RecordExportService(BaseService):
             *[item.project_id for item in records.notes],
         }
         return sorted(project_ids, key=str)
+
+    def _record_counts(self, records: RecordExportRecords) -> dict[str, int]:
+        return {
+            "questions": len(records.questions),
+            "datasets": len(records.datasets),
+            "analyses": len(records.analyses),
+            "claims": len(records.claims),
+            "notes": len(records.notes),
+        }

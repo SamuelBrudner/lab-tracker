@@ -25,6 +25,7 @@ from lab_tracker.models import (
     ProjectMembership,
     Question,
     QuestionRefactor,
+    RecordExportEvent,
     Session,
     SupervisionEdge,
     Visualization,
@@ -58,6 +59,7 @@ class LabTrackerRepository(Protocol):
     group_memberships: EntityRepository[GroupMembership]
     supervision_edges: EntityRepository[SupervisionEdge]
     ownership_reassignments: EntityRepository[OwnershipReassignment]
+    record_export_events: EntityRepository[RecordExportEvent]
     questions: EntityRepository[Question]
     question_refactors: EntityRepository[QuestionRefactor]
     datasets: EntityRepository[Dataset]
@@ -170,6 +172,16 @@ class LabTrackerRepository(Protocol):
         created_at: datetime,
     ) -> OwnershipReassignment:
         """Move attribution values and record the reassignment audit row."""
+
+    def query_record_export_events(
+        self,
+        *,
+        user_id: UUID | None = None,
+        group_id: UUID | None = None,
+        limit: int | None = None,
+        offset: int = 0,
+    ) -> tuple[list[RecordExportEvent], int]:
+        """Query user record export audit events."""
 
     def query_questions(
         self,
