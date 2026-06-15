@@ -40,6 +40,10 @@ class ProjectGroupModel(Base):
     kind: Mapped[str] = mapped_column(String(30), nullable=False, default="lab")
     group_read_all: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     created_by: Mapped[str | None] = mapped_column(String(255))
+    created_by_user_id: Mapped[str | None] = mapped_column(
+        String(36),
+        ForeignKey("users.user_id", ondelete="SET NULL"),
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utc_now)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
@@ -64,6 +68,10 @@ class ProjectModel(Base):
     description: Mapped[str] = mapped_column(String(1000), default="")
     status: Mapped[str] = mapped_column(String(20), default="active")
     created_by: Mapped[str | None] = mapped_column(String(255))
+    created_by_user_id: Mapped[str | None] = mapped_column(
+        String(36),
+        ForeignKey("users.user_id", ondelete="SET NULL"),
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utc_now)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
@@ -98,6 +106,10 @@ class QuestionModel(Base):
         ForeignKey("questions.question_id", ondelete="SET NULL"),
     )
     created_by: Mapped[str | None] = mapped_column(String(255))
+    created_by_user_id: Mapped[str | None] = mapped_column(
+        String(36),
+        ForeignKey("users.user_id", ondelete="SET NULL"),
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utc_now)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
@@ -149,6 +161,10 @@ class QuestionRefactorModel(Base):
     replacement_snapshot: Mapped[dict[str, object]] = mapped_column(JSON, default=dict)
     relationship_changes: Mapped[dict[str, object]] = mapped_column(JSON, default=dict)
     created_by: Mapped[str | None] = mapped_column(String(255))
+    created_by_user_id: Mapped[str | None] = mapped_column(
+        String(36),
+        ForeignKey("users.user_id", ondelete="SET NULL"),
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utc_now)
 
 
@@ -183,6 +199,10 @@ class DatasetModel(Base):
     manifest_source_session_id: Mapped[str | None] = mapped_column(String(36))
     status: Mapped[str] = mapped_column(String(20), default="staged")
     created_by: Mapped[str | None] = mapped_column(String(255))
+    created_by_user_id: Mapped[str | None] = mapped_column(
+        String(36),
+        ForeignKey("users.user_id", ondelete="SET NULL"),
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utc_now)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
@@ -260,6 +280,10 @@ class NoteModel(Base):
     note_metadata: Mapped[dict[str, str]] = mapped_column("metadata", JSON, default=dict)
     status: Mapped[str] = mapped_column(String(20), default="staged")
     created_by: Mapped[str | None] = mapped_column(String(255))
+    created_by_user_id: Mapped[str | None] = mapped_column(
+        String(36),
+        ForeignKey("users.user_id", ondelete="SET NULL"),
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utc_now)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
@@ -320,6 +344,10 @@ class GraphChangeSetModel(Base):
     commit_message: Mapped[str | None] = mapped_column(Text)
     error_metadata: Mapped[dict[str, object]] = mapped_column(JSON, default=dict)
     created_by: Mapped[str | None] = mapped_column(String(255))
+    created_by_user_id: Mapped[str | None] = mapped_column(
+        String(36),
+        ForeignKey("users.user_id", ondelete="SET NULL"),
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utc_now)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
@@ -440,6 +468,10 @@ class GraphDraftBatchRunModel(Base):
     summary: Mapped[str] = mapped_column(Text, default="")
     error_metadata: Mapped[dict[str, object]] = mapped_column(JSON, default=dict)
     created_by: Mapped[str | None] = mapped_column(String(255))
+    created_by_user_id: Mapped[str | None] = mapped_column(
+        String(36),
+        ForeignKey("users.user_id", ondelete="SET NULL"),
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utc_now)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
@@ -472,6 +504,10 @@ class SessionModel(Base):
     started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utc_now)
     ended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_by: Mapped[str | None] = mapped_column(String(255))
+    created_by_user_id: Mapped[str | None] = mapped_column(
+        String(36),
+        ForeignKey("users.user_id", ondelete="SET NULL"),
+    )
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         default=_utc_now,
@@ -527,6 +563,10 @@ class AnalysisModel(Base):
     code_version: Mapped[str] = mapped_column(String(255), nullable=False)
     environment_hash: Mapped[str | None] = mapped_column(String(255))
     executed_by: Mapped[str | None] = mapped_column(String(255))
+    executed_by_user_id: Mapped[str | None] = mapped_column(
+        String(36),
+        ForeignKey("users.user_id", ondelete="SET NULL"),
+    )
     executed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utc_now)
     status: Mapped[str] = mapped_column(String(20), default="staged")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utc_now)
@@ -642,6 +682,10 @@ class GoalModel(Base):
     external_ref: Mapped[str | None] = mapped_column(String(1000))
     attributes: Mapped[dict[str, object]] = mapped_column(JSON, default=dict)
     created_by: Mapped[str | None] = mapped_column(String(255))
+    created_by_user_id: Mapped[str | None] = mapped_column(
+        String(36),
+        ForeignKey("users.user_id", ondelete="SET NULL"),
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utc_now)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
@@ -679,6 +723,10 @@ class GoalLinkModel(Base):
     link_status: Mapped[str] = mapped_column(String(20), default="candidate")
     slot: Mapped[str] = mapped_column(String(120), nullable=False, default="")
     created_by: Mapped[str | None] = mapped_column(String(255))
+    created_by_user_id: Mapped[str | None] = mapped_column(
+        String(36),
+        ForeignKey("users.user_id", ondelete="SET NULL"),
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utc_now)
 
 
@@ -764,6 +812,10 @@ class ProjectMembershipModel(Base):
     )
     role: Mapped[str] = mapped_column(String(30), nullable=False)
     created_by: Mapped[str | None] = mapped_column(String(255))
+    created_by_user_id: Mapped[str | None] = mapped_column(
+        String(36),
+        ForeignKey("users.user_id", ondelete="SET NULL"),
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utc_now)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
@@ -795,6 +847,10 @@ class GroupMembershipModel(Base):
     )
     role: Mapped[str] = mapped_column(String(30), nullable=False)
     created_by: Mapped[str | None] = mapped_column(String(255))
+    created_by_user_id: Mapped[str | None] = mapped_column(
+        String(36),
+        ForeignKey("users.user_id", ondelete="SET NULL"),
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utc_now)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
@@ -855,6 +911,20 @@ class DeviceEnrollmentModel(Base):
 
 Index("ix_questions_project_created_at", QuestionModel.project_id, QuestionModel.created_at)
 Index("ix_projects_group_id", ProjectModel.group_id)
+Index("ix_project_groups_created_by_user_id", ProjectGroupModel.created_by_user_id)
+Index("ix_projects_created_by_user_id", ProjectModel.created_by_user_id)
+Index("ix_questions_created_by_user_id", QuestionModel.created_by_user_id)
+Index("ix_question_refactors_created_by_user_id", QuestionRefactorModel.created_by_user_id)
+Index("ix_datasets_created_by_user_id", DatasetModel.created_by_user_id)
+Index("ix_notes_created_by_user_id", NoteModel.created_by_user_id)
+Index("ix_graph_change_sets_created_by_user_id", GraphChangeSetModel.created_by_user_id)
+Index("ix_graph_draft_batch_runs_created_by_user_id", GraphDraftBatchRunModel.created_by_user_id)
+Index("ix_sessions_created_by_user_id", SessionModel.created_by_user_id)
+Index("ix_analyses_executed_by_user_id", AnalysisModel.executed_by_user_id)
+Index("ix_goals_created_by_user_id", GoalModel.created_by_user_id)
+Index("ix_goal_links_created_by_user_id", GoalLinkModel.created_by_user_id)
+Index("ix_project_memberships_created_by_user_id", ProjectMembershipModel.created_by_user_id)
+Index("ix_group_memberships_created_by_user_id", GroupMembershipModel.created_by_user_id)
 Index(
     "ix_questions_superseded_by_question_id",
     QuestionModel.superseded_by_question_id,

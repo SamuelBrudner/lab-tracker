@@ -78,7 +78,7 @@ def test_alembic_upgrade_chain_from_empty_to_head(monkeypatch, tmp_path):
     for revision in revisions:
         command.upgrade(config, revision)
         assert revision in _current_revisions(database_url)
-    assert _current_revision(database_url) == "0026_project_groups"
+    assert _current_revision(database_url) == "0027_attribution_user_fks"
 
 
 def test_alembic_has_single_head() -> None:
@@ -146,6 +146,7 @@ def test_alembic_upgrade_head_creates_expected_tables(monkeypatch, tmp_path):
     }
     question_columns = {column["name"] for column in inspector.get_columns("questions")}
     dataset_columns = {column["name"] for column in inspector.get_columns("datasets")}
+    analysis_columns = {column["name"] for column in inspector.get_columns("analyses")}
     graph_change_columns = {
         column["name"] for column in inspector.get_columns("graph_change_sets")
     }
@@ -164,6 +165,27 @@ def test_alembic_upgrade_head_creates_expected_tables(monkeypatch, tmp_path):
 
     assert "review_policy" not in project_columns
     assert "group_id" in project_columns
+    _assert_created_by_user_fk(inspector, "project_groups")
+    _assert_created_by_user_fk(inspector, "projects")
+    _assert_created_by_user_fk(inspector, "questions")
+    _assert_created_by_user_fk(inspector, "question_refactors")
+    _assert_created_by_user_fk(inspector, "datasets")
+    _assert_created_by_user_fk(inspector, "notes")
+    _assert_created_by_user_fk(inspector, "graph_change_sets")
+    _assert_created_by_user_fk(inspector, "graph_draft_batch_runs")
+    _assert_created_by_user_fk(inspector, "sessions")
+    _assert_created_by_user_fk(inspector, "goals")
+    _assert_created_by_user_fk(inspector, "goal_links")
+    _assert_created_by_user_fk(inspector, "project_memberships")
+    _assert_created_by_user_fk(inspector, "group_memberships")
+    assert "executed_by_user_id" in analysis_columns
+    _assert_index(inspector, "analyses", "ix_analyses_executed_by_user_id")
+    _assert_fk(
+        inspector,
+        "analyses",
+        column="executed_by_user_id",
+        referred_table="users",
+    )
     assert {
         "group_id",
         "name",
@@ -213,7 +235,7 @@ def test_database_at_daily_review_branch_upgrades_to_current_head(monkeypatch, t
     assert _current_revision(database_url) == "0017_daily_graph_reviews"
 
     command.upgrade(config, "head")
-    assert _current_revision(database_url) == "0026_project_groups"
+    assert _current_revision(database_url) == "0027_attribution_user_fks"
 
     engine = create_engine(
         database_url,
@@ -234,6 +256,38 @@ def test_database_at_daily_review_branch_upgrades_to_current_head(monkeypatch, t
         "group_memberships",
     }.issubset(table_names)
     engine.dispose()
+
+
+def _assert_created_by_user_fk(inspector, table_name: str) -> None:
+    columns = {column["name"] for column in inspector.get_columns(table_name)}
+    assert "created_by_user_id" in columns
+    _assert_index(inspector, table_name, f"ix_{table_name}_created_by_user_id")
+    _assert_fk(
+        inspector,
+        table_name,
+        column="created_by_user_id",
+        referred_table="users",
+    )
+
+
+def _assert_index(inspector, table_name: str, index_name: str) -> None:
+    indexes = {index["name"] for index in inspector.get_indexes(table_name)}
+    assert index_name in indexes
+
+
+def _assert_fk(
+    inspector,
+    table_name: str,
+    *,
+    column: str,
+    referred_table: str,
+) -> None:
+    foreign_keys = inspector.get_foreign_keys(table_name)
+    assert any(
+        column in foreign_key["constrained_columns"]
+        and foreign_key["referred_table"] == referred_table
+        for foreign_key in foreign_keys
+    )
 
 
 def test_migrated_database_supports_api_round_trip(monkeypatch, tmp_path):
