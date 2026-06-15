@@ -328,6 +328,98 @@ class ProjectService(BaseService):
             repository.group_memberships.delete(membership.membership_id)
         return membership
 
+    def upsert_group_project_memberships(
+        self,
+        group_id: UUID,
+        user_id: UUID,
+        role: ProjectMembershipRole,
+        *,
+        actor: AuthContext | None = None,
+    ) -> list[ProjectMembership]:
+        self.authorization.require_group_owner(group_id, actor=actor)
+        self.get_project_group(group_id)
+        projects = self.query_from_repository(
+            loader=lambda repository: repository.query_projects(
+                group_id=group_id,
+                limit=None,
+                offset=0,
+            ),
+        )
+        memberships: list[ProjectMembership] = []
+        with self.unit_of_work() as repository:
+            for project in projects:
+                existing = repository.get_project_membership(
+                    project_id=project.project_id,
+                    user_id=user_id,
+                )
+                if existing is None:
+                    membership = ProjectMembership(
+                        membership_id=uuid4(),
+                        project_id=project.project_id,
+                        user_id=user_id,
+                        role=role,
+                        created_by=actor_user_id(actor),
+                    )
+                else:
+                    membership = existing
+                    membership.role = role
+                    membership.updated_at = utc_now()
+                repository.project_memberships.save(membership)
+                saved = repository.project_memberships.get(membership.membership_id)
+                memberships.append(saved or membership)
+        return memberships
+
+    def delete_group_project_memberships(
+        self,
+        group_id: UUID,
+        user_id: UUID,
+        *,
+        actor: AuthContext | None = None,
+    ) -> list[ProjectMembership]:
+        self.authorization.require_group_owner(group_id, actor=actor)
+        self.get_project_group(group_id)
+        projects = self.query_from_repository(
+            loader=lambda repository: repository.query_projects(
+                group_id=group_id,
+                limit=None,
+                offset=0,
+            ),
+        )
+        memberships = [
+            membership
+            for project in projects
+            if (
+                membership := self.repository.get_project_membership(
+                    project_id=project.project_id,
+                    user_id=user_id,
+                )
+            )
+            is not None
+        ]
+        sole_owner_project_ids: list[UUID] = []
+        for membership in memberships:
+            if membership.role != ProjectMembershipRole.OWNER:
+                continue
+            owner_count = sum(
+                1
+                for item in self.list_project_memberships(
+                    project_id=membership.project_id,
+                )
+                if item.role == ProjectMembershipRole.OWNER
+            )
+            if owner_count <= 1:
+                sole_owner_project_ids.append(membership.project_id)
+        if sole_owner_project_ids:
+            project_list = ", ".join(str(project_id) for project_id in sole_owner_project_ids)
+            raise ValidationError(
+                "Cannot remove the last owner from projects: "
+                f"{project_list}."
+            )
+        with self.unit_of_work() as repository:
+            for membership in memberships:
+                repository.project_memberships.delete(membership.membership_id)
+        return memberships
+
     def list_project_memberships(
         self,
         *,

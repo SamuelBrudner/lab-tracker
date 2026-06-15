@@ -10,11 +10,17 @@ from starlette.requests import Request
 
 from lab_tracker.api import LabTrackerAPI
 from lab_tracker.errors import NotFoundError
-from lab_tracker.models import GroupMembership, ProjectGroup, ProjectGroupKind
+from lab_tracker.models import (
+    GroupMembership,
+    ProjectGroup,
+    ProjectGroupKind,
+    ProjectMembership,
+)
 from lab_tracker.schemas import (
     Envelope,
     GroupMembershipCreate,
     GroupMembershipUpdate,
+    GroupProjectMembershipBulkCreate,
     ListEnvelope,
     ProjectGroupCreate,
     ProjectGroupUpdate,
@@ -23,6 +29,7 @@ from lab_tracker.schemas import (
 from .shared import (
     actor_from_request,
     api_from_request,
+    ensure_group_owner,
     ensure_group_read,
     list_response,
     paginate,
@@ -160,10 +167,50 @@ def build_groups_router(api: LabTrackerAPI) -> APIRouter:
         )
         return Envelope(data=membership)
 
+    @router.post(
+        "/groups/{group_id:uuid}/project-memberships",
+        response_model=Envelope[list[ProjectMembership]],
+    )
+    def bulk_upsert_group_project_memberships(
+        group_id: UUID,
+        payload: GroupProjectMembershipBulkCreate,
+        request: Request,
+    ):
+        actor = actor_from_request(request)
+        ensure_group_owner(request, group_id)
+        user_id = _resolve_member_user_id(request, payload)
+        memberships = api_from_request(request, api).upsert_group_project_memberships(
+            group_id,
+            user_id,
+            payload.role,
+            actor=actor,
+        )
+        return Envelope(data=memberships)
+
+    @router.delete(
+        "/groups/{group_id:uuid}/project-memberships/{user_id:uuid}",
+        response_model=Envelope[list[ProjectMembership]],
+    )
+    def bulk_delete_group_project_memberships(
+        group_id: UUID,
+        user_id: UUID,
+        request: Request,
+    ):
+        actor = actor_from_request(request)
+        memberships = api_from_request(request, api).delete_group_project_memberships(
+            group_id,
+            user_id,
+            actor=actor,
+        )
+        return Envelope(data=memberships)
+
     return router
 
 
-def _resolve_member_user_id(request: Request, payload: GroupMembershipCreate) -> UUID:
+def _resolve_member_user_id(
+    request: Request,
+    payload: GroupMembershipCreate | GroupProjectMembershipBulkCreate,
+) -> UUID:
     if payload.user_id is not None:
         user = request.app.state.auth_service.get_user_by_id(payload.user_id)
         if user is None:

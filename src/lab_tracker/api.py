@@ -244,6 +244,12 @@ class LabTrackerAPI:
     def delete_group_membership(self, *args: Any, **kwargs: Any) -> Any:
         return self.projects.delete_group_membership(*args, **kwargs)
 
+    def upsert_group_project_memberships(self, *args: Any, **kwargs: Any) -> Any:
+        return self.projects.upsert_group_project_memberships(*args, **kwargs)
+
+    def delete_group_project_memberships(self, *args: Any, **kwargs: Any) -> Any:
+        return self.projects.delete_group_project_memberships(*args, **kwargs)
+
     def accessible_project_ids(self, *args: Any, **kwargs: Any) -> Any:
         return self.project_authorization.accessible_project_ids(*args, **kwargs)
 

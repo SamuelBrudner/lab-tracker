@@ -228,6 +228,12 @@ class GroupMembershipUpdate(RequestModel):
     role: ProjectMembershipRole
 
 
+class GroupProjectMembershipBulkCreate(RequestModel):
+    user_id: UUID | None = None
+    username: str | None = Field(default=None, min_length=1)
+    role: ProjectMembershipRole
+
+
 ProjectGroupRead = ProjectGroup
 GroupMembershipRead = GroupMembership
 

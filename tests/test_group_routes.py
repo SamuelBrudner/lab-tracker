@@ -26,6 +26,21 @@ def _register_user(
     return data["access_token"], data["user"]["user_id"]
 
 
+def _create_project(
+    client: TestClient,
+    headers: dict[str, str],
+    name: str,
+    *,
+    group_id: str | None = None,
+) -> str:
+    payload = {"name": name}
+    if group_id is not None:
+        payload["group_id"] = group_id
+    response = client.post("/projects", json=payload, headers=headers)
+    assert response.status_code == 201
+    return response.json()["data"]["project_id"]
+
+
 def test_editor_group_creator_bootstraps_owner_and_manages_members(
     client: TestClient,
     admin_auth_headers: dict[str, str],
@@ -170,3 +185,104 @@ def test_group_routes_reject_last_owner_removal_and_allow_group_delete(
     assert delete_group.status_code == 200
     assert delete_group.json()["data"]["group_id"] == group["group_id"]
     assert get_deleted.status_code == 404
+
+
+def test_group_owner_bulk_onboards_and_offboards_project_memberships(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+):
+    editor_token, _ = _register_user(
+        client,
+        f"group-bulk-owner-{uuid4().hex[:8]}",
+        role="editor",
+        headers=admin_auth_headers,
+    )
+    editor_headers = _auth_headers(editor_token)
+    group = client.post(
+        "/groups",
+        json={"name": "Bulk membership group"},
+        headers=editor_headers,
+    ).json()["data"]
+    project_ids = {
+        _create_project(
+            client,
+            admin_auth_headers,
+            "Bulk grouped project A",
+            group_id=group["group_id"],
+        ),
+        _create_project(
+            client,
+            admin_auth_headers,
+            "Bulk grouped project B",
+            group_id=group["group_id"],
+        ),
+    }
+    viewer_name = f"group-bulk-member-{uuid4().hex[:8]}"
+    viewer_token, viewer_user_id = _register_user(client, viewer_name)
+    viewer_headers = _auth_headers(viewer_token)
+
+    onboard = client.post(
+        f"/groups/{group['group_id']}/project-memberships",
+        json={"username": viewer_name, "role": "contributor"},
+        headers=editor_headers,
+    )
+    visible_after_onboard = client.get("/projects", headers=viewer_headers)
+    offboard = client.delete(
+        f"/groups/{group['group_id']}/project-memberships/{viewer_user_id}",
+        headers=editor_headers,
+    )
+    visible_after_offboard = client.get("/projects", headers=viewer_headers)
+
+    assert onboard.status_code == 200
+    onboarded = onboard.json()["data"]
+    assert {item["project_id"] for item in onboarded} == project_ids
+    assert {item["role"] for item in onboarded} == {"contributor"}
+    assert {item["project_id"] for item in visible_after_onboard.json()["data"]} == project_ids
+    assert offboard.status_code == 200
+    assert {item["project_id"] for item in offboard.json()["data"]} == project_ids
+    assert visible_after_offboard.json()["data"] == []
+
+
+def test_group_bulk_offboard_rejects_sole_project_owner_removal(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+):
+    editor_token, _ = _register_user(
+        client,
+        f"group-bulk-guard-owner-{uuid4().hex[:8]}",
+        role="editor",
+        headers=admin_auth_headers,
+    )
+    editor_headers = _auth_headers(editor_token)
+    group = client.post(
+        "/groups",
+        json={"name": "Bulk guard group"},
+        headers=editor_headers,
+    ).json()["data"]
+    project_id = _create_project(
+        client,
+        admin_auth_headers,
+        "Bulk guarded project",
+        group_id=group["group_id"],
+    )
+    viewer_name = f"group-bulk-sole-owner-{uuid4().hex[:8]}"
+    viewer_token, viewer_user_id = _register_user(client, viewer_name)
+    viewer_headers = _auth_headers(viewer_token)
+    onboard = client.post(
+        f"/groups/{group['group_id']}/project-memberships",
+        json={"username": viewer_name, "role": "owner"},
+        headers=editor_headers,
+    )
+    assert onboard.status_code == 200
+
+    offboard = client.delete(
+        f"/groups/{group['group_id']}/project-memberships/{viewer_user_id}",
+        headers=editor_headers,
+    )
+    still_visible = client.get("/projects", headers=viewer_headers)
+
+    assert offboard.status_code == 422
+    assert offboard.json()["error"]["message"].startswith(
+        "Cannot remove the last owner from projects:"
+    )
+    assert [item["project_id"] for item in still_visible.json()["data"]] == [project_id]
