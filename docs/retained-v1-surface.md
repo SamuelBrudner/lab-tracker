@@ -9,8 +9,16 @@ defines the supported v1 product surface.
 The retained v1 product is the smallest workflow set that preserves the core
 research record:
 
-- Auth and role-based access control.
-- Projects as the top-level container for work.
+- Auth and role-based access control, including project memberships and
+  project-group memberships as Lab Tracker-owned semantic access edges.
+- Project groups (`kind=lab`) as an optional organizing container above
+  projects, with each project belonging to at most one group through
+  `projects.group_id`.
+- Projects as the durable unit of research work.
+- Group owners inheriting owner access on child projects for PI oversight,
+  while group viewers and contributors inherit no child-project access unless
+  the explicit `group_read_all` flag is enabled for that group; when enabled,
+  that inherited access is read-only.
 - Questions created, staged, activated, maintained explicitly by users, and
   connected with `parent_question_ids` to form broad-to-atomic hierarchies.
 - Simple query/search flows over questions and notes using the built-in
@@ -69,6 +77,9 @@ Follow these rules in sibling cleanup work:
   speculative abstractions created for deferred workflows.
 - New work should preserve durable data and invariants, not deferred feature
   surfaces.
+- Project groups and group memberships are retained semantic edges only. Do not
+  turn them into an org chart, HR system, identity-provider admin surface,
+  grant-management product, or cross-lab/co-PI hierarchy.
 - Build-vs-buy boundaries are recorded in
   [`docs/build-vs-buy-boundaries.md`](build-vs-buy-boundaries.md). Adjacent
   commodity responsibilities should use pointer-not-reimplementation: keep
