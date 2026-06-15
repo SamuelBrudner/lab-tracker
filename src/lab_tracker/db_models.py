@@ -88,9 +88,10 @@ class QuestionModel(Base):
         primary_key=True,
         default=lambda: str(uuid4()),
     )
-    project_id: Mapped[str | None] = mapped_column(
+    project_id: Mapped[str] = mapped_column(
         String(36),
         ForeignKey("projects.project_id", ondelete="CASCADE"),
+        nullable=False,
     )
     text: Mapped[str] = mapped_column(Text, nullable=False)
     question_type: Mapped[str] = mapped_column(String(40), nullable=False)
@@ -668,10 +669,9 @@ class GoalModel(Base):
         primary_key=True,
         default=lambda: str(uuid4()),
     )
-    project_id: Mapped[str] = mapped_column(
+    project_id: Mapped[str | None] = mapped_column(
         String(36),
         ForeignKey("projects.project_id", ondelete="CASCADE"),
-        nullable=False,
     )
     goal_type: Mapped[str] = mapped_column(String(40), nullable=False)
     title: Mapped[str] = mapped_column(String(255), nullable=False)
