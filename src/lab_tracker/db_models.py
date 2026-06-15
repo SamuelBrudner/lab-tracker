@@ -816,6 +816,34 @@ class SupervisionEdgeModel(Base):
     )
 
 
+class OwnershipReassignmentModel(Base):
+    __tablename__ = "ownership_reassignments"
+
+    reassignment_id: Mapped[str] = mapped_column(
+        String(36),
+        primary_key=True,
+        default=lambda: str(uuid4()),
+    )
+    from_user_id: Mapped[str] = mapped_column(
+        String(36),
+        ForeignKey("users.user_id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    to_user_id: Mapped[str] = mapped_column(
+        String(36),
+        ForeignKey("users.user_id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    reason: Mapped[str] = mapped_column(Text, default="")
+    record_counts: Mapped[dict[str, int]] = mapped_column(JSON, default=dict)
+    created_by: Mapped[str | None] = mapped_column(String(255))
+    created_by_user_id: Mapped[str | None] = mapped_column(
+        String(36),
+        ForeignKey("users.user_id", ondelete="SET NULL"),
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utc_now)
+
+
 class ProjectMembershipModel(Base):
     __tablename__ = "project_memberships"
     __table_args__ = (
@@ -1016,6 +1044,20 @@ Index(
     "ix_supervision_edges_supervisee_started",
     SupervisionEdgeModel.supervisee_user_id,
     SupervisionEdgeModel.started_at,
+)
+Index(
+    "ix_ownership_reassignments_from_created",
+    OwnershipReassignmentModel.from_user_id,
+    OwnershipReassignmentModel.created_at,
+)
+Index(
+    "ix_ownership_reassignments_to_created",
+    OwnershipReassignmentModel.to_user_id,
+    OwnershipReassignmentModel.created_at,
+)
+Index(
+    "ix_ownership_reassignments_created_by_user_id",
+    OwnershipReassignmentModel.created_by_user_id,
 )
 Index(
     "uq_supervision_edges_active_pair",

@@ -22,6 +22,7 @@ from lab_tracker.models import (
     GraphDraftBatchSettings,
     GroupMembership,
     Note,
+    OwnershipReassignment,
     Project,
     ProjectGroup,
     Question,
@@ -53,6 +54,7 @@ from .graph_batches import (
 )
 from .graph_drafts import SQLAlchemyGraphChangeSetRepository
 from .notes import SQLAlchemyNoteRepository
+from .ownership import SQLAlchemyOwnershipReassignmentRepository
 from .sessions import SQLAlchemyAcquisitionOutputRepository, SQLAlchemySessionRepository
 from .supervision import SQLAlchemySupervisionEdgeRepository
 
@@ -67,6 +69,7 @@ class SQLAlchemyLabTrackerRepository(LabTrackerRepository):
         self.project_memberships = SQLAlchemyProjectMembershipRepository(session)
         self.group_memberships = SQLAlchemyGroupMembershipRepository(session)
         self.supervision_edges = SQLAlchemySupervisionEdgeRepository(session)
+        self.ownership_reassignments = SQLAlchemyOwnershipReassignmentRepository(session)
         self.questions = SQLAlchemyQuestionRepository(session)
         self.question_refactors = SQLAlchemyQuestionRefactorRepository(session)
         self.datasets = SQLAlchemyDatasetRepository(session)
@@ -221,6 +224,42 @@ class SQLAlchemyLabTrackerRepository(LabTrackerRepository):
             as_of=as_of,
             limit=limit,
             offset=offset,
+        )
+
+    def query_ownership_reassignments(
+        self,
+        *,
+        from_user_id: UUID | None = None,
+        to_user_id: UUID | None = None,
+        limit: int | None = None,
+        offset: int = 0,
+    ) -> tuple[list[OwnershipReassignment], int]:
+        return self.ownership_reassignments.query(
+            from_user_id=from_user_id,
+            to_user_id=to_user_id,
+            limit=limit,
+            offset=offset,
+        )
+
+    def reassign_ownership(
+        self,
+        *,
+        reassignment_id: UUID,
+        from_user_id: UUID,
+        to_user_id: UUID,
+        reason: str,
+        created_by: str | None,
+        created_by_user_id: UUID | None,
+        created_at: datetime,
+    ) -> OwnershipReassignment:
+        return self.ownership_reassignments.reassign(
+            reassignment_id=reassignment_id,
+            from_user_id=from_user_id,
+            to_user_id=to_user_id,
+            reason=reason,
+            created_by=created_by,
+            created_by_user_id=created_by_user_id,
+            created_at=created_at,
         )
 
     def query_questions(

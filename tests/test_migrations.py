@@ -78,7 +78,7 @@ def test_alembic_upgrade_chain_from_empty_to_head(monkeypatch, tmp_path):
     for revision in revisions:
         command.upgrade(config, revision)
         assert revision in _current_revisions(database_url)
-    assert _current_revision(database_url) == "0030_nullable_goal_project"
+    assert _current_revision(database_url) == "0031_ownership_reassignments"
 
 
 def test_alembic_has_single_head() -> None:
@@ -135,6 +135,7 @@ def test_alembic_upgrade_head_creates_expected_tables(monkeypatch, tmp_path):
         "project_groups",
         "group_memberships",
         "supervision_edges",
+        "ownership_reassignments",
     }
     assert expected.issubset(table_names)
     assert "dataset_reviews" not in table_names
@@ -159,6 +160,9 @@ def test_alembic_upgrade_head_creates_expected_tables(monkeypatch, tmp_path):
     }
     supervision_columns = {
         column["name"] for column in inspector.get_columns("supervision_edges")
+    }
+    ownership_columns = {
+        column["name"] for column in inspector.get_columns("ownership_reassignments")
     }
     visualization_columns = {
         column["name"] for column in inspector.get_columns("visualizations")
@@ -250,6 +254,49 @@ def test_alembic_upgrade_head_creates_expected_tables(monkeypatch, tmp_path):
         referred_table="users",
     )
     assert {
+        "reassignment_id",
+        "from_user_id",
+        "to_user_id",
+        "reason",
+        "record_counts",
+        "created_by",
+        "created_by_user_id",
+        "created_at",
+    }.issubset(ownership_columns)
+    _assert_fk(
+        inspector,
+        "ownership_reassignments",
+        column="from_user_id",
+        referred_table="users",
+    )
+    _assert_fk(
+        inspector,
+        "ownership_reassignments",
+        column="to_user_id",
+        referred_table="users",
+    )
+    _assert_fk(
+        inspector,
+        "ownership_reassignments",
+        column="created_by_user_id",
+        referred_table="users",
+    )
+    _assert_index(
+        inspector,
+        "ownership_reassignments",
+        "ix_ownership_reassignments_from_created",
+    )
+    _assert_index(
+        inspector,
+        "ownership_reassignments",
+        "ix_ownership_reassignments_to_created",
+    )
+    _assert_index(
+        inspector,
+        "ownership_reassignments",
+        "ix_ownership_reassignments_created_by_user_id",
+    )
+    assert {
         "asset_storage_id",
         "asset_filename",
         "asset_content_type",
@@ -272,7 +319,7 @@ def test_database_at_daily_review_branch_upgrades_to_current_head(monkeypatch, t
     assert _current_revision(database_url) == "0017_daily_graph_reviews"
 
     command.upgrade(config, "head")
-    assert _current_revision(database_url) == "0030_nullable_goal_project"
+    assert _current_revision(database_url) == "0031_ownership_reassignments"
 
     engine = create_engine(
         database_url,
@@ -292,6 +339,7 @@ def test_database_at_daily_review_branch_upgrades_to_current_head(monkeypatch, t
         "project_groups",
         "group_memberships",
         "supervision_edges",
+        "ownership_reassignments",
     }.issubset(table_names)
     engine.dispose()
 

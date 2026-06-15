@@ -19,6 +19,7 @@ from lab_tracker.services import (
     GoalService,
     GraphDraftService,
     NoteService,
+    OwnershipReassignmentService,
     ProjectAuthorizationPolicy,
     ProjectService,
     QuestionService,
@@ -60,6 +61,9 @@ class LabTrackerAPI:
             authorization=self.project_authorization,
         )
         self.supervision: SupervisionService = SupervisionService(context)
+        self.ownership_reassignments: OwnershipReassignmentService = (
+            OwnershipReassignmentService(context)
+        )
         self.questions: QuestionService = QuestionService(
             context,
             projects=self.projects,
@@ -269,6 +273,18 @@ class LabTrackerAPI:
 
     def delete_supervision_edge(self, *args: Any, **kwargs: Any) -> Any:
         return self.supervision.delete_supervision_edge(*args, **kwargs)
+
+    def reassign_ownership(self, *args: Any, **kwargs: Any) -> Any:
+        return self.ownership_reassignments.reassign_ownership(*args, **kwargs)
+
+    def get_ownership_reassignment(self, *args: Any, **kwargs: Any) -> Any:
+        return self.ownership_reassignments.get_ownership_reassignment(*args, **kwargs)
+
+    def list_ownership_reassignments(self, *args: Any, **kwargs: Any) -> Any:
+        return self.ownership_reassignments.list_ownership_reassignments(
+            *args,
+            **kwargs,
+        )
 
     def project_membership_role(self, *args: Any, **kwargs: Any) -> Any:
         return self.project_authorization.membership_role(*args, **kwargs)

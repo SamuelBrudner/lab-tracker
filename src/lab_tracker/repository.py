@@ -19,6 +19,7 @@ from lab_tracker.models import (
     GraphDraftBatchSettings,
     GroupMembership,
     Note,
+    OwnershipReassignment,
     Project,
     ProjectGroup,
     ProjectMembership,
@@ -56,6 +57,7 @@ class LabTrackerRepository(Protocol):
     project_memberships: EntityRepository[ProjectMembership]
     group_memberships: EntityRepository[GroupMembership]
     supervision_edges: EntityRepository[SupervisionEdge]
+    ownership_reassignments: EntityRepository[OwnershipReassignment]
     questions: EntityRepository[Question]
     question_refactors: EntityRepository[QuestionRefactor]
     datasets: EntityRepository[Dataset]
@@ -145,6 +147,29 @@ class LabTrackerRepository(Protocol):
         offset: int = 0,
     ) -> tuple[list[SupervisionEdge], int]:
         """Query dated supervision edges."""
+
+    def query_ownership_reassignments(
+        self,
+        *,
+        from_user_id: UUID | None = None,
+        to_user_id: UUID | None = None,
+        limit: int | None = None,
+        offset: int = 0,
+    ) -> tuple[list[OwnershipReassignment], int]:
+        """Query ownership reassignment audit records."""
+
+    def reassign_ownership(
+        self,
+        *,
+        reassignment_id: UUID,
+        from_user_id: UUID,
+        to_user_id: UUID,
+        reason: str,
+        created_by: str | None,
+        created_by_user_id: UUID | None,
+        created_at: datetime,
+    ) -> OwnershipReassignment:
+        """Move attribution values and record the reassignment audit row."""
 
     def query_questions(
         self,

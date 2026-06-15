@@ -38,6 +38,7 @@ from lab_tracker.models import (
     Note,
     NoteMetadataScalar,
     NoteStatus,
+    OwnershipReassignment,
     ProjectGroup,
     ProjectGroupKind,
     ProjectMembership,
@@ -267,6 +268,15 @@ class SupervisionEdgeUpdate(RequestModel):
 
 
 SupervisionEdgeRead = SupervisionEdge
+
+
+class OwnershipReassignmentCreate(RequestModel):
+    from_user_id: UUID
+    to_user_id: UUID
+    reason: str | None = None
+
+
+OwnershipReassignmentRead = OwnershipReassignment
 
 
 class QuestionCreate(RequestModel):

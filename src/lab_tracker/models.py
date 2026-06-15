@@ -490,6 +490,22 @@ class SupervisionEdge(_DomainModel):
     updated_at: datetime = Field(default_factory=utc_now)
 
 
+class OwnershipReassignment(_DomainModel):
+    reassignment_id: UUID
+    from_user_id: UUID
+    to_user_id: UUID
+    reason: str = ""
+    record_counts: dict[str, int] = Field(default_factory=dict)
+    created_at: datetime = Field(default_factory=utc_now)
+    created_by: str | None = None
+    created_by_user_id: UUID | None = None
+
+    @computed_field(return_type=int)
+    @property
+    def total_records(self) -> int:
+        return sum(self.record_counts.values())
+
+
 class Question(_DomainModel):
     question_id: UUID
     project_id: UUID
