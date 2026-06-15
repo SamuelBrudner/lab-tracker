@@ -14,6 +14,7 @@ import { MobileCaptureCard } from "./features/mobile-capture.jsx";
 import { NoteDetailCard } from "./features/notes.jsx";
 import { QuestionDetailCard } from "./features/questions/QuestionDetailCard.jsx";
 import { SessionDetailCard } from "./features/sessions/index.js";
+import { UsersPage } from "./features/users.jsx";
 import { WorkspaceHome } from "./features/workspace/WorkspaceHome.jsx";
 import { useAnalysisWorkflow } from "./hooks/useAnalysisWorkflow.js";
 import { useAuthSession } from "./hooks/useAuthSession.js";
@@ -290,7 +291,9 @@ function App() {
   return (
     <div className={`app-shell${isCaptureRoute ? " capture-app-shell" : ""}`}>
       <AppHeader
+        activeKind={route.kind}
         authEnabled={auth.authEnabled}
+        navigate={navigate}
         user={auth.user}
         onLogout={auth.handleLogout}
       />
@@ -312,15 +315,20 @@ function App() {
       ) : auth.authEnabled && !auth.token ? (
         <section className="grid">
           <AuthForm
+            authBootstrapStatus={auth.authBootstrapStatus}
+            authBootstrapToken={auth.authBootstrapToken}
             authMode={auth.authMode}
             authUsername={auth.authUsername}
             authPassword={auth.authPassword}
             authBusy={auth.authBusy}
+            onBootstrapTokenChange={(event) => auth.setAuthBootstrapToken(event.target.value)}
             onSubmit={auth.handleAuthSubmit}
             onUsernameChange={(event) => auth.setAuthUsername(event.target.value)}
             onPasswordChange={(event) => auth.setAuthPassword(event.target.value)}
             onToggleMode={() =>
-              auth.setAuthMode((current) => (current === "login" ? "register" : "login"))
+              auth.setAuthMode((current) =>
+                current === "login" ? "register" : "login"
+              )
             }
           />
           <WorkflowCoverageCard />
@@ -383,6 +391,15 @@ function App() {
               token={auth.token}
               canWrite={auth.canWrite}
               navigate={navigate}
+              setFlash={setFlash}
+            />
+          ) : null}
+
+          {route.kind === "users" ? (
+            <UsersPage
+              token={auth.token}
+              canManageUsers={auth.user?.role === "admin"}
+              setBusy={setBusy}
               setFlash={setFlash}
             />
           ) : null}

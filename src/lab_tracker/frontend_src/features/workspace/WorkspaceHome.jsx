@@ -7,7 +7,7 @@ import { NotePanel } from "../notes.jsx";
 import { PortfolioHome } from "../portfolio-home.jsx";
 import { QuestionPanel } from "../questions/QuestionPanel.jsx";
 import { SessionPanel } from "../sessions/index.js";
-import { ProjectContextCard } from "../../shared/ui.jsx";
+import { ProjectContextCard, RequestEditAccess } from "../../shared/ui.jsx";
 
 function WorkspaceHome({
   auth,
@@ -27,6 +27,7 @@ function WorkspaceHome({
   projectAccess = {},
 }) {
   const canContribute = Boolean(projectAccess.canContribute);
+  const hasProjects = workspaceData.projects.length > 0;
   const showPortfolioHome = workspaceData.projects.length > 1;
   return (
     <>
@@ -36,6 +37,22 @@ function WorkspaceHome({
         token={auth.token}
         onOpenProject={workspaceData.setSelectedProjectId}
       />
+      {!hasProjects ? (
+        <article className="card span-12 first-run-card">
+          <div>
+            <h2>Welcome to Lab Tracker</h2>
+            <p className="subtle">Create your first project to start capturing lab context.</p>
+          </div>
+          <button
+            type="button"
+            className="btn-primary"
+            disabled={!auth.canWrite}
+            onClick={() => document.querySelector('[name="new-project-name"]')?.focus()}
+          >
+            Create first project
+          </button>
+        </article>
+      ) : null}
 
       <Dashboard
         projects={workspaceData.projects}
@@ -65,6 +82,9 @@ function WorkspaceHome({
         onAddProjectMember={projectAccess.onAddMember}
         onUpdateProjectMember={projectAccess.onUpdateMember}
         onRemoveProjectMember={projectAccess.onRemoveMember}
+        requestAccessNode={
+          <RequestEditAccess selectedProject={workspaceData.selectedProject} />
+        }
       />
 
       <QuestionPanel
@@ -196,6 +216,32 @@ function WorkspaceHome({
       />
 
       <ProjectContextCard selectedProject={workspaceData.selectedProject} />
+
+      <article className="card span-12">
+        <h2>Terms</h2>
+        <div className="term-grid">
+          <p>
+            <strong>Project</strong>
+            <span>One durable research effort or lab question space.</span>
+          </p>
+          <p>
+            <strong>Question</strong>
+            <span>A staged or active scientific question that records why data was collected.</span>
+          </p>
+          <p>
+            <strong>Dataset</strong>
+            <span>A committed data record with provenance and source files.</span>
+          </p>
+          <p>
+            <strong>Claim</strong>
+            <span>An interpretation linked back to datasets or analyses.</span>
+          </p>
+          <p>
+            <strong>Graph draft</strong>
+            <span>A proposed change that a human reviews before it is committed.</span>
+          </p>
+        </div>
+      </article>
     </>
   );
 }

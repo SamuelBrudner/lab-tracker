@@ -24,6 +24,9 @@ function parseAppRoute(pathname) {
   if (parts.length === 2 && parts[1] === "devices") {
     return { kind: "devices" };
   }
+  if (parts.length === 2 && parts[1] === "users") {
+    return { kind: "users" };
+  }
   if (parts.length === 2 && parts[1] === "enroll") {
     return { kind: "enroll" };
   }

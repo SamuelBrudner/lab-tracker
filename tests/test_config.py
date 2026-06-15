@@ -57,6 +57,13 @@ def test_dotenv_ignores_non_lab_tracker_keys(tmp_path, monkeypatch):
     assert settings.openai_model == "gpt-test"
 
 
+def test_default_openai_model_is_standard_account_model(monkeypatch):
+    _clear_auth_env(monkeypatch)
+    monkeypatch.setenv("LAB_TRACKER_ENVIRONMENT", "local")
+    settings = _settings_from_environment()
+    assert settings.openai_model == "gpt-4o-mini"
+
+
 def test_non_local_environment_rejects_default_auth_secret(monkeypatch):
     _clear_auth_env(monkeypatch)
     monkeypatch.setenv("LAB_TRACKER_ENVIRONMENT", "production")

@@ -12,11 +12,32 @@ Lab Tracker keeps the *reasoning* behind experiments connected to the data they 
 - **External evidence inboxes.** Synced local folders can be imported as staged evidence notes with source metadata; graph changes remain human-reviewed drafts.
 - **Search.** Substring search over questions and notes so prior context is findable later.
 
+![Project graph preview](docs/screenshots/project-graph-full.png)
+
+![Phone capture draft review](docs/screenshots/capture-draft-review.png)
+
+![Question graph preview](docs/screenshots/project-graph-questions.png)
+
 What ships today is the minimum that preserves the core research record. The supported surface is defined in [`docs/retained-v1-surface.md`](docs/retained-v1-surface.md) — if it and this README disagree, that document wins. The broader vision (meeting-photo question capture, OCR, vector search, PI review gates) lives in [`idea.md`](idea.md) and is explicitly deferred.
 
 ## Who it's for
 
 Wet labs (initially neuroscience) that produce high-bandwidth data on specialized rigs and want the semantic context preserved alongside it.
+
+## Scientists start here
+
+You do not need to install anything to use Lab Tracker. If your lab already runs
+it, open the link your admin gave you and sign in. For phone capture, pair your
+phone from the app's `Devices` page, then open the capture link or scan the QR
+from the LAN helper.
+
+If your lab needs to set it up, hand the setup sections below to the lab member
+or IT contact who is comfortable installing software. The shortest local path is
+the double-click launcher in `launchers/`; the shared-lab path is Docker/Postgres
+with first-admin setup in the browser.
+
+Preview the product without a build from the screenshots above and the retained
+workflow screenshots under [`docs/screenshots`](docs/screenshots).
 
 ## Quickstart
 
@@ -42,6 +63,18 @@ Windows fresh-clone notes, including Beads/Dolt setup, are in
 [`docs/windows-fresh-clone.md`](docs/windows-fresh-clone.md).
 
 ## Run the API
+
+Preferred local launcher:
+
+```bash
+lab-tracker serve
+```
+
+That command runs `alembic upgrade head`, opens `http://127.0.0.1:8000/app`,
+and starts the server. Double-click launchers are available in `launchers/` for
+macOS and Windows.
+
+Developer fallback:
 
 ```bash
 uv run uvicorn lab_tracker.asgi:app --reload
@@ -76,10 +109,20 @@ Or run the full app stack:
 docker compose up app
 ```
 
+On first boot, the app container generates a persistent auth secret and first
+admin bootstrap token if you did not set them. Read the token with
+`docker compose logs app`, then create the first admin in the browser.
+
 SQLite remains the default single-client local fallback.
 
 To serve the same graph to other computers on a LAN or VPN, bind the API to all
 interfaces and use the printed host IP from the serving machine:
+
+```bash
+scripts/serve-lan.sh --use-postgres
+```
+
+On Windows:
 
 ```powershell
 .\scripts\serve-lan.ps1 -UsePostgres
@@ -87,8 +130,9 @@ interfaces and use the printed host IP from the serving machine:
 
 Then open `http://<host-ip>:8000/app` from the other computer or set
 `LAB_TRACKER_MCP_BASE_URL=http://<host-ip>:8000` for MCP clients. If remote
-clients time out, Windows Firewall may need an administrator rule for TCP port
-8000. See [`docs/lan-shared-graph.md`](docs/lan-shared-graph.md).
+clients time out, your OS firewall may need an inbound rule for TCP port 8000.
+See [`docs/lan-shared-graph.md`](docs/lan-shared-graph.md) and
+[`docs/phone-capture-quickstart.md`](docs/phone-capture-quickstart.md).
 
 Local development starts with authentication disabled so early testing can use
 the app without creating accounts. Set `LAB_TRACKER_AUTH_ENABLED=true` to test
@@ -128,6 +172,35 @@ Authentication notes:
 - register/login is available in the UI
 - public registration creates viewer accounts
 - write workflows require editor/admin role
+- a fresh auth-enabled instance shows first-admin setup when
+  `LAB_TRACKER_BOOTSTRAP_ADMIN_TOKEN` is configured
+
+### First admin setup
+
+For Docker, run:
+
+```bash
+docker compose up app
+docker compose logs app
+```
+
+Copy the printed first-admin bootstrap token, open `http://127.0.0.1:8000/app`,
+and use `Create First Admin`.
+
+For a non-Docker deployment, set the token before starting the app:
+
+```bash
+export LAB_TRACKER_AUTH_ENABLED=true
+export LAB_TRACKER_BOOTSTRAP_ADMIN_TOKEN="<one-time-admin-token>"
+lab-tracker serve
+```
+
+After the first admin exists, use the `Users` screen to grant viewer/editor/admin
+roles and reset passwords. Use each project's `Project Members` panel to grant
+project viewer/contributor/owner access.
+
+For self-hosted backups, restores, upgrades, and Docker data locations, see
+[`docs/self-hosted-operations.md`](docs/self-hosted-operations.md).
 
 ## Configuration
 
@@ -147,7 +220,7 @@ development.
 - `LAB_TRACKER_OPENAI_API_KEY`: required for graph draft generation and
   voice-note transcription
 - `LAB_TRACKER_OPENAI_MODEL`: OpenAI model for graph drafts (default:
-  `gpt-5.4-mini`; set `gpt-5.5` or another compatible model to override)
+  `gpt-4o-mini`; set another compatible model to override)
 - `LAB_TRACKER_OPENAI_TRANSCRIPTION_MODEL`: OpenAI model for voice-note
   transcription (default: `gpt-4o-mini-transcribe`)
 - `LAB_TRACKER_OPENAI_BASE_URL`: OpenAI API base URL (default:
@@ -161,18 +234,18 @@ To try the local image review loop:
 
 ```powershell
 $env:LAB_TRACKER_OPENAI_API_KEY = "<your OpenAI API key>"
-$env:LAB_TRACKER_OPENAI_MODEL = "gpt-5.4-mini"
+$env:LAB_TRACKER_OPENAI_MODEL = "gpt-4o-mini"
 uv run alembic upgrade head
 uv run uvicorn lab_tracker.asgi:app --reload
 ```
 
-Open `http://127.0.0.1:8000/app/capture` from a phone or desktop browser, then
-capture a photo, voice note, photo+voice bundle, or text note. Select the
-project and optional question/session/dataset/analysis/claim targets, add an
-optional hint, then choose `Upload and draft`. Raw images and raw audio are
-stored first as note artifacts in `LAB_TRACKER_NOTE_STORAGE_PATH`; voice notes
-receive editable transcripts linked back to the raw audio. The draft is stored
-separately as a `GraphChangeSet` linked back to the source note.
+Pair a phone from `Devices`, or use the LAN helper's QR code, then open the
+phone capture URL. Capture a photo, voice note, photo+voice bundle, or text
+note. Select the project and optional question/session/dataset/analysis/claim
+targets, add an optional hint, then choose `Upload and draft`. Raw images and
+raw audio are stored first as note artifacts in `LAB_TRACKER_NOTE_STORAGE_PATH`;
+voice notes receive editable transcripts linked back to the raw audio. The draft
+is stored separately as a `GraphChangeSet` linked back to the source note.
 
 Draft mode defaults to `graph_context`. In that mode, Lab Tracker builds and
 stores a compact context packet containing the source note, selected targets,
@@ -233,6 +306,15 @@ rather than the active product surface.
 ```bash
 uv run alembic upgrade head
 ```
+
+## Deployment and operations
+
+- No-uvicorn launchers and Docker first-run setup:
+  [`docs/deployment-options.md`](docs/deployment-options.md)
+- Phone capture over LAN:
+  [`docs/phone-capture-quickstart.md`](docs/phone-capture-quickstart.md)
+- Backup, restore, and upgrade:
+  [`docs/self-hosted-operations.md`](docs/self-hosted-operations.md)
 
 ## Validation
 

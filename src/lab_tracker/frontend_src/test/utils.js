@@ -91,6 +91,13 @@ function installFetchMock(routes) {
 
     const route = routes.find((candidate) => matchesRoute(candidate, method, url));
     if (!route) {
+      if (method === "GET" && url === "/auth/bootstrap-status") {
+        return apiResponse({
+          bootstrap_admin_configured: false,
+          first_admin_available: false,
+          has_users: true,
+        });
+      }
       throw new Error(`Unexpected fetch: ${method} ${url}`);
     }
 

@@ -169,6 +169,49 @@ class AuthService:
                 return None
             return _user_from_model(row)
 
+    def list_users(self) -> list[User]:
+        if self._session_factory is None:
+            return sorted(self._users_by_username.values(), key=lambda user: user.username)
+        with self._session_factory() as session:
+            rows = list(session.scalars(select(UserModel).order_by(UserModel.username)))
+            return [_user_from_model(row) for row in rows]
+
+    def update_user(
+        self,
+        user_id: UUID,
+        *,
+        role: Role | None = None,
+        password: str | None = None,
+    ) -> User:
+        if role is None and password is None:
+            raise ValidationError("A role or password update is required.")
+
+        if self._session_factory is None:
+            user = self.get_user_by_id(user_id)
+            if user is None:
+                raise NotFoundError("User does not exist.")
+            if role is not None:
+                self._ensure_not_demoting_last_admin(user, role, self.list_users())
+                user.role = role
+            if password is not None:
+                user.password_hash = PasswordHasher.hash_password(password)
+            return user
+
+        with self._session_factory() as session:
+            row = session.get(UserModel, str(user_id))
+            if row is None:
+                raise NotFoundError("User does not exist.")
+            if role is not None:
+                users = [_user_from_model(item) for item in session.scalars(select(UserModel))]
+                current = _user_from_model(row)
+                self._ensure_not_demoting_last_admin(current, role, users)
+                row.role = role.value
+            if password is not None:
+                row.password_hash = PasswordHasher.hash_password(password)
+            session.commit()
+            session.refresh(row)
+            return _user_from_model(row)
+
     def has_users(self) -> bool:
         if self._session_factory is None:
             return bool(self._users_by_username)
@@ -180,6 +223,18 @@ class AuthService:
         if not username or not username.strip():
             raise ValidationError("Username must not be empty.")
         return username.strip()
+
+    @staticmethod
+    def _ensure_not_demoting_last_admin(
+        user: User,
+        next_role: Role,
+        users: Iterable[User],
+    ) -> None:
+        if user.role != Role.ADMIN or next_role == Role.ADMIN:
+            return
+        admin_count = sum(1 for item in users if item.role == Role.ADMIN)
+        if admin_count <= 1:
+            raise ValidationError("At least one admin account is required.")
 
 
 def ensure_local_auth_user(session_factory: sessionmaker[Session]) -> User:

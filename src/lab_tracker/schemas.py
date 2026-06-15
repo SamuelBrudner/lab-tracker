@@ -132,6 +132,12 @@ class AuthUserRead(BaseModel):
     created_at: datetime
 
 
+class AuthBootstrapStatus(BaseModel):
+    has_users: bool
+    bootstrap_admin_configured: bool
+    first_admin_available: bool
+
+
 class AuthTokenRead(BaseModel):
     access_token: str
     token_type: str = "bearer"
@@ -144,6 +150,11 @@ class AuthRegisterRequest(RequestModel):
     password: NonBlankStr
     role: Role = Role.VIEWER
     bootstrap_token: NonBlankStr | None = None
+
+
+class AuthUserUpdate(RequestModel):
+    password: NonBlankStr | None = None
+    role: Role | None = None
 
 
 class AuthLoginRequest(RequestModel):

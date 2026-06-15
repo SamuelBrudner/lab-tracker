@@ -8,7 +8,7 @@ from pathlib import Path
 
 import tomllib
 
-from lab_tracker.cli import init_consumer_repo
+from lab_tracker.cli import init_consumer_repo, serve_app
 
 
 def test_init_creates_portable_consumer_files(tmp_path: Path) -> None:
@@ -81,3 +81,54 @@ def test_lab_tracker_init_console_entrypoints_are_packaged() -> None:
     assert scripts["lab_tracker"] == "lab_tracker.cli:main"
     assert scripts["lab-tracker"] == "lab_tracker.cli:main"
     assert scripts["lt"] == "lab_tracker_client.cli:main"
+
+
+def test_serve_app_runs_migrations_opens_browser_and_starts_server(monkeypatch) -> None:
+    calls: list[tuple[str, object]] = []
+
+    def fake_upgrade(config, revision):
+        calls.append(("upgrade", revision))
+
+    def fake_open(url: str):
+        calls.append(("open", url))
+        return True
+
+    def fake_runner(app_path: str, **kwargs):
+        calls.append(("runner", (app_path, kwargs)))
+
+    monkeypatch.setattr("lab_tracker.cli.command.upgrade", fake_upgrade)
+
+    serve_app(
+        browser_opener=fake_open,
+        port=8123,
+        reload=True,
+        server_runner=fake_runner,
+    )
+
+    assert calls[0] == ("upgrade", "head")
+    assert calls[1] == ("open", "http://127.0.0.1:8123/app")
+    assert calls[2] == (
+        "runner",
+        ("lab_tracker.asgi:app", {"host": "127.0.0.1", "port": 8123, "reload": True}),
+    )
+
+
+def test_serve_app_can_skip_migrations_and_browser() -> None:
+    calls: list[tuple[str, object]] = []
+
+    def fake_runner(app_path: str, **kwargs):
+        calls.append(("runner", (app_path, kwargs)))
+
+    serve_app(
+        host="0.0.0.0",
+        open_browser=False,
+        run_migrations=False,
+        server_runner=fake_runner,
+    )
+
+    assert calls == [
+        (
+            "runner",
+            ("lab_tracker.asgi:app", {"host": "0.0.0.0", "port": 8000, "reload": False}),
+        )
+    ]

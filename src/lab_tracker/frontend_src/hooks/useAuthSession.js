@@ -14,6 +14,8 @@ function useAuthSession({ replace, setBusy, setFlash }) {
   const [authMode, setAuthMode] = useState("login");
   const [authUsername, setAuthUsername] = useState("");
   const [authPassword, setAuthPassword] = useState("");
+  const [authBootstrapToken, setAuthBootstrapToken] = useState("");
+  const [authBootstrapStatus, setAuthBootstrapStatus] = useState(null);
   const [authBusy, setAuthBusy] = useState(false);
 
   const canWrite = useMemo(
@@ -31,6 +33,18 @@ function useAuthSession({ replace, setBusy, setFlash }) {
 
   useEffect(() => {
     let canceled = false;
+
+    apiFetch("/auth/bootstrap-status")
+      .then((payload) => {
+        if (!canceled) {
+          setAuthBootstrapStatus(payload?.data || null);
+        }
+      })
+      .catch(() => {
+        if (!canceled) {
+          setAuthBootstrapStatus(null);
+        }
+      });
 
     setBusy(true);
     if (token) {
@@ -71,18 +85,36 @@ function useAuthSession({ replace, setBusy, setFlash }) {
     };
   }, [setBusy, setFlash, token]);
 
+  useEffect(() => {
+    if (token || authMode !== "login" || !authBootstrapStatus?.first_admin_available) {
+      return;
+    }
+    setAuthMode("setup");
+  }, [authBootstrapStatus, authMode, token]);
+
   async function handleAuthSubmit(event) {
     event.preventDefault();
     if (!authUsername.trim() || !authPassword) {
       setFlash("", "Username and password are required.");
       return;
     }
+    if (authMode === "setup" && !authBootstrapToken.trim()) {
+      setFlash("", "Bootstrap token is required for the first admin account.");
+      return;
+    }
 
     setAuthBusy(true);
     setFlash("", "");
     try {
-      const payload = await apiRequest(authMode === "register" ? "/auth/register" : "/auth/login", {
+      const isRegistration = authMode === "register" || authMode === "setup";
+      const payload = await apiRequest(isRegistration ? "/auth/register" : "/auth/login", {
         body: {
+          ...(authMode === "setup"
+            ? {
+                bootstrap_token: authBootstrapToken.trim(),
+                role: "admin",
+              }
+            : {}),
           password: authPassword,
           username: authUsername.trim(),
         },
@@ -90,9 +122,12 @@ function useAuthSession({ replace, setBusy, setFlash }) {
       });
       setToken(payload.access_token);
       setUser(payload.user || null);
+      setAuthBootstrapToken("");
       setAuthPassword("");
       setFlash(
-        authMode === "register"
+        authMode === "setup"
+          ? "Admin account created. You are signed in."
+          : authMode === "register"
           ? "Viewer account created. You are signed in."
           : "Signed in successfully."
       );
@@ -110,6 +145,7 @@ function useAuthSession({ replace, setBusy, setFlash }) {
     }
     setToken("");
     setUser(null);
+    setAuthBootstrapToken("");
     setAuthPassword("");
     replace("/app");
     setFlash("Signed out.", "");
@@ -117,6 +153,8 @@ function useAuthSession({ replace, setBusy, setFlash }) {
 
   return {
     authBusy,
+    authBootstrapStatus,
+    authBootstrapToken,
     authChecked,
     authEnabled,
     authMode,
@@ -126,6 +164,7 @@ function useAuthSession({ replace, setBusy, setFlash }) {
     handleAuthSubmit,
     handleLogout,
     setAuthMode,
+    setAuthBootstrapToken,
     setAuthPassword,
     setAuthUsername,
     token,

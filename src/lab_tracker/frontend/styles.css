@@ -67,6 +67,23 @@ body {
   justify-content: space-between;
 }
 
+.app-nav {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.45rem;
+  margin-top: 0.75rem;
+}
+
+.app-nav-link {
+  border-color: var(--line);
+  background: #f9f7f4;
+}
+
+.app-nav-link.active {
+  background: var(--accent);
+  color: #fff;
+}
+
 h1 {
   margin: 0;
   font-size: clamp(1.3rem, 2.3vw, 2rem);
@@ -255,6 +272,44 @@ button:disabled {
   display: flex;
   flex-wrap: wrap;
   gap: 0.45rem;
+}
+
+.first-run-card {
+  align-items: center;
+  display: flex;
+  gap: 0.9rem;
+  justify-content: space-between;
+}
+
+.term-grid,
+.user-admin-row {
+  display: grid;
+  gap: 0.7rem;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.term-grid p {
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  display: grid;
+  gap: 0.25rem;
+  margin: 0;
+  padding: 0.65rem;
+}
+
+.term-grid span {
+  color: var(--ink-soft);
+  font-size: 0.88rem;
+}
+
+.warn-action {
+  display: block;
+  margin-top: 0.55rem;
+}
+
+.request-access {
+  display: inline-flex;
+  text-decoration: none;
 }
 
 .kpi {
@@ -1098,6 +1153,20 @@ button:disabled {
   }
 
   .search-row {
+    grid-template-columns: 1fr;
+  }
+
+  .first-run-card {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .user-admin-row {
+    align-items: stretch;
+    grid-template-columns: 1fr;
+  }
+
+  .term-grid {
     grid-template-columns: 1fr;
   }
 

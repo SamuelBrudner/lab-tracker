@@ -903,15 +903,24 @@ def _response_json(response: httpx.Response) -> dict[str, Any]:
 
 
 def _response_error(response: httpx.Response) -> str:
+    status_hint = {
+        401: "OpenAI rejected the API key",
+        403: "OpenAI denied access to this model or account",
+        404: "OpenAI could not find the configured model or endpoint",
+        429: "OpenAI rate limit or quota was reached",
+    }.get(response.status_code)
     try:
         payload = response.json()
     except ValueError:
-        return f"OpenAI returned HTTP {response.status_code}: {response.text}"
+        prefix = status_hint or f"OpenAI returned HTTP {response.status_code}"
+        return f"{prefix}: {response.text}"
     if isinstance(payload, dict):
         error = payload.get("error")
         if isinstance(error, dict) and error.get("message"):
-            return str(error["message"])
-    return f"OpenAI returned HTTP {response.status_code}: {payload}"
+            message = str(error["message"])
+            return f"{status_hint}: {message}" if status_hint else message
+    prefix = status_hint or f"OpenAI returned HTTP {response.status_code}"
+    return f"{prefix}: {payload}"
 
 
 def _extract_output_text(payload: dict[str, Any]) -> str:

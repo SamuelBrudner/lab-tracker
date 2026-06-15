@@ -60,7 +60,7 @@ class ErrorBoundary extends React.Component {
           <header className="hero">
             <div className="hero-row">
               <div>
-                <h1>Lab Tracker Frontend MVP</h1>
+                <h1>Lab Tracker</h1>
                 <p className="subtle">The app hit an unexpected error.</p>
               </div>
             </div>
@@ -103,12 +103,12 @@ class ErrorBoundary extends React.Component {
   }
 }
 
-function AppHeader({ authEnabled, user, onLogout }) {
+function AppHeader({ activeKind, authEnabled, navigate, user, onLogout }) {
   return (
     <header className="hero">
       <div className="hero-row">
         <div>
-          <h1>Lab Tracker Frontend MVP</h1>
+          <h1>Lab Tracker</h1>
           <p className="subtle">
             Projects, questions, notes, sessions, datasets, and analysis records.
           </p>
@@ -123,7 +123,39 @@ function AppHeader({ authEnabled, user, onLogout }) {
           ) : null}
         </div>
       </div>
+      {user ? (
+        <AppNavigation
+          activeKind={activeKind}
+          isAdmin={user.role === "admin"}
+          navigate={navigate}
+        />
+      ) : null}
     </header>
+  );
+}
+
+function AppNavigation({ activeKind, isAdmin = false, navigate }) {
+  const links = [
+    ["home", "/app", "Home"],
+    ["capture", "/app/capture", "Capture"],
+    ["devices", "/app/devices", "Devices"],
+  ];
+  if (isAdmin) {
+    links.push(["users", "/app/users", "Users"]);
+  }
+  return (
+    <nav className="app-nav" aria-label="Primary">
+      {links.map(([kind, path, label]) => (
+        <button
+          key={kind}
+          type="button"
+          className={`app-nav-link${activeKind === kind ? " active" : ""}`}
+          onClick={() => navigate(path)}
+        >
+          {label}
+        </button>
+      ))}
+    </nav>
   );
 }
 
@@ -141,21 +173,27 @@ function FlashMessages({ message, error }) {
 }
 
 function AuthForm({
+  authBootstrapStatus,
+  authBootstrapToken,
   authMode,
   authUsername,
   authPassword,
   authBusy,
+  onBootstrapTokenChange,
   onSubmit,
   onUsernameChange,
   onPasswordChange,
   onToggleMode,
 }) {
+  const isSetup = authMode === "setup";
+  const title = isSetup ? "Create First Admin" : authMode === "login" ? "Sign In" : "Create Viewer Account";
+  const supportingCopy = isSetup
+    ? "Use the bootstrap token from the server logs or first-run setup file."
+    : "Viewer registration is public. Admin/editor accounts must be provisioned by an admin.";
   return (
     <article className="card span-6">
-      <h2>{authMode === "login" ? "Sign In" : "Create Viewer Account"}</h2>
-      <p className="subtle">
-        Viewer registration is public. Admin/editor accounts must be provisioned by an admin.
-      </p>
+      <h2>{title}</h2>
+      <p className="subtle">{supportingCopy}</p>
       <form className="form" onSubmit={onSubmit}>
         <label>
           Username
@@ -170,9 +208,23 @@ function AuthForm({
             autoComplete={authMode === "login" ? "current-password" : "new-password"}
           />
         </label>
+        {isSetup ? (
+          <label>
+            Bootstrap token
+            <input
+              type="password"
+              value={authBootstrapToken}
+              onChange={onBootstrapTokenChange}
+              autoComplete="one-time-code"
+            />
+          </label>
+        ) : null}
+        {!isSetup && authBootstrapStatus?.first_admin_available ? (
+          <p className="warn">This instance has no admin yet. Use first-admin setup first.</p>
+        ) : null}
         <div className="inline">
           <button className="btn-primary" disabled={authBusy}>
-            {authBusy ? "Working..." : authMode === "login" ? "Sign in" : "Register"}
+            {authBusy ? "Working..." : isSetup ? "Create admin" : authMode === "login" ? "Sign in" : "Register"}
           </button>
           <button type="button" className="btn-secondary" onClick={onToggleMode}>
             {authMode === "login" ? "Need an account?" : "Have an account?"}
@@ -180,6 +232,24 @@ function AuthForm({
         </div>
       </form>
     </article>
+  );
+}
+
+function RequestEditAccess({ selectedProject }) {
+  const subject = encodeURIComponent("Lab Tracker edit access request");
+  const body = encodeURIComponent(
+    [
+      "Please grant editor access for Lab Tracker.",
+      selectedProject ? `Project: ${selectedProject.name}` : "",
+      `Page: ${window.location.href}`,
+    ]
+      .filter(Boolean)
+      .join("\n")
+  );
+  return (
+    <a className="btn-secondary request-access" href={`mailto:?subject=${subject}&body=${body}`}>
+      Request edit access
+    </a>
   );
 }
 
@@ -227,11 +297,13 @@ function UnknownRouteCard({ pathname, navigate }) {
 }
 
 export {
+  AppNavigation,
   AppHeader,
   AuthForm,
   ErrorBoundary,
   FlashMessages,
   ProjectContextCard,
+  RequestEditAccess,
   UnknownRouteCard,
   WorkflowCoverageCard,
 };

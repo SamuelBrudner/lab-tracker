@@ -179,6 +179,14 @@ def test_bootstrap_admin_allows_first_admin_registration(monkeypatch, tmp_path):
     _bootstrap_database(monkeypatch, tmp_path)
     monkeypatch.setenv("LAB_TRACKER_BOOTSTRAP_ADMIN_TOKEN", "bootstrap-secret")
     with TestClient(create_app()) as client:
+        status_response = client.get("/auth/bootstrap-status")
+        assert status_response.status_code == 200
+        assert status_response.json()["data"] == {
+            "bootstrap_admin_configured": True,
+            "first_admin_available": True,
+            "has_users": False,
+        }
+
         bootstrap_response = client.post(
             "/auth/register",
             json={
@@ -212,6 +220,63 @@ def test_bootstrap_admin_allows_first_admin_registration(monkeypatch, tmp_path):
         )
         assert repeat_bootstrap.status_code == 401
         assert repeat_bootstrap.json()["error"]["code"] == "auth_error"
+
+
+def test_admin_can_manage_users(monkeypatch, tmp_path):
+    _bootstrap_database(monkeypatch, tmp_path)
+    with TestClient(create_app()) as client:
+        _seed_admin(client)
+        admin_token = _login(client, "root", "secret")
+
+        viewer_response = client.post(
+            "/auth/register",
+            json={"username": "viewer-1", "password": "old-secret"},
+        )
+        assert viewer_response.status_code == 201
+        viewer = viewer_response.json()["data"]["user"]
+        viewer_token = viewer_response.json()["data"]["access_token"]
+
+        denied_response = client.get("/auth/users", headers=_auth_headers(viewer_token))
+        assert denied_response.status_code == 401
+
+        users_response = client.get("/auth/users", headers=_auth_headers(admin_token))
+        assert users_response.status_code == 200
+        usernames = [item["username"] for item in users_response.json()["data"]]
+        assert usernames == ["root", "viewer-1"]
+
+        update_response = client.patch(
+            f"/auth/users/{viewer['user_id']}",
+            json={"role": "editor", "password": "new-secret"},
+            headers=_auth_headers(admin_token),
+        )
+        assert update_response.status_code == 200
+        assert update_response.json()["data"]["role"] == "editor"
+
+        old_login_response = client.post(
+            "/auth/login",
+            json={"username": "viewer-1", "password": "old-secret"},
+        )
+        assert old_login_response.status_code == 401
+
+        new_login_response = client.post(
+            "/auth/login",
+            json={"username": "viewer-1", "password": "new-secret"},
+        )
+        assert new_login_response.status_code == 200
+        assert new_login_response.json()["data"]["user"]["role"] == "editor"
+
+        root_id = next(
+            item["user_id"]
+            for item in users_response.json()["data"]
+            if item["username"] == "root"
+        )
+        demote_last_admin_response = client.patch(
+            f"/auth/users/{root_id}",
+            json={"role": "viewer"},
+            headers=_auth_headers(admin_token),
+        )
+        assert demote_last_admin_response.status_code == 422
+        assert "At least one admin" in demote_last_admin_response.json()["error"]["message"]
 
 
 def test_refresh_issues_fresh_token_ttl(monkeypatch, tmp_path):

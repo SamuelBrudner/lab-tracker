@@ -13,11 +13,14 @@ from starlette.requests import Request
 from lab_tracker.auth import LOCAL_AUTH_USERNAME, AuthService, Role, TokenService
 from lab_tracker.errors import AuthError
 from lab_tracker.schemas import (
+    AuthBootstrapStatus,
     AuthLoginRequest,
     AuthRegisterRequest,
     AuthTokenRead,
     AuthUserRead,
+    AuthUserUpdate,
     Envelope,
+    ListEnvelope,
 )
 
 from .shared import (
@@ -25,6 +28,9 @@ from .shared import (
     actor_from_request,
     auth_token_read,
     auth_user_read,
+    list_response,
+    paginate,
+    validate_pagination,
 )
 
 
@@ -35,6 +41,18 @@ def build_auth_router(
     bootstrap_admin_token: str | None = None,
 ) -> APIRouter:
     router = APIRouter()
+
+    @router.get("/auth/bootstrap-status", response_model=Envelope[AuthBootstrapStatus])
+    def auth_bootstrap_status():
+        expected = (bootstrap_admin_token or "").strip()
+        has_users = auth_service.has_users()
+        return Envelope(
+            data=AuthBootstrapStatus(
+                has_users=has_users,
+                bootstrap_admin_configured=bool(expected),
+                first_admin_available=not has_users and bool(expected),
+            )
+        )
 
     @router.post(
         "/auth/register",
@@ -67,6 +85,24 @@ def build_auth_router(
         )
         token = token_service.issue_access_token(user)
         return Envelope(data=auth_token_read(user, token.token, token.expires_at))
+
+    @router.get("/auth/users", response_model=ListEnvelope[AuthUserRead])
+    def list_auth_users(request: Request, limit: int = 50, offset: int = 0):
+        validate_pagination(limit, offset)
+        _ensure_admin(request)
+        users = [auth_user_read(user) for user in auth_service.list_users()]
+        items, total = paginate(users, limit, offset)
+        return list_response(items, limit=limit, offset=offset, total=total)
+
+    @router.patch("/auth/users/{user_id:uuid}", response_model=Envelope[AuthUserRead])
+    def update_auth_user(user_id: UUID, payload: AuthUserUpdate, request: Request):
+        _ensure_admin(request)
+        user = auth_service.update_user(
+            user_id,
+            role=payload.role,
+            password=payload.password,
+        )
+        return Envelope(data=auth_user_read(user))
 
     @router.post("/auth/login", response_model=Envelope[AuthTokenRead])
     def login_auth(payload: AuthLoginRequest):
@@ -102,3 +138,9 @@ def build_auth_router(
         return Envelope(data=auth_user_read(user), meta={"auth_enabled": True})
 
     return router
+
+
+def _ensure_admin(request: Request) -> None:
+    actor = actor_from_request(request)
+    if actor.role != Role.ADMIN:
+        raise AuthError("Admin privileges required.")

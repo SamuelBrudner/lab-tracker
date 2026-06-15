@@ -4,9 +4,16 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
+import webbrowser
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from textwrap import dedent
+
+from alembic.config import Config
+
+from alembic import command
 
 
 @dataclass
@@ -43,6 +50,33 @@ def init_consumer_repo(
     return result
 
 
+def serve_app(
+    *,
+    host: str = "127.0.0.1",
+    port: int = 8000,
+    reload: bool = False,
+    run_migrations: bool = True,
+    open_browser: bool = True,
+    server_runner: Callable[..., None] | None = None,
+    browser_opener: Callable[[str], object] | None = None,
+) -> None:
+    if run_migrations:
+        alembic_config = Config(str(_repo_root() / "alembic.ini"))
+        command.upgrade(alembic_config, "head")
+
+    browser_host = "127.0.0.1" if host in {"0.0.0.0", "::"} else host
+    url = f"http://{browser_host}:{port}/app"
+    if open_browser:
+        opener = browser_opener or webbrowser.open
+        opener(url)
+
+    if server_runner is None:
+        import uvicorn
+
+        server_runner = uvicorn.run
+    server_runner("lab_tracker.asgi:app", host=host, port=port, reload=reload)
+
+
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(prog="lab_tracker")
     subcommands = parser.add_subparsers(dest="command", required=True)
@@ -66,6 +100,27 @@ def main(argv: list[str] | None = None) -> None:
         action="store_true",
         help="Overwrite existing scaffolded files.",
     )
+    serve_parser = subcommands.add_parser(
+        "serve",
+        help="Run migrations, open the browser, and start the Lab Tracker web app.",
+    )
+    serve_parser.add_argument("--host", default="127.0.0.1", help="Host interface to bind.")
+    serve_parser.add_argument("--port", default=8000, type=int, help="Port to listen on.")
+    serve_parser.add_argument(
+        "--reload",
+        action="store_true",
+        help="Enable uvicorn reload for local development.",
+    )
+    serve_parser.add_argument(
+        "--no-browser",
+        action="store_true",
+        help="Do not open the browser after migrations complete.",
+    )
+    serve_parser.add_argument(
+        "--skip-migrations",
+        action="store_true",
+        help="Start the server without running alembic upgrade head first.",
+    )
 
     args = parser.parse_args(argv)
     if args.command == "init":
@@ -75,6 +130,28 @@ def main(argv: list[str] | None = None) -> None:
             force=args.force,
         )
         print(json.dumps(result.as_dict(), indent=2))
+    elif args.command == "serve":
+        try:
+            serve_app(
+                host=args.host,
+                port=args.port,
+                reload=args.reload,
+                run_migrations=not args.skip_migrations,
+                open_browser=not args.no_browser,
+            )
+        except Exception as exc:
+            print(f"Failed to start Lab Tracker: {exc}", file=sys.stderr)
+            raise SystemExit(1) from exc
+
+
+def _repo_root() -> Path:
+    cwd = Path.cwd()
+    if (cwd / "alembic.ini").exists():
+        return cwd
+    for parent in Path(__file__).resolve().parents:
+        if (parent / "alembic.ini").exists():
+            return parent
+    return cwd
 
 
 def _write_scaffold_file(

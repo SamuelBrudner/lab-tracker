@@ -39,6 +39,16 @@ $env:LAB_TRACKER_AUTH_SECRET_KEY = "<long-random-secret>"
 
 ## Start the LAN Server
 
+On macOS or Linux, use the helper:
+
+```bash
+scripts/serve-lan.sh --use-postgres
+```
+
+It runs migrations, prints `http://<lan-ip>:8000/app` and
+`http://<lan-ip>:8000/app/capture`, and prints a terminal QR code for the phone
+capture URL when `segno` is installed.
+
 On Windows, use the helper:
 
 ```powershell
@@ -52,8 +62,9 @@ starts:
 .venv\Scripts\python.exe -m uvicorn lab_tracker.asgi:app --host 0.0.0.0 --port 8000
 ```
 
-If you do not want the helper to set the local Postgres URL, omit `-UsePostgres`
-and rely on `.env` or the current shell environment.
+If you do not want a helper to set the local Postgres URL, omit
+`--use-postgres` or `-UsePostgres` and rely on `.env` or the current shell
+environment.
 
 ## Windows Firewall
 
@@ -82,3 +93,6 @@ $env:LAB_TRACKER_MCP_BASE_URL = "http://<lan-ip>:8000"
 
 When authentication is enabled, also set `LAB_TRACKER_MCP_USERNAME` and
 `LAB_TRACKER_MCP_PASSWORD` in that client environment.
+
+For phone pairing and capture details, see
+[`docs/phone-capture-quickstart.md`](phone-capture-quickstart.md).

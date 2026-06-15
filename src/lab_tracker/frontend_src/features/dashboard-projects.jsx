@@ -26,6 +26,7 @@ function Dashboard({
   onAddProjectMember = () => {},
   onUpdateProjectMember = () => {},
   onRemoveProjectMember = () => {},
+  requestAccessNode = null,
 }) {
   return (
     <article className="card span-4 dashboard-card">
@@ -81,7 +82,12 @@ function Dashboard({
         <h3>New Project</h3>
         <label>
           Name
-          <input value={projectName} onChange={onProjectNameChange} disabled={!canWrite} />
+          <input
+            name="new-project-name"
+            value={projectName}
+            onChange={onProjectNameChange}
+            disabled={!canWrite}
+          />
         </label>
         <label>
           Description
@@ -100,6 +106,7 @@ function Dashboard({
         <p className="warn">
           Your role is read-only. Ask an admin to provision an editor or admin account for write
           workflows.
+          {requestAccessNode ? <span className="warn-action">{requestAccessNode}</span> : null}
         </p>
       ) : null}
 
