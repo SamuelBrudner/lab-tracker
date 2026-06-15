@@ -78,7 +78,7 @@ def test_alembic_upgrade_chain_from_empty_to_head(monkeypatch, tmp_path):
     for revision in revisions:
         command.upgrade(config, revision)
         assert revision in _current_revisions(database_url)
-    assert _current_revision(database_url) == "0027_attribution_user_fks"
+    assert _current_revision(database_url) == "0028_backfill_attribution_user_fks"
 
 
 def test_alembic_has_single_head() -> None:
@@ -235,7 +235,7 @@ def test_database_at_daily_review_branch_upgrades_to_current_head(monkeypatch, t
     assert _current_revision(database_url) == "0017_daily_graph_reviews"
 
     command.upgrade(config, "head")
-    assert _current_revision(database_url) == "0027_attribution_user_fks"
+    assert _current_revision(database_url) == "0028_backfill_attribution_user_fks"
 
     engine = create_engine(
         database_url,
@@ -255,6 +255,94 @@ def test_database_at_daily_review_branch_upgrades_to_current_head(monkeypatch, t
         "project_groups",
         "group_memberships",
     }.issubset(table_names)
+    engine.dispose()
+
+
+def test_attribution_user_fk_backfill_is_guarded(monkeypatch, tmp_path):
+    db_path = tmp_path / "attribution-backfill.db"
+    database_url = f"sqlite+pysqlite:///{db_path}"
+    config = _alembic_config()
+    _set_database_url(monkeypatch, database_url)
+
+    command.upgrade(config, "0027_attribution_user_fks")
+    valid_user_id = str(uuid4())
+    missing_user_id = str(uuid4())
+    local_user_id = "00000000-0000-4000-8000-000000000001"
+    valid_project_id = str(uuid4())
+    missing_project_id = str(uuid4())
+    local_project_id = str(uuid4())
+    legacy_project_id = str(uuid4())
+    analysis_id = str(uuid4())
+    engine = create_engine(
+        database_url,
+        future=True,
+        connect_args={"check_same_thread": False},
+    )
+    with engine.begin() as connection:
+        connection.execute(
+            text(
+                "INSERT INTO users (user_id, username, password_hash, role, created_at) "
+                "VALUES (:user_id, :username, :password_hash, :role, CURRENT_TIMESTAMP)"
+            ),
+            {
+                "user_id": valid_user_id,
+                "username": "valid-attribution-user",
+                "password_hash": "unused",
+                "role": "admin",
+            },
+        )
+        for project_id, created_by in (
+            (valid_project_id, valid_user_id),
+            (missing_project_id, missing_user_id),
+            (local_project_id, local_user_id),
+            (legacy_project_id, "legacy-operator"),
+        ):
+            connection.execute(
+                text(
+                    "INSERT INTO projects "
+                    "(project_id, name, status, created_by, created_at, updated_at) "
+                    "VALUES (:project_id, :name, 'active', :created_by, "
+                    "CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
+                ),
+                {
+                    "project_id": project_id,
+                    "name": f"Project {project_id}",
+                    "created_by": created_by,
+                },
+            )
+        connection.execute(
+            text(
+                "INSERT INTO analyses "
+                "(analysis_id, project_id, method_hash, code_version, executed_by, "
+                "executed_at, status, created_at, updated_at) "
+                "VALUES (:analysis_id, :project_id, 'method', 'code', :executed_by, "
+                "CURRENT_TIMESTAMP, 'staged', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
+            ),
+            {
+                "analysis_id": analysis_id,
+                "project_id": valid_project_id,
+                "executed_by": valid_user_id,
+            },
+        )
+
+    command.upgrade(config, "head")
+
+    with engine.connect() as connection:
+        project_rows = dict(
+            connection.execute(
+                text("SELECT project_id, created_by_user_id FROM projects")
+            ).all()
+        )
+        analysis_user_id = connection.execute(
+            text("SELECT executed_by_user_id FROM analyses WHERE analysis_id = :analysis_id"),
+            {"analysis_id": analysis_id},
+        ).scalar_one()
+
+    assert project_rows[valid_project_id] == valid_user_id
+    assert project_rows[missing_project_id] is None
+    assert project_rows[local_project_id] is None
+    assert project_rows[legacy_project_id] is None
+    assert analysis_user_id == valid_user_id
     engine.dispose()
 
 
