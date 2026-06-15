@@ -394,6 +394,127 @@ describe("App", () => {
     expect(requestedUrls(fetchMock)).toContain(projectsPath);
   });
 
+  it("shows portfolio home for multi-project local auth sessions", async () => {
+    const portfolioPath = buildApiPath("/portfolio/summary", { limit: 100, offset: 0 });
+    const fetchMock = installFetchMock([
+      {
+        match: "/auth/me",
+        response: apiResponse(
+          { role: "admin", username: "local-tester" },
+          200,
+          { auth_enabled: false }
+        ),
+      },
+      {
+        match: projectsPath,
+        response: apiResponse([
+          project("project-1", "Temporal odor"),
+          project("project-2", "Fly behavior"),
+        ]),
+      },
+      {
+        match: questionListPath("project-1"),
+        response: paged([question({ projectId: "project-1", text: "Odor timing?" })]),
+      },
+      {
+        match: datasetListPath("project-1"),
+        response: paged([]),
+      },
+      {
+        match: noteCountPath("project-1"),
+        response: paged([], { limit: 1, offset: 0, total: 0 }),
+      },
+      {
+        match: recentNotesPath("project-1"),
+        response: paged([]),
+      },
+      {
+        match: activeSessionsPath("project-1"),
+        response: paged([]),
+      },
+      {
+        match: stagedAnalysesPath("project-1"),
+        response: paged([]),
+      },
+      {
+        match: committedAnalysesMetaPath("project-1"),
+        response: paged([], { limit: 1, offset: 0, total: 0 }),
+      },
+      {
+        match: projectMembersPath("project-1"),
+        response: paged([]),
+      },
+      {
+        match: buildApiPath("/batches", { limit: 5 }),
+        response: paged([], { limit: 5, offset: 0, total: 0 }),
+      },
+      {
+        match: portfolioPath,
+        response: paged([
+          {
+            project_count: 2,
+            project_group: { group_id: "group-1", name: "Olfaction lab" },
+            projects: [
+              {
+                committed_dataset_count: 1,
+                draft_dataset_count: 0,
+                last_activity_at: "2026-06-12T12:00:00Z",
+                name: "Temporal odor",
+                open_question_count: 2,
+                owners: [{ user_id: "owner-1", username: "maya" }],
+                project_id: "project-1",
+                staged_analysis_count: 1,
+                status: "active",
+                triage_flags: [
+                  {
+                    count: 2,
+                    key: "unanswered_questions",
+                    label: "Unanswered questions",
+                    severity: "warning",
+                  },
+                  {
+                    count: 1,
+                    key: "overdue_goals",
+                    label: "Overdue goals",
+                    severity: "critical",
+                  },
+                ],
+                unreviewed_claim_count: 1,
+              },
+              {
+                committed_dataset_count: 0,
+                draft_dataset_count: 1,
+                last_activity_at: "2026-06-11T12:00:00Z",
+                name: "Fly behavior",
+                open_question_count: 0,
+                owners: [],
+                project_id: "project-2",
+                staged_analysis_count: 0,
+                status: "active",
+                triage_flags: [],
+                unreviewed_claim_count: 0,
+              },
+            ],
+          },
+        ]),
+      },
+    ]);
+
+    render(<App />);
+
+    expect(await screen.findByRole("heading", { name: "Portfolio Home" })).toBeInTheDocument();
+    expect(screen.getByText("Olfaction lab")).toBeInTheDocument();
+    expect(screen.getByText("Local single-user mode: per-trainee differentiation is unavailable until multi-user auth is enabled.")).toBeInTheDocument();
+    expect(screen.getByText("Unanswered questions: 2")).toBeInTheDocument();
+    expect(screen.getByText("Overdue goals: 1")).toBeInTheDocument();
+    expect(screen.getByText("No triage flags")).toBeInTheDocument();
+    expect(screen.getByText("Owners: maya")).toBeInTheDocument();
+    expect(requestedUrls(fetchMock)).toContain(portfolioPath);
+
+    fireEvent.click(screen.getAllByRole("button", { name: "Open project" })[1]);
+    await waitFor(() => expect(screen.getByLabelText("Active project")).toHaveValue("project-2"));
+  });
+
   it("restores a stored session and signs out", async () => {
     localStorage.setItem(TOKEN_STORAGE_KEY, "token-1");
     installFetchMock([

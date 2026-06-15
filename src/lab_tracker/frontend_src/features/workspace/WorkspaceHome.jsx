@@ -4,6 +4,7 @@ import { Dashboard } from "../dashboard-projects.jsx";
 import { AnalysisPanel } from "../analysis/AnalysisPanel.jsx";
 import { DatasetPanel } from "../datasets/index.js";
 import { NotePanel } from "../notes.jsx";
+import { PortfolioHome } from "../portfolio-home.jsx";
 import { QuestionPanel } from "../questions/QuestionPanel.jsx";
 import { SessionPanel } from "../sessions/index.js";
 import { ProjectContextCard } from "../../shared/ui.jsx";
@@ -26,8 +27,16 @@ function WorkspaceHome({
   projectAccess = {},
 }) {
   const canContribute = Boolean(projectAccess.canContribute);
+  const showPortfolioHome = workspaceData.projects.length > 1;
   return (
     <>
+      <PortfolioHome
+        authEnabled={auth.authEnabled}
+        enabled={showPortfolioHome}
+        token={auth.token}
+        onOpenProject={workspaceData.setSelectedProjectId}
+      />
+
       <Dashboard
         projects={workspaceData.projects}
         questionCount={workspaceData.questionCount}
