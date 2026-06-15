@@ -12,6 +12,7 @@ from lab_tracker.decision_context_builders import (
     task_guidance,
     truncation,
     validate_context_limit,
+    write_front_door,
 )
 from lab_tracker.decision_context_constants import (
     CONTEXT_LOOKUP_LIMIT,
@@ -325,6 +326,17 @@ def build_decision_context(
                 analyses,
                 claims,
                 visualizations,
+            ),
+            "write_front_door": write_front_door(
+                task_kind=cleaned_task_kind,
+                project=project,
+                anchors=anchors,
+                questions=questions,
+                sessions=sessions,
+                datasets=datasets,
+                analyses=analyses,
+                claims=claims,
+                visualizations=visualizations,
             ),
             "questions": questions,
             "notes": notes,

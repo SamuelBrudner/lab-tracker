@@ -101,6 +101,11 @@ def test_decision_context_route_returns_research_writing_graph_slice(
     assert data["claims"][0]["claim_id"] == claim_id
     assert data["visualizations"][0]["viz_id"] == visualization_id
     assert data["task_guidance"]["candidate_outputs"][0]["entity_type"] == "claim"
+    assert data["write_front_door"]["resolved_scope"]["project_id"] == project_id
+    assert data["write_front_door"]["candidate_ids"]["claims"][0]["entity_id"] == claim_id
+    assert data["write_front_door"]["candidate_ids"]["datasets"][0]["entity_id"] == (
+        dataset_id
+    )
     assert {
         item["entity"]["entity_type"] for item in data["evidence_map"]
     } == {"dataset", "analysis", "claim", "visualization"}

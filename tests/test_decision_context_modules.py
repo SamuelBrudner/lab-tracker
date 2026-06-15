@@ -5,6 +5,7 @@ from lab_tracker.decision_context_builders import (
     task_guidance,
     truncation,
 )
+from lab_tracker.decision_context_constants import TASK_KIND_VALUES
 from lab_tracker.decision_context_selection import merge_entities, project_ids_from_search
 from lab_tracker.decision_context_types import JsonObject
 from lab_tracker.decision_context_use_case import build_decision_context
@@ -276,5 +277,16 @@ def test_build_decision_context_orchestrates_reader_selection_and_builders() -> 
         "recent_activity",
     ]
     assert data["task_guidance"]["candidate_outputs"][0]["entity_type"] == "claim"
+    assert data["write_front_door"]["allowed_task_kinds"] == list(TASK_KIND_VALUES)
+    assert data["write_front_door"]["resolved_scope"]["project_id"] == "project-1"
+    assert data["write_front_door"]["candidate_ids"]["questions"][0] == {
+        "entity_type": "question",
+        "entity_id": "question-1",
+        "label": "Which baseline controls matter?",
+    }
+    assert data["write_front_door"]["candidate_ids"]["claims"][0]["entity_id"] == (
+        "claim-1"
+    )
+    assert "lab_tracker_describe_schema" in data["write_front_door"]["create_guidance"][2]
     assert data["evidence_map"][0]["entity"]["entity_type"] == "dataset"
     assert data["truncation"] == {"was_truncated": False, "sections": []}

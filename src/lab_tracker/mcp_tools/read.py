@@ -307,7 +307,13 @@ def lab_tracker_get_decision_context(
     visualization_id: str | None = None,
     limit: int = 20,
 ) -> JsonObject:
-    """Build bounded graph context before research-facing assistant decisions."""
+    """Call before research-facing read-then-write tasks.
+
+    Returns bounded graph context plus resolved project scope, anchor IDs,
+    candidate entity IDs, evidence links, and guidance for subsequent create
+    calls. Allowed task_kind values: plot, analysis, slides, experiment_plan,
+    summary, research_writing.
+    """
     client = client_from_env()
     try:
         return client.get_decision_context(

@@ -69,7 +69,10 @@ Use these tools when available:
 
 - `lab_tracker_get_decision_context` returns bounded graph context before
   research-facing decisions such as choosing plots, analyses, slides, experiment
-  plans, summaries, or research writing.
+  plans, summaries, or research writing. Call it before research-facing
+  read-then-write tasks; its `write_front_door` block returns resolved project
+  scope, anchor IDs, candidate entity IDs, allowed task kinds, and follow-on
+  create guidance.
 - `lab_tracker_health` checks the API health endpoint.
 - `lab_tracker_readiness` checks database and storage readiness.
 - `lab_tracker_describe_schema` returns source-derived create/update fields,

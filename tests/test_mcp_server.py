@@ -19,11 +19,15 @@ def test_fastmcp_registers_lab_tracker_tools() -> None:
     tools = asyncio.run(mcp_server.server.list_tools())
 
     names = {tool.name for tool in tools}
+    tools_by_name = {tool.name: tool for tool in tools}
     assert "lab_tracker_health" in names
     assert "lab_tracker_readiness" in names
     assert "lab_tracker_describe_schema" in names
     assert "lab_tracker_search" in names
     assert "lab_tracker_get_decision_context" in names
+    assert "read-then-write tasks" in (
+        tools_by_name["lab_tracker_get_decision_context"].description or ""
+    )
     assert "lab_tracker_list_datasets" in names
     assert "lab_tracker_list_analyses" in names
     assert "lab_tracker_list_claims" in names

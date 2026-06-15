@@ -106,9 +106,11 @@ analyses, slides, experiment plans, summaries, or research writing.
 `lab_tracker_get_decision_context` accepts `task_kind` values `plot`,
 `analysis`, `slides`, `experiment_plan`, `summary`, and `research_writing`.
 It returns bounded project graph context, task guidance, stable IDs, relevance
-reasons, an evidence map, and truncation metadata. If the request is ambiguous,
-for example because no project can be inferred, it returns a structured error
-instead of guessing.
+reasons, an evidence map, truncation metadata, and a `write_front_door` block
+with resolved project scope, anchor IDs, candidate entity IDs, allowed task
+kinds, and guidance for follow-on create calls. If the request is ambiguous, for
+example because no project can be inferred, it returns a structured error
+instead of guessing. Use it before research-facing read-then-write tasks.
 
 The MCP tool calls the Lab Tracker API endpoint `POST /assistant/decision-context`;
 the API remains the single context-building path for browser users, MCP clients,

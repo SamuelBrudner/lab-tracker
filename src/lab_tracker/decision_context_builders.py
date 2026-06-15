@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from lab_tracker.decision_context_constants import TASK_KIND_VALUES
 from lab_tracker.decision_context_selection import envelope_items, meta_total
 from lab_tracker.decision_context_types import JsonObject
 
@@ -176,6 +177,77 @@ def task_guidance(
         "caveats": caveats,
         "missing_evidence": missing_evidence,
     }
+
+
+def write_front_door(
+    *,
+    task_kind: str,
+    project: JsonObject,
+    anchors: list[JsonObject],
+    questions: list[JsonObject],
+    sessions: list[JsonObject],
+    datasets: list[JsonObject],
+    analyses: list[JsonObject],
+    claims: list[JsonObject],
+    visualizations: list[JsonObject],
+) -> JsonObject:
+    """Build write-oriented affordances for follow-on MCP create calls."""
+    return {
+        "call_first_for": (
+            "Call lab_tracker_get_decision_context before research-facing "
+            "read-then-write tasks so subsequent creates can reuse stable IDs."
+        ),
+        "allowed_task_kinds": list(TASK_KIND_VALUES),
+        "resolved_scope": {
+            "project_id": str(project.get("project_id") or ""),
+            "project": entity_ref("project", project, "project_id"),
+            "anchors": anchors,
+        },
+        "candidate_ids": {
+            "questions": [
+                entity_ref("question", item, "question_id") for item in questions[:10]
+            ],
+            "sessions": [
+                entity_ref("session", item, "session_id") for item in sessions[:10]
+            ],
+            "datasets": [
+                entity_ref("dataset", item, "dataset_id") for item in datasets[:10]
+            ],
+            "analyses": [
+                entity_ref("analysis", item, "analysis_id") for item in analyses[:10]
+            ],
+            "claims": [
+                entity_ref("claim", item, "claim_id") for item in claims[:10]
+            ],
+            "visualizations": [
+                entity_ref("visualization", item, "viz_id")
+                for item in visualizations[:10]
+            ],
+        },
+        "create_guidance": _create_guidance(task_kind),
+    }
+
+
+def _create_guidance(task_kind: str) -> list[str]:
+    guidance = [
+        "Use resolved_scope.project_id as the project_id for follow-on create calls.",
+        "Prefer candidate_ids and evidence_map before creating duplicate records.",
+        "Call lab_tracker_describe_schema for required fields, enums, and lifecycle values.",
+    ]
+    if task_kind in {"plot", "analysis", "research_writing"}:
+        guidance.append(
+            "For evidence writes, keep the order dataset -> analysis -> claim -> "
+            "visualization when new records are needed."
+        )
+    if task_kind == "experiment_plan":
+        guidance.append(
+            "Prefer adding atomic child questions under returned motivating questions."
+        )
+    if task_kind == "slides":
+        guidance.append(
+            "Prefer returned visualizations and supported claims as slide evidence anchors."
+        )
+    return guidance
 
 
 def truncation(sections: list[tuple[str, JsonObject, str | None]]) -> JsonObject:
