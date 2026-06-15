@@ -65,6 +65,7 @@ def build_analyses_router(api: LabTrackerAPI) -> APIRouter:
         dataset_id: UUID | None = None,
         question_id: UUID | None = None,
         status: AnalysisStatus | None = None,
+        created_by: str | None = None,
         limit: int = 50,
         offset: int = 0,
     ):
@@ -76,6 +77,7 @@ def build_analyses_router(api: LabTrackerAPI) -> APIRouter:
             dataset_id=dataset_id,
             question_id=question_id,
             status=status.value if status is not None else None,
+            created_by=created_by,
             limit=None,
             offset=0,
         )

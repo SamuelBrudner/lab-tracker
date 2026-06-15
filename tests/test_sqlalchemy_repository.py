@@ -341,6 +341,7 @@ def test_query_questions_applies_filters_and_pagination(db_session):
             text=f"Question {index}",
             question_type=QuestionType.DESCRIPTIVE,
             status=QuestionStatus.ACTIVE if index < 2 else QuestionStatus.STAGED,
+            created_by="trainee-b" if index == 1 else "trainee-a",
             parent_question_ids=[],
             created_at=_ts(index + 1),
             updated_at=_ts(index + 1),
@@ -360,6 +361,14 @@ def test_query_questions_applies_filters_and_pagination(db_session):
     assert total == 2
     assert len(page) == 1
     assert page[0].question_id == active_ids[1]
+
+    created_page, created_total = repo.query_questions(
+        project_id=project.project_id,
+        created_by="trainee-b",
+    )
+
+    assert created_total == 1
+    assert [item.question_id for item in created_page] == [active_ids[1]]
 
 
 def test_query_questions_applies_substring_search_in_database(db_session):
@@ -479,6 +488,7 @@ def test_query_notes_filters_by_target(db_session):
             raw_content="dataset note",
             targets=[EntityRef(entity_type=EntityType.DATASET, entity_id=dataset_target)],
             status=NoteStatus.STAGED,
+            created_by="trainee-a",
             created_at=_ts(1),
             updated_at=_ts(1),
         )
@@ -490,6 +500,7 @@ def test_query_notes_filters_by_target(db_session):
             raw_content="other note",
             targets=[EntityRef(entity_type=EntityType.DATASET, entity_id=other_target)],
             status=NoteStatus.STAGED,
+            created_by="trainee-b",
             created_at=_ts(2),
             updated_at=_ts(2),
         )
@@ -506,6 +517,14 @@ def test_query_notes_filters_by_target(db_session):
 
     assert total == 1
     assert [note.raw_content for note in notes] == ["dataset note"]
+
+    created_notes, created_total = repo.query_notes(
+        project_id=project.project_id,
+        created_by="trainee-b",
+    )
+
+    assert created_total == 1
+    assert [note.raw_content for note in created_notes] == ["other note"]
 
 
 def test_query_notes_applies_substring_search_in_database(db_session):
@@ -686,6 +705,7 @@ def test_query_datasets_dataset_files_and_note_targets_use_focused_repository_pa
             ],
         ),
         status=DatasetStatus.STAGED,
+        created_by="trainee-a",
         created_at=_ts(2),
         updated_at=_ts(2),
     )
@@ -712,6 +732,7 @@ def test_query_datasets_dataset_files_and_note_targets_use_focused_repository_pa
             ],
         ),
         status=DatasetStatus.COMMITTED,
+        created_by="trainee-b",
         created_at=_ts(3),
         updated_at=_ts(3),
     )
@@ -783,6 +804,10 @@ def test_query_datasets_dataset_files_and_note_targets_use_focused_repository_pa
         limit=1,
         offset=0,
     )
+    created_datasets, created_total_datasets = repo.query_datasets(
+        project_id=project.project_id,
+        created_by="trainee-b",
+    )
     files, total_files = repo.query_dataset_files(
         dataset_id=staged_dataset.dataset_id,
         limit=1,
@@ -792,6 +817,8 @@ def test_query_datasets_dataset_files_and_note_targets_use_focused_repository_pa
 
     assert total_datasets == 1
     assert [item.dataset_id for item in datasets] == [staged_dataset.dataset_id]
+    assert created_total_datasets == 1
+    assert [item.dataset_id for item in created_datasets] == [committed_dataset.dataset_id]
     assert total_files == 2
     assert [item.path for item in files] == ["capture/beta.bin"]
     assert [item.path for item in repo.list_dataset_files(staged_dataset.dataset_id)] == [
@@ -879,6 +906,7 @@ def test_query_analyses_claims_and_visualizations_apply_focused_filters(db_sessi
         method_hash="method-1",
         code_version="code-1",
         status=AnalysisStatus.COMMITTED,
+        executed_by="trainee-a",
         executed_at=_ts(4),
         created_at=_ts(4),
         updated_at=_ts(4),
@@ -890,6 +918,7 @@ def test_query_analyses_claims_and_visualizations_apply_focused_filters(db_sessi
         method_hash="method-2",
         code_version="code-2",
         status=AnalysisStatus.STAGED,
+        executed_by="trainee-b",
         executed_at=_ts(5),
         created_at=_ts(5),
         updated_at=_ts(5),
@@ -902,6 +931,7 @@ def test_query_analyses_claims_and_visualizations_apply_focused_filters(db_sessi
         status=ClaimStatus.PROPOSED,
         supported_by_dataset_ids=[dataset_one.dataset_id],
         supported_by_analysis_ids=[joined_analysis.analysis_id],
+        created_by="trainee-a",
         created_at=_ts(6),
         updated_at=_ts(6),
     )
@@ -913,6 +943,7 @@ def test_query_analyses_claims_and_visualizations_apply_focused_filters(db_sessi
         status=ClaimStatus.PROPOSED,
         supported_by_dataset_ids=[dataset_two.dataset_id],
         supported_by_analysis_ids=[other_analysis.analysis_id],
+        created_by="trainee-b",
         created_at=_ts(7),
         updated_at=_ts(7),
     )
@@ -950,6 +981,7 @@ def test_query_analyses_claims_and_visualizations_apply_focused_filters(db_sessi
     analyses, total_analyses = repo.query_analyses(
         question_id=question.question_id,
         status=AnalysisStatus.COMMITTED.value,
+        created_by="trainee-a",
         limit=10,
         offset=0,
     )
@@ -957,6 +989,12 @@ def test_query_analyses_claims_and_visualizations_apply_focused_filters(db_sessi
         project_id=project.project_id,
         dataset_id=dataset_one.dataset_id,
         analysis_id=joined_analysis.analysis_id,
+        limit=10,
+        offset=0,
+    )
+    created_claims, created_total_claims = repo.query_claims(
+        project_id=project.project_id,
+        created_by="trainee-b",
         limit=10,
         offset=0,
     )
@@ -972,5 +1010,7 @@ def test_query_analyses_claims_and_visualizations_apply_focused_filters(db_sessi
     assert [item.analysis_id for item in analyses] == [joined_analysis.analysis_id]
     assert total_claims == 1
     assert [item.claim_id for item in claims] == [supported_claim.claim_id]
+    assert created_total_claims == 1
+    assert [item.claim_id for item in created_claims] == [other_claim.claim_id]
     assert total_visualizations == 1
     assert [item.viz_id for item in visualizations] == [linked_visualization.viz_id]

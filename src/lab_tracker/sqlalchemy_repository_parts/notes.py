@@ -94,6 +94,7 @@ class SQLAlchemyNoteRepository(EntityRepository[Note]):
         project_id: UUID | None = None,
         status: str | None = None,
         search: str | None = None,
+        created_by: str | None = None,
         target_entity_type: str | None = None,
         target_entity_id: UUID | None = None,
         limit: int | None = None,
@@ -108,6 +109,9 @@ class SQLAlchemyNoteRepository(EntityRepository[Note]):
         if status is not None:
             stmt = stmt.where(NoteModel.status == status)
             count_stmt = count_stmt.where(NoteModel.status == status)
+        if created_by is not None:
+            stmt = stmt.where(NoteModel.created_by == created_by)
+            count_stmt = count_stmt.where(NoteModel.created_by == created_by)
         pattern = substring_pattern(search)
         if pattern is not None:
             search_clause = or_(

@@ -53,6 +53,7 @@ def build_claims_router(api: LabTrackerAPI) -> APIRouter:
         status: ClaimStatus | None = None,
         dataset_id: UUID | None = None,
         analysis_id: UUID | None = None,
+        created_by: str | None = None,
         limit: int = 50,
         offset: int = 0,
     ):
@@ -64,6 +65,7 @@ def build_claims_router(api: LabTrackerAPI) -> APIRouter:
             status=status.value if status is not None else None,
             dataset_id=dataset_id,
             analysis_id=analysis_id,
+            created_by=created_by,
             limit=None,
             offset=0,
         )

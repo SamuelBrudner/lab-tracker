@@ -47,6 +47,23 @@ def _admin_headers(client: TestClient) -> dict[str, str]:
     return {"Authorization": f"Bearer {token}"}
 
 
+def _admin_headers_with_user_id(client: TestClient) -> tuple[dict[str, str], str]:
+    username = f"admin-{uuid4().hex[:8]}"
+    password = "secret"
+    user = client.app.state.auth_service.register_user(
+        username=username,
+        password=password,
+        role=Role.ADMIN,
+    )
+    response = client.post(
+        "/auth/login",
+        json={"username": username, "password": password},
+    )
+    assert response.status_code == 200
+    token = response.json()["data"]["access_token"]
+    return {"Authorization": f"Bearer {token}"}, str(user.user_id)
+
+
 def _fail_next_commit(monkeypatch) -> None:
     original_commit = Session.commit
     state = {"failed": False}
@@ -58,6 +75,103 @@ def _fail_next_commit(monkeypatch) -> None:
         return original_commit(self, *args, **kwargs)
 
     monkeypatch.setattr(Session, "commit", _commit_once)
+
+
+def test_list_routes_filter_records_by_creator(client: TestClient):
+    owner_headers, owner_id = _admin_headers_with_user_id(client)
+    other_headers, _ = _admin_headers_with_user_id(client)
+
+    project_response = client.post(
+        "/projects",
+        json={"name": "Creator filter"},
+        headers=owner_headers,
+    )
+    assert project_response.status_code == 201
+    project_id = project_response.json()["data"]["project_id"]
+
+    def create_bundle(headers: dict[str, str], label: str) -> dict[str, str]:
+        question_response = client.post(
+            "/questions",
+            json={
+                "project_id": project_id,
+                "text": f"{label} question",
+                "question_type": "descriptive",
+            },
+            headers=headers,
+        )
+        assert question_response.status_code == 201
+        question_id = question_response.json()["data"]["question_id"]
+
+        dataset_response = client.post(
+            "/datasets",
+            json={"project_id": project_id, "primary_question_id": question_id},
+            headers=headers,
+        )
+        assert dataset_response.status_code == 201
+        dataset_id = dataset_response.json()["data"]["dataset_id"]
+
+        note_response = client.post(
+            "/notes",
+            json={"project_id": project_id, "raw_content": f"{label} note"},
+            headers=headers,
+        )
+        assert note_response.status_code == 201
+        note_id = note_response.json()["data"]["note_id"]
+
+        analysis_response = client.post(
+            "/analyses",
+            json={
+                "project_id": project_id,
+                "dataset_ids": [dataset_id],
+                "method_hash": f"{label}-method",
+                "code_version": f"{label}-code",
+            },
+            headers=headers,
+        )
+        assert analysis_response.status_code == 201
+        analysis_id = analysis_response.json()["data"]["analysis_id"]
+
+        claim_response = client.post(
+            "/claims",
+            json={
+                "project_id": project_id,
+                "statement": f"{label} claim",
+                "confidence": 0.9,
+                "supported_by_dataset_ids": [dataset_id],
+                "supported_by_analysis_ids": [analysis_id],
+            },
+            headers=headers,
+        )
+        assert claim_response.status_code == 201
+        claim_id = claim_response.json()["data"]["claim_id"]
+
+        return {
+            "question_id": question_id,
+            "dataset_id": dataset_id,
+            "note_id": note_id,
+            "analysis_id": analysis_id,
+            "claim_id": claim_id,
+        }
+
+    expected = create_bundle(owner_headers, "owner")
+    create_bundle(other_headers, "other")
+
+    endpoint_ids = {
+        "/questions": "question_id",
+        "/datasets": "dataset_id",
+        "/notes": "note_id",
+        "/analyses": "analysis_id",
+        "/claims": "claim_id",
+    }
+    for endpoint, id_key in endpoint_ids.items():
+        response = client.get(
+            endpoint,
+            params={"project_id": project_id, "created_by": owner_id},
+            headers=owner_headers,
+        )
+        assert response.status_code == 200
+        assert [item[id_key] for item in response.json()["data"]] == [expected[id_key]]
+        assert response.json()["meta"]["total"] == 1
 
 
 def test_core_entity_crud_routes_use_database_persistence(

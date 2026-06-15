@@ -139,6 +139,7 @@ class LabTrackerRepository(Protocol):
         status: str | None = None,
         question_type: str | None = None,
         search: str | None = None,
+        created_by: str | None = None,
         parent_question_id: UUID | None = None,
         ancestor_question_id: UUID | None = None,
         limit: int | None = None,
@@ -160,6 +161,7 @@ class LabTrackerRepository(Protocol):
         *,
         project_id: UUID | None = None,
         status: str | None = None,
+        created_by: str | None = None,
         limit: int | None = None,
         offset: int = 0,
     ) -> tuple[list[Dataset], int]:
@@ -171,6 +173,7 @@ class LabTrackerRepository(Protocol):
         project_id: UUID | None = None,
         status: str | None = None,
         search: str | None = None,
+        created_by: str | None = None,
         target_entity_type: str | None = None,
         target_entity_id: UUID | None = None,
         limit: int | None = None,
@@ -214,6 +217,7 @@ class LabTrackerRepository(Protocol):
         dataset_id: UUID | None = None,
         question_id: UUID | None = None,
         status: str | None = None,
+        created_by: str | None = None,
         limit: int | None = None,
         offset: int = 0,
     ) -> tuple[list[Analysis], int]:
@@ -226,6 +230,7 @@ class LabTrackerRepository(Protocol):
         status: str | None = None,
         dataset_id: UUID | None = None,
         analysis_id: UUID | None = None,
+        created_by: str | None = None,
         limit: int | None = None,
         offset: int = 0,
     ) -> tuple[list[Claim], int]:

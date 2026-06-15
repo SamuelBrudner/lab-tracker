@@ -152,6 +152,7 @@ def build_notes_router(api: LabTrackerAPI) -> APIRouter:
         request: Request,
         project_id: UUID | None = None,
         status: NoteStatus | None = None,
+        created_by: str | None = None,
         target_entity_type: EntityType | None = None,
         target_entity_id: UUID | None = None,
         limit: int = 50,
@@ -163,6 +164,7 @@ def build_notes_router(api: LabTrackerAPI) -> APIRouter:
         notes, _ = repository_from_request(request).query_notes(
             project_id=project_id,
             status=status.value if status is not None else None,
+            created_by=created_by,
             target_entity_type=target_entity_type.value if target_entity_type is not None else None,
             target_entity_id=target_entity_id,
             limit=None,

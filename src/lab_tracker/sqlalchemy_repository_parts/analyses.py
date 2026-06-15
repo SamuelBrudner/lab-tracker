@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections import defaultdict
 from uuid import UUID
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.orm import Session as OrmSession
 
 from lab_tracker.db_models import (
@@ -15,6 +15,7 @@ from lab_tracker.db_models import (
     ClaimDatasetModel,
     ClaimModel,
     ClaimQuestionModel,
+    DatasetModel,
     DatasetQuestionLinkModel,
     VisualizationClaimModel,
     VisualizationModel,
@@ -112,6 +113,7 @@ class SQLAlchemyAnalysisRepository(EntityRepository[Analysis]):
         dataset_id: UUID | None = None,
         question_id: UUID | None = None,
         status: str | None = None,
+        created_by: str | None = None,
         limit: int | None = None,
         offset: int = 0,
     ) -> tuple[list[Analysis], int]:
@@ -155,6 +157,9 @@ class SQLAlchemyAnalysisRepository(EntityRepository[Analysis]):
         if status is not None:
             stmt = stmt.where(AnalysisModel.status == status)
             count_stmt = count_stmt.where(AnalysisModel.status == status)
+        if created_by is not None:
+            stmt = stmt.where(AnalysisModel.executed_by == created_by)
+            count_stmt = count_stmt.where(AnalysisModel.executed_by == created_by)
         if distinct_required:
             stmt = stmt.distinct()
             count_stmt = count_stmt.distinct()
@@ -278,6 +283,7 @@ class SQLAlchemyClaimRepository(EntityRepository[Claim]):
         status: str | None = None,
         dataset_id: UUID | None = None,
         analysis_id: UUID | None = None,
+        created_by: str | None = None,
         limit: int | None = None,
         offset: int = 0,
     ) -> tuple[list[Claim], int]:
@@ -291,6 +297,27 @@ class SQLAlchemyClaimRepository(EntityRepository[Claim]):
         if status is not None:
             stmt = stmt.where(ClaimModel.status == status)
             count_stmt = count_stmt.where(ClaimModel.status == status)
+        if created_by is not None:
+            created_by_clause = or_(
+                ClaimModel.claim_id.in_(
+                    select(ClaimDatasetModel.claim_id)
+                    .join(
+                        DatasetModel,
+                        DatasetModel.dataset_id == ClaimDatasetModel.dataset_id,
+                    )
+                    .where(DatasetModel.created_by == created_by)
+                ),
+                ClaimModel.claim_id.in_(
+                    select(ClaimAnalysisModel.claim_id)
+                    .join(
+                        AnalysisModel,
+                        AnalysisModel.analysis_id == ClaimAnalysisModel.analysis_id,
+                    )
+                    .where(AnalysisModel.executed_by == created_by)
+                ),
+            )
+            stmt = stmt.where(created_by_clause)
+            count_stmt = count_stmt.where(created_by_clause)
         if dataset_id is not None:
             distinct_required = True
             stmt = stmt.join(

@@ -54,6 +54,7 @@ class RepositoryDecisionContextReader:
         status: str | None = None,
         question_type: str | None = None,
         search: str | None = None,
+        created_by: str | None = None,
         parent_question_id: str | None = None,
         ancestor_question_id: str | None = None,
         limit: int = 50,
@@ -66,6 +67,7 @@ class RepositoryDecisionContextReader:
             status=status,
             question_type=question_type,
             search=search,
+            created_by=created_by,
             parent_question_id=_uuid_or_none(parent_question_id),
             ancestor_question_id=_uuid_or_none(ancestor_question_id),
             limit=limit,
@@ -78,6 +80,7 @@ class RepositoryDecisionContextReader:
         *,
         project_id: str | None = None,
         status: str | None = None,
+        created_by: str | None = None,
         target_entity_type: str | None = None,
         target_entity_id: str | None = None,
         limit: int = 50,
@@ -88,6 +91,7 @@ class RepositoryDecisionContextReader:
         items, total = self._repository.query_notes(
             project_id=_uuid_or_none(project_id),
             status=status,
+            created_by=created_by,
             target_entity_type=target_entity_type,
             target_entity_id=_uuid_or_none(target_entity_id),
             limit=limit,
@@ -199,6 +203,7 @@ class RepositoryDecisionContextReader:
         *,
         project_id: str | None = None,
         status: str | None = None,
+        created_by: str | None = None,
         limit: int = 50,
         offset: int = 0,
     ) -> JsonObject:
@@ -207,6 +212,7 @@ class RepositoryDecisionContextReader:
         items, total = self._repository.query_datasets(
             project_id=_uuid_or_none(project_id),
             status=status,
+            created_by=created_by,
             limit=limit,
             offset=offset,
         )
@@ -219,6 +225,7 @@ class RepositoryDecisionContextReader:
         dataset_id: str | None = None,
         question_id: str | None = None,
         status: str | None = None,
+        created_by: str | None = None,
         limit: int = 50,
         offset: int = 0,
     ) -> JsonObject:
@@ -229,6 +236,7 @@ class RepositoryDecisionContextReader:
             dataset_id=_uuid_or_none(dataset_id),
             question_id=_uuid_or_none(question_id),
             status=status,
+            created_by=created_by,
             limit=limit,
             offset=offset,
         )
@@ -241,6 +249,7 @@ class RepositoryDecisionContextReader:
         status: str | None = None,
         dataset_id: str | None = None,
         analysis_id: str | None = None,
+        created_by: str | None = None,
         limit: int = 50,
         offset: int = 0,
     ) -> JsonObject:
@@ -251,6 +260,7 @@ class RepositoryDecisionContextReader:
             status=status,
             dataset_id=_uuid_or_none(dataset_id),
             analysis_id=_uuid_or_none(analysis_id),
+            created_by=created_by,
             limit=limit,
             offset=offset,
         )

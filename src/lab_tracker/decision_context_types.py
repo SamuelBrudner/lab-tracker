@@ -26,6 +26,7 @@ class DecisionContextReader(Protocol):
         status: str | None = None,
         question_type: str | None = None,
         search: str | None = None,
+        created_by: str | None = None,
         parent_question_id: str | None = None,
         ancestor_question_id: str | None = None,
         limit: int = 50,
@@ -38,6 +39,7 @@ class DecisionContextReader(Protocol):
         *,
         project_id: str | None = None,
         status: str | None = None,
+        created_by: str | None = None,
         target_entity_type: str | None = None,
         target_entity_id: str | None = None,
         limit: int = 50,
@@ -72,6 +74,7 @@ class DecisionContextReader(Protocol):
         *,
         project_id: str | None = None,
         status: str | None = None,
+        created_by: str | None = None,
         limit: int = 50,
         offset: int = 0,
     ) -> JsonObject:
@@ -84,6 +87,7 @@ class DecisionContextReader(Protocol):
         dataset_id: str | None = None,
         question_id: str | None = None,
         status: str | None = None,
+        created_by: str | None = None,
         limit: int = 50,
         offset: int = 0,
     ) -> JsonObject:
@@ -96,6 +100,7 @@ class DecisionContextReader(Protocol):
         status: str | None = None,
         dataset_id: str | None = None,
         analysis_id: str | None = None,
+        created_by: str | None = None,
         limit: int = 50,
         offset: int = 0,
     ) -> JsonObject:

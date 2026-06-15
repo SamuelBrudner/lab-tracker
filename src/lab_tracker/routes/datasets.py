@@ -56,6 +56,7 @@ def build_datasets_router(api: LabTrackerAPI) -> APIRouter:
         request: Request,
         project_id: UUID | None = None,
         status: DatasetStatus | None = None,
+        created_by: str | None = None,
         limit: int = 50,
         offset: int = 0,
     ):
@@ -65,6 +66,7 @@ def build_datasets_router(api: LabTrackerAPI) -> APIRouter:
         datasets, _ = repository_from_request(request).query_datasets(
             project_id=project_id,
             status=status.value if status is not None else None,
+            created_by=created_by,
             limit=None,
             offset=0,
         )

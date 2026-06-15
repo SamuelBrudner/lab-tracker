@@ -431,6 +431,7 @@ class SQLAlchemyQuestionRepository(EntityRepository[Question]):
         status: str | None = None,
         question_type: str | None = None,
         search: str | None = None,
+        created_by: str | None = None,
         parent_question_id: UUID | None = None,
         ancestor_question_id: UUID | None = None,
         limit: int | None = None,
@@ -448,6 +449,9 @@ class SQLAlchemyQuestionRepository(EntityRepository[Question]):
         if question_type is not None:
             stmt = stmt.where(QuestionModel.question_type == question_type)
             count_stmt = count_stmt.where(QuestionModel.question_type == question_type)
+        if created_by is not None:
+            stmt = stmt.where(QuestionModel.created_by == created_by)
+            count_stmt = count_stmt.where(QuestionModel.created_by == created_by)
         pattern = substring_pattern(search)
         if pattern is not None:
             search_clause = or_(

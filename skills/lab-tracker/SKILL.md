@@ -328,6 +328,7 @@ List/search endpoints use `limit` between 1 and 200 and `offset` of 0 or greater
 - `question_type` (optional): QuestionType enum: descriptive, hypothesis_driven, method_dev, other | null
 - `search` (optional): string | null
 - `q` (optional): string | null
+- `created_by` (optional): string | null
 - `parent_question_id` (optional): string(uuid) | null
 - `ancestor_question_id` (optional): string(uuid) | null
 - `limit` (optional): integer; default 50; maximum 200 from shared route validation
@@ -336,6 +337,7 @@ List/search endpoints use `limit` between 1 and 200 and `offset` of 0 or greater
 #### `GET /notes`
 - `project_id` (optional): string(uuid) | null
 - `status` (optional): NoteStatus enum: staged, committed, archived | null
+- `created_by` (optional): string | null
 - `target_entity_type` (optional): EntityType enum: project, question, dataset, note, session, analysis, claim, visualization, goal | null
 - `target_entity_id` (optional): string(uuid) | null
 - `limit` (optional): integer; default 50; maximum 200 from shared route validation
@@ -351,6 +353,7 @@ List/search endpoints use `limit` between 1 and 200 and `offset` of 0 or greater
 #### `GET /datasets`
 - `project_id` (optional): string(uuid) | null
 - `status` (optional): DatasetStatus enum: staged, committed, archived | null
+- `created_by` (optional): string | null
 - `limit` (optional): integer; default 50; maximum 200 from shared route validation
 - `offset` (optional): integer; default 0; minimum 0 from shared route validation
 
@@ -359,6 +362,7 @@ List/search endpoints use `limit` between 1 and 200 and `offset` of 0 or greater
 - `dataset_id` (optional): string(uuid) | null
 - `question_id` (optional): string(uuid) | null
 - `status` (optional): AnalysisStatus enum: staged, committed, archived | null
+- `created_by` (optional): string | null
 - `limit` (optional): integer; default 50; maximum 200 from shared route validation
 - `offset` (optional): integer; default 0; minimum 0 from shared route validation
 
@@ -367,6 +371,7 @@ List/search endpoints use `limit` between 1 and 200 and `offset` of 0 or greater
 - `status` (optional): ClaimStatus enum: proposed, supported, rejected | null
 - `dataset_id` (optional): string(uuid) | null
 - `analysis_id` (optional): string(uuid) | null
+- `created_by` (optional): string | null
 - `limit` (optional): integer; default 50; maximum 200 from shared route validation
 - `offset` (optional): integer; default 0; minimum 0 from shared route validation
 
