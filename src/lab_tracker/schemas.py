@@ -588,6 +588,24 @@ class SearchResults(BaseModel):
     notes: list[Note] = Field(default_factory=list)
 
 
+class PortfolioProjectOwner(BaseModel):
+    user_id: UUID
+    username: str | None = None
+
+
+class PortfolioProjectSummary(BaseModel):
+    project_id: UUID
+    name: str
+    status: ProjectStatus
+    open_question_count: int = Field(..., ge=0)
+    draft_dataset_count: int = Field(..., ge=0)
+    committed_dataset_count: int = Field(..., ge=0)
+    running_analysis_count: int = Field(..., ge=0)
+    unreviewed_claim_count: int = Field(..., ge=0)
+    last_activity_at: datetime | None = None
+    owners: list[PortfolioProjectOwner] = Field(default_factory=list)
+
+
 class AnalysisCommitRequest(RequestModel):
     environment_hash: str | None = None
     claims: list[ClaimInput] | None = None
