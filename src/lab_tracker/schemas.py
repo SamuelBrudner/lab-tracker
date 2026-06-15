@@ -34,9 +34,12 @@ from lab_tracker.models import (
     GraphChangeSetStatus,
     GraphDraftBatchRunStatus,
     GraphDraftMode,
+    GroupMembership,
     Note,
     NoteMetadataScalar,
     NoteStatus,
+    ProjectGroup,
+    ProjectGroupKind,
     ProjectMembership,
     ProjectMembershipRole,
     ProjectStatus,
@@ -197,6 +200,34 @@ class ProjectUpdate(RequestModel):
     name: NonBlankStr | None = None
     description: str | None = None
     status: ProjectStatus | None = None
+
+
+class ProjectGroupCreate(RequestModel):
+    name: NonBlankStr
+    description: str | None = None
+    kind: ProjectGroupKind | None = None
+    group_read_all: bool | None = None
+
+
+class ProjectGroupUpdate(RequestModel):
+    name: NonBlankStr | None = None
+    description: str | None = None
+    kind: ProjectGroupKind | None = None
+    group_read_all: bool | None = None
+
+
+class GroupMembershipCreate(RequestModel):
+    user_id: UUID | None = None
+    username: str | None = Field(default=None, min_length=1)
+    role: ProjectMembershipRole
+
+
+class GroupMembershipUpdate(RequestModel):
+    role: ProjectMembershipRole
+
+
+ProjectGroupRead = ProjectGroup
+GroupMembershipRead = GroupMembership
 
 
 class ProjectMembershipCreate(RequestModel):

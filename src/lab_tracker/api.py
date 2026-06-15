@@ -199,6 +199,21 @@ class LabTrackerAPI:
     def delete_project(self, *args: Any, **kwargs: Any) -> Any:
         return self.projects.delete_project(*args, **kwargs)
 
+    def create_project_group(self, *args: Any, **kwargs: Any) -> Any:
+        return self.projects.create_project_group(*args, **kwargs)
+
+    def get_project_group(self, *args: Any, **kwargs: Any) -> Any:
+        return self.projects.get_project_group(*args, **kwargs)
+
+    def list_project_groups(self, *args: Any, **kwargs: Any) -> Any:
+        return self.projects.list_project_groups(*args, **kwargs)
+
+    def update_project_group(self, *args: Any, **kwargs: Any) -> Any:
+        return self.projects.update_project_group(*args, **kwargs)
+
+    def delete_project_group(self, *args: Any, **kwargs: Any) -> Any:
+        return self.projects.delete_project_group(*args, **kwargs)
+
     def get_project_membership(self, *args: Any, **kwargs: Any) -> Any:
         return self.projects.get_project_membership(*args, **kwargs)
 
@@ -214,6 +229,21 @@ class LabTrackerAPI:
     def delete_project_membership(self, *args: Any, **kwargs: Any) -> Any:
         return self.projects.delete_project_membership(*args, **kwargs)
 
+    def get_group_membership(self, *args: Any, **kwargs: Any) -> Any:
+        return self.projects.get_group_membership(*args, **kwargs)
+
+    def get_group_membership_for_user(self, *args: Any, **kwargs: Any) -> Any:
+        return self.projects.get_group_membership_for_user(*args, **kwargs)
+
+    def list_group_memberships(self, *args: Any, **kwargs: Any) -> Any:
+        return self.projects.list_group_memberships(*args, **kwargs)
+
+    def upsert_group_membership(self, *args: Any, **kwargs: Any) -> Any:
+        return self.projects.upsert_group_membership(*args, **kwargs)
+
+    def delete_group_membership(self, *args: Any, **kwargs: Any) -> Any:
+        return self.projects.delete_group_membership(*args, **kwargs)
+
     def accessible_project_ids(self, *args: Any, **kwargs: Any) -> Any:
         return self.project_authorization.accessible_project_ids(*args, **kwargs)
 
@@ -228,6 +258,15 @@ class LabTrackerAPI:
 
     def require_project_owner(self, *args: Any, **kwargs: Any) -> Any:
         return self.project_authorization.require_owner(*args, **kwargs)
+
+    def group_membership_role(self, *args: Any, **kwargs: Any) -> Any:
+        return self.project_authorization.group_membership_role(*args, **kwargs)
+
+    def require_group_read(self, *args: Any, **kwargs: Any) -> Any:
+        return self.project_authorization.require_group_read(*args, **kwargs)
+
+    def require_group_owner(self, *args: Any, **kwargs: Any) -> Any:
+        return self.project_authorization.require_group_owner(*args, **kwargs)
 
     def create_question(self, *args: Any, **kwargs: Any) -> Any:
         return self.questions.create_question(*args, **kwargs)

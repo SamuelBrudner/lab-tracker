@@ -9,6 +9,12 @@ from lab_tracker.errors import AuthError
 from lab_tracker.models import ProjectMembershipRole
 from lab_tracker.services.base import BaseService, ServiceContext
 
+GROUP_READ_ROLES = {
+    ProjectMembershipRole.VIEWER,
+    ProjectMembershipRole.CONTRIBUTOR,
+    ProjectMembershipRole.OWNER,
+}
+GROUP_OWNER_ROLES = {ProjectMembershipRole.OWNER}
 PROJECT_READ_ROLES = {
     ProjectMembershipRole.VIEWER,
     ProjectMembershipRole.CONTRIBUTOR,
@@ -33,6 +39,43 @@ class ProjectAuthorizationPolicy(BaseService):
 
     def has_global_admin(self, actor: AuthContext | None) -> bool:
         return actor is not None and actor.role == Role.ADMIN
+
+    def group_membership_role(
+        self,
+        group_id: UUID,
+        actor: AuthContext | None,
+    ) -> ProjectMembershipRole | None:
+        if actor is None:
+            raise AuthError("Authentication required.")
+        if self.has_global_read(actor):
+            return ProjectMembershipRole.OWNER
+        membership = self.repository.get_group_membership(
+            group_id=group_id,
+            user_id=actor.user_id,
+        )
+        return membership.role if membership is not None else None
+
+    def require_group_read(
+        self,
+        group_id: UUID,
+        *,
+        actor: AuthContext | None = None,
+    ) -> None:
+        role = self.group_membership_role(group_id, actor)
+        if role not in GROUP_READ_ROLES:
+            raise AuthError("Group access required.")
+
+    def require_group_owner(
+        self,
+        group_id: UUID,
+        *,
+        actor: AuthContext | None = None,
+    ) -> None:
+        if self.has_global_admin(actor):
+            return
+        role = self.group_membership_role(group_id, actor)
+        if role not in GROUP_OWNER_ROLES:
+            raise AuthError("Group owner access required.")
 
     def accessible_project_ids(self, actor: AuthContext | None) -> set[UUID] | None:
         if self.has_global_read(actor):

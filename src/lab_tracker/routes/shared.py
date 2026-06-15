@@ -86,6 +86,16 @@ def ensure_project_owner(request: Request, project_id: Any) -> None:
     api_from_request(request).require_project_owner(project_id, actor=actor)
 
 
+def ensure_group_read(request: Request, group_id: Any) -> None:
+    actor = actor_from_request(request)
+    api_from_request(request).require_group_read(group_id, actor=actor)
+
+
+def ensure_group_owner(request: Request, group_id: Any) -> None:
+    actor = actor_from_request(request)
+    api_from_request(request).require_group_owner(group_id, actor=actor)
+
+
 def filter_project_scoped_items(request: Request, items: list[Any]) -> list[Any]:
     allowed = accessible_project_ids_from_request(request)
     if allowed is None:

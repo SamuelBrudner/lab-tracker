@@ -18,6 +18,7 @@ from .errors import register_error_handlers
 from .goals import build_goals_router
 from .graph_batches import build_graph_batches_router
 from .graph_drafts import build_graph_drafts_router
+from .groups import build_groups_router
 from .notes import build_notes_router
 from .portfolio import build_portfolio_router
 from .project_graph import build_project_graph_router
@@ -50,6 +51,7 @@ def register_routes(
         build_device_auth_router(device_auth_service=device_auth_service)
     )
     app.include_router(build_projects_router(api))
+    app.include_router(build_groups_router(api))
     app.include_router(build_portfolio_router(api))
     app.include_router(build_project_graph_router(api))
     app.include_router(build_questions_router(api))
