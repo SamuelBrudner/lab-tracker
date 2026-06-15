@@ -31,6 +31,7 @@ from lab_tracker.services.shared import (
     _find_acquisition_output,
     _manifest_input_with_source,
     _merge_acquisition_outputs,
+    actor_user_fk,
     actor_user_id,
     ensure_non_empty,
 )
@@ -103,6 +104,7 @@ class SessionService(BaseService):
             status=SessionStatus.ACTIVE,
             primary_question_id=primary_question_id,
             created_by=actor_user_id(actor),
+            created_by_user_id=actor_user_fk(actor, self.repository),
         )
         with self.unit_of_work() as repository:
             repository.sessions.save(session)

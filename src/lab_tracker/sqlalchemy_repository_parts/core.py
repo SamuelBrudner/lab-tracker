@@ -143,6 +143,11 @@ class SQLAlchemyProjectMembershipRepository(EntityRepository[ProjectMembership])
             username=user.username if user is not None else None,
             user_global_role=user.role if user is not None else None,
             created_by=row.created_by,
+            created_by_user_id=(
+                uuid_from_db(row.created_by_user_id)
+                if row.created_by_user_id is not None
+                else None
+            ),
             created_at=as_utc(row.created_at),
             updated_at=as_utc(row.updated_at),
         )
@@ -246,6 +251,11 @@ class SQLAlchemyGroupMembershipRepository(EntityRepository[GroupMembership]):
             username=user.username if user is not None else None,
             user_global_role=user.role if user is not None else None,
             created_by=row.created_by,
+            created_by_user_id=(
+                uuid_from_db(row.created_by_user_id)
+                if row.created_by_user_id is not None
+                else None
+            ),
             created_at=as_utc(row.created_at),
             updated_at=as_utc(row.updated_at),
         )
@@ -257,6 +267,11 @@ class SQLAlchemyGroupMembershipRepository(EntityRepository[GroupMembership]):
             user_id=uuid_to_db(membership.user_id),
             role=membership.role.value,
             created_by=membership.created_by,
+            created_by_user_id=(
+                uuid_to_db(membership.created_by_user_id)
+                if membership.created_by_user_id is not None
+                else None
+            ),
             created_at=membership.created_at,
             updated_at=membership.updated_at,
         )
@@ -266,6 +281,11 @@ class SQLAlchemyGroupMembershipRepository(EntityRepository[GroupMembership]):
         row.user_id = uuid_to_db(membership.user_id)
         row.role = membership.role.value
         row.created_by = membership.created_by
+        row.created_by_user_id = (
+            uuid_to_db(membership.created_by_user_id)
+            if membership.created_by_user_id is not None
+            else None
+        )
         row.created_at = membership.created_at
         row.updated_at = membership.updated_at
 

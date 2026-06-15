@@ -50,7 +50,7 @@ from lab_tracker.services.project_authorization import ProjectAuthorizationPolic
 from lab_tracker.services.project_service import ProjectService
 from lab_tracker.services.question_service import QuestionService
 from lab_tracker.services.session_service import SessionService
-from lab_tracker.services.shared import actor_user_id
+from lab_tracker.services.shared import actor_user_fk, actor_user_id
 from lab_tracker.services.visualization_service import VisualizationService
 
 _BATCH_NOTE_LIMIT = 100
@@ -156,6 +156,7 @@ class GraphDraftService(BaseService):
             draft_mode=mode,
             context_packet=context_packet,
             created_by=actor_user_id(actor),
+            created_by_user_id=actor_user_fk(actor, self.repository),
         )
         self._save_graph_change_set(change_set)
         try:
@@ -256,6 +257,7 @@ class GraphDraftService(BaseService):
             draft_mode=GraphDraftMode.GRAPH_BATCH,
             context_packet=context_packet,
             created_by=actor_user_id(actor),
+            created_by_user_id=actor_user_fk(actor, self.repository),
         )
         self._save_graph_change_set(change_set)
 
@@ -418,6 +420,7 @@ class GraphDraftService(BaseService):
             note_count=len(notes),
             batch_key=batch_key,
             created_by=actor_user_id(actor),
+            created_by_user_id=actor_user_fk(actor, self.repository),
         )
         with self.unit_of_work() as repository:
             repository.graph_draft_batch_runs.save(run)

@@ -20,6 +20,7 @@ from lab_tracker.services.base import BaseService, ServiceContext
 from lab_tracker.services.project_authorization import ProjectAuthorizationPolicy
 from lab_tracker.services.shared import (
     WRITE_ROLES,
+    actor_user_fk,
     actor_user_id,
     ensure_non_empty,
 )
@@ -58,6 +59,7 @@ class ProjectService(BaseService):
             description=description.strip(),
             status=status,
             created_by=actor_user_id(actor),
+            created_by_user_id=actor_user_fk(actor, self.repository),
         )
         with self.unit_of_work() as repository:
             repository.projects.save(project)
@@ -68,6 +70,7 @@ class ProjectService(BaseService):
                 user_id=actor.user_id,
                 role=ProjectMembershipRole.OWNER,
                 created_by=actor_user_id(actor),
+                created_by_user_id=actor_user_fk(actor, self.repository),
             )
             with self.unit_of_work() as repository:
                 repository.project_memberships.save(membership)
@@ -139,6 +142,7 @@ class ProjectService(BaseService):
             kind=kind,
             group_read_all=group_read_all,
             created_by=actor_user_id(actor),
+            created_by_user_id=actor_user_fk(actor, self.repository),
         )
         with self.unit_of_work() as repository:
             repository.project_groups.save(group)
@@ -150,6 +154,7 @@ class ProjectService(BaseService):
                 user_id=actor.user_id,
                 role=ProjectMembershipRole.OWNER,
                 created_by=actor_user_id(actor),
+                created_by_user_id=actor_user_fk(actor, self.repository),
             )
             with self.unit_of_work() as repository:
                 repository.group_memberships.save(membership)
@@ -296,6 +301,7 @@ class ProjectService(BaseService):
                 user_id=user_id,
                 role=role,
                 created_by=actor_user_id(actor),
+                created_by_user_id=actor_user_fk(actor, self.repository),
             )
         else:
             membership = existing
@@ -359,6 +365,7 @@ class ProjectService(BaseService):
                         user_id=user_id,
                         role=role,
                         created_by=actor_user_id(actor),
+                        created_by_user_id=actor_user_fk(actor, self.repository),
                     )
                 else:
                     membership = existing
@@ -454,6 +461,7 @@ class ProjectService(BaseService):
                 user_id=user_id,
                 role=role,
                 created_by=actor_user_id(actor),
+                created_by_user_id=actor_user_fk(actor, self.repository),
             )
         else:
             membership = existing

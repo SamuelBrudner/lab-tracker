@@ -68,6 +68,9 @@ class LabTrackerRepository(Protocol):
     graph_draft_batch_settings: EntityRepository[GraphDraftBatchSettings]
     graph_draft_batch_runs: EntityRepository[GraphDraftBatchRun]
 
+    def user_exists(self, user_id: UUID) -> bool:
+        """Return whether a user exists for FK-backed attribution."""
+
     def fetch_questions(self, question_ids: list[UUID]) -> list[Question]:
         """Fetch questions in the provided order."""
 

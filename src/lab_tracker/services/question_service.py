@@ -24,6 +24,7 @@ from lab_tracker.services.project_service import ProjectService
 from lab_tracker.services.shared import (
     _ensure_question_parents_dag,
     _ensure_question_status_transition,
+    actor_user_fk,
     actor_user_id,
     ensure_non_empty,
     question_matches_substring,
@@ -109,6 +110,7 @@ class QuestionService(BaseService):
             status=status,
             parent_question_ids=parent_ids,
             created_by=actor_user_id(actor),
+            created_by_user_id=actor_user_fk(actor, self.repository),
         )
         with self.unit_of_work() as repository:
             repository.questions.save(question)
@@ -270,6 +272,7 @@ class QuestionService(BaseService):
             parent_question_ids=parent_ids,
             supersedes_question_id=source.question_id,
             created_by=actor_user_id(actor),
+            created_by_user_id=actor_user_fk(actor, self.repository),
         )
         graph = self._question_graph(source.project_id)
         graph[replacement.question_id] = replacement
@@ -315,6 +318,7 @@ class QuestionService(BaseService):
             replacement_snapshot=replacement.model_dump(mode="json"),
             relationship_changes=relationship_changes,
             created_by=actor_user_id(actor),
+            created_by_user_id=actor_user_fk(actor, self.repository),
         )
 
         def _persist(repository) -> None:  # noqa: ANN001

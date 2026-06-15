@@ -153,6 +153,11 @@ def project_membership_to_model(membership: ProjectMembership) -> ProjectMembers
         user_id=_uuid_str(membership.user_id),
         role=membership.role.value,
         created_by=membership.created_by,
+        created_by_user_id=(
+            _uuid_str(membership.created_by_user_id)
+            if membership.created_by_user_id is not None
+            else None
+        ),
         created_at=membership.created_at,
         updated_at=membership.updated_at,
     )
@@ -169,6 +174,9 @@ def project_membership_from_model(row: ProjectMembershipModel) -> ProjectMembers
         username=username,
         user_global_role=user_global_role,
         created_by=row.created_by,
+        created_by_user_id=(
+            _uuid(row.created_by_user_id) if row.created_by_user_id else None
+        ),
         created_at=_as_utc(row.created_at),
         updated_at=_as_utc(row.updated_at),
     )
@@ -182,6 +190,11 @@ def apply_project_membership_to_model(
     row.user_id = _uuid_str(membership.user_id)
     row.role = membership.role.value
     row.created_by = membership.created_by
+    row.created_by_user_id = (
+        _uuid_str(membership.created_by_user_id)
+        if membership.created_by_user_id is not None
+        else None
+    )
     row.created_at = membership.created_at
     row.updated_at = membership.updated_at
 
@@ -205,6 +218,11 @@ def question_to_model(question: Question) -> QuestionModel:
             else None
         ),
         created_by=question.created_by,
+        created_by_user_id=(
+            _uuid_str(question.created_by_user_id)
+            if question.created_by_user_id is not None
+            else None
+        ),
         created_at=question.created_at,
         updated_at=question.updated_at,
     )
@@ -230,6 +248,9 @@ def question_from_model(
             _uuid(row.supersedes_question_id) if row.supersedes_question_id else None
         ),
         created_by=row.created_by,
+        created_by_user_id=(
+            _uuid(row.created_by_user_id) if row.created_by_user_id else None
+        ),
         created_at=_as_utc(row.created_at),
         updated_at=_as_utc(row.updated_at),
     )
@@ -262,6 +283,11 @@ def apply_question_to_model(row: QuestionModel, question: Question) -> None:
         else None
     )
     row.created_by = question.created_by
+    row.created_by_user_id = (
+        _uuid_str(question.created_by_user_id)
+        if question.created_by_user_id is not None
+        else None
+    )
     row.created_at = question.created_at
     row.updated_at = question.updated_at
 
@@ -277,6 +303,11 @@ def question_refactor_to_model(refactor: QuestionRefactor) -> QuestionRefactorMo
         replacement_snapshot=dict(refactor.replacement_snapshot),
         relationship_changes=dict(refactor.relationship_changes),
         created_by=refactor.created_by,
+        created_by_user_id=(
+            _uuid_str(refactor.created_by_user_id)
+            if refactor.created_by_user_id is not None
+            else None
+        ),
         created_at=refactor.created_at,
     )
 
@@ -292,6 +323,9 @@ def question_refactor_from_model(row: QuestionRefactorModel) -> QuestionRefactor
         replacement_snapshot=dict(row.replacement_snapshot or {}),
         relationship_changes=dict(row.relationship_changes or {}),
         created_by=row.created_by,
+        created_by_user_id=(
+            _uuid(row.created_by_user_id) if row.created_by_user_id else None
+        ),
         created_at=_as_utc(row.created_at),
     )
 
@@ -308,6 +342,11 @@ def apply_question_refactor_to_model(
     row.replacement_snapshot = dict(refactor.replacement_snapshot)
     row.relationship_changes = dict(refactor.relationship_changes)
     row.created_by = refactor.created_by
+    row.created_by_user_id = (
+        _uuid_str(refactor.created_by_user_id)
+        if refactor.created_by_user_id is not None
+        else None
+    )
     row.created_at = refactor.created_at
 
 
@@ -331,6 +370,11 @@ def dataset_to_model(dataset: Dataset) -> DatasetModel:
         ),
         status=dataset.status.value,
         created_by=dataset.created_by,
+        created_by_user_id=(
+            _uuid_str(dataset.created_by_user_id)
+            if dataset.created_by_user_id is not None
+            else None
+        ),
         created_at=dataset.created_at,
         updated_at=dataset.updated_at,
     )
@@ -379,6 +423,9 @@ def dataset_from_model(
         commit_manifest=manifest,
         status=DatasetStatus(row.status),
         created_by=row.created_by,
+        created_by_user_id=(
+            _uuid(row.created_by_user_id) if row.created_by_user_id else None
+        ),
         created_at=_as_utc(row.created_at),
         updated_at=_as_utc(row.updated_at),
     )
@@ -420,6 +467,11 @@ def apply_dataset_to_model(row: DatasetModel, dataset: Dataset) -> None:
     )
     row.status = dataset.status.value
     row.created_by = dataset.created_by
+    row.created_by_user_id = (
+        _uuid_str(dataset.created_by_user_id)
+        if dataset.created_by_user_id is not None
+        else None
+    )
     row.created_at = dataset.created_at
     row.updated_at = dataset.updated_at
 
@@ -440,6 +492,11 @@ def note_to_model(note: Note) -> NoteModel:
         note_metadata=dict(note.metadata),
         status=note.status.value,
         created_by=note.created_by,
+        created_by_user_id=(
+            _uuid_str(note.created_by_user_id)
+            if note.created_by_user_id is not None
+            else None
+        ),
         created_at=note.created_at,
         updated_at=note.updated_at,
     )
@@ -469,6 +526,9 @@ def note_from_model(
         metadata=dict(getattr(row, "note_metadata", {}) or {}),
         status=NoteStatus(row.status),
         created_by=row.created_by,
+        created_by_user_id=(
+            _uuid(row.created_by_user_id) if row.created_by_user_id else None
+        ),
         created_at=_as_utc(row.created_at),
         updated_at=_as_utc(row.updated_at),
     )
@@ -506,6 +566,11 @@ def apply_note_to_model(row: NoteModel, note: Note) -> None:
     row.note_metadata = dict(note.metadata)
     row.status = note.status.value
     row.created_by = note.created_by
+    row.created_by_user_id = (
+        _uuid_str(note.created_by_user_id)
+        if note.created_by_user_id is not None
+        else None
+    )
     row.created_at = note.created_at
     row.updated_at = note.updated_at
 
@@ -524,6 +589,11 @@ def session_to_model(session: Session) -> SessionModel:
         started_at=session.started_at,
         ended_at=session.ended_at,
         created_by=session.created_by,
+        created_by_user_id=(
+            _uuid_str(session.created_by_user_id)
+            if session.created_by_user_id is not None
+            else None
+        ),
         updated_at=session.updated_at,
     )
 
@@ -540,6 +610,9 @@ def session_from_model(row: SessionModel) -> Session:
         started_at=_as_utc(row.started_at),
         ended_at=_as_utc_optional(row.ended_at),
         created_by=row.created_by,
+        created_by_user_id=(
+            _uuid(row.created_by_user_id) if row.created_by_user_id else None
+        ),
         updated_at=_as_utc(row.updated_at),
     )
 
@@ -554,6 +627,11 @@ def apply_session_to_model(row: SessionModel, session: Session) -> None:
     row.started_at = session.started_at
     row.ended_at = session.ended_at
     row.created_by = session.created_by
+    row.created_by_user_id = (
+        _uuid_str(session.created_by_user_id)
+        if session.created_by_user_id is not None
+        else None
+    )
     row.updated_at = session.updated_at
 
 
@@ -601,6 +679,11 @@ def analysis_to_model(analysis: Analysis) -> AnalysisModel:
         code_version=analysis.code_version,
         environment_hash=analysis.environment_hash,
         executed_by=analysis.executed_by,
+        executed_by_user_id=(
+            _uuid_str(analysis.executed_by_user_id)
+            if analysis.executed_by_user_id is not None
+            else None
+        ),
         executed_at=analysis.executed_at,
         status=analysis.status.value,
         created_at=analysis.created_at,
@@ -621,6 +704,9 @@ def analysis_from_model(
         code_version=row.code_version,
         environment_hash=row.environment_hash,
         executed_by=row.executed_by,
+        executed_by_user_id=(
+            _uuid(row.executed_by_user_id) if row.executed_by_user_id else None
+        ),
         executed_at=_as_utc(row.executed_at),
         status=AnalysisStatus(row.status),
         created_at=_as_utc(row.created_at),
@@ -644,6 +730,11 @@ def apply_analysis_to_model(row: AnalysisModel, analysis: Analysis) -> None:
     row.code_version = analysis.code_version
     row.environment_hash = analysis.environment_hash
     row.executed_by = analysis.executed_by
+    row.executed_by_user_id = (
+        _uuid_str(analysis.executed_by_user_id)
+        if analysis.executed_by_user_id is not None
+        else None
+    )
     row.executed_at = analysis.executed_at
     row.status = analysis.status.value
     row.created_at = analysis.created_at
@@ -734,6 +825,11 @@ def goal_to_model(goal: Goal) -> GoalModel:
         external_ref=goal.external_ref,
         attributes=dict(goal.attributes),
         created_by=goal.created_by,
+        created_by_user_id=(
+            _uuid_str(goal.created_by_user_id)
+            if goal.created_by_user_id is not None
+            else None
+        ),
         created_at=goal.created_at,
         updated_at=goal.updated_at,
     )
@@ -756,6 +852,9 @@ def goal_from_model(
         attributes=dict(row.attributes or {}),
         links=list(links),
         created_by=row.created_by,
+        created_by_user_id=(
+            _uuid(row.created_by_user_id) if row.created_by_user_id else None
+        ),
         created_at=_as_utc(row.created_at),
         updated_at=_as_utc(row.updated_at),
     )
@@ -771,6 +870,11 @@ def apply_goal_to_model(row: GoalModel, goal: Goal) -> None:
     row.external_ref = goal.external_ref
     row.attributes = dict(goal.attributes)
     row.created_by = goal.created_by
+    row.created_by_user_id = (
+        _uuid_str(goal.created_by_user_id)
+        if goal.created_by_user_id is not None
+        else None
+    )
     row.created_at = goal.created_at
     row.updated_at = goal.updated_at
 
@@ -787,6 +891,9 @@ def goal_link_from_model(row: GoalLinkModel) -> GoalLink:
         link_status=GoalLinkStatus(row.link_status),
         slot=row.slot or None,
         created_by=row.created_by,
+        created_by_user_id=(
+            _uuid(row.created_by_user_id) if row.created_by_user_id else None
+        ),
         created_at=_as_utc(row.created_at),
     )
 
@@ -801,6 +908,11 @@ def goal_link_to_model(link: GoalLink) -> GoalLinkModel:
         link_status=link.link_status.value,
         slot=link.slot or "",
         created_by=link.created_by,
+        created_by_user_id=(
+            _uuid_str(link.created_by_user_id)
+            if link.created_by_user_id is not None
+            else None
+        ),
         created_at=link.created_at,
     )
 

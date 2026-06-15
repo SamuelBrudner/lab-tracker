@@ -26,6 +26,7 @@ from lab_tracker.services.project_service import ProjectService
 from lab_tracker.services.shared import (
     _analysis_has_question_link,
     _ensure_analysis_status_transition,
+    actor_user_fk,
     actor_user_id,
     ensure_non_empty,
     unique_ids,
@@ -101,6 +102,7 @@ class AnalysisService(BaseService):
             environment_hash=environment_hash.strip() if environment_hash else None,
             status=status,
             executed_by=actor_user_id(actor),
+            executed_by_user_id=actor_user_fk(actor, self.repository),
         )
         with self.unit_of_work() as repository:
             repository.analyses.save(analysis)

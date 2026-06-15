@@ -28,6 +28,7 @@ from lab_tracker.services.project_service import ProjectService
 from lab_tracker.services.question_service import QuestionService
 from lab_tracker.services.session_service import SessionService
 from lab_tracker.services.shared import (
+    actor_user_fk,
     actor_user_id,
     normalize_note_metadata,
 )
@@ -124,6 +125,7 @@ class NoteService(BaseService):
             metadata=resolved_metadata,
             status=status,
             created_by=actor_user_id(actor),
+            created_by_user_id=actor_user_fk(actor, self.repository),
         )
         with self.unit_of_work() as repository:
             repository.notes.save(note)

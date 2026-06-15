@@ -122,6 +122,7 @@ def change_set_to_model(change_set: GraphChangeSet) -> GraphChangeSetModel:
         commit_message=change_set.commit_message,
         error_metadata=dict(change_set.error_metadata),
         created_by=change_set.created_by,
+        created_by_user_id=_uuid_str(change_set.created_by_user_id),
         created_at=change_set.created_at,
         updated_at=change_set.updated_at,
         submitted_at=change_set.submitted_at,
@@ -156,6 +157,7 @@ def apply_change_set_to_model(row: GraphChangeSetModel, change_set: GraphChangeS
     row.commit_message = change_set.commit_message
     row.error_metadata = dict(change_set.error_metadata)
     row.created_by = change_set.created_by
+    row.created_by_user_id = _uuid_str(change_set.created_by_user_id)
     row.created_at = change_set.created_at
     row.updated_at = change_set.updated_at
     row.submitted_at = change_set.submitted_at
@@ -200,6 +202,7 @@ def change_set_from_model(
         error_metadata=_dict(row.error_metadata),
         operations=list(operations),
         created_by=row.created_by,
+        created_by_user_id=_uuid(row.created_by_user_id),
         created_by_username=resolved_usernames.get(row.created_by or ""),
         created_at=as_utc(row.created_at),
         updated_at=as_utc(row.updated_at),

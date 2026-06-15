@@ -8,7 +8,7 @@ from uuid import UUID
 from sqlalchemy import select
 from sqlalchemy.orm import Session as OrmSession
 
-from lab_tracker.db_models import NoteModel, QuestionModel
+from lab_tracker.db_models import NoteModel, QuestionModel, UserModel
 from lab_tracker.models import (
     AcquisitionOutput,
     Analysis,
@@ -83,6 +83,9 @@ class SQLAlchemyLabTrackerRepository(LabTrackerRepository):
 
     def rollback(self) -> None:
         self._session.rollback()
+
+    def user_exists(self, user_id: UUID) -> bool:
+        return self._session.get(UserModel, str(user_id)) is not None
 
     def fetch_questions(self, question_ids: list[UUID]) -> list[Question]:
         self._session.flush()

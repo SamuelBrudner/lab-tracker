@@ -15,6 +15,11 @@ def project_to_model(project: Project) -> ProjectModel:
         description=project.description,
         status=project.status.value,
         created_by=project.created_by,
+        created_by_user_id=(
+            uuid_to_db(project.created_by_user_id)
+            if project.created_by_user_id is not None
+            else None
+        ),
         created_at=project.created_at,
         updated_at=project.updated_at,
     )
@@ -28,6 +33,11 @@ def project_from_model(row: ProjectModel) -> Project:
         description=row.description,
         status=ProjectStatus(row.status),
         created_by=row.created_by,
+        created_by_user_id=(
+            uuid_from_db(row.created_by_user_id)
+            if row.created_by_user_id is not None
+            else None
+        ),
         created_at=as_utc(row.created_at),
         updated_at=as_utc(row.updated_at),
     )
@@ -39,6 +49,11 @@ def apply_project_to_model(row: ProjectModel, project: Project) -> None:
     row.description = project.description
     row.status = project.status.value
     row.created_by = project.created_by
+    row.created_by_user_id = (
+        uuid_to_db(project.created_by_user_id)
+        if project.created_by_user_id is not None
+        else None
+    )
     row.created_at = project.created_at
     row.updated_at = project.updated_at
 
@@ -51,6 +66,11 @@ def project_group_to_model(group: ProjectGroup) -> ProjectGroupModel:
         kind=group.kind.value,
         group_read_all=group.group_read_all,
         created_by=group.created_by,
+        created_by_user_id=(
+            uuid_to_db(group.created_by_user_id)
+            if group.created_by_user_id is not None
+            else None
+        ),
         created_at=group.created_at,
         updated_at=group.updated_at,
     )
@@ -64,6 +84,11 @@ def project_group_from_model(row: ProjectGroupModel) -> ProjectGroup:
         kind=ProjectGroupKind(row.kind),
         group_read_all=row.group_read_all,
         created_by=row.created_by,
+        created_by_user_id=(
+            uuid_from_db(row.created_by_user_id)
+            if row.created_by_user_id is not None
+            else None
+        ),
         created_at=as_utc(row.created_at),
         updated_at=as_utc(row.updated_at),
     )
@@ -75,5 +100,10 @@ def apply_project_group_to_model(row: ProjectGroupModel, group: ProjectGroup) ->
     row.kind = group.kind.value
     row.group_read_all = group.group_read_all
     row.created_by = group.created_by
+    row.created_by_user_id = (
+        uuid_to_db(group.created_by_user_id)
+        if group.created_by_user_id is not None
+        else None
+    )
     row.created_at = group.created_at
     row.updated_at = group.updated_at

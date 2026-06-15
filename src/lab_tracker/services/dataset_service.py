@@ -30,6 +30,7 @@ from lab_tracker.services.shared import (
     _ensure_primary_question_active,
     _manifest_input_from_commit,
     _validate_commit_hash,
+    actor_user_fk,
     actor_user_id,
     unique_ids,
 )
@@ -137,6 +138,7 @@ class DatasetService(BaseService):
             commit_manifest=resolved_manifest,
             status=status,
             created_by=actor_user_id(actor),
+            created_by_user_id=actor_user_fk(actor, self.repository),
         )
         if commit_requested:
             _ensure_primary_question_active(primary_question)

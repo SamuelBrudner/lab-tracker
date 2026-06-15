@@ -5,19 +5,24 @@ from uuid import uuid4
 import pytest
 from api_helpers import repository_backed_api
 from fastapi.testclient import TestClient
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, text
 
 from lab_tracker.api import LabTrackerAPI
 from lab_tracker.app import create_app
-from lab_tracker.auth import AuthContext, Role
+from lab_tracker.auth import LOCAL_AUTH_USER_ID, AuthContext, Role
 from lab_tracker.db import Base, get_session_factory
-from lab_tracker.db_models import NoteModel, ProjectModel, QuestionModel
+from lab_tracker.db_models import NoteModel, ProjectModel, QuestionModel, UserModel
 from lab_tracker.errors import ValidationError
 from lab_tracker.models import (
     AnalysisStatus,
     ClaimStatus,
     DatasetCommitManifestInput,
     DatasetStatus,
+    EntityRef,
+    EntityType,
+    GoalRelation,
+    GoalType,
+    ProjectMembershipRole,
     QuestionStatus,
     QuestionType,
     SessionType,
@@ -39,6 +44,56 @@ def _seed_admin(app, *, username: str, password: str) -> None:
         password=password,
         role=Role.ADMIN,
     )
+
+
+class _AttributionDraftClient:
+    provider = "fake"
+    model = "fake-attribution-model"
+
+    def draft_from_note(self, **_kwargs):
+        return {
+            "summary": "empty",
+            "uncertain_fields": [],
+            "clarification_requests": [],
+            "operations": [],
+        }
+
+    def draft_from_batch(self, **_kwargs):
+        return self.draft_from_note()
+
+
+def _insert_user(session, user_id, username, role=Role.ADMIN):
+    session.add(
+        UserModel(
+            user_id=str(user_id),
+            username=username,
+            password_hash="unused",
+            role=role.value,
+        )
+    )
+
+
+def _assert_attribution_row(
+    session,
+    *,
+    table_name,
+    id_column,
+    id_value,
+    legacy_column,
+    fk_column,
+    expected_legacy,
+    expected_fk,
+):
+    row = session.execute(
+        text(
+            f"SELECT {legacy_column}, {fk_column} "
+            f"FROM {table_name} "
+            f"WHERE {id_column} = :id_value"
+        ),
+        {"id_value": str(id_value)},
+    ).mappings().one()
+    assert row[legacy_column] == expected_legacy
+    assert row[fk_column] == expected_fk
 
 
 class _SpySearchRepository(SQLAlchemyLabTrackerRepository):
@@ -151,6 +206,190 @@ def test_repository_backed_api_persists_core_entities(tmp_path):
         assert api.get_session(created_session.session_id).project_id == project.project_id
         outputs = api.list_acquisition_outputs(session_id=created_session.session_id)
         assert outputs == [created_output]
+
+    engine.dispose()
+
+
+def test_repository_backed_api_dual_writes_attribution_user_fk_columns(tmp_path):
+    db_path = tmp_path / "api-attribution-fks.db"
+    engine = create_engine(
+        f"sqlite+pysqlite:///{db_path}",
+        future=True,
+        connect_args={"check_same_thread": False},
+    )
+    Base.metadata.create_all(bind=engine)
+    session_factory = get_session_factory(engine=engine)
+    actor_id = uuid4()
+    target_user_id = uuid4()
+    actor = AuthContext(user_id=actor_id, role=Role.ADMIN)
+
+    with session_factory() as session:
+        _insert_user(session, actor_id, "attribution-admin", Role.ADMIN)
+        _insert_user(session, target_user_id, "attribution-viewer", Role.VIEWER)
+        session.commit()
+
+    with session_factory() as session:
+        api = LabTrackerAPI(repository=SQLAlchemyLabTrackerRepository(session))
+        group = api.create_project_group("Attribution group", actor=actor)
+        project = api.create_project(
+            "Attribution project",
+            group_id=group.group_id,
+            actor=actor,
+        )
+        group_membership = api.upsert_group_membership(
+            group.group_id,
+            target_user_id,
+            ProjectMembershipRole.VIEWER,
+            actor=actor,
+        )
+        project_membership = api.upsert_project_membership(
+            project.project_id,
+            target_user_id,
+            ProjectMembershipRole.CONTRIBUTOR,
+            actor=actor,
+        )
+        question = api.create_question(
+            project_id=project.project_id,
+            text="Which attribution fields stay linked?",
+            question_type=QuestionType.DESCRIPTIVE,
+            actor=actor,
+        )
+        refactor_source = api.create_question(
+            project_id=project.project_id,
+            text="Can this question be refined?",
+            question_type=QuestionType.DESCRIPTIVE,
+            actor=actor,
+        )
+        refactor = api.refactor_question(
+            refactor_source.question_id,
+            replacement_text="Can this refined question keep attribution?",
+            replacement_question_type=QuestionType.DESCRIPTIVE,
+            replacement_status=QuestionStatus.STAGED,
+            reason="Exercise attribution mirror writes.",
+            actor=actor,
+        ).refactor
+        dataset = api.create_dataset(
+            project_id=project.project_id,
+            primary_question_id=question.question_id,
+            actor=actor,
+        )
+        note = api.create_note(
+            project_id=project.project_id,
+            raw_content="attribution note",
+            actor=actor,
+        )
+        created_session = api.create_session(
+            project_id=project.project_id,
+            session_type=SessionType.OPERATIONAL,
+            actor=actor,
+        )
+        analysis = api.create_analysis(
+            project_id=project.project_id,
+            dataset_ids=[dataset.dataset_id],
+            method_hash="method",
+            code_version="v1",
+            actor=actor,
+        )
+        goal = api.create_goal(
+            project_id=project.project_id,
+            goal_type=GoalType.PAPER,
+            title="Attribution manuscript",
+            actor=actor,
+        )
+        goal_link = api.link_node_to_goal(
+            goal.goal_id,
+            target=EntityRef(entity_type=EntityType.QUESTION, entity_id=question.question_id),
+            relation=GoalRelation.ADDRESSES,
+            actor=actor,
+        )
+        draft_client = _AttributionDraftClient()
+        change_set = api.create_graph_draft_from_note(
+            note.note_id,
+            draft_client=draft_client,
+            actor=actor,
+        )
+        batch_run = api.run_graph_draft_batch_for_project(
+            project.project_id,
+            draft_client=draft_client,
+            actor=actor,
+        )
+
+        assert project.created_by_user_id == actor_id
+        assert analysis.executed_by_user_id == actor_id
+        assert batch_run.created_by_user_id == actor_id
+
+        expected_user = str(actor_id)
+        created_rows = [
+            ("project_groups", "group_id", group.group_id),
+            ("projects", "project_id", project.project_id),
+            ("group_memberships", "membership_id", group_membership.membership_id),
+            ("project_memberships", "membership_id", project_membership.membership_id),
+            ("questions", "question_id", question.question_id),
+            ("question_refactors", "refactor_id", refactor.refactor_id),
+            ("datasets", "dataset_id", dataset.dataset_id),
+            ("notes", "note_id", note.note_id),
+            ("sessions", "session_id", created_session.session_id),
+            ("goals", "goal_id", goal.goal_id),
+            ("goal_links", "link_id", goal_link.link_id),
+            ("graph_change_sets", "change_set_id", change_set.change_set_id),
+            ("graph_draft_batch_runs", "run_id", batch_run.run_id),
+        ]
+        if batch_run.change_set_id is not None:
+            created_rows.append(
+                ("graph_change_sets", "change_set_id", batch_run.change_set_id)
+            )
+        for table_name, id_column, id_value in created_rows:
+            _assert_attribution_row(
+                session,
+                table_name=table_name,
+                id_column=id_column,
+                id_value=id_value,
+                legacy_column="created_by",
+                fk_column="created_by_user_id",
+                expected_legacy=expected_user,
+                expected_fk=expected_user,
+            )
+        _assert_attribution_row(
+            session,
+            table_name="analyses",
+            id_column="analysis_id",
+            id_value=analysis.analysis_id,
+            legacy_column="executed_by",
+            fk_column="executed_by_user_id",
+            expected_legacy=expected_user,
+            expected_fk=expected_user,
+        )
+
+    engine.dispose()
+
+
+def test_repository_backed_api_leaves_local_attribution_fk_null(tmp_path):
+    db_path = tmp_path / "api-local-attribution.db"
+    engine = create_engine(
+        f"sqlite+pysqlite:///{db_path}",
+        future=True,
+        connect_args={"check_same_thread": False},
+    )
+    Base.metadata.create_all(bind=engine)
+    session_factory = get_session_factory(engine=engine)
+    actor = AuthContext(user_id=LOCAL_AUTH_USER_ID, role=Role.ADMIN)
+
+    with session_factory() as session:
+        api = LabTrackerAPI(repository=SQLAlchemyLabTrackerRepository(session))
+        project = api.create_project("Local attribution project", actor=actor)
+
+        assert project.created_by == str(LOCAL_AUTH_USER_ID)
+        assert project.created_by_user_id is None
+        _assert_attribution_row(
+            session,
+            table_name="projects",
+            id_column="project_id",
+            id_value=project.project_id,
+            legacy_column="created_by",
+            fk_column="created_by_user_id",
+            expected_legacy=str(LOCAL_AUTH_USER_ID),
+            expected_fk=None,
+        )
 
     engine.dispose()
 

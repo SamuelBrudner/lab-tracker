@@ -377,6 +377,7 @@ class GraphChangeSet(_DomainModel):
     operations: list[GraphChangeOperation] = Field(default_factory=list)
     created_at: datetime = Field(default_factory=utc_now)
     created_by: str | None = None
+    created_by_user_id: UUID | None = None
     created_by_username: str | None = None
     updated_at: datetime = Field(default_factory=utc_now)
     submitted_at: datetime | None = None
@@ -426,6 +427,7 @@ class GraphDraftBatchRun(_DomainModel):
     started_at: datetime = Field(default_factory=utc_now)
     finished_at: datetime | None = None
     created_by: str | None = None
+    created_by_user_id: UUID | None = None
 
 
 class Project(_DomainModel):
@@ -436,6 +438,7 @@ class Project(_DomainModel):
     status: ProjectStatus = ProjectStatus.ACTIVE
     created_at: datetime = Field(default_factory=utc_now)
     created_by: str | None = None
+    created_by_user_id: UUID | None = None
     updated_at: datetime = Field(default_factory=utc_now)
 
 
@@ -447,6 +450,7 @@ class ProjectGroup(_DomainModel):
     group_read_all: bool = False
     created_at: datetime = Field(default_factory=utc_now)
     created_by: str | None = None
+    created_by_user_id: UUID | None = None
     updated_at: datetime = Field(default_factory=utc_now)
 
 
@@ -459,6 +463,7 @@ class ProjectMembership(_DomainModel):
     user_global_role: str | None = None
     created_at: datetime = Field(default_factory=utc_now)
     created_by: str | None = None
+    created_by_user_id: UUID | None = None
     updated_at: datetime = Field(default_factory=utc_now)
 
 
@@ -471,6 +476,7 @@ class GroupMembership(_DomainModel):
     user_global_role: str | None = None
     created_at: datetime = Field(default_factory=utc_now)
     created_by: str | None = None
+    created_by_user_id: UUID | None = None
     updated_at: datetime = Field(default_factory=utc_now)
 
 
@@ -486,6 +492,7 @@ class Question(_DomainModel):
     supersedes_question_id: UUID | None = None
     created_at: datetime = Field(default_factory=utc_now)
     created_by: str | None = None
+    created_by_user_id: UUID | None = None
     updated_at: datetime = Field(default_factory=utc_now)
 
 
@@ -500,6 +507,7 @@ class QuestionRefactor(_DomainModel):
     relationship_changes: dict[str, Any] = Field(default_factory=dict)
     created_at: datetime = Field(default_factory=utc_now)
     created_by: str | None = None
+    created_by_user_id: UUID | None = None
 
 
 class Dataset(_DomainModel):
@@ -512,6 +520,7 @@ class Dataset(_DomainModel):
     status: DatasetStatus = DatasetStatus.STAGED
     created_at: datetime = Field(default_factory=utc_now)
     created_by: str | None = None
+    created_by_user_id: UUID | None = None
     updated_at: datetime = Field(default_factory=utc_now)
 
 
@@ -526,6 +535,7 @@ class Note(_DomainModel):
     status: NoteStatus = NoteStatus.STAGED
     created_at: datetime = Field(default_factory=utc_now)
     created_by: str | None = None
+    created_by_user_id: UUID | None = None
     updated_at: datetime = Field(default_factory=utc_now)
 
 
@@ -538,6 +548,7 @@ class Session(_DomainModel):
     started_at: datetime = Field(default_factory=utc_now)
     ended_at: datetime | None = None
     created_by: str | None = None
+    created_by_user_id: UUID | None = None
     updated_at: datetime = Field(default_factory=utc_now)
 
     @computed_field(return_type=str)
@@ -564,6 +575,7 @@ class Analysis(_DomainModel):
     code_version: str
     environment_hash: str | None = None
     executed_by: str | None = None
+    executed_by_user_id: UUID | None = None
     executed_at: datetime = Field(default_factory=utc_now)
     status: AnalysisStatus = AnalysisStatus.STAGED
     created_at: datetime = Field(default_factory=utc_now)
@@ -603,6 +615,7 @@ class GoalLink(_DomainModel):
     slot: str | None = None
     created_at: datetime = Field(default_factory=utc_now)
     created_by: str | None = None
+    created_by_user_id: UUID | None = None
 
 
 class Goal(_DomainModel):
@@ -618,6 +631,7 @@ class Goal(_DomainModel):
     links: list[GoalLink] = Field(default_factory=list)
     created_at: datetime = Field(default_factory=utc_now)
     created_by: str | None = None
+    created_by_user_id: UUID | None = None
     updated_at: datetime = Field(default_factory=utc_now)
 
 

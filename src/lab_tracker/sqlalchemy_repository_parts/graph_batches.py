@@ -21,6 +21,14 @@ from lab_tracker.repository import EntityRepository
 from .common import apply_pagination, count_from_statement
 
 
+def _uuid(value: str | None) -> UUID | None:
+    return UUID(value) if value else None
+
+
+def _uuid_str(value: UUID | None) -> str | None:
+    return str(value) if value is not None else None
+
+
 def _dict(value: Any) -> dict[str, Any]:
     return dict(value or {})
 
@@ -88,6 +96,7 @@ def run_to_model(run: GraphDraftBatchRun) -> GraphDraftBatchRunModel:
         started_at=run.started_at,
         finished_at=run.finished_at,
         created_by=run.created_by,
+        created_by_user_id=_uuid_str(run.created_by_user_id),
     )
 
 
@@ -107,6 +116,7 @@ def apply_run_to_model(row: GraphDraftBatchRunModel, run: GraphDraftBatchRun) ->
     row.started_at = run.started_at
     row.finished_at = run.finished_at
     row.created_by = run.created_by
+    row.created_by_user_id = _uuid_str(run.created_by_user_id)
 
 
 def run_from_model(row: GraphDraftBatchRunModel) -> GraphDraftBatchRun:
@@ -127,6 +137,7 @@ def run_from_model(row: GraphDraftBatchRunModel) -> GraphDraftBatchRun:
         started_at=row.started_at,
         finished_at=row.finished_at,
         created_by=row.created_by,
+        created_by_user_id=_uuid(row.created_by_user_id),
     )
 
 

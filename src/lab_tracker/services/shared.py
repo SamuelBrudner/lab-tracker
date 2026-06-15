@@ -6,10 +6,10 @@ import hashlib
 import json
 from collections.abc import Iterable, Mapping
 from enum import Enum
-from typing import TypeVar
+from typing import TYPE_CHECKING, TypeVar
 from uuid import UUID
 
-from lab_tracker.auth import AuthContext, Role
+from lab_tracker.auth import LOCAL_AUTH_USER_ID, AuthContext, Role
 from lab_tracker.errors import NotFoundError, ValidationError
 from lab_tracker.models import (
     AcquisitionOutput,
@@ -32,6 +32,9 @@ from lab_tracker.models import (
 )
 from lab_tracker.provenance_ingestion import external_artifacts_from_metadata
 
+if TYPE_CHECKING:
+    from lab_tracker.repository import LabTrackerRepository
+
 WRITE_ROLES = {Role.ADMIN, Role.EDITOR}
 StatusT = TypeVar("StatusT", bound=Enum)
 
@@ -40,6 +43,18 @@ def actor_user_id(actor: AuthContext | None) -> str | None:
     if actor is None:
         return None
     return str(actor.user_id)
+
+
+def actor_user_fk(
+    actor: AuthContext | None,
+    repository: LabTrackerRepository,
+) -> UUID | None:
+    if actor is None or actor.user_id == LOCAL_AUTH_USER_ID:
+        return None
+    user_exists = getattr(repository, "user_exists", None)
+    if not callable(user_exists) or not user_exists(actor.user_id):
+        return None
+    return actor.user_id
 
 
 def ensure_non_empty(value: str, field_name: str) -> None:

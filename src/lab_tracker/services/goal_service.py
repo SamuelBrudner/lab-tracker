@@ -28,7 +28,7 @@ from lab_tracker.services.dataset_service import DatasetService
 from lab_tracker.services.project_authorization import ProjectAuthorizationPolicy
 from lab_tracker.services.project_service import ProjectService
 from lab_tracker.services.question_service import QuestionService
-from lab_tracker.services.shared import actor_user_id, ensure_non_empty
+from lab_tracker.services.shared import actor_user_fk, actor_user_id, ensure_non_empty
 
 if TYPE_CHECKING:
     from lab_tracker.services.analysis_service import AnalysisService
@@ -123,6 +123,7 @@ class GoalService(BaseService):
             external_ref=external_ref.strip() if external_ref else None,
             attributes=normalized_attributes,
             created_by=actor_user_id(actor),
+            created_by_user_id=actor_user_fk(actor, self.repository),
         )
         with self.unit_of_work() as repository:
             repository.goals.save(goal)
@@ -356,6 +357,7 @@ class GoalService(BaseService):
             link_status=status,
             slot=cleaned_slot,
             created_by=actor_user_id(actor),
+            created_by_user_id=actor_user_fk(actor, self.repository),
         )
         goal.links.append(link)
         return link
