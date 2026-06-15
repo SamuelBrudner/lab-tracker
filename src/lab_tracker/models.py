@@ -630,7 +630,7 @@ class GoalLink(_DomainModel):
 
 class Goal(_DomainModel):
     goal_id: UUID
-    project_id: UUID
+    project_id: UUID | None = None
     goal_type: GoalType
     title: str
     summary: str = ""

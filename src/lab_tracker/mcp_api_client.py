@@ -311,15 +311,16 @@ class LabTrackerAPIClient:
     def list_goals(
         self,
         *,
-        project_id: str,
+        project_id: str | None = None,
         goal_type: str | None = None,
         status: str | None = None,
         limit: int = 50,
         offset: int = 0,
     ) -> JsonObject:
+        path = "/goals" if project_id is None else f"/projects/{project_id}/goals"
         return self._request(
             "GET",
-            f"/projects/{project_id}/goals",
+            path,
             params={
                 "goal_type": _validate_goal_type(goal_type),
                 "status": _validate_goal_status(status),

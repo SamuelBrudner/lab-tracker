@@ -193,6 +193,18 @@ class GraphPatchApplier:
                 target_date=data.target_date,
                 external_ref=data.external_ref,
                 attributes=data.attributes,
+                links=[
+                    GoalLinkSpec(
+                        target=EntityRef(
+                            entity_type=link.entity_type,
+                            entity_id=link.entity_id,
+                        ),
+                        relation=link.relation,
+                        link_status=link.link_status,
+                        slot=link.slot,
+                    )
+                    for link in data.links or []
+                ],
                 actor=actor,
             )
         if entity_type == EntityType.VISUALIZATION:

@@ -816,7 +816,7 @@ def apply_claim_to_model(row: ClaimModel, claim: Claim) -> None:
 def goal_to_model(goal: Goal) -> GoalModel:
     return GoalModel(
         goal_id=_uuid_str(goal.goal_id),
-        project_id=_uuid_str(goal.project_id),
+        project_id=_uuid_str(goal.project_id) if goal.project_id is not None else None,
         goal_type=goal.goal_type.value,
         title=goal.title,
         summary=goal.summary,
@@ -842,7 +842,7 @@ def goal_from_model(
 ) -> Goal:
     return Goal(
         goal_id=_uuid(row.goal_id),
-        project_id=_uuid(row.project_id),
+        project_id=_uuid(row.project_id) if row.project_id is not None else None,
         goal_type=GoalType(row.goal_type),
         title=row.title,
         summary=row.summary or "",
@@ -861,7 +861,7 @@ def goal_from_model(
 
 
 def apply_goal_to_model(row: GoalModel, goal: Goal) -> None:
-    row.project_id = _uuid_str(goal.project_id)
+    row.project_id = _uuid_str(goal.project_id) if goal.project_id is not None else None
     row.goal_type = goal.goal_type.value
     row.title = goal.title
     row.summary = goal.summary

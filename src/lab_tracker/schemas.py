@@ -547,16 +547,17 @@ class GoalCreateFields(RequestModel):
         return self
 
 
-class GoalCreate(GoalCreateFields):
-    project_id: UUID
-
-
 class GoalLinkCreate(RequestModel):
     entity_type: EntityType
     entity_id: UUID
     relation: GoalRelation
     link_status: GoalLinkStatus | None = None
     slot: str | None = Field(default=None, max_length=120)
+
+
+class GoalCreate(GoalCreateFields):
+    project_id: UUID | None = None
+    links: list[GoalLinkCreate] | None = None
 
 
 class GoalUpdate(RequestModel):

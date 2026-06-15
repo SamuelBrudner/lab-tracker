@@ -386,6 +386,7 @@ class SQLAlchemyLabTrackerRepository(LabTrackerRepository):
         self,
         *,
         project_id: UUID | None = None,
+        project_ids: set[UUID] | None = None,
         goal_type: str | None = None,
         status: str | None = None,
         target_entity_type: str | None = None,
@@ -395,6 +396,7 @@ class SQLAlchemyLabTrackerRepository(LabTrackerRepository):
     ) -> tuple[list[Goal], int]:
         return self.goals.query(
             project_id=project_id,
+            project_ids=project_ids,
             goal_type=goal_type,
             status=status,
             target_entity_type=target_entity_type,

@@ -10,7 +10,7 @@ from uuid import UUID, uuid4
 from pydantic import ValidationError as PydanticValidationError
 
 from lab_tracker.auth import AuthContext
-from lab_tracker.errors import ValidationError
+from lab_tracker.errors import AuthError, ValidationError
 from lab_tracker.goals_attributes import validate_goal_attributes
 from lab_tracker.models import (
     EntityRef,
@@ -39,6 +39,7 @@ if TYPE_CHECKING:
 
 
 GOAL_LINK_TARGET_TYPES = {
+    EntityType.PROJECT,
     EntityType.QUESTION,
     EntityType.NOTE,
     EntityType.SESSION,
@@ -97,7 +98,7 @@ class GoalService(BaseService):
 
     def create_goal(
         self,
-        project_id: UUID,
+        project_id: UUID | None,
         *,
         goal_type: GoalType,
         title: str,
@@ -106,10 +107,11 @@ class GoalService(BaseService):
         target_date: date | None = None,
         external_ref: str | None = None,
         attributes: dict[str, object] | None = None,
+        links: Iterable[GoalLinkSpec] | None = None,
         actor: AuthContext | None = None,
     ) -> Goal:
-        self.authorization.require_contributor(project_id, actor=actor)
-        self.projects.get_project(project_id)
+        if project_id is not None:
+            self.projects.get_project(project_id)
         ensure_non_empty(title, "title")
         normalized_attributes = self._validate_attributes(goal_type, attributes)
         goal = Goal(
@@ -125,6 +127,18 @@ class GoalService(BaseService):
             created_by=actor_user_id(actor),
             created_by_user_id=actor_user_fk(actor, self.repository),
         )
+        for link in links or []:
+            self._ensure_target_exists(link.target, goal.project_id)
+            self._upsert_goal_link(
+                goal,
+                target=link.target,
+                relation=link.relation,
+                link_status=link.link_status,
+                slot=link.slot,
+                actor=actor,
+            )
+        self._ensure_goal_has_scope(goal)
+        self._require_goal_contributor(goal, actor=actor)
         with self.unit_of_work() as repository:
             repository.goals.save(goal)
         return goal
@@ -153,6 +167,43 @@ class GoalService(BaseService):
             ),
         )
 
+    def list_visible_goals(
+        self,
+        *,
+        project_id: UUID | None = None,
+        goal_type: GoalType | None = None,
+        status: GoalStatus | None = None,
+        actor: AuthContext | None = None,
+    ) -> list[Goal]:
+        if project_id is not None:
+            self.authorization.require_read(project_id, actor=actor)
+            project_ids = None
+        else:
+            project_ids = self.authorization.accessible_project_ids(actor)
+            if project_ids == set():
+                return []
+        goals = self.query_from_repository(
+            loader=lambda repository: repository.query_goals(
+                project_id=project_id,
+                project_ids=project_ids,
+                goal_type=goal_type.value if goal_type is not None else None,
+                status=status.value if status is not None else None,
+                limit=None,
+                offset=0,
+            ),
+        )
+        return [goal for goal in goals if self.can_read_goal(goal, actor=actor)]
+
+    def can_read_goal(self, goal: Goal, *, actor: AuthContext | None = None) -> bool:
+        try:
+            self._require_goal_read(goal, actor=actor)
+        except AuthError:
+            return False
+        return True
+
+    def require_goal_read(self, goal: Goal, *, actor: AuthContext | None = None) -> None:
+        self._require_goal_read(goal, actor=actor)
+
     def update_goal(
         self,
         goal_id: UUID,
@@ -168,7 +219,7 @@ class GoalService(BaseService):
         actor: AuthContext | None = None,
     ) -> Goal:
         goal = self.get_goal(goal_id)
-        self.authorization.require_contributor(goal.project_id, actor=actor)
+        self._require_goal_contributor(goal, actor=actor)
         next_goal_type = goal_type or goal.goal_type
         if title is not None:
             ensure_non_empty(title, "title")
@@ -201,13 +252,15 @@ class GoalService(BaseService):
                 )
         goal.updated_at = utc_now()
         self._ensure_unique_goal_links(goal.links)
+        self._ensure_goal_has_scope(goal)
+        self._require_goal_contributor(goal, actor=actor)
         with self.unit_of_work() as repository:
             repository.goals.save(goal)
         return goal
 
     def delete_goal(self, goal_id: UUID, *, actor: AuthContext | None = None) -> Goal:
         goal = self.get_goal(goal_id)
-        self.authorization.require_owner(goal.project_id, actor=actor)
+        self._require_goal_owner(goal, actor=actor)
         with self.unit_of_work() as repository:
             repository.goals.delete(goal_id)
         return goal
@@ -223,7 +276,7 @@ class GoalService(BaseService):
         actor: AuthContext | None = None,
     ) -> GoalLink:
         goal = self.get_goal(goal_id)
-        self.authorization.require_contributor(goal.project_id, actor=actor)
+        self._require_goal_contributor(goal, actor=actor)
         self._ensure_target_exists(target, goal.project_id)
         link = self._upsert_goal_link(
             goal,
@@ -235,6 +288,8 @@ class GoalService(BaseService):
         )
         goal.updated_at = utc_now()
         self._ensure_unique_goal_links(goal.links)
+        self._ensure_goal_has_scope(goal)
+        self._require_goal_contributor(goal, actor=actor)
         with self.unit_of_work() as repository:
             repository.goals.save(goal)
         return link
@@ -250,7 +305,7 @@ class GoalService(BaseService):
         actor: AuthContext | None = None,
     ) -> GoalLink:
         goal = self.get_goal(goal_id)
-        self.authorization.require_contributor(goal.project_id, actor=actor)
+        self._require_goal_contributor(goal, actor=actor)
         link = self._find_goal_link(goal, link_id)
         if relation is not None:
             link.relation = relation
@@ -260,6 +315,8 @@ class GoalService(BaseService):
             link.slot = self._clean_slot(slot)
         goal.updated_at = utc_now()
         self._ensure_unique_goal_links(goal.links)
+        self._ensure_goal_has_scope(goal)
+        self._require_goal_contributor(goal, actor=actor)
         with self.unit_of_work() as repository:
             repository.goals.save(goal)
         return link
@@ -272,10 +329,12 @@ class GoalService(BaseService):
         actor: AuthContext | None = None,
     ) -> GoalLink:
         goal = self.get_goal(goal_id)
-        self.authorization.require_contributor(goal.project_id, actor=actor)
+        self._require_goal_contributor(goal, actor=actor)
         link = self._find_goal_link(goal, link_id)
         goal.links = [item for item in goal.links if item.link_id != link_id]
         goal.updated_at = utc_now()
+        self._ensure_goal_has_scope(goal)
+        self._require_goal_contributor(goal, actor=actor)
         with self.unit_of_work() as repository:
             repository.goals.save(goal)
         return link
@@ -307,9 +366,21 @@ class GoalService(BaseService):
         except (PydanticValidationError, ValueError) as exc:
             raise ValidationError(f"Goal attributes are invalid: {exc}") from exc
 
-    def _ensure_target_exists(self, target: EntityRef, project_id: UUID) -> None:
+    def _ensure_target_exists(
+        self,
+        target: EntityRef,
+        project_id: UUID | None,
+    ) -> UUID:
         if target.entity_type not in GOAL_LINK_TARGET_TYPES:
             raise ValidationError("Unsupported goal link target entity type.")
+        if target.entity_type == EntityType.PROJECT:
+            self.projects.get_project(target.entity_id)
+            if project_id is not None and target.entity_id != project_id:
+                raise ValidationError(
+                    "Project goal links must match the goal project; "
+                    "create a projectless goal to span projects."
+                )
+            return target.entity_id
         entity_getters = {
             EntityType.QUESTION: self.questions.get_question,
             EntityType.NOTE: self.notes.get_note,
@@ -322,11 +393,57 @@ class GoalService(BaseService):
         entity = entity_getters[target.entity_type](target.entity_id)
         if target.entity_type == EntityType.VISUALIZATION:
             analysis = self.analyses.get_analysis(entity.analysis_id)
-            if analysis.project_id != project_id:
+            if project_id is not None and analysis.project_id != project_id:
                 raise ValidationError("Goal link target must belong to the same project.")
-            return
-        if getattr(entity, "project_id", None) != project_id:
+            return analysis.project_id
+        target_project_id = getattr(entity, "project_id", None)
+        if project_id is not None and target_project_id != project_id:
             raise ValidationError("Goal link target must belong to the same project.")
+        return target_project_id
+
+    def _target_project_id(self, target: EntityRef) -> UUID:
+        return self._ensure_target_exists(target, None)
+
+    def _goal_scope_project_ids(self, goal: Goal) -> set[UUID]:
+        project_ids: set[UUID] = set()
+        if goal.project_id is not None:
+            project_ids.add(goal.project_id)
+        for link in goal.links:
+            project_ids.add(self._target_project_id(link.target))
+        return project_ids
+
+    def _ensure_goal_has_scope(self, goal: Goal) -> None:
+        if goal.project_id is not None:
+            return
+        if any(link.target.entity_type == EntityType.PROJECT for link in goal.links):
+            return
+        raise ValidationError("Projectless goals must include at least one project link.")
+
+    def _require_goal_read(self, goal: Goal, *, actor: AuthContext | None = None) -> None:
+        project_ids = self._goal_scope_project_ids(goal)
+        if not project_ids and not self.authorization.has_global_read(actor):
+            raise AuthError("Project access required.")
+        for project_id in project_ids:
+            self.authorization.require_read(project_id, actor=actor)
+
+    def _require_goal_contributor(
+        self,
+        goal: Goal,
+        *,
+        actor: AuthContext | None = None,
+    ) -> None:
+        project_ids = self._goal_scope_project_ids(goal)
+        if not project_ids and not self.authorization.has_global_write(actor):
+            raise AuthError("Project contributor access required.")
+        for project_id in project_ids:
+            self.authorization.require_contributor(project_id, actor=actor)
+
+    def _require_goal_owner(self, goal: Goal, *, actor: AuthContext | None = None) -> None:
+        project_ids = self._goal_scope_project_ids(goal)
+        if not project_ids and not self.authorization.has_global_admin(actor):
+            raise AuthError("Project owner access required.")
+        for project_id in project_ids:
+            self.authorization.require_owner(project_id, actor=actor)
 
     def _upsert_goal_link(
         self,

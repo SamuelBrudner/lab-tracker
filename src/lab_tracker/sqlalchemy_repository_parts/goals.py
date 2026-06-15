@@ -4,11 +4,12 @@ from __future__ import annotations
 
 from uuid import UUID
 
-from sqlalchemy import select
+from sqlalchemy import and_, or_, select
 from sqlalchemy.orm import Session as OrmSession
+from sqlalchemy.orm import aliased
 
 from lab_tracker.db_models import GoalLinkModel, GoalModel
-from lab_tracker.models import Goal, GoalLink
+from lab_tracker.models import EntityType, Goal, GoalLink
 from lab_tracker.repository import EntityRepository
 from lab_tracker.sqlalchemy_mappers import (
     apply_goal_to_model,
@@ -90,6 +91,7 @@ class SQLAlchemyGoalRepository(EntityRepository[Goal]):
         self,
         *,
         project_id: UUID | None = None,
+        project_ids: set[UUID] | None = None,
         goal_type: str | None = None,
         status: str | None = None,
         target_entity_type: str | None = None,
@@ -102,8 +104,15 @@ class SQLAlchemyGoalRepository(EntityRepository[Goal]):
         count_stmt = select(GoalModel.goal_id)
         distinct_required = False
         if project_id is not None:
-            stmt = stmt.where(GoalModel.project_id == str(project_id))
-            count_stmt = count_stmt.where(GoalModel.project_id == str(project_id))
+            project_clause = self._project_scope_clause({project_id})
+            stmt = stmt.where(project_clause)
+            count_stmt = count_stmt.where(project_clause)
+        elif project_ids is not None:
+            if not project_ids:
+                return [], 0
+            project_clause = self._project_scope_clause(project_ids)
+            stmt = stmt.where(project_clause)
+            count_stmt = count_stmt.where(project_clause)
         if goal_type is not None:
             stmt = stmt.where(GoalModel.goal_type == goal_type)
             count_stmt = count_stmt.where(GoalModel.goal_type == goal_type)
@@ -130,6 +139,21 @@ class SQLAlchemyGoalRepository(EntityRepository[Goal]):
         total = count_from_statement(self._session, count_stmt)
         rows = list(self._session.scalars(apply_pagination(stmt, limit=limit, offset=offset)))
         return self.goals_from_rows(rows), total
+
+    def _project_scope_clause(self, project_ids: set[UUID]):
+        project_values = [str(project_id) for project_id in sorted(project_ids, key=str)]
+        project_link = aliased(GoalLinkModel)
+        project_link_goals = select(project_link.goal_id).where(
+            project_link.entity_type == EntityType.PROJECT.value,
+            project_link.entity_id.in_(project_values),
+        )
+        return or_(
+            GoalModel.project_id.in_(project_values),
+            and_(
+                GoalModel.project_id.is_(None),
+                GoalModel.goal_id.in_(project_link_goals),
+            ),
+        )
 
     def query_links(
         self,

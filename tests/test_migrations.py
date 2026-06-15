@@ -78,7 +78,7 @@ def test_alembic_upgrade_chain_from_empty_to_head(monkeypatch, tmp_path):
     for revision in revisions:
         command.upgrade(config, revision)
         assert revision in _current_revisions(database_url)
-    assert _current_revision(database_url) == "0029_supervision_edges"
+    assert _current_revision(database_url) == "0030_nullable_goal_project"
 
 
 def test_alembic_has_single_head() -> None:
@@ -165,6 +165,9 @@ def test_alembic_upgrade_head_creates_expected_tables(monkeypatch, tmp_path):
     }
     goal_link_columns = {
         column["name"]: column for column in inspector.get_columns("goal_links")
+    }
+    goal_columns = {
+        column["name"]: column for column in inspector.get_columns("goals")
     }
 
     assert "review_policy" not in project_columns
@@ -254,6 +257,7 @@ def test_alembic_upgrade_head_creates_expected_tables(monkeypatch, tmp_path):
         "asset_checksum",
     }.issubset(visualization_columns)
     assert "review_note" in operation_columns
+    assert goal_columns["project_id"]["nullable"] is True
     assert goal_link_columns["slot"]["nullable"] is False
     engine.dispose()
 
@@ -268,7 +272,7 @@ def test_database_at_daily_review_branch_upgrades_to_current_head(monkeypatch, t
     assert _current_revision(database_url) == "0017_daily_graph_reviews"
 
     command.upgrade(config, "head")
-    assert _current_revision(database_url) == "0029_supervision_edges"
+    assert _current_revision(database_url) == "0030_nullable_goal_project"
 
     engine = create_engine(
         database_url,

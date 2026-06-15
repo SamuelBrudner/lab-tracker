@@ -254,6 +254,7 @@ class LabTrackerRepository(Protocol):
         self,
         *,
         project_id: UUID | None = None,
+        project_ids: set[UUID] | None = None,
         goal_type: str | None = None,
         status: str | None = None,
         target_entity_type: str | None = None,

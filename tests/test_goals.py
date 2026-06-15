@@ -30,6 +30,42 @@ def _actor(role: Role = Role.ADMIN) -> AuthContext:
     return AuthContext(user_id=uuid4(), role=role)
 
 
+def _auth_headers(token: str) -> dict[str, str]:
+    return {"Authorization": f"Bearer {token}"}
+
+
+def _register_user(client: TestClient, username: str) -> tuple[dict[str, str], str]:
+    response = client.post(
+        "/auth/register",
+        json={"username": username, "password": "secret"},
+    )
+    assert response.status_code == 201
+    data = response.json()["data"]
+    return _auth_headers(data["access_token"]), data["user"]["user_id"]
+
+
+def _create_project(client: TestClient, headers: dict[str, str], name: str) -> str:
+    response = client.post("/projects", json={"name": name}, headers=headers)
+    assert response.status_code == 201
+    return response.json()["data"]["project_id"]
+
+
+def _add_project_member(
+    client: TestClient,
+    headers: dict[str, str],
+    *,
+    project_id: str,
+    user_id: str,
+    role: str = "viewer",
+) -> None:
+    response = client.post(
+        f"/projects/{project_id}/members",
+        json={"user_id": user_id, "role": role},
+        headers=headers,
+    )
+    assert response.status_code == 201
+
+
 def _api_project_question():
     api = repository_backed_api()
     actor = _actor()
@@ -88,6 +124,18 @@ def test_goals_round_trip_links_and_reverse_lookup_through_repository():
         target=EntityRef(entity_type=EntityType.QUESTION, entity_id=question.question_id),
     )
     assert [item.goal_id for item in reverse] == [goal.goal_id]
+
+
+def test_projectless_goal_requires_project_link_scope():
+    api, actor, _project, _question = _api_project_question()
+
+    with pytest.raises(ValidationError, match="Projectless goals"):
+        api.create_goal(
+            None,
+            goal_type=GoalType.GRANT,
+            title="Unscoped grant",
+            actor=actor,
+        )
 
 
 def test_goal_links_use_empty_db_slot_to_enforce_unslotted_uniqueness():
@@ -200,6 +248,89 @@ def test_goal_routes_create_link_reverse_lookup_and_goal_scoped_search(
     )
     assert search.status_code == 200
     assert [item["question_id"] for item in search.json()["data"]["questions"]] == [question_id]
+
+
+def test_spanning_goal_index_requires_access_to_all_linked_projects(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+):
+    project_a = _create_project(client, admin_auth_headers, "Spanning A")
+    project_b = _create_project(client, admin_auth_headers, "Spanning B")
+    project_c = _create_project(client, admin_auth_headers, "Hidden C")
+    viewer_headers, viewer_user_id = _register_user(
+        client,
+        f"goal-viewer-{uuid4().hex[:8]}",
+    )
+
+    _add_project_member(
+        client,
+        admin_auth_headers,
+        project_id=project_a,
+        user_id=viewer_user_id,
+    )
+    hidden_goal = client.post(
+        f"/projects/{project_c}/goals",
+        json={"goal_type": "paper", "title": "Hidden manuscript"},
+        headers=admin_auth_headers,
+    )
+    assert hidden_goal.status_code == 201
+    created = client.post(
+        "/goals",
+        json={
+            "project_id": None,
+            "goal_type": "grant",
+            "title": "Cross-project grant",
+            "links": [
+                {
+                    "entity_type": "project",
+                    "entity_id": project_a,
+                    "relation": "contributes_to",
+                },
+                {
+                    "entity_type": "project",
+                    "entity_id": project_b,
+                    "relation": "contributes_to",
+                },
+            ],
+        },
+        headers=admin_auth_headers,
+    )
+    assert created.status_code == 201
+    goal = created.json()["data"]
+    goal_id = goal["goal_id"]
+    assert goal["project_id"] is None
+    assert {link["target"]["entity_id"] for link in goal["links"]} == {project_a, project_b}
+
+    partially_scoped = client.get("/goals", headers=viewer_headers)
+    partially_scoped_project = client.get(
+        f"/projects/{project_a}/goals",
+        headers=viewer_headers,
+    )
+    partially_scoped_get = client.get(f"/goals/{goal_id}", headers=viewer_headers)
+
+    assert partially_scoped.status_code == 200
+    assert partially_scoped.json()["data"] == []
+    assert partially_scoped_project.status_code == 200
+    assert partially_scoped_project.json()["data"] == []
+    assert partially_scoped_get.status_code == 401
+
+    _add_project_member(
+        client,
+        admin_auth_headers,
+        project_id=project_b,
+        user_id=viewer_user_id,
+    )
+
+    global_index = client.get("/goals", headers=viewer_headers)
+    project_index = client.get(f"/projects/{project_a}/goals", headers=viewer_headers)
+    direct_get = client.get(f"/goals/{goal_id}", headers=viewer_headers)
+
+    assert global_index.status_code == 200
+    assert [item["goal_id"] for item in global_index.json()["data"]] == [goal_id]
+    assert project_index.status_code == 200
+    assert [item["goal_id"] for item in project_index.json()["data"]] == [goal_id]
+    assert direct_get.status_code == 200
+    assert direct_get.json()["data"]["goal_id"] == goal_id
 
 
 def test_graph_draft_goal_operations_validate_and_apply_committed_links():

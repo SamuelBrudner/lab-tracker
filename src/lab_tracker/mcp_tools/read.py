@@ -238,13 +238,13 @@ def lab_tracker_list_visualizations(
 
 
 def lab_tracker_list_goals(
-    project_id: str,
+    project_id: str | None = None,
     goal_type: str | None = None,
     status: str | None = None,
     limit: int = 50,
     offset: int = 0,
 ) -> JsonObject:
-    """List Lab Tracker goals for a project."""
+    """List Lab Tracker goals visible to the caller, optionally scoped to a project."""
     client = client_from_env()
     try:
         return client.list_goals(
