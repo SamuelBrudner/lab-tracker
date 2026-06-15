@@ -450,8 +450,8 @@ class SQLAlchemyQuestionRepository(EntityRepository[Question]):
             stmt = stmt.where(QuestionModel.question_type == question_type)
             count_stmt = count_stmt.where(QuestionModel.question_type == question_type)
         if created_by is not None:
-            stmt = stmt.where(QuestionModel.created_by == created_by)
-            count_stmt = count_stmt.where(QuestionModel.created_by == created_by)
+            stmt = stmt.where(QuestionModel.created_by_user_id == created_by)
+            count_stmt = count_stmt.where(QuestionModel.created_by_user_id == created_by)
         pattern = substring_pattern(search)
         if pattern is not None:
             search_clause = or_(

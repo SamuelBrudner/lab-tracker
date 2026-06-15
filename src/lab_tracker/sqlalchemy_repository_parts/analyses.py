@@ -158,8 +158,8 @@ class SQLAlchemyAnalysisRepository(EntityRepository[Analysis]):
             stmt = stmt.where(AnalysisModel.status == status)
             count_stmt = count_stmt.where(AnalysisModel.status == status)
         if created_by is not None:
-            stmt = stmt.where(AnalysisModel.executed_by == created_by)
-            count_stmt = count_stmt.where(AnalysisModel.executed_by == created_by)
+            stmt = stmt.where(AnalysisModel.executed_by_user_id == created_by)
+            count_stmt = count_stmt.where(AnalysisModel.executed_by_user_id == created_by)
         if distinct_required:
             stmt = stmt.distinct()
             count_stmt = count_stmt.distinct()
@@ -305,7 +305,7 @@ class SQLAlchemyClaimRepository(EntityRepository[Claim]):
                         DatasetModel,
                         DatasetModel.dataset_id == ClaimDatasetModel.dataset_id,
                     )
-                    .where(DatasetModel.created_by == created_by)
+                    .where(DatasetModel.created_by_user_id == created_by)
                 ),
                 ClaimModel.claim_id.in_(
                     select(ClaimAnalysisModel.claim_id)
@@ -313,7 +313,7 @@ class SQLAlchemyClaimRepository(EntityRepository[Claim]):
                         AnalysisModel,
                         AnalysisModel.analysis_id == ClaimAnalysisModel.analysis_id,
                     )
-                    .where(AnalysisModel.executed_by == created_by)
+                    .where(AnalysisModel.executed_by_user_id == created_by)
                 ),
             )
             stmt = stmt.where(created_by_clause)

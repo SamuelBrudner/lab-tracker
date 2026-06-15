@@ -118,8 +118,8 @@ class SQLAlchemyDatasetRepository(EntityRepository[Dataset]):
             stmt = stmt.where(DatasetModel.status == status)
             count_stmt = count_stmt.where(DatasetModel.status == status)
         if created_by is not None:
-            stmt = stmt.where(DatasetModel.created_by == created_by)
-            count_stmt = count_stmt.where(DatasetModel.created_by == created_by)
+            stmt = stmt.where(DatasetModel.created_by_user_id == created_by)
+            count_stmt = count_stmt.where(DatasetModel.created_by_user_id == created_by)
         stmt = stmt.order_by(DatasetModel.created_at, DatasetModel.dataset_id)
         total = count_from_statement(self._session, count_stmt)
         rows = list(self._session.scalars(apply_pagination(stmt, limit=limit, offset=offset)))

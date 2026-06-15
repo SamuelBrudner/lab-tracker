@@ -110,8 +110,8 @@ class SQLAlchemyNoteRepository(EntityRepository[Note]):
             stmt = stmt.where(NoteModel.status == status)
             count_stmt = count_stmt.where(NoteModel.status == status)
         if created_by is not None:
-            stmt = stmt.where(NoteModel.created_by == created_by)
-            count_stmt = count_stmt.where(NoteModel.created_by == created_by)
+            stmt = stmt.where(NoteModel.created_by_user_id == created_by)
+            count_stmt = count_stmt.where(NoteModel.created_by_user_id == created_by)
         pattern = substring_pattern(search)
         if pattern is not None:
             search_clause = or_(

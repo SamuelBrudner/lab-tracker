@@ -57,6 +57,17 @@ def db_session():
         engine.dispose()
 
 
+def _add_user(db_session, user_id, username: str) -> None:  # noqa: ANN001
+    db_session.add(
+        UserModel(
+            user_id=str(user_id),
+            username=username,
+            password_hash="unused",
+            role="viewer",
+        )
+    )
+
+
 def test_project_repository_crud(db_session):
     repo = SQLAlchemyLabTrackerRepository(db_session)
     project = Project(
@@ -324,6 +335,10 @@ def test_acquisition_output_repository_crud(db_session):
 
 def test_query_questions_applies_filters_and_pagination(db_session):
     repo = SQLAlchemyLabTrackerRepository(db_session)
+    owner_user_id = uuid4()
+    other_user_id = uuid4()
+    _add_user(db_session, owner_user_id, "question-owner")
+    _add_user(db_session, other_user_id, "question-other")
     project = Project(
         project_id=uuid4(),
         name="Filtered questions",
@@ -341,7 +356,8 @@ def test_query_questions_applies_filters_and_pagination(db_session):
             text=f"Question {index}",
             question_type=QuestionType.DESCRIPTIVE,
             status=QuestionStatus.ACTIVE if index < 2 else QuestionStatus.STAGED,
-            created_by="trainee-b" if index == 1 else "trainee-a",
+            created_by=str(other_user_id) if index == 2 else f"legacy-question-{index}",
+            created_by_user_id=other_user_id if index == 1 else owner_user_id,
             parent_question_ids=[],
             created_at=_ts(index + 1),
             updated_at=_ts(index + 1),
@@ -364,7 +380,7 @@ def test_query_questions_applies_filters_and_pagination(db_session):
 
     created_page, created_total = repo.query_questions(
         project_id=project.project_id,
-        created_by="trainee-b",
+        created_by=str(other_user_id),
     )
 
     assert created_total == 1
@@ -471,6 +487,10 @@ def test_note_repository_list_batches_child_queries(db_session):
 
 def test_query_notes_filters_by_target(db_session):
     repo = SQLAlchemyLabTrackerRepository(db_session)
+    owner_user_id = uuid4()
+    other_user_id = uuid4()
+    _add_user(db_session, owner_user_id, "note-owner")
+    _add_user(db_session, other_user_id, "note-other")
     project = Project(
         project_id=uuid4(),
         name="Note targets",
@@ -488,7 +508,8 @@ def test_query_notes_filters_by_target(db_session):
             raw_content="dataset note",
             targets=[EntityRef(entity_type=EntityType.DATASET, entity_id=dataset_target)],
             status=NoteStatus.STAGED,
-            created_by="trainee-a",
+            created_by=str(other_user_id),
+            created_by_user_id=owner_user_id,
             created_at=_ts(1),
             updated_at=_ts(1),
         )
@@ -500,7 +521,8 @@ def test_query_notes_filters_by_target(db_session):
             raw_content="other note",
             targets=[EntityRef(entity_type=EntityType.DATASET, entity_id=other_target)],
             status=NoteStatus.STAGED,
-            created_by="trainee-b",
+            created_by="legacy-note-other",
+            created_by_user_id=other_user_id,
             created_at=_ts(2),
             updated_at=_ts(2),
         )
@@ -520,7 +542,7 @@ def test_query_notes_filters_by_target(db_session):
 
     created_notes, created_total = repo.query_notes(
         project_id=project.project_id,
-        created_by="trainee-b",
+        created_by=str(other_user_id),
     )
 
     assert created_total == 1
@@ -665,6 +687,10 @@ def test_query_sessions_and_acquisition_outputs_apply_filters_and_pagination(db_
 
 def test_query_datasets_dataset_files_and_note_targets_use_focused_repository_paths(db_session):
     repo = SQLAlchemyLabTrackerRepository(db_session)
+    owner_user_id = uuid4()
+    other_user_id = uuid4()
+    _add_user(db_session, owner_user_id, "dataset-owner")
+    _add_user(db_session, other_user_id, "dataset-other")
     project = Project(
         project_id=uuid4(),
         name="Dataset focus",
@@ -705,7 +731,8 @@ def test_query_datasets_dataset_files_and_note_targets_use_focused_repository_pa
             ],
         ),
         status=DatasetStatus.STAGED,
-        created_by="trainee-a",
+        created_by=str(other_user_id),
+        created_by_user_id=owner_user_id,
         created_at=_ts(2),
         updated_at=_ts(2),
     )
@@ -732,7 +759,8 @@ def test_query_datasets_dataset_files_and_note_targets_use_focused_repository_pa
             ],
         ),
         status=DatasetStatus.COMMITTED,
-        created_by="trainee-b",
+        created_by="legacy-dataset-other",
+        created_by_user_id=other_user_id,
         created_at=_ts(3),
         updated_at=_ts(3),
     )
@@ -806,7 +834,7 @@ def test_query_datasets_dataset_files_and_note_targets_use_focused_repository_pa
     )
     created_datasets, created_total_datasets = repo.query_datasets(
         project_id=project.project_id,
-        created_by="trainee-b",
+        created_by=str(other_user_id),
     )
     files, total_files = repo.query_dataset_files(
         dataset_id=staged_dataset.dataset_id,
@@ -830,6 +858,10 @@ def test_query_datasets_dataset_files_and_note_targets_use_focused_repository_pa
 
 def test_query_analyses_claims_and_visualizations_apply_focused_filters(db_session):
     repo = SQLAlchemyLabTrackerRepository(db_session)
+    owner_user_id = uuid4()
+    other_user_id = uuid4()
+    _add_user(db_session, owner_user_id, "analysis-owner")
+    _add_user(db_session, other_user_id, "analysis-other")
     project = Project(
         project_id=uuid4(),
         name="Analysis focus",
@@ -870,6 +902,8 @@ def test_query_analyses_claims_and_visualizations_apply_focused_filters(db_sessi
             ],
         ),
         status=DatasetStatus.COMMITTED,
+        created_by=str(other_user_id),
+        created_by_user_id=owner_user_id,
         created_at=_ts(2),
         updated_at=_ts(2),
     )
@@ -896,6 +930,8 @@ def test_query_analyses_claims_and_visualizations_apply_focused_filters(db_sessi
             ],
         ),
         status=DatasetStatus.COMMITTED,
+        created_by="legacy-dataset-two",
+        created_by_user_id=other_user_id,
         created_at=_ts(3),
         updated_at=_ts(3),
     )
@@ -906,7 +942,8 @@ def test_query_analyses_claims_and_visualizations_apply_focused_filters(db_sessi
         method_hash="method-1",
         code_version="code-1",
         status=AnalysisStatus.COMMITTED,
-        executed_by="trainee-a",
+        executed_by="legacy-analysis-owner",
+        executed_by_user_id=owner_user_id,
         executed_at=_ts(4),
         created_at=_ts(4),
         updated_at=_ts(4),
@@ -918,7 +955,8 @@ def test_query_analyses_claims_and_visualizations_apply_focused_filters(db_sessi
         method_hash="method-2",
         code_version="code-2",
         status=AnalysisStatus.STAGED,
-        executed_by="trainee-b",
+        executed_by=str(owner_user_id),
+        executed_by_user_id=other_user_id,
         executed_at=_ts(5),
         created_at=_ts(5),
         updated_at=_ts(5),
@@ -981,7 +1019,7 @@ def test_query_analyses_claims_and_visualizations_apply_focused_filters(db_sessi
     analyses, total_analyses = repo.query_analyses(
         question_id=question.question_id,
         status=AnalysisStatus.COMMITTED.value,
-        created_by="trainee-a",
+        created_by=str(owner_user_id),
         limit=10,
         offset=0,
     )
@@ -994,7 +1032,7 @@ def test_query_analyses_claims_and_visualizations_apply_focused_filters(db_sessi
     )
     created_claims, created_total_claims = repo.query_claims(
         project_id=project.project_id,
-        created_by="trainee-b",
+        created_by=str(other_user_id),
         limit=10,
         offset=0,
     )
