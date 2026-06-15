@@ -15,6 +15,23 @@ def _node_by_id(document: dict[str, object], node_id: str) -> dict[str, object]:
     raise AssertionError(f"Node not found: {node_id}")
 
 
+def _node_type_includes(node: dict[str, object], node_type: str) -> bool:
+    node_types = node["@type"]
+    if isinstance(node_types, list):
+        return node_type in node_types
+    return node_types == node_type
+
+
+def _register_user(client: TestClient, username: str) -> tuple[str, str]:
+    response = client.post(
+        "/auth/register",
+        json={"username": username, "password": "secret"},
+    )
+    assert response.status_code == 201
+    data = response.json()["data"]
+    return data["access_token"], data["user"]["user_id"]
+
+
 def _create_committed_dataset_with_provenance(
     client: TestClient,
     headers: dict[str, str],
@@ -85,9 +102,24 @@ def test_dataset_provenance_route_exports_json_ld_graph(
     admin_auth_headers: dict[str, str],
 ):
     headers = admin_auth_headers
+    admin_user_id = client.get("/auth/me", headers=headers).json()["data"]["user_id"]
+    _, supervisor_user_id = _register_user(
+        client,
+        f"provenance-supervisor-{uuid4().hex[:8]}",
+    )
     _, dataset_id, primary_question_id, secondary_question_id, note_id = (
         _create_committed_dataset_with_provenance(client, headers)
     )
+    supervision_response = client.post(
+        "/supervision-edges",
+        json={
+            "supervisor_user_id": supervisor_user_id,
+            "supervisee_user_id": admin_user_id,
+            "started_at": "2020-01-01T00:00:00+00:00",
+        },
+        headers=headers,
+    )
+    assert supervision_response.status_code == 201
 
     dataset_response = client.get(f"/datasets/{dataset_id}", headers=headers)
     assert dataset_response.status_code == 200
@@ -103,14 +135,19 @@ def test_dataset_provenance_route_exports_json_ld_graph(
     commit_iri = f"{dataset_iri}/provenance/commit"
     primary_question_link_iri = f"{dataset_iri}/provenance/question-links/{primary_question_id}"
     secondary_question_link_iri = f"{dataset_iri}/provenance/question-links/{secondary_question_id}"
+    creator_iri = f"http://testserver/agents/{admin_user_id}"
+    supervisor_iri = f"http://testserver/agents/{supervisor_user_id}"
 
     dataset_node = _node_by_id(payload, dataset_iri)
     commit_node = _node_by_id(payload, commit_iri)
     primary_question_link = _node_by_id(payload, primary_question_link_iri)
     secondary_question_link = _node_by_id(payload, secondary_question_link_iri)
+    creator_node = _node_by_id(payload, creator_iri)
+    supervisor_node = _node_by_id(payload, supervisor_iri)
 
     assert dataset_node["@type"] == "prov:Entity"
     assert dataset_node["prov:wasGeneratedBy"] == {"@id": commit_iri}
+    assert dataset_node["prov:wasAttributedTo"] == {"@id": creator_iri}
     assert dataset_node["commitHash"]
     assert dataset_node["status"] == "committed"
     assert commit_node["prov:used"] == [
@@ -133,6 +170,13 @@ def test_dataset_provenance_route_exports_json_ld_graph(
         "@id": f"http://testserver/questions/{secondary_question_id}"
     }
     assert secondary_question_link["role"] == "secondary"
+    assert _node_type_includes(creator_node, "prov:Person")
+    assert creator_node["userId"] == admin_user_id
+    assert creator_node["prov:actedOnBehalfOf"] == {
+        "@id": supervisor_iri,
+        "supervisionStartedAt": "2020-01-01T00:00:00+00:00",
+    }
+    assert _node_type_includes(supervisor_node, "prov:Person")
 
 
 def test_dataset_route_accepts_external_artifact_manifest_without_files(
@@ -243,6 +287,7 @@ def test_analysis_provenance_route_exports_related_entities(
     viz_iri = f"http://testserver/visualizations/{viz_id}"
 
     analysis_node = _node_by_id(payload, analysis_iri)
+    dataset_node = _node_by_id(payload, dataset_iri)
     claim_node = _node_by_id(payload, claim_iri)
     viz_node = _node_by_id(payload, viz_iri)
     agent_node = _node_by_id(payload, analysis_node["prov:wasAssociatedWith"]["@id"])
@@ -254,11 +299,15 @@ def test_analysis_provenance_route_exports_related_entities(
     assert analysis_node["environmentHash"] == "env-1"
     assert analysis_node["status"] == "committed"
     assert analysis_node["executedAt"]
-    assert agent_node["@type"] == "prov:Agent"
+    assert _node_type_includes(agent_node, "prov:Agent")
+    assert _node_type_includes(agent_node, "prov:Person")
     assert agent_node["userId"]
+    assert dataset_node["prov:wasAttributedTo"] == {"@id": agent_node["@id"]}
     assert claim_node["supportsDataset"] == [{"@id": dataset_iri}]
     assert claim_node["supportsAnalysis"] == [{"@id": analysis_iri}]
+    assert claim_node["prov:wasAttributedTo"] == {"@id": agent_node["@id"]}
     assert viz_node["prov:wasGeneratedBy"] == {"@id": analysis_iri}
+    assert viz_node["prov:wasAttributedTo"] == {"@id": agent_node["@id"]}
     assert viz_node["relatedClaim"] == [{"@id": claim_iri}]
 
 

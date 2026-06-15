@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 from datetime import datetime
 from urllib.parse import quote
+from uuid import UUID
 
 from lab_tracker.models import (
     Analysis,
@@ -16,6 +17,7 @@ from lab_tracker.models import (
     ExternalArtifactReference,
     QuestionLink,
     QuestionLinkRole,
+    SupervisionEdge,
     Visualization,
 )
 from lab_tracker.provenance_ingestion import external_artifacts_from_metadata
@@ -46,6 +48,7 @@ def _context(base_url: str) -> dict[str, object]:
     return {
         "prov": "http://www.w3.org/ns/prov#",
         "lab": _terms_iri(base_url),
+        "actedOnBehalfOf": {"@id": "prov:actedOnBehalfOf", "@type": "@id"},
         "answersQuestion": {"@id": "lab:answersQuestion", "@type": "@id"},
         "caption": "lab:caption",
         "checksum": "lab:checksum",
@@ -82,8 +85,11 @@ def _context(base_url: str) -> dict[str, object]:
         "supportsAnalysis": {"@id": "lab:supportsAnalysis", "@type": "@id"},
         "supportsDataset": {"@id": "lab:supportsDataset", "@type": "@id"},
         "sha256": "lab:sha256",
+        "supervisionEndedAt": "lab:supervisionEndedAt",
+        "supervisionStartedAt": "lab:supervisionStartedAt",
         "userId": "lab:userId",
         "vizType": "lab:vizType",
+        "wasAttributedTo": {"@id": "prov:wasAttributedTo", "@type": "@id"},
         "bidsMetadata": {"@id": "lab:bidsMetadata", "@type": "@json"},
     }
 
@@ -92,6 +98,132 @@ def _isoformat(value: datetime | None) -> str | None:
     if value is None:
         return None
     return value.isoformat()
+
+
+def _coerce_user_id(value: UUID | str | None) -> str | None:
+    if value is None:
+        return None
+    user_id = str(value).strip()
+    return user_id or None
+
+
+def _creator_user_id(created_by_user_id: UUID | None, created_by: str | None) -> str | None:
+    return _coerce_user_id(created_by_user_id) or _coerce_user_id(created_by)
+
+
+def _agent_iri(base_url: str, user_id: str) -> str:
+    normalized = _normalize_base_url(base_url)
+    return f"{normalized}/agents/{quote(user_id, safe='')}"
+
+
+def _attribution_value(base_url: str, user_ids: list[str]) -> dict[str, str] | list[dict[str, str]]:
+    refs = [{"@id": _agent_iri(base_url, user_id)} for user_id in user_ids]
+    if len(refs) == 1:
+        return refs[0]
+    return refs
+
+
+def _unique_user_ids(user_ids: list[str | None]) -> list[str]:
+    seen: set[str] = set()
+    unique: list[str] = []
+    for user_id in user_ids:
+        if user_id is None or user_id in seen:
+            continue
+        seen.add(user_id)
+        unique.append(user_id)
+    return unique
+
+
+def _person_node(base_url: str, user_id: str) -> dict[str, object]:
+    return {
+        "@id": _agent_iri(base_url, user_id),
+        "@type": ["prov:Agent", "prov:Person"],
+        "userId": user_id,
+    }
+
+
+def _uuid_or_none(value: str) -> UUID | None:
+    try:
+        return UUID(value)
+    except ValueError:
+        return None
+
+
+def _supervision_edge_active_at(edge: SupervisionEdge, activity_time: datetime) -> bool:
+    if edge.started_at > activity_time:
+        return False
+    return edge.ended_at is None or edge.ended_at > activity_time
+
+
+def _supervision_relationship(
+    base_url: str,
+    edge: SupervisionEdge,
+) -> dict[str, object]:
+    relationship: dict[str, object] = {
+        "@id": _agent_iri(base_url, str(edge.supervisor_user_id)),
+        "supervisionStartedAt": _isoformat(edge.started_at),
+    }
+    if edge.ended_at is not None:
+        relationship["supervisionEndedAt"] = _isoformat(edge.ended_at)
+    return relationship
+
+
+def _add_person_with_supervision(
+    people: dict[str, dict[str, object]],
+    base_url: str,
+    user_id: str,
+    *,
+    activity_time: datetime | None,
+    supervision_edges: list[SupervisionEdge],
+) -> None:
+    person_node = people.setdefault(user_id, _person_node(base_url, user_id))
+    user_uuid = _uuid_or_none(user_id)
+    if user_uuid is None or activity_time is None:
+        return
+
+    active_edges = [
+        edge
+        for edge in supervision_edges
+        if edge.supervisee_user_id == user_uuid and _supervision_edge_active_at(edge, activity_time)
+    ]
+    if not active_edges:
+        return
+
+    existing_relationships = person_node.get("prov:actedOnBehalfOf")
+    relationships: list[dict[str, object]]
+    if isinstance(existing_relationships, list):
+        relationships = list(existing_relationships)
+    elif isinstance(existing_relationships, dict):
+        relationships = [existing_relationships]
+    else:
+        relationships = []
+    relationship_keys = {
+        (
+            str(relationship.get("@id")),
+            str(relationship.get("supervisionStartedAt")),
+            str(relationship.get("supervisionEndedAt")),
+        )
+        for relationship in relationships
+    }
+
+    for edge in sorted(active_edges, key=lambda value: (value.started_at, str(value.edge_id))):
+        supervisor_user_id = str(edge.supervisor_user_id)
+        people.setdefault(supervisor_user_id, _person_node(base_url, supervisor_user_id))
+        relationship = _supervision_relationship(base_url, edge)
+        key = (
+            str(relationship.get("@id")),
+            str(relationship.get("supervisionStartedAt")),
+            str(relationship.get("supervisionEndedAt")),
+        )
+        if key in relationship_keys:
+            continue
+        relationships.append(relationship)
+        relationship_keys.add(key)
+
+    if len(relationships) == 1:
+        person_node["prov:actedOnBehalfOf"] = relationships[0]
+    elif relationships:
+        person_node["prov:actedOnBehalfOf"] = relationships
 
 
 def _file_entity_id(base_url: str, dataset: Dataset, file: DatasetFile) -> str:
@@ -182,13 +314,20 @@ def _dataset_question_link_node(base_url: str, dataset: Dataset, link) -> dict[s
     }
 
 
-def build_dataset_provenance_document(base_url: str, dataset: Dataset) -> dict[str, object]:
+def build_dataset_provenance_document(
+    base_url: str,
+    dataset: Dataset,
+    *,
+    supervision_edges: list[SupervisionEdge] | None = None,
+) -> dict[str, object]:
     dataset_iri = _resource_iri(base_url, "datasets", dataset.dataset_id)
     commit_activity_iri = _synthetic_child_iri(dataset_iri, "provenance", "commit")
     files = _sorted_dataset_files(dataset.commit_manifest.files)
     question_links = _sorted_question_links(dataset.commit_manifest.question_links)
     notes = sorted(dataset.commit_manifest.note_ids, key=str)
     external_artifacts = _manifest_external_artifacts(dataset.commit_manifest)
+    people: dict[str, dict[str, object]] = {}
+    supervision_edges = supervision_edges or []
     graph: list[dict[str, object]] = []
 
     dataset_node: dict[str, object] = {
@@ -198,6 +337,16 @@ def build_dataset_provenance_document(base_url: str, dataset: Dataset) -> dict[s
         "commitHash": dataset.commit_hash,
         "status": dataset.status.value,
     }
+    creator_user_id = _creator_user_id(dataset.created_by_user_id, dataset.created_by)
+    if creator_user_id is not None:
+        dataset_node["prov:wasAttributedTo"] = {"@id": _agent_iri(base_url, creator_user_id)}
+        _add_person_with_supervision(
+            people,
+            base_url,
+            creator_user_id,
+            activity_time=dataset.created_at,
+            supervision_edges=supervision_edges,
+        )
     graph.append(dataset_node)
 
     commit_node: dict[str, object] = {
@@ -263,21 +412,21 @@ def build_dataset_provenance_document(base_url: str, dataset: Dataset) -> dict[s
         _dataset_question_link_node(base_url, dataset, link)
         for link in question_links
     )
+    graph.extend(people[user_id] for user_id in sorted(people))
 
     return {"@context": _context(base_url), "@graph": graph}
 
 
 def _analysis_agent_node(base_url: str, executed_by: str) -> dict[str, object]:
-    normalized = _normalize_base_url(base_url)
-    agent_id = f"{normalized}/agents/{quote(executed_by, safe='')}"
-    return {
-        "@id": agent_id,
-        "@type": "prov:Agent",
-        "userId": executed_by,
-    }
+    return _person_node(base_url, executed_by)
 
 
-def _claim_node(base_url: str, claim: Claim) -> dict[str, object]:
+def _claim_node(
+    base_url: str,
+    claim: Claim,
+    *,
+    attributed_user_ids: list[str],
+) -> dict[str, object]:
     node: dict[str, object] = {
         "@id": _resource_iri(base_url, "claims", claim.claim_id),
         "@type": "prov:Entity",
@@ -285,6 +434,8 @@ def _claim_node(base_url: str, claim: Claim) -> dict[str, object]:
         "confidence": claim.confidence,
         "status": claim.status.value,
     }
+    if attributed_user_ids:
+        node["prov:wasAttributedTo"] = _attribution_value(base_url, attributed_user_ids)
     if claim.supported_by_dataset_ids:
         node["supportsDataset"] = [
             {"@id": _resource_iri(base_url, "datasets", dataset_id)}
@@ -303,7 +454,12 @@ def _claim_node(base_url: str, claim: Claim) -> dict[str, object]:
     return node
 
 
-def _visualization_node(base_url: str, visualization: Visualization) -> dict[str, object]:
+def _visualization_node(
+    base_url: str,
+    visualization: Visualization,
+    *,
+    attributed_user_ids: list[str],
+) -> dict[str, object]:
     node: dict[str, object] = {
         "@id": _resource_iri(base_url, "visualizations", visualization.viz_id),
         "@type": "prov:Entity",
@@ -313,6 +469,8 @@ def _visualization_node(base_url: str, visualization: Visualization) -> dict[str
         "vizType": visualization.viz_type,
         "filePath": visualization.file_path,
     }
+    if attributed_user_ids:
+        node["prov:wasAttributedTo"] = _attribution_value(base_url, attributed_user_ids)
     if visualization.caption:
         node["caption"] = visualization.caption
     if visualization.asset is not None:
@@ -338,8 +496,19 @@ def build_analysis_provenance_document(
     datasets: list[Dataset],
     claims: list[Claim],
     visualizations: list[Visualization],
+    supervision_edges: list[SupervisionEdge] | None = None,
 ) -> dict[str, object]:
     analysis_iri = _resource_iri(base_url, "analyses", analysis.analysis_id)
+    supervision_edges = supervision_edges or []
+    people: dict[str, dict[str, object]] = {}
+    analysis_actor_user_id = _creator_user_id(
+        analysis.executed_by_user_id,
+        analysis.executed_by,
+    )
+    dataset_attribution = {
+        dataset.dataset_id: _creator_user_id(dataset.created_by_user_id, dataset.created_by)
+        for dataset in datasets
+    }
     graph: list[dict[str, object]] = []
 
     analysis_node: dict[str, object] = {
@@ -357,22 +526,88 @@ def build_analysis_provenance_document(
             {"@id": _resource_iri(base_url, "datasets", dataset.dataset_id)}
             for dataset in datasets
         ]
-    if analysis.executed_by:
-        agent = _analysis_agent_node(base_url, analysis.executed_by)
-        analysis_node["prov:wasAssociatedWith"] = {"@id": agent["@id"]}
-        graph.append(agent)
+    if analysis_actor_user_id is not None:
+        _add_person_with_supervision(
+            people,
+            base_url,
+            analysis_actor_user_id,
+            activity_time=analysis.executed_at,
+            supervision_edges=supervision_edges,
+        )
+        analysis_node["prov:wasAssociatedWith"] = {
+            "@id": _agent_iri(base_url, analysis_actor_user_id)
+        }
     graph.append(analysis_node)
 
-    graph.extend(
-        {
+    for dataset in datasets:
+        dataset_node: dict[str, object] = {
             "@id": _resource_iri(base_url, "datasets", dataset.dataset_id),
             "@type": "prov:Entity",
             "commitHash": dataset.commit_hash,
             "status": dataset.status.value,
         }
-        for dataset in datasets
-    )
-    graph.extend(_claim_node(base_url, claim) for claim in claims)
-    graph.extend(_visualization_node(base_url, visualization) for visualization in visualizations)
+        dataset_user_id = dataset_attribution[dataset.dataset_id]
+        if dataset_user_id is not None:
+            dataset_node["prov:wasAttributedTo"] = {"@id": _agent_iri(base_url, dataset_user_id)}
+            _add_person_with_supervision(
+                people,
+                base_url,
+                dataset_user_id,
+                activity_time=dataset.created_at,
+                supervision_edges=supervision_edges,
+            )
+        graph.append(dataset_node)
+    for claim in claims:
+        attributed_user_ids = _unique_user_ids(
+            [
+                *[
+                    dataset_attribution.get(dataset_id)
+                    for dataset_id in claim.supported_by_dataset_ids
+                ],
+                *[
+                    analysis_actor_user_id
+                    for analysis_id in claim.supported_by_analysis_ids
+                    if analysis_id == analysis.analysis_id
+                ],
+            ]
+        )
+        for user_id in attributed_user_ids:
+            _add_person_with_supervision(
+                people,
+                base_url,
+                user_id,
+                activity_time=claim.created_at,
+                supervision_edges=supervision_edges,
+            )
+        graph.append(
+            _claim_node(
+                base_url,
+                claim,
+                attributed_user_ids=attributed_user_ids,
+            )
+        )
+    for visualization in visualizations:
+        attributed_user_ids = (
+            [analysis_actor_user_id]
+            if analysis_actor_user_id is not None
+            and visualization.analysis_id == analysis.analysis_id
+            else []
+        )
+        for user_id in attributed_user_ids:
+            _add_person_with_supervision(
+                people,
+                base_url,
+                user_id,
+                activity_time=visualization.created_at,
+                supervision_edges=supervision_edges,
+            )
+        graph.append(
+            _visualization_node(
+                base_url,
+                visualization,
+                attributed_user_ids=attributed_user_ids,
+            )
+        )
+    graph.extend(people[user_id] for user_id in sorted(people))
 
     return {"@context": _context(base_url), "@graph": graph}

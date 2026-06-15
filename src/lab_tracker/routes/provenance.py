@@ -28,7 +28,13 @@ def build_provenance_router(api: LabTrackerAPI) -> APIRouter:
     def get_dataset_provenance(dataset_id: UUID, request: Request):
         dataset = api_from_request(request, api).get_dataset(dataset_id)
         ensure_project_read(request, dataset.project_id)
-        payload = build_dataset_provenance_document(_request_base_url(request), dataset)
+        repository = repository_from_request(request)
+        supervision_edges, _ = repository.query_supervision_edges(limit=None, offset=0)
+        payload = build_dataset_provenance_document(
+            _request_base_url(request),
+            dataset,
+            supervision_edges=supervision_edges,
+        )
         return JSONResponse(content=payload, media_type="application/ld+json")
 
     @router.get("/analyses/{analysis_id}/provenance")
@@ -44,12 +50,14 @@ def build_provenance_router(api: LabTrackerAPI) -> APIRouter:
             limit=None,
             offset=0,
         )
+        supervision_edges, _ = repository.query_supervision_edges(limit=None, offset=0)
         payload = build_analysis_provenance_document(
             _request_base_url(request),
             analysis,
             datasets=datasets,
             claims=claims,
             visualizations=visualizations,
+            supervision_edges=supervision_edges,
         )
         return JSONResponse(content=payload, media_type="application/ld+json")
 

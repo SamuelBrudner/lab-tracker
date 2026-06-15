@@ -17,6 +17,7 @@ from lab_tracker.models import (
     OutcomeStatus,
     QuestionLink,
     QuestionLinkRole,
+    SupervisionEdge,
     Visualization,
     VisualizationAsset,
 )
@@ -40,6 +41,13 @@ def _node_by_id(document: dict[str, object], node_id: str) -> dict[str, object]:
         if node.get("@id") == node_id:
             return node
     raise AssertionError(f"Node not found: {node_id}")
+
+
+def _node_type_includes(node: dict[str, object], node_type: str) -> bool:
+    node_types = node["@type"]
+    if isinstance(node_types, list):
+        return node_type in node_types
+    return node_types == node_type
 
 
 def test_dataset_provenance_uses_inline_context_and_json_metadata():
@@ -105,6 +113,76 @@ def test_dataset_provenance_uses_inline_context_and_json_metadata():
     ]
     assert commit_node["sourceSession"] == {
         "@id": "http://example.test/sessions/44444444-4444-4444-4444-444444444444"
+    }
+
+
+def test_dataset_provenance_attributes_creator_and_active_supervisor():
+    creator_user_id = UUID("aaaaaaaa-aaaa-aaaa-aaaa-000000000001")
+    supervisor_user_id = UUID("aaaaaaaa-aaaa-aaaa-aaaa-000000000002")
+    inactive_supervisor_user_id = UUID("aaaaaaaa-aaaa-aaaa-aaaa-000000000003")
+    dataset_id = UUID("11111111-1111-1111-1111-000000000001")
+    question_id = UUID("22222222-2222-2222-2222-000000000001")
+    created_at = datetime(2026, 4, 23, tzinfo=timezone.utc)
+
+    dataset = Dataset(
+        dataset_id=dataset_id,
+        project_id=uuid4(),
+        commit_hash="commit-attributed",
+        primary_question_id=question_id,
+        question_links=[],
+        commit_manifest=DatasetCommitManifest(),
+        status=DatasetStatus.COMMITTED,
+        created_at=created_at,
+        created_by="legacy-user-string",
+        created_by_user_id=creator_user_id,
+    )
+    active_edge = SupervisionEdge(
+        edge_id=uuid4(),
+        supervisor_user_id=supervisor_user_id,
+        supervisee_user_id=creator_user_id,
+        started_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+    )
+    inactive_edge = SupervisionEdge(
+        edge_id=uuid4(),
+        supervisor_user_id=inactive_supervisor_user_id,
+        supervisee_user_id=creator_user_id,
+        started_at=datetime(2025, 1, 1, tzinfo=timezone.utc),
+        ended_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+    )
+
+    document = build_dataset_provenance_document(
+        "http://example.test",
+        dataset,
+        supervision_edges=[inactive_edge, active_edge],
+    )
+
+    context = document["@context"]
+    assert isinstance(context, dict)
+    assert context["wasAttributedTo"] == {"@id": "prov:wasAttributedTo", "@type": "@id"}
+    assert context["actedOnBehalfOf"] == {"@id": "prov:actedOnBehalfOf", "@type": "@id"}
+    assert context["supervisionStartedAt"] == "lab:supervisionStartedAt"
+    assert context["supervisionEndedAt"] == "lab:supervisionEndedAt"
+
+    dataset_iri = "http://example.test/datasets/11111111-1111-1111-1111-000000000001"
+    creator_iri = f"http://example.test/agents/{creator_user_id}"
+    supervisor_iri = f"http://example.test/agents/{supervisor_user_id}"
+    dataset_node = _node_by_id(document, dataset_iri)
+    creator_node = _node_by_id(document, creator_iri)
+    supervisor_node = _node_by_id(document, supervisor_iri)
+
+    assert dataset_node["prov:wasAttributedTo"] == {"@id": creator_iri}
+    assert _node_type_includes(creator_node, "prov:Agent")
+    assert _node_type_includes(creator_node, "prov:Person")
+    assert creator_node["userId"] == str(creator_user_id)
+    assert creator_node["prov:actedOnBehalfOf"] == {
+        "@id": supervisor_iri,
+        "supervisionStartedAt": "2026-01-01T00:00:00+00:00",
+    }
+    assert _node_type_includes(supervisor_node, "prov:Person")
+    assert str(inactive_supervisor_user_id) not in {
+        str(node.get("userId"))
+        for node in document["@graph"]
+        if isinstance(node, dict)
     }
 
 
@@ -410,3 +488,86 @@ def test_analysis_provenance_omits_optional_fields_and_preserves_support_links()
     assert viz_node["contentSize"] == 128
     assert viz_node["sha256"] == "abc123"
     assert "caption" not in viz_node
+
+
+def test_analysis_provenance_attributes_supported_entities_to_people():
+    actor_user_id = UUID("bbbbbbbb-bbbb-bbbb-bbbb-000000000001")
+    supervisor_user_id = UUID("bbbbbbbb-bbbb-bbbb-bbbb-000000000002")
+    analysis_id = UUID("55555555-5555-5555-5555-000000000001")
+    dataset_id = UUID("66666666-6666-6666-6666-000000000001")
+    claim_id = UUID("77777777-7777-7777-7777-000000000001")
+    viz_id = UUID("88888888-8888-8888-8888-000000000001")
+
+    analysis = Analysis(
+        analysis_id=analysis_id,
+        project_id=uuid4(),
+        dataset_ids=[dataset_id],
+        method_hash="method-people",
+        code_version="v2",
+        executed_by="legacy-runner",
+        executed_by_user_id=actor_user_id,
+        executed_at=datetime(2026, 4, 23, tzinfo=timezone.utc),
+        status=AnalysisStatus.COMMITTED,
+    )
+    dataset = Dataset(
+        dataset_id=dataset_id,
+        project_id=analysis.project_id,
+        commit_hash="commit-people",
+        primary_question_id=uuid4(),
+        question_links=[],
+        commit_manifest=DatasetCommitManifest(),
+        status=DatasetStatus.COMMITTED,
+        created_at=datetime(2026, 4, 20, tzinfo=timezone.utc),
+        created_by_user_id=actor_user_id,
+    )
+    claim = Claim(
+        claim_id=claim_id,
+        project_id=analysis.project_id,
+        statement="Stable effect",
+        confidence=0.8,
+        status=ClaimStatus.SUPPORTED,
+        supported_by_dataset_ids=[dataset_id],
+        supported_by_analysis_ids=[analysis_id],
+        created_at=datetime(2026, 4, 24, tzinfo=timezone.utc),
+    )
+    visualization = Visualization(
+        viz_id=viz_id,
+        analysis_id=analysis_id,
+        viz_type="line",
+        file_path="figs/signal.png",
+        created_at=datetime(2026, 4, 25, tzinfo=timezone.utc),
+    )
+    supervision_edge = SupervisionEdge(
+        edge_id=uuid4(),
+        supervisor_user_id=supervisor_user_id,
+        supervisee_user_id=actor_user_id,
+        started_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+    )
+
+    document = build_analysis_provenance_document(
+        "http://example.test",
+        analysis,
+        datasets=[dataset],
+        claims=[claim],
+        visualizations=[visualization],
+        supervision_edges=[supervision_edge],
+    )
+
+    actor_iri = f"http://example.test/agents/{actor_user_id}"
+    supervisor_iri = f"http://example.test/agents/{supervisor_user_id}"
+    analysis_node = _node_by_id(document, f"http://example.test/analyses/{analysis_id}")
+    dataset_node = _node_by_id(document, f"http://example.test/datasets/{dataset_id}")
+    claim_node = _node_by_id(document, f"http://example.test/claims/{claim_id}")
+    viz_node = _node_by_id(document, f"http://example.test/visualizations/{viz_id}")
+    actor_node = _node_by_id(document, actor_iri)
+
+    assert analysis_node["prov:wasAssociatedWith"] == {"@id": actor_iri}
+    assert dataset_node["prov:wasAttributedTo"] == {"@id": actor_iri}
+    assert claim_node["prov:wasAttributedTo"] == {"@id": actor_iri}
+    assert viz_node["prov:wasAttributedTo"] == {"@id": actor_iri}
+    assert _node_type_includes(actor_node, "prov:Person")
+    assert actor_node["prov:actedOnBehalfOf"] == {
+        "@id": supervisor_iri,
+        "supervisionStartedAt": "2026-01-01T00:00:00+00:00",
+    }
+    assert _node_type_includes(_node_by_id(document, supervisor_iri), "prov:Person")
