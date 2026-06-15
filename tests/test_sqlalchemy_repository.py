@@ -35,6 +35,7 @@ from lab_tracker.models import (
     Session,
     SessionStatus,
     SessionType,
+    SupervisionEdge,
     Visualization,
 )
 from lab_tracker.sqlalchemy_repository import SQLAlchemyLabTrackerRepository
@@ -155,6 +156,55 @@ def test_project_group_repository_crud_and_membership_queries(db_session):
     assert repo.project_groups.delete(group.group_id) == updated
     repo.commit()
     assert repo.project_groups.get(group.group_id) is None
+
+
+def test_supervision_edge_repository_queries_active_and_as_of_edges(db_session):
+    repo = SQLAlchemyLabTrackerRepository(db_session)
+    supervisor_user_id = uuid4()
+    successor_user_id = uuid4()
+    supervisee_user_id = uuid4()
+    _add_user(db_session, supervisor_user_id, "primary-supervisor")
+    _add_user(db_session, successor_user_id, "successor-supervisor")
+    _add_user(db_session, supervisee_user_id, "supervisee")
+    historical_edge = SupervisionEdge(
+        edge_id=uuid4(),
+        supervisor_user_id=supervisor_user_id,
+        supervisee_user_id=supervisee_user_id,
+        started_at=_ts(1),
+        ended_at=_ts(20),
+        created_at=_ts(1),
+        updated_at=_ts(20),
+    )
+    active_edge = SupervisionEdge(
+        edge_id=uuid4(),
+        supervisor_user_id=successor_user_id,
+        supervisee_user_id=supervisee_user_id,
+        started_at=_ts(20),
+        created_at=_ts(20),
+        updated_at=_ts(20),
+    )
+
+    repo.supervision_edges.save(historical_edge)
+    repo.supervision_edges.save(active_edge)
+    repo.commit()
+
+    active_edges, active_total = repo.query_supervision_edges(
+        supervisee_user_id=supervisee_user_id,
+        active_only=True,
+    )
+    historical_edges, historical_total = repo.query_supervision_edges(
+        supervisee_user_id=supervisee_user_id,
+        as_of=_ts(10),
+    )
+
+    assert repo.supervision_edges.get(historical_edge.edge_id) == historical_edge
+    assert active_total == 1
+    assert active_edges == [active_edge]
+    assert historical_total == 1
+    assert historical_edges == [historical_edge]
+    assert repo.supervision_edges.delete(active_edge.edge_id) == active_edge
+    repo.commit()
+    assert repo.supervision_edges.get(active_edge.edge_id) is None
 
 
 def test_question_repository_persists_parent_links(db_session):

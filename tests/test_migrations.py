@@ -78,7 +78,7 @@ def test_alembic_upgrade_chain_from_empty_to_head(monkeypatch, tmp_path):
     for revision in revisions:
         command.upgrade(config, revision)
         assert revision in _current_revisions(database_url)
-    assert _current_revision(database_url) == "0028_backfill_attribution_user_fks"
+    assert _current_revision(database_url) == "0029_supervision_edges"
 
 
 def test_alembic_has_single_head() -> None:
@@ -134,6 +134,7 @@ def test_alembic_upgrade_head_creates_expected_tables(monkeypatch, tmp_path):
         "project_memberships",
         "project_groups",
         "group_memberships",
+        "supervision_edges",
     }
     assert expected.issubset(table_names)
     assert "dataset_reviews" not in table_names
@@ -155,6 +156,9 @@ def test_alembic_upgrade_head_creates_expected_tables(monkeypatch, tmp_path):
     }
     group_membership_columns = {
         column["name"] for column in inspector.get_columns("group_memberships")
+    }
+    supervision_columns = {
+        column["name"] for column in inspector.get_columns("supervision_edges")
     }
     visualization_columns = {
         column["name"] for column in inspector.get_columns("visualizations")
@@ -214,6 +218,35 @@ def test_alembic_upgrade_head_creates_expected_tables(monkeypatch, tmp_path):
     assert {"project_id", "user_id", "role"}.issubset(membership_columns)
     assert {"group_id", "user_id", "role"}.issubset(group_membership_columns)
     assert {
+        "supervisor_user_id",
+        "supervisee_user_id",
+        "started_at",
+        "ended_at",
+    }.issubset(supervision_columns)
+    _assert_index(
+        inspector,
+        "supervision_edges",
+        "ix_supervision_edges_supervisor_started",
+    )
+    _assert_index(
+        inspector,
+        "supervision_edges",
+        "ix_supervision_edges_supervisee_started",
+    )
+    _assert_index(inspector, "supervision_edges", "uq_supervision_edges_active_pair")
+    _assert_fk(
+        inspector,
+        "supervision_edges",
+        column="supervisor_user_id",
+        referred_table="users",
+    )
+    _assert_fk(
+        inspector,
+        "supervision_edges",
+        column="supervisee_user_id",
+        referred_table="users",
+    )
+    assert {
         "asset_storage_id",
         "asset_filename",
         "asset_content_type",
@@ -235,7 +268,7 @@ def test_database_at_daily_review_branch_upgrades_to_current_head(monkeypatch, t
     assert _current_revision(database_url) == "0017_daily_graph_reviews"
 
     command.upgrade(config, "head")
-    assert _current_revision(database_url) == "0028_backfill_attribution_user_fks"
+    assert _current_revision(database_url) == "0029_supervision_edges"
 
     engine = create_engine(
         database_url,
@@ -254,6 +287,7 @@ def test_database_at_daily_review_branch_upgrades_to_current_head(monkeypatch, t
         "graph_draft_batch_runs",
         "project_groups",
         "group_memberships",
+        "supervision_edges",
     }.issubset(table_names)
     engine.dispose()
 

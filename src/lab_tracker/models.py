@@ -480,6 +480,16 @@ class GroupMembership(_DomainModel):
     updated_at: datetime = Field(default_factory=utc_now)
 
 
+class SupervisionEdge(_DomainModel):
+    edge_id: UUID
+    supervisor_user_id: UUID
+    supervisee_user_id: UUID
+    started_at: datetime = Field(default_factory=utc_now)
+    ended_at: datetime | None = None
+    created_at: datetime = Field(default_factory=utc_now)
+    updated_at: datetime = Field(default_factory=utc_now)
+
+
 class Question(_DomainModel):
     question_id: UUID
     project_id: UUID

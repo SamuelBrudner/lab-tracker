@@ -25,6 +25,7 @@ from lab_tracker.models import (
     Question,
     QuestionRefactor,
     Session,
+    SupervisionEdge,
     Visualization,
 )
 
@@ -54,6 +55,7 @@ class LabTrackerRepository(Protocol):
     project_groups: EntityRepository[ProjectGroup]
     project_memberships: EntityRepository[ProjectMembership]
     group_memberships: EntityRepository[GroupMembership]
+    supervision_edges: EntityRepository[SupervisionEdge]
     questions: EntityRepository[Question]
     question_refactors: EntityRepository[QuestionRefactor]
     datasets: EntityRepository[Dataset]
@@ -131,6 +133,18 @@ class LabTrackerRepository(Protocol):
         user_id: UUID,
     ) -> GroupMembership | None:
         """Return one group membership by group and user."""
+
+    def query_supervision_edges(
+        self,
+        *,
+        supervisor_user_id: UUID | None = None,
+        supervisee_user_id: UUID | None = None,
+        active_only: bool = False,
+        as_of: datetime | None = None,
+        limit: int | None = None,
+        offset: int = 0,
+    ) -> tuple[list[SupervisionEdge], int]:
+        """Query dated supervision edges."""
 
     def query_questions(
         self,

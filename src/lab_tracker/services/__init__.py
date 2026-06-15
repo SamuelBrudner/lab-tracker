@@ -11,6 +11,7 @@ from lab_tracker.services.project_authorization import ProjectAuthorizationPolic
 from lab_tracker.services.project_service import ProjectService
 from lab_tracker.services.question_service import QuestionRefactorResult, QuestionService
 from lab_tracker.services.session_service import SessionService
+from lab_tracker.services.supervision_service import SupervisionService
 from lab_tracker.services.visualization_service import VisualizationService
 
 __all__ = [
@@ -28,4 +29,5 @@ __all__ = [
     "ServiceContext",
     "SessionService",
     "VisualizationService",
+    "SupervisionService",
 ]

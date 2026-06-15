@@ -24,6 +24,7 @@ from lab_tracker.services import (
     QuestionService,
     ServiceContext,
     SessionService,
+    SupervisionService,
     VisualizationService,
 )
 
@@ -58,6 +59,7 @@ class LabTrackerAPI:
             context,
             authorization=self.project_authorization,
         )
+        self.supervision: SupervisionService = SupervisionService(context)
         self.questions: QuestionService = QuestionService(
             context,
             projects=self.projects,
@@ -252,6 +254,21 @@ class LabTrackerAPI:
 
     def accessible_project_ids(self, *args: Any, **kwargs: Any) -> Any:
         return self.project_authorization.accessible_project_ids(*args, **kwargs)
+
+    def create_supervision_edge(self, *args: Any, **kwargs: Any) -> Any:
+        return self.supervision.create_supervision_edge(*args, **kwargs)
+
+    def get_supervision_edge(self, *args: Any, **kwargs: Any) -> Any:
+        return self.supervision.get_supervision_edge(*args, **kwargs)
+
+    def list_supervision_edges(self, *args: Any, **kwargs: Any) -> Any:
+        return self.supervision.list_supervision_edges(*args, **kwargs)
+
+    def update_supervision_edge(self, *args: Any, **kwargs: Any) -> Any:
+        return self.supervision.update_supervision_edge(*args, **kwargs)
+
+    def delete_supervision_edge(self, *args: Any, **kwargs: Any) -> Any:
+        return self.supervision.delete_supervision_edge(*args, **kwargs)
 
     def project_membership_role(self, *args: Any, **kwargs: Any) -> Any:
         return self.project_authorization.membership_role(*args, **kwargs)

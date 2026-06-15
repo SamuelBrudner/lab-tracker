@@ -19,6 +19,7 @@ from lab_tracker.sqlalchemy_repository_parts import (
     SQLAlchemyProjectRepository,
     SQLAlchemyQuestionRepository,
     SQLAlchemySessionRepository,
+    SQLAlchemySupervisionEdgeRepository,
     SQLAlchemyVisualizationRepository,
 )
 
@@ -36,5 +37,6 @@ __all__ = [
     "SQLAlchemyProjectRepository",
     "SQLAlchemyQuestionRepository",
     "SQLAlchemySessionRepository",
+    "SQLAlchemySupervisionEdgeRepository",
     "SQLAlchemyVisualizationRepository",
 ]

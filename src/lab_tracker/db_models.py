@@ -789,6 +789,34 @@ class UserModel(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utc_now)
 
 
+class SupervisionEdgeModel(Base):
+    __tablename__ = "supervision_edges"
+
+    edge_id: Mapped[str] = mapped_column(
+        String(36),
+        primary_key=True,
+        default=lambda: str(uuid4()),
+    )
+    supervisor_user_id: Mapped[str] = mapped_column(
+        String(36),
+        ForeignKey("users.user_id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    supervisee_user_id: Mapped[str] = mapped_column(
+        String(36),
+        ForeignKey("users.user_id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    ended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utc_now)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=_utc_now,
+        onupdate=_utc_now,
+    )
+
+
 class ProjectMembershipModel(Base):
     __tablename__ = "project_memberships"
     __table_args__ = (
@@ -979,6 +1007,24 @@ Index(
     "ix_group_memberships_group_role",
     GroupMembershipModel.group_id,
     GroupMembershipModel.role,
+)
+Index(
+    "ix_supervision_edges_supervisor_started",
+    SupervisionEdgeModel.supervisor_user_id,
+    SupervisionEdgeModel.started_at,
+)
+Index(
+    "ix_supervision_edges_supervisee_started",
+    SupervisionEdgeModel.supervisee_user_id,
+    SupervisionEdgeModel.started_at,
+)
+Index(
+    "uq_supervision_edges_active_pair",
+    SupervisionEdgeModel.supervisor_user_id,
+    SupervisionEdgeModel.supervisee_user_id,
+    unique=True,
+    sqlite_where=SupervisionEdgeModel.ended_at.is_(None),
+    postgresql_where=SupervisionEdgeModel.ended_at.is_(None),
 )
 Index(
     "ix_note_targets_entity_lookup",

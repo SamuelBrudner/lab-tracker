@@ -40,6 +40,7 @@ from lab_tracker.models import (
     Session,
     SessionStatus,
     SessionType,
+    SupervisionEdge,
     Visualization,
 )
 
@@ -82,6 +83,7 @@ __all__ = [
     "Session",
     "SessionStatus",
     "SessionType",
+    "SupervisionEdge",
     "ValidationError",
     "Visualization",
     "require_role",

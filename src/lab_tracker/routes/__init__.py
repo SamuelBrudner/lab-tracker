@@ -28,6 +28,7 @@ from .questions import build_questions_router
 from .schema import build_schema_router
 from .search import build_search_router
 from .sessions import build_sessions_router
+from .supervision import build_supervision_router
 from .visualizations import build_visualizations_router
 
 
@@ -53,6 +54,7 @@ def register_routes(
     )
     app.include_router(build_projects_router(api))
     app.include_router(build_groups_router(api))
+    app.include_router(build_supervision_router(api))
     app.include_router(build_portfolio_router(api))
     app.include_router(build_project_graph_router(api))
     app.include_router(build_questions_router(api))

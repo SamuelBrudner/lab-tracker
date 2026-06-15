@@ -50,6 +50,7 @@ from lab_tracker.models import (
     QuestionType,
     SessionStatus,
     SessionType,
+    SupervisionEdge,
     Visualization,
     VisualizationInput,
 )
@@ -249,6 +250,23 @@ class ProjectMembershipUpdate(RequestModel):
 
 
 ProjectMembershipRead = ProjectMembership
+
+
+class SupervisionEdgeCreate(RequestModel):
+    supervisor_user_id: UUID
+    supervisee_user_id: UUID
+    started_at: datetime | None = None
+    ended_at: datetime | None = None
+
+
+class SupervisionEdgeUpdate(RequestModel):
+    supervisor_user_id: UUID | None = None
+    supervisee_user_id: UUID | None = None
+    started_at: datetime | None = None
+    ended_at: datetime | None = None
+
+
+SupervisionEdgeRead = SupervisionEdge
 
 
 class QuestionCreate(RequestModel):

@@ -27,6 +27,7 @@ from lab_tracker.models import (
     Question,
     QuestionRefactor,
     Session,
+    SupervisionEdge,
     Visualization,
 )
 from lab_tracker.repository import LabTrackerRepository
@@ -53,6 +54,7 @@ from .graph_batches import (
 from .graph_drafts import SQLAlchemyGraphChangeSetRepository
 from .notes import SQLAlchemyNoteRepository
 from .sessions import SQLAlchemyAcquisitionOutputRepository, SQLAlchemySessionRepository
+from .supervision import SQLAlchemySupervisionEdgeRepository
 
 
 class SQLAlchemyLabTrackerRepository(LabTrackerRepository):
@@ -64,6 +66,7 @@ class SQLAlchemyLabTrackerRepository(LabTrackerRepository):
         self.project_groups = SQLAlchemyProjectGroupRepository(session)
         self.project_memberships = SQLAlchemyProjectMembershipRepository(session)
         self.group_memberships = SQLAlchemyGroupMembershipRepository(session)
+        self.supervision_edges = SQLAlchemySupervisionEdgeRepository(session)
         self.questions = SQLAlchemyQuestionRepository(session)
         self.question_refactors = SQLAlchemyQuestionRefactorRepository(session)
         self.datasets = SQLAlchemyDatasetRepository(session)
@@ -199,6 +202,25 @@ class SQLAlchemyLabTrackerRepository(LabTrackerRepository):
         return self.group_memberships.get_by_group_user(
             group_id=group_id,
             user_id=user_id,
+        )
+
+    def query_supervision_edges(
+        self,
+        *,
+        supervisor_user_id: UUID | None = None,
+        supervisee_user_id: UUID | None = None,
+        active_only: bool = False,
+        as_of: datetime | None = None,
+        limit: int | None = None,
+        offset: int = 0,
+    ) -> tuple[list[SupervisionEdge], int]:
+        return self.supervision_edges.query(
+            supervisor_user_id=supervisor_user_id,
+            supervisee_user_id=supervisee_user_id,
+            active_only=active_only,
+            as_of=as_of,
+            limit=limit,
+            offset=offset,
         )
 
     def query_questions(
