@@ -661,6 +661,20 @@ class PortfolioProjectOwner(BaseModel):
     username: str | None = None
 
 
+class PortfolioTriageFlag(BaseModel):
+    key: Literal[
+        "stale_project",
+        "unanswered_questions",
+        "datasets_without_analyses",
+        "analyses_without_claims",
+        "unreviewed_claims",
+        "overdue_goals",
+    ]
+    label: str
+    count: int = Field(..., ge=0)
+    severity: Literal["info", "warning", "critical"] = "warning"
+
+
 class PortfolioProjectSummary(BaseModel):
     project_id: UUID
     name: str
@@ -672,6 +686,7 @@ class PortfolioProjectSummary(BaseModel):
     unreviewed_claim_count: int = Field(..., ge=0)
     last_activity_at: datetime | None = None
     owners: list[PortfolioProjectOwner] = Field(default_factory=list)
+    triage_flags: list[PortfolioTriageFlag] = Field(default_factory=list)
 
 
 class PortfolioProjectGroupSummary(BaseModel):

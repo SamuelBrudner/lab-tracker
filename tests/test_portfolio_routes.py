@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
 from fastapi.testclient import TestClient
+
+from lab_tracker.db_models import ProjectModel
 
 
 class FakeDraftClient:
@@ -135,6 +137,10 @@ def _portfolio_projects(payload: dict[str, Any]) -> list[dict[str, Any]]:
         for project_group in payload["data"]
         for project in project_group["projects"]
     ]
+
+
+def _triage_flags_by_key(row: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    return {flag["key"]: flag for flag in row["triage_flags"]}
 
 
 def test_portfolio_summary_aggregates_project_health_rows(
@@ -357,3 +363,103 @@ def test_portfolio_summary_normalizes_graph_change_set_activity(
     assert _parse_utc_timestamp(row["last_activity_at"]) == _parse_utc_timestamp(
         draft_response.json()["data"]["updated_at"]
     )
+
+
+def test_portfolio_summary_derives_lab_health_triage_flags(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+):
+    stale_project_id = _create_project(client, admin_auth_headers, "Stale portfolio")
+    old_timestamp = datetime.now(timezone.utc) - timedelta(days=45)
+    with client.app.state.db_session_factory() as session:
+        stale_project = session.get(ProjectModel, stale_project_id)
+        stale_project.created_at = old_timestamp
+        stale_project.updated_at = old_timestamp
+        session.commit()
+
+    project_id = _create_project(client, admin_auth_headers, "Flagged portfolio")
+    question_id = _create_question(
+        client,
+        admin_auth_headers,
+        project_id,
+        text="Which analysis gaps remain?",
+    )
+    analyzed_dataset_id = _create_staged_dataset(
+        client,
+        admin_auth_headers,
+        project_id,
+        question_id,
+    )
+    _commit_dataset(client, admin_auth_headers, analyzed_dataset_id)
+    unanalyzed_dataset_id = _create_staged_dataset(
+        client,
+        admin_auth_headers,
+        project_id,
+        question_id,
+    )
+    _commit_dataset(client, admin_auth_headers, unanalyzed_dataset_id)
+    analysis = client.post(
+        "/analyses",
+        json={
+            "project_id": project_id,
+            "dataset_ids": [analyzed_dataset_id],
+            "method_hash": "triage-method",
+            "code_version": "v1",
+        },
+        headers=admin_auth_headers,
+    )
+    assert analysis.status_code == 201
+    committed_analysis = client.post(
+        f"/analyses/{analysis.json()['data']['analysis_id']}/commit",
+        json={},
+        headers=admin_auth_headers,
+    )
+    assert committed_analysis.status_code == 200
+    claim = client.post(
+        "/claims",
+        json={
+            "project_id": project_id,
+            "statement": "This claim still needs review.",
+            "confidence": 55.0,
+        },
+        headers=admin_auth_headers,
+    )
+    assert claim.status_code == 201
+    overdue_goal = client.post(
+        f"/projects/{project_id}/goals",
+        json={
+            "goal_type": "other",
+            "title": "Overdue portfolio goal",
+            "target_date": (date.today() - timedelta(days=1)).isoformat(),
+        },
+        headers=admin_auth_headers,
+    )
+    assert overdue_goal.status_code == 201
+
+    response = client.get("/portfolio/summary", headers=admin_auth_headers)
+
+    assert response.status_code == 200
+    rows = {item["project_id"]: item for item in _portfolio_projects(response.json())}
+    stale_flags = _triage_flags_by_key(rows[stale_project_id])
+    assert stale_flags["stale_project"] == {
+        "count": 1,
+        "key": "stale_project",
+        "label": "No activity in 30 days",
+        "severity": "warning",
+    }
+    flags = _triage_flags_by_key(rows[project_id])
+    assert flags["unanswered_questions"]["count"] == 1
+    assert flags["datasets_without_analyses"]["count"] == 1
+    assert flags["analyses_without_claims"]["count"] == 1
+    assert flags["unreviewed_claims"] == {
+        "count": 1,
+        "key": "unreviewed_claims",
+        "label": "Unreviewed claims",
+        "severity": "info",
+    }
+    assert flags["overdue_goals"] == {
+        "count": 1,
+        "key": "overdue_goals",
+        "label": "Overdue goals",
+        "severity": "critical",
+    }
