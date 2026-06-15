@@ -21,6 +21,7 @@ from lab_tracker.models import (
     GraphDraftSemanticType,
 )
 from lab_tracker.repository import EntityRepository
+from lab_tracker.sqlalchemy_mapper_parts.common import as_utc
 
 from .common import apply_pagination, count_from_statement, replace_child_rows
 
@@ -41,6 +42,10 @@ def _list(value: Any) -> list[dict[str, Any]]:
     if not value:
         return []
     return [dict(item) for item in value]
+
+
+def _as_utc_optional(value: Any) -> Any:
+    return as_utc(value) if value is not None else None
 
 
 def operation_to_model(operation: GraphChangeOperation) -> GraphChangeOperationModel:
@@ -88,8 +93,8 @@ def operation_from_model(row: GraphChangeOperationModel) -> GraphChangeOperation
         review_note=row.review_note,
         result_entity_id=_uuid(row.result_entity_id),
         error_metadata=_dict(row.error_metadata),
-        created_at=row.created_at,
-        updated_at=row.updated_at,
+        created_at=as_utc(row.created_at),
+        updated_at=as_utc(row.updated_at),
     )
 
 
@@ -196,16 +201,16 @@ def change_set_from_model(
         operations=list(operations),
         created_by=row.created_by,
         created_by_username=resolved_usernames.get(row.created_by or ""),
-        created_at=row.created_at,
-        updated_at=row.updated_at,
-        submitted_at=row.submitted_at,
+        created_at=as_utc(row.created_at),
+        updated_at=as_utc(row.updated_at),
+        submitted_at=_as_utc_optional(row.submitted_at),
         submitted_by=row.submitted_by,
         submitted_by_username=resolved_usernames.get(row.submitted_by or ""),
-        reviewed_at=row.reviewed_at,
+        reviewed_at=_as_utc_optional(row.reviewed_at),
         reviewed_by=row.reviewed_by,
         reviewed_by_username=resolved_usernames.get(row.reviewed_by or ""),
         review_note=row.review_note,
-        committed_at=row.committed_at,
+        committed_at=_as_utc_optional(row.committed_at),
         committed_by=row.committed_by,
         committed_by_username=resolved_usernames.get(row.committed_by or ""),
     )

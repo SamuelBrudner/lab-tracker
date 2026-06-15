@@ -1,6 +1,23 @@
 from __future__ import annotations
 
+import json
+from datetime import datetime, timezone
+from typing import Any
+
 from fastapi.testclient import TestClient
+
+
+class FakeDraftClient:
+    model = "fake-gpt"
+
+    def __init__(self, patch: dict[str, Any]) -> None:
+        self.patch = patch
+
+    def draft_from_note(self, **_: Any) -> dict[str, Any]:
+        return self.patch
+
+    def close(self) -> None:
+        return None
 
 
 def _auth_headers(token: str) -> dict[str, str]:
@@ -69,6 +86,36 @@ def _commit_dataset(client: TestClient, headers: dict[str, str], dataset_id: str
         headers=headers,
     )
     assert response.status_code == 200
+
+
+def _graph_draft_patch(project_id: str) -> dict[str, Any]:
+    return {
+        "summary": "Drafted portfolio activity",
+        "uncertain_fields": [],
+        "clarification_requests": [],
+        "operations": [
+            {
+                "client_ref": "portfolio-note",
+                "op": "create",
+                "entity_type": "note",
+                "semantic_type": "create_note",
+                "target_entity_id": None,
+                "payload_json": json.dumps(
+                    {
+                        "project_id": project_id,
+                        "raw_content": "Portfolio graph draft activity.",
+                    }
+                ),
+                "rationale": "Capture a follow-up note from the source.",
+                "confidence": 0.9,
+                "source_refs": [],
+            }
+        ],
+    }
+
+
+def _parse_utc_timestamp(raw: str) -> datetime:
+    return datetime.fromisoformat(raw.replace("Z", "+00:00")).astimezone(timezone.utc)
 
 
 def test_portfolio_summary_aggregates_project_health_rows(
@@ -204,3 +251,34 @@ def test_portfolio_summary_is_scoped_to_accessible_projects(
     assert admin_response.status_code == 200
     admin_project_ids = {item["project_id"] for item in admin_response.json()["data"]}
     assert {visible_project_id, hidden_project_id}.issubset(admin_project_ids)
+
+
+def test_portfolio_summary_normalizes_graph_change_set_activity(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+):
+    project_id = _create_project(client, admin_auth_headers, "Graph draft portfolio")
+    note = client.post(
+        "/notes",
+        json={"project_id": project_id, "raw_content": "Source note for graph draft."},
+        headers=admin_auth_headers,
+    )
+    assert note.status_code == 201
+    note_id = note.json()["data"]["note_id"]
+    client.app.state.graph_draft_client_factory = lambda settings: FakeDraftClient(
+        _graph_draft_patch(project_id)
+    )
+    draft_response = client.post(
+        f"/notes/{note_id}/graph-drafts",
+        headers=admin_auth_headers,
+    )
+    assert draft_response.status_code == 201
+
+    response = client.get("/portfolio/summary", headers=admin_auth_headers)
+
+    assert response.status_code == 200
+    rows = response.json()["data"]
+    row = next(item for item in rows if item["project_id"] == project_id)
+    assert _parse_utc_timestamp(row["last_activity_at"]) == _parse_utc_timestamp(
+        draft_response.json()["data"]["updated_at"]
+    )

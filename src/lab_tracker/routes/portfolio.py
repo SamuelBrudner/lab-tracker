@@ -26,6 +26,7 @@ from lab_tracker.schemas import (
     PortfolioProjectOwner,
     PortfolioProjectSummary,
 )
+from lab_tracker.sqlalchemy_mapper_parts.common import as_utc
 
 from .shared import (
     filter_project_scoped_items,
@@ -126,7 +127,7 @@ def _latest_activity_at(
     candidates: list[datetime] = []
     for value in (project.created_at, project.updated_at):
         if value is not None:
-            candidates.append(value)
+            candidates.append(as_utc(value))
     for query in (
         repository.query_questions,
         repository.query_datasets,
@@ -148,7 +149,7 @@ def _activity_timestamps(items: Iterable[Any]) -> Iterable[datetime]:
         for field_name in ("updated_at", "created_at"):
             value = getattr(item, field_name, None)
             if value is not None:
-                yield value
+                yield as_utc(value)
 
 
 def _owners_for_project(
