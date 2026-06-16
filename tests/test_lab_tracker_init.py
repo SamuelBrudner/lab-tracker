@@ -128,6 +128,9 @@ def test_serve_app_runs_migrations_opens_browser_and_starts_server(monkeypatch) 
     calls: list[tuple[str, object]] = []
 
     def fake_upgrade(config, revision):
+        script_location = Path(config.get_main_option("script_location"))
+        assert script_location.name == "alembic"
+        assert (script_location / "env.py").exists()
         calls.append(("upgrade", revision))
 
     def fake_open(url: str):

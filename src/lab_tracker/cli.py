@@ -8,12 +8,13 @@ import sys
 import webbrowser
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from importlib import resources
 from pathlib import Path
 from textwrap import dedent
 
+from alembic import command
 from alembic.config import Config
 
-from alembic import command
 from lab_tracker.decision_context_constants import (
     CLAUDE_BLOCK_BEGIN,
     CLAUDE_BLOCK_END,
@@ -68,7 +69,7 @@ def serve_app(
     browser_opener: Callable[[str], object] | None = None,
 ) -> None:
     if run_migrations:
-        alembic_config = Config(str(_repo_root() / "alembic.ini"))
+        alembic_config = _alembic_config()
         command.upgrade(alembic_config, "head")
 
     browser_host = "127.0.0.1" if host in {"0.0.0.0", "::"} else host
@@ -151,14 +152,10 @@ def main(argv: list[str] | None = None) -> None:
             raise SystemExit(1) from exc
 
 
-def _repo_root() -> Path:
-    cwd = Path.cwd()
-    if (cwd / "alembic.ini").exists():
-        return cwd
-    for parent in Path(__file__).resolve().parents:
-        if (parent / "alembic.ini").exists():
-            return parent
-    return cwd
+def _alembic_config() -> Config:
+    config = Config()
+    config.set_main_option("script_location", str(resources.files("lab_tracker") / "alembic"))
+    return config
 
 
 def _write_scaffold_file(

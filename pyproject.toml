@@ -43,6 +43,8 @@ include = ["lab_tracker", "lab_tracker.*", "lab_tracker_client", "lab_tracker_cl
 
 [tool.setuptools.package-data]
 lab_tracker = [
+  "alembic/env.py",
+  "alembic/versions/*.py",
   "frontend/*",
 ]
 
@@ -57,6 +59,7 @@ pythonpath = ["."]
 [tool.ruff]
 line-length = 100
 target-version = "py310"
+extend-exclude = ["src/lab_tracker/alembic"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "B", "UP", "SIM"]
