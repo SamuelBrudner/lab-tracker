@@ -162,10 +162,11 @@ def test_graph_patch_applier_resolves_client_refs_before_create_service_call() -
             raw_content: str,
             transcribed_text: str | None,
             targets: list[EntityRef],
-            metadata: dict[str, str],
-            status: Any,
-            actor: Any,
-        ) -> Note:
+                metadata: dict[str, str],
+                status: Any,
+                actor: Any,
+                **_: Any,
+            ) -> Note:
             captured.update(
                 {
                     "project_id": project_id,
@@ -217,6 +218,7 @@ def test_graph_patch_applier_resolves_client_refs_before_create_service_call() -
         operation,
         ref_map={"question-1": question_id},
         actor=None,
+        change_set=_change_set(project_id),
     )
 
     assert result.raw_content == "Resolved note"

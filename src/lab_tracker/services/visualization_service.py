@@ -7,12 +7,14 @@ from uuid import UUID, uuid4
 
 from lab_tracker.auth import AuthContext
 from lab_tracker.errors import ValidationError
-from lab_tracker.models import Visualization, utc_now
+from lab_tracker.models import EntityOrigin, Visualization, utc_now
 from lab_tracker.services.analysis_service import AnalysisService
 from lab_tracker.services.base import BaseService, ServiceContext
 from lab_tracker.services.claim_service import ClaimService
 from lab_tracker.services.project_authorization import ProjectAuthorizationPolicy
 from lab_tracker.services.shared import (
+    actor_user_fk,
+    actor_user_id,
     ensure_non_empty,
     unique_ids,
 )
@@ -41,6 +43,11 @@ class VisualizationService(BaseService):
         caption: str | None = None,
         related_claim_ids: Iterable[UUID] | None = None,
         actor: AuthContext | None = None,
+        origin: EntityOrigin = EntityOrigin.USER,
+        change_set_id: UUID | None = None,
+        origin_provider: str | None = None,
+        origin_model: str | None = None,
+        origin_prompt_version: str | None = None,
     ) -> Visualization:
         analysis = self.analyses.get_analysis(analysis_id)
         self.authorization.require_contributor(analysis.project_id, actor=actor)
@@ -58,6 +65,13 @@ class VisualizationService(BaseService):
             file_path=file_path.strip(),
             caption=caption.strip() if caption else None,
             related_claim_ids=claim_ids,
+            created_by=actor_user_id(actor),
+            created_by_user_id=actor_user_fk(actor, self.repository),
+            origin=origin,
+            change_set_id=change_set_id,
+            origin_provider=origin_provider,
+            origin_model=origin_model,
+            origin_prompt_version=origin_prompt_version,
         )
         with self.unit_of_work() as repository:
             repository.visualizations.save(visualization)
@@ -96,6 +110,11 @@ class VisualizationService(BaseService):
         caption: str | None = None,
         related_claim_ids: Iterable[UUID] | None = None,
         actor: AuthContext | None = None,
+        origin: EntityOrigin | None = None,
+        change_set_id: UUID | None = None,
+        origin_provider: str | None = None,
+        origin_model: str | None = None,
+        origin_prompt_version: str | None = None,
     ) -> Visualization:
         visualization = self.get_visualization(viz_id)
         analysis = self.analyses.get_analysis(visualization.analysis_id)
@@ -115,6 +134,16 @@ class VisualizationService(BaseService):
                 if claim.project_id != analysis.project_id:
                     raise ValidationError("Related claims must belong to the same project.")
             visualization.related_claim_ids = claim_ids
+        if origin is not None:
+            visualization.origin = origin
+        if change_set_id is not None:
+            visualization.change_set_id = change_set_id
+        if origin_provider is not None:
+            visualization.origin_provider = origin_provider
+        if origin_model is not None:
+            visualization.origin_model = origin_model
+        if origin_prompt_version is not None:
+            visualization.origin_prompt_version = origin_prompt_version
         visualization.updated_at = utc_now()
         with self.unit_of_work() as repository:
             repository.visualizations.save(visualization)

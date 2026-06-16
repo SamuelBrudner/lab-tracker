@@ -412,6 +412,11 @@ class SQLAlchemyLabTrackerRepository(LabTrackerRepository):
         )
         stmt = select(ClaimModel).where(
             or_(
+                self._attribution_predicate(
+                    created_by_column=ClaimModel.created_by,
+                    user_id_column=ClaimModel.created_by_user_id,
+                    user_id=user_id,
+                ),
                 ClaimModel.claim_id.in_(dataset_claim_ids),
                 ClaimModel.claim_id.in_(analysis_claim_ids),
             )

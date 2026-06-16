@@ -167,6 +167,13 @@ class EntityType(str, Enum):
     GOAL = "goal"
 
 
+class EntityOrigin(str, Enum):
+    USER = "user"
+    AI_SUGGESTED = "ai_suggested"
+    AI_EXECUTED = "ai_executed"
+    USER_REVISED = "user_revised"
+
+
 class GraphChangeSetStatus(str, Enum):
     DRAFTING = "drafting"
     READY = "ready"
@@ -232,6 +239,7 @@ class _DomainModel(BaseModel):
 class EntityRef(_DomainModel):
     entity_type: EntityType
     entity_id: UUID
+
 
 class QuestionLink(_DomainModel):
     question_id: UUID
@@ -520,6 +528,11 @@ class Question(_DomainModel):
     created_at: datetime = Field(default_factory=utc_now)
     created_by: str | None = None
     created_by_user_id: UUID | None = None
+    origin: EntityOrigin = EntityOrigin.USER
+    change_set_id: UUID | None = None
+    origin_provider: str | None = None
+    origin_model: str | None = None
+    origin_prompt_version: str | None = None
     updated_at: datetime = Field(default_factory=utc_now)
 
 
@@ -549,6 +562,11 @@ class Dataset(_DomainModel):
     created_at: datetime = Field(default_factory=utc_now)
     created_by: str | None = None
     created_by_user_id: UUID | None = None
+    origin: EntityOrigin = EntityOrigin.USER
+    change_set_id: UUID | None = None
+    origin_provider: str | None = None
+    origin_model: str | None = None
+    origin_prompt_version: str | None = None
     updated_at: datetime = Field(default_factory=utc_now)
 
 
@@ -564,6 +582,11 @@ class Note(_DomainModel):
     created_at: datetime = Field(default_factory=utc_now)
     created_by: str | None = None
     created_by_user_id: UUID | None = None
+    origin: EntityOrigin = EntityOrigin.USER
+    change_set_id: UUID | None = None
+    origin_provider: str | None = None
+    origin_model: str | None = None
+    origin_prompt_version: str | None = None
     updated_at: datetime = Field(default_factory=utc_now)
 
 
@@ -577,6 +600,11 @@ class Session(_DomainModel):
     ended_at: datetime | None = None
     created_by: str | None = None
     created_by_user_id: UUID | None = None
+    origin: EntityOrigin = EntityOrigin.USER
+    change_set_id: UUID | None = None
+    origin_provider: str | None = None
+    origin_model: str | None = None
+    origin_prompt_version: str | None = None
     updated_at: datetime = Field(default_factory=utc_now)
 
     @computed_field(return_type=str)
@@ -608,6 +636,11 @@ class Analysis(_DomainModel):
     status: AnalysisStatus = AnalysisStatus.STAGED
     terminal_reason: str | None = None
     created_at: datetime = Field(default_factory=utc_now)
+    origin: EntityOrigin = EntityOrigin.USER
+    change_set_id: UUID | None = None
+    origin_provider: str | None = None
+    origin_model: str | None = None
+    origin_prompt_version: str | None = None
     updated_at: datetime = Field(default_factory=utc_now)
 
 
@@ -634,6 +667,13 @@ class Claim(_DomainModel):
     supported_by_analysis_ids: list[UUID] = Field(default_factory=list)
     answers_question_ids: list[UUID] = Field(default_factory=list)
     created_at: datetime = Field(default_factory=utc_now)
+    created_by: str | None = None
+    created_by_user_id: UUID | None = None
+    origin: EntityOrigin = EntityOrigin.USER
+    change_set_id: UUID | None = None
+    origin_provider: str | None = None
+    origin_model: str | None = None
+    origin_prompt_version: str | None = None
     updated_at: datetime = Field(default_factory=utc_now)
 
 
@@ -663,6 +703,11 @@ class Goal(_DomainModel):
     created_at: datetime = Field(default_factory=utc_now)
     created_by: str | None = None
     created_by_user_id: UUID | None = None
+    origin: EntityOrigin = EntityOrigin.USER
+    change_set_id: UUID | None = None
+    origin_provider: str | None = None
+    origin_model: str | None = None
+    origin_prompt_version: str | None = None
     updated_at: datetime = Field(default_factory=utc_now)
 
 
@@ -692,6 +737,13 @@ class Visualization(_DomainModel):
     related_claim_ids: list[UUID] = Field(default_factory=list)
     asset: VisualizationAsset | None = None
     created_at: datetime = Field(default_factory=utc_now)
+    created_by: str | None = None
+    created_by_user_id: UUID | None = None
+    origin: EntityOrigin = EntityOrigin.USER
+    change_set_id: UUID | None = None
+    origin_provider: str | None = None
+    origin_model: str | None = None
+    origin_prompt_version: str | None = None
     updated_at: datetime = Field(default_factory=utc_now)
 
     @computed_field(return_type=str | None)

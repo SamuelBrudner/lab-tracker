@@ -11,6 +11,7 @@ from sqlalchemy.orm.attributes import InstrumentedAttribute
 
 from lab_tracker.db_models import (
     AnalysisModel,
+    ClaimModel,
     DatasetModel,
     GoalLinkModel,
     GoalModel,
@@ -26,6 +27,7 @@ from lab_tracker.db_models import (
     QuestionRefactorModel,
     RecordExportEventModel,
     SessionModel,
+    VisualizationModel,
 )
 from lab_tracker.models import OwnershipReassignment, RecordExportEvent
 from lab_tracker.repository import EntityRepository
@@ -53,6 +55,13 @@ _CREATED_BY_TARGETS: tuple[
     ),
     ("datasets", DatasetModel, DatasetModel.created_by, DatasetModel.created_by_user_id),
     ("notes", NoteModel, NoteModel.created_by, NoteModel.created_by_user_id),
+    ("claims", ClaimModel, ClaimModel.created_by, ClaimModel.created_by_user_id),
+    (
+        "visualizations",
+        VisualizationModel,
+        VisualizationModel.created_by,
+        VisualizationModel.created_by_user_id,
+    ),
     (
         "graph_change_sets",
         GraphChangeSetModel,

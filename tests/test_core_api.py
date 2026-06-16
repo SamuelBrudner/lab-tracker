@@ -11,6 +11,7 @@ from lab_tracker.models import (
     DatasetCommitManifestInput,
     DatasetFile,
     DatasetStatus,
+    EntityOrigin,
     EntityRef,
     EntityType,
     ExternalArtifactReference,
@@ -59,6 +60,51 @@ def test_project_question_dataset_flow():
     assert any(link.role == QuestionLinkRole.PRIMARY for link in dataset.question_links)
     assert dataset.commit_hash
     assert dataset.commit_manifest.question_links == dataset.question_links
+
+
+def test_direct_claim_and_visualization_writes_record_creator_and_user_origin():
+    api = repository_backed_api()
+    actor = _actor()
+    project = api.create_project("Origin Project", actor=actor)
+    question = api.create_question(
+        project_id=project.project_id,
+        text="What should be attributed directly?",
+        question_type=QuestionType.DESCRIPTIVE,
+        actor=actor,
+    )
+    dataset = api.create_dataset(
+        project_id=project.project_id,
+        primary_question_id=question.question_id,
+        actor=actor,
+    )
+    analysis = api.create_analysis(
+        project_id=project.project_id,
+        dataset_ids=[dataset.dataset_id],
+        method_hash="method-v1",
+        code_version="code-v1",
+        actor=actor,
+    )
+
+    claim = api.create_claim(
+        project_id=project.project_id,
+        statement="Direct claims carry their creator.",
+        confidence=90,
+        actor=actor,
+    )
+    visualization = api.create_visualization(
+        analysis_id=analysis.analysis_id,
+        viz_type="line",
+        file_path="/tmp/figure.png",
+        related_claim_ids=[claim.claim_id],
+        actor=actor,
+    )
+
+    assert claim.created_by == str(actor.user_id)
+    assert claim.origin == EntityOrigin.USER
+    assert claim.change_set_id is None
+    assert visualization.created_by == str(actor.user_id)
+    assert visualization.origin == EntityOrigin.USER
+    assert visualization.change_set_id is None
 
 
 def test_dataset_requires_primary_question():

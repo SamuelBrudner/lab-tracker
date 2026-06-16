@@ -13,6 +13,7 @@ from lab_tracker.auth import AuthContext
 from lab_tracker.errors import AuthError, ValidationError
 from lab_tracker.goals_attributes import validate_goal_attributes
 from lab_tracker.models import (
+    EntityOrigin,
     EntityRef,
     EntityType,
     Goal,
@@ -109,6 +110,11 @@ class GoalService(BaseService):
         attributes: dict[str, object] | None = None,
         links: Iterable[GoalLinkSpec] | None = None,
         actor: AuthContext | None = None,
+        origin: EntityOrigin = EntityOrigin.USER,
+        change_set_id: UUID | None = None,
+        origin_provider: str | None = None,
+        origin_model: str | None = None,
+        origin_prompt_version: str | None = None,
     ) -> Goal:
         if project_id is not None:
             self.projects.get_project(project_id)
@@ -126,6 +132,11 @@ class GoalService(BaseService):
             attributes=normalized_attributes,
             created_by=actor_user_id(actor),
             created_by_user_id=actor_user_fk(actor, self.repository),
+            origin=origin,
+            change_set_id=change_set_id,
+            origin_provider=origin_provider,
+            origin_model=origin_model,
+            origin_prompt_version=origin_prompt_version,
         )
         for link in links or []:
             self._ensure_target_exists(link.target, goal.project_id)
@@ -217,6 +228,11 @@ class GoalService(BaseService):
         attributes: dict[str, object] | None = None,
         links: Iterable[GoalLinkSpec] | None = None,
         actor: AuthContext | None = None,
+        origin: EntityOrigin | None = None,
+        change_set_id: UUID | None = None,
+        origin_provider: str | None = None,
+        origin_model: str | None = None,
+        origin_prompt_version: str | None = None,
     ) -> Goal:
         goal = self.get_goal(goal_id)
         self._require_goal_contributor(goal, actor=actor)
@@ -250,6 +266,16 @@ class GoalService(BaseService):
                     slot=link.slot,
                     actor=actor,
                 )
+        if origin is not None:
+            goal.origin = origin
+        if change_set_id is not None:
+            goal.change_set_id = change_set_id
+        if origin_provider is not None:
+            goal.origin_provider = origin_provider
+        if origin_model is not None:
+            goal.origin_model = origin_model
+        if origin_prompt_version is not None:
+            goal.origin_prompt_version = origin_prompt_version
         goal.updated_at = utc_now()
         self._ensure_unique_goal_links(goal.links)
         self._ensure_goal_has_scope(goal)

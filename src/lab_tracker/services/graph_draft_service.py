@@ -817,6 +817,7 @@ class GraphDraftService(BaseService):
                 operation,
                 ref_map=ref_map,
                 actor=actor,
+                change_set=change_set,
             )
             resolved_entity_id = graph_entity_id(operation.entity_type, entity)
             if operation.client_ref:

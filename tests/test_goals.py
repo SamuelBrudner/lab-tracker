@@ -20,6 +20,7 @@ from lab_tracker.models import (
     GoalType,
     GraphChangeOp,
     GraphChangeOperation,
+    GraphChangeSet,
     GraphDraftSemanticType,
     QuestionStatus,
     QuestionType,
@@ -381,6 +382,13 @@ def test_graph_draft_goal_operations_validate_and_apply_committed_links():
         link_operation,
         ref_map={},
         actor=actor,
+        change_set=GraphChangeSet(
+            change_set_id=link_operation.change_set_id,
+            project_id=project.project_id,
+            source_note_id=uuid4(),
+            model="fake-gpt",
+            prompt_version="test",
+        ),
     )
 
     reloaded = api.get_goal(goal.goal_id)

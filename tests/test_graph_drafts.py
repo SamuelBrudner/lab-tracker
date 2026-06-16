@@ -1451,12 +1451,25 @@ def test_edit_accept_and_commit_resolves_refs_into_canonical_records(
     question_id = committed["operations"][0]["result_entity_id"]
     assert UUID(question_id)
 
+    question = client.get(f"/questions/{question_id}", headers=admin_auth_headers)
+    assert question.status_code == 200
+    question_payload = question.json()["data"]
+    assert question_payload["origin"] == "ai_suggested"
+    assert question_payload["change_set_id"] == change_set_id
+    assert question_payload["origin_provider"] == "openai"
+    assert question_payload["origin_model"] == "fake-gpt"
+    assert question_payload["origin_prompt_version"] == "multimodal-graph-draft-v1"
+
     notes = client.get(
         f"/notes?project_id={project_id}&target_entity_type=question&target_entity_id={question_id}",
         headers=admin_auth_headers,
     )
     assert notes.status_code == 200
-    assert notes.json()["data"][0]["targets"][0]["entity_id"] == question_id
+    note_payload = notes.json()["data"][0]
+    assert note_payload["targets"][0]["entity_id"] == question_id
+    assert note_payload["origin"] == "ai_suggested"
+    assert note_payload["change_set_id"] == change_set_id
+    assert note_payload["origin_model"] == "fake-gpt"
 
 
 def test_commit_resolves_question_parent_refs(

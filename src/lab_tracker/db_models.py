@@ -111,6 +111,14 @@ class QuestionModel(Base):
         String(36),
         ForeignKey("users.user_id", ondelete="SET NULL"),
     )
+    origin: Mapped[str] = mapped_column(String(32), nullable=False, default="user")
+    change_set_id: Mapped[str | None] = mapped_column(
+        String(36),
+        ForeignKey("graph_change_sets.change_set_id", ondelete="SET NULL"),
+    )
+    origin_provider: Mapped[str | None] = mapped_column(String(80))
+    origin_model: Mapped[str | None] = mapped_column(String(255))
+    origin_prompt_version: Mapped[str | None] = mapped_column(String(120))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utc_now)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
@@ -205,6 +213,14 @@ class DatasetModel(Base):
         String(36),
         ForeignKey("users.user_id", ondelete="SET NULL"),
     )
+    origin: Mapped[str] = mapped_column(String(32), nullable=False, default="user")
+    change_set_id: Mapped[str | None] = mapped_column(
+        String(36),
+        ForeignKey("graph_change_sets.change_set_id", ondelete="SET NULL"),
+    )
+    origin_provider: Mapped[str | None] = mapped_column(String(80))
+    origin_model: Mapped[str | None] = mapped_column(String(255))
+    origin_prompt_version: Mapped[str | None] = mapped_column(String(120))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utc_now)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
@@ -286,6 +302,14 @@ class NoteModel(Base):
         String(36),
         ForeignKey("users.user_id", ondelete="SET NULL"),
     )
+    origin: Mapped[str] = mapped_column(String(32), nullable=False, default="user")
+    change_set_id: Mapped[str | None] = mapped_column(
+        String(36),
+        ForeignKey("graph_change_sets.change_set_id", ondelete="SET NULL"),
+    )
+    origin_provider: Mapped[str | None] = mapped_column(String(80))
+    origin_model: Mapped[str | None] = mapped_column(String(255))
+    origin_prompt_version: Mapped[str | None] = mapped_column(String(120))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utc_now)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
@@ -510,6 +534,14 @@ class SessionModel(Base):
         String(36),
         ForeignKey("users.user_id", ondelete="SET NULL"),
     )
+    origin: Mapped[str] = mapped_column(String(32), nullable=False, default="user")
+    change_set_id: Mapped[str | None] = mapped_column(
+        String(36),
+        ForeignKey("graph_change_sets.change_set_id", ondelete="SET NULL"),
+    )
+    origin_provider: Mapped[str | None] = mapped_column(String(80))
+    origin_model: Mapped[str | None] = mapped_column(String(255))
+    origin_prompt_version: Mapped[str | None] = mapped_column(String(120))
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         default=_utc_now,
@@ -572,6 +604,14 @@ class AnalysisModel(Base):
     executed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utc_now)
     status: Mapped[str] = mapped_column(String(20), default="staged")
     terminal_reason: Mapped[str | None] = mapped_column(Text)
+    origin: Mapped[str] = mapped_column(String(32), nullable=False, default="user")
+    change_set_id: Mapped[str | None] = mapped_column(
+        String(36),
+        ForeignKey("graph_change_sets.change_set_id", ondelete="SET NULL"),
+    )
+    origin_provider: Mapped[str | None] = mapped_column(String(80))
+    origin_model: Mapped[str | None] = mapped_column(String(255))
+    origin_prompt_version: Mapped[str | None] = mapped_column(String(120))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utc_now)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
@@ -612,6 +652,19 @@ class ClaimModel(Base):
     confidence: Mapped[float] = mapped_column(Float, nullable=False)
     status: Mapped[str] = mapped_column(String(20), default="proposed")
     terminal_reason: Mapped[str | None] = mapped_column(Text)
+    created_by: Mapped[str | None] = mapped_column(String(255))
+    created_by_user_id: Mapped[str | None] = mapped_column(
+        String(36),
+        ForeignKey("users.user_id", ondelete="SET NULL"),
+    )
+    origin: Mapped[str] = mapped_column(String(32), nullable=False, default="user")
+    change_set_id: Mapped[str | None] = mapped_column(
+        String(36),
+        ForeignKey("graph_change_sets.change_set_id", ondelete="SET NULL"),
+    )
+    origin_provider: Mapped[str | None] = mapped_column(String(80))
+    origin_model: Mapped[str | None] = mapped_column(String(255))
+    origin_prompt_version: Mapped[str | None] = mapped_column(String(120))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utc_now)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
@@ -689,6 +742,14 @@ class GoalModel(Base):
         String(36),
         ForeignKey("users.user_id", ondelete="SET NULL"),
     )
+    origin: Mapped[str] = mapped_column(String(32), nullable=False, default="user")
+    change_set_id: Mapped[str | None] = mapped_column(
+        String(36),
+        ForeignKey("graph_change_sets.change_set_id", ondelete="SET NULL"),
+    )
+    origin_provider: Mapped[str | None] = mapped_column(String(80))
+    origin_model: Mapped[str | None] = mapped_column(String(255))
+    origin_prompt_version: Mapped[str | None] = mapped_column(String(120))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utc_now)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
@@ -754,6 +815,19 @@ class VisualizationModel(Base):
     asset_content_type: Mapped[str | None] = mapped_column(String(255))
     asset_size_bytes: Mapped[int | None] = mapped_column(Integer)
     asset_checksum: Mapped[str | None] = mapped_column(String(64))
+    created_by: Mapped[str | None] = mapped_column(String(255))
+    created_by_user_id: Mapped[str | None] = mapped_column(
+        String(36),
+        ForeignKey("users.user_id", ondelete="SET NULL"),
+    )
+    origin: Mapped[str] = mapped_column(String(32), nullable=False, default="user")
+    change_set_id: Mapped[str | None] = mapped_column(
+        String(36),
+        ForeignKey("graph_change_sets.change_set_id", ondelete="SET NULL"),
+    )
+    origin_provider: Mapped[str | None] = mapped_column(String(80))
+    origin_model: Mapped[str | None] = mapped_column(String(255))
+    origin_prompt_version: Mapped[str | None] = mapped_column(String(120))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utc_now)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
@@ -1033,10 +1107,20 @@ Index("ix_graph_change_sets_created_by_user_id", GraphChangeSetModel.created_by_
 Index("ix_graph_draft_batch_runs_created_by_user_id", GraphDraftBatchRunModel.created_by_user_id)
 Index("ix_sessions_created_by_user_id", SessionModel.created_by_user_id)
 Index("ix_analyses_executed_by_user_id", AnalysisModel.executed_by_user_id)
+Index("ix_claims_created_by_user_id", ClaimModel.created_by_user_id)
 Index("ix_goals_created_by_user_id", GoalModel.created_by_user_id)
 Index("ix_goal_links_created_by_user_id", GoalLinkModel.created_by_user_id)
+Index("ix_visualizations_created_by_user_id", VisualizationModel.created_by_user_id)
 Index("ix_project_memberships_created_by_user_id", ProjectMembershipModel.created_by_user_id)
 Index("ix_group_memberships_created_by_user_id", GroupMembershipModel.created_by_user_id)
+Index("ix_questions_change_set_id", QuestionModel.change_set_id)
+Index("ix_datasets_change_set_id", DatasetModel.change_set_id)
+Index("ix_notes_change_set_id", NoteModel.change_set_id)
+Index("ix_sessions_change_set_id", SessionModel.change_set_id)
+Index("ix_analyses_change_set_id", AnalysisModel.change_set_id)
+Index("ix_claims_change_set_id", ClaimModel.change_set_id)
+Index("ix_goals_change_set_id", GoalModel.change_set_id)
+Index("ix_visualizations_change_set_id", VisualizationModel.change_set_id)
 Index(
     "ix_questions_superseded_by_question_id",
     QuestionModel.superseded_by_question_id,

@@ -14,6 +14,7 @@ from lab_tracker.models import (
     DatasetCommitManifestInput,
     DatasetFile,
     DatasetStatus,
+    EntityOrigin,
     QuestionLink,
     QuestionLinkRole,
     SessionType,
@@ -90,6 +91,11 @@ class DatasetService(BaseService):
         commit_manifest: DatasetCommitManifestInput | DatasetCommitManifest | None = None,
         commit_hash: str | None = None,
         actor: AuthContext | None = None,
+        origin: EntityOrigin = EntityOrigin.USER,
+        change_set_id: UUID | None = None,
+        origin_provider: str | None = None,
+        origin_model: str | None = None,
+        origin_prompt_version: str | None = None,
     ) -> Dataset:
         self.authorization.require_contributor(project_id, actor=actor)
         self.projects.get_project(project_id)
@@ -149,6 +155,11 @@ class DatasetService(BaseService):
             terminal_reason=resolved_terminal_reason,
             created_by=actor_user_id(actor),
             created_by_user_id=actor_user_fk(actor, self.repository),
+            origin=origin,
+            change_set_id=change_set_id,
+            origin_provider=origin_provider,
+            origin_model=origin_model,
+            origin_prompt_version=origin_prompt_version,
         )
         if commit_requested:
             _ensure_primary_question_active(primary_question)
@@ -182,6 +193,11 @@ class DatasetService(BaseService):
         commit_manifest: DatasetCommitManifestInput | DatasetCommitManifest | None = None,
         commit_hash: str | None = None,
         actor: AuthContext | None = None,
+        origin: EntityOrigin | None = None,
+        change_set_id: UUID | None = None,
+        origin_provider: str | None = None,
+        origin_model: str | None = None,
+        origin_prompt_version: str | None = None,
     ) -> Dataset:
         dataset = self.get_dataset(dataset_id)
         self.authorization.require_contributor(dataset.project_id, actor=actor)
@@ -276,6 +292,16 @@ class DatasetService(BaseService):
             dataset.status = status
         if resolved_terminal_reason is not None:
             dataset.terminal_reason = resolved_terminal_reason
+        if origin is not None:
+            dataset.origin = origin
+        if change_set_id is not None:
+            dataset.change_set_id = change_set_id
+        if origin_provider is not None:
+            dataset.origin_provider = origin_provider
+        if origin_model is not None:
+            dataset.origin_model = origin_model
+        if origin_prompt_version is not None:
+            dataset.origin_prompt_version = origin_prompt_version
         dataset.updated_at = utc_now()
         with self.unit_of_work() as repository:
             repository.datasets.save(dataset)

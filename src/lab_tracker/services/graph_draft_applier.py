@@ -11,12 +11,14 @@ from lab_tracker.models import (
     AnalysisStatus,
     ClaimStatus,
     DatasetStatus,
+    EntityOrigin,
     EntityRef,
     EntityType,
     GoalLinkStatus,
     GoalStatus,
     GraphChangeOp,
     GraphChangeOperation,
+    GraphChangeSet,
     GraphDraftSemanticType,
     NoteStatus,
     ProjectStatus,
@@ -85,12 +87,19 @@ class GraphPatchApplier:
         *,
         ref_map: dict[str, UUID],
         actor: AuthContext | None,
+        change_set: GraphChangeSet,
     ) -> EntityResult:
         payload = resolve_refs(operation.payload, ref_map)
         if not isinstance(payload, dict):
             raise ValidationError("Resolved operation payload must be a JSON object.")
+        origin_kwargs = _graph_draft_origin_kwargs(change_set, operation.op)
         if operation.op == GraphChangeOp.CREATE:
-            return self._create_graph_entity(operation.entity_type, payload, actor=actor)
+            return self._create_graph_entity(
+                operation.entity_type,
+                payload,
+                actor=actor,
+                origin_kwargs=origin_kwargs,
+            )
         if operation.target_entity_id is None:
             raise ValidationError("Update operations require target_entity_id.")
         return self._update_graph_entity(
@@ -99,6 +108,7 @@ class GraphPatchApplier:
             payload,
             operation_semantic=operation.semantic_type,
             actor=actor,
+            origin_kwargs=origin_kwargs,
         )
 
     def _create_graph_entity(
@@ -107,6 +117,7 @@ class GraphPatchApplier:
         payload: dict[str, Any],
         *,
         actor: AuthContext | None,
+        origin_kwargs: dict[str, Any],
     ) -> EntityResult:
         if entity_type == EntityType.PROJECT:
             data = validate_payload(ProjectCreate, payload)
@@ -127,6 +138,7 @@ class GraphPatchApplier:
                 terminal_reason=data.terminal_reason,
                 parent_question_ids=data.parent_question_ids,
                 actor=actor,
+                **origin_kwargs,
             )
         if entity_type == EntityType.NOTE:
             data = validate_payload(NoteCreate, payload)
@@ -138,6 +150,7 @@ class GraphPatchApplier:
                 metadata=data.metadata,
                 status=data.status or NoteStatus.STAGED,
                 actor=actor,
+                **origin_kwargs,
             )
         if entity_type == EntityType.SESSION:
             data = validate_payload(SessionCreate, payload)
@@ -146,6 +159,7 @@ class GraphPatchApplier:
                 session_type=data.session_type,
                 primary_question_id=data.primary_question_id,
                 actor=actor,
+                **origin_kwargs,
             )
         if entity_type == EntityType.DATASET:
             data = validate_payload(DatasetCreate, payload)
@@ -158,6 +172,7 @@ class GraphPatchApplier:
                 commit_manifest=data.commit_manifest,
                 commit_hash=data.commit_hash,
                 actor=actor,
+                **origin_kwargs,
             )
         if entity_type == EntityType.ANALYSIS:
             data = validate_payload(AnalysisCreate, payload)
@@ -170,6 +185,7 @@ class GraphPatchApplier:
                 status=data.status or AnalysisStatus.STAGED,
                 terminal_reason=data.terminal_reason,
                 actor=actor,
+                **origin_kwargs,
             )
         if entity_type == EntityType.CLAIM:
             data = validate_payload(ClaimCreate, payload)
@@ -183,6 +199,7 @@ class GraphPatchApplier:
                 supported_by_analysis_ids=data.supported_by_analysis_ids,
                 answers_question_ids=data.answers_question_ids,
                 actor=actor,
+                **origin_kwargs,
             )
         if entity_type == EntityType.GOAL:
             if self.goals is None:
@@ -210,6 +227,7 @@ class GraphPatchApplier:
                     for link in data.links or []
                 ],
                 actor=actor,
+                **origin_kwargs,
             )
         if entity_type == EntityType.VISUALIZATION:
             data = validate_payload(VisualizationCreate, payload)
@@ -220,6 +238,7 @@ class GraphPatchApplier:
                 caption=data.caption,
                 related_claim_ids=data.related_claim_ids,
                 actor=actor,
+                **origin_kwargs,
             )
         raise ValidationError("Unsupported entity type.")
 
@@ -231,6 +250,7 @@ class GraphPatchApplier:
         *,
         operation_semantic: GraphDraftSemanticType | None,
         actor: AuthContext | None,
+        origin_kwargs: dict[str, Any],
     ) -> EntityResult:
         if entity_type == EntityType.PROJECT:
             data = validate_payload(ProjectUpdate, payload)
@@ -252,6 +272,7 @@ class GraphPatchApplier:
                 terminal_reason=data.terminal_reason,
                 parent_question_ids=data.parent_question_ids,
                 actor=actor,
+                **origin_kwargs,
             )
         if entity_type == EntityType.NOTE:
             data = validate_payload(NoteUpdate, payload)
@@ -262,6 +283,7 @@ class GraphPatchApplier:
                 metadata=data.metadata,
                 status=data.status,
                 actor=actor,
+                **origin_kwargs,
             )
         if entity_type == EntityType.SESSION:
             data = validate_payload(SessionUpdate, payload)
@@ -270,6 +292,7 @@ class GraphPatchApplier:
                 status=data.status,
                 ended_at=data.ended_at,
                 actor=actor,
+                **origin_kwargs,
             )
         if entity_type == EntityType.DATASET:
             data = validate_payload(DatasetUpdate, payload)
@@ -281,6 +304,7 @@ class GraphPatchApplier:
                 commit_manifest=data.commit_manifest,
                 commit_hash=data.commit_hash,
                 actor=actor,
+                **origin_kwargs,
             )
         if entity_type == EntityType.ANALYSIS:
             data = validate_payload(AnalysisUpdate, payload)
@@ -290,6 +314,7 @@ class GraphPatchApplier:
                 environment_hash=data.environment_hash,
                 terminal_reason=data.terminal_reason,
                 actor=actor,
+                **origin_kwargs,
             )
         if entity_type == EntityType.CLAIM:
             data = validate_payload(ClaimUpdate, payload)
@@ -303,6 +328,7 @@ class GraphPatchApplier:
                 supported_by_analysis_ids=data.supported_by_analysis_ids,
                 answers_question_ids=data.answers_question_ids,
                 actor=actor,
+                **origin_kwargs,
             )
         if entity_type == EntityType.GOAL:
             if self.goals is None:
@@ -333,6 +359,7 @@ class GraphPatchApplier:
                     for link in data.links or []
                 ],
                 actor=actor,
+                **origin_kwargs,
             )
         if entity_type == EntityType.VISUALIZATION:
             data = validate_payload(VisualizationUpdate, payload)
@@ -343,8 +370,26 @@ class GraphPatchApplier:
                 caption=data.caption,
                 related_claim_ids=data.related_claim_ids,
                 actor=actor,
+                **origin_kwargs,
             )
         raise ValidationError("Unsupported entity type.")
+
+
+def _graph_draft_origin_kwargs(
+    change_set: GraphChangeSet,
+    op: GraphChangeOp,
+) -> dict[str, Any]:
+    return {
+        "origin": (
+            EntityOrigin.AI_SUGGESTED
+            if op == GraphChangeOp.CREATE
+            else EntityOrigin.USER_REVISED
+        ),
+        "change_set_id": change_set.change_set_id,
+        "origin_provider": change_set.provider,
+        "origin_model": change_set.model,
+        "origin_prompt_version": change_set.prompt_version,
+    }
 
 
 def _applied_goal_link_status(

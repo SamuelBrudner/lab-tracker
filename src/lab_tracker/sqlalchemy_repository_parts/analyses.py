@@ -299,6 +299,8 @@ class SQLAlchemyClaimRepository(EntityRepository[Claim]):
             count_stmt = count_stmt.where(ClaimModel.status == status)
         if created_by is not None:
             created_by_clause = or_(
+                ClaimModel.created_by_user_id == created_by,
+                ClaimModel.created_by == created_by,
                 ClaimModel.claim_id.in_(
                     select(ClaimDatasetModel.claim_id)
                     .join(

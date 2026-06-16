@@ -78,7 +78,7 @@ def test_alembic_upgrade_chain_from_empty_to_head(monkeypatch, tmp_path):
     for revision in revisions:
         command.upgrade(config, revision)
         assert revision in _current_revisions(database_url)
-    assert _current_revision(database_url) == "0034_terminal_transition_reasons"
+    assert _current_revision(database_url) == "0035_entity_origin_backlinks"
 
 
 def test_alembic_has_single_head() -> None:
@@ -191,10 +191,23 @@ def test_alembic_upgrade_head_creates_expected_tables(monkeypatch, tmp_path):
     _assert_created_by_user_fk(inspector, "graph_change_sets")
     _assert_created_by_user_fk(inspector, "graph_draft_batch_runs")
     _assert_created_by_user_fk(inspector, "sessions")
+    _assert_created_by_user_fk(inspector, "claims")
     _assert_created_by_user_fk(inspector, "goals")
     _assert_created_by_user_fk(inspector, "goal_links")
+    _assert_created_by_user_fk(inspector, "visualizations")
     _assert_created_by_user_fk(inspector, "project_memberships")
     _assert_created_by_user_fk(inspector, "group_memberships")
+    for table_name in (
+        "questions",
+        "datasets",
+        "notes",
+        "sessions",
+        "analyses",
+        "claims",
+        "goals",
+        "visualizations",
+    ):
+        _assert_origin_backlink_columns(inspector, table_name)
     assert "executed_by_user_id" in analysis_columns
     _assert_index(inspector, "analyses", "ix_analyses_executed_by_user_id")
     _assert_fk(
@@ -392,7 +405,7 @@ def test_database_at_daily_review_branch_upgrades_to_current_head(monkeypatch, t
     assert _current_revision(database_url) == "0017_daily_graph_reviews"
 
     command.upgrade(config, "head")
-    assert _current_revision(database_url) == "0034_terminal_transition_reasons"
+    assert _current_revision(database_url) == "0035_entity_origin_backlinks"
 
     engine = create_engine(
         database_url,
@@ -515,6 +528,24 @@ def _assert_created_by_user_fk(inspector, table_name: str) -> None:
         table_name,
         column="created_by_user_id",
         referred_table="users",
+    )
+
+
+def _assert_origin_backlink_columns(inspector, table_name: str) -> None:
+    columns = {column["name"] for column in inspector.get_columns(table_name)}
+    assert {
+        "origin",
+        "change_set_id",
+        "origin_provider",
+        "origin_model",
+        "origin_prompt_version",
+    }.issubset(columns)
+    _assert_index(inspector, table_name, f"ix_{table_name}_change_set_id")
+    _assert_fk(
+        inspector,
+        table_name,
+        column="change_set_id",
+        referred_table="graph_change_sets",
     )
 
 

@@ -15,6 +15,7 @@ from lab_tracker.models import (
     DatasetCommitManifest,
     DatasetCommitManifestInput,
     DatasetStatus,
+    EntityOrigin,
     QuestionStatus,
     Session,
     SessionStatus,
@@ -83,6 +84,11 @@ class SessionService(BaseService):
         *,
         primary_question_id: UUID | None = None,
         actor: AuthContext | None = None,
+        origin: EntityOrigin = EntityOrigin.USER,
+        change_set_id: UUID | None = None,
+        origin_provider: str | None = None,
+        origin_model: str | None = None,
+        origin_prompt_version: str | None = None,
     ) -> Session:
         self.authorization.require_contributor(project_id, actor=actor)
         self.projects.get_project(project_id)
@@ -105,6 +111,11 @@ class SessionService(BaseService):
             primary_question_id=primary_question_id,
             created_by=actor_user_id(actor),
             created_by_user_id=actor_user_fk(actor, self.repository),
+            origin=origin,
+            change_set_id=change_set_id,
+            origin_provider=origin_provider,
+            origin_model=origin_model,
+            origin_prompt_version=origin_prompt_version,
         )
         with self.unit_of_work() as repository:
             repository.sessions.save(session)
@@ -141,6 +152,11 @@ class SessionService(BaseService):
         status: SessionStatus | None = None,
         ended_at: datetime | None = None,
         actor: AuthContext | None = None,
+        origin: EntityOrigin | None = None,
+        change_set_id: UUID | None = None,
+        origin_provider: str | None = None,
+        origin_model: str | None = None,
+        origin_prompt_version: str | None = None,
     ) -> Session:
         session = self.get_session(session_id)
         self.authorization.require_contributor(session.project_id, actor=actor)
@@ -155,6 +171,16 @@ class SessionService(BaseService):
             session.ended_at = ended_at or session.ended_at or utc_now()
         elif ended_at is not None:
             session.ended_at = ended_at
+        if origin is not None:
+            session.origin = origin
+        if change_set_id is not None:
+            session.change_set_id = change_set_id
+        if origin_provider is not None:
+            session.origin_provider = origin_provider
+        if origin_model is not None:
+            session.origin_model = origin_model
+        if origin_prompt_version is not None:
+            session.origin_prompt_version = origin_prompt_version
         session.updated_at = utc_now()
         with self.unit_of_work() as repository:
             repository.sessions.save(session)

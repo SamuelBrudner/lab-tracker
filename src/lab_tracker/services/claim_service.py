@@ -11,6 +11,7 @@ from lab_tracker.errors import ValidationError
 from lab_tracker.models import (
     Claim,
     ClaimStatus,
+    EntityOrigin,
     utc_now,
 )
 from lab_tracker.services.base import BaseService, ServiceContext
@@ -22,6 +23,8 @@ from lab_tracker.services.shared import (
     _ensure_claim_confidence,
     _ensure_claim_status_transition,
     _ensure_claim_support_links,
+    actor_user_fk,
+    actor_user_id,
     ensure_non_empty,
     terminal_reason_for_status,
     unique_ids,
@@ -65,6 +68,11 @@ class ClaimService(BaseService):
         supported_by_analysis_ids: Iterable[UUID] | None = None,
         answers_question_ids: Iterable[UUID] | None = None,
         actor: AuthContext | None = None,
+        origin: EntityOrigin = EntityOrigin.USER,
+        change_set_id: UUID | None = None,
+        origin_provider: str | None = None,
+        origin_model: str | None = None,
+        origin_prompt_version: str | None = None,
     ) -> Claim:
         self.authorization.require_contributor(project_id, actor=actor)
         self.projects.get_project(project_id)
@@ -94,6 +102,13 @@ class ClaimService(BaseService):
             supported_by_dataset_ids=dataset_ids,
             supported_by_analysis_ids=analysis_ids,
             answers_question_ids=question_ids,
+            created_by=actor_user_id(actor),
+            created_by_user_id=actor_user_fk(actor, self.repository),
+            origin=origin,
+            change_set_id=change_set_id,
+            origin_provider=origin_provider,
+            origin_model=origin_model,
+            origin_prompt_version=origin_prompt_version,
         )
         with self.unit_of_work() as repository:
             repository.claims.save(claim)
@@ -137,6 +152,11 @@ class ClaimService(BaseService):
         supported_by_analysis_ids: Iterable[UUID] | None = None,
         answers_question_ids: Iterable[UUID] | None = None,
         actor: AuthContext | None = None,
+        origin: EntityOrigin | None = None,
+        change_set_id: UUID | None = None,
+        origin_provider: str | None = None,
+        origin_model: str | None = None,
+        origin_prompt_version: str | None = None,
     ) -> Claim:
         claim = self.get_claim(claim_id)
         self.authorization.require_contributor(claim.project_id, actor=actor)
@@ -182,6 +202,16 @@ class ClaimService(BaseService):
             claim.status = status
         if resolved_terminal_reason is not None:
             claim.terminal_reason = resolved_terminal_reason
+        if origin is not None:
+            claim.origin = origin
+        if change_set_id is not None:
+            claim.change_set_id = change_set_id
+        if origin_provider is not None:
+            claim.origin_provider = origin_provider
+        if origin_model is not None:
+            claim.origin_model = origin_model
+        if origin_prompt_version is not None:
+            claim.origin_prompt_version = origin_prompt_version
         claim.updated_at = utc_now()
         with self.unit_of_work() as repository:
             repository.claims.save(claim)

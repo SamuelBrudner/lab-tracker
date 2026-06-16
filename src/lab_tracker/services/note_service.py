@@ -11,6 +11,7 @@ from lab_tracker.auth import AuthContext
 from lab_tracker.errors import NotFoundError, ValidationError
 from lab_tracker.graph_drafting import PROVIDER, GraphDraftingError
 from lab_tracker.models import (
+    EntityOrigin,
     EntityRef,
     EntityType,
     Note,
@@ -105,6 +106,11 @@ class NoteService(BaseService):
         metadata: dict[str, NoteMetadataScalar] | None = None,
         status: NoteStatus = NoteStatus.STAGED,
         actor: AuthContext | None = None,
+        origin: EntityOrigin = EntityOrigin.USER,
+        change_set_id: UUID | None = None,
+        origin_provider: str | None = None,
+        origin_model: str | None = None,
+        origin_prompt_version: str | None = None,
     ) -> Note:
         self.authorization.require_contributor(project_id, actor=actor)
         self.projects.get_project(project_id)
@@ -126,6 +132,11 @@ class NoteService(BaseService):
             status=status,
             created_by=actor_user_id(actor),
             created_by_user_id=actor_user_fk(actor, self.repository),
+            origin=origin,
+            change_set_id=change_set_id,
+            origin_provider=origin_provider,
+            origin_model=origin_model,
+            origin_prompt_version=origin_prompt_version,
         )
         with self.unit_of_work() as repository:
             repository.notes.save(note)
@@ -298,6 +309,11 @@ class NoteService(BaseService):
         metadata: dict[str, NoteMetadataScalar] | None = None,
         status: NoteStatus | None = None,
         actor: AuthContext | None = None,
+        origin: EntityOrigin | None = None,
+        change_set_id: UUID | None = None,
+        origin_provider: str | None = None,
+        origin_model: str | None = None,
+        origin_prompt_version: str | None = None,
     ) -> Note:
         note = self.get_note(note_id)
         self.authorization.require_contributor(note.project_id, actor=actor)
@@ -312,6 +328,16 @@ class NoteService(BaseService):
             note.metadata = normalize_note_metadata(metadata)
         if status is not None:
             note.status = status
+        if origin is not None:
+            note.origin = origin
+        if change_set_id is not None:
+            note.change_set_id = change_set_id
+        if origin_provider is not None:
+            note.origin_provider = origin_provider
+        if origin_model is not None:
+            note.origin_model = origin_model
+        if origin_prompt_version is not None:
+            note.origin_prompt_version = origin_prompt_version
         note.updated_at = utc_now()
         with self.unit_of_work() as repository:
             repository.notes.save(note)

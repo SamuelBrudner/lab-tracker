@@ -564,6 +564,24 @@ def _compact_actor(actor: AuthContext | None) -> dict[str, Any] | None:
     return {"id": str(actor.user_id), "role": actor.role.value}
 
 
+def _add_origin_context(payload: dict[str, Any], entity: Any) -> None:
+    origin = getattr(entity, "origin", None)
+    if origin is not None:
+        payload["origin"] = origin.value if hasattr(origin, "value") else str(origin)
+    change_set_id = getattr(entity, "change_set_id", None)
+    if change_set_id is not None:
+        payload["change_set_id"] = str(change_set_id)
+    origin_provider = getattr(entity, "origin_provider", None)
+    if origin_provider:
+        payload["origin_provider"] = origin_provider
+    origin_model = getattr(entity, "origin_model", None)
+    if origin_model:
+        payload["origin_model"] = origin_model
+    origin_prompt_version = getattr(entity, "origin_prompt_version", None)
+    if origin_prompt_version:
+        payload["origin_prompt_version"] = origin_prompt_version
+
+
 def _compact_note(note: Note, *, include_raw_asset: bool = False) -> dict[str, Any]:
     preview = note.transcribed_text or note.raw_content or ""
     payload: dict[str, Any] = {
@@ -586,6 +604,7 @@ def _compact_note(note: Note, *, include_raw_asset: bool = False) -> dict[str, A
             "size_bytes": note.raw_asset.size_bytes,
             "checksum": note.raw_asset.checksum,
         }
+    _add_origin_context(payload, note)
     return payload
 
 
@@ -654,11 +673,12 @@ def _compact_question(question: Question) -> dict[str, Any]:
     }
     if question.terminal_reason:
         payload["terminal_reason"] = question.terminal_reason
+    _add_origin_context(payload, question)
     return payload
 
 
 def _compact_session(session: Session) -> dict[str, Any]:
-    return {
+    payload: dict[str, Any] = {
         "id": str(session.session_id),
         "label": f"{session.session_type.value} session {session.started_at.date().isoformat()}",
         "status": session.status.value,
@@ -669,6 +689,8 @@ def _compact_session(session: Session) -> dict[str, Any]:
         "started_at": session.started_at.isoformat(),
         "ended_at": session.ended_at.isoformat() if session.ended_at else None,
     }
+    _add_origin_context(payload, session)
+    return payload
 
 
 def _compact_dataset(dataset: Dataset) -> dict[str, Any]:
@@ -694,6 +716,7 @@ def _compact_dataset(dataset: Dataset) -> dict[str, Any]:
     }
     if dataset.terminal_reason:
         payload["terminal_reason"] = dataset.terminal_reason
+    _add_origin_context(payload, dataset)
     return payload
 
 
@@ -708,6 +731,7 @@ def _compact_analysis(analysis: Analysis) -> dict[str, Any]:
     }
     if analysis.terminal_reason:
         payload["terminal_reason"] = analysis.terminal_reason
+    _add_origin_context(payload, analysis)
     return payload
 
 
@@ -723,11 +747,12 @@ def _compact_claim(claim: Claim) -> dict[str, Any]:
     }
     if claim.terminal_reason:
         payload["terminal_reason"] = claim.terminal_reason
+    _add_origin_context(payload, claim)
     return payload
 
 
 def _compact_visualization(visualization: Visualization) -> dict[str, Any]:
-    return {
+    payload: dict[str, Any] = {
         "id": str(visualization.viz_id),
         "label": visualization.caption or visualization.file_path,
         "analysis_id": str(visualization.analysis_id),
@@ -736,10 +761,12 @@ def _compact_visualization(visualization: Visualization) -> dict[str, Any]:
         "related_claim_ids": [str(item) for item in visualization.related_claim_ids],
         "created_at": visualization.created_at.isoformat(),
     }
+    _add_origin_context(payload, visualization)
+    return payload
 
 
 def _compact_goal(goal: Goal) -> dict[str, Any]:
-    return {
+    payload: dict[str, Any] = {
         "id": str(goal.goal_id),
         "label": goal.title,
         "goal_type": goal.goal_type.value,
@@ -759,6 +786,8 @@ def _compact_goal(goal: Goal) -> dict[str, Any]:
         ],
         "created_at": goal.created_at.isoformat(),
     }
+    _add_origin_context(payload, goal)
+    return payload
 
 
 def _known_aliases(

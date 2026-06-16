@@ -9,6 +9,7 @@ from uuid import UUID, uuid4
 from lab_tracker.auth import AuthContext
 from lab_tracker.errors import ValidationError
 from lab_tracker.models import (
+    EntityOrigin,
     EntityRef,
     EntityType,
     Note,
@@ -88,6 +89,11 @@ class QuestionService(BaseService):
         terminal_reason: str | None = None,
         parent_question_ids: Iterable[UUID] | None = None,
         actor: AuthContext | None = None,
+        origin: EntityOrigin = EntityOrigin.USER,
+        change_set_id: UUID | None = None,
+        origin_provider: str | None = None,
+        origin_model: str | None = None,
+        origin_prompt_version: str | None = None,
     ) -> Question:
         self.authorization.require_contributor(project_id, actor=actor)
         self.projects.get_project(project_id)
@@ -121,6 +127,11 @@ class QuestionService(BaseService):
             parent_question_ids=parent_ids,
             created_by=actor_user_id(actor),
             created_by_user_id=actor_user_fk(actor, self.repository),
+            origin=origin,
+            change_set_id=change_set_id,
+            origin_provider=origin_provider,
+            origin_model=origin_model,
+            origin_prompt_version=origin_prompt_version,
         )
         with self.unit_of_work() as repository:
             repository.questions.save(question)
@@ -191,6 +202,11 @@ class QuestionService(BaseService):
         terminal_reason: str | None = None,
         parent_question_ids: Iterable[UUID] | None = None,
         actor: AuthContext | None = None,
+        origin: EntityOrigin | None = None,
+        change_set_id: UUID | None = None,
+        origin_provider: str | None = None,
+        origin_model: str | None = None,
+        origin_prompt_version: str | None = None,
     ) -> Question:
         question = self.get_question(question_id)
         self.authorization.require_contributor(question.project_id, actor=actor)
@@ -228,6 +244,16 @@ class QuestionService(BaseService):
                 self._question_graph(question.project_id),
             )
             question.parent_question_ids = parent_ids
+        if origin is not None:
+            question.origin = origin
+        if change_set_id is not None:
+            question.change_set_id = change_set_id
+        if origin_provider is not None:
+            question.origin_provider = origin_provider
+        if origin_model is not None:
+            question.origin_model = origin_model
+        if origin_prompt_version is not None:
+            question.origin_prompt_version = origin_prompt_version
         question.updated_at = utc_now()
         with self.unit_of_work() as repository:
             repository.questions.save(question)

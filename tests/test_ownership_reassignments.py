@@ -9,6 +9,7 @@ from fastapi.testclient import TestClient
 from lab_tracker.auth import AuthContext, Role
 from lab_tracker.db_models import (
     AnalysisModel,
+    ClaimModel,
     DatasetModel,
     GoalLinkModel,
     GoalModel,
@@ -23,6 +24,7 @@ from lab_tracker.db_models import (
     QuestionRefactorModel,
     SessionModel,
     UserModel,
+    VisualizationModel,
 )
 
 
@@ -81,6 +83,8 @@ def test_ownership_reassignment_moves_all_attribution_surfaces():
     batch_run_id = uuid4()
     session_id = uuid4()
     analysis_id = uuid4()
+    claim_id = uuid4()
+    visualization_id = uuid4()
     goal_id = uuid4()
     goal_link_id = uuid4()
     project_membership_id = uuid4()
@@ -264,6 +268,28 @@ def test_ownership_reassignment_moves_all_attribution_surfaces():
                 created_at=now,
                 updated_at=now,
             ),
+            ClaimModel(
+                claim_id=str(claim_id),
+                project_id=str(project_id),
+                statement="Departing scientist claim",
+                confidence=80.0,
+                status="proposed",
+                created_by=from_user,
+                created_by_user_id=from_user,
+                created_at=now,
+                updated_at=now,
+            ),
+            VisualizationModel(
+                viz_id=str(visualization_id),
+                analysis_id=str(analysis_id),
+                viz_type="line",
+                file_path="outputs/handoff.png",
+                caption="Handoff figure",
+                created_by=from_user,
+                created_by_user_id=from_user,
+                created_at=now,
+                updated_at=now,
+            ),
             GoalModel(
                 goal_id=str(goal_id),
                 project_id=str(project_id),
@@ -307,6 +333,8 @@ def test_ownership_reassignment_moves_all_attribution_surfaces():
         "question_refactors": 1,
         "datasets": 1,
         "notes": 1,
+        "claims": 1,
+        "visualizations": 1,
         "graph_change_sets": 1,
         "graph_draft_batch_runs": 1,
         "sessions": 1,
@@ -320,7 +348,7 @@ def test_ownership_reassignment_moves_all_attribution_surfaces():
     assert reassignment.to_user_id == to_user_id
     assert reassignment.reason == "trainee graduated"
     assert reassignment.record_counts == expected_counts
-    assert reassignment.total_records == 14
+    assert reassignment.total_records == 16
     assert reassignment.created_by == str(admin_user_id)
     assert reassignment.created_by_user_id == admin_user_id
 
@@ -333,6 +361,8 @@ def test_ownership_reassignment_moves_all_attribution_surfaces():
         session.get(QuestionRefactorModel, str(refactor_id)),
         session.get(DatasetModel, str(dataset_id)),
         session.get(NoteModel, str(note_id)),
+        session.get(ClaimModel, str(claim_id)),
+        session.get(VisualizationModel, str(visualization_id)),
         session.get(GraphChangeSetModel, str(change_set_id)),
         session.get(GraphDraftBatchRunModel, str(batch_run_id)),
         session.get(SessionModel, str(session_id)),
@@ -357,9 +387,7 @@ def test_ownership_reassignment_route_records_audit_and_requires_admin(
     source_headers, source_user_id = _register_user(client, role=Role.ADMIN)
     _, successor_user_id = _register_user(client, role=Role.VIEWER)
     viewer_headers, _ = _register_user(client, role=Role.VIEWER)
-    admin_user_id = client.get("/auth/me", headers=admin_auth_headers).json()["data"][
-        "user_id"
-    ]
+    admin_user_id = client.get("/auth/me", headers=admin_auth_headers).json()["data"]["user_id"]
 
     project_id = client.post(
         "/projects",

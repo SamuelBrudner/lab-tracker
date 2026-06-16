@@ -14,6 +14,7 @@ from lab_tracker.models import (
     Dataset,
     DatasetCommitManifest,
     DatasetFile,
+    EntityOrigin,
     ExternalArtifactKind,
     ExternalArtifactReference,
     Note,
@@ -63,6 +64,10 @@ def _context(base_url: str) -> dict[str, object]:
         "contentUrl": {"@id": "lab:contentUrl", "@type": "@id"},
         "contentType": "lab:contentType",
         "createdAt": "lab:createdAt",
+        "aiModel": "lab:aiModel",
+        "aiPromptVersion": "lab:aiPromptVersion",
+        "aiProvider": "lab:aiProvider",
+        "changeSet": {"@id": "lab:changeSet", "@type": "@id"},
         "encodingFormat": "lab:encodingFormat",
         "environmentHash": "lab:environmentHash",
         "entityId": "lab:entityId",
@@ -81,6 +86,7 @@ def _context(base_url: str) -> dict[str, object]:
         "note": {"@id": "lab:note", "@type": "@id"},
         "nwbMetadata": {"@id": "lab:nwbMetadata", "@type": "@json"},
         "outcomeStatus": "lab:outcomeStatus",
+        "origin": "lab:origin",
         "question": {"@id": "lab:question", "@type": "@id"},
         "questionLink": {"@id": "lab:questionLink", "@type": "@id"},
         "questionType": "lab:questionType",
@@ -103,6 +109,8 @@ def _context(base_url: str) -> dict[str, object]:
         "userId": "lab:userId",
         "vizType": "lab:vizType",
         "wasAttributedTo": {"@id": "prov:wasAttributedTo", "@type": "@id"},
+        "wasGeneratedBy": {"@id": "prov:wasGeneratedBy", "@type": "@id"},
+        "wasRevisionOf": {"@id": "prov:wasRevisionOf", "@type": "@id"},
         "bidsMetadata": {"@id": "lab:bidsMetadata", "@type": "@json"},
     }
 
@@ -153,6 +161,95 @@ def _person_node(base_url: str, user_id: str) -> dict[str, object]:
         "@type": ["prov:Agent", "prov:Person"],
         "userId": user_id,
     }
+
+
+def _draft_activity_iri(base_url: str, change_set_id: UUID) -> str:
+    return _resource_iri(base_url, "graph-drafts", change_set_id)
+
+
+def _software_agent_iri(base_url: str, change_set_id: UUID) -> str:
+    return _synthetic_child_iri(_draft_activity_iri(base_url, change_set_id), "software-agent")
+
+
+def _append_id_ref(node: dict[str, object], key: str, ref: dict[str, str]) -> None:
+    existing = node.get(key)
+    if existing is None:
+        node[key] = ref
+        return
+    if isinstance(existing, list):
+        if ref not in existing:
+            existing.append(ref)
+        return
+    if existing != ref:
+        node[key] = [existing, ref]
+
+
+def _node_type_includes(node: dict[str, object], node_type: str) -> bool:
+    raw_type = node.get("@type")
+    if isinstance(raw_type, list):
+        return node_type in raw_type
+    return raw_type == node_type
+
+
+def _entity_origin_value(entity: object) -> EntityOrigin:
+    raw_origin = getattr(entity, "origin", EntityOrigin.USER)
+    if isinstance(raw_origin, EntityOrigin):
+        return raw_origin
+    return EntityOrigin(str(raw_origin or EntityOrigin.USER.value))
+
+
+def _apply_origin_provenance(
+    base_url: str,
+    node: dict[str, object],
+    entity: object,
+) -> None:
+    origin = _entity_origin_value(entity)
+    node["origin"] = origin.value
+    change_set_id = getattr(entity, "change_set_id", None)
+    if change_set_id is None:
+        return
+    draft_activity = {"@id": _draft_activity_iri(base_url, change_set_id)}
+    node["changeSet"] = draft_activity
+    if origin == EntityOrigin.USER_REVISED:
+        node["prov:wasRevisionOf"] = {
+            "@id": _synthetic_child_iri(
+                str(node["@id"]),
+                "versions",
+                "before",
+                change_set_id,
+            )
+        }
+        _append_id_ref(node, "prov:wasInformedBy", draft_activity)
+    elif _node_type_includes(node, "prov:Activity"):
+        _append_id_ref(node, "prov:wasInformedBy", draft_activity)
+    else:
+        _append_id_ref(node, "prov:wasGeneratedBy", draft_activity)
+
+
+def _origin_provenance_nodes(base_url: str, entity: object) -> list[dict[str, object]]:
+    change_set_id = getattr(entity, "change_set_id", None)
+    if change_set_id is None:
+        return []
+    activity_iri = _draft_activity_iri(base_url, change_set_id)
+    agent_iri = _software_agent_iri(base_url, change_set_id)
+    activity_node: dict[str, object] = {
+        "@id": activity_iri,
+        "@type": "prov:Activity",
+        "entityType": "graph_change_set",
+        "entityId": str(change_set_id),
+        "prov:wasAssociatedWith": {"@id": agent_iri},
+    }
+    agent_node: dict[str, object] = {
+        "@id": agent_iri,
+        "@type": ["prov:Agent", "prov:SoftwareAgent"],
+    }
+    if getattr(entity, "origin_provider", None):
+        agent_node["aiProvider"] = entity.origin_provider
+    if getattr(entity, "origin_model", None):
+        agent_node["aiModel"] = entity.origin_model
+    if getattr(entity, "origin_prompt_version", None):
+        agent_node["aiPromptVersion"] = entity.origin_prompt_version
+    return [activity_node, agent_node]
 
 
 def _uuid_or_none(value: str) -> UUID | None:
@@ -350,6 +447,7 @@ def build_dataset_provenance_document(
         "commitHash": dataset.commit_hash,
         "status": dataset.status.value,
     }
+    _apply_origin_provenance(base_url, dataset_node, dataset)
     if dataset.terminal_reason:
         dataset_node["terminalReason"] = dataset.terminal_reason
     creator_user_id = _creator_user_id(dataset.created_by_user_id, dataset.created_by)
@@ -421,6 +519,7 @@ def build_dataset_provenance_document(
         commit_node["bidsMetadata"] = dataset.commit_manifest.bids_metadata
 
     graph.append(commit_node)
+    graph.extend(_origin_provenance_nodes(base_url, dataset))
     graph.extend(_dataset_file_node(base_url, dataset, file) for file in files)
     graph.extend(_external_artifact_node(artifact) for artifact in external_artifacts)
     graph.extend(
@@ -451,6 +550,7 @@ def _claim_node(
     }
     if claim.terminal_reason:
         node["terminalReason"] = claim.terminal_reason
+    _apply_origin_provenance(base_url, node, claim)
     if attributed_user_ids:
         node["prov:wasAttributedTo"] = _attribution_value(base_url, attributed_user_ids)
     if claim.supported_by_dataset_ids:
@@ -486,6 +586,7 @@ def _visualization_node(
         "vizType": visualization.viz_type,
         "filePath": visualization.file_path,
     }
+    _apply_origin_provenance(base_url, node, visualization)
     if attributed_user_ids:
         node["prov:wasAttributedTo"] = _attribution_value(base_url, attributed_user_ids)
     if visualization.caption:
@@ -538,6 +639,7 @@ def build_analysis_provenance_document(
     }
     if analysis.terminal_reason:
         analysis_node["terminalReason"] = analysis.terminal_reason
+    _apply_origin_provenance(base_url, analysis_node, analysis)
     if analysis.environment_hash is not None:
         analysis_node["environmentHash"] = analysis.environment_hash
     if datasets:
@@ -557,6 +659,7 @@ def build_analysis_provenance_document(
             "@id": _agent_iri(base_url, analysis_actor_user_id)
         }
     graph.append(analysis_node)
+    graph.extend(_origin_provenance_nodes(base_url, analysis))
 
     for dataset in datasets:
         dataset_node: dict[str, object] = {
@@ -565,6 +668,7 @@ def build_analysis_provenance_document(
             "commitHash": dataset.commit_hash,
             "status": dataset.status.value,
         }
+        _apply_origin_provenance(base_url, dataset_node, dataset)
         if dataset.terminal_reason:
             dataset_node["terminalReason"] = dataset.terminal_reason
         dataset_user_id = dataset_attribution[dataset.dataset_id]
@@ -578,9 +682,12 @@ def build_analysis_provenance_document(
                 supervision_edges=supervision_edges,
             )
         graph.append(dataset_node)
+        graph.extend(_origin_provenance_nodes(base_url, dataset))
     for claim in claims:
+        claim_creator_user_id = _creator_user_id(claim.created_by_user_id, claim.created_by)
         attributed_user_ids = _unique_user_ids(
             [
+                claim_creator_user_id,
                 *[
                     dataset_attribution.get(dataset_id)
                     for dataset_id in claim.supported_by_dataset_ids
@@ -607,12 +714,21 @@ def build_analysis_provenance_document(
                 attributed_user_ids=attributed_user_ids,
             )
         )
+        graph.extend(_origin_provenance_nodes(base_url, claim))
     for visualization in visualizations:
-        attributed_user_ids = (
-            [analysis_actor_user_id]
-            if analysis_actor_user_id is not None
-            and visualization.analysis_id == analysis.analysis_id
-            else []
+        visualization_creator_user_id = _creator_user_id(
+            visualization.created_by_user_id,
+            visualization.created_by,
+        )
+        attributed_user_ids = _unique_user_ids(
+            [
+                visualization_creator_user_id,
+                (
+                    analysis_actor_user_id
+                    if visualization.analysis_id == analysis.analysis_id
+                    else None
+                ),
+            ]
         )
         for user_id in attributed_user_ids:
             _add_person_with_supervision(
@@ -629,6 +745,7 @@ def build_analysis_provenance_document(
                 attributed_user_ids=attributed_user_ids,
             )
         )
+        graph.extend(_origin_provenance_nodes(base_url, visualization))
     graph.extend(people[user_id] for user_id in sorted(people))
 
     return {"@context": _context(base_url), "@graph": graph}
@@ -661,6 +778,7 @@ def _question_node(
     }
     if question.terminal_reason:
         node["terminalReason"] = question.terminal_reason
+    _apply_origin_provenance(base_url, node, question)
     creator_user_id = _creator_user_id(question.created_by_user_id, question.created_by)
     if creator_user_id is not None:
         node["prov:wasAttributedTo"] = {"@id": _agent_iri(base_url, creator_user_id)}
@@ -690,6 +808,7 @@ def _note_node(
     }
     if note.transcribed_text:
         node["transcribedText"] = note.transcribed_text
+    _apply_origin_provenance(base_url, node, note)
     if note.targets:
         node["target"] = [
             {
@@ -753,6 +872,7 @@ def build_record_export_provenance_document(
             supervision_edges=supervision_edges,
         )
         merged.setdefault(str(node["@id"]), node)
+        _merge_graph_nodes(merged, _origin_provenance_nodes(base_url, question))
 
     for note in records.notes:
         node = _note_node(
@@ -762,6 +882,7 @@ def build_record_export_provenance_document(
             supervision_edges=supervision_edges,
         )
         merged.setdefault(str(node["@id"]), node)
+        _merge_graph_nodes(merged, _origin_provenance_nodes(base_url, note))
 
     for dataset in records.datasets:
         document = build_dataset_provenance_document(
@@ -813,8 +934,10 @@ def build_record_export_provenance_document(
     for claim in records.claims:
         if claim.claim_id in covered_claim_ids:
             continue
+        claim_creator_user_id = _creator_user_id(claim.created_by_user_id, claim.created_by)
         attributed_user_ids = _unique_user_ids(
             [
+                claim_creator_user_id,
                 *[
                     dataset_attribution.get(dataset_id)
                     for dataset_id in claim.supported_by_dataset_ids
@@ -839,6 +962,7 @@ def build_record_export_provenance_document(
             attributed_user_ids=attributed_user_ids,
         )
         merged.setdefault(str(node["@id"]), node)
+        _merge_graph_nodes(merged, _origin_provenance_nodes(base_url, claim))
 
     for user_id in sorted(people):
         person = people[user_id]

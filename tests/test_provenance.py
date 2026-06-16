@@ -12,6 +12,7 @@ from lab_tracker.models import (
     DatasetCommitManifest,
     DatasetFile,
     DatasetStatus,
+    EntityOrigin,
     ExternalArtifactKind,
     ExternalArtifactReference,
     OutcomeStatus,
@@ -133,6 +134,94 @@ def test_record_export_provenance_includes_terminal_reasons():
         _node_by_id(document, f"http://example.test/claims/{claim_id}")["terminalReason"]
         == "A later analysis refuted the interpretation."
     )
+
+
+def test_analysis_provenance_distinguishes_ai_suggested_and_user_revised_nodes():
+    change_set_id = UUID("99999999-9999-4999-8999-999999999999")
+    analysis_id = UUID("55555555-aaaa-aaaa-aaaa-555555555555")
+    dataset_id = UUID("66666666-aaaa-aaaa-aaaa-666666666666")
+    claim_id = UUID("77777777-aaaa-aaaa-aaaa-777777777777")
+    viz_id = UUID("88888888-aaaa-aaaa-aaaa-888888888888")
+    creator_user_id = UUID("aaaaaaaa-9999-4999-8999-aaaaaaaaaaaa")
+
+    analysis = Analysis(
+        analysis_id=analysis_id,
+        project_id=uuid4(),
+        dataset_ids=[dataset_id],
+        method_hash="method-ai-origin",
+        code_version="v1",
+        status=AnalysisStatus.COMMITTED,
+    )
+    dataset = Dataset(
+        dataset_id=dataset_id,
+        project_id=analysis.project_id,
+        commit_hash="commit-ai-origin",
+        primary_question_id=uuid4(),
+        question_links=[],
+        commit_manifest=DatasetCommitManifest(),
+        status=DatasetStatus.COMMITTED,
+    )
+    claim = Claim(
+        claim_id=claim_id,
+        project_id=analysis.project_id,
+        statement="AI-suggested claim",
+        confidence=0.7,
+        status=ClaimStatus.SUPPORTED,
+        supported_by_analysis_ids=[analysis_id],
+        created_by_user_id=creator_user_id,
+        origin=EntityOrigin.AI_SUGGESTED,
+        change_set_id=change_set_id,
+        origin_provider="openai",
+        origin_model="fake-gpt",
+        origin_prompt_version="multimodal-graph-draft-v1",
+    )
+    visualization = Visualization(
+        viz_id=viz_id,
+        analysis_id=analysis_id,
+        viz_type="line",
+        file_path="figs/ai-origin.png",
+        created_by_user_id=creator_user_id,
+        origin=EntityOrigin.USER_REVISED,
+        change_set_id=change_set_id,
+        origin_provider="openai",
+        origin_model="fake-gpt",
+        origin_prompt_version="multimodal-graph-draft-v1",
+    )
+
+    document = build_analysis_provenance_document(
+        "http://example.test",
+        analysis,
+        datasets=[dataset],
+        claims=[claim],
+        visualizations=[visualization],
+    )
+
+    draft_iri = f"http://example.test/graph-drafts/{change_set_id}"
+    agent_iri = f"{draft_iri}/software-agent"
+    claim_node = _node_by_id(document, f"http://example.test/claims/{claim_id}")
+    viz_node = _node_by_id(document, f"http://example.test/visualizations/{viz_id}")
+    draft_node = _node_by_id(document, draft_iri)
+    agent_node = _node_by_id(document, agent_iri)
+
+    assert claim_node["origin"] == "ai_suggested"
+    assert claim_node["changeSet"] == {"@id": draft_iri}
+    assert claim_node["prov:wasGeneratedBy"] == {"@id": draft_iri}
+    assert claim_node["prov:wasAttributedTo"] == {
+        "@id": f"http://example.test/agents/{creator_user_id}"
+    }
+    assert viz_node["origin"] == "user_revised"
+    assert viz_node["changeSet"] == {"@id": draft_iri}
+    assert viz_node["prov:wasInformedBy"] == {"@id": draft_iri}
+    assert viz_node["prov:wasRevisionOf"] == {
+        "@id": (
+            f"http://example.test/visualizations/{viz_id}/versions/before/{change_set_id}"
+        )
+    }
+    assert draft_node["prov:wasAssociatedWith"] == {"@id": agent_iri}
+    assert _node_type_includes(agent_node, "prov:SoftwareAgent")
+    assert agent_node["aiProvider"] == "openai"
+    assert agent_node["aiModel"] == "fake-gpt"
+    assert agent_node["aiPromptVersion"] == "multimodal-graph-draft-v1"
 
 
 def test_dataset_provenance_uses_inline_context_and_json_metadata():

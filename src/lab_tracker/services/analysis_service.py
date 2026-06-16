@@ -15,6 +15,7 @@ from lab_tracker.models import (
     ClaimInput,
     ClaimStatus,
     DatasetStatus,
+    EntityOrigin,
     Visualization,
     VisualizationInput,
     utc_now,
@@ -75,6 +76,11 @@ class AnalysisService(BaseService):
         status: AnalysisStatus = AnalysisStatus.STAGED,
         terminal_reason: str | None = None,
         actor: AuthContext | None = None,
+        origin: EntityOrigin = EntityOrigin.USER,
+        change_set_id: UUID | None = None,
+        origin_provider: str | None = None,
+        origin_model: str | None = None,
+        origin_prompt_version: str | None = None,
     ) -> Analysis:
         self.authorization.require_contributor(project_id, actor=actor)
         self.projects.get_project(project_id)
@@ -113,6 +119,11 @@ class AnalysisService(BaseService):
             terminal_reason=resolved_terminal_reason,
             executed_by=actor_user_id(actor),
             executed_by_user_id=actor_user_fk(actor, self.repository),
+            origin=origin,
+            change_set_id=change_set_id,
+            origin_provider=origin_provider,
+            origin_model=origin_model,
+            origin_prompt_version=origin_prompt_version,
         )
         with self.unit_of_work() as repository:
             repository.analyses.save(analysis)
@@ -168,6 +179,11 @@ class AnalysisService(BaseService):
         environment_hash: str | None = None,
         terminal_reason: str | None = None,
         actor: AuthContext | None = None,
+        origin: EntityOrigin | None = None,
+        change_set_id: UUID | None = None,
+        origin_provider: str | None = None,
+        origin_model: str | None = None,
+        origin_prompt_version: str | None = None,
     ) -> Analysis:
         analysis = self.get_analysis(analysis_id)
         self.authorization.require_contributor(analysis.project_id, actor=actor)
@@ -195,6 +211,16 @@ class AnalysisService(BaseService):
             analysis.terminal_reason = resolved_terminal_reason
         if environment_hash is not None:
             analysis.environment_hash = environment_hash.strip() if environment_hash else None
+        if origin is not None:
+            analysis.origin = origin
+        if change_set_id is not None:
+            analysis.change_set_id = change_set_id
+        if origin_provider is not None:
+            analysis.origin_provider = origin_provider
+        if origin_model is not None:
+            analysis.origin_model = origin_model
+        if origin_prompt_version is not None:
+            analysis.origin_prompt_version = origin_prompt_version
         analysis.updated_at = utc_now()
         with self.unit_of_work() as repository:
             repository.analyses.save(analysis)
