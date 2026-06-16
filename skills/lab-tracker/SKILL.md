@@ -92,6 +92,8 @@ Use these tools when available:
   or claim.
 - `lab_tracker_get_dataset_provenance` returns dataset provenance JSON-LD.
 - `lab_tracker_get_analysis_provenance` returns analysis provenance JSON-LD.
+- `lab_tracker_publication_readiness` checks ARA-Seal L1 structural readiness
+  for a project.
 - `lab_tracker_search` searches questions and notes together.
 - `lab_tracker_create_project` creates a project.
 - `lab_tracker_create_question` creates a question in a project; pass

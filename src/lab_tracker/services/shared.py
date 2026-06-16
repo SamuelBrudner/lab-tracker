@@ -29,6 +29,7 @@ from lab_tracker.models import (
     QuestionLinkRole,
     QuestionStatus,
     SessionStatus,
+    external_artifact_uri_validation_error,
 )
 from lab_tracker.provenance_ingestion import external_artifacts_from_metadata
 
@@ -425,6 +426,7 @@ def _normalize_external_artifacts(
     seen: set[tuple[str, str, str]] = set()
     for artifact in artifacts:
         item = ExternalArtifactReference.model_validate(artifact)
+        _ensure_external_artifact_uri(item)
         key = _external_artifact_key(item)
         if key in seen:
             raise ValidationError("Duplicate external artifact reference in commit manifest.")
@@ -441,6 +443,7 @@ def _merge_external_artifacts(
     seen: dict[tuple[str, str, str], ExternalArtifactReference] = {}
     for artifact in [*legacy_artifacts, *artifacts]:
         item = ExternalArtifactReference.model_validate(artifact)
+        _ensure_external_artifact_uri(item)
         key = _external_artifact_key(item)
         if key in seen:
             if seen[key] != item:
@@ -453,6 +456,12 @@ def _merge_external_artifacts(
 
 def _external_artifact_key(artifact: ExternalArtifactReference) -> tuple[str, str, str]:
     return (artifact.kind.value, artifact.source_system, artifact.uri)
+
+
+def _ensure_external_artifact_uri(artifact: ExternalArtifactReference) -> None:
+    reason = external_artifact_uri_validation_error(artifact.uri)
+    if reason is not None:
+        raise ValidationError(reason)
 
 
 def _manifest_input_from_commit(manifest: DatasetCommitManifest) -> DatasetCommitManifestInput:

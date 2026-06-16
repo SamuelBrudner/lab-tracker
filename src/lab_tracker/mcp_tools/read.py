@@ -336,6 +336,18 @@ def lab_tracker_get_goal(goal_id: str) -> JsonObject:
     )
 
 
+def lab_tracker_publication_readiness(project_id: str) -> JsonObject:
+    """Check ARA-Seal L1 structural readiness for one project."""
+    return _read_tool(
+        "lab_tracker_publication_readiness",
+        lambda client: client.publication_readiness(project_id),
+        hint=next_action(
+            "lab_tracker_get_decision_context",
+            "If readiness is blocked, inspect the flagged graph nodes before writing.",
+        ),
+    )
+
+
 def lab_tracker_list_node_goals(
     project_id: str,
     entity_type: str,
@@ -457,6 +469,7 @@ READ_TOOLS = (
     lab_tracker_list_visualizations,
     lab_tracker_list_goals,
     lab_tracker_get_goal,
+    lab_tracker_publication_readiness,
     lab_tracker_list_node_goals,
     lab_tracker_get_dataset_provenance,
     lab_tracker_get_analysis_provenance,

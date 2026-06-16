@@ -19,7 +19,12 @@ from lab_tracker.db_models import (
     VisualizationModel,
 )
 from lab_tracker.errors import NotFoundError
-from lab_tracker.models import Project, ProjectMembership, ProjectStatus
+from lab_tracker.models import (
+    Project,
+    ProjectMembership,
+    ProjectStatus,
+    PublicationReadinessReport,
+)
 from lab_tracker.schemas import (
     Envelope,
     ListEnvelope,
@@ -102,6 +107,18 @@ def build_projects_router(api: LabTrackerAPI) -> APIRouter:
         project = api_from_request(request, api).get_project(project_id)
         ensure_project_read(request, project.project_id)
         return Envelope(data=project)
+
+    @router.get(
+        "/projects/{project_id}/publication-readiness",
+        response_model=Envelope[PublicationReadinessReport],
+    )
+    def publication_readiness(project_id: UUID, request: Request):
+        actor = actor_from_request(request)
+        report = api_from_request(request, api).check_publication_readiness(
+            project_id,
+            actor=actor,
+        )
+        return Envelope(data=report)
 
     @router.patch("/projects/{project_id}", response_model=Envelope[Project])
     def update_project(project_id: UUID, payload: ProjectUpdate, request: Request):

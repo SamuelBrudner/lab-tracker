@@ -10,6 +10,7 @@ from lab_tracker.services.note_service import NoteService
 from lab_tracker.services.ownership_service import OwnershipReassignmentService
 from lab_tracker.services.project_authorization import ProjectAuthorizationPolicy
 from lab_tracker.services.project_service import ProjectService
+from lab_tracker.services.publication_readiness_service import PublicationReadinessService
 from lab_tracker.services.question_service import QuestionRefactorResult, QuestionService
 from lab_tracker.services.record_export_service import RecordExportService
 from lab_tracker.services.session_service import SessionService
@@ -27,6 +28,7 @@ __all__ = [
     "OwnershipReassignmentService",
     "ProjectAuthorizationPolicy",
     "ProjectService",
+    "PublicationReadinessService",
     "QuestionRefactorResult",
     "QuestionService",
     "RecordExportService",

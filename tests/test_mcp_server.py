@@ -36,6 +36,7 @@ def test_fastmcp_registers_lab_tracker_tools() -> None:
     assert "lab_tracker_list_goals" in names
     assert "lab_tracker_get_goal" in names
     assert "lab_tracker_list_node_goals" in names
+    assert "lab_tracker_publication_readiness" in names
     assert "lab_tracker_create_note" in names
     assert "lab_tracker_create_dataset" in names
     assert "lab_tracker_create_analysis" in names
@@ -150,6 +151,20 @@ def test_client_low_level_read_tools_call_retained_routes() -> None:
             return _json_response(200, {"data": {"@id": "dataset-1"}})
         if request.url.path == "/analyses/analysis-1/provenance":
             return _json_response(200, {"data": {"@id": "analysis-1"}})
+        if request.url.path == "/projects/project-1/publication-readiness":
+            return _json_response(
+                200,
+                {
+                    "data": {
+                        "project_id": "project-1",
+                        "unsupported_claims": [],
+                        "ungrounded_questions": [],
+                        "orphaned_entities": [],
+                        "broken_external_refs": [],
+                        "seal_level": "ara_l1",
+                    }
+                },
+            )
         return _json_response(404, {"error": {"message": "not found"}})
 
     client = mcp_server.LabTrackerAPIClient(
@@ -178,6 +193,7 @@ def test_client_low_level_read_tools_call_retained_routes() -> None:
         assert client.get_analysis_provenance("analysis-1")["data"]["@id"] == (
             "analysis-1"
         )
+        assert client.publication_readiness("project-1")["data"]["seal_level"] == "ara_l1"
     finally:
         client.close()
 
@@ -189,6 +205,7 @@ def test_client_low_level_read_tools_call_retained_routes() -> None:
         "/visualizations",
         "/datasets/dataset-1/provenance",
         "/analyses/analysis-1/provenance",
+        "/projects/project-1/publication-readiness",
     ]
 
 

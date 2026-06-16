@@ -339,6 +339,9 @@ class LabTrackerAPIClient:
     def get_goal(self, goal_id: str) -> JsonObject:
         return self._request("GET", f"/goals/{goal_id}")
 
+    def publication_readiness(self, project_id: str) -> JsonObject:
+        return self._request("GET", f"/projects/{project_id}/publication-readiness")
+
     def get_dataset_provenance(self, dataset_id: str) -> JsonObject:
         return self._request("GET", f"/datasets/{dataset_id}/provenance")
 

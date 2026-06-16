@@ -38,6 +38,7 @@ from lab_tracker.mcp_tools.read import (
     lab_tracker_list_sessions,
     lab_tracker_list_visualizations,
     lab_tracker_next_questions,
+    lab_tracker_publication_readiness,
     lab_tracker_readiness,
     lab_tracker_search,
 )
@@ -110,6 +111,7 @@ __all__ = [
     "lab_tracker_list_sessions",
     "lab_tracker_list_visualizations",
     "lab_tracker_next_questions",
+    "lab_tracker_publication_readiness",
     "lab_tracker_quickstart",
     "lab_tracker_readiness",
     "lab_tracker_link_node_to_goal",

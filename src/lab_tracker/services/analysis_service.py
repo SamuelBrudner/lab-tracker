@@ -19,6 +19,7 @@ from lab_tracker.models import (
     ExternalArtifactReference,
     Visualization,
     VisualizationInput,
+    external_artifact_uri_validation_error,
     utc_now,
 )
 from lab_tracker.services.base import BaseService, ServiceContext
@@ -334,6 +335,9 @@ def _normalize_external_artifacts(
     seen: set[tuple[str, str, str]] = set()
     for artifact in artifacts or []:
         item = ExternalArtifactReference.model_validate(artifact)
+        reason = external_artifact_uri_validation_error(item.uri)
+        if reason is not None:
+            raise ValidationError(reason)
         key = (item.kind.value, item.source_system, item.uri)
         if key in seen:
             raise ValidationError("Duplicate external artifact reference on analysis.")

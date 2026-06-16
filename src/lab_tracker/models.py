@@ -14,12 +14,14 @@ import re
 from collections.abc import Mapping
 from datetime import date, datetime, timezone
 from enum import Enum
-from typing import Any
+from typing import Any, Literal
+from urllib.parse import urlsplit
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, computed_field, field_validator
 
 NoteMetadataScalar = str | bool | int | float
+_EXTERNAL_ARTIFACT_URI_SCHEME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*$")
 
 
 def utc_now() -> datetime:
@@ -47,6 +49,26 @@ def decode_session_link_code(link_code: str) -> UUID:
     if len(decoded) != 16:
         raise ValueError("Invalid link_code length.")
     return UUID(bytes=decoded)
+
+
+def external_artifact_uri_validation_error(uri: str) -> str | None:
+    cleaned = (uri or "").strip()
+    if not cleaned:
+        return "External artifact URI must not be empty."
+    if any(ch.isspace() or ord(ch) < 0x20 for ch in cleaned):
+        return "External artifact URI must not contain spaces or control characters."
+    parsed = urlsplit(cleaned)
+    if not parsed.scheme or not _EXTERNAL_ARTIFACT_URI_SCHEME_RE.fullmatch(parsed.scheme):
+        return "External artifact URI must be a well-formed IRI with a scheme."
+    if not parsed.netloc and not parsed.path:
+        return "External artifact URI must identify a resource."
+    if parsed.scheme in {"http", "https"} and not parsed.netloc:
+        return "External artifact HTTP(S) URI must include a host."
+    return None
+
+
+def external_artifact_uri_is_valid(uri: str) -> bool:
+    return external_artifact_uri_validation_error(uri) is None
 
 
 class ProjectStatus(str, Enum):
@@ -761,6 +783,53 @@ class RecordExportRecords(_DomainModel):
     analyses: list[Analysis] = Field(default_factory=list)
     claims: list[Claim] = Field(default_factory=list)
     notes: list[Note] = Field(default_factory=list)
+
+
+class PublicationReadinessUnsupportedClaim(_DomainModel):
+    claim_id: UUID
+    statement: str
+    status: ClaimStatus
+    reason: str
+
+
+class PublicationReadinessUngroundedQuestion(_DomainModel):
+    question_id: UUID
+    text: str
+    status: QuestionStatus
+    reason: str
+
+
+class PublicationReadinessOrphanedEntity(_DomainModel):
+    entity_type: EntityType
+    entity_id: UUID
+    relation: str
+    missing_entity_type: EntityType
+    missing_entity_id: UUID
+
+
+class PublicationReadinessBrokenExternalRef(_DomainModel):
+    entity_type: EntityType
+    entity_id: UUID
+    source_system: str
+    uri: str
+    reason: str
+
+
+class PublicationReadinessReport(_DomainModel):
+    project_id: UUID
+    unsupported_claims: list[PublicationReadinessUnsupportedClaim] = Field(
+        default_factory=list
+    )
+    ungrounded_questions: list[PublicationReadinessUngroundedQuestion] = Field(
+        default_factory=list
+    )
+    orphaned_entities: list[PublicationReadinessOrphanedEntity] = Field(
+        default_factory=list
+    )
+    broken_external_refs: list[PublicationReadinessBrokenExternalRef] = Field(
+        default_factory=list
+    )
+    seal_level: Literal["blocked", "ara_l1"] = "blocked"
 
 
 class RecordExportEvent(_DomainModel):
