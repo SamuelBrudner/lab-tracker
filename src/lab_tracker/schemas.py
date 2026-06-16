@@ -132,6 +132,14 @@ class AuthUserRead(BaseModel):
     created_at: datetime
 
 
+class AuthInvitationRead(BaseModel):
+    email: str
+    role: Role
+    invite_url: str
+    mailto_url: str
+    expires_at: datetime
+
+
 class AuthBootstrapStatus(BaseModel):
     has_users: bool
     bootstrap_admin_configured: bool
@@ -150,11 +158,17 @@ class AuthRegisterRequest(RequestModel):
     password: NonBlankStr
     role: Role = Role.VIEWER
     bootstrap_token: NonBlankStr | None = None
+    invite_token: NonBlankStr | None = None
 
 
 class AuthUserUpdate(RequestModel):
     password: NonBlankStr | None = None
     role: Role | None = None
+
+
+class AuthInvitationCreate(RequestModel):
+    email: NonBlankStr
+    role: Role = Role.VIEWER
 
 
 class AuthLoginRequest(RequestModel):

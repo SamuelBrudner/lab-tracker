@@ -279,6 +279,79 @@ def test_admin_can_manage_users(monkeypatch, tmp_path):
         assert "At least one admin" in demote_last_admin_response.json()["error"]["message"]
 
 
+def test_admin_can_invite_user_by_email(monkeypatch, tmp_path):
+    _bootstrap_database(monkeypatch, tmp_path)
+    monkeypatch.setenv("LAB_TRACKER_PUBLIC_BASE_URL", "https://lab.example.org")
+    with TestClient(create_app()) as client:
+        _seed_admin(client)
+        admin_token = _login(client, "root", "secret")
+
+        denied_response = client.post(
+            "/auth/invitations",
+            json={"email": "member@example.org", "role": "editor"},
+        )
+        assert denied_response.status_code == 401
+
+        invite_response = client.post(
+            "/auth/invitations",
+            json={"email": "Member@Example.Org", "role": "editor"},
+            headers=_auth_headers(admin_token),
+        )
+        assert invite_response.status_code == 201
+        invitation = invite_response.json()["data"]
+        assert invitation["email"] == "member@example.org"
+        assert invitation["role"] == "editor"
+        assert invitation["invite_url"].startswith("https://lab.example.org/app?invite=")
+        assert "mailto:member%40example.org" in invitation["mailto_url"]
+
+        invite_token = invitation["invite_url"].split("invite=", 1)[1].split("&", 1)[0]
+        register_response = client.post(
+            "/auth/register",
+            json={
+                "invite_token": invite_token,
+                "password": "invite-secret",
+                "username": "member@example.org",
+            },
+        )
+        assert register_response.status_code == 201
+        payload = register_response.json()["data"]
+        assert payload["user"]["username"] == "member@example.org"
+        assert payload["user"]["role"] == "editor"
+
+        login_response = client.post(
+            "/auth/login",
+            json={"username": "member@example.org", "password": "invite-secret"},
+        )
+        assert login_response.status_code == 200
+
+
+def test_invitation_token_must_match_registration_email(monkeypatch, tmp_path):
+    _bootstrap_database(monkeypatch, tmp_path)
+    with TestClient(create_app()) as client:
+        _seed_admin(client)
+        admin_token = _login(client, "root", "secret")
+        invite_response = client.post(
+            "/auth/invitations",
+            json={"email": "member@example.org", "role": "editor"},
+            headers=_auth_headers(admin_token),
+        )
+        assert invite_response.status_code == 201
+        invite_token = invite_response.json()["data"]["invite_url"].split("invite=", 1)[1].split(
+            "&", 1
+        )[0]
+
+        register_response = client.post(
+            "/auth/register",
+            json={
+                "invite_token": invite_token,
+                "password": "invite-secret",
+                "username": "other@example.org",
+            },
+        )
+        assert register_response.status_code == 401
+        assert "Invitation token" in register_response.json()["error"]["message"]
+
+
 def test_refresh_issues_fresh_token_ttl(monkeypatch, tmp_path):
     _bootstrap_database(monkeypatch, tmp_path)
 

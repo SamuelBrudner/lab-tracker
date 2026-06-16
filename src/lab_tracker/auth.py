@@ -279,6 +279,14 @@ class TokenClaims:
     issued_at: datetime
 
 
+@dataclass(frozen=True)
+class InvitationClaims:
+    email: str
+    role: Role
+    expires_at: datetime
+    issued_at: datetime
+
+
 class TokenService:
     """HMAC-signed JWT-style token issuer and verifier."""
 
@@ -333,6 +341,78 @@ class TokenService:
             expires_at=expires_at,
             issued_at=issued_at,
         )
+
+    def _sign(self, data: bytes) -> bytes:
+        return hmac.new(self._secret, data, hashlib.sha256).digest()
+
+
+class InvitationTokenService:
+    """HMAC-signed invitation token issuer and verifier."""
+
+    def __init__(self, secret_key: str, *, ttl_hours: int = 168) -> None:
+        if not secret_key or not secret_key.strip():
+            raise ValidationError("auth_secret_key must not be empty.")
+        if ttl_hours < 1:
+            raise ValidationError("auth_invite_ttl_hours must be at least 1.")
+        self._secret = secret_key.encode("utf-8")
+        self._ttl_hours = ttl_hours
+
+    def issue_invitation_token(self, *, email: str, role: Role) -> tuple[str, datetime]:
+        issued_at = utc_now()
+        expires_at = issued_at + timedelta(hours=self._ttl_hours)
+        header = {"alg": "HS256", "typ": "LT-INVITE"}
+        payload = {
+            "email": self.normalize_email(email),
+            "role": role.value,
+            "iat": int(issued_at.timestamp()),
+            "exp": int(expires_at.timestamp()),
+        }
+        header_segment = _b64url_encode_json(header)
+        payload_segment = _b64url_encode_json(payload)
+        signature = self._sign(f"{header_segment}.{payload_segment}".encode())
+        token = f"{header_segment}.{payload_segment}.{_b64url_encode(signature)}"
+        return token, expires_at
+
+    def verify_invitation_token(self, token: str) -> InvitationClaims:
+        _ensure_non_empty(token, "invite_token")
+        parts = token.split(".")
+        if len(parts) != 3:
+            raise AuthError("Invalid invitation token.")
+        header_segment, payload_segment, signature_segment = parts
+        signing_input = f"{header_segment}.{payload_segment}".encode()
+        expected_signature = self._sign(signing_input)
+        provided_signature = _b64url_decode(signature_segment)
+        if not hmac.compare_digest(expected_signature, provided_signature):
+            raise AuthError("Invalid invitation token.")
+        header = _b64url_decode_json(header_segment)
+        if header.get("typ") != "LT-INVITE":
+            raise AuthError("Invalid invitation token.")
+        payload = _b64url_decode_json(payload_segment)
+        try:
+            email = self.normalize_email(str(payload["email"]))
+            role = Role(str(payload["role"]))
+            issued_at = datetime.fromtimestamp(int(payload["iat"]), tz=timezone.utc)
+            expires_at = datetime.fromtimestamp(int(payload["exp"]), tz=timezone.utc)
+        except (KeyError, ValueError, TypeError) as exc:
+            raise AuthError("Invalid invitation token.") from exc
+        if expires_at <= utc_now():
+            raise AuthError("Invitation token has expired.")
+        return InvitationClaims(
+            email=email,
+            role=role,
+            expires_at=expires_at,
+            issued_at=issued_at,
+        )
+
+    @staticmethod
+    def normalize_email(email: str) -> str:
+        normalized = (email or "").strip().lower()
+        if not normalized or "@" not in normalized or normalized.startswith("@"):
+            raise ValidationError("Invite email must be a valid email address.")
+        local_part, _, domain = normalized.partition("@")
+        if not local_part or "." not in domain or domain.endswith("."):
+            raise ValidationError("Invite email must be a valid email address.")
+        return normalized
 
     def _sign(self, data: bytes) -> bytes:
         return hmac.new(self._secret, data, hashlib.sha256).digest()

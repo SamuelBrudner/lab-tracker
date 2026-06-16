@@ -32,9 +32,12 @@ phone from the app's `Devices` page, then open the capture link or scan the QR
 from the LAN helper.
 
 If your lab needs to set it up, hand the setup sections below to the lab member
-or IT contact who is comfortable installing software. The shortest local path is
-the double-click launcher in `launchers/`; the shared-lab path is Docker/Postgres
-with first-admin setup in the browser.
+or IT contact who is comfortable installing software. The zero-terminal shared
+lab path is the managed Render deploy button below. The shortest local path is
+the double-click launcher in `launchers/`; the self-hosted shared-lab path is
+Docker/Postgres with first-admin setup in the browser.
+
+[![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https://github.com/SamuelBrudner/lab-tracker)
 
 Preview the product without a build from the screenshots above and the retained
 workflow screenshots under [`docs/screenshots`](docs/screenshots).
@@ -196,8 +199,12 @@ lab-tracker serve
 ```
 
 After the first admin exists, use the `Users` screen to grant viewer/editor/admin
-roles and reset passwords. Use each project's `Project Members` panel to grant
-project viewer/contributor/owner access.
+roles, create email invitation links, and reset passwords. Use each project's
+`Project Members` panel to grant project viewer/contributor/owner access.
+
+For zero-terminal managed deployment with a web URL, managed Postgres, platform
+database backups, and email invite links, see
+[`docs/one-click-cloud-deploy.md`](docs/one-click-cloud-deploy.md).
 
 For self-hosted backups, restores, upgrades, and Docker data locations, see
 [`docs/self-hosted-operations.md`](docs/self-hosted-operations.md).
@@ -215,8 +222,11 @@ development.
 - `LAB_TRACKER_NOTE_STORAGE_PATH`: note storage directory (default: `./note_storage`)
 - `LAB_TRACKER_AUTH_SECRET_KEY`: auth signing secret (default allowed only in `local`)
 - `LAB_TRACKER_AUTH_TOKEN_TTL_MINUTES`: access token lifetime (default: `720`)
+- `LAB_TRACKER_AUTH_INVITE_TTL_HOURS`: signed invitation link lifetime
+  (default: `168`)
 - `LAB_TRACKER_AUTH_ENABLED`: enable login and role enforcement (default: `false`
   in `local`, `true` otherwise; non-local environments cannot disable auth)
+- `LAB_TRACKER_PUBLIC_BASE_URL`: public URL used in email invitation links
 - `LAB_TRACKER_OPENAI_API_KEY`: required for graph draft generation and
   voice-note transcription
 - `LAB_TRACKER_OPENAI_MODEL`: OpenAI model for graph drafts (default:

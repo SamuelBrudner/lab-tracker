@@ -1,0 +1,39 @@
+services:
+  - type: web
+    name: lab-tracker
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    healthCheckPath: /health
+    disk:
+      name: lab-tracker-data
+      mountPath: /var/data
+      sizeGB: 1
+    envVars:
+      - key: LAB_TRACKER_APP_NAME
+        value: lab-tracker
+      - key: LAB_TRACKER_ENVIRONMENT
+        value: production
+      - key: LAB_TRACKER_LOG_LEVEL
+        value: INFO
+      - key: LAB_TRACKER_DATABASE_URL
+        fromDatabase:
+          name: lab-tracker-db
+          property: connectionString
+      - key: LAB_TRACKER_FILE_STORAGE_PATH
+        value: /var/data/file_storage
+      - key: LAB_TRACKER_NOTE_STORAGE_PATH
+        value: /var/data/note_storage
+      - key: LAB_TRACKER_RUNTIME_ENV_DIR
+        value: /var/data/runtime-env
+      - key: LAB_TRACKER_AUTH_SECRET_KEY
+        generateValue: true
+      - key: LAB_TRACKER_AUTH_TOKEN_TTL_MINUTES
+        value: 720
+      - key: LAB_TRACKER_AUTH_INVITE_TTL_HOURS
+        value: 168
+
+databases:
+  - name: lab-tracker-db
+    databaseName: lab_tracker
+    user: lab_tracker

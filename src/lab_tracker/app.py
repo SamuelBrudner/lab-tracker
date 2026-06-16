@@ -43,6 +43,7 @@ def create_app() -> FastAPI:
         app.state.lab_tracker_api,
         auth_service=runtime.auth_service,
         token_service=runtime.token_service,
+        invitation_token_service=runtime.invitation_token_service,
         device_auth_service=runtime.device_auth_service,
         bootstrap_admin_token=settings.bootstrap_admin_token,
     )

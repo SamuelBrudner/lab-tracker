@@ -3,6 +3,9 @@ import * as React from "react";
 import { apiListRequest, apiRequest, buildApiPath } from "../shared/api.js";
 
 function UsersPage({ token, canManageUsers, setBusy, setFlash }) {
+  const [inviteEmail, setInviteEmail] = React.useState("");
+  const [inviteRole, setInviteRole] = React.useState("viewer");
+  const [latestInvitation, setLatestInvitation] = React.useState(null);
   const [users, setUsers] = React.useState([]);
   const [passwordsByUser, setPasswordsByUser] = React.useState({});
 
@@ -47,6 +50,33 @@ function UsersPage({ token, canManageUsers, setBusy, setFlash }) {
     }
   }
 
+  async function createInvitation(event) {
+    event.preventDefault();
+    if (!canManageUsers || !inviteEmail.trim()) {
+      setFlash("", "Invite email is required.");
+      return;
+    }
+    setBusy(true);
+    setFlash("", "");
+    try {
+      const invitation = await apiRequest("/auth/invitations", {
+        body: {
+          email: inviteEmail.trim(),
+          role: inviteRole,
+        },
+        method: "POST",
+        token,
+      });
+      setLatestInvitation(invitation);
+      setInviteEmail("");
+      setFlash("Invitation link created.");
+    } catch (err) {
+      setFlash("", err.message || "Failed to create invitation.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
   function updatePasswordDraft(userId, value) {
     setPasswordsByUser((current) => ({ ...current, [userId]: value }));
   }
@@ -74,6 +104,44 @@ function UsersPage({ token, canManageUsers, setBusy, setFlash }) {
   return (
     <article className="card span-8">
       <h2>Users</h2>
+      <section className="form invite-panel">
+        <h3>Invite by Email</h3>
+        <form className="inline" onSubmit={createInvitation}>
+          <label>
+            Email
+            <input
+              type="email"
+              value={inviteEmail}
+              onChange={(event) => setInviteEmail(event.target.value)}
+              autoComplete="email"
+            />
+          </label>
+          <label>
+            Global role
+            <select value={inviteRole} onChange={(event) => setInviteRole(event.target.value)}>
+              <option value="viewer">viewer</option>
+              <option value="editor">editor</option>
+              <option value="admin">admin</option>
+            </select>
+          </label>
+          <button className="btn-primary">Create invite</button>
+        </form>
+        {latestInvitation ? (
+          <div className="invite-result">
+            <div>
+              <strong>{latestInvitation.email}</strong>
+              <p className="subtle">Role: {latestInvitation.role}</p>
+            </div>
+            <label>
+              Invite link
+              <input value={latestInvitation.invite_url} readOnly />
+            </label>
+            <a className="btn-secondary" href={latestInvitation.mailto_url}>
+              Email invite
+            </a>
+          </div>
+        ) : null}
+      </section>
       <div className="stack">
         {users.map((user) => (
           <article className="item" key={user.user_id}>

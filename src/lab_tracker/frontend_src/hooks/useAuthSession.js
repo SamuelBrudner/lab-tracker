@@ -5,17 +5,28 @@ import { TOKEN_STORAGE_KEY } from "../shared/constants.js";
 
 const { useEffect, useMemo, useState } = React;
 
+function readInitialInvitation() {
+  const params = new URLSearchParams(window.location.search || "");
+  return {
+    email: params.get("email") || "",
+    token: params.get("invite") || "",
+  };
+}
+
 function useAuthSession({ replace, setBusy, setFlash }) {
+  const initialInvitation = readInitialInvitation();
   const [token, setToken] = useState(() => localStorage.getItem(TOKEN_STORAGE_KEY) || "");
   const [user, setUser] = useState(null);
   const [authChecked, setAuthChecked] = useState(false);
   const [authEnabled, setAuthEnabled] = useState(true);
 
-  const [authMode, setAuthMode] = useState("login");
-  const [authUsername, setAuthUsername] = useState("");
+  const [authMode, setAuthMode] = useState(initialInvitation.token ? "register" : "login");
+  const [authUsername, setAuthUsername] = useState(initialInvitation.email);
   const [authPassword, setAuthPassword] = useState("");
   const [authBootstrapToken, setAuthBootstrapToken] = useState("");
   const [authBootstrapStatus, setAuthBootstrapStatus] = useState(null);
+  const [authInviteEmail] = useState(initialInvitation.email);
+  const [authInviteToken, setAuthInviteToken] = useState(initialInvitation.token);
   const [authBusy, setAuthBusy] = useState(false);
 
   const canWrite = useMemo(
@@ -86,11 +97,16 @@ function useAuthSession({ replace, setBusy, setFlash }) {
   }, [setBusy, setFlash, token]);
 
   useEffect(() => {
-    if (token || authMode !== "login" || !authBootstrapStatus?.first_admin_available) {
+    if (
+      token ||
+      authInviteToken ||
+      authMode !== "login" ||
+      !authBootstrapStatus?.first_admin_available
+    ) {
       return;
     }
     setAuthMode("setup");
-  }, [authBootstrapStatus, authMode, token]);
+  }, [authBootstrapStatus, authInviteToken, authMode, token]);
 
   async function handleAuthSubmit(event) {
     event.preventDefault();
@@ -115,6 +131,11 @@ function useAuthSession({ replace, setBusy, setFlash }) {
                 role: "admin",
               }
             : {}),
+          ...(authMode === "register" && authInviteToken
+            ? {
+                invite_token: authInviteToken,
+              }
+            : {}),
           password: authPassword,
           username: authUsername.trim(),
         },
@@ -123,10 +144,16 @@ function useAuthSession({ replace, setBusy, setFlash }) {
       setToken(payload.access_token);
       setUser(payload.user || null);
       setAuthBootstrapToken("");
+      setAuthInviteToken("");
       setAuthPassword("");
+      if (authInviteToken) {
+        replace("/app");
+      }
       setFlash(
         authMode === "setup"
           ? "Admin account created. You are signed in."
+          : authInviteToken
+          ? "Invited account created. You are signed in."
           : authMode === "register"
           ? "Viewer account created. You are signed in."
           : "Signed in successfully."
@@ -157,6 +184,8 @@ function useAuthSession({ replace, setBusy, setFlash }) {
     authBootstrapToken,
     authChecked,
     authEnabled,
+    authInviteEmail,
+    authInviteToken,
     authMode,
     authPassword,
     authUsername,

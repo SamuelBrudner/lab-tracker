@@ -341,6 +341,67 @@ function requestedUrls(fetchMock) {
 }
 
 describe("App", () => {
+  it("accepts an emailed invitation link", async () => {
+    window.history.replaceState(
+      {},
+      "",
+      "/app?invite=signed-token&email=member%40example.org"
+    );
+    installFetchMock([
+      {
+        match: "/auth/me",
+        response: [
+          errorResponse("Authentication required.", 401),
+          apiResponse({
+            role: "editor",
+            username: "member@example.org",
+            user_id: "user-1",
+          }),
+        ],
+      },
+      {
+        match: "/auth/register",
+        method: "POST",
+        response: (request) => {
+          expect(JSON.parse(request.init.body)).toEqual({
+            invite_token: "signed-token",
+            password: "invite-secret",
+            username: "member@example.org",
+          });
+          return apiResponse({
+            access_token: "invite-access-token",
+            expires_at: "2026-06-16T12:00:00Z",
+            token_type: "bearer",
+            user: {
+              role: "editor",
+              username: "member@example.org",
+              user_id: "user-1",
+            },
+          });
+        },
+      },
+      {
+        match: projectsPath,
+        response: apiResponse([]),
+      },
+    ]);
+
+    render(<App />);
+
+    expect(await screen.findByRole("heading", { name: "Accept Invitation" })).toBeInTheDocument();
+    expect(screen.getByLabelText("Username")).toHaveValue("member@example.org");
+
+    fireEvent.change(screen.getByLabelText("Password"), {
+      target: { value: "invite-secret" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Create account" }));
+
+    await waitFor(() =>
+      expect(localStorage.getItem(TOKEN_STORAGE_KEY)).toBe("invite-access-token")
+    );
+    expect(await screen.findByText("Welcome to Lab Tracker")).toBeInTheDocument();
+  });
+
   it("loads projects without a token when local auth is disabled", async () => {
     const fetchMock = installFetchMock([
       {

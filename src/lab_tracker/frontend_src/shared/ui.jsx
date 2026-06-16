@@ -175,6 +175,8 @@ function FlashMessages({ message, error }) {
 function AuthForm({
   authBootstrapStatus,
   authBootstrapToken,
+  authInviteEmail,
+  authInviteToken,
   authMode,
   authUsername,
   authPassword,
@@ -186,9 +188,18 @@ function AuthForm({
   onToggleMode,
 }) {
   const isSetup = authMode === "setup";
-  const title = isSetup ? "Create First Admin" : authMode === "login" ? "Sign In" : "Create Viewer Account";
+  const isInvite = authMode === "register" && Boolean(authInviteToken);
+  const title = isSetup
+    ? "Create First Admin"
+    : isInvite
+    ? "Accept Invitation"
+    : authMode === "login"
+    ? "Sign In"
+    : "Create Viewer Account";
   const supportingCopy = isSetup
     ? "Use the bootstrap token from the server logs or first-run setup file."
+    : isInvite
+    ? "Set a password for the invited account."
     : "Viewer registration is public. Admin/editor accounts must be provisioned by an admin.";
   return (
     <article className="card span-6">
@@ -197,7 +208,12 @@ function AuthForm({
       <form className="form" onSubmit={onSubmit}>
         <label>
           Username
-          <input value={authUsername} onChange={onUsernameChange} autoComplete="username" />
+          <input
+            value={authUsername}
+            onChange={onUsernameChange}
+            autoComplete="username"
+            readOnly={isInvite && Boolean(authInviteEmail)}
+          />
         </label>
         <label>
           Password
@@ -224,11 +240,21 @@ function AuthForm({
         ) : null}
         <div className="inline">
           <button className="btn-primary" disabled={authBusy}>
-            {authBusy ? "Working..." : isSetup ? "Create admin" : authMode === "login" ? "Sign in" : "Register"}
+            {authBusy
+              ? "Working..."
+              : isSetup
+              ? "Create admin"
+              : isInvite
+              ? "Create account"
+              : authMode === "login"
+              ? "Sign in"
+              : "Register"}
           </button>
-          <button type="button" className="btn-secondary" onClick={onToggleMode}>
-            {authMode === "login" ? "Need an account?" : "Have an account?"}
-          </button>
+          {!isInvite ? (
+            <button type="button" className="btn-secondary" onClick={onToggleMode}>
+              {authMode === "login" ? "Need an account?" : "Have an account?"}
+            </button>
+          ) : null}
         </div>
       </form>
     </article>

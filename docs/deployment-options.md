@@ -3,6 +3,18 @@
 Lab Tracker can be used without each bench scientist touching a terminal, but
 someone still needs to run or host the shared instance.
 
+## One-Click Cloud Deploy
+
+Use the Render Blueprint when a lab wants a managed shared instance and does not
+want to maintain Docker or Postgres on a lab computer:
+
+[![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https://github.com/SamuelBrudner/lab-tracker)
+
+The blueprint provisions the web service, managed Postgres database, persistent
+file disk, generated auth secret, first-admin setup token, startup migrations,
+TLS URL, restarts, and platform database backups. See
+[`docs/one-click-cloud-deploy.md`](one-click-cloud-deploy.md).
+
 ## Current No-Uvicorn Paths
 
 ### Local Desktop Launcher
@@ -51,9 +63,10 @@ A public hosted demo should be seeded, resettable or read-only, and linked from
 the repository homepage. Until that infrastructure is available, the README
 screenshots are the non-build preview path.
 
-## Managed Lab Requirement
+## Managed Lab Deployment
 
-A managed lab deployment should eventually handle email invites, password
-recovery, backups, upgrades, and monitoring outside the lab member's terminal.
-The current repo provides admin user management, first-admin setup, Docker
-first-run secrets, and backup/restore documentation as local building blocks.
+Managed lab deployments should keep infrastructure work out of the lab member's
+terminal. The current repo supports first-admin setup, email invitation links,
+global role grants, project membership grants, password reset, startup
+migrations, Docker first-run secrets, and managed Render deployment with
+platform database backups.

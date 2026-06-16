@@ -1315,3 +1315,35 @@ button:disabled {
   text-align: center;
   padding: 1.6rem 1.2rem;
 }
+
+.invite-panel {
+  border-bottom: 1px solid var(--line);
+  margin-bottom: 1rem;
+  padding-bottom: 1rem;
+}
+
+.invite-result {
+  display: grid;
+  grid-template-columns: minmax(160px, 0.8fr) minmax(220px, 1.5fr) auto;
+  align-items: end;
+  gap: 0.75rem;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 0.75rem;
+  background: #f8f7f4;
+}
+
+.invite-result label {
+  min-width: 0;
+}
+
+.invite-result input {
+  font-family: "IBM Plex Mono", "Menlo", monospace;
+  font-size: 0.82rem;
+}
+
+@media (max-width: 820px) {
+  .invite-result {
+    grid-template-columns: 1fr;
+  }
+}

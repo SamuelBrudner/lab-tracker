@@ -317,6 +317,8 @@ function App() {
           <AuthForm
             authBootstrapStatus={auth.authBootstrapStatus}
             authBootstrapToken={auth.authBootstrapToken}
+            authInviteEmail={auth.authInviteEmail}
+            authInviteToken={auth.authInviteToken}
             authMode={auth.authMode}
             authUsername={auth.authUsername}
             authPassword={auth.authPassword}

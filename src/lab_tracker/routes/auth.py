@@ -4,16 +4,25 @@ from __future__ import annotations
 
 import hmac
 from datetime import datetime, timezone
+from urllib.parse import quote, urlencode
 from uuid import UUID
 
 from fastapi import APIRouter
 from starlette import status as http_status
 from starlette.requests import Request
 
-from lab_tracker.auth import LOCAL_AUTH_USERNAME, AuthService, Role, TokenService
+from lab_tracker.auth import (
+    LOCAL_AUTH_USERNAME,
+    AuthService,
+    InvitationTokenService,
+    Role,
+    TokenService,
+)
 from lab_tracker.errors import AuthError
 from lab_tracker.schemas import (
     AuthBootstrapStatus,
+    AuthInvitationCreate,
+    AuthInvitationRead,
     AuthLoginRequest,
     AuthRegisterRequest,
     AuthTokenRead,
@@ -38,6 +47,7 @@ def build_auth_router(
     *,
     auth_service: AuthService,
     token_service: TokenService,
+    invitation_token_service: InvitationTokenService,
     bootstrap_admin_token: str | None = None,
 ) -> APIRouter:
     router = APIRouter()
@@ -60,7 +70,15 @@ def build_auth_router(
         status_code=http_status.HTTP_201_CREATED,
     )
     def register_auth(payload: AuthRegisterRequest, request: Request):
-        if payload.role != Role.VIEWER:
+        registration_role = payload.role
+        if payload.invite_token:
+            invitation = invitation_token_service.verify_invitation_token(payload.invite_token)
+            invited_email = invitation_token_service.normalize_email(invitation.email)
+            provided_username = invitation_token_service.normalize_email(payload.username)
+            if provided_username != invited_email:
+                raise AuthError("Invitation token does not match this email address.")
+            registration_role = invitation.role
+        elif payload.role != Role.VIEWER:
             if payload.role == Role.ADMIN and not auth_service.has_users():
                 expected = (bootstrap_admin_token or "").strip()
                 provided = (payload.bootstrap_token or "").strip()
@@ -81,10 +99,40 @@ def build_auth_router(
         user = auth_service.register_user(
             username=payload.username,
             password=payload.password,
-            role=payload.role,
+            role=registration_role,
         )
         token = token_service.issue_access_token(user)
         return Envelope(data=auth_token_read(user, token.token, token.expires_at))
+
+    @router.post(
+        "/auth/invitations",
+        response_model=Envelope[AuthInvitationRead],
+        status_code=http_status.HTTP_201_CREATED,
+    )
+    def create_auth_invitation(payload: AuthInvitationCreate, request: Request):
+        _ensure_admin(request)
+        email = invitation_token_service.normalize_email(payload.email)
+        invite_token, expires_at = invitation_token_service.issue_invitation_token(
+            email=email,
+            role=payload.role,
+        )
+        base_url = _public_base_url(request)
+        invite_url = f"{base_url}/app?{urlencode({'invite': invite_token, 'email': email})}"
+        mailto_url = _mailto_invitation_url(
+            email=email,
+            invite_url=invite_url,
+            role=payload.role,
+            expires_at=expires_at,
+        )
+        return Envelope(
+            data=AuthInvitationRead(
+                email=email,
+                role=payload.role,
+                invite_url=invite_url,
+                mailto_url=mailto_url,
+                expires_at=expires_at,
+            )
+        )
 
     @router.get("/auth/users", response_model=ListEnvelope[AuthUserRead])
     def list_auth_users(request: Request, limit: int = 50, offset: int = 0):
@@ -144,3 +192,27 @@ def _ensure_admin(request: Request) -> None:
     actor = actor_from_request(request)
     if actor.role != Role.ADMIN:
         raise AuthError("Admin privileges required.")
+
+
+def _public_base_url(request: Request) -> str:
+    configured = str(getattr(request.app.state.settings, "public_base_url", "") or "").strip()
+    if configured:
+        return configured.rstrip("/")
+    return str(request.base_url).rstrip("/")
+
+
+def _mailto_invitation_url(
+    *,
+    email: str,
+    invite_url: str,
+    role: Role,
+    expires_at: datetime,
+) -> str:
+    subject = "Lab Tracker invitation"
+    body = (
+        "You have been invited to Lab Tracker.\n\n"
+        f"Open this link to create your password and sign in as {role.value}:\n"
+        f"{invite_url}\n\n"
+        f"This invitation expires at {expires_at.isoformat()}."
+    )
+    return f"mailto:{quote(email)}?{urlencode({'subject': subject, 'body': body})}"

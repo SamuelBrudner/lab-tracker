@@ -14,7 +14,13 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session, sessionmaker
 
 from lab_tracker.api import LabTrackerAPI
-from lab_tracker.auth import AuthService, DeviceAuthService, TokenService, ensure_local_auth_user
+from lab_tracker.auth import (
+    AuthService,
+    DeviceAuthService,
+    InvitationTokenService,
+    TokenService,
+    ensure_local_auth_user,
+)
 from lab_tracker.config import Settings
 from lab_tracker.db import get_engine, get_session_factory
 from lab_tracker.file_storage import LocalFileStorageBackend
@@ -33,6 +39,7 @@ class AppRuntime:
     auth_enabled: bool
     auth_service: AuthService
     device_auth_service: DeviceAuthService
+    invitation_token_service: InvitationTokenService
     token_service: TokenService
     file_storage_backend: LocalFileStorageBackend
     raw_note_storage: LocalNoteStorage
@@ -57,6 +64,10 @@ def build_app_runtime(settings: Settings) -> AppRuntime:
         settings.auth_secret_key,
         ttl_minutes=settings.auth_token_ttl_minutes,
     )
+    invitation_token_service = InvitationTokenService(
+        settings.auth_secret_key,
+        ttl_hours=settings.auth_invite_ttl_hours,
+    )
     file_storage_backend = LocalFileStorageBackend(settings.file_storage_path)
     raw_note_storage = LocalNoteStorage(settings.note_storage_path)
     lab_tracker_api = LabTrackerAPI(
@@ -69,6 +80,7 @@ def build_app_runtime(settings: Settings) -> AppRuntime:
         auth_enabled=auth_enabled,
         auth_service=auth_service,
         device_auth_service=device_auth_service,
+        invitation_token_service=invitation_token_service,
         token_service=token_service,
         file_storage_backend=file_storage_backend,
         raw_note_storage=raw_note_storage,
@@ -93,6 +105,7 @@ def configure_app_state(app: FastAPI, runtime: AppRuntime) -> None:
     app.state.db_session_factory = runtime.session_factory
     app.state.auth_service = runtime.auth_service
     app.state.device_auth_service = runtime.device_auth_service
+    app.state.invitation_token_service = runtime.invitation_token_service
     app.state.auth_enabled = runtime.auth_enabled
     app.state.settings = runtime.settings
     app.state.token_service = runtime.token_service

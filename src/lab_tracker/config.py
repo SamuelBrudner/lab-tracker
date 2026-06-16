@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from pydantic import model_validator
+from pydantic import field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 DEFAULT_AUTH_SECRET_KEY = "dev-only-change-me"
@@ -24,6 +24,7 @@ class Settings(BaseSettings):
     note_storage_path: str = "./note_storage"
     auth_secret_key: str = DEFAULT_AUTH_SECRET_KEY
     auth_token_ttl_minutes: int = 60 * 12
+    auth_invite_ttl_hours: int = 7 * 24
     bootstrap_admin_token: str = ""
     auth_enabled: bool | None = None
     graph_draft_provider: str = "openai"
@@ -46,6 +47,16 @@ class Settings(BaseSettings):
         if self.auth_enabled is not None:
             return self.auth_enabled
         return self.environment.strip().lower() != "local"
+
+    @field_validator("database_url")
+    @classmethod
+    def _normalize_database_url(cls, value: str) -> str:
+        cleaned = str(value or "").strip()
+        if cleaned.startswith("postgres://"):
+            return f"postgresql+psycopg://{cleaned.removeprefix('postgres://')}"
+        if cleaned.startswith("postgresql://"):
+            return f"postgresql+psycopg://{cleaned.removeprefix('postgresql://')}"
+        return cleaned
 
     @model_validator(mode="after")
     def _validate_auth_secret_key(self) -> Settings:

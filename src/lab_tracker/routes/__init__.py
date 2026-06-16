@@ -5,7 +5,7 @@ from __future__ import annotations
 from fastapi import FastAPI
 
 from lab_tracker.api import LabTrackerAPI
-from lab_tracker.auth import AuthService, DeviceAuthService, TokenService
+from lab_tracker.auth import AuthService, DeviceAuthService, InvitationTokenService, TokenService
 
 from .analyses import build_analyses_router
 from .assistant import build_assistant_router
@@ -40,6 +40,7 @@ def register_routes(
     *,
     auth_service: AuthService,
     token_service: TokenService,
+    invitation_token_service: InvitationTokenService,
     device_auth_service: DeviceAuthService,
     bootstrap_admin_token: str | None = None,
 ) -> None:
@@ -48,6 +49,7 @@ def register_routes(
         build_auth_router(
             auth_service=auth_service,
             token_service=token_service,
+            invitation_token_service=invitation_token_service,
             bootstrap_admin_token=bootstrap_admin_token,
         )
     )

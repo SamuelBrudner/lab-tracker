@@ -23,6 +23,11 @@ PY
 
 mkdir -p "$runtime_env_dir"
 
+if [ -z "${LAB_TRACKER_PUBLIC_BASE_URL:-}" ] && [ -n "${RENDER_EXTERNAL_URL:-}" ]; then
+    LAB_TRACKER_PUBLIC_BASE_URL="$RENDER_EXTERNAL_URL"
+    export LAB_TRACKER_PUBLIC_BASE_URL
+fi
+
 if [ -z "${LAB_TRACKER_AUTH_SECRET_KEY:-}" ]; then
     if [ -s "$auth_secret_file" ]; then
         LAB_TRACKER_AUTH_SECRET_KEY="$(cat "$auth_secret_file")"

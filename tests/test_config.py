@@ -64,6 +64,28 @@ def test_default_openai_model_is_standard_account_model(monkeypatch):
     assert settings.openai_model == "gpt-4o-mini"
 
 
+def test_managed_postgres_urls_use_installed_psycopg_driver(monkeypatch):
+    _clear_auth_env(monkeypatch)
+    monkeypatch.setenv("LAB_TRACKER_ENVIRONMENT", "local")
+    monkeypatch.setenv(
+        "LAB_TRACKER_DATABASE_URL",
+        "postgres://lab_tracker:secret@db.example.org/lab_tracker",
+    )
+    settings = _settings_from_environment()
+    assert settings.database_url == (
+        "postgresql+psycopg://lab_tracker:secret@db.example.org/lab_tracker"
+    )
+
+    monkeypatch.setenv(
+        "LAB_TRACKER_DATABASE_URL",
+        "postgresql://lab_tracker:secret@db.example.org/lab_tracker",
+    )
+    settings = _settings_from_environment()
+    assert settings.database_url == (
+        "postgresql+psycopg://lab_tracker:secret@db.example.org/lab_tracker"
+    )
+
+
 def test_non_local_environment_rejects_default_auth_secret(monkeypatch):
     _clear_auth_env(monkeypatch)
     monkeypatch.setenv("LAB_TRACKER_ENVIRONMENT", "production")
