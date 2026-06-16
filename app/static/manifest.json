@@ -1,0 +1,25 @@
+{
+  "name": "Lab Tracker",
+  "short_name": "Lab Tracker",
+  "description": "Capture lab notes and review AI-drafted graph proposals.",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "portrait",
+  "theme_color": "#0d8b6f",
+  "background_color": "#f6f5f3",
+  "icons": [
+    {
+      "src": "static/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "static/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ]
+}
