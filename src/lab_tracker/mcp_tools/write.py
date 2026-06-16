@@ -216,6 +216,7 @@ def lab_tracker_create_claim(
     supported_by_dataset_ids: list[str] | None = None,
     supported_by_analysis_ids: list[str] | None = None,
     answers_question_ids: list[str] | None = None,
+    external_citations: list[JsonObject] | None = None,
 ) -> JsonObject:
     """Create a claim after linking supporting datasets or analyses."""
     client = client_from_env()
@@ -229,11 +230,29 @@ def lab_tracker_create_claim(
                 supported_by_dataset_ids=supported_by_dataset_ids,
                 supported_by_analysis_ids=supported_by_analysis_ids,
                 answers_question_ids=answers_question_ids,
+                external_citations=external_citations,
             ),
             next_action(
                 "lab_tracker_create_visualization",
                 "If a figure communicates this claim, register or upload it next.",
             ),
+        )
+    finally:
+        client.close()
+
+
+def lab_tracker_create_claim_edge(
+    claim_id: str,
+    target_claim_id: str,
+    relation: str,
+) -> JsonObject:
+    """Create a typed claim-to-claim logic edge such as refutes or extends."""
+    client = client_from_env()
+    try:
+        return client.create_claim_edge(
+            claim_id=claim_id,
+            target_claim_id=target_claim_id,
+            relation=relation,
         )
     finally:
         client.close()
@@ -434,6 +453,7 @@ WRITE_TOOLS = (
     lab_tracker_create_dataset,
     lab_tracker_create_analysis,
     lab_tracker_create_claim,
+    lab_tracker_create_claim_edge,
     lab_tracker_create_visualization,
     lab_tracker_create_goal,
     lab_tracker_update_goal,

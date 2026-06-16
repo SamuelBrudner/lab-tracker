@@ -653,6 +653,7 @@ class ClaimModel(Base):
     confidence: Mapped[float] = mapped_column(Float, nullable=False)
     status: Mapped[str] = mapped_column(String(20), default="proposed")
     terminal_reason: Mapped[str | None] = mapped_column(Text)
+    external_citations: Mapped[list[dict[str, object]]] = mapped_column(JSON, default=list)
     created_by: Mapped[str | None] = mapped_column(String(255))
     created_by_user_id: Mapped[str | None] = mapped_column(
         String(36),
@@ -717,6 +718,41 @@ class ClaimQuestionModel(Base):
         ForeignKey("questions.question_id", ondelete="CASCADE"),
         primary_key=True,
     )
+
+
+class ClaimEdgeModel(Base):
+    __tablename__ = "claim_edges"
+    __table_args__ = (
+        UniqueConstraint(
+            "claim_id",
+            "target_claim_id",
+            "relation",
+            name="uq_claim_edges_claim_target_relation",
+        ),
+    )
+
+    edge_id: Mapped[str] = mapped_column(
+        String(36),
+        primary_key=True,
+        default=lambda: str(uuid4()),
+    )
+    claim_id: Mapped[str] = mapped_column(
+        String(36),
+        ForeignKey("claims.claim_id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    target_claim_id: Mapped[str] = mapped_column(
+        String(36),
+        ForeignKey("claims.claim_id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    relation: Mapped[str] = mapped_column(String(32), nullable=False)
+    created_by: Mapped[str | None] = mapped_column(String(255))
+    created_by_user_id: Mapped[str | None] = mapped_column(
+        String(36),
+        ForeignKey("users.user_id", ondelete="SET NULL"),
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utc_now)
 
 
 class GoalModel(Base):
@@ -1235,6 +1271,9 @@ Index("ix_analyses_project_created_at", AnalysisModel.project_id, AnalysisModel.
 Index("ix_claim_datasets_dataset_id", ClaimDatasetModel.dataset_id)
 Index("ix_claim_analyses_analysis_id", ClaimAnalysisModel.analysis_id)
 Index("ix_claims_project_created_at", ClaimModel.project_id, ClaimModel.created_at)
+Index("ix_claim_edges_claim_id", ClaimEdgeModel.claim_id)
+Index("ix_claim_edges_target_claim_id", ClaimEdgeModel.target_claim_id)
+Index("ix_claim_edges_created_by_user_id", ClaimEdgeModel.created_by_user_id)
 Index("ix_dataset_question_links_question_id", DatasetQuestionLinkModel.question_id)
 Index("ix_goals_project_created_at", GoalModel.project_id, GoalModel.created_at)
 Index(

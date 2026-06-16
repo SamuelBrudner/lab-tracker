@@ -13,6 +13,7 @@ from lab_tracker.db_models import (
     AnalysisModel,
     ClaimAnalysisModel,
     ClaimDatasetModel,
+    ClaimEdgeModel,
     ClaimModel,
     ClaimQuestionModel,
     DatasetModel,
@@ -34,6 +35,8 @@ from lab_tracker.models import (
     Analysis,
     AnalysisStatus,
     Claim,
+    ClaimEdge,
+    ClaimRelation,
     ClaimStatus,
     Dataset,
     DatasetCommitManifest,
@@ -811,6 +814,7 @@ def claim_to_model(claim: Claim) -> ClaimModel:
         confidence=claim.confidence,
         status=claim.status.value,
         terminal_reason=claim.terminal_reason,
+        external_citations=_external_artifacts_to_json(claim.external_citations),
         created_by=claim.created_by,
         created_by_user_id=(
             _uuid_str(claim.created_by_user_id)
@@ -840,6 +844,9 @@ def claim_from_model(
         supported_by_dataset_ids=list(supported_by_dataset_ids),
         supported_by_analysis_ids=list(supported_by_analysis_ids),
         answers_question_ids=list(answers_question_ids),
+        external_citations=_external_artifacts_from_json(
+            getattr(row, "external_citations", None)
+        ),
         created_by=getattr(row, "created_by", None),
         created_by_user_id=(
             _uuid(row.created_by_user_id)
@@ -888,6 +895,7 @@ def apply_claim_to_model(row: ClaimModel, claim: Claim) -> None:
     row.confidence = claim.confidence
     row.status = claim.status.value
     row.terminal_reason = claim.terminal_reason
+    row.external_citations = _external_artifacts_to_json(claim.external_citations)
     row.created_by = claim.created_by
     row.created_by_user_id = (
         _uuid_str(claim.created_by_user_id)
@@ -897,6 +905,51 @@ def apply_claim_to_model(row: ClaimModel, claim: Claim) -> None:
     _apply_origin_to_model(row, claim)
     row.created_at = claim.created_at
     row.updated_at = claim.updated_at
+
+
+def claim_edge_to_model(edge: ClaimEdge) -> ClaimEdgeModel:
+    return ClaimEdgeModel(
+        edge_id=_uuid_str(edge.edge_id),
+        claim_id=_uuid_str(edge.claim_id),
+        target_claim_id=_uuid_str(edge.target_claim_id),
+        relation=edge.relation.value,
+        created_by=edge.created_by,
+        created_by_user_id=(
+            _uuid_str(edge.created_by_user_id)
+            if edge.created_by_user_id is not None
+            else None
+        ),
+        created_at=edge.created_at,
+    )
+
+
+def claim_edge_from_model(row: ClaimEdgeModel) -> ClaimEdge:
+    return ClaimEdge(
+        edge_id=_uuid(row.edge_id),
+        claim_id=_uuid(row.claim_id),
+        target_claim_id=_uuid(row.target_claim_id),
+        relation=ClaimRelation(row.relation),
+        created_by=getattr(row, "created_by", None),
+        created_by_user_id=(
+            _uuid(row.created_by_user_id)
+            if getattr(row, "created_by_user_id", None)
+            else None
+        ),
+        created_at=_as_utc(row.created_at),
+    )
+
+
+def apply_claim_edge_to_model(row: ClaimEdgeModel, edge: ClaimEdge) -> None:
+    row.claim_id = _uuid_str(edge.claim_id)
+    row.target_claim_id = _uuid_str(edge.target_claim_id)
+    row.relation = edge.relation.value
+    row.created_by = edge.created_by
+    row.created_by_user_id = (
+        _uuid_str(edge.created_by_user_id)
+        if edge.created_by_user_id is not None
+        else None
+    )
+    row.created_at = edge.created_at
 
 
 def goal_to_model(goal: Goal) -> GoalModel:

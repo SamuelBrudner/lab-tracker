@@ -272,6 +272,64 @@ def test_project_graph_evidence_and_full_views_include_expected_links(
     }.issubset(_edge_ids(full["edges"]))
 
 
+def test_project_graph_includes_claim_relations_and_external_citations(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+):
+    project_id = client.post(
+        "/projects",
+        json={"name": "Claim logic graph"},
+        headers=admin_auth_headers,
+    ).json()["data"]["project_id"]
+    citation = {
+        "source_system": "doi",
+        "uri": "doi:10.1101/example-preprint",
+        "content_hash": "sha256:paper",
+    }
+    source_id = client.post(
+        "/claims",
+        json={
+            "project_id": project_id,
+            "statement": "Perturbation reduces activity.",
+            "confidence": 80,
+            "external_citations": [citation],
+        },
+        headers=admin_auth_headers,
+    ).json()["data"]["claim_id"]
+    target_id = client.post(
+        "/claims",
+        json={
+            "project_id": project_id,
+            "statement": "Perturbation does not affect activity.",
+            "confidence": 25,
+        },
+        headers=admin_auth_headers,
+    ).json()["data"]["claim_id"]
+
+    edge_response = client.post(
+        f"/claims/{source_id}/edges",
+        json={"target_claim_id": target_id, "relation": "refutes"},
+        headers=admin_auth_headers,
+    )
+    assert edge_response.status_code == 201
+    listed_edges = client.get(
+        f"/claims/{source_id}/edges",
+        headers=admin_auth_headers,
+    ).json()["data"]
+    assert [item["relation"] for item in listed_edges] == ["refutes"]
+
+    graph = client.get(
+        f"/projects/{project_id}/graph",
+        headers=admin_auth_headers,
+    ).json()["data"]
+
+    assert f"external_artifact:{citation['uri']}" in _ids(graph["nodes"])
+    assert {
+        f"claim_relation_refutes:claim:{source_id}->claim:{target_id}",
+        f"claim_cites:claim:{source_id}->external_artifact:{citation['uri']}",
+    }.issubset(_edge_ids(graph["edges"]))
+
+
 def test_project_graph_mermaid_export_is_stable_and_escaped(
     client: TestClient,
     admin_auth_headers: dict[str, str],

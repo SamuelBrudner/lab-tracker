@@ -124,5 +124,6 @@ class RecordExportService(BaseService):
             "datasets": len(records.datasets),
             "analyses": len(records.analyses),
             "claims": len(records.claims),
+            "claim_edges": len(records.claim_edges),
             "notes": len(records.notes),
         }

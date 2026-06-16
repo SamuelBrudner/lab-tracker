@@ -12,12 +12,15 @@ from lab_tracker.models import (
     Analysis,
     AnalysisStatus,
     Claim,
+    ClaimEdge,
+    ClaimRelation,
     ClaimStatus,
     Dataset,
     DatasetCommitManifest,
     DatasetStatus,
     EntityRef,
     EntityType,
+    ExternalArtifactReference,
     GroupMembership,
     Note,
     NoteStatus,
@@ -1019,6 +1022,13 @@ def test_query_analyses_claims_and_visualizations_apply_focused_filters(db_sessi
         status=ClaimStatus.PROPOSED,
         supported_by_dataset_ids=[dataset_one.dataset_id],
         supported_by_analysis_ids=[joined_analysis.analysis_id],
+        external_citations=[
+            ExternalArtifactReference(
+                source_system="doi",
+                uri="doi:10.1101/repository-test",
+                content_hash="sha256:paper",
+            )
+        ],
         created_by="trainee-a",
         created_at=_ts(6),
         updated_at=_ts(6),
@@ -1062,6 +1072,14 @@ def test_query_analyses_claims_and_visualizations_apply_focused_filters(db_sessi
     repo.analyses.save(other_analysis)
     repo.claims.save(supported_claim)
     repo.claims.save(other_claim)
+    claim_edge = ClaimEdge(
+        edge_id=uuid4(),
+        claim_id=supported_claim.claim_id,
+        target_claim_id=other_claim.claim_id,
+        relation=ClaimRelation.REFUTES,
+        created_at=_ts(10),
+    )
+    repo.claim_edges.save(claim_edge)
     repo.visualizations.save(linked_visualization)
     repo.visualizations.save(other_visualization)
     repo.commit()
@@ -1093,12 +1111,21 @@ def test_query_analyses_claims_and_visualizations_apply_focused_filters(db_sessi
         limit=10,
         offset=0,
     )
+    claim_edges, total_claim_edges = repo.query_claim_edges(
+        project_id=project.project_id,
+        claim_id=supported_claim.claim_id,
+        limit=10,
+        offset=0,
+    )
 
     assert total_analyses == 1
     assert [item.analysis_id for item in analyses] == [joined_analysis.analysis_id]
     assert total_claims == 1
     assert [item.claim_id for item in claims] == [supported_claim.claim_id]
+    assert claims[0].external_citations == supported_claim.external_citations
     assert created_total_claims == 1
     assert [item.claim_id for item in created_claims] == [other_claim.claim_id]
     assert total_visualizations == 1
     assert [item.viz_id for item in visualizations] == [linked_visualization.viz_id]
+    assert total_claim_edges == 1
+    assert claim_edges == [claim_edge]

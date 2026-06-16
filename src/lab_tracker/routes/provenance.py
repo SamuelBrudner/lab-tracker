@@ -45,6 +45,13 @@ def build_provenance_router(api: LabTrackerAPI) -> APIRouter:
         ensure_project_read(request, analysis.project_id)
         datasets = [request_api.get_dataset(dataset_id) for dataset_id in analysis.dataset_ids]
         claims, _ = repository.query_claims(analysis_id=analysis_id, limit=None, offset=0)
+        claim_ids = {claim.claim_id for claim in claims}
+        claim_edges, _ = repository.query_claim_edges(
+            project_id=analysis.project_id,
+            limit=None,
+            offset=0,
+        )
+        claim_edges = [edge for edge in claim_edges if edge.claim_id in claim_ids]
         visualizations, _ = repository.query_visualizations(
             analysis_id=analysis_id,
             limit=None,
@@ -57,6 +64,7 @@ def build_provenance_router(api: LabTrackerAPI) -> APIRouter:
             datasets=datasets,
             claims=claims,
             visualizations=visualizations,
+            claim_edges=claim_edges,
             supervision_edges=supervision_edges,
         )
         return JSONResponse(content=payload, media_type="application/ld+json")

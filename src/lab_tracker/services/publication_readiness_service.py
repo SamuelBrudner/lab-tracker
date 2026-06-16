@@ -96,6 +96,14 @@ class PublicationReadinessService(BaseService):
                     analysis.external_artifacts,
                 )
             )
+        for claim in claims:
+            broken_external_refs.extend(
+                _broken_external_refs(
+                    EntityType.CLAIM,
+                    claim.claim_id,
+                    claim.external_citations,
+                )
+            )
         seal_level = (
             "ara_l1"
             if not unsupported_claims

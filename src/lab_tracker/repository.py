@@ -10,6 +10,7 @@ from lab_tracker.models import (
     AcquisitionOutput,
     Analysis,
     Claim,
+    ClaimEdge,
     Dataset,
     DatasetFile,
     Goal,
@@ -69,6 +70,7 @@ class LabTrackerRepository(Protocol):
     acquisition_outputs: EntityRepository[AcquisitionOutput]
     analyses: EntityRepository[Analysis]
     claims: EntityRepository[Claim]
+    claim_edges: EntityRepository[ClaimEdge]
     goals: EntityRepository[Goal]
     visualizations: EntityRepository[Visualization]
     graph_change_sets: EntityRepository[GraphChangeSet]
@@ -295,6 +297,18 @@ class LabTrackerRepository(Protocol):
         offset: int = 0,
     ) -> tuple[list[Claim], int]:
         """Query claims with filters and pagination."""
+
+    def query_claim_edges(
+        self,
+        *,
+        project_id: UUID | None = None,
+        claim_id: UUID | None = None,
+        target_claim_id: UUID | None = None,
+        relation: str | None = None,
+        limit: int | None = None,
+        offset: int = 0,
+    ) -> tuple[list[ClaimEdge], int]:
+        """Query typed claim-to-claim edges with filters and pagination."""
 
     def query_goals(
         self,

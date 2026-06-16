@@ -9,8 +9,8 @@ from starlette import status as http_status
 from starlette.requests import Request
 
 from lab_tracker.api import LabTrackerAPI
-from lab_tracker.models import Claim, ClaimStatus
-from lab_tracker.schemas import ClaimCreate, ClaimUpdate, Envelope, ListEnvelope
+from lab_tracker.models import Claim, ClaimEdge, ClaimStatus
+from lab_tracker.schemas import ClaimCreate, ClaimEdgeCreate, ClaimUpdate, Envelope, ListEnvelope
 
 from .shared import (
     CreatedByFilter,
@@ -44,6 +44,7 @@ def build_claims_router(api: LabTrackerAPI) -> APIRouter:
             supported_by_dataset_ids=payload.supported_by_dataset_ids,
             supported_by_analysis_ids=payload.supported_by_analysis_ids,
             answers_question_ids=payload.answers_question_ids,
+            external_citations=payload.external_citations,
             actor=actor,
         )
         return Envelope(data=claim)
@@ -95,9 +96,41 @@ def build_claims_router(api: LabTrackerAPI) -> APIRouter:
             supported_by_dataset_ids=payload.supported_by_dataset_ids,
             supported_by_analysis_ids=payload.supported_by_analysis_ids,
             answers_question_ids=payload.answers_question_ids,
+            external_citations=payload.external_citations,
             actor=actor,
         )
         return Envelope(data=claim)
+
+    @router.post(
+        "/claims/{claim_id}/edges",
+        response_model=Envelope[ClaimEdge],
+        status_code=http_status.HTTP_201_CREATED,
+    )
+    def create_claim_edge(claim_id: UUID, payload: ClaimEdgeCreate, request: Request):
+        actor = actor_from_request(request)
+        existing = api_from_request(request, api).get_claim(claim_id)
+        ensure_project_read(request, existing.project_id)
+        edge = api_from_request(request, api).create_claim_edge(
+            claim_id,
+            target_claim_id=payload.target_claim_id,
+            relation=payload.relation,
+            actor=actor,
+        )
+        return Envelope(data=edge)
+
+    @router.get("/claims/{claim_id}/edges", response_model=ListEnvelope[ClaimEdge])
+    def list_claim_edges(
+        claim_id: UUID,
+        request: Request,
+        limit: int = 50,
+        offset: int = 0,
+    ):
+        validate_pagination(limit, offset)
+        claim = api_from_request(request, api).get_claim(claim_id)
+        ensure_project_read(request, claim.project_id)
+        edges = api_from_request(request, api).list_claim_edges(claim_id=claim_id)
+        items, total = paginate(edges, limit, offset)
+        return list_response(items, limit=limit, offset=offset, total=total)
 
     @router.delete("/claims/{claim_id}", response_model=Envelope[Claim])
     def delete_claim(claim_id: UUID, request: Request):

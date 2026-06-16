@@ -19,6 +19,7 @@ from lab_tracker.models import (
     AnalysisStatus,
     Claim,
     ClaimInput,
+    ClaimRelation,
     ClaimStatus,
     DatasetCommitManifestInput,
     DatasetStatus,
@@ -560,6 +561,7 @@ class ClaimCreate(RequestModel):
     supported_by_dataset_ids: list[UUID] | None = None
     supported_by_analysis_ids: list[UUID] | None = None
     answers_question_ids: list[UUID] | None = None
+    external_citations: list[ExternalArtifactReference] | None = None
 
     @field_validator(
         "supported_by_dataset_ids", "supported_by_analysis_ids", "answers_question_ids"
@@ -577,6 +579,7 @@ class ClaimUpdate(RequestModel):
     supported_by_dataset_ids: list[UUID] | None = None
     supported_by_analysis_ids: list[UUID] | None = None
     answers_question_ids: list[UUID] | None = None
+    external_citations: list[ExternalArtifactReference] | None = None
 
     @field_validator(
         "supported_by_dataset_ids", "supported_by_analysis_ids", "answers_question_ids"
@@ -584,6 +587,11 @@ class ClaimUpdate(RequestModel):
     @classmethod
     def _claim_ids_unique(cls, value: list[UUID] | None) -> list[UUID] | None:
         return _unique_uuid_list(value)
+
+
+class ClaimEdgeCreate(RequestModel):
+    target_claim_id: UUID
+    relation: ClaimRelation
 
 
 class GoalCreateFields(RequestModel):

@@ -11,6 +11,7 @@ from uuid import UUID
 from lab_tracker.models import (
     Analysis,
     Claim,
+    ClaimEdge,
     Dataset,
     DatasetCommitManifest,
     DatasetFile,
@@ -68,6 +69,11 @@ def _context(base_url: str) -> dict[str, object]:
         "aiPromptVersion": "lab:aiPromptVersion",
         "aiProvider": "lab:aiProvider",
         "changeSet": {"@id": "lab:changeSet", "@type": "@id"},
+        "cites": {"@id": "lab:cites", "@type": "@id"},
+        "claimRelation": {"@id": "lab:claimRelation", "@type": "@id"},
+        "claimRelationSource": {"@id": "lab:claimRelationSource", "@type": "@id"},
+        "claimRelationTarget": {"@id": "lab:claimRelationTarget", "@type": "@id"},
+        "claimRelationType": "lab:claimRelationType",
         "encodingFormat": "lab:encodingFormat",
         "environmentHash": "lab:environmentHash",
         "entityId": "lab:entityId",
@@ -541,6 +547,7 @@ def _claim_node(
     claim: Claim,
     *,
     attributed_user_ids: list[str],
+    claim_edges: list[ClaimEdge] | None = None,
 ) -> dict[str, object]:
     node: dict[str, object] = {
         "@id": _resource_iri(base_url, "claims", claim.claim_id),
@@ -569,7 +576,33 @@ def _claim_node(
             {"@id": _resource_iri(base_url, "questions", question_id)}
             for question_id in claim.answers_question_ids
         ]
+    outgoing_edges = [
+        edge for edge in claim_edges or [] if edge.claim_id == claim.claim_id
+    ]
+    if outgoing_edges:
+        node["claimRelation"] = [
+            {"@id": _claim_relation_iri(base_url, edge)} for edge in outgoing_edges
+        ]
+    if claim.external_citations:
+        node["cites"] = [{"@id": citation.uri} for citation in claim.external_citations]
     return node
+
+
+def _claim_relation_iri(base_url: str, edge: ClaimEdge) -> str:
+    return _resource_iri(base_url, "claim-relations", edge.edge_id)
+
+
+def _claim_relation_node(base_url: str, edge: ClaimEdge) -> dict[str, object]:
+    return {
+        "@id": _claim_relation_iri(base_url, edge),
+        "@type": "lab:ClaimRelation",
+        "claimRelationSource": {"@id": _resource_iri(base_url, "claims", edge.claim_id)},
+        "claimRelationTarget": {
+            "@id": _resource_iri(base_url, "claims", edge.target_claim_id)
+        },
+        "claimRelationType": edge.relation.value,
+        "createdAt": _isoformat(edge.created_at),
+    }
 
 
 def _visualization_node(
@@ -615,10 +648,12 @@ def build_analysis_provenance_document(
     datasets: list[Dataset],
     claims: list[Claim],
     visualizations: list[Visualization],
+    claim_edges: list[ClaimEdge] | None = None,
     supervision_edges: list[SupervisionEdge] | None = None,
 ) -> dict[str, object]:
     analysis_iri = _resource_iri(base_url, "analyses", analysis.analysis_id)
     supervision_edges = supervision_edges or []
+    claim_edges = claim_edges or []
     people: dict[str, dict[str, object]] = {}
     analysis_actor_user_id = _creator_user_id(
         analysis.executed_by_user_id,
@@ -718,9 +753,19 @@ def build_analysis_provenance_document(
                 base_url,
                 claim,
                 attributed_user_ids=attributed_user_ids,
+                claim_edges=claim_edges,
             )
         )
         graph.extend(_origin_provenance_nodes(base_url, claim))
+        graph.extend(
+            _external_artifact_node(citation) for citation in claim.external_citations
+        )
+    claim_ids = {claim.claim_id for claim in claims}
+    graph.extend(
+        _claim_relation_node(base_url, edge)
+        for edge in claim_edges
+        if edge.claim_id in claim_ids
+    )
     for visualization in visualizations:
         visualization_creator_user_id = _creator_user_id(
             visualization.created_by_user_id,
@@ -911,12 +956,17 @@ def build_record_export_provenance_document(
             for claim in records.claims
             if analysis.analysis_id in claim.supported_by_analysis_ids
         ]
+        analysis_claim_ids = {claim.claim_id for claim in analysis_claims}
+        analysis_claim_edges = [
+            edge for edge in records.claim_edges if edge.claim_id in analysis_claim_ids
+        ]
         document = build_analysis_provenance_document(
             base_url,
             analysis,
             datasets=analysis_datasets,
             claims=analysis_claims,
             visualizations=[],
+            claim_edges=analysis_claim_edges,
             supervision_edges=supervision_edges,
         )
         graph = document.get("@graph", [])
@@ -966,9 +1016,22 @@ def build_record_export_provenance_document(
             base_url,
             claim,
             attributed_user_ids=attributed_user_ids,
+            claim_edges=records.claim_edges,
         )
         merged.setdefault(str(node["@id"]), node)
         _merge_graph_nodes(merged, _origin_provenance_nodes(base_url, claim))
+        _merge_graph_nodes(
+            merged,
+            [_external_artifact_node(citation) for citation in claim.external_citations],
+        )
+        _merge_graph_nodes(
+            merged,
+            [
+                _claim_relation_node(base_url, edge)
+                for edge in records.claim_edges
+                if edge.claim_id == claim.claim_id
+            ],
+        )
 
     for user_id in sorted(people):
         person = people[user_id]

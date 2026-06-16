@@ -199,6 +199,7 @@ class GraphPatchApplier:
                 supported_by_dataset_ids=data.supported_by_dataset_ids,
                 supported_by_analysis_ids=data.supported_by_analysis_ids,
                 answers_question_ids=data.answers_question_ids,
+                external_citations=data.external_citations,
                 actor=actor,
                 **origin_kwargs,
             )
@@ -329,6 +330,7 @@ class GraphPatchApplier:
                 supported_by_dataset_ids=data.supported_by_dataset_ids,
                 supported_by_analysis_ids=data.supported_by_analysis_ids,
                 answers_question_ids=data.answers_question_ids,
+                external_citations=data.external_citations,
                 actor=actor,
                 **origin_kwargs,
             )

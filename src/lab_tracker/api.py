@@ -458,6 +458,12 @@ class LabTrackerAPI:
     def delete_claim(self, *args: Any, **kwargs: Any) -> Any:
         return self.claims.delete_claim(*args, **kwargs)
 
+    def create_claim_edge(self, *args: Any, **kwargs: Any) -> Any:
+        return self.claims.create_claim_edge(*args, **kwargs)
+
+    def list_claim_edges(self, *args: Any, **kwargs: Any) -> Any:
+        return self.claims.list_claim_edges(*args, **kwargs)
+
     def create_goal(self, *args: Any, **kwargs: Any) -> Any:
         return self.goals.create_goal(*args, **kwargs)
 

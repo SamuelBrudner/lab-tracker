@@ -276,6 +276,26 @@ def lab_tracker_list_claims(
     )
 
 
+def lab_tracker_list_claim_edges(
+    claim_id: str,
+    limit: int = 50,
+    offset: int = 0,
+) -> JsonObject:
+    """List typed outgoing logic edges for a claim."""
+    return _read_tool(
+        "lab_tracker_list_claim_edges",
+        lambda client: client.list_claim_edges(
+            claim_id=claim_id,
+            limit=limit,
+            offset=offset,
+        ),
+        hint=next_action(
+            "lab_tracker_create_claim_edge",
+            "Add a typed relation when one claim extends or refutes another.",
+        ),
+    )
+
+
 def lab_tracker_list_visualizations(
     project_id: str | None = None,
     analysis_id: str | None = None,
@@ -466,6 +486,7 @@ READ_TOOLS = (
     lab_tracker_list_datasets,
     lab_tracker_list_analyses,
     lab_tracker_list_claims,
+    lab_tracker_list_claim_edges,
     lab_tracker_list_visualizations,
     lab_tracker_list_goals,
     lab_tracker_get_goal,

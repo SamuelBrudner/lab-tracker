@@ -9,8 +9,10 @@ from uuid import UUID
 from lab_tracker.models import (
     Analysis,
     Claim,
+    ClaimEdge,
     Dataset,
     EntityType,
+    ExternalArtifactReference,
     Goal,
     Note,
     Question,
@@ -34,8 +36,9 @@ _NODE_TYPE_ORDER = {
     "dataset": 3,
     "analysis": 4,
     "claim": 5,
-    "visualization": 6,
-    "goal": 7,
+    "external_artifact": 6,
+    "visualization": 7,
+    "goal": 8,
 }
 _QUESTION_LINK_ROLE_ORDER = {"primary": 0, "secondary": 1}
 
@@ -53,6 +56,7 @@ def build_project_graph(
     datasets, _ = repository.query_datasets(project_id=project_id, limit=None, offset=0)
     analyses, _ = repository.query_analyses(project_id=project_id, limit=None, offset=0)
     claims, _ = repository.query_claims(project_id=project_id, limit=None, offset=0)
+    claim_edges: list[ClaimEdge] = []
     visualizations, _ = repository.query_visualizations(
         project_id=project_id,
         limit=None,
@@ -63,6 +67,11 @@ def build_project_graph(
     sessions: list[Session] = []
     if view_value in {"evidence", "full"}:
         goals, _ = repository.query_goals(project_id=project_id, limit=None, offset=0)
+        claim_edges, _ = repository.query_claim_edges(
+            project_id=project_id,
+            limit=None,
+            offset=0,
+        )
     if view_value == "full":
         notes, _ = repository.query_notes(project_id=project_id, limit=None, offset=0)
         sessions, _ = repository.query_sessions(project_id=project_id, limit=None, offset=0)
@@ -82,6 +91,8 @@ def build_project_graph(
             builder.add_node(_analysis_node(analysis))
         for claim in _sort_entities(claims, "claim_id", _claim_label):
             builder.add_node(_claim_node(claim))
+            for citation in sorted(claim.external_citations, key=_external_artifact_sort_key):
+                builder.add_node(_external_artifact_node(citation))
         for visualization in _sort_entities(visualizations, "viz_id", _visualization_label):
             builder.add_node(_visualization_node(visualization))
         for goal in _sort_entities(goals, "goal_id", _goal_label):
@@ -89,7 +100,15 @@ def build_project_graph(
 
     _add_question_edges(builder, questions)
     if view_value in {"evidence", "full"}:
-        _add_evidence_edges(builder, datasets, analyses, claims, visualizations, goals)
+        _add_evidence_edges(
+            builder,
+            datasets,
+            analyses,
+            claims,
+            claim_edges,
+            visualizations,
+            goals,
+        )
     if view_value == "full":
         _add_full_edges(builder, notes, sessions, datasets)
 
@@ -169,6 +188,14 @@ def _normalize_view(view: ProjectGraphView) -> ProjectGraphView:
 
 def _entity_node_id(entity_type: str, entity_id: UUID | str) -> str:
     return f"{entity_type}:{entity_id}"
+
+
+def _external_artifact_node_id(artifact: ExternalArtifactReference) -> str:
+    return _entity_node_id("external_artifact", artifact.uri)
+
+
+def _external_artifact_sort_key(artifact: ExternalArtifactReference) -> tuple[str, str, str]:
+    return (artifact.source_system, artifact.uri, artifact.content_hash)
 
 
 def _enum_value(value: object) -> str | None:
@@ -283,6 +310,21 @@ def _claim_node(claim: Claim) -> ProjectGraphNode:
     )
 
 
+def _external_artifact_node(artifact: ExternalArtifactReference) -> ProjectGraphNode:
+    return ProjectGraphNode(
+        id=_external_artifact_node_id(artifact),
+        entity_type="external_artifact",
+        entity_id=artifact.uri,
+        label=artifact.uri,
+        detail=artifact.source_system,
+        metadata={
+            "kind": artifact.kind.value,
+            "content_hash": artifact.content_hash,
+            "metadata": artifact.metadata,
+        },
+    )
+
+
 def _visualization_node(visualization: Visualization) -> ProjectGraphNode:
     return ProjectGraphNode(
         id=_entity_node_id("visualization", visualization.viz_id),
@@ -365,6 +407,7 @@ def _add_evidence_edges(
     datasets: list[Dataset],
     analyses: list[Analysis],
     claims: list[Claim],
+    claim_edges: list[ClaimEdge],
     visualizations: list[Visualization],
     goals: list[Goal],
 ) -> None:
@@ -410,6 +453,24 @@ def _add_evidence_edges(
                 "answers",
                 "claim_question_answers",
             )
+        for citation in sorted(claim.external_citations, key=_external_artifact_sort_key):
+            builder.add_edge(
+                claim_id,
+                _external_artifact_node_id(citation),
+                "cites",
+                "claim_cites",
+            )
+    for edge in sorted(
+        claim_edges,
+        key=lambda item: (str(item.claim_id), item.relation.value, str(item.target_claim_id)),
+    ):
+        relation = edge.relation.value
+        builder.add_edge(
+            _entity_node_id("claim", edge.claim_id),
+            _entity_node_id("claim", edge.target_claim_id),
+            relation.replace("_", " "),
+            f"claim_relation_{relation}",
+        )
     for visualization in _sort_entities(visualizations, "viz_id", _visualization_label):
         visualization_id = _entity_node_id("visualization", visualization.viz_id)
         builder.add_edge(

@@ -135,6 +135,14 @@ class ClaimStatus(str, Enum):
     REJECTED = "rejected"
 
 
+class ClaimRelation(str, Enum):
+    EXTENDS = "extends"
+    CONTRADICTS = "contradicts"
+    REFUTES = "refutes"
+    DEPENDS_ON = "depends_on"
+    SUPERSEDES = "supersedes"
+
+
 class GoalType(str, Enum):
     PAPER = "paper"
     GRANT = "grant"
@@ -677,6 +685,7 @@ class ClaimInput(_DomainModel):
     supported_by_dataset_ids: list[UUID] = Field(default_factory=list)
     supported_by_analysis_ids: list[UUID] = Field(default_factory=list)
     answers_question_ids: list[UUID] = Field(default_factory=list)
+    external_citations: list[ExternalArtifactReference] = Field(default_factory=list)
 
 
 class Claim(_DomainModel):
@@ -689,6 +698,7 @@ class Claim(_DomainModel):
     supported_by_dataset_ids: list[UUID] = Field(default_factory=list)
     supported_by_analysis_ids: list[UUID] = Field(default_factory=list)
     answers_question_ids: list[UUID] = Field(default_factory=list)
+    external_citations: list[ExternalArtifactReference] = Field(default_factory=list)
     created_at: datetime = Field(default_factory=utc_now)
     created_by: str | None = None
     created_by_user_id: UUID | None = None
@@ -698,6 +708,16 @@ class Claim(_DomainModel):
     origin_model: str | None = None
     origin_prompt_version: str | None = None
     updated_at: datetime = Field(default_factory=utc_now)
+
+
+class ClaimEdge(_DomainModel):
+    edge_id: UUID
+    claim_id: UUID
+    target_claim_id: UUID
+    relation: ClaimRelation
+    created_at: datetime = Field(default_factory=utc_now)
+    created_by: str | None = None
+    created_by_user_id: UUID | None = None
 
 
 class GoalLink(_DomainModel):
@@ -782,6 +802,7 @@ class RecordExportRecords(_DomainModel):
     datasets: list[Dataset] = Field(default_factory=list)
     analyses: list[Analysis] = Field(default_factory=list)
     claims: list[Claim] = Field(default_factory=list)
+    claim_edges: list[ClaimEdge] = Field(default_factory=list)
     notes: list[Note] = Field(default_factory=list)
 
 

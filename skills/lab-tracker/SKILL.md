@@ -88,6 +88,7 @@ Use these tools when available:
   status.
 - `lab_tracker_list_claims` lists claims by project, status, dataset, or
   analysis.
+- `lab_tracker_list_claim_edges` lists typed outgoing logic edges from a claim.
 - `lab_tracker_list_visualizations` lists visualizations by project, analysis,
   or claim.
 - `lab_tracker_get_dataset_provenance` returns dataset provenance JSON-LD.
@@ -111,6 +112,8 @@ Use these tools when available:
   datasets.
 - `lab_tracker_create_claim` creates a claim, optionally linked to supporting
   datasets or analyses.
+- `lab_tracker_create_claim_edge` links one claim to another with a typed logic
+  relation such as `extends`, `refutes`, or `depends_on`.
 - `lab_tracker_create_visualization` creates a visualization linked to an
   analysis and optional related claims.
 - `lab_tracker_upload_visualization_file` uploads a local file into managed Lab
@@ -280,6 +283,7 @@ List/search endpoints use `limit` between 1 and 200 and `offset` of 0 or greater
 - Required: `project_id`, `statement`, `confidence`
 - `answers_question_ids` (optional): list[string(uuid)] | null
 - `confidence` (required): number; minimum 0.0, maximum 100.0
+- `external_citations` (optional): list[object] | null
 - `project_id` (required): string(uuid)
 - `statement` (required): string; min length 1
 - `status` (optional): ClaimStatus enum: proposed, supported, rejected | null

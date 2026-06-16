@@ -7,6 +7,8 @@ from lab_tracker.models import (
     Analysis,
     AnalysisStatus,
     Claim,
+    ClaimEdge,
+    ClaimRelation,
     ClaimStatus,
     Dataset,
     DatasetCommitManifest,
@@ -128,6 +130,62 @@ def test_record_export_provenance_includes_terminal_reasons():
         _node_by_id(document, f"http://example.test/claims/{claim_id}")["terminalReason"]
         == "A later analysis refuted the interpretation."
     )
+
+
+def test_claim_relations_and_external_citations_are_exported_in_provenance():
+    project_id = UUID("11111111-bbbb-bbbb-bbbb-111111111111")
+    source_claim_id = UUID("22222222-bbbb-bbbb-bbbb-222222222222")
+    target_claim_id = UUID("33333333-bbbb-bbbb-bbbb-333333333333")
+    edge_id = UUID("44444444-bbbb-bbbb-bbbb-444444444444")
+    citation = ExternalArtifactReference(
+        source_system="doi",
+        uri="doi:10.1101/example-preprint",
+        content_hash="sha256:paper",
+    )
+    source_claim = Claim(
+        claim_id=source_claim_id,
+        project_id=project_id,
+        statement="Perturbation reduces activity.",
+        confidence=80.0,
+        status=ClaimStatus.PROPOSED,
+        external_citations=[citation],
+    )
+    target_claim = Claim(
+        claim_id=target_claim_id,
+        project_id=project_id,
+        statement="Perturbation does not affect activity.",
+        confidence=25.0,
+        status=ClaimStatus.PROPOSED,
+    )
+    edge = ClaimEdge(
+        edge_id=edge_id,
+        claim_id=source_claim_id,
+        target_claim_id=target_claim_id,
+        relation=ClaimRelation.REFUTES,
+    )
+
+    document = build_record_export_provenance_document(
+        "http://example.test",
+        RecordExportRecords(
+            claims=[source_claim, target_claim],
+            claim_edges=[edge],
+        ),
+    )
+
+    source_node = _node_by_id(document, f"http://example.test/claims/{source_claim_id}")
+    relation_iri = f"http://example.test/claim-relations/{edge_id}"
+    assert source_node["cites"] == [{"@id": citation.uri}]
+    assert source_node["claimRelation"] == [{"@id": relation_iri}]
+    assert _node_by_id(document, citation.uri)["externalContentHash"] == "sha256:paper"
+    relation_node = _node_by_id(document, relation_iri)
+    assert relation_node["@type"] == "lab:ClaimRelation"
+    assert relation_node["claimRelationType"] == "refutes"
+    assert relation_node["claimRelationSource"] == {
+        "@id": f"http://example.test/claims/{source_claim_id}"
+    }
+    assert relation_node["claimRelationTarget"] == {
+        "@id": f"http://example.test/claims/{target_claim_id}"
+    }
 
 
 def test_analysis_provenance_distinguishes_ai_suggested_and_user_revised_nodes():

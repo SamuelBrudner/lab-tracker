@@ -78,7 +78,7 @@ def test_alembic_upgrade_chain_from_empty_to_head(monkeypatch, tmp_path):
     for revision in revisions:
         command.upgrade(config, revision)
         assert revision in _current_revisions(database_url)
-    assert _current_revision(database_url) == "0036_analysis_external_artifacts"
+    assert _current_revision(database_url) == "0037_claim_logic_edges"
 
 
 def test_alembic_has_single_head() -> None:
@@ -122,6 +122,7 @@ def test_alembic_upgrade_head_creates_expected_tables(monkeypatch, tmp_path):
         "claim_datasets",
         "claim_analyses",
         "claim_questions",
+        "claim_edges",
         "goals",
         "goal_links",
         "visualization_claims",
@@ -233,6 +234,33 @@ def test_alembic_upgrade_head_creates_expected_tables(monkeypatch, tmp_path):
     assert "terminal_reason" in analysis_columns
     claim_columns = {column["name"] for column in inspector.get_columns("claims")}
     assert "terminal_reason" in claim_columns
+    assert "external_citations" in claim_columns
+    claim_edge_columns = {column["name"] for column in inspector.get_columns("claim_edges")}
+    assert {
+        "edge_id",
+        "claim_id",
+        "target_claim_id",
+        "relation",
+        "created_by",
+        "created_by_user_id",
+        "created_at",
+    }.issubset(claim_edge_columns)
+    _assert_index(inspector, "claim_edges", "ix_claim_edges_claim_id")
+    _assert_index(inspector, "claim_edges", "ix_claim_edges_target_claim_id")
+    _assert_index(inspector, "claim_edges", "ix_claim_edges_created_by_user_id")
+    _assert_fk(inspector, "claim_edges", column="claim_id", referred_table="claims")
+    _assert_fk(
+        inspector,
+        "claim_edges",
+        column="target_claim_id",
+        referred_table="claims",
+    )
+    _assert_fk(
+        inspector,
+        "claim_edges",
+        column="created_by_user_id",
+        referred_table="users",
+    )
     assert {
         "submitted_at",
         "submitted_by",
@@ -406,7 +434,7 @@ def test_database_at_daily_review_branch_upgrades_to_current_head(monkeypatch, t
     assert _current_revision(database_url) == "0017_daily_graph_reviews"
 
     command.upgrade(config, "head")
-    assert _current_revision(database_url) == "0036_analysis_external_artifacts"
+    assert _current_revision(database_url) == "0037_claim_logic_edges"
 
     engine = create_engine(
         database_url,

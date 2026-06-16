@@ -577,6 +577,7 @@ class LabTrackerAPIClient:
         supported_by_dataset_ids: list[str] | None = None,
         supported_by_analysis_ids: list[str] | None = None,
         answers_question_ids: list[str] | None = None,
+        external_citations: list[JsonObject] | None = None,
     ) -> JsonObject:
         resolved_status = _validate_claim_status(status)
         return self._request(
@@ -590,7 +591,37 @@ class LabTrackerAPIClient:
                 "supported_by_dataset_ids": supported_by_dataset_ids,
                 "supported_by_analysis_ids": supported_by_analysis_ids,
                 "answers_question_ids": answers_question_ids,
+                "external_citations": external_citations,
             },
+        )
+
+    def create_claim_edge(
+        self,
+        *,
+        claim_id: str,
+        target_claim_id: str,
+        relation: str,
+    ) -> JsonObject:
+        return self._request(
+            "POST",
+            f"/claims/{claim_id}/edges",
+            json_payload={
+                "target_claim_id": target_claim_id,
+                "relation": relation,
+            },
+        )
+
+    def list_claim_edges(
+        self,
+        *,
+        claim_id: str,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> JsonObject:
+        return self._request(
+            "GET",
+            f"/claims/{claim_id}/edges",
+            params={"limit": limit, "offset": offset},
         )
 
     def create_visualization(

@@ -9,10 +9,12 @@ from lab_tracker.errors import ValidationError
 from lab_tracker.models import (
     AnalysisStatus,
     ClaimInput,
+    ClaimRelation,
     ClaimStatus,
     DatasetCommitManifestInput,
     DatasetFile,
     DatasetStatus,
+    ExternalArtifactReference,
     QuestionStatus,
     QuestionType,
     VisualizationInput,
@@ -170,6 +172,84 @@ def test_claim_answers_question_links_round_trip_and_project_scope():
             statement="Answers a question from another project",
             confidence=10.0,
             answers_question_ids=[foreign_question.question_id],
+            actor=actor,
+        )
+
+
+def test_claim_edges_and_external_citations_round_trip_with_cycle_guard():
+    api = repository_backed_api()
+    actor = _actor()
+    project, _ = _setup_project_with_question(api, actor)
+    citation = ExternalArtifactReference(
+        source_system="doi",
+        uri="doi:10.1101/example-preprint",
+        content_hash="sha256:paper",
+    )
+    source = api.create_claim(
+        project_id=project.project_id,
+        statement="Perturbation reduces activity.",
+        confidence=80.0,
+        external_citations=[citation],
+        actor=actor,
+    )
+    target = api.create_claim(
+        project_id=project.project_id,
+        statement="Perturbation does not affect activity.",
+        confidence=25.0,
+        actor=actor,
+    )
+
+    assert api.get_claim(source.claim_id).external_citations == [citation]
+    edge = api.create_claim_edge(
+        source.claim_id,
+        target_claim_id=target.claim_id,
+        relation=ClaimRelation.REFUTES,
+        actor=actor,
+    )
+
+    assert edge.claim_id == source.claim_id
+    assert edge.target_claim_id == target.claim_id
+    assert edge.relation == ClaimRelation.REFUTES
+    assert api.list_claim_edges(claim_id=source.claim_id) == [edge]
+    with pytest.raises(ValidationError, match="Duplicate claim edge"):
+        api.create_claim_edge(
+            source.claim_id,
+            target_claim_id=target.claim_id,
+            relation=ClaimRelation.REFUTES,
+            actor=actor,
+        )
+    with pytest.raises(ValidationError, match="cannot target the source"):
+        api.create_claim_edge(
+            source.claim_id,
+            target_claim_id=source.claim_id,
+            relation=ClaimRelation.EXTENDS,
+            actor=actor,
+        )
+    with pytest.raises(ValidationError, match="would create a cycle"):
+        api.create_claim_edge(
+            target.claim_id,
+            target_claim_id=source.claim_id,
+            relation=ClaimRelation.DEPENDS_ON,
+            actor=actor,
+        )
+
+
+def test_claim_external_citations_validate_iris_on_write():
+    api = repository_backed_api()
+    actor = _actor()
+    project, _ = _setup_project_with_question(api, actor)
+    with pytest.raises(ValidationError, match="well-formed IRI"):
+        api.create_claim(
+            project_id=project.project_id,
+            statement="Invalid citation URI.",
+            confidence=10.0,
+            external_citations=[
+                ExternalArtifactReference(
+                    source_system="doi",
+                    uri="not-a-doi",
+                    content_hash="sha256:paper",
+                )
+            ],
             actor=actor,
         )
 

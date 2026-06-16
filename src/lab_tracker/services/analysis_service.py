@@ -282,6 +282,8 @@ class AnalysisService(BaseService):
                     terminal_reason=claim_input.terminal_reason,
                     supported_by_dataset_ids=claim_input.supported_by_dataset_ids,
                     supported_by_analysis_ids=supported_by_analysis_ids,
+                    answers_question_ids=claim_input.answers_question_ids,
+                    external_citations=claim_input.external_citations,
                     actor=actor,
                 )
             )

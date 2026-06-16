@@ -13,6 +13,7 @@ from lab_tracker.db_models import (
     AnalysisModel,
     ClaimAnalysisModel,
     ClaimDatasetModel,
+    ClaimEdgeModel,
     ClaimModel,
     ClaimQuestionModel,
     DatasetModel,
@@ -20,17 +21,20 @@ from lab_tracker.db_models import (
     VisualizationClaimModel,
     VisualizationModel,
 )
-from lab_tracker.models import Analysis, Claim, Visualization
+from lab_tracker.models import Analysis, Claim, ClaimEdge, Visualization
 from lab_tracker.repository import EntityRepository
 from lab_tracker.sqlalchemy_mappers import (
     analysis_dataset_models,
     analysis_from_model,
     analysis_to_model,
     apply_analysis_to_model,
+    apply_claim_edge_to_model,
     apply_claim_to_model,
     apply_visualization_to_model,
     claim_analysis_models,
     claim_dataset_models,
+    claim_edge_from_model,
+    claim_edge_to_model,
     claim_from_model,
     claim_question_models,
     claim_to_model,
@@ -347,6 +351,89 @@ class SQLAlchemyClaimRepository(EntityRepository[Claim]):
         total = count_from_statement(self._session, count_stmt)
         rows = list(self._session.scalars(apply_pagination(stmt, limit=limit, offset=offset)))
         return self.claims_from_rows(rows), total
+
+
+class SQLAlchemyClaimEdgeRepository(EntityRepository[ClaimEdge]):
+    def __init__(self, session: OrmSession) -> None:
+        self._session = session
+
+    def _edges_from_rows(self, rows: list[ClaimEdgeModel]) -> list[ClaimEdge]:
+        return [claim_edge_from_model(row) for row in rows]
+
+    def get(self, entity_id: UUID) -> ClaimEdge | None:
+        self._session.flush()
+        row = self._session.get(ClaimEdgeModel, str(entity_id))
+        if row is None:
+            return None
+        return claim_edge_from_model(row)
+
+    def list(self) -> list[ClaimEdge]:
+        self._session.flush()
+        rows = list(
+            self._session.scalars(
+                select(ClaimEdgeModel).order_by(
+                    ClaimEdgeModel.created_at,
+                    ClaimEdgeModel.edge_id,
+                )
+            )
+        )
+        return self._edges_from_rows(rows)
+
+    def save(self, entity: ClaimEdge) -> None:
+        entity_id = str(entity.edge_id)
+        row = self._session.get(ClaimEdgeModel, entity_id)
+        if row is None:
+            self._session.add(claim_edge_to_model(entity))
+        else:
+            apply_claim_edge_to_model(row, entity)
+        self._session.flush()
+
+    def delete(self, entity_id: UUID) -> ClaimEdge | None:
+        entity = self.get(entity_id)
+        if entity is None:
+            return None
+        row = self._session.get(ClaimEdgeModel, str(entity_id))
+        if row is not None:
+            self._session.delete(row)
+        return entity
+
+    def query(
+        self,
+        *,
+        project_id: UUID | None = None,
+        claim_id: UUID | None = None,
+        target_claim_id: UUID | None = None,
+        relation: str | None = None,
+        limit: int | None = None,
+        offset: int = 0,
+    ) -> tuple[list[ClaimEdge], int]:
+        self._session.flush()
+        stmt = select(ClaimEdgeModel)
+        count_stmt = select(ClaimEdgeModel.edge_id)
+        if project_id is not None:
+            stmt = stmt.join(
+                ClaimModel,
+                ClaimModel.claim_id == ClaimEdgeModel.claim_id,
+            ).where(ClaimModel.project_id == str(project_id))
+            count_stmt = count_stmt.join(
+                ClaimModel,
+                ClaimModel.claim_id == ClaimEdgeModel.claim_id,
+            ).where(ClaimModel.project_id == str(project_id))
+        if claim_id is not None:
+            stmt = stmt.where(ClaimEdgeModel.claim_id == str(claim_id))
+            count_stmt = count_stmt.where(ClaimEdgeModel.claim_id == str(claim_id))
+        if target_claim_id is not None:
+            stmt = stmt.where(ClaimEdgeModel.target_claim_id == str(target_claim_id))
+            count_stmt = count_stmt.where(
+                ClaimEdgeModel.target_claim_id == str(target_claim_id)
+            )
+        if relation is not None:
+            stmt = stmt.where(ClaimEdgeModel.relation == relation)
+            count_stmt = count_stmt.where(ClaimEdgeModel.relation == relation)
+        stmt = stmt.order_by(ClaimEdgeModel.created_at, ClaimEdgeModel.edge_id)
+        total = count_from_statement(self._session, count_stmt)
+        rows = list(self._session.scalars(apply_pagination(stmt, limit=limit, offset=offset)))
+        return self._edges_from_rows(rows), total
 
 
 class SQLAlchemyVisualizationRepository(EntityRepository[Visualization]):

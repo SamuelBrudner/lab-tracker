@@ -12,6 +12,7 @@ from lab_tracker.db_models import (
     AnalysisModel,
     ClaimAnalysisModel,
     ClaimDatasetModel,
+    ClaimEdgeModel,
     ClaimModel,
     DatasetModel,
     NoteModel,
@@ -22,6 +23,7 @@ from lab_tracker.models import (
     AcquisitionOutput,
     Analysis,
     Claim,
+    ClaimEdge,
     Dataset,
     DatasetFile,
     Goal,
@@ -46,6 +48,7 @@ from lab_tracker.repository import LabTrackerRepository
 
 from .analyses import (
     SQLAlchemyAnalysisRepository,
+    SQLAlchemyClaimEdgeRepository,
     SQLAlchemyClaimRepository,
     SQLAlchemyVisualizationRepository,
 )
@@ -93,6 +96,7 @@ class SQLAlchemyLabTrackerRepository(LabTrackerRepository):
         self.acquisition_outputs = SQLAlchemyAcquisitionOutputRepository(session)
         self.analyses = SQLAlchemyAnalysisRepository(session)
         self.claims = SQLAlchemyClaimRepository(session)
+        self.claim_edges = SQLAlchemyClaimEdgeRepository(session)
         self.goals = SQLAlchemyGoalRepository(session)
         self.visualizations = SQLAlchemyVisualizationRepository(session)
         self.graph_change_sets = SQLAlchemyGraphChangeSetRepository(session)
@@ -354,12 +358,19 @@ class SQLAlchemyLabTrackerRepository(LabTrackerRepository):
                 )
             )
         )
+        claims = self.claims.claims_from_rows(claim_rows)
+        claim_ids = {claim.claim_id for claim in claims}
+        claim_edges = self._claim_edges_for_record_claims(
+            claim_ids,
+            project_filter=project_filter,
+        )
         return RecordExportRecords(
             questions=self.questions.questions_from_rows(question_rows),
             datasets=self.datasets.datasets_from_rows(dataset_rows),
             notes=self.notes.notes_from_rows(note_rows),
             analyses=self.analyses.analyses_from_rows(analysis_rows),
-            claims=self.claims.claims_from_rows(claim_rows),
+            claims=claims,
+            claim_edges=claim_edges,
         )
 
     def _attributed_record_statement(
@@ -424,6 +435,34 @@ class SQLAlchemyLabTrackerRepository(LabTrackerRepository):
         if project_filter:
             stmt = stmt.where(ClaimModel.project_id.in_(project_filter))
         return stmt.order_by(ClaimModel.created_at, ClaimModel.claim_id)
+
+    def _claim_edges_for_record_claims(
+        self,
+        claim_ids: set[UUID],
+        *,
+        project_filter: list[str],
+    ) -> list[ClaimEdge]:
+        if not claim_ids:
+            return []
+        stmt = select(ClaimEdgeModel).where(
+            or_(
+                ClaimEdgeModel.claim_id.in_([str(claim_id) for claim_id in claim_ids]),
+                ClaimEdgeModel.target_claim_id.in_([str(claim_id) for claim_id in claim_ids]),
+            )
+        )
+        if project_filter:
+            stmt = stmt.join(
+                ClaimModel,
+                ClaimModel.claim_id == ClaimEdgeModel.claim_id,
+            ).where(ClaimModel.project_id.in_(project_filter))
+        stmt = stmt.order_by(ClaimEdgeModel.created_at, ClaimEdgeModel.edge_id)
+        rows = list(self._session.scalars(stmt))
+        edges: list[ClaimEdge] = []
+        for row in rows:
+            edge = self.claim_edges.get(UUID(row.edge_id))
+            if edge is not None:
+                edges.append(edge)
+        return edges
 
     @staticmethod
     def _attribution_predicate(
@@ -593,6 +632,25 @@ class SQLAlchemyLabTrackerRepository(LabTrackerRepository):
             dataset_id=dataset_id,
             analysis_id=analysis_id,
             created_by=created_by,
+            limit=limit,
+            offset=offset,
+        )
+
+    def query_claim_edges(
+        self,
+        *,
+        project_id: UUID | None = None,
+        claim_id: UUID | None = None,
+        target_claim_id: UUID | None = None,
+        relation: str | None = None,
+        limit: int | None = None,
+        offset: int = 0,
+    ) -> tuple[list[ClaimEdge], int]:
+        return self.claim_edges.query(
+            project_id=project_id,
+            claim_id=claim_id,
+            target_claim_id=target_claim_id,
+            relation=relation,
             limit=limit,
             offset=offset,
         )
