@@ -61,6 +61,7 @@ class VisualizationService(BaseService):
         visualization = Visualization(
             viz_id=uuid4(),
             analysis_id=analysis_id,
+            dataset_ids=list(analysis.dataset_ids),
             viz_type=viz_type.strip(),
             file_path=file_path.strip(),
             caption=caption.strip() if caption else None,

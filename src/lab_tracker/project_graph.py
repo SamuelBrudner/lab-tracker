@@ -479,6 +479,13 @@ def _add_evidence_edges(
             "generates",
             "visualization_analysis",
         )
+        for dataset_id in sorted(visualization.dataset_ids, key=str):
+            builder.add_edge(
+                _entity_node_id("dataset", dataset_id),
+                visualization_id,
+                "grounds",
+                "visualization_dataset",
+            )
         for claim_id in sorted(visualization.related_claim_ids, key=str):
             builder.add_edge(
                 _entity_node_id("claim", claim_id),

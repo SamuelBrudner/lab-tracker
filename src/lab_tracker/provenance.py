@@ -87,6 +87,7 @@ def _context(base_url: str) -> dict[str, object]:
         "fileName": "lab:fileName",
         "filePath": "lab:filePath",
         "filename": "lab:filename",
+        "groundingDataset": {"@id": "lab:groundingDataset", "@type": "@id"},
         "metadata": {"@id": "lab:metadata", "@type": "@json"},
         "methodHash": "lab:methodHash",
         "note": {"@id": "lab:note", "@type": "@id"},
@@ -115,6 +116,7 @@ def _context(base_url: str) -> dict[str, object]:
         "userId": "lab:userId",
         "vizType": "lab:vizType",
         "wasAttributedTo": {"@id": "prov:wasAttributedTo", "@type": "@id"},
+        "wasDerivedFrom": {"@id": "prov:wasDerivedFrom", "@type": "@id"},
         "wasGeneratedBy": {"@id": "prov:wasGeneratedBy", "@type": "@id"},
         "wasRevisionOf": {"@id": "prov:wasRevisionOf", "@type": "@id"},
         "bidsMetadata": {"@id": "lab:bidsMetadata", "@type": "@json"},
@@ -638,6 +640,13 @@ def _visualization_node(
             {"@id": _resource_iri(base_url, "claims", claim_id)}
             for claim_id in visualization.related_claim_ids
         ]
+    if visualization.dataset_ids:
+        dataset_refs = [
+            {"@id": _resource_iri(base_url, "datasets", dataset_id)}
+            for dataset_id in visualization.dataset_ids
+        ]
+        node["groundingDataset"] = dataset_refs
+        node["prov:wasDerivedFrom"] = dataset_refs
     return node
 
 

@@ -284,8 +284,11 @@ def test_visualization_filters_and_analysis_question_links():
         related_claim_ids=[claim.claim_id],
         actor=actor,
     )
+    assert visualization.dataset_ids == [dataset.dataset_id]
+    assert api.get_visualization(visualization.viz_id).dataset_ids == [dataset.dataset_id]
     by_claim = api.list_visualizations(claim_id=claim.claim_id)
     assert any(viz.viz_id == visualization.viz_id for viz in by_claim)
+    assert [viz.dataset_ids for viz in by_claim] == [[dataset.dataset_id]]
     by_analysis = api.list_visualizations(analysis_id=analysis.analysis_id)
     assert any(viz.viz_id == visualization.viz_id for viz in by_analysis)
     by_question = api.list_analyses(question_id=question.question_id)

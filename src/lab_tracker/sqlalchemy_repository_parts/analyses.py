@@ -453,11 +453,28 @@ class SQLAlchemyVisualizationRepository(EntityRepository[Visualization]):
             claim_map[row.viz_id].append(UUID(row.claim_id))
         return claim_map
 
+    def dataset_map(self, analysis_ids: list[str]) -> dict[str, list[UUID]]:
+        dataset_map: dict[str, list[UUID]] = defaultdict(list)
+        if not analysis_ids:
+            return dataset_map
+        rows = self._session.scalars(
+            select(AnalysisDatasetModel).where(AnalysisDatasetModel.analysis_id.in_(analysis_ids))
+        )
+        for row in rows:
+            dataset_map[row.analysis_id].append(UUID(row.dataset_id))
+        return dataset_map
+
     def visualizations_from_rows(self, rows: list[VisualizationModel]) -> list[Visualization]:
         visualization_ids = [row.viz_id for row in rows]
+        analysis_ids = sorted({row.analysis_id for row in rows})
         claim_map = self.claim_map(visualization_ids)
+        dataset_map = self.dataset_map(analysis_ids)
         return [
-            visualization_from_model(row, related_claim_ids=claim_map.get(row.viz_id, []))
+            visualization_from_model(
+                row,
+                dataset_ids=sorted(dataset_map.get(row.analysis_id, []), key=str),
+                related_claim_ids=claim_map.get(row.viz_id, []),
+            )
             for row in rows
         ]
 

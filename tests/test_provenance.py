@@ -680,6 +680,7 @@ def test_analysis_provenance_omits_optional_fields_and_preserves_support_links()
     visualization = Visualization(
         viz_id=viz_id,
         analysis_id=analysis_id,
+        dataset_ids=[dataset_id],
         viz_type="line",
         file_path="figs/signal.png",
         related_claim_ids=[claim_id],
@@ -739,6 +740,12 @@ def test_analysis_provenance_omits_optional_fields_and_preserves_support_links()
     }
     assert viz_node["relatedClaim"] == [
         {"@id": "http://example.test/claims/77777777-7777-7777-7777-777777777777"}
+    ]
+    assert viz_node["groundingDataset"] == [
+        {"@id": "http://example.test/datasets/66666666-6666-6666-6666-666666666666"}
+    ]
+    assert viz_node["prov:wasDerivedFrom"] == [
+        {"@id": "http://example.test/datasets/66666666-6666-6666-6666-666666666666"}
     ]
     assert viz_node["contentUrl"] == (
         "http://example.test/visualizations/88888888-8888-8888-8888-888888888888/file/download"

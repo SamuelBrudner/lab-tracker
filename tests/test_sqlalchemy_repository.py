@@ -1127,5 +1127,9 @@ def test_query_analyses_claims_and_visualizations_apply_focused_filters(db_sessi
     assert [item.claim_id for item in created_claims] == [other_claim.claim_id]
     assert total_visualizations == 1
     assert [item.viz_id for item in visualizations] == [linked_visualization.viz_id]
+    assert visualizations[0].dataset_ids == sorted(
+        [dataset_one.dataset_id, dataset_two.dataset_id],
+        key=str,
+    )
     assert total_claim_edges == 1
     assert claim_edges == [claim_edge]

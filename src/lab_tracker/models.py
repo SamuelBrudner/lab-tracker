@@ -774,6 +774,7 @@ class VisualizationAsset(_DomainModel):
 class Visualization(_DomainModel):
     viz_id: UUID
     analysis_id: UUID
+    dataset_ids: list[UUID] = Field(default_factory=list)
     viz_type: str
     file_path: str
     caption: str | None = None

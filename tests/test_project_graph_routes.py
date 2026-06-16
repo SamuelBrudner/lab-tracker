@@ -251,6 +251,7 @@ def test_project_graph_evidence_and_full_views_include_expected_links(
         f"claim_analysis_support:analysis:{ids['analysis_id']}->claim:{ids['claim_id']}",
         f"claim_question_answers:claim:{ids['claim_id']}->question:{ids['child_question_id']}",
         f"visualization_analysis:analysis:{ids['analysis_id']}->visualization:{ids['viz_id']}",
+        f"visualization_dataset:dataset:{ids['dataset_id']}->visualization:{ids['viz_id']}",
         f"visualization_claim:claim:{ids['claim_id']}->visualization:{ids['viz_id']}",
         f"goal_candidate_figure_candidate:visualization:{ids['viz_id']}->goal:{ids['goal_id']}",
     }.issubset(_edge_ids(evidence["edges"]))

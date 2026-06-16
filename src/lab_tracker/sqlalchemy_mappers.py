@@ -1098,6 +1098,7 @@ def visualization_to_model(visualization: Visualization) -> VisualizationModel:
 def visualization_from_model(
     row: VisualizationModel,
     *,
+    dataset_ids: Iterable[UUID] = (),
     related_claim_ids: Iterable[UUID] = (),
 ) -> Visualization:
     asset = None
@@ -1112,6 +1113,7 @@ def visualization_from_model(
     return Visualization(
         viz_id=_uuid(row.viz_id),
         analysis_id=_uuid(row.analysis_id),
+        dataset_ids=list(dataset_ids),
         viz_type=row.viz_type,
         file_path=row.file_path,
         caption=row.caption,
