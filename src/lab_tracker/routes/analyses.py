@@ -54,6 +54,7 @@ def build_analyses_router(api: LabTrackerAPI) -> APIRouter:
             method_hash=payload.method_hash,
             code_version=payload.code_version,
             environment_hash=payload.environment_hash,
+            external_artifacts=payload.external_artifacts,
             status=payload.status or analysis_default_status(),
             terminal_reason=payload.terminal_reason,
             actor=actor,
@@ -102,6 +103,7 @@ def build_analyses_router(api: LabTrackerAPI) -> APIRouter:
             analysis_id,
             status=payload.status,
             environment_hash=payload.environment_hash,
+            external_artifacts=payload.external_artifacts,
             terminal_reason=payload.terminal_reason,
             actor=actor,
         )
@@ -115,6 +117,7 @@ def build_analyses_router(api: LabTrackerAPI) -> APIRouter:
         analysis, claims, visualizations = api_from_request(request, api).commit_analysis(
             analysis_id,
             environment_hash=payload.environment_hash,
+            external_artifacts=payload.external_artifacts,
             claims=payload.claims,
             visualizations=payload.visualizations,
             actor=actor,

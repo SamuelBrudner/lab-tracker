@@ -731,6 +731,7 @@ def analysis_to_model(analysis: Analysis) -> AnalysisModel:
         method_hash=analysis.method_hash,
         code_version=analysis.code_version,
         environment_hash=analysis.environment_hash,
+        external_artifacts=_external_artifacts_to_json(analysis.external_artifacts),
         executed_by=analysis.executed_by,
         executed_by_user_id=(
             _uuid_str(analysis.executed_by_user_id)
@@ -758,6 +759,7 @@ def analysis_from_model(
         method_hash=row.method_hash,
         code_version=row.code_version,
         environment_hash=row.environment_hash,
+        external_artifacts=_external_artifacts_from_json(getattr(row, "external_artifacts", None)),
         executed_by=row.executed_by,
         executed_by_user_id=(
             _uuid(row.executed_by_user_id) if row.executed_by_user_id else None
@@ -786,6 +788,7 @@ def apply_analysis_to_model(row: AnalysisModel, analysis: Analysis) -> None:
     row.method_hash = analysis.method_hash
     row.code_version = analysis.code_version
     row.environment_hash = analysis.environment_hash
+    row.external_artifacts = _external_artifacts_to_json(analysis.external_artifacts)
     row.executed_by = analysis.executed_by
     row.executed_by_user_id = (
         _uuid_str(analysis.executed_by_user_id)

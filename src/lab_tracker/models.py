@@ -630,6 +630,7 @@ class Analysis(_DomainModel):
     method_hash: str
     code_version: str
     environment_hash: str | None = None
+    external_artifacts: list[ExternalArtifactReference] = Field(default_factory=list)
     executed_by: str | None = None
     executed_by_user_id: UUID | None = None
     executed_at: datetime = Field(default_factory=utc_now)

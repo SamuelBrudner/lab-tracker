@@ -150,9 +150,7 @@ def test_dataset_provenance_route_exports_json_ld_graph(
     assert dataset_node["prov:wasAttributedTo"] == {"@id": creator_iri}
     assert dataset_node["commitHash"]
     assert dataset_node["status"] == "committed"
-    assert commit_node["prov:used"] == [
-        {"@id": f"{dataset_iri}/provenance/files/raw%2Fdata.csv"}
-    ]
+    assert commit_node["prov:used"] == [{"@id": f"{dataset_iri}/provenance/files/raw%2Fdata.csv"}]
     assert commit_node["metadata"] == {"run": "7"}
     assert commit_node["nwbMetadata"] == {"Session Description": "baseline"}
     assert commit_node["bidsMetadata"] == {"Name": "Example Dataset"}
@@ -231,6 +229,13 @@ def test_analysis_provenance_route_exports_related_entities(
 ):
     headers = admin_auth_headers
     project_id, dataset_id, _, _, _ = _create_committed_dataset_with_provenance(client, headers)
+    run = {
+        "kind": "activity",
+        "source_system": "mlflow",
+        "uri": "mlflow://experiments/fly/runs/run-001",
+        "content_hash": "sha256:run001",
+        "metadata": {"run_name": "gain-fit"},
+    }
 
     analysis_id = client.post(
         "/analyses",
@@ -239,6 +244,7 @@ def test_analysis_provenance_route_exports_related_entities(
             "dataset_ids": [dataset_id],
             "method_hash": "method-1",
             "code_version": "v1",
+            "external_artifacts": [run],
         },
         headers=headers,
     ).json()["data"]["analysis_id"]
@@ -290,10 +296,12 @@ def test_analysis_provenance_route_exports_related_entities(
     dataset_node = _node_by_id(payload, dataset_iri)
     claim_node = _node_by_id(payload, claim_iri)
     viz_node = _node_by_id(payload, viz_iri)
+    run_node = _node_by_id(payload, run["uri"])
     agent_node = _node_by_id(payload, analysis_node["prov:wasAssociatedWith"]["@id"])
 
     assert analysis_node["@type"] == "prov:Activity"
     assert analysis_node["prov:used"] == [{"@id": dataset_iri}]
+    assert analysis_node["prov:wasInformedBy"] == [{"@id": run["uri"]}]
     assert analysis_node["methodHash"] == "method-1"
     assert analysis_node["codeVersion"] == "v1"
     assert analysis_node["environmentHash"] == "env-1"
@@ -302,6 +310,9 @@ def test_analysis_provenance_route_exports_related_entities(
     assert _node_type_includes(agent_node, "prov:Agent")
     assert _node_type_includes(agent_node, "prov:Person")
     assert agent_node["userId"]
+    assert run_node["@type"] == "prov:Activity"
+    assert run_node["externalSourceSystem"] == "mlflow"
+    assert run_node["externalContentHash"] == "sha256:run001"
     assert dataset_node["prov:wasAttributedTo"] == {"@id": agent_node["@id"]}
     assert claim_node["supportsDataset"] == [{"@id": dataset_iri}]
     assert claim_node["supportsAnalysis"] == [{"@id": analysis_iri}]

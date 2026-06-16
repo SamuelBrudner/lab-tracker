@@ -376,6 +376,51 @@ def test_dataset_commit_accepts_external_artifact_without_file_attachment():
     assert dataset.commit_manifest.external_artifacts == [_external_artifact()]
 
 
+def test_analysis_accepts_external_run_reference_and_rejects_duplicates():
+    api = repository_backed_api()
+    actor = _actor()
+    project = api.create_project("Analysis Run Project", actor=actor)
+    question = api.create_question(
+        project_id=project.project_id,
+        text="Can analysis runs be referenced externally?",
+        question_type=QuestionType.DESCRIPTIVE,
+        status=QuestionStatus.ACTIVE,
+        actor=actor,
+    )
+    dataset = api.create_dataset(
+        project_id=project.project_id,
+        primary_question_id=question.question_id,
+        status=DatasetStatus.COMMITTED,
+        commit_manifest=DatasetCommitManifestInput(
+            files=[DatasetFile(path="data.csv", checksum="sha256:data")]
+        ),
+        actor=actor,
+    )
+    run = ExternalArtifactReference(
+        source_system="mlflow",
+        uri="mlflow://experiments/fly/runs/run-001",
+        content_hash="sha256:run001",
+        metadata={"run_name": "gain-fit"},
+    )
+
+    analysis = api.create_analysis(
+        project_id=project.project_id,
+        dataset_ids=[dataset.dataset_id],
+        method_hash="method-1",
+        code_version="git:abc123",
+        external_artifacts=[run],
+        actor=actor,
+    )
+
+    assert analysis.external_artifacts == [run]
+    with pytest.raises(ValidationError, match="Duplicate external artifact reference"):
+        api.update_analysis(
+            analysis.analysis_id,
+            external_artifacts=[run, run],
+            actor=actor,
+        )
+
+
 def test_dataset_manifest_rejects_duplicate_external_artifact_reference():
     api = repository_backed_api()
     actor = _actor()
@@ -392,9 +437,7 @@ def test_dataset_manifest_rejects_duplicate_external_artifact_reference():
         api.create_dataset(
             project_id=project.project_id,
             primary_question_id=question.question_id,
-            commit_manifest=DatasetCommitManifestInput(
-                external_artifacts=[artifact, artifact]
-            ),
+            commit_manifest=DatasetCommitManifestInput(external_artifacts=[artifact, artifact]),
             actor=actor,
         )
 
@@ -433,8 +476,7 @@ def test_question_refactor_supports_staged_and_active_replacements(
 
     assert result.source_question.status == QuestionStatus.SUPERSEDED
     assert (
-        result.source_question.superseded_by_question_id
-        == result.replacement_question.question_id
+        result.source_question.superseded_by_question_id == result.replacement_question.question_id
     )
     assert result.replacement_question.status == replacement_status
     assert result.replacement_question.supersedes_question_id == source.question_id
@@ -511,9 +553,7 @@ def test_question_refactor_moves_only_selected_children_and_notes():
     assert result.replacement_question.parent_question_ids == [parent.question_id]
     assert api.get_question(source.question_id).superseded_by_question_id == replacement_id
     assert api.get_question(moved_child.question_id).parent_question_ids == [replacement_id]
-    assert api.get_question(retained_child.question_id).parent_question_ids == [
-        source.question_id
-    ]
+    assert api.get_question(retained_child.question_id).parent_question_ids == [source.question_id]
     assert api.get_note(moved_note.note_id).targets == [
         EntityRef(entity_type=EntityType.QUESTION, entity_id=replacement_id)
     ]

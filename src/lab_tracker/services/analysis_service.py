@@ -16,6 +16,7 @@ from lab_tracker.models import (
     ClaimStatus,
     DatasetStatus,
     EntityOrigin,
+    ExternalArtifactReference,
     Visualization,
     VisualizationInput,
     utc_now,
@@ -73,6 +74,7 @@ class AnalysisService(BaseService):
         code_version: str,
         *,
         environment_hash: str | None = None,
+        external_artifacts: Iterable[ExternalArtifactReference] | None = None,
         status: AnalysisStatus = AnalysisStatus.STAGED,
         terminal_reason: str | None = None,
         actor: AuthContext | None = None,
@@ -115,6 +117,7 @@ class AnalysisService(BaseService):
             method_hash=method_hash.strip(),
             code_version=code_version.strip(),
             environment_hash=environment_hash.strip() if environment_hash else None,
+            external_artifacts=_normalize_external_artifacts(external_artifacts),
             status=status,
             terminal_reason=resolved_terminal_reason,
             executed_by=actor_user_id(actor),
@@ -157,9 +160,7 @@ class AnalysisService(BaseService):
         if dataset_id is not None:
             analyses = [analysis for analysis in analyses if dataset_id in analysis.dataset_ids]
         if question_id is not None:
-            dataset_map = {
-                dataset.dataset_id: dataset for dataset in self.datasets.list_datasets()
-            }
+            dataset_map = {dataset.dataset_id: dataset for dataset in self.datasets.list_datasets()}
             analyses = [
                 analysis
                 for analysis in analyses
@@ -177,6 +178,7 @@ class AnalysisService(BaseService):
         *,
         status: AnalysisStatus | None = None,
         environment_hash: str | None = None,
+        external_artifacts: Iterable[ExternalArtifactReference] | None = None,
         terminal_reason: str | None = None,
         actor: AuthContext | None = None,
         origin: EntityOrigin | None = None,
@@ -191,6 +193,8 @@ class AnalysisService(BaseService):
         next_status = status or current_status
         if current_status == AnalysisStatus.COMMITTED:
             if environment_hash is not None:
+                raise ValidationError("Committed analyses are immutable.")
+            if external_artifacts is not None:
                 raise ValidationError("Committed analyses are immutable.")
             if status == AnalysisStatus.STAGED:
                 raise ValidationError("Committed analyses cannot return to staged.")
@@ -211,6 +215,8 @@ class AnalysisService(BaseService):
             analysis.terminal_reason = resolved_terminal_reason
         if environment_hash is not None:
             analysis.environment_hash = environment_hash.strip() if environment_hash else None
+        if external_artifacts is not None:
+            analysis.external_artifacts = _normalize_external_artifacts(external_artifacts)
         if origin is not None:
             analysis.origin = origin
         if change_set_id is not None:
@@ -239,6 +245,7 @@ class AnalysisService(BaseService):
         analysis_id: UUID,
         *,
         environment_hash: str | None = None,
+        external_artifacts: Iterable[ExternalArtifactReference] | None = None,
         claims: Iterable[ClaimInput] | None = None,
         visualizations: Iterable[VisualizationInput] | None = None,
         actor: AuthContext | None = None,
@@ -246,13 +253,17 @@ class AnalysisService(BaseService):
         analysis = self.get_analysis(analysis_id)
         self.authorization.require_contributor(analysis.project_id, actor=actor)
         _ensure_analysis_status_transition(analysis.status, AnalysisStatus.COMMITTED)
-        if analysis.status == AnalysisStatus.COMMITTED and environment_hash is not None:
+        if analysis.status == AnalysisStatus.COMMITTED and (
+            environment_hash is not None or external_artifacts is not None
+        ):
             raise ValidationError("Committed analyses are immutable.")
         if analysis.status != AnalysisStatus.COMMITTED:
             self._ensure_analysis_datasets_committed(analysis)
             analysis.status = AnalysisStatus.COMMITTED
         if environment_hash is not None:
             analysis.environment_hash = environment_hash.strip() if environment_hash else None
+        if external_artifacts is not None:
+            analysis.external_artifacts = _normalize_external_artifacts(external_artifacts)
         analysis.updated_at = utc_now()
         with self.unit_of_work() as repository:
             repository.analyses.save(analysis)
@@ -314,3 +325,18 @@ class AnalysisService(BaseService):
                     "Analysis cannot be deleted while it is the last support link "
                     "for a non-proposed claim."
                 )
+
+
+def _normalize_external_artifacts(
+    artifacts: Iterable[ExternalArtifactReference] | None,
+) -> list[ExternalArtifactReference]:
+    normalized: list[ExternalArtifactReference] = []
+    seen: set[tuple[str, str, str]] = set()
+    for artifact in artifacts or []:
+        item = ExternalArtifactReference.model_validate(artifact)
+        key = (item.kind.value, item.source_system, item.uri)
+        if key in seen:
+            raise ValidationError("Duplicate external artifact reference on analysis.")
+        seen.add(key)
+        normalized.append(item)
+    return normalized

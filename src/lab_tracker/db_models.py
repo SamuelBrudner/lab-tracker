@@ -596,6 +596,7 @@ class AnalysisModel(Base):
     method_hash: Mapped[str] = mapped_column(String(255), nullable=False)
     code_version: Mapped[str] = mapped_column(String(255), nullable=False)
     environment_hash: Mapped[str | None] = mapped_column(String(255))
+    external_artifacts: Mapped[list[dict[str, object]]] = mapped_column(JSON, default=list)
     executed_by: Mapped[str | None] = mapped_column(String(255))
     executed_by_user_id: Mapped[str | None] = mapped_column(
         String(36),

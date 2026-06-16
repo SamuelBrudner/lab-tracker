@@ -78,7 +78,7 @@ def test_alembic_upgrade_chain_from_empty_to_head(monkeypatch, tmp_path):
     for revision in revisions:
         command.upgrade(config, revision)
         assert revision in _current_revisions(database_url)
-    assert _current_revision(database_url) == "0035_entity_origin_backlinks"
+    assert _current_revision(database_url) == "0036_analysis_external_artifacts"
 
 
 def test_alembic_has_single_head() -> None:
@@ -209,6 +209,7 @@ def test_alembic_upgrade_head_creates_expected_tables(monkeypatch, tmp_path):
     ):
         _assert_origin_backlink_columns(inspector, table_name)
     assert "executed_by_user_id" in analysis_columns
+    assert "external_artifacts" in analysis_columns
     _assert_index(inspector, "analyses", "ix_analyses_executed_by_user_id")
     _assert_fk(
         inspector,
@@ -405,7 +406,7 @@ def test_database_at_daily_review_branch_upgrades_to_current_head(monkeypatch, t
     assert _current_revision(database_url) == "0017_daily_graph_reviews"
 
     command.upgrade(config, "head")
-    assert _current_revision(database_url) == "0035_entity_origin_backlinks"
+    assert _current_revision(database_url) == "0036_analysis_external_artifacts"
 
     engine = create_engine(
         database_url,

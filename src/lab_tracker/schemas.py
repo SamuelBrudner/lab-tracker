@@ -24,6 +24,7 @@ from lab_tracker.models import (
     DatasetStatus,
     EntityRef,
     EntityType,
+    ExternalArtifactReference,
     Goal,
     GoalLink,
     GoalLinkStatus,
@@ -533,6 +534,7 @@ class AnalysisCreate(RequestModel):
     method_hash: NonBlankStr
     code_version: NonBlankStr
     environment_hash: str | None = None
+    external_artifacts: list[ExternalArtifactReference] | None = None
     status: AnalysisStatus | None = None
     terminal_reason: NonBlankStr | None = None
 
@@ -545,6 +547,7 @@ class AnalysisCreate(RequestModel):
 class AnalysisUpdate(RequestModel):
     status: AnalysisStatus | None = None
     environment_hash: str | None = None
+    external_artifacts: list[ExternalArtifactReference] | None = None
     terminal_reason: NonBlankStr | None = None
 
 
@@ -738,6 +741,7 @@ class PortfolioProjectGroupSummary(BaseModel):
 
 class AnalysisCommitRequest(RequestModel):
     environment_hash: str | None = None
+    external_artifacts: list[ExternalArtifactReference] | None = None
     claims: list[ClaimInput] | None = None
     visualizations: list[VisualizationInput] | None = None
 

@@ -268,6 +268,7 @@ List/search endpoints use `limit` between 1 and 200 and `offset` of 0 or greater
 - `code_version` (required): string; min length 1
 - `dataset_ids` (required): list[string(uuid)]
 - `environment_hash` (optional): string | null
+- `external_artifacts` (optional): list[object] | null
 - `method_hash` (required): string; min length 1
 - `project_id` (required): string(uuid)
 - `status` (optional): AnalysisStatus enum: staged, committed, archived | null

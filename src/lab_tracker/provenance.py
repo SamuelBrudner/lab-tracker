@@ -184,6 +184,19 @@ def _append_id_ref(node: dict[str, object], key: str, ref: dict[str, str]) -> No
         node[key] = [existing, ref]
 
 
+def _append_id_ref_list(node: dict[str, object], key: str, ref: dict[str, str]) -> None:
+    existing = node.get(key)
+    if existing is None:
+        node[key] = [ref]
+        return
+    if isinstance(existing, list):
+        if ref not in existing:
+            existing.append(ref)
+        return
+    if existing != ref:
+        node[key] = [existing, ref]
+
+
 def _node_type_includes(node: dict[str, object], node_type: str) -> bool:
     raw_type = node.get("@type")
     if isinstance(raw_type, list):
@@ -403,9 +416,7 @@ def _manifest_external_artifacts(
 def _external_artifact_node(artifact: ExternalArtifactReference) -> dict[str, object]:
     node: dict[str, object] = {
         "@id": artifact.uri,
-        "@type": "prov:Entity"
-        if artifact.kind == ExternalArtifactKind.ENTITY
-        else "prov:Activity",
+        "@type": "prov:Entity" if artifact.kind == ExternalArtifactKind.ENTITY else "prov:Activity",
         "externalSourceSystem": artifact.source_system,
         "externalUri": artifact.uri,
         "externalContentHash": artifact.content_hash,
@@ -467,10 +478,7 @@ def build_dataset_provenance_document(
         "@type": "prov:Activity",
     }
 
-    used_files = [
-        {"@id": _file_entity_id(base_url, dataset, file)}
-        for file in files
-    ]
+    used_files = [{"@id": _file_entity_id(base_url, dataset, file)} for file in files]
     used_external_entities = [
         {"@id": artifact.uri}
         for artifact in external_artifacts
@@ -489,16 +497,12 @@ def build_dataset_provenance_document(
         commit_node["prov:wasInformedBy"] = informed_by
 
     question_link_refs = [
-        {"@id": _question_link_id(base_url, dataset, link.question_id)}
-        for link in question_links
+        {"@id": _question_link_id(base_url, dataset, link.question_id)} for link in question_links
     ]
     if question_link_refs:
         commit_node["questionLink"] = question_link_refs
 
-    note_refs = [
-        {"@id": _resource_iri(base_url, "notes", note_id)}
-        for note_id in notes
-    ]
+    note_refs = [{"@id": _resource_iri(base_url, "notes", note_id)} for note_id in notes]
     if note_refs:
         commit_node["note"] = note_refs
 
@@ -522,10 +526,7 @@ def build_dataset_provenance_document(
     graph.extend(_origin_provenance_nodes(base_url, dataset))
     graph.extend(_dataset_file_node(base_url, dataset, file) for file in files)
     graph.extend(_external_artifact_node(artifact) for artifact in external_artifacts)
-    graph.extend(
-        _dataset_question_link_node(base_url, dataset, link)
-        for link in question_links
-    )
+    graph.extend(_dataset_question_link_node(base_url, dataset, link) for link in question_links)
     graph.extend(people[user_id] for user_id in sorted(people))
 
     return {"@context": _context(base_url), "@graph": graph}
@@ -644,9 +645,13 @@ def build_analysis_provenance_document(
         analysis_node["environmentHash"] = analysis.environment_hash
     if datasets:
         analysis_node["prov:used"] = [
-            {"@id": _resource_iri(base_url, "datasets", dataset.dataset_id)}
-            for dataset in datasets
+            {"@id": _resource_iri(base_url, "datasets", dataset.dataset_id)} for dataset in datasets
         ]
+    for artifact in analysis.external_artifacts:
+        if artifact.kind == ExternalArtifactKind.ENTITY:
+            _append_id_ref_list(analysis_node, "prov:used", {"@id": artifact.uri})
+        else:
+            _append_id_ref_list(analysis_node, "prov:wasInformedBy", {"@id": artifact.uri})
     if analysis_actor_user_id is not None:
         _add_person_with_supervision(
             people,
@@ -660,6 +665,7 @@ def build_analysis_provenance_document(
         }
     graph.append(analysis_node)
     graph.extend(_origin_provenance_nodes(base_url, analysis))
+    graph.extend(_external_artifact_node(artifact) for artifact in analysis.external_artifacts)
 
     for dataset in datasets:
         dataset_node: dict[str, object] = {

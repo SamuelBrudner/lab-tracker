@@ -113,21 +113,15 @@ def test_record_export_provenance_includes_terminal_reasons():
     assert isinstance(context, dict)
     assert context["terminalReason"] == "lab:terminalReason"
     assert (
-        _node_by_id(document, f"http://example.test/questions/{question_id}")[
-            "terminalReason"
-        ]
+        _node_by_id(document, f"http://example.test/questions/{question_id}")["terminalReason"]
         == "The control group erased the apparent effect."
     )
     assert (
-        _node_by_id(document, f"http://example.test/datasets/{dataset_id}")[
-            "terminalReason"
-        ]
+        _node_by_id(document, f"http://example.test/datasets/{dataset_id}")["terminalReason"]
         == "The source acquisition was corrupted."
     )
     assert (
-        _node_by_id(document, f"http://example.test/analyses/{analysis_id}")[
-            "terminalReason"
-        ]
+        _node_by_id(document, f"http://example.test/analyses/{analysis_id}")["terminalReason"]
         == "The analysis environment could not be reproduced."
     )
     assert (
@@ -213,9 +207,7 @@ def test_analysis_provenance_distinguishes_ai_suggested_and_user_revised_nodes()
     assert viz_node["changeSet"] == {"@id": draft_iri}
     assert viz_node["prov:wasInformedBy"] == {"@id": draft_iri}
     assert viz_node["prov:wasRevisionOf"] == {
-        "@id": (
-            f"http://example.test/visualizations/{viz_id}/versions/before/{change_set_id}"
-        )
+        "@id": (f"http://example.test/visualizations/{viz_id}/versions/before/{change_set_id}")
     }
     assert draft_node["prov:wasAssociatedWith"] == {"@id": agent_iri}
     assert _node_type_includes(agent_node, "prov:SoftwareAgent")
@@ -270,7 +262,9 @@ def test_dataset_provenance_uses_inline_context_and_json_metadata():
     assert context["nwbMetadata"] == {"@id": "lab:nwbMetadata", "@type": "@json"}
     assert context["bidsMetadata"] == {"@id": "lab:bidsMetadata", "@type": "@json"}
 
-    commit_id = "http://example.test/datasets/11111111-1111-1111-1111-111111111111/provenance/commit"
+    commit_id = (
+        "http://example.test/datasets/11111111-1111-1111-1111-111111111111/provenance/commit"
+    )
     dataset_node = _node_by_id(
         document,
         "http://example.test/datasets/11111111-1111-1111-1111-111111111111",
@@ -354,9 +348,7 @@ def test_dataset_provenance_attributes_creator_and_active_supervisor():
     }
     assert _node_type_includes(supervisor_node, "prov:Person")
     assert str(inactive_supervisor_user_id) not in {
-        str(node.get("userId"))
-        for node in document["@graph"]
-        if isinstance(node, dict)
+        str(node.get("userId")) for node in document["@graph"] if isinstance(node, dict)
     }
 
 
@@ -369,21 +361,19 @@ def test_dataset_provenance_uses_stable_synthetic_ids():
         project_id=uuid4(),
         commit_hash="commit-456",
         primary_question_id=question_id,
-        question_links=[
-            QuestionLink(question_id=question_id, role=QuestionLinkRole.PRIMARY)
-        ],
+        question_links=[QuestionLink(question_id=question_id, role=QuestionLinkRole.PRIMARY)],
         commit_manifest=DatasetCommitManifest(
             files=[DatasetFile(path="nested/file.bin", checksum="def456")],
-            question_links=[
-                QuestionLink(question_id=question_id, role=QuestionLinkRole.PRIMARY)
-            ],
+            question_links=[QuestionLink(question_id=question_id, role=QuestionLinkRole.PRIMARY)],
         ),
         status=DatasetStatus.STAGED,
     )
 
     document = build_dataset_provenance_document("http://example.test/", dataset)
 
-    commit_id = "http://example.test/datasets/aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa/provenance/commit"
+    commit_id = (
+        "http://example.test/datasets/aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa/provenance/commit"
+    )
     commit_node = _node_by_id(document, commit_id)
     file_node = _node_by_id(
         document,
@@ -442,9 +432,7 @@ def test_external_dataset_artifact_round_trips_through_dataset_provenance():
         project_id=uuid4(),
         commit_hash="commit-external",
         primary_question_id=question_id,
-        question_links=[
-            QuestionLink(question_id=question_id, role=QuestionLinkRole.PRIMARY)
-        ],
+        question_links=[QuestionLink(question_id=question_id, role=QuestionLinkRole.PRIMARY)],
         commit_manifest=DatasetCommitManifest(
             files=manifest_input.files,
             external_artifacts=[*manifest_input.external_artifacts, activity],
@@ -503,14 +491,10 @@ def test_legacy_external_artifact_metadata_still_exports_dataset_provenance():
         project_id=uuid4(),
         commit_hash="commit-legacy-external",
         primary_question_id=question_id,
-        question_links=[
-            QuestionLink(question_id=question_id, role=QuestionLinkRole.PRIMARY)
-        ],
+        question_links=[QuestionLink(question_id=question_id, role=QuestionLinkRole.PRIMARY)],
         commit_manifest=DatasetCommitManifest(
             metadata={EXTERNAL_ARTIFACTS_METADATA_KEY: encode_external_artifacts([artifact])},
-            question_links=[
-                QuestionLink(question_id=question_id, role=QuestionLinkRole.PRIMARY)
-            ],
+            question_links=[QuestionLink(question_id=question_id, role=QuestionLinkRole.PRIMARY)],
         ),
         status=DatasetStatus.COMMITTED,
     )
@@ -534,14 +518,10 @@ def test_malformed_legacy_external_artifact_metadata_is_ignored_in_provenance():
         project_id=uuid4(),
         commit_hash="commit-malformed-legacy-external",
         primary_question_id=question_id,
-        question_links=[
-            QuestionLink(question_id=question_id, role=QuestionLinkRole.PRIMARY)
-        ],
+        question_links=[QuestionLink(question_id=question_id, role=QuestionLinkRole.PRIMARY)],
         commit_manifest=DatasetCommitManifest(
             metadata={EXTERNAL_ARTIFACTS_METADATA_KEY: "not-json"},
-            question_links=[
-                QuestionLink(question_id=question_id, role=QuestionLinkRole.PRIMARY)
-            ],
+            question_links=[QuestionLink(question_id=question_id, role=QuestionLinkRole.PRIMARY)],
         ),
         status=DatasetStatus.COMMITTED,
     )
@@ -553,6 +533,55 @@ def test_malformed_legacy_external_artifact_metadata_is_ignored_in_provenance():
     )
 
     assert "prov:used" not in commit_node
+
+
+def test_analysis_provenance_exports_external_run_reference():
+    analysis_id = UUID("55555555-aaaa-1111-aaaa-555555555555")
+    dataset_id = UUID("66666666-bbbb-2222-bbbb-666666666666")
+    run = ExternalArtifactReference(
+        kind=ExternalArtifactKind.ACTIVITY,
+        source_system="mlflow",
+        uri="mlflow://experiments/fly/runs/run-001",
+        content_hash="sha256:run001",
+        metadata={"run_name": "gain-fit"},
+    )
+    analysis = Analysis(
+        analysis_id=analysis_id,
+        project_id=uuid4(),
+        dataset_ids=[dataset_id],
+        method_hash="method-1",
+        code_version="git:abc123",
+        environment_hash="conda:lock",
+        external_artifacts=[run],
+        status=AnalysisStatus.COMMITTED,
+    )
+    dataset = Dataset(
+        dataset_id=dataset_id,
+        project_id=analysis.project_id,
+        commit_hash="commit-run-ref",
+        primary_question_id=uuid4(),
+        question_links=[],
+        commit_manifest=DatasetCommitManifest(),
+        status=DatasetStatus.COMMITTED,
+    )
+
+    document = build_analysis_provenance_document(
+        "http://example.test",
+        analysis,
+        datasets=[dataset],
+        claims=[],
+        visualizations=[],
+    )
+
+    analysis_node = _node_by_id(document, f"http://example.test/analyses/{analysis_id}")
+    run_node = _node_by_id(document, run.uri)
+
+    assert analysis_node["prov:used"] == [{"@id": f"http://example.test/datasets/{dataset_id}"}]
+    assert analysis_node["prov:wasInformedBy"] == [{"@id": run.uri}]
+    assert run_node["@type"] == "prov:Activity"
+    assert run_node["externalSourceSystem"] == "mlflow"
+    assert run_node["externalContentHash"] == "sha256:run001"
+    assert run_node["externalMetadata"] == {"run_name": "gain-fit"}
 
 
 def test_analysis_provenance_omits_optional_fields_and_preserves_support_links():
@@ -654,8 +683,7 @@ def test_analysis_provenance_omits_optional_fields_and_preserves_support_links()
         {"@id": "http://example.test/claims/77777777-7777-7777-7777-777777777777"}
     ]
     assert viz_node["contentUrl"] == (
-        "http://example.test/visualizations/"
-        "88888888-8888-8888-8888-888888888888/file/download"
+        "http://example.test/visualizations/88888888-8888-8888-8888-888888888888/file/download"
     )
     assert viz_node["fileName"] == "signal.png"
     assert viz_node["encodingFormat"] == "image/png"

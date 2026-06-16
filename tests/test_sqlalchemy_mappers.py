@@ -4,6 +4,8 @@ from uuid import UUID, uuid4
 from lab_tracker import sqlalchemy_mappers
 from lab_tracker.db_models import ProjectModel
 from lab_tracker.models import (
+    Analysis,
+    AnalysisStatus,
     Dataset,
     DatasetCommitManifest,
     EntityRef,
@@ -36,6 +38,8 @@ from lab_tracker.sqlalchemy_mapper_parts.projects import (
     project_to_model,
 )
 from lab_tracker.sqlalchemy_mappers import (
+    analysis_from_model,
+    analysis_to_model,
     dataset_from_model,
     dataset_question_link_from_model,
     dataset_question_link_models,
@@ -251,6 +255,34 @@ def test_dataset_mapper_ignores_malformed_legacy_external_artifact_metadata():
 
     assert mapped.commit_manifest.external_artifacts == []
     assert mapped.commit_manifest.metadata == dataset.commit_manifest.metadata
+
+
+def test_analysis_mapper_round_trip_preserves_external_artifacts():
+    artifact = ExternalArtifactReference(
+        source_system="wandb",
+        uri="wandb://entity/project/runs/run-001",
+        content_hash="sha256:wandb-run-001",
+        metadata={"sweep": "gain-fit"},
+    )
+    dataset_id = uuid4()
+    analysis = Analysis(
+        analysis_id=uuid4(),
+        project_id=uuid4(),
+        dataset_ids=[dataset_id],
+        method_hash="method-1",
+        code_version="git:abc123",
+        environment_hash="conda:lock",
+        external_artifacts=[artifact],
+        status=AnalysisStatus.COMMITTED,
+        executed_at=_ts(),
+        created_at=_ts(),
+        updated_at=_ts(),
+    )
+
+    row = analysis_to_model(analysis)
+    mapped = analysis_from_model(row, dataset_ids=[dataset_id])
+
+    assert mapped == analysis
 
 
 def test_note_mapper_round_trip_for_supported_fields():
