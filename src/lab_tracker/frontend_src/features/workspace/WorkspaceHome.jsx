@@ -72,7 +72,6 @@ function WorkspaceHome({
         onCreateProject={projectActions.handleCreateProject}
         onOpenGraph={() => navigate("/app/graph")}
         onOpenBatches={() => navigate("/app/batches")}
-        onOpenReviewQueue={() => navigate("/app/review")}
         projectMembers={projectMembers}
         canManageProjectMembers={projectAccess.canManageMembers}
         memberUsername={projectAccess.memberUsername || ""}
