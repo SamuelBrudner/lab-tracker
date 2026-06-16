@@ -2,6 +2,7 @@ import * as React from "react";
 
 import { apiFetch, apiRequest } from "../shared/api.js";
 import { TOKEN_STORAGE_KEY } from "../shared/constants.js";
+import { isStaticDemoEnabled } from "../shared/static-demo-api.js";
 
 const { useEffect, useMemo, useState } = React;
 
@@ -13,9 +14,17 @@ function readInitialInvitation() {
   };
 }
 
+function readInitialToken() {
+  try {
+    return localStorage.getItem(TOKEN_STORAGE_KEY) || (isStaticDemoEnabled() ? "demo-token" : "");
+  } catch {
+    return isStaticDemoEnabled() ? "demo-token" : "";
+  }
+}
+
 function useAuthSession({ replace, setBusy, setFlash }) {
   const initialInvitation = readInitialInvitation();
-  const [token, setToken] = useState(() => localStorage.getItem(TOKEN_STORAGE_KEY) || "");
+  const [token, setToken] = useState(() => readInitialToken());
   const [user, setUser] = useState(null);
   const [authChecked, setAuthChecked] = useState(false);
   const [authEnabled, setAuthEnabled] = useState(true);

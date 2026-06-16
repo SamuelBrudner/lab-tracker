@@ -1,5 +1,7 @@
 # Lab Tracker
 
+[Try the hosted read-only demo](https://samuelbrudner.github.io/lab-tracker/app/) with seeded fly-olfaction data. No install or login required.
+
 Lab Tracker keeps the *reasoning* behind experiments connected to the data they produce. A file named `2025_12_10_Rig2_session001.nwb` tells you when, where, and what — but not *why* it was collected, what was expected, or what was actually observed at the bench. That context usually lives on paper towels, whiteboards, and in people's heads, and it disappears when people leave.
 
 ## What it does
@@ -39,8 +41,9 @@ Docker/Postgres with first-admin setup in the browser.
 
 [![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https://github.com/SamuelBrudner/lab-tracker)
 
-Preview the product without a build from the screenshots above and the retained
-workflow screenshots under [`docs/screenshots`](docs/screenshots).
+Preview the product without a build from the hosted read-only demo above, the
+screenshots above, and the retained workflow screenshots under
+[`docs/screenshots`](docs/screenshots).
 
 ## Quickstart
 

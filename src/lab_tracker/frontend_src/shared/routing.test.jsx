@@ -1,0 +1,23 @@
+import { describe, expect, it } from "vitest";
+
+import { appBasePath, parseAppRoute, resolveAppPath } from "./routing.jsx";
+
+const QUESTION_ID = "fb3454e0-6319-40bb-864c-9de91d0b04f1";
+
+describe("app routing", () => {
+  it("parses app routes under a GitHub Pages project prefix", () => {
+    expect(parseAppRoute("/lab-tracker/app/graph")).toEqual({ kind: "graph" });
+    expect(parseAppRoute(`/lab-tracker/app/questions/${QUESTION_ID}`)).toEqual({
+      kind: "question",
+      questionId: QUESTION_ID,
+    });
+  });
+
+  it("preserves the current base path when resolving app links", () => {
+    expect(appBasePath("/lab-tracker/app")).toBe("/lab-tracker");
+    expect(resolveAppPath("/app/graph", "/lab-tracker/app")).toBe(
+      "/lab-tracker/app/graph"
+    );
+    expect(resolveAppPath("/app/graph", "/app")).toBe("/app/graph");
+  });
+});

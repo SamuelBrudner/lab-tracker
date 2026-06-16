@@ -1,3 +1,5 @@
+import { demoFetch, isStaticDemoEnabled } from "./static-demo-api.js";
+
 function parseApiError(payload, fallbackMessage) {
   if (!payload || typeof payload !== "object") {
     return fallbackMessage;
@@ -59,11 +61,18 @@ function buildApiPath(path, params = {}) {
   return `${url.pathname}${url.search}${url.hash}`;
 }
 
+function appFetch(path, init = {}) {
+  if (isStaticDemoEnabled()) {
+    return demoFetch(path, init);
+  }
+  return fetch(path, init);
+}
+
 async function apiFetch(path, options = {}) {
   const { method = "GET", token = "", body = null, accept = "application/json" } = options;
   const { headers, isFormData } = buildRequestHeaders({ accept, body, token });
 
-  const response = await fetch(path, {
+  const response = await appFetch(path, {
     method,
     headers,
     body: body === null ? undefined : isFormData ? body : JSON.stringify(body),
@@ -90,7 +99,7 @@ async function apiRequest(path, options = {}) {
 async function apiTextRequest(path, options = {}) {
   const { method = "GET", token = "", body = null, accept = "text/plain" } = options;
   const { headers, isFormData } = buildRequestHeaders({ accept, body, token });
-  const response = await fetch(path, {
+  const response = await appFetch(path, {
     method,
     headers,
     body: body === null ? undefined : isFormData ? body : JSON.stringify(body),
@@ -182,7 +191,7 @@ function parseContentDispositionFilename(headerValue) {
 
 async function downloadProtectedResource({ path, token = "", filename = "" }) {
   const { headers } = buildRequestHeaders({ token, accept: "*/*" });
-  const response = await fetch(path, {
+  const response = await appFetch(path, {
     method: "GET",
     headers,
   });
@@ -221,5 +230,6 @@ export {
   buildApiPath,
   downloadProtectedResource,
   fetchAllPages,
+  isStaticDemoEnabled,
   parseApiError,
 };

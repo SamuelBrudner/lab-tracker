@@ -12,58 +12,91 @@ function parseAppRoute(pathname) {
   if (parts.length === 0) {
     return { kind: "home" };
   }
-  if (parts[0] !== "app") {
+  const appIndex = parts.indexOf("app");
+  if (appIndex < 0) {
     return { kind: "home" };
   }
-  if (parts.length === 1) {
+  const routeParts = parts.slice(appIndex);
+  if (routeParts.length === 1) {
     return { kind: "home" };
   }
-  if (parts.length === 2 && parts[1] === "capture") {
+  if (routeParts.length === 2 && routeParts[1] === "capture") {
     return { kind: "capture" };
   }
-  if (parts.length === 2 && parts[1] === "devices") {
+  if (routeParts.length === 2 && routeParts[1] === "devices") {
     return { kind: "devices" };
   }
-  if (parts.length === 2 && parts[1] === "users") {
+  if (routeParts.length === 2 && routeParts[1] === "users") {
     return { kind: "users" };
   }
-  if (parts.length === 2 && parts[1] === "enroll") {
+  if (routeParts.length === 2 && routeParts[1] === "enroll") {
     return { kind: "enroll" };
   }
-  if (parts.length === 2 && parts[1] === "graph") {
+  if (routeParts.length === 2 && routeParts[1] === "graph") {
     return { kind: "graph" };
   }
-  if (parts.length === 2 && parts[1] === "batches") {
+  if (routeParts.length === 2 && routeParts[1] === "batches") {
     return { kind: "batches" };
   }
-  if (parts.length === 2 && parts[1] === "review") {
+  if (routeParts.length === 2 && routeParts[1] === "review") {
     return { kind: "review" };
   }
-  if (parts.length >= 3 && parts[1] === "batches" && UUID_RE.test(parts[2] || "")) {
-    return { kind: "batch", changeSetId: parts[2] };
+  if (routeParts.length >= 3 && routeParts[1] === "batches" && UUID_RE.test(routeParts[2] || "")) {
+    return { kind: "batch", changeSetId: routeParts[2] };
   }
-  if (parts.length >= 3 && parts[1] === "questions" && UUID_RE.test(parts[2] || "")) {
-    return { kind: "question", questionId: parts[2] };
+  if (routeParts.length >= 3 && routeParts[1] === "questions" && UUID_RE.test(routeParts[2] || "")) {
+    return { kind: "question", questionId: routeParts[2] };
   }
-  if (parts.length >= 3 && parts[1] === "notes" && UUID_RE.test(parts[2] || "")) {
-    return { kind: "note", noteId: parts[2] };
+  if (routeParts.length >= 3 && routeParts[1] === "notes" && UUID_RE.test(routeParts[2] || "")) {
+    return { kind: "note", noteId: routeParts[2] };
   }
-  if (parts.length >= 3 && parts[1] === "sessions" && UUID_RE.test(parts[2] || "")) {
-    return { kind: "session", sessionId: parts[2] };
+  if (routeParts.length >= 3 && routeParts[1] === "sessions" && UUID_RE.test(routeParts[2] || "")) {
+    return { kind: "session", sessionId: routeParts[2] };
   }
-  if (parts.length >= 3 && parts[1] === "datasets" && UUID_RE.test(parts[2] || "")) {
-    return { kind: "dataset", datasetId: parts[2] };
+  if (routeParts.length >= 3 && routeParts[1] === "datasets" && UUID_RE.test(routeParts[2] || "")) {
+    return { kind: "dataset", datasetId: routeParts[2] };
   }
-  if (parts.length >= 3 && parts[1] === "visualizations" && UUID_RE.test(parts[2] || "")) {
-    return { kind: "visualization", vizId: parts[2] };
+  if (
+    routeParts.length >= 3 &&
+    routeParts[1] === "visualizations" &&
+    UUID_RE.test(routeParts[2] || "")
+  ) {
+    return { kind: "visualization", vizId: routeParts[2] };
   }
-  if (parts.length >= 3 && parts[1] === "goals" && UUID_RE.test(parts[2] || "")) {
-    return { kind: "goal", goalId: parts[2] };
+  if (routeParts.length >= 3 && routeParts[1] === "goals" && UUID_RE.test(routeParts[2] || "")) {
+    return { kind: "goal", goalId: routeParts[2] };
   }
-  if (parts.length >= 3 && parts[1] === "graph-drafts" && UUID_RE.test(parts[2] || "")) {
-    return { kind: "graph-draft", changeSetId: parts[2] };
+  if (
+    routeParts.length >= 3 &&
+    routeParts[1] === "graph-drafts" &&
+    UUID_RE.test(routeParts[2] || "")
+  ) {
+    return { kind: "graph-draft", changeSetId: routeParts[2] };
   }
-  return { kind: "unknown", pathname: `/${parts.join("/")}` };
+  return { kind: "unknown", pathname: `/${routeParts.join("/")}` };
+}
+
+function appBasePath(pathname = window.location.pathname) {
+  const parts = String(pathname || "")
+    .split("/")
+    .filter(Boolean);
+  const appIndex = parts.indexOf("app");
+  if (appIndex <= 0) {
+    return "";
+  }
+  return `/${parts.slice(0, appIndex).join("/")}`;
+}
+
+function resolveAppPath(to, currentPathname = window.location.pathname) {
+  const resolved = String(to || "/app");
+  const basePath = appBasePath(currentPathname);
+  if (!basePath || !resolved.startsWith("/app")) {
+    return resolved;
+  }
+  if (resolved.startsWith(`${basePath}/app`)) {
+    return resolved;
+  }
+  return `${basePath}${resolved}`;
 }
 
 function useAppRoute() {
@@ -79,7 +112,7 @@ function useAppRoute() {
   }, []);
 
   const navigate = useCallback((to) => {
-    const resolved = String(to || "/app");
+    const resolved = resolveAppPath(to);
     if (resolved === window.location.pathname) {
       return;
     }
@@ -88,7 +121,7 @@ function useAppRoute() {
   }, []);
 
   const replace = useCallback((to) => {
-    const resolved = String(to || "/app");
+    const resolved = resolveAppPath(to);
     window.history.replaceState({}, "", resolved);
     setRoute(parseAppRoute(resolved));
   }, []);
@@ -125,4 +158,4 @@ function AppLink({ to, navigate, className = "", children }) {
   );
 }
 
-export { AppLink, parseAppRoute, useAppRoute };
+export { AppLink, appBasePath, parseAppRoute, resolveAppPath, useAppRoute };

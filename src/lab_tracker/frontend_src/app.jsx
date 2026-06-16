@@ -4,8 +4,11 @@ import * as ReactDOM from "react-dom/client";
 import { App } from "./app-shell.jsx";
 import { ErrorBoundary } from "./shared/ui.jsx";
 import { registerServiceWorker } from "./shared/register-sw.js";
+import { isStaticDemoEnabled } from "./shared/static-demo-api.js";
 
-registerServiceWorker();
+if (!isStaticDemoEnabled()) {
+  registerServiceWorker();
+}
 
 const root = ReactDOM.createRoot(document.getElementById("app-root"));
 root.render(
