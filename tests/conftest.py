@@ -4,10 +4,10 @@ from pathlib import Path
 from uuid import uuid4
 
 import pytest
+from alembic import command
 from alembic.config import Config
 from fastapi.testclient import TestClient
 
-from alembic import command
 from lab_tracker.app import create_app
 from lab_tracker.auth import Role
 

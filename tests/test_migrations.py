@@ -78,7 +78,7 @@ def test_alembic_upgrade_chain_from_empty_to_head(monkeypatch, tmp_path):
     for revision in revisions:
         command.upgrade(config, revision)
         assert revision in _current_revisions(database_url)
-    assert _current_revision(database_url) == "0033_persistent_invitations"
+    assert _current_revision(database_url) == "0034_terminal_transition_reasons"
 
 
 def test_alembic_has_single_head() -> None:
@@ -212,8 +212,13 @@ def test_alembic_upgrade_head_creates_expected_tables(monkeypatch, tmp_path):
     }.issubset(project_group_columns)
     assert "created_from" not in question_columns
     assert "source_provenance" not in question_columns
+    assert "terminal_reason" in question_columns
     assert "manifest_extraction_provenance" not in dataset_columns
     assert "manifest_external_artifacts" in dataset_columns
+    assert "terminal_reason" in dataset_columns
+    assert "terminal_reason" in analysis_columns
+    claim_columns = {column["name"] for column in inspector.get_columns("claims")}
+    assert "terminal_reason" in claim_columns
     assert {
         "submitted_at",
         "submitted_by",
@@ -387,7 +392,7 @@ def test_database_at_daily_review_branch_upgrades_to_current_head(monkeypatch, t
     assert _current_revision(database_url) == "0017_daily_graph_reviews"
 
     command.upgrade(config, "head")
-    assert _current_revision(database_url) == "0033_persistent_invitations"
+    assert _current_revision(database_url) == "0034_terminal_transition_reasons"
 
     engine = create_engine(
         database_url,

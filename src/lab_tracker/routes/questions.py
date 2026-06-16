@@ -49,6 +49,7 @@ def build_questions_router(api: LabTrackerAPI) -> APIRouter:
             question_type=payload.question_type,
             hypothesis=payload.hypothesis,
             status=payload.status or question_default_status(),
+            terminal_reason=payload.terminal_reason,
             parent_question_ids=payload.parent_question_ids,
             actor=actor,
         )
@@ -104,6 +105,7 @@ def build_questions_router(api: LabTrackerAPI) -> APIRouter:
             question_type=payload.question_type,
             hypothesis=payload.hypothesis,
             status=payload.status,
+            terminal_reason=payload.terminal_reason,
             parent_question_ids=payload.parent_question_ids,
             actor=actor,
         )

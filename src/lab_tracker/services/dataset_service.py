@@ -32,6 +32,7 @@ from lab_tracker.services.shared import (
     _validate_commit_hash,
     actor_user_fk,
     actor_user_id,
+    terminal_reason_for_status,
     unique_ids,
 )
 
@@ -85,6 +86,7 @@ class DatasetService(BaseService):
         *,
         secondary_question_ids: Iterable[UUID] | None = None,
         status: DatasetStatus = DatasetStatus.STAGED,
+        terminal_reason: str | None = None,
         commit_manifest: DatasetCommitManifestInput | DatasetCommitManifest | None = None,
         commit_hash: str | None = None,
         actor: AuthContext | None = None,
@@ -128,6 +130,13 @@ class DatasetService(BaseService):
             )
         resolved_commit_hash = _compute_commit_hash(resolved_manifest)
         _validate_commit_hash(commit_hash, resolved_commit_hash)
+        resolved_terminal_reason = terminal_reason_for_status(
+            None,
+            status,
+            DatasetStatus.ARCHIVED,
+            terminal_reason,
+            entity_name="Dataset",
+        )
 
         dataset = Dataset(
             dataset_id=uuid4(),
@@ -137,6 +146,7 @@ class DatasetService(BaseService):
             question_links=question_links,
             commit_manifest=resolved_manifest,
             status=status,
+            terminal_reason=resolved_terminal_reason,
             created_by=actor_user_id(actor),
             created_by_user_id=actor_user_fk(actor, self.repository),
         )
@@ -167,6 +177,7 @@ class DatasetService(BaseService):
         dataset_id: UUID,
         *,
         status: DatasetStatus | None = None,
+        terminal_reason: str | None = None,
         question_links: Iterable[QuestionLink] | None = None,
         commit_manifest: DatasetCommitManifestInput | DatasetCommitManifest | None = None,
         commit_hash: str | None = None,
@@ -174,9 +185,18 @@ class DatasetService(BaseService):
     ) -> Dataset:
         dataset = self.get_dataset(dataset_id)
         self.authorization.require_contributor(dataset.project_id, actor=actor)
+        current_status = dataset.status
+        next_status = status or current_status
         if status is not None:
-            _ensure_dataset_status_transition(dataset.status, status)
-        was_committed = dataset.status == DatasetStatus.COMMITTED
+            _ensure_dataset_status_transition(current_status, status)
+        resolved_terminal_reason = terminal_reason_for_status(
+            current_status,
+            next_status,
+            DatasetStatus.ARCHIVED,
+            terminal_reason,
+            entity_name="Dataset",
+        )
+        was_committed = current_status == DatasetStatus.COMMITTED
         if was_committed and (
             commit_hash is not None or question_links is not None or commit_manifest is not None
         ):
@@ -254,6 +274,8 @@ class DatasetService(BaseService):
             _validate_commit_hash(commit_hash, _compute_commit_hash(dataset.commit_manifest))
         if status is not None:
             dataset.status = status
+        if resolved_terminal_reason is not None:
+            dataset.terminal_reason = resolved_terminal_reason
         dataset.updated_at = utc_now()
         with self.unit_of_work() as repository:
             repository.datasets.save(dataset)

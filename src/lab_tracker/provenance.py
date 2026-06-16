@@ -97,6 +97,7 @@ def _context(base_url: str) -> dict[str, object]:
         "supervisionEndedAt": "lab:supervisionEndedAt",
         "supervisionStartedAt": "lab:supervisionStartedAt",
         "target": {"@id": "lab:target", "@type": "@id"},
+        "terminalReason": "lab:terminalReason",
         "text": "lab:text",
         "transcribedText": "lab:transcribedText",
         "userId": "lab:userId",
@@ -349,6 +350,8 @@ def build_dataset_provenance_document(
         "commitHash": dataset.commit_hash,
         "status": dataset.status.value,
     }
+    if dataset.terminal_reason:
+        dataset_node["terminalReason"] = dataset.terminal_reason
     creator_user_id = _creator_user_id(dataset.created_by_user_id, dataset.created_by)
     if creator_user_id is not None:
         dataset_node["prov:wasAttributedTo"] = {"@id": _agent_iri(base_url, creator_user_id)}
@@ -446,6 +449,8 @@ def _claim_node(
         "confidence": claim.confidence,
         "status": claim.status.value,
     }
+    if claim.terminal_reason:
+        node["terminalReason"] = claim.terminal_reason
     if attributed_user_ids:
         node["prov:wasAttributedTo"] = _attribution_value(base_url, attributed_user_ids)
     if claim.supported_by_dataset_ids:
@@ -531,6 +536,8 @@ def build_analysis_provenance_document(
         "executedAt": _isoformat(analysis.executed_at),
         "status": analysis.status.value,
     }
+    if analysis.terminal_reason:
+        analysis_node["terminalReason"] = analysis.terminal_reason
     if analysis.environment_hash is not None:
         analysis_node["environmentHash"] = analysis.environment_hash
     if datasets:
@@ -558,6 +565,8 @@ def build_analysis_provenance_document(
             "commitHash": dataset.commit_hash,
             "status": dataset.status.value,
         }
+        if dataset.terminal_reason:
+            dataset_node["terminalReason"] = dataset.terminal_reason
         dataset_user_id = dataset_attribution[dataset.dataset_id]
         if dataset_user_id is not None:
             dataset_node["prov:wasAttributedTo"] = {"@id": _agent_iri(base_url, dataset_user_id)}
@@ -650,6 +659,8 @@ def _question_node(
         "status": question.status.value,
         "createdAt": _isoformat(question.created_at),
     }
+    if question.terminal_reason:
+        node["terminalReason"] = question.terminal_reason
     creator_user_id = _creator_user_id(question.created_by_user_id, question.created_by)
     if creator_user_id is not None:
         node["prov:wasAttributedTo"] = {"@id": _agent_iri(base_url, creator_user_id)}

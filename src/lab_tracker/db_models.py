@@ -97,6 +97,7 @@ class QuestionModel(Base):
     question_type: Mapped[str] = mapped_column(String(40), nullable=False)
     hypothesis: Mapped[str | None] = mapped_column(Text)
     status: Mapped[str] = mapped_column(String(20), default="staged")
+    terminal_reason: Mapped[str | None] = mapped_column(Text)
     superseded_by_question_id: Mapped[str | None] = mapped_column(
         String(36),
         ForeignKey("questions.question_id", ondelete="SET NULL"),
@@ -198,6 +199,7 @@ class DatasetModel(Base):
     manifest_note_ids: Mapped[list[str]] = mapped_column(JSON, default=list)
     manifest_source_session_id: Mapped[str | None] = mapped_column(String(36))
     status: Mapped[str] = mapped_column(String(20), default="staged")
+    terminal_reason: Mapped[str | None] = mapped_column(Text)
     created_by: Mapped[str | None] = mapped_column(String(255))
     created_by_user_id: Mapped[str | None] = mapped_column(
         String(36),
@@ -569,6 +571,7 @@ class AnalysisModel(Base):
     )
     executed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utc_now)
     status: Mapped[str] = mapped_column(String(20), default="staged")
+    terminal_reason: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utc_now)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
@@ -608,6 +611,7 @@ class ClaimModel(Base):
     statement: Mapped[str] = mapped_column(Text, nullable=False)
     confidence: Mapped[float] = mapped_column(Float, nullable=False)
     status: Mapped[str] = mapped_column(String(20), default="proposed")
+    terminal_reason: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utc_now)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),

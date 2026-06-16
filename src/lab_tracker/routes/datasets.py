@@ -46,6 +46,7 @@ def build_datasets_router(api: LabTrackerAPI) -> APIRouter:
             primary_question_id=payload.primary_question_id,
             secondary_question_ids=payload.secondary_question_ids,
             status=payload.status or dataset_default_status(),
+            terminal_reason=payload.terminal_reason,
             commit_manifest=payload.commit_manifest,
             commit_hash=payload.commit_hash,
             actor=actor,
@@ -89,6 +90,7 @@ def build_datasets_router(api: LabTrackerAPI) -> APIRouter:
         dataset = api_from_request(request, api).update_dataset(
             dataset_id,
             status=payload.status,
+            terminal_reason=payload.terminal_reason,
             question_links=payload.question_links,
             commit_manifest=payload.commit_manifest,
             commit_hash=payload.commit_hash,

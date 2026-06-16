@@ -318,6 +318,7 @@ class QuestionCreate(RequestModel):
     question_type: QuestionType
     hypothesis: str | None = None
     status: QuestionStatus | None = None
+    terminal_reason: NonBlankStr | None = None
     parent_question_ids: list[UUID] | None = None
 
     @field_validator("parent_question_ids")
@@ -331,6 +332,7 @@ class QuestionUpdate(RequestModel):
     question_type: QuestionType | None = None
     hypothesis: str | None = None
     status: QuestionStatus | None = None
+    terminal_reason: NonBlankStr | None = None
     parent_question_ids: list[UUID] | None = None
 
     @field_validator("parent_question_ids")
@@ -377,6 +379,7 @@ class DatasetCreate(RequestModel):
     primary_question_id: UUID
     secondary_question_ids: list[UUID] | None = None
     status: DatasetStatus | None = None
+    terminal_reason: NonBlankStr | None = None
 
     @field_validator("secondary_question_ids")
     @classmethod
@@ -388,6 +391,7 @@ class DatasetUpdate(RequestModel):
     commit_manifest: DatasetCommitManifestInput | None = None
     commit_hash: str | None = None
     status: DatasetStatus | None = None
+    terminal_reason: NonBlankStr | None = None
     question_links: list[QuestionLink] | None = None
 
 
@@ -530,6 +534,7 @@ class AnalysisCreate(RequestModel):
     code_version: NonBlankStr
     environment_hash: str | None = None
     status: AnalysisStatus | None = None
+    terminal_reason: NonBlankStr | None = None
 
     @field_validator("dataset_ids")
     @classmethod
@@ -540,6 +545,7 @@ class AnalysisCreate(RequestModel):
 class AnalysisUpdate(RequestModel):
     status: AnalysisStatus | None = None
     environment_hash: str | None = None
+    terminal_reason: NonBlankStr | None = None
 
 
 class ClaimCreate(RequestModel):
@@ -547,6 +553,7 @@ class ClaimCreate(RequestModel):
     statement: NonBlankStr
     confidence: float = Field(..., ge=0.0, le=100.0)
     status: ClaimStatus | None = None
+    terminal_reason: NonBlankStr | None = None
     supported_by_dataset_ids: list[UUID] | None = None
     supported_by_analysis_ids: list[UUID] | None = None
     answers_question_ids: list[UUID] | None = None
@@ -563,6 +570,7 @@ class ClaimUpdate(RequestModel):
     statement: NonBlankStr | None = None
     confidence: float | None = Field(None, ge=0.0, le=100.0)
     status: ClaimStatus | None = None
+    terminal_reason: NonBlankStr | None = None
     supported_by_dataset_ids: list[UUID] | None = None
     supported_by_analysis_ids: list[UUID] | None = None
     answers_question_ids: list[UUID] | None = None

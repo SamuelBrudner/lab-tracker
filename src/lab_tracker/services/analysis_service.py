@@ -29,6 +29,7 @@ from lab_tracker.services.shared import (
     actor_user_fk,
     actor_user_id,
     ensure_non_empty,
+    terminal_reason_for_status,
     unique_ids,
 )
 
@@ -72,6 +73,7 @@ class AnalysisService(BaseService):
         *,
         environment_hash: str | None = None,
         status: AnalysisStatus = AnalysisStatus.STAGED,
+        terminal_reason: str | None = None,
         actor: AuthContext | None = None,
     ) -> Analysis:
         self.authorization.require_contributor(project_id, actor=actor)
@@ -93,6 +95,13 @@ class AnalysisService(BaseService):
                     raise ValidationError(
                         "Analyses can only be created as committed with committed datasets."
                     )
+        resolved_terminal_reason = terminal_reason_for_status(
+            None,
+            status,
+            AnalysisStatus.ARCHIVED,
+            terminal_reason,
+            entity_name="Analysis",
+        )
         analysis = Analysis(
             analysis_id=uuid4(),
             project_id=project_id,
@@ -101,6 +110,7 @@ class AnalysisService(BaseService):
             code_version=code_version.strip(),
             environment_hash=environment_hash.strip() if environment_hash else None,
             status=status,
+            terminal_reason=resolved_terminal_reason,
             executed_by=actor_user_id(actor),
             executed_by_user_id=actor_user_fk(actor, self.repository),
         )
@@ -156,20 +166,33 @@ class AnalysisService(BaseService):
         *,
         status: AnalysisStatus | None = None,
         environment_hash: str | None = None,
+        terminal_reason: str | None = None,
         actor: AuthContext | None = None,
     ) -> Analysis:
         analysis = self.get_analysis(analysis_id)
         self.authorization.require_contributor(analysis.project_id, actor=actor)
-        if analysis.status == AnalysisStatus.COMMITTED:
+        current_status = analysis.status
+        next_status = status or current_status
+        if current_status == AnalysisStatus.COMMITTED:
             if environment_hash is not None:
                 raise ValidationError("Committed analyses are immutable.")
             if status == AnalysisStatus.STAGED:
                 raise ValidationError("Committed analyses cannot return to staged.")
         if status is not None:
-            _ensure_analysis_status_transition(analysis.status, status)
-            if status == AnalysisStatus.COMMITTED and analysis.status != AnalysisStatus.COMMITTED:
+            _ensure_analysis_status_transition(current_status, status)
+            if status == AnalysisStatus.COMMITTED and current_status != AnalysisStatus.COMMITTED:
                 self._ensure_analysis_datasets_committed(analysis)
+        resolved_terminal_reason = terminal_reason_for_status(
+            current_status,
+            next_status,
+            AnalysisStatus.ARCHIVED,
+            terminal_reason,
+            entity_name="Analysis",
+        )
+        if status is not None:
             analysis.status = status
+        if resolved_terminal_reason is not None:
+            analysis.terminal_reason = resolved_terminal_reason
         if environment_hash is not None:
             analysis.environment_hash = environment_hash.strip() if environment_hash else None
         analysis.updated_at = utc_now()
@@ -218,6 +241,7 @@ class AnalysisService(BaseService):
                     statement=claim_input.statement,
                     confidence=claim_input.confidence,
                     status=claim_input.status,
+                    terminal_reason=claim_input.terminal_reason,
                     supported_by_dataset_ids=claim_input.supported_by_dataset_ids,
                     supported_by_analysis_ids=supported_by_analysis_ids,
                     actor=actor,

@@ -513,6 +513,7 @@ class Question(_DomainModel):
     question_type: QuestionType
     hypothesis: str | None = None
     status: QuestionStatus = QuestionStatus.STAGED
+    terminal_reason: str | None = None
     parent_question_ids: list[UUID] = Field(default_factory=list)
     superseded_by_question_id: UUID | None = None
     supersedes_question_id: UUID | None = None
@@ -544,6 +545,7 @@ class Dataset(_DomainModel):
     question_links: list[QuestionLink]
     commit_manifest: DatasetCommitManifest
     status: DatasetStatus = DatasetStatus.STAGED
+    terminal_reason: str | None = None
     created_at: datetime = Field(default_factory=utc_now)
     created_by: str | None = None
     created_by_user_id: UUID | None = None
@@ -604,6 +606,7 @@ class Analysis(_DomainModel):
     executed_by_user_id: UUID | None = None
     executed_at: datetime = Field(default_factory=utc_now)
     status: AnalysisStatus = AnalysisStatus.STAGED
+    terminal_reason: str | None = None
     created_at: datetime = Field(default_factory=utc_now)
     updated_at: datetime = Field(default_factory=utc_now)
 
@@ -614,6 +617,7 @@ class ClaimInput(_DomainModel):
     statement: str
     confidence: float
     status: ClaimStatus = ClaimStatus.PROPOSED
+    terminal_reason: str | None = None
     supported_by_dataset_ids: list[UUID] = Field(default_factory=list)
     supported_by_analysis_ids: list[UUID] = Field(default_factory=list)
     answers_question_ids: list[UUID] = Field(default_factory=list)
@@ -625,6 +629,7 @@ class Claim(_DomainModel):
     statement: str
     confidence: float
     status: ClaimStatus = ClaimStatus.PROPOSED
+    terminal_reason: str | None = None
     supported_by_dataset_ids: list[UUID] = Field(default_factory=list)
     supported_by_analysis_ids: list[UUID] = Field(default_factory=list)
     answers_question_ids: list[UUID] = Field(default_factory=list)

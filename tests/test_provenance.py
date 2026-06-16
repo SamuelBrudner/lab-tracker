@@ -15,8 +15,12 @@ from lab_tracker.models import (
     ExternalArtifactKind,
     ExternalArtifactReference,
     OutcomeStatus,
+    Question,
     QuestionLink,
     QuestionLinkRole,
+    QuestionStatus,
+    QuestionType,
+    RecordExportRecords,
     SupervisionEdge,
     Visualization,
     VisualizationAsset,
@@ -24,6 +28,7 @@ from lab_tracker.models import (
 from lab_tracker.provenance import (
     build_analysis_provenance_document,
     build_dataset_provenance_document,
+    build_record_export_provenance_document,
 )
 from lab_tracker.provenance_ingestion import (
     EXTERNAL_ARTIFACTS_METADATA_KEY,
@@ -48,6 +53,86 @@ def _node_type_includes(node: dict[str, object], node_type: str) -> bool:
     if isinstance(node_types, list):
         return node_type in node_types
     return node_types == node_type
+
+
+def test_record_export_provenance_includes_terminal_reasons():
+    question_id = UUID("11111111-aaaa-aaaa-aaaa-111111111111")
+    dataset_id = UUID("22222222-aaaa-aaaa-aaaa-222222222222")
+    analysis_id = UUID("33333333-aaaa-aaaa-aaaa-333333333333")
+    claim_id = UUID("44444444-aaaa-aaaa-aaaa-444444444444")
+    project_id = uuid4()
+
+    question = Question(
+        question_id=question_id,
+        project_id=project_id,
+        text="Dead-end hypothesis",
+        question_type=QuestionType.HYPOTHESIS_DRIVEN,
+        status=QuestionStatus.ABANDONED,
+        terminal_reason="The control group erased the apparent effect.",
+    )
+    dataset = Dataset(
+        dataset_id=dataset_id,
+        project_id=project_id,
+        commit_hash="commit-dead-end",
+        primary_question_id=question_id,
+        question_links=[QuestionLink(question_id=question_id, role=QuestionLinkRole.PRIMARY)],
+        commit_manifest=DatasetCommitManifest(),
+        status=DatasetStatus.ARCHIVED,
+        terminal_reason="The source acquisition was corrupted.",
+    )
+    analysis = Analysis(
+        analysis_id=analysis_id,
+        project_id=project_id,
+        dataset_ids=[dataset_id],
+        method_hash="method-dead-end",
+        code_version="v1",
+        status=AnalysisStatus.ARCHIVED,
+        terminal_reason="The analysis environment could not be reproduced.",
+    )
+    claim = Claim(
+        claim_id=claim_id,
+        project_id=project_id,
+        statement="Rejected interpretation",
+        confidence=0.1,
+        status=ClaimStatus.REJECTED,
+        terminal_reason="A later analysis refuted the interpretation.",
+    )
+
+    document = build_record_export_provenance_document(
+        "http://example.test",
+        RecordExportRecords(
+            questions=[question],
+            datasets=[dataset],
+            analyses=[analysis],
+            claims=[claim],
+        ),
+    )
+
+    context = document["@context"]
+    assert isinstance(context, dict)
+    assert context["terminalReason"] == "lab:terminalReason"
+    assert (
+        _node_by_id(document, f"http://example.test/questions/{question_id}")[
+            "terminalReason"
+        ]
+        == "The control group erased the apparent effect."
+    )
+    assert (
+        _node_by_id(document, f"http://example.test/datasets/{dataset_id}")[
+            "terminalReason"
+        ]
+        == "The source acquisition was corrupted."
+    )
+    assert (
+        _node_by_id(document, f"http://example.test/analyses/{analysis_id}")[
+            "terminalReason"
+        ]
+        == "The analysis environment could not be reproduced."
+    )
+    assert (
+        _node_by_id(document, f"http://example.test/claims/{claim_id}")["terminalReason"]
+        == "A later analysis refuted the interpretation."
+    )
 
 
 def test_dataset_provenance_uses_inline_context_and_json_metadata():

@@ -28,6 +28,7 @@ from lab_tracker.services.shared import (
     actor_user_id,
     ensure_non_empty,
     question_matches_substring,
+    terminal_reason_for_status,
     unique_ids,
 )
 
@@ -84,6 +85,7 @@ class QuestionService(BaseService):
         *,
         hypothesis: str | None = None,
         status: QuestionStatus = QuestionStatus.STAGED,
+        terminal_reason: str | None = None,
         parent_question_ids: Iterable[UUID] | None = None,
         actor: AuthContext | None = None,
     ) -> Question:
@@ -101,6 +103,13 @@ class QuestionService(BaseService):
             parent_ids,
             self._question_graph(project_id),
         )
+        resolved_terminal_reason = terminal_reason_for_status(
+            None,
+            status,
+            QuestionStatus.ABANDONED,
+            terminal_reason,
+            entity_name="Question",
+        )
         question = Question(
             question_id=question_id,
             project_id=project_id,
@@ -108,6 +117,7 @@ class QuestionService(BaseService):
             question_type=question_type,
             hypothesis=hypothesis.strip() if hypothesis else None,
             status=status,
+            terminal_reason=resolved_terminal_reason,
             parent_question_ids=parent_ids,
             created_by=actor_user_id(actor),
             created_by_user_id=actor_user_fk(actor, self.repository),
@@ -178,6 +188,7 @@ class QuestionService(BaseService):
         question_type: QuestionType | None = None,
         hypothesis: str | None = None,
         status: QuestionStatus | None = None,
+        terminal_reason: str | None = None,
         parent_question_ids: Iterable[UUID] | None = None,
         actor: AuthContext | None = None,
     ) -> Question:
@@ -190,9 +201,21 @@ class QuestionService(BaseService):
             question.question_type = question_type
         if hypothesis is not None:
             question.hypothesis = hypothesis.strip() if hypothesis else None
+        current_status = question.status
+        next_status = status or current_status
         if status is not None:
-            _ensure_question_status_transition(question.status, status)
+            _ensure_question_status_transition(current_status, status)
+        resolved_terminal_reason = terminal_reason_for_status(
+            current_status,
+            next_status,
+            QuestionStatus.ABANDONED,
+            terminal_reason,
+            entity_name="Question",
+        )
+        if status is not None:
             question.status = status
+        if resolved_terminal_reason is not None:
+            question.terminal_reason = resolved_terminal_reason
         if parent_question_ids is not None:
             parent_ids = unique_ids(parent_question_ids)
             for parent_id in parent_ids:

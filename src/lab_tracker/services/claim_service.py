@@ -23,6 +23,7 @@ from lab_tracker.services.shared import (
     _ensure_claim_status_transition,
     _ensure_claim_support_links,
     ensure_non_empty,
+    terminal_reason_for_status,
     unique_ids,
 )
 
@@ -59,6 +60,7 @@ class ClaimService(BaseService):
         confidence: float,
         *,
         status: ClaimStatus = ClaimStatus.PROPOSED,
+        terminal_reason: str | None = None,
         supported_by_dataset_ids: Iterable[UUID] | None = None,
         supported_by_analysis_ids: Iterable[UUID] | None = None,
         answers_question_ids: Iterable[UUID] | None = None,
@@ -75,12 +77,20 @@ class ClaimService(BaseService):
         )
         question_ids = self._resolve_claim_question_links(project_id, answers_question_ids)
         _ensure_claim_support_links(status, dataset_ids, analysis_ids)
+        resolved_terminal_reason = terminal_reason_for_status(
+            None,
+            status,
+            ClaimStatus.REJECTED,
+            terminal_reason,
+            entity_name="Claim",
+        )
         claim = Claim(
             claim_id=uuid4(),
             project_id=project_id,
             statement=statement.strip(),
             confidence=confidence,
             status=status,
+            terminal_reason=resolved_terminal_reason,
             supported_by_dataset_ids=dataset_ids,
             supported_by_analysis_ids=analysis_ids,
             answers_question_ids=question_ids,
@@ -122,6 +132,7 @@ class ClaimService(BaseService):
         statement: str | None = None,
         confidence: float | None = None,
         status: ClaimStatus | None = None,
+        terminal_reason: str | None = None,
         supported_by_dataset_ids: Iterable[UUID] | None = None,
         supported_by_analysis_ids: Iterable[UUID] | None = None,
         answers_question_ids: Iterable[UUID] | None = None,
@@ -131,6 +142,13 @@ class ClaimService(BaseService):
         self.authorization.require_contributor(claim.project_id, actor=actor)
         next_status = status or claim.status
         _ensure_claim_status_transition(claim.status, next_status)
+        resolved_terminal_reason = terminal_reason_for_status(
+            claim.status,
+            next_status,
+            ClaimStatus.REJECTED,
+            terminal_reason,
+            entity_name="Claim",
+        )
         if claim.status != ClaimStatus.PROPOSED and (
             statement is not None
             or confidence is not None
@@ -162,6 +180,8 @@ class ClaimService(BaseService):
         )
         if status is not None:
             claim.status = status
+        if resolved_terminal_reason is not None:
+            claim.terminal_reason = resolved_terminal_reason
         claim.updated_at = utc_now()
         with self.unit_of_work() as repository:
             repository.claims.save(claim)

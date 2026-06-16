@@ -207,6 +207,7 @@ def question_to_model(question: Question) -> QuestionModel:
         question_type=question.question_type.value,
         hypothesis=question.hypothesis,
         status=question.status.value,
+        terminal_reason=question.terminal_reason,
         superseded_by_question_id=(
             _uuid_str(question.superseded_by_question_id)
             if question.superseded_by_question_id is not None
@@ -240,6 +241,7 @@ def question_from_model(
         question_type=QuestionType(row.question_type),
         hypothesis=row.hypothesis,
         status=QuestionStatus(row.status),
+        terminal_reason=getattr(row, "terminal_reason", None),
         parent_question_ids=list(parent_question_ids),
         superseded_by_question_id=(
             _uuid(row.superseded_by_question_id) if row.superseded_by_question_id else None
@@ -272,6 +274,7 @@ def apply_question_to_model(row: QuestionModel, question: Question) -> None:
     row.question_type = question.question_type.value
     row.hypothesis = question.hypothesis
     row.status = question.status.value
+    row.terminal_reason = question.terminal_reason
     row.superseded_by_question_id = (
         _uuid_str(question.superseded_by_question_id)
         if question.superseded_by_question_id is not None
@@ -369,6 +372,7 @@ def dataset_to_model(dataset: Dataset) -> DatasetModel:
             else None
         ),
         status=dataset.status.value,
+        terminal_reason=dataset.terminal_reason,
         created_by=dataset.created_by,
         created_by_user_id=(
             _uuid_str(dataset.created_by_user_id)
@@ -422,6 +426,7 @@ def dataset_from_model(
         question_links=links,
         commit_manifest=manifest,
         status=DatasetStatus(row.status),
+        terminal_reason=getattr(row, "terminal_reason", None),
         created_by=row.created_by,
         created_by_user_id=(
             _uuid(row.created_by_user_id) if row.created_by_user_id else None
@@ -466,6 +471,7 @@ def apply_dataset_to_model(row: DatasetModel, dataset: Dataset) -> None:
         _uuid_str(manifest.source_session_id) if manifest.source_session_id is not None else None
     )
     row.status = dataset.status.value
+    row.terminal_reason = dataset.terminal_reason
     row.created_by = dataset.created_by
     row.created_by_user_id = (
         _uuid_str(dataset.created_by_user_id)
@@ -686,6 +692,7 @@ def analysis_to_model(analysis: Analysis) -> AnalysisModel:
         ),
         executed_at=analysis.executed_at,
         status=analysis.status.value,
+        terminal_reason=analysis.terminal_reason,
         created_at=analysis.created_at,
         updated_at=analysis.updated_at,
     )
@@ -709,6 +716,7 @@ def analysis_from_model(
         ),
         executed_at=_as_utc(row.executed_at),
         status=AnalysisStatus(row.status),
+        terminal_reason=getattr(row, "terminal_reason", None),
         created_at=_as_utc(row.created_at),
         updated_at=_as_utc(row.updated_at),
     )
@@ -737,6 +745,7 @@ def apply_analysis_to_model(row: AnalysisModel, analysis: Analysis) -> None:
     )
     row.executed_at = analysis.executed_at
     row.status = analysis.status.value
+    row.terminal_reason = analysis.terminal_reason
     row.created_at = analysis.created_at
     row.updated_at = analysis.updated_at
 
@@ -748,6 +757,7 @@ def claim_to_model(claim: Claim) -> ClaimModel:
         statement=claim.statement,
         confidence=claim.confidence,
         status=claim.status.value,
+        terminal_reason=claim.terminal_reason,
         created_at=claim.created_at,
         updated_at=claim.updated_at,
     )
@@ -766,6 +776,7 @@ def claim_from_model(
         statement=row.statement,
         confidence=row.confidence,
         status=ClaimStatus(row.status),
+        terminal_reason=getattr(row, "terminal_reason", None),
         supported_by_dataset_ids=list(supported_by_dataset_ids),
         supported_by_analysis_ids=list(supported_by_analysis_ids),
         answers_question_ids=list(answers_question_ids),
@@ -809,6 +820,7 @@ def apply_claim_to_model(row: ClaimModel, claim: Claim) -> None:
     row.statement = claim.statement
     row.confidence = claim.confidence
     row.status = claim.status.value
+    row.terminal_reason = claim.terminal_reason
     row.created_at = claim.created_at
     row.updated_at = claim.updated_at
 

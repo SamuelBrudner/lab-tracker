@@ -235,6 +235,7 @@ List/search endpoints use `limit` between 1 and 200 and `offset` of 0 or greater
 - `project_id` (required): string(uuid)
 - `question_type` (required): QuestionType enum: descriptive, hypothesis_driven, method_dev, other
 - `status` (optional): QuestionStatus enum: staged, active, answered, abandoned, superseded | null
+- `terminal_reason` (optional): string; min length 1 | null
 - `text` (required): string; min length 1
 
 #### Notes: `NoteCreate`
@@ -260,6 +261,7 @@ List/search endpoints use `limit` between 1 and 200 and `offset` of 0 or greater
 - `project_id` (required): string(uuid)
 - `secondary_question_ids` (optional): list[string(uuid)] | null
 - `status` (optional): DatasetStatus enum: staged, committed, archived | null
+- `terminal_reason` (optional): string; min length 1 | null
 
 #### Analyses: `AnalysisCreate`
 - Required: `project_id`, `dataset_ids`, `method_hash`, `code_version`
@@ -269,6 +271,7 @@ List/search endpoints use `limit` between 1 and 200 and `offset` of 0 or greater
 - `method_hash` (required): string; min length 1
 - `project_id` (required): string(uuid)
 - `status` (optional): AnalysisStatus enum: staged, committed, archived | null
+- `terminal_reason` (optional): string; min length 1 | null
 
 #### Claims: `ClaimCreate`
 - Required: `project_id`, `statement`, `confidence`
@@ -279,6 +282,7 @@ List/search endpoints use `limit` between 1 and 200 and `offset` of 0 or greater
 - `status` (optional): ClaimStatus enum: proposed, supported, rejected | null
 - `supported_by_analysis_ids` (optional): list[string(uuid)] | null
 - `supported_by_dataset_ids` (optional): list[string(uuid)] | null
+- `terminal_reason` (optional): string; min length 1 | null
 
 #### Goals: `GoalCreateFields`
 - Required: `goal_type`, `title`

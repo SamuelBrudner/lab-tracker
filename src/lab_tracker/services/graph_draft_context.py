@@ -644,7 +644,7 @@ def _source_artifact_packet(note: Note) -> dict[str, Any]:
 
 
 def _compact_question(question: Question) -> dict[str, Any]:
-    return {
+    payload: dict[str, Any] = {
         "id": str(question.question_id),
         "label": question.text,
         "status": question.status.value,
@@ -652,6 +652,9 @@ def _compact_question(question: Question) -> dict[str, Any]:
         "parent_question_ids": [str(item) for item in question.parent_question_ids],
         "updated_at": question.updated_at.isoformat(),
     }
+    if question.terminal_reason:
+        payload["terminal_reason"] = question.terminal_reason
+    return payload
 
 
 def _compact_session(session: Session) -> dict[str, Any]:
@@ -669,7 +672,7 @@ def _compact_session(session: Session) -> dict[str, Any]:
 
 
 def _compact_dataset(dataset: Dataset) -> dict[str, Any]:
-    return {
+    payload: dict[str, Any] = {
         "id": str(dataset.dataset_id),
         "label": f"Dataset {dataset.commit_hash[:12]}",
         "status": dataset.status.value,
@@ -689,10 +692,13 @@ def _compact_dataset(dataset: Dataset) -> dict[str, Any]:
         ),
         "created_at": dataset.created_at.isoformat(),
     }
+    if dataset.terminal_reason:
+        payload["terminal_reason"] = dataset.terminal_reason
+    return payload
 
 
 def _compact_analysis(analysis: Analysis) -> dict[str, Any]:
-    return {
+    payload: dict[str, Any] = {
         "id": str(analysis.analysis_id),
         "label": analysis.method_hash,
         "status": analysis.status.value,
@@ -700,10 +706,13 @@ def _compact_analysis(analysis: Analysis) -> dict[str, Any]:
         "code_version": analysis.code_version,
         "created_at": analysis.created_at.isoformat(),
     }
+    if analysis.terminal_reason:
+        payload["terminal_reason"] = analysis.terminal_reason
+    return payload
 
 
 def _compact_claim(claim: Claim) -> dict[str, Any]:
-    return {
+    payload: dict[str, Any] = {
         "id": str(claim.claim_id),
         "label": claim.statement[:180],
         "status": claim.status.value,
@@ -712,6 +721,9 @@ def _compact_claim(claim: Claim) -> dict[str, Any]:
         "supported_by_analysis_ids": [str(item) for item in claim.supported_by_analysis_ids],
         "created_at": claim.created_at.isoformat(),
     }
+    if claim.terminal_reason:
+        payload["terminal_reason"] = claim.terminal_reason
+    return payload
 
 
 def _compact_visualization(visualization: Visualization) -> dict[str, Any]:

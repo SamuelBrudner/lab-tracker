@@ -55,6 +55,7 @@ def build_analyses_router(api: LabTrackerAPI) -> APIRouter:
             code_version=payload.code_version,
             environment_hash=payload.environment_hash,
             status=payload.status or analysis_default_status(),
+            terminal_reason=payload.terminal_reason,
             actor=actor,
         )
         return Envelope(data=analysis)
@@ -101,6 +102,7 @@ def build_analyses_router(api: LabTrackerAPI) -> APIRouter:
             analysis_id,
             status=payload.status,
             environment_hash=payload.environment_hash,
+            terminal_reason=payload.terminal_reason,
             actor=actor,
         )
         return Envelope(data=analysis)

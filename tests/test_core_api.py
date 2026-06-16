@@ -6,6 +6,8 @@ from api_helpers import repository_backed_api
 from lab_tracker.auth import AuthContext, AuthService, Role
 from lab_tracker.errors import AuthError, ValidationError
 from lab_tracker.models import (
+    AnalysisStatus,
+    ClaimStatus,
     DatasetCommitManifestInput,
     DatasetFile,
     DatasetStatus,
@@ -592,7 +594,12 @@ def test_question_refactor_validates_source_status_relationships_and_cycles():
         question_type=QuestionType.DESCRIPTIVE,
         actor=actor,
     )
-    api.update_question(abandoned.question_id, status=QuestionStatus.ABANDONED, actor=actor)
+    api.update_question(
+        abandoned.question_id,
+        status=QuestionStatus.ABANDONED,
+        terminal_reason="Question was ruled out before refactor.",
+        actor=actor,
+    )
     for invalid_source in (answered, abandoned):
         with pytest.raises(ValidationError, match="staged or active"):
             api.refactor_question(
@@ -633,6 +640,131 @@ def test_question_status_superseded_is_terminal_and_active_to_staged_remains_dis
             status=QuestionStatus.ACTIVE,
             actor=actor,
         )
+
+
+def test_terminal_status_transitions_require_and_persist_reason():
+    api = repository_backed_api()
+    actor = _actor()
+    project = api.create_project("Terminal transition lessons", actor=actor)
+    question = api.create_question(
+        project_id=project.project_id,
+        text="Does the effect survive the control?",
+        question_type=QuestionType.HYPOTHESIS_DRIVEN,
+        status=QuestionStatus.ACTIVE,
+        actor=actor,
+    )
+    with pytest.raises(ValidationError, match="terminal_reason is required"):
+        api.update_question(question.question_id, status=QuestionStatus.ABANDONED, actor=actor)
+    abandoned = api.update_question(
+        question.question_id,
+        status=QuestionStatus.ABANDONED,
+        terminal_reason="  Control erased the effect.  ",
+        actor=actor,
+    )
+    assert abandoned.terminal_reason == "Control erased the effect."
+
+    data_question = api.create_question(
+        project_id=project.project_id,
+        text="Dataset-bearing question",
+        question_type=QuestionType.DESCRIPTIVE,
+        status=QuestionStatus.ACTIVE,
+        actor=actor,
+    )
+    manifest = DatasetCommitManifestInput(files=[DatasetFile(path="data.csv", checksum="abc123")])
+    dataset = api.create_dataset(
+        project_id=project.project_id,
+        primary_question_id=data_question.question_id,
+        commit_manifest=manifest,
+        status=DatasetStatus.COMMITTED,
+        actor=actor,
+    )
+    analysis = api.create_analysis(
+        project_id=project.project_id,
+        dataset_ids=[dataset.dataset_id],
+        method_hash="method-1",
+        code_version="v1",
+        status=AnalysisStatus.COMMITTED,
+        actor=actor,
+    )
+    with pytest.raises(ValidationError, match="terminal_reason is required"):
+        api.update_analysis(analysis.analysis_id, status=AnalysisStatus.ARCHIVED, actor=actor)
+    archived_analysis = api.update_analysis(
+        analysis.analysis_id,
+        status=AnalysisStatus.ARCHIVED,
+        terminal_reason="Pipeline parameters were invalid.",
+        actor=actor,
+    )
+    assert archived_analysis.terminal_reason == "Pipeline parameters were invalid."
+
+    with pytest.raises(ValidationError, match="terminal_reason is required"):
+        api.update_dataset(dataset.dataset_id, status=DatasetStatus.ARCHIVED, actor=actor)
+    archived_dataset = api.update_dataset(
+        dataset.dataset_id,
+        status=DatasetStatus.ARCHIVED,
+        terminal_reason="Raw acquisition was corrupted.",
+        actor=actor,
+    )
+    assert archived_dataset.terminal_reason == "Raw acquisition was corrupted."
+
+    claim = api.create_claim(
+        project_id=project.project_id,
+        statement="The control had no effect.",
+        confidence=0.7,
+        actor=actor,
+    )
+    with pytest.raises(ValidationError, match="terminal_reason is required"):
+        api.update_claim(claim.claim_id, status=ClaimStatus.REJECTED, actor=actor)
+    rejected = api.update_claim(
+        claim.claim_id,
+        status=ClaimStatus.REJECTED,
+        terminal_reason="New control analysis refuted the interpretation.",
+        actor=actor,
+    )
+    assert rejected.terminal_reason == "New control analysis refuted the interpretation."
+
+
+def test_terminal_reason_is_rejected_for_non_terminal_statuses():
+    api = repository_backed_api()
+    actor = _actor()
+    project = api.create_project("Terminal reason guard", actor=actor)
+    question = api.create_question(
+        project_id=project.project_id,
+        text="Is the field scoped to dead ends?",
+        question_type=QuestionType.DESCRIPTIVE,
+        actor=actor,
+    )
+
+    with pytest.raises(ValidationError, match="can only be set"):
+        api.update_question(
+            question.question_id,
+            status=QuestionStatus.ACTIVE,
+            terminal_reason="Not a dead end.",
+            actor=actor,
+        )
+
+
+def test_terminal_status_creation_requires_reason():
+    api = repository_backed_api()
+    actor = _actor()
+    project = api.create_project("Terminal creation lessons", actor=actor)
+
+    with pytest.raises(ValidationError, match="terminal_reason is required"):
+        api.create_question(
+            project_id=project.project_id,
+            text="Known dead end",
+            question_type=QuestionType.DESCRIPTIVE,
+            status=QuestionStatus.ABANDONED,
+            actor=actor,
+        )
+    created = api.create_question(
+        project_id=project.project_id,
+        text="Known dead end with lesson",
+        question_type=QuestionType.DESCRIPTIVE,
+        status=QuestionStatus.ABANDONED,
+        terminal_reason="Prior data already invalidated it.",
+        actor=actor,
+    )
+    assert created.terminal_reason == "Prior data already invalidated it."
 
 
 def test_session_creation_starts_active_without_end_time():
@@ -686,7 +818,12 @@ def test_committed_dataset_is_immutable():
         )
     with pytest.raises(ValidationError):
         api.update_dataset(dataset.dataset_id, commit_hash="deadbeef", actor=actor)
-    archived = api.update_dataset(dataset.dataset_id, status=DatasetStatus.ARCHIVED, actor=actor)
+    archived = api.update_dataset(
+        dataset.dataset_id,
+        status=DatasetStatus.ARCHIVED,
+        terminal_reason="Archive immutable dataset for transition coverage.",
+        actor=actor,
+    )
     assert archived.status == DatasetStatus.ARCHIVED
 
 
@@ -1006,7 +1143,12 @@ def test_archived_dataset_cannot_be_recommitted():
         actor=actor,
     )
     api.update_dataset(dataset.dataset_id, status=DatasetStatus.COMMITTED, actor=actor)
-    api.update_dataset(dataset.dataset_id, status=DatasetStatus.ARCHIVED, actor=actor)
+    api.update_dataset(
+        dataset.dataset_id,
+        status=DatasetStatus.ARCHIVED,
+        terminal_reason="Archive before recommit regression check.",
+        actor=actor,
+    )
 
     with pytest.raises(ValidationError):
         api.update_dataset(dataset.dataset_id, status=DatasetStatus.COMMITTED, actor=actor)

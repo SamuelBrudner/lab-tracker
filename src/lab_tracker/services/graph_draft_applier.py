@@ -124,6 +124,7 @@ class GraphPatchApplier:
                 question_type=data.question_type,
                 hypothesis=data.hypothesis,
                 status=data.status or QuestionStatus.STAGED,
+                terminal_reason=data.terminal_reason,
                 parent_question_ids=data.parent_question_ids,
                 actor=actor,
             )
@@ -153,6 +154,7 @@ class GraphPatchApplier:
                 primary_question_id=data.primary_question_id,
                 secondary_question_ids=data.secondary_question_ids,
                 status=data.status or DatasetStatus.STAGED,
+                terminal_reason=data.terminal_reason,
                 commit_manifest=data.commit_manifest,
                 commit_hash=data.commit_hash,
                 actor=actor,
@@ -166,6 +168,7 @@ class GraphPatchApplier:
                 code_version=data.code_version,
                 environment_hash=data.environment_hash,
                 status=data.status or AnalysisStatus.STAGED,
+                terminal_reason=data.terminal_reason,
                 actor=actor,
             )
         if entity_type == EntityType.CLAIM:
@@ -175,6 +178,7 @@ class GraphPatchApplier:
                 statement=data.statement,
                 confidence=data.confidence,
                 status=data.status or ClaimStatus.PROPOSED,
+                terminal_reason=data.terminal_reason,
                 supported_by_dataset_ids=data.supported_by_dataset_ids,
                 supported_by_analysis_ids=data.supported_by_analysis_ids,
                 answers_question_ids=data.answers_question_ids,
@@ -245,6 +249,7 @@ class GraphPatchApplier:
                 question_type=data.question_type,
                 hypothesis=data.hypothesis,
                 status=data.status,
+                terminal_reason=data.terminal_reason,
                 parent_question_ids=data.parent_question_ids,
                 actor=actor,
             )
@@ -271,6 +276,7 @@ class GraphPatchApplier:
             return self.datasets.update_dataset(
                 entity_id,
                 status=data.status,
+                terminal_reason=data.terminal_reason,
                 question_links=data.question_links,
                 commit_manifest=data.commit_manifest,
                 commit_hash=data.commit_hash,
@@ -282,6 +288,7 @@ class GraphPatchApplier:
                 entity_id,
                 status=data.status,
                 environment_hash=data.environment_hash,
+                terminal_reason=data.terminal_reason,
                 actor=actor,
             )
         if entity_type == EntityType.CLAIM:
@@ -291,6 +298,7 @@ class GraphPatchApplier:
                 statement=data.statement,
                 confidence=data.confidence,
                 status=data.status,
+                terminal_reason=data.terminal_reason,
                 supported_by_dataset_ids=data.supported_by_dataset_ids,
                 supported_by_analysis_ids=data.supported_by_analysis_ids,
                 answers_question_ids=data.answers_question_ids,

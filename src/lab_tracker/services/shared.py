@@ -62,6 +62,31 @@ def ensure_non_empty(value: str, field_name: str) -> None:
         raise ValidationError(f"{field_name} must not be empty.")
 
 
+def terminal_reason_for_status(
+    current_status: StatusT | None,
+    next_status: StatusT,
+    terminal_status: StatusT,
+    terminal_reason: str | None,
+    *,
+    entity_name: str,
+) -> str | None:
+    cleaned_reason = terminal_reason.strip() if terminal_reason is not None else None
+    if terminal_reason is not None and not cleaned_reason:
+        raise ValidationError("terminal_reason must not be empty.")
+    entering_terminal = current_status != next_status and next_status == terminal_status
+    if entering_terminal and cleaned_reason is None:
+        raise ValidationError(
+            f"{entity_name} terminal_reason is required when status becomes "
+            f"{terminal_status.value}."
+        )
+    if cleaned_reason is not None and next_status != terminal_status:
+        raise ValidationError(
+            f"{entity_name} terminal_reason can only be set for "
+            f"{terminal_status.value} status."
+        )
+    return cleaned_reason
+
+
 def _is_note_metadata_scalar(value: object) -> bool:
     return isinstance(value, (str, bool, int, float))
 
