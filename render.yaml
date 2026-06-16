@@ -28,6 +28,10 @@ services:
         value: /var/data/runtime-env
       - key: LAB_TRACKER_AUTH_SECRET_KEY
         generateValue: true
+      - key: LAB_TRACKER_BOOTSTRAP_ADMIN_TOKEN
+        generateValue: true
+      - key: LAB_TRACKER_BOOTSTRAP_ADMIN_TOKEN_DISCLOSURE
+        value: first_run
       - key: LAB_TRACKER_AUTH_TOKEN_TTL_MINUTES
         value: 720
       - key: LAB_TRACKER_AUTH_INVITE_TTL_HOURS

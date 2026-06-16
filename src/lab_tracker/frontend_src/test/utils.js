@@ -94,6 +94,8 @@ function installFetchMock(routes) {
       if (method === "GET" && url === "/auth/bootstrap-status") {
         return apiResponse({
           bootstrap_admin_configured: false,
+          bootstrap_token: null,
+          bootstrap_token_warning: null,
           first_admin_available: false,
           has_users: true,
         });

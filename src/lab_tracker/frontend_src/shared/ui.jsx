@@ -189,6 +189,7 @@ function AuthForm({
 }) {
   const isSetup = authMode === "setup";
   const isInvite = authMode === "register" && Boolean(authInviteToken);
+  const bootstrapTokenLoaded = Boolean(authBootstrapStatus?.bootstrap_token);
   const title = isSetup
     ? "Create First Admin"
     : isInvite
@@ -197,7 +198,9 @@ function AuthForm({
     ? "Sign In"
     : "Create Viewer Account";
   const supportingCopy = isSetup
-    ? "Use the bootstrap token from the server logs or first-run setup file."
+    ? bootstrapTokenLoaded
+      ? "The first-admin token is loaded for this setup screen."
+      : "Enter the first-admin token for this deployment."
     : isInvite
     ? "Set a password for the invited account."
     : "Viewer registration is public. Admin/editor accounts must be provisioned by an admin.";
@@ -232,8 +235,12 @@ function AuthForm({
               value={authBootstrapToken}
               onChange={onBootstrapTokenChange}
               autoComplete="one-time-code"
+              placeholder={bootstrapTokenLoaded ? "Loaded for first admin setup" : ""}
             />
           </label>
+        ) : null}
+        {isSetup && authBootstrapStatus?.bootstrap_token_warning ? (
+          <p className="warn">{authBootstrapStatus.bootstrap_token_warning}</p>
         ) : null}
         {!isSetup && authBootstrapStatus?.first_admin_available ? (
           <p className="warn">This instance has no admin yet. Use first-admin setup first.</p>

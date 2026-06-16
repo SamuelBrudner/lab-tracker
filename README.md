@@ -116,8 +116,9 @@ docker compose up app
 ```
 
 On first boot, the app container generates a persistent auth secret and first
-admin bootstrap token if you did not set them. Read the token with
-`docker compose logs app`, then create the first admin in the browser.
+admin bootstrap token if you did not set them. Open the app in the browser and
+use `Create First Admin`; the setup screen loads the token while no users
+exist.
 
 SQLite remains the default single-client local fallback.
 
@@ -187,11 +188,10 @@ For Docker, run:
 
 ```bash
 docker compose up app
-docker compose logs app
 ```
 
-Copy the printed first-admin bootstrap token, open `http://127.0.0.1:8000/app`,
-and use `Create First Admin`.
+Open `http://127.0.0.1:8000/app` and use `Create First Admin`. The setup
+screen loads the generated bootstrap token while the instance has no users.
 
 For a non-Docker deployment, set the token before starting the app:
 
@@ -200,6 +200,11 @@ export LAB_TRACKER_AUTH_ENABLED=true
 export LAB_TRACKER_BOOTSTRAP_ADMIN_TOKEN="<one-time-admin-token>"
 lab-tracker serve
 ```
+
+By default, the setup screen displays that token only when reached through a
+local, LAN, or VPN address. Public one-click deployments can opt into first-run
+browser display with `LAB_TRACKER_BOOTSTRAP_ADMIN_TOKEN_DISCLOSURE=first_run`;
+the token is never returned after any user exists.
 
 After the first admin exists, use the `Users` screen to grant viewer/editor/admin
 roles, create email invitation links, and reset passwords. Use each project's
@@ -230,6 +235,11 @@ development.
 - `LAB_TRACKER_AUTH_ENABLED`: enable login and role enforcement (default: `false`
   in `local`, `true` otherwise; non-local environments cannot disable auth)
 - `LAB_TRACKER_PUBLIC_BASE_URL`: public URL used in email invitation links
+- `LAB_TRACKER_BOOTSTRAP_ADMIN_TOKEN`: one-time token for creating the first
+  admin on fresh auth-enabled deployments
+- `LAB_TRACKER_BOOTSTRAP_ADMIN_TOKEN_DISCLOSURE`: `local` (default),
+  `first_run`, or `never`; controls whether `/auth/bootstrap-status` can return
+  the first-admin token before any users exist
 - `LAB_TRACKER_OPENAI_API_KEY`: required for graph draft generation and
   voice-note transcription
 - `LAB_TRACKER_OPENAI_MODEL`: OpenAI model for graph drafts (default:

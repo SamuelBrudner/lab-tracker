@@ -12,7 +12,8 @@ managed deployment without running terminal commands on a lab computer.
 - A persistent disk for uploaded files, note storage, and generated runtime
   secrets
 - A generated auth signing secret
-- A first-admin setup token printed in the service logs
+- A generated first-admin setup token shown in the browser only while no users
+  exist
 - Automatic migrations at service startup
 
 Render handles the always-on web URL, TLS certificate, service restart, database
@@ -24,8 +25,14 @@ roles and project membership inside Lab Tracker.
 1. Click **Deploy to Render**.
 2. Connect or fork the GitHub repo when Render asks.
 3. Wait for the first deploy to finish.
-4. Open the Lab Tracker service logs and copy `First admin setup token`.
-5. Open the service URL, choose `Create First Admin`, and paste the token.
+4. Open the service URL and choose `Create First Admin`.
+5. The setup token is already loaded on that screen; choose a username and
+   password to create the admin account.
+
+The Render Blueprint opts into first-run browser display with
+`LAB_TRACKER_BOOTSTRAP_ADMIN_TOKEN_DISCLOSURE=first_run`. The token is returned
+only while the users table is empty and disappears after the first admin is
+created.
 
 After the first admin exists, use `Users` to invite lab members by email, grant
 viewer/editor/admin roles, and reset passwords. Use each project's

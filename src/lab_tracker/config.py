@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Literal
+
 from pydantic import field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -26,6 +28,7 @@ class Settings(BaseSettings):
     auth_token_ttl_minutes: int = 60 * 12
     auth_invite_ttl_hours: int = 7 * 24
     bootstrap_admin_token: str = ""
+    bootstrap_admin_token_disclosure: Literal["local", "first_run", "never"] = "local"
     auth_enabled: bool | None = None
     graph_draft_provider: str = "openai"
     public_base_url: str = ""

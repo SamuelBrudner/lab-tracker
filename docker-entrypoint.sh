@@ -49,7 +49,6 @@ if [ -z "${LAB_TRACKER_BOOTSTRAP_ADMIN_TOKEN:-}" ]; then
         umask 077
         printf '%s\n' "$LAB_TRACKER_BOOTSTRAP_ADMIN_TOKEN" > "$bootstrap_token_file"
         echo "Generated first-admin bootstrap token in ${bootstrap_token_file}." >&2
-        echo "First admin setup token: ${LAB_TRACKER_BOOTSTRAP_ADMIN_TOKEN}" >&2
     fi
     export LAB_TRACKER_BOOTSTRAP_ADMIN_TOKEN
 fi

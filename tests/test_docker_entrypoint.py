@@ -10,7 +10,4 @@ def test_bootstrap_admin_token_is_not_echoed_unconditionally() -> None:
         line for line in lines if "First admin setup token:" in line and "echo" in line
     ]
 
-    assert token_echo_lines == [
-        '        echo "First admin setup token: ${LAB_TRACKER_BOOTSTRAP_ADMIN_TOKEN}" >&2'
-    ]
-
+    assert token_echo_lines == []

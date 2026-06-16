@@ -150,6 +150,8 @@ class AuthBootstrapStatus(BaseModel):
     has_users: bool
     bootstrap_admin_configured: bool
     first_admin_available: bool
+    bootstrap_token: str | None = None
+    bootstrap_token_warning: str | None = None
 
 
 class AuthTokenRead(BaseModel):

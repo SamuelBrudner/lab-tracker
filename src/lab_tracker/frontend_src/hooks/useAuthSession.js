@@ -57,7 +57,11 @@ function useAuthSession({ replace, setBusy, setFlash }) {
     apiFetch("/auth/bootstrap-status")
       .then((payload) => {
         if (!canceled) {
-          setAuthBootstrapStatus(payload?.data || null);
+          const status = payload?.data || null;
+          setAuthBootstrapStatus(status);
+          if (status?.bootstrap_token) {
+            setAuthBootstrapToken((current) => current || status.bootstrap_token);
+          }
         }
       })
       .catch(() => {

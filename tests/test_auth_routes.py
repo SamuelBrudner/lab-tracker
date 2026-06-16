@@ -201,11 +201,14 @@ def test_register_non_viewer_requires_admin_token(monkeypatch, tmp_path):
 def test_bootstrap_admin_allows_first_admin_registration(monkeypatch, tmp_path):
     _bootstrap_database(monkeypatch, tmp_path)
     monkeypatch.setenv("LAB_TRACKER_BOOTSTRAP_ADMIN_TOKEN", "bootstrap-secret")
-    with TestClient(create_app()) as client:
+    with TestClient(create_app(), base_url="http://127.0.0.1") as client:
         status_response = client.get("/auth/bootstrap-status")
         assert status_response.status_code == 200
-        assert status_response.json()["data"] == {
+        status_payload = status_response.json()["data"]
+        assert status_payload == {
             "bootstrap_admin_configured": True,
+            "bootstrap_token": "bootstrap-secret",
+            "bootstrap_token_warning": None,
             "first_admin_available": True,
             "has_users": False,
         }
@@ -216,12 +219,20 @@ def test_bootstrap_admin_allows_first_admin_registration(monkeypatch, tmp_path):
                 "username": "root",
                 "password": "secret",
                 "role": "admin",
-                "bootstrap_token": "bootstrap-secret",
+                "bootstrap_token": status_payload["bootstrap_token"],
             },
         )
         assert bootstrap_response.status_code == 201
         payload = bootstrap_response.json()["data"]
         assert payload["user"]["role"] == "admin"
+
+        used_status_response = client.get("/auth/bootstrap-status")
+        assert used_status_response.status_code == 200
+        used_status_payload = used_status_response.json()["data"]
+        assert used_status_payload["first_admin_available"] is False
+        assert used_status_payload["has_users"] is True
+        assert used_status_payload["bootstrap_token"] is None
+        assert used_status_payload["bootstrap_token_warning"] is None
 
         admin_token = payload["access_token"]
         editor_response = client.post(
@@ -243,6 +254,34 @@ def test_bootstrap_admin_allows_first_admin_registration(monkeypatch, tmp_path):
         )
         assert repeat_bootstrap.status_code == 401
         assert repeat_bootstrap.json()["error"]["code"] == "auth_error"
+
+
+def test_bootstrap_status_hides_token_on_public_hosts(monkeypatch, tmp_path):
+    _bootstrap_database(monkeypatch, tmp_path)
+    monkeypatch.setenv("LAB_TRACKER_BOOTSTRAP_ADMIN_TOKEN", "bootstrap-secret")
+    with TestClient(create_app(), base_url="https://lab.example.org") as client:
+        status_response = client.get("/auth/bootstrap-status")
+        assert status_response.status_code == 200
+        status_payload = status_response.json()["data"]
+        assert status_payload["bootstrap_admin_configured"] is True
+        assert status_payload["first_admin_available"] is True
+        assert status_payload["bootstrap_token"] is None
+        assert "local, LAN, or VPN" in status_payload["bootstrap_token_warning"]
+
+
+def test_bootstrap_status_can_opt_into_public_first_run_disclosure(
+    monkeypatch,
+    tmp_path,
+):
+    _bootstrap_database(monkeypatch, tmp_path)
+    monkeypatch.setenv("LAB_TRACKER_BOOTSTRAP_ADMIN_TOKEN", "bootstrap-secret")
+    monkeypatch.setenv("LAB_TRACKER_BOOTSTRAP_ADMIN_TOKEN_DISCLOSURE", "first_run")
+    with TestClient(create_app(), base_url="https://lab.example.org") as client:
+        status_response = client.get("/auth/bootstrap-status")
+        assert status_response.status_code == 200
+        status_payload = status_response.json()["data"]
+        assert status_payload["bootstrap_token"] == "bootstrap-secret"
+        assert status_payload["bootstrap_token_warning"] is None
 
 
 def test_admin_can_manage_users(monkeypatch, tmp_path):

@@ -89,5 +89,9 @@ generates one and stores it in:
 /app/data/runtime-env/bootstrap-admin-token
 ```
 
-The token is also printed in `docker compose logs app` so the first admin can be
-created from the browser.
+Open the app through `http://127.0.0.1:8000/app` or another local/LAN/VPN host
+and choose `Create First Admin`; the first-run setup screen loads the generated
+token while no users exist. The token is not shown after the first user is
+created. Public deployments can opt into browser display with
+`LAB_TRACKER_BOOTSTRAP_ADMIN_TOKEN_DISCLOSURE=first_run`; otherwise the token is
+hidden on public hosts.

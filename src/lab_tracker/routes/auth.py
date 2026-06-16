@@ -55,14 +55,21 @@ def build_auth_router(
     router = APIRouter()
 
     @router.get("/auth/bootstrap-status", response_model=Envelope[AuthBootstrapStatus])
-    def auth_bootstrap_status():
+    def auth_bootstrap_status(request: Request):
         expected = (bootstrap_admin_token or "").strip()
         has_users = auth_service.has_users()
+        bootstrap_token, bootstrap_token_warning = _bootstrap_token_for_status(
+            request,
+            bootstrap_token=expected,
+            has_users=has_users,
+        )
         return Envelope(
             data=AuthBootstrapStatus(
                 has_users=has_users,
                 bootstrap_admin_configured=bool(expected),
                 first_admin_available=not has_users and bool(expected),
+                bootstrap_token=bootstrap_token,
+                bootstrap_token_warning=bootstrap_token_warning,
             )
         )
 
@@ -271,6 +278,43 @@ def _host_needs_public_base_url_warning(hostname: str) -> bool:
     except ValueError:
         return False
     return address.is_loopback or address.is_private or address.is_link_local
+
+
+def _bootstrap_token_for_status(
+    request: Request,
+    *,
+    bootstrap_token: str,
+    has_users: bool,
+) -> tuple[str | None, str | None]:
+    if has_users or not bootstrap_token:
+        return None, None
+    mode = (
+        str(
+            getattr(
+                request.app.state.settings,
+                "bootstrap_admin_token_disclosure",
+                "local",
+            )
+            or "local"
+        )
+        .strip()
+        .lower()
+    )
+    if mode == "never":
+        return (
+            None,
+            "First-admin token display is disabled for this deployment.",
+        )
+    if mode == "first_run":
+        return bootstrap_token, None
+    hostname = request.url.hostname or urlparse(str(request.base_url)).hostname or ""
+    if _host_needs_public_base_url_warning(hostname):
+        return bootstrap_token, None
+    return (
+        None,
+        "First-admin token display is available only from a local, LAN, or VPN "
+        "address for this deployment.",
+    )
 
 
 def _mailto_invitation_url(

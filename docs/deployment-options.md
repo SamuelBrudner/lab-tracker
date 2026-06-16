@@ -38,8 +38,10 @@ On first boot, the container generates and persists:
 - `LAB_TRACKER_AUTH_SECRET_KEY`
 - `LAB_TRACKER_BOOTSTRAP_ADMIN_TOKEN`
 
-The first-admin token is printed in `docker compose logs app` and stored in the
-app data volume. Use it in the browser first-admin setup form.
+The first-admin token is stored in the app data volume. Open the app through
+`http://127.0.0.1:8000/app` or another local/LAN/VPN host and choose
+`Create First Admin`; the setup screen loads the generated token while no users
+exist.
 
 ### LAN Phone Capture
 

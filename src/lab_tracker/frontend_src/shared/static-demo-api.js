@@ -652,7 +652,13 @@ function findDetail(pathname) {
 function demoPayload(url) {
   const { pathname, searchParams } = url;
   if (pathname === "/auth/bootstrap-status") {
-    return dataResponse({ first_admin_available: false, user_count: 1 });
+    return dataResponse({
+      bootstrap_admin_configured: false,
+      bootstrap_token: null,
+      bootstrap_token_warning: null,
+      first_admin_available: false,
+      has_users: true,
+    });
   }
   if (pathname === "/auth/me") {
     return jsonResponse({
