@@ -80,6 +80,14 @@ That command runs `alembic upgrade head`, opens `http://127.0.0.1:8000/app`,
 and starts the server. Double-click launchers are available in `launchers/` for
 macOS and Windows.
 
+macOS launcher notes:
+
+- Install `uv` before using `Start Lab Tracker.command`:
+  `curl -LsSf https://astral.sh/uv/install.sh | sh`
+- If macOS blocks the downloaded `.command` file the first time, right-click
+  `Start Lab Tracker.command`, choose `Open`, then confirm `Open`. After that,
+  normal double-clicking works.
+
 Developer fallback:
 
 ```bash

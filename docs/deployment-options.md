@@ -27,6 +27,14 @@ Use one of the files in `launchers/`:
 The launcher runs `lab-tracker serve`, which applies migrations, opens the
 browser to `/app`, and starts the web server.
 
+macOS first-run notes:
+
+- Install `uv` before using `Start Lab Tracker.command`:
+  `curl -LsSf https://astral.sh/uv/install.sh | sh`
+- If macOS Gatekeeper blocks the downloaded `.command` file, right-click
+  `Start Lab Tracker.command`, choose `Open`, then confirm `Open`. After that,
+  normal double-clicking works.
+
 ### Docker/Postgres Lab Instance
 
 ```bash

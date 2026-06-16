@@ -15,4 +15,16 @@ if [ -x ".venv/bin/python" ]; then
     exec .venv/bin/python -m lab_tracker serve
 fi
 
-exec python3 -m lab_tracker serve
+cat <<'EOF'
+Lab Tracker is not installed in this checkout yet.
+
+Install uv first, then double-click this launcher again:
+
+  curl -LsSf https://astral.sh/uv/install.sh | sh
+
+If macOS blocks this launcher the first time, right-click it, choose Open, then
+confirm Open. Plain double-clicking works after that first approval.
+EOF
+printf '\nPress Return to close this window... '
+read -r _
+exit 1
