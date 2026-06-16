@@ -15,11 +15,17 @@ from typing import Any
 
 import httpx
 
+from lab_tracker.assistant_next_questions import (
+    OPEN_GOAL_STATUSES,
+    OPEN_QUESTION_STATUSES,
+    build_next_questions_payload,
+)
 from lab_tracker.models import (
     AnalysisStatus,
     ClaimStatus,
     DatasetStatus,
     EntityType,
+    GoalStatus,
     NoteMetadataScalar,
     NoteStatus,
     ProjectStatus,
@@ -45,6 +51,7 @@ SESSION_TYPE_VALUES = tuple(session_type.value for session_type in SessionType)
 DATASET_STATUS_VALUES = tuple(status.value for status in DatasetStatus)
 ANALYSIS_STATUS_VALUES = tuple(status.value for status in AnalysisStatus)
 CLAIM_STATUS_VALUES = tuple(status.value for status in ClaimStatus)
+GOAL_STATUS_VALUES = tuple(status.value for status in GoalStatus)
 
 _ID_FIELDS = (
     "question_id",
@@ -56,6 +63,7 @@ _ID_FIELDS = (
     "viz_id",
     "visualization_id",
     "project_id",
+    "goal_id",
 )
 
 EVIDENCE_METADATA_KEYS = (
@@ -430,6 +438,50 @@ class LabTracker:
             limit=limit,
             offset=offset,
         )
+
+    def list_goals(
+        self,
+        *,
+        project_id: str | None = None,
+        status: str | None = None,
+        limit: int = MAX_PAGE_SIZE,
+        offset: int = 0,
+    ) -> list[LTRecord]:
+        path = "/goals" if project_id is None else f"/projects/{project_id}/goals"
+        return self._list_all(
+            path,
+            params={
+                "status": _validate_optional_enum(
+                    status,
+                    field_name="goal status",
+                    allowed_values=GOAL_STATUS_VALUES,
+                ),
+            },
+            limit=limit,
+            offset=offset,
+        )
+
+    def next_questions(
+        self,
+        *,
+        project_id: str | None = None,
+        limit: int = 5,
+    ) -> JsonObject:
+        goals: list[JsonObject] = []
+        for status in OPEN_GOAL_STATUSES:
+            goals.extend(self.list_goals(project_id=project_id, status=status))
+
+        project_ids = _project_ids_for_next_question_lookup(goals, project_id)
+        questions: list[JsonObject] = []
+        claims: list[JsonObject] = []
+        for lookup_project_id in project_ids:
+            for status in OPEN_QUESTION_STATUSES:
+                questions.extend(
+                    self.list_questions(project_id=lookup_project_id, status=status)
+                )
+            claims.extend(self.list_claims(project_id=lookup_project_id))
+
+        return build_next_questions_payload(goals, questions, claims, limit=limit)
 
     def find_project_by_name(self, name: str) -> LTRecord | None:
         cleaned = _require_non_empty(name, "name")
@@ -990,6 +1042,14 @@ def list_visualizations(**kwargs: Any) -> list[LTRecord]:
     return client.list_visualizations(**kwargs)
 
 
+def list_goals(**kwargs: Any) -> list[LTRecord]:
+    return client.list_goals(**kwargs)
+
+
+def next_questions(**kwargs: Any) -> JsonObject:
+    return client.next_questions(**kwargs)
+
+
 def find_project_by_name(name: str) -> LTRecord | None:
     return client.find_project_by_name(name)
 
@@ -1052,6 +1112,22 @@ def _validate_offset(offset: int) -> int:
     if offset < 0:
         raise LTValidationError("offset must be 0 or greater.")
     return offset
+
+
+def _project_ids_for_next_question_lookup(
+    goals: list[JsonObject],
+    project_id: str | None,
+) -> list[str | None]:
+    if project_id is not None:
+        return [project_id]
+    goal_project_ids = sorted(
+        {
+            str(goal["project_id"])
+            for goal in goals
+            if goal.get("project_id") is not None
+        }
+    )
+    return goal_project_ids or [None]
 
 
 def _require_non_empty(value: str, field_name: str) -> str:

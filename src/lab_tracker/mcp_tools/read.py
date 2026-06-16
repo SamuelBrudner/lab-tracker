@@ -4,34 +4,66 @@ from __future__ import annotations
 
 from typing import Any
 
-from lab_tracker.mcp_api_client import JsonObject, client_from_env
+import httpx
+
+from lab_tracker.mcp_api_client import (
+    JsonObject,
+    LabTrackerAPIError,
+    client_from_env,
+    lab_tracker_unavailable,
+)
+from lab_tracker.mcp_tools.hints import next_action, with_next_action
+
+
+def _read_tool(
+    tool_name: str,
+    call: Any,
+    *,
+    hint: JsonObject,
+) -> JsonObject:
+    client = client_from_env()
+    try:
+        return with_next_action(call(client), hint)
+    except (LabTrackerAPIError, httpx.HTTPError) as exc:
+        return lab_tracker_unavailable(tool_name, detail=str(exc))
+    finally:
+        client.close()
 
 
 def lab_tracker_health() -> JsonObject:
-    """Check the Lab Tracker API health endpoint."""
-    client = client_from_env()
-    try:
-        return client.health()
-    finally:
-        client.close()
+    """Check Lab Tracker API health; fail softly if the service is unavailable."""
+    return _read_tool(
+        "lab_tracker_health",
+        lambda client: client.health(),
+        hint=next_action(
+            "lab_tracker_readiness",
+            "If health is OK, check database and storage readiness next.",
+        ),
+    )
 
 
 def lab_tracker_readiness() -> JsonObject:
-    """Check database and storage readiness for Lab Tracker."""
-    client = client_from_env()
-    try:
-        return client.readiness()
-    finally:
-        client.close()
+    """Check Lab Tracker database and storage readiness."""
+    return _read_tool(
+        "lab_tracker_readiness",
+        lambda client: client.readiness(),
+        hint=next_action(
+            "lab_tracker_get_decision_context",
+            "For research-facing work, load graph context after readiness passes.",
+        ),
+    )
 
 
 def lab_tracker_describe_schema(entity_type: str | None = None) -> JsonObject:
-    """Describe Lab Tracker fields, allowed enum values, and status lifecycles."""
-    client = client_from_env()
-    try:
-        return client.describe_schema(entity_type=entity_type)
-    finally:
-        client.close()
+    """Describe fields/enums before create_* calls; use after context lookup."""
+    return _read_tool(
+        "lab_tracker_describe_schema",
+        lambda client: client.describe_schema(entity_type=entity_type),
+        hint=next_action(
+            "lab_tracker_get_decision_context",
+            "Resolve project and entity IDs before writing new records.",
+        ),
+    )
 
 
 def lab_tracker_list_projects(
@@ -39,12 +71,15 @@ def lab_tracker_list_projects(
     limit: int = 50,
     offset: int = 0,
 ) -> JsonObject:
-    """List Lab Tracker projects through the API."""
-    client = client_from_env()
-    try:
-        return client.list_projects(status=status, limit=limit, offset=offset)
-    finally:
-        client.close()
+    """List visible projects when scoping a follow-up Lab Tracker read."""
+    return _read_tool(
+        "lab_tracker_list_projects",
+        lambda client: client.list_projects(status=status, limit=limit, offset=offset),
+        hint=next_action(
+            "lab_tracker_list_goals",
+            "After choosing a project, inspect active goals or call decision context.",
+        ),
+    )
 
 
 def lab_tracker_list_questions(
@@ -58,10 +93,14 @@ def lab_tracker_list_questions(
     limit: int = 50,
     offset: int = 0,
 ) -> JsonObject:
-    """List/search questions; use parent or ancestor filters for hierarchy traversal."""
-    client = client_from_env()
-    try:
-        return client.list_questions(
+    """List/search questions when inspecting known project/question scope.
+
+    Use lab_tracker_get_decision_context first for research-facing decisions.
+    Parent and ancestor filters traverse the question hierarchy.
+    """
+    return _read_tool(
+        "lab_tracker_list_questions",
+        lambda client: client.list_questions(
             project_id=project_id,
             status=status,
             question_type=question_type,
@@ -71,9 +110,12 @@ def lab_tracker_list_questions(
             ancestor_question_id=ancestor_question_id,
             limit=limit,
             offset=offset,
-        )
-    finally:
-        client.close()
+        ),
+        hint=next_action(
+            "lab_tracker_get_decision_context",
+            "Load bounded graph context before using a question to plan analysis or writing.",
+        ),
+    )
 
 
 def lab_tracker_list_notes(
@@ -85,10 +127,10 @@ def lab_tracker_list_notes(
     limit: int = 50,
     offset: int = 0,
 ) -> JsonObject:
-    """List Lab Tracker notes through the API."""
-    client = client_from_env()
-    try:
-        return client.list_notes(
+    """List notes for known scope; use decision context first for research choices."""
+    return _read_tool(
+        "lab_tracker_list_notes",
+        lambda client: client.list_notes(
             project_id=project_id,
             status=status,
             created_by=created_by,
@@ -96,9 +138,12 @@ def lab_tracker_list_notes(
             target_entity_id=target_entity_id,
             limit=limit,
             offset=offset,
-        )
-    finally:
-        client.close()
+        ),
+        hint=next_action(
+            "lab_tracker_get_decision_context",
+            "Use notes as source context through decision context before writing outputs.",
+        ),
+    )
 
 
 def lab_tracker_search(
@@ -109,19 +154,22 @@ def lab_tracker_search(
     limit: int = 20,
     offset: int = 0,
 ) -> JsonObject:
-    """Search Lab Tracker questions and notes through the API."""
-    client = client_from_env()
-    try:
-        return client.search(
+    """Search questions and notes when the project or anchor IDs are not known."""
+    return _read_tool(
+        "lab_tracker_search",
+        lambda client: client.search(
             query,
             project_id=project_id,
             goal_id=goal_id,
             include=include,
             limit=limit,
             offset=offset,
-        )
-    finally:
-        client.close()
+        ),
+        hint=next_action(
+            "lab_tracker_get_decision_context",
+            "Turn search hits into bounded decision context before research-facing work.",
+        ),
+    )
 
 
 def lab_tracker_list_sessions(
@@ -131,18 +179,21 @@ def lab_tracker_list_sessions(
     limit: int = 50,
     offset: int = 0,
 ) -> JsonObject:
-    """List Lab Tracker sessions through the API."""
-    client = client_from_env()
-    try:
-        return client.list_sessions(
+    """List acquisition/experiment sessions for a known project scope."""
+    return _read_tool(
+        "lab_tracker_list_sessions",
+        lambda client: client.list_sessions(
             project_id=project_id,
             status=status,
             session_type=session_type,
             limit=limit,
             offset=offset,
-        )
-    finally:
-        client.close()
+        ),
+        hint=next_action(
+            "lab_tracker_list_datasets",
+            "After sessions, inspect datasets or load decision context for the task.",
+        ),
+    )
 
 
 def lab_tracker_list_datasets(
@@ -152,18 +203,21 @@ def lab_tracker_list_datasets(
     limit: int = 50,
     offset: int = 0,
 ) -> JsonObject:
-    """List Lab Tracker datasets through the API."""
-    client = client_from_env()
-    try:
-        return client.list_datasets(
+    """List datasets; create-order is dataset -> analysis -> claim -> visualization."""
+    return _read_tool(
+        "lab_tracker_list_datasets",
+        lambda client: client.list_datasets(
             project_id=project_id,
             status=status,
             created_by=created_by,
             limit=limit,
             offset=offset,
-        )
-    finally:
-        client.close()
+        ),
+        hint=next_action(
+            "lab_tracker_list_analyses",
+            "Find analyses that used candidate datasets before creating new analyses.",
+        ),
+    )
 
 
 def lab_tracker_list_analyses(
@@ -175,10 +229,10 @@ def lab_tracker_list_analyses(
     limit: int = 50,
     offset: int = 0,
 ) -> JsonObject:
-    """List Lab Tracker analyses through the API."""
-    client = client_from_env()
-    try:
-        return client.list_analyses(
+    """List analyses; use after datasets and before claims/visualizations."""
+    return _read_tool(
+        "lab_tracker_list_analyses",
+        lambda client: client.list_analyses(
             project_id=project_id,
             dataset_id=dataset_id,
             question_id=question_id,
@@ -186,9 +240,12 @@ def lab_tracker_list_analyses(
             created_by=created_by,
             limit=limit,
             offset=offset,
-        )
-    finally:
-        client.close()
+        ),
+        hint=next_action(
+            "lab_tracker_list_claims",
+            "Check claims supported by candidate analyses before writing new claims.",
+        ),
+    )
 
 
 def lab_tracker_list_claims(
@@ -200,10 +257,10 @@ def lab_tracker_list_claims(
     limit: int = 50,
     offset: int = 0,
 ) -> JsonObject:
-    """List Lab Tracker claims through the API."""
-    client = client_from_env()
-    try:
-        return client.list_claims(
+    """List claims for known evidence; claims come after datasets and analyses."""
+    return _read_tool(
+        "lab_tracker_list_claims",
+        lambda client: client.list_claims(
             project_id=project_id,
             status=status,
             dataset_id=dataset_id,
@@ -211,9 +268,12 @@ def lab_tracker_list_claims(
             created_by=created_by,
             limit=limit,
             offset=offset,
-        )
-    finally:
-        client.close()
+        ),
+        hint=next_action(
+            "lab_tracker_list_visualizations",
+            "Inspect visualizations tied to claims before creating new figures.",
+        ),
+    )
 
 
 def lab_tracker_list_visualizations(
@@ -223,18 +283,21 @@ def lab_tracker_list_visualizations(
     limit: int = 50,
     offset: int = 0,
 ) -> JsonObject:
-    """List Lab Tracker visualizations through the API."""
-    client = client_from_env()
-    try:
-        return client.list_visualizations(
+    """List visualizations after resolving related analyses or claims."""
+    return _read_tool(
+        "lab_tracker_list_visualizations",
+        lambda client: client.list_visualizations(
             project_id=project_id,
             analysis_id=analysis_id,
             claim_id=claim_id,
             limit=limit,
             offset=offset,
-        )
-    finally:
-        client.close()
+        ),
+        hint=next_action(
+            "lab_tracker_get_decision_context",
+            "Use returned figures as evidence context for plots, slides, or writing.",
+        ),
+    )
 
 
 def lab_tracker_list_goals(
@@ -244,27 +307,33 @@ def lab_tracker_list_goals(
     limit: int = 50,
     offset: int = 0,
 ) -> JsonObject:
-    """List Lab Tracker goals visible to the caller, optionally scoped to a project."""
-    client = client_from_env()
-    try:
-        return client.list_goals(
+    """List goals/outputs when deciding what research objective to advance."""
+    return _read_tool(
+        "lab_tracker_list_goals",
+        lambda client: client.list_goals(
             project_id=project_id,
             goal_type=goal_type,
             status=status,
             limit=limit,
             offset=offset,
-        )
-    finally:
-        client.close()
+        ),
+        hint=next_action(
+            "lab_tracker_next_questions",
+            "Rank open questions on active goals to choose an obvious next move.",
+        ),
+    )
 
 
 def lab_tracker_get_goal(goal_id: str) -> JsonObject:
-    """Get a Lab Tracker goal with its node links."""
-    client = client_from_env()
-    try:
-        return client.get_goal(goal_id)
-    finally:
-        client.close()
+    """Get one goal with node links before advancing or updating it."""
+    return _read_tool(
+        "lab_tracker_get_goal",
+        lambda client: client.get_goal(goal_id),
+        hint=next_action(
+            "lab_tracker_next_questions",
+            "Use goal links to rank open questions before choosing follow-up work.",
+        ),
+    )
 
 
 def lab_tracker_list_node_goals(
@@ -275,35 +344,44 @@ def lab_tracker_list_node_goals(
     offset: int = 0,
 ) -> JsonObject:
     """List goals linked to one project graph node."""
-    client = client_from_env()
-    try:
-        return client.list_node_goals(
+    return _read_tool(
+        "lab_tracker_list_node_goals",
+        lambda client: client.list_node_goals(
             project_id=project_id,
             entity_type=entity_type,
             entity_id=entity_id,
             limit=limit,
             offset=offset,
-        )
-    finally:
-        client.close()
+        ),
+        hint=next_action(
+            "lab_tracker_get_decision_context",
+            "Load decision context for the linked goal/node before research-facing work.",
+        ),
+    )
 
 
 def lab_tracker_get_dataset_provenance(dataset_id: str) -> JsonObject:
-    """Get dataset provenance JSON-LD through the API."""
-    client = client_from_env()
-    try:
-        return client.get_dataset_provenance(dataset_id)
-    finally:
-        client.close()
+    """Get dataset provenance JSON-LD before reusing evidence."""
+    return _read_tool(
+        "lab_tracker_get_dataset_provenance",
+        lambda client: client.get_dataset_provenance(dataset_id),
+        hint=next_action(
+            "lab_tracker_list_analyses",
+            "Find analyses derived from this dataset before creating new claims.",
+        ),
+    )
 
 
 def lab_tracker_get_analysis_provenance(analysis_id: str) -> JsonObject:
-    """Get analysis provenance JSON-LD through the API."""
-    client = client_from_env()
-    try:
-        return client.get_analysis_provenance(analysis_id)
-    finally:
-        client.close()
+    """Get analysis provenance JSON-LD before reusing derived evidence."""
+    return _read_tool(
+        "lab_tracker_get_analysis_provenance",
+        lambda client: client.get_analysis_provenance(analysis_id),
+        hint=next_action(
+            "lab_tracker_list_claims",
+            "Find claims supported by this analysis before writing new claims.",
+        ),
+    )
 
 
 def lab_tracker_get_decision_context(
@@ -317,16 +395,17 @@ def lab_tracker_get_decision_context(
     visualization_id: str | None = None,
     limit: int = 20,
 ) -> JsonObject:
-    """Call before research-facing read-then-write tasks.
+    """CALL THIS FIRST before research-facing decisions.
 
     Returns bounded graph context plus resolved project scope, anchor IDs,
     candidate entity IDs, evidence links, and guidance for subsequent create
-    calls. Allowed task_kind values: plot, analysis, slides, experiment_plan,
-    summary, research_writing.
+    calls. Use for what to plot, which analysis/control to run, figures,
+    summaries, slides, and manuscript/grant/abstract text. Allowed task_kind
+    values: plot, analysis, slides, experiment_plan, summary, research_writing.
     """
-    client = client_from_env()
-    try:
-        return client.get_decision_context(
+    return _read_tool(
+        "lab_tracker_get_decision_context",
+        lambda client: client.get_decision_context(
             task_kind=task_kind,
             query=query,
             project_id=project_id,
@@ -336,9 +415,32 @@ def lab_tracker_get_decision_context(
             claim_id=claim_id,
             visualization_id=visualization_id,
             limit=limit,
-        )
-    finally:
-        client.close()
+        ),
+        hint=next_action(
+            "lab_tracker_next_questions",
+            "If the user asks what to advance next, rank active-goal questions.",
+        ),
+    )
+
+
+def lab_tracker_next_questions(
+    project_id: str | None = None,
+    limit: int = 5,
+) -> JsonObject:
+    """Rank open active/staged questions on planned/in-progress goals.
+
+    Call this when the user asks what research thread to advance or when a
+    fresh session needs an obvious entry action. The ranking favors direct
+    goal-question links, active questions, and questions with hypotheses.
+    """
+    return _read_tool(
+        "lab_tracker_next_questions",
+        lambda client: client.next_questions(project_id=project_id, limit=limit),
+        hint=next_action(
+            "lab_tracker_get_decision_context",
+            "Load graph context for the selected ranked question.",
+        ),
+    )
 
 READ_TOOLS = (
     lab_tracker_health,
@@ -359,6 +461,7 @@ READ_TOOLS = (
     lab_tracker_get_dataset_provenance,
     lab_tracker_get_analysis_provenance,
     lab_tracker_get_decision_context,
+    lab_tracker_next_questions,
 )
 
 

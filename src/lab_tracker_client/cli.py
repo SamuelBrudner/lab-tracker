@@ -5,9 +5,11 @@ from __future__ import annotations
 import argparse
 import fnmatch
 import json
+import sys
 from pathlib import Path
 from typing import Any
 
+from lab_tracker.assistant_next_questions import is_research_facing_prompt
 from lab_tracker_client.client import (
     NOTE_STATUS_VALUES,
     EntityRef,
@@ -20,11 +22,16 @@ from lab_tracker_client.client import (
 def main(argv: list[str] | None = None) -> None:
     parser = _build_parser()
     args = parser.parse_args(argv)
-    client = LabTracker.from_env()
     try:
-        payload = args.func(client, args)
-    finally:
-        client.close()
+        client = LabTracker.from_env()
+        try:
+            payload = args.func(client, args)
+        finally:
+            client.close()
+    except Exception:
+        if getattr(args, "fail_silent", False):
+            return
+        raise
     if payload is not None:
         print(json.dumps(_jsonable(payload), indent=2))
 
@@ -44,6 +51,28 @@ def _build_parser() -> argparse.ArgumentParser:
     subcommands.add_parser("ids", help="Print lt_ids.json.").set_defaults(
         func=lambda _client, _args: ids()
     )
+
+    prime_parser = subcommands.add_parser(
+        "prime",
+        help="Emit a lightweight active-goal/open-question prime for agent hooks.",
+    )
+    prime_parser.add_argument("--project", help="Optional project UUID.")
+    prime_parser.add_argument("--limit", type=int, default=5)
+    prime_parser.add_argument(
+        "--if-research-facing",
+        action="store_true",
+        help="Read stdin and emit nothing unless the prompt is research-facing.",
+    )
+    prime_parser.add_argument(
+        "--fail-silent",
+        action="store_true",
+        help="Suppress API errors so prompt hooks never block a session.",
+    )
+    prime_parser.add_argument(
+        "--prompt",
+        help="Prompt text to classify instead of stdin; primarily for tests.",
+    )
+    prime_parser.set_defaults(func=_cmd_prime)
 
     note_parser = subcommands.add_parser("note", help="Idempotently upsert a text note.")
     note_parser.add_argument("--project", required=True, help="Project UUID.")
@@ -140,6 +169,15 @@ def _cmd_note(client: LabTracker, args: argparse.Namespace) -> Any:
 
 def _cmd_quick(client: LabTracker, args: argparse.Namespace) -> Any:
     return client.quick_capture(args.text, project_id=args.project, source=args.source)
+
+
+def _cmd_prime(client: LabTracker, args: argparse.Namespace) -> Any:
+    prompt = args.prompt
+    if prompt is None and args.if_research_facing:
+        prompt = sys.stdin.read()
+    if args.if_research_facing and not is_research_facing_prompt(prompt or ""):
+        return None
+    return client.next_questions(project_id=args.project, limit=args.limit)
 
 
 def _cmd_import_folder(client: LabTracker, args: argparse.Namespace) -> Any:

@@ -25,9 +25,10 @@ def test_fastmcp_registers_lab_tracker_tools() -> None:
     assert "lab_tracker_describe_schema" in names
     assert "lab_tracker_search" in names
     assert "lab_tracker_get_decision_context" in names
-    assert "read-then-write tasks" in (
+    assert "CALL THIS FIRST" in (
         tools_by_name["lab_tracker_get_decision_context"].description or ""
     )
+    assert "lab_tracker_next_questions" in names
     assert "lab_tracker_list_datasets" in names
     assert "lab_tracker_list_analyses" in names
     assert "lab_tracker_list_claims" in names
@@ -45,6 +46,11 @@ def test_fastmcp_registers_lab_tracker_tools() -> None:
     assert "lab_tracker_link_node_to_goal" in names
     assert "lab_tracker_upload_visualization_file" in names
     assert "lab_tracker_record_evidence_bundle" in names
+    assert mcp_server.server.instructions is not None
+    assert "CALL THIS FIRST before research-facing decisions" in (
+        mcp_server.server.instructions
+    )
+    assert "what to plot" in mcp_server.server.instructions
 
 
 def test_fastmcp_registers_agent_consultation_policy_resource() -> None:
@@ -287,8 +293,132 @@ def test_decision_context_returns_unavailable_when_api_read_fails() -> None:
     finally:
         client.close()
 
-    assert payload["error"]["code"] == "unavailable"
+    assert payload["error"]["code"] == "lab_tracker_unavailable"
+    assert payload["error"]["message"].startswith("Lab Tracker unavailable")
+    assert payload["next_action"]["action"] == "proceed_without_graph_context"
     assert "offline" in payload["error"]["detail"]
+
+
+def test_read_tool_returns_unavailable_contract_when_api_is_down(monkeypatch) -> None:
+    from lab_tracker.mcp_tools import read as read_tools
+
+    class BrokenClient:
+        def list_projects(self, **_kwargs):
+            raise mcp_server.LabTrackerAPIError("HTTP 502 bad gateway")
+
+        def close(self) -> None:
+            return None
+
+    monkeypatch.setattr(read_tools, "client_from_env", lambda: BrokenClient())
+
+    payload = read_tools.lab_tracker_list_projects()
+
+    assert payload["error"]["code"] == "lab_tracker_unavailable"
+    assert payload["error"]["operation"] == "lab_tracker_list_projects"
+    assert payload["data"] is None
+    assert payload["next_action"]["action"] == "proceed_without_graph_context"
+
+
+def test_next_questions_ranks_goal_linked_active_questions() -> None:
+    requests: list[tuple[str, dict[str, str]]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append((request.url.path, dict(request.url.params.multi_items())))
+        if request.url.path == "/goals":
+            status = request.url.params.get("status")
+            if status == "planned":
+                return _json_response(
+                    200,
+                    {
+                        "data": [
+                            {
+                                "goal_id": "goal-1",
+                                "project_id": "project-1",
+                                "title": "Submit odor paper",
+                                "status": "planned",
+                                "links": [
+                                    {
+                                        "entity_type": "question",
+                                        "entity_id": "question-1",
+                                        "link_status": "committed",
+                                    }
+                                ],
+                            }
+                        ],
+                        "meta": {"total": 1},
+                    },
+                )
+            return _json_response(200, {"data": [], "meta": {"total": 0}})
+        if request.url.path == "/questions":
+            if request.url.params.get("status") == "active":
+                return _json_response(
+                    200,
+                    {
+                        "data": [
+                            {
+                                "question_id": "question-1",
+                                "project_id": "project-1",
+                                "text": "Which control supports the odor claim?",
+                                "status": "active",
+                                "hypothesis": "The solvent control is clean.",
+                            },
+                            {
+                                "question_id": "question-2",
+                                "project_id": "project-1",
+                                "text": "Unlinked active question",
+                                "status": "active",
+                            },
+                        ],
+                        "meta": {"total": 2},
+                    },
+                )
+            return _json_response(200, {"data": [], "meta": {"total": 0}})
+        if request.url.path == "/claims":
+            return _json_response(200, {"data": [], "meta": {"total": 0}})
+        return _json_response(404, {"error": {"message": "not found"}})
+
+    client = mcp_server.LabTrackerAPIClient(
+        mcp_server.MCPSettings(base_url="http://testserver"),
+        transport=httpx.MockTransport(handler),
+    )
+
+    try:
+        payload = client.next_questions(limit=2)
+    finally:
+        client.close()
+
+    assert payload["data"][0]["question"]["question_id"] == "question-1"
+    assert payload["data"][0]["score"] > payload["data"][1]["score"]
+    assert payload["next_action"]["tool"] == "lab_tracker_get_decision_context"
+    assert payload["meta"]["ranking"].startswith("direct goal-question links")
+    assert [path for path, _params in requests] == [
+        "/goals",
+        "/goals",
+        "/questions",
+        "/questions",
+        "/claims",
+    ]
+
+
+def test_write_tool_appends_structured_next_action(monkeypatch) -> None:
+    from lab_tracker.mcp_tools import write as write_tools
+
+    class FakeClient:
+        def create_dataset(self, **_kwargs):
+            return {"data": {"dataset_id": "dataset-1"}}
+
+        def close(self) -> None:
+            return None
+
+    monkeypatch.setattr(write_tools, "client_from_env", lambda: FakeClient())
+
+    payload = write_tools.lab_tracker_create_dataset(
+        project_id="project-1",
+        primary_question_id="question-1",
+    )
+
+    assert payload["data"]["dataset_id"] == "dataset-1"
+    assert payload["next_action"]["tool"] == "lab_tracker_create_analysis"
 
 
 def test_client_retries_once_after_expired_token() -> None:

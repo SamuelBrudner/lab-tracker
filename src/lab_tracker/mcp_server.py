@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from mcp.server.fastmcp import FastMCP
 
+from lab_tracker.decision_context_constants import MCP_SERVER_INSTRUCTIONS
 from lab_tracker.mcp_api_client import (
     DEFAULT_BASE_URL,
     DEFAULT_TIMEOUT_SECONDS,
@@ -36,6 +37,7 @@ from lab_tracker.mcp_tools.read import (
     lab_tracker_list_questions,
     lab_tracker_list_sessions,
     lab_tracker_list_visualizations,
+    lab_tracker_next_questions,
     lab_tracker_readiness,
     lab_tracker_search,
 )
@@ -61,7 +63,7 @@ from lab_tracker.mcp_tools.write import (
     lab_tracker_upload_visualization_file,
 )
 
-server = FastMCP(SERVER_NAME)
+server = FastMCP(SERVER_NAME, instructions=MCP_SERVER_INSTRUCTIONS)
 register_read_tools(server)
 register_write_tools(server)
 register_resources(server)
@@ -78,6 +80,7 @@ __all__ = [
     "LabTrackerAPIClient",
     "LabTrackerAPIError",
     "MCPSettings",
+    "MCP_SERVER_INSTRUCTIONS",
     "SERVER_NAME",
     "client_from_env",
     "lab_tracker_agent_consultation_policy",
@@ -106,6 +109,7 @@ __all__ = [
     "lab_tracker_list_questions",
     "lab_tracker_list_sessions",
     "lab_tracker_list_visualizations",
+    "lab_tracker_next_questions",
     "lab_tracker_quickstart",
     "lab_tracker_readiness",
     "lab_tracker_link_node_to_goal",

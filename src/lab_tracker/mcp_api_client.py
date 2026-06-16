@@ -10,6 +10,11 @@ from typing import Any
 
 import httpx
 
+from lab_tracker.assistant_next_questions import (
+    OPEN_GOAL_STATUSES,
+    OPEN_QUESTION_STATUSES,
+    build_next_questions_payload,
+)
 from lab_tracker.models import (
     AnalysisStatus,
     ClaimStatus,
@@ -27,6 +32,8 @@ JsonObject = dict[str, Any]
 SERVER_NAME = "lab-tracker-mcp"
 DEFAULT_BASE_URL = "http://127.0.0.1:8000"
 DEFAULT_TIMEOUT_SECONDS = 10.0
+UNAVAILABLE_CODE = "lab_tracker_unavailable"
+UNAVAILABLE_MESSAGE = "Lab Tracker unavailable - proceeding without graph context."
 NOTE_STATUS_VALUES = tuple(status.value for status in NoteStatus)
 NOTE_STATUS_TEXT = ", ".join(NOTE_STATUS_VALUES)
 QUESTION_STATUS_VALUES = tuple(status.value for status in QuestionStatus)
@@ -368,11 +375,38 @@ class LabTrackerAPIClient:
                 },
             )
         except (LabTrackerAPIError, httpx.HTTPError) as exc:
-            return _decision_error(
-                "unavailable",
-                "Lab Tracker decision context is unavailable.",
+            return lab_tracker_unavailable(
+                "lab_tracker_get_decision_context",
                 detail=str(exc),
             )
+
+    def next_questions(
+        self,
+        *,
+        project_id: str | None = None,
+        limit: int = 5,
+    ) -> JsonObject:
+        goals: list[JsonObject] = []
+        for status in OPEN_GOAL_STATUSES:
+            payload = self.list_goals(project_id=project_id, status=status, limit=200)
+            goals.extend(_payload_items(payload))
+
+        project_ids = _project_ids_for_next_question_lookup(goals, project_id)
+        questions: list[JsonObject] = []
+        claims: list[JsonObject] = []
+        for lookup_project_id in project_ids:
+            for status in OPEN_QUESTION_STATUSES:
+                payload = self.list_questions(
+                    project_id=lookup_project_id,
+                    status=status,
+                    limit=200,
+                )
+                questions.extend(_payload_items(payload))
+            claims.extend(
+                _payload_items(self.list_claims(project_id=lookup_project_id, limit=200))
+            )
+
+        return build_next_questions_payload(goals, questions, claims, limit=limit)
 
     def create_project(
         self,
@@ -868,10 +902,49 @@ def _validate_status(
     return cleaned
 
 
-def _decision_error(code: str, message: str, **metadata: object) -> JsonObject:
-    error: JsonObject = {"code": code, "message": message}
+def lab_tracker_unavailable(operation: str, **metadata: object) -> JsonObject:
+    error: JsonObject = {
+        "code": UNAVAILABLE_CODE,
+        "message": UNAVAILABLE_MESSAGE,
+        "operation": operation,
+    }
     error.update(metadata)
-    return {"error": error}
+    return {
+        "error": error,
+        "data": None,
+        "next_action": {
+            "action": "proceed_without_graph_context",
+            "tool": None,
+            "arguments": {},
+            "reason": (
+                "State that Lab Tracker is unavailable, then continue without graph "
+                "context instead of retrying indefinitely."
+            ),
+        },
+    }
+
+
+def _payload_items(payload: JsonObject) -> list[JsonObject]:
+    data = payload.get("data")
+    if not isinstance(data, list):
+        raise LabTrackerAPIError("Lab Tracker API response did not include list data.")
+    return [item for item in data if isinstance(item, dict)]
+
+
+def _project_ids_for_next_question_lookup(
+    goals: list[JsonObject],
+    project_id: str | None,
+) -> list[str | None]:
+    if project_id is not None:
+        return [project_id]
+    goal_project_ids = sorted(
+        {
+            str(goal["project_id"])
+            for goal in goals
+            if goal.get("project_id") is not None
+        }
+    )
+    return goal_project_ids or [None]
 
 
 def _response_json(response: httpx.Response) -> JsonObject:

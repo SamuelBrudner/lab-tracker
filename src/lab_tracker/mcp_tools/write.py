@@ -13,6 +13,7 @@ from lab_tracker.mcp_api_client import (
     client_from_env,
 )
 from lab_tracker.mcp_evidence_bundle import record_evidence_bundle
+from lab_tracker.mcp_tools.hints import next_action, with_next_action
 
 
 def lab_tracker_create_project(
@@ -20,10 +21,16 @@ def lab_tracker_create_project(
     description: str | None = None,
     status: str | None = None,
 ) -> JsonObject:
-    """Create a Lab Tracker project through the API."""
+    """Create a project only when the user explicitly asks for a new scope."""
     client = client_from_env()
     try:
-        return client.create_project(name=name, description=description, status=status)
+        return with_next_action(
+            client.create_project(name=name, description=description, status=status),
+            next_action(
+                "lab_tracker_create_goal",
+                "Create or select the goal/output this project should advance.",
+            ),
+        )
     finally:
         client.close()
 
@@ -36,16 +43,22 @@ def lab_tracker_create_question(
     status: str | None = None,
     parent_question_ids: list[str] | None = None,
 ) -> JsonObject:
-    """Create a Lab Tracker question through the API."""
+    """Create a question after project/goal scope is known."""
     client = client_from_env()
     try:
-        return client.create_question(
-            project_id=project_id,
-            text=text,
-            question_type=question_type,
-            hypothesis=hypothesis,
-            status=status,
-            parent_question_ids=parent_question_ids,
+        return with_next_action(
+            client.create_question(
+                project_id=project_id,
+                text=text,
+                question_type=question_type,
+                hypothesis=hypothesis,
+                status=status,
+                parent_question_ids=parent_question_ids,
+            ),
+            next_action(
+                "lab_tracker_link_node_to_goal",
+                "Link important questions to the goal they advance.",
+            ),
         )
     finally:
         client.close()
@@ -70,16 +83,22 @@ def lab_tracker_refactor_question(
         )
     client = client_from_env()
     try:
-        return client.refactor_question(
-            question_id=question_id,
-            replacement_text=replacement_text,
-            replacement_question_type=replacement_question_type,
-            replacement_status=replacement_status,
-            replacement_hypothesis=replacement_hypothesis,
-            replacement_parent_question_ids=replacement_parent_question_ids,
-            reason=reason,
-            child_question_ids_to_reparent=child_question_ids_to_reparent,
-            note_ids_to_retarget=note_ids_to_retarget,
+        return with_next_action(
+            client.refactor_question(
+                question_id=question_id,
+                replacement_text=replacement_text,
+                replacement_question_type=replacement_question_type,
+                replacement_status=replacement_status,
+                replacement_hypothesis=replacement_hypothesis,
+                replacement_parent_question_ids=replacement_parent_question_ids,
+                reason=reason,
+                child_question_ids_to_reparent=child_question_ids_to_reparent,
+                note_ids_to_retarget=note_ids_to_retarget,
+            ),
+            next_action(
+                "lab_tracker_get_decision_context",
+                "Reload context for the replacement question before follow-up writes.",
+            ),
         )
     finally:
         client.close()
@@ -110,16 +129,22 @@ def lab_tracker_create_note(
     metadata: dict[str, NoteMetadataScalar] | None = None,
     status: str | None = None,
 ) -> JsonObject:
-    """Create a text note, optionally targeting graph entities."""
+    """Create a text note when the user asks to record source context."""
     client = client_from_env()
     try:
-        return client.create_note(
-            project_id=project_id,
-            raw_content=raw_content,
-            transcribed_text=transcribed_text,
-            targets=targets,
-            metadata=metadata,
-            status=status,
+        return with_next_action(
+            client.create_note(
+                project_id=project_id,
+                raw_content=raw_content,
+                transcribed_text=transcribed_text,
+                targets=targets,
+                metadata=metadata,
+                status=status,
+            ),
+            next_action(
+                "lab_tracker_create_question",
+                "If the note raises a durable research question, create or link it next.",
+            ),
         )
     finally:
         client.close()
@@ -133,16 +158,22 @@ def lab_tracker_create_dataset(
     commit_hash: str | None = None,
     status: str | None = "staged",
 ) -> JsonObject:
-    """Create a Lab Tracker dataset through the API."""
+    """Create a dataset before analyses, claims, and visualizations."""
     client = client_from_env()
     try:
-        return client.create_dataset(
-            project_id=project_id,
-            primary_question_id=primary_question_id,
-            secondary_question_ids=secondary_question_ids,
-            commit_manifest=commit_manifest,
-            commit_hash=commit_hash,
-            status=status,
+        return with_next_action(
+            client.create_dataset(
+                project_id=project_id,
+                primary_question_id=primary_question_id,
+                secondary_question_ids=secondary_question_ids,
+                commit_manifest=commit_manifest,
+                commit_hash=commit_hash,
+                status=status,
+            ),
+            next_action(
+                "lab_tracker_create_analysis",
+                "Record the analysis that uses this dataset before creating claims.",
+            ),
         )
     finally:
         client.close()
@@ -156,16 +187,22 @@ def lab_tracker_create_analysis(
     environment_hash: str | None = None,
     status: str | None = "staged",
 ) -> JsonObject:
-    """Create a Lab Tracker analysis through the API."""
+    """Create an analysis after datasets and before claims or figures."""
     client = client_from_env()
     try:
-        return client.create_analysis(
-            project_id=project_id,
-            dataset_ids=dataset_ids,
-            method_hash=method_hash,
-            code_version=code_version,
-            environment_hash=environment_hash,
-            status=status,
+        return with_next_action(
+            client.create_analysis(
+                project_id=project_id,
+                dataset_ids=dataset_ids,
+                method_hash=method_hash,
+                code_version=code_version,
+                environment_hash=environment_hash,
+                status=status,
+            ),
+            next_action(
+                "lab_tracker_create_claim",
+                "Summarize what this analysis supports or refutes as a claim.",
+            ),
         )
     finally:
         client.close()
@@ -180,17 +217,23 @@ def lab_tracker_create_claim(
     supported_by_analysis_ids: list[str] | None = None,
     answers_question_ids: list[str] | None = None,
 ) -> JsonObject:
-    """Create a Lab Tracker claim through the API."""
+    """Create a claim after linking supporting datasets or analyses."""
     client = client_from_env()
     try:
-        return client.create_claim(
-            project_id=project_id,
-            statement=statement,
-            confidence=confidence,
-            status=status,
-            supported_by_dataset_ids=supported_by_dataset_ids,
-            supported_by_analysis_ids=supported_by_analysis_ids,
-            answers_question_ids=answers_question_ids,
+        return with_next_action(
+            client.create_claim(
+                project_id=project_id,
+                statement=statement,
+                confidence=confidence,
+                status=status,
+                supported_by_dataset_ids=supported_by_dataset_ids,
+                supported_by_analysis_ids=supported_by_analysis_ids,
+                answers_question_ids=answers_question_ids,
+            ),
+            next_action(
+                "lab_tracker_create_visualization",
+                "If a figure communicates this claim, register or upload it next.",
+            ),
         )
     finally:
         client.close()
@@ -203,15 +246,21 @@ def lab_tracker_create_visualization(
     caption: str | None = None,
     related_claim_ids: list[str] | None = None,
 ) -> JsonObject:
-    """Create a Lab Tracker visualization through the API."""
+    """Register a visualization after its analysis and related claims exist."""
     client = client_from_env()
     try:
-        return client.create_visualization(
-            analysis_id=analysis_id,
-            viz_type=viz_type,
-            file_path=file_path,
-            caption=caption,
-            related_claim_ids=related_claim_ids,
+        return with_next_action(
+            client.create_visualization(
+                analysis_id=analysis_id,
+                viz_type=viz_type,
+                file_path=file_path,
+                caption=caption,
+                related_claim_ids=related_claim_ids,
+            ),
+            next_action(
+                "lab_tracker_upload_visualization_file",
+                "Upload the local figure asset if file_path is not already managed storage.",
+            ),
         )
     finally:
         client.close()
@@ -227,18 +276,24 @@ def lab_tracker_create_goal(
     external_ref: str | None = None,
     attributes: JsonObject | None = None,
 ) -> JsonObject:
-    """Create a Lab Tracker goal/output for a project."""
+    """Create a goal/output before linking questions, datasets, or claims."""
     client = client_from_env()
     try:
-        return client.create_goal(
-            project_id=project_id,
-            goal_type=goal_type,
-            title=title,
-            summary=summary,
-            status=status,
-            target_date=target_date,
-            external_ref=external_ref,
-            attributes=attributes,
+        return with_next_action(
+            client.create_goal(
+                project_id=project_id,
+                goal_type=goal_type,
+                title=title,
+                summary=summary,
+                status=status,
+                target_date=target_date,
+                external_ref=external_ref,
+                attributes=attributes,
+            ),
+            next_action(
+                "lab_tracker_link_node_to_goal",
+                "Link existing questions or evidence nodes that advance this goal.",
+            ),
         )
     finally:
         client.close()
@@ -257,15 +312,21 @@ def lab_tracker_update_goal(
     """Update a Lab Tracker goal/output."""
     client = client_from_env()
     try:
-        return client.update_goal(
-            goal_id=goal_id,
-            goal_type=goal_type,
-            title=title,
-            summary=summary,
-            status=status,
-            target_date=target_date,
-            external_ref=external_ref,
-            attributes=attributes,
+        return with_next_action(
+            client.update_goal(
+                goal_id=goal_id,
+                goal_type=goal_type,
+                title=title,
+                summary=summary,
+                status=status,
+                target_date=target_date,
+                external_ref=external_ref,
+                attributes=attributes,
+            ),
+            next_action(
+                "lab_tracker_next_questions",
+                "After changing goal state, re-rank open questions on active goals.",
+            ),
         )
     finally:
         client.close()
@@ -282,13 +343,19 @@ def lab_tracker_link_node_to_goal(
     """Tag an existing graph node in relation to a goal/output."""
     client = client_from_env()
     try:
-        return client.link_node_to_goal(
-            goal_id=goal_id,
-            entity_type=entity_type,
-            entity_id=entity_id,
-            relation=relation,
-            link_status=link_status,
-            slot=slot,
+        return with_next_action(
+            client.link_node_to_goal(
+                goal_id=goal_id,
+                entity_type=entity_type,
+                entity_id=entity_id,
+                relation=relation,
+                link_status=link_status,
+                slot=slot,
+            ),
+            next_action(
+                "lab_tracker_next_questions",
+                "Use goal links to rank the next open questions.",
+            ),
         )
     finally:
         client.close()
@@ -302,10 +369,16 @@ def lab_tracker_upload_visualization_file(
     """Upload a local file into managed storage for a visualization node."""
     client = client_from_env()
     try:
-        return client.upload_visualization_file(
-            viz_id=viz_id,
-            file_path=file_path,
-            content_type=content_type,
+        return with_next_action(
+            client.upload_visualization_file(
+                viz_id=viz_id,
+                file_path=file_path,
+                content_type=content_type,
+            ),
+            next_action(
+                "lab_tracker_get_decision_context",
+                "Reload context before using this visualization in writing or slides.",
+            ),
         )
     finally:
         client.close()
@@ -330,17 +403,23 @@ def lab_tracker_record_evidence_bundle(
     """
     client = client_from_env()
     try:
-        return record_evidence_bundle(
-            client,
-            project_id=project_id,
-            primary_question_id=primary_question_id,
-            dataset=dataset,
-            analysis=analysis,
-            claim=claim,
-            visualization=visualization,
-            source_note=source_note,
-            dry_run=dry_run,
-            idempotency_key=idempotency_key,
+        return with_next_action(
+            record_evidence_bundle(
+                client,
+                project_id=project_id,
+                primary_question_id=primary_question_id,
+                dataset=dataset,
+                analysis=analysis,
+                claim=claim,
+                visualization=visualization,
+                source_note=source_note,
+                dry_run=dry_run,
+                idempotency_key=idempotency_key,
+            ),
+            next_action(
+                "lab_tracker_get_decision_context",
+                "Reload decision context after recording the evidence bundle.",
+            ),
         )
     finally:
         client.close()

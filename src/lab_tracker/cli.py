@@ -14,6 +14,11 @@ from textwrap import dedent
 from alembic.config import Config
 
 from alembic import command
+from lab_tracker.decision_context_constants import (
+    CLAUDE_BLOCK_BEGIN,
+    CLAUDE_BLOCK_END,
+    managed_claude_block,
+)
 
 
 @dataclass
@@ -41,12 +46,14 @@ def init_consumer_repo(
     result = InitResult()
     files = {
         root / ".mcp.json": _mcp_json(),
+        root / ".claude" / "settings.json": _claude_settings_json(),
         root / "scripts" / "lt.py": _lt_shim(),
         root / "AGENTS.lt.md": _agents_fragment(),
         root / "lt_ids.json": _ids_placeholder(project_name),
     }
     for path, content in files.items():
         _write_scaffold_file(path, content, force=force, result=result)
+    _write_managed_claude_block(root / "CLAUDE.md", result=result)
     return result
 
 
@@ -173,6 +180,31 @@ def _write_scaffold_file(
         result.created.append(path)
 
 
+def _write_managed_claude_block(path: Path, *, result: InitResult) -> None:
+    block = managed_claude_block()
+    if path.exists():
+        existing = path.read_text(encoding="utf-8")
+        content = _upsert_managed_block(existing, block)
+        if content == existing:
+            result.skipped.append(path)
+            return
+        path.write_text(content, encoding="utf-8")
+        result.overwritten.append(path)
+        return
+    path.write_text(block, encoding="utf-8")
+    result.created.append(path)
+
+
+def _upsert_managed_block(existing: str, block: str) -> str:
+    if CLAUDE_BLOCK_BEGIN in existing and CLAUDE_BLOCK_END in existing:
+        prefix, rest = existing.split(CLAUDE_BLOCK_BEGIN, 1)
+        _old_block, suffix = rest.split(CLAUDE_BLOCK_END, 1)
+        return f"{prefix.rstrip()}\n\n{block}{suffix.lstrip()}"
+    if existing.strip():
+        return f"{existing.rstrip()}\n\n{block}"
+    return block
+
+
 def _mcp_json() -> str:
     payload = {
         "mcpServers": {
@@ -182,6 +214,27 @@ def _mcp_json() -> str:
                     "LAB_TRACKER_MCP_BASE_URL": "http://127.0.0.1:8000",
                 },
             }
+        }
+    }
+    return json.dumps(payload, indent=2) + "\n"
+
+
+def _claude_settings_json() -> str:
+    payload = {
+        "hooks": {
+            "UserPromptSubmit": [
+                {
+                    "matcher": "",
+                    "hooks": [
+                        {
+                            "type": "command",
+                            "command": (
+                                "lt prime --if-research-facing --fail-silent --limit 5"
+                            ),
+                        }
+                    ],
+                }
+            ]
         }
     }
     return json.dumps(payload, indent=2) + "\n"
