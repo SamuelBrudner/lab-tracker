@@ -348,6 +348,31 @@ class LabTrackerAPIClient:
     def get_analysis_provenance(self, analysis_id: str) -> JsonObject:
         return self._request("GET", f"/analyses/{analysis_id}/provenance")
 
+    def get_claim_provenance(self, claim_id: str) -> JsonObject:
+        return self._request("GET", f"/claims/{claim_id}/provenance")
+
+    def export_goal_artifact(
+        self,
+        goal_id: str,
+        *,
+        layer: str | None = None,
+    ) -> JsonObject:
+        path = f"/goals/{goal_id}/ara-artifact"
+        if layer:
+            path = f"{path}/{layer}"
+        return self._request("GET", path)
+
+    def export_question_subtree(
+        self,
+        question_id: str,
+        *,
+        layer: str | None = None,
+    ) -> JsonObject:
+        path = f"/questions/{question_id}/ara-artifact"
+        if layer:
+            path = f"{path}/{layer}"
+        return self._request("GET", path)
+
     def get_decision_context(
         self,
         *,

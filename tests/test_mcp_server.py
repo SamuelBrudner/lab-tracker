@@ -37,6 +37,9 @@ def test_fastmcp_registers_lab_tracker_tools() -> None:
     assert "lab_tracker_get_goal" in names
     assert "lab_tracker_list_node_goals" in names
     assert "lab_tracker_publication_readiness" in names
+    assert "lab_tracker_get_claim_provenance" in names
+    assert "lab_tracker_export_goal_artifact" in names
+    assert "lab_tracker_export_question_subtree" in names
     assert "lab_tracker_create_note" in names
     assert "lab_tracker_create_dataset" in names
     assert "lab_tracker_create_analysis" in names
@@ -151,6 +154,12 @@ def test_client_low_level_read_tools_call_retained_routes() -> None:
             return _json_response(200, {"data": {"@id": "dataset-1"}})
         if request.url.path == "/analyses/analysis-1/provenance":
             return _json_response(200, {"data": {"@id": "analysis-1"}})
+        if request.url.path == "/claims/claim-1/provenance":
+            return _json_response(200, {"data": {"@id": "claim-1"}})
+        if request.url.path == "/goals/goal-1/ara-artifact/src":
+            return _json_response(200, {"data": {"@id": "goal-src"}})
+        if request.url.path == "/questions/question-1/ara-artifact":
+            return _json_response(200, {"data": {"@id": "question-artifact"}})
         if request.url.path == "/projects/project-1/publication-readiness":
             return _json_response(
                 200,
@@ -193,6 +202,13 @@ def test_client_low_level_read_tools_call_retained_routes() -> None:
         assert client.get_analysis_provenance("analysis-1")["data"]["@id"] == (
             "analysis-1"
         )
+        assert client.get_claim_provenance("claim-1")["data"]["@id"] == "claim-1"
+        assert client.export_goal_artifact("goal-1", layer="src")["data"]["@id"] == (
+            "goal-src"
+        )
+        assert client.export_question_subtree("question-1")["data"]["@id"] == (
+            "question-artifact"
+        )
         assert client.publication_readiness("project-1")["data"]["seal_level"] == "ara_l1"
     finally:
         client.close()
@@ -205,6 +221,9 @@ def test_client_low_level_read_tools_call_retained_routes() -> None:
         "/visualizations",
         "/datasets/dataset-1/provenance",
         "/analyses/analysis-1/provenance",
+        "/claims/claim-1/provenance",
+        "/goals/goal-1/ara-artifact/src",
+        "/questions/question-1/ara-artifact",
         "/projects/project-1/publication-readiness",
     ]
 

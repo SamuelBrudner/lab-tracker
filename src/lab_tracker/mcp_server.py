@@ -22,7 +22,10 @@ from lab_tracker.mcp_tools import (
 )
 from lab_tracker.mcp_tools.read import (
     lab_tracker_describe_schema,
+    lab_tracker_export_goal_artifact,
+    lab_tracker_export_question_subtree,
     lab_tracker_get_analysis_provenance,
+    lab_tracker_get_claim_provenance,
     lab_tracker_get_dataset_provenance,
     lab_tracker_get_decision_context,
     lab_tracker_get_goal,
@@ -97,7 +100,10 @@ __all__ = [
     "lab_tracker_create_question",
     "lab_tracker_create_visualization",
     "lab_tracker_describe_schema",
+    "lab_tracker_export_goal_artifact",
+    "lab_tracker_export_question_subtree",
     "lab_tracker_get_analysis_provenance",
+    "lab_tracker_get_claim_provenance",
     "lab_tracker_get_dataset_provenance",
     "lab_tracker_get_decision_context",
     "lab_tracker_get_goal",

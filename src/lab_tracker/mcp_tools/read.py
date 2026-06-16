@@ -416,6 +416,48 @@ def lab_tracker_get_analysis_provenance(analysis_id: str) -> JsonObject:
     )
 
 
+def lab_tracker_get_claim_provenance(claim_id: str) -> JsonObject:
+    """Get claim-centric provenance JSON-LD with analysis/dataset/question ancestry."""
+    return _read_tool(
+        "lab_tracker_get_claim_provenance",
+        lambda client: client.get_claim_provenance(claim_id),
+        hint=next_action(
+            "lab_tracker_export_goal_artifact",
+            "Use the surrounding goal artifact when compiling publication evidence.",
+        ),
+    )
+
+
+def lab_tracker_export_goal_artifact(
+    goal_id: str,
+    layer: str | None = None,
+) -> JsonObject:
+    """Compile a goal into an Ara artifact; pass layer logic/src/trace/evidence for one layer."""
+    return _read_tool(
+        "lab_tracker_export_goal_artifact",
+        lambda client: client.export_goal_artifact(goal_id, layer=layer),
+        hint=next_action(
+            "lab_tracker_get_claim_provenance",
+            "Inspect claim provenance when a layer binding needs ancestry details.",
+        ),
+    )
+
+
+def lab_tracker_export_question_subtree(
+    question_id: str,
+    layer: str | None = None,
+) -> JsonObject:
+    """Compile a question subtree into layered Ara JSON-LD."""
+    return _read_tool(
+        "lab_tracker_export_question_subtree",
+        lambda client: client.export_question_subtree(question_id, layer=layer),
+        hint=next_action(
+            "lab_tracker_get_claim_provenance",
+            "Inspect claim provenance for any claims in the compiled subtree.",
+        ),
+    )
+
+
 def lab_tracker_get_decision_context(
     task_kind: str,
     query: str,
@@ -494,6 +536,9 @@ READ_TOOLS = (
     lab_tracker_list_node_goals,
     lab_tracker_get_dataset_provenance,
     lab_tracker_get_analysis_provenance,
+    lab_tracker_get_claim_provenance,
+    lab_tracker_export_goal_artifact,
+    lab_tracker_export_question_subtree,
     lab_tracker_get_decision_context,
     lab_tracker_next_questions,
 )

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 from urllib.parse import quote
@@ -16,8 +17,13 @@ from lab_tracker.models import (
     DatasetCommitManifest,
     DatasetFile,
     EntityOrigin,
+    EntityRef,
+    EntityType,
+    EntityVersion,
     ExternalArtifactKind,
     ExternalArtifactReference,
+    Goal,
+    GoalLink,
     Note,
     Question,
     QuestionLink,
@@ -55,6 +61,7 @@ def _context(base_url: str) -> dict[str, object]:
         "prov": "http://www.w3.org/ns/prov#",
         "lab": _terms_iri(base_url),
         "actedOnBehalfOf": {"@id": "prov:actedOnBehalfOf", "@type": "@id"},
+        "analysis": {"@id": "lab:analysis", "@type": "@id"},
         "answersQuestion": {"@id": "lab:answersQuestion", "@type": "@id"},
         "caption": "lab:caption",
         "checksum": "lab:checksum",
@@ -65,6 +72,7 @@ def _context(base_url: str) -> dict[str, object]:
         "contentUrl": {"@id": "lab:contentUrl", "@type": "@id"},
         "contentType": "lab:contentType",
         "createdAt": "lab:createdAt",
+        "crossLayerBinding": {"@id": "lab:crossLayerBinding", "@type": "@id"},
         "aiModel": "lab:aiModel",
         "aiPromptVersion": "lab:aiPromptVersion",
         "aiProvider": "lab:aiProvider",
@@ -79,6 +87,7 @@ def _context(base_url: str) -> dict[str, object]:
         "entityId": "lab:entityId",
         "entityType": "lab:entityType",
         "executedAt": "lab:executedAt",
+        "evidence": {"@id": "lab:evidence", "@type": "@id"},
         "externalArtifact": {"@id": "lab:externalArtifact", "@type": "@id"},
         "externalContentHash": "lab:externalContentHash",
         "externalMetadata": {"@id": "lab:externalMetadata", "@type": "@json"},
@@ -88,6 +97,10 @@ def _context(base_url: str) -> dict[str, object]:
         "filePath": "lab:filePath",
         "filename": "lab:filename",
         "groundingDataset": {"@id": "lab:groundingDataset", "@type": "@id"},
+        "generatedAt": "lab:generatedAt",
+        "goalLink": {"@id": "lab:goalLink", "@type": "@id"},
+        "layer": "lab:layer",
+        "layers": {"@id": "lab:layers", "@type": "@json"},
         "metadata": {"@id": "lab:metadata", "@type": "@json"},
         "methodHash": "lab:methodHash",
         "note": {"@id": "lab:note", "@type": "@id"},
@@ -100,6 +113,7 @@ def _context(base_url: str) -> dict[str, object]:
         "rawContent": "lab:rawContent",
         "relatedClaim": {"@id": "lab:relatedClaim", "@type": "@id"},
         "role": "lab:role",
+        "scope": {"@id": "lab:scope", "@type": "@id"},
         "sizeBytes": "lab:sizeBytes",
         "sourceSession": {"@id": "lab:sourceSession", "@type": "@id"},
         "statement": "lab:statement",
@@ -114,6 +128,7 @@ def _context(base_url: str) -> dict[str, object]:
         "text": "lab:text",
         "transcribedText": "lab:transcribedText",
         "userId": "lab:userId",
+        "versionNumber": "lab:versionNumber",
         "vizType": "lab:vizType",
         "wasAttributedTo": {"@id": "prov:wasAttributedTo", "@type": "@id"},
         "wasDerivedFrom": {"@id": "prov:wasDerivedFrom", "@type": "@id"},
@@ -540,6 +555,168 @@ def build_dataset_provenance_document(
     return {"@context": _context(base_url), "@graph": graph}
 
 
+def _dataset_summary_node(base_url: str, dataset: Dataset) -> dict[str, object]:
+    node: dict[str, object] = {
+        "@id": _resource_iri(base_url, "datasets", dataset.dataset_id),
+        "@type": "prov:Entity",
+        "commitHash": dataset.commit_hash,
+        "status": dataset.status.value,
+    }
+    if dataset.terminal_reason:
+        node["terminalReason"] = dataset.terminal_reason
+    _apply_origin_provenance(base_url, node, dataset)
+    return node
+
+
+def _analysis_summary_node(
+    base_url: str,
+    analysis: Analysis,
+    *,
+    datasets: list[Dataset],
+) -> dict[str, object]:
+    node: dict[str, object] = {
+        "@id": _resource_iri(base_url, "analyses", analysis.analysis_id),
+        "@type": "prov:Activity",
+        "methodHash": analysis.method_hash,
+        "codeVersion": analysis.code_version,
+        "executedAt": _isoformat(analysis.executed_at),
+        "status": analysis.status.value,
+    }
+    if analysis.terminal_reason:
+        node["terminalReason"] = analysis.terminal_reason
+    _apply_origin_provenance(base_url, node, analysis)
+    if analysis.environment_hash is not None:
+        node["environmentHash"] = analysis.environment_hash
+    if datasets:
+        node["prov:used"] = [
+            {"@id": _resource_iri(base_url, "datasets", dataset.dataset_id)}
+            for dataset in datasets
+        ]
+    for artifact in analysis.external_artifacts:
+        if artifact.kind == ExternalArtifactKind.ENTITY:
+            _append_id_ref_list(node, "prov:used", {"@id": artifact.uri})
+        else:
+            _append_id_ref_list(node, "prov:wasInformedBy", {"@id": artifact.uri})
+    return node
+
+
+def build_claim_provenance_document(
+    base_url: str,
+    claim: Claim,
+    *,
+    analyses: list[Analysis],
+    datasets: list[Dataset],
+    questions: list[Question],
+    visualizations: list[Visualization],
+    claim_edges: list[ClaimEdge] | None = None,
+    supervision_edges: list[SupervisionEdge] | None = None,
+) -> dict[str, object]:
+    supervision_edges = supervision_edges or []
+    claim_edges = claim_edges or []
+    people: dict[str, dict[str, object]] = {}
+    merged: dict[str, dict[str, Any]] = {}
+    datasets_by_id = {dataset.dataset_id: dataset for dataset in datasets}
+    analysis_attribution = {
+        analysis.analysis_id: _creator_user_id(analysis.executed_by_user_id, analysis.executed_by)
+        for analysis in analyses
+    }
+    dataset_attribution = {
+        dataset.dataset_id: _creator_user_id(dataset.created_by_user_id, dataset.created_by)
+        for dataset in datasets
+    }
+
+    for question in questions:
+        node = _question_node(
+            base_url,
+            question,
+            people=people,
+            supervision_edges=supervision_edges,
+        )
+        merged.setdefault(str(node["@id"]), node)
+        _merge_graph_nodes(merged, _origin_provenance_nodes(base_url, question))
+
+    for dataset in datasets:
+        document = build_dataset_provenance_document(
+            base_url,
+            dataset,
+            supervision_edges=supervision_edges,
+        )
+        graph = document.get("@graph", [])
+        if isinstance(graph, list):
+            _merge_graph_nodes(merged, graph)
+
+    for analysis in analyses:
+        analysis_datasets = [
+            datasets_by_id[dataset_id]
+            for dataset_id in analysis.dataset_ids
+            if dataset_id in datasets_by_id
+        ]
+        document = build_analysis_provenance_document(
+            base_url,
+            analysis,
+            datasets=analysis_datasets,
+            claims=[claim] if analysis.analysis_id in claim.supported_by_analysis_ids else [],
+            visualizations=[
+                visualization
+                for visualization in visualizations
+                if visualization.analysis_id == analysis.analysis_id
+            ],
+            claim_edges=claim_edges,
+            supervision_edges=supervision_edges,
+        )
+        graph = document.get("@graph", [])
+        if isinstance(graph, list):
+            _merge_graph_nodes(merged, graph)
+
+    claim_creator_user_id = _creator_user_id(claim.created_by_user_id, claim.created_by)
+    attributed_user_ids = _unique_user_ids(
+        [
+            claim_creator_user_id,
+            *[
+                dataset_attribution.get(dataset_id)
+                for dataset_id in claim.supported_by_dataset_ids
+            ],
+            *[
+                analysis_attribution.get(analysis_id)
+                for analysis_id in claim.supported_by_analysis_ids
+            ],
+        ]
+    )
+    for user_id in attributed_user_ids:
+        _add_person_with_supervision(
+            people,
+            base_url,
+            user_id,
+            activity_time=claim.created_at,
+            supervision_edges=supervision_edges,
+        )
+    claim_node = _claim_node(
+        base_url,
+        claim,
+        attributed_user_ids=attributed_user_ids,
+        claim_edges=claim_edges,
+    )
+    merged[str(claim_node["@id"])] = claim_node
+    _merge_graph_nodes(merged, _origin_provenance_nodes(base_url, claim))
+    _merge_graph_nodes(
+        merged,
+        [_external_artifact_node(citation) for citation in claim.external_citations],
+    )
+    _merge_graph_nodes(
+        merged,
+        [
+            _claim_relation_node(base_url, edge)
+            for edge in claim_edges
+            if edge.claim_id == claim.claim_id or edge.target_claim_id == claim.claim_id
+        ],
+    )
+    for user_id in sorted(people):
+        person = people[user_id]
+        merged[str(person["@id"])] = person
+
+    return {"@context": _context(base_url), "@graph": list(merged.values())}
+
+
 def _analysis_agent_node(base_url: str, executed_by: str) -> dict[str, object]:
     return _person_node(base_url, executed_by)
 
@@ -911,6 +1088,513 @@ _ENTITY_RESOURCE_NAMES = {
 def _entity_resource_name(entity_type: object) -> str:
     value = str(entity_type)
     return _ENTITY_RESOURCE_NAMES.get(value, f"{value}s")
+
+
+ARA_LAYER_NAMES = ("logic", "src", "trace", "evidence")
+
+
+@dataclass(frozen=True)
+class AraArtifactRecords:
+    """Scoped current-state records compiled into layered Ara JSON-LD."""
+
+    questions: list[Question]
+    datasets: list[Dataset]
+    analyses: list[Analysis]
+    claims: list[Claim]
+    claim_edges: list[ClaimEdge]
+    notes: list[Note]
+    visualizations: list[Visualization]
+    entity_versions: list[EntityVersion]
+    goal: Goal | None = None
+    goal_links: list[GoalLink] | None = None
+
+
+def build_ara_artifact_document(
+    base_url: str,
+    *,
+    scope_type: EntityType,
+    scope_id: UUID,
+    records: AraArtifactRecords,
+    generated_at: datetime,
+    layer_name: str | None = None,
+    supervision_edges: list[SupervisionEdge] | None = None,
+) -> dict[str, object]:
+    if layer_name is not None and layer_name not in ARA_LAYER_NAMES:
+        raise ValueError(f"Unknown Ara layer {layer_name!r}.")
+    artifact_iri = _ara_artifact_iri(base_url, scope_type, scope_id)
+    layers = {
+        name: _build_ara_layer_document(
+            base_url,
+            scope_type=scope_type,
+            scope_id=scope_id,
+            artifact_iri=artifact_iri,
+            layer_name=name,
+            records=records,
+            generated_at=generated_at,
+            supervision_edges=supervision_edges or [],
+        )
+        for name in ARA_LAYER_NAMES
+    }
+    if layer_name is not None:
+        return layers[layer_name]
+    bindings = _claim_cross_layer_bindings(
+        base_url,
+        scope_type=scope_type,
+        scope_id=scope_id,
+        records=records,
+    )
+    return {
+        "@context": _context(base_url),
+        "@id": artifact_iri,
+        "@type": "lab:AraArtifact",
+        "scope": _scope_ref(base_url, scope_type, scope_id),
+        "generatedAt": _isoformat(generated_at),
+        "layers": layers,
+        "crossLayerBinding": [{"@id": str(binding["@id"])} for binding in bindings],
+        "crossLayerBindings": bindings,
+    }
+
+
+def _ara_artifact_iri(base_url: str, scope_type: EntityType, scope_id: UUID) -> str:
+    if scope_type == EntityType.GOAL:
+        return _resource_iri(base_url, "goals", scope_id) + "/ara-artifact"
+    if scope_type == EntityType.QUESTION:
+        return _resource_iri(base_url, "questions", scope_id) + "/ara-artifact"
+    return _resource_iri(base_url, _entity_resource_name(scope_type.value), scope_id)
+
+
+def _ara_layer_iri(
+    base_url: str,
+    scope_type: EntityType,
+    scope_id: UUID,
+    layer_name: str,
+) -> str:
+    return f"{_ara_artifact_iri(base_url, scope_type, scope_id)}/{layer_name}"
+
+
+def _scope_ref(base_url: str, scope_type: EntityType, scope_id: UUID) -> dict[str, object]:
+    return {
+        "@id": _resource_iri(base_url, _entity_resource_name(scope_type.value), scope_id),
+        "entityType": scope_type.value,
+        "entityId": str(scope_id),
+    }
+
+
+def _build_ara_layer_document(
+    base_url: str,
+    *,
+    scope_type: EntityType,
+    scope_id: UUID,
+    artifact_iri: str,
+    layer_name: str,
+    records: AraArtifactRecords,
+    generated_at: datetime,
+    supervision_edges: list[SupervisionEdge],
+) -> dict[str, object]:
+    return {
+        "@context": _context(base_url),
+        "@id": _ara_layer_iri(base_url, scope_type, scope_id, layer_name),
+        "@type": ["prov:Bundle", "lab:AraLayer"],
+        "layer": layer_name,
+        "scope": _scope_ref(base_url, scope_type, scope_id),
+        "prov:wasDerivedFrom": {"@id": artifact_iri},
+        "generatedAt": _isoformat(generated_at),
+        "crossLayerBindings": _claim_cross_layer_bindings(
+            base_url,
+            scope_type=scope_type,
+            scope_id=scope_id,
+            records=records,
+            layer_filter=layer_name,
+        ),
+        "@graph": _ara_layer_graph(
+            base_url,
+            layer_name=layer_name,
+            records=records,
+            supervision_edges=supervision_edges,
+        ),
+    }
+
+
+def _ara_layer_graph(
+    base_url: str,
+    *,
+    layer_name: str,
+    records: AraArtifactRecords,
+    supervision_edges: list[SupervisionEdge],
+) -> list[dict[str, object]]:
+    builders = {
+        "logic": _ara_logic_graph,
+        "src": _ara_src_graph,
+        "trace": _ara_trace_graph,
+        "evidence": _ara_evidence_graph,
+    }
+    return builders[layer_name](
+        base_url,
+        records=records,
+        supervision_edges=supervision_edges,
+    )
+
+
+def _ara_logic_graph(
+    base_url: str,
+    *,
+    records: AraArtifactRecords,
+    supervision_edges: list[SupervisionEdge],
+) -> list[dict[str, object]]:
+    people: dict[str, dict[str, object]] = {}
+    merged: dict[str, dict[str, Any]] = {}
+    for claim in records.claims:
+        creator_user_id = _creator_user_id(claim.created_by_user_id, claim.created_by)
+        attributed_user_ids = _unique_user_ids([creator_user_id])
+        for user_id in attributed_user_ids:
+            _add_person_with_supervision(
+                people,
+                base_url,
+                user_id,
+                activity_time=claim.created_at,
+                supervision_edges=supervision_edges,
+            )
+        node = _claim_node(
+            base_url,
+            claim,
+            attributed_user_ids=attributed_user_ids,
+            claim_edges=records.claim_edges,
+        )
+        merged[str(node["@id"])] = node
+        _merge_graph_nodes(merged, _origin_provenance_nodes(base_url, claim))
+        _merge_graph_nodes(
+            merged,
+            [_external_artifact_node(citation) for citation in claim.external_citations],
+        )
+    _merge_graph_nodes(
+        merged,
+        [_claim_relation_node(base_url, edge) for edge in records.claim_edges],
+    )
+    if records.goal is not None:
+        goal_node = _goal_node(base_url, records.goal)
+        merged[str(goal_node["@id"])] = goal_node
+    for link in records.goal_links or []:
+        link_node = _goal_link_node(base_url, link)
+        merged[str(link_node["@id"])] = link_node
+    for user_id in sorted(people):
+        person = people[user_id]
+        merged[str(person["@id"])] = person
+    return list(merged.values())
+
+
+def _ara_src_graph(
+    base_url: str,
+    *,
+    records: AraArtifactRecords,
+    supervision_edges: list[SupervisionEdge],
+) -> list[dict[str, object]]:
+    del supervision_edges
+    datasets_by_id = {dataset.dataset_id: dataset for dataset in records.datasets}
+    merged: dict[str, dict[str, Any]] = {}
+    for analysis in records.analyses:
+        analysis_datasets = [
+            datasets_by_id[dataset_id]
+            for dataset_id in analysis.dataset_ids
+            if dataset_id in datasets_by_id
+        ]
+        node = _analysis_summary_node(base_url, analysis, datasets=analysis_datasets)
+        merged[str(node["@id"])] = node
+        _merge_graph_nodes(merged, _origin_provenance_nodes(base_url, analysis))
+        _merge_graph_nodes(
+            merged,
+            [_external_artifact_node(artifact) for artifact in analysis.external_artifacts],
+        )
+    return list(merged.values())
+
+
+def _ara_trace_graph(
+    base_url: str,
+    *,
+    records: AraArtifactRecords,
+    supervision_edges: list[SupervisionEdge],
+) -> list[dict[str, object]]:
+    people: dict[str, dict[str, object]] = {}
+    merged: dict[str, dict[str, Any]] = {}
+    for question in records.questions:
+        node = _question_node(
+            base_url,
+            question,
+            people=people,
+            supervision_edges=supervision_edges,
+        )
+        if question.parent_question_ids:
+            node["prov:wasDerivedFrom"] = [
+                {"@id": _resource_iri(base_url, "questions", parent_id)}
+                for parent_id in question.parent_question_ids
+            ]
+        merged[str(node["@id"])] = node
+        _merge_graph_nodes(merged, _origin_provenance_nodes(base_url, question))
+    for dataset in records.datasets:
+        node = _dataset_summary_node(base_url, dataset)
+        merged[str(node["@id"])] = node
+        _merge_graph_nodes(merged, _origin_provenance_nodes(base_url, dataset))
+    datasets_by_id = {dataset.dataset_id: dataset for dataset in records.datasets}
+    for analysis in records.analyses:
+        node = _analysis_summary_node(
+            base_url,
+            analysis,
+            datasets=[
+                datasets_by_id[dataset_id]
+                for dataset_id in analysis.dataset_ids
+                if dataset_id in datasets_by_id
+            ],
+        )
+        merged[str(node["@id"])] = node
+        _merge_graph_nodes(merged, _origin_provenance_nodes(base_url, analysis))
+    for claim in records.claims:
+        node = _claim_node(
+            base_url,
+            claim,
+            attributed_user_ids=[],
+            claim_edges=records.claim_edges,
+        )
+        merged[str(node["@id"])] = node
+        _merge_graph_nodes(merged, _origin_provenance_nodes(base_url, claim))
+    for visualization in records.visualizations:
+        node = _visualization_node(base_url, visualization, attributed_user_ids=[])
+        merged[str(node["@id"])] = node
+        _merge_graph_nodes(merged, _origin_provenance_nodes(base_url, visualization))
+    for version in records.entity_versions:
+        node = _entity_version_node(base_url, version)
+        merged[str(node["@id"])] = node
+    for user_id in sorted(people):
+        person = people[user_id]
+        merged[str(person["@id"])] = person
+    return list(merged.values())
+
+
+def _ara_evidence_graph(
+    base_url: str,
+    *,
+    records: AraArtifactRecords,
+    supervision_edges: list[SupervisionEdge],
+) -> list[dict[str, object]]:
+    people: dict[str, dict[str, object]] = {}
+    merged: dict[str, dict[str, Any]] = {}
+    for dataset in records.datasets:
+        document = build_dataset_provenance_document(
+            base_url,
+            dataset,
+            supervision_edges=supervision_edges,
+        )
+        graph = document.get("@graph", [])
+        if isinstance(graph, list):
+            _merge_graph_nodes(merged, graph)
+    for visualization in records.visualizations:
+        creator_user_id = _creator_user_id(
+            visualization.created_by_user_id,
+            visualization.created_by,
+        )
+        attributed_user_ids = _unique_user_ids([creator_user_id])
+        for user_id in attributed_user_ids:
+            _add_person_with_supervision(
+                people,
+                base_url,
+                user_id,
+                activity_time=visualization.created_at,
+                supervision_edges=supervision_edges,
+            )
+        node = _visualization_node(
+            base_url,
+            visualization,
+            attributed_user_ids=attributed_user_ids,
+        )
+        merged[str(node["@id"])] = node
+        _merge_graph_nodes(merged, _origin_provenance_nodes(base_url, visualization))
+    for note in records.notes:
+        node = _note_node(
+            base_url,
+            note,
+            people=people,
+            supervision_edges=supervision_edges,
+        )
+        merged[str(node["@id"])] = node
+        _merge_graph_nodes(merged, _origin_provenance_nodes(base_url, note))
+    for user_id in sorted(people):
+        person = people[user_id]
+        merged[str(person["@id"])] = person
+    return list(merged.values())
+
+
+def _goal_node(base_url: str, goal: Goal) -> dict[str, object]:
+    node: dict[str, object] = {
+        "@id": _resource_iri(base_url, "goals", goal.goal_id),
+        "@type": "lab:Goal",
+        "entityType": EntityType.GOAL.value,
+        "entityId": str(goal.goal_id),
+        "text": goal.title,
+        "status": goal.status.value,
+        "createdAt": _isoformat(goal.created_at),
+    }
+    if goal.summary:
+        node["summary"] = goal.summary
+    if goal.external_ref:
+        node["externalUri"] = goal.external_ref
+    _apply_origin_provenance(base_url, node, goal)
+    return node
+
+
+def _goal_link_node(base_url: str, link: GoalLink) -> dict[str, object]:
+    goal_iri = _resource_iri(base_url, "goals", link.goal_id)
+    node: dict[str, object] = {
+        "@id": _synthetic_child_iri(goal_iri, "links", link.link_id),
+        "@type": "lab:GoalLink",
+        "goalLink": {"@id": goal_iri},
+        "target": {
+            "@id": _entity_ref_iri(base_url, link.target),
+            "entityType": link.target.entity_type.value,
+            "entityId": str(link.target.entity_id),
+        },
+        "role": link.relation.value,
+        "status": link.link_status.value,
+        "createdAt": _isoformat(link.created_at),
+    }
+    if link.slot is not None:
+        node["slot"] = link.slot
+    return node
+
+
+def _entity_ref_iri(base_url: str, ref: EntityRef) -> str:
+    return _resource_iri(base_url, _entity_resource_name(ref.entity_type.value), ref.entity_id)
+
+
+def _entity_version_node(base_url: str, version: EntityVersion) -> dict[str, object]:
+    entity_iri = _resource_iri(
+        base_url,
+        _entity_resource_name(version.entity_type.value),
+        version.entity_id,
+    )
+    node: dict[str, object] = {
+        "@id": _synthetic_child_iri(entity_iri, "versions", version.version_number),
+        "@type": "lab:EntityVersion",
+        "entityType": version.entity_type.value,
+        "entityId": str(version.entity_id),
+        "versionNumber": version.version_number,
+        "createdAt": _isoformat(version.created_at),
+        "metadata": version.snapshot,
+        "prov:wasDerivedFrom": {"@id": entity_iri},
+    }
+    if version.change_set_id is not None:
+        node["changeSet"] = {"@id": _draft_activity_iri(base_url, version.change_set_id)}
+    if version.committed_at is not None:
+        node["generatedAt"] = _isoformat(version.committed_at)
+    return node
+
+
+def _claim_cross_layer_bindings(
+    base_url: str,
+    *,
+    scope_type: EntityType,
+    scope_id: UUID,
+    records: AraArtifactRecords,
+    layer_filter: str | None = None,
+) -> list[dict[str, object]]:
+    if layer_filter is not None and layer_filter not in ARA_LAYER_NAMES:
+        return []
+    datasets_by_id = {dataset.dataset_id: dataset for dataset in records.datasets}
+    analyses_by_id = {analysis.analysis_id: analysis for analysis in records.analyses}
+    visualizations_by_claim: dict[UUID, list[Visualization]] = {}
+    for visualization in records.visualizations:
+        for claim_id in visualization.related_claim_ids:
+            visualizations_by_claim.setdefault(claim_id, []).append(visualization)
+    notes_by_target: dict[tuple[EntityType, UUID], list[Note]] = {}
+    for note in records.notes:
+        for target in note.targets:
+            notes_by_target.setdefault((target.entity_type, target.entity_id), []).append(note)
+
+    bindings: list[dict[str, object]] = []
+    for claim in sorted(records.claims, key=lambda item: (item.created_at, str(item.claim_id))):
+        analysis_ids = [
+            analysis_id
+            for analysis_id in claim.supported_by_analysis_ids
+            if analysis_id in analyses_by_id
+        ]
+        dataset_ids = {
+            dataset_id
+            for dataset_id in claim.supported_by_dataset_ids
+            if dataset_id in datasets_by_id
+        }
+        for analysis_id in analysis_ids:
+            dataset_ids.update(
+                dataset_id
+                for dataset_id in analyses_by_id[analysis_id].dataset_ids
+                if dataset_id in datasets_by_id
+            )
+        question_ids = set(claim.answers_question_ids)
+        for dataset_id in dataset_ids:
+            dataset = datasets_by_id[dataset_id]
+            question_ids.update(link.question_id for link in dataset.question_links)
+        question_ids.update(
+            question.question_id
+            for question in records.questions
+            if question.question_id in question_ids
+        )
+        evidence_refs = [
+            {"@id": _resource_iri(base_url, "datasets", dataset_id)}
+            for dataset_id in sorted(dataset_ids, key=str)
+        ]
+        evidence_refs.extend(
+            {"@id": _resource_iri(base_url, "visualizations", visualization.viz_id)}
+            for visualization in sorted(
+                visualizations_by_claim.get(claim.claim_id, []),
+                key=lambda item: (item.created_at, str(item.viz_id)),
+            )
+        )
+        for note in sorted(
+            notes_by_target.get((EntityType.CLAIM, claim.claim_id), []),
+            key=lambda item: (item.created_at, str(item.note_id)),
+        ):
+            evidence_refs.append({"@id": _resource_iri(base_url, "notes", note.note_id)})
+        layer_refs: dict[str, dict[str, str]] = {
+            name: {"@id": _ara_layer_iri(base_url, scope_type, scope_id, name)}
+            for name in ARA_LAYER_NAMES
+        }
+        if layer_filter is not None:
+            layer_refs = {layer_filter: layer_refs[layer_filter]}
+        binding: dict[str, object] = {
+            "@id": _synthetic_child_iri(
+                _resource_iri(base_url, "claims", claim.claim_id),
+                "ara-binding",
+                scope_type.value,
+                scope_id,
+            ),
+            "@type": "lab:ForensicBinding",
+            "layer": layer_refs,
+            "claim": {"@id": _resource_iri(base_url, "claims", claim.claim_id)},
+            "analysis": [
+                {"@id": _resource_iri(base_url, "analyses", analysis_id)}
+                for analysis_id in sorted(analysis_ids, key=str)
+            ],
+            "dataset": [
+                {"@id": _resource_iri(base_url, "datasets", dataset_id)}
+                for dataset_id in sorted(dataset_ids, key=str)
+            ],
+            "question": [
+                {"@id": _resource_iri(base_url, "questions", question_id)}
+                for question_id in sorted(question_ids, key=str)
+            ],
+            "evidence": evidence_refs,
+        }
+        code_environment: list[dict[str, object]] = []
+        for analysis_id in sorted(analysis_ids, key=str):
+            analysis = analyses_by_id[analysis_id]
+            item: dict[str, object] = {
+                "@id": _resource_iri(base_url, "analyses", analysis.analysis_id),
+                "codeVersion": analysis.code_version,
+                "methodHash": analysis.method_hash,
+            }
+            if analysis.environment_hash is not None:
+                item["environmentHash"] = analysis.environment_hash
+            code_environment.append(item)
+        if code_environment:
+            binding["codeEnvironment"] = code_environment
+        bindings.append(binding)
+    return bindings
 
 
 def build_record_export_provenance_document(

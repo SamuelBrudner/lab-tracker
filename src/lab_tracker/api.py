@@ -307,6 +307,12 @@ class LabTrackerAPI:
     def export_user_records(self, *args: Any, **kwargs: Any) -> Any:
         return self.record_exports.export_user_records(*args, **kwargs)
 
+    def export_goal_artifact(self, *args: Any, **kwargs: Any) -> Any:
+        return self.record_exports.export_goal_artifact(*args, **kwargs)
+
+    def export_question_subtree(self, *args: Any, **kwargs: Any) -> Any:
+        return self.record_exports.export_question_subtree(*args, **kwargs)
+
     def check_publication_readiness(self, *args: Any, **kwargs: Any) -> Any:
         return self.publication_readiness.check(*args, **kwargs)
 

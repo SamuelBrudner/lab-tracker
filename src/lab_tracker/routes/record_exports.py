@@ -5,7 +5,9 @@ from __future__ import annotations
 from uuid import UUID
 
 from fastapi import APIRouter
+from fastapi.encoders import jsonable_encoder
 from starlette.requests import Request
+from starlette.responses import JSONResponse
 
 from lab_tracker.api import LabTrackerAPI
 from lab_tracker.models import RecordExport
@@ -47,5 +49,59 @@ def build_record_exports_router(api: LabTrackerAPI) -> APIRouter:
             actor=actor,
         )
         return Envelope(data=export)
+
+    @router.get("/goals/{goal_id:uuid}/ara-artifact")
+    def export_goal_artifact(goal_id: UUID, request: Request):
+        actor = actor_from_request(request)
+        payload = api_from_request(request, api).export_goal_artifact(
+            goal_id=goal_id,
+            base_url=_request_base_url(request),
+            actor=actor,
+        )
+        return JSONResponse(
+            content=jsonable_encoder(payload),
+            media_type="application/ld+json",
+        )
+
+    @router.get("/goals/{goal_id:uuid}/ara-artifact/{layer_name}")
+    def export_goal_artifact_layer(goal_id: UUID, layer_name: str, request: Request):
+        actor = actor_from_request(request)
+        payload = api_from_request(request, api).export_goal_artifact(
+            goal_id=goal_id,
+            base_url=_request_base_url(request),
+            layer_name=layer_name,
+            actor=actor,
+        )
+        return JSONResponse(
+            content=jsonable_encoder(payload),
+            media_type="application/ld+json",
+        )
+
+    @router.get("/questions/{question_id:uuid}/ara-artifact")
+    def export_question_subtree(question_id: UUID, request: Request):
+        actor = actor_from_request(request)
+        payload = api_from_request(request, api).export_question_subtree(
+            root_id=question_id,
+            base_url=_request_base_url(request),
+            actor=actor,
+        )
+        return JSONResponse(
+            content=jsonable_encoder(payload),
+            media_type="application/ld+json",
+        )
+
+    @router.get("/questions/{question_id:uuid}/ara-artifact/{layer_name}")
+    def export_question_subtree_layer(question_id: UUID, layer_name: str, request: Request):
+        actor = actor_from_request(request)
+        payload = api_from_request(request, api).export_question_subtree(
+            root_id=question_id,
+            base_url=_request_base_url(request),
+            layer_name=layer_name,
+            actor=actor,
+        )
+        return JSONResponse(
+            content=jsonable_encoder(payload),
+            media_type="application/ld+json",
+        )
 
     return router

@@ -5,12 +5,14 @@ from __future__ import annotations
 from uuid import UUID
 
 from fastapi import APIRouter
+from fastapi.encoders import jsonable_encoder
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
 from lab_tracker.api import LabTrackerAPI
 from lab_tracker.provenance import (
     build_analysis_provenance_document,
+    build_claim_provenance_document,
     build_dataset_provenance_document,
 )
 
@@ -68,5 +70,57 @@ def build_provenance_router(api: LabTrackerAPI) -> APIRouter:
             supervision_edges=supervision_edges,
         )
         return JSONResponse(content=payload, media_type="application/ld+json")
+
+    @router.get("/claims/{claim_id}/provenance")
+    def get_claim_provenance(claim_id: UUID, request: Request):
+        request_api = api_from_request(request, api)
+        repository = repository_from_request(request)
+        claim = request_api.get_claim(claim_id)
+        ensure_project_read(request, claim.project_id)
+
+        analyses = [
+            request_api.get_analysis(analysis_id)
+            for analysis_id in claim.supported_by_analysis_ids
+        ]
+        dataset_ids = set(claim.supported_by_dataset_ids)
+        for analysis in analyses:
+            dataset_ids.update(analysis.dataset_ids)
+        datasets = [request_api.get_dataset(dataset_id) for dataset_id in sorted(dataset_ids)]
+        question_ids = set(claim.answers_question_ids)
+        for dataset in datasets:
+            question_ids.update(link.question_id for link in dataset.question_links)
+        questions = [
+            request_api.get_question(question_id) for question_id in sorted(question_ids)
+        ]
+        visualizations, _ = repository.query_visualizations(
+            claim_id=claim_id,
+            limit=None,
+            offset=0,
+        )
+        claim_edges, _ = repository.query_claim_edges(
+            project_id=claim.project_id,
+            limit=None,
+            offset=0,
+        )
+        claim_edges = [
+            edge
+            for edge in claim_edges
+            if edge.claim_id == claim_id or edge.target_claim_id == claim_id
+        ]
+        supervision_edges, _ = repository.query_supervision_edges(limit=None, offset=0)
+        payload = build_claim_provenance_document(
+            _request_base_url(request),
+            claim,
+            analyses=analyses,
+            datasets=datasets,
+            questions=questions,
+            visualizations=visualizations,
+            claim_edges=claim_edges,
+            supervision_edges=supervision_edges,
+        )
+        return JSONResponse(
+            content=jsonable_encoder(payload),
+            media_type="application/ld+json",
+        )
 
     return router

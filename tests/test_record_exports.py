@@ -103,9 +103,170 @@ def _graph_ids(export_payload: dict[str, object]) -> set[str]:
     return {str(node["@id"]) for node in graph if isinstance(node, dict) and "@id" in node}
 
 
+def _layer_graph_ids(layer_payload: dict[str, object]) -> set[str]:
+    graph = layer_payload["@graph"]
+    assert isinstance(graph, list)
+    return {str(node["@id"]) for node in graph if isinstance(node, dict) and "@id" in node}
+
+
+def _node_by_id(document: dict[str, object], node_id: str) -> dict[str, object]:
+    graph = document["@graph"]
+    assert isinstance(graph, list)
+    for node in graph:
+        assert isinstance(node, dict)
+        if node.get("@id") == node_id:
+            return node
+    raise AssertionError(f"Node not found: {node_id}")
+
+
 def _record_export_event_count(client: TestClient) -> int:
     with client.app.state.db_session_factory() as session:
         return len(list(session.scalars(select(RecordExportEventModel.export_id))))
+
+
+def _create_ara_bundle(
+    client: TestClient,
+    headers: dict[str, str],
+) -> dict[str, str]:
+    project_id = client.post(
+        "/projects",
+        json={"name": "Ara export project"},
+        headers=headers,
+    ).json()["data"]["project_id"]
+    root_question_id = client.post(
+        "/questions",
+        json={
+            "project_id": project_id,
+            "text": "What mechanism supports the paper?",
+            "question_type": "descriptive",
+            "status": "active",
+        },
+        headers=headers,
+    ).json()["data"]["question_id"]
+    child_question_id = client.post(
+        "/questions",
+        json={
+            "project_id": project_id,
+            "text": "Does the fitted analysis support the main claim?",
+            "question_type": "hypothesis_driven",
+            "hypothesis": "The fitted analysis supports the claim.",
+            "status": "active",
+            "parent_question_ids": [root_question_id],
+        },
+        headers=headers,
+    ).json()["data"]["question_id"]
+    note_id = client.post(
+        "/notes",
+        json={
+            "project_id": project_id,
+            "raw_content": "Figure note: use the fitted signal panel.",
+            "status": "committed",
+        },
+        headers=headers,
+    ).json()["data"]["note_id"]
+    dataset_id = client.post(
+        "/datasets",
+        json={
+            "project_id": project_id,
+            "primary_question_id": child_question_id,
+            "status": "committed",
+            "commit_manifest": {
+                "files": [{"path": "raw/signal.csv", "checksum": "sha256:data"}],
+                "note_ids": [note_id],
+            },
+        },
+        headers=headers,
+    ).json()["data"]["dataset_id"]
+    run_pointer = {
+        "kind": "activity",
+        "source_system": "mlflow",
+        "uri": "mlflow://experiments/ara/runs/run-001",
+        "content_hash": "sha256:run001",
+    }
+    analysis_id = client.post(
+        "/analyses",
+        json={
+            "project_id": project_id,
+            "dataset_ids": [dataset_id],
+            "method_hash": "method-fit",
+            "code_version": "git:abc123",
+            "environment_hash": "uv:lock123",
+            "external_artifacts": [run_pointer],
+            "status": "committed",
+        },
+        headers=headers,
+    ).json()["data"]["analysis_id"]
+    claim_id = client.post(
+        "/claims",
+        json={
+            "project_id": project_id,
+            "statement": "The fitted signal supports the paper mechanism.",
+            "confidence": 88,
+            "status": "supported",
+            "supported_by_analysis_ids": [analysis_id],
+            "answers_question_ids": [child_question_id],
+        },
+        headers=headers,
+    ).json()["data"]["claim_id"]
+    note_target_response = client.post(
+        "/notes",
+        json={
+            "project_id": project_id,
+            "raw_content": "Claim note: this is the narrative anchor.",
+            "status": "committed",
+            "targets": [{"entity_type": "claim", "entity_id": claim_id}],
+        },
+        headers=headers,
+    )
+    assert note_target_response.status_code == 201, note_target_response.text
+    viz_id = client.post(
+        "/visualizations",
+        json={
+            "analysis_id": analysis_id,
+            "viz_type": "line",
+            "file_path": "figures/signal.png",
+            "caption": "Fitted signal",
+            "related_claim_ids": [claim_id],
+        },
+        headers=headers,
+    ).json()["data"]["viz_id"]
+    goal_id = client.post(
+        f"/projects/{project_id}/goals",
+        json={
+            "goal_type": "paper",
+            "title": "Ara paper",
+            "summary": "Compiled paper artifact.",
+            "status": "in_progress",
+        },
+        headers=headers,
+    ).json()["data"]["goal_id"]
+    for entity_type, entity_id, relation in [
+        ("question", root_question_id, "addresses"),
+        ("claim", claim_id, "supporting_evidence"),
+        ("visualization", viz_id, "candidate_figure"),
+    ]:
+        response = client.post(
+            f"/goals/{goal_id}/links",
+            json={
+                "entity_type": entity_type,
+                "entity_id": entity_id,
+                "relation": relation,
+                "link_status": "committed",
+            },
+            headers=headers,
+        )
+        assert response.status_code == 201, response.text
+    return {
+        "project_id": project_id,
+        "root_question_id": root_question_id,
+        "child_question_id": child_question_id,
+        "dataset_id": dataset_id,
+        "analysis_id": analysis_id,
+        "claim_id": claim_id,
+        "viz_id": viz_id,
+        "goal_id": goal_id,
+        "run_uri": run_pointer["uri"],
+    }
 
 
 def test_record_export_returns_scoped_dump_and_provenance_for_user_and_group(
@@ -236,3 +397,90 @@ def test_record_export_returns_not_found_for_missing_user(
     )
 
     assert response.status_code == 404
+
+
+def test_goal_ara_artifact_exposes_four_independently_retrievable_layers(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+):
+    records = _create_ara_bundle(client, admin_auth_headers)
+
+    response = client.get(
+        f"/goals/{records['goal_id']}/ara-artifact",
+        headers=admin_auth_headers,
+    )
+    assert response.status_code == 200, response.text
+    assert response.headers["content-type"].startswith("application/ld+json")
+    artifact = response.json()
+
+    assert artifact["@id"] == f"http://testserver/goals/{records['goal_id']}/ara-artifact"
+    assert set(artifact["layers"]) == {"logic", "src", "trace", "evidence"}
+    for layer_name in ("logic", "src", "trace", "evidence"):
+        layer = artifact["layers"][layer_name]
+        assert layer["@id"] == (
+            f"http://testserver/goals/{records['goal_id']}/ara-artifact/{layer_name}"
+        )
+        layer_response = client.get(
+            f"/goals/{records['goal_id']}/ara-artifact/{layer_name}",
+            headers=admin_auth_headers,
+        )
+        assert layer_response.status_code == 200, layer_response.text
+        assert layer_response.headers["content-type"].startswith("application/ld+json")
+        assert layer_response.json()["@id"] == layer["@id"]
+
+    logic_ids = _layer_graph_ids(artifact["layers"]["logic"])
+    src_ids = _layer_graph_ids(artifact["layers"]["src"])
+    trace_ids = _layer_graph_ids(artifact["layers"]["trace"])
+    evidence_ids = _layer_graph_ids(artifact["layers"]["evidence"])
+
+    claim_iri = f"http://testserver/claims/{records['claim_id']}"
+    analysis_iri = f"http://testserver/analyses/{records['analysis_id']}"
+    dataset_iri = f"http://testserver/datasets/{records['dataset_id']}"
+    question_iri = f"http://testserver/questions/{records['child_question_id']}"
+    viz_iri = f"http://testserver/visualizations/{records['viz_id']}"
+
+    assert claim_iri in logic_ids
+    assert analysis_iri in src_ids
+    assert question_iri in trace_ids
+    assert dataset_iri in evidence_ids
+    assert viz_iri in evidence_ids
+    assert records["run_uri"] in src_ids
+
+    binding = artifact["crossLayerBindings"][0]
+    assert binding["claim"] == {"@id": claim_iri}
+    assert binding["analysis"] == [{"@id": analysis_iri}]
+    assert binding["dataset"] == [{"@id": dataset_iri}]
+    assert {"@id": question_iri} in binding["question"]
+    assert {"@id": viz_iri} in binding["evidence"]
+    assert binding["codeEnvironment"] == [
+        {
+            "@id": analysis_iri,
+            "codeVersion": "git:abc123",
+            "methodHash": "method-fit",
+            "environmentHash": "uv:lock123",
+        }
+    ]
+
+
+def test_question_subtree_ara_artifact_scopes_to_descendants(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+):
+    records = _create_ara_bundle(client, admin_auth_headers)
+
+    response = client.get(
+        f"/questions/{records['root_question_id']}/ara-artifact/evidence",
+        headers=admin_auth_headers,
+    )
+    assert response.status_code == 200, response.text
+    layer = response.json()
+
+    assert layer["@id"] == (
+        f"http://testserver/questions/{records['root_question_id']}/ara-artifact/evidence"
+    )
+    graph_ids = _layer_graph_ids(layer)
+    assert f"http://testserver/datasets/{records['dataset_id']}" in graph_ids
+    assert f"http://testserver/visualizations/{records['viz_id']}" in graph_ids
+    assert layer["crossLayerBindings"][0]["claim"] == {
+        "@id": f"http://testserver/claims/{records['claim_id']}"
+    }

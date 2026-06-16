@@ -93,8 +93,14 @@ Use these tools when available:
   or claim.
 - `lab_tracker_get_dataset_provenance` returns dataset provenance JSON-LD.
 - `lab_tracker_get_analysis_provenance` returns analysis provenance JSON-LD.
+- `lab_tracker_get_claim_provenance` returns claim-centric provenance JSON-LD
+  with analysis, dataset, code/environment, and question ancestry.
 - `lab_tracker_publication_readiness` checks ARA-Seal L1 structural readiness
   for a project.
+- `lab_tracker_export_goal_artifact` compiles a Goal into a layered Ara artifact.
+  Pass `layer` as `logic`, `src`, `trace`, or `evidence` to retrieve one layer.
+- `lab_tracker_export_question_subtree` compiles a question subtree into a
+  layered Ara artifact. Pass `layer` for one independently retrievable layer.
 - `lab_tracker_search` searches questions and notes together.
 - `lab_tracker_create_project` creates a project.
 - `lab_tracker_create_question` creates a question in a project; pass

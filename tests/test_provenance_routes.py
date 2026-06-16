@@ -322,15 +322,75 @@ def test_analysis_provenance_route_exports_related_entities(
     assert viz_node["relatedClaim"] == [{"@id": claim_iri}]
 
 
+def test_claim_provenance_route_exports_full_ancestry(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+):
+    headers = admin_auth_headers
+    project_id, dataset_id, primary_question_id, _, _ = (
+        _create_committed_dataset_with_provenance(client, headers)
+    )
+    analysis_id = client.post(
+        "/analyses",
+        json={
+            "project_id": project_id,
+            "dataset_ids": [dataset_id],
+            "method_hash": "method-claim",
+            "code_version": "git:claim",
+            "environment_hash": "env-claim",
+            "status": "committed",
+        },
+        headers=headers,
+    ).json()["data"]["analysis_id"]
+    claim_id = client.post(
+        "/claims",
+        json={
+            "project_id": project_id,
+            "statement": "Claim ancestry is complete",
+            "confidence": 90,
+            "status": "supported",
+            "supported_by_analysis_ids": [analysis_id],
+            "answers_question_ids": [primary_question_id],
+        },
+        headers=headers,
+    ).json()["data"]["claim_id"]
+
+    response = client.get(f"/claims/{claim_id}/provenance", headers=headers)
+    assert response.status_code == 200, response.text
+    assert response.headers["content-type"].startswith("application/ld+json")
+    payload = response.json()
+
+    claim_iri = f"http://testserver/claims/{claim_id}"
+    analysis_iri = f"http://testserver/analyses/{analysis_id}"
+    dataset_iri = f"http://testserver/datasets/{dataset_id}"
+    question_iri = f"http://testserver/questions/{primary_question_id}"
+
+    claim_node = _node_by_id(payload, claim_iri)
+    analysis_node = _node_by_id(payload, analysis_iri)
+    dataset_node = _node_by_id(payload, dataset_iri)
+    question_node = _node_by_id(payload, question_iri)
+
+    assert claim_node["supportsAnalysis"] == [{"@id": analysis_iri}]
+    assert claim_node["answersQuestion"] == [{"@id": question_iri}]
+    assert analysis_node["prov:used"] == [{"@id": dataset_iri}]
+    assert analysis_node["codeVersion"] == "git:claim"
+    assert analysis_node["environmentHash"] == "env-claim"
+    assert dataset_node["commitHash"]
+    assert question_node["text"] == "Does provenance export preserve the dataset graph?"
+
+
 def test_provenance_routes_require_authentication(client: TestClient):
     dataset_id = uuid4()
     analysis_id = uuid4()
+    claim_id = uuid4()
 
     dataset_response = client.get(f"/datasets/{dataset_id}/provenance")
     analysis_response = client.get(f"/analyses/{analysis_id}/provenance")
+    claim_response = client.get(f"/claims/{claim_id}/provenance")
 
     assert dataset_response.status_code == 401
     assert analysis_response.status_code == 401
+    assert claim_response.status_code == 401
 
 
 def test_provenance_routes_return_not_found_for_missing_resources(
@@ -340,9 +400,12 @@ def test_provenance_routes_return_not_found_for_missing_resources(
     headers = admin_auth_headers
     dataset_id = uuid4()
     analysis_id = uuid4()
+    claim_id = uuid4()
 
     dataset_response = client.get(f"/datasets/{dataset_id}/provenance", headers=headers)
     analysis_response = client.get(f"/analyses/{analysis_id}/provenance", headers=headers)
+    claim_response = client.get(f"/claims/{claim_id}/provenance", headers=headers)
 
     assert dataset_response.status_code == 404
     assert analysis_response.status_code == 404
+    assert claim_response.status_code == 404
