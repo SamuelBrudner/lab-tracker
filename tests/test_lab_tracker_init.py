@@ -8,7 +8,7 @@ from pathlib import Path
 
 import tomllib
 
-from lab_tracker.cli import init_consumer_repo, serve_app
+from lab_tracker.cli import _open_browser_when_ready, init_consumer_repo, serve_app
 from lab_tracker_client.cli import main as lt_main
 
 
@@ -124,7 +124,7 @@ def test_lt_prime_non_research_prompt_emits_nothing(capsys) -> None:
     assert captured.err == ""
 
 
-def test_serve_app_runs_migrations_opens_browser_and_starts_server(monkeypatch) -> None:
+def test_serve_app_runs_migrations_schedules_browser_and_starts_server(monkeypatch) -> None:
     calls: list[tuple[str, object]] = []
 
     def fake_upgrade(config, revision):
@@ -137,10 +137,27 @@ def test_serve_app_runs_migrations_opens_browser_and_starts_server(monkeypatch) 
         calls.append(("open", url))
         return True
 
+    def fake_start_browser_when_ready(url: str, **kwargs):
+        calls.append(
+            (
+                "schedule_browser",
+                {
+                    "opener_is_fake": kwargs["opener"] is fake_open,
+                    "readiness_url": kwargs["readiness_url"],
+                    "url": url,
+                },
+            )
+        )
+        return None
+
     def fake_runner(app_path: str, **kwargs):
         calls.append(("runner", (app_path, kwargs)))
 
     monkeypatch.setattr("lab_tracker.cli.command.upgrade", fake_upgrade)
+    monkeypatch.setattr(
+        "lab_tracker.cli._start_browser_when_ready",
+        fake_start_browser_when_ready,
+    )
 
     serve_app(
         browser_opener=fake_open,
@@ -150,11 +167,38 @@ def test_serve_app_runs_migrations_opens_browser_and_starts_server(monkeypatch) 
     )
 
     assert calls[0] == ("upgrade", "head")
-    assert calls[1] == ("open", "http://127.0.0.1:8123/app")
+    assert calls[1] == (
+        "schedule_browser",
+        {
+            "opener_is_fake": True,
+            "readiness_url": "http://127.0.0.1:8123/health",
+            "url": "http://127.0.0.1:8123/app",
+        },
+    )
     assert calls[2] == (
         "runner",
         ("lab_tracker.asgi:app", {"host": "127.0.0.1", "port": 8123, "reload": True}),
     )
+
+
+def test_browser_opener_waits_until_readiness_probe_passes() -> None:
+    probe_results = iter([False, False, True])
+    opened: list[str] = []
+    sleeps: list[float] = []
+
+    result = _open_browser_when_ready(
+        "http://127.0.0.1:8123/app",
+        readiness_url="http://127.0.0.1:8123/health",
+        opener=opened.append,
+        readiness_probe=lambda _url: next(probe_results),
+        poll_interval_seconds=0.1,
+        max_attempts=3,
+        sleep=sleeps.append,
+    )
+
+    assert result is True
+    assert opened == ["http://127.0.0.1:8123/app"]
+    assert sleeps == [0.1, 0.1]
 
 
 def test_serve_app_can_skip_migrations_and_browser() -> None:

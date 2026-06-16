@@ -4,7 +4,12 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import sys
+import threading
+import time
+import urllib.error
+import urllib.request
 import webbrowser
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -76,13 +81,71 @@ def serve_app(
     url = f"http://{browser_host}:{port}/app"
     if open_browser:
         opener = browser_opener or webbrowser.open
-        opener(url)
+        _start_browser_when_ready(
+            url,
+            readiness_url=f"http://{browser_host}:{port}/health",
+            opener=opener,
+        )
 
     if server_runner is None:
         import uvicorn
 
         server_runner = uvicorn.run
     server_runner("lab_tracker.asgi:app", host=host, port=port, reload=reload)
+
+
+def _start_browser_when_ready(
+    url: str,
+    *,
+    readiness_url: str,
+    opener: Callable[[str], object],
+) -> threading.Thread:
+    thread = threading.Thread(
+        target=_open_browser_when_ready,
+        kwargs={
+            "opener": opener,
+            "readiness_url": readiness_url,
+            "url": url,
+        },
+        daemon=True,
+    )
+    thread.start()
+    return thread
+
+
+def _open_browser_when_ready(
+    url: str,
+    *,
+    readiness_url: str,
+    opener: Callable[[str], object],
+    readiness_probe: Callable[[str], bool] | None = None,
+    timeout_seconds: float = 20.0,
+    poll_interval_seconds: float = 0.2,
+    max_attempts: int | None = None,
+    sleep: Callable[[float], object] = time.sleep,
+) -> bool:
+    probe = readiness_probe or _http_ready
+    attempts = max_attempts
+    if attempts is None:
+        attempts = max(1, math.ceil(timeout_seconds / poll_interval_seconds))
+    for _attempt in range(attempts):
+        if probe(readiness_url):
+            opener(url)
+            return True
+        sleep(poll_interval_seconds)
+    print(
+        f"Lab Tracker is still starting. Open {url} after the server is ready.",
+        file=sys.stderr,
+    )
+    return False
+
+
+def _http_ready(url: str) -> bool:
+    try:
+        with urllib.request.urlopen(url, timeout=0.5) as response:
+            return 200 <= response.status < 500
+    except (OSError, urllib.error.URLError):
+        return False
 
 
 def main(argv: list[str] | None = None) -> None:
