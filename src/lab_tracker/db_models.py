@@ -788,6 +788,32 @@ class UserModel(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utc_now)
 
 
+class InvitationModel(Base):
+    __tablename__ = "invitations"
+    __table_args__ = (
+        UniqueConstraint("token_hash", name="uq_invitations_token_hash"),
+        Index("ix_invitations_email_created", "email", "created_at"),
+        Index("ix_invitations_expires_at", "expires_at"),
+    )
+
+    invitation_id: Mapped[str] = mapped_column(
+        String(36),
+        primary_key=True,
+        default=lambda: str(uuid4()),
+    )
+    email: Mapped[str] = mapped_column(String(255), nullable=False)
+    role: Mapped[str] = mapped_column(String(20), nullable=False)
+    token_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utc_now)
+    consumed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    consumed_by_user_id: Mapped[str | None] = mapped_column(
+        String(36),
+        ForeignKey("users.user_id", ondelete="SET NULL"),
+    )
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
 class SupervisionEdgeModel(Base):
     __tablename__ = "supervision_edges"
 

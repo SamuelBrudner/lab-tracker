@@ -133,11 +133,17 @@ class AuthUserRead(BaseModel):
 
 
 class AuthInvitationRead(BaseModel):
+    invitation_id: UUID
     email: str
     role: Role
-    invite_url: str
-    mailto_url: str
+    status: str
+    invite_url: str | None = None
+    mailto_url: str | None = None
     expires_at: datetime
+    created_at: datetime
+    consumed_at: datetime | None = None
+    revoked_at: datetime | None = None
+    warning: str | None = None
 
 
 class AuthBootstrapStatus(BaseModel):
@@ -168,7 +174,7 @@ class AuthUserUpdate(RequestModel):
 
 class AuthInvitationCreate(RequestModel):
     email: NonBlankStr
-    role: Role = Role.VIEWER
+    role: Role = Role.EDITOR
 
 
 class AuthLoginRequest(RequestModel):

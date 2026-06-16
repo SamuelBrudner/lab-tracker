@@ -33,10 +33,11 @@ viewer/editor/admin roles, and reset passwords. Use each project's
 
 ## Invitation Links
 
-The `Users` screen creates signed invitation links. If
+The `Users` screen creates single-use invitation links. Pending invitations are
+listed on the same screen and can be revoked before they are consumed. If
 `LAB_TRACKER_PUBLIC_BASE_URL` is set, links use that URL. Otherwise links use
-the host from the browser request. On Render, the Docker entrypoint also uses
-`RENDER_EXTERNAL_URL` when available.
+the host from the browser request and warn when the host is local or private.
+On Render, the Docker entrypoint also uses `RENDER_EXTERNAL_URL` when available.
 
 Invitation links expire after `LAB_TRACKER_AUTH_INVITE_TTL_HOURS` hours
 (default: 168). The invited member opens the emailed link, sets a password, and

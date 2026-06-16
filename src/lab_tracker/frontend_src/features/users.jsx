@@ -4,7 +4,8 @@ import { apiListRequest, apiRequest, buildApiPath } from "../shared/api.js";
 
 function UsersPage({ token, canManageUsers, setBusy, setFlash }) {
   const [inviteEmail, setInviteEmail] = React.useState("");
-  const [inviteRole, setInviteRole] = React.useState("viewer");
+  const [inviteRole, setInviteRole] = React.useState("editor");
+  const [invitations, setInvitations] = React.useState([]);
   const [latestInvitation, setLatestInvitation] = React.useState(null);
   const [users, setUsers] = React.useState([]);
   const [passwordsByUser, setPasswordsByUser] = React.useState({});
@@ -25,9 +26,26 @@ function UsersPage({ token, canManageUsers, setBusy, setFlash }) {
     }
   }, [canManageUsers, setFlash, token]);
 
+  const refreshInvitations = React.useCallback(async () => {
+    if (!canManageUsers) {
+      setInvitations([]);
+      return;
+    }
+    try {
+      const { data } = await apiListRequest(buildApiPath("/auth/invitations", { limit: 200 }), {
+        token,
+      });
+      setInvitations(data);
+    } catch (err) {
+      setInvitations([]);
+      setFlash("", err.message || "Failed to load invitations.");
+    }
+  }, [canManageUsers, setFlash, token]);
+
   React.useEffect(() => {
     refreshUsers();
-  }, [refreshUsers]);
+    refreshInvitations();
+  }, [refreshInvitations, refreshUsers]);
 
   async function updateUser(userId, body, successMessage) {
     if (!canManageUsers) {
@@ -69,9 +87,33 @@ function UsersPage({ token, canManageUsers, setBusy, setFlash }) {
       });
       setLatestInvitation(invitation);
       setInviteEmail("");
+      await refreshInvitations();
       setFlash("Invitation link created.");
     } catch (err) {
       setFlash("", err.message || "Failed to create invitation.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function revokeInvitation(invitationId) {
+    if (!canManageUsers) {
+      return;
+    }
+    setBusy(true);
+    setFlash("", "");
+    try {
+      await apiRequest(`/auth/invitations/${invitationId}`, {
+        method: "DELETE",
+        token,
+      });
+      setLatestInvitation((current) =>
+        current?.invitation_id === invitationId ? null : current
+      );
+      await refreshInvitations();
+      setFlash("Invitation revoked.");
+    } catch (err) {
+      setFlash("", err.message || "Failed to revoke invitation.");
     } finally {
       setBusy(false);
     }
@@ -119,8 +161,8 @@ function UsersPage({ token, canManageUsers, setBusy, setFlash }) {
           <label>
             Global role
             <select value={inviteRole} onChange={(event) => setInviteRole(event.target.value)}>
-              <option value="viewer">viewer</option>
               <option value="editor">editor</option>
+              <option value="viewer">viewer</option>
               <option value="admin">admin</option>
             </select>
           </label>
@@ -132,6 +174,9 @@ function UsersPage({ token, canManageUsers, setBusy, setFlash }) {
               <strong>{latestInvitation.email}</strong>
               <p className="subtle">Role: {latestInvitation.role}</p>
             </div>
+            {latestInvitation.warning ? (
+              <p className="warn">{latestInvitation.warning}</p>
+            ) : null}
             <label>
               Invite link
               <input value={latestInvitation.invite_url} readOnly />
@@ -139,6 +184,34 @@ function UsersPage({ token, canManageUsers, setBusy, setFlash }) {
             <a className="btn-secondary" href={latestInvitation.mailto_url}>
               Email invite
             </a>
+          </div>
+        ) : null}
+        {invitations.length ? (
+          <div className="stack">
+            {invitations.map((invitation) => (
+              <article className="item" key={invitation.invitation_id}>
+                <div className="item-head">
+                  <div>
+                    <strong>{invitation.email}</strong>
+                    <p className="subtle">
+                      {invitation.role} · expires {new Date(invitation.expires_at).toLocaleString()}
+                    </p>
+                  </div>
+                  <span className={`pill status-${invitation.status}`}>
+                    {invitation.status}
+                  </span>
+                </div>
+                {invitation.status === "pending" ? (
+                  <button
+                    className="btn-secondary"
+                    type="button"
+                    onClick={() => revokeInvitation(invitation.invitation_id)}
+                  >
+                    Revoke invite
+                  </button>
+                ) : null}
+              </article>
+            ))}
           </div>
         ) : null}
       </section>

@@ -18,12 +18,18 @@ from uuid import UUID, uuid4
 from sqlalchemy import select
 from sqlalchemy.orm import Session, sessionmaker
 
-from lab_tracker.db_models import DeviceEnrollmentModel, DeviceTokenModel, UserModel
+from lab_tracker.db_models import (
+    DeviceEnrollmentModel,
+    DeviceTokenModel,
+    InvitationModel,
+    UserModel,
+)
 from lab_tracker.errors import AuthError, ConflictError, NotFoundError, ValidationError
 
 LOCAL_AUTH_USER_ID = UUID("00000000-0000-4000-8000-000000000001")
 LOCAL_AUTH_USERNAME = "local-tester"
 LOCAL_AUTH_PASSWORD_HASH = "local-auth-disabled"
+MIN_PASSWORD_LENGTH = 6
 
 
 def utc_now() -> datetime:
@@ -69,8 +75,12 @@ class PasswordHasher:
 
     @classmethod
     def hash_password(cls, password: str) -> str:
-        if not password:
+        if not password or not password.strip():
             raise ValidationError("Password must not be empty.")
+        if len(password) < MIN_PASSWORD_LENGTH:
+            raise ValidationError(
+                f"Password must be at least {MIN_PASSWORD_LENGTH} characters long."
+            )
         salt = os.urandom(cls.salt_bytes)
         digest = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, cls.iterations)
         return f"{cls.algorithm}${cls.iterations}${salt.hex()}${digest.hex()}"
@@ -281,10 +291,39 @@ class TokenClaims:
 
 @dataclass(frozen=True)
 class InvitationClaims:
+    invitation_id: UUID
     email: str
     role: Role
     expires_at: datetime
     issued_at: datetime
+
+
+@dataclass(frozen=True)
+class Invitation:
+    invitation_id: UUID
+    email: str
+    role: Role
+    expires_at: datetime
+    created_at: datetime
+    consumed_at: datetime | None = None
+    consumed_by_user_id: UUID | None = None
+    revoked_at: datetime | None = None
+
+    @property
+    def status(self) -> str:
+        if self.revoked_at is not None:
+            return "revoked"
+        if self.consumed_at is not None:
+            return "consumed"
+        if self.expires_at <= utc_now():
+            return "expired"
+        return "pending"
+
+
+@dataclass(frozen=True)
+class IssuedInvitation:
+    invitation: Invitation
+    token: str
 
 
 class TokenService:
@@ -347,62 +386,155 @@ class TokenService:
 
 
 class InvitationTokenService:
-    """HMAC-signed invitation token issuer and verifier."""
+    """Persistent single-use invitation issuer and verifier."""
 
-    def __init__(self, secret_key: str, *, ttl_hours: int = 168) -> None:
+    def __init__(
+        self,
+        secret_key: str,
+        *,
+        ttl_hours: int = 168,
+        session_factory: sessionmaker[Session] | None = None,
+    ) -> None:
         if not secret_key or not secret_key.strip():
             raise ValidationError("auth_secret_key must not be empty.")
         if ttl_hours < 1:
             raise ValidationError("auth_invite_ttl_hours must be at least 1.")
         self._secret = secret_key.encode("utf-8")
         self._ttl_hours = ttl_hours
+        self._session_factory = session_factory
+        self._memory_invitations_by_hash: dict[str, InvitationModel] = {}
 
-    def issue_invitation_token(self, *, email: str, role: Role) -> tuple[str, datetime]:
+    def issue_invitation(self, *, email: str, role: Role) -> IssuedInvitation:
         issued_at = utc_now()
         expires_at = issued_at + timedelta(hours=self._ttl_hours)
-        header = {"alg": "HS256", "typ": "LT-INVITE"}
-        payload = {
-            "email": self.normalize_email(email),
-            "role": role.value,
-            "iat": int(issued_at.timestamp()),
-            "exp": int(expires_at.timestamp()),
-        }
-        header_segment = _b64url_encode_json(header)
-        payload_segment = _b64url_encode_json(payload)
-        signature = self._sign(f"{header_segment}.{payload_segment}".encode())
-        token = f"{header_segment}.{payload_segment}.{_b64url_encode(signature)}"
-        return token, expires_at
+        token = _generate_secret(INVITATION_TOKEN_PREFIX)
+        token_hash = _hash_token(token)
+        invitation_id = uuid4()
+        row = InvitationModel(
+            invitation_id=str(invitation_id),
+            email=self.normalize_email(email),
+            role=role.value,
+            token_hash=token_hash,
+            expires_at=expires_at,
+            created_at=issued_at,
+        )
+        if self._session_factory is None:
+            self._memory_invitations_by_hash[token_hash] = row
+            return IssuedInvitation(invitation=_invitation_from_model(row), token=token)
+
+        with self._session_factory() as session:
+            session.add(row)
+            session.commit()
+            session.refresh(row)
+            return IssuedInvitation(invitation=_invitation_from_model(row), token=token)
+
+    def issue_invitation_token(self, *, email: str, role: Role) -> tuple[str, datetime]:
+        issued = self.issue_invitation(email=email, role=role)
+        return issued.token, issued.invitation.expires_at
 
     def verify_invitation_token(self, token: str) -> InvitationClaims:
         _ensure_non_empty(token, "invite_token")
-        parts = token.split(".")
-        if len(parts) != 3:
-            raise AuthError("Invalid invitation token.")
-        header_segment, payload_segment, signature_segment = parts
-        signing_input = f"{header_segment}.{payload_segment}".encode()
-        expected_signature = self._sign(signing_input)
-        provided_signature = _b64url_decode(signature_segment)
-        if not hmac.compare_digest(expected_signature, provided_signature):
-            raise AuthError("Invalid invitation token.")
-        header = _b64url_decode_json(header_segment)
-        if header.get("typ") != "LT-INVITE":
-            raise AuthError("Invalid invitation token.")
-        payload = _b64url_decode_json(payload_segment)
-        try:
-            email = self.normalize_email(str(payload["email"]))
-            role = Role(str(payload["role"]))
-            issued_at = datetime.fromtimestamp(int(payload["iat"]), tz=timezone.utc)
-            expires_at = datetime.fromtimestamp(int(payload["exp"]), tz=timezone.utc)
-        except (KeyError, ValueError, TypeError) as exc:
-            raise AuthError("Invalid invitation token.") from exc
-        if expires_at <= utc_now():
-            raise AuthError("Invitation token has expired.")
+        invitation = self._invitation_for_token(token)
+        self._ensure_invitation_pending(invitation)
         return InvitationClaims(
-            email=email,
-            role=role,
-            expires_at=expires_at,
-            issued_at=issued_at,
+            invitation_id=invitation.invitation_id,
+            email=invitation.email,
+            role=invitation.role,
+            expires_at=invitation.expires_at,
+            issued_at=invitation.created_at,
         )
+
+    def consume_invitation_token(self, token: str, *, consumed_by_user_id: UUID) -> Invitation:
+        _ensure_non_empty(token, "invite_token")
+        token_hash = _hash_token(token)
+        if self._session_factory is None:
+            row = self._memory_invitations_by_hash.get(token_hash)
+            if row is None:
+                raise AuthError("Invitation token is invalid.")
+            invitation = _invitation_from_model(row)
+            self._ensure_invitation_pending(invitation)
+            row.consumed_at = utc_now()
+            row.consumed_by_user_id = str(consumed_by_user_id)
+            return _invitation_from_model(row)
+
+        with self._session_factory() as session:
+            row = session.scalar(
+                select(InvitationModel).where(InvitationModel.token_hash == token_hash)
+            )
+            if row is None:
+                raise AuthError("Invitation token is invalid.")
+            invitation = _invitation_from_model(row)
+            self._ensure_invitation_pending(invitation)
+            row.consumed_at = utc_now()
+            row.consumed_by_user_id = str(consumed_by_user_id)
+            session.commit()
+            session.refresh(row)
+            return _invitation_from_model(row)
+
+    def list_invitations(self) -> list[Invitation]:
+        if self._session_factory is None:
+            return sorted(
+                (_invitation_from_model(row) for row in self._memory_invitations_by_hash.values()),
+                key=lambda invitation: invitation.created_at,
+                reverse=True,
+            )
+        with self._session_factory() as session:
+            rows = list(
+                session.scalars(
+                    select(InvitationModel).order_by(InvitationModel.created_at.desc())
+                )
+            )
+            return [_invitation_from_model(row) for row in rows]
+
+    def revoke_invitation(self, invitation_id: UUID) -> Invitation:
+        if self._session_factory is None:
+            for row in self._memory_invitations_by_hash.values():
+                if row.invitation_id == str(invitation_id):
+                    if row.consumed_at is not None:
+                        raise ValidationError("Consumed invitations cannot be revoked.")
+                    if row.revoked_at is None:
+                        row.revoked_at = utc_now()
+                    return _invitation_from_model(row)
+            raise NotFoundError("Invitation does not exist.")
+
+        with self._session_factory() as session:
+            row = session.get(InvitationModel, str(invitation_id))
+            if row is None:
+                raise NotFoundError("Invitation does not exist.")
+            if row.consumed_at is not None:
+                raise ValidationError("Consumed invitations cannot be revoked.")
+            if row.revoked_at is None:
+                row.revoked_at = utc_now()
+                session.commit()
+                session.refresh(row)
+            return _invitation_from_model(row)
+
+    def _invitation_for_token(self, token: str) -> Invitation:
+        if not token.startswith(INVITATION_TOKEN_PREFIX):
+            raise AuthError("Unrecognized invitation token.")
+        token_hash = _hash_token(token)
+        if self._session_factory is None:
+            row = self._memory_invitations_by_hash.get(token_hash)
+            if row is None:
+                raise AuthError("Invitation token is invalid.")
+            return _invitation_from_model(row)
+
+        with self._session_factory() as session:
+            row = session.scalar(
+                select(InvitationModel).where(InvitationModel.token_hash == token_hash)
+            )
+            if row is None:
+                raise AuthError("Invitation token is invalid.")
+            return _invitation_from_model(row)
+
+    @staticmethod
+    def _ensure_invitation_pending(invitation: Invitation) -> None:
+        if invitation.revoked_at is not None:
+            raise AuthError("Invitation has been revoked.")
+        if invitation.consumed_at is not None:
+            raise AuthError("Invitation has already been used.")
+        if invitation.expires_at <= utc_now():
+            raise AuthError("Invitation token has expired.")
 
     @staticmethod
     def normalize_email(email: str) -> str:
@@ -420,6 +552,7 @@ class InvitationTokenService:
 
 DEVICE_TOKEN_PREFIX = "ldev_"
 ENROLLMENT_OFFER_PREFIX = "lpair_"
+INVITATION_TOKEN_PREFIX = "linv_"
 
 
 def device_principal_can_access(method: str, path: str) -> bool:
@@ -683,6 +816,23 @@ def _as_utc(value: datetime) -> datetime:
     if value.tzinfo is None:
         return value.replace(tzinfo=timezone.utc)
     return value.astimezone(timezone.utc)
+
+
+def _optional_as_utc(value: datetime | None) -> datetime | None:
+    return None if value is None else _as_utc(value)
+
+
+def _invitation_from_model(row: InvitationModel) -> Invitation:
+    return Invitation(
+        invitation_id=UUID(row.invitation_id),
+        email=row.email,
+        role=Role(row.role),
+        expires_at=_as_utc(row.expires_at),
+        created_at=_as_utc(row.created_at),
+        consumed_at=_optional_as_utc(row.consumed_at),
+        consumed_by_user_id=UUID(row.consumed_by_user_id) if row.consumed_by_user_id else None,
+        revoked_at=_optional_as_utc(row.revoked_at),
+    )
 
 
 def _user_from_model(row: UserModel) -> User:

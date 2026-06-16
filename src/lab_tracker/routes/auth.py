@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import hmac
+import ipaddress
 from datetime import datetime, timezone
-from urllib.parse import quote, urlencode
+from urllib.parse import quote, urlencode, urlparse
 from uuid import UUID
 
 from fastapi import APIRouter
@@ -14,6 +15,7 @@ from starlette.requests import Request
 from lab_tracker.auth import (
     LOCAL_AUTH_USERNAME,
     AuthService,
+    Invitation,
     InvitationTokenService,
     Role,
     TokenService,
@@ -105,6 +107,11 @@ def build_auth_router(
             password=payload.password,
             role=registration_role,
         )
+        if payload.invite_token:
+            invitation_token_service.consume_invitation_token(
+                payload.invite_token,
+                consumed_by_user_id=user.user_id,
+            )
         token = token_service.issue_access_token(user)
         return Envelope(data=auth_token_read(user, token.token, token.expires_at))
 
@@ -116,27 +123,47 @@ def build_auth_router(
     def create_auth_invitation(payload: AuthInvitationCreate, request: Request):
         _ensure_admin(request)
         email = invitation_token_service.normalize_email(payload.email)
-        invite_token, expires_at = invitation_token_service.issue_invitation_token(
+        issued = invitation_token_service.issue_invitation(
             email=email,
             role=payload.role,
         )
-        base_url = _public_base_url(request)
+        base_url, warning = _public_base_url_with_warning(request)
+        invite_token = issued.token
         invite_url = f"{base_url}/app?{urlencode({'invite': invite_token, 'email': email})}"
         mailto_url = _mailto_invitation_url(
             email=email,
             invite_url=invite_url,
             role=payload.role,
-            expires_at=expires_at,
+            expires_at=issued.invitation.expires_at,
         )
         return Envelope(
-            data=AuthInvitationRead(
-                email=email,
-                role=payload.role,
+            data=_auth_invitation_read(
+                issued.invitation,
                 invite_url=invite_url,
                 mailto_url=mailto_url,
-                expires_at=expires_at,
+                warning=warning,
             )
         )
+
+    @router.get("/auth/invitations", response_model=ListEnvelope[AuthInvitationRead])
+    def list_auth_invitations(request: Request, limit: int = 50, offset: int = 0):
+        validate_pagination(limit, offset)
+        _ensure_admin(request)
+        invitations = [
+            _auth_invitation_read(invitation)
+            for invitation in invitation_token_service.list_invitations()
+        ]
+        items, total = paginate(invitations, limit, offset)
+        return list_response(items, limit=limit, offset=offset, total=total)
+
+    @router.delete(
+        "/auth/invitations/{invitation_id:uuid}",
+        response_model=Envelope[AuthInvitationRead],
+    )
+    def revoke_auth_invitation(invitation_id: UUID, request: Request):
+        _ensure_admin(request)
+        invitation = invitation_token_service.revoke_invitation(invitation_id)
+        return Envelope(data=_auth_invitation_read(invitation))
 
     @router.get("/auth/users", response_model=ListEnvelope[AuthUserRead])
     def list_auth_users(request: Request, limit: int = 50, offset: int = 0):
@@ -198,11 +225,52 @@ def _ensure_admin(request: Request) -> None:
         raise AuthError("Admin privileges required.")
 
 
-def _public_base_url(request: Request) -> str:
+def _auth_invitation_read(
+    invitation: Invitation,
+    *,
+    invite_url: str | None = None,
+    mailto_url: str | None = None,
+    warning: str | None = None,
+) -> AuthInvitationRead:
+    return AuthInvitationRead(
+        invitation_id=invitation.invitation_id,
+        email=invitation.email,
+        role=invitation.role,
+        status=invitation.status,
+        invite_url=invite_url,
+        mailto_url=mailto_url,
+        expires_at=invitation.expires_at,
+        created_at=invitation.created_at,
+        consumed_at=invitation.consumed_at,
+        revoked_at=invitation.revoked_at,
+        warning=warning,
+    )
+
+
+def _public_base_url_with_warning(request: Request) -> tuple[str, str | None]:
     configured = str(getattr(request.app.state.settings, "public_base_url", "") or "").strip()
     if configured:
-        return configured.rstrip("/")
-    return str(request.base_url).rstrip("/")
+        return configured.rstrip("/"), None
+    base_url = str(request.base_url).rstrip("/")
+    hostname = urlparse(base_url).hostname or ""
+    if _host_needs_public_base_url_warning(hostname):
+        return (
+            base_url,
+            "Invitation link uses a local or private host. Set LAB_TRACKER_PUBLIC_BASE_URL "
+            "to a reachable lab URL before sending it off-machine.",
+        )
+    return base_url, None
+
+
+def _host_needs_public_base_url_warning(hostname: str) -> bool:
+    host = hostname.strip().lower()
+    if host in {"", "localhost", "0.0.0.0"} or host.endswith(".local"):
+        return True
+    try:
+        address = ipaddress.ip_address(host)
+    except ValueError:
+        return False
+    return address.is_loopback or address.is_private or address.is_link_local
 
 
 def _mailto_invitation_url(

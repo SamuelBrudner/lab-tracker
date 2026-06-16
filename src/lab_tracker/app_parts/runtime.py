@@ -67,6 +67,7 @@ def build_app_runtime(settings: Settings) -> AppRuntime:
     invitation_token_service = InvitationTokenService(
         settings.auth_secret_key,
         ttl_hours=settings.auth_invite_ttl_hours,
+        session_factory=session_factory,
     )
     file_storage_backend = LocalFileStorageBackend(settings.file_storage_path)
     raw_note_storage = LocalNoteStorage(settings.note_storage_path)

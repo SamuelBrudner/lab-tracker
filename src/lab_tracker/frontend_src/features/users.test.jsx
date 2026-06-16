@@ -16,6 +16,26 @@ describe("UsersPage invitations", () => {
         response: apiResponse([], 200, { limit: 200, offset: 0, total: 0 }),
       },
       {
+        match: "/auth/invitations?limit=200",
+        response: [
+          apiResponse([], 200, { limit: 200, offset: 0, total: 0 }),
+          apiResponse(
+            [
+              {
+                created_at: "2026-06-16T12:00:00Z",
+                email: "member@example.org",
+                expires_at: "2026-06-22T12:00:00Z",
+                invitation_id: "11111111-1111-4111-8111-111111111111",
+                role: "editor",
+                status: "pending",
+              },
+            ],
+            200,
+            { limit: 200, offset: 0, total: 1 }
+          ),
+        ],
+      },
+      {
         match: "/auth/invitations",
         method: "POST",
         response: (request) => {
@@ -25,11 +45,14 @@ describe("UsersPage invitations", () => {
           });
           return apiResponse(
             {
+              created_at: "2026-06-16T12:00:00Z",
               email: "member@example.org",
               expires_at: "2026-06-22T12:00:00Z",
+              invitation_id: "11111111-1111-4111-8111-111111111111",
               invite_url: "https://lab.example.org/app?invite=signed-token",
               mailto_url: "mailto:member%40example.org?subject=Lab%20Tracker%20invitation",
               role: "editor",
+              status: "pending",
             },
             201
           );
@@ -50,7 +73,10 @@ describe("UsersPage invitations", () => {
     fireEvent.click(screen.getByRole("button", { name: "Create invite" }));
 
     await waitFor(() => expect(setFlash).toHaveBeenCalledWith("Invitation link created."));
-    expect(screen.getByDisplayValue("https://lab.example.org/app?invite=signed-token")).toBeInTheDocument();
+    expect(
+      screen.getByDisplayValue("https://lab.example.org/app?invite=signed-token")
+    ).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Revoke invite" })).toBeInTheDocument();
     expect(screen.getByRole("link", { name: "Email invite" })).toHaveAttribute(
       "href",
       "mailto:member%40example.org?subject=Lab%20Tracker%20invitation"

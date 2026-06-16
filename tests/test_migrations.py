@@ -3,11 +3,11 @@ from __future__ import annotations
 from pathlib import Path
 from uuid import uuid4
 
+from alembic import command
 from alembic.config import Config
 from alembic.script import ScriptDirectory
 from sqlalchemy import create_engine, inspect, text
 
-from alembic import command
 from lab_tracker.api import LabTrackerAPI
 from lab_tracker.auth import AuthContext, Role
 from lab_tracker.db import get_session_factory
@@ -78,7 +78,7 @@ def test_alembic_upgrade_chain_from_empty_to_head(monkeypatch, tmp_path):
     for revision in revisions:
         command.upgrade(config, revision)
         assert revision in _current_revisions(database_url)
-    assert _current_revision(database_url) == "0032_record_export_events"
+    assert _current_revision(database_url) == "0033_persistent_invitations"
 
 
 def test_alembic_has_single_head() -> None:
@@ -137,6 +137,7 @@ def test_alembic_upgrade_head_creates_expected_tables(monkeypatch, tmp_path):
         "supervision_edges",
         "ownership_reassignments",
         "record_export_events",
+        "invitations",
     }
     assert expected.issubset(table_names)
     assert "dataset_reviews" not in table_names
@@ -168,6 +169,7 @@ def test_alembic_upgrade_head_creates_expected_tables(monkeypatch, tmp_path):
     record_export_columns = {
         column["name"] for column in inspector.get_columns("record_export_events")
     }
+    invitation_columns = {column["name"] for column in inspector.get_columns("invitations")}
     visualization_columns = {
         column["name"] for column in inspector.get_columns("visualizations")
     }
@@ -344,6 +346,25 @@ def test_alembic_upgrade_head_creates_expected_tables(monkeypatch, tmp_path):
         "ix_record_export_events_created_by_user_id",
     )
     assert {
+        "invitation_id",
+        "email",
+        "role",
+        "token_hash",
+        "expires_at",
+        "created_at",
+        "consumed_at",
+        "consumed_by_user_id",
+        "revoked_at",
+    }.issubset(invitation_columns)
+    _assert_fk(
+        inspector,
+        "invitations",
+        column="consumed_by_user_id",
+        referred_table="users",
+    )
+    _assert_index(inspector, "invitations", "ix_invitations_email_created")
+    _assert_index(inspector, "invitations", "ix_invitations_expires_at")
+    assert {
         "asset_storage_id",
         "asset_filename",
         "asset_content_type",
@@ -366,7 +387,7 @@ def test_database_at_daily_review_branch_upgrades_to_current_head(monkeypatch, t
     assert _current_revision(database_url) == "0017_daily_graph_reviews"
 
     command.upgrade(config, "head")
-    assert _current_revision(database_url) == "0032_record_export_events"
+    assert _current_revision(database_url) == "0033_persistent_invitations"
 
     engine = create_engine(
         database_url,
