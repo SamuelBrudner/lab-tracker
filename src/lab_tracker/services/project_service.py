@@ -540,22 +540,21 @@ class ProjectService(BaseService):
     ) -> set[UUID]:
         if not candidate_project_ids:
             return set()
-        user_id_filter = str(user_id)
-        record_project_ids: set[UUID] = set()
-        for query in (
-            self.repository.query_questions,
-            self.repository.query_datasets,
-            self.repository.query_notes,
-            self.repository.query_analyses,
-            self.repository.query_claims,
-        ):
-            records, _ = query(created_by=user_id_filter, limit=None, offset=0)
-            record_project_ids.update(
-                record.project_id
-                for record in records
-                if record.project_id in candidate_project_ids
+        records = self.repository.records_attributed_to_user(
+            user_id=user_id,
+            project_ids=candidate_project_ids,
+        )
+        return {
+            item.project_id
+            for collection in (
+                records.questions,
+                records.datasets,
+                records.notes,
+                records.analyses,
+                records.claims,
             )
-        return record_project_ids
+            for item in collection
+        }
 
     def accessible_project_ids(self, actor: AuthContext | None) -> set[UUID] | None:
         return self.authorization.accessible_project_ids(actor)

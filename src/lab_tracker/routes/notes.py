@@ -34,6 +34,7 @@ from lab_tracker.schemas import (
 )
 
 from .shared import (
+    CreatedByFilter,
     actor_from_request,
     api_from_request,
     ensure_project_contributor,
@@ -152,7 +153,7 @@ def build_notes_router(api: LabTrackerAPI) -> APIRouter:
         request: Request,
         project_id: UUID | None = None,
         status: NoteStatus | None = None,
-        created_by: str | None = None,
+        created_by: CreatedByFilter = None,
         target_entity_type: EntityType | None = None,
         target_entity_id: UUID | None = None,
         limit: int = 50,

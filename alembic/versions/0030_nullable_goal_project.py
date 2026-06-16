@@ -1,5 +1,9 @@
 """Allow projectless spanning goals.
 
+Downgrading this revision is intentionally one-way once projectless goals exist:
+restoring the NOT NULL constraint on goals.project_id will fail until those rows
+are reassigned or removed.
+
 Revision ID: 0030_nullable_goal_project
 Revises: 0029_supervision_edges
 Create Date: 2026-06-15 00:00:00.000000

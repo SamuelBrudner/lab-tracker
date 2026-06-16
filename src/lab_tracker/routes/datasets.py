@@ -16,6 +16,7 @@ from lab_tracker.schemas import DatasetCreate, DatasetUpdate, Envelope, ListEnve
 
 from .dataset_files import _delete_stored_dataset_file
 from .shared import (
+    CreatedByFilter,
     actor_from_request,
     api_from_request,
     dataset_default_status,
@@ -56,7 +57,7 @@ def build_datasets_router(api: LabTrackerAPI) -> APIRouter:
         request: Request,
         project_id: UUID | None = None,
         status: DatasetStatus | None = None,
-        created_by: str | None = None,
+        created_by: CreatedByFilter = None,
         limit: int = 50,
         offset: int = 0,
     ):

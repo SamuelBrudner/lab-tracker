@@ -222,7 +222,7 @@ class AuthService:
     def _normalize_username(username: str) -> str:
         if not username or not username.strip():
             raise ValidationError("Username must not be empty.")
-        return username.strip()
+        return username.strip().lower()
 
     @staticmethod
     def _ensure_not_demoting_last_admin(

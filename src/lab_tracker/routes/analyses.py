@@ -22,6 +22,7 @@ from lab_tracker.schemas import (
 )
 
 from .shared import (
+    CreatedByFilter,
     actor_from_request,
     analysis_default_status,
     api_from_request,
@@ -65,7 +66,7 @@ def build_analyses_router(api: LabTrackerAPI) -> APIRouter:
         dataset_id: UUID | None = None,
         question_id: UUID | None = None,
         status: AnalysisStatus | None = None,
-        created_by: str | None = None,
+        created_by: CreatedByFilter = None,
         limit: int = 50,
         offset: int = 0,
     ):

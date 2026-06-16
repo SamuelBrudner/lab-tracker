@@ -18,7 +18,7 @@ from lab_tracker.auth import (
     Role,
     TokenService,
 )
-from lab_tracker.errors import AuthError
+from lab_tracker.errors import AuthError, ConflictError
 from lab_tracker.schemas import (
     AuthBootstrapStatus,
     AuthInvitationCreate,
@@ -71,12 +71,16 @@ def build_auth_router(
     )
     def register_auth(payload: AuthRegisterRequest, request: Request):
         registration_role = payload.role
+        username = payload.username
         if payload.invite_token:
             invitation = invitation_token_service.verify_invitation_token(payload.invite_token)
             invited_email = invitation_token_service.normalize_email(invitation.email)
             provided_username = invitation_token_service.normalize_email(payload.username)
             if provided_username != invited_email:
                 raise AuthError("Invitation token does not match this email address.")
+            if auth_service.get_user(invited_email) is not None:
+                raise ConflictError("Invitation has already been used.")
+            username = invited_email
             registration_role = invitation.role
         elif payload.role != Role.VIEWER:
             if payload.role == Role.ADMIN and not auth_service.has_users():
@@ -97,7 +101,7 @@ def build_auth_router(
                 if actor.role != Role.ADMIN:
                     raise AuthError("Admin privileges required to register non-viewer users.")
         user = auth_service.register_user(
-            username=payload.username,
+            username=username,
             password=payload.password,
             role=registration_role,
         )

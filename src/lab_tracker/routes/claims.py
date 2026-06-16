@@ -13,6 +13,7 @@ from lab_tracker.models import Claim, ClaimStatus
 from lab_tracker.schemas import ClaimCreate, ClaimUpdate, Envelope, ListEnvelope
 
 from .shared import (
+    CreatedByFilter,
     actor_from_request,
     api_from_request,
     ensure_project_read,
@@ -53,7 +54,7 @@ def build_claims_router(api: LabTrackerAPI) -> APIRouter:
         status: ClaimStatus | None = None,
         dataset_id: UUID | None = None,
         analysis_id: UUID | None = None,
-        created_by: str | None = None,
+        created_by: CreatedByFilter = None,
         limit: int = 50,
         offset: int = 0,
     ):

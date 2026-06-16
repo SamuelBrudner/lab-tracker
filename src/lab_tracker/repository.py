@@ -26,6 +26,7 @@ from lab_tracker.models import (
     Question,
     QuestionRefactor,
     RecordExportEvent,
+    RecordExportRecords,
     Session,
     SupervisionEdge,
     Visualization,
@@ -182,6 +183,14 @@ class LabTrackerRepository(Protocol):
         offset: int = 0,
     ) -> tuple[list[RecordExportEvent], int]:
         """Query user record export audit events."""
+
+    def records_attributed_to_user(
+        self,
+        *,
+        user_id: UUID,
+        project_ids: set[UUID] | None = None,
+    ) -> RecordExportRecords:
+        """Return records attributed to a user for export/offboarding recovery."""
 
     def query_questions(
         self,

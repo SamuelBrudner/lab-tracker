@@ -43,16 +43,16 @@ fi
 if [ -z "${LAB_TRACKER_BOOTSTRAP_ADMIN_TOKEN:-}" ]; then
     if [ -s "$bootstrap_token_file" ]; then
         LAB_TRACKER_BOOTSTRAP_ADMIN_TOKEN="$(cat "$bootstrap_token_file")"
+        echo "Using first-admin bootstrap token from ${bootstrap_token_file}." >&2
     else
         LAB_TRACKER_BOOTSTRAP_ADMIN_TOKEN="$(generate_bootstrap_token)"
         umask 077
         printf '%s\n' "$LAB_TRACKER_BOOTSTRAP_ADMIN_TOKEN" > "$bootstrap_token_file"
         echo "Generated first-admin bootstrap token in ${bootstrap_token_file}." >&2
+        echo "First admin setup token: ${LAB_TRACKER_BOOTSTRAP_ADMIN_TOKEN}" >&2
     fi
     export LAB_TRACKER_BOOTSTRAP_ADMIN_TOKEN
 fi
-
-echo "First admin setup token: ${LAB_TRACKER_BOOTSTRAP_ADMIN_TOKEN}" >&2
 
 max_attempts="${MIGRATION_MAX_ATTEMPTS:-30}"
 sleep_seconds="${MIGRATION_SLEEP_SECONDS:-2}"

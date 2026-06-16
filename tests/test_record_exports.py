@@ -3,8 +3,10 @@ from __future__ import annotations
 from uuid import uuid4
 
 from fastapi.testclient import TestClient
+from sqlalchemy import select
 
 from lab_tracker.auth import Role
+from lab_tracker.db_models import RecordExportEventModel
 
 
 def _auth_headers(token: str) -> dict[str, str]:
@@ -101,6 +103,11 @@ def _graph_ids(export_payload: dict[str, object]) -> set[str]:
     return {str(node["@id"]) for node in graph if isinstance(node, dict) and "@id" in node}
 
 
+def _record_export_event_count(client: TestClient) -> int:
+    with client.app.state.db_session_factory() as session:
+        return len(list(session.scalars(select(RecordExportEventModel.export_id))))
+
+
 def test_record_export_returns_scoped_dump_and_provenance_for_user_and_group(
     client: TestClient,
     admin_auth_headers: dict[str, str],
@@ -135,18 +142,25 @@ def test_record_export_returns_scoped_dump_and_provenance_for_user_and_group(
         project_name="Outside export",
     )
 
-    global_denied = client.get(
+    global_denied = client.post(
         f"/record-exports/users/{source_user_id}",
         headers=group_owner_headers,
     )
-    group_denied = client.get(
+    group_denied = client.post(
         f"/groups/{group_id}/record-exports/users/{source_user_id}",
         headers=viewer_headers,
     )
     assert global_denied.status_code == 401
     assert group_denied.status_code == 401
 
-    global_export = client.get(
+    unsafe_read = client.get(
+        f"/record-exports/users/{source_user_id}",
+        headers=admin_auth_headers,
+    )
+    assert unsafe_read.status_code == 405
+    assert _record_export_event_count(client) == 0
+
+    global_export = client.post(
         f"/record-exports/users/{source_user_id}",
         headers=admin_auth_headers,
     )
@@ -182,7 +196,7 @@ def test_record_export_returns_scoped_dump_and_provenance_for_user_and_group(
     assert f"http://testserver/claims/{group_records['claim_id']}" in graph_ids
     assert f"http://testserver/notes/{outside_records['note_id']}" in graph_ids
 
-    group_export = client.get(
+    group_export = client.post(
         f"/groups/{group_id}/record-exports/users/{source_user_id}",
         headers=group_owner_headers,
     )
@@ -216,7 +230,7 @@ def test_record_export_returns_not_found_for_missing_user(
     client: TestClient,
     admin_auth_headers: dict[str, str],
 ):
-    response = client.get(
+    response = client.post(
         f"/record-exports/users/{uuid4()}",
         headers=admin_auth_headers,
     )

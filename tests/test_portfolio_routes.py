@@ -322,7 +322,7 @@ def test_portfolio_summary_groups_projects_by_project_group(
 
     assert response.status_code == 200
     payload = response.json()
-    assert payload["meta"]["total"] == 2
+    assert payload["meta"]["total"] == 1
     assert len(payload["data"]) == 1
     bucket = payload["data"][0]
     assert bucket["project_group"]["group_id"] == group["group_id"]
@@ -332,6 +332,16 @@ def test_portfolio_summary_groups_projects_by_project_group(
     assert ungrouped_project_id not in {
         item["project_id"] for item in _portfolio_projects(payload)
     }
+
+    page_response = client.get("/portfolio/summary?limit=1", headers=owner_headers)
+    assert page_response.status_code == 200
+    page_payload = page_response.json()
+    assert page_payload["meta"]["total"] == 1
+    assert len(page_payload["data"]) == 1
+    assert page_payload["data"][0]["project_count"] == 2
+    assert {item["project_id"] for item in page_payload["data"][0]["projects"]} == set(
+        grouped_project_ids
+    )
 
 
 def test_portfolio_summary_normalizes_graph_change_set_activity(

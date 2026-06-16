@@ -5,10 +5,19 @@ from __future__ import annotations
 from datetime import datetime
 from uuid import UUID
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.orm import Session as OrmSession
 
-from lab_tracker.db_models import NoteModel, QuestionModel, UserModel
+from lab_tracker.db_models import (
+    AnalysisModel,
+    ClaimAnalysisModel,
+    ClaimDatasetModel,
+    ClaimModel,
+    DatasetModel,
+    NoteModel,
+    QuestionModel,
+    UserModel,
+)
 from lab_tracker.models import (
     AcquisitionOutput,
     Analysis,
@@ -28,6 +37,7 @@ from lab_tracker.models import (
     Question,
     QuestionRefactor,
     RecordExportEvent,
+    RecordExportRecords,
     Session,
     SupervisionEdge,
     Visualization,
@@ -280,6 +290,147 @@ class SQLAlchemyLabTrackerRepository(LabTrackerRepository):
             group_id=group_id,
             limit=limit,
             offset=offset,
+        )
+
+    def records_attributed_to_user(
+        self,
+        *,
+        user_id: UUID,
+        project_ids: set[UUID] | None = None,
+    ) -> RecordExportRecords:
+        self._session.flush()
+        if project_ids is not None and not project_ids:
+            return RecordExportRecords()
+        project_filter = [str(project_id) for project_id in project_ids or set()]
+        question_rows = list(
+            self._session.scalars(
+                self._attributed_record_statement(
+                    QuestionModel,
+                    created_by_column=QuestionModel.created_by,
+                    user_id_column=QuestionModel.created_by_user_id,
+                    user_id=user_id,
+                    project_filter=project_filter,
+                ).order_by(QuestionModel.created_at, QuestionModel.question_id)
+            )
+        )
+        dataset_rows = list(
+            self._session.scalars(
+                self._attributed_record_statement(
+                    DatasetModel,
+                    created_by_column=DatasetModel.created_by,
+                    user_id_column=DatasetModel.created_by_user_id,
+                    user_id=user_id,
+                    project_filter=project_filter,
+                ).order_by(DatasetModel.created_at, DatasetModel.dataset_id)
+            )
+        )
+        note_rows = list(
+            self._session.scalars(
+                self._attributed_record_statement(
+                    NoteModel,
+                    created_by_column=NoteModel.created_by,
+                    user_id_column=NoteModel.created_by_user_id,
+                    user_id=user_id,
+                    project_filter=project_filter,
+                ).order_by(NoteModel.created_at, NoteModel.note_id)
+            )
+        )
+        analysis_rows = list(
+            self._session.scalars(
+                self._attributed_record_statement(
+                    AnalysisModel,
+                    created_by_column=AnalysisModel.executed_by,
+                    user_id_column=AnalysisModel.executed_by_user_id,
+                    user_id=user_id,
+                    project_filter=project_filter,
+                ).order_by(AnalysisModel.created_at, AnalysisModel.analysis_id)
+            )
+        )
+        claim_rows = list(
+            self._session.scalars(
+                self._attributed_claim_statement(
+                    user_id=user_id,
+                    project_filter=project_filter,
+                )
+            )
+        )
+        return RecordExportRecords(
+            questions=self.questions.questions_from_rows(question_rows),
+            datasets=self.datasets.datasets_from_rows(dataset_rows),
+            notes=self.notes.notes_from_rows(note_rows),
+            analyses=self.analyses.analyses_from_rows(analysis_rows),
+            claims=self.claims.claims_from_rows(claim_rows),
+        )
+
+    def _attributed_record_statement(
+        self,
+        model_type,
+        *,
+        created_by_column,
+        user_id_column,
+        user_id: UUID,
+        project_filter: list[str],
+    ):
+        stmt = select(model_type).where(
+            self._attribution_predicate(
+                created_by_column=created_by_column,
+                user_id_column=user_id_column,
+                user_id=user_id,
+            )
+        )
+        if project_filter:
+            stmt = stmt.where(model_type.project_id.in_(project_filter))
+        return stmt
+
+    def _attributed_claim_statement(
+        self,
+        *,
+        user_id: UUID,
+        project_filter: list[str],
+    ):
+        dataset_claim_ids = (
+            select(ClaimDatasetModel.claim_id)
+            .join(DatasetModel, DatasetModel.dataset_id == ClaimDatasetModel.dataset_id)
+            .where(
+                self._attribution_predicate(
+                    created_by_column=DatasetModel.created_by,
+                    user_id_column=DatasetModel.created_by_user_id,
+                    user_id=user_id,
+                )
+            )
+        )
+        analysis_claim_ids = (
+            select(ClaimAnalysisModel.claim_id)
+            .join(AnalysisModel, AnalysisModel.analysis_id == ClaimAnalysisModel.analysis_id)
+            .where(
+                self._attribution_predicate(
+                    created_by_column=AnalysisModel.executed_by,
+                    user_id_column=AnalysisModel.executed_by_user_id,
+                    user_id=user_id,
+                )
+            )
+        )
+        stmt = select(ClaimModel).where(
+            or_(
+                ClaimModel.claim_id.in_(dataset_claim_ids),
+                ClaimModel.claim_id.in_(analysis_claim_ids),
+            )
+        )
+        if project_filter:
+            stmt = stmt.where(ClaimModel.project_id.in_(project_filter))
+        return stmt.order_by(ClaimModel.created_at, ClaimModel.claim_id)
+
+    @staticmethod
+    def _attribution_predicate(
+        *,
+        created_by_column,
+        user_id_column,
+        user_id: UUID,
+    ):
+        user_id_text = str(user_id)
+        return or_(
+            user_id_column == user_id_text,
+            user_id_column.is_(None) & (created_by_column == user_id_text),
         )
 
     def query_questions(

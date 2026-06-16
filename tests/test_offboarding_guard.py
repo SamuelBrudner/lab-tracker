@@ -5,6 +5,7 @@ from uuid import uuid4
 from fastapi.testclient import TestClient
 
 from lab_tracker.auth import Role
+from lab_tracker.db_models import QuestionModel
 
 
 def _login_headers(client: TestClient, username: str, password: str = "secret") -> dict[str, str]:
@@ -50,6 +51,14 @@ def _create_attributed_question(
     return response.json()["data"]["question_id"]
 
 
+def _clear_question_attribution_fk(client: TestClient, question_id: str) -> None:
+    with client.app.state.db_session_factory() as session:
+        row = session.get(QuestionModel, question_id)
+        assert row is not None
+        row.created_by_user_id = None
+        session.commit()
+
+
 def test_project_membership_revoke_requires_export_for_attributed_records(
     client: TestClient,
     admin_auth_headers: dict[str, str],
@@ -80,12 +89,58 @@ def test_project_membership_revoke_requires_export_for_attributed_records(
     assert blocked.status_code == 422
     assert "Export or reassign" in blocked.json()["error"]["message"]
 
-    export = client.get(
+    export = client.post(
         f"/record-exports/users/{source_user_id}",
         headers=admin_auth_headers,
     )
     assert export.status_code == 200
     assert export.json()["data"]["export_event_id"]
+
+    removed = client.delete(
+        f"/projects/{project_id}/members/{source_user_id}",
+        headers=admin_auth_headers,
+    )
+    assert removed.status_code == 200
+
+
+def test_project_membership_revoke_blocks_legacy_null_fk_records(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+):
+    source_headers, source_user_id = _register_user(client)
+    project_id = client.post(
+        "/projects",
+        json={"name": "Legacy offboarding"},
+        headers=admin_auth_headers,
+    ).json()["data"]["project_id"]
+    member = client.post(
+        f"/projects/{project_id}/members",
+        json={"user_id": source_user_id, "role": "contributor"},
+        headers=admin_auth_headers,
+    )
+    assert member.status_code == 201
+    question_id = _create_attributed_question(
+        client,
+        source_headers,
+        project_id=project_id,
+        label="legacy handoff",
+    )
+    _clear_question_attribution_fk(client, question_id)
+
+    blocked = client.delete(
+        f"/projects/{project_id}/members/{source_user_id}",
+        headers=admin_auth_headers,
+    )
+    assert blocked.status_code == 422
+    assert "Export or reassign" in blocked.json()["error"]["message"]
+
+    export = client.post(
+        f"/record-exports/users/{source_user_id}",
+        headers=admin_auth_headers,
+    )
+    assert export.status_code == 200
+    exported_questions = export.json()["data"]["records"]["questions"]
+    assert [item["question_id"] for item in exported_questions] == [question_id]
 
     removed = client.delete(
         f"/projects/{project_id}/members/{source_user_id}",

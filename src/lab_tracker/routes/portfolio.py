@@ -65,10 +65,10 @@ def build_portfolio_router(api: LabTrackerAPI) -> APIRouter:
             offset=0,
         )
         visible_projects = filter_project_scoped_items(request, projects)
-        page_projects, total = paginate(visible_projects, limit, offset)
-        summaries = [_summary_for_project(repository, project) for project in page_projects]
-        groups = _group_project_summaries(repository, page_projects, summaries)
-        return list_response(groups, limit=limit, offset=offset, total=total)
+        summaries = [_summary_for_project(repository, project) for project in visible_projects]
+        groups = _group_project_summaries(repository, visible_projects, summaries)
+        page_groups, total = paginate(groups, limit, offset)
+        return list_response(page_groups, limit=limit, offset=offset, total=total)
 
     return router
 

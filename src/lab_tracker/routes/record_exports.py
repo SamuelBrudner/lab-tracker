@@ -21,7 +21,7 @@ def _request_base_url(request: Request) -> str:
 def build_record_exports_router(api: LabTrackerAPI) -> APIRouter:
     router = APIRouter()
 
-    @router.get(
+    @router.post(
         "/record-exports/users/{user_id:uuid}",
         response_model=Envelope[RecordExport],
     )
@@ -34,7 +34,7 @@ def build_record_exports_router(api: LabTrackerAPI) -> APIRouter:
         )
         return Envelope(data=export)
 
-    @router.get(
+    @router.post(
         "/groups/{group_id:uuid}/record-exports/users/{user_id:uuid}",
         response_model=Envelope[RecordExport],
     )

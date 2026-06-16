@@ -310,7 +310,7 @@ def test_admin_can_invite_user_by_email(monkeypatch, tmp_path):
             json={
                 "invite_token": invite_token,
                 "password": "invite-secret",
-                "username": "member@example.org",
+                "username": "MEMBER@EXAMPLE.ORG",
             },
         )
         assert register_response.status_code == 201
@@ -318,9 +318,20 @@ def test_admin_can_invite_user_by_email(monkeypatch, tmp_path):
         assert payload["user"]["username"] == "member@example.org"
         assert payload["user"]["role"] == "editor"
 
+        replay_response = client.post(
+            "/auth/register",
+            json={
+                "invite_token": invite_token,
+                "password": "other-secret",
+                "username": "member@example.org",
+            },
+        )
+        assert replay_response.status_code == 409
+        assert "Invitation" in replay_response.json()["error"]["message"]
+
         login_response = client.post(
             "/auth/login",
-            json={"username": "member@example.org", "password": "invite-secret"},
+            json={"username": "Member@Example.Org", "password": "invite-secret"},
         )
         assert login_response.status_code == 200
 

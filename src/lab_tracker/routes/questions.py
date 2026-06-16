@@ -20,6 +20,7 @@ from lab_tracker.schemas import (
 )
 
 from .shared import (
+    CreatedByFilter,
     actor_from_request,
     api_from_request,
     ensure_project_read,
@@ -61,7 +62,7 @@ def build_questions_router(api: LabTrackerAPI) -> APIRouter:
         question_type: QuestionType | None = None,
         search: str | None = None,
         q: str | None = None,
-        created_by: str | None = None,
+        created_by: CreatedByFilter = None,
         parent_question_id: UUID | None = None,
         ancestor_question_id: UUID | None = None,
         limit: int = 50,

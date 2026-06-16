@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import json
 from datetime import datetime
-from typing import Any
+from typing import Annotated, Any
 from urllib.parse import unquote
 
+from fastapi import Query
 from sqlalchemy.orm import Session
 from starlette.requests import Request
 from starlette.responses import JSONResponse
@@ -33,6 +34,16 @@ from lab_tracker.schemas import (
     ListEnvelope,
     PaginationMeta,
 )
+
+CreatedByFilter = Annotated[
+    str | None,
+    Query(
+        description=(
+            "Filter by the FK-backed attribution user UUID. Legacy string-only "
+            "attribution rows are recovered only by record export and offboarding."
+        ),
+    ),
+]
 
 
 def auth_user_read(user: User) -> AuthUserRead:
