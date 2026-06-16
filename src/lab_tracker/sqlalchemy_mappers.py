@@ -18,6 +18,7 @@ from lab_tracker.db_models import (
     ClaimQuestionModel,
     DatasetModel,
     DatasetQuestionLinkModel,
+    EntityVersionModel,
     GoalLinkModel,
     GoalModel,
     NoteModel,
@@ -45,6 +46,7 @@ from lab_tracker.models import (
     EntityOrigin,
     EntityRef,
     EntityType,
+    EntityVersion,
     ExternalArtifactReference,
     Goal,
     GoalLink,
@@ -950,6 +952,65 @@ def apply_claim_edge_to_model(row: ClaimEdgeModel, edge: ClaimEdge) -> None:
         else None
     )
     row.created_at = edge.created_at
+
+
+def entity_version_to_model(version: EntityVersion) -> EntityVersionModel:
+    return EntityVersionModel(
+        version_id=_uuid_str(version.version_id),
+        entity_type=version.entity_type.value,
+        entity_id=_uuid_str(version.entity_id),
+        version_number=version.version_number,
+        snapshot=dict(version.snapshot),
+        change_set_id=(
+            _uuid_str(version.change_set_id) if version.change_set_id is not None else None
+        ),
+        committed_at=version.committed_at,
+        created_at=version.created_at,
+        created_by=version.created_by,
+        created_by_user_id=(
+            _uuid_str(version.created_by_user_id)
+            if version.created_by_user_id is not None
+            else None
+        ),
+    )
+
+
+def entity_version_from_model(row: EntityVersionModel) -> EntityVersion:
+    return EntityVersion(
+        version_id=_uuid(row.version_id),
+        entity_type=EntityType(row.entity_type),
+        entity_id=_uuid(row.entity_id),
+        version_number=row.version_number,
+        snapshot=dict(row.snapshot or {}),
+        change_set_id=_uuid(row.change_set_id) if row.change_set_id else None,
+        committed_at=_as_utc_optional(row.committed_at),
+        created_at=_as_utc(row.created_at),
+        created_by=row.created_by,
+        created_by_user_id=(
+            _uuid(row.created_by_user_id) if row.created_by_user_id else None
+        ),
+    )
+
+
+def apply_entity_version_to_model(
+    row: EntityVersionModel,
+    version: EntityVersion,
+) -> None:
+    row.entity_type = version.entity_type.value
+    row.entity_id = _uuid_str(version.entity_id)
+    row.version_number = version.version_number
+    row.snapshot = dict(version.snapshot)
+    row.change_set_id = (
+        _uuid_str(version.change_set_id) if version.change_set_id is not None else None
+    )
+    row.committed_at = version.committed_at
+    row.created_at = version.created_at
+    row.created_by = version.created_by
+    row.created_by_user_id = (
+        _uuid_str(version.created_by_user_id)
+        if version.created_by_user_id is not None
+        else None
+    )
 
 
 def goal_to_model(goal: Goal) -> GoalModel:

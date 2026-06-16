@@ -431,6 +431,39 @@ class GraphChangeOperationModel(Base):
     )
 
 
+class EntityVersionModel(Base):
+    __tablename__ = "entity_versions"
+    __table_args__ = (
+        UniqueConstraint(
+            "entity_type",
+            "entity_id",
+            "version_number",
+            name="uq_entity_versions_entity_number",
+        ),
+    )
+
+    version_id: Mapped[str] = mapped_column(
+        String(36),
+        primary_key=True,
+        default=lambda: str(uuid4()),
+    )
+    entity_type: Mapped[str] = mapped_column(String(30), nullable=False)
+    entity_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    version_number: Mapped[int] = mapped_column(Integer, nullable=False)
+    snapshot: Mapped[dict[str, object]] = mapped_column(JSON, default=dict)
+    change_set_id: Mapped[str | None] = mapped_column(
+        String(36),
+        ForeignKey("graph_change_sets.change_set_id", ondelete="SET NULL"),
+    )
+    committed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utc_now)
+    created_by: Mapped[str | None] = mapped_column(String(255))
+    created_by_user_id: Mapped[str | None] = mapped_column(
+        String(36),
+        ForeignKey("users.user_id", ondelete="SET NULL"),
+    )
+
+
 class GraphDraftBatchSettingsModel(Base):
     __tablename__ = "graph_draft_batch_settings"
     __table_args__ = (
@@ -1192,6 +1225,20 @@ Index(
     "ix_graph_change_operations_change_set_sequence",
     GraphChangeOperationModel.change_set_id,
     GraphChangeOperationModel.sequence,
+)
+Index(
+    "ix_entity_versions_entity_created_at",
+    EntityVersionModel.entity_type,
+    EntityVersionModel.entity_id,
+    EntityVersionModel.created_at,
+)
+Index(
+    "ix_entity_versions_change_set_id",
+    EntityVersionModel.change_set_id,
+)
+Index(
+    "ix_entity_versions_created_by_user_id",
+    EntityVersionModel.created_by_user_id,
 )
 Index(
     "ix_project_memberships_user_project",

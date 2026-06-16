@@ -16,6 +16,7 @@ from lab_tracker.services import (
     AnalysisService,
     ClaimService,
     DatasetService,
+    EntityVersionService,
     GoalService,
     GraphDraftService,
     NoteService,
@@ -77,10 +78,12 @@ class LabTrackerAPI:
                 authorization=self.project_authorization,
             )
         )
+        self.entity_versions: EntityVersionService = EntityVersionService(context)
         self.questions: QuestionService = QuestionService(
             context,
             projects=self.projects,
             notes_provider=lambda: self.notes,
+            versions=self.entity_versions,
             authorization=self.project_authorization,
         )
         self.datasets: DatasetService = DatasetService(
@@ -111,6 +114,7 @@ class LabTrackerAPI:
             datasets=self.datasets,
             questions=self.questions,
             analyses_provider=lambda: self.analyses,
+            versions=self.entity_versions,
             authorization=self.project_authorization,
         )
         self.visualizations: VisualizationService = VisualizationService(
@@ -154,6 +158,7 @@ class LabTrackerAPI:
             claims=self.claims,
             visualizations=self.visualizations,
             goals=self.goals,
+            versions=self.entity_versions,
             authorization=self.project_authorization,
         )
 
@@ -349,6 +354,12 @@ class LabTrackerAPI:
 
     def delete_question(self, *args: Any, **kwargs: Any) -> Any:
         return self.questions.delete_question(*args, **kwargs)
+
+    def list_entity_versions(self, *args: Any, **kwargs: Any) -> Any:
+        return self.entity_versions.list_entity_versions(*args, **kwargs)
+
+    def diff_entity_versions(self, *args: Any, **kwargs: Any) -> Any:
+        return self.entity_versions.diff_entity_versions(*args, **kwargs)
 
     def create_dataset(self, *args: Any, **kwargs: Any) -> Any:
         return self.datasets.create_dataset(*args, **kwargs)

@@ -34,6 +34,7 @@ from lab_tracker.services.shared import (
 )
 
 if TYPE_CHECKING:
+    from lab_tracker.services.entity_version_service import EntityVersionService
     from lab_tracker.services.note_service import NoteService
 
 
@@ -57,11 +58,13 @@ class QuestionService(BaseService):
         *,
         projects: ProjectService,
         notes_provider: Callable[[], NoteService],
+        versions: EntityVersionService,
         authorization: ProjectAuthorizationPolicy,
     ) -> None:
         super().__init__(context)
         self.projects = projects
         self._notes_provider = notes_provider
+        self.versions = versions
         self.authorization = authorization
 
     @property
@@ -135,6 +138,13 @@ class QuestionService(BaseService):
         )
         with self.unit_of_work() as repository:
             repository.questions.save(question)
+            self.versions.record_entity_version(
+                repository,
+                entity_type=EntityType.QUESTION,
+                entity_id=question.question_id,
+                entity=question,
+                actor=actor,
+            )
         return question
 
     def get_question(self, question_id: UUID) -> Question:
@@ -257,6 +267,13 @@ class QuestionService(BaseService):
         question.updated_at = utc_now()
         with self.unit_of_work() as repository:
             repository.questions.save(question)
+            self.versions.record_entity_version(
+                repository,
+                entity_type=EntityType.QUESTION,
+                entity_id=question.question_id,
+                entity=question,
+                actor=actor,
+            )
         return question
 
     def list_question_refactors(

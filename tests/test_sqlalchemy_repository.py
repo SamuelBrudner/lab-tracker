@@ -20,6 +20,7 @@ from lab_tracker.models import (
     DatasetStatus,
     EntityRef,
     EntityType,
+    EntityVersion,
     ExternalArtifactReference,
     GroupMembership,
     Note,
@@ -1133,3 +1134,56 @@ def test_query_analyses_claims_and_visualizations_apply_focused_filters(db_sessi
     )
     assert total_claim_edges == 1
     assert claim_edges == [claim_edge]
+
+
+def test_query_entity_versions_filters_by_entity_and_change_set(db_session):
+    repo = SQLAlchemyLabTrackerRepository(db_session)
+    entity_id = uuid4()
+    change_set_id = uuid4()
+    first = EntityVersion(
+        version_id=uuid4(),
+        entity_type=EntityType.QUESTION,
+        entity_id=entity_id,
+        version_number=1,
+        snapshot={"text": "before"},
+        created_at=_ts(1),
+    )
+    second = EntityVersion(
+        version_id=uuid4(),
+        entity_type=EntityType.QUESTION,
+        entity_id=entity_id,
+        version_number=2,
+        snapshot={"text": "after"},
+        change_set_id=change_set_id,
+        committed_at=_ts(3),
+        created_at=_ts(2),
+    )
+    other = EntityVersion(
+        version_id=uuid4(),
+        entity_type=EntityType.CLAIM,
+        entity_id=uuid4(),
+        version_number=1,
+        snapshot={"statement": "other"},
+        created_at=_ts(4),
+    )
+    repo.entity_versions.save(first)
+    repo.entity_versions.save(second)
+    repo.entity_versions.save(other)
+    repo.commit()
+
+    versions, total = repo.query_entity_versions(
+        entity_type=EntityType.QUESTION.value,
+        entity_id=entity_id,
+        limit=10,
+        offset=0,
+    )
+    committed_versions, committed_total = repo.query_entity_versions(
+        change_set_id=change_set_id,
+        limit=10,
+        offset=0,
+    )
+
+    assert total == 2
+    assert versions == [first, second]
+    assert committed_total == 1
+    assert committed_versions == [second]

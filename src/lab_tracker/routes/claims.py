@@ -9,7 +9,14 @@ from starlette import status as http_status
 from starlette.requests import Request
 
 from lab_tracker.api import LabTrackerAPI
-from lab_tracker.models import Claim, ClaimEdge, ClaimStatus
+from lab_tracker.models import (
+    Claim,
+    ClaimEdge,
+    ClaimStatus,
+    EntityType,
+    EntityVersion,
+    EntityVersionDiff,
+)
 from lab_tracker.schemas import ClaimCreate, ClaimEdgeCreate, ClaimUpdate, Envelope, ListEnvelope
 
 from .shared import (
@@ -81,6 +88,43 @@ def build_claims_router(api: LabTrackerAPI) -> APIRouter:
         claim = api_from_request(request, api).get_claim(claim_id)
         ensure_project_read(request, claim.project_id)
         return Envelope(data=claim)
+
+    @router.get("/claims/{claim_id}/versions", response_model=ListEnvelope[EntityVersion])
+    def list_claim_versions(
+        claim_id: UUID,
+        request: Request,
+        limit: int = 50,
+        offset: int = 0,
+    ):
+        validate_pagination(limit, offset)
+        claim = api_from_request(request, api).get_claim(claim_id)
+        ensure_project_read(request, claim.project_id)
+        versions = api_from_request(request, api).list_entity_versions(
+            entity_type=EntityType.CLAIM,
+            entity_id=claim_id,
+        )
+        items, total = paginate(versions, limit, offset)
+        return list_response(items, limit=limit, offset=offset, total=total)
+
+    @router.get(
+        "/claims/{claim_id}/versions/diff",
+        response_model=Envelope[EntityVersionDiff],
+    )
+    def diff_claim_versions(
+        claim_id: UUID,
+        request: Request,
+        from_version: int,
+        to_version: int,
+    ):
+        claim = api_from_request(request, api).get_claim(claim_id)
+        ensure_project_read(request, claim.project_id)
+        diff = api_from_request(request, api).diff_entity_versions(
+            entity_type=EntityType.CLAIM,
+            entity_id=claim_id,
+            from_version=from_version,
+            to_version=to_version,
+        )
+        return Envelope(data=diff)
 
     @router.patch("/claims/{claim_id}", response_model=Envelope[Claim])
     def update_claim(claim_id: UUID, payload: ClaimUpdate, request: Request):

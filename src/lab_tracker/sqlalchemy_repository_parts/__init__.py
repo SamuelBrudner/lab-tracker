@@ -27,12 +27,16 @@ from lab_tracker.sqlalchemy_repository_parts.sessions import (
 from lab_tracker.sqlalchemy_repository_parts.supervision import (
     SQLAlchemySupervisionEdgeRepository,
 )
+from lab_tracker.sqlalchemy_repository_parts.versions import (
+    SQLAlchemyEntityVersionRepository,
+)
 
 __all__ = [
     "SQLAlchemyAcquisitionOutputRepository",
     "SQLAlchemyAnalysisRepository",
     "SQLAlchemyClaimRepository",
     "SQLAlchemyDatasetRepository",
+    "SQLAlchemyEntityVersionRepository",
     "SQLAlchemyGoalRepository",
     "SQLAlchemyGroupMembershipRepository",
     "SQLAlchemyLabTrackerRepository",

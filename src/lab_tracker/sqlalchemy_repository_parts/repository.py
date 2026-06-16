@@ -26,6 +26,7 @@ from lab_tracker.models import (
     ClaimEdge,
     Dataset,
     DatasetFile,
+    EntityVersion,
     Goal,
     GoalLink,
     GraphChangeSet,
@@ -74,6 +75,7 @@ from .ownership import (
 )
 from .sessions import SQLAlchemyAcquisitionOutputRepository, SQLAlchemySessionRepository
 from .supervision import SQLAlchemySupervisionEdgeRepository
+from .versions import SQLAlchemyEntityVersionRepository
 
 
 class SQLAlchemyLabTrackerRepository(LabTrackerRepository):
@@ -97,6 +99,7 @@ class SQLAlchemyLabTrackerRepository(LabTrackerRepository):
         self.analyses = SQLAlchemyAnalysisRepository(session)
         self.claims = SQLAlchemyClaimRepository(session)
         self.claim_edges = SQLAlchemyClaimEdgeRepository(session)
+        self.entity_versions = SQLAlchemyEntityVersionRepository(session)
         self.goals = SQLAlchemyGoalRepository(session)
         self.visualizations = SQLAlchemyVisualizationRepository(session)
         self.graph_change_sets = SQLAlchemyGraphChangeSetRepository(session)
@@ -651,6 +654,23 @@ class SQLAlchemyLabTrackerRepository(LabTrackerRepository):
             claim_id=claim_id,
             target_claim_id=target_claim_id,
             relation=relation,
+            limit=limit,
+            offset=offset,
+        )
+
+    def query_entity_versions(
+        self,
+        *,
+        entity_type: str | None = None,
+        entity_id: UUID | None = None,
+        change_set_id: UUID | None = None,
+        limit: int | None = None,
+        offset: int = 0,
+    ) -> tuple[list[EntityVersion], int]:
+        return self.entity_versions.query(
+            entity_type=entity_type,
+            entity_id=entity_id,
+            change_set_id=change_set_id,
             limit=limit,
             offset=offset,
         )

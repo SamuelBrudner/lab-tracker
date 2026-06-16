@@ -78,7 +78,7 @@ def test_alembic_upgrade_chain_from_empty_to_head(monkeypatch, tmp_path):
     for revision in revisions:
         command.upgrade(config, revision)
         assert revision in _current_revisions(database_url)
-    assert _current_revision(database_url) == "0037_claim_logic_edges"
+    assert _current_revision(database_url) == "0038_entity_versions"
 
 
 def test_alembic_has_single_head() -> None:
@@ -123,6 +123,7 @@ def test_alembic_upgrade_head_creates_expected_tables(monkeypatch, tmp_path):
         "claim_analyses",
         "claim_questions",
         "claim_edges",
+        "entity_versions",
         "goals",
         "goal_links",
         "visualization_claims",
@@ -171,6 +172,9 @@ def test_alembic_upgrade_head_creates_expected_tables(monkeypatch, tmp_path):
         column["name"] for column in inspector.get_columns("record_export_events")
     }
     invitation_columns = {column["name"] for column in inspector.get_columns("invitations")}
+    entity_version_columns = {
+        column["name"] for column in inspector.get_columns("entity_versions")
+    }
     visualization_columns = {
         column["name"] for column in inspector.get_columns("visualizations")
     }
@@ -193,6 +197,7 @@ def test_alembic_upgrade_head_creates_expected_tables(monkeypatch, tmp_path):
     _assert_created_by_user_fk(inspector, "graph_draft_batch_runs")
     _assert_created_by_user_fk(inspector, "sessions")
     _assert_created_by_user_fk(inspector, "claims")
+    _assert_created_by_user_fk(inspector, "entity_versions")
     _assert_created_by_user_fk(inspector, "goals")
     _assert_created_by_user_fk(inspector, "goal_links")
     _assert_created_by_user_fk(inspector, "visualizations")
@@ -260,6 +265,30 @@ def test_alembic_upgrade_head_creates_expected_tables(monkeypatch, tmp_path):
         "claim_edges",
         column="created_by_user_id",
         referred_table="users",
+    )
+    assert {
+        "version_id",
+        "entity_type",
+        "entity_id",
+        "version_number",
+        "snapshot",
+        "change_set_id",
+        "committed_at",
+        "created_at",
+        "created_by",
+        "created_by_user_id",
+    }.issubset(entity_version_columns)
+    _assert_index(
+        inspector,
+        "entity_versions",
+        "ix_entity_versions_entity_created_at",
+    )
+    _assert_index(inspector, "entity_versions", "ix_entity_versions_change_set_id")
+    _assert_fk(
+        inspector,
+        "entity_versions",
+        column="change_set_id",
+        referred_table="graph_change_sets",
     )
     assert {
         "submitted_at",
@@ -434,7 +463,7 @@ def test_database_at_daily_review_branch_upgrades_to_current_head(monkeypatch, t
     assert _current_revision(database_url) == "0017_daily_graph_reviews"
 
     command.upgrade(config, "head")
-    assert _current_revision(database_url) == "0037_claim_logic_edges"
+    assert _current_revision(database_url) == "0038_entity_versions"
 
     engine = create_engine(
         database_url,

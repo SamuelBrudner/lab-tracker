@@ -720,6 +720,27 @@ class ClaimEdge(_DomainModel):
     created_by_user_id: UUID | None = None
 
 
+class EntityVersion(_DomainModel):
+    version_id: UUID
+    entity_type: EntityType
+    entity_id: UUID
+    version_number: int = Field(..., ge=1)
+    snapshot: dict[str, Any] = Field(default_factory=dict)
+    change_set_id: UUID | None = None
+    committed_at: datetime | None = None
+    created_at: datetime = Field(default_factory=utc_now)
+    created_by: str | None = None
+    created_by_user_id: UUID | None = None
+
+
+class EntityVersionDiff(_DomainModel):
+    entity_type: EntityType
+    entity_id: UUID
+    from_version: int
+    to_version: int
+    changed_fields: dict[str, dict[str, Any]] = Field(default_factory=dict)
+
+
 class GoalLink(_DomainModel):
     link_id: UUID
     goal_id: UUID

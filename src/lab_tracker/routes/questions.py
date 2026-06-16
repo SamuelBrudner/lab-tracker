@@ -9,7 +9,15 @@ from starlette import status as http_status
 from starlette.requests import Request
 
 from lab_tracker.api import LabTrackerAPI
-from lab_tracker.models import Question, QuestionRefactor, QuestionStatus, QuestionType
+from lab_tracker.models import (
+    EntityType,
+    EntityVersion,
+    EntityVersionDiff,
+    Question,
+    QuestionRefactor,
+    QuestionStatus,
+    QuestionType,
+)
 from lab_tracker.schemas import (
     Envelope,
     ListEnvelope,
@@ -93,6 +101,43 @@ def build_questions_router(api: LabTrackerAPI) -> APIRouter:
         question = api_from_request(request, api).get_question(question_id)
         ensure_project_read(request, question.project_id)
         return Envelope(data=question)
+
+    @router.get("/questions/{question_id}/versions", response_model=ListEnvelope[EntityVersion])
+    def list_question_versions(
+        question_id: UUID,
+        request: Request,
+        limit: int = 50,
+        offset: int = 0,
+    ):
+        validate_pagination(limit, offset)
+        question = api_from_request(request, api).get_question(question_id)
+        ensure_project_read(request, question.project_id)
+        versions = api_from_request(request, api).list_entity_versions(
+            entity_type=EntityType.QUESTION,
+            entity_id=question_id,
+        )
+        items, total = paginate(versions, limit, offset)
+        return list_response(items, limit=limit, offset=offset, total=total)
+
+    @router.get(
+        "/questions/{question_id}/versions/diff",
+        response_model=Envelope[EntityVersionDiff],
+    )
+    def diff_question_versions(
+        question_id: UUID,
+        request: Request,
+        from_version: int,
+        to_version: int,
+    ):
+        question = api_from_request(request, api).get_question(question_id)
+        ensure_project_read(request, question.project_id)
+        diff = api_from_request(request, api).diff_entity_versions(
+            entity_type=EntityType.QUESTION,
+            entity_id=question_id,
+            from_version=from_version,
+            to_version=to_version,
+        )
+        return Envelope(data=diff)
 
     @router.patch("/questions/{question_id}", response_model=Envelope[Question])
     def update_question(question_id: UUID, payload: QuestionUpdate, request: Request):

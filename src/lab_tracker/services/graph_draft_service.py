@@ -36,6 +36,7 @@ from lab_tracker.services.analysis_service import AnalysisService
 from lab_tracker.services.base import BaseService, ServiceContext
 from lab_tracker.services.claim_service import ClaimService
 from lab_tracker.services.dataset_service import DatasetService
+from lab_tracker.services.entity_version_service import EntityVersionService
 from lab_tracker.services.goal_service import GoalService
 from lab_tracker.services.graph_draft_applier import GraphPatchApplier
 from lab_tracker.services.graph_draft_context import (
@@ -74,6 +75,7 @@ class GraphDraftService(BaseService):
         claims: ClaimService,
         visualizations: VisualizationService,
         goals: GoalService,
+        versions: EntityVersionService,
         authorization: ProjectAuthorizationPolicy,
     ) -> None:
         super().__init__(context)
@@ -86,6 +88,7 @@ class GraphDraftService(BaseService):
         self.claims = claims
         self.visualizations = visualizations
         self.goals = goals
+        self.versions = versions
         self.authorization = authorization
         self.context_builder = GraphContextBuilder(
             projects=projects,
@@ -831,6 +834,10 @@ class GraphDraftService(BaseService):
         change_set.committed_at = utc_now()
         change_set.committed_by = actor_user_id(actor)
         change_set.updated_at = change_set.committed_at
+        self.versions.mark_change_set_committed(
+            change_set.change_set_id,
+            change_set.committed_at,
+        )
         self._save_graph_change_set(change_set)
         return change_set
 

@@ -14,6 +14,7 @@ from lab_tracker.models import (
     ClaimRelation,
     ClaimStatus,
     EntityOrigin,
+    EntityType,
     ExternalArtifactReference,
     external_artifact_uri_validation_error,
     utc_now,
@@ -36,6 +37,7 @@ from lab_tracker.services.shared import (
 
 if TYPE_CHECKING:
     from lab_tracker.services.analysis_service import AnalysisService
+    from lab_tracker.services.entity_version_service import EntityVersionService
 
 
 class ClaimService(BaseService):
@@ -47,6 +49,7 @@ class ClaimService(BaseService):
         datasets: DatasetService,
         questions: QuestionService,
         analyses_provider: Callable[[], AnalysisService],
+        versions: EntityVersionService,
         authorization: ProjectAuthorizationPolicy,
     ) -> None:
         super().__init__(context)
@@ -54,6 +57,7 @@ class ClaimService(BaseService):
         self.datasets = datasets
         self.questions = questions
         self._analyses_provider = analyses_provider
+        self.versions = versions
         self.authorization = authorization
 
     @property
@@ -119,6 +123,13 @@ class ClaimService(BaseService):
         )
         with self.unit_of_work() as repository:
             repository.claims.save(claim)
+            self.versions.record_entity_version(
+                repository,
+                entity_type=EntityType.CLAIM,
+                entity_id=claim.claim_id,
+                entity=claim,
+                actor=actor,
+            )
         return claim
 
     def get_claim(self, claim_id: UUID) -> Claim:
@@ -226,6 +237,13 @@ class ClaimService(BaseService):
         claim.updated_at = utc_now()
         with self.unit_of_work() as repository:
             repository.claims.save(claim)
+            self.versions.record_entity_version(
+                repository,
+                entity_type=EntityType.CLAIM,
+                entity_id=claim.claim_id,
+                entity=claim,
+                actor=actor,
+            )
         return claim
 
     def delete_claim(self, claim_id: UUID, *, actor: AuthContext | None = None) -> Claim:
