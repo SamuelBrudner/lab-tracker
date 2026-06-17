@@ -67,6 +67,7 @@ def test_analysis_commit_requires_committed_datasets():
                 statement="Signal is stable",
                 confidence=0.8,
                 status=ClaimStatus.SUPPORTED,
+                answers_question_ids=[question.question_id],
             )
         ],
         visualizations=[
@@ -80,6 +81,7 @@ def test_analysis_commit_requires_committed_datasets():
     assert analysis_result.status == AnalysisStatus.COMMITTED
     assert analysis_result.environment_hash == "env-1"
     assert claims and analysis.analysis_id in claims[0].supported_by_analysis_ids
+    assert claims[0].answers_question_ids == [question.question_id]
     assert visualizations
 
 
