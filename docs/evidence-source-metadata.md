@@ -29,10 +29,12 @@ lt import-folder \
   --include "*.md"
 ```
 
-The adapter uses the root-relative POSIX path as `evidence_source_external_id`
-and the absolute `file://` URI as `evidence_source_uri`. It skips an item when a
-note already exists with the same project, source provider, external ID, and
-content hash. Changed file contents therefore create a new staged evidence note.
+The adapter uses a root-qualified POSIX path as `evidence_source_external_id`
+and the absolute `file://` URI as `evidence_source_uri`. The external ID is
+formatted as `<root-uri>::<relative-path>` so two imported folders with the same
+file names do not share one dedupe namespace. It skips an item when a note
+already exists with the same project, source provider, external ID, and content
+hash. Changed file contents therefore create a new staged evidence note.
 
 `lt import-folder` imports files as staged evidence notes that record where each
 file came from. Imported notes never become canonical graph records on import,

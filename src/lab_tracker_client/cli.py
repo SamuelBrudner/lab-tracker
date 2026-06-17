@@ -34,6 +34,9 @@ def main(argv: list[str] | None = None) -> None:
         raise
     if payload is not None:
         print(json.dumps(_jsonable(payload), indent=2))
+    exit_code = _payload_exit_code(payload)
+    if exit_code:
+        raise SystemExit(exit_code)
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -195,6 +198,7 @@ def _cmd_import_folder(client: LabTracker, args: argparse.Namespace) -> Any:
     if args.limit is not None:
         candidates = candidates[: args.limit]
     summary: dict[str, Any] = {
+        "command": "import-folder",
         "root": str(root),
         "project_id": args.project,
         "provider": args.provider,
@@ -206,25 +210,42 @@ def _cmd_import_folder(client: LabTracker, args: argparse.Namespace) -> Any:
         "skipped": [],
         "errors": [],
     }
+    try:
+        evidence_note_index = (
+            client.build_evidence_note_index(project_id=args.project) if candidates else {}
+        )
+    except Exception as exc:  # noqa: BLE001 - report batch setup failures as JSON.
+        for path in candidates:
+            relative_path = path.relative_to(root).as_posix()
+            summary["errors"].append(
+                {
+                    "path": str(path),
+                    "source_external_id": _local_folder_external_id(root, relative_path),
+                    "error": str(exc),
+                }
+            )
+        return summary
     for path in candidates:
         relative_path = path.relative_to(root).as_posix()
+        source_external_id = _local_folder_external_id(root, relative_path)
         try:
             result = client.import_evidence_file(
                 project_id=args.project,
                 file_path=path,
                 source_provider=args.provider,
-                source_external_id=relative_path,
+                source_external_id=source_external_id,
                 source_uri=path.as_uri(),
                 adapter=args.adapter_name,
                 title=path.name,
                 status=args.status,
                 dry_run=args.dry_run,
+                evidence_note_index=evidence_note_index,
             )
         except Exception as exc:  # noqa: BLE001 - continue importing remaining inbox files.
             summary["errors"].append(
                 {
                     "path": str(path),
-                    "source_external_id": relative_path,
+                    "source_external_id": source_external_id,
                     "error": str(exc),
                 }
             )
@@ -281,6 +302,10 @@ def _matches_any(path: Path, *, root: Path, patterns: list[str]) -> bool:
     )
 
 
+def _local_folder_external_id(root: Path, relative_path: str) -> str:
+    return f"{root.as_uri()}::{relative_path}"
+
+
 def _jsonable(value: Any) -> Any:
     if isinstance(value, EvidenceImportResult):
         return value.to_dict()
@@ -289,3 +314,13 @@ def _jsonable(value: Any) -> Any:
     if isinstance(value, list):
         return [_jsonable(item) for item in value]
     return value
+
+
+def _payload_exit_code(payload: Any) -> int:
+    if (
+        isinstance(payload, dict)
+        and payload.get("command") == "import-folder"
+        and payload.get("errors")
+    ):
+        return 1
+    return 0

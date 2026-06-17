@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import argparse
+import json
 
 import httpx
+import pytest
 
-from lab_tracker_client import LabTracker
+from lab_tracker_client import LabTracker, file_sha256
 from lab_tracker_client import cli as lt_cli
 
 
@@ -62,7 +64,10 @@ def test_import_folder_filters_limit_and_dry_run(tmp_path) -> None:
     assert summary["imported"] == []
     assert summary["errors"] == []
     assert summary["skipped"][0]["reason"] == "dry_run"
-    assert summary["skipped"][0]["source_external_id"] == "a.txt"
+    assert summary["skipped"][0]["source_external_id"] == lt_cli._local_folder_external_id(
+        tmp_path.resolve(),
+        "a.txt",
+    )
     assert all(request.method == "GET" for request in requests)
 
 
@@ -105,5 +110,84 @@ def test_import_folder_imports_files_with_summary(tmp_path) -> None:
     assert summary["skipped"] == []
     assert summary["errors"] == []
     assert summary["imported"][0]["note_id"] == "note-imported"
-    assert summary["imported"][0]["source_external_id"] == "capture.md"
+    assert summary["imported"][0][
+        "source_external_id"
+    ] == lt_cli._local_folder_external_id(tmp_path.resolve(), "capture.md")
     assert [request.method for request in requests] == ["GET", "POST"]
+
+
+def test_import_folder_prefetches_notes_once_for_batch_dedupe(tmp_path) -> None:
+    duplicate_path = tmp_path / "duplicate.md"
+    duplicate_path.write_text("same content", encoding="utf-8")
+    new_path = tmp_path / "new.md"
+    new_path.write_text("new content", encoding="utf-8")
+    duplicate_external_id = lt_cli._local_folder_external_id(
+        tmp_path.resolve(),
+        "duplicate.md",
+    )
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if request.method == "GET" and request.url.path == "/notes":
+            return _json_response(
+                200,
+                {
+                    "data": [
+                        {
+                            "note_id": "note-existing",
+                            "metadata": {
+                                "evidence_source_provider": "local-folder",
+                                "evidence_source_external_id": duplicate_external_id,
+                                "evidence_content_hash": file_sha256(duplicate_path),
+                            },
+                        }
+                    ],
+                    "meta": {"limit": 200, "offset": 0, "total": 1},
+                },
+            )
+        if request.method == "POST" and request.url.path == "/notes/upload-file":
+            return _json_response(
+                201,
+                {"data": {"note_id": "note-new", "project_id": "project-1"}},
+            )
+        return _json_response(404, {"error": {"message": "not found"}})
+
+    with LabTracker(base_url="http://testserver", transport=httpx.MockTransport(handler)) as lt:
+        summary = lt_cli._cmd_import_folder(lt, _args(root=str(tmp_path)))
+
+    assert [request.method for request in requests] == ["GET", "POST"]
+    assert summary["skipped"][0]["note_id"] == "note-existing"
+    assert summary["imported"][0]["note_id"] == "note-new"
+
+
+def test_import_folder_main_exits_nonzero_after_error_summary(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    (tmp_path / "capture.md").write_text("capture text", encoding="utf-8")
+
+    class FailingClient:
+        def build_evidence_note_index(self, *, project_id: str):  # noqa: ARG002
+            return {}
+
+        def import_evidence_file(self, **_kwargs):
+            raise RuntimeError("server down")
+
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setattr(
+        lt_cli.LabTracker,
+        "from_env",
+        classmethod(lambda cls: FailingClient()),  # noqa: ARG005
+    )
+
+    with pytest.raises(SystemExit) as exc_info:
+        lt_cli.main(["import-folder", "--project", "project-1", "--root", str(tmp_path)])
+
+    assert exc_info.value.code == 1
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["command"] == "import-folder"
+    assert payload["errors"][0]["error"] == "server down"

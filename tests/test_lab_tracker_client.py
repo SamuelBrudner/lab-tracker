@@ -293,6 +293,58 @@ def test_import_evidence_file_skips_duplicate_and_imports_changed_content(tmp_pa
     assert post_count == 1
 
 
+def test_import_evidence_file_hashes_uploaded_bytes_from_one_read(tmp_path) -> None:
+    evidence_path = tmp_path / "bench.md"
+    evidence_path.write_text("stable observation", encoding="utf-8")
+    stable_hash = file_sha256(evidence_path)
+    post_count = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal post_count
+        if request.method == "GET" and request.url.path == "/notes":
+            evidence_path.write_text("changed observation", encoding="utf-8")
+            return _json_response(
+                200,
+                {"data": [], "meta": {"limit": 200, "offset": 0, "total": 0}},
+            )
+        if request.method == "POST" and request.url.path == "/notes/upload-file":
+            post_count += 1
+            body = request.content
+            assert b"stable observation" in body
+            assert b"changed observation" not in body
+            assert stable_hash.encode("utf-8") in body
+            return _json_response(
+                201,
+                {"data": {"note_id": "note-imported", "project_id": "project-1"}},
+            )
+        return _json_response(404, {"error": {"message": "not found"}})
+
+    with LabTracker(base_url="http://testserver", transport=httpx.MockTransport(handler)) as lt:
+        result = lt.import_evidence_file(
+            project_id="project-1",
+            file_path=evidence_path,
+            source_external_id="bench.md",
+        )
+
+    assert result.action == "imported"
+    assert result.content_hash == stable_hash
+    assert post_count == 1
+
+
+def test_build_evidence_metadata_preserves_external_id_whitespace() -> None:
+    metadata = build_evidence_metadata(
+        source_provider="local-folder",
+        source_uri="file:///tmp/root/%20leading.md",
+        source_external_id="  leading.md",
+        content_hash="abc123",
+        capture_kind="file",
+        adapter="test-adapter",
+        title="leading.md",
+    )
+
+    assert metadata["evidence_source_external_id"] == "  leading.md"
+
+
 def test_auth_login_and_retry_after_unauthorized() -> None:
     seen: list[tuple[str, str, str | None]] = []
     projects_response_count = 0
