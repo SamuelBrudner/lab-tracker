@@ -7,6 +7,24 @@ const serviceWorkerSource = readFileSync(
   resolve(process.cwd(), "src/lab_tracker/frontend/sw.js"),
   "utf8"
 );
+const indexHtmlSource = readFileSync(
+  resolve(process.cwd(), "src/lab_tracker/frontend/index.html"),
+  "utf8"
+);
+
+function extractVersionedShellAssets(source) {
+  return Object.fromEntries(
+    source
+      .matchAll(/\/app\/static\/(?<asset>app\.js|styles\.css)\?v=(?<version>\d+)/g)
+      .map((match) => [match.groups.asset, match.groups.version])
+  );
+}
+
+function extractCacheVersion(source) {
+  const match = source.match(/const CACHE_VERSION = "(?<version>v\d+)"/);
+  expect(match, "service worker CACHE_VERSION").not.toBeNull();
+  return match.groups.version;
+}
 
 describe("service worker source", () => {
   it("waits for share-inbox transaction completion before resolving writes", () => {
@@ -15,9 +33,16 @@ describe("service worker source", () => {
     expect(serviceWorkerSource).toContain("IndexedDB transaction aborted");
   });
 
-  it("keeps cache and asset versions aligned for the rebuilt bundle", () => {
-    expect(serviceWorkerSource).toContain('CACHE_VERSION = "v18"');
-    expect(serviceWorkerSource).toContain("/app/static/app.js?v=18");
-    expect(serviceWorkerSource).toContain("/app/static/styles.css?v=18");
+  it("keeps cache and asset versions aligned across the shell files", () => {
+    const cacheVersion = extractCacheVersion(serviceWorkerSource);
+    const expectedAssetVersion = cacheVersion.replace(/^v/, "");
+    const indexAssetVersions = extractVersionedShellAssets(indexHtmlSource);
+    const serviceWorkerAssetVersions = extractVersionedShellAssets(serviceWorkerSource);
+
+    expect(indexAssetVersions).toEqual({
+      "app.js": expectedAssetVersion,
+      "styles.css": expectedAssetVersion,
+    });
+    expect(serviceWorkerAssetVersions).toEqual(indexAssetVersions);
   });
 });
