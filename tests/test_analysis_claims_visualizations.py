@@ -327,3 +327,40 @@ def test_delete_analysis_rejects_last_support_for_non_proposed_claim():
 
     with pytest.raises(ValidationError, match="last support link"):
         api.delete_analysis(analysis.analysis_id, actor=actor)
+
+
+def test_delete_analysis_allows_rejected_claim_support_link():
+    api = repository_backed_api()
+    actor = _actor()
+    project, question = _setup_project_with_question(api, actor)
+    dataset = api.create_dataset(
+        project_id=project.project_id,
+        primary_question_id=question.question_id,
+        status=DatasetStatus.COMMITTED,
+        commit_manifest=DatasetCommitManifestInput(
+            files=[DatasetFile(path="data.csv", checksum="abc123")]
+        ),
+        actor=actor,
+    )
+    analysis = api.create_analysis(
+        project_id=project.project_id,
+        dataset_ids=[dataset.dataset_id],
+        method_hash="method-rejected",
+        code_version="v1",
+        status=AnalysisStatus.COMMITTED,
+        actor=actor,
+    )
+    claim = api.create_claim(
+        project_id=project.project_id,
+        statement="Analysis does not support the conclusion.",
+        confidence=0.9,
+        status=ClaimStatus.REJECTED,
+        terminal_reason="Follow-up review rejected this interpretation.",
+        supported_by_analysis_ids=[analysis.analysis_id],
+        actor=actor,
+    )
+
+    deleted = api.delete_analysis(analysis.analysis_id, actor=actor)
+
+    assert deleted.analysis_id == analysis.analysis_id
+    assert api.get_claim(claim.claim_id).supported_by_analysis_ids == []

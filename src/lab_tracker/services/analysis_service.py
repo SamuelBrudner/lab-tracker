@@ -316,7 +316,7 @@ class AnalysisService(BaseService):
             ),
         )
         for claim in claims:
-            if claim.status == ClaimStatus.PROPOSED:
+            if claim.status in {ClaimStatus.PROPOSED, ClaimStatus.REJECTED}:
                 continue
             remaining_analysis_ids = [
                 analysis_id
