@@ -2,7 +2,7 @@ import * as React from "react";
 
 import { apiRequest } from "../shared/api.js";
 
-const { useEffect, useState } = React;
+const { useCallback, useEffect, useState } = React;
 
 function useApiResource(path, token, errorMessage) {
   const [state, setState] = useState({
@@ -10,6 +10,14 @@ function useApiResource(path, token, errorMessage) {
     error: "",
     loading: false,
   });
+
+  const setData = useCallback((nextData) => {
+    setState((current) => ({
+      ...current,
+      data: typeof nextData === "function" ? nextData(current.data) : nextData,
+      error: "",
+    }));
+  }, []);
 
   useEffect(() => {
     let canceled = false;
@@ -42,7 +50,7 @@ function useApiResource(path, token, errorMessage) {
     };
   }, [errorMessage, path, token]);
 
-  return state;
+  return { ...state, setData };
 }
 
 export { useApiResource };

@@ -30,6 +30,7 @@ function SessionDetailCard({
     primaryQuestion,
     project,
     session,
+    setSession,
   } = useSessionDetailData({
     token,
     sessionId,
@@ -67,7 +68,9 @@ function SessionDetailCard({
       const updated = await onCloseSession(session.session_id, session.project_id);
       if (!updated) {
         setActionError("Failed to close session.");
+        return;
       }
+      setSession(updated);
     } catch (err) {
       setActionError(err.message || "Failed to close session.");
     }
@@ -91,7 +94,9 @@ function SessionDetailCard({
       );
       if (!updated) {
         setActionError("Failed to promote session.");
+        return;
       }
+      setSession(updated);
     } catch (err) {
       setActionError(err.message || "Failed to promote session.");
     } finally {

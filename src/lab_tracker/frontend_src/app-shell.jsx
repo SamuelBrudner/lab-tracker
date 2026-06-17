@@ -466,6 +466,7 @@ function App() {
               navigate={navigate}
               canWrite={canContributeToProject}
               canManageGraph={canManageProjectMembers}
+              user={auth.user}
               setBusy={setBusy}
               setFlash={setFlash}
             />
@@ -478,6 +479,7 @@ function App() {
               navigate={navigate}
               canWrite={canContributeToProject}
               canManageGraph={canManageProjectMembers}
+              user={auth.user}
               setBusy={setBusy}
               setFlash={setFlash}
               backPath="/app/batches"

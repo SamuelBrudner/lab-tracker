@@ -85,7 +85,18 @@ describe("SessionDetailCard", () => {
   });
 
   it("calls the close handler with the session and project ids", async () => {
-    const onCloseSession = vi.fn(async () => ({ status: "closed" }));
+    const onCloseSession = vi.fn(async () => ({
+      created_at: "2026-04-20T00:00:00Z",
+      ended_at: "2026-04-20T04:00:00Z",
+      link_code: "ABC123",
+      primary_question_id: "question-1",
+      project_id: "project-1",
+      session_id: "session-1",
+      session_type: "scientific",
+      started_at: "2026-04-20T01:00:00Z",
+      status: "closed",
+      updated_at: "2026-04-20T04:00:00Z",
+    }));
 
     installFetchMock([
       {
@@ -151,10 +162,22 @@ describe("SessionDetailCard", () => {
     await waitFor(() => {
       expect(onCloseSession).toHaveBeenCalledWith("session-1", "project-1");
     });
+    expect(await screen.findByText("closed")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Close session" })).not.toBeInTheDocument();
   });
 
   it("calls the promote handler with the selected active question", async () => {
-    const onPromoteSession = vi.fn(async () => ({ session_id: "session-1" }));
+    const onPromoteSession = vi.fn(async () => ({
+      created_at: "2026-04-20T00:00:00Z",
+      link_code: "ABC123",
+      primary_question_id: "question-1",
+      project_id: "project-1",
+      session_id: "session-1",
+      session_type: "scientific",
+      started_at: "2026-04-20T01:00:00Z",
+      status: "active",
+      updated_at: "2026-04-20T02:00:00Z",
+    }));
 
     installFetchMock([
       {
@@ -212,5 +235,7 @@ describe("SessionDetailCard", () => {
     await waitFor(() => {
       expect(onPromoteSession).toHaveBeenCalledWith("session-1", "question-1", "project-1");
     });
+    expect(await screen.findByText("scientific")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Promote to scientific" })).not.toBeInTheDocument();
   });
 });

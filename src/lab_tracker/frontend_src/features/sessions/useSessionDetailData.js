@@ -6,7 +6,7 @@ import { useApiResource } from "../../hooks/useApiResource.js";
 const { useEffect, useMemo, useState } = React;
 
 function useSessionDetailData({ token, sessionId, projects }) {
-  const { data: session, error: loadError, loading } = useApiResource(
+  const { data: session, error: loadError, loading, setData: setSession } = useApiResource(
     token && sessionId ? `/sessions/${sessionId}` : "",
     token,
     "Failed to load session."
@@ -176,6 +176,7 @@ function useSessionDetailData({ token, sessionId, projects }) {
     primaryQuestion,
     project,
     session,
+    setSession,
   };
 }
 

@@ -1,6 +1,6 @@
 import * as React from "react";
 
-import { apiRequest } from "../shared/api.js";
+import { apiListRequest, apiRequest, buildApiPath } from "../shared/api.js";
 import { formatDate } from "../shared/formatters.js";
 
 const { useCallback, useEffect, useMemo, useState } = React;
@@ -112,6 +112,18 @@ function contextCountLabel(key) {
   return key.replaceAll("_", " ");
 }
 
+function canContributeWithRole(user, role) {
+  return (
+    user?.role === "admin" ||
+    role === "contributor" ||
+    role === "owner"
+  );
+}
+
+function canManageWithRole(user, role) {
+  return user?.role === "admin" || role === "owner";
+}
+
 function semanticLinkTargetType(operation) {
   if (operation.semantic_type === "link_note_to_question") {
     return "question";
@@ -178,6 +190,7 @@ function GraphDraftDetailCard({
   navigate,
   canWrite,
   canManageGraph = false,
+  user = null,
   setBusy,
   setFlash,
   backPath = "/app",
@@ -185,6 +198,8 @@ function GraphDraftDetailCard({
   const [changeSet, setChangeSet] = useState(null);
   const [payloads, setPayloads] = useState({});
   const [operationReviewNotes, setOperationReviewNotes] = useState({});
+  const [draftProjectRole, setDraftProjectRole] = useState("");
+  const [draftProjectId, setDraftProjectId] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [sourceImage, setSourceImage] = useState("");
@@ -199,13 +214,22 @@ function GraphDraftDetailCard({
     [changeSet]
   );
   const visibleSourceRegions = useMemo(() => sourceRegions(changeSet), [changeSet]);
+  const isAdmin = user?.role === "admin";
+  const usesDraftProjectAccess = Boolean(changeSet?.project_id);
+  const hasDraftProjectAccess = usesDraftProjectAccess && draftProjectId === changeSet.project_id;
+  const effectiveCanWrite = usesDraftProjectAccess
+    ? isAdmin || (hasDraftProjectAccess && canContributeWithRole(user, draftProjectRole))
+    : Boolean(canWrite);
+  const effectiveCanManageGraph = usesDraftProjectAccess
+    ? isAdmin || (hasDraftProjectAccess && canManageWithRole(user, draftProjectRole))
+    : Boolean(canManageGraph);
   const canEditDraft =
-    canWrite && ["ready", "changes_requested"].includes(changeSet?.status || "");
+    effectiveCanWrite && ["ready", "changes_requested"].includes(changeSet?.status || "");
   const canSubmitDraft =
-    canWrite && ["ready", "changes_requested"].includes(changeSet?.status || "");
-  const canReviewDraft = canManageGraph && changeSet?.status === "submitted";
+    effectiveCanWrite && ["ready", "changes_requested"].includes(changeSet?.status || "");
+  const canReviewDraft = effectiveCanManageGraph && changeSet?.status === "submitted";
   const canCommitDraft =
-    canManageGraph && ["ready", "submitted"].includes(changeSet?.status || "");
+    effectiveCanManageGraph && ["ready", "submitted"].includes(changeSet?.status || "");
 
   const loadDraft = useCallback(async () => {
     if (!changeSetId) {
@@ -230,6 +254,49 @@ function GraphDraftDetailCard({
   useEffect(() => {
     loadDraft();
   }, [loadDraft]);
+
+  useEffect(() => {
+    let canceled = false;
+    const projectId = changeSet?.project_id || "";
+    if (!projectId) {
+      setDraftProjectId("");
+      setDraftProjectRole("");
+      return () => {
+        canceled = true;
+      };
+    }
+    setDraftProjectId(projectId);
+    if (user?.role === "admin") {
+      setDraftProjectRole("owner");
+      return () => {
+        canceled = true;
+      };
+    }
+    if (!user?.user_id) {
+      setDraftProjectRole("");
+      return () => {
+        canceled = true;
+      };
+    }
+
+    setDraftProjectRole("");
+    apiListRequest(buildApiPath(`/projects/${projectId}/members`, { limit: 200 }), { token })
+      .then(({ data }) => {
+        if (canceled) {
+          return;
+        }
+        const membership = data.find((member) => member.user_id === user.user_id);
+        setDraftProjectRole(membership?.role || "");
+      })
+      .catch(() => {
+        if (!canceled) {
+          setDraftProjectRole("");
+        }
+      });
+    return () => {
+      canceled = true;
+    };
+  }, [changeSet?.project_id, token, user?.role, user?.user_id]);
 
   useEffect(() => {
     let canceled = false;

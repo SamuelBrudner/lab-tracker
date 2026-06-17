@@ -75,21 +75,12 @@ function stagedAnalysesPath(projectId) {
   });
 }
 
-function committedAnalysesMetaPath(projectId) {
+function committedAnalysesPath(projectId) {
   return buildApiPath("/analyses", {
-    limit: 1,
+    project_id: projectId,
+    status: "committed",
+    limit: 200,
     offset: 0,
-    project_id: projectId,
-    status: "committed",
-  });
-}
-
-function committedAnalysesRecentPath(projectId, total) {
-  return buildApiPath("/analyses", {
-    limit: 5,
-    offset: Math.max(total - 5, 0),
-    project_id: projectId,
-    status: "committed",
   });
 }
 
@@ -441,7 +432,7 @@ describe("App", () => {
         response: paged([]),
       },
       {
-        match: committedAnalysesMetaPath("project-1"),
+        match: committedAnalysesPath("project-1"),
         response: paged([], { limit: 1, offset: 0, total: 0 }),
       },
     ]);
@@ -498,7 +489,7 @@ describe("App", () => {
         response: paged([]),
       },
       {
-        match: committedAnalysesMetaPath("project-1"),
+        match: committedAnalysesPath("project-1"),
         response: paged([], { limit: 1, offset: 0, total: 0 }),
       },
       {
@@ -1049,6 +1040,127 @@ describe("App", () => {
     expect(await screen.findByText("Graph draft committed.")).toBeInTheDocument();
     expect(await screen.findByText("applied")).toBeInTheDocument();
     expect(await screen.findByText(questionId)).toBeInTheDocument();
+  });
+
+  it("uses the draft project membership for graph-draft commit controls", async () => {
+    const draftId = "22222222-2222-4222-8222-222222222222";
+    const operationId = "33333333-3333-4333-8333-333333333333";
+    const draftBase = {
+      change_set_id: draftId,
+      clarification_requests: [],
+      context_packet: { project: { id: "project-2", label: "Draft Project" } },
+      created_at: "2026-04-20T00:00:00Z",
+      draft_mode: "graph_context",
+      model: "gpt-5.4-mini",
+      operations: [
+        {
+          change_set_id: draftId,
+          confidence: 0.82,
+          created_at: "2026-04-20T00:00:00Z",
+          entity_type: "question",
+          error_metadata: {},
+          op: "create",
+          operation_id: operationId,
+          payload: { project_id: "project-2", text: "Draft-owned question" },
+          sequence: 1,
+          semantic_type: "suggest_new_question",
+          source_refs: [],
+          status: "accepted",
+          updated_at: "2026-04-20T00:00:00Z",
+        },
+      ],
+      project_id: "project-2",
+      prompt_version: "image-graph-draft-v2",
+      provider: "openai",
+      source_content_type: "text/plain",
+      source_filename: "",
+      source_note_id: null,
+      status: "ready",
+      summary: "Draft from another selected project.",
+      uncertain_fields: [],
+      updated_at: "2026-04-20T00:00:00Z",
+    };
+
+    localStorage.setItem(TOKEN_STORAGE_KEY, "token-graph-draft-project-access");
+    window.history.replaceState({}, "", `/app/graph-drafts/${draftId}`);
+
+    installFetchMock([
+      {
+        match: "/auth/me",
+        response: apiResponse({
+          role: "editor",
+          user_id: "user-1",
+          username: "sam",
+        }),
+      },
+      {
+        match: projectsPath,
+        response: apiResponse([
+          project("project-1", "Selected Project"),
+          project("project-2", "Draft Project"),
+        ]),
+      },
+      {
+        match: questionCountPath("project-1"),
+        response: paged([], { limit: 1, offset: 0, total: 0 }),
+      },
+      {
+        match: datasetCountPath("project-1"),
+        response: paged([], { limit: 1, offset: 0, total: 0 }),
+      },
+      {
+        match: noteCountPath("project-1"),
+        response: paged([], { limit: 1, offset: 0, total: 0 }),
+      },
+      {
+        match: projectMembersPath("project-1"),
+        response: paged([
+          {
+            membership_id: "membership-selected",
+            role: "viewer",
+            user_id: "user-1",
+            username: "sam",
+          },
+        ]),
+      },
+      {
+        match: `/graph-drafts/${draftId}`,
+        response: apiResponse(draftBase),
+      },
+      {
+        match: projectMembersPath("project-2"),
+        response: paged([
+          {
+            membership_id: "membership-draft",
+            role: "owner",
+            user_id: "user-1",
+            username: "sam",
+          },
+        ]),
+      },
+      {
+        match: `/graph-drafts/${draftId}/commit`,
+        method: "POST",
+        response: apiResponse({
+          ...draftBase,
+          commit_message: "Commit draft project",
+          status: "committed",
+        }),
+      },
+    ]);
+
+    render(<App />);
+
+    expect(await screen.findByRole("heading", { name: "Graph Draft Review" })).toBeInTheDocument();
+    await waitFor(() => {
+      expect(screen.getByLabelText("Commit message")).toBeEnabled();
+    });
+    fireEvent.change(screen.getByLabelText("Commit message"), {
+      target: { value: "Commit draft project" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Commit accepted changes" }));
+
+    expect(await screen.findByText("Graph draft committed.")).toBeInTheDocument();
   });
 
   it("puts capture actions before upload details on the mobile capture route", async () => {
@@ -2160,7 +2272,7 @@ describe("App", () => {
         response: paged([]),
       },
       {
-        match: committedAnalysesMetaPath("project-1"),
+        match: committedAnalysesPath("project-1"),
         response: paged([], { limit: 1, offset: 0, total: 0 }),
       },
       {
@@ -2192,7 +2304,7 @@ describe("App", () => {
         response: paged([]),
       },
       {
-        match: committedAnalysesMetaPath("project-2"),
+        match: committedAnalysesPath("project-2"),
         response: paged([], { limit: 1, offset: 0, total: 0 }),
       },
     ]);
@@ -2214,7 +2326,7 @@ describe("App", () => {
     const urls = requestedUrls(fetchMock);
     expect(urls).toContain(recentNotesPath("project-1"));
     expect(urls).toContain(activeSessionsPath("project-1"));
-    expect(urls).toContain(committedAnalysesMetaPath("project-1"));
+    expect(urls).toContain(committedAnalysesPath("project-1"));
     expect(urls).not.toContain(buildApiPath("/notes", { project_id: "project-1", limit: 200, offset: 0 }));
     expect(urls).not.toContain(buildApiPath("/sessions", { project_id: "project-1", limit: 200, offset: 0 }));
     expect(urls.some((url) => url.startsWith("/visualizations?project_id="))).toBe(false);
@@ -2280,7 +2392,7 @@ describe("App", () => {
         response: paged([]),
       },
       {
-        match: committedAnalysesMetaPath("project-1"),
+        match: committedAnalysesPath("project-1"),
         response: paged([], { limit: 1, offset: 0, total: 0 }),
       },
     ]);
@@ -2395,7 +2507,7 @@ describe("App", () => {
         response: paged([]),
       },
       {
-        match: committedAnalysesMetaPath("project-1"),
+        match: committedAnalysesPath("project-1"),
         response: paged([], { limit: 1, offset: 0, total: 0 }),
       },
     ]);
@@ -2485,7 +2597,7 @@ describe("App", () => {
         response: paged([]),
       },
       {
-        match: committedAnalysesMetaPath("project-1"),
+        match: committedAnalysesPath("project-1"),
         response: paged([], { limit: 1, offset: 0, total: 0 }),
       },
     ]);
@@ -2754,7 +2866,7 @@ describe("App", () => {
         response: paged([]),
       },
       {
-        match: committedAnalysesMetaPath("project-1"),
+        match: committedAnalysesPath("project-1"),
         response: paged([], { limit: 1, offset: 0, total: 0 }),
       },
       {
@@ -2840,7 +2952,7 @@ describe("App", () => {
         response: paged([]),
       },
       {
-        match: committedAnalysesMetaPath("project-1"),
+        match: committedAnalysesPath("project-1"),
         response: paged([], { limit: 1, offset: 0, total: 0 }),
       },
       {
@@ -2918,7 +3030,7 @@ describe("App", () => {
         response: paged([]),
       },
       {
-        match: committedAnalysesMetaPath("project-1"),
+        match: committedAnalysesPath("project-1"),
         response: paged([], { limit: 1, offset: 0, total: 0 }),
       },
       {
@@ -3017,20 +3129,12 @@ describe("App", () => {
         ],
       },
       {
-        match: committedAnalysesMetaPath("project-1"),
+        match: committedAnalysesPath("project-1"),
         response: [
-          paged([committedAnalysis], { limit: 1, offset: 0, total: 1 }),
-          paged([], { limit: 1, offset: 0, total: 2 }),
-          paged([committedAfterCommit], { limit: 1, offset: 0, total: 1 }),
+          paged([committedAnalysis]),
+          paged([committedAfterCommit, committedAnalysis], { limit: 200, offset: 0, total: 2 }),
+          paged([committedAfterCommit]),
         ],
-      },
-      {
-        match: committedAnalysesRecentPath("project-1", 2),
-        response: paged([committedAfterCommit, committedAnalysis], {
-          limit: 5,
-          offset: 0,
-          total: 2,
-        }),
       },
       {
         match: visualizationsPath("analysis-committed"),

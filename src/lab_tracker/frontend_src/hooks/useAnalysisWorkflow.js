@@ -1,6 +1,6 @@
 import * as React from "react";
 
-import { apiListRequest, apiRequest, buildApiPath, fetchAllPages } from "../shared/api.js";
+import { apiRequest, buildApiPath, fetchAllPages } from "../shared/api.js";
 
 const { useCallback, useEffect, useRef, useState } = React;
 
@@ -29,7 +29,7 @@ function useAnalysisWorkflow({ token, canWrite, selectedProjectId, setBusy, setF
   const [analysisEnvironmentHash, setAnalysisEnvironmentHash] = useState("");
 
   const analysisRequestRef = useRef(0);
-  const visualizationRequestRef = useRef(0);
+  const visualizationRequestRef = useRef({});
 
   const refreshAnalysisData = useCallback(
     async (projectId = selectedProjectId) => {
@@ -45,7 +45,7 @@ function useAnalysisWorkflow({ token, canWrite, selectedProjectId, setBusy, setF
       setAnalysisLoading(true);
       setAnalysisError("");
       try {
-        const [nextStagedAnalyses, committedMetaPage] = await Promise.all([
+        const [nextStagedAnalyses, committedAnalyses] = await Promise.all([
           fetchAllPages(
             buildApiPath("/analyses", {
               project_id: projectId,
@@ -53,35 +53,18 @@ function useAnalysisWorkflow({ token, canWrite, selectedProjectId, setBusy, setF
             }),
             { token }
           ),
-          apiListRequest(
+          fetchAllPages(
             buildApiPath("/analyses", {
-              limit: 1,
-              offset: 0,
               project_id: projectId,
               status: "committed",
             }),
             { token }
           ),
         ]);
-
-        let nextCommittedAnalyses = [];
-        const committedTotal = committedMetaPage.meta.total || 0;
-        if (committedTotal > 0) {
-          const recentOffset = Math.max(committedTotal - RECENT_COMMITTED_LIMIT, 0);
-          const committedPage =
-            committedTotal === 1
-              ? committedMetaPage
-              : await apiListRequest(
-                  buildApiPath("/analyses", {
-                    limit: RECENT_COMMITTED_LIMIT,
-                    offset: recentOffset,
-                    project_id: projectId,
-                    status: "committed",
-                  }),
-                  { token }
-                );
-          nextCommittedAnalyses = committedPage.data;
-        }
+        const nextCommittedAnalyses = sortByRecent(committedAnalyses).slice(
+          0,
+          RECENT_COMMITTED_LIMIT
+        );
 
         if (analysisRequestRef.current !== requestId) {
           return {
@@ -91,7 +74,7 @@ function useAnalysisWorkflow({ token, canWrite, selectedProjectId, setBusy, setF
         }
 
         setStagedAnalyses(sortByRecent(nextStagedAnalyses));
-        setRecentCommittedAnalyses(sortByRecent(nextCommittedAnalyses));
+        setRecentCommittedAnalyses(nextCommittedAnalyses);
         return {
           recentCommitted: nextCommittedAnalyses,
           staged: nextStagedAnalyses,
@@ -134,8 +117,8 @@ function useAnalysisWorkflow({ token, canWrite, selectedProjectId, setBusy, setF
         return currentState.items;
       }
 
-      const requestId = visualizationRequestRef.current + 1;
-      visualizationRequestRef.current = requestId;
+      const requestId = (visualizationRequestRef.current[analysisId] || 0) + 1;
+      visualizationRequestRef.current[analysisId] = requestId;
       setVisualizationStates((current) => ({
         ...current,
         [analysisId]: {
@@ -151,7 +134,7 @@ function useAnalysisWorkflow({ token, canWrite, selectedProjectId, setBusy, setF
           buildApiPath("/visualizations", { analysis_id: analysisId }),
           { token }
         );
-        if (visualizationRequestRef.current !== requestId) {
+        if (visualizationRequestRef.current[analysisId] !== requestId) {
           return items;
         }
         const nextItems = Array.isArray(items) ? sortByRecent(items) : [];
@@ -166,7 +149,7 @@ function useAnalysisWorkflow({ token, canWrite, selectedProjectId, setBusy, setF
         }));
         return nextItems;
       } catch (err) {
-        if (visualizationRequestRef.current === requestId) {
+        if (visualizationRequestRef.current[analysisId] === requestId) {
           setVisualizationStates((current) => ({
             ...current,
             [analysisId]: {
@@ -188,6 +171,7 @@ function useAnalysisWorkflow({ token, canWrite, selectedProjectId, setBusy, setF
     setAnalysisCodeVersion("");
     setAnalysisMethodHash("");
     setAnalysisEnvironmentHash("");
+    visualizationRequestRef.current = {};
     setVisualizationStates({});
   }, [selectedProjectId, token]);
 
