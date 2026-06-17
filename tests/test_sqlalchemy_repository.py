@@ -22,6 +22,7 @@ from lab_tracker.models import (
     EntityType,
     EntityVersion,
     ExternalArtifactReference,
+    GraphChangeSet,
     GroupMembership,
     Note,
     NoteStatus,
@@ -71,6 +72,7 @@ def _add_user(db_session, user_id, username: str) -> None:  # noqa: ANN001
             role="viewer",
         )
     )
+    db_session.flush()
 
 
 def test_project_repository_crud(db_session):
@@ -97,14 +99,7 @@ def test_project_repository_crud(db_session):
 def test_project_group_repository_crud_and_membership_queries(db_session):
     repo = SQLAlchemyLabTrackerRepository(db_session)
     user_id = uuid4()
-    db_session.add(
-        UserModel(
-            user_id=str(user_id),
-            username="pi-user",
-            password_hash="unused",
-            role="viewer",
-        )
-    )
+    _add_user(db_session, user_id, "pi-user")
     group = ProjectGroup(
         group_id=uuid4(),
         name="Neural systems lab",
@@ -134,7 +129,9 @@ def test_project_group_repository_crud_and_membership_queries(db_session):
     )
 
     repo.project_groups.save(group)
+    db_session.flush()
     repo.projects.save(project)
+    db_session.flush()
     repo.group_memberships.save(membership)
     repo.commit()
 
@@ -259,6 +256,7 @@ def test_note_repository_persists_supported_children(db_session):
         updated_at=_ts(),
     )
     repo.projects.save(project)
+    db_session.flush()
     note = Note(
         note_id=uuid4(),
         project_id=project.project_id,
@@ -374,7 +372,9 @@ def test_acquisition_output_repository_crud(db_session):
     )
 
     repo.projects.save(project)
+    db_session.flush()
     repo.sessions.save(session)
+    db_session.flush()
     repo.acquisition_outputs.save(output)
     repo.commit()
 
@@ -401,6 +401,7 @@ def test_query_questions_applies_filters_and_pagination(db_session):
         updated_at=_ts(),
     )
     repo.projects.save(project)
+    db_session.flush()
 
     active_ids = []
     for index in range(3):
@@ -495,6 +496,7 @@ def test_note_repository_list_batches_child_queries(db_session):
         updated_at=_ts(),
     )
     repo.projects.save(project)
+    db_session.flush()
     for index in range(2):
         repo.notes.save(
             Note(
@@ -555,6 +557,7 @@ def test_query_notes_filters_by_target(db_session):
     dataset_target = uuid4()
     other_target = uuid4()
     repo.projects.save(project)
+    db_session.flush()
     repo.notes.save(
         Note(
             note_id=uuid4(),
@@ -613,6 +616,7 @@ def test_query_notes_applies_substring_search_in_database(db_session):
         updated_at=_ts(),
     )
     repo.projects.save(project)
+    db_session.flush()
     repo.notes.save(
         Note(
             note_id=uuid4(),
@@ -683,9 +687,12 @@ def test_query_sessions_and_acquisition_outputs_apply_filters_and_pagination(db_
     )
 
     repo.projects.save(project)
+    db_session.flush()
     repo.questions.save(question)
+    db_session.flush()
     repo.sessions.save(active_session)
     repo.sessions.save(closed_session)
+    db_session.flush()
     repo.acquisition_outputs.save(
         AcquisitionOutput(
             output_id=uuid4(),
@@ -1140,6 +1147,31 @@ def test_query_entity_versions_filters_by_entity_and_change_set(db_session):
     repo = SQLAlchemyLabTrackerRepository(db_session)
     entity_id = uuid4()
     change_set_id = uuid4()
+    project = Project(
+        project_id=uuid4(),
+        name="Versioned project",
+        status=ProjectStatus.ACTIVE,
+        created_at=_ts(),
+        updated_at=_ts(),
+    )
+    source_note = Note(
+        note_id=uuid4(),
+        project_id=project.project_id,
+        raw_content="version source",
+        status=NoteStatus.COMMITTED,
+        created_at=_ts(),
+        updated_at=_ts(),
+    )
+    change_set = GraphChangeSet(
+        change_set_id=change_set_id,
+        project_id=project.project_id,
+        source_note_id=source_note.note_id,
+        source_note_ids=[source_note.note_id],
+        model="test-model",
+        prompt_version="test-prompt",
+        created_at=_ts(1),
+        updated_at=_ts(1),
+    )
     first = EntityVersion(
         version_id=uuid4(),
         entity_type=EntityType.QUESTION,
@@ -1166,6 +1198,12 @@ def test_query_entity_versions_filters_by_entity_and_change_set(db_session):
         snapshot={"statement": "other"},
         created_at=_ts(4),
     )
+    repo.projects.save(project)
+    db_session.flush()
+    repo.notes.save(source_note)
+    db_session.flush()
+    repo.graph_change_sets.save(change_set)
+    db_session.flush()
     repo.entity_versions.save(first)
     repo.entity_versions.save(second)
     repo.entity_versions.save(other)

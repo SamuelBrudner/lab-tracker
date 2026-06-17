@@ -98,28 +98,42 @@ def test_ownership_reassignment_moves_all_attribution_surfaces():
             _user(from_user_id, "departing"),
             _user(to_user_id, "successor"),
             _user(admin_user_id, "reassignment-admin"),
-            ProjectGroupModel(
-                group_id=str(project_group_id),
-                name="Lab group",
-                description="",
-                kind="lab",
-                group_read_all=False,
-                created_by=from_user,
-                created_by_user_id=from_user,
-                created_at=now,
-                updated_at=now,
-            ),
-            ProjectModel(
-                project_id=str(project_id),
-                group_id=str(project_group_id),
-                name="Owned project",
-                description="",
-                status="active",
-                created_by=from_user,
-                created_by_user_id=from_user,
-                created_at=now,
-                updated_at=now,
-            ),
+        ]
+    )
+    session.flush()
+
+    session.add(
+        ProjectGroupModel(
+            group_id=str(project_group_id),
+            name="Lab group",
+            description="",
+            kind="lab",
+            group_read_all=False,
+            created_by=from_user,
+            created_by_user_id=from_user,
+            created_at=now,
+            updated_at=now,
+        )
+    )
+    session.flush()
+
+    session.add(
+        ProjectModel(
+            project_id=str(project_id),
+            group_id=str(project_group_id),
+            name="Owned project",
+            description="",
+            status="active",
+            created_by=from_user,
+            created_by_user_id=from_user,
+            created_at=now,
+            updated_at=now,
+        )
+    )
+    session.flush()
+
+    session.add_all(
+        [
             ProjectMembershipModel(
                 membership_id=str(project_membership_id),
                 project_id=str(project_id),
@@ -164,6 +178,40 @@ def test_ownership_reassignment_moves_all_attribution_surfaces():
                 created_at=now,
                 updated_at=now,
             ),
+            NoteModel(
+                note_id=str(note_id),
+                project_id=str(project_id),
+                raw_content="handoff note",
+                note_metadata={},
+                status="staged",
+                created_by=from_user,
+                created_by_user_id=from_user,
+                created_at=now,
+                updated_at=now,
+            ),
+            GraphDraftBatchRunModel(
+                run_id=str(batch_run_id),
+                project_id=str(project_id),
+                trigger="manual",
+                status="ready",
+                window_start=now,
+                window_end=now,
+                note_count=1,
+                batch_key=f"batch-{batch_run_id}",
+                summary="",
+                error_metadata={},
+                created_by=from_user,
+                created_by_user_id=from_user,
+                created_at=now,
+                updated_at=now,
+                started_at=now,
+            ),
+        ]
+    )
+    session.flush()
+
+    session.add_all(
+        [
             QuestionRefactorModel(
                 refactor_id=str(refactor_id),
                 project_id=str(project_id),
@@ -195,17 +243,6 @@ def test_ownership_reassignment_moves_all_attribution_surfaces():
                 created_at=now,
                 updated_at=now,
             ),
-            NoteModel(
-                note_id=str(note_id),
-                project_id=str(project_id),
-                raw_content="handoff note",
-                note_metadata={},
-                status="staged",
-                created_by=from_user,
-                created_by_user_id=from_user,
-                created_at=now,
-                updated_at=now,
-            ),
             GraphChangeSetModel(
                 change_set_id=str(change_set_id),
                 project_id=str(project_id),
@@ -225,23 +262,6 @@ def test_ownership_reassignment_moves_all_attribution_surfaces():
                 created_by_user_id=from_user,
                 created_at=now,
                 updated_at=now,
-            ),
-            GraphDraftBatchRunModel(
-                run_id=str(batch_run_id),
-                project_id=str(project_id),
-                trigger="manual",
-                status="ready",
-                window_start=now,
-                window_end=now,
-                note_count=1,
-                batch_key=f"batch-{batch_run_id}",
-                summary="",
-                error_metadata={},
-                created_by=from_user,
-                created_by_user_id=from_user,
-                created_at=now,
-                updated_at=now,
-                started_at=now,
             ),
             SessionModel(
                 session_id=str(session_id),
@@ -279,17 +299,6 @@ def test_ownership_reassignment_moves_all_attribution_surfaces():
                 created_at=now,
                 updated_at=now,
             ),
-            VisualizationModel(
-                viz_id=str(visualization_id),
-                analysis_id=str(analysis_id),
-                viz_type="line",
-                file_path="outputs/handoff.png",
-                caption="Handoff figure",
-                created_by=from_user,
-                created_by_user_id=from_user,
-                created_at=now,
-                updated_at=now,
-            ),
             GoalModel(
                 goal_id=str(goal_id),
                 project_id=str(project_id),
@@ -298,6 +307,23 @@ def test_ownership_reassignment_moves_all_attribution_surfaces():
                 summary="",
                 status="planned",
                 attributes={},
+                created_by=from_user,
+                created_by_user_id=from_user,
+                created_at=now,
+                updated_at=now,
+            ),
+        ]
+    )
+    session.flush()
+
+    session.add_all(
+        [
+            VisualizationModel(
+                viz_id=str(visualization_id),
+                analysis_id=str(analysis_id),
+                viz_type="line",
+                file_path="outputs/handoff.png",
+                caption="Handoff figure",
                 created_by=from_user,
                 created_by_user_id=from_user,
                 created_at=now,

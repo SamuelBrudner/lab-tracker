@@ -4,7 +4,7 @@ from uuid import uuid4
 
 from fastapi import Request
 from fastapi.testclient import TestClient
-from sqlalchemy import delete, select
+from sqlalchemy import create_engine, delete, select
 from sqlalchemy.orm import Session
 from starlette.responses import JSONResponse
 
@@ -136,6 +136,20 @@ def test_sqlite_engine_enforces_foreign_keys_and_busy_wal_pragmas(tmp_path):
             )
             is None
         )
+
+
+def test_raw_sqlite_test_engines_enforce_foreign_keys_and_busy_wal_pragmas(tmp_path):
+    engine = create_engine(
+        f"sqlite+pysqlite:///{tmp_path / 'raw-sqlite-pragmas.db'}",
+        future=True,
+    )
+    try:
+        with engine.connect() as connection:
+            assert connection.exec_driver_sql("PRAGMA foreign_keys").scalar_one() == 1
+            assert connection.exec_driver_sql("PRAGMA busy_timeout").scalar_one() == 5000
+            assert connection.exec_driver_sql("PRAGMA journal_mode").scalar_one() == "wal"
+    finally:
+        engine.dispose()
 
 
 def test_db_session_middleware_runs_after_commit_actions_once():

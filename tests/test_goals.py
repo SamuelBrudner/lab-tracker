@@ -378,17 +378,25 @@ def test_graph_draft_goal_operations_validate_and_apply_committed_links():
         },
     )
     api.graph_drafts.patch_validator.validate_operation(link_operation, link_operation.payload)
+    source_note = api.create_note(
+        project.project_id,
+        "Goal draft source",
+        actor=actor,
+    )
+    change_set = GraphChangeSet(
+        change_set_id=link_operation.change_set_id,
+        project_id=project.project_id,
+        source_note_id=source_note.note_id,
+        model="fake-gpt",
+        prompt_version="test",
+    )
+    api.graph_drafts.repository.graph_change_sets.save(change_set)
+    api.graph_drafts.repository.commit()
     api.graph_drafts.patch_applier.apply_graph_operation(
         link_operation,
         ref_map={},
         actor=actor,
-        change_set=GraphChangeSet(
-            change_set_id=link_operation.change_set_id,
-            project_id=project.project_id,
-            source_note_id=uuid4(),
-            model="fake-gpt",
-            prompt_version="test",
-        ),
+        change_set=change_set,
     )
 
     reloaded = api.get_goal(goal.goal_id)

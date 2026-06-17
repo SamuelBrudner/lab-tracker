@@ -1,13 +1,17 @@
 from __future__ import annotations
 
+import sqlite3
+from collections.abc import Iterator
 from pathlib import Path
 from uuid import uuid4
 
 import pytest
-from alembic import command
 from alembic.config import Config
 from fastapi.testclient import TestClient
+from sqlalchemy import event
+from sqlalchemy.engine import Engine
 
+from alembic import command
 from lab_tracker.app import create_app
 from lab_tracker.auth import Role
 
@@ -18,6 +22,26 @@ def _repo_root() -> Path:
 
 def _auth_headers(token: str) -> dict[str, str]:
     return {"Authorization": f"Bearer {token}"}
+
+
+@pytest.fixture(scope="session", autouse=True)
+def raw_sqlite_test_engines_use_production_pragmas() -> Iterator[None]:
+    def _set_sqlite_pragmas(dbapi_connection, _connection_record) -> None:  # noqa: ANN001
+        if not isinstance(dbapi_connection, sqlite3.Connection):
+            return
+        cursor = dbapi_connection.cursor()
+        try:
+            cursor.execute("PRAGMA foreign_keys=ON")
+            cursor.execute("PRAGMA journal_mode=WAL")
+            cursor.execute("PRAGMA busy_timeout=5000")
+        finally:
+            cursor.close()
+
+    event.listen(Engine, "connect", _set_sqlite_pragmas)
+    try:
+        yield
+    finally:
+        event.remove(Engine, "connect", _set_sqlite_pragmas)
 
 
 @pytest.fixture()
