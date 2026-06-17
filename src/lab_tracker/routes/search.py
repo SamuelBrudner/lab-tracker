@@ -44,9 +44,7 @@ def build_search_router(api: LabTrackerAPI) -> APIRouter:
             for item in (include.split(",") if include else ["questions", "notes"])
             if item.strip()
         }
-        project_ids = [project_id] if project_id is not None else None
-        if project_ids is None and allowed_project_ids is not None:
-            project_ids = sorted(allowed_project_ids)
+        project_ids = {project_id} if project_id is not None else allowed_project_ids
         linked_question_ids: set[UUID] | None = None
         linked_note_ids: set[UUID] | None = None
         if goal_id is not None:
@@ -54,7 +52,7 @@ def build_search_router(api: LabTrackerAPI) -> APIRouter:
             ensure_project_read(request, goal.project_id)
             if project_id is not None and goal.project_id != project_id:
                 raise ValidationError("goal_id must belong to project_id.")
-            project_ids = [goal.project_id]
+            project_ids = {goal.project_id}
             links, _ = repository.query_goal_links(goal_id=goal_id, limit=None, offset=0)
             linked_question_ids = {
                 link.target.entity_id
@@ -66,55 +64,35 @@ def build_search_router(api: LabTrackerAPI) -> APIRouter:
                 for link in links
                 if link.target.entity_type == EntityType.NOTE
             }
-        if project_ids is None:
-            questions = (
-                repository.query_questions(
-                    project_id=None,
-                    search=q,
-                    limit=None if linked_question_ids is not None else limit,
-                    offset=0 if linked_question_ids is not None else offset,
-                )[0]
-                if not include_set or "questions" in include_set
-                else []
-            )
-            notes = (
-                repository.query_notes(
-                    project_id=None,
-                    search=q,
-                    limit=None if linked_note_ids is not None else limit,
-                    offset=0 if linked_note_ids is not None else offset,
-                )[0]
-                if not include_set or "notes" in include_set
-                else []
-            )
-        else:
-            questions = []
-            notes = []
-            for scoped_project_id in project_ids:
-                if not include_set or "questions" in include_set:
-                    questions.extend(
-                        repository.query_questions(
-                            project_id=scoped_project_id,
-                            search=q,
-                            limit=None if linked_question_ids is not None else limit,
-                            offset=0,
-                        )[0]
-                    )
-                if not include_set or "notes" in include_set:
-                    notes.extend(
-                        repository.query_notes(
-                            project_id=scoped_project_id,
-                            search=q,
-                            limit=None if linked_note_ids is not None else limit,
-                            offset=0,
-                        )[0]
-                    )
+        questions = (
+            repository.query_questions(
+                project_id=None,
+                project_ids=project_ids,
+                search=q,
+                limit=None if linked_question_ids is not None else limit,
+                offset=0 if linked_question_ids is not None else offset,
+            )[0]
+            if not include_set or "questions" in include_set
+            else []
+        )
+        notes = (
+            repository.query_notes(
+                project_id=None,
+                project_ids=project_ids,
+                search=q,
+                limit=None if linked_note_ids is not None else limit,
+                offset=0 if linked_note_ids is not None else offset,
+            )[0]
+            if not include_set or "notes" in include_set
+            else []
+        )
         if linked_question_ids is not None:
             questions = [item for item in questions if item.question_id in linked_question_ids]
         if linked_note_ids is not None:
             notes = [item for item in notes if item.note_id in linked_note_ids]
-        if project_ids is not None:
+        if linked_question_ids is not None:
             questions = questions[offset : offset + limit]
+        if linked_note_ids is not None:
             notes = notes[offset : offset + limit]
         return Envelope(
             data=SearchResults(questions=questions, notes=notes),
