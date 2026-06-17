@@ -9,10 +9,32 @@ import httpx
 from lab_tracker.mcp_api_client import (
     JsonObject,
     LabTrackerAPIError,
+    LabTrackerAPIUnavailableError,
     client_from_env,
+    lab_tracker_api_error,
     lab_tracker_unavailable,
 )
 from lab_tracker.mcp_tools.hints import next_action, with_next_action
+
+_cached_read_client: Any | None = None
+_cached_read_client_factory: Any | None = None
+
+
+def _read_client() -> Any:
+    global _cached_read_client, _cached_read_client_factory
+    if _cached_read_client is None or _cached_read_client_factory is not client_from_env:
+        close_cached_read_client()
+        _cached_read_client = client_from_env()
+        _cached_read_client_factory = client_from_env
+    return _cached_read_client
+
+
+def close_cached_read_client() -> None:
+    global _cached_read_client, _cached_read_client_factory
+    if _cached_read_client is not None:
+        _cached_read_client.close()
+    _cached_read_client = None
+    _cached_read_client_factory = None
 
 
 def _read_tool(
@@ -21,13 +43,14 @@ def _read_tool(
     *,
     hint: JsonObject,
 ) -> JsonObject:
-    client = client_from_env()
+    client = _read_client()
     try:
         return with_next_action(call(client), hint)
-    except (LabTrackerAPIError, httpx.HTTPError) as exc:
+    except (LabTrackerAPIUnavailableError, httpx.HTTPError) as exc:
+        close_cached_read_client()
         return lab_tracker_unavailable(tool_name, detail=str(exc))
-    finally:
-        client.close()
+    except LabTrackerAPIError as exc:
+        return lab_tracker_api_error(tool_name, exc)
 
 
 def lab_tracker_health() -> JsonObject:

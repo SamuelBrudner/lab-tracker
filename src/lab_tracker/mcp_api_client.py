@@ -55,6 +55,31 @@ GOAL_LINK_STATUS_TEXT = ", ".join(GOAL_LINK_STATUS_VALUES)
 class LabTrackerAPIError(RuntimeError):
     """Raised when the Lab Tracker API returns an unusable response."""
 
+    def __init__(
+        self,
+        message: str,
+        *,
+        status_code: int | None = None,
+        code: str | None = None,
+        issues: list[JsonObject] | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+        self.code = code
+        self.issues = issues
+
+
+class LabTrackerAPIUnavailableError(LabTrackerAPIError):
+    """Raised when the Lab Tracker API cannot be reached or is unavailable."""
+
+
+class LabTrackerAPIAuthError(LabTrackerAPIError):
+    """Raised when Lab Tracker rejects MCP credentials or permissions."""
+
+
+class LabTrackerAPIValidationError(LabTrackerAPIError):
+    """Raised when a Lab Tracker API request is invalid."""
+
 
 @dataclass(frozen=True)
 class MCPSettings:
@@ -402,7 +427,7 @@ class LabTrackerAPIClient:
                     "limit": limit,
                 },
             )
-        except (LabTrackerAPIError, httpx.HTTPError) as exc:
+        except LabTrackerAPIUnavailableError as exc:
             return lab_tracker_unavailable(
                 "lab_tracker_get_decision_context",
                 detail=str(exc),
@@ -794,7 +819,7 @@ class LabTrackerAPIClient:
         headers: dict[str, str] = {}
         if authenticated and self._has_credentials():
             headers["Authorization"] = f"Bearer {self._token()}"
-        response = self._client.request(
+        response = self._send(
             method,
             path,
             params=_drop_empty(params),
@@ -805,12 +830,14 @@ class LabTrackerAPIClient:
         if response.status_code == 401 and authenticated and retry_on_unauthorized:
             self._access_token = None
             if not self._has_credentials():
-                raise LabTrackerAPIError(
+                raise LabTrackerAPIAuthError(
                     "LAB_TRACKER_MCP_USERNAME and LAB_TRACKER_MCP_PASSWORD are required "
-                    "when the Lab Tracker API has authentication enabled."
+                    "when the Lab Tracker API has authentication enabled.",
+                    status_code=response.status_code,
+                    code="auth_error",
                 )
             headers["Authorization"] = f"Bearer {self._token()}"
-            response = self._client.request(
+            response = self._send(
                 method,
                 path,
                 params=_drop_empty(params),
@@ -819,8 +846,17 @@ class LabTrackerAPIClient:
                 headers=headers,
             )
         if response.status_code >= 400:
-            raise LabTrackerAPIError(_response_error(response))
+            raise _api_error_from_response(response)
         return _response_json(response)
+
+    def _send(self, method: str, path: str, **kwargs: Any) -> httpx.Response:
+        try:
+            return self._client.request(method, path, **kwargs)
+        except httpx.HTTPError as exc:
+            raise LabTrackerAPIUnavailableError(
+                f"Lab Tracker request {method} {path} failed: {exc}",
+                code=UNAVAILABLE_CODE,
+            ) from exc
 
     def _has_credentials(self) -> bool:
         return bool((self._settings.username or "").strip() and self._settings.password)
@@ -831,16 +867,18 @@ class LabTrackerAPIClient:
         username = (self._settings.username or "").strip()
         password = self._settings.password or ""
         if not username or not password:
-            raise LabTrackerAPIError(
+            raise LabTrackerAPIAuthError(
                 "LAB_TRACKER_MCP_USERNAME and LAB_TRACKER_MCP_PASSWORD are required "
-                "for authenticated Lab Tracker MCP tools."
+                "for authenticated Lab Tracker MCP tools.",
+                code="auth_error",
             )
-        response = self._client.post(
+        response = self._send(
+            "POST",
             "/auth/login",
             json={"username": username, "password": password},
         )
         if response.status_code >= 400:
-            raise LabTrackerAPIError(_response_error(response))
+            raise _api_error_from_response(response)
         payload = _response_json(response)
         try:
             token = str(payload["data"]["access_token"])
@@ -983,6 +1021,31 @@ def lab_tracker_unavailable(operation: str, **metadata: object) -> JsonObject:
     }
 
 
+def lab_tracker_api_error(operation: str, exc: LabTrackerAPIError) -> JsonObject:
+    error: JsonObject = {
+        "code": exc.code or "lab_tracker_api_error",
+        "message": str(exc),
+        "operation": operation,
+    }
+    if exc.status_code is not None:
+        error["status_code"] = exc.status_code
+    if exc.issues:
+        error["issues"] = exc.issues
+    return {
+        "error": error,
+        "data": None,
+        "next_action": {
+            "action": "revise_request_or_credentials",
+            "tool": None,
+            "arguments": {},
+            "reason": (
+                "Use the structured error details to correct the request, credentials, "
+                "or Lab Tracker permissions before retrying."
+            ),
+        },
+    }
+
+
 def _payload_items(payload: JsonObject) -> list[JsonObject]:
     data = payload.get("data")
     if not isinstance(data, list):
@@ -1016,18 +1079,56 @@ def _response_json(response: httpx.Response) -> JsonObject:
     return payload
 
 
+def _api_error_from_response(response: httpx.Response) -> LabTrackerAPIError:
+    message, code, issues = _response_error_parts(response)
+    kwargs = {"status_code": response.status_code, "code": code, "issues": issues}
+    if response.status_code in {401, 403}:
+        return LabTrackerAPIAuthError(message, **kwargs)
+    if response.status_code == 422:
+        return LabTrackerAPIValidationError(message, **kwargs)
+    if response.status_code >= 500:
+        return LabTrackerAPIUnavailableError(message, **kwargs)
+    return LabTrackerAPIError(message, **kwargs)
+
+
 def _response_error(response: httpx.Response) -> str:
+    return _response_error_parts(response)[0]
+
+
+def _response_error_parts(
+    response: httpx.Response,
+) -> tuple[str, str | None, list[JsonObject] | None]:
     try:
         payload = response.json()
     except ValueError:
-        return f"Lab Tracker API returned HTTP {response.status_code}: {response.text}"
+        return f"Lab Tracker API returned HTTP {response.status_code}: {response.text}", None, None
     if isinstance(payload, dict):
         error = payload.get("error")
-        if isinstance(error, dict) and error.get("message"):
-            return str(error["message"])
+        if isinstance(error, dict):
+            code = str(error["code"]) if error.get("code") else None
+            issues = _coerce_error_issues(error.get("issues"))
+            if error.get("message"):
+                return _append_issue_text(str(error["message"]), issues), code, issues
         if payload.get("detail"):
-            return str(payload["detail"])
-    return f"Lab Tracker API returned HTTP {response.status_code}: {payload}"
+            return str(payload["detail"]), None, None
+    return f"Lab Tracker API returned HTTP {response.status_code}: {payload}", None, None
+
+
+def _coerce_error_issues(value: object) -> list[JsonObject] | None:
+    if not isinstance(value, list):
+        return None
+    issues = [issue for issue in value if isinstance(issue, dict)]
+    return issues or None
+
+
+def _append_issue_text(message: str, issues: list[JsonObject] | None) -> str:
+    if not issues:
+        return message
+    issue_text = "; ".join(
+        f"{issue.get('field') or 'request'}: {issue.get('message') or 'Invalid value'}"
+        for issue in issues
+    )
+    return f"{message} Issues: {issue_text}."
 
 
 def client_from_env() -> LabTrackerAPIClient:

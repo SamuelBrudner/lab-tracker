@@ -335,12 +335,46 @@ def test_decision_context_returns_unavailable_when_api_read_fails() -> None:
     assert "offline" in payload["error"]["detail"]
 
 
+def test_decision_context_preserves_validation_error_details() -> None:
+    client = mcp_server.LabTrackerAPIClient(
+        mcp_server.MCPSettings(base_url="http://testserver"),
+        transport=httpx.MockTransport(
+            lambda request: _json_response(
+                422,
+                {
+                    "error": {
+                        "code": "request_validation_error",
+                        "message": "Request validation failed.",
+                        "issues": [{"field": "limit", "message": "Input should be <= 50"}],
+                    }
+                },
+            )
+        ),
+    )
+
+    try:
+        with pytest.raises(mcp_server.LabTrackerAPIValidationError) as exc_info:
+            client.get_decision_context(
+                task_kind="research_writing",
+                query="baseline",
+                project_id="project-1",
+            )
+    finally:
+        client.close()
+
+    exc = exc_info.value
+    assert exc.status_code == 422
+    assert exc.code == "request_validation_error"
+    assert exc.issues == [{"field": "limit", "message": "Input should be <= 50"}]
+    assert "limit: Input should be <= 50" in str(exc)
+
+
 def test_read_tool_returns_unavailable_contract_when_api_is_down(monkeypatch) -> None:
     from lab_tracker.mcp_tools import read as read_tools
 
     class BrokenClient:
         def list_projects(self, **_kwargs):
-            raise mcp_server.LabTrackerAPIError("HTTP 502 bad gateway")
+            raise mcp_server.LabTrackerAPIUnavailableError("HTTP 502 bad gateway")
 
         def close(self) -> None:
             return None
@@ -353,6 +387,73 @@ def test_read_tool_returns_unavailable_contract_when_api_is_down(monkeypatch) ->
     assert payload["error"]["operation"] == "lab_tracker_list_projects"
     assert payload["data"] is None
     assert payload["next_action"]["action"] == "proceed_without_graph_context"
+
+
+def test_read_tool_returns_structured_api_errors(monkeypatch) -> None:
+    from lab_tracker.mcp_tools import read as read_tools
+
+    class InvalidClient:
+        def get_decision_context(self, **_kwargs):
+            raise mcp_server.LabTrackerAPIValidationError(
+                "Request validation failed. Issues: limit: Input should be <= 50.",
+                status_code=422,
+                code="request_validation_error",
+                issues=[{"field": "limit", "message": "Input should be <= 50"}],
+            )
+
+        def close(self) -> None:
+            return None
+
+    monkeypatch.setattr(read_tools, "client_from_env", lambda: InvalidClient())
+
+    payload = read_tools.lab_tracker_get_decision_context(
+        task_kind="research_writing",
+        query="baseline",
+        limit=100,
+    )
+
+    assert payload["error"]["code"] == "request_validation_error"
+    assert payload["error"]["status_code"] == 422
+    assert payload["error"]["issues"] == [{"field": "limit", "message": "Input should be <= 50"}]
+    assert payload["next_action"]["action"] == "revise_request_or_credentials"
+    read_tools.close_cached_read_client()
+
+
+def test_read_tools_reuse_cached_client(monkeypatch) -> None:
+    from lab_tracker.mcp_tools import read as read_tools
+
+    class FakeClient:
+        def __init__(self) -> None:
+            self.close_count = 0
+
+        def list_projects(self, **_kwargs):
+            return {"data": [{"project_id": "project-1"}]}
+
+        def list_goals(self, **_kwargs):
+            return {"data": [{"goal_id": "goal-1"}]}
+
+        def close(self) -> None:
+            self.close_count += 1
+
+    clients: list[FakeClient] = []
+
+    def factory() -> FakeClient:
+        client = FakeClient()
+        clients.append(client)
+        return client
+
+    read_tools.close_cached_read_client()
+    monkeypatch.setattr(read_tools, "client_from_env", factory)
+
+    try:
+        assert read_tools.lab_tracker_list_projects()["data"][0]["project_id"] == "project-1"
+        assert read_tools.lab_tracker_list_goals()["data"][0]["goal_id"] == "goal-1"
+        assert len(clients) == 1
+        assert clients[0].close_count == 0
+    finally:
+        read_tools.close_cached_read_client()
+
+    assert clients[0].close_count == 1
 
 
 def test_next_questions_ranks_goal_linked_active_questions() -> None:
