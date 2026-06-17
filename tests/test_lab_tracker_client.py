@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import importlib
 import json
 
 import httpx
@@ -8,6 +9,8 @@ import pytest
 from lab_tracker_client import (
     EntityRef,
     LabTracker,
+    LTAPIError,
+    LTRecord,
     LTValidationError,
     build_evidence_metadata,
     file_sha256,
@@ -378,3 +381,96 @@ def test_auth_login_and_retry_after_unauthorized() -> None:
         ("POST", "/auth/login", None),
         ("GET", "/projects", "Bearer token-1"),
     ]
+
+
+def test_visualization_record_id_prefers_visualization_id() -> None:
+    record = LTRecord({"analysis_id": "analysis-1", "viz_id": "viz-1"})
+
+    assert record.id == "viz-1"
+
+
+def test_list_limit_is_total_cap_not_page_size() -> None:
+    requests: list[tuple[str, str]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append((request.url.params["limit"], request.url.params["offset"]))
+        return _json_response(
+            200,
+            {
+                "data": [
+                    {"project_id": "project-1", "name": "One"},
+                    {"project_id": "project-2", "name": "Two"},
+                    {"project_id": "project-3", "name": "Three"},
+                ],
+                "meta": {"limit": 3, "offset": 0, "total": 50},
+            },
+        )
+
+    with LabTracker(base_url="http://testserver", transport=httpx.MockTransport(handler)) as lt:
+        projects = lt.list_projects(limit=3)
+
+    assert [project.id for project in projects] == ["project-1", "project-2", "project-3"]
+    assert requests == [("3", "0")]
+
+
+def test_transport_errors_use_client_error_hierarchy() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("offline", request=request)
+
+    with (
+        LabTracker(base_url="http://testserver", transport=httpx.MockTransport(handler)) as lt,
+        pytest.raises(LTAPIError, match="GET /projects failed: offline"),
+    ):
+        lt.list_projects()
+
+
+def test_rejected_supplied_access_token_does_not_report_missing_credentials() -> None:
+    requests: list[tuple[str, str | None]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append((request.url.path, request.headers.get("authorization")))
+        return _json_response(401, {"error": {"message": "expired"}})
+
+    with (
+        LabTracker(
+            base_url="http://testserver",
+            access_token="stale-token",
+            transport=httpx.MockTransport(handler),
+        ) as lt,
+        pytest.raises(LTAPIError, match="LAB_TRACKER_ACCESS_TOKEN was rejected"),
+    ):
+        lt.list_projects()
+
+    assert requests == [("/projects", "Bearer stale-token")]
+
+
+def test_from_env_uses_mcp_base_url_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("LAB_TRACKER_BASE_URL", raising=False)
+    monkeypatch.setenv("LAB_TRACKER_MCP_BASE_URL", "http://lab.example.test:8123/")
+    monkeypatch.setenv("LAB_TRACKER_HTTP_TIMEOUT", "15")
+
+    lt = LabTracker.from_env()
+    try:
+        assert lt.base_url == "http://lab.example.test:8123"
+    finally:
+        lt.close()
+
+
+def test_module_default_client_is_lazy(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("LAB_TRACKER_HTTP_TIMEOUT", "not-a-float")
+    client_module = importlib.reload(importlib.import_module("lab_tracker_client.client"))
+
+    calls = 0
+
+    def fail_from_env() -> LabTracker:
+        nonlocal calls
+        calls += 1
+        raise LTAPIError("constructed")
+
+    monkeypatch.setattr(client_module, "_default_client_instance", None)
+    monkeypatch.setattr(client_module, "client_from_env", fail_from_env)
+
+    assert calls == 0
+    with pytest.raises(LTAPIError, match="constructed"):
+        client_module.health()
+    assert calls == 1

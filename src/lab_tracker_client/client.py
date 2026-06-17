@@ -59,10 +59,10 @@ _ID_FIELDS = (
     "note_id",
     "session_id",
     "dataset_id",
-    "analysis_id",
-    "claim_id",
     "viz_id",
     "visualization_id",
+    "analysis_id",
+    "claim_id",
     "project_id",
     "goal_id",
 )
@@ -192,6 +192,7 @@ class LabTracker:
         self.password = password
         self.default_project_id = default_project_id
         self._access_token = access_token
+        self._supplied_access_token = bool(access_token)
         self._client = httpx.Client(
             base_url=self.base_url,
             timeout=timeout_seconds,
@@ -203,7 +204,9 @@ class LabTracker:
         """Build a client from environment variables used by consumer repos."""
 
         return cls(
-            base_url=os.getenv("LAB_TRACKER_BASE_URL", DEFAULT_BASE_URL),
+            base_url=os.getenv("LAB_TRACKER_BASE_URL")
+            or os.getenv("LAB_TRACKER_MCP_BASE_URL")
+            or DEFAULT_BASE_URL,
             username=os.getenv("LAB_TRACKER_USERNAME")
             or os.getenv("LAB_TRACKER_MCP_USERNAME"),
             password=os.getenv("LAB_TRACKER_PASSWORD")
@@ -844,12 +847,15 @@ class LabTracker:
         current_offset = _validate_offset(offset)
         items: list[LTRecord] = []
         while True:
+            remaining = page_size - len(items)
+            if remaining <= 0:
+                break
             payload = self._request(
                 "GET",
                 path,
                 params={
                     **(params or {}),
-                    "limit": page_size,
+                    "limit": min(page_size, remaining),
                     "offset": current_offset,
                 },
             )
@@ -861,9 +867,9 @@ class LabTracker:
             if not isinstance(meta, dict):
                 break
             total = int(meta.get("total") or 0)
-            returned_limit = int(meta.get("limit") or page_size)
-            current_offset += returned_limit
-            if current_offset >= total or not page_items:
+            returned_count = len(page_items)
+            current_offset += returned_count
+            if len(items) >= page_size or current_offset >= total or returned_count == 0:
                 break
         return items
 
@@ -880,11 +886,12 @@ class LabTracker:
         retry_on_unauthorized: bool = True,
     ) -> JsonObject:
         headers: dict[str, str] = {}
+        supplied_token_used = bool(self._access_token and self._supplied_access_token)
         if authenticated:
             token = self._bearer_token(required=False)
             if token is not None:
                 headers["Authorization"] = f"Bearer {token}"
-        response = self._client.request(
+        response = self._send(
             method,
             path,
             params=_drop_empty(params),
@@ -894,10 +901,17 @@ class LabTracker:
             headers=headers,
         )
         if response.status_code == 401 and authenticated and retry_on_unauthorized:
+            if supplied_token_used and not self._has_login_credentials():
+                raise LTAPIError(
+                    "LAB_TRACKER_ACCESS_TOKEN was rejected by the Lab Tracker API. "
+                    "Refresh the token or set LAB_TRACKER_USERNAME and "
+                    "LAB_TRACKER_PASSWORD so the client can log in."
+                )
             self._access_token = None
+            self._supplied_access_token = False
             token = self._bearer_token(required=True)
             headers["Authorization"] = f"Bearer {token}"
-            response = self._client.request(
+            response = self._send(
                 method,
                 path,
                 params=_drop_empty(params),
@@ -912,6 +926,15 @@ class LabTracker:
             raise LTAPIError(_response_error(response))
         return _response_json(response)
 
+    def _send(self, method: str, path: str, **kwargs: Any) -> httpx.Response:
+        try:
+            return self._client.request(method, path, **kwargs)
+        except httpx.HTTPError as exc:
+            raise LTAPIError(f"Lab Tracker request {method} {path} failed: {exc}") from exc
+
+    def _has_login_credentials(self) -> bool:
+        return bool((self.username or "").strip() and self.password)
+
     def _bearer_token(self, *, required: bool) -> str | None:
         if self._access_token:
             return self._access_token
@@ -924,7 +947,8 @@ class LabTracker:
                     "when the Lab Tracker API has authentication enabled."
                 )
             return None
-        response = self._client.post(
+        response = self._send(
+            "POST",
             "/auth/login",
             json={"username": username, "password": password},
         )
@@ -938,6 +962,7 @@ class LabTracker:
         except (KeyError, TypeError) as exc:
             raise LTAPIError("Login response did not include an access token.") from exc
         self._access_token = token
+        self._supplied_access_token = False
         return token
 
     @staticmethod
@@ -1066,7 +1091,28 @@ def client_from_env() -> LabTracker:
     return LabTracker.from_env()
 
 
-client = client_from_env()
+_default_client_instance: LabTracker | None = None
+
+
+def _default_client() -> LabTracker:
+    global _default_client_instance
+    if _default_client_instance is None:
+        _default_client_instance = client_from_env()
+    return _default_client_instance
+
+
+class _LazyLabTrackerClient:
+    def __getattr__(self, name: str) -> Any:
+        return getattr(_default_client(), name)
+
+    def __enter__(self) -> LabTracker:
+        return _default_client().__enter__()
+
+    def __exit__(self, *exc_info: object) -> None:
+        return _default_client().__exit__(*exc_info)
+
+
+client = _LazyLabTrackerClient()
 
 
 def health() -> JsonObject:
