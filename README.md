@@ -1,402 +1,80 @@
 # Lab Tracker
 
-[Try the hosted read-only demo](https://samuelbrudner.github.io/lab-tracker/app/) with seeded fly-olfaction data. No install or login required.
+A file named `2025_12_10_Rig2_session001.nwb` tells you *when*, *where*, and *what* — but not *why* you collected it, what you expected, or what you actually saw at the bench. That reasoning lives on paper towels, on whiteboards, and in people's heads — and it walks out the door when they do. Lab Tracker gives it a durable place to live, next to the data.
 
-Lab Tracker keeps the *reasoning* behind experiments connected to the data they produce. A file named `2025_12_10_Rig2_session001.nwb` tells you when, where, and what — but not *why* it was collected, what was expected, or what was actually observed at the bench. That context usually lives on paper towels, whiteboards, and in people's heads, and it disappears when people leave.
+## See it live
 
-## What it does
+**[Open the read-only demo →](https://samuelbrudner.github.io/lab-tracker/app/)** — seeded fly-olfaction data, no install, no login. Click around for 60 seconds.
 
-- **Questions are first-class.** Projects contain Questions — descriptive, hypothesis-driven, method-development, or other — that are created, staged, activated, maintained explicitly by users, and linked into broad-to-atomic hierarchies with `parent_question_ids`.
-- **Sessions and datasets.** Acquisition sessions capture outputs at the rig, are closed when done, and eligible sessions can be promoted into Datasets. Dataset staging and direct commit capture a provenance manifest.
-- **Notes attached to entities.** Manual note capture — text, multipart raw file upload/download, and raw voice notes with editable transcripts — attached to the project, question, session, dataset, analysis, or claim they describe. Notes stay as the raw human record.
-- **Analysis, claims, visualizations.** Explicit records linking analysis runs back to the datasets and questions they address, with claims and visualizations as first-class artifacts.
-- **Mobile multimodal graph-aware draft review.** Phone capture stores raw photo, voice, photo+voice bundle, or text notes, builds a project-scoped graph context packet, asks GPT for reviewable draft operations, then humans edit, accept/reject, and commit through the same API validation as normal writes.
-- **External evidence inboxes.** Synced local folders can be imported as staged evidence notes with source metadata; graph changes remain human-reviewed drafts.
-- **Search.** Substring search over questions and notes so prior context is findable later.
+The whole project as a graph — questions, sessions, datasets, and the notes that connect them:
 
-![Project graph preview](docs/screenshots/project-graph-full.png)
+![The full project graph in Lab Tracker](docs/screenshots/project-graph-full.png)
 
-![Phone capture draft review](docs/screenshots/capture-draft-review.png)
+Questions are first-class. You see how a broad question breaks down into the atomic ones you can actually answer at the rig:
 
-![Question graph preview](docs/screenshots/project-graph-questions.png)
+![The question hierarchy for a project](docs/screenshots/project-graph-questions.png)
 
-What ships today is the minimum that preserves the core research record. The supported surface is defined in [`docs/retained-v1-surface.md`](docs/retained-v1-surface.md) — if it and this README disagree, that document wins. The broader vision (meeting-photo question capture, OCR, vector search, PI review gates) lives in [`idea.md`](idea.md) and is explicitly deferred.
+Snap a photo or record a voice note from your phone, and Lab Tracker drafts the graph changes. You edit and accept — nothing touches your record until you do:
+
+![Reviewing an AI-drafted graph change from a phone capture](docs/screenshots/capture-draft-review.png)
+
+## What you can do
+
+- **Write down the question first.** Create questions, stage and activate them, and link a broad question down to the small ones you can answer — so the *why* is a durable record, not a buried comment.
+- **Capture at the bench.** Add notes as text, file attachments, or voice notes (with transcripts you can edit), pinned to the project, question, session, dataset, analysis, or claim they describe.
+- **Track what happened at the rig.** Log acquisition sessions, then turn a finished one into a dataset — every dataset commit records its provenance automatically.
+- **Connect findings to evidence.** Analyses, claims, and visualizations are explicit records that link back to the datasets and questions they answer.
+- **Draft from your phone, accept on review.** From a photo or voice note, Lab Tracker proposes graph changes from your project's context. You edit, accept, and commit through the same checks as any normal write — no silent automation. AI can suggest; only a person commits.
+- **Find old context later.** Keyword search runs across your questions and notes, so context you captured months ago is findable when you need it.
 
 ## Who it's for
 
-Wet labs (initially neuroscience) that produce high-bandwidth data on specialized rigs and want the semantic context preserved alongside it.
+Wet labs — initially neuroscience — that generate high-bandwidth data on specialized rigs and want the reasoning preserved alongside it. If you've ever inherited a folder of `.nwb` files with no idea why they exist, this is for you.
 
 ## Scientists start here
 
-You do not need to install anything to use Lab Tracker. If your lab already runs
-it, open the link your admin gave you and sign in. For phone capture, pair your
-phone from the app's `Devices` page, then open the capture link or scan the QR
-from the LAN helper.
+No install. No terminal.
 
-If your lab needs to set it up, hand the setup sections below to the lab member
-or IT contact who is comfortable installing software. The zero-terminal shared
-lab path is the managed Render deploy button below. The shortest local path is
-the double-click launcher in `launchers/`; the self-hosted shared-lab path is
-Docker/Postgres with first-admin setup in the browser.
+- **Just looking?** [Open the demo](https://samuelbrudner.github.io/lab-tracker/app/) — read-only, seeded data, no login.
+- **Your lab already runs it?** Open the link your admin gave you. Local instances start with sign-in off, so you can jump straight into `/app`. Where sign-in is on, public sign-up creates a viewer account — ask your admin for editor access to write.
+- **Capturing from your phone?** Pair it from the **Devices** page, then use the capture link. See the [phone capture quickstart](docs/phone-capture-quickstart.md).
 
-[![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https://github.com/SamuelBrudner/lab-tracker)
+That's it. The rest of this page is for whoever sets it up.
 
-Preview the product without a build from the hosted read-only demo above, the
-screenshots above, and the retained workflow screenshots under
-[`docs/screenshots`](docs/screenshots).
+## Set it up for your lab
 
-## Quickstart
+This part is for the lab member or IT contact comfortable installing software. Two common paths, no terminal required for the first:
 
-```bash
-uv venv
-source .venv/bin/activate
-uv pip install -e ".[test,lint]"
-```
+- **Hosted, zero-terminal:** one click provisions a managed instance with a web URL, managed Postgres, and first-admin setup in the browser.
 
-Install `uv` first if needed (for example: `brew install uv` or `pipx install uv`).
+  [![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https://github.com/SamuelBrudner/lab-tracker)
 
-If you prefer pip/venv:
+- **Run it locally:** `lab-tracker serve` runs migrations, opens http://127.0.0.1:8000/app, and starts the server. There are double-click launchers for macOS and Windows in [`launchers/`](launchers/).
 
-```bash
-python -m venv .venv
-source .venv/bin/activate
-pip install -e ".[test,lint]"
-```
+Full install, configuration, and deployment instructions live in the docs below — start with the [setup guide](docs/setup.md).
 
-Commands below use `uv run`. If you used pip/venv instead, drop the `uv run` prefix.
+## What ships today
 
-Windows fresh-clone notes, including Beads/Dolt setup, are in
-[`docs/windows-fresh-clone.md`](docs/windows-fresh-clone.md).
+What ships today is the minimum that preserves the core research record. The authoritative list of what's supported is **[docs/retained-v1-surface.md](docs/retained-v1-surface.md)** — if this README disagrees with it, that document wins. The broader vision (OCR, semantic search, PI review gates) lives in [idea.md](idea.md) and is explicitly deferred.
 
-## Run the API
+## Documentation
 
-Preferred local launcher:
+**Set it up**
+- [Local setup, run, and validate](docs/setup.md) — install, `lab-tracker serve`, frontend build, migrations, tests
+- [Configuration reference](docs/configuration.md) — every `LAB_TRACKER_*` variable, optional AI/transcription config, and auth behavior
+- [Windows fresh-clone setup](docs/windows-fresh-clone.md) — PowerShell install plus Beads/Dolt bootstrap
 
-```bash
-lab-tracker serve
-```
+**Deploy and run it for a lab**
+- [Deployment options](docs/deployment-options.md) — choose between launcher, Docker/Postgres, and managed cloud
+- [One-click cloud deploy (Render)](docs/one-click-cloud-deploy.md) — managed instance with browser invites and first admin
+- [Self-hosted operations](docs/self-hosted-operations.md) — Docker/Postgres backup, restore, upgrade, and first-admin setup
+- [Serve the shared graph on a LAN/VPN](docs/lan-shared-graph.md) — one live Postgres graph for browsers, scripts, and assistants
 
-That command runs `alembic upgrade head`, opens `http://127.0.0.1:8000/app`,
-and starts the server. Double-click launchers are available in `launchers/` for
-macOS and Windows.
+**Capture and integrate**
+- [Phone capture quickstart](docs/phone-capture-quickstart.md) — pair a phone for LAN capture
+- [Evidence source metadata](docs/evidence-source-metadata.md) — import a synced folder as staged evidence notes with `lt import-folder`
+- [MCP server, skills, and Dolt mirror](docs/lab-tracker-mcp-skills.md) — wire up assistants and the export-only versioned mirror
 
-macOS launcher notes:
-
-- Install `uv` before using `Start Lab Tracker.command`:
-  `curl -LsSf https://astral.sh/uv/install.sh | sh`
-- If macOS blocks the downloaded `.command` file the first time, right-click
-  `Start Lab Tracker.command`, choose `Open`, then confirm `Open`. After that,
-  normal double-clicking works.
-
-Developer fallback:
-
-```bash
-uv run uvicorn lab_tracker.asgi:app --reload
-```
-
-Health check:
-
-```bash
-curl http://127.0.0.1:8000/health
-```
-
-Frontend:
-
-Open `http://127.0.0.1:8000/app`.
-
-### Multi-client runtime
-
-For browser, Codex, Claude, scripts, and future workers writing at the same time,
-use Postgres as the live source of truth and keep writes behind the Lab Tracker
-API. Start only Postgres for local development:
-
-```powershell
-docker compose up postgres
-$env:LAB_TRACKER_DATABASE_URL = "postgresql+psycopg://lab_tracker:lab_tracker@127.0.0.1:5432/lab_tracker"
-uv run alembic upgrade head
-uv run uvicorn lab_tracker.asgi:app --reload
-```
-
-Or run the full app stack:
-
-```bash
-docker compose up app
-```
-
-On first boot, the app container generates a persistent auth secret and first
-admin bootstrap token if you did not set them. Open the app in the browser and
-use `Create First Admin`; the setup screen loads the token while no users
-exist.
-
-SQLite remains the default single-client local fallback.
-
-To serve the same graph to other computers on a LAN or VPN, bind the API to all
-interfaces and use the printed host IP from the serving machine:
-
-```bash
-scripts/serve-lan.sh --use-postgres
-```
-
-On Windows:
-
-```powershell
-.\scripts\serve-lan.ps1 -UsePostgres
-```
-
-Then open `http://<host-ip>:8000/app` from the other computer or set
-`LAB_TRACKER_MCP_BASE_URL=http://<host-ip>:8000` for MCP clients. If remote
-clients time out, your OS firewall may need an inbound rule for TCP port 8000.
-See [`docs/lan-shared-graph.md`](docs/lan-shared-graph.md) and
-[`docs/phone-capture-quickstart.md`](docs/phone-capture-quickstart.md).
-
-Local development starts with authentication disabled so early testing can use
-the app without creating accounts. Set `LAB_TRACKER_AUTH_ENABLED=true` to test
-the login and role flow. Non-local environments keep authentication enabled by
-default.
-
-The retained v1 product surface is defined in
-[`docs/retained-v1-surface.md`](docs/retained-v1-surface.md).
-If this README and the retained-surface document disagree, the retained-surface
-document defines the supported runtime.
-
-### Frontend build
-
-The frontend bundle is committed to the repo and served from `src/lab_tracker/frontend/app.js`.
-
-If you change the frontend source in `src/lab_tracker/frontend_src`, rebuild the bundle:
-
-```bash
-npm install
-npm run lint:frontend
-npm run build
-```
-
-The committed frontend bundle ships without a source map by default.
-
-Supported workflows in the frontend include:
-- project dashboard
-- question staging, activation, and parent-child hierarchy mapping
-- phone-first photo, voice, photo+voice bundle, and text capture at `/app/capture`
-- manual note creation and multipart upload/download handling
-- graph-aware image note draft review with human edit, accept/reject, defer, and commit
-- sessions and acquisition outputs
-- dataset staging, file attachment, and direct commit with provenance capture
-- analysis, claim, and visualization tracking
-
-Authentication notes:
-- register/login is available in the UI
-- public registration creates viewer accounts
-- write workflows require editor/admin role
-- a fresh auth-enabled instance shows first-admin setup when
-  `LAB_TRACKER_BOOTSTRAP_ADMIN_TOKEN` is configured
-
-### First admin setup
-
-For Docker, run:
-
-```bash
-docker compose up app
-```
-
-Open `http://127.0.0.1:8000/app` and use `Create First Admin`. The setup
-screen loads the generated bootstrap token while the instance has no users.
-
-For a non-Docker deployment, set the token before starting the app:
-
-```bash
-export LAB_TRACKER_AUTH_ENABLED=true
-export LAB_TRACKER_BOOTSTRAP_ADMIN_TOKEN="<one-time-admin-token>"
-lab-tracker serve
-```
-
-By default, the setup screen displays that token only when reached through a
-local, LAN, or VPN address. Public one-click deployments can opt into first-run
-browser display with `LAB_TRACKER_BOOTSTRAP_ADMIN_TOKEN_DISCLOSURE=first_run`;
-the token is never returned after any user exists.
-
-After the first admin exists, use the `Users` screen to grant viewer/editor/admin
-roles, create email invitation links, and reset passwords. Use each project's
-`Project Members` panel to grant project viewer/contributor/owner access.
-
-For zero-terminal managed deployment with a web URL, managed Postgres, platform
-database backups, and email invite links, see
-[`docs/one-click-cloud-deploy.md`](docs/one-click-cloud-deploy.md).
-
-For self-hosted backups, restores, upgrades, and Docker data locations, see
-[`docs/self-hosted-operations.md`](docs/self-hosted-operations.md).
-
-## Configuration
-
-Environment variables are loaded with the `LAB_TRACKER_` prefix. The defaults are suitable for local
-development.
-
-- `LAB_TRACKER_APP_NAME`: FastAPI title (default: `lab-tracker`)
-- `LAB_TRACKER_ENVIRONMENT`: environment label (default: `local`)
-- `LAB_TRACKER_LOG_LEVEL`: logging level (default: `INFO`)
-- `LAB_TRACKER_DATABASE_URL`: SQLAlchemy database URL (default: `sqlite+pysqlite:///./lab_tracker.db`)
-- `LAB_TRACKER_FILE_STORAGE_PATH`: file storage directory (default: `./file_storage`)
-- `LAB_TRACKER_NOTE_STORAGE_PATH`: note storage directory (default: `./note_storage`)
-- `LAB_TRACKER_AUTH_SECRET_KEY`: auth signing secret (default allowed only in `local`)
-- `LAB_TRACKER_AUTH_TOKEN_TTL_MINUTES`: access token lifetime (default: `720`)
-- `LAB_TRACKER_AUTH_INVITE_TTL_HOURS`: signed invitation link lifetime
-  (default: `168`)
-- `LAB_TRACKER_AUTH_ENABLED`: enable login and role enforcement (default: `false`
-  in `local`, `true` otherwise; non-local environments cannot disable auth)
-- `LAB_TRACKER_PUBLIC_BASE_URL`: public URL used in email invitation links
-- `LAB_TRACKER_BOOTSTRAP_ADMIN_TOKEN`: one-time token for creating the first
-  admin on fresh auth-enabled deployments
-- `LAB_TRACKER_BOOTSTRAP_ADMIN_TOKEN_DISCLOSURE`: `local` (default),
-  `first_run`, or `never`; controls whether `/auth/bootstrap-status` can return
-  the first-admin token before any users exist
-- `LAB_TRACKER_OPENAI_API_KEY`: required for graph draft generation and
-  voice-note transcription
-- `LAB_TRACKER_OPENAI_MODEL`: OpenAI model for graph drafts (default:
-  `gpt-4o-mini`; set another compatible model to override)
-- `LAB_TRACKER_OPENAI_TRANSCRIPTION_MODEL`: OpenAI model for voice-note
-  transcription (default: `gpt-4o-mini-transcribe`)
-- `LAB_TRACKER_OPENAI_BASE_URL`: OpenAI API base URL (default:
-  `https://api.openai.com/v1`)
-- `LAB_TRACKER_OPENAI_TIMEOUT_SECONDS`: graph draft API timeout in seconds
-  (default: `60`)
-
-### Multimodal graph draft review
-
-To try the local image review loop:
-
-```powershell
-$env:LAB_TRACKER_OPENAI_API_KEY = "<your OpenAI API key>"
-$env:LAB_TRACKER_OPENAI_MODEL = "gpt-4o-mini"
-uv run alembic upgrade head
-uv run uvicorn lab_tracker.asgi:app --reload
-```
-
-Pair a phone from `Devices`, or use the LAN helper's QR code, then open the
-phone capture URL. Capture a photo, voice note, photo+voice bundle, or text
-note. Select the project and optional question/session/dataset/analysis/claim
-targets, add an optional hint, then choose `Upload and draft`. Raw images and
-raw audio are stored first as note artifacts in `LAB_TRACKER_NOTE_STORAGE_PATH`;
-voice notes receive editable transcripts linked back to the raw audio. The draft
-is stored separately as a `GraphChangeSet` linked back to the source note.
-
-Draft mode defaults to `graph_context`. In that mode, Lab Tracker builds and
-stores a compact context packet containing the source note, selected targets,
-project, active/staged questions with parent links, recent notes, sessions,
-datasets, analyses, claims, visualizations, and unresolved recent image
-captures. Context build failures are loud API errors and do not silently fall
-back to OCR or image-only interpretation. Image-only drafting is available only
-when explicitly requested and records `draft_mode=image_only`.
-
-The configured OpenAI-compatible provider receives the uploaded image bytes when
-present, editable transcript text when present, optional user hint, graph
-context packet, and strict operation schema. Voice transcription uses the
-configured transcription model before drafting. Configure these routes with
-`LAB_TRACKER_OPENAI_API_KEY`, `LAB_TRACKER_OPENAI_MODEL`,
-`LAB_TRACKER_OPENAI_TRANSCRIPTION_MODEL`, and `LAB_TRACKER_OPENAI_BASE_URL`.
-Third-party logging, retention, and residency depend on the configured provider
-and base URL. For institutional deployments, point `LAB_TRACKER_OPENAI_BASE_URL`
-at an approved gateway or model endpoint.
-
-Authentication and role checks apply to raw images, drafts, draft edits, and
-commits. Viewer accounts can inspect authorized records; editor/admin roles are
-required for note upload, draft creation, operation edits, and graph commits.
-Raw images and draft operations are not committed automatically. Accepted
-operations still pass through the normal API validation path, and model output
-that references unknown entity IDs or unsupported semantic operations is rejected.
-
-The review screen records enough metadata to compare `graph_context` and
-`image_only` behavior: draft mode, model/provider, context snapshot, uncertainty
-fields, clarification requests, operation statuses, and commit timing. Suggested
-evaluation metrics are accepted/edited/rejected operations, duplicate entity
-proposals, reviewer edit burden, time from capture to commit, and uncertainty
-quality. Offline queued capture is intentionally deferred in this release.
-
-### Local evidence inbox imports
-
-Use `lt import-folder` to turn files from a local or synced folder into staged
-evidence notes. This works for folders synced by Google Drive, Dropbox, OneDrive,
-or similar tools without adding a provider-specific OAuth workflow:
-
-```bash
-LAB_TRACKER_BASE_URL=http://127.0.0.1:8000 \
-LAB_TRACKER_PROJECT_ID=<project-id> \
-lt import-folder --project "$LAB_TRACKER_PROJECT_ID" --root /path/to/lab-inbox
-```
-
-The adapter records `evidence_source_*` metadata, skips duplicates by source ID
-and content hash, and never commits graph changes. Scheduled graph-draft batches
-can later propose reviewable graph updates from the staged notes. See
-[`docs/evidence-source-metadata.md`](docs/evidence-source-metadata.md).
-
-The retained v1 runtime keeps note handling manual and uses direct substring
-search for query flows. Deferred concepts live in
-[`docs/retained-v1-surface.md`](docs/retained-v1-surface.md)
-rather than the active product surface.
-
-## Database migrations
-
-```bash
-uv run alembic upgrade head
-```
-
-## Deployment and operations
-
-- No-uvicorn launchers and Docker first-run setup:
-  [`docs/deployment-options.md`](docs/deployment-options.md)
-- Phone capture over LAN:
-  [`docs/phone-capture-quickstart.md`](docs/phone-capture-quickstart.md)
-- Backup, restore, and upgrade:
-  [`docs/self-hosted-operations.md`](docs/self-hosted-operations.md)
-
-## Validation
-
-Core backend validation:
-
-```bash
-uv run pytest -q
-```
-
-Run the frontend checks only when you change `src/lab_tracker/frontend_src` or
-the committed bundle in `src/lab_tracker/frontend`:
-
-```bash
-npm run test:frontend
-npm run lint:frontend
-npm run build
-```
-
-## MCP and Dolt mirror
-
-Lab Tracker ships an API-backed MCP server for assistants:
-
-```bash
-LAB_TRACKER_MCP_BASE_URL=http://127.0.0.1:8000
-LAB_TRACKER_MCP_USERNAME=<service-account-username>
-LAB_TRACKER_MCP_PASSWORD=<service-account-password>
-lt-mcp
-```
-
-`python -m lab_tracker.mcp_server` is still supported for source checkouts. For
-portable consumer repo MCP config, prefer the installed `lt-mcp` entry point so
-`.mcp.json` does not embed a workstation-specific Python path.
-
-The MCP username/password are only required when `LAB_TRACKER_AUTH_ENABLED=true`.
-
-Consumer repositories can scaffold the standard integration files in one step:
-
-```bash
-lab_tracker init --target /path/to/consumer-repo --project-name "My Project"
-```
-
-This creates a portable `.mcp.json`, a thin `scripts/lt.py` shim backed by
-`lab_tracker_client`, an `AGENTS.lt.md` fragment, and an `lt_ids.json`
-placeholder. Existing files are skipped unless `--force` is passed.
-
-Dolt is an export-only versioned mirror in v1:
-
-```bash
-python -m lab_tracker.dolt_mirror export --message "Lab Tracker snapshot"
-```
-
-The default local mirror path is `.lab-tracker-dolt/`. See
-[`docs/lab-tracker-mcp-skills.md`](docs/lab-tracker-mcp-skills.md) for setup
-details.
+**Scope and vision**
+- [Supported v1 surface (authoritative)](docs/retained-v1-surface.md) — the definitive list of what ships
+- [Deferred long-term vision](idea.md) — OCR, vector search, and PI review gates, explicitly out of v1
