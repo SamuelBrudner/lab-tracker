@@ -41,12 +41,12 @@ from .shared import (
     ensure_project_owner,
     ensure_project_read,
     file_storage_from_request,
-    filter_project_scoped_items,
     list_response,
     paginate,
     project_default_status,
     repository_from_request,
     validate_pagination,
+    visible_projects,
 )
 
 _logger = logging.getLogger(__name__)
@@ -93,12 +93,8 @@ def build_projects_router(api: LabTrackerAPI) -> APIRouter:
         offset: int = 0,
     ):
         validate_pagination(limit, offset)
-        projects, _ = repository_from_request(request).query_projects(
-            status=status.value if status is not None else None,
-            limit=None,
-            offset=0,
-        )
-        visible = filter_project_scoped_items(request, projects)
+        repository = repository_from_request(request)
+        visible = visible_projects(request, repository, status=status)
         items, total = paginate(visible, limit, offset)
         return list_response(items, limit=limit, offset=offset, total=total)
 

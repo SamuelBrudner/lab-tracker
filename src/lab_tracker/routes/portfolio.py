@@ -32,11 +32,11 @@ from lab_tracker.schemas import (
 from lab_tracker.sqlalchemy_mapper_parts.common import as_utc
 
 from .shared import (
-    filter_project_scoped_items,
     list_response,
     paginate,
     repository_from_request,
     validate_pagination,
+    visible_projects,
 )
 
 QueryCount = Callable[..., tuple[list[Any], int]]
@@ -59,14 +59,9 @@ def build_portfolio_router(api: LabTrackerAPI) -> APIRouter:
     ):
         validate_pagination(limit, offset)
         repository = repository_from_request(request)
-        projects, _ = repository.query_projects(
-            status=status.value if status is not None else None,
-            limit=None,
-            offset=0,
-        )
-        visible_projects = filter_project_scoped_items(request, projects)
-        summaries = [_summary_for_project(repository, project) for project in visible_projects]
-        groups = _group_project_summaries(repository, visible_projects, summaries)
+        visible = visible_projects(request, repository, status=status)
+        summaries = [_summary_for_project(repository, project) for project in visible]
+        groups = _group_project_summaries(repository, visible, summaries)
         page_groups, total = paginate(groups, limit, offset)
         return list_response(page_groups, limit=limit, offset=offset, total=total)
 
