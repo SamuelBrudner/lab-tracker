@@ -13,6 +13,7 @@ import os
 import tempfile
 from abc import ABC, abstractmethod
 from collections.abc import Iterable, Iterator
+from contextlib import suppress
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -147,17 +148,25 @@ class LocalFileStorageBackend(FileStorageBackend):
         size_bytes = 0
         data_path = self._data_path(storage_id)
         data_path.parent.mkdir(parents=True, exist_ok=True)
-        with tempfile.NamedTemporaryFile("wb", delete=False, dir=data_path.parent) as handle:
-            for chunk in chunks:
-                if not chunk:
-                    continue
-                hasher.update(chunk)
-                size_bytes += len(chunk)
-                handle.write(chunk)
-            handle.flush()
-            os.fsync(handle.fileno())
-            tmp_name = handle.name
-        os.replace(tmp_name, data_path)
+        tmp_name: str | None = None
+        try:
+            with tempfile.NamedTemporaryFile("wb", delete=False, dir=data_path.parent) as handle:
+                tmp_name = handle.name
+                for chunk in chunks:
+                    if not chunk:
+                        continue
+                    hasher.update(chunk)
+                    size_bytes += len(chunk)
+                    handle.write(chunk)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(tmp_name, data_path)
+            tmp_name = None
+        except BaseException:
+            if tmp_name is not None:
+                with suppress(FileNotFoundError):
+                    Path(tmp_name).unlink()
+            raise
         checksum = hasher.hexdigest()
         metadata = StoredFileMetadata(
             storage_id=storage_id,

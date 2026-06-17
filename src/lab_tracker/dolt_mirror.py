@@ -20,6 +20,7 @@ from lab_tracker.db import Base, get_engine
 DEFAULT_MIRROR_PATH = ".lab-tracker-dolt"
 DEFAULT_EXPORT_DIR = "_export"
 EXCLUDED_TABLES = frozenset({"users"})
+NULL_SENTINEL = "__LAB_TRACKER_NULL__"
 
 
 class DoltMirrorError(RuntimeError):
@@ -80,22 +81,27 @@ def export_tables(export_dir: Path) -> tuple[TableExport, ...]:
     export_dir.mkdir(parents=True, exist_ok=True)
     engine = get_engine()
     exports: list[TableExport] = []
-    with engine.connect() as connection:
-        for table in retained_tables():
-            primary_keys = tuple(column.name for column in table.primary_key.columns)
-            csv_path = export_dir / f"{table.name}.csv"
-            order_by = [table.c[name] for name in primary_keys]
-            rows = connection.execute(select(table).order_by(*order_by)).mappings()
-            row_count = _write_csv(table, rows, csv_path)
-            exports.append(
-                TableExport(
-                    name=table.name,
-                    csv_path=csv_path,
-                    primary_keys=primary_keys,
-                    row_count=row_count,
-                )
-            )
-    engine.dispose()
+    try:
+        with engine.connect() as connection:
+            if connection.dialect.name != "sqlite":
+                connection = connection.execution_options(isolation_level="REPEATABLE READ")
+            with connection.begin():
+                for table in retained_tables():
+                    primary_keys = tuple(column.name for column in table.primary_key.columns)
+                    csv_path = export_dir / f"{table.name}.csv"
+                    order_by = [table.c[name] for name in primary_keys]
+                    rows = connection.execute(select(table).order_by(*order_by)).mappings()
+                    row_count = _write_csv(table, rows, csv_path)
+                    exports.append(
+                        TableExport(
+                            name=table.name,
+                            csv_path=csv_path,
+                            primary_keys=primary_keys,
+                            row_count=row_count,
+                        )
+                    )
+    finally:
+        engine.dispose()
     return tuple(exports)
 
 
@@ -115,20 +121,22 @@ def export_to_dolt(
         shutil.rmtree(export_dir)
     exports = export_tables(export_dir)
     existing_tables = _dolt_tables(runner)
+    export_table_names = {table_export.name for table_export in exports}
+
+    for stale_table in sorted(existing_tables - export_table_names):
+        runner.run("table", "rm", stale_table)
 
     for table_export in exports:
         relative_csv = table_export.csv_path.relative_to(mirror_path)
-        if table_export.name in existing_tables:
-            runner.run("table", "import", "-r", table_export.name, str(relative_csv))
-        else:
-            runner.run(
-                "table",
-                "import",
-                "-c",
-                f"--pk={','.join(table_export.primary_keys)}",
-                table_export.name,
-                str(relative_csv),
-            )
+        runner.run(
+            "table",
+            "import",
+            "-c",
+            "-f",
+            f"--pk={','.join(table_export.primary_keys)}",
+            table_export.name,
+            str(relative_csv),
+        )
 
     runner.run("add", ".")
     status = runner.run("status", "--porcelain", check=False)
@@ -152,7 +160,7 @@ def _write_csv(table: Table, rows: Any, csv_path: Path) -> int:
 
 def _serialize(value: Any) -> str:
     if value is None:
-        return ""
+        return NULL_SENTINEL
     if isinstance(value, (datetime, date)):
         return value.isoformat()
     if isinstance(value, (dict, list)):

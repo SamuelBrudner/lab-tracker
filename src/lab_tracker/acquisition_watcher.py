@@ -30,8 +30,12 @@ def _hash_file(path: Path, *, chunk_size: int = 1024 * 1024) -> str:
     return hasher.hexdigest()
 
 
-def _is_hidden(path: Path) -> bool:
-    return any(part.startswith(".") for part in path.parts)
+def _is_hidden_relative(path: Path, *, relative_to: Path) -> bool:
+    try:
+        candidate = path.relative_to(relative_to)
+    except ValueError:
+        candidate = path
+    return any(part.startswith(".") for part in candidate.parts)
 
 
 class AcquisitionOutputWatcher:
@@ -46,55 +50,56 @@ class AcquisitionOutputWatcher:
         actor: AuthContext | None = None,
         base_path: str | Path | None = None,
         ignore_hidden: bool = True,
+        failure_backoff_seconds: float = 5.0,
     ) -> None:
         self._api = api
         self._session_id = session_id
         self._watch_paths = [Path(path) for path in watch_paths]
         if not self._watch_paths:
             raise ValueError("watch_paths must not be empty.")
+        if failure_backoff_seconds < 0:
+            raise ValueError("failure_backoff_seconds must be 0 or greater.")
         self._actor = actor
         self._ignore_hidden = ignore_hidden
+        self._failure_backoff_seconds = failure_backoff_seconds
         self._base_path = Path(base_path).resolve() if base_path is not None else None
         self._fingerprints: dict[Path, _FileFingerprint] = {}
+        self._retry_after: dict[Path, float] = {}
 
     def scan(self) -> list[AcquisitionOutput]:
         outputs: list[AcquisitionOutput] = []
+        now = time.monotonic()
         for file_path in self._iter_files():
-            try:
-                stat = file_path.stat()
-            except (FileNotFoundError, PermissionError):
+            retry_after = self._retry_after.get(file_path)
+            if retry_after is not None and retry_after > now:
+                continue
+            new_fingerprint = self._stable_fingerprint(file_path)
+            if new_fingerprint is None:
                 continue
             fingerprint = self._fingerprints.get(file_path)
             if (
                 fingerprint
-                and fingerprint.size_bytes == stat.st_size
-                and fingerprint.mtime == stat.st_mtime
+                and fingerprint.size_bytes == new_fingerprint.size_bytes
+                and fingerprint.mtime == new_fingerprint.mtime
             ):
                 continue
+            if fingerprint and fingerprint.checksum == new_fingerprint.checksum:
+                self._fingerprints[file_path] = new_fingerprint
+                continue
             try:
-                checksum = _hash_file(file_path)
-            except (FileNotFoundError, PermissionError):
-                continue
-            if fingerprint and fingerprint.checksum == checksum:
-                self._fingerprints[file_path] = _FileFingerprint(
-                    size_bytes=stat.st_size,
-                    mtime=stat.st_mtime,
-                    checksum=checksum,
+                output = self._api.register_acquisition_output(
+                    self._session_id,
+                    file_path=self._format_path(file_path),
+                    checksum=new_fingerprint.checksum,
+                    size_bytes=new_fingerprint.size_bytes,
+                    actor=self._actor,
                 )
+            except Exception:
+                self._retry_after[file_path] = now + self._failure_backoff_seconds
                 continue
-            output = self._api.register_acquisition_output(
-                self._session_id,
-                file_path=self._format_path(file_path),
-                checksum=checksum,
-                size_bytes=stat.st_size,
-                actor=self._actor,
-            )
             outputs.append(output)
-            self._fingerprints[file_path] = _FileFingerprint(
-                size_bytes=stat.st_size,
-                mtime=stat.st_mtime,
-                checksum=checksum,
-            )
+            self._retry_after.pop(file_path, None)
+            self._fingerprints[file_path] = new_fingerprint
         return outputs
 
     def run(self, *, interval: float = 1.0, stop_event: Event | None = None) -> None:
@@ -117,18 +122,41 @@ class AcquisitionOutputWatcher:
         except ValueError:
             return str(resolved)
 
+    def _stable_fingerprint(self, path: Path) -> _FileFingerprint | None:
+        try:
+            before = path.stat()
+            checksum = _hash_file(path)
+            after = path.stat()
+        except (FileNotFoundError, PermissionError):
+            return None
+        if before.st_size != after.st_size or before.st_mtime != after.st_mtime:
+            return None
+        return _FileFingerprint(
+            size_bytes=after.st_size,
+            mtime=after.st_mtime,
+            checksum=checksum,
+        )
+
     def _iter_files(self) -> Iterable[Path]:
         for root in self._watch_paths:
             if not root.exists():
                 continue
+            resolved_root = root.resolve()
             if root.is_file():
-                if self._ignore_hidden and _is_hidden(root):
+                if self._ignore_hidden and _is_hidden_relative(
+                    resolved_root,
+                    relative_to=resolved_root.parent,
+                ):
                     continue
-                yield root.resolve()
+                yield resolved_root
                 continue
-            for candidate in root.rglob("*"):
+            for candidate in sorted(root.rglob("*")):
                 if not candidate.is_file():
                     continue
-                if self._ignore_hidden and _is_hidden(candidate):
+                resolved_candidate = candidate.resolve()
+                if self._ignore_hidden and _is_hidden_relative(
+                    resolved_candidate,
+                    relative_to=resolved_root,
+                ):
                     continue
-                yield candidate.resolve()
+                yield resolved_candidate

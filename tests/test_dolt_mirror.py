@@ -5,7 +5,7 @@ import subprocess
 from pathlib import Path
 
 import pytest
-from sqlalchemy import create_engine, insert
+from sqlalchemy import Column, MetaData, String, Table, create_engine, insert
 
 from lab_tracker import dolt_mirror
 from lab_tracker.db import Base
@@ -75,6 +75,32 @@ def test_export_tables_writes_deterministic_primary_key_order(
     assert projects_export.row_count == 2
 
 
+def test_export_tables_distinguishes_null_from_empty_string(
+    tmp_path: Path,
+) -> None:
+    table = Table(
+        "example",
+        MetaData(),
+        Column("id", String, primary_key=True),
+        Column("nullable_value", String),
+        Column("empty_value", String),
+    )
+    csv_path = tmp_path / "example.csv"
+
+    row_count = dolt_mirror._write_csv(
+        table,
+        [{"id": "row-1", "nullable_value": None, "empty_value": ""}],
+        csv_path,
+    )
+
+    with csv_path.open(encoding="utf-8", newline="") as handle:
+        rows = list(csv.DictReader(handle))
+
+    assert row_count == 1
+    assert rows[0]["nullable_value"] == dolt_mirror.NULL_SENTINEL
+    assert rows[0]["empty_value"] == ""
+
+
 def test_export_to_dolt_uses_create_replace_add_and_commit(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -94,7 +120,7 @@ def test_export_to_dolt_uses_create_replace_add_and_commit(
         ) -> subprocess.CompletedProcess[str]:
             commands.append(args)
             if args == ("table", "ls"):
-                return subprocess.CompletedProcess(args, 0, stdout="projects\n")
+                return subprocess.CompletedProcess(args, 0, stdout="projects\nretired_table\n")
             if args == ("status", "--porcelain"):
                 return subprocess.CompletedProcess(args, 0, stdout=" M projects\n")
             return subprocess.CompletedProcess(args, 0, stdout="")
@@ -109,13 +135,25 @@ def test_export_to_dolt_uses_create_replace_add_and_commit(
 
     assert result.commit_created is True
     assert ("init",) in commands
-    assert ("table", "import", "-r", "projects", "_export\\projects.csv") in commands or (
+    assert ("table", "rm", "retired_table") in commands
+    assert (
         "table",
         "import",
-        "-r",
+        "-c",
+        "-f",
+        "--pk=project_id",
+        "projects",
+        "_export\\projects.csv",
+    ) in commands or (
+        "table",
+        "import",
+        "-c",
+        "-f",
+        "--pk=project_id",
         "projects",
         "_export/projects.csv",
     ) in commands
+    assert not any(command[:3] == ("table", "import", "-r") for command in commands)
     assert ("add", ".") in commands
     assert ("commit", "-m", "mirror snapshot") in commands
 
