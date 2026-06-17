@@ -23,13 +23,13 @@ from lab_tracker.schemas import Envelope, ListEnvelope
 from .shared import (
     actor_from_request,
     api_from_request,
+    content_disposition_header,
     db_session_from_request,
     ensure_project_contributor,
     ensure_project_read,
     file_storage_from_request,
     list_response,
     repository_from_request,
-    safe_attachment_filename,
     validate_pagination,
 )
 
@@ -180,9 +180,7 @@ def build_dataset_files_router(api: LabTrackerAPI) -> APIRouter:
             raise NotFoundError("Dataset file does not exist.")
 
         headers = {
-            "Content-Disposition": (
-                f'attachment; filename="{safe_attachment_filename(row.filename)}"'
-            ),
+            "Content-Disposition": content_disposition_header("attachment", row.filename),
             "Content-Length": str(row.size_bytes),
         }
         return StreamingResponse(

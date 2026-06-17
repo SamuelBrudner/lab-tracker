@@ -38,6 +38,7 @@ from .shared import (
     accessible_project_ids_from_request,
     actor_from_request,
     api_from_request,
+    content_disposition_header,
     ensure_project_contributor,
     ensure_project_read,
     list_response,
@@ -45,7 +46,6 @@ from .shared import (
     parse_entity_refs_form,
     parse_metadata_form,
     repository_from_request,
-    safe_attachment_filename,
     validate_pagination,
 )
 
@@ -190,8 +190,8 @@ def build_notes_router(api: LabTrackerAPI) -> APIRouter:
         accept = (request.headers.get("accept") or "").lower()
         if "application/json" not in accept:
             headers = {
-                "Content-Disposition": (
-                    f'attachment; filename="{safe_attachment_filename(raw_asset.filename)}"'
+                "Content-Disposition": content_disposition_header(
+                    "attachment", raw_asset.filename
                 ),
                 "Content-Length": str(raw_asset.size_bytes),
             }

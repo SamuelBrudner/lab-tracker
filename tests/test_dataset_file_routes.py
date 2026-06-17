@@ -176,6 +176,53 @@ def test_dataset_file_download_streams_raw_bytes(
     assert download.headers["content-type"].startswith("text/plain")
 
 
+def test_dataset_file_download_encodes_non_ascii_filename(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+):
+    headers = admin_auth_headers
+
+    project_id = client.post(
+        "/projects",
+        json={"name": "Dataset file download names", "description": "integration"},
+        headers=headers,
+    ).json()["data"]["project_id"]
+    question_id = client.post(
+        "/questions",
+        json={
+            "project_id": project_id,
+            "text": "Can downloads preserve UTF-8 names?",
+            "question_type": "descriptive",
+        },
+        headers=headers,
+    ).json()["data"]["question_id"]
+    dataset_id = client.post(
+        "/datasets",
+        json={"project_id": project_id, "primary_question_id": question_id},
+        headers=headers,
+    ).json()["data"]["dataset_id"]
+
+    content = b"alpha,beta\n1,2\n"
+    upload = client.post(
+        f"/datasets/{dataset_id}/files",
+        files={"file": ("数据.csv", content, "text/csv")},
+        headers=headers,
+    )
+    assert upload.status_code == 201
+    file_id = upload.json()["data"]["file_id"]
+
+    download = client.get(
+        f"/datasets/{dataset_id}/files/{file_id}/download",
+        headers=headers,
+    )
+    assert download.status_code == 200
+    assert download.content == content
+    assert download.headers["content-disposition"] == (
+        "attachment; filename=\"download.csv\"; "
+        "filename*=UTF-8''%E6%95%B0%E6%8D%AE.csv"
+    )
+
+
 def test_dataset_file_download_requires_auth(client: TestClient):
     response = client.get(f"/datasets/{uuid4()}/files/{uuid4()}/download")
     assert response.status_code == 401

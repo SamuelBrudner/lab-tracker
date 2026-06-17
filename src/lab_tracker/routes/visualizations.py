@@ -22,13 +22,13 @@ from .shared import (
     accessible_project_ids_from_request,
     actor_from_request,
     api_from_request,
+    content_disposition_header,
     db_session_from_request,
     ensure_project_contributor,
     ensure_project_read,
     file_storage_from_request,
     list_response,
     repository_from_request,
-    safe_attachment_filename,
     validate_pagination,
 )
 
@@ -189,8 +189,8 @@ def build_visualizations_router(api: LabTrackerAPI) -> APIRouter:
             raise NotFoundError("Visualization file does not exist.")
 
         headers = {
-            "Content-Disposition": (
-                f'inline; filename="{safe_attachment_filename(row.asset_filename or "figure")}"'
+            "Content-Disposition": content_disposition_header(
+                "inline", row.asset_filename or "figure"
             ),
             "Content-Length": str(row.asset_size_bytes or 0),
         }

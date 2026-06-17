@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import json
+import unicodedata
 from datetime import datetime
 from typing import Annotated, Any
-from urllib.parse import unquote
+from urllib.parse import quote, unquote
 
 from fastapi import Query
 from sqlalchemy.orm import Session
@@ -138,6 +139,20 @@ def actor_from_authorization_header(
 
 
 def safe_attachment_filename(filename: str) -> str:
+    cleaned = _clean_attachment_filename(filename)
+    return _ascii_attachment_fallback(cleaned)
+
+
+def content_disposition_header(disposition: str, filename: str) -> str:
+    cleaned = _clean_attachment_filename(filename)
+    fallback = _ascii_attachment_fallback(cleaned)
+    header = f'{disposition}; filename="{fallback}"'
+    if cleaned != fallback:
+        header = f"{header}; filename*=UTF-8''{quote(cleaned, safe='')}"
+    return header
+
+
+def _clean_attachment_filename(filename: str) -> str:
     cleaned = unquote((filename or "").strip())
     if not cleaned:
         return "download"
@@ -147,6 +162,21 @@ def safe_attachment_filename(filename: str) -> str:
     if not cleaned:
         return "download"
     return cleaned
+
+
+def _ascii_attachment_fallback(filename: str) -> str:
+    normalized = unicodedata.normalize("NFKD", filename)
+    fallback = "".join(ch for ch in normalized if 32 <= ord(ch) < 127)
+    fallback = fallback.replace("\\", "_").replace("/", "_").strip()
+    if fallback and not fallback.startswith("."):
+        return fallback
+    suffix = ""
+    if "." in fallback:
+        suffix = fallback[fallback.rfind(".") :]
+    elif "." in filename:
+        raw_suffix = filename[filename.rfind(".") :]
+        suffix = "".join(ch for ch in raw_suffix if ch.isascii() and ch.isprintable())
+    return f"download{suffix}"
 
 
 def validate_pagination(limit: int, offset: int) -> None:
