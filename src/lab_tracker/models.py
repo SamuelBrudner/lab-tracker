@@ -412,6 +412,7 @@ class GraphChangeSet(_DomainModel):
     status: GraphChangeSetStatus = GraphChangeSetStatus.DRAFTING
     commit_message: str | None = None
     error_metadata: dict[str, Any] = Field(default_factory=dict)
+    operation_count: int = 0
     operations: list[GraphChangeOperation] = Field(default_factory=list)
     created_at: datetime = Field(default_factory=utc_now)
     created_by: str | None = None

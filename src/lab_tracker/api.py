@@ -535,6 +535,9 @@ class LabTrackerAPI:
     def list_graph_change_sets(self, *args: Any, **kwargs: Any) -> Any:
         return self.graph_drafts.list_graph_change_sets(*args, **kwargs)
 
+    def query_graph_change_sets(self, *args: Any, **kwargs: Any) -> Any:
+        return self.graph_drafts.query_graph_change_sets(*args, **kwargs)
+
     def list_batch_graph_drafts(self, *args: Any, **kwargs: Any) -> Any:
         return self.graph_drafts.list_batch_graph_drafts(*args, **kwargs)
 

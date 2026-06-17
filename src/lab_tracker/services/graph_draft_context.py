@@ -98,58 +98,14 @@ class GraphContextBuilder:
                 project = self.projects.get_project(project_id)
             except NotFoundError:
                 continue
-            project_questions = self.questions.list_questions(project_id=project_id)
-            active_or_staged = sorted(
-                [
-                    q
-                    for q in project_questions
-                    if q.status in {QuestionStatus.ACTIVE, QuestionStatus.STAGED}
-                ],
-                key=lambda q: (q.status.value, q.updated_at, q.question_id),
-                reverse=True,
-            )[:_QUESTION_CONTEXT_LIMIT]
-            active_ids = {q.question_id for q in active_or_staged}
-            superseded = [
-                q
-                for q in project_questions
-                if q.status == QuestionStatus.SUPERSEDED
-                and q.superseded_by_question_id in active_ids
-            ]
             batch_ids_in_project = {n.note_id for n in project_notes}
-            recent_notes = [
-                item
-                for item in sorted(
-                    self.notes.list_notes(project_id=project_id),
-                    key=lambda candidate: candidate.created_at,
-                    reverse=True,
-                )
-                if item.note_id not in batch_ids_in_project
-            ][:_RECENT_CONTEXT_LIMIT]
-            recent_sessions = sorted(
-                self.sessions.list_sessions(project_id=project_id),
-                key=lambda item: item.started_at,
-                reverse=True,
-            )[:_RECENT_CONTEXT_LIMIT]
-            recent_datasets = sorted(
-                self.datasets.list_datasets(project_id=project_id),
-                key=lambda item: item.created_at,
-                reverse=True,
-            )[:_RECENT_CONTEXT_LIMIT]
-            recent_analyses = sorted(
-                self.analyses.list_analyses(project_id=project_id),
-                key=lambda item: item.created_at,
-                reverse=True,
-            )[:_RECENT_CONTEXT_LIMIT]
-            recent_claims = sorted(
-                self.claims.list_claims(project_id=project_id),
-                key=lambda item: item.created_at,
-                reverse=True,
-            )[:_RECENT_CONTEXT_LIMIT]
-            recent_visualizations = sorted(
-                self.visualizations.list_visualizations(project_id=project_id),
-                key=lambda item: item.created_at,
-                reverse=True,
-            )[:_RECENT_CONTEXT_LIMIT]
+            active_or_staged, superseded = self._question_context(project_id)
+            recent_notes = self._recent_notes_excluding(project_id, batch_ids_in_project)
+            recent_sessions = self._recent_sessions(project_id)
+            recent_datasets = self._recent_datasets(project_id)
+            recent_analyses = self._recent_analyses(project_id)
+            recent_claims = self._recent_claims(project_id)
+            recent_visualizations = self._recent_visualizations(project_id)
             recent_goals = self._recent_goals(project_id)
             project_blocks.append(
                 {
@@ -289,57 +245,13 @@ class GraphContextBuilder:
             raise ValidationError(
                 "Graph context cannot be built because the note project does not exist."
             ) from exc
-        project_questions = self.questions.list_questions(project_id=note.project_id)
-        questions = sorted(
-            [
-                question
-                for question in project_questions
-                if question.status in {QuestionStatus.ACTIVE, QuestionStatus.STAGED}
-            ],
-            key=lambda question: (question.status.value, question.updated_at, question.question_id),
-            reverse=True,
-        )[:_QUESTION_CONTEXT_LIMIT]
-        active_context_ids = {question.question_id for question in questions}
-        superseded_questions = [
-            question
-            for question in project_questions
-            if question.status == QuestionStatus.SUPERSEDED
-            and question.superseded_by_question_id in active_context_ids
-        ]
-        recent_notes = [
-            item
-            for item in sorted(
-                self.notes.list_notes(project_id=note.project_id),
-                key=lambda candidate: candidate.created_at,
-                reverse=True,
-            )
-            if item.note_id != note.note_id
-        ][:_RECENT_CONTEXT_LIMIT]
-        recent_sessions = sorted(
-            self.sessions.list_sessions(project_id=note.project_id),
-            key=lambda item: item.started_at,
-            reverse=True,
-        )[:_RECENT_CONTEXT_LIMIT]
-        recent_datasets = sorted(
-            self.datasets.list_datasets(project_id=note.project_id),
-            key=lambda item: item.created_at,
-            reverse=True,
-        )[:_RECENT_CONTEXT_LIMIT]
-        recent_analyses = sorted(
-            self.analyses.list_analyses(project_id=note.project_id),
-            key=lambda item: item.created_at,
-            reverse=True,
-        )[:_RECENT_CONTEXT_LIMIT]
-        recent_claims = sorted(
-            self.claims.list_claims(project_id=note.project_id),
-            key=lambda item: item.created_at,
-            reverse=True,
-        )[:_RECENT_CONTEXT_LIMIT]
-        recent_visualizations = sorted(
-            self.visualizations.list_visualizations(project_id=note.project_id),
-            key=lambda item: item.created_at,
-            reverse=True,
-        )[:_RECENT_CONTEXT_LIMIT]
+        questions, superseded_questions = self._question_context(note.project_id)
+        recent_notes = self._recent_notes_excluding(note.project_id, {note.note_id})
+        recent_sessions = self._recent_sessions(note.project_id)
+        recent_datasets = self._recent_datasets(note.project_id)
+        recent_analyses = self._recent_analyses(note.project_id)
+        recent_claims = self._recent_claims(note.project_id)
+        recent_visualizations = self._recent_visualizations(note.project_id)
         recent_goals = self._recent_goals(note.project_id)
         context_packet = {
             "mode": GraphDraftMode.GRAPH_CONTEXT.value,
@@ -450,11 +362,110 @@ class GraphContextBuilder:
     def _recent_goals(self, project_id: UUID) -> list[Goal]:
         if self.goals is None:
             return []
-        return sorted(
-            self.goals.list_goals(project_id=project_id),
-            key=lambda item: item.created_at,
+        goals, _ = self.goals.repository.query_goals(
+            project_id=project_id,
+            limit=_RECENT_CONTEXT_LIMIT,
+            offset=0,
+            recent_first=True,
+        )
+        return goals
+
+    def _question_context(self, project_id: UUID) -> tuple[list[Question], list[Question]]:
+        active_questions, _ = self.questions.repository.query_questions(
+            project_id=project_id,
+            status=QuestionStatus.ACTIVE.value,
+            limit=_QUESTION_CONTEXT_LIMIT,
+            offset=0,
+            recent_first=True,
+        )
+        staged_questions, _ = self.questions.repository.query_questions(
+            project_id=project_id,
+            status=QuestionStatus.STAGED.value,
+            limit=_QUESTION_CONTEXT_LIMIT,
+            offset=0,
+            recent_first=True,
+        )
+        questions = sorted(
+            [*active_questions, *staged_questions],
+            key=lambda question: (question.status.value, question.updated_at, question.question_id),
             reverse=True,
-        )[:_RECENT_CONTEXT_LIMIT]
+        )[:_QUESTION_CONTEXT_LIMIT]
+        active_context_ids = {question.question_id for question in questions}
+        superseded_candidates, _ = self.questions.repository.query_questions(
+            project_id=project_id,
+            status=QuestionStatus.SUPERSEDED.value,
+            limit=_QUESTION_CONTEXT_LIMIT * 2,
+            offset=0,
+            recent_first=True,
+        )
+        superseded_questions = [
+            question
+            for question in superseded_candidates
+            if question.superseded_by_question_id in active_context_ids
+        ]
+        return questions, superseded_questions
+
+    def _recent_notes_excluding(
+        self,
+        project_id: UUID,
+        excluded_note_ids: set[UUID],
+    ) -> list[Note]:
+        recent_notes, _ = self.notes.repository.query_notes(
+            project_id=project_id,
+            limit=_RECENT_CONTEXT_LIMIT + len(excluded_note_ids),
+            offset=0,
+            recent_first=True,
+        )
+        return [
+            note
+            for note in recent_notes
+            if note.note_id not in excluded_note_ids
+        ][:_RECENT_CONTEXT_LIMIT]
+
+    def _recent_sessions(self, project_id: UUID) -> list[Session]:
+        recent_sessions, _ = self.sessions.repository.query_sessions(
+            project_id=project_id,
+            limit=_RECENT_CONTEXT_LIMIT,
+            offset=0,
+            recent_first=True,
+        )
+        return recent_sessions
+
+    def _recent_datasets(self, project_id: UUID) -> list[Dataset]:
+        recent_datasets, _ = self.datasets.repository.query_datasets(
+            project_id=project_id,
+            limit=_RECENT_CONTEXT_LIMIT,
+            offset=0,
+            recent_first=True,
+        )
+        return recent_datasets
+
+    def _recent_analyses(self, project_id: UUID) -> list[Analysis]:
+        recent_analyses, _ = self.analyses.repository.query_analyses(
+            project_id=project_id,
+            limit=_RECENT_CONTEXT_LIMIT,
+            offset=0,
+            recent_first=True,
+        )
+        return recent_analyses
+
+    def _recent_claims(self, project_id: UUID) -> list[Claim]:
+        recent_claims, _ = self.claims.repository.query_claims(
+            project_id=project_id,
+            limit=_RECENT_CONTEXT_LIMIT,
+            offset=0,
+            recent_first=True,
+        )
+        return recent_claims
+
+    def _recent_visualizations(self, project_id: UUID) -> list[Visualization]:
+        recent_visualizations, _ = self.visualizations.repository.query_visualizations(
+            project_id=project_id,
+            limit=_RECENT_CONTEXT_LIMIT,
+            offset=0,
+            recent_first=True,
+        )
+        return recent_visualizations
 
 
 def _graph_context_summary(context_packet: dict[str, Any]) -> dict[str, Any]:

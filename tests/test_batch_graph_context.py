@@ -11,6 +11,7 @@ from uuid import UUID
 from fastapi.testclient import TestClient
 
 from lab_tracker.api import LabTrackerAPI
+from lab_tracker.db_models import NoteModel
 from lab_tracker.models import Note
 from lab_tracker.sqlalchemy_repository import SQLAlchemyLabTrackerRepository
 
@@ -80,6 +81,25 @@ def _quick_capture(
 def _load_notes(client: TestClient, note_ids: list[str]) -> list[Note]:
     with _request_api(client) as api:
         return [api.get_note(UUID(note_id)) for note_id in note_ids]
+
+
+def _set_note_created_at(
+    client: TestClient,
+    note_id: str,
+    created_at: datetime,
+) -> None:
+    session = client.app.state.db_session_factory()
+    try:
+        row = session.get(NoteModel, note_id)
+        assert row is not None
+        row.created_at = created_at
+        row.updated_at = created_at
+        session.commit()
+    except Exception:
+        session.rollback()
+        raise
+    finally:
+        session.close()
 
 
 def test_batch_context_groups_per_project_with_questions_and_recent_neighborhood(
@@ -164,6 +184,47 @@ def test_batch_context_groups_per_project_with_questions_and_recent_neighborhood
     assert summary["counts"]["recent_notes"] >= 1
     assert summary["source_artifact_counts"] == {"image": 2}
     assert summary["truncated_note_count"] == 0
+
+
+def test_batch_context_uses_newest_limited_recent_notes(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+):
+    project_id = _create_project(client, admin_auth_headers, "Bounded Recent Notes")
+    prior_note_ids = [
+        _quick_capture(
+            client,
+            admin_auth_headers,
+            project_id=project_id,
+            filename=f"prior-{index}.txt",
+            body=f"prior observation {index}".encode(),
+            content_type="text/plain",
+        )
+        for index in range(12)
+    ]
+    batch_note_id = _quick_capture(
+        client,
+        admin_auth_headers,
+        project_id=project_id,
+        filename="batch.txt",
+        body=b"new batch note",
+        content_type="text/plain",
+    )
+    baseline = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    for index, note_id in enumerate([*prior_note_ids, batch_note_id]):
+        _set_note_created_at(client, note_id, baseline + timedelta(minutes=index))
+
+    batch_notes = _load_notes(client, [batch_note_id])
+
+    with _request_api(client) as api:
+        packet = api.build_batch_graph_context(batch_notes)
+
+    recent_note_ids = [
+        note["id"]
+        for note in packet["projects"][0]["recent_notes"]
+    ]
+    assert recent_note_ids == list(reversed(prior_note_ids[-10:]))
+    assert batch_note_id not in recent_note_ids
 
 
 def test_batch_context_spans_multiple_projects_with_independent_blocks(

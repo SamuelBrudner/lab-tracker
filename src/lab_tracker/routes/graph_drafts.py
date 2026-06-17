@@ -14,6 +14,7 @@ from lab_tracker.graph_drafting import make_graph_draft_client
 from lab_tracker.models import GraphChangeSet, GraphChangeSetStatus
 from lab_tracker.schemas import (
     Envelope,
+    GraphChangeSetSummary,
     GraphDraftCommitRequest,
     GraphDraftCreateRequest,
     GraphDraftOperationUpdate,
@@ -23,12 +24,11 @@ from lab_tracker.schemas import (
 )
 
 from .shared import (
+    accessible_project_ids_from_request,
     actor_from_request,
     api_from_request,
     ensure_project_read,
-    filter_project_scoped_items,
     list_response,
-    paginate,
     validate_pagination,
 )
 
@@ -63,7 +63,7 @@ def build_graph_drafts_router(api: LabTrackerAPI) -> APIRouter:
                 close()
         return Envelope(data=_attach_graph_usernames(request, change_set))
 
-    @router.get("/graph-drafts", response_model=ListEnvelope[GraphChangeSet])
+    @router.get("/graph-drafts", response_model=ListEnvelope[GraphChangeSetSummary])
     def list_graph_drafts(
         request: Request,
         project_id: UUID | None = None,
@@ -75,15 +75,23 @@ def build_graph_drafts_router(api: LabTrackerAPI) -> APIRouter:
         validate_pagination(limit, offset)
         if project_id is not None:
             ensure_project_read(request, project_id)
-        change_sets = api_from_request(request, api).list_graph_change_sets(
+            project_ids = None
+        else:
+            project_ids = accessible_project_ids_from_request(request)
+        change_sets, total = api_from_request(request, api).query_graph_change_sets(
             project_id=project_id,
+            project_ids=project_ids,
             status=status,
             source_note_id=source_note_id,
+            limit=limit,
+            offset=offset,
+            include_operations=False,
         )
-        visible = filter_project_scoped_items(request, change_sets)
-        items, total = paginate(visible, limit, offset)
         return list_response(
-            [_attach_graph_usernames(request, item) for item in items],
+            [
+                _graph_change_set_summary(_attach_graph_usernames(request, item))
+                for item in change_sets
+            ],
             limit=limit,
             offset=offset,
             total=total,
@@ -218,6 +226,48 @@ def _attach_graph_usernames(request: Request, change_set: GraphChangeSet) -> Gra
         if user is not None:
             setattr(change_set, username_field, user.username)
     return change_set
+
+
+def _graph_change_set_summary(change_set: GraphChangeSet) -> GraphChangeSetSummary:
+    return GraphChangeSetSummary(
+        change_set_id=change_set.change_set_id,
+        project_id=change_set.project_id,
+        source_note_id=change_set.source_note_id,
+        source_note_ids=list(change_set.source_note_ids),
+        source_checksum=change_set.source_checksum,
+        source_content_type=change_set.source_content_type,
+        source_filename=change_set.source_filename,
+        source_note_count=change_set.source_note_count,
+        batch_key=change_set.batch_key,
+        batch_window_start=change_set.batch_window_start,
+        batch_window_end=change_set.batch_window_end,
+        provider=change_set.provider,
+        model=change_set.model,
+        prompt_version=change_set.prompt_version,
+        draft_mode=change_set.draft_mode,
+        summary=change_set.summary,
+        uncertain_fields=list(change_set.uncertain_fields),
+        clarification_requests=list(change_set.clarification_requests),
+        status=change_set.status,
+        commit_message=change_set.commit_message,
+        error_metadata=dict(change_set.error_metadata),
+        operation_count=change_set.operation_count,
+        created_at=change_set.created_at,
+        created_by=change_set.created_by,
+        created_by_user_id=change_set.created_by_user_id,
+        created_by_username=change_set.created_by_username,
+        updated_at=change_set.updated_at,
+        submitted_at=change_set.submitted_at,
+        submitted_by=change_set.submitted_by,
+        submitted_by_username=change_set.submitted_by_username,
+        reviewed_at=change_set.reviewed_at,
+        reviewed_by=change_set.reviewed_by,
+        reviewed_by_username=change_set.reviewed_by_username,
+        review_note=change_set.review_note,
+        committed_at=change_set.committed_at,
+        committed_by=change_set.committed_by,
+        committed_by_username=change_set.committed_by_username,
+    )
 
 
 attach_graph_usernames = _attach_graph_usernames

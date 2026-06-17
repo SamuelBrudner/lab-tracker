@@ -6,7 +6,7 @@ from collections.abc import Iterable
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session as OrmSession
 
 from lab_tracker.db_models import GraphChangeOperationModel, GraphChangeSetModel, UserModel
@@ -23,7 +23,7 @@ from lab_tracker.models import (
 from lab_tracker.repository import EntityRepository
 from lab_tracker.sqlalchemy_mapper_parts.common import as_utc
 
-from .common import apply_pagination, count_from_statement, replace_child_rows
+from .common import apply_pagination, count_from_statement, replace_child_rows, uuid_values
 
 
 def _uuid(value: str | None) -> UUID | None:
@@ -173,9 +173,11 @@ def change_set_from_model(
     row: GraphChangeSetModel,
     *,
     operations: Iterable[GraphChangeOperation] = (),
+    operation_count: int | None = None,
     usernames: dict[str, str] | None = None,
 ) -> GraphChangeSet:
     resolved_usernames = usernames or {}
+    operation_list = list(operations)
     return GraphChangeSet(
         change_set_id=UUID(row.change_set_id),
         project_id=UUID(row.project_id),
@@ -200,7 +202,8 @@ def change_set_from_model(
         status=GraphChangeSetStatus(row.status),
         commit_message=row.commit_message,
         error_metadata=_dict(row.error_metadata),
-        operations=list(operations),
+        operation_count=operation_count if operation_count is not None else len(operation_list),
+        operations=operation_list,
         created_by=row.created_by,
         created_by_user_id=_uuid(row.created_by_user_id),
         created_by_username=resolved_usernames.get(row.created_by or ""),
@@ -241,8 +244,34 @@ class SQLAlchemyGraphChangeSetRepository(EntityRepository[GraphChangeSet]):
             operation_map.setdefault(row.change_set_id, []).append(operation_from_model(row))
         return operation_map
 
-    def _from_rows(self, rows: list[GraphChangeSetModel]) -> list[GraphChangeSet]:
-        operation_map = self._operations_for([row.change_set_id for row in rows])
+    def _operation_counts_for(self, change_set_ids: list[str]) -> dict[str, int]:
+        if not change_set_ids:
+            return {}
+        rows = list(
+            self._session.execute(
+                select(
+                    GraphChangeOperationModel.change_set_id,
+                    func.count(GraphChangeOperationModel.operation_id),
+                )
+                .where(GraphChangeOperationModel.change_set_id.in_(change_set_ids))
+                .group_by(GraphChangeOperationModel.change_set_id)
+            )
+        )
+        return {str(change_set_id): int(count) for change_set_id, count in rows}
+
+    def _from_rows(
+        self,
+        rows: list[GraphChangeSetModel],
+        *,
+        include_operations: bool = True,
+    ) -> list[GraphChangeSet]:
+        change_set_ids = [row.change_set_id for row in rows]
+        operation_map = self._operations_for(change_set_ids) if include_operations else {}
+        operation_counts = (
+            {change_set_id: len(operations) for change_set_id, operations in operation_map.items()}
+            if include_operations
+            else self._operation_counts_for(change_set_ids)
+        )
         user_ids = sorted(
             {
                 user_id
@@ -266,6 +295,7 @@ class SQLAlchemyGraphChangeSetRepository(EntityRepository[GraphChangeSet]):
             change_set_from_model(
                 row,
                 operations=operation_map.get(row.change_set_id, []),
+                operation_count=operation_counts.get(row.change_set_id, 0),
                 usernames=usernames,
             )
             for row in rows
@@ -320,19 +350,27 @@ class SQLAlchemyGraphChangeSetRepository(EntityRepository[GraphChangeSet]):
         self,
         *,
         project_id: UUID | None = None,
+        project_ids: set[UUID] | None = None,
         status: str | None = None,
         source_note_id: UUID | None = None,
         draft_mode: str | None = None,
         batch_key: str | None = None,
         limit: int | None = None,
         offset: int = 0,
+        include_operations: bool = True,
     ) -> tuple[list[GraphChangeSet], int]:
         self._session.flush()
+        if project_ids is not None and not project_ids:
+            return [], 0
         stmt = select(GraphChangeSetModel)
         count_stmt = select(GraphChangeSetModel.change_set_id)
         if project_id is not None:
             stmt = stmt.where(GraphChangeSetModel.project_id == str(project_id))
             count_stmt = count_stmt.where(GraphChangeSetModel.project_id == str(project_id))
+        if project_ids is not None:
+            project_values = uuid_values(project_ids)
+            stmt = stmt.where(GraphChangeSetModel.project_id.in_(project_values))
+            count_stmt = count_stmt.where(GraphChangeSetModel.project_id.in_(project_values))
         if status is not None:
             stmt = stmt.where(GraphChangeSetModel.status == status)
             count_stmt = count_stmt.where(GraphChangeSetModel.status == status)
@@ -351,4 +389,4 @@ class SQLAlchemyGraphChangeSetRepository(EntityRepository[GraphChangeSet]):
         )
         total = count_from_statement(self._session, count_stmt)
         rows = list(self._session.scalars(apply_pagination(stmt, limit=limit, offset=offset)))
-        return self._from_rows(rows), total
+        return self._from_rows(rows, include_operations=include_operations), total

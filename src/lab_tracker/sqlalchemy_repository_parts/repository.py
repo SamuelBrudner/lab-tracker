@@ -712,6 +712,7 @@ class SQLAlchemyLabTrackerRepository(LabTrackerRepository):
         target_entity_id: UUID | None = None,
         limit: int | None = None,
         offset: int = 0,
+        recent_first: bool = False,
     ) -> tuple[list[Goal], int]:
         return self.goals.query(
             project_id=project_id,
@@ -722,6 +723,7 @@ class SQLAlchemyLabTrackerRepository(LabTrackerRepository):
             target_entity_id=target_entity_id,
             limit=limit,
             offset=offset,
+            recent_first=recent_first,
         )
 
     def query_goal_links(
@@ -768,21 +770,25 @@ class SQLAlchemyLabTrackerRepository(LabTrackerRepository):
         self,
         *,
         project_id: UUID | None = None,
+        project_ids: set[UUID] | None = None,
         status: str | None = None,
         source_note_id: UUID | None = None,
         draft_mode: str | None = None,
         batch_key: str | None = None,
         limit: int | None = None,
         offset: int = 0,
+        include_operations: bool = True,
     ) -> tuple[list[GraphChangeSet], int]:
         return self.graph_change_sets.query(
             project_id=project_id,
+            project_ids=project_ids,
             status=status,
             source_note_id=source_note_id,
             draft_mode=draft_mode,
             batch_key=batch_key,
             limit=limit,
             offset=offset,
+            include_operations=include_operations,
         )
 
     def get_graph_draft_batch_settings_by_project(

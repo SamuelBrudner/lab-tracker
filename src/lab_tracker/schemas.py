@@ -457,6 +457,46 @@ class GraphDraftReviseRequest(RequestModel):
     feedback: NonBlankStr
 
 
+class GraphChangeSetSummary(BaseModel):
+    change_set_id: UUID
+    project_id: UUID
+    source_note_id: UUID
+    source_note_ids: list[UUID] = Field(default_factory=list)
+    source_checksum: str | None = None
+    source_content_type: str | None = None
+    source_filename: str | None = None
+    source_note_count: int
+    batch_key: str | None = None
+    batch_window_start: datetime | None = None
+    batch_window_end: datetime | None = None
+    provider: str
+    model: str
+    prompt_version: str
+    draft_mode: GraphDraftMode
+    summary: str = ""
+    uncertain_fields: list[str] = Field(default_factory=list)
+    clarification_requests: list[str] = Field(default_factory=list)
+    status: GraphChangeSetStatus
+    commit_message: str | None = None
+    error_metadata: dict[str, Any] = Field(default_factory=dict)
+    operation_count: int = 0
+    created_at: datetime
+    created_by: str | None = None
+    created_by_user_id: UUID | None = None
+    created_by_username: str | None = None
+    updated_at: datetime
+    submitted_at: datetime | None = None
+    submitted_by: str | None = None
+    submitted_by_username: str | None = None
+    reviewed_at: datetime | None = None
+    reviewed_by: str | None = None
+    reviewed_by_username: str | None = None
+    review_note: str | None = None
+    committed_at: datetime | None = None
+    committed_by: str | None = None
+    committed_by_username: str | None = None
+
+
 class GraphDraftListFilters(BaseModel):
     project_id: UUID | None = None
     status: GraphChangeSetStatus | None = None

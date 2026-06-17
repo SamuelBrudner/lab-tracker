@@ -1258,6 +1258,50 @@ def test_gpt_failure_returns_stored_failed_draft(
     assert listed.json()["data"][0]["change_set_id"] == payload["change_set_id"]
 
 
+def test_graph_draft_list_returns_paged_summaries_without_context_packets(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+) -> None:
+    project_id = _project(client, admin_auth_headers)
+    client.app.state.graph_draft_client_factory = lambda settings: FakeDraftClient(
+        _draft_patch(project_id)
+    )
+    draft_ids: list[str] = []
+    for _ in range(3):
+        note_id = _image_note(client, admin_auth_headers, project_id)
+        response = client.post(f"/notes/{note_id}/graph-drafts", headers=admin_auth_headers)
+        assert response.status_code == 201
+        draft = response.json()["data"]
+        assert draft["context_packet"]
+        assert len(draft["operations"]) == 2
+        draft_ids.append(draft["change_set_id"])
+
+    listed = client.get(
+        f"/graph-drafts?project_id={project_id}&limit=1&offset=1",
+        headers=admin_auth_headers,
+    )
+
+    assert listed.status_code == 200
+    page = listed.json()
+    assert page["meta"] == {"limit": 1, "offset": 1, "total": 3}
+    assert len(page["data"]) == 1
+    item = page["data"][0]
+    assert item["change_set_id"] in draft_ids
+    assert item["operation_count"] == 2
+    assert item["source_note_count"] == 1
+    assert "context_packet" not in item
+    assert "operations" not in item
+
+    detail = client.get(
+        f"/graph-drafts/{item['change_set_id']}",
+        headers=admin_auth_headers,
+    )
+    assert detail.status_code == 200
+    detail_payload = detail.json()["data"]
+    assert detail_payload["context_packet"]
+    assert len(detail_payload["operations"]) == 2
+
+
 def test_malformed_or_unsupported_gpt_patch_returns_stored_failed_draft(
     client: TestClient,
     admin_auth_headers: dict[str, str],

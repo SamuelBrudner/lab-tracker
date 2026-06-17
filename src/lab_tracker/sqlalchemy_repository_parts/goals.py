@@ -98,6 +98,7 @@ class SQLAlchemyGoalRepository(EntityRepository[Goal]):
         target_entity_id: UUID | None = None,
         limit: int | None = None,
         offset: int = 0,
+        recent_first: bool = False,
     ) -> tuple[list[Goal], int]:
         self._session.flush()
         stmt = select(GoalModel)
@@ -135,7 +136,10 @@ class SQLAlchemyGoalRepository(EntityRepository[Goal]):
         if distinct_required:
             stmt = stmt.distinct()
             count_stmt = count_stmt.distinct()
-        stmt = stmt.order_by(GoalModel.created_at, GoalModel.goal_id)
+        if recent_first:
+            stmt = stmt.order_by(GoalModel.created_at.desc(), GoalModel.goal_id.desc())
+        else:
+            stmt = stmt.order_by(GoalModel.created_at, GoalModel.goal_id)
         total = count_from_statement(self._session, count_stmt)
         rows = list(self._session.scalars(apply_pagination(stmt, limit=limit, offset=offset)))
         return self.goals_from_rows(rows), total

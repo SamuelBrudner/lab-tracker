@@ -540,16 +540,40 @@ class GraphDraftService(BaseService):
         draft_mode: GraphDraftMode | None = None,
         batch_key: str | None = None,
     ) -> list[GraphChangeSet]:
-        return self.query_from_repository(
-            loader=lambda repository: repository.query_graph_change_sets(
-                project_id=project_id,
-                status=status.value if status is not None else None,
-                source_note_id=source_note_id,
-                draft_mode=draft_mode.value if draft_mode is not None else None,
-                batch_key=batch_key,
-                limit=None,
-                offset=0,
-            ),
+        change_sets, _ = self.query_graph_change_sets(
+            project_id=project_id,
+            status=status,
+            source_note_id=source_note_id,
+            draft_mode=draft_mode,
+            batch_key=batch_key,
+            limit=None,
+            offset=0,
+        )
+        return change_sets
+
+    def query_graph_change_sets(
+        self,
+        *,
+        project_id: UUID | None = None,
+        project_ids: set[UUID] | None = None,
+        status: GraphChangeSetStatus | None = None,
+        source_note_id: UUID | None = None,
+        draft_mode: GraphDraftMode | None = None,
+        batch_key: str | None = None,
+        limit: int | None = None,
+        offset: int = 0,
+        include_operations: bool = True,
+    ) -> tuple[list[GraphChangeSet], int]:
+        return self.repository.query_graph_change_sets(
+            project_id=project_id,
+            project_ids=project_ids,
+            status=status.value if status is not None else None,
+            source_note_id=source_note_id,
+            draft_mode=draft_mode.value if draft_mode is not None else None,
+            batch_key=batch_key,
+            limit=limit,
+            offset=offset,
+            include_operations=include_operations,
         )
 
     def list_batch_graph_drafts(
@@ -872,6 +896,7 @@ class GraphDraftService(BaseService):
             raise ValidationError("Submitted graph drafts cannot be edited by contributors.")
 
     def _save_graph_change_set(self, change_set: GraphChangeSet) -> None:
+        change_set.operation_count = len(change_set.operations)
         with self.unit_of_work() as repository:
             repository.graph_change_sets.save(change_set)
 

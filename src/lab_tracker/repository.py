@@ -347,6 +347,7 @@ class LabTrackerRepository(Protocol):
         target_entity_id: UUID | None = None,
         limit: int | None = None,
         offset: int = 0,
+        recent_first: bool = False,
     ) -> tuple[list[Goal], int]:
         """Query goals with filters and optional reverse node lookup."""
 
@@ -379,12 +380,14 @@ class LabTrackerRepository(Protocol):
         self,
         *,
         project_id: UUID | None = None,
+        project_ids: set[UUID] | None = None,
         status: str | None = None,
         source_note_id: UUID | None = None,
         draft_mode: str | None = None,
         batch_key: str | None = None,
         limit: int | None = None,
         offset: int = 0,
+        include_operations: bool = True,
     ) -> tuple[list[GraphChangeSet], int]:
         """Query graph draft change sets with filters and pagination."""
 
