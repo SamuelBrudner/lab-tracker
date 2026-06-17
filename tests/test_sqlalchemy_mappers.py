@@ -225,7 +225,11 @@ def test_dataset_mapper_reads_legacy_external_artifact_metadata():
         primary_question_id=uuid4(),
         question_links=[],
         commit_manifest=DatasetCommitManifest(
-            metadata={EXTERNAL_ARTIFACTS_METADATA_KEY: encode_external_artifacts([artifact])},
+            metadata={
+                EXTERNAL_ARTIFACTS_METADATA_KEY: encode_external_artifacts(
+                    [artifact, artifact]
+                )
+            },
         ),
     )
     row = dataset_to_model(dataset)

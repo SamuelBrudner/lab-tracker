@@ -255,10 +255,6 @@ class DatasetService(BaseService):
             if commit_requested:
                 attached_files = _load_attached_files(self, dataset.dataset_id)
                 files = attached_files or list(base_manifest.files)
-                if not files and not base_manifest.external_artifacts:
-                    raise ValidationError(
-                        "At least one file or external artifact is required to commit a dataset."
-                    )
 
                 note_ids = list(base_manifest.note_ids)
                 note_targets = _load_dataset_note_targets(self, dataset.dataset_id)
@@ -282,6 +278,14 @@ class DatasetService(BaseService):
             self._ensure_source_session_valid(
                 resolved_manifest.source_session_id, dataset.project_id
             )
+            if (
+                commit_requested
+                and not resolved_manifest.files
+                and not resolved_manifest.external_artifacts
+            ):
+                raise ValidationError(
+                    "At least one file or external artifact is required to commit a dataset."
+                )
             resolved_commit_hash = _compute_commit_hash(resolved_manifest)
             _validate_commit_hash(commit_hash, resolved_commit_hash)
             dataset.commit_manifest = resolved_manifest

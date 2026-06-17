@@ -1,4 +1,6 @@
-from uuid import uuid4
+import hashlib
+import json
+from uuid import UUID, uuid4
 
 import pytest
 from api_helpers import repository_backed_api
@@ -23,6 +25,10 @@ from lab_tracker.models import (
     SessionStatus,
     SessionType,
 )
+from lab_tracker.provenance_ingestion import (
+    EXTERNAL_ARTIFACTS_METADATA_KEY,
+    encode_external_artifacts,
+)
 
 
 def _actor(role: Role = Role.ADMIN) -> AuthContext:
@@ -39,6 +45,34 @@ def _external_artifact(
         content_hash=content_hash,
         metadata={"file_count": 12, "total_size_bytes": 1024},
     )
+
+
+def _legacy_commit_hash(
+    *,
+    files: list[DatasetFile],
+    metadata: dict[str, str],
+    primary_question_id: UUID,
+) -> str:
+    payload = {
+        "files": sorted(
+            ({"path": file.path, "checksum": file.checksum} for file in files),
+            key=lambda item: (item["path"], item["checksum"]),
+        ),
+        "metadata": {key: metadata[key] for key in sorted(metadata)},
+        "nwb_metadata": {},
+        "bids_metadata": {},
+        "question_links": [
+            {
+                "question_id": str(primary_question_id),
+                "role": "primary",
+                "outcome_status": "unknown",
+            }
+        ],
+        "note_ids": [],
+        "source_session_id": None,
+    }
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
 
 def test_project_question_dataset_flow():
@@ -216,6 +250,37 @@ def test_external_artifacts_are_content_addressed_deterministically():
     assert changed.commit_hash != first.commit_hash
 
 
+def test_duplicate_legacy_external_artifact_metadata_preserves_hash_shape():
+    api = repository_backed_api()
+    actor = _actor()
+    project = api.create_project("Neuro Project", actor=actor)
+    question = api.create_question(
+        project_id=project.project_id,
+        text="Can legacy duplicate external references keep their hash?",
+        question_type=QuestionType.DESCRIPTIVE,
+        actor=actor,
+    )
+    artifact = _external_artifact()
+    files = [DatasetFile(path="data.csv", checksum="abc123")]
+    metadata = {
+        EXTERNAL_ARTIFACTS_METADATA_KEY: encode_external_artifacts([artifact, artifact])
+    }
+
+    dataset = api.create_dataset(
+        project_id=project.project_id,
+        primary_question_id=question.question_id,
+        commit_manifest=DatasetCommitManifestInput(files=files, metadata=metadata),
+        actor=actor,
+    )
+
+    assert dataset.commit_manifest.external_artifacts == [artifact]
+    assert dataset.commit_hash == _legacy_commit_hash(
+        files=files,
+        metadata=metadata,
+        primary_question_id=question.question_id,
+    )
+
+
 def test_dataset_commit_manifest_preserves_nwb_metadata_keys():
     api = repository_backed_api()
     actor = _actor()
@@ -374,6 +439,40 @@ def test_dataset_commit_accepts_external_artifact_without_file_attachment():
     assert dataset.status == DatasetStatus.COMMITTED
     assert dataset.commit_manifest.files == []
     assert dataset.commit_manifest.external_artifacts == [_external_artifact()]
+
+
+def test_dataset_update_commit_accepts_legacy_external_artifact_metadata():
+    api = repository_backed_api()
+    actor = _actor()
+    project = api.create_project("Neuro Project", actor=actor)
+    question = api.create_question(
+        project_id=project.project_id,
+        text="Can legacy external artifacts commit on update?",
+        question_type=QuestionType.DESCRIPTIVE,
+        status=QuestionStatus.ACTIVE,
+        actor=actor,
+    )
+    artifact = _external_artifact()
+    legacy_manifest = DatasetCommitManifestInput(
+        metadata={EXTERNAL_ARTIFACTS_METADATA_KEY: encode_external_artifacts([artifact])}
+    )
+    dataset = api.create_dataset(
+        project_id=project.project_id,
+        primary_question_id=question.question_id,
+        commit_manifest=legacy_manifest,
+        actor=actor,
+    )
+
+    committed = api.update_dataset(
+        dataset.dataset_id,
+        status=DatasetStatus.COMMITTED,
+        commit_manifest=legacy_manifest,
+        actor=actor,
+    )
+
+    assert committed.status == DatasetStatus.COMMITTED
+    assert committed.commit_manifest.files == []
+    assert committed.commit_manifest.external_artifacts == [artifact]
 
 
 def test_analysis_accepts_external_run_reference_and_rejects_duplicates():
