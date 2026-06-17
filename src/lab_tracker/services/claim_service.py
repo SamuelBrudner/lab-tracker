@@ -206,8 +206,12 @@ class ClaimService(BaseService):
         if supported_by_dataset_ids is not None or supported_by_analysis_ids is not None:
             dataset_ids, analysis_ids = self._resolve_claim_support_links(
                 claim.project_id,
-                supported_by_dataset_ids or claim.supported_by_dataset_ids,
-                supported_by_analysis_ids or claim.supported_by_analysis_ids,
+                claim.supported_by_dataset_ids
+                if supported_by_dataset_ids is None
+                else supported_by_dataset_ids,
+                claim.supported_by_analysis_ids
+                if supported_by_analysis_ids is None
+                else supported_by_analysis_ids,
             )
             claim.supported_by_dataset_ids = dataset_ids
             claim.supported_by_analysis_ids = analysis_ids

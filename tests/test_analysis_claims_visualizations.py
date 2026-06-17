@@ -151,6 +151,48 @@ def test_claim_status_transitions_and_edits():
         api.update_claim(claim.claim_id, statement="Updated statement", actor=actor)
 
 
+def test_update_claim_can_clear_support_links_with_empty_lists():
+    api = repository_backed_api()
+    actor = _actor()
+    project, question = _setup_project_with_question(api, actor)
+    dataset = api.create_dataset(
+        project_id=project.project_id,
+        primary_question_id=question.question_id,
+        actor=actor,
+    )
+    analysis = api.create_analysis(
+        project_id=project.project_id,
+        dataset_ids=[dataset.dataset_id],
+        method_hash="method-1",
+        code_version="v1",
+        actor=actor,
+    )
+    claim = api.create_claim(
+        project_id=project.project_id,
+        statement="Linked evidence can be revised before support review.",
+        confidence=45.0,
+        supported_by_dataset_ids=[dataset.dataset_id],
+        supported_by_analysis_ids=[analysis.analysis_id],
+        actor=actor,
+    )
+
+    cleared_dataset = api.update_claim(
+        claim.claim_id,
+        supported_by_dataset_ids=[],
+        actor=actor,
+    )
+    assert cleared_dataset.supported_by_dataset_ids == []
+    assert cleared_dataset.supported_by_analysis_ids == [analysis.analysis_id]
+
+    cleared_analysis = api.update_claim(
+        claim.claim_id,
+        supported_by_analysis_ids=[],
+        actor=actor,
+    )
+    assert cleared_analysis.supported_by_dataset_ids == []
+    assert cleared_analysis.supported_by_analysis_ids == []
+
+
 def test_claim_answers_question_links_round_trip_and_project_scope():
     api = repository_backed_api()
     actor = _actor()
