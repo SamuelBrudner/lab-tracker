@@ -17,6 +17,7 @@ from lab_tracker.models import (
     GraphDraftBatchTrigger,
 )
 from lab_tracker.repository import EntityRepository
+from lab_tracker.sqlalchemy_mapper_parts.common import as_utc
 
 from .common import apply_pagination, count_from_statement
 
@@ -31,6 +32,10 @@ def _uuid_str(value: UUID | None) -> str | None:
 
 def _dict(value: Any) -> dict[str, Any]:
     return dict(value or {})
+
+
+def _as_utc_optional(value: datetime | None) -> datetime | None:
+    return as_utc(value) if value is not None else None
 
 
 def settings_to_model(settings: GraphDraftBatchSettings) -> GraphDraftBatchSettingsModel:
@@ -71,9 +76,9 @@ def settings_from_model(row: GraphDraftBatchSettingsModel) -> GraphDraftBatchSet
         cadence_minutes=row.cadence_minutes,
         run_at_local_time=row.run_at_local_time,
         timezone_name=row.timezone_name,
-        next_run_at=row.next_run_at,
-        created_at=row.created_at,
-        updated_at=row.updated_at,
+        next_run_at=_as_utc_optional(row.next_run_at),
+        created_at=as_utc(row.created_at),
+        updated_at=as_utc(row.updated_at),
         updated_by=row.updated_by,
     )
 
@@ -125,17 +130,17 @@ def run_from_model(row: GraphDraftBatchRunModel) -> GraphDraftBatchRun:
         project_id=UUID(row.project_id),
         trigger=GraphDraftBatchTrigger(row.trigger),
         status=GraphDraftBatchRunStatus(row.status),
-        window_start=row.window_start,
-        window_end=row.window_end,
+        window_start=as_utc(row.window_start),
+        window_end=as_utc(row.window_end),
         note_count=row.note_count,
         batch_key=row.batch_key,
         change_set_id=UUID(row.change_set_id) if row.change_set_id else None,
         summary=row.summary or "",
         error_metadata=_dict(row.error_metadata),
-        created_at=row.created_at,
-        updated_at=row.updated_at,
-        started_at=row.started_at,
-        finished_at=row.finished_at,
+        created_at=as_utc(row.created_at),
+        updated_at=as_utc(row.updated_at),
+        started_at=as_utc(row.started_at),
+        finished_at=_as_utc_optional(row.finished_at),
         created_by=row.created_by,
         created_by_user_id=_uuid(row.created_by_user_id),
     )

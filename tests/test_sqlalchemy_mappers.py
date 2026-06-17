@@ -2,7 +2,11 @@ from datetime import datetime, timezone
 from uuid import UUID, uuid4
 
 from lab_tracker import sqlalchemy_mappers
-from lab_tracker.db_models import ProjectModel
+from lab_tracker.db_models import (
+    GraphDraftBatchRunModel,
+    GraphDraftBatchSettingsModel,
+    ProjectModel,
+)
 from lab_tracker.models import (
     Analysis,
     AnalysisStatus,
@@ -52,10 +56,22 @@ from lab_tracker.sqlalchemy_mappers import (
     question_parent_models,
     question_to_model,
 )
+from lab_tracker.sqlalchemy_repository_parts.graph_batches import (
+    run_from_model,
+    settings_from_model,
+)
 
 
 def _ts() -> datetime:
     return datetime(2026, 2, 7, tzinfo=timezone.utc)
+
+
+def _naive_ts() -> datetime:
+    return datetime(2026, 2, 7, 9, 30, 15)
+
+
+def _assert_utc(value: datetime) -> None:
+    assert value.tzinfo == timezone.utc
 
 
 def test_project_mapper_round_trip():
@@ -94,6 +110,66 @@ def test_project_group_mapper_round_trip():
     updated = group.model_copy(update={"name": "Updated lab", "group_read_all": False})
     apply_project_group_to_model(row, updated)
     assert project_group_from_model(row) == updated
+
+
+def test_graph_batch_mappers_normalize_sqlite_naive_datetimes():
+    timestamp = _naive_ts()
+    expected = timestamp.replace(tzinfo=timezone.utc)
+    project_id = uuid4()
+    user_id = uuid4()
+
+    settings = settings_from_model(
+        GraphDraftBatchSettingsModel(
+            settings_id=str(uuid4()),
+            project_id=str(project_id),
+            enabled=True,
+            cadence_minutes=60,
+            run_at_local_time="06:00",
+            timezone_name="UTC",
+            next_run_at=timestamp,
+            created_at=timestamp,
+            updated_at=timestamp,
+            updated_by=str(user_id),
+        )
+    )
+    assert settings.next_run_at == expected
+    assert settings.created_at == expected
+    assert settings.updated_at == expected
+    _assert_utc(settings.next_run_at)
+    _assert_utc(settings.created_at)
+    _assert_utc(settings.updated_at)
+
+    run = run_from_model(
+        GraphDraftBatchRunModel(
+            run_id=str(uuid4()),
+            project_id=str(project_id),
+            trigger="manual",
+            status="skipped",
+            window_start=timestamp,
+            window_end=timestamp,
+            note_count=0,
+            batch_key="manual:test",
+            change_set_id=None,
+            summary="No staged notes.",
+            error_metadata={},
+            created_by=str(user_id),
+            created_by_user_id=str(user_id),
+            created_at=timestamp,
+            updated_at=timestamp,
+            started_at=timestamp,
+            finished_at=timestamp,
+        )
+    )
+    for value in (
+        run.window_start,
+        run.window_end,
+        run.created_at,
+        run.updated_at,
+        run.started_at,
+        run.finished_at,
+    ):
+        assert value == expected
+        _assert_utc(value)
 
 
 def test_project_mapper_pilot_preserves_compatibility_barrel():
