@@ -234,6 +234,37 @@ def _entity_origin_value(entity: object) -> EntityOrigin:
     return EntityOrigin(str(raw_origin or EntityOrigin.USER.value))
 
 
+# Keyed by domain class name so a foreign-key attribute (e.g. Visualization.analysis_id)
+# never resolves to the wrong resource; the (own-id attr, resource) must match the
+# entity's summary-node @id.
+_ORIGIN_ENTITY_RESOURCES = {
+    "Dataset": ("dataset_id", "datasets"),
+    "Analysis": ("analysis_id", "analyses"),
+    "Claim": ("claim_id", "claims"),
+    "Visualization": ("viz_id", "visualizations"),
+    "Question": ("question_id", "questions"),
+    "Note": ("note_id", "notes"),
+    "Goal": ("goal_id", "goals"),
+}
+
+
+def _entity_iri(base_url: str, entity: object) -> str | None:
+    """Resolve a domain entity to the same @id its summary node uses."""
+    spec = _ORIGIN_ENTITY_RESOURCES.get(type(entity).__name__)
+    if spec is None:
+        return None
+    attr, resource = spec
+    value = getattr(entity, attr, None)
+    if value is None:
+        return None
+    return _resource_iri(base_url, resource, value)
+
+
+def _before_revision_iri(entity_iri: str, change_set_id: object) -> str:
+    """IRI of the pre-revision (AI-drafted) state a USER_REVISED entity supersedes."""
+    return _synthetic_child_iri(entity_iri, "versions", "before", change_set_id)
+
+
 def _apply_origin_provenance(
     base_url: str,
     node: dict[str, object],
@@ -247,13 +278,10 @@ def _apply_origin_provenance(
     draft_activity = {"@id": _draft_activity_iri(base_url, change_set_id)}
     node["changeSet"] = draft_activity
     if origin == EntityOrigin.USER_REVISED:
+        # The companion "before" node is materialized by _origin_provenance_nodes so
+        # this reference resolves within @graph.
         node["prov:wasRevisionOf"] = {
-            "@id": _synthetic_child_iri(
-                str(node["@id"]),
-                "versions",
-                "before",
-                change_set_id,
-            )
+            "@id": _before_revision_iri(str(node["@id"]), change_set_id)
         }
         _append_id_ref(node, "prov:wasInformedBy", draft_activity)
     elif _node_type_includes(node, "prov:Activity"):
@@ -285,7 +313,22 @@ def _origin_provenance_nodes(base_url: str, entity: object) -> list[dict[str, ob
         agent_node["aiModel"] = entity.origin_model
     if getattr(entity, "origin_prompt_version", None):
         agent_node["aiPromptVersion"] = entity.origin_prompt_version
-    return [activity_node, agent_node]
+    nodes = [activity_node, agent_node]
+    if _entity_origin_value(entity) == EntityOrigin.USER_REVISED:
+        # Materialize the pre-revision state that the entity's prov:wasRevisionOf
+        # edge points at, so the JSON-LD graph is self-consistent.
+        entity_iri = _entity_iri(base_url, entity)
+        if entity_iri is not None:
+            nodes.append(
+                {
+                    "@id": _before_revision_iri(entity_iri, change_set_id),
+                    "@type": "prov:Entity",
+                    "origin": EntityOrigin.AI_SUGGESTED.value,
+                    "changeSet": {"@id": activity_iri},
+                    "prov:wasGeneratedBy": {"@id": activity_iri},
+                }
+            )
+    return nodes
 
 
 def _uuid_or_none(value: str) -> UUID | None:

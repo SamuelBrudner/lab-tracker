@@ -280,6 +280,27 @@ def _host_needs_public_base_url_warning(hostname: str) -> bool:
     return address.is_loopback or address.is_private or address.is_link_local
 
 
+def _client_is_local(request: Request) -> bool:
+    """True only when the real connection peer is a loopback/private/link-local IP.
+
+    The peer comes from the transport (request.client), not the client-controlled
+    Host header, so it cannot be spoofed by a remote attacker. Behind a reverse
+    proxy this is the proxy's address; configure trusted proxy headers (or use the
+    ``never``/``first_run`` disclosure modes) for hosted deployments.
+    """
+    client = request.client
+    if client is None:
+        return False
+    host = (client.host or "").strip().lower()
+    if not host:
+        return False
+    try:
+        address = ipaddress.ip_address(host)
+    except ValueError:
+        return False
+    return address.is_loopback or address.is_private or address.is_link_local
+
+
 def _bootstrap_token_for_status(
     request: Request,
     *,
@@ -307,8 +328,12 @@ def _bootstrap_token_for_status(
         )
     if mode == "first_run":
         return bootstrap_token, None
-    hostname = request.url.hostname or urlparse(str(request.base_url)).hostname or ""
-    if _host_needs_public_base_url_warning(hostname):
+    # Default ('local') mode: disclose only to a real local/private-network peer.
+    # The trust boundary MUST come from the connection peer (request.client.host),
+    # never the client-controlled Host header — otherwise a remote attacker on an
+    # internet-exposed deploy can send `Host: 127.0.0.1`, read the token, and seize
+    # the first admin.
+    if _client_is_local(request):
         return bootstrap_token, None
     return (
         None,

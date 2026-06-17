@@ -26,6 +26,23 @@ def _package_data_patterns(repo_root: Path) -> list[str]:
     return pyproject["tool"]["setuptools"]["package-data"]["lab_tracker"]
 
 
+def test_dockerfile_copy_sources_exist_in_build_context():
+    """Guard against COPYing a relocated/missing path (breaks docker + Render build)."""
+    repo_root = Path(__file__).resolve().parent.parent
+    dockerfile = repo_root / "Dockerfile"
+    missing: list[str] = []
+    for raw_line in dockerfile.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line.upper().startswith("COPY "):
+            continue
+        tokens = line.split()[1:]
+        if any(token.startswith("--from") for token in tokens):
+            continue  # multi-stage copy: source is a build stage, not the context
+        sources = [token for token in tokens[:-1] if not token.startswith("--")]
+        missing.extend(source for source in sources if not (repo_root / source).exists())
+    assert not missing, f"Dockerfile COPYs missing build-context paths: {missing}"
+
+
 def test_frontend_package_data_covers_all_bundle_files():
     repo_root = Path(__file__).resolve().parent.parent
     package_root = repo_root / "src" / "lab_tracker"

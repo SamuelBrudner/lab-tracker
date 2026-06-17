@@ -4,10 +4,12 @@ from datetime import datetime, timedelta, timezone
 
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
+from starlette.requests import Request
 
 from lab_tracker.app import create_app
 from lab_tracker.auth import Role
 from lab_tracker.db import Base
+from lab_tracker.routes.auth import _bootstrap_token_for_status
 
 
 def _bootstrap_database(monkeypatch, tmp_path) -> None:
@@ -201,7 +203,13 @@ def test_register_non_viewer_requires_admin_token(monkeypatch, tmp_path):
 def test_bootstrap_admin_allows_first_admin_registration(monkeypatch, tmp_path):
     _bootstrap_database(monkeypatch, tmp_path)
     monkeypatch.setenv("LAB_TRACKER_BOOTSTRAP_ADMIN_TOKEN", "bootstrap-secret")
-    with TestClient(create_app(), base_url="http://127.0.0.1") as client:
+    # Local-mode disclosure is gated on the real connection peer, so present a
+    # loopback peer; the peer-based gating itself is unit-tested below.
+    with TestClient(
+        create_app(),
+        base_url="http://127.0.0.1",
+        client=("127.0.0.1", 50000),
+    ) as client:
         status_response = client.get("/auth/bootstrap-status")
         assert status_response.status_code == 200
         status_payload = status_response.json()["data"]
@@ -256,17 +264,58 @@ def test_bootstrap_admin_allows_first_admin_registration(monkeypatch, tmp_path):
         assert repeat_bootstrap.json()["error"]["code"] == "auth_error"
 
 
-def test_bootstrap_status_hides_token_on_public_hosts(monkeypatch, tmp_path):
+def _bootstrap_status_request(app, *, client, host="lab.example.org") -> Request:
+    """Build a minimal request with a chosen connection peer and Host header.
+
+    The TestClient transport cannot set a non-loopback peer, so the peer-based
+    trust boundary is exercised directly against the helper.
+    """
+    return Request(
+        {
+            "type": "http",
+            "app": app,
+            "client": client,
+            "headers": [(b"host", host.encode())],
+        }
+    )
+
+
+def test_bootstrap_token_disclosed_to_local_peer(monkeypatch, tmp_path):
     _bootstrap_database(monkeypatch, tmp_path)
     monkeypatch.setenv("LAB_TRACKER_BOOTSTRAP_ADMIN_TOKEN", "bootstrap-secret")
-    with TestClient(create_app(), base_url="https://lab.example.org") as client:
-        status_response = client.get("/auth/bootstrap-status")
-        assert status_response.status_code == 200
-        status_payload = status_response.json()["data"]
-        assert status_payload["bootstrap_admin_configured"] is True
-        assert status_payload["first_admin_available"] is True
-        assert status_payload["bootstrap_token"] is None
-        assert "local, LAN, or VPN" in status_payload["bootstrap_token_warning"]
+    app = create_app()
+    request = _bootstrap_status_request(app, client=("127.0.0.1", 50000))
+    token, warning = _bootstrap_token_for_status(
+        request, bootstrap_token="bootstrap-secret", has_users=False
+    )
+    assert token == "bootstrap-secret"
+    assert warning is None
+
+
+def test_bootstrap_token_hidden_from_remote_peer_despite_spoofed_host(monkeypatch, tmp_path):
+    """A remote peer cannot read the token by spoofing a loopback Host header."""
+    _bootstrap_database(monkeypatch, tmp_path)
+    monkeypatch.setenv("LAB_TRACKER_BOOTSTRAP_ADMIN_TOKEN", "bootstrap-secret")
+    app = create_app()
+    request = _bootstrap_status_request(
+        app, client=("8.8.8.8", 50000), host="127.0.0.1"
+    )
+    token, warning = _bootstrap_token_for_status(
+        request, bootstrap_token="bootstrap-secret", has_users=False
+    )
+    assert token is None
+    assert "local, LAN, or VPN" in warning
+
+
+def test_bootstrap_token_hidden_when_peer_unknown(monkeypatch, tmp_path):
+    _bootstrap_database(monkeypatch, tmp_path)
+    monkeypatch.setenv("LAB_TRACKER_BOOTSTRAP_ADMIN_TOKEN", "bootstrap-secret")
+    app = create_app()
+    request = _bootstrap_status_request(app, client=None)
+    token, _warning = _bootstrap_token_for_status(
+        request, bootstrap_token="bootstrap-secret", has_users=False
+    )
+    assert token is None
 
 
 def test_bootstrap_status_can_opt_into_public_first_run_disclosure(

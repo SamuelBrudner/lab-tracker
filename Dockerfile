@@ -11,7 +11,6 @@ RUN apt-get update \
 
 COPY pyproject.toml README.md alembic.ini /app/
 COPY src /app/src
-COPY alembic /app/alembic
 
 RUN pip install --no-cache-dir uv \
     && uv pip install --system .

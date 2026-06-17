@@ -264,9 +264,12 @@ def test_analysis_provenance_distinguishes_ai_suggested_and_user_revised_nodes()
     assert viz_node["origin"] == "user_revised"
     assert viz_node["changeSet"] == {"@id": draft_iri}
     assert viz_node["prov:wasInformedBy"] == {"@id": draft_iri}
-    assert viz_node["prov:wasRevisionOf"] == {
-        "@id": (f"http://example.test/visualizations/{viz_id}/versions/before/{change_set_id}")
-    }
+    before_iri = f"http://example.test/visualizations/{viz_id}/versions/before/{change_set_id}"
+    assert viz_node["prov:wasRevisionOf"] == {"@id": before_iri}
+    # The wasRevisionOf target must resolve to a node present in @graph (raises if absent).
+    before_node = _node_by_id(document, before_iri)
+    assert before_node["origin"] == "ai_suggested"
+    assert before_node["changeSet"] == {"@id": draft_iri}
     assert draft_node["prov:wasAssociatedWith"] == {"@id": agent_iri}
     assert _node_type_includes(agent_node, "prov:SoftwareAgent")
     assert agent_node["aiProvider"] == "openai"
