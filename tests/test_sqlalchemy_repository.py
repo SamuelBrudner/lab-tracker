@@ -555,6 +555,7 @@ def test_query_notes_filters_by_target(db_session):
         updated_at=_ts(),
     )
     dataset_target = uuid4()
+    extra_dataset_target = uuid4()
     other_target = uuid4()
     repo.projects.save(project)
     db_session.flush()
@@ -563,7 +564,10 @@ def test_query_notes_filters_by_target(db_session):
             note_id=uuid4(),
             project_id=project.project_id,
             raw_content="dataset note",
-            targets=[EntityRef(entity_type=EntityType.DATASET, entity_id=dataset_target)],
+            targets=[
+                EntityRef(entity_type=EntityType.DATASET, entity_id=dataset_target),
+                EntityRef(entity_type=EntityType.DATASET, entity_id=extra_dataset_target),
+            ],
             status=NoteStatus.STAGED,
             created_by=str(other_user_id),
             created_by_user_id=owner_user_id,
@@ -596,6 +600,26 @@ def test_query_notes_filters_by_target(db_session):
 
     assert total == 1
     assert [note.raw_content for note in notes] == ["dataset note"]
+
+    target_type_notes, target_type_total = repo.query_notes(
+        project_id=project.project_id,
+        target_entity_type=EntityType.DATASET.value,
+        limit=None,
+        offset=0,
+    )
+
+    assert target_type_total == 2
+    assert [note.raw_content for note in target_type_notes] == ["dataset note", "other note"]
+
+    target_id_notes, target_id_total = repo.query_notes(
+        project_id=project.project_id,
+        target_entity_id=extra_dataset_target,
+        limit=None,
+        offset=0,
+    )
+
+    assert target_id_total == 1
+    assert [note.raw_content for note in target_id_notes] == ["dataset note"]
 
     created_notes, created_total = repo.query_notes(
         project_id=project.project_id,

@@ -626,6 +626,16 @@ def test_evidence_authoring_routes_create_and_filter_graph_records(
         },
         headers=headers,
     )
+    claim_type_notes = client.get(
+        "/notes",
+        params={"project_id": project_id, "target_entity_type": "claim"},
+        headers=headers,
+    )
+    visualization_id_notes = client.get(
+        "/notes",
+        params={"project_id": project_id, "target_entity_id": visualization_id},
+        headers=headers,
+    )
 
     assert dataset_id in _ids(datasets.json()["data"], "dataset_id")
     assert analysis_id in _ids(analyses.json()["data"], "analysis_id")
@@ -637,6 +647,12 @@ def test_evidence_authoring_routes_create_and_filter_graph_records(
         {"entity_type": "claim", "entity_id": supported_claim_id}
     ]
     assert visualization_notes.json()["data"][0]["targets"] == [
+        {"entity_type": "visualization", "entity_id": visualization_id}
+    ]
+    assert claim_type_notes.json()["data"][0]["targets"] == [
+        {"entity_type": "claim", "entity_id": supported_claim_id}
+    ]
+    assert visualization_id_notes.json()["data"][0]["targets"] == [
         {"entity_type": "visualization", "entity_id": visualization_id}
     ]
 

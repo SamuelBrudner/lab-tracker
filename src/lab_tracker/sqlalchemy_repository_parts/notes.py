@@ -134,17 +134,24 @@ class SQLAlchemyNoteRepository(EntityRepository[Note]):
             )
             stmt = stmt.where(search_clause)
             count_stmt = count_stmt.where(search_clause)
-        if target_entity_type is not None and target_entity_id is not None:
-            stmt = stmt.join(NoteTargetModel, NoteTargetModel.note_id == NoteModel.note_id).where(
-                NoteTargetModel.entity_type == target_entity_type,
-                NoteTargetModel.entity_id == str(target_entity_id),
+        if target_entity_type is not None or target_entity_id is not None:
+            target_conditions = []
+            if target_entity_type is not None:
+                target_conditions.append(NoteTargetModel.entity_type == target_entity_type)
+            if target_entity_id is not None:
+                target_conditions.append(NoteTargetModel.entity_id == str(target_entity_id))
+            stmt = (
+                stmt.join(NoteTargetModel, NoteTargetModel.note_id == NoteModel.note_id)
+                .where(*target_conditions)
+                .distinct()
             )
-            count_stmt = count_stmt.join(
-                NoteTargetModel,
-                NoteTargetModel.note_id == NoteModel.note_id,
-            ).where(
-                NoteTargetModel.entity_type == target_entity_type,
-                NoteTargetModel.entity_id == str(target_entity_id),
+            count_stmt = (
+                count_stmt.join(
+                    NoteTargetModel,
+                    NoteTargetModel.note_id == NoteModel.note_id,
+                )
+                .where(*target_conditions)
+                .distinct()
             )
         if recent_first:
             stmt = stmt.order_by(NoteModel.created_at.desc(), NoteModel.note_id.desc())
