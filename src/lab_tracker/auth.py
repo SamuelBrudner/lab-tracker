@@ -553,6 +553,7 @@ class InvitationTokenService:
 DEVICE_TOKEN_PREFIX = "ldev_"
 ENROLLMENT_OFFER_PREFIX = "lpair_"
 INVITATION_TOKEN_PREFIX = "linv_"
+DEVICE_LAST_USED_UPDATE_INTERVAL = timedelta(minutes=5)
 
 
 def device_principal_can_access(method: str, path: str) -> bool:
@@ -754,8 +755,14 @@ class DeviceAuthService:
             )
             if row is None or row.revoked_at is not None:
                 return None
-            row.last_used_at = utc_now()
-            session.commit()
+            now = utc_now()
+            last_used_at = _as_utc(row.last_used_at) if row.last_used_at is not None else None
+            if (
+                last_used_at is None
+                or now - last_used_at >= DEVICE_LAST_USED_UPDATE_INTERVAL
+            ):
+                row.last_used_at = now
+                session.commit()
             return DevicePrincipal(
                 user_id=UUID(row.user_id),
                 device_token_id=UUID(row.device_token_id),

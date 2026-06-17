@@ -106,7 +106,7 @@ def build_visualizations_router(api: LabTrackerAPI) -> APIRouter:
         response_model=Envelope[Visualization],
         status_code=http_status.HTTP_201_CREATED,
     )
-    async def upload_visualization_file(
+    def upload_visualization_file(
         viz_id: UUID,
         request: Request,
         file: Annotated[UploadFile, File()],

@@ -58,7 +58,7 @@ def build_dataset_files_router(api: LabTrackerAPI) -> APIRouter:
         response_model=Envelope[DatasetFile],
         status_code=http_status.HTTP_201_CREATED,
     )
-    async def upload_dataset_file(
+    def upload_dataset_file(
         dataset_id: UUID,
         request: Request,
         file: Annotated[UploadFile, File()],

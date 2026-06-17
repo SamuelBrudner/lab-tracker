@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from fastapi import FastAPI, Request
+from starlette.concurrency import run_in_threadpool
 from starlette.responses import JSONResponse
 
 from lab_tracker.api import LabTrackerAPI
@@ -75,14 +76,20 @@ def configure_auth_middleware(app: FastAPI) -> None:
         try:
             token = extract_bearer_token(request.headers.get("Authorization"))
             if token.startswith(DEVICE_TOKEN_PREFIX):
-                principal = app.state.device_auth_service.verify_device_token(token)
+                principal = await run_in_threadpool(
+                    app.state.device_auth_service.verify_device_token,
+                    token,
+                )
                 if principal is None:
                     raise AuthError("Invalid device token.")
                 if not device_principal_can_access(request.method, request.url.path):
                     return _device_forbidden_response(
                         "This action is not permitted for paired devices."
                     )
-                user = app.state.auth_service.get_user_by_id(principal.user_id)
+                user = await run_in_threadpool(
+                    app.state.auth_service.get_user_by_id,
+                    principal.user_id,
+                )
                 if user is None:
                     raise AuthError("Invalid device token.")
                 request.state.auth_context = AuthContext(
@@ -92,8 +99,14 @@ def configure_auth_middleware(app: FastAPI) -> None:
                     device_token_id=principal.device_token_id,
                 )
             else:
-                claims = app.state.token_service.verify_access_token(token)
-                user = app.state.auth_service.get_user_by_id(claims.user_id)
+                claims = await run_in_threadpool(
+                    app.state.token_service.verify_access_token,
+                    token,
+                )
+                user = await run_in_threadpool(
+                    app.state.auth_service.get_user_by_id,
+                    claims.user_id,
+                )
                 if user is None:
                     raise AuthError("Invalid token.")
                 request.state.auth_context = AuthContext(user_id=user.user_id, role=user.role)
@@ -113,7 +126,24 @@ def configure_database_session_middleware(
         request.state.db_session = db_session
         repository = SQLAlchemyLabTrackerRepository(db_session)
         request.state.lab_tracker_repository = repository
-        with api.request_scope(repository, close=db_session.close) as request_scope:
+        request_scope = api.request_scope(repository, close=db_session.close)
+        request_scope.__enter__()
+        try:
             request.state.lab_tracker_api = request_scope.api
             response = await call_next(request)
-            return request_scope.complete_response(response)
+        except BaseException as exc:
+            await run_in_threadpool(
+                request_scope.__exit__,
+                type(exc),
+                exc,
+                exc.__traceback__,
+            )
+            raise
+        return await run_in_threadpool(_complete_request_scope_response, request_scope, response)
+
+
+def _complete_request_scope_response(request_scope, response):
+    try:
+        return request_scope.complete_response(response)
+    finally:
+        request_scope.__exit__(None, None, None)

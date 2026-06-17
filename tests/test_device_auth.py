@@ -16,9 +16,10 @@ from lab_tracker.auth import (
     AuthError,
     DeviceAuthService,
     Role,
+    _as_utc,
     utc_now,
 )
-from lab_tracker.db_models import DeviceEnrollmentModel, UserModel
+from lab_tracker.db_models import DeviceEnrollmentModel, DeviceTokenModel, UserModel
 from lab_tracker.errors import NotFoundError, ValidationError
 
 
@@ -184,6 +185,29 @@ def test_verify_device_token_returns_principal_for_valid_token(session_factory):
     devices_after = service.list_devices(uuid_from(user_id))
     matching = next(d for d in devices_after if d.device_token_id == principal.device_token_id)
     assert matching.last_used_at is not None
+
+
+def test_verify_device_token_throttles_recent_last_used_writes(session_factory):
+    service = DeviceAuthService(session_factory=session_factory)
+    user_id = _create_user(session_factory)
+    issued = service.consume_enrollment(
+        service.create_enrollment(uuid_from(user_id)).offer_token,
+        label="iPhone",
+    )
+    recent_last_used_at = utc_now() - timedelta(minutes=1)
+    with session_factory() as session:
+        row = session.get(DeviceTokenModel, str(issued.device_token.device_token_id))
+        assert row is not None
+        row.last_used_at = recent_last_used_at
+        session.commit()
+
+    principal = service.verify_device_token(issued.secret)
+
+    assert principal is not None
+    with session_factory() as session:
+        row = session.get(DeviceTokenModel, str(issued.device_token.device_token_id))
+        assert row is not None
+        assert _as_utc(row.last_used_at) == recent_last_used_at
 
 
 def test_verify_device_token_rejects_revoked_unknown_and_malformed(session_factory):

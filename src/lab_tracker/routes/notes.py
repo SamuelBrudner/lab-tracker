@@ -77,7 +77,7 @@ def build_notes_router(api: LabTrackerAPI) -> APIRouter:
         response_model=Envelope[Note],
         status_code=http_status.HTTP_201_CREATED,
     )
-    async def upload_note_file(
+    def upload_note_file(
         request: Request,
         file: Annotated[UploadFile, File()],
         project_id: Annotated[UUID, Form()],
@@ -118,7 +118,7 @@ def build_notes_router(api: LabTrackerAPI) -> APIRouter:
         response_model=Envelope[Note],
         status_code=http_status.HTTP_202_ACCEPTED,
     )
-    async def quick_capture_note(
+    def quick_capture_note(
         request: Request,
         file: Annotated[UploadFile, File()],
         project_id: Annotated[UUID, Form()],
