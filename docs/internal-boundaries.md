@@ -32,11 +32,18 @@ The SQLAlchemy repository is now split into focused modules under
 [`src/lab_tracker/sqlalchemy_repository_parts`](../src/lab_tracker/sqlalchemy_repository_parts).
 
 - `common.py`: shared pagination/count helpers and the generic model repository
-- `core.py`: projects and questions
+- `core.py`: projects, project groups, project memberships, questions, and
+  question refactors
 - `datasets.py`: datasets and attached files
 - `notes.py`: notes and note child rows
 - `sessions.py`: sessions and acquisition outputs
 - `analyses.py`: analyses, claims, and visualizations
+- `goals.py`: goals and goal links
+- `graph_drafts.py`: note-scoped graph change sets and operations
+- `graph_batches.py`: graph-draft batch settings, runs, and batch summaries
+- `ownership.py`: ownership reassignment and record export events
+- `supervision.py`: supervision edges
+- `versions.py`: entity version records
 - `repository.py`: the top-level `SQLAlchemyLabTrackerRepository` query surface
 
 [`src/lab_tracker/sqlalchemy_repository.py`](../src/lab_tracker/sqlalchemy_repository.py) remains as the import-stable compatibility barrel.
@@ -83,9 +90,13 @@ Mixed-resource route modules have been replaced with one-resource routers under
 Examples:
 
 - `projects.py`, `questions.py`
+- `groups.py`, `ownership.py`, `supervision.py`, `record_exports.py`,
+  `portfolio.py`
 - `datasets.py`, `dataset_files.py`
 - `notes.py`, `search.py`
-- `sessions.py`, `analyses.py`, `claims.py`, `visualizations.py`
+- `graph_drafts.py`, `graph_batches.py`, `project_graph.py`, `provenance.py`
+- `sessions.py`, `analyses.py`, `claims.py`, `goals.py`, `visualizations.py`
+- `auth.py`, `device_auth.py`, `assistant.py`, `schema.py`
 
 Routes keep their existing URLs, envelopes, pagination, and auth requirements.
 `search.py` is the retained query surface and stays on the simple substring
@@ -99,7 +110,18 @@ Workspace state is no longer concentrated in one hook.
 
 - [`useProjectWorkspaceData.js`](../src/lab_tracker/frontend_src/hooks/useProjectWorkspaceData.js) owns project/resource loading and selection
 - [`useProjectWorkspaceForms.js`](../src/lab_tracker/frontend_src/hooks/useProjectWorkspaceForms.js) owns form state
-- [`useProjectWorkspaceActions.js`](../src/lab_tracker/frontend_src/hooks/useProjectWorkspaceActions.js) owns mutations and refresh behavior
+- [`useProjectActions.js`](../src/lab_tracker/frontend_src/hooks/useProjectActions.js),
+  [`useQuestionActions.js`](../src/lab_tracker/frontend_src/hooks/useQuestionActions.js),
+  [`useNoteActions.js`](../src/lab_tracker/frontend_src/hooks/useNoteActions.js),
+  and [`useSessionActions.js`](../src/lab_tracker/frontend_src/hooks/useSessionActions.js)
+  own the workspace mutations for their resources
+- [`useProjectNoteData.js`](../src/lab_tracker/frontend_src/hooks/useProjectNoteData.js)
+  and [`useProjectSessionData.js`](../src/lab_tracker/frontend_src/hooks/useProjectSessionData.js)
+  own focused project-scoped note and session loading
+- [`useDatasetWorkflow.js`](../src/lab_tracker/frontend_src/hooks/useDatasetWorkflow.js)
+  and [`useAnalysisWorkflow.js`](../src/lab_tracker/frontend_src/hooks/useAnalysisWorkflow.js)
+  own the dataset, analysis, claim, visualization, and related refresh flows
+- [`useApiResource.js`](../src/lab_tracker/frontend_src/hooks/useApiResource.js) owns detail-page resource loading for single-record routes
 
 Protected browser downloads must go through
 [`downloadProtectedResource(...)`](../src/lab_tracker/frontend_src/shared/api.js),

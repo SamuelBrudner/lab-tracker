@@ -26,15 +26,31 @@ research record:
 - Manual note capture, including text notes, multipart raw file upload, raw file
   download, raw voice notes with editable transcripts, and attaching notes to
   retained entities.
-- On-demand multimodal note-to-graph draft review for uploaded image notes,
-  voice-note transcripts, and photo+voice bundles, with human
-  edit/accept/reject before commit through normal API validation.
+- Human-gated graph draft review for uploaded image notes, voice-note
+  transcripts, photo+voice bundles, and scheduled or user-triggered batches over
+  staged notes. Drafting may be note-scoped or batch-scoped, but every proposed
+  operation requires human edit/accept/reject before commit through normal API
+  validation.
+- Per-project graph-draft batch settings and run history for configured
+  cadence, run-now, and run-due drafting over staged notes.
+- Paired-device enrollment for phone capture, including one-time enrollment
+  URLs, device-token capture, and revocation.
+- Project graph views and exports for inspecting the retained question,
+  evidence, goal, analysis, claim, dataset, session, and visualization graph.
 - Sessions and acquisition outputs, including closing sessions and promoting
   eligible sessions into datasets.
 - Dataset staging and direct commit with provenance/manifest capture, without
   an approval gate.
 - Analysis, claim, and visualization records as explicit user-driven flows,
   including managed file storage for visualization assets.
+- Goals and goal links as explicit planning and evidence-spanning records
+  connected to retained graph entities.
+- PROV-O/JSON-LD provenance export, record export events, and external artifact
+  references that preserve semantic edges to outside tools without
+  reimplementing their workflows.
+- Read-only assistant and MCP decision-context endpoints over the retained
+  graph. Assistants may inspect context through these surfaces, but retained v1
+  does not delegate graph commits to autonomous agents.
 
 Anything not listed above is out of the retained v1 surface and should not
 shape the default runtime, supported docs, or simplified architecture.
@@ -52,9 +68,10 @@ supported product path:
 - OCR-based note transcription.
 - Automatic audio transcription on every upload. Voice transcription is an
   explicit note-scoped action for user-captured voice notes.
-- Automatic question extraction and extraction inbox workflows. The retained
-  image-to-graph draft action is explicitly on-demand and note-scoped; it is not
-  a standing extraction inbox.
+- Automatic question extraction and extraction inbox workflows. Retained graph
+  drafting includes note-scoped drafting and human-gated batch drafting over
+  user-captured staged notes; it is not a standing system-selected extraction
+  inbox, and nothing commits automatically.
 - Entity and tag suggestion workflows derived from notes or OCR output.
 - Semantic/vector search, embedding providers, and backend-specific relevance
   ranking.

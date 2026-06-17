@@ -51,18 +51,37 @@ Tracker API.
   first-run browser display on public deployments; `never` always hides it. The
   token is never returned after any user exists.
 
-### OpenAI (multimodal drafts and transcription)
+### Graph draft providers and transcription
 
-- `LAB_TRACKER_OPENAI_API_KEY`: required for graph draft generation and
-  voice-note transcription
+- `LAB_TRACKER_GRAPH_DRAFT_PROVIDER`: active drafting provider (default:
+  `openai`; accepted values are `openai`, `anthropic`/`claude`, and
+  `google`/`gemini`)
+- `LAB_TRACKER_OPENAI_API_KEY`: required when the provider is `openai` and for
+  OpenAI voice-note transcription
 - `LAB_TRACKER_OPENAI_MODEL`: OpenAI model for graph drafts (default:
   `gpt-4o-mini`; set another compatible model to override)
 - `LAB_TRACKER_OPENAI_TRANSCRIPTION_MODEL`: OpenAI model for voice-note
   transcription (default: `gpt-4o-mini-transcribe`)
 - `LAB_TRACKER_OPENAI_BASE_URL`: OpenAI API base URL (default:
   `https://api.openai.com/v1`)
-- `LAB_TRACKER_OPENAI_TIMEOUT_SECONDS`: graph draft API timeout in seconds
-  (default: `60`)
+- `LAB_TRACKER_OPENAI_TIMEOUT_SECONDS`: OpenAI graph draft API timeout in
+  seconds (default: `60`)
+- `LAB_TRACKER_ANTHROPIC_API_KEY`: required when the provider is `anthropic` or
+  `claude`
+- `LAB_TRACKER_ANTHROPIC_MODEL`: Anthropic model for graph drafts (default:
+  `claude-3-5-sonnet-latest`)
+- `LAB_TRACKER_ANTHROPIC_BASE_URL`: Anthropic API base URL (default:
+  `https://api.anthropic.com/v1`)
+- `LAB_TRACKER_ANTHROPIC_TIMEOUT_SECONDS`: Anthropic graph draft API timeout in
+  seconds (default: `60`)
+- `LAB_TRACKER_GOOGLE_API_KEY`: required when the provider is `google` or
+  `gemini`; also required for Google voice-note transcription
+- `LAB_TRACKER_GOOGLE_MODEL`: Google Gemini model for graph drafts and
+  transcription (default: `gemini-2.5-flash`)
+- `LAB_TRACKER_GOOGLE_BASE_URL`: Google Generative Language API base URL
+  (default: `https://generativelanguage.googleapis.com/v1beta`)
+- `LAB_TRACKER_GOOGLE_TIMEOUT_SECONDS`: Google graph draft API timeout in
+  seconds (default: `60`)
 
 ## Authentication behavior
 
@@ -79,8 +98,9 @@ configured.
 
 ## Multimodal graph draft review
 
-Multimodal draft generation and voice-note transcription require
-`LAB_TRACKER_OPENAI_API_KEY`. To try the local image review loop:
+Multimodal draft generation defaults to OpenAI and requires
+`LAB_TRACKER_OPENAI_API_KEY` unless `LAB_TRACKER_GRAPH_DRAFT_PROVIDER` selects
+another provider. To try the local image review loop with the default provider:
 
 ```powershell
 $env:LAB_TRACKER_OPENAI_API_KEY = "<your OpenAI API key>"
@@ -109,15 +129,15 @@ when explicitly requested and records `draft_mode=image_only`.
 
 ### Provider, model, and residency
 
-The configured OpenAI-compatible provider receives the uploaded image bytes when
-present, editable transcript text when present, optional user hint, graph
-context packet, and strict operation schema. Voice transcription uses the
-configured transcription model before drafting. Configure these routes with
-`LAB_TRACKER_OPENAI_API_KEY`, `LAB_TRACKER_OPENAI_MODEL`,
-`LAB_TRACKER_OPENAI_TRANSCRIPTION_MODEL`, and `LAB_TRACKER_OPENAI_BASE_URL`.
-Third-party logging, retention, and residency depend on the configured provider
-and base URL. For institutional deployments, point `LAB_TRACKER_OPENAI_BASE_URL`
-at an approved gateway or model endpoint.
+The configured graph-draft provider receives uploaded image bytes when present,
+editable transcript text when present, optional user hint, graph context packet,
+and strict operation schema. OpenAI and Google clients can transcribe voice
+notes; Anthropic drafting does not provide native audio transcription in this
+runtime. Configure provider, model, API key, base URL, and timeout with the
+provider-specific variables above. Third-party logging, retention, and
+residency depend on the selected provider and base URL. For institutional
+deployments, point the active provider's base URL at an approved gateway or
+model endpoint.
 
 ### Auth, validation, and committed records
 

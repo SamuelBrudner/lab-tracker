@@ -51,6 +51,13 @@ This part is for the lab member or IT contact comfortable installing software. T
 
 - **Run it locally:** `lab-tracker serve` runs migrations, opens http://127.0.0.1:8000/app, and starts the server. There are double-click launchers for macOS and Windows in [`launchers/`](launchers/).
 
+Manual server runs should apply migrations first with
+`uv run alembic upgrade head` before starting
+`uv run uvicorn lab_tracker.asgi:app --reload`. Graph draft review defaults to
+OpenAI, but `LAB_TRACKER_GRAPH_DRAFT_PROVIDER` can select Anthropic or Google;
+voice transcription requires a provider that supports audio. See the
+configuration reference for the exact environment variables.
+
 Full install, configuration, and deployment instructions live in the docs below — start with the [setup guide](docs/setup.md).
 
 ## What ships today
