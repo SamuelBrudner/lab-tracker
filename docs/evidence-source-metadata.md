@@ -1,6 +1,6 @@
 # Evidence Source Metadata
 
-Lab Tracker treats external inboxes as evidence sources that create staged notes.
+Lab Tracker treats external evidence sources as inputs that create staged notes.
 Adapters may harvest from synced folders, Google Drive desktop folders, Dropbox,
 OneDrive, CI outputs, git checkouts, or other tools, but they should only create
 raw evidence notes. They must not create canonical graph records or commit graph
@@ -34,5 +34,11 @@ and the absolute `file://` URI as `evidence_source_uri`. It skips an item when a
 note already exists with the same project, source provider, external ID, and
 content hash. Changed file contents therefore create a new staged evidence note.
 
-Imported notes are staged by default so scheduled graph-draft batches can propose
-reviewable graph changes later. Human review remains the commit boundary.
+`lt import-folder` imports files as staged evidence notes that record where each
+file came from. Imported notes never become canonical graph records on import,
+and graph changes are never committed automatically — humans review the staged
+notes, and human review remains the commit boundary.
+
+> Deferred / future, not part of v1: automated batch drafting that proposes
+> reviewable graph changes from staged notes could be layered on later, but it is
+> not shipping today.
