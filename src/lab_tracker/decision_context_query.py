@@ -25,7 +25,15 @@ class RepositoryDecisionContextReader:
             return True
         if project_id is None:
             return False
-        return UUID(str(project_id)) in self._accessible_project_ids
+        try:
+            return UUID(str(project_id)) in self._accessible_project_ids
+        except ValueError:
+            return False
+
+    def _project_filter(self, project_id: str | None) -> set[UUID] | None:
+        if project_id is not None:
+            return None
+        return self._accessible_project_ids
 
     def list_projects(
         self,
@@ -35,17 +43,51 @@ class RepositoryDecisionContextReader:
         offset: int = 0,
     ) -> JsonObject:
         items, total = self._repository.query_projects(
+            project_ids=self._accessible_project_ids,
             status=status,
-            limit=None if self._accessible_project_ids is not None else limit,
-            offset=0 if self._accessible_project_ids is not None else offset,
+            limit=limit,
+            offset=offset,
         )
-        if self._accessible_project_ids is not None:
-            items = [
-                item for item in items if item.project_id in self._accessible_project_ids
-            ]
-            total = len(items)
-            items = items[offset : offset + limit] if limit is not None else items[offset:]
         return _list_payload(items, total, limit, offset)
+
+    def get_project(self, project_id: str) -> JsonObject | None:
+        if not self._project_allowed(project_id):
+            return None
+        project = self._repository.projects.get(UUID(str(project_id)))
+        return _entity_to_json(project) if project is not None else None
+
+    def get_question(self, question_id: str) -> JsonObject | None:
+        question = self._repository.questions.get(UUID(str(question_id)))
+        return self._project_entity_to_json(question)
+
+    def get_dataset(self, dataset_id: str) -> JsonObject | None:
+        dataset = self._repository.datasets.get(UUID(str(dataset_id)))
+        return self._project_entity_to_json(dataset)
+
+    def get_analysis(self, analysis_id: str) -> JsonObject | None:
+        analysis = self._repository.analyses.get(UUID(str(analysis_id)))
+        return self._project_entity_to_json(analysis)
+
+    def get_claim(self, claim_id: str) -> JsonObject | None:
+        claim = self._repository.claims.get(UUID(str(claim_id)))
+        return self._project_entity_to_json(claim)
+
+    def get_visualization(self, visualization_id: str) -> JsonObject | None:
+        visualization = self._repository.visualizations.get(UUID(str(visualization_id)))
+        if visualization is None:
+            return None
+        analysis = self._repository.analyses.get(visualization.analysis_id)
+        if analysis is None or not self._project_allowed(str(analysis.project_id)):
+            return None
+        return _entity_to_json(visualization)
+
+    def _project_entity_to_json(self, entity: object | None) -> JsonObject | None:
+        if entity is None:
+            return None
+        project_id = getattr(entity, "project_id", None)
+        if not self._project_allowed(str(project_id)):
+            return None
+        return _entity_to_json(entity)
 
     def list_questions(
         self,
@@ -59,11 +101,13 @@ class RepositoryDecisionContextReader:
         ancestor_question_id: str | None = None,
         limit: int = 50,
         offset: int = 0,
+        recent_first: bool = False,
     ) -> JsonObject:
-        if not self._project_allowed(project_id):
+        if project_id is not None and not self._project_allowed(project_id):
             return _list_payload([], 0, limit, offset)
         items, total = self._repository.query_questions(
             project_id=_uuid_or_none(project_id),
+            project_ids=self._project_filter(project_id),
             status=status,
             question_type=question_type,
             search=search,
@@ -72,6 +116,7 @@ class RepositoryDecisionContextReader:
             ancestor_question_id=_uuid_or_none(ancestor_question_id),
             limit=limit,
             offset=offset,
+            recent_first=recent_first,
         )
         return _list_payload(items, total, limit, offset)
 
@@ -85,17 +130,20 @@ class RepositoryDecisionContextReader:
         target_entity_id: str | None = None,
         limit: int = 50,
         offset: int = 0,
+        recent_first: bool = False,
     ) -> JsonObject:
-        if not self._project_allowed(project_id):
+        if project_id is not None and not self._project_allowed(project_id):
             return _list_payload([], 0, limit, offset)
         items, total = self._repository.query_notes(
             project_id=_uuid_or_none(project_id),
+            project_ids=self._project_filter(project_id),
             status=status,
             created_by=created_by,
             target_entity_type=target_entity_type,
             target_entity_id=_uuid_or_none(target_entity_id),
             limit=limit,
             offset=offset,
+            recent_first=recent_first,
         )
         return _list_payload(items, total, limit, offset)
 
@@ -113,46 +161,20 @@ class RepositoryDecisionContextReader:
             for item in (include.split(",") if include else ["questions", "notes"])
             if item.strip()
         }
-        resolved_project_id = _uuid_or_none(project_id)
         if project_id is not None and not self._project_allowed(project_id):
             return {
                 "data": {"questions": [], "notes": []},
                 "meta": {"questions_count": 0, "notes_count": 0},
             }
-        if project_id is None and self._accessible_project_ids is not None:
-            questions: list[object] = []
-            notes: list[object] = []
-            for scoped_project_id in sorted(self._accessible_project_ids):
-                if not include_set or "questions" in include_set:
-                    questions.extend(
-                        self._repository.query_questions(
-                            project_id=scoped_project_id,
-                            search=query,
-                            limit=limit,
-                            offset=0,
-                        )[0]
-                    )
-                if not include_set or "notes" in include_set:
-                    notes.extend(
-                        self._repository.query_notes(
-                            project_id=scoped_project_id,
-                            search=query,
-                            limit=limit,
-                            offset=0,
-                        )[0]
-                    )
-            questions = questions[offset : offset + limit]
-            notes = notes[offset : offset + limit]
-            return {
-                "data": {
-                    "questions": [_entity_to_json(item) for item in questions],
-                    "notes": [_entity_to_json(item) for item in notes],
-                },
-                "meta": {"questions_count": len(questions), "notes_count": len(notes)},
-            }
+        project_ids = (
+            {UUID(str(project_id))}
+            if project_id is not None
+            else self._accessible_project_ids
+        )
         questions = (
             self._repository.query_questions(
-                project_id=resolved_project_id,
+                project_id=None,
+                project_ids=project_ids,
                 search=query,
                 limit=limit,
                 offset=offset,
@@ -162,7 +184,8 @@ class RepositoryDecisionContextReader:
         )
         notes = (
             self._repository.query_notes(
-                project_id=resolved_project_id,
+                project_id=None,
+                project_ids=project_ids,
                 search=query,
                 limit=limit,
                 offset=offset,
@@ -186,15 +209,18 @@ class RepositoryDecisionContextReader:
         session_type: str | None = None,
         limit: int = 50,
         offset: int = 0,
+        recent_first: bool = False,
     ) -> JsonObject:
-        if not self._project_allowed(project_id):
+        if project_id is not None and not self._project_allowed(project_id):
             return _list_payload([], 0, limit, offset)
         items, total = self._repository.query_sessions(
             project_id=_uuid_or_none(project_id),
+            project_ids=self._project_filter(project_id),
             status=status,
             session_type=session_type,
             limit=limit,
             offset=offset,
+            recent_first=recent_first,
         )
         return _list_payload(items, total, limit, offset)
 
@@ -206,15 +232,18 @@ class RepositoryDecisionContextReader:
         created_by: str | None = None,
         limit: int = 50,
         offset: int = 0,
+        recent_first: bool = False,
     ) -> JsonObject:
-        if not self._project_allowed(project_id):
+        if project_id is not None and not self._project_allowed(project_id):
             return _list_payload([], 0, limit, offset)
         items, total = self._repository.query_datasets(
             project_id=_uuid_or_none(project_id),
+            project_ids=self._project_filter(project_id),
             status=status,
             created_by=created_by,
             limit=limit,
             offset=offset,
+            recent_first=recent_first,
         )
         return _list_payload(items, total, limit, offset)
 
@@ -228,17 +257,20 @@ class RepositoryDecisionContextReader:
         created_by: str | None = None,
         limit: int = 50,
         offset: int = 0,
+        recent_first: bool = False,
     ) -> JsonObject:
-        if not self._project_allowed(project_id):
+        if project_id is not None and not self._project_allowed(project_id):
             return _list_payload([], 0, limit, offset)
         items, total = self._repository.query_analyses(
             project_id=_uuid_or_none(project_id),
+            project_ids=self._project_filter(project_id),
             dataset_id=_uuid_or_none(dataset_id),
             question_id=_uuid_or_none(question_id),
             status=status,
             created_by=created_by,
             limit=limit,
             offset=offset,
+            recent_first=recent_first,
         )
         return _list_payload(items, total, limit, offset)
 
@@ -252,17 +284,20 @@ class RepositoryDecisionContextReader:
         created_by: str | None = None,
         limit: int = 50,
         offset: int = 0,
+        recent_first: bool = False,
     ) -> JsonObject:
-        if not self._project_allowed(project_id):
+        if project_id is not None and not self._project_allowed(project_id):
             return _list_payload([], 0, limit, offset)
         items, total = self._repository.query_claims(
             project_id=_uuid_or_none(project_id),
+            project_ids=self._project_filter(project_id),
             status=status,
             dataset_id=_uuid_or_none(dataset_id),
             analysis_id=_uuid_or_none(analysis_id),
             created_by=created_by,
             limit=limit,
             offset=offset,
+            recent_first=recent_first,
         )
         return _list_payload(items, total, limit, offset)
 
@@ -274,15 +309,18 @@ class RepositoryDecisionContextReader:
         claim_id: str | None = None,
         limit: int = 50,
         offset: int = 0,
+        recent_first: bool = False,
     ) -> JsonObject:
-        if not self._project_allowed(project_id):
+        if project_id is not None and not self._project_allowed(project_id):
             return _list_payload([], 0, limit, offset)
         items, total = self._repository.query_visualizations(
             project_id=_uuid_or_none(project_id),
+            project_ids=self._project_filter(project_id),
             analysis_id=_uuid_or_none(analysis_id),
             claim_id=_uuid_or_none(claim_id),
             limit=limit,
             offset=offset,
+            recent_first=recent_first,
         )
         return _list_payload(items, total, limit, offset)
 

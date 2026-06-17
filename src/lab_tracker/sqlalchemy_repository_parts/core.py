@@ -445,6 +445,7 @@ class SQLAlchemyQuestionRepository(EntityRepository[Question]):
         ancestor_question_id: UUID | None = None,
         limit: int | None = None,
         offset: int = 0,
+        recent_first: bool = False,
     ) -> tuple[list[Question], int]:
         self._session.flush()
         if project_ids is not None and not project_ids:
@@ -490,7 +491,13 @@ class SQLAlchemyQuestionRepository(EntityRepository[Question]):
             count_stmt = count_stmt.where(
                 QuestionModel.question_id.in_(select(descendants.c.question_id))
             )
-        stmt = stmt.order_by(QuestionModel.created_at, QuestionModel.question_id)
+        if recent_first:
+            stmt = stmt.order_by(
+                QuestionModel.created_at.desc(),
+                QuestionModel.question_id.desc(),
+            )
+        else:
+            stmt = stmt.order_by(QuestionModel.created_at, QuestionModel.question_id)
         total = count_from_statement(self._session, count_stmt)
         rows = list(self._session.scalars(apply_pagination(stmt, limit=limit, offset=offset)))
         return self.questions_from_rows(rows), total

@@ -108,6 +108,7 @@ class SQLAlchemyDatasetRepository(EntityRepository[Dataset]):
         created_by: str | None = None,
         limit: int | None = None,
         offset: int = 0,
+        recent_first: bool = False,
     ) -> tuple[list[Dataset], int]:
         self._session.flush()
         if project_ids is not None and not project_ids:
@@ -127,7 +128,13 @@ class SQLAlchemyDatasetRepository(EntityRepository[Dataset]):
         if created_by is not None:
             stmt = stmt.where(DatasetModel.created_by_user_id == created_by)
             count_stmt = count_stmt.where(DatasetModel.created_by_user_id == created_by)
-        stmt = stmt.order_by(DatasetModel.created_at, DatasetModel.dataset_id)
+        if recent_first:
+            stmt = stmt.order_by(
+                DatasetModel.created_at.desc(),
+                DatasetModel.dataset_id.desc(),
+            )
+        else:
+            stmt = stmt.order_by(DatasetModel.created_at, DatasetModel.dataset_id)
         total = count_from_statement(self._session, count_stmt)
         rows = list(self._session.scalars(apply_pagination(stmt, limit=limit, offset=offset)))
         return self.datasets_from_rows(rows), total

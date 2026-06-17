@@ -210,6 +210,7 @@ class LabTrackerRepository(Protocol):
         ancestor_question_id: UUID | None = None,
         limit: int | None = None,
         offset: int = 0,
+        recent_first: bool = False,
     ) -> tuple[list[Question], int]:
         """Query questions with filters and pagination."""
 
@@ -231,6 +232,7 @@ class LabTrackerRepository(Protocol):
         created_by: str | None = None,
         limit: int | None = None,
         offset: int = 0,
+        recent_first: bool = False,
     ) -> tuple[list[Dataset], int]:
         """Query datasets with filters and pagination."""
 
@@ -246,6 +248,7 @@ class LabTrackerRepository(Protocol):
         target_entity_id: UUID | None = None,
         limit: int | None = None,
         offset: int = 0,
+        recent_first: bool = False,
     ) -> tuple[list[Note], int]:
         """Query notes with filters and pagination."""
 
@@ -258,6 +261,7 @@ class LabTrackerRepository(Protocol):
         session_type: str | None = None,
         limit: int | None = None,
         offset: int = 0,
+        recent_first: bool = False,
     ) -> tuple[list[Session], int]:
         """Query sessions with filters and pagination."""
 
@@ -290,6 +294,7 @@ class LabTrackerRepository(Protocol):
         created_by: str | None = None,
         limit: int | None = None,
         offset: int = 0,
+        recent_first: bool = False,
     ) -> tuple[list[Analysis], int]:
         """Query analyses with filters and pagination."""
 
@@ -304,6 +309,7 @@ class LabTrackerRepository(Protocol):
         created_by: str | None = None,
         limit: int | None = None,
         offset: int = 0,
+        recent_first: bool = False,
     ) -> tuple[list[Claim], int]:
         """Query claims with filters and pagination."""
 
@@ -365,6 +371,7 @@ class LabTrackerRepository(Protocol):
         claim_id: UUID | None = None,
         limit: int | None = None,
         offset: int = 0,
+        recent_first: bool = False,
     ) -> tuple[list[Visualization], int]:
         """Query visualizations with filters and pagination."""
 

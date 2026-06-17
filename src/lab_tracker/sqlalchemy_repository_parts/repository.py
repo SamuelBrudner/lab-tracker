@@ -495,6 +495,7 @@ class SQLAlchemyLabTrackerRepository(LabTrackerRepository):
         ancestor_question_id: UUID | None = None,
         limit: int | None = None,
         offset: int = 0,
+        recent_first: bool = False,
     ) -> tuple[list[Question], int]:
         return self.questions.query(
             project_id=project_id,
@@ -507,6 +508,7 @@ class SQLAlchemyLabTrackerRepository(LabTrackerRepository):
             ancestor_question_id=ancestor_question_id,
             limit=limit,
             offset=offset,
+            recent_first=recent_first,
         )
 
     def query_question_refactors(
@@ -531,6 +533,7 @@ class SQLAlchemyLabTrackerRepository(LabTrackerRepository):
         created_by: str | None = None,
         limit: int | None = None,
         offset: int = 0,
+        recent_first: bool = False,
     ) -> tuple[list[Dataset], int]:
         return self.datasets.query(
             project_id=project_id,
@@ -539,6 +542,7 @@ class SQLAlchemyLabTrackerRepository(LabTrackerRepository):
             created_by=created_by,
             limit=limit,
             offset=offset,
+            recent_first=recent_first,
         )
 
     def query_notes(
@@ -553,6 +557,7 @@ class SQLAlchemyLabTrackerRepository(LabTrackerRepository):
         target_entity_id: UUID | None = None,
         limit: int | None = None,
         offset: int = 0,
+        recent_first: bool = False,
     ) -> tuple[list[Note], int]:
         return self.notes.query(
             project_id=project_id,
@@ -564,6 +569,7 @@ class SQLAlchemyLabTrackerRepository(LabTrackerRepository):
             target_entity_id=target_entity_id,
             limit=limit,
             offset=offset,
+            recent_first=recent_first,
         )
 
     def query_sessions(
@@ -575,6 +581,7 @@ class SQLAlchemyLabTrackerRepository(LabTrackerRepository):
         session_type: str | None = None,
         limit: int | None = None,
         offset: int = 0,
+        recent_first: bool = False,
     ) -> tuple[list[Session], int]:
         return self.sessions.query(
             project_id=project_id,
@@ -583,6 +590,7 @@ class SQLAlchemyLabTrackerRepository(LabTrackerRepository):
             session_type=session_type,
             limit=limit,
             offset=offset,
+            recent_first=recent_first,
         )
 
     def query_acquisition_outputs(
@@ -618,6 +626,7 @@ class SQLAlchemyLabTrackerRepository(LabTrackerRepository):
         created_by: str | None = None,
         limit: int | None = None,
         offset: int = 0,
+        recent_first: bool = False,
     ) -> tuple[list[Analysis], int]:
         return self.analyses.query(
             project_id=project_id,
@@ -628,6 +637,7 @@ class SQLAlchemyLabTrackerRepository(LabTrackerRepository):
             created_by=created_by,
             limit=limit,
             offset=offset,
+            recent_first=recent_first,
         )
 
     def query_claims(
@@ -641,6 +651,7 @@ class SQLAlchemyLabTrackerRepository(LabTrackerRepository):
         created_by: str | None = None,
         limit: int | None = None,
         offset: int = 0,
+        recent_first: bool = False,
     ) -> tuple[list[Claim], int]:
         return self.claims.query(
             project_id=project_id,
@@ -651,6 +662,7 @@ class SQLAlchemyLabTrackerRepository(LabTrackerRepository):
             created_by=created_by,
             limit=limit,
             offset=offset,
+            recent_first=recent_first,
         )
 
     def query_claim_edges(
@@ -740,6 +752,7 @@ class SQLAlchemyLabTrackerRepository(LabTrackerRepository):
         claim_id: UUID | None = None,
         limit: int | None = None,
         offset: int = 0,
+        recent_first: bool = False,
     ) -> tuple[list[Visualization], int]:
         return self.visualizations.query(
             project_id=project_id,
@@ -748,6 +761,7 @@ class SQLAlchemyLabTrackerRepository(LabTrackerRepository):
             claim_id=claim_id,
             limit=limit,
             offset=offset,
+            recent_first=recent_first,
         )
 
     def query_graph_change_sets(

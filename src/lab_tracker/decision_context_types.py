@@ -19,6 +19,24 @@ class DecisionContextReader(Protocol):
     ) -> JsonObject:
         ...
 
+    def get_project(self, project_id: str) -> JsonObject | None:
+        ...
+
+    def get_question(self, question_id: str) -> JsonObject | None:
+        ...
+
+    def get_dataset(self, dataset_id: str) -> JsonObject | None:
+        ...
+
+    def get_analysis(self, analysis_id: str) -> JsonObject | None:
+        ...
+
+    def get_claim(self, claim_id: str) -> JsonObject | None:
+        ...
+
+    def get_visualization(self, visualization_id: str) -> JsonObject | None:
+        ...
+
     def list_questions(
         self,
         *,
@@ -31,6 +49,7 @@ class DecisionContextReader(Protocol):
         ancestor_question_id: str | None = None,
         limit: int = 50,
         offset: int = 0,
+        recent_first: bool = False,
     ) -> JsonObject:
         ...
 
@@ -44,6 +63,7 @@ class DecisionContextReader(Protocol):
         target_entity_id: str | None = None,
         limit: int = 50,
         offset: int = 0,
+        recent_first: bool = False,
     ) -> JsonObject:
         ...
 
@@ -66,6 +86,7 @@ class DecisionContextReader(Protocol):
         session_type: str | None = None,
         limit: int = 50,
         offset: int = 0,
+        recent_first: bool = False,
     ) -> JsonObject:
         ...
 
@@ -77,6 +98,7 @@ class DecisionContextReader(Protocol):
         created_by: str | None = None,
         limit: int = 50,
         offset: int = 0,
+        recent_first: bool = False,
     ) -> JsonObject:
         ...
 
@@ -90,6 +112,7 @@ class DecisionContextReader(Protocol):
         created_by: str | None = None,
         limit: int = 50,
         offset: int = 0,
+        recent_first: bool = False,
     ) -> JsonObject:
         ...
 
@@ -103,6 +126,7 @@ class DecisionContextReader(Protocol):
         created_by: str | None = None,
         limit: int = 50,
         offset: int = 0,
+        recent_first: bool = False,
     ) -> JsonObject:
         ...
 
@@ -114,5 +138,6 @@ class DecisionContextReader(Protocol):
         claim_id: str | None = None,
         limit: int = 50,
         offset: int = 0,
+        recent_first: bool = False,
     ) -> JsonObject:
         ...

@@ -21,13 +21,15 @@ from lab_tracker.decision_context_constants import (
 )
 from lab_tracker.decision_context_selection import (
     envelope_items,
-    find_by_id,
     merge_entities,
+    meta_total,
     project_ids_from_search,
     project_lookup,
     search_items,
 )
 from lab_tracker.decision_context_types import DecisionContextReader, JsonObject
+
+NOTE_TEXT_FIELD_LIMIT = 1000
 
 
 def build_decision_context(
@@ -60,6 +62,10 @@ def build_decision_context(
     projects_by_id = project_lookup(projects)
 
     resolved_project_id = str(project_id) if project_id else None
+    if resolved_project_id:
+        project_anchor = reader.get_project(resolved_project_id)
+        if project_anchor is not None:
+            projects_by_id[resolved_project_id] = project_anchor
     if resolved_project_id and resolved_project_id not in projects_by_id:
         return decision_error(
             "anchor_not_found",
@@ -77,14 +83,8 @@ def build_decision_context(
     anchor_project_ids: set[str] = set()
 
     if question_id:
-        questions = envelope_items(
-            reader.list_questions(
-                project_id=resolved_project_id,
-                limit=CONTEXT_LOOKUP_LIMIT,
-            )
-        )
-        question = find_by_id(questions, "question_id", str(question_id))
-        if question is None:
+        question = reader.get_question(str(question_id))
+        if question is None or not _matches_project_anchor(question, resolved_project_id):
             return decision_error(
                 "anchor_not_found",
                 f"Question {question_id!r} was not found.",
@@ -94,14 +94,8 @@ def build_decision_context(
         anchor_project_ids.add(str(question["project_id"]))
 
     if dataset_id:
-        datasets = envelope_items(
-            reader.list_datasets(
-                project_id=resolved_project_id,
-                limit=CONTEXT_LOOKUP_LIMIT,
-            )
-        )
-        dataset = find_by_id(datasets, "dataset_id", str(dataset_id))
-        if dataset is None:
+        dataset = reader.get_dataset(str(dataset_id))
+        if dataset is None or not _matches_project_anchor(dataset, resolved_project_id):
             return decision_error(
                 "anchor_not_found",
                 f"Dataset {dataset_id!r} was not found.",
@@ -111,14 +105,8 @@ def build_decision_context(
         anchor_project_ids.add(str(dataset["project_id"]))
 
     if analysis_id:
-        analyses = envelope_items(
-            reader.list_analyses(
-                project_id=resolved_project_id,
-                limit=CONTEXT_LOOKUP_LIMIT,
-            )
-        )
-        analysis = find_by_id(analyses, "analysis_id", str(analysis_id))
-        if analysis is None:
+        analysis = reader.get_analysis(str(analysis_id))
+        if analysis is None or not _matches_project_anchor(analysis, resolved_project_id):
             return decision_error(
                 "anchor_not_found",
                 f"Analysis {analysis_id!r} was not found.",
@@ -128,14 +116,8 @@ def build_decision_context(
         anchor_project_ids.add(str(analysis["project_id"]))
 
     if claim_id:
-        claims = envelope_items(
-            reader.list_claims(
-                project_id=resolved_project_id,
-                limit=CONTEXT_LOOKUP_LIMIT,
-            )
-        )
-        claim = find_by_id(claims, "claim_id", str(claim_id))
-        if claim is None:
+        claim = reader.get_claim(str(claim_id))
+        if claim is None or not _matches_project_anchor(claim, resolved_project_id):
             return decision_error(
                 "anchor_not_found",
                 f"Claim {claim_id!r} was not found.",
@@ -145,13 +127,7 @@ def build_decision_context(
         anchor_project_ids.add(str(claim["project_id"]))
 
     if visualization_id:
-        visualizations = envelope_items(
-            reader.list_visualizations(
-                project_id=resolved_project_id,
-                limit=CONTEXT_LOOKUP_LIMIT,
-            )
-        )
-        visualization = find_by_id(visualizations, "viz_id", str(visualization_id))
+        visualization = reader.get_visualization(str(visualization_id))
         if visualization is None:
             return decision_error(
                 "anchor_not_found",
@@ -162,17 +138,22 @@ def build_decision_context(
                 },
             )
         anchor_entities["visualizations"].append(visualization)
-        analyses = envelope_items(
-            reader.list_analyses(
-                project_id=resolved_project_id,
-                limit=CONTEXT_LOOKUP_LIMIT,
+        analysis_id_value = visualization.get("analysis_id")
+        analysis = (
+            reader.get_analysis(str(analysis_id_value)) if analysis_id_value else None
+        )
+        if analysis is not None and not _matches_project_anchor(
+            analysis,
+            resolved_project_id,
+        ):
+            return decision_error(
+                "anchor_not_found",
+                f"Visualization {visualization_id!r} was not found.",
+                anchor={
+                    "entity_type": "visualization",
+                    "entity_id": str(visualization_id),
+                },
             )
-        )
-        analysis = find_by_id(
-            analyses,
-            "analysis_id",
-            str(visualization.get("analysis_id")),
-        )
         if analysis is not None:
             anchor_project_ids.add(str(analysis["project_id"]))
 
@@ -188,8 +169,11 @@ def build_decision_context(
         resolved_project_id = next(iter(anchor_project_ids))
 
     if not resolved_project_id:
-        global_search_payload = reader.search(cleaned_query, limit=resolved_limit)
-        search_project_ids = project_ids_from_search(global_search_payload)
+        search_project_ids = _project_ids_with_search_matches(
+            reader,
+            cleaned_query,
+            projects,
+        )
         if len(search_project_ids) == 1:
             resolved_project_id = next(iter(search_project_ids))
         else:
@@ -226,24 +210,37 @@ def build_decision_context(
     questions_payload = reader.list_questions(
         project_id=resolved_project_id,
         limit=resolved_limit,
+        recent_first=True,
     )
-    notes_payload = reader.list_notes(project_id=resolved_project_id, limit=resolved_limit)
+    notes_payload = reader.list_notes(
+        project_id=resolved_project_id,
+        limit=resolved_limit,
+        recent_first=True,
+    )
     sessions_payload = reader.list_sessions(
         project_id=resolved_project_id,
         limit=resolved_limit,
+        recent_first=True,
     )
     datasets_payload = reader.list_datasets(
         project_id=resolved_project_id,
         limit=resolved_limit,
+        recent_first=True,
     )
     analyses_payload = reader.list_analyses(
         project_id=resolved_project_id,
         limit=resolved_limit,
+        recent_first=True,
     )
-    claims_payload = reader.list_claims(project_id=resolved_project_id, limit=resolved_limit)
+    claims_payload = reader.list_claims(
+        project_id=resolved_project_id,
+        limit=resolved_limit,
+        recent_first=True,
+    )
     visualizations_payload = reader.list_visualizations(
         project_id=resolved_project_id,
         limit=resolved_limit,
+        recent_first=True,
     )
 
     questions = merge_entities(
@@ -257,6 +254,7 @@ def build_decision_context(
         (search_items(search_payload, "notes"), "search_match"),
         (envelope_items(notes_payload), "recent_activity"),
     )
+    notes = _compact_notes(notes)
     sessions = merge_entities(
         "session_id",
         (envelope_items(sessions_payload), "recent_activity"),
@@ -363,3 +361,66 @@ def build_decision_context(
             "limit": resolved_limit,
         },
     }
+
+
+def _matches_project_anchor(entity: JsonObject, project_id: str | None) -> bool:
+    if project_id is None:
+        return True
+    return str(entity.get("project_id")) == project_id
+
+
+def _project_ids_with_search_matches(
+    reader: DecisionContextReader,
+    query: str,
+    projects: list[JsonObject],
+) -> set[str]:
+    project_ids: set[str] = set()
+    for project in projects:
+        project_id = project.get("project_id")
+        if project_id is None:
+            continue
+        project_id_text = str(project_id)
+        payload = reader.search(query, project_id=project_id_text, limit=1)
+        if _search_payload_has_matches(payload):
+            project_ids.add(project_id_text)
+        else:
+            project_ids.update(project_ids_from_search(payload))
+    return project_ids
+
+
+def _search_payload_has_matches(payload: JsonObject) -> bool:
+    question_count = meta_total(payload, "questions_count") or 0
+    note_count = meta_total(payload, "notes_count") or 0
+    return question_count > 0 or note_count > 0
+
+
+def _compact_notes(notes: list[JsonObject]) -> list[JsonObject]:
+    return [_compact_note(note) for note in notes]
+
+
+def _compact_note(note: JsonObject) -> JsonObject:
+    compacted = dict(note)
+    truncated_fields: JsonObject = {}
+    for field in ("raw_content", "transcribed_text"):
+        value = compacted.get(field)
+        if not isinstance(value, str):
+            continue
+        truncated, was_truncated = _truncate_text(value, NOTE_TEXT_FIELD_LIMIT)
+        if was_truncated:
+            compacted[field] = truncated
+            truncated_fields[field] = {
+                "original_length": len(value),
+                "returned_length": len(truncated),
+            }
+    if truncated_fields:
+        existing = compacted.get("truncated_fields")
+        if isinstance(existing, dict):
+            truncated_fields = {**existing, **truncated_fields}
+        compacted["truncated_fields"] = truncated_fields
+    return compacted
+
+
+def _truncate_text(value: str, limit: int) -> tuple[str, bool]:
+    if len(value) <= limit:
+        return value, False
+    return f"{value[: limit - 3]}...", True

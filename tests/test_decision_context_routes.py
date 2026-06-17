@@ -191,6 +191,138 @@ def test_decision_context_route_reports_truncation_metadata(
     } >= {("questions", 1, 2)}
 
 
+def test_decision_context_route_resolves_question_anchor_by_id(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+    monkeypatch,
+) -> None:
+    import lab_tracker.decision_context_use_case as decision_context_use_case
+
+    monkeypatch.setattr(decision_context_use_case, "CONTEXT_LOOKUP_LIMIT", 1)
+    project_id = client.post(
+        "/projects",
+        json={"name": "Anchor Lookup Project", "description": ""},
+        headers=admin_auth_headers,
+    ).json()["data"]["project_id"]
+    client.post(
+        "/questions",
+        json={
+            "project_id": project_id,
+            "text": "Older anchor lookup question",
+            "question_type": "descriptive",
+            "status": "active",
+        },
+        headers=admin_auth_headers,
+    )
+    anchored_question_id = client.post(
+        "/questions",
+        json={
+            "project_id": project_id,
+            "text": "Newer anchor lookup question",
+            "question_type": "descriptive",
+            "status": "active",
+        },
+        headers=admin_auth_headers,
+    ).json()["data"]["question_id"]
+
+    response = client.post(
+        "/assistant/decision-context",
+        json={
+            "task_kind": "summary",
+            "query": "anchor lookup",
+            "project_id": project_id,
+            "question_id": anchored_question_id,
+            "limit": 1,
+        },
+        headers=admin_auth_headers,
+    )
+
+    assert response.status_code == 200
+    data = response.json()["data"]
+    assert data["scope"]["anchors"][0]["entity_id"] == anchored_question_id
+    assert data["questions"][0]["question_id"] == anchored_question_id
+    assert "anchor" in data["questions"][0]["relevance_reasons"]
+
+
+def test_decision_context_route_returns_newest_recent_activity(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+) -> None:
+    project_id = client.post(
+        "/projects",
+        json={"name": "Recent Context Project", "description": ""},
+        headers=admin_auth_headers,
+    ).json()["data"]["project_id"]
+    for text in ["Older recent question", "Newer recent question"]:
+        client.post(
+            "/questions",
+            json={
+                "project_id": project_id,
+                "text": text,
+                "question_type": "descriptive",
+                "status": "active",
+            },
+            headers=admin_auth_headers,
+        )
+
+    response = client.post(
+        "/assistant/decision-context",
+        json={
+            "task_kind": "summary",
+            "query": "unmatched phrase",
+            "project_id": project_id,
+            "limit": 1,
+        },
+        headers=admin_auth_headers,
+    )
+
+    assert response.status_code == 200
+    questions = response.json()["data"]["questions"]
+    assert [item["text"] for item in questions] == ["Newer recent question"]
+    assert questions[0]["relevance_reasons"] == ["recent_activity"]
+
+
+def test_decision_context_route_truncates_long_note_fields(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+) -> None:
+    project_id = client.post(
+        "/projects",
+        json={"name": "Long Note Context Project", "description": ""},
+        headers=admin_auth_headers,
+    ).json()["data"]["project_id"]
+    raw_content = "needle " + ("x" * 1200)
+    client.post(
+        "/notes",
+        json={
+            "project_id": project_id,
+            "raw_content": raw_content,
+            "status": "committed",
+        },
+        headers=admin_auth_headers,
+    )
+
+    response = client.post(
+        "/assistant/decision-context",
+        json={
+            "task_kind": "summary",
+            "query": "needle",
+            "project_id": project_id,
+            "limit": 5,
+        },
+        headers=admin_auth_headers,
+    )
+
+    assert response.status_code == 200
+    note = response.json()["data"]["notes"][0]
+    assert len(note["raw_content"]) == 1000
+    assert note["raw_content"].endswith("...")
+    assert note["truncated_fields"]["raw_content"] == {
+        "original_length": len(raw_content),
+        "returned_length": 1000,
+    }
+
+
 def test_decision_context_route_is_read_only(
     client: TestClient,
     admin_auth_headers: dict[str, str],

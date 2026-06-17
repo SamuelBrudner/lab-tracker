@@ -42,6 +42,7 @@ class SQLAlchemySessionRepository(SQLAlchemyModelRepository[Session, SessionMode
         session_type: str | None = None,
         limit: int | None = None,
         offset: int = 0,
+        recent_first: bool = False,
     ) -> tuple[list[Session], int]:
         self._session.flush()
         if project_ids is not None and not project_ids:
@@ -61,7 +62,13 @@ class SQLAlchemySessionRepository(SQLAlchemyModelRepository[Session, SessionMode
         if session_type is not None:
             stmt = stmt.where(SessionModel.session_type == session_type)
             count_stmt = count_stmt.where(SessionModel.session_type == session_type)
-        stmt = stmt.order_by(SessionModel.started_at, SessionModel.session_id)
+        if recent_first:
+            stmt = stmt.order_by(
+                SessionModel.started_at.desc(),
+                SessionModel.session_id.desc(),
+            )
+        else:
+            stmt = stmt.order_by(SessionModel.started_at, SessionModel.session_id)
         total = count_from_statement(self._session, count_stmt)
         rows = list(self._session.scalars(apply_pagination(stmt, limit=limit, offset=offset)))
         return [session_from_model(row) for row in rows], total

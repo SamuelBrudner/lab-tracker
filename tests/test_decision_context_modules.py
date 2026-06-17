@@ -81,6 +81,26 @@ class FakeDecisionContextReader:
     ) -> JsonObject:
         return _envelope([self.project], limit=limit, offset=offset)
 
+    def get_project(self, project_id: str) -> JsonObject | None:
+        return self.project if project_id == self.project["project_id"] else None
+
+    def get_question(self, question_id: str) -> JsonObject | None:
+        return self.question if question_id == self.question["question_id"] else None
+
+    def get_dataset(self, dataset_id: str) -> JsonObject | None:
+        return self.dataset if dataset_id == self.dataset["dataset_id"] else None
+
+    def get_analysis(self, analysis_id: str) -> JsonObject | None:
+        return self.analysis if analysis_id == self.analysis["analysis_id"] else None
+
+    def get_claim(self, claim_id: str) -> JsonObject | None:
+        return self.claim if claim_id == self.claim["claim_id"] else None
+
+    def get_visualization(self, visualization_id: str) -> JsonObject | None:
+        if visualization_id == self.visualization["viz_id"]:
+            return self.visualization
+        return None
+
     def search(
         self,
         query: str,
@@ -111,6 +131,7 @@ class FakeDecisionContextReader:
         ancestor_question_id: str | None = None,
         limit: int = 50,
         offset: int = 0,
+        recent_first: bool = False,
     ) -> JsonObject:
         return _envelope([self.question], limit=limit, offset=offset)
 
@@ -123,6 +144,7 @@ class FakeDecisionContextReader:
         target_entity_id: str | None = None,
         limit: int = 50,
         offset: int = 0,
+        recent_first: bool = False,
     ) -> JsonObject:
         return _envelope([self.note], limit=limit, offset=offset)
 
@@ -134,6 +156,7 @@ class FakeDecisionContextReader:
         session_type: str | None = None,
         limit: int = 50,
         offset: int = 0,
+        recent_first: bool = False,
     ) -> JsonObject:
         return _envelope([], limit=limit, offset=offset)
 
@@ -144,6 +167,7 @@ class FakeDecisionContextReader:
         status: str | None = None,
         limit: int = 50,
         offset: int = 0,
+        recent_first: bool = False,
     ) -> JsonObject:
         return _envelope([self.dataset], limit=limit, offset=offset)
 
@@ -156,6 +180,7 @@ class FakeDecisionContextReader:
         status: str | None = None,
         limit: int = 50,
         offset: int = 0,
+        recent_first: bool = False,
     ) -> JsonObject:
         return _envelope([self.analysis], limit=limit, offset=offset)
 
@@ -168,6 +193,7 @@ class FakeDecisionContextReader:
         analysis_id: str | None = None,
         limit: int = 50,
         offset: int = 0,
+        recent_first: bool = False,
     ) -> JsonObject:
         return _envelope([self.claim], limit=limit, offset=offset)
 
@@ -179,6 +205,7 @@ class FakeDecisionContextReader:
         claim_id: str | None = None,
         limit: int = 50,
         offset: int = 0,
+        recent_first: bool = False,
     ) -> JsonObject:
         return _envelope([self.visualization], limit=limit, offset=offset)
 
@@ -290,3 +317,65 @@ def test_build_decision_context_orchestrates_reader_selection_and_builders() -> 
     assert "lab_tracker_describe_schema" in data["write_front_door"]["create_guidance"][2]
     assert data["evidence_map"][0]["entity"]["entity_type"] == "dataset"
     assert data["truncation"] == {"was_truncated": False, "sections": []}
+
+
+def test_build_decision_context_uses_per_project_counts_for_auto_resolution() -> None:
+    class AmbiguousSearchReader(FakeDecisionContextReader):
+        second_project = {
+            "project_id": "project-2",
+            "name": "Second Project",
+            "status": "active",
+        }
+
+        def list_projects(
+            self,
+            *,
+            status: str | None = None,
+            limit: int = 50,
+            offset: int = 0,
+        ) -> JsonObject:
+            return _envelope([self.project, self.second_project], limit=limit, offset=offset)
+
+        def get_project(self, project_id: str) -> JsonObject | None:
+            if project_id == self.project["project_id"]:
+                return self.project
+            if project_id == self.second_project["project_id"]:
+                return self.second_project
+            return None
+
+        def search(
+            self,
+            query: str,
+            *,
+            project_id: str | None = None,
+            include: str | None = None,
+            limit: int = 20,
+            offset: int = 0,
+        ) -> JsonObject:
+            if project_id is None:
+                return {
+                    "data": {"questions": [self.question], "notes": []},
+                    "meta": {"questions_count": 1, "notes_count": 0},
+                }
+            if project_id in {"project-1", "project-2"}:
+                return {
+                    "data": {"questions": [{"project_id": project_id}], "notes": []},
+                    "meta": {"questions_count": 1, "notes_count": 0},
+                }
+            return {
+                "data": {"questions": [], "notes": []},
+                "meta": {"questions_count": 0, "notes_count": 0},
+            }
+
+    payload = build_decision_context(
+        AmbiguousSearchReader(),
+        task_kind="summary",
+        query="baseline",
+        limit=1,
+    )
+
+    assert payload["error"]["code"] == "ambiguous_project"
+    assert {item["project_id"] for item in payload["error"]["candidate_projects"]} == {
+        "project-1",
+        "project-2",
+    }

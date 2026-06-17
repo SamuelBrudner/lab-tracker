@@ -121,6 +121,7 @@ class SQLAlchemyAnalysisRepository(EntityRepository[Analysis]):
         created_by: str | None = None,
         limit: int | None = None,
         offset: int = 0,
+        recent_first: bool = False,
     ) -> tuple[list[Analysis], int]:
         self._session.flush()
         if project_ids is not None and not project_ids:
@@ -174,7 +175,13 @@ class SQLAlchemyAnalysisRepository(EntityRepository[Analysis]):
         if distinct_required:
             stmt = stmt.distinct()
             count_stmt = count_stmt.distinct()
-        stmt = stmt.order_by(AnalysisModel.created_at, AnalysisModel.analysis_id)
+        if recent_first:
+            stmt = stmt.order_by(
+                AnalysisModel.created_at.desc(),
+                AnalysisModel.analysis_id.desc(),
+            )
+        else:
+            stmt = stmt.order_by(AnalysisModel.created_at, AnalysisModel.analysis_id)
         total = count_from_statement(self._session, count_stmt)
         rows = list(self._session.scalars(apply_pagination(stmt, limit=limit, offset=offset)))
         return self.analyses_from_rows(rows), total
@@ -298,6 +305,7 @@ class SQLAlchemyClaimRepository(EntityRepository[Claim]):
         created_by: str | None = None,
         limit: int | None = None,
         offset: int = 0,
+        recent_first: bool = False,
     ) -> tuple[list[Claim], int]:
         self._session.flush()
         if project_ids is not None and not project_ids:
@@ -361,7 +369,10 @@ class SQLAlchemyClaimRepository(EntityRepository[Claim]):
         if distinct_required:
             stmt = stmt.distinct()
             count_stmt = count_stmt.distinct()
-        stmt = stmt.order_by(ClaimModel.created_at, ClaimModel.claim_id)
+        if recent_first:
+            stmt = stmt.order_by(ClaimModel.created_at.desc(), ClaimModel.claim_id.desc())
+        else:
+            stmt = stmt.order_by(ClaimModel.created_at, ClaimModel.claim_id)
         total = count_from_statement(self._session, count_stmt)
         rows = list(self._session.scalars(apply_pagination(stmt, limit=limit, offset=offset)))
         return self.claims_from_rows(rows), total
@@ -545,6 +556,7 @@ class SQLAlchemyVisualizationRepository(EntityRepository[Visualization]):
         claim_id: UUID | None = None,
         limit: int | None = None,
         offset: int = 0,
+        recent_first: bool = False,
     ) -> tuple[list[Visualization], int]:
         self._session.flush()
         if project_ids is not None and not project_ids:
@@ -593,7 +605,13 @@ class SQLAlchemyVisualizationRepository(EntityRepository[Visualization]):
         if distinct_required:
             stmt = stmt.distinct()
             count_stmt = count_stmt.distinct()
-        stmt = stmt.order_by(VisualizationModel.created_at, VisualizationModel.viz_id)
+        if recent_first:
+            stmt = stmt.order_by(
+                VisualizationModel.created_at.desc(),
+                VisualizationModel.viz_id.desc(),
+            )
+        else:
+            stmt = stmt.order_by(VisualizationModel.created_at, VisualizationModel.viz_id)
         total = count_from_statement(self._session, count_stmt)
         rows = list(self._session.scalars(apply_pagination(stmt, limit=limit, offset=offset)))
         return self.visualizations_from_rows(rows), total

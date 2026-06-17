@@ -106,6 +106,7 @@ class SQLAlchemyNoteRepository(EntityRepository[Note]):
         target_entity_id: UUID | None = None,
         limit: int | None = None,
         offset: int = 0,
+        recent_first: bool = False,
     ) -> tuple[list[Note], int]:
         self._session.flush()
         if project_ids is not None and not project_ids:
@@ -145,7 +146,10 @@ class SQLAlchemyNoteRepository(EntityRepository[Note]):
                 NoteTargetModel.entity_type == target_entity_type,
                 NoteTargetModel.entity_id == str(target_entity_id),
             )
-        stmt = stmt.order_by(NoteModel.created_at, NoteModel.note_id)
+        if recent_first:
+            stmt = stmt.order_by(NoteModel.created_at.desc(), NoteModel.note_id.desc())
+        else:
+            stmt = stmt.order_by(NoteModel.created_at, NoteModel.note_id)
         total = count_from_statement(self._session, count_stmt)
         rows = list(self._session.scalars(apply_pagination(stmt, limit=limit, offset=offset)))
         return self.notes_from_rows(rows), total
