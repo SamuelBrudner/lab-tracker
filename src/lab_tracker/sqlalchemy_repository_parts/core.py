@@ -55,6 +55,7 @@ from .common import (
     count_from_statement,
     replace_child_rows,
     substring_pattern,
+    uuid_values,
 )
 
 
@@ -74,16 +75,23 @@ class SQLAlchemyProjectRepository(SQLAlchemyModelRepository[Project, ProjectMode
         self,
         *,
         group_id: UUID | None = None,
+        project_ids: set[UUID] | None = None,
         status: str | None = None,
         limit: int | None = None,
         offset: int = 0,
     ) -> tuple[list[Project], int]:
         self._session.flush()
+        if project_ids is not None and not project_ids:
+            return [], 0
         stmt = select(ProjectModel)
         count_stmt = select(ProjectModel.project_id)
         if group_id is not None:
             stmt = stmt.where(ProjectModel.group_id == str(group_id))
             count_stmt = count_stmt.where(ProjectModel.group_id == str(group_id))
+        if project_ids is not None:
+            project_values = uuid_values(project_ids)
+            stmt = stmt.where(ProjectModel.project_id.in_(project_values))
+            count_stmt = count_stmt.where(ProjectModel.project_id.in_(project_values))
         if status is not None:
             stmt = stmt.where(ProjectModel.status == status)
             count_stmt = count_stmt.where(ProjectModel.status == status)
@@ -428,6 +436,7 @@ class SQLAlchemyQuestionRepository(EntityRepository[Question]):
         self,
         *,
         project_id: UUID | None = None,
+        project_ids: set[UUID] | None = None,
         status: str | None = None,
         question_type: str | None = None,
         search: str | None = None,
@@ -438,11 +447,17 @@ class SQLAlchemyQuestionRepository(EntityRepository[Question]):
         offset: int = 0,
     ) -> tuple[list[Question], int]:
         self._session.flush()
+        if project_ids is not None and not project_ids:
+            return [], 0
         stmt = select(QuestionModel)
         count_stmt = select(QuestionModel.question_id)
         if project_id is not None:
             stmt = stmt.where(QuestionModel.project_id == str(project_id))
             count_stmt = count_stmt.where(QuestionModel.project_id == str(project_id))
+        if project_ids is not None:
+            project_values = uuid_values(project_ids)
+            stmt = stmt.where(QuestionModel.project_id.in_(project_values))
+            count_stmt = count_stmt.where(QuestionModel.project_id.in_(project_values))
         if status is not None:
             stmt = stmt.where(QuestionModel.status == status)
             count_stmt = count_stmt.where(QuestionModel.status == status)

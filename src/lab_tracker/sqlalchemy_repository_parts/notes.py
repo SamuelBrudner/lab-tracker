@@ -18,7 +18,13 @@ from lab_tracker.sqlalchemy_mappers import (
     note_to_model,
 )
 
-from .common import apply_pagination, count_from_statement, replace_child_rows, substring_pattern
+from .common import (
+    apply_pagination,
+    count_from_statement,
+    replace_child_rows,
+    substring_pattern,
+    uuid_values,
+)
 
 
 class SQLAlchemyNoteRepository(EntityRepository[Note]):
@@ -92,6 +98,7 @@ class SQLAlchemyNoteRepository(EntityRepository[Note]):
         self,
         *,
         project_id: UUID | None = None,
+        project_ids: set[UUID] | None = None,
         status: str | None = None,
         search: str | None = None,
         created_by: str | None = None,
@@ -101,11 +108,17 @@ class SQLAlchemyNoteRepository(EntityRepository[Note]):
         offset: int = 0,
     ) -> tuple[list[Note], int]:
         self._session.flush()
+        if project_ids is not None and not project_ids:
+            return [], 0
         stmt = select(NoteModel)
         count_stmt = select(NoteModel.note_id)
         if project_id is not None:
             stmt = stmt.where(NoteModel.project_id == str(project_id))
             count_stmt = count_stmt.where(NoteModel.project_id == str(project_id))
+        if project_ids is not None:
+            project_values = uuid_values(project_ids)
+            stmt = stmt.where(NoteModel.project_id.in_(project_values))
+            count_stmt = count_stmt.where(NoteModel.project_id.in_(project_values))
         if status is not None:
             stmt = stmt.where(NoteModel.status == status)
             count_stmt = count_stmt.where(NoteModel.status == status)

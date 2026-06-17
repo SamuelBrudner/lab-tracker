@@ -23,15 +23,14 @@ from lab_tracker.schemas import (
 
 from .shared import (
     CreatedByFilter,
+    accessible_project_ids_from_request,
     actor_from_request,
     analysis_default_status,
     api_from_request,
     db_session_from_request,
     ensure_project_read,
     file_storage_from_request,
-    filter_project_scoped_items,
     list_response,
-    paginate,
     repository_from_request,
     validate_pagination,
 )
@@ -75,18 +74,20 @@ def build_analyses_router(api: LabTrackerAPI) -> APIRouter:
         validate_pagination(limit, offset)
         if project_id is not None:
             ensure_project_read(request, project_id)
-        analyses, _ = repository_from_request(request).query_analyses(
+            project_ids = None
+        else:
+            project_ids = accessible_project_ids_from_request(request)
+        analyses, total = repository_from_request(request).query_analyses(
             project_id=project_id,
+            project_ids=project_ids,
             dataset_id=dataset_id,
             question_id=question_id,
             status=status.value if status is not None else None,
             created_by=created_by,
-            limit=None,
-            offset=0,
+            limit=limit,
+            offset=offset,
         )
-        visible = filter_project_scoped_items(request, analyses)
-        items, total = paginate(visible, limit, offset)
-        return list_response(items, limit=limit, offset=offset, total=total)
+        return list_response(analyses, limit=limit, offset=offset, total=total)
 
     @router.get("/analyses/{analysis_id}", response_model=Envelope[Analysis])
     def get_analysis(analysis_id: UUID, request: Request):

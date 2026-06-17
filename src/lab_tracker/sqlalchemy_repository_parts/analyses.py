@@ -43,7 +43,7 @@ from lab_tracker.sqlalchemy_mappers import (
     visualization_to_model,
 )
 
-from .common import apply_pagination, count_from_statement, replace_child_rows
+from .common import apply_pagination, count_from_statement, replace_child_rows, uuid_values
 
 
 class SQLAlchemyAnalysisRepository(EntityRepository[Analysis]):
@@ -114,6 +114,7 @@ class SQLAlchemyAnalysisRepository(EntityRepository[Analysis]):
         self,
         *,
         project_id: UUID | None = None,
+        project_ids: set[UUID] | None = None,
         dataset_id: UUID | None = None,
         question_id: UUID | None = None,
         status: str | None = None,
@@ -122,6 +123,8 @@ class SQLAlchemyAnalysisRepository(EntityRepository[Analysis]):
         offset: int = 0,
     ) -> tuple[list[Analysis], int]:
         self._session.flush()
+        if project_ids is not None and not project_ids:
+            return [], 0
         stmt = select(AnalysisModel)
         count_stmt = select(AnalysisModel.analysis_id)
         distinct_required = False
@@ -129,6 +132,10 @@ class SQLAlchemyAnalysisRepository(EntityRepository[Analysis]):
         if project_id is not None:
             stmt = stmt.where(AnalysisModel.project_id == str(project_id))
             count_stmt = count_stmt.where(AnalysisModel.project_id == str(project_id))
+        if project_ids is not None:
+            project_values = uuid_values(project_ids)
+            stmt = stmt.where(AnalysisModel.project_id.in_(project_values))
+            count_stmt = count_stmt.where(AnalysisModel.project_id.in_(project_values))
         if dataset_id is not None:
             stmt = stmt.join(
                 AnalysisDatasetModel,
@@ -284,6 +291,7 @@ class SQLAlchemyClaimRepository(EntityRepository[Claim]):
         self,
         *,
         project_id: UUID | None = None,
+        project_ids: set[UUID] | None = None,
         status: str | None = None,
         dataset_id: UUID | None = None,
         analysis_id: UUID | None = None,
@@ -292,12 +300,18 @@ class SQLAlchemyClaimRepository(EntityRepository[Claim]):
         offset: int = 0,
     ) -> tuple[list[Claim], int]:
         self._session.flush()
+        if project_ids is not None and not project_ids:
+            return [], 0
         stmt = select(ClaimModel)
         count_stmt = select(ClaimModel.claim_id)
         distinct_required = False
         if project_id is not None:
             stmt = stmt.where(ClaimModel.project_id == str(project_id))
             count_stmt = count_stmt.where(ClaimModel.project_id == str(project_id))
+        if project_ids is not None:
+            project_values = uuid_values(project_ids)
+            stmt = stmt.where(ClaimModel.project_id.in_(project_values))
+            count_stmt = count_stmt.where(ClaimModel.project_id.in_(project_values))
         if status is not None:
             stmt = stmt.where(ClaimModel.status == status)
             count_stmt = count_stmt.where(ClaimModel.status == status)
@@ -526,15 +540,19 @@ class SQLAlchemyVisualizationRepository(EntityRepository[Visualization]):
         self,
         *,
         project_id: UUID | None = None,
+        project_ids: set[UUID] | None = None,
         analysis_id: UUID | None = None,
         claim_id: UUID | None = None,
         limit: int | None = None,
         offset: int = 0,
     ) -> tuple[list[Visualization], int]:
         self._session.flush()
+        if project_ids is not None and not project_ids:
+            return [], 0
         stmt = select(VisualizationModel)
         count_stmt = select(VisualizationModel.viz_id)
         distinct_required = False
+        joined_analysis = False
         if project_id is not None:
             stmt = stmt.join(
                 AnalysisModel,
@@ -544,6 +562,21 @@ class SQLAlchemyVisualizationRepository(EntityRepository[Visualization]):
                 AnalysisModel,
                 AnalysisModel.analysis_id == VisualizationModel.analysis_id,
             ).where(AnalysisModel.project_id == str(project_id))
+            joined_analysis = True
+        if project_ids is not None:
+            if not joined_analysis:
+                stmt = stmt.join(
+                    AnalysisModel,
+                    AnalysisModel.analysis_id == VisualizationModel.analysis_id,
+                )
+                count_stmt = count_stmt.join(
+                    AnalysisModel,
+                    AnalysisModel.analysis_id == VisualizationModel.analysis_id,
+                )
+                joined_analysis = True
+            project_values = uuid_values(project_ids)
+            stmt = stmt.where(AnalysisModel.project_id.in_(project_values))
+            count_stmt = count_stmt.where(AnalysisModel.project_id.in_(project_values))
         if analysis_id is not None:
             stmt = stmt.where(VisualizationModel.analysis_id == str(analysis_id))
             count_stmt = count_stmt.where(VisualizationModel.analysis_id == str(analysis_id))

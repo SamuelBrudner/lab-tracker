@@ -14,11 +14,12 @@ from starlette.responses import StreamingResponse
 
 from lab_tracker.api import LabTrackerAPI
 from lab_tracker.db_models import VisualizationModel
-from lab_tracker.errors import AuthError, NotFoundError, ValidationError
+from lab_tracker.errors import NotFoundError, ValidationError
 from lab_tracker.models import Visualization, utc_now
 from lab_tracker.schemas import Envelope, ListEnvelope, VisualizationCreate, VisualizationUpdate
 
 from .shared import (
+    accessible_project_ids_from_request,
     actor_from_request,
     api_from_request,
     db_session_from_request,
@@ -26,7 +27,6 @@ from .shared import (
     ensure_project_read,
     file_storage_from_request,
     list_response,
-    paginate,
     repository_from_request,
     safe_attachment_filename,
     validate_pagination,
@@ -81,16 +81,18 @@ def build_visualizations_router(api: LabTrackerAPI) -> APIRouter:
         validate_pagination(limit, offset)
         if project_id is not None:
             ensure_project_read(request, project_id)
-        visualizations, _ = repository_from_request(request).query_visualizations(
+            project_ids = None
+        else:
+            project_ids = accessible_project_ids_from_request(request)
+        visualizations, total = repository_from_request(request).query_visualizations(
             project_id=project_id,
+            project_ids=project_ids,
             analysis_id=analysis_id,
             claim_id=claim_id,
-            limit=None,
-            offset=0,
+            limit=limit,
+            offset=offset,
         )
-        visible = _filter_visualizations_for_access(request, visualizations)
-        items, total = paginate(visible, limit, offset)
-        return list_response(items, limit=limit, offset=offset, total=total)
+        return list_response(visualizations, limit=limit, offset=offset, total=total)
 
     @router.get("/visualizations/{viz_id}", response_model=Envelope[Visualization])
     def get_visualization(viz_id: UUID, request: Request):
@@ -239,19 +241,3 @@ def build_visualizations_router(api: LabTrackerAPI) -> APIRouter:
         return Envelope(data=visualization)
 
     return router
-
-
-def _filter_visualizations_for_access(
-    request: Request,
-    visualizations: list[Visualization],
-) -> list[Visualization]:
-    request_api = api_from_request(request)
-    visible: list[Visualization] = []
-    for visualization in visualizations:
-        analysis = request_api.get_analysis(visualization.analysis_id)
-        try:
-            ensure_project_read(request, analysis.project_id)
-        except AuthError:
-            continue
-        visible.append(visualization)
-    return visible

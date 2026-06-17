@@ -157,12 +157,14 @@ class SQLAlchemyLabTrackerRepository(LabTrackerRepository):
         self,
         *,
         group_id: UUID | None = None,
+        project_ids: set[UUID] | None = None,
         status: str | None = None,
         limit: int | None = None,
         offset: int = 0,
     ) -> tuple[list[Project], int]:
         return self.projects.query(
             group_id=group_id,
+            project_ids=project_ids,
             status=status,
             limit=limit,
             offset=offset,
@@ -484,6 +486,7 @@ class SQLAlchemyLabTrackerRepository(LabTrackerRepository):
         self,
         *,
         project_id: UUID | None = None,
+        project_ids: set[UUID] | None = None,
         status: str | None = None,
         question_type: str | None = None,
         search: str | None = None,
@@ -495,6 +498,7 @@ class SQLAlchemyLabTrackerRepository(LabTrackerRepository):
     ) -> tuple[list[Question], int]:
         return self.questions.query(
             project_id=project_id,
+            project_ids=project_ids,
             status=status,
             question_type=question_type,
             search=search,
@@ -522,6 +526,7 @@ class SQLAlchemyLabTrackerRepository(LabTrackerRepository):
         self,
         *,
         project_id: UUID | None = None,
+        project_ids: set[UUID] | None = None,
         status: str | None = None,
         created_by: str | None = None,
         limit: int | None = None,
@@ -529,6 +534,7 @@ class SQLAlchemyLabTrackerRepository(LabTrackerRepository):
     ) -> tuple[list[Dataset], int]:
         return self.datasets.query(
             project_id=project_id,
+            project_ids=project_ids,
             status=status,
             created_by=created_by,
             limit=limit,
@@ -539,6 +545,7 @@ class SQLAlchemyLabTrackerRepository(LabTrackerRepository):
         self,
         *,
         project_id: UUID | None = None,
+        project_ids: set[UUID] | None = None,
         status: str | None = None,
         search: str | None = None,
         created_by: str | None = None,
@@ -549,6 +556,7 @@ class SQLAlchemyLabTrackerRepository(LabTrackerRepository):
     ) -> tuple[list[Note], int]:
         return self.notes.query(
             project_id=project_id,
+            project_ids=project_ids,
             status=status,
             search=search,
             created_by=created_by,
@@ -562,6 +570,7 @@ class SQLAlchemyLabTrackerRepository(LabTrackerRepository):
         self,
         *,
         project_id: UUID | None = None,
+        project_ids: set[UUID] | None = None,
         status: str | None = None,
         session_type: str | None = None,
         limit: int | None = None,
@@ -569,6 +578,7 @@ class SQLAlchemyLabTrackerRepository(LabTrackerRepository):
     ) -> tuple[list[Session], int]:
         return self.sessions.query(
             project_id=project_id,
+            project_ids=project_ids,
             status=status,
             session_type=session_type,
             limit=limit,
@@ -601,6 +611,7 @@ class SQLAlchemyLabTrackerRepository(LabTrackerRepository):
         self,
         *,
         project_id: UUID | None = None,
+        project_ids: set[UUID] | None = None,
         dataset_id: UUID | None = None,
         question_id: UUID | None = None,
         status: str | None = None,
@@ -610,6 +621,7 @@ class SQLAlchemyLabTrackerRepository(LabTrackerRepository):
     ) -> tuple[list[Analysis], int]:
         return self.analyses.query(
             project_id=project_id,
+            project_ids=project_ids,
             dataset_id=dataset_id,
             question_id=question_id,
             status=status,
@@ -622,6 +634,7 @@ class SQLAlchemyLabTrackerRepository(LabTrackerRepository):
         self,
         *,
         project_id: UUID | None = None,
+        project_ids: set[UUID] | None = None,
         status: str | None = None,
         dataset_id: UUID | None = None,
         analysis_id: UUID | None = None,
@@ -631,6 +644,7 @@ class SQLAlchemyLabTrackerRepository(LabTrackerRepository):
     ) -> tuple[list[Claim], int]:
         return self.claims.query(
             project_id=project_id,
+            project_ids=project_ids,
             status=status,
             dataset_id=dataset_id,
             analysis_id=analysis_id,
@@ -721,6 +735,7 @@ class SQLAlchemyLabTrackerRepository(LabTrackerRepository):
         self,
         *,
         project_id: UUID | None = None,
+        project_ids: set[UUID] | None = None,
         analysis_id: UUID | None = None,
         claim_id: UUID | None = None,
         limit: int | None = None,
@@ -728,6 +743,7 @@ class SQLAlchemyLabTrackerRepository(LabTrackerRepository):
     ) -> tuple[list[Visualization], int]:
         return self.visualizations.query(
             project_id=project_id,
+            project_ids=project_ids,
             analysis_id=analysis_id,
             claim_id=claim_id,
             limit=limit,

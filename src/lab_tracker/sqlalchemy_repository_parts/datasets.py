@@ -24,7 +24,7 @@ from lab_tracker.sqlalchemy_mappers import (
     dataset_to_model,
 )
 
-from .common import apply_pagination, count_from_statement, replace_child_rows
+from .common import apply_pagination, count_from_statement, replace_child_rows, uuid_values
 
 
 class SQLAlchemyDatasetRepository(EntityRepository[Dataset]):
@@ -103,17 +103,24 @@ class SQLAlchemyDatasetRepository(EntityRepository[Dataset]):
         self,
         *,
         project_id: UUID | None = None,
+        project_ids: set[UUID] | None = None,
         status: str | None = None,
         created_by: str | None = None,
         limit: int | None = None,
         offset: int = 0,
     ) -> tuple[list[Dataset], int]:
         self._session.flush()
+        if project_ids is not None and not project_ids:
+            return [], 0
         stmt = select(DatasetModel)
         count_stmt = select(DatasetModel.dataset_id)
         if project_id is not None:
             stmt = stmt.where(DatasetModel.project_id == str(project_id))
             count_stmt = count_stmt.where(DatasetModel.project_id == str(project_id))
+        if project_ids is not None:
+            project_values = uuid_values(project_ids)
+            stmt = stmt.where(DatasetModel.project_id.in_(project_values))
+            count_stmt = count_stmt.where(DatasetModel.project_id.in_(project_values))
         if status is not None:
             stmt = stmt.where(DatasetModel.status == status)
             count_stmt = count_stmt.where(DatasetModel.status == status)

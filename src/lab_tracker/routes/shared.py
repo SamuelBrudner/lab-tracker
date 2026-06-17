@@ -21,7 +21,6 @@ from lab_tracker.models import (
     EntityRef,
     NoteMetadataScalar,
     NoteStatus,
-    Project,
     ProjectStatus,
     QuestionStatus,
     SessionStatus,
@@ -113,20 +112,6 @@ def filter_project_scoped_items(request: Request, items: list[Any]) -> list[Any]
     if allowed is None:
         return items
     return [item for item in items if getattr(item, "project_id", None) in allowed]
-
-
-def visible_projects(
-    request: Request,
-    repository: LabTrackerRepository,
-    *,
-    status: ProjectStatus | None = None,
-) -> list[Project]:
-    projects, _ = repository.query_projects(
-        status=status.value if status is not None else None,
-        limit=None,
-        offset=0,
-    )
-    return filter_project_scoped_items(request, projects)
 
 
 def api_from_request(request: Request, fallback: LabTrackerAPI | None = None) -> LabTrackerAPI:

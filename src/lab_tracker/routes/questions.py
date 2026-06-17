@@ -29,10 +29,10 @@ from lab_tracker.schemas import (
 
 from .shared import (
     CreatedByFilter,
+    accessible_project_ids_from_request,
     actor_from_request,
     api_from_request,
     ensure_project_read,
-    filter_project_scoped_items,
     list_response,
     paginate,
     question_default_status,
@@ -81,20 +81,22 @@ def build_questions_router(api: LabTrackerAPI) -> APIRouter:
         resolved_search = search or q
         if project_id is not None:
             ensure_project_read(request, project_id)
-        questions, _ = repository_from_request(request).query_questions(
+            project_ids = None
+        else:
+            project_ids = accessible_project_ids_from_request(request)
+        questions, total = repository_from_request(request).query_questions(
             project_id=project_id,
+            project_ids=project_ids,
             status=status.value if status is not None else None,
             question_type=question_type.value if question_type is not None else None,
             search=resolved_search,
             created_by=created_by,
             parent_question_id=parent_question_id,
             ancestor_question_id=ancestor_question_id,
-            limit=None,
-            offset=0,
+            limit=limit,
+            offset=offset,
         )
-        visible = filter_project_scoped_items(request, questions)
-        items, total = paginate(visible, limit, offset)
-        return list_response(items, limit=limit, offset=offset, total=total)
+        return list_response(questions, limit=limit, offset=offset, total=total)
 
     @router.get("/questions/{question_id}", response_model=Envelope[Question])
     def get_question(question_id: UUID, request: Request):

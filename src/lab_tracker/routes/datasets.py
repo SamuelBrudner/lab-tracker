@@ -17,15 +17,14 @@ from lab_tracker.schemas import DatasetCreate, DatasetUpdate, Envelope, ListEnve
 from .dataset_files import _delete_stored_dataset_file
 from .shared import (
     CreatedByFilter,
+    accessible_project_ids_from_request,
     actor_from_request,
     api_from_request,
     dataset_default_status,
     db_session_from_request,
     ensure_project_read,
     file_storage_from_request,
-    filter_project_scoped_items,
     list_response,
-    paginate,
     repository_from_request,
     validate_pagination,
 )
@@ -65,16 +64,18 @@ def build_datasets_router(api: LabTrackerAPI) -> APIRouter:
         validate_pagination(limit, offset)
         if project_id is not None:
             ensure_project_read(request, project_id)
-        datasets, _ = repository_from_request(request).query_datasets(
+            project_ids = None
+        else:
+            project_ids = accessible_project_ids_from_request(request)
+        datasets, total = repository_from_request(request).query_datasets(
             project_id=project_id,
+            project_ids=project_ids,
             status=status.value if status is not None else None,
             created_by=created_by,
-            limit=None,
-            offset=0,
+            limit=limit,
+            offset=offset,
         )
-        visible = filter_project_scoped_items(request, datasets)
-        items, total = paginate(visible, limit, offset)
-        return list_response(items, limit=limit, offset=offset, total=total)
+        return list_response(datasets, limit=limit, offset=offset, total=total)
 
     @router.get("/datasets/{dataset_id}", response_model=Envelope[Dataset])
     def get_dataset(dataset_id: UUID, request: Request):

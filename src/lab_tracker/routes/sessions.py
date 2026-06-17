@@ -28,12 +28,11 @@ from lab_tracker.schemas import (
 )
 
 from .shared import (
+    accessible_project_ids_from_request,
     actor_from_request,
     api_from_request,
     ensure_project_read,
-    filter_project_scoped_items,
     list_response,
-    paginate,
     repository_from_request,
     validate_pagination,
 )
@@ -69,16 +68,18 @@ def build_sessions_router(api: LabTrackerAPI) -> APIRouter:
         validate_pagination(limit, offset)
         if project_id is not None:
             ensure_project_read(request, project_id)
-        sessions, _ = repository_from_request(request).query_sessions(
+            project_ids = None
+        else:
+            project_ids = accessible_project_ids_from_request(request)
+        sessions, total = repository_from_request(request).query_sessions(
             project_id=project_id,
+            project_ids=project_ids,
             status=status.value if status is not None else None,
             session_type=session_type.value if session_type is not None else None,
-            limit=None,
-            offset=0,
+            limit=limit,
+            offset=offset,
         )
-        visible = filter_project_scoped_items(request, sessions)
-        items, total = paginate(visible, limit, offset)
-        return list_response(items, limit=limit, offset=offset, total=total)
+        return list_response(sessions, limit=limit, offset=offset, total=total)
 
     @router.get("/sessions/by-link/{link_code}", response_model=Envelope[Session])
     def get_session_by_link_code(link_code: str, request: Request):

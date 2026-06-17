@@ -35,6 +35,7 @@ from lab_tracker.schemas import (
 )
 
 from .shared import (
+    accessible_project_ids_from_request,
     actor_from_request,
     api_from_request,
     db_session_from_request,
@@ -46,7 +47,6 @@ from .shared import (
     project_default_status,
     repository_from_request,
     validate_pagination,
-    visible_projects,
 )
 
 _logger = logging.getLogger(__name__)
@@ -93,9 +93,12 @@ def build_projects_router(api: LabTrackerAPI) -> APIRouter:
         offset: int = 0,
     ):
         validate_pagination(limit, offset)
-        repository = repository_from_request(request)
-        visible = visible_projects(request, repository, status=status)
-        items, total = paginate(visible, limit, offset)
+        items, total = repository_from_request(request).query_projects(
+            project_ids=accessible_project_ids_from_request(request),
+            status=status.value if status is not None else None,
+            limit=limit,
+            offset=offset,
+        )
         return list_response(items, limit=limit, offset=offset, total=total)
 
     @router.get("/projects/{project_id}", response_model=Envelope[Project])

@@ -18,7 +18,7 @@ from lab_tracker.sqlalchemy_mappers import (
     session_to_model,
 )
 
-from .common import SQLAlchemyModelRepository, apply_pagination, count_from_statement
+from .common import SQLAlchemyModelRepository, apply_pagination, count_from_statement, uuid_values
 
 
 class SQLAlchemySessionRepository(SQLAlchemyModelRepository[Session, SessionModel]):
@@ -37,17 +37,24 @@ class SQLAlchemySessionRepository(SQLAlchemyModelRepository[Session, SessionMode
         self,
         *,
         project_id: UUID | None = None,
+        project_ids: set[UUID] | None = None,
         status: str | None = None,
         session_type: str | None = None,
         limit: int | None = None,
         offset: int = 0,
     ) -> tuple[list[Session], int]:
         self._session.flush()
+        if project_ids is not None and not project_ids:
+            return [], 0
         stmt = select(SessionModel)
         count_stmt = select(SessionModel.session_id)
         if project_id is not None:
             stmt = stmt.where(SessionModel.project_id == str(project_id))
             count_stmt = count_stmt.where(SessionModel.project_id == str(project_id))
+        if project_ids is not None:
+            project_values = uuid_values(project_ids)
+            stmt = stmt.where(SessionModel.project_id.in_(project_values))
+            count_stmt = count_stmt.where(SessionModel.project_id.in_(project_values))
         if status is not None:
             stmt = stmt.where(SessionModel.status == status)
             count_stmt = count_stmt.where(SessionModel.status == status)

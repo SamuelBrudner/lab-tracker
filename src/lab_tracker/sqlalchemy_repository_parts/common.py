@@ -39,6 +39,10 @@ def apply_pagination(statement: Any, *, limit: int | None, offset: int) -> Any:
     return statement
 
 
+def uuid_values(values: set[UUID]) -> list[str]:
+    return [str(value) for value in sorted(values, key=str)]
+
+
 def substring_pattern(query: str | None) -> str | None:
     if query is None:
         return None
