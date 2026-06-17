@@ -1,12 +1,11 @@
 from __future__ import annotations
 
-import fnmatch
 import os
 import shutil
 import subprocess
 import sys
 import zipfile
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 import pytest
 import tomllib
@@ -24,6 +23,44 @@ def _packaged_files(package_root: Path, subdir: str) -> set[str]:
 def _package_data_patterns(repo_root: Path) -> list[str]:
     pyproject = tomllib.loads((repo_root / "pyproject.toml").read_text(encoding="utf-8"))
     return pyproject["tool"]["setuptools"]["package-data"]["lab_tracker"]
+
+
+def _package_data_matches(file_path: str, patterns: list[str]) -> bool:
+    path = PurePosixPath(file_path)
+    return any(path.match(pattern) for pattern in patterns)
+
+
+def _build_wheel(repo_root: Path, wheelhouse: Path) -> Path:
+    uv = shutil.which("uv")
+    if uv is None:
+        pytest.skip("uv is required for the wheel smoke test")
+
+    build_dir = repo_root / "build"
+    had_build_dir = build_dir.exists()
+    try:
+        subprocess.run(
+            [
+                uv,
+                "build",
+                "--wheel",
+                "--out-dir",
+                str(wheelhouse),
+                str(repo_root),
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    finally:
+        if not had_build_dir:
+            shutil.rmtree(build_dir, ignore_errors=True)
+    return next(wheelhouse.glob("lab_tracker-*.whl"))
+
+
+@pytest.fixture(scope="module")
+def built_wheel(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    repo_root = Path(__file__).resolve().parent.parent
+    return _build_wheel(repo_root, tmp_path_factory.mktemp("wheelhouse"))
 
 
 def test_dockerfile_copy_sources_exist_in_build_context():
@@ -52,10 +89,25 @@ def test_frontend_package_data_covers_all_bundle_files():
     packaged_files = {
         file_path
         for file_path in bundle_files
-        if any(fnmatch.fnmatch(file_path, pattern) for pattern in patterns)
+        if _package_data_matches(file_path, patterns)
     }
 
     assert packaged_files == bundle_files
+
+
+def test_wheel_contains_all_frontend_bundle_files(built_wheel: Path):
+    repo_root = Path(__file__).resolve().parent.parent
+    package_root = repo_root / "src" / "lab_tracker"
+    bundle_files = _packaged_files(package_root, "frontend")
+
+    with zipfile.ZipFile(built_wheel) as archive:
+        wheel_files = {
+            name.removeprefix("lab_tracker/")
+            for name in archive.namelist()
+            if name.startswith("lab_tracker/frontend/") and not name.endswith("/")
+        }
+
+    assert wheel_files == bundle_files
 
 
 def test_alembic_package_data_covers_all_migration_files():
@@ -67,43 +119,15 @@ def test_alembic_package_data_covers_all_migration_files():
     packaged_files = {
         file_path
         for file_path in migration_files
-        if any(fnmatch.fnmatch(file_path, pattern) for pattern in patterns)
+        if _package_data_matches(file_path, patterns)
     }
 
     assert packaged_files == migration_files
 
 
-def test_wheel_installed_migrations_can_upgrade_sqlite(tmp_path: Path):
-    repo_root = Path(__file__).resolve().parent.parent
-    wheelhouse = tmp_path / "wheelhouse"
+def test_wheel_installed_migrations_can_upgrade_sqlite(tmp_path: Path, built_wheel: Path):
     target = tmp_path / "site"
-    wheelhouse.mkdir()
-    build_dir = repo_root / "build"
-    had_build_dir = build_dir.exists()
-
-    uv = shutil.which("uv")
-    if uv is None:
-        pytest.skip("uv is required for the wheel smoke test")
-
-    try:
-        subprocess.run(
-            [
-                uv,
-                "build",
-                "--wheel",
-                "--out-dir",
-                str(wheelhouse),
-                str(repo_root),
-            ],
-            check=True,
-            capture_output=True,
-            text=True,
-        )
-    finally:
-        if not had_build_dir:
-            shutil.rmtree(build_dir, ignore_errors=True)
-    wheel = next(wheelhouse.glob("lab_tracker-*.whl"))
-    with zipfile.ZipFile(wheel) as archive:
+    with zipfile.ZipFile(built_wheel) as archive:
         names = set(archive.namelist())
     assert "lab_tracker/alembic/env.py" in names
     assert any(
@@ -111,7 +135,7 @@ def test_wheel_installed_migrations_can_upgrade_sqlite(tmp_path: Path):
         for name in names
     )
 
-    with zipfile.ZipFile(wheel) as archive:
+    with zipfile.ZipFile(built_wheel) as archive:
         archive.extractall(target)
 
     db_path = tmp_path / "wheel-install.db"

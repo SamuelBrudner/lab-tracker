@@ -46,6 +46,7 @@ lab_tracker = [
   "alembic/env.py",
   "alembic/versions/*.py",
   "frontend/*",
+  "frontend/**/*",
 ]
 
 [tool.codex_orchestrator]
