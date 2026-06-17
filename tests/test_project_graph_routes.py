@@ -5,6 +5,8 @@ from uuid import uuid4
 from fastapi.testclient import TestClient
 
 from lab_tracker.auth import Role
+from lab_tracker.models import Question, QuestionStatus, QuestionType
+from lab_tracker.project_graph import build_project_graph
 
 
 def _ids(items: list[dict[str, object]]) -> set[str]:
@@ -13,6 +15,40 @@ def _ids(items: list[dict[str, object]]) -> set[str]:
 
 def _edge_ids(items: list[dict[str, object]]) -> set[str]:
     return {str(item["id"]) for item in items}
+
+
+class _QuestionsOnlyGraphRepository:
+    def __init__(self, question: Question) -> None:
+        self.question = question
+        self.calls: list[str] = []
+
+    def query_questions(self, **_):
+        self.calls.append("questions")
+        return [self.question], 1
+
+    def query_datasets(self, **_):
+        raise AssertionError("questions view should not query datasets")
+
+    def query_analyses(self, **_):
+        raise AssertionError("questions view should not query analyses")
+
+    def query_claims(self, **_):
+        raise AssertionError("questions view should not query claims")
+
+    def query_claim_edges(self, **_):
+        raise AssertionError("questions view should not query claim edges")
+
+    def query_visualizations(self, **_):
+        raise AssertionError("questions view should not query visualizations")
+
+    def query_goals(self, **_):
+        raise AssertionError("questions view should not query goals")
+
+    def query_notes(self, **_):
+        raise AssertionError("questions view should not query notes")
+
+    def query_sessions(self, **_):
+        raise AssertionError("questions view should not query sessions")
 
 
 def _auth_headers(client: TestClient, *, role: Role = Role.VIEWER) -> dict[str, str]:
@@ -182,6 +218,24 @@ def _create_graph_fixture(
     }
 
 
+def test_project_graph_questions_view_only_queries_questions():
+    project_id = uuid4()
+    question = Question(
+        question_id=uuid4(),
+        project_id=project_id,
+        text="Which question edges are needed?",
+        question_type=QuestionType.DESCRIPTIVE,
+        status=QuestionStatus.ACTIVE,
+    )
+    repository = _QuestionsOnlyGraphRepository(question)
+
+    graph = build_project_graph(repository, project_id, view="questions")
+
+    assert repository.calls == ["questions"]
+    assert [node.id for node in graph.nodes] == [f"question:{question.question_id}"]
+    assert graph.edges == []
+
+
 def test_project_graph_questions_view_contains_question_edges(
     client: TestClient,
     admin_auth_headers: dict[str, str],
@@ -271,6 +325,49 @@ def test_project_graph_evidence_and_full_views_include_expected_links(
             f"session:{ids['source_session_id']}->dataset:{ids['dataset_id']}"
         ),
     }.issubset(_edge_ids(full["edges"]))
+
+
+def test_project_graph_full_view_truncates_long_note_and_claim_labels(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+):
+    project_id = client.post(
+        "/projects",
+        json={"name": "Bound graph labels"},
+        headers=admin_auth_headers,
+    ).json()["data"]["project_id"]
+    transcript = "Transcript " + ("long text " * 30)
+    note_id = client.post(
+        "/notes",
+        json={
+            "project_id": project_id,
+            "raw_content": "raw seed",
+            "transcribed_text": transcript,
+        },
+        headers=admin_auth_headers,
+    ).json()["data"]["note_id"]
+    claim_statement = "Claim " + ("long statement " * 30)
+    claim_id = client.post(
+        "/claims",
+        json={
+            "project_id": project_id,
+            "statement": claim_statement,
+            "confidence": 75,
+        },
+        headers=admin_auth_headers,
+    ).json()["data"]["claim_id"]
+
+    response = client.get(
+        f"/projects/{project_id}/graph?view=full",
+        headers=admin_auth_headers,
+    )
+
+    assert response.status_code == 200
+    nodes = {item["id"]: item for item in response.json()["data"]["nodes"]}
+    assert nodes[f"note:{note_id}"]["label"] == transcript[:180]
+    assert len(nodes[f"note:{note_id}"]["label"]) == 180
+    assert nodes[f"claim:{claim_id}"]["label"] == claim_statement[:180]
+    assert len(nodes[f"claim:{claim_id}"]["label"]) == 180
 
 
 def test_project_graph_includes_claim_relations_and_external_citations(

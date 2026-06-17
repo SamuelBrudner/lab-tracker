@@ -41,6 +41,7 @@ _NODE_TYPE_ORDER = {
     "goal": 8,
 }
 _QUESTION_LINK_ROLE_ORDER = {"primary": 0, "secondary": 1}
+_GRAPH_LABEL_LIMIT = 180
 
 
 def build_project_graph(
@@ -53,19 +54,23 @@ def build_project_graph(
 
     view_value = _normalize_view(view)
     questions, _ = repository.query_questions(project_id=project_id, limit=None, offset=0)
-    datasets, _ = repository.query_datasets(project_id=project_id, limit=None, offset=0)
-    analyses, _ = repository.query_analyses(project_id=project_id, limit=None, offset=0)
-    claims, _ = repository.query_claims(project_id=project_id, limit=None, offset=0)
+    datasets: list[Dataset] = []
+    analyses: list[Analysis] = []
+    claims: list[Claim] = []
     claim_edges: list[ClaimEdge] = []
-    visualizations, _ = repository.query_visualizations(
-        project_id=project_id,
-        limit=None,
-        offset=0,
-    )
+    visualizations: list[Visualization] = []
     goals: list[Goal] = []
     notes: list[Note] = []
     sessions: list[Session] = []
     if view_value in {"evidence", "full"}:
+        datasets, _ = repository.query_datasets(project_id=project_id, limit=None, offset=0)
+        analyses, _ = repository.query_analyses(project_id=project_id, limit=None, offset=0)
+        claims, _ = repository.query_claims(project_id=project_id, limit=None, offset=0)
+        visualizations, _ = repository.query_visualizations(
+            project_id=project_id,
+            limit=None,
+            offset=0,
+        )
         goals, _ = repository.query_goals(project_id=project_id, limit=None, offset=0)
         claim_edges, _ = repository.query_claim_edges(
             project_id=project_id,
@@ -221,6 +226,10 @@ def _sort_entities(items: Iterable[Any], id_attr: str, label_getter) -> list[Any
     )
 
 
+def _truncate_graph_label(value: str) -> str:
+    return value[:_GRAPH_LABEL_LIMIT]
+
+
 def _question_label(question: Question) -> str:
     return question.text
 
@@ -234,7 +243,7 @@ def _analysis_label(analysis: Analysis) -> str:
 
 
 def _claim_label(claim: Claim) -> str:
-    return claim.statement
+    return _truncate_graph_label(claim.statement)
 
 
 def _visualization_label(visualization: Visualization) -> str:
@@ -247,11 +256,11 @@ def _goal_label(goal: Goal) -> str:
 
 def _note_label(note: Note) -> str:
     if note.transcribed_text:
-        return note.transcribed_text
+        return _truncate_graph_label(note.transcribed_text)
     if note.raw_content:
-        return note.raw_content
+        return _truncate_graph_label(note.raw_content)
     if note.raw_asset is not None:
-        return note.raw_asset.filename
+        return _truncate_graph_label(note.raw_asset.filename)
     return f"Note {_short_id(note.note_id)}"
 
 
@@ -304,7 +313,7 @@ def _claim_node(claim: Claim) -> ProjectGraphNode:
         id=_entity_node_id("claim", claim.claim_id),
         entity_type="claim",
         entity_id=str(claim.claim_id),
-        label=claim.statement,
+        label=_claim_label(claim),
         detail=f"confidence {claim.confidence:g}",
         status=_enum_value(claim.status),
     )
