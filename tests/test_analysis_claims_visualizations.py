@@ -85,6 +85,61 @@ def test_analysis_commit_requires_committed_datasets():
     assert visualizations
 
 
+def test_archived_committed_analysis_remains_immutable():
+    api = repository_backed_api()
+    actor = _actor()
+    project, question = _setup_project_with_question(api, actor)
+    dataset = api.create_dataset(
+        project_id=project.project_id,
+        primary_question_id=question.question_id,
+        commit_manifest=DatasetCommitManifestInput(
+            files=[DatasetFile(path="data.csv", checksum="abc123")]
+        ),
+        status=DatasetStatus.COMMITTED,
+        actor=actor,
+    )
+    run = ExternalArtifactReference(
+        source_system="wandb",
+        uri="https://wandb.ai/lab/run-1",
+        content_hash="sha256:run001",
+        metadata={"run_name": "signal-fit"},
+    )
+    analysis = api.create_analysis(
+        project_id=project.project_id,
+        dataset_ids=[dataset.dataset_id],
+        method_hash="method-1",
+        code_version="v1",
+        status=AnalysisStatus.COMMITTED,
+        environment_hash="env-1",
+        external_artifacts=[run],
+        actor=actor,
+    )
+    archived = api.update_analysis(
+        analysis.analysis_id,
+        status=AnalysisStatus.ARCHIVED,
+        terminal_reason="Superseded by a corrected pipeline.",
+        actor=actor,
+    )
+    assert archived.status == AnalysisStatus.ARCHIVED
+
+    with pytest.raises(ValidationError, match="Committed analyses are immutable"):
+        api.update_analysis(
+            analysis.analysis_id,
+            environment_hash="env-2",
+            actor=actor,
+        )
+    with pytest.raises(ValidationError, match="Committed analyses are immutable"):
+        api.update_analysis(
+            analysis.analysis_id,
+            external_artifacts=[],
+            actor=actor,
+        )
+
+    reloaded = api.get_analysis(analysis.analysis_id)
+    assert reloaded.environment_hash == "env-1"
+    assert reloaded.external_artifacts == [run]
+
+
 def test_analysis_cannot_be_created_as_committed_with_staged_datasets():
     api = repository_backed_api()
     actor = _actor()

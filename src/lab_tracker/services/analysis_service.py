@@ -41,6 +41,12 @@ if TYPE_CHECKING:
     from lab_tracker.services.visualization_service import VisualizationService
 
 
+_IMMUTABLE_ANALYSIS_STATUSES = {
+    AnalysisStatus.COMMITTED,
+    AnalysisStatus.ARCHIVED,
+}
+
+
 class AnalysisService(BaseService):
     def __init__(
         self,
@@ -192,13 +198,13 @@ class AnalysisService(BaseService):
         self.authorization.require_contributor(analysis.project_id, actor=actor)
         current_status = analysis.status
         next_status = status or current_status
-        if current_status == AnalysisStatus.COMMITTED:
+        if current_status in _IMMUTABLE_ANALYSIS_STATUSES:
             if environment_hash is not None:
                 raise ValidationError("Committed analyses are immutable.")
             if external_artifacts is not None:
                 raise ValidationError("Committed analyses are immutable.")
-            if status == AnalysisStatus.STAGED:
-                raise ValidationError("Committed analyses cannot return to staged.")
+        if current_status == AnalysisStatus.COMMITTED and status == AnalysisStatus.STAGED:
+            raise ValidationError("Committed analyses cannot return to staged.")
         if status is not None:
             _ensure_analysis_status_transition(current_status, status)
             if status == AnalysisStatus.COMMITTED and current_status != AnalysisStatus.COMMITTED:
