@@ -4,7 +4,7 @@ export default defineConfig({
   test: {
     environment: "jsdom",
     globals: true,
-    include: ["src/lab_tracker/frontend_src/**/*.test.jsx"],
+    include: ["src/lab_tracker/frontend_src/**/*.test.{js,jsx}"],
     setupFiles: ["src/lab_tracker/frontend_src/test/setup.js"],
   },
 });

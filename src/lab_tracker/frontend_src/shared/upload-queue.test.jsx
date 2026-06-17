@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { indexedDB as fakeIndexedDB } from "fake-indexeddb";
 
 import {
   MAX_RETRY_ATTEMPTS,
@@ -9,12 +10,29 @@ import {
   createUploadQueue,
 } from "./upload-queue.js";
 
+const UPLOAD_QUEUE_DB_NAME = "lab-tracker-upload-queue";
+
 function makeFile(name = "snap.jpg", content = "image-bytes", type = "image/jpeg") {
   return new File([content], name, { type });
 }
 
+function deleteDatabase(name) {
+  return new Promise((resolve, reject) => {
+    const request = fakeIndexedDB.deleteDatabase(name);
+    request.onsuccess = () => resolve();
+    request.onerror = () => reject(request.error);
+    request.onblocked = () => reject(new Error(`Timed out deleting ${name}`));
+  });
+}
+
+async function useFakeIndexedDb(name) {
+  vi.stubGlobal("indexedDB", fakeIndexedDB);
+  await deleteDatabase(name);
+}
+
 afterEach(() => {
   vi.restoreAllMocks();
+  vi.unstubAllGlobals();
 });
 
 describe("createUploadQueue", () => {
@@ -360,5 +378,47 @@ describe("createUploadQueue", () => {
 
     await expect(addPromise).resolves.toBe(42);
     expect(fakeDb.close).toHaveBeenCalled();
+  });
+
+  it("stores, updates, lists, and removes records through the IndexedDB adapter", async () => {
+    await useFakeIndexedDb(UPLOAD_QUEUE_DB_NAME);
+    const storage = createIndexedDbStorage();
+    const file = makeFile("real-idb.jpg", "real bytes");
+
+    const id = await storage.add({
+      endpoint: UPLOAD_FILE_PATH,
+      fields: { project_id: "proj-a", note: "from-real-idb" },
+      file,
+      filename: file.name,
+      contentType: file.type,
+      token: "tok-1",
+    });
+
+    expect(id).toBe(1);
+    expect(await storage.list()).toMatchObject([
+      {
+        id,
+        endpoint: UPLOAD_FILE_PATH,
+        fields: { project_id: "proj-a", note: "from-real-idb" },
+        filename: "real-idb.jpg",
+        contentType: "image/jpeg",
+        token: "tok-1",
+      },
+    ]);
+
+    const updated = await storage.update(id, {
+      retryCount: 2,
+      lastStatus: 429,
+    });
+
+    expect(updated).toMatchObject({
+      id,
+      retryCount: 2,
+      lastStatus: 429,
+    });
+    expect(await storage.list()).toHaveLength(1);
+
+    await storage.remove(id);
+    expect(await storage.list()).toEqual([]);
   });
 });

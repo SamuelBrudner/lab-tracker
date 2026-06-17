@@ -1,6 +1,9 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { indexedDB as fakeIndexedDB } from "fake-indexeddb";
 
 import {
+  DB_NAME,
+  STORE,
   createIndexedDbShareStorage,
   createMemoryShareStorage,
   migrateIncomingShares,
@@ -22,8 +25,56 @@ function makeQueue() {
   });
 }
 
+function deleteDatabase(name) {
+  return new Promise((resolve, reject) => {
+    const request = fakeIndexedDB.deleteDatabase(name);
+    request.onsuccess = () => resolve();
+    request.onerror = () => reject(request.error);
+    request.onblocked = () => reject(new Error(`Timed out deleting ${name}`));
+  });
+}
+
+function openSeedDb() {
+  return new Promise((resolve, reject) => {
+    const request = fakeIndexedDB.open(DB_NAME, 1);
+    request.onupgradeneeded = () => {
+      const db = request.result;
+      if (!db.objectStoreNames.contains(STORE)) {
+        db.createObjectStore(STORE, { keyPath: "id", autoIncrement: true });
+      }
+    };
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error);
+  });
+}
+
+function txDone(tx) {
+  return new Promise((resolve, reject) => {
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+    tx.onabort = () => reject(tx.error || new Error("IndexedDB transaction aborted."));
+  });
+}
+
+async function seedShareInbox(shares) {
+  vi.stubGlobal("indexedDB", fakeIndexedDB);
+  await deleteDatabase(DB_NAME);
+  const db = await openSeedDb();
+  try {
+    const tx = db.transaction(STORE, "readwrite");
+    const store = tx.objectStore(STORE);
+    for (const share of shares) {
+      store.add(share);
+    }
+    await txDone(tx);
+  } finally {
+    db.close();
+  }
+}
+
 afterEach(() => {
   vi.restoreAllMocks();
+  vi.unstubAllGlobals();
 });
 
 describe("migrateIncomingShares", () => {
@@ -158,5 +209,45 @@ describe("migrateIncomingShares", () => {
 
     await expect(removePromise).resolves.toBeUndefined();
     expect(fakeDb.close).toHaveBeenCalled();
+  });
+
+  it("migrates and removes records through the IndexedDB share inbox adapter", async () => {
+    await seedShareInbox([
+      {
+        file: makeFile("idb-share.jpg", "idb-img"),
+        filename: "idb-share.jpg",
+        contentType: "image/jpeg",
+        title: "Shared from OS",
+        text: "bench note",
+        receivedAt: 1717_000_002_000,
+      },
+    ]);
+    const storage = createIndexedDbShareStorage();
+    const uploadQueue = makeQueue();
+
+    const result = await migrateIncomingShares({
+      projectId: "proj-a",
+      token: "fresh-token",
+      uploadQueue,
+      storage,
+    });
+
+    expect(result).toEqual({ migrated: 1, skipped: 0 });
+    expect(await storage.list()).toEqual([]);
+    const queued = await uploadQueue.listPending();
+    expect(queued).toHaveLength(1);
+    expect(queued[0]).toMatchObject({
+      endpoint: UPLOAD_FILE_PATH,
+      filename: "idb-share.jpg",
+      token: "fresh-token",
+      fields: {
+        project_id: "proj-a",
+      },
+    });
+    expect(JSON.parse(queued[0].fields.metadata)).toMatchObject({
+      capture_source: "share_target",
+      share_title: "Shared from OS",
+      share_text: "bench note",
+    });
   });
 });

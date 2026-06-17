@@ -125,6 +125,8 @@ async function migrateIncomingShares({
       endpoint: UPLOAD_FILE_PATH,
       file: share.file,
       fields,
+      filename: share.filename,
+      contentType: share.contentType,
       token,
     });
     await storage.remove(share.id);

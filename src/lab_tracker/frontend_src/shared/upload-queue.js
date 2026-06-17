@@ -170,7 +170,7 @@ function createUploadQueue({ storage, fetch: fetchImpl = globalThis.fetch, now =
     });
   }
 
-  async function enqueue({ endpoint, file, fields = {}, token = "" }) {
+  async function enqueue({ endpoint, file, fields = {}, token = "", filename = "", contentType = "" }) {
     if (!endpoint) {
       throw new Error("enqueue requires endpoint");
     }
@@ -184,8 +184,8 @@ function createUploadQueue({ storage, fetch: fetchImpl = globalThis.fetch, now =
       endpoint,
       file,
       fields: { ...fields },
-      filename: file.name || "capture",
-      contentType: file.type || "application/octet-stream",
+      filename: filename || file.name || "capture",
+      contentType: contentType || file.type || "application/octet-stream",
       token,
       enqueuedAt: now(),
     };
