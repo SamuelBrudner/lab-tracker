@@ -3,16 +3,54 @@ from __future__ import annotations
 from pathlib import Path
 from uuid import uuid4
 
-from alembic import command
 from alembic.config import Config
 from alembic.script import ScriptDirectory
 from sqlalchemy import create_engine, inspect, text
 
+from alembic import command
 from lab_tracker.api import LabTrackerAPI
 from lab_tracker.auth import AuthContext, Role
 from lab_tracker.db import get_session_factory
 from lab_tracker.models import QuestionType
 from lab_tracker.sqlalchemy_repository import SQLAlchemyLabTrackerRepository
+
+_NOT_NULL_TIGHTENING_COLUMNS_0014_0024 = {
+    "graph_change_sets": {
+        "source_note_ids",
+        "context_packet",
+        "summary",
+        "uncertain_fields",
+        "clarification_requests",
+        "error_metadata",
+        "created_at",
+        "updated_at",
+    },
+    "graph_change_operations": {
+        "payload",
+        "rationale",
+        "source_refs",
+        "error_metadata",
+        "created_at",
+        "updated_at",
+    },
+    "question_refactors": {
+        "source_snapshot",
+        "replacement_snapshot",
+        "relationship_changes",
+        "created_at",
+    },
+    "project_memberships": {"created_at", "updated_at"},
+    "goals": {"summary", "status", "attributes", "created_at", "updated_at"},
+    "goal_links": {"link_status", "created_at"},
+    "graph_draft_batch_settings": {"created_at", "updated_at"},
+    "graph_draft_batch_runs": {
+        "summary",
+        "error_metadata",
+        "created_at",
+        "updated_at",
+        "started_at",
+    },
+}
 
 
 def _actor() -> AuthContext:
@@ -78,7 +116,7 @@ def test_alembic_upgrade_chain_from_empty_to_head(monkeypatch, tmp_path):
     for revision in revisions:
         command.upgrade(config, revision)
         assert revision in _current_revisions(database_url)
-    assert _current_revision(database_url) == "0038_entity_versions"
+    assert _current_revision(database_url) == "0039_not_null_tightening_0014_0024"
 
 
 def test_alembic_has_single_head() -> None:
@@ -450,6 +488,241 @@ def test_alembic_upgrade_head_creates_expected_tables(monkeypatch, tmp_path):
     assert "review_note" in operation_columns
     assert goal_columns["project_id"]["nullable"] is True
     assert goal_link_columns["slot"]["nullable"] is False
+    _assert_columns_not_nullable(
+        inspector,
+        _NOT_NULL_TIGHTENING_COLUMNS_0014_0024,
+    )
+    engine.dispose()
+
+
+def test_not_null_tightening_migration_backfills_existing_nulls(
+    monkeypatch,
+    tmp_path,
+):
+    db_path = tmp_path / "not-null-tightening.db"
+    database_url = f"sqlite+pysqlite:///{db_path}"
+    config = _alembic_config()
+    _set_database_url(monkeypatch, database_url)
+
+    command.upgrade(config, "0038_entity_versions")
+
+    user_id = str(uuid4())
+    project_id = str(uuid4())
+    note_id = str(uuid4())
+    source_question_id = str(uuid4())
+    replacement_question_id = str(uuid4())
+    change_set_id = str(uuid4())
+    operation_id = str(uuid4())
+    refactor_id = str(uuid4())
+    membership_id = str(uuid4())
+    goal_id = str(uuid4())
+    link_id = str(uuid4())
+    batch_settings_id = str(uuid4())
+    batch_run_id = str(uuid4())
+
+    engine = create_engine(
+        database_url,
+        future=True,
+        connect_args={"check_same_thread": False},
+    )
+    with engine.begin() as connection:
+        connection.execute(
+            text(
+                "INSERT INTO users "
+                "(user_id, username, password_hash, role, created_at) "
+                "VALUES (:user_id, 'migration-user', 'unused', 'admin', "
+                "CURRENT_TIMESTAMP)"
+            ),
+            {"user_id": user_id},
+        )
+        connection.execute(
+            text(
+                "INSERT INTO projects "
+                "(project_id, name, description, status, created_at, updated_at) "
+                "VALUES (:project_id, 'Migration project', '', 'active', "
+                "CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
+            ),
+            {"project_id": project_id},
+        )
+        connection.execute(
+            text(
+                "INSERT INTO notes "
+                "(note_id, project_id, raw_content, status, origin, created_at, "
+                "updated_at) VALUES (:note_id, :project_id, 'raw', 'staged', "
+                "'user', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
+            ),
+            {"note_id": note_id, "project_id": project_id},
+        )
+        for question_id, text_value in (
+            (source_question_id, "Source question?"),
+            (replacement_question_id, "Replacement question?"),
+        ):
+            connection.execute(
+                text(
+                    "INSERT INTO questions "
+                    "(question_id, project_id, text, question_type, status, "
+                    "origin, created_at, updated_at) "
+                    "VALUES (:question_id, :project_id, :text_value, "
+                    "'descriptive', 'staged', 'user', CURRENT_TIMESTAMP, "
+                    "CURRENT_TIMESTAMP)"
+                ),
+                {
+                    "question_id": question_id,
+                    "project_id": project_id,
+                    "text_value": text_value,
+                },
+            )
+        connection.execute(
+            text(
+                "INSERT INTO graph_change_sets "
+                "(change_set_id, project_id, source_note_id, provider, model, "
+                "prompt_version, draft_mode, status) "
+                "VALUES (:change_set_id, :project_id, :note_id, 'openai', "
+                "'test-model', 'v1', 'graph_context', 'drafting')"
+            ),
+            {
+                "change_set_id": change_set_id,
+                "project_id": project_id,
+                "note_id": note_id,
+            },
+        )
+        connection.execute(
+            text(
+                "INSERT INTO graph_change_operations "
+                "(operation_id, change_set_id, sequence, op, entity_type, status) "
+                "VALUES (:operation_id, :change_set_id, 1, 'create', "
+                "'question', 'proposed')"
+            ),
+            {
+                "operation_id": operation_id,
+                "change_set_id": change_set_id,
+            },
+        )
+        connection.execute(
+            text(
+                "INSERT INTO question_refactors "
+                "(refactor_id, project_id, source_question_id, "
+                "replacement_question_id, reason) "
+                "VALUES (:refactor_id, :project_id, :source_question_id, "
+                ":replacement_question_id, 'cleanup')"
+            ),
+            {
+                "refactor_id": refactor_id,
+                "project_id": project_id,
+                "source_question_id": source_question_id,
+                "replacement_question_id": replacement_question_id,
+            },
+        )
+        connection.execute(
+            text(
+                "INSERT INTO project_memberships "
+                "(membership_id, project_id, user_id, role) "
+                "VALUES (:membership_id, :project_id, :user_id, 'owner')"
+            ),
+            {
+                "membership_id": membership_id,
+                "project_id": project_id,
+                "user_id": user_id,
+            },
+        )
+        connection.execute(
+            text(
+                "INSERT INTO goals "
+                "(goal_id, project_id, goal_type, title, origin) "
+                "VALUES (:goal_id, :project_id, 'answer_question', "
+                "'Migration goal', 'user')"
+            ),
+            {"goal_id": goal_id, "project_id": project_id},
+        )
+        connection.execute(
+            text(
+                "INSERT INTO goal_links "
+                "(link_id, goal_id, entity_type, entity_id, relation, slot) "
+                "VALUES (:link_id, :goal_id, 'question', :entity_id, "
+                "'milestone', '')"
+            ),
+            {
+                "link_id": link_id,
+                "goal_id": goal_id,
+                "entity_id": source_question_id,
+            },
+        )
+        connection.execute(
+            text(
+                "INSERT INTO graph_draft_batch_settings "
+                "(settings_id, project_id, enabled, cadence_minutes, "
+                "run_at_local_time, timezone_name) "
+                "VALUES (:settings_id, :project_id, 1, 1440, '06:00', 'UTC')"
+            ),
+            {"settings_id": batch_settings_id, "project_id": project_id},
+        )
+        connection.execute(
+            text(
+                "INSERT INTO graph_draft_batch_runs "
+                "(run_id, project_id, trigger, status, window_start, window_end, "
+                "note_count, batch_key) "
+                "VALUES (:run_id, :project_id, 'manual', 'running', "
+                "CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, 0, :batch_key)"
+            ),
+            {
+                "run_id": batch_run_id,
+                "project_id": project_id,
+                "batch_key": f"batch-{uuid4()}",
+            },
+        )
+    engine.dispose()
+
+    command.upgrade(config, "head")
+
+    engine = create_engine(
+        database_url,
+        future=True,
+        connect_args={"check_same_thread": False},
+    )
+    inspector = inspect(engine)
+    _assert_columns_not_nullable(
+        inspector,
+        _NOT_NULL_TIGHTENING_COLUMNS_0014_0024,
+    )
+    with engine.connect() as connection:
+        for table_name, id_column, id_value in (
+            ("graph_change_sets", "change_set_id", change_set_id),
+            ("graph_change_operations", "operation_id", operation_id),
+            ("question_refactors", "refactor_id", refactor_id),
+            ("project_memberships", "membership_id", membership_id),
+            ("goals", "goal_id", goal_id),
+            ("goal_links", "link_id", link_id),
+            ("graph_draft_batch_settings", "settings_id", batch_settings_id),
+            ("graph_draft_batch_runs", "run_id", batch_run_id),
+        ):
+            row_count = connection.execute(
+                text(
+                    f"SELECT COUNT(*) FROM {table_name} "
+                    f"WHERE {id_column} = :id_value"
+                ),
+                {"id_value": id_value},
+            ).scalar_one()
+            assert row_count == 1, f"{table_name} row was lost during migration"
+        for table_name, column_names in _NOT_NULL_TIGHTENING_COLUMNS_0014_0024.items():
+            for column_name in column_names:
+                null_count = connection.execute(
+                    text(
+                        f"SELECT COUNT(*) FROM {table_name} "
+                        f"WHERE {column_name} IS NULL"
+                    )
+                ).scalar_one()
+                assert null_count == 0, f"{table_name}.{column_name} remained NULL"
+        goal_row = connection.execute(
+            text("SELECT summary, status FROM goals WHERE goal_id = :goal_id"),
+            {"goal_id": goal_id},
+        ).one()
+        assert goal_row.summary == ""
+        assert goal_row.status == "planned"
+        link_status = connection.execute(
+            text("SELECT link_status FROM goal_links WHERE goal_id = :goal_id"),
+            {"goal_id": goal_id},
+        ).scalar_one()
+        assert link_status == "candidate"
     engine.dispose()
 
 
@@ -463,7 +736,7 @@ def test_database_at_daily_review_branch_upgrades_to_current_head(monkeypatch, t
     assert _current_revision(database_url) == "0017_daily_graph_reviews"
 
     command.upgrade(config, "head")
-    assert _current_revision(database_url) == "0038_entity_versions"
+    assert _current_revision(database_url) == "0039_not_null_tightening_0014_0024"
 
     engine = create_engine(
         database_url,
@@ -587,6 +860,18 @@ def _assert_created_by_user_fk(inspector, table_name: str) -> None:
         column="created_by_user_id",
         referred_table="users",
     )
+
+
+def _assert_columns_not_nullable(
+    inspector,
+    table_columns: dict[str, set[str]],
+) -> None:
+    for table_name, column_names in table_columns.items():
+        columns = {column["name"]: column for column in inspector.get_columns(table_name)}
+        for column_name in column_names:
+            assert columns[column_name]["nullable"] is False, (
+                f"{table_name}.{column_name} should be NOT NULL"
+            )
 
 
 def _assert_origin_backlink_columns(inspector, table_name: str) -> None:
