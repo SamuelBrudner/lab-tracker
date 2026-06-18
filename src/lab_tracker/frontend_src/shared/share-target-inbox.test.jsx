@@ -149,7 +149,7 @@ describe("migrateIncomingShares", () => {
     expect(await uploadQueue.pendingCount()).toBe(0);
   });
 
-  it("drops shares that have no file rather than blocking the inbox", async () => {
+  it("drops empty shares that have no file rather than blocking the inbox", async () => {
     const storage = createMemoryShareStorage([{ receivedAt: 1 }]);
     const uploadQueue = makeQueue();
 
@@ -160,8 +160,65 @@ describe("migrateIncomingShares", () => {
       storage,
     });
 
-    expect(result.migrated).toBe(0);
+    expect(result).toEqual({ migrated: 0, skipped: 1 });
     expect(await storage.list()).toHaveLength(0);
+  });
+
+  it("creates text notes for fileless text and URL shares", async () => {
+    const storage = createMemoryShareStorage([
+      {
+        title: "Paper link",
+        text: "Follow up on this protocol",
+        url: "https://example.test/protocol",
+        receivedAt: 1,
+      },
+    ]);
+    const uploadQueue = makeQueue();
+    const createTextNote = vi.fn(async () => ({ note_id: "note-share" }));
+
+    const result = await migrateIncomingShares({
+      createTextNote,
+      projectId: "proj-a",
+      token: "tok-1",
+      uploadQueue,
+      storage,
+    });
+
+    expect(result).toEqual({ migrated: 1, skipped: 0 });
+    expect(await storage.list()).toHaveLength(0);
+    expect(await uploadQueue.pendingCount()).toBe(0);
+    expect(createTextNote).toHaveBeenCalledWith({
+      metadata: {
+        capture_source: "share_target",
+        share_text: "Follow up on this protocol",
+        share_title: "Paper link",
+        share_url: "https://example.test/protocol",
+        shared_at: "1970-01-01T00:00:00.001Z",
+      },
+      projectId: "proj-a",
+      rawContent: "Paper link\n\nFollow up on this protocol\n\nhttps://example.test/protocol",
+      share: expect.objectContaining({
+        title: "Paper link",
+        url: "https://example.test/protocol",
+      }),
+      token: "tok-1",
+    });
+  });
+
+  it("leaves fileless text shares in the inbox if no note creator is available", async () => {
+    const storage = createMemoryShareStorage([{ text: "bench note", receivedAt: 1 }]);
+    const uploadQueue = makeQueue();
+
+    const result = await migrateIncomingShares({
+      projectId: "proj-a",
+      token: "tok-1",
+      uploadQueue,
+      storage,
+    });
+
+    expect(result).toEqual({ migrated: 0, skipped: 1 });
+    expect(await storage.list()).toHaveLength(1);
+    expect(await uploadQueue.pendingCount()).toBe(0);
   });
 
   it("waits for IndexedDB transaction completion when removing shares", async () => {

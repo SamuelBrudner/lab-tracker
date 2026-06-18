@@ -1251,6 +1251,61 @@ describe("App", () => {
     expect(await screen.findByRole("heading", { name: "Project Graph" })).toBeInTheDocument();
   });
 
+  it("surfaces share-target inbox write failures on the capture route", async () => {
+    localStorage.setItem(TOKEN_STORAGE_KEY, "token-share-target-error");
+    window.history.replaceState({}, "", "/app/capture?from-share=error");
+
+    installFetchMock([
+      {
+        match: "/auth/me",
+        response: apiResponse({ role: "admin", username: "sam" }),
+      },
+      {
+        match: projectsPath,
+        response: apiResponse([project("project-1", "Project One")]),
+      },
+      {
+        match: questionListPath("project-1"),
+        response: paged([]),
+      },
+      {
+        match: datasetListPath("project-1"),
+        response: paged([]),
+      },
+      {
+        match: noteCountPath("project-1"),
+        response: paged([], { limit: 1, offset: 0, total: 0 }),
+      },
+      {
+        match: activeSessionsPath("project-1"),
+        response: paged([]),
+      },
+      {
+        match: buildApiPath("/graph-drafts", { project_id: "project-1", limit: 10 }),
+        response: paged([]),
+      },
+      {
+        match: buildApiPath("/notes", { project_id: "project-1", limit: 10 }),
+        response: paged([]),
+      },
+      {
+        match: captureAnalysesPath("project-1"),
+        response: paged([]),
+      },
+      {
+        match: captureClaimsPath("project-1"),
+        response: paged([]),
+      },
+    ]);
+
+    render(<App />);
+
+    expect(
+      await screen.findByText("Shared capture could not be saved. Open Lab Tracker and try again.")
+    ).toBeInTheDocument();
+    expect(window.location.search).not.toContain("from-share");
+  });
+
   it("shows pending batch notifications and the batch review queue", async () => {
     const batchId = "22222222-2222-4222-8222-222222222222";
     const noteA = "11111111-1111-4111-8111-111111111111";

@@ -95,10 +95,21 @@ function buildShareMetadata(share) {
   if (share.text) {
     metadata.share_text = share.text;
   }
+  if (share.url) {
+    metadata.share_url = share.url;
+  }
   return metadata;
 }
 
+function shareTextContent(share) {
+  const parts = [share.title, share.text, share.url]
+    .map((value) => String(value || "").trim())
+    .filter(Boolean);
+  return Array.from(new Set(parts)).join("\n\n");
+}
+
 async function migrateIncomingShares({
+  createTextNote = null,
   projectId,
   token,
   uploadQueue,
@@ -112,9 +123,28 @@ async function migrateIncomingShares({
     return { migrated: 0, skipped: 0 };
   }
   let migrated = 0;
+  let skipped = 0;
   for (const share of shares) {
     if (!share.file) {
+      const rawContent = shareTextContent(share);
+      if (!rawContent) {
+        await storage.remove(share.id);
+        skipped += 1;
+        continue;
+      }
+      if (typeof createTextNote !== "function") {
+        skipped += 1;
+        continue;
+      }
+      await createTextNote({
+        metadata: buildShareMetadata(share),
+        projectId,
+        rawContent,
+        share,
+        token,
+      });
       await storage.remove(share.id);
+      migrated += 1;
       continue;
     }
     const fields = {
@@ -132,7 +162,7 @@ async function migrateIncomingShares({
     await storage.remove(share.id);
     migrated += 1;
   }
-  return { migrated, skipped: 0 };
+  return { migrated, skipped };
 }
 
 export {

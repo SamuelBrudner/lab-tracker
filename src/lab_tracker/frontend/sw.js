@@ -97,29 +97,46 @@ self.addEventListener("fetch", (event) => {
 });
 
 async function handleShareTarget(request) {
+  let redirectStatus = "empty";
   try {
     const formData = await request.formData();
     const files = formData.getAll("file");
-    const title = formData.get("title") || "";
-    const text = formData.get("text") || "";
+    const title = String(formData.get("title") || "").trim();
+    const text = String(formData.get("text") || "").trim();
+    const url = String(formData.get("url") || "").trim();
+    const receivedAt = Date.now();
+    let storedCount = 0;
     for (const file of files) {
       if (file && (file instanceof File || file instanceof Blob)) {
         await storeIncomingShare({
           file,
           filename: file.name || "shared",
           contentType: file.type || "application/octet-stream",
-          title: String(title || ""),
-          text: String(text || ""),
-          receivedAt: Date.now(),
+          title,
+          text,
+          url,
+          receivedAt,
         });
+        storedCount += 1;
       }
     }
+    if (storedCount === 0 && (title || text || url)) {
+      await storeIncomingShare({
+        title,
+        text,
+        url,
+        receivedAt,
+      });
+      storedCount += 1;
+    }
+    redirectStatus = storedCount > 0 ? "1" : "empty";
   } catch (error) {
-    // Stashing failed; we still navigate the user into the app so they see
-    // that something happened. The lost-share case is rare and visible.
+    // Stashing failed; navigate into the app with an explicit error marker so
+    // the capture page can tell the user the OS share was not saved.
     console.warn("share-target inbox write failed", error);
+    redirectStatus = "error";
   }
-  return Response.redirect("/app/capture?from-share=1", 303);
+  return Response.redirect(`/app/capture?from-share=${redirectStatus}`, 303);
 }
 
 function openShareInbox() {

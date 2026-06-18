@@ -33,6 +33,14 @@ describe("service worker source", () => {
     expect(serviceWorkerSource).toContain("IndexedDB transaction aborted");
   });
 
+  it("stores fileless share-target text and URL records and redirects with explicit status", () => {
+    expect(serviceWorkerSource).toContain('formData.get("url")');
+    expect(serviceWorkerSource).toContain("storedCount === 0 && (title || text || url)");
+    expect(serviceWorkerSource).toContain("from-share=${redirectStatus}");
+    expect(serviceWorkerSource).toContain('redirectStatus = "error"');
+    expect(serviceWorkerSource).toContain('redirectStatus = storedCount > 0 ? "1" : "empty"');
+  });
+
   it("keeps cache and asset versions aligned across the shell files", () => {
     const cacheVersion = extractCacheVersion(serviceWorkerSource);
     const expectedAssetVersion = cacheVersion.replace(/^v/, "");

@@ -102,6 +102,27 @@ function readInstallIntent() {
   }
 }
 
+function readShareTargetStatus() {
+  try {
+    return new URLSearchParams(window.location.search || "").get("from-share") || "";
+  } catch {
+    return "";
+  }
+}
+
+function clearShareTargetStatus() {
+  try {
+    const url = new URL(window.location.href);
+    if (!url.searchParams.has("from-share")) {
+      return;
+    }
+    url.searchParams.delete("from-share");
+    window.history.replaceState({}, "", `${url.pathname}${url.search}${url.hash}`);
+  } catch {
+    // Query cleanup is cosmetic; the inbox migration still runs independently.
+  }
+}
+
 function CaptureIcon({ kind }) {
   if (kind === "voice") {
     return (
@@ -336,6 +357,19 @@ function MobileCaptureCard({
   }, [selectedProjectId, token]);
 
   useEffect(() => {
+    const status = readShareTargetStatus();
+    if (!status) {
+      return;
+    }
+    clearShareTargetStatus();
+    if (status === "error") {
+      setFlash("", "Shared capture could not be saved. Open Lab Tracker and try again.");
+    } else if (status === "empty") {
+      setFlash("", "Shared content was empty.");
+    }
+  }, [setFlash]);
+
+  useEffect(() => {
     // Pick up anything the OS share sheet handed off via the service worker
     // and route it through the standard offline upload queue. Runs only once
     // a project is selected so the migrated shares get attached to a real
@@ -349,15 +383,30 @@ function MobileCaptureCard({
       return undefined;
     }
     let canceled = false;
-    migrateIncomingShares({ projectId: selectedProjectId, token, uploadQueue: queue })
+    migrateIncomingShares({
+      createTextNote: ({ metadata, rawContent }) =>
+        apiRequest("/notes", {
+          body: {
+            metadata,
+            project_id: selectedProjectId,
+            raw_content: rawContent,
+            targets: [],
+          },
+          method: "POST",
+          token,
+        }),
+      projectId: selectedProjectId,
+      token,
+      uploadQueue: queue,
+    })
       .then((result) => {
         if (canceled || result.migrated === 0) {
           return undefined;
         }
         setFlash(
           result.migrated === 1
-            ? "1 shared capture queued — uploading now."
-            : `${result.migrated} shared captures queued — uploading now.`
+            ? "1 shared capture imported."
+            : `${result.migrated} shared captures imported.`
         );
         return queue
           .drain({ token })
