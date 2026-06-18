@@ -20,14 +20,30 @@ from lab_tracker.errors import AuthError
 from lab_tracker.schemas import ErrorEnvelope, ErrorInfo
 from lab_tracker.sqlalchemy_repository import SQLAlchemyLabTrackerRepository
 
+_APP_CONTENT_SECURITY_POLICY = "; ".join(
+    [
+        "default-src 'self'",
+        "script-src 'self'",
+        "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
+        "font-src 'self' https://fonts.gstatic.com data:",
+        "img-src 'self' data: blob:",
+        "media-src 'self' data: blob:",
+        "connect-src 'self'",
+        "manifest-src 'self'",
+        "worker-src 'self'",
+        "object-src 'none'",
+        "base-uri 'self'",
+        "form-action 'self'",
+        "frame-ancestors 'none'",
+    ]
+)
+
 _PUBLIC_PATHS = frozenset(
     {
         "/",
         "/app",
         "/app/",
         "/health",
-        "/metrics",
-        "/readiness",
         "/auth/login",
         "/auth/register",
         "/auth/bootstrap-status",
@@ -36,6 +52,13 @@ _PUBLIC_PATHS = frozenset(
         "/docs",
         "/redoc",
     }
+)
+
+_CSP_PATH_PREFIXES = (
+    "/app",
+    "/datasets/",
+    "/notes/",
+    "/visualizations/",
 )
 
 
@@ -56,11 +79,10 @@ def local_auth_context() -> AuthContext:
 def _is_public_path(path: str) -> bool:
     if path in _PUBLIC_PATHS:
         return True
-    # Keep docs assets and tests reachable without credentials.
+    # Keep docs and app assets reachable without credentials.
     return (
         path.startswith("/docs/")
         or path.startswith("/redoc/")
-        or path.startswith("/_test/")
         or path.startswith("/app/")
     )
 
@@ -113,6 +135,32 @@ def configure_auth_middleware(app: FastAPI) -> None:
         except AuthError as exc:
             return _auth_error_response(str(exc))
         return await call_next(request)
+
+
+def configure_security_headers_middleware(app: FastAPI) -> None:
+    @app.middleware("http")
+    async def security_headers_middleware(request: Request, call_next):
+        response = await call_next(request)
+        response.headers.setdefault("X-Content-Type-Options", "nosniff")
+        response.headers.setdefault("X-Frame-Options", "DENY")
+        response.headers.setdefault("Referrer-Policy", "no-referrer")
+        if request.url.scheme == "https":
+            response.headers.setdefault(
+                "Strict-Transport-Security",
+                "max-age=31536000; includeSubDomains",
+            )
+        if _should_apply_csp(request.url.path):
+            response.headers.setdefault(
+                "Content-Security-Policy",
+                _APP_CONTENT_SECURITY_POLICY,
+            )
+        return response
+
+
+def _should_apply_csp(path: str) -> bool:
+    if path == "/" or path.startswith("/openapi"):
+        return False
+    return any(path.startswith(prefix) for prefix in _CSP_PATH_PREFIXES)
 
 
 def configure_database_session_middleware(

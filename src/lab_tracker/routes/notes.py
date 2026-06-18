@@ -32,6 +32,10 @@ from lab_tracker.schemas import (
     NoteTranscriptRequest,
     NoteUpdate,
 )
+from lab_tracker.upload_security import (
+    enforce_request_content_length_limit,
+    validate_upload_content_type,
+)
 
 from .shared import (
     CreatedByFilter,
@@ -92,7 +96,11 @@ def build_notes_router(api: LabTrackerAPI) -> APIRouter:
         filename = (file.filename or "").strip()
         if not filename:
             raise ValidationError("filename must not be empty.")
-        content_type = (file.content_type or "application/octet-stream").strip()
+        enforce_request_content_length_limit(
+            request,
+            max_bytes=request.app.state.settings.max_upload_bytes,
+        )
+        content_type = validate_upload_content_type(file.content_type)
         parsed_targets = parse_entity_refs_form(targets)
         parsed_metadata = parse_metadata_form(metadata)
         asset = request_api.store_note_raw_asset(
@@ -129,7 +137,11 @@ def build_notes_router(api: LabTrackerAPI) -> APIRouter:
         filename = (file.filename or "").strip()
         if not filename:
             raise ValidationError("filename must not be empty.")
-        content_type = (file.content_type or "application/octet-stream").strip()
+        enforce_request_content_length_limit(
+            request,
+            max_bytes=request.app.state.settings.max_upload_bytes,
+        )
+        content_type = validate_upload_content_type(file.content_type)
         parsed_metadata = parse_metadata_form(metadata)
         asset = request_api.store_note_raw_asset(
             file.file,

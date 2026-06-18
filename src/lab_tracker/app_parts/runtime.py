@@ -27,6 +27,7 @@ from lab_tracker.file_storage import LocalFileStorageBackend
 from lab_tracker.graph_drafting import make_graph_draft_client
 from lab_tracker.logging import configure_logging
 from lab_tracker.note_storage import LocalNoteStorage
+from lab_tracker.rate_limit import InMemoryRateLimiter
 
 _logger = logging.getLogger(__name__)
 
@@ -45,6 +46,7 @@ class AppRuntime:
     raw_note_storage: LocalNoteStorage
     lab_tracker_api: LabTrackerAPI
     graph_draft_client_factory: Callable[..., Any]
+    auth_rate_limiter: InMemoryRateLimiter
 
 
 def build_app_runtime(settings: Settings) -> AppRuntime:
@@ -69,10 +71,20 @@ def build_app_runtime(settings: Settings) -> AppRuntime:
         ttl_hours=settings.auth_invite_ttl_hours,
         session_factory=session_factory,
     )
-    file_storage_backend = LocalFileStorageBackend(settings.file_storage_path)
-    raw_note_storage = LocalNoteStorage(settings.note_storage_path)
+    file_storage_backend = LocalFileStorageBackend(
+        settings.file_storage_path,
+        max_bytes=settings.max_upload_bytes,
+    )
+    raw_note_storage = LocalNoteStorage(
+        settings.note_storage_path,
+        max_bytes=settings.max_upload_bytes,
+    )
     lab_tracker_api = LabTrackerAPI(
         raw_storage=raw_note_storage,
+    )
+    auth_rate_limiter = InMemoryRateLimiter(
+        max_attempts=settings.auth_rate_limit_attempts,
+        window_seconds=settings.auth_rate_limit_window_seconds,
     )
     return AppRuntime(
         settings=settings,
@@ -87,6 +99,7 @@ def build_app_runtime(settings: Settings) -> AppRuntime:
         raw_note_storage=raw_note_storage,
         lab_tracker_api=lab_tracker_api,
         graph_draft_client_factory=make_graph_draft_client,
+        auth_rate_limiter=auth_rate_limiter,
     )
 
 
@@ -114,3 +127,4 @@ def configure_app_state(app: FastAPI, runtime: AppRuntime) -> None:
     app.state.raw_note_storage = runtime.raw_note_storage
     app.state.lab_tracker_api = runtime.lab_tracker_api
     app.state.graph_draft_client_factory = runtime.graph_draft_client_factory
+    app.state.auth_rate_limiter = runtime.auth_rate_limiter

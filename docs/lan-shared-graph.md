@@ -66,6 +66,11 @@ If you do not want a helper to set the local Postgres URL, omit
 `--use-postgres` or `-UsePostgres` and rely on `.env` or the current shell
 environment.
 
+The LAN helpers refuse to bind `0.0.0.0` while effective Lab Tracker settings
+leave authentication disabled. For a trusted temporary demo only, override this
+with `scripts/serve-lan.sh --allow-insecure-auth-disabled` or
+`.\scripts\serve-lan.ps1 -AllowInsecureAuthDisabled`.
+
 ## Windows Firewall
 
 Opening inbound ports requires administrator privileges. If another computer

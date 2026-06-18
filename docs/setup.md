@@ -139,6 +139,8 @@ On Windows:
 Then open `http://<host-ip>:8000/app` from the other computer, or set
 `LAB_TRACKER_MCP_BASE_URL=http://<host-ip>:8000` for MCP clients. If remote
 clients time out, your OS firewall may need an inbound rule for TCP port 8000.
+The LAN helpers refuse to bind `0.0.0.0` when authentication is disabled unless
+you pass the explicit insecure-demo override documented in the LAN guide.
 
 LAN serving, firewall rules, and phone capture are documented in full in
 [`lan-shared-graph.md`](lan-shared-graph.md) and

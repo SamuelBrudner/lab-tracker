@@ -444,6 +444,31 @@ def test_rejected_supplied_access_token_does_not_report_missing_credentials() ->
     assert requests == [("/projects", "Bearer stale-token")]
 
 
+def test_readiness_uses_credentials_when_configured() -> None:
+    seen: list[tuple[str, str, str | None]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append((request.method, request.url.path, request.headers.get("authorization")))
+        if request.url.path == "/auth/login":
+            return _json_response(200, {"data": {"access_token": "token-1"}})
+        if request.url.path == "/readiness":
+            return _json_response(200, {"status": "ok"})
+        return _json_response(404, {"error": {"message": "not found"}})
+
+    with LabTracker(
+        base_url="http://testserver",
+        username="service",
+        password="secret",
+        transport=httpx.MockTransport(handler),
+    ) as lt:
+        assert lt.readiness() == {"status": "ok"}
+
+    assert seen == [
+        ("POST", "/auth/login", None),
+        ("GET", "/readiness", "Bearer token-1"),
+    ]
+
+
 def test_from_env_uses_mcp_base_url_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("LAB_TRACKER_BASE_URL", raising=False)
     monkeypatch.setenv("LAB_TRACKER_MCP_BASE_URL", "http://lab.example.test:8123/")

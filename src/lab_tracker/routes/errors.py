@@ -15,6 +15,8 @@ from lab_tracker.errors import (
     ConflictError,
     LabTrackerError,
     NotFoundError,
+    PayloadTooLargeError,
+    RateLimitError,
     ValidationError,
 )
 from lab_tracker.schemas import ErrorEnvelope, ErrorInfo, ErrorIssue
@@ -29,6 +31,14 @@ def register_error_handlers(app: FastAPI) -> None:
             str(exc),
         )
 
+    @app.exception_handler(PayloadTooLargeError)
+    def _handle_payload_too_large_error(request: Request, exc: PayloadTooLargeError):
+        return error_response(
+            http_status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            "payload_too_large",
+            str(exc),
+        )
+
     @app.exception_handler(NotFoundError)
     def _handle_not_found_error(request: Request, exc: NotFoundError):
         return error_response(http_status.HTTP_404_NOT_FOUND, "not_found", str(exc))
@@ -36,6 +46,14 @@ def register_error_handlers(app: FastAPI) -> None:
     @app.exception_handler(AuthError)
     def _handle_auth_error(request: Request, exc: AuthError):
         return error_response(http_status.HTTP_401_UNAUTHORIZED, "auth_error", str(exc))
+
+    @app.exception_handler(RateLimitError)
+    def _handle_rate_limit_error(request: Request, exc: RateLimitError):
+        return error_response(
+            http_status.HTTP_429_TOO_MANY_REQUESTS,
+            "rate_limited",
+            str(exc),
+        )
 
     @app.exception_handler(ConflictError)
     def _handle_conflict_error(request: Request, exc: ConflictError):

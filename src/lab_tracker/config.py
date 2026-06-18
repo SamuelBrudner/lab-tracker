@@ -27,9 +27,13 @@ class Settings(BaseSettings):
     auth_secret_key: str = DEFAULT_AUTH_SECRET_KEY
     auth_token_ttl_minutes: int = 60 * 12
     auth_invite_ttl_hours: int = 7 * 24
+    auth_rate_limit_attempts: int = 10
+    auth_rate_limit_window_seconds: int = 60
+    auth_public_viewer_registration_enabled: bool = True
     bootstrap_admin_token: str = ""
     bootstrap_admin_token_disclosure: Literal["local", "first_run", "never"] = "local"
     auth_enabled: bool | None = None
+    max_upload_bytes: int = 100 * 1024 * 1024
     graph_draft_provider: str = "openai"
     public_base_url: str = ""
     openai_api_key: str = ""
@@ -75,6 +79,14 @@ class Settings(BaseSettings):
             raise ValueError(
                 "LAB_TRACKER_AUTH_SECRET_KEY must be set to a strong "
                 "non-placeholder value when authentication is enabled."
+            )
+        if self.max_upload_bytes < 1:
+            raise ValueError("LAB_TRACKER_MAX_UPLOAD_BYTES must be at least 1.")
+        if self.auth_rate_limit_attempts < 1:
+            raise ValueError("LAB_TRACKER_AUTH_RATE_LIMIT_ATTEMPTS must be at least 1.")
+        if self.auth_rate_limit_window_seconds < 1:
+            raise ValueError(
+                "LAB_TRACKER_AUTH_RATE_LIMIT_WINDOW_SECONDS must be at least 1."
             )
         return self
 

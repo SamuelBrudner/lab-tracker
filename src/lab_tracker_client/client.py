@@ -235,7 +235,7 @@ class LabTracker:
         return self._request("GET", "/health", authenticated=False)
 
     def readiness(self) -> JsonObject:
-        return self._request("GET", "/readiness", authenticated=False)
+        return self._request("GET", "/readiness")
 
     def list_projects(
         self,

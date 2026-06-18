@@ -35,6 +35,22 @@ def test_frontend_routes_and_assets_are_served():
 
     assert "unpkg.com" not in app_response.text
     assert "text/babel" not in app_response.text
+    assert app_response.headers["x-content-type-options"] == "nosniff"
+    assert app_response.headers["x-frame-options"] == "DENY"
+    assert app_response.headers["referrer-policy"] == "no-referrer"
+    csp = app_response.headers["content-security-policy"]
+    assert "default-src 'self'" in csp
+    assert "object-src 'none'" in csp
+    assert "frame-ancestors 'none'" in csp
+
+
+def test_https_responses_include_hsts():
+    client = TestClient(create_app(), base_url="https://lab.example.org")
+
+    response = client.get("/app")
+
+    assert response.status_code == 200
+    assert response.headers["strict-transport-security"].startswith("max-age=31536000")
 
 
 def test_service_worker_is_served_with_app_scope():

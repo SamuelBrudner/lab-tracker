@@ -9,18 +9,26 @@ from uuid import UUID, uuid4
 
 from lab_tracker.errors import NotFoundError, ValidationError
 from lab_tracker.models import NoteRawAsset
+from lab_tracker.upload_security import enforce_stream_size_limit
 
 
 class LocalNoteStorage:
     """Store raw note bytes on local disk."""
 
-    def __init__(self, base_path: str | Path) -> None:
+    def __init__(
+        self,
+        base_path: str | Path,
+        *,
+        max_bytes: int | None = None,
+    ) -> None:
         self._base_path = Path(base_path)
+        self._max_bytes = max_bytes
 
     def store(self, content: bytes, *, filename: str, content_type: str) -> NoteRawAsset:
         self._validate_store_inputs(filename=filename, content_type=content_type)
         if not content:
             raise ValidationError("raw_content must not be empty.")
+        enforce_stream_size_limit(len(content), max_bytes=self._max_bytes)
         storage_id = uuid4()
         checksum = hashlib.sha256(content).hexdigest()
         asset = NoteRawAsset(
@@ -40,6 +48,7 @@ class LocalNoteStorage:
         filename: str,
         content_type: str,
         chunk_size: int = 1024 * 1024,
+        max_bytes: int | None = None,
     ) -> NoteRawAsset:
         self._validate_store_inputs(filename=filename, content_type=content_type)
         storage_id = uuid4()
@@ -48,14 +57,20 @@ class LocalNoteStorage:
 
         checksum = hashlib.sha256()
         size_bytes = 0
-        with path.open("wb") as handle:
-            while True:
-                chunk = stream.read(chunk_size)
-                if not chunk:
-                    break
-                checksum.update(chunk)
-                size_bytes += len(chunk)
-                handle.write(chunk)
+        resolved_max_bytes = self._max_bytes if max_bytes is None else max_bytes
+        try:
+            with path.open("wb") as handle:
+                while True:
+                    chunk = stream.read(chunk_size)
+                    if not chunk:
+                        break
+                    checksum.update(chunk)
+                    size_bytes += len(chunk)
+                    enforce_stream_size_limit(size_bytes, max_bytes=resolved_max_bytes)
+                    handle.write(chunk)
+        except BaseException:
+            path.unlink(missing_ok=True)
+            raise
 
         if size_bytes == 0:
             path.unlink(missing_ok=True)

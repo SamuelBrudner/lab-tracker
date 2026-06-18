@@ -20,6 +20,7 @@ from pathlib import Path
 from uuid import UUID, uuid4
 
 from lab_tracker.errors import NotFoundError, ValidationError
+from lab_tracker.upload_security import enforce_stream_size_limit
 
 LAB_TRACKER_FILE_STORAGE_PATH_ENV = "LAB_TRACKER_FILE_STORAGE_PATH"
 
@@ -31,6 +32,7 @@ class FileStorageBackend(ABC):
         *,
         filename: str,
         content_type: str,
+        max_bytes: int | None = None,
     ) -> StoredFileMetadata:
         """Persist a stream of byte chunks and return stored-file metadata."""
 
@@ -38,6 +40,7 @@ class FileStorageBackend(ABC):
         for chunk in chunks:
             if chunk:
                 payload.extend(chunk)
+                enforce_stream_size_limit(len(payload), max_bytes=max_bytes)
         storage_id = self.store(bytes(payload), filename=filename, content_type=content_type)
         return StoredFileMetadata(
             storage_id=storage_id,
@@ -113,13 +116,19 @@ def _atomic_write_bytes(path: Path, content: bytes) -> None:
 class LocalFileStorageBackend(FileStorageBackend):
     """Local filesystem storage with UUID sharding and checksum sidecar metadata."""
 
-    def __init__(self, base_path: str | Path | None = None) -> None:
+    def __init__(
+        self,
+        base_path: str | Path | None = None,
+        *,
+        max_bytes: int | None = None,
+    ) -> None:
         configured = (
             base_path
             or os.environ.get(LAB_TRACKER_FILE_STORAGE_PATH_ENV)
             or "./file_storage"
         )
         self._base_path = Path(configured).expanduser()
+        self._max_bytes = max_bytes
 
     @property
     def base_path(self) -> Path:
@@ -135,6 +144,7 @@ class LocalFileStorageBackend(FileStorageBackend):
         *,
         filename: str,
         content_type: str,
+        max_bytes: int | None = None,
     ) -> StoredFileMetadata:
         cleaned_filename = (filename or "").strip()
         cleaned_content_type = (content_type or "").strip()
@@ -146,6 +156,7 @@ class LocalFileStorageBackend(FileStorageBackend):
         storage_id = uuid4()
         hasher = hashlib.sha256()
         size_bytes = 0
+        resolved_max_bytes = self._max_bytes if max_bytes is None else max_bytes
         data_path = self._data_path(storage_id)
         data_path.parent.mkdir(parents=True, exist_ok=True)
         tmp_name: str | None = None
@@ -157,6 +168,7 @@ class LocalFileStorageBackend(FileStorageBackend):
                         continue
                     hasher.update(chunk)
                     size_bytes += len(chunk)
+                    enforce_stream_size_limit(size_bytes, max_bytes=resolved_max_bytes)
                     handle.write(chunk)
                 handle.flush()
                 os.fsync(handle.fileno())

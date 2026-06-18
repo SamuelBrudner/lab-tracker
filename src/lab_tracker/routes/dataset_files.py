@@ -19,6 +19,10 @@ from lab_tracker.db_models import DatasetFileModel, DatasetModel
 from lab_tracker.errors import ConflictError, NotFoundError, ValidationError
 from lab_tracker.models import DatasetFile, DatasetStatus
 from lab_tracker.schemas import Envelope, ListEnvelope
+from lab_tracker.upload_security import (
+    enforce_request_content_length_limit,
+    validate_upload_content_type,
+)
 
 from .shared import (
     actor_from_request,
@@ -74,6 +78,10 @@ def build_dataset_files_router(api: LabTrackerAPI) -> APIRouter:
         ensure_project_contributor(request, UUID(dataset_row.project_id))
         if dataset_row.status != DatasetStatus.STAGED.value:
             raise ValidationError("Files can only be attached while dataset status is staged.")
+        enforce_request_content_length_limit(
+            request,
+            max_bytes=request.app.state.settings.max_upload_bytes,
+        )
 
         filename = (file.filename or "").strip()
         if not filename:
@@ -88,9 +96,7 @@ def build_dataset_files_router(api: LabTrackerAPI) -> APIRouter:
         if existing is not None:
             raise ConflictError("Dataset file path already exists.")
 
-        content_type = (file.content_type or "application/octet-stream").strip()
-        if not content_type:
-            content_type = "application/octet-stream"
+        content_type = validate_upload_content_type(file.content_type)
         metadata = storage_backend.store_stream(
             iter(lambda: file.file.read(1024 * 1024), b""),
             filename=filename,

@@ -1,9 +1,16 @@
 #!/usr/bin/env sh
 set -eu
 
+SCRIPT_DIR=$(dirname "$0")
+SCRIPT_DIR=$(CDPATH= cd "$SCRIPT_DIR" && pwd)
+REPO_ROOT=$(CDPATH= cd "${SCRIPT_DIR}/.." && pwd)
+cd "$REPO_ROOT"
+export PYTHONPATH="${REPO_ROOT}/src${PYTHONPATH:+:${PYTHONPATH}}"
+
 HOST="${LAB_TRACKER_HOST:-0.0.0.0}"
 PORT="${LAB_TRACKER_PORT:-8000}"
 USE_POSTGRES=0
+ALLOW_INSECURE_AUTH_DISABLED=0
 
 while [ "$#" -gt 0 ]; do
     case "$1" in
@@ -18,8 +25,11 @@ while [ "$#" -gt 0 ]; do
             shift
             PORT="$1"
             ;;
+        --allow-insecure-auth-disabled)
+            ALLOW_INSECURE_AUTH_DISABLED=1
+            ;;
         -h|--help)
-            echo "Usage: scripts/serve-lan.sh [--use-postgres] [--host 0.0.0.0] [--port 8000]"
+            echo "Usage: scripts/serve-lan.sh [--use-postgres] [--host 0.0.0.0] [--port 8000] [--allow-insecure-auth-disabled]"
             exit 0
             ;;
         *)
@@ -70,6 +80,25 @@ except ImportError:
 
 segno.make(sys.argv[1]).terminal(compact=True)
 PY
+
+if [ "$HOST" = "0.0.0.0" ] || [ "$HOST" = "::" ]; then
+    AUTH_ENABLED="$("$PYTHON_BIN" - <<'PY'
+from lab_tracker.config import get_settings
+
+print("true" if get_settings().is_auth_enabled() else "false")
+PY
+)"
+    case "${LAB_TRACKER_ALLOW_INSECURE_AUTH_DISABLED:-}" in
+        1|true|TRUE|yes|YES)
+            ALLOW_INSECURE_AUTH_DISABLED=1
+            ;;
+    esac
+    if [ "$AUTH_ENABLED" != "true" ] && [ "$ALLOW_INSECURE_AUTH_DISABLED" -ne 1 ]; then
+        echo "Refusing to bind Lab Tracker to ${HOST} while authentication is disabled." >&2
+        echo "Set LAB_TRACKER_AUTH_ENABLED=true and LAB_TRACKER_AUTH_SECRET_KEY, or pass --allow-insecure-auth-disabled only for a trusted temporary LAN." >&2
+        exit 1
+    fi
+fi
 
 "$PYTHON_BIN" -m alembic upgrade head
 exec "$PYTHON_BIN" -m uvicorn lab_tracker.asgi:app --host "$HOST" --port "$PORT"

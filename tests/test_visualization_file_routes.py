@@ -104,9 +104,27 @@ def test_visualization_file_upload_get_and_download(
     download = client.get(f"/visualizations/{viz_id}/file/download", headers=headers)
     assert download.status_code == 200
     assert download.content == content
-    assert download.headers["content-disposition"] == 'inline; filename="figure.png"'
+    assert download.headers["content-disposition"] == 'attachment; filename="figure.png"'
     assert download.headers["content-length"] == str(len(content))
     assert download.headers["content-type"].startswith("image/png")
+    assert download.headers["x-content-type-options"] == "nosniff"
+
+
+def test_visualization_file_upload_rejects_browser_executable_content_type(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+):
+    headers = admin_auth_headers
+    viz_id = _create_visualization(client, headers)
+
+    upload = client.post(
+        f"/visualizations/{viz_id}/file",
+        files={"file": ("attack.html", b"<script>alert(1)</script>", "text/html")},
+        headers=headers,
+    )
+
+    assert upload.status_code == 422
+    assert "not allowed" in upload.json()["error"]["message"]
 
 
 def test_visualization_file_upload_replaces_old_asset(

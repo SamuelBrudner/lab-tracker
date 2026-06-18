@@ -8,6 +8,7 @@ from lab_tracker.app_parts.frontend import configure_frontend_routes
 from lab_tracker.app_parts.middleware import (
     configure_auth_middleware,
     configure_database_session_middleware,
+    configure_security_headers_middleware,
 )
 from lab_tracker.app_parts.observability import register_observability_routes
 from lab_tracker.app_parts.runtime import (
@@ -29,6 +30,7 @@ def create_app() -> FastAPI:
     configure_app_state(app, runtime)
     configure_auth_middleware(app)
     configure_database_session_middleware(app, api=app.state.lab_tracker_api)
+    configure_security_headers_middleware(app)
     register_observability_routes(
         app,
         session_factory=runtime.session_factory,

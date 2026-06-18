@@ -228,6 +228,41 @@ def test_dataset_file_download_requires_auth(client: TestClient):
     assert response.status_code == 401
 
 
+def test_dataset_file_upload_rejects_browser_executable_content_type(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+):
+    headers = admin_auth_headers
+    project_id = client.post(
+        "/projects",
+        json={"name": "Blocked content type"},
+        headers=headers,
+    ).json()["data"]["project_id"]
+    question_id = client.post(
+        "/questions",
+        json={
+            "project_id": project_id,
+            "text": "Do uploads reject active browser content?",
+            "question_type": "descriptive",
+        },
+        headers=headers,
+    ).json()["data"]["question_id"]
+    dataset_id = client.post(
+        "/datasets",
+        json={"project_id": project_id, "primary_question_id": question_id},
+        headers=headers,
+    ).json()["data"]["dataset_id"]
+
+    upload = client.post(
+        f"/datasets/{dataset_id}/files",
+        files={"file": ("attack.svg", b"<svg></svg>", "image/svg+xml")},
+        headers=headers,
+    )
+
+    assert upload.status_code == 422
+    assert "not allowed" in upload.json()["error"]["message"]
+
+
 def test_dataset_file_upload_rejects_duplicate_path(
     client: TestClient,
     admin_auth_headers: dict[str, str],

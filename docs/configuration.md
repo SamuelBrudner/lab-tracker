@@ -35,9 +35,23 @@ Tracker API.
 - `LAB_TRACKER_AUTH_TOKEN_TTL_MINUTES`: access token lifetime (default: `720`)
 - `LAB_TRACKER_AUTH_INVITE_TTL_HOURS`: signed invitation link lifetime
   (default: `168`)
+- `LAB_TRACKER_AUTH_RATE_LIMIT_ATTEMPTS`: failed login attempts, or register
+  attempts from one caller, allowed per window (default: `10`)
+- `LAB_TRACKER_AUTH_RATE_LIMIT_WINDOW_SECONDS`: rate-limit window in seconds
+  (default: `60`)
+- `LAB_TRACKER_AUTH_PUBLIC_VIEWER_REGISTRATION_ENABLED`: allow public
+  self-registration for viewer accounts (default: `true`). Set to `false` to
+  require invites or an admin bearer token for new users.
 - `LAB_TRACKER_AUTH_ENABLED`: enable login and role enforcement (default: `false`
   in `local`, `true` otherwise; non-local environments cannot disable auth)
 - `LAB_TRACKER_PUBLIC_BASE_URL`: public URL used in email invitation links
+
+### Uploads and managed files
+
+- `LAB_TRACKER_MAX_UPLOAD_BYTES`: maximum raw upload size for note files,
+  dataset files, and visualization assets (default: `104857600`, 100 MiB).
+  Uploads that exceed the limit are rejected and partial local files are
+  cleaned up.
 
 ### Bootstrap (first admin)
 
@@ -90,11 +104,14 @@ the app without creating accounts. Set `LAB_TRACKER_AUTH_ENABLED=true` to test
 the login and role flow. Non-local environments keep authentication enabled by
 default and cannot disable auth.
 
-Public registration creates viewer accounts. Viewer accounts can inspect
-authorized records; write workflows (note upload, draft creation, operation
-edits, and graph commits) require an editor or admin role. A fresh auth-enabled
-instance shows first-admin setup when `LAB_TRACKER_BOOTSTRAP_ADMIN_TOKEN` is
-configured.
+Public registration creates viewer accounts when
+`LAB_TRACKER_AUTH_PUBLIC_VIEWER_REGISTRATION_ENABLED=true`. Viewer accounts can
+inspect authorized records; write workflows (note upload, draft creation,
+operation edits, and graph commits) require an editor or admin role. A fresh
+auth-enabled instance shows first-admin setup when
+`LAB_TRACKER_BOOTSTRAP_ADMIN_TOKEN` is configured. `/health` remains public for
+uptime probes; `/readiness` and `/metrics` require credentials when
+authentication is enabled.
 
 ## Multimodal graph draft review
 

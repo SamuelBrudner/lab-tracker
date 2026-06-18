@@ -1,11 +1,12 @@
 import hashlib
+from io import BytesIO
 from uuid import uuid4
 
 import pytest
 from api_helpers import repository_backed_api
 
 from lab_tracker.auth import AuthContext, Role
-from lab_tracker.errors import NotFoundError
+from lab_tracker.errors import NotFoundError, ValidationError
 from lab_tracker.models import EntityRef, EntityType
 from lab_tracker.note_storage import LocalNoteStorage
 
@@ -99,3 +100,17 @@ def test_delete_note_removes_stored_raw_asset(tmp_path):
     api.delete_note(note.note_id, actor=actor)
 
     assert not raw_path.exists()
+
+
+def test_local_note_storage_rejects_oversized_stream_and_cleans_partial_file(tmp_path):
+    storage = LocalNoteStorage(tmp_path, max_bytes=5)
+
+    with pytest.raises(ValidationError, match="configured limit"):
+        storage.store_stream(
+            BytesIO(b"123456"),
+            filename="too-large.jpg",
+            content_type="image/jpeg",
+            chunk_size=3,
+        )
+
+    assert list(tmp_path.iterdir()) == []

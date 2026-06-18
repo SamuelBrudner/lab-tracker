@@ -4,6 +4,7 @@ param(
     [switch]$UsePostgres,
     [switch]$SkipMigrations,
     [switch]$PrintOnly,
+    [switch]$AllowInsecureAuthDisabled,
     [string]$Python = ""
 )
 
@@ -11,6 +12,12 @@ $ErrorActionPreference = "Stop"
 
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 Set-Location $repoRoot
+$srcPath = Join-Path $repoRoot "src"
+if ($env:PYTHONPATH) {
+    $env:PYTHONPATH = "$srcPath;$($env:PYTHONPATH)"
+} else {
+    $env:PYTHONPATH = $srcPath
+}
 
 if (-not $Python) {
     $venvPython = Join-Path $repoRoot ".venv\Scripts\python.exe"
@@ -83,6 +90,18 @@ Write-Host ""
 
 if ($PrintOnly) {
     exit 0
+}
+
+$authEnabledOutput = & $Python -c "from lab_tracker.config import get_settings; print('true' if get_settings().is_auth_enabled() else 'false')" 2>&1
+if ($LASTEXITCODE -ne 0) {
+    $authError = ($authEnabledOutput | Out-String).Trim()
+    throw "Unable to evaluate Lab Tracker auth settings before LAN serving. $authError"
+}
+$authEnabled = (($authEnabledOutput | Select-Object -Last 1) -as [string]).Trim().ToLowerInvariant()
+$envOverride = ($env:LAB_TRACKER_ALLOW_INSECURE_AUTH_DISABLED -as [string]).Trim().ToLowerInvariant()
+$overrideRequested = $AllowInsecureAuthDisabled -or $envOverride -in @("1", "true", "yes")
+if ($authEnabled -ne "true" -and -not $overrideRequested) {
+    throw "Refusing to bind Lab Tracker to 0.0.0.0 while authentication is disabled. Set LAB_TRACKER_AUTH_ENABLED=true and LAB_TRACKER_AUTH_SECRET_KEY, or rerun with -AllowInsecureAuthDisabled only for a trusted temporary LAN."
 }
 
 $listeners = @(Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue)

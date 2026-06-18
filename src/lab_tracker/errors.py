@@ -19,3 +19,11 @@ class AuthError(LabTrackerError):
 
 class ConflictError(LabTrackerError):
     """Conflicting state or duplicate entity."""
+
+
+class PayloadTooLargeError(ValidationError):
+    """Uploaded payload exceeds the configured size limit."""
+
+
+class RateLimitError(AuthError):
+    """Too many authentication attempts in a short window."""

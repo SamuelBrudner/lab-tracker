@@ -603,3 +603,51 @@ def test_refresh_rejects_expired_token(monkeypatch, tmp_path):
         refresh_response = client.post("/auth/refresh", headers=_auth_headers(token))
         assert refresh_response.status_code == 401
         assert refresh_response.json()["error"]["code"] == "auth_error"
+
+
+def test_login_rate_limits_repeated_invalid_credentials(monkeypatch, tmp_path):
+    _bootstrap_database(monkeypatch, tmp_path)
+    monkeypatch.setenv("LAB_TRACKER_AUTH_RATE_LIMIT_ATTEMPTS", "2")
+    monkeypatch.setenv("LAB_TRACKER_AUTH_RATE_LIMIT_WINDOW_SECONDS", "60")
+
+    with TestClient(create_app()) as client:
+        _seed_admin(client, username="sam", password="secret")
+
+        for _ in range(2):
+            response = client.post(
+                "/auth/login",
+                json={"username": "sam", "password": "wrong"},
+            )
+            assert response.status_code == 401
+
+        limited = client.post(
+            "/auth/login",
+            json={"username": "sam", "password": "wrong"},
+        )
+
+    assert limited.status_code == 429
+    assert limited.json()["error"]["code"] == "rate_limited"
+
+
+def test_public_viewer_registration_can_be_disabled(monkeypatch, tmp_path):
+    _bootstrap_database(monkeypatch, tmp_path)
+    monkeypatch.setenv("LAB_TRACKER_AUTH_PUBLIC_VIEWER_REGISTRATION_ENABLED", "false")
+
+    with TestClient(create_app()) as client:
+        denied = client.post(
+            "/auth/register",
+            json={"username": "viewer-1", "password": "secret"},
+        )
+        assert denied.status_code == 401
+        assert "disabled" in denied.json()["error"]["message"]
+
+        _seed_admin(client)
+        admin_token = _login(client, "root", "secret")
+        created_by_admin = client.post(
+            "/auth/register",
+            json={"username": "viewer-2", "password": "secret"},
+            headers=_auth_headers(admin_token),
+        )
+
+    assert created_by_admin.status_code == 201
+    assert created_by_admin.json()["data"]["user"]["role"] == "viewer"

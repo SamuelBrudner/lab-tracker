@@ -79,6 +79,7 @@ def build_auth_router(
         status_code=http_status.HTTP_201_CREATED,
     )
     def register_auth(payload: AuthRegisterRequest, request: Request):
+        _record_auth_attempt(request, _auth_rate_key(request, "register"))
         registration_role = payload.role
         username = payload.username
         if payload.invite_token:
@@ -109,6 +110,16 @@ def build_auth_router(
                 )
                 if actor.role != Role.ADMIN:
                     raise AuthError("Admin privileges required to register non-viewer users.")
+        elif not request.app.state.settings.auth_public_viewer_registration_enabled:
+            if not request.headers.get("authorization"):
+                raise AuthError("Public viewer registration is disabled.")
+            actor = actor_from_authorization_header(
+                request,
+                auth_service=auth_service,
+                token_service=token_service,
+            )
+            if actor.role != Role.ADMIN:
+                raise AuthError("Public viewer registration is disabled.")
         user = auth_service.register_user(
             username=username,
             password=payload.password,
@@ -191,8 +202,15 @@ def build_auth_router(
         return Envelope(data=auth_user_read(user))
 
     @router.post("/auth/login", response_model=Envelope[AuthTokenRead])
-    def login_auth(payload: AuthLoginRequest):
-        user = auth_service.authenticate(payload.username, payload.password)
+    def login_auth(payload: AuthLoginRequest, request: Request):
+        rate_key = _auth_rate_key(request, "login", payload.username)
+        _check_auth_rate_limit(request, rate_key)
+        try:
+            user = auth_service.authenticate(payload.username, payload.password)
+        except AuthError:
+            _record_auth_failure(request, rate_key)
+            raise
+        _reset_auth_rate_limit(request, rate_key)
         token = token_service.issue_access_token(user)
         return Envelope(data=auth_token_read(user, token.token, token.expires_at))
 
@@ -230,6 +248,34 @@ def _ensure_admin(request: Request) -> None:
     actor = actor_from_request(request)
     if actor.role != Role.ADMIN:
         raise AuthError("Admin privileges required.")
+
+
+def _auth_rate_key(request: Request, purpose: str, username: str | None = None) -> str:
+    client_host = request.client.host if request.client is not None else "unknown"
+    parts = [purpose, client_host]
+    if username is not None:
+        parts.append(username.strip().lower())
+    return ":".join(parts)
+
+
+def _auth_rate_limiter(request: Request):
+    return request.app.state.auth_rate_limiter
+
+
+def _check_auth_rate_limit(request: Request, key: str) -> None:
+    _auth_rate_limiter(request).check(key)
+
+
+def _record_auth_attempt(request: Request, key: str) -> None:
+    _auth_rate_limiter(request).record_attempt(key)
+
+
+def _record_auth_failure(request: Request, key: str) -> None:
+    _auth_rate_limiter(request).record_failure(key)
+
+
+def _reset_auth_rate_limit(request: Request, key: str) -> None:
+    _auth_rate_limiter(request).reset(key)
 
 
 def _auth_invitation_read(

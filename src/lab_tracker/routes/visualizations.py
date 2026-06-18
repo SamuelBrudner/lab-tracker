@@ -17,6 +17,10 @@ from lab_tracker.db_models import VisualizationModel
 from lab_tracker.errors import NotFoundError, ValidationError
 from lab_tracker.models import Visualization, utc_now
 from lab_tracker.schemas import Envelope, ListEnvelope, VisualizationCreate, VisualizationUpdate
+from lab_tracker.upload_security import (
+    enforce_request_content_length_limit,
+    validate_upload_content_type,
+)
 
 from .shared import (
     accessible_project_ids_from_request,
@@ -122,13 +126,15 @@ def build_visualizations_router(api: LabTrackerAPI) -> APIRouter:
         visualization = request_api.get_visualization(viz_id)
         analysis = request_api.get_analysis(visualization.analysis_id)
         ensure_project_contributor(request, analysis.project_id)
+        enforce_request_content_length_limit(
+            request,
+            max_bytes=request.app.state.settings.max_upload_bytes,
+        )
 
         filename = (file.filename or "").strip()
         if not filename:
             raise ValidationError("filename must not be empty.")
-        content_type = (file.content_type or "application/octet-stream").strip()
-        if not content_type:
-            content_type = "application/octet-stream"
+        content_type = validate_upload_content_type(file.content_type)
 
         old_storage_id = UUID(row.asset_storage_id) if row.asset_storage_id else None
         metadata = storage_backend.store_stream(
@@ -190,9 +196,10 @@ def build_visualizations_router(api: LabTrackerAPI) -> APIRouter:
 
         headers = {
             "Content-Disposition": content_disposition_header(
-                "inline", row.asset_filename or "figure"
+                "attachment", row.asset_filename or "figure"
             ),
             "Content-Length": str(row.asset_size_bytes or 0),
+            "X-Content-Type-Options": "nosniff",
         }
         return StreamingResponse(
             storage_backend.iter_chunks(UUID(row.asset_storage_id)),

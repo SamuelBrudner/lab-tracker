@@ -128,7 +128,7 @@ class LabTrackerAPIClient:
         return self._request("GET", "/health", authenticated=False)
 
     def readiness(self) -> JsonObject:
-        return self._request("GET", "/readiness", authenticated=False)
+        return self._request("GET", "/readiness")
 
     def describe_schema(self, *, entity_type: str | None = None) -> JsonObject:
         return self._request(

@@ -1008,3 +1008,34 @@ def test_public_health_does_not_require_credentials() -> None:
         assert client.health() == {"status": "ok"}
     finally:
         client.close()
+
+
+def test_client_readiness_uses_service_credentials_when_configured() -> None:
+    seen: list[tuple[str, str, str | None]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append((request.method, request.url.path, request.headers.get("authorization")))
+        if request.url.path == "/auth/login":
+            return _json_response(200, {"data": {"access_token": "token-1"}})
+        if request.url.path == "/readiness":
+            return _json_response(200, {"status": "ok"})
+        return _json_response(404, {"error": {"message": "not found"}})
+
+    client = mcp_server.LabTrackerAPIClient(
+        mcp_server.MCPSettings(
+            base_url="http://testserver",
+            username="mcp-user",
+            password="mcp-pass",
+        ),
+        transport=httpx.MockTransport(handler),
+    )
+
+    try:
+        assert client.readiness() == {"status": "ok"}
+    finally:
+        client.close()
+
+    assert seen == [
+        ("POST", "/auth/login", None),
+        ("GET", "/readiness", "Bearer token-1"),
+    ]

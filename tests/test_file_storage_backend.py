@@ -79,6 +79,21 @@ def test_local_file_storage_backend_cleans_temp_file_after_stream_error(tmp_path
     assert [path for path in tmp_path.rglob("*") if path.is_file()] == []
 
 
+def test_local_file_storage_backend_rejects_oversized_stream_and_cleans_temp_file(
+    tmp_path,
+):
+    backend = LocalFileStorageBackend(tmp_path, max_bytes=5)
+
+    with pytest.raises(ValidationError, match="configured limit"):
+        backend.store_stream(
+            [b"123", b"456"],
+            filename="too-large.bin",
+            content_type="application/octet-stream",
+        )
+
+    assert [path for path in tmp_path.rglob("*") if path.is_file()] == []
+
+
 def test_local_file_storage_backend_uses_env_var_default(tmp_path, monkeypatch):
     monkeypatch.setenv(LAB_TRACKER_FILE_STORAGE_PATH_ENV, str(tmp_path))
     backend = LocalFileStorageBackend()
