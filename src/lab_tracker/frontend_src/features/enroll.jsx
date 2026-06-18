@@ -1,7 +1,10 @@
 import * as React from "react";
 
 import { apiRequest } from "../shared/api.js";
-import { TOKEN_STORAGE_KEY } from "../shared/constants.js";
+import {
+  TOKEN_EXPIRES_AT_STORAGE_KEY,
+  TOKEN_STORAGE_KEY,
+} from "../shared/constants.js";
 
 const { useEffect, useRef, useState } = React;
 
@@ -57,6 +60,7 @@ function EnrollPage({ replace, setFlash }) {
       .then((payload) => {
         try {
           localStorage.setItem(TOKEN_STORAGE_KEY, payload.secret);
+          localStorage.removeItem(TOKEN_EXPIRES_AT_STORAGE_KEY);
         } catch {
           // localStorage may be blocked; the user will see the failure on
           // the next request rather than here, and can pair again.

@@ -2394,7 +2394,9 @@ describe("App", () => {
 
     render(<App />);
 
-    expect(await screen.findByText("Session expired.")).toBeInTheDocument();
+    expect(
+      await screen.findByText("Your session expired. Please sign in again.")
+    ).toBeInTheDocument();
     expect(await screen.findByRole("heading", { name: "Sign In" })).toBeInTheDocument();
   });
 

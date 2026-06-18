@@ -1,10 +1,16 @@
 import * as React from "react";
 
-import { apiFetch, apiRequest } from "../shared/api.js";
-import { TOKEN_STORAGE_KEY } from "../shared/constants.js";
+import { AUTH_REJECTED_EVENT, apiFetch, apiRequest } from "../shared/api.js";
+import {
+  TOKEN_EXPIRES_AT_STORAGE_KEY,
+  TOKEN_STORAGE_KEY,
+} from "../shared/constants.js";
 import { isStaticDemoEnabled } from "../shared/static-demo-api.js";
 
-const { useEffect, useMemo, useState } = React;
+const { useCallback, useEffect, useMemo, useState } = React;
+const REFRESH_MARGIN_MS = 5 * 60 * 1000;
+const REFRESH_RETRY_MS = 60 * 1000;
+const SESSION_EXPIRED_MESSAGE = "Your session expired. Please sign in again.";
 
 function readInitialInvitation() {
   const params = new URLSearchParams(window.location.search || "");
@@ -22,9 +28,31 @@ function readInitialToken() {
   }
 }
 
+function readInitialTokenExpiresAt() {
+  try {
+    return localStorage.getItem(TOKEN_EXPIRES_AT_STORAGE_KEY) || "";
+  } catch {
+    return "";
+  }
+}
+
+function parseExpiryMs(expiresAt) {
+  const value = Date.parse(expiresAt || "");
+  return Number.isFinite(value) ? value : null;
+}
+
+function sessionExpiredMessage(message) {
+  const text = String(message || "").trim();
+  if (!text || /token|auth|credential|session/i.test(text)) {
+    return SESSION_EXPIRED_MESSAGE;
+  }
+  return text;
+}
+
 function useAuthSession({ replace, setBusy, setFlash }) {
   const initialInvitation = readInitialInvitation();
   const [token, setToken] = useState(() => readInitialToken());
+  const [tokenExpiresAt, setTokenExpiresAt] = useState(() => readInitialTokenExpiresAt());
   const [user, setUser] = useState(null);
   const [authChecked, setAuthChecked] = useState(false);
   const [authEnabled, setAuthEnabled] = useState(true);
@@ -43,13 +71,47 @@ function useAuthSession({ replace, setBusy, setFlash }) {
     [user]
   );
 
+  const clearSession = useCallback(() => {
+    setToken("");
+    setTokenExpiresAt("");
+    setUser(null);
+  }, []);
+
+  const applyAuthPayload = useCallback((payload) => {
+    setToken(payload?.access_token || "");
+    setTokenExpiresAt(payload?.expires_at || "");
+    setUser(payload?.user || null);
+  }, []);
+
   useEffect(() => {
     if (token) {
       localStorage.setItem(TOKEN_STORAGE_KEY, token);
+      if (tokenExpiresAt) {
+        localStorage.setItem(TOKEN_EXPIRES_AT_STORAGE_KEY, tokenExpiresAt);
+      } else {
+        localStorage.removeItem(TOKEN_EXPIRES_AT_STORAGE_KEY);
+      }
       return;
     }
     localStorage.removeItem(TOKEN_STORAGE_KEY);
-  }, [token]);
+    localStorage.removeItem(TOKEN_EXPIRES_AT_STORAGE_KEY);
+  }, [token, tokenExpiresAt]);
+
+  useEffect(() => {
+    function handleAuthRejected(event) {
+      const rejectedToken = event.detail?.token || "";
+      if (!token || (rejectedToken && rejectedToken !== token)) {
+        return;
+      }
+      clearSession();
+      setFlash("", sessionExpiredMessage(event.detail?.message));
+    }
+
+    window.addEventListener(AUTH_REJECTED_EVENT, handleAuthRejected);
+    return () => {
+      window.removeEventListener(AUTH_REJECTED_EVENT, handleAuthRejected);
+    };
+  }, [clearSession, setFlash, token]);
 
   useEffect(() => {
     let canceled = false;
@@ -74,7 +136,7 @@ function useAuthSession({ replace, setBusy, setFlash }) {
     if (token) {
       setFlash("", "");
     }
-    apiFetch("/auth/me", token ? { token } : {})
+    apiFetch("/auth/me", token ? { notifyAuthRejected: false, token } : {})
       .then((payload) => {
         if (!canceled) {
           const nextAuthEnabled = payload?.meta?.auth_enabled !== false;
@@ -82,6 +144,7 @@ function useAuthSession({ replace, setBusy, setFlash }) {
           setUser(payload?.data || null);
           if (!nextAuthEnabled && token) {
             setToken("");
+            setTokenExpiresAt("");
           }
         }
       })
@@ -90,8 +153,8 @@ function useAuthSession({ replace, setBusy, setFlash }) {
           setAuthEnabled(true);
           setUser(null);
           if (token && (err.status === 401 || err.status === 403)) {
-            setToken("");
-            setFlash("", err.message || "Failed to restore session.");
+            clearSession();
+            setFlash("", sessionExpiredMessage(err.message));
           } else if (token) {
             setFlash("", err.message || "Could not verify the saved session.");
           }
@@ -107,7 +170,63 @@ function useAuthSession({ replace, setBusy, setFlash }) {
     return () => {
       canceled = true;
     };
-  }, [setBusy, setFlash, token]);
+  }, [clearSession, setBusy, setFlash, token]);
+
+  useEffect(() => {
+    if (!authEnabled || !token || !tokenExpiresAt || isStaticDemoEnabled()) {
+      return undefined;
+    }
+    const expiresAtMs = parseExpiryMs(tokenExpiresAt);
+    if (expiresAtMs === null) {
+      return undefined;
+    }
+
+    let canceled = false;
+    let timeoutId = null;
+
+    function scheduleRefresh(delayMs) {
+      timeoutId = window.setTimeout(refreshSession, Math.max(0, delayMs));
+    }
+
+    async function refreshSession() {
+      try {
+        const payload = await apiRequest("/auth/refresh", {
+          method: "POST",
+          notifyAuthRejected: false,
+          token,
+        });
+        if (!canceled) {
+          applyAuthPayload(payload);
+        }
+      } catch (err) {
+        if (canceled) {
+          return;
+        }
+        if (err.status === 401 || err.status === 403) {
+          clearSession();
+          setFlash("", sessionExpiredMessage(err.message));
+          return;
+        }
+        setFlash("", err.message || "Could not refresh the saved session. Lab Tracker will retry.");
+        scheduleRefresh(REFRESH_RETRY_MS);
+      }
+    }
+
+    scheduleRefresh(expiresAtMs - Date.now() - REFRESH_MARGIN_MS);
+    return () => {
+      canceled = true;
+      if (timeoutId !== null) {
+        window.clearTimeout(timeoutId);
+      }
+    };
+  }, [
+    applyAuthPayload,
+    authEnabled,
+    clearSession,
+    setFlash,
+    token,
+    tokenExpiresAt,
+  ]);
 
   useEffect(() => {
     if (
@@ -154,8 +273,7 @@ function useAuthSession({ replace, setBusy, setFlash }) {
         },
         method: "POST",
       });
-      setToken(payload.access_token);
-      setUser(payload.user || null);
+      applyAuthPayload(payload);
       setAuthBootstrapToken("");
       setAuthInviteToken("");
       setAuthPassword("");
@@ -183,8 +301,7 @@ function useAuthSession({ replace, setBusy, setFlash }) {
       replace("/app");
       return;
     }
-    setToken("");
-    setUser(null);
+    clearSession();
     setAuthBootstrapToken("");
     setAuthPassword("");
     replace("/app");
@@ -210,6 +327,7 @@ function useAuthSession({ replace, setBusy, setFlash }) {
     setAuthPassword,
     setAuthUsername,
     token,
+    tokenExpiresAt,
     user,
   };
 }

@@ -1,5 +1,9 @@
 import { demoFetch, isStaticDemoEnabled } from "./static-demo-api.js";
 
+const AUTH_REJECTED_EVENT = "lab-tracker:auth-rejected";
+const AUTH_REJECTION_MESSAGE_PATTERN =
+  /auth(entication|orization)? required|authorization header|credential|invalid token|missing authorization|session|token (has )?expired|unrecognized token/i;
+
 function parseApiError(payload, fallbackMessage) {
   if (!payload || typeof payload !== "object") {
     return fallbackMessage;
@@ -25,11 +29,36 @@ async function parseErrorPayload(response) {
   }
 }
 
-async function throwApiError(response) {
+function notifyAuthRejected(error, token) {
+  if (typeof window === "undefined" || typeof window.dispatchEvent !== "function") {
+    return;
+  }
+  window.dispatchEvent(
+    new CustomEvent(AUTH_REJECTED_EVENT, {
+      detail: {
+        message: error.message,
+        status: error.status,
+        token,
+      },
+    })
+  );
+}
+
+function isAuthRejectedMessage(message) {
+  return AUTH_REJECTION_MESSAGE_PATTERN.test(String(message || ""));
+}
+
+async function throwApiError(
+  response,
+  { notifyAuthRejected: shouldNotify = false, token = "" } = {}
+) {
   const payload = await parseErrorPayload(response);
   const error = new Error(parseApiError(payload, `Request failed with ${response.status}`));
   error.status = response.status;
   error.payload = payload;
+  if (shouldNotify && response.status === 401 && isAuthRejectedMessage(error.message)) {
+    notifyAuthRejected(error, token);
+  }
   throw error;
 }
 
@@ -69,7 +98,13 @@ function appFetch(path, init = {}) {
 }
 
 async function apiFetch(path, options = {}) {
-  const { method = "GET", token = "", body = null, accept = "application/json" } = options;
+  const {
+    method = "GET",
+    token = "",
+    body = null,
+    accept = "application/json",
+    notifyAuthRejected = true,
+  } = options;
   const { headers, isFormData } = buildRequestHeaders({ accept, body, token });
 
   const response = await appFetch(path, {
@@ -79,7 +114,10 @@ async function apiFetch(path, options = {}) {
   });
 
   if (!response.ok) {
-    await throwApiError(response);
+    await throwApiError(response, {
+      notifyAuthRejected: notifyAuthRejected && Boolean(token) && !isStaticDemoEnabled(),
+      token,
+    });
   }
 
   if (!isJsonResponse(response)) {
@@ -97,7 +135,13 @@ async function apiRequest(path, options = {}) {
 }
 
 async function apiTextRequest(path, options = {}) {
-  const { method = "GET", token = "", body = null, accept = "text/plain" } = options;
+  const {
+    method = "GET",
+    token = "",
+    body = null,
+    accept = "text/plain",
+    notifyAuthRejected = true,
+  } = options;
   const { headers, isFormData } = buildRequestHeaders({ accept, body, token });
   const response = await appFetch(path, {
     method,
@@ -106,7 +150,10 @@ async function apiTextRequest(path, options = {}) {
   });
 
   if (!response.ok) {
-    await throwApiError(response);
+    await throwApiError(response, {
+      notifyAuthRejected: notifyAuthRejected && Boolean(token) && !isStaticDemoEnabled(),
+      token,
+    });
   }
 
   return response.text();
@@ -197,7 +244,10 @@ async function downloadProtectedResource({ path, token = "", filename = "" }) {
   });
 
   if (!response.ok) {
-    await throwApiError(response);
+    await throwApiError(response, {
+      notifyAuthRejected: Boolean(token) && !isStaticDemoEnabled(),
+      token,
+    });
   }
 
   const blob = await response.blob();
@@ -223,6 +273,7 @@ async function downloadProtectedResource({ path, token = "", filename = "" }) {
 }
 
 export {
+  AUTH_REJECTED_EVENT,
   apiFetch,
   apiRequest,
   apiTextRequest,
