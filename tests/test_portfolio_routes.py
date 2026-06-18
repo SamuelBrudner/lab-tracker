@@ -156,6 +156,20 @@ def test_portfolio_summary_aggregates_project_health_rows(
         headers=admin_auth_headers,
     )
     assert owner_response.status_code == 201
+    _register_user(client, "portfolio-viewer-member")
+    _register_user(client, "portfolio-contributor-member")
+    viewer_response = client.post(
+        f"/projects/{project_id}/members",
+        json={"username": "portfolio-viewer-member", "role": "viewer"},
+        headers=admin_auth_headers,
+    )
+    contributor_response = client.post(
+        f"/projects/{project_id}/members",
+        json={"username": "portfolio-contributor-member", "role": "contributor"},
+        headers=admin_auth_headers,
+    )
+    assert viewer_response.status_code == 201
+    assert contributor_response.status_code == 201
 
     active_question_id = _create_question(
         client,
@@ -305,6 +319,83 @@ def test_portfolio_summary_rejects_unauthenticated_and_hides_all_from_non_member
     assert response.json()["meta"]["total"] == 0
 
 
+def test_portfolio_summary_filters_project_status(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+):
+    active_project_id = _create_project(client, admin_auth_headers, "Active portfolio")
+    archived_project_id = _create_project(client, admin_auth_headers, "Archived portfolio")
+    archive_response = client.patch(
+        f"/projects/{archived_project_id}",
+        json={"status": "archived"},
+        headers=admin_auth_headers,
+    )
+    assert archive_response.status_code == 200
+
+    active_response = client.get(
+        "/portfolio/summary?status=active",
+        headers=admin_auth_headers,
+    )
+    archived_response = client.get(
+        "/portfolio/summary?status=archived",
+        headers=admin_auth_headers,
+    )
+
+    assert active_response.status_code == 200
+    assert [item["project_id"] for item in _portfolio_projects(active_response.json())] == [
+        active_project_id
+    ]
+    assert archived_response.status_code == 200
+    assert [item["project_id"] for item in _portfolio_projects(archived_response.json())] == [
+        archived_project_id
+    ]
+
+
+def test_portfolio_summary_paginates_group_buckets_and_validates_bounds(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+):
+    group_response = client.post(
+        "/groups",
+        json={"name": "Paged portfolio group"},
+        headers=admin_auth_headers,
+    )
+    assert group_response.status_code == 201
+    grouped_project_id = _create_project(client, admin_auth_headers, "Paged grouped")
+    ungrouped_project_id = _create_project(client, admin_auth_headers, "Paged ungrouped")
+    assign_response = client.patch(
+        f"/projects/{grouped_project_id}",
+        json={"group_id": group_response.json()["data"]["group_id"]},
+        headers=admin_auth_headers,
+    )
+    assert assign_response.status_code == 200
+
+    first_page = client.get(
+        "/portfolio/summary?limit=1",
+        headers=admin_auth_headers,
+    )
+    second_page = client.get(
+        "/portfolio/summary?limit=1&offset=1",
+        headers=admin_auth_headers,
+    )
+
+    assert first_page.status_code == 200
+    assert second_page.status_code == 200
+    assert first_page.json()["meta"]["total"] == 2
+    assert second_page.json()["meta"]["total"] == 2
+    page_project_ids = {
+        item["project_id"]
+        for payload in (first_page.json(), second_page.json())
+        for item in _portfolio_projects(payload)
+    }
+    assert page_project_ids == {grouped_project_id, ungrouped_project_id}
+
+    for query in ("limit=0", "limit=201", "offset=-1"):
+        invalid = client.get(f"/portfolio/summary?{query}", headers=admin_auth_headers)
+        assert invalid.status_code == 422
+        assert invalid.json()["error"]["code"] == "validation_error"
+
+
 def test_portfolio_summary_groups_projects_by_project_group(
     client: TestClient,
     admin_auth_headers: dict[str, str],
@@ -396,6 +487,27 @@ def test_portfolio_summary_normalizes_graph_change_set_activity(
     assert _parse_utc_timestamp(row["last_activity_at"]) == _parse_utc_timestamp(
         draft_response.json()["data"]["updated_at"]
     )
+
+
+def test_portfolio_summary_uses_project_timestamp_for_childless_project(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+):
+    project_id = _create_project(client, admin_auth_headers, "Childless portfolio")
+    created_at = datetime(2026, 6, 1, 12, 0, tzinfo=timezone.utc)
+    updated_at = created_at + timedelta(hours=3)
+    with client.app.state.db_session_factory() as session:
+        project = session.get(ProjectModel, project_id)
+        project.created_at = created_at
+        project.updated_at = updated_at
+        session.commit()
+
+    response = client.get("/portfolio/summary", headers=admin_auth_headers)
+
+    assert response.status_code == 200
+    rows = _portfolio_projects(response.json())
+    row = next(item for item in rows if item["project_id"] == project_id)
+    assert _parse_utc_timestamp(row["last_activity_at"]) == updated_at
 
 
 def test_portfolio_summary_derives_lab_health_triage_flags(
