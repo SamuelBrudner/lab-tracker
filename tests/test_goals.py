@@ -25,6 +25,7 @@ from lab_tracker.models import (
     QuestionStatus,
     QuestionType,
 )
+from lab_tracker.services.goal_service import GoalLinkSpec
 
 
 def _actor(role: Role = Role.ADMIN) -> AuthContext:
@@ -125,6 +126,87 @@ def test_goals_round_trip_links_and_reverse_lookup_through_repository():
         target=EntityRef(entity_type=EntityType.QUESTION, entity_id=question.question_id),
     )
     assert [item.goal_id for item in reverse] == [goal.goal_id]
+
+
+def test_goal_links_are_removed_when_target_question_is_deleted():
+    api, actor, project, question = _api_project_question()
+    goal = api.create_goal(
+        project.project_id,
+        goal_type=GoalType.PAPER,
+        title="Question-linked paper",
+        actor=actor,
+    )
+    link = api.link_node_to_goal(
+        goal.goal_id,
+        target=EntityRef(entity_type=EntityType.QUESTION, entity_id=question.question_id),
+        relation=GoalRelation.ADDRESSES,
+        actor=actor,
+    )
+    _, session = api._test_resources  # type: ignore[attr-defined]
+
+    api.delete_question(question.question_id, actor=actor)
+
+    assert api.get_goal(goal.goal_id).links == []
+    assert session.get(GoalLinkModel, str(link.link_id)) is None
+
+
+def test_project_delete_removes_projectless_goal_links_to_cascaded_entities():
+    api = repository_backed_api()
+    actor = _actor()
+    removed_project = api.create_project("Deleted goal scope", actor=actor)
+    retained_project = api.create_project("Retained goal scope", actor=actor)
+    removed_question = api.create_question(
+        project_id=removed_project.project_id,
+        text="Will this project be removed?",
+        question_type=QuestionType.DESCRIPTIVE,
+        status=QuestionStatus.ACTIVE,
+        actor=actor,
+    )
+    goal = api.create_goal(
+        None,
+        goal_type=GoalType.GRANT,
+        title="Cross-project goal",
+        links=[
+            GoalLinkSpec(
+                target=EntityRef(
+                    entity_type=EntityType.PROJECT,
+                    entity_id=removed_project.project_id,
+                ),
+                relation=GoalRelation.CONTRIBUTES_TO,
+            ),
+            GoalLinkSpec(
+                target=EntityRef(
+                    entity_type=EntityType.PROJECT,
+                    entity_id=retained_project.project_id,
+                ),
+                relation=GoalRelation.CONTRIBUTES_TO,
+            ),
+            GoalLinkSpec(
+                target=EntityRef(
+                    entity_type=EntityType.QUESTION,
+                    entity_id=removed_question.question_id,
+                ),
+                relation=GoalRelation.ADDRESSES,
+            ),
+        ],
+        actor=actor,
+    )
+    removed_link_ids = {
+        link.link_id
+        for link in goal.links
+        if link.target.entity_id in {removed_project.project_id, removed_question.question_id}
+    }
+    _, session = api._test_resources  # type: ignore[attr-defined]
+
+    api.delete_project(removed_project.project_id, actor=actor)
+
+    reloaded = api.get_goal(goal.goal_id)
+    assert [(link.target.entity_type, link.target.entity_id) for link in reloaded.links] == [
+        (EntityType.PROJECT, retained_project.project_id)
+    ]
+    assert all(
+        session.get(GoalLinkModel, str(link_id)) is None for link_id in removed_link_ids
+    )
 
 
 def test_projectless_goal_requires_project_link_scope():

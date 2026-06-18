@@ -24,6 +24,7 @@ from lab_tracker.services.analysis_service import AnalysisService
 from lab_tracker.services.base import BaseService, ServiceContext
 from lab_tracker.services.claim_service import ClaimService
 from lab_tracker.services.dataset_service import DatasetService
+from lab_tracker.services.goal_link_cleanup import remove_goal_links_to_entity
 from lab_tracker.services.project_authorization import ProjectAuthorizationPolicy
 from lab_tracker.services.project_service import ProjectService
 from lab_tracker.services.question_service import QuestionService
@@ -357,6 +358,11 @@ class NoteService(BaseService):
         self.authorization.require_contributor(note.project_id, actor=actor)
         self._ensure_note_can_be_deleted(note)
         with self.unit_of_work() as repository:
+            remove_goal_links_to_entity(
+                repository,
+                entity_type=EntityType.NOTE,
+                entity_id=note_id,
+            )
             repository.notes.delete(note_id)
         if note.raw_asset is not None:
             self.run_after_commit(

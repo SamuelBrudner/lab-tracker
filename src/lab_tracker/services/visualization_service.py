@@ -7,10 +7,11 @@ from uuid import UUID, uuid4
 
 from lab_tracker.auth import AuthContext
 from lab_tracker.errors import ValidationError
-from lab_tracker.models import EntityOrigin, Visualization, utc_now
+from lab_tracker.models import EntityOrigin, EntityType, Visualization, utc_now
 from lab_tracker.services.analysis_service import AnalysisService
 from lab_tracker.services.base import BaseService, ServiceContext
 from lab_tracker.services.claim_service import ClaimService
+from lab_tracker.services.goal_link_cleanup import remove_goal_links_to_entity
 from lab_tracker.services.project_authorization import ProjectAuthorizationPolicy
 from lab_tracker.services.shared import (
     actor_user_fk,
@@ -160,5 +161,10 @@ class VisualizationService(BaseService):
         analysis = self.analyses.get_analysis(visualization.analysis_id)
         self.authorization.require_contributor(analysis.project_id, actor=actor)
         with self.unit_of_work() as repository:
+            remove_goal_links_to_entity(
+                repository,
+                entity_type=EntityType.VISUALIZATION,
+                entity_id=viz_id,
+            )
             repository.visualizations.delete(viz_id)
         return visualization

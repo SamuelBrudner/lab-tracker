@@ -16,6 +16,7 @@ from lab_tracker.models import (
     DatasetCommitManifestInput,
     DatasetStatus,
     EntityOrigin,
+    EntityType,
     QuestionStatus,
     Session,
     SessionStatus,
@@ -24,6 +25,7 @@ from lab_tracker.models import (
     utc_now,
 )
 from lab_tracker.services.base import BaseService, ServiceContext
+from lab_tracker.services.goal_link_cleanup import remove_goal_links_to_entity
 from lab_tracker.services.project_authorization import ProjectAuthorizationPolicy
 from lab_tracker.services.project_service import ProjectService
 from lab_tracker.services.question_service import QuestionService
@@ -190,6 +192,11 @@ class SessionService(BaseService):
         session = self.get_session(session_id)
         self.authorization.require_contributor(session.project_id, actor=actor)
         with self.unit_of_work() as repository:
+            remove_goal_links_to_entity(
+                repository,
+                entity_type=EntityType.SESSION,
+                entity_id=session_id,
+            )
             repository.sessions.delete(session_id)
         return session
 

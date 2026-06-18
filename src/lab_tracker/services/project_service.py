@@ -17,6 +17,7 @@ from lab_tracker.models import (
     utc_now,
 )
 from lab_tracker.services.base import BaseService, ServiceContext
+from lab_tracker.services.goal_link_cleanup import remove_goal_links_to_project_contents
 from lab_tracker.services.project_authorization import ProjectAuthorizationPolicy
 from lab_tracker.services.shared import (
     WRITE_ROLES,
@@ -121,6 +122,7 @@ class ProjectService(BaseService):
         self.authorization.require_owner(project_id, actor=actor)
         project = self.get_project(project_id)
         with self.unit_of_work() as repository:
+            remove_goal_links_to_project_contents(repository, project_id=project_id)
             repository.projects.delete(project_id)
         return project
 

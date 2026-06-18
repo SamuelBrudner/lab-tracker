@@ -16,6 +16,7 @@ from lab_tracker.models import (
     ClaimStatus,
     DatasetStatus,
     EntityOrigin,
+    EntityType,
     ExternalArtifactReference,
     Visualization,
     VisualizationInput,
@@ -24,6 +25,7 @@ from lab_tracker.models import (
 )
 from lab_tracker.services.base import BaseService, ServiceContext
 from lab_tracker.services.dataset_service import DatasetService
+from lab_tracker.services.goal_link_cleanup import remove_goal_links_to_entity
 from lab_tracker.services.project_authorization import ProjectAuthorizationPolicy
 from lab_tracker.services.project_service import ProjectService
 from lab_tracker.services.shared import (
@@ -244,6 +246,11 @@ class AnalysisService(BaseService):
         self.authorization.require_contributor(analysis.project_id, actor=actor)
         self._ensure_analysis_can_be_deleted(analysis)
         with self.unit_of_work() as repository:
+            remove_goal_links_to_entity(
+                repository,
+                entity_type=EntityType.ANALYSIS,
+                entity_id=analysis_id,
+            )
             repository.analyses.delete(analysis_id)
         return analysis
 

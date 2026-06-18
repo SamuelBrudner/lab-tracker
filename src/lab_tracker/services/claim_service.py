@@ -21,6 +21,7 @@ from lab_tracker.models import (
 )
 from lab_tracker.services.base import BaseService, ServiceContext
 from lab_tracker.services.dataset_service import DatasetService
+from lab_tracker.services.goal_link_cleanup import remove_goal_links_to_entity
 from lab_tracker.services.project_authorization import ProjectAuthorizationPolicy
 from lab_tracker.services.project_service import ProjectService
 from lab_tracker.services.question_service import QuestionService
@@ -254,6 +255,11 @@ class ClaimService(BaseService):
         claim = self.get_claim(claim_id)
         self.authorization.require_contributor(claim.project_id, actor=actor)
         with self.unit_of_work() as repository:
+            remove_goal_links_to_entity(
+                repository,
+                entity_type=EntityType.CLAIM,
+                entity_id=claim_id,
+            )
             repository.claims.delete(claim_id)
         return claim
 
