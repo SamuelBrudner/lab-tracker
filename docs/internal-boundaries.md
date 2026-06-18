@@ -74,6 +74,11 @@ first-class `prov:Entity` or `prov:Activity` nodes and links them to the dataset
 commit activity. This keeps adapters optional and thin while preserving semantic
 edges to questions and claims in Lab Tracker.
 
+The retained-v1 ingestion helpers include thin DataLad and DVC import adapters in
+`provenance_ingestion.py`. They accept exported manifests or `.dvc` pointer
+content, create `DatasetCommitManifestInput` values, and do not require DataLad
+or DVC as runtime dependencies.
+
 ## Database Artifacts
 
 Root-level SQLite files such as `lab_tracker.db`, `*.db`, and
