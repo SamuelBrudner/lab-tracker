@@ -62,6 +62,25 @@ def _merge_unique_ids(base: list[UUID], additions: Iterable[UUID]) -> list[UUID]
     return merged
 
 
+def _merge_manifest_files_with_attached_files(
+    manifest_files: Iterable[DatasetFile],
+    attached_files: Iterable[DatasetFile] | None,
+) -> list[DatasetFile]:
+    merged = list(manifest_files)
+    seen = {file.path.strip(): file.checksum.strip() for file in merged}
+    for file in attached_files or []:
+        path = file.path.strip()
+        checksum = file.checksum.strip()
+        existing = seen.get(path)
+        if existing is None:
+            merged.append(DatasetFile(path=path, checksum=checksum))
+            seen[path] = checksum
+            continue
+        if existing != checksum:
+            raise ValidationError("Attached file checksum conflict for file path.")
+    return merged
+
+
 class DatasetService(BaseService):
     def __init__(
         self,
@@ -256,7 +275,10 @@ class DatasetService(BaseService):
 
             if commit_requested:
                 attached_files = _load_attached_files(self, dataset.dataset_id)
-                files = attached_files or list(base_manifest.files)
+                files = _merge_manifest_files_with_attached_files(
+                    base_manifest.files,
+                    attached_files,
+                )
 
                 note_ids = list(base_manifest.note_ids)
                 note_targets = _load_dataset_note_targets(self, dataset.dataset_id)

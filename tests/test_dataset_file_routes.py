@@ -364,6 +364,130 @@ def test_dataset_commit_requires_attached_file(
     assert committed_payload["commit_hash"] != staged_hash
 
 
+def test_dataset_commit_merges_attached_files_with_manifest_files(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+):
+    headers = admin_auth_headers
+
+    project_id = client.post(
+        "/projects",
+        json={"name": "Commit manifest merge"},
+        headers=headers,
+    ).json()["data"]["project_id"]
+    question_id = client.post(
+        "/questions",
+        json={
+            "project_id": project_id,
+            "text": "Do manifest and uploaded files both reach the commit?",
+            "question_type": "descriptive",
+        },
+        headers=headers,
+    ).json()["data"]["question_id"]
+    activate_response = client.patch(
+        f"/questions/{question_id}",
+        json={"status": "active"},
+        headers=headers,
+    )
+    assert activate_response.status_code == 200
+
+    dataset_response = client.post(
+        "/datasets",
+        json={
+            "project_id": project_id,
+            "primary_question_id": question_id,
+            "commit_manifest": {
+                "files": [
+                    {"path": "manifest-only.csv", "checksum": "sha256:manifest"}
+                ]
+            },
+        },
+        headers=headers,
+    )
+    assert dataset_response.status_code == 201
+    dataset_id = dataset_response.json()["data"]["dataset_id"]
+
+    content = b"real-data"
+    uploaded_checksum = hashlib.sha256(content).hexdigest()
+    attach_response = client.post(
+        f"/datasets/{dataset_id}/files",
+        files={"file": ("uploaded.bin", content, "application/octet-stream")},
+        headers=headers,
+    )
+    assert attach_response.status_code == 201
+
+    commit_response = client.patch(
+        f"/datasets/{dataset_id}",
+        json={"status": "committed"},
+        headers=headers,
+    )
+
+    assert commit_response.status_code == 200
+    committed_files = commit_response.json()["data"]["commit_manifest"]["files"]
+    assert {file["path"]: file["checksum"] for file in committed_files} == {
+        "manifest-only.csv": "sha256:manifest",
+        "uploaded.bin": uploaded_checksum,
+    }
+
+
+def test_dataset_commit_rejects_attached_manifest_file_checksum_conflict(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+):
+    headers = admin_auth_headers
+
+    project_id = client.post(
+        "/projects",
+        json={"name": "Commit manifest conflict"},
+        headers=headers,
+    ).json()["data"]["project_id"]
+    question_id = client.post(
+        "/questions",
+        json={
+            "project_id": project_id,
+            "text": "Do conflicting files fail the commit?",
+            "question_type": "descriptive",
+        },
+        headers=headers,
+    ).json()["data"]["question_id"]
+    activate_response = client.patch(
+        f"/questions/{question_id}",
+        json={"status": "active"},
+        headers=headers,
+    )
+    assert activate_response.status_code == 200
+
+    dataset_response = client.post(
+        "/datasets",
+        json={
+            "project_id": project_id,
+            "primary_question_id": question_id,
+            "commit_manifest": {
+                "files": [{"path": "data.bin", "checksum": "sha256:manifest"}]
+            },
+        },
+        headers=headers,
+    )
+    assert dataset_response.status_code == 201
+    dataset_id = dataset_response.json()["data"]["dataset_id"]
+
+    attach_response = client.post(
+        f"/datasets/{dataset_id}/files",
+        files={"file": ("data.bin", b"real-data", "application/octet-stream")},
+        headers=headers,
+    )
+    assert attach_response.status_code == 201
+
+    commit_response = client.patch(
+        f"/datasets/{dataset_id}",
+        json={"status": "committed"},
+        headers=headers,
+    )
+
+    assert commit_response.status_code == 422
+    assert "checksum conflict" in commit_response.json()["error"]["message"].lower()
+
+
 def test_dataset_file_upload_requires_staged_dataset(
     client: TestClient,
     admin_auth_headers: dict[str, str],
