@@ -55,6 +55,11 @@ def _replace_batch_key_constraint_with_index() -> None:
 
 
 def _set_sqlite_foreign_keys(*, enabled: bool) -> None:
+    """Toggle SQLite FKs around batch table rebuilds.
+
+    env.py configures SQLite migrations with transactional_ddl=False so this
+    PRAGMA is honored before Alembic recreates parent tables.
+    """
     if op.get_context().dialect.name == "sqlite":
         value = "ON" if enabled else "OFF"
         op.execute(f"PRAGMA foreign_keys={value}")

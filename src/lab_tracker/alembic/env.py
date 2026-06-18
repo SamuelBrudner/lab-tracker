@@ -48,7 +48,13 @@ def run_migrations_online() -> None:
     )
 
     with connectable.connect() as connection:
-        context.configure(connection=connection, target_metadata=target_metadata)
+        configure_kwargs = {
+            "connection": connection,
+            "target_metadata": target_metadata,
+        }
+        if connection.dialect.name == "sqlite":
+            configure_kwargs["transactional_ddl"] = False
+        context.configure(**configure_kwargs)
 
         with context.begin_transaction():
             context.run_migrations()
