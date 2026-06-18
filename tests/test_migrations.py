@@ -726,6 +726,101 @@ def test_not_null_tightening_migration_backfills_existing_nulls(
     engine.dispose()
 
 
+def test_goal_link_slot_migration_dedupes_unslotted_duplicates(
+    monkeypatch,
+    tmp_path,
+):
+    db_path = tmp_path / "goal-link-slot-dedupe.db"
+    database_url = f"sqlite+pysqlite:///{db_path}"
+    config = _alembic_config()
+    _set_database_url(monkeypatch, database_url)
+
+    command.upgrade(config, "0022_goals")
+
+    project_id = str(uuid4())
+    goal_id = str(uuid4())
+    entity_id = str(uuid4())
+    kept_link_id = str(uuid4())
+    duplicate_link_id = str(uuid4())
+    empty_slot_link_id = str(uuid4())
+    slotted_link_id = str(uuid4())
+
+    engine = create_engine(
+        database_url,
+        future=True,
+        connect_args={"check_same_thread": False},
+    )
+    with engine.begin() as connection:
+        connection.execute(
+            text(
+                "INSERT INTO projects "
+                "(project_id, name, description, status, created_at, updated_at) "
+                "VALUES (:project_id, 'Goal migration project', '', 'active', "
+                "CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
+            ),
+            {"project_id": project_id},
+        )
+        connection.execute(
+            text(
+                "INSERT INTO goals "
+                "(goal_id, project_id, goal_type, title, created_at, updated_at) "
+                "VALUES (:goal_id, :project_id, 'answer_question', "
+                "'Goal migration', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
+            ),
+            {"goal_id": goal_id, "project_id": project_id},
+        )
+        for link_id, slot, created_at in (
+            (kept_link_id, None, "2026-01-01 00:00:00"),
+            (duplicate_link_id, None, "2026-01-02 00:00:00"),
+            (empty_slot_link_id, "", "2026-01-03 00:00:00"),
+            (slotted_link_id, "Figure 1", "2026-01-04 00:00:00"),
+        ):
+            connection.execute(
+                text(
+                    "INSERT INTO goal_links "
+                    "(link_id, goal_id, entity_type, entity_id, relation, slot, "
+                    "created_at) VALUES (:link_id, :goal_id, 'question', "
+                    ":entity_id, 'milestone', :slot, :created_at)"
+                ),
+                {
+                    "link_id": link_id,
+                    "goal_id": goal_id,
+                    "entity_id": entity_id,
+                    "slot": slot,
+                    "created_at": created_at,
+                },
+            )
+    engine.dispose()
+
+    command.upgrade(config, "0023_goal_link_slot_not_null")
+
+    engine = create_engine(
+        database_url,
+        future=True,
+        connect_args={"check_same_thread": False},
+    )
+    inspector = inspect(engine)
+    goal_link_columns = {
+        column["name"]: column for column in inspector.get_columns("goal_links")
+    }
+    assert goal_link_columns["slot"]["nullable"] is False
+    with engine.connect() as connection:
+        rows = connection.execute(
+            text(
+                "SELECT link_id, slot FROM goal_links "
+                "WHERE goal_id = :goal_id AND entity_id = :entity_id "
+                "ORDER BY slot, link_id"
+            ),
+            {"goal_id": goal_id, "entity_id": entity_id},
+        ).mappings().all()
+
+    assert rows == [
+        {"link_id": kept_link_id, "slot": ""},
+        {"link_id": slotted_link_id, "slot": "Figure 1"},
+    ]
+    engine.dispose()
+
+
 def test_database_at_daily_review_branch_upgrades_to_current_head(monkeypatch, tmp_path):
     db_path = tmp_path / "daily-review-branch.db"
     database_url = f"sqlite+pysqlite:///{db_path}"
