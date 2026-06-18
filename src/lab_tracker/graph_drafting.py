@@ -272,7 +272,9 @@ class OpenAIGraphDraftClient:
                 raise GraphDraftingError("Source image content type is required.")
             image_url = _data_url(image_bytes=image_bytes, content_type=image_content_type)
             content.append({"type": "input_image", "image_url": image_url})
-        response = self._client.post(
+        response = _post_provider_request(
+            self._client,
+            "OpenAI",
             "/responses",
             headers={
                 "Authorization": f"Bearer {self._api_key}",
@@ -337,7 +339,9 @@ class OpenAIGraphDraftClient:
                 ),
             }
         ]
-        response = self._client.post(
+        response = _post_provider_request(
+            self._client,
+            "OpenAI",
             "/responses",
             headers={
                 "Authorization": f"Bearer {self._api_key}",
@@ -392,7 +396,9 @@ class OpenAIGraphDraftClient:
         }
         if prompt and prompt.strip():
             data["prompt"] = prompt.strip()
-        response = self._client.post(
+        response = _post_provider_request(
+            self._client,
+            "OpenAI",
             "/audio/transcriptions",
             headers={"Authorization": f"Bearer {self._api_key}"},
             data=data,
@@ -527,7 +533,9 @@ class AnthropicGraphDraftClient:
         content: list[dict[str, Any]],
         instructions: str,
     ) -> dict[str, Any]:
-        response = self._client.post(
+        response = _post_provider_request(
+            self._client,
+            "Anthropic",
             "/messages",
             headers={
                 "x-api-key": self._api_key,
@@ -649,7 +657,9 @@ class GoogleGraphDraftClient:
             )
         if not audio_bytes:
             raise GraphDraftingError("Source audio is empty.")
-        response = self._client.post(
+        response = _post_provider_request(
+            self._client,
+            "Google",
             f"/{_gemini_model_path(self.model)}:generateContent",
             params={"key": self._api_key},
             json={
@@ -681,7 +691,9 @@ class GoogleGraphDraftClient:
         parts: list[dict[str, Any]],
         instructions: str,
     ) -> dict[str, Any]:
-        response = self._client.post(
+        response = _post_provider_request(
+            self._client,
+            "Google",
             f"/{_gemini_model_path(self.model)}:generateContent",
             params={"key": self._api_key},
             json={
@@ -826,6 +838,18 @@ def _parse_graph_patch_text(output_text: str, provider_name: str) -> dict[str, A
     if not isinstance(operations, list):
         raise GraphDraftingError(f"{provider_name} graph patch did not include an operations list.")
     return parsed
+
+
+def _post_provider_request(
+    client: httpx.Client,
+    provider_name: str,
+    *args: Any,
+    **kwargs: Any,
+) -> httpx.Response:
+    try:
+        return client.post(*args, **kwargs)
+    except httpx.HTTPError as exc:
+        raise GraphDraftingError(f"{provider_name} request failed: {exc}") from exc
 
 
 def _provider_response_json(response: httpx.Response, provider_name: str) -> dict[str, Any]:

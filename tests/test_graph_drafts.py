@@ -9,6 +9,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from lab_tracker.config import Settings
+from lab_tracker.db_models import GraphChangeSetModel
 from lab_tracker.graph_drafting import (
     AnthropicGraphDraftClient,
     GoogleGraphDraftClient,
@@ -645,6 +646,49 @@ def test_anthropic_and_google_clients_report_api_errors() -> None:
     google.close()
 
 
+@pytest.mark.parametrize(
+    ("client_factory", "provider_name"),
+    [
+        (
+            lambda transport: OpenAIGraphDraftClient(
+                api_key="openai-key",
+                model="gpt-test",
+                transport=transport,
+            ),
+            "OpenAI",
+        ),
+        (
+            lambda transport: AnthropicGraphDraftClient(
+                api_key="anthropic-key",
+                model="claude-test",
+                transport=transport,
+            ),
+            "Anthropic",
+        ),
+        (
+            lambda transport: GoogleGraphDraftClient(
+                api_key="google-key",
+                model="gemini-test",
+                transport=transport,
+            ),
+            "Google",
+        ),
+    ],
+)
+def test_graph_draft_clients_wrap_transport_errors(client_factory, provider_name) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ReadTimeout("network stalled", request=request)
+
+    draft_client = client_factory(httpx.MockTransport(handler))
+    try:
+        with pytest.raises(GraphDraftingError, match=f"{provider_name} request failed"):
+            draft_client.draft_from_batch(
+                batch_context={"mode": "graph_batch", "batch_notes": [{"id": "note-1"}]}
+            )
+    finally:
+        draft_client.close()
+
+
 def test_make_graph_draft_client_rejects_unknown_provider() -> None:
     settings = Settings(
         environment="local",
@@ -1231,6 +1275,74 @@ def test_saved_photo_voice_bundle_review_transcribes_drafts_and_commits(
     )
     assert linked_notes.status_code == 200
     assert linked_notes.json()["data"][0]["targets"][0]["entity_id"] == question_id
+
+
+def test_graph_draft_commit_rejects_refs_to_rejected_operations(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+) -> None:
+    project_id = _project(client, admin_auth_headers)
+    note_id = _image_note(client, admin_auth_headers, project_id)
+    client.app.state.graph_draft_client_factory = lambda settings: FakeDraftClient(
+        _draft_patch(project_id)
+    )
+
+    draft = client.post(f"/notes/{note_id}/graph-drafts", headers=admin_auth_headers)
+    assert draft.status_code == 201
+    draft_payload = draft.json()["data"]
+    change_set_id = draft_payload["change_set_id"]
+    question_op, note_op = draft_payload["operations"]
+
+    rejected = client.patch(
+        f"/graph-drafts/{change_set_id}/operations/{question_op['operation_id']}",
+        json={"payload": question_op["payload"], "status": "rejected"},
+        headers=admin_auth_headers,
+    )
+    assert rejected.status_code == 200
+
+    accepted = client.patch(
+        f"/graph-drafts/{change_set_id}/operations/{note_op['operation_id']}",
+        json={"payload": note_op["payload"], "status": "accepted"},
+        headers=admin_auth_headers,
+    )
+    assert accepted.status_code == 200
+
+    commit = client.post(
+        f"/graph-drafts/{change_set_id}/commit",
+        json={"message": "commit dangling ref"},
+        headers=admin_auth_headers,
+    )
+
+    assert commit.status_code == 422
+    assert "unavailable operation ref(s): q1" in commit.json()["error"]["message"]
+
+
+def test_graph_draft_commit_rejects_already_claimed_draft(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+) -> None:
+    project_id = _project(client, admin_auth_headers)
+    note_id = _image_note(client, admin_auth_headers, project_id)
+    client.app.state.graph_draft_client_factory = lambda settings: FakeDraftClient(
+        _draft_patch(project_id)
+    )
+    draft = client.post(f"/notes/{note_id}/graph-drafts", headers=admin_auth_headers)
+    assert draft.status_code == 201
+    change_set_id = draft.json()["data"]["change_set_id"]
+
+    with client.app.state.db_session_factory() as session:
+        row = session.get(GraphChangeSetModel, change_set_id)
+        row.status = "committing"
+        session.commit()
+
+    commit = client.post(
+        f"/graph-drafts/{change_set_id}/commit",
+        json={"message": "commit claimed draft"},
+        headers=admin_auth_headers,
+    )
+
+    assert commit.status_code == 422
+    assert "already being committed" in commit.json()["error"]["message"]
 
 
 def test_gpt_failure_returns_stored_failed_draft(

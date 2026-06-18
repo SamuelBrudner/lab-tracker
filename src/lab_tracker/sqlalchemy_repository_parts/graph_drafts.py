@@ -6,7 +6,7 @@ from collections.abc import Iterable
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.orm import Session as OrmSession
 
 from lab_tracker.db_models import GraphChangeOperationModel, GraphChangeSetModel, UserModel
@@ -19,6 +19,7 @@ from lab_tracker.models import (
     GraphChangeSetStatus,
     GraphDraftMode,
     GraphDraftSemanticType,
+    utc_now,
 )
 from lab_tracker.repository import EntityRepository
 from lab_tracker.sqlalchemy_mapper_parts.common import as_utc
@@ -336,6 +337,26 @@ class SQLAlchemyGraphChangeSetRepository(EntityRepository[GraphChangeSet]):
             entity_id,
             [operation_to_model(operation) for operation in entity.operations],
         )
+
+    def claim_for_commit(self, entity_id: UUID) -> GraphChangeSet | None:
+        self._session.flush()
+        result = self._session.execute(
+            update(GraphChangeSetModel)
+            .where(GraphChangeSetModel.change_set_id == str(entity_id))
+            .where(
+                GraphChangeSetModel.status.in_(
+                    [
+                        GraphChangeSetStatus.READY.value,
+                        GraphChangeSetStatus.SUBMITTED.value,
+                    ]
+                )
+            )
+            .values(status=GraphChangeSetStatus.COMMITTING.value, updated_at=utc_now())
+        )
+        if result.rowcount != 1:
+            return None
+        self._session.flush()
+        return self.get(entity_id)
 
     def delete(self, entity_id: UUID) -> GraphChangeSet | None:
         entity = self.get(entity_id)

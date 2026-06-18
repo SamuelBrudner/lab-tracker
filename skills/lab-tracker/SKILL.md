@@ -408,7 +408,7 @@ List/search endpoints use `limit` between 1 and 200 and `offset` of 0 or greater
 
 #### `GET /graph-drafts`
 - `project_id` (optional): string(uuid) | null
-- `status` (optional): GraphChangeSetStatus enum: drafting, ready, submitted, changes_requested, rejected, failed, committed | null
+- `status` (optional): GraphChangeSetStatus enum: drafting, ready, submitted, changes_requested, committing, rejected, failed, committed | null
 - `source_note_id` (optional): string(uuid) | null
 - `limit` (optional): integer; default 50; maximum 200 from shared route validation
 - `offset` (optional): integer; default 0; minimum 0 from shared route validation

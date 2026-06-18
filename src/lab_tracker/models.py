@@ -209,6 +209,7 @@ class GraphChangeSetStatus(str, Enum):
     READY = "ready"
     SUBMITTED = "submitted"
     CHANGES_REQUESTED = "changes_requested"
+    COMMITTING = "committing"
     REJECTED = "rejected"
     FAILED = "failed"
     COMMITTED = "committed"

@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from fastapi.testclient import TestClient
+from sqlalchemy import select
 
+from lab_tracker.db_models import GraphDraftBatchSettingsModel, NoteModel
 from lab_tracker.graph_drafting import GraphDraftingError
 
 
@@ -151,13 +154,18 @@ def test_batch_run_is_idempotent_for_same_window(
     admin_auth_headers: dict[str, str],
 ) -> None:
     project_id = _project(client, admin_auth_headers)
-    _note(client, admin_auth_headers, project_id, "One staged note.")
+    note_id = _note(client, admin_auth_headers, project_id, "One staged note.")
+    with client.app.state.db_session_factory() as session:
+        row = session.get(NoteModel, note_id)
+        row.created_at = datetime(2026, 1, 2, tzinfo=timezone.utc)
+        row.updated_at = row.created_at
+        session.commit()
     fake_client = FakeBatchDraftClient(_batch_patch(project_id))
     client.app.state.graph_draft_client_factory = lambda settings: fake_client
     window = {
         "project_id": project_id,
         "since": "2026-01-01T00:00:00Z",
-        "until": "2026-12-31T00:00:00Z",
+        "until": "2026-01-03T00:00:00Z",
     }
 
     first = client.post("/batches/run-now", json=window, headers=admin_auth_headers)
@@ -250,6 +258,14 @@ def test_empty_batch_window_skips_without_creating_change_set(
     assert run["change_set_id"] is None
     assert run["note_count"] == 0
     assert fake_client.calls == []
+    with client.app.state.db_session_factory() as session:
+        settings = session.scalar(
+            select(GraphDraftBatchSettingsModel).where(
+                GraphDraftBatchSettingsModel.project_id == project_id
+            )
+        )
+    assert settings is not None
+    assert settings.enabled is False
 
 
 def test_batch_cadence_settings_are_user_visible_and_rescheduled(
@@ -263,8 +279,16 @@ def test_batch_cadence_settings_are_user_visible_and_rescheduled(
         headers=admin_auth_headers,
     )
     assert defaults.status_code == 200
+    assert defaults.json()["data"]["enabled"] is False
     assert defaults.json()["data"]["cadence_minutes"] == 1440
-    assert defaults.json()["data"]["next_run_at"]
+    assert defaults.json()["data"]["next_run_at"] is None
+    with client.app.state.db_session_factory() as session:
+        persisted_default = session.scalar(
+            select(GraphDraftBatchSettingsModel).where(
+                GraphDraftBatchSettingsModel.project_id == project_id
+            )
+        )
+    assert persisted_default is None
 
     updated = client.patch(
         f"/projects/{project_id}/graph-draft-batch-settings",
@@ -281,3 +305,142 @@ def test_batch_cadence_settings_are_user_visible_and_rescheduled(
     assert payload["cadence_minutes"] == 720
     assert payload["run_at_local_time"] == "07:30"
     assert payload["next_run_at"]
+
+
+def test_batch_run_validates_and_clamps_manual_windows(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+) -> None:
+    project_id = _project(client, admin_auth_headers)
+    _note(client, admin_auth_headers, project_id, "Manual window note.")
+    fake_client = FakeBatchDraftClient(_batch_patch(project_id))
+    client.app.state.graph_draft_client_factory = lambda settings: fake_client
+
+    invalid = client.post(
+        "/batches/run-now",
+        json={
+            "project_id": project_id,
+            "since": "2026-01-03T00:00:00Z",
+            "until": "2026-01-02T00:00:00Z",
+        },
+        headers=admin_auth_headers,
+    )
+
+    assert invalid.status_code == 422
+    assert "since must be before until" in invalid.json()["error"]["message"]
+
+    before = datetime.now(timezone.utc)
+    future = client.post(
+        "/batches/run-now",
+        json={"project_id": project_id, "until": "2099-01-01T00:00:00Z"},
+        headers=admin_auth_headers,
+    )
+    after = datetime.now(timezone.utc)
+
+    assert future.status_code == 201
+    run = future.json()["data"]
+    window_end = datetime.fromisoformat(run["window_end"].replace("Z", "+00:00"))
+    assert before <= window_end <= after
+
+
+def test_batch_run_limits_window_to_notes_sent_to_model(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+) -> None:
+    project_id = _project(client, admin_auth_headers)
+    note_ids = [
+        _note(client, admin_auth_headers, project_id, f"Staged note {index}")
+        for index in range(101)
+    ]
+    base_time = datetime.now(timezone.utc) - timedelta(minutes=10)
+    with client.app.state.db_session_factory() as session:
+        for index, note_id in enumerate(note_ids):
+            row = session.get(NoteModel, note_id)
+            row.created_at = base_time + timedelta(seconds=index)
+            row.updated_at = row.created_at
+        session.commit()
+    fake_client = FakeBatchDraftClient(_batch_patch(project_id))
+    client.app.state.graph_draft_client_factory = lambda settings: fake_client
+
+    first = client.post(
+        "/batches/run-now",
+        json={"project_id": project_id, "until": "2099-01-01T00:00:00Z"},
+        headers=admin_auth_headers,
+    )
+
+    assert first.status_code == 201
+    first_run = first.json()["data"]
+    assert first_run["note_count"] == 100
+    first_context_notes = fake_client.calls[0]["batch_context"]["batch_notes"]
+    assert len(first_context_notes) == 100
+    assert first_context_notes[-1]["id"] == note_ids[99]
+
+    draft = client.get(f"/batches/{first_run['change_set_id']}", headers=admin_auth_headers)
+    assert draft.status_code == 200
+    assert draft.json()["data"]["source_note_ids"][-1] == note_ids[99]
+    assert note_ids[100] not in draft.json()["data"]["source_note_ids"]
+
+    second = client.post(
+        "/batches/run-now",
+        json={"project_id": project_id, "until": "2099-01-01T00:00:00Z"},
+        headers=admin_auth_headers,
+    )
+
+    assert second.status_code == 201
+    assert second.json()["data"]["note_count"] == 1
+    assert len(fake_client.calls) == 2
+    assert fake_client.calls[1]["batch_context"]["batch_notes"][0]["id"] == note_ids[100]
+
+
+def test_run_due_isolates_project_errors_and_continues(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+) -> None:
+    first_project_id = _project(client, admin_auth_headers)
+    second_project_id = _project(client, admin_auth_headers)
+    _note(client, admin_auth_headers, first_project_id, "First due project.")
+    _note(client, admin_auth_headers, second_project_id, "Second due project.")
+    for project_id in (first_project_id, second_project_id):
+        response = client.patch(
+            f"/projects/{project_id}/graph-draft-batch-settings",
+            json={"enabled": True},
+            headers=admin_auth_headers,
+        )
+        assert response.status_code == 200
+
+    past = datetime.now(timezone.utc) - timedelta(hours=1)
+    with client.app.state.db_session_factory() as session:
+        first = session.scalar(
+            select(GraphDraftBatchSettingsModel).where(
+                GraphDraftBatchSettingsModel.project_id == first_project_id
+            )
+        )
+        second = session.scalar(
+            select(GraphDraftBatchSettingsModel).where(
+                GraphDraftBatchSettingsModel.project_id == second_project_id
+            )
+        )
+        first.next_run_at = past
+        second.next_run_at = past + timedelta(seconds=1)
+        session.commit()
+
+    calls = 0
+    healthy_client = FakeBatchDraftClient(_batch_patch(second_project_id))
+
+    def factory(settings):  # noqa: ANN001
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise RuntimeError("factory down")
+        return healthy_client
+
+    client.app.state.graph_draft_client_factory = factory
+
+    response = client.post("/batches/run-due", headers=admin_auth_headers)
+
+    assert response.status_code == 200
+    runs = response.json()["data"]
+    assert [run["status"] for run in runs] == ["failed", "ready"]
+    assert runs[0]["error_metadata"]["category"] == "scheduler_error"
+    assert runs[1]["project_id"] == second_project_id
+    assert healthy_client.closed is True

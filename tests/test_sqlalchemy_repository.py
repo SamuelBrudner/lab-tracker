@@ -23,6 +23,7 @@ from lab_tracker.models import (
     EntityVersion,
     ExternalArtifactReference,
     GraphChangeSet,
+    GraphChangeSetStatus,
     GroupMembership,
     Note,
     NoteStatus,
@@ -1249,3 +1250,45 @@ def test_query_entity_versions_filters_by_entity_and_change_set(db_session):
     assert versions == [first, second]
     assert committed_total == 1
     assert committed_versions == [second]
+
+
+def test_graph_change_set_commit_claim_is_conditional(db_session):
+    repo = SQLAlchemyLabTrackerRepository(db_session)
+    project = Project(
+        project_id=uuid4(),
+        name="Claim project",
+        status=ProjectStatus.ACTIVE,
+        created_at=_ts(),
+        updated_at=_ts(),
+    )
+    source_note = Note(
+        note_id=uuid4(),
+        project_id=project.project_id,
+        raw_content="claim source",
+        status=NoteStatus.COMMITTED,
+        created_at=_ts(),
+        updated_at=_ts(),
+    )
+    change_set = GraphChangeSet(
+        change_set_id=uuid4(),
+        project_id=project.project_id,
+        source_note_id=source_note.note_id,
+        source_note_ids=[source_note.note_id],
+        model="test-model",
+        prompt_version="test-prompt",
+        status=GraphChangeSetStatus.READY,
+        created_at=_ts(1),
+        updated_at=_ts(1),
+    )
+    repo.projects.save(project)
+    db_session.flush()
+    repo.notes.save(source_note)
+    repo.graph_change_sets.save(change_set)
+    repo.commit()
+
+    claimed = repo.claim_graph_change_set_for_commit(change_set.change_set_id)
+    second_claim = repo.claim_graph_change_set_for_commit(change_set.change_set_id)
+
+    assert claimed is not None
+    assert claimed.status == GraphChangeSetStatus.COMMITTING
+    assert second_claim is None

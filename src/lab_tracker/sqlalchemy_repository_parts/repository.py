@@ -791,6 +791,12 @@ class SQLAlchemyLabTrackerRepository(LabTrackerRepository):
             include_operations=include_operations,
         )
 
+    def claim_graph_change_set_for_commit(
+        self,
+        change_set_id: UUID,
+    ) -> GraphChangeSet | None:
+        return self.graph_change_sets.claim_for_commit(change_set_id)
+
     def get_graph_draft_batch_settings_by_project(
         self,
         project_id: UUID,

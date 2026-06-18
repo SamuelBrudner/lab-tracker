@@ -391,6 +391,12 @@ class LabTrackerRepository(Protocol):
     ) -> tuple[list[GraphChangeSet], int]:
         """Query graph draft change sets with filters and pagination."""
 
+    def claim_graph_change_set_for_commit(
+        self,
+        change_set_id: UUID,
+    ) -> GraphChangeSet | None:
+        """Atomically move a ready/submitted graph draft into commit processing."""
+
     def get_graph_draft_batch_settings_by_project(
         self,
         project_id: UUID,

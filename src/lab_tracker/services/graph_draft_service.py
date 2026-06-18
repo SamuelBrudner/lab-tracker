@@ -59,6 +59,13 @@ _BATCH_RETRY_ATTEMPTS = 3
 _DEFAULT_BATCH_CADENCE_MINUTES = 24 * 60
 _DEFAULT_BATCH_RUN_TIME = "06:00"
 _DEFAULT_BATCH_TIMEZONE = "America/New_York"
+_BATCH_ACTIVE_STATUSES = {
+    GraphChangeSetStatus.DRAFTING,
+    GraphChangeSetStatus.READY,
+    GraphChangeSetStatus.SUBMITTED,
+    GraphChangeSetStatus.CHANGES_REQUESTED,
+    GraphChangeSetStatus.COMMITTING,
+}
 
 
 class GraphDraftService(BaseService):
@@ -231,8 +238,11 @@ class GraphDraftService(BaseService):
             draft_mode=GraphDraftMode.GRAPH_BATCH,
             batch_key=batch_key,
         )
-        if existing:
-            return existing[0]
+        active_existing = [
+            change_set for change_set in existing if change_set.status in _BATCH_ACTIVE_STATUSES
+        ]
+        if active_existing:
+            return active_existing[0]
         context_packet = self.context_builder.build_batch_graph_context(
             batch_notes,
             window=window,
@@ -337,10 +347,7 @@ class GraphDraftService(BaseService):
         settings = self.repository.get_graph_draft_batch_settings_by_project(project_id)
         if settings is not None:
             return settings
-        settings = _default_batch_settings(project_id=project_id, actor=actor)
-        with self.unit_of_work() as repository:
-            repository.graph_draft_batch_settings.save(settings)
-        return settings
+        return _default_batch_settings(project_id=project_id, actor=actor)
 
     def update_graph_draft_batch_settings(
         self,
@@ -368,10 +375,14 @@ class GraphDraftService(BaseService):
         if timezone_name is not None:
             _zoneinfo(timezone_name)
             settings.timezone_name = timezone_name
-        settings.next_run_at = _next_run_at(
-            cadence_minutes=settings.cadence_minutes,
-            run_at_local_time=settings.run_at_local_time,
-            timezone_name=settings.timezone_name,
+        settings.next_run_at = (
+            _next_run_at(
+                cadence_minutes=settings.cadence_minutes,
+                run_at_local_time=settings.run_at_local_time,
+                timezone_name=settings.timezone_name,
+            )
+            if settings.enabled
+            else None
         )
         settings.updated_at = utc_now()
         settings.updated_by = actor_user_id(actor)
@@ -392,17 +403,23 @@ class GraphDraftService(BaseService):
     ) -> GraphDraftBatchRun:
         self.authorization.require_contributor(project_id, actor=actor)
         self.projects.get_project(project_id)
-        window_end = _as_utc(until or utc_now())
+        self._ensure_graph_draft_batch_settings_row(project_id, actor=actor)
+        now = _as_utc(utc_now())
+        requested_window_end = _as_utc(until) if until is not None else now
+        window_end = min(requested_window_end, now)
         latest_success = self.repository.latest_successful_graph_draft_batch_run(project_id)
         window_start = _as_utc(
             since
             or (latest_success.window_end if latest_success is not None else datetime(1970, 1, 1))
         )
+        if since is not None and window_start >= window_end:
+            raise ValidationError("Batch window since must be before until.")
         notes = _staged_notes_in_window(
             self.notes.list_notes(project_id=project_id),
             since=window_start,
             until=window_end,
         )
+        notes, window_end = _limit_notes_to_draft(notes, window_end=window_end)
         note_ids = [note.note_id for note in notes]
         batch_key = _batch_key(
             project_id=project_id,
@@ -470,6 +487,19 @@ class GraphDraftService(BaseService):
             repository.graph_draft_batch_runs.save(run)
         return run
 
+    def _ensure_graph_draft_batch_settings_row(
+        self,
+        project_id: UUID,
+        *,
+        actor: AuthContext | None,
+    ) -> None:
+        if self.repository.get_graph_draft_batch_settings_by_project(project_id) is not None:
+            return
+        with self.unit_of_work() as repository:
+            repository.graph_draft_batch_settings.save(
+                _default_batch_settings(project_id=project_id, actor=actor)
+            )
+
     def run_due_graph_draft_batches(
         self,
         *,
@@ -484,8 +514,19 @@ class GraphDraftService(BaseService):
         due_settings = self.repository.list_due_graph_draft_batch_settings(current_time)
         runs: list[GraphDraftBatchRun] = []
         for batch_settings in due_settings:
-            draft_client = draft_client_factory(app_settings)
             try:
+                self.projects.get_project(batch_settings.project_id)
+            except NotFoundError:
+                batch_settings.enabled = False
+                batch_settings.next_run_at = None
+                batch_settings.updated_at = utc_now()
+                batch_settings.updated_by = actor_user_id(actor)
+                with self.unit_of_work() as repository:
+                    repository.graph_draft_batch_settings.save(batch_settings)
+                continue
+            draft_client = None
+            try:
+                draft_client = draft_client_factory(app_settings)
                 run = self.run_graph_draft_batch_for_project(
                     batch_settings.project_id,
                     draft_client=draft_client,
@@ -493,10 +534,18 @@ class GraphDraftService(BaseService):
                     trigger=GraphDraftBatchTrigger.SCHEDULED,
                     actor=actor,
                 )
+            except Exception as exc:
+                run = self._record_failed_scheduled_batch_run(
+                    batch_settings.project_id,
+                    window_end=current_time,
+                    error=exc,
+                    actor=actor,
+                )
             finally:
-                close = getattr(draft_client, "close", None)
-                if callable(close):
-                    close()
+                if draft_client is not None:
+                    close = getattr(draft_client, "close", None)
+                    if callable(close):
+                        close()
             runs.append(run)
             batch_settings.next_run_at = _next_run_at(
                 cadence_minutes=batch_settings.cadence_minutes,
@@ -509,6 +558,46 @@ class GraphDraftService(BaseService):
             with self.unit_of_work() as repository:
                 repository.graph_draft_batch_settings.save(batch_settings)
         return runs
+
+    def _record_failed_scheduled_batch_run(
+        self,
+        project_id: UUID,
+        *,
+        window_end: datetime,
+        error: Exception,
+        actor: AuthContext | None,
+    ) -> GraphDraftBatchRun:
+        latest_success = self.repository.latest_successful_graph_draft_batch_run(project_id)
+        window_start = _as_utc(
+            latest_success.window_end if latest_success is not None else datetime(1970, 1, 1)
+        )
+        run = GraphDraftBatchRun(
+            run_id=uuid4(),
+            project_id=project_id,
+            trigger=GraphDraftBatchTrigger.SCHEDULED,
+            status=GraphDraftBatchRunStatus.FAILED,
+            window_start=window_start,
+            window_end=window_end,
+            note_count=0,
+            batch_key=_batch_key(
+                project_id=project_id,
+                since=window_start,
+                until=window_end,
+                note_ids=[],
+            ),
+            summary="Scheduled batch draft failed before a project run could complete.",
+            error_metadata={
+                "category": "scheduler_error",
+                "message": str(error),
+            },
+            finished_at=utc_now(),
+            created_by=actor_user_id(actor),
+            created_by_user_id=actor_user_fk(actor, self.repository),
+        )
+        run.updated_at = run.finished_at
+        with self.unit_of_work() as repository:
+            repository.graph_draft_batch_runs.save(run)
+        return run
 
     def list_graph_draft_batch_runs(
         self,
@@ -826,6 +915,8 @@ class GraphDraftService(BaseService):
             raise ValidationError("message must not be empty.")
         change_set = self.get_graph_change_set(change_set_id)
         self.authorization.require_owner(change_set.project_id, actor=actor)
+        if change_set.status == GraphChangeSetStatus.COMMITTING:
+            raise ValidationError("This graph draft is already being committed.")
         if change_set.status not in {
             GraphChangeSetStatus.READY,
             GraphChangeSetStatus.SUBMITTED,
@@ -839,6 +930,21 @@ class GraphDraftService(BaseService):
         ]
         if not accepted:
             raise ValidationError("At least one accepted operation is required to commit.")
+        _ensure_accepted_operation_refs_available(accepted)
+        claimed = self.repository.claim_graph_change_set_for_commit(change_set_id)
+        if claimed is None:
+            latest = self.get_graph_change_set(change_set_id)
+            if latest.status == GraphChangeSetStatus.COMMITTED:
+                raise ValidationError("This graph draft has already been committed.")
+            if latest.status == GraphChangeSetStatus.COMMITTING:
+                raise ValidationError("This graph draft is already being committed.")
+            raise ValidationError("Only ready or submitted graph drafts can be committed.")
+        change_set = claimed
+        accepted = [
+            operation
+            for operation in sorted(change_set.operations, key=lambda item: item.sequence)
+            if operation.status == GraphChangeOperationStatus.ACCEPTED
+        ]
         for operation in accepted:
             entity = self.patch_applier.apply_graph_operation(
                 operation,
@@ -880,6 +986,7 @@ class GraphDraftService(BaseService):
     ) -> None:
         if change_set.status in {
             GraphChangeSetStatus.COMMITTED,
+            GraphChangeSetStatus.COMMITTING,
             GraphChangeSetStatus.REJECTED,
             GraphChangeSetStatus.FAILED,
         }:
@@ -1030,6 +1137,41 @@ def _attach_batch_source_traceability(
         operation.source_refs = next_refs
 
 
+def _ensure_accepted_operation_refs_available(
+    operations: list[GraphChangeOperation],
+) -> None:
+    available_refs: set[str] = set()
+    for operation in operations:
+        missing = sorted(_payload_ref_names(operation.payload) - available_refs)
+        if missing:
+            refs = ", ".join(missing)
+            raise ValidationError(
+                "Accepted graph draft operation "
+                f"{operation.sequence} references unavailable operation ref(s): {refs}. "
+                "Accept the referenced operation and make sure it appears earlier in the draft, "
+                "or edit this operation before committing."
+            )
+        if operation.client_ref:
+            available_refs.add(operation.client_ref)
+
+
+def _payload_ref_names(value: Any) -> set[str]:
+    if isinstance(value, list):
+        refs: set[str] = set()
+        for item in value:
+            refs.update(_payload_ref_names(item))
+        return refs
+    if not isinstance(value, dict):
+        return set()
+    if set(value) == {"$ref"}:
+        ref_name = value["$ref"]
+        return {ref_name} if isinstance(ref_name, str) else set()
+    refs: set[str] = set()
+    for item in value.values():
+        refs.update(_payload_ref_names(item))
+    return refs
+
+
 def _default_batch_settings(
     *,
     project_id: UUID,
@@ -1038,15 +1180,11 @@ def _default_batch_settings(
     return GraphDraftBatchSettings(
         settings_id=uuid4(),
         project_id=project_id,
-        enabled=True,
+        enabled=False,
         cadence_minutes=_DEFAULT_BATCH_CADENCE_MINUTES,
         run_at_local_time=_DEFAULT_BATCH_RUN_TIME,
         timezone_name=_DEFAULT_BATCH_TIMEZONE,
-        next_run_at=_next_run_at(
-            cadence_minutes=_DEFAULT_BATCH_CADENCE_MINUTES,
-            run_at_local_time=_DEFAULT_BATCH_RUN_TIME,
-            timezone_name=_DEFAULT_BATCH_TIMEZONE,
-        ),
+        next_run_at=None,
         updated_by=actor_user_id(actor),
     )
 
@@ -1111,3 +1249,14 @@ def _staged_notes_in_window(
         ],
         key=lambda item: (item.created_at, str(item.note_id)),
     )
+
+
+def _limit_notes_to_draft(
+    notes: list[Note],
+    *,
+    window_end: datetime,
+) -> tuple[list[Note], datetime]:
+    if len(notes) <= _BATCH_NOTE_LIMIT:
+        return notes, window_end
+    limited = notes[:_BATCH_NOTE_LIMIT]
+    return limited, _as_utc(limited[-1].created_at)
