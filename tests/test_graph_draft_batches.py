@@ -414,6 +414,51 @@ def test_batch_run_limits_window_to_notes_sent_to_model(
     assert fake_client.calls[1]["batch_context"]["batch_notes"][0]["id"] == note_ids[100]
 
 
+def test_batch_run_continues_notes_sharing_cutoff_timestamp(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+) -> None:
+    project_id = _project(client, admin_auth_headers)
+    note_ids = [
+        _note(client, admin_auth_headers, project_id, f"Same timestamp note {index}")
+        for index in range(101)
+    ]
+    shared_time = datetime.now(timezone.utc) - timedelta(minutes=10)
+    with client.app.state.db_session_factory() as session:
+        for note_id in note_ids:
+            row = session.get(NoteModel, note_id)
+            row.created_at = shared_time
+            row.updated_at = shared_time
+        session.commit()
+    sorted_note_ids = sorted(note_ids)
+    fake_client = FakeBatchDraftClient(_batch_patch(project_id))
+    client.app.state.graph_draft_client_factory = lambda settings: fake_client
+
+    first = client.post(
+        "/batches/run-now",
+        json={"project_id": project_id, "until": "2099-01-01T00:00:00Z"},
+        headers=admin_auth_headers,
+    )
+    second = client.post(
+        "/batches/run-now",
+        json={"project_id": project_id, "until": "2099-01-01T00:00:00Z"},
+        headers=admin_auth_headers,
+    )
+
+    assert first.status_code == 201
+    assert second.status_code == 201
+    assert first.json()["data"]["note_count"] == 100
+    assert second.json()["data"]["note_count"] == 1
+    first_context_ids = [
+        note["id"] for note in fake_client.calls[0]["batch_context"]["batch_notes"]
+    ]
+    second_context_ids = [
+        note["id"] for note in fake_client.calls[1]["batch_context"]["batch_notes"]
+    ]
+    assert first_context_ids == sorted_note_ids[:100]
+    assert second_context_ids == sorted_note_ids[100:]
+
+
 def test_run_due_isolates_project_errors_and_continues(
     client: TestClient,
     admin_auth_headers: dict[str, str],

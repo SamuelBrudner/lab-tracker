@@ -9,7 +9,11 @@ from uuid import UUID
 from sqlalchemy import select
 from sqlalchemy.orm import Session as OrmSession
 
-from lab_tracker.db_models import GraphDraftBatchRunModel, GraphDraftBatchSettingsModel
+from lab_tracker.db_models import (
+    GraphChangeSetModel,
+    GraphDraftBatchRunModel,
+    GraphDraftBatchSettingsModel,
+)
 from lab_tracker.models import (
     GraphDraftBatchRun,
     GraphDraftBatchRunStatus,
@@ -240,6 +244,27 @@ class SQLAlchemyGraphDraftBatchRunRepository(EntityRepository[GraphDraftBatchRun
             .limit(1)
         )
         return run_from_model(row) if row is not None else None
+
+    def successful_source_note_ids_at_window_end(
+        self,
+        project_id: UUID,
+        window_end: datetime,
+    ) -> set[UUID]:
+        self._session.flush()
+        rows = self._session.execute(
+            select(GraphChangeSetModel.source_note_ids)
+            .join(
+                GraphDraftBatchRunModel,
+                GraphDraftBatchRunModel.change_set_id == GraphChangeSetModel.change_set_id,
+            )
+            .where(GraphDraftBatchRunModel.project_id == str(project_id))
+            .where(GraphDraftBatchRunModel.status == GraphDraftBatchRunStatus.READY.value)
+            .where(GraphDraftBatchRunModel.window_end == window_end)
+        )
+        note_ids: set[UUID] = set()
+        for (source_note_ids,) in rows:
+            note_ids.update(UUID(str(note_id)) for note_id in (source_note_ids or []))
+        return note_ids
 
     def list(self) -> list[GraphDraftBatchRun]:
         self._session.flush()

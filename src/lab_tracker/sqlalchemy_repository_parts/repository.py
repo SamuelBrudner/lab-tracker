@@ -821,6 +821,16 @@ class SQLAlchemyLabTrackerRepository(LabTrackerRepository):
     ) -> GraphDraftBatchRun | None:
         return self.graph_draft_batch_runs.latest_successful_for_project(project_id)
 
+    def successful_graph_draft_batch_source_note_ids_at_window_end(
+        self,
+        project_id: UUID,
+        window_end: datetime,
+    ) -> set[UUID]:
+        return self.graph_draft_batch_runs.successful_source_note_ids_at_window_end(
+            project_id,
+            window_end,
+        )
+
     def query_graph_draft_batch_runs(
         self,
         *,

@@ -414,10 +414,21 @@ class GraphDraftService(BaseService):
         )
         if since is not None and window_start >= window_end:
             raise ValidationError("Batch window since must be before until.")
+        continuing_auto_window = since is None and latest_success is not None
+        already_drafted_note_ids = (
+            self.repository.successful_graph_draft_batch_source_note_ids_at_window_end(
+                project_id,
+                window_start,
+            )
+            if continuing_auto_window
+            else set()
+        )
         notes = _staged_notes_in_window(
             self.notes.list_notes(project_id=project_id),
             since=window_start,
             until=window_end,
+            include_start=continuing_auto_window,
+            exclude_note_ids=already_drafted_note_ids,
         )
         notes, window_end = _limit_notes_to_draft(notes, window_end=window_end)
         note_ids = [note.note_id for note in notes]
@@ -1238,14 +1249,24 @@ def _staged_notes_in_window(
     *,
     since: datetime,
     until: datetime,
+    include_start: bool = False,
+    exclude_note_ids: set[UUID] | None = None,
 ) -> list[Note]:
     start = _as_utc(since)
     end = _as_utc(until)
+    excluded = exclude_note_ids or set()
     return sorted(
         [
             note
             for note in notes
-            if note.status == NoteStatus.STAGED and start < _as_utc(note.created_at) <= end
+            if note.status == NoteStatus.STAGED
+            and note.note_id not in excluded
+            and (
+                start <= _as_utc(note.created_at)
+                if include_start
+                else start < _as_utc(note.created_at)
+            )
+            and _as_utc(note.created_at) <= end
         ],
         key=lambda item: (item.created_at, str(item.note_id)),
     )

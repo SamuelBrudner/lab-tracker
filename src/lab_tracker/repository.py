@@ -421,6 +421,13 @@ class LabTrackerRepository(Protocol):
     ) -> GraphDraftBatchRun | None:
         """Return the latest successful/skipped batch run for a project."""
 
+    def successful_graph_draft_batch_source_note_ids_at_window_end(
+        self,
+        project_id: UUID,
+        window_end: datetime,
+    ) -> set[UUID]:
+        """Return source note IDs from successful batch runs ending at a window boundary."""
+
     def query_graph_draft_batch_runs(
         self,
         *,
