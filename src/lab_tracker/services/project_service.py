@@ -501,21 +501,38 @@ class ProjectService(BaseService):
                     created_by_user_id=actor_user_fk(actor, self.repository),
                 )
             else:
-                if membership.role == ProjectMembershipRole.OWNER and role != membership.role:
-                    repository.lock_project_owner_memberships(project_id)
-                    membership = repository.get_project_membership(
-                        project_id=project_id,
-                        user_id=user_id,
-                    )
-                    if membership is None:
-                        raise NotFoundError("Project membership does not exist.")
-                    if (
-                        membership.role == ProjectMembershipRole.OWNER
-                        and self._project_owner_count(repository, project_id) <= 1
-                    ):
-                        raise ValidationError("Projects must keep at least one owner.")
-                membership.role = role
-                membership.updated_at = utc_now()
+                membership = self._update_existing_project_membership_role(
+                    repository,
+                    project_id=project_id,
+                    membership=membership,
+                    role=role,
+                )
+            repository.project_memberships.save(membership)
+        return membership
+
+    def update_project_membership(
+        self,
+        project_id: UUID,
+        user_id: UUID,
+        role: ProjectMembershipRole,
+        *,
+        actor: AuthContext | None = None,
+    ) -> ProjectMembership:
+        self.authorization.require_owner(project_id, actor=actor)
+        self.get_project(project_id)
+        with self.unit_of_work() as repository:
+            membership = repository.get_project_membership(
+                project_id=project_id,
+                user_id=user_id,
+            )
+            if membership is None:
+                raise NotFoundError("Project membership does not exist.")
+            membership = self._update_existing_project_membership_role(
+                repository,
+                project_id=project_id,
+                membership=membership,
+                role=role,
+            )
             repository.project_memberships.save(membership)
         return membership
 
@@ -552,6 +569,32 @@ class ProjectService(BaseService):
         return sum(
             1 for membership in memberships if membership.role == ProjectMembershipRole.OWNER
         )
+
+    def _update_existing_project_membership_role(
+        self,
+        repository,  # noqa: ANN001
+        *,
+        project_id: UUID,
+        membership: ProjectMembership,
+        role: ProjectMembershipRole,
+    ) -> ProjectMembership:
+        if membership.role == ProjectMembershipRole.OWNER and role != membership.role:
+            repository.lock_project_owner_memberships(project_id)
+            refreshed = repository.get_project_membership(
+                project_id=project_id,
+                user_id=membership.user_id,
+            )
+            if refreshed is None:
+                raise NotFoundError("Project membership does not exist.")
+            membership = refreshed
+            if (
+                membership.role == ProjectMembershipRole.OWNER
+                and self._project_owner_count(repository, project_id) <= 1
+            ):
+                raise ValidationError("Projects must keep at least one owner.")
+        membership.role = role
+        membership.updated_at = utc_now()
+        return membership
 
     def _project_ids_for_group(self, group_id: UUID) -> set[UUID]:
         projects, _ = self.repository.query_projects(

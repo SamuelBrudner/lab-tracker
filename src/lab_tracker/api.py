@@ -250,6 +250,9 @@ class LabTrackerAPI:
     def upsert_project_membership(self, *args: Any, **kwargs: Any) -> Any:
         return self.projects.upsert_project_membership(*args, **kwargs)
 
+    def update_project_membership(self, *args: Any, **kwargs: Any) -> Any:
+        return self.projects.update_project_membership(*args, **kwargs)
+
     def delete_project_membership(self, *args: Any, **kwargs: Any) -> Any:
         return self.projects.delete_project_membership(*args, **kwargs)
 

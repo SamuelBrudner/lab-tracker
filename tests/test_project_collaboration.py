@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from typing import Any
+from uuid import uuid4
 
 from fastapi.testclient import TestClient
 
@@ -10,9 +11,19 @@ def _auth_headers(token: str) -> dict[str, str]:
 
 
 def _register_user(client: TestClient, username: str, password: str = "secret") -> str:
+    token, _ = _register_user_with_id(client, username, password=password)
+    return token
+
+
+def _register_user_with_id(
+    client: TestClient,
+    username: str,
+    password: str = "secret",
+) -> tuple[str, str]:
     response = client.post("/auth/register", json={"username": username, "password": password})
     assert response.status_code == 201
-    return response.json()["data"]["access_token"]
+    data = response.json()["data"]
+    return data["access_token"], data["user"]["user_id"]
 
 
 def _create_project(client: TestClient, headers: dict[str, str], name: str) -> str:
@@ -117,6 +128,63 @@ def test_project_membership_scopes_reads_and_contributor_notes(
     )
     assert context.status_code == 200
     assert context.json()["data"]["scope"]["project"]["project_id"] == temporal_project
+
+
+def test_project_member_patch_updates_existing_member_without_creating_new_one(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+):
+    _, member_user_id = _register_user_with_id(client, "membership-patch-target")
+    project_id = _create_project(client, admin_auth_headers, "Membership patch")
+
+    create_member = client.post(
+        f"/projects/{project_id}/members",
+        json={"user_id": member_user_id, "role": "viewer"},
+        headers=admin_auth_headers,
+    )
+    assert create_member.status_code == 201
+
+    update_member = client.patch(
+        f"/projects/{project_id}/members/{member_user_id}",
+        json={"role": "contributor"},
+        headers=admin_auth_headers,
+    )
+
+    assert update_member.status_code == 200
+    assert update_member.json()["data"]["role"] == "contributor"
+    list_members = client.get(f"/projects/{project_id}/members", headers=admin_auth_headers)
+    matching_members = [
+        item for item in list_members.json()["data"] if item["user_id"] == member_user_id
+    ]
+    assert [item["role"] for item in matching_members] == ["contributor"]
+
+
+def test_project_member_patch_rejects_nonmembers_and_unknown_users(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+):
+    _, nonmember_user_id = _register_user_with_id(client, "membership-patch-nonmember")
+    unknown_user_id = str(uuid4())
+    project_id = _create_project(client, admin_auth_headers, "Membership patch rejects")
+
+    nonmember_update = client.patch(
+        f"/projects/{project_id}/members/{nonmember_user_id}",
+        json={"role": "contributor"},
+        headers=admin_auth_headers,
+    )
+    unknown_user_update = client.patch(
+        f"/projects/{project_id}/members/{unknown_user_id}",
+        json={"role": "viewer"},
+        headers=admin_auth_headers,
+    )
+
+    assert nonmember_update.status_code == 404
+    assert nonmember_update.json()["error"]["message"] == "Project membership does not exist."
+    assert unknown_user_update.status_code == 404
+    assert unknown_user_update.json()["error"]["message"] == "User does not exist."
+    list_members = client.get(f"/projects/{project_id}/members", headers=admin_auth_headers)
+    assert list_members.status_code == 200
+    assert list_members.json()["data"] == []
 
 
 def test_project_contributor_can_use_core_write_routes(

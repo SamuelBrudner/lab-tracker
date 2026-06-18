@@ -245,7 +245,11 @@ def build_projects_router(api: LabTrackerAPI) -> APIRouter:
         request: Request,
     ):
         actor = actor_from_request(request)
-        membership = api_from_request(request, api).upsert_project_membership(
+        request_api = api_from_request(request, api)
+        request_api.require_project_owner(project_id, actor=actor)
+        request_api.get_project(project_id)
+        _ensure_member_user_exists(request, user_id)
+        membership = request_api.update_project_membership(
             project_id,
             user_id,
             payload.role,
@@ -271,12 +275,15 @@ def build_projects_router(api: LabTrackerAPI) -> APIRouter:
 
 def _resolve_member_user_id(request: Request, payload: ProjectMembershipCreate) -> UUID:
     if payload.user_id is not None:
-        user = request.app.state.auth_service.get_user_by_id(payload.user_id)
-        if user is None:
-            raise NotFoundError("User does not exist.")
+        _ensure_member_user_exists(request, payload.user_id)
         return payload.user_id
     if payload.username:
         user = request.app.state.auth_service.get_user(payload.username)
         if user is not None:
             return user.user_id
     raise NotFoundError("User does not exist.")
+
+
+def _ensure_member_user_exists(request: Request, user_id: UUID) -> None:
+    if request.app.state.auth_service.get_user_by_id(user_id) is None:
+        raise NotFoundError("User does not exist.")
