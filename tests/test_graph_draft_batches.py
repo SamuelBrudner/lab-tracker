@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, time, timedelta, timezone
 from typing import Any
+from uuid import uuid4
 
 from fastapi.testclient import TestClient
 from sqlalchemy import select
 
+from lab_tracker.auth import Role
 from lab_tracker.db_models import GraphDraftBatchSettingsModel, NoteModel
 from lab_tracker.graph_drafting import GraphDraftingError
 
@@ -46,6 +48,30 @@ class FakeBatchDraftClient:
 
     def close(self) -> None:
         self.closed = True
+
+
+def _auth_headers(token: str) -> dict[str, str]:
+    return {"Authorization": f"Bearer {token}"}
+
+
+def _user_auth_headers(client: TestClient, *, role: Role = Role.VIEWER) -> dict[str, str]:
+    username = f"batch-{role.value}-{uuid4().hex[:8]}"
+    password = "secret"
+    client.app.state.auth_service.register_user(
+        username=username,
+        password=password,
+        role=role,
+    )
+    login_response = client.post(
+        "/auth/login",
+        json={"username": username, "password": password},
+    )
+    assert login_response.status_code == 200
+    return _auth_headers(login_response.json()["data"]["access_token"])
+
+
+def _api_datetime(value: str) -> datetime:
+    return datetime.fromisoformat(value.replace("Z", "+00:00")).astimezone(timezone.utc)
 
 
 def _project(client: TestClient, headers: dict[str, str]) -> str:
@@ -401,9 +427,16 @@ def test_run_due_isolates_project_errors_and_continues(
     _note(client, admin_auth_headers, first_project_id, "First due project.")
     _note(client, admin_auth_headers, second_project_id, "Second due project.")
     for project_id in (first_project_id, second_project_id):
+        payload: dict[str, Any] = {"enabled": True}
+        if project_id == second_project_id:
+            payload |= {
+                "cadence_minutes": 1440,
+                "run_at_local_time": "00:00",
+                "timezone_name": "UTC",
+            }
         response = client.patch(
             f"/projects/{project_id}/graph-draft-batch-settings",
-            json={"enabled": True},
+            json=payload,
             headers=admin_auth_headers,
         )
         assert response.status_code == 200
@@ -444,3 +477,52 @@ def test_run_due_isolates_project_errors_and_continues(
     assert runs[0]["error_metadata"]["category"] == "scheduler_error"
     assert runs[1]["project_id"] == second_project_id
     assert healthy_client.closed is True
+
+    settings = client.get(
+        f"/projects/{second_project_id}/graph-draft-batch-settings",
+        headers=admin_auth_headers,
+    )
+    assert settings.status_code == 200
+    window_end = _api_datetime(runs[1]["window_end"])
+    expected_next_run_at = datetime.combine(
+        (window_end + timedelta(days=1)).date(),
+        time.min,
+        tzinfo=timezone.utc,
+    )
+    assert _api_datetime(settings.json()["data"]["next_run_at"]) == expected_next_run_at
+
+
+def test_run_due_rejects_non_admin_user(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+) -> None:
+    viewer_headers = _user_auth_headers(client)
+    project_id = _project(client, admin_auth_headers)
+    response = client.patch(
+        f"/projects/{project_id}/graph-draft-batch-settings",
+        json={"enabled": True},
+        headers=admin_auth_headers,
+    )
+    assert response.status_code == 200
+    with client.app.state.db_session_factory() as session:
+        settings = session.scalar(
+            select(GraphDraftBatchSettingsModel).where(
+                GraphDraftBatchSettingsModel.project_id == project_id
+            )
+        )
+        settings.next_run_at = datetime.now(timezone.utc) - timedelta(minutes=5)
+        session.commit()
+
+    def factory(settings):  # noqa: ANN001
+        raise AssertionError("non-admin scheduled runs must not start a draft client")
+
+    client.app.state.graph_draft_client_factory = factory
+
+    response = client.post("/batches/run-due", headers=viewer_headers)
+
+    assert response.status_code == 401
+    assert response.json()["error"] == {
+        "code": "auth_error",
+        "message": "Only admins can run scheduled batch drafts.",
+        "issues": None,
+    }

@@ -11,7 +11,7 @@ from uuid import UUID, uuid4
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from lab_tracker.auth import AuthContext
-from lab_tracker.errors import NotFoundError, ValidationError
+from lab_tracker.errors import AuthError, NotFoundError, ValidationError
 from lab_tracker.graph_drafting import (
     BATCH_PROMPT_VERSION,
     PROMPT_VERSION,
@@ -509,7 +509,7 @@ class GraphDraftService(BaseService):
         now: datetime | None = None,
     ) -> list[GraphDraftBatchRun]:
         if not self.authorization.has_global_admin(actor):
-            raise ValidationError("Only admins can run scheduled batch drafts.")
+            raise AuthError("Only admins can run scheduled batch drafts.")
         current_time = _as_utc(now or utc_now())
         due_settings = self.repository.list_due_graph_draft_batch_settings(current_time)
         runs: list[GraphDraftBatchRun] = []
