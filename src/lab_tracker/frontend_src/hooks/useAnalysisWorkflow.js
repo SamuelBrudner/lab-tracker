@@ -53,10 +53,12 @@ function useAnalysisWorkflow({ token, canWrite, selectedProjectId, setBusy, setF
             }),
             { token }
           ),
-          fetchAllPages(
+          apiRequest(
             buildApiPath("/analyses", {
               project_id: projectId,
               status: "committed",
+              limit: RECENT_COMMITTED_LIMIT,
+              recent_first: true,
             }),
             { token }
           ),

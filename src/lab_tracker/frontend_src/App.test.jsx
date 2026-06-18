@@ -79,8 +79,8 @@ function committedAnalysesPath(projectId) {
   return buildApiPath("/analyses", {
     project_id: projectId,
     status: "committed",
-    limit: 200,
-    offset: 0,
+    limit: 5,
+    recent_first: true,
   });
 }
 

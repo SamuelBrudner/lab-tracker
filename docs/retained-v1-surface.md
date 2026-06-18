@@ -43,6 +43,9 @@ research record:
   an approval gate.
 - Analysis, claim, and visualization records as explicit user-driven flows,
   including managed file storage for visualization assets.
+- Bounded recent analysis retrieval through `GET /analyses?recent_first=true`,
+  so workspace summaries can load the newest committed analyses without scanning
+  a project's full analysis history.
 - Goals and goal links as explicit planning and evidence-spanning records
   connected to retained graph entities.
 - PROV-O/JSON-LD provenance export, record export events, and external artifact

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from uuid import uuid4
 
@@ -9,6 +9,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy.orm import Session
 
 from lab_tracker.auth import Role
+from lab_tracker.db_models import AnalysisModel
 
 
 def _ids(payload: list[dict[str, object]], key: str) -> set[str]:
@@ -462,6 +463,88 @@ def test_analysis_commit_route_is_atomic_on_failure(
     assert claims_get.json()["data"] == []
     assert visualizations_get.status_code == 200
     assert visualizations_get.json()["data"] == []
+
+
+def test_list_analyses_supports_recent_first_bounded_order(client: TestClient):
+    headers = _admin_headers(client)
+    project_id = client.post(
+        "/projects",
+        json={"name": "Recent analyses"},
+        headers=headers,
+    ).json()["data"]["project_id"]
+    question_id = client.post(
+        "/questions",
+        json={
+            "project_id": project_id,
+            "text": "Which analyses are recent?",
+            "question_type": "descriptive",
+            "status": "active",
+        },
+        headers=headers,
+    ).json()["data"]["question_id"]
+    dataset = client.post(
+        "/datasets",
+        json={
+            "project_id": project_id,
+            "primary_question_id": question_id,
+            "status": "committed",
+            "commit_manifest": {
+                "external_artifacts": [
+                    {
+                        "kind": "entity",
+                        "source_system": "s3",
+                        "uri": "s3://lab-tracker/recent-analyses/manifest.json",
+                        "content_hash": "sha256:recent-analyses",
+                    }
+                ]
+            },
+        },
+        headers=headers,
+    )
+    assert dataset.status_code == 201
+    dataset_id = dataset.json()["data"]["dataset_id"]
+
+    analysis_ids: list[str] = []
+    for index in range(6):
+        analysis = client.post(
+            "/analyses",
+            json={
+                "project_id": project_id,
+                "dataset_ids": [dataset_id],
+                "method_hash": f"method-{index}",
+                "code_version": "v1",
+                "status": "committed",
+            },
+            headers=headers,
+        )
+        assert analysis.status_code == 201
+        analysis_ids.append(analysis.json()["data"]["analysis_id"])
+
+    base_created_at = datetime(2026, 6, 18, 12, 0, tzinfo=timezone.utc)
+    with client.app.state.db_session_factory() as session:
+        for index, analysis_id in enumerate(analysis_ids):
+            row = session.get(AnalysisModel, analysis_id)
+            assert row is not None
+            row.created_at = base_created_at + timedelta(minutes=index)
+            row.updated_at = row.created_at
+        session.commit()
+
+    response = client.get(
+        "/analyses",
+        params={
+            "project_id": project_id,
+            "status": "committed",
+            "limit": 3,
+            "recent_first": "true",
+        },
+        headers=headers,
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert [item["analysis_id"] for item in payload["data"]] == list(reversed(analysis_ids[-3:]))
+    assert payload["meta"]["limit"] == 3
+    assert payload["meta"]["total"] == 6
 
 
 def test_evidence_authoring_routes_create_and_filter_graph_records(

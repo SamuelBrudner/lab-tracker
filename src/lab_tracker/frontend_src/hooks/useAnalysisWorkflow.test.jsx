@@ -2,6 +2,7 @@ import * as React from "react";
 
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 
+import { buildApiPath } from "../shared/api.js";
 import { useAnalysisWorkflow } from "./useAnalysisWorkflow.js";
 import { apiResponse, installFetchMock } from "../test/utils.js";
 
@@ -20,6 +21,19 @@ function visualization(analysisId, filePath) {
     file_path: filePath,
     viz_id: `${analysisId}-viz`,
     viz_type: "figure",
+  };
+}
+
+function analysis(analysisId) {
+  return {
+    analysis_id: analysisId,
+    code_version: "v1",
+    created_at: "2026-06-18T12:00:00Z",
+    dataset_ids: ["dataset-1"],
+    method_hash: "method",
+    project_id: "project-1",
+    status: "committed",
+    updated_at: "2026-06-18T12:00:00Z",
   };
 }
 
@@ -53,7 +67,72 @@ function Harness() {
   );
 }
 
+function RefreshHarness() {
+  const { recentCommittedAnalyses, stagedAnalyses } = useAnalysisWorkflow({
+    canWrite: true,
+    enabled: true,
+    selectedProjectId: "project-1",
+    setBusy: noop,
+    setFlash: noop,
+    token: "token-1",
+  });
+
+  return (
+    <div>
+      <p data-testid="staged-count">{stagedAnalyses.length}</p>
+      <p data-testid="recent-committed">{recentCommittedAnalyses[0]?.analysis_id || ""}</p>
+    </div>
+  );
+}
+
 describe("useAnalysisWorkflow", () => {
+  it("loads recent committed analyses with one bounded request", async () => {
+    const committedPath = buildApiPath("/analyses", {
+      project_id: "project-1",
+      status: "committed",
+      limit: 5,
+      recent_first: true,
+    });
+    const oldPaginatedCommittedPath = buildApiPath("/analyses", {
+      project_id: "project-1",
+      status: "committed",
+      limit: 200,
+      offset: 0,
+    });
+    const fetchMock = installFetchMock([
+      {
+        match: buildApiPath("/analyses", {
+          project_id: "project-1",
+          status: "staged",
+          limit: 200,
+          offset: 0,
+        }),
+        response: apiResponse([], 200, { limit: 200, offset: 0, total: 0 }),
+      },
+      {
+        match: committedPath,
+        response: apiResponse([analysis("analysis-recent")], 200, {
+          limit: 5,
+          offset: 0,
+          total: 300,
+        }),
+      },
+    ]);
+
+    render(<RefreshHarness />);
+
+    expect(await screen.findByTestId("recent-committed")).toHaveTextContent(
+      "analysis-recent"
+    );
+    expect(fetchMock).toHaveBeenCalledWith(
+      committedPath,
+      expect.objectContaining({ method: "GET" })
+    );
+    expect(fetchMock.mock.calls.map(([url]) => url)).not.toContain(
+      oldPaginatedCommittedPath
+    );
+  });
+
   it("tracks concurrent visualization loads per analysis", async () => {
     const first = deferred();
     const second = deferred();
