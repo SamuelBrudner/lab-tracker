@@ -9,6 +9,7 @@ import { isStaticDemoEnabled } from "../shared/static-demo-api.js";
 
 const { useCallback, useEffect, useMemo, useState } = React;
 const REFRESH_MARGIN_MS = 5 * 60 * 1000;
+const MIN_REFRESH_DELAY_MS = 60 * 1000;
 const REFRESH_RETRY_MS = 60 * 1000;
 const SESSION_EXPIRED_MESSAGE = "Your session expired. Please sign in again.";
 
@@ -39,6 +40,10 @@ function readInitialTokenExpiresAt() {
 function parseExpiryMs(expiresAt) {
   const value = Date.parse(expiresAt || "");
   return Number.isFinite(value) ? value : null;
+}
+
+function refreshDelayMs(expiresAtMs, nowMs = Date.now()) {
+  return Math.max(MIN_REFRESH_DELAY_MS, expiresAtMs - nowMs - REFRESH_MARGIN_MS);
 }
 
 function sessionExpiredMessage(message) {
@@ -185,7 +190,7 @@ function useAuthSession({ replace, setBusy, setFlash }) {
     let timeoutId = null;
 
     function scheduleRefresh(delayMs) {
-      timeoutId = window.setTimeout(refreshSession, Math.max(0, delayMs));
+      timeoutId = window.setTimeout(refreshSession, delayMs);
     }
 
     async function refreshSession() {
@@ -212,7 +217,7 @@ function useAuthSession({ replace, setBusy, setFlash }) {
       }
     }
 
-    scheduleRefresh(expiresAtMs - Date.now() - REFRESH_MARGIN_MS);
+    scheduleRefresh(refreshDelayMs(expiresAtMs));
     return () => {
       canceled = true;
       if (timeoutId !== null) {
@@ -332,4 +337,4 @@ function useAuthSession({ replace, setBusy, setFlash }) {
   };
 }
 
-export { useAuthSession };
+export { MIN_REFRESH_DELAY_MS, useAuthSession };

@@ -1,5 +1,5 @@
 import * as React from "react";
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { apiRequest } from "../shared/api.js";
@@ -8,7 +8,7 @@ import {
   TOKEN_STORAGE_KEY,
 } from "../shared/constants.js";
 import { apiResponse, errorResponse, installFetchMock } from "../test/utils.js";
-import { useAuthSession } from "./useAuthSession.js";
+import { MIN_REFRESH_DELAY_MS, useAuthSession } from "./useAuthSession.js";
 
 const USER = {
   created_at: "2026-06-18T12:00:00Z",
@@ -17,14 +17,16 @@ const USER = {
   username: "sam",
 };
 
+function noop() {}
+
 afterEach(() => {
   vi.useRealTimers();
 });
 
 function AuthHarness({
-  replace = vi.fn(),
-  setBusy = vi.fn(),
-  setFlash = vi.fn(),
+  replace = noop,
+  setBusy = noop,
+  setFlash = noop,
   withProbe = false,
 }) {
   const session = useAuthSession({ replace, setBusy, setFlash });
@@ -48,6 +50,44 @@ function AuthHarness({
       ) : null}
     </>
   );
+}
+
+async function flushAuthEffects() {
+  await act(async () => {
+    await Promise.resolve();
+    await Promise.resolve();
+  });
+}
+
+function captureRefreshTimers() {
+  const timers = [];
+  const realSetTimeout = window.setTimeout.bind(window);
+  const realClearTimeout = window.clearTimeout.bind(window);
+  const capturedTimerIds = new Set();
+  vi.spyOn(window, "setTimeout").mockImplementation((callback, delay, ...args) => {
+    if (callback?.name === "refreshSession") {
+      timers.push({ callback, delay });
+      const timerId = 1000 + timers.length;
+      capturedTimerIds.add(timerId);
+      return timerId;
+    }
+    return realSetTimeout(callback, delay, ...args);
+  });
+  vi.spyOn(window, "clearTimeout").mockImplementation((timerId) => {
+    if (capturedTimerIds.has(timerId)) {
+      capturedTimerIds.delete(timerId);
+      return undefined;
+    }
+    return realClearTimeout(timerId);
+  });
+  return timers;
+}
+
+async function runRefreshTimer(timer) {
+  await act(async () => {
+    await timer.callback();
+  });
+  await flushAuthEffects();
 }
 
 describe("useAuthSession", () => {
@@ -93,6 +133,7 @@ describe("useAuthSession", () => {
     localStorage.setItem(TOKEN_STORAGE_KEY, "stored-token");
     localStorage.setItem(TOKEN_EXPIRES_AT_STORAGE_KEY, nearExpiry);
     const setBusy = vi.fn();
+    const refreshTimers = captureRefreshTimers();
     const fetchMock = installFetchMock([
       {
         match: "/auth/me",
@@ -111,10 +152,12 @@ describe("useAuthSession", () => {
 
     render(<AuthHarness setBusy={setBusy} />);
 
-    await waitFor(() => expect(setBusy).toHaveBeenLastCalledWith(false));
-    await waitFor(() =>
-      expect(localStorage.getItem(TOKEN_STORAGE_KEY)).toBe("refreshed-token")
-    );
+    await flushAuthEffects();
+    expect(setBusy).toHaveBeenLastCalledWith(false);
+    expect(refreshTimers).toHaveLength(1);
+    expect(refreshTimers[0].delay).toBe(MIN_REFRESH_DELAY_MS);
+    await runRefreshTimer(refreshTimers[0]);
+    expect(localStorage.getItem(TOKEN_STORAGE_KEY)).toBe("refreshed-token");
     expect(localStorage.getItem(TOKEN_EXPIRES_AT_STORAGE_KEY)).toBe(refreshedExpiry);
     expect(screen.getByTestId("expires-at")).toHaveTextContent(refreshedExpiry);
     expect(fetchMock).toHaveBeenCalledWith(
@@ -126,6 +169,42 @@ describe("useAuthSession", () => {
         method: "POST",
       })
     );
+  });
+
+  it("reschedules a short refreshed token with a bounded delay", async () => {
+    const nearExpiry = new Date(Date.now() + 4 * 60 * 1000).toISOString();
+    const shortRefreshedExpiry = new Date(Date.now() + 2 * 60 * 1000).toISOString();
+    localStorage.setItem(TOKEN_STORAGE_KEY, "stored-token");
+    localStorage.setItem(TOKEN_EXPIRES_AT_STORAGE_KEY, nearExpiry);
+    const setBusy = vi.fn();
+    const refreshTimers = captureRefreshTimers();
+    const fetchMock = installFetchMock([
+      {
+        match: "/auth/me",
+        response: apiResponse(USER, 200, { auth_enabled: true }),
+      },
+      {
+        match: "/auth/refresh",
+        method: "POST",
+        response: apiResponse({
+          access_token: "short-refresh-token",
+          expires_at: shortRefreshedExpiry,
+          user: USER,
+        }),
+      },
+    ]);
+
+    render(<AuthHarness setBusy={setBusy} />);
+
+    await flushAuthEffects();
+    expect(setBusy).toHaveBeenLastCalledWith(false);
+    expect(refreshTimers).toHaveLength(1);
+    expect(refreshTimers[0].delay).toBe(MIN_REFRESH_DELAY_MS);
+    await runRefreshTimer(refreshTimers[0]);
+    expect(localStorage.getItem(TOKEN_STORAGE_KEY)).toBe("short-refresh-token");
+    expect(refreshTimers).toHaveLength(2);
+    expect(refreshTimers[1].delay).toBe(MIN_REFRESH_DELAY_MS);
+    expect(fetchMock.mock.calls.filter(([url]) => url === "/auth/refresh")).toHaveLength(1);
   });
 
   it("clears the current token when a later API request returns an auth 401", async () => {
