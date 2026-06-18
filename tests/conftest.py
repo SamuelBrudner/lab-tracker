@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sqlite3
 from collections.abc import Iterator
+from dataclasses import dataclass
 from pathlib import Path
 from uuid import uuid4
 
@@ -22,6 +23,58 @@ def _repo_root() -> Path:
 
 def _auth_headers(token: str) -> dict[str, str]:
     return {"Authorization": f"Bearer {token}"}
+
+
+@dataclass(frozen=True)
+class TestUser:
+    headers: dict[str, str]
+    user_id: str
+    username: str
+
+
+@dataclass(frozen=True)
+class ScopedProjectMember:
+    member_headers: dict[str, str]
+    member_user_id: str
+    member_username: str
+    visible_project_id: str
+    hidden_project_id: str
+
+
+def _register_test_user(
+    client: TestClient,
+    *,
+    role: Role = Role.VIEWER,
+    username_prefix: str = "user",
+) -> TestUser:
+    username = f"{username_prefix}-{uuid4().hex[:8]}"
+    password = "secret"
+    user = client.app.state.auth_service.register_user(
+        username=username,
+        password=password,
+        role=role,
+    )
+    login_response = client.post(
+        "/auth/login",
+        json={"username": username, "password": password},
+    )
+    assert login_response.status_code == 200
+    token = login_response.json()["data"]["access_token"]
+    return TestUser(
+        headers=_auth_headers(token),
+        user_id=str(user.user_id),
+        username=username,
+    )
+
+
+def _create_test_project(
+    client: TestClient,
+    headers: dict[str, str],
+    name: str,
+) -> str:
+    response = client.post("/projects", json={"name": name}, headers=headers)
+    assert response.status_code == 201
+    return response.json()["data"]["project_id"]
 
 
 @pytest.fixture(scope="session", autouse=True)
@@ -95,3 +148,39 @@ def admin_auth_headers(client: TestClient) -> dict[str, str]:
     assert login_response.status_code == 200
     token = login_response.json()["data"]["access_token"]
     return _auth_headers(token)
+
+
+@pytest.fixture()
+def viewer_user(client: TestClient) -> TestUser:
+    return _register_test_user(client, username_prefix="viewer")
+
+
+@pytest.fixture()
+def scoped_project_member(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+) -> ScopedProjectMember:
+    member = _register_test_user(client, username_prefix="scoped-member")
+    visible_project_id = _create_test_project(
+        client,
+        admin_auth_headers,
+        "Scoped visible project",
+    )
+    hidden_project_id = _create_test_project(
+        client,
+        admin_auth_headers,
+        "Scoped hidden project",
+    )
+    membership_response = client.post(
+        f"/projects/{visible_project_id}/members",
+        json={"user_id": member.user_id, "role": "viewer"},
+        headers=admin_auth_headers,
+    )
+    assert membership_response.status_code == 201
+    return ScopedProjectMember(
+        member_headers=member.headers,
+        member_user_id=member.user_id,
+        member_username=member.username,
+        visible_project_id=visible_project_id,
+        hidden_project_id=hidden_project_id,
+    )

@@ -240,38 +240,42 @@ def test_portfolio_summary_aggregates_project_health_rows(
 def test_portfolio_summary_is_scoped_to_accessible_projects(
     client: TestClient,
     admin_auth_headers: dict[str, str],
+    scoped_project_member,
 ):
-    visible_project_id = _create_project(client, admin_auth_headers, "Visible portfolio")
-    hidden_project_id = _create_project(client, admin_auth_headers, "Hidden portfolio")
-    viewer_headers = _auth_headers(_register_user(client, "portfolio-viewer"))
-    membership = client.post(
-        f"/projects/{visible_project_id}/members",
-        json={"username": "portfolio-viewer", "role": "viewer"},
-        headers=admin_auth_headers,
-    )
-    assert membership.status_code == 201
-
     visible_question_id = _create_question(
         client,
         admin_auth_headers,
-        visible_project_id,
+        scoped_project_member.visible_project_id,
         text="Visible project question?",
     )
     hidden_question_id = _create_question(
         client,
         admin_auth_headers,
-        hidden_project_id,
+        scoped_project_member.hidden_project_id,
         text="Hidden project question?",
     )
-    _create_staged_dataset(client, admin_auth_headers, visible_project_id, visible_question_id)
-    _create_staged_dataset(client, admin_auth_headers, hidden_project_id, hidden_question_id)
+    _create_staged_dataset(
+        client,
+        admin_auth_headers,
+        scoped_project_member.visible_project_id,
+        visible_question_id,
+    )
+    _create_staged_dataset(
+        client,
+        admin_auth_headers,
+        scoped_project_member.hidden_project_id,
+        hidden_question_id,
+    )
 
-    scoped_response = client.get("/portfolio/summary", headers=viewer_headers)
+    scoped_response = client.get(
+        "/portfolio/summary",
+        headers=scoped_project_member.member_headers,
+    )
     admin_response = client.get("/portfolio/summary", headers=admin_auth_headers)
 
     assert scoped_response.status_code == 200
     assert [item["project_id"] for item in _portfolio_projects(scoped_response.json())] == [
-        visible_project_id
+        scoped_project_member.visible_project_id
     ]
     assert scoped_response.json()["meta"]["total"] == 1
 
@@ -279,7 +283,26 @@ def test_portfolio_summary_is_scoped_to_accessible_projects(
     admin_project_ids = {
         item["project_id"] for item in _portfolio_projects(admin_response.json())
     }
-    assert {visible_project_id, hidden_project_id}.issubset(admin_project_ids)
+    assert {
+        scoped_project_member.visible_project_id,
+        scoped_project_member.hidden_project_id,
+    }.issubset(admin_project_ids)
+
+
+def test_portfolio_summary_rejects_unauthenticated_and_hides_all_from_non_member(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+    viewer_user,
+):
+    _create_project(client, admin_auth_headers, "Hidden from non-member portfolio")
+
+    unauthenticated = client.get("/portfolio/summary")
+    response = client.get("/portfolio/summary", headers=viewer_user.headers)
+
+    assert unauthenticated.status_code == 401
+    assert response.status_code == 200
+    assert response.json()["data"] == []
+    assert response.json()["meta"]["total"] == 0
 
 
 def test_portfolio_summary_groups_projects_by_project_group(
