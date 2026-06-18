@@ -17,10 +17,8 @@ jobs:
           node-version: "20"
           cache: "npm"
       - uses: astral-sh/setup-uv@v3
-      - name: Create venv
-        run: uv venv
-      - name: Install dependencies
-        run: uv pip install -e ".[test,lint]"
+      - name: Install Python dependencies
+        run: uv sync --frozen --extra test --extra lint
       - name: Install frontend dependencies
         run: npm ci
       - name: Lint

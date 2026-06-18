@@ -5,15 +5,17 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
+ENV PATH="/app/.venv/bin:${PATH}"
+
 RUN apt-get update \
     && apt-get install --no-install-recommends -y ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
-COPY pyproject.toml README.md alembic.ini /app/
+COPY pyproject.toml uv.lock README.md alembic.ini /app/
 COPY src /app/src
 
 RUN pip install --no-cache-dir uv \
-    && uv pip install --system .
+    && uv sync --frozen --no-dev --no-editable --compile-bytecode
 
 COPY docker-entrypoint.sh /app/docker-entrypoint.sh
 RUN chmod +x /app/docker-entrypoint.sh
