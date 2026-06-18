@@ -15,7 +15,7 @@ from datetime import datetime, timedelta, timezone
 from enum import Enum
 from uuid import UUID, uuid4
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.orm import Session, sessionmaker
 
 from lab_tracker.db_models import (
@@ -691,7 +691,32 @@ class DeviceAuthService:
         if not offer_token.startswith(ENROLLMENT_OFFER_PREFIX):
             raise AuthError("Unrecognized enrollment offer token.")
         offer_hash = _hash_token(offer_token)
+        label = label.strip()
+        claim_time = utc_now()
         with self._session_factory() as session:
+            claim_result = session.execute(
+                update(DeviceEnrollmentModel)
+                .where(
+                    DeviceEnrollmentModel.offer_token_hash == offer_hash,
+                    DeviceEnrollmentModel.consumed_at.is_(None),
+                    DeviceEnrollmentModel.expires_at > claim_time,
+                )
+                .values(consumed_at=claim_time)
+            )
+            if claim_result.rowcount != 1:
+                enrollment = session.scalar(
+                    select(DeviceEnrollmentModel).where(
+                        DeviceEnrollmentModel.offer_token_hash == offer_hash
+                    )
+                )
+                if enrollment is None:
+                    raise AuthError("Enrollment offer is invalid.")
+                if enrollment.consumed_at is not None:
+                    raise AuthError("Enrollment offer has already been consumed.")
+                if _as_utc(enrollment.expires_at) <= claim_time:
+                    raise AuthError("Enrollment offer has expired.")
+                raise AuthError("Enrollment offer has already been consumed.")
+
             enrollment = session.scalar(
                 select(DeviceEnrollmentModel).where(
                     DeviceEnrollmentModel.offer_token_hash == offer_hash
@@ -699,22 +724,21 @@ class DeviceAuthService:
             )
             if enrollment is None:
                 raise AuthError("Enrollment offer is invalid.")
-            if enrollment.consumed_at is not None:
-                raise AuthError("Enrollment offer has already been consumed.")
-            if _as_utc(enrollment.expires_at) <= utc_now():
-                raise AuthError("Enrollment offer has expired.")
             secret = _generate_secret(DEVICE_TOKEN_PREFIX)
             device_row = DeviceTokenModel(
                 device_token_id=str(uuid4()),
                 user_id=enrollment.user_id,
-                label=label.strip(),
+                label=label,
                 token_hash=_hash_token(secret),
                 created_at=utc_now(),
             )
             session.add(device_row)
             session.flush()
-            enrollment.consumed_at = utc_now()
-            enrollment.consumed_device_token_id = device_row.device_token_id
+            session.execute(
+                update(DeviceEnrollmentModel)
+                .where(DeviceEnrollmentModel.enrollment_id == enrollment.enrollment_id)
+                .values(consumed_device_token_id=device_row.device_token_id)
+            )
             session.commit()
             session.refresh(device_row)
             return IssuedDeviceToken(

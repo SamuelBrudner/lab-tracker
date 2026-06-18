@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import threading
 from collections.abc import Iterator
+from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
 from uuid import uuid4
 
 import pytest
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session, sessionmaker
 
 from lab_tracker.auth import (
@@ -117,6 +119,59 @@ def test_consume_enrollment_is_single_use(session_factory):
     service.consume_enrollment(offer.offer_token, label="First")
     with pytest.raises(AuthError, match="already been consumed"):
         service.consume_enrollment(offer.offer_token, label="Second")
+
+
+def test_consume_enrollment_does_not_issue_token_after_lost_claim(session_factory):
+    service = DeviceAuthService(session_factory=session_factory)
+    user_id = _create_user(session_factory)
+    offer = service.create_enrollment(uuid_from(user_id))
+
+    with session_factory() as session:
+        row = session.get(DeviceEnrollmentModel, str(offer.enrollment_id))
+        assert row is not None
+        row.consumed_at = utc_now()
+        session.commit()
+
+    with pytest.raises(AuthError, match="already been consumed"):
+        service.consume_enrollment(offer.offer_token, label="Second")
+
+    with session_factory() as session:
+        token_rows = session.scalars(
+            select(DeviceTokenModel).where(DeviceTokenModel.user_id == user_id)
+        ).all()
+        assert token_rows == []
+
+
+def test_consume_enrollment_allows_only_one_concurrent_consumer(session_factory):
+    service = DeviceAuthService(session_factory=session_factory)
+    user_id = _create_user(session_factory)
+    offer = service.create_enrollment(uuid_from(user_id))
+    barrier = threading.Barrier(2)
+
+    def consume(label: str) -> tuple[str, str]:
+        barrier.wait(timeout=5)
+        try:
+            issued = service.consume_enrollment(offer.offer_token, label=label)
+        except AuthError as exc:
+            return ("error", str(exc))
+        return ("issued", str(issued.device_token.device_token_id))
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        results = list(executor.map(consume, ["Phone A", "Phone B"]))
+
+    issued_ids = [value for kind, value in results if kind == "issued"]
+    errors = [value for kind, value in results if kind == "error"]
+    assert len(issued_ids) == 1
+    assert errors == ["Enrollment offer has already been consumed."]
+
+    with session_factory() as session:
+        token_rows = session.scalars(
+            select(DeviceTokenModel).where(DeviceTokenModel.user_id == user_id)
+        ).all()
+        row = session.get(DeviceEnrollmentModel, str(offer.enrollment_id))
+        assert len(token_rows) == 1
+        assert row is not None
+        assert row.consumed_device_token_id == issued_ids[0]
 
 
 def test_consume_enrollment_rejects_unknown_or_malformed_offers(session_factory):
