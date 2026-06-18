@@ -10,9 +10,13 @@ def test_frontend_routes_and_assets_are_served():
 
     root_response = client.get("/", follow_redirects=False)
     assert root_response.status_code in (302, 307)
-    assert root_response.headers["location"] == "/app"
+    assert root_response.headers["location"] == "/app/"
 
-    app_response = client.get("/app")
+    bare_app_response = client.get("/app", follow_redirects=False)
+    assert bare_app_response.status_code in (302, 307)
+    assert bare_app_response.headers["location"] == "/app/"
+
+    app_response = client.get("/app/")
     assert app_response.status_code == 200
     assert "text/html" in app_response.headers.get("content-type", "")
     assert "no-store" in app_response.headers["cache-control"]
@@ -47,7 +51,7 @@ def test_frontend_routes_and_assets_are_served():
 def test_https_responses_include_hsts():
     client = TestClient(create_app(), base_url="https://lab.example.org")
 
-    response = client.get("/app")
+    response = client.get("/app/")
 
     assert response.status_code == 200
     assert response.headers["strict-transport-security"].startswith("max-age=31536000")
@@ -98,7 +102,7 @@ def test_manifest_declares_web_share_target():
 def test_pwa_manifest_and_icons_are_served():
     client = TestClient(create_app())
 
-    app_response = client.get("/app")
+    app_response = client.get("/app/")
     assert '<link rel="manifest" href="/app/static/manifest.json" />' in app_response.text
     assert '<link rel="apple-touch-icon" href="/app/static/icon-180.png" />' in app_response.text
     assert '<meta name="theme-color" content="#0d8b6f" />' in app_response.text

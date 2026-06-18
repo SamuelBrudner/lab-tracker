@@ -38,7 +38,11 @@ def configure_frontend_routes(
 
     @app.get("/", include_in_schema=False)
     def root_redirect():
-        return RedirectResponse(url="/app")
+        return RedirectResponse(url="/app/")
+
+    @app.get("/app", include_in_schema=False)
+    def app_redirect():
+        return RedirectResponse(url="/app/")
 
     sw_file = frontend_dir / "sw.js"
 
@@ -62,7 +66,7 @@ def configure_frontend_routes(
         # we still redirect the user into the app so the failure is visible.
         return RedirectResponse(url="/app/capture", status_code=303)
 
-    @app.get("/app", include_in_schema=False)
+    @app.get("/app/", include_in_schema=False)
     @app.get("/app/{_path:path}", include_in_schema=False)
     def frontend_index(_path: str = ""):
         return FileResponse(index_file, headers=_APP_SHELL_CACHE_HEADERS)

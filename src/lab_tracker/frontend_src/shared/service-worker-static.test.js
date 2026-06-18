@@ -41,6 +41,14 @@ describe("service worker source", () => {
     expect(serviceWorkerSource).toContain('redirectStatus = storedCount > 0 ? "1" : "empty"');
   });
 
+  it("caches the canonical app shell and falls back for failed navigations", () => {
+    expect(serviceWorkerSource).toContain('"/app/"');
+    expect(serviceWorkerSource).toContain('caches.match("/app/")');
+    expect(serviceWorkerSource).toContain("response.status >= 500");
+    expect(serviceWorkerSource).toContain("cached || response");
+    expect(serviceWorkerSource).toContain("cached || Response.error()");
+  });
+
   it("keeps cache and asset versions aligned across the shell files", () => {
     const cacheVersion = extractCacheVersion(serviceWorkerSource);
     const expectedAssetVersion = cacheVersion.replace(/^v/, "");

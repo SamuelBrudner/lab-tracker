@@ -12,7 +12,7 @@
 const CACHE_VERSION = "v18";
 const CACHE_NAME = `lab-tracker-shell-${CACHE_VERSION}`;
 const SHELL_ASSETS = [
-  "/app",
+  "/app/",
   "/app/static/app.js?v=18",
   "/app/static/styles.css?v=18",
   "/app/static/manifest.json",
@@ -71,9 +71,14 @@ self.addEventListener("fetch", (event) => {
   // Navigations under /app/* fall back to the cached app shell when offline.
   if (request.mode === "navigate" && url.pathname.startsWith("/app")) {
     event.respondWith(
-      fetch(request).catch(() =>
-        caches.match("/app").then((cached) => cached || Response.error())
-      )
+      fetch(request)
+        .then((response) => {
+          if (response && response.status >= 500) {
+            return caches.match("/app/").then((cached) => cached || response);
+          }
+          return response;
+        })
+        .catch(() => caches.match("/app/").then((cached) => cached || Response.error()))
     );
     return;
   }
