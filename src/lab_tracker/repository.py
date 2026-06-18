@@ -211,9 +211,11 @@ class LabTrackerRepository(Protocol):
         created_by: str | None = None,
         parent_question_id: UUID | None = None,
         ancestor_question_id: UUID | None = None,
+        superseded_by_question_ids: set[UUID] | None = None,
         limit: int | None = None,
         offset: int = 0,
         recent_first: bool = False,
+        updated_first: bool = False,
     ) -> tuple[list[Question], int]:
         """Query questions with filters and pagination."""
 

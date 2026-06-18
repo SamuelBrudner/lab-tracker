@@ -376,14 +376,14 @@ class GraphContextBuilder:
             status=QuestionStatus.ACTIVE.value,
             limit=_QUESTION_CONTEXT_LIMIT,
             offset=0,
-            recent_first=True,
+            updated_first=True,
         )
         staged_questions, _ = self.questions.repository.query_questions(
             project_id=project_id,
             status=QuestionStatus.STAGED.value,
             limit=_QUESTION_CONTEXT_LIMIT,
             offset=0,
-            recent_first=True,
+            updated_first=True,
         )
         questions = sorted(
             [*active_questions, *staged_questions],
@@ -394,16 +394,12 @@ class GraphContextBuilder:
         superseded_candidates, _ = self.questions.repository.query_questions(
             project_id=project_id,
             status=QuestionStatus.SUPERSEDED.value,
+            superseded_by_question_ids=active_context_ids,
             limit=_QUESTION_CONTEXT_LIMIT * 2,
             offset=0,
-            recent_first=True,
+            updated_first=True,
         )
-        superseded_questions = [
-            question
-            for question in superseded_candidates
-            if question.superseded_by_question_id in active_context_ids
-        ]
-        return questions, superseded_questions
+        return questions, superseded_candidates
 
     def _recent_notes_excluding(
         self,

@@ -496,9 +496,11 @@ class SQLAlchemyLabTrackerRepository(LabTrackerRepository):
         created_by: str | None = None,
         parent_question_id: UUID | None = None,
         ancestor_question_id: UUID | None = None,
+        superseded_by_question_ids: set[UUID] | None = None,
         limit: int | None = None,
         offset: int = 0,
         recent_first: bool = False,
+        updated_first: bool = False,
     ) -> tuple[list[Question], int]:
         return self.questions.query(
             project_id=project_id,
@@ -509,9 +511,11 @@ class SQLAlchemyLabTrackerRepository(LabTrackerRepository):
             created_by=created_by,
             parent_question_id=parent_question_id,
             ancestor_question_id=ancestor_question_id,
+            superseded_by_question_ids=superseded_by_question_ids,
             limit=limit,
             offset=offset,
             recent_first=recent_first,
+            updated_first=updated_first,
         )
 
     def query_question_refactors(

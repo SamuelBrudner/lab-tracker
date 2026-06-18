@@ -11,7 +11,7 @@ from uuid import UUID
 from fastapi.testclient import TestClient
 
 from lab_tracker.api import LabTrackerAPI
-from lab_tracker.db_models import NoteModel
+from lab_tracker.db_models import NoteModel, QuestionModel
 from lab_tracker.models import Note
 from lab_tracker.sqlalchemy_repository import SQLAlchemyLabTrackerRepository
 
@@ -94,6 +94,51 @@ def _set_note_created_at(
         assert row is not None
         row.created_at = created_at
         row.updated_at = created_at
+        session.commit()
+    except Exception:
+        session.rollback()
+        raise
+    finally:
+        session.close()
+
+
+def _set_question_timestamps(
+    client: TestClient,
+    question_id: str,
+    *,
+    created_at: datetime,
+    updated_at: datetime,
+) -> None:
+    session = client.app.state.db_session_factory()
+    try:
+        row = session.get(QuestionModel, question_id)
+        assert row is not None
+        row.created_at = created_at
+        row.updated_at = updated_at
+        session.commit()
+    except Exception:
+        session.rollback()
+        raise
+    finally:
+        session.close()
+
+
+def _mark_question_superseded(
+    client: TestClient,
+    question_id: str,
+    *,
+    superseded_by_question_id: str | None,
+    created_at: datetime,
+    updated_at: datetime,
+) -> None:
+    session = client.app.state.db_session_factory()
+    try:
+        row = session.get(QuestionModel, question_id)
+        assert row is not None
+        row.status = "superseded"
+        row.superseded_by_question_id = superseded_by_question_id
+        row.created_at = created_at
+        row.updated_at = updated_at
         session.commit()
     except Exception:
         session.rollback()
@@ -225,6 +270,139 @@ def test_batch_context_uses_newest_limited_recent_notes(
     ]
     assert recent_note_ids == list(reversed(prior_note_ids[-10:]))
     assert batch_note_id not in recent_note_ids
+
+
+def test_batch_context_selects_questions_by_recent_update(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+):
+    project_id = _create_project(client, admin_auth_headers, "Updated Questions")
+    old_but_updated = _create_question(
+        client,
+        admin_auth_headers,
+        project_id=project_id,
+        text="Old created question with the newest update",
+        status="active",
+    )
+    other_questions = [
+        _create_question(
+            client,
+            admin_auth_headers,
+            project_id=project_id,
+            text=f"Newer created active question {index}",
+            status="active",
+        )
+        for index in range(55)
+    ]
+    batch_note_id = _quick_capture(
+        client,
+        admin_auth_headers,
+        project_id=project_id,
+        filename="batch.txt",
+        body=b"new batch note",
+        content_type="text/plain",
+    )
+    baseline = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    _set_question_timestamps(
+        client,
+        old_but_updated["question_id"],
+        created_at=baseline,
+        updated_at=baseline + timedelta(days=10),
+    )
+    for index, question in enumerate(other_questions):
+        timestamp = baseline + timedelta(days=1, minutes=index)
+        _set_question_timestamps(
+            client,
+            question["question_id"],
+            created_at=timestamp,
+            updated_at=timestamp,
+        )
+
+    batch_notes = _load_notes(client, [batch_note_id])
+
+    with _request_api(client) as api:
+        packet = api.build_batch_graph_context(batch_notes)
+
+    context_question_ids = {
+        question["id"]
+        for question in packet["projects"][0]["active_or_staged_questions"]
+    }
+    assert old_but_updated["question_id"] in context_question_ids
+
+
+def test_batch_context_filters_superseded_question_aliases_in_sql(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+):
+    project_id = _create_project(client, admin_auth_headers, "Superseded Questions")
+    replacement = _create_question(
+        client,
+        admin_auth_headers,
+        project_id=project_id,
+        text="Replacement active question",
+        status="active",
+    )
+    old_alias = _create_question(
+        client,
+        admin_auth_headers,
+        project_id=project_id,
+        text="Old wording for the replacement",
+        status="active",
+    )
+    irrelevant = [
+        _create_question(
+            client,
+            admin_auth_headers,
+            project_id=project_id,
+            text=f"Irrelevant superseded question {index}",
+            status="active",
+        )
+        for index in range(110)
+    ]
+    batch_note_id = _quick_capture(
+        client,
+        admin_auth_headers,
+        project_id=project_id,
+        filename="batch.txt",
+        body=b"new batch note",
+        content_type="text/plain",
+    )
+    baseline = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    _set_question_timestamps(
+        client,
+        replacement["question_id"],
+        created_at=baseline,
+        updated_at=baseline + timedelta(days=20),
+    )
+    _mark_question_superseded(
+        client,
+        old_alias["question_id"],
+        superseded_by_question_id=replacement["question_id"],
+        created_at=baseline,
+        updated_at=baseline,
+    )
+    for index, question in enumerate(irrelevant):
+        timestamp = baseline + timedelta(days=1, minutes=index)
+        _mark_question_superseded(
+            client,
+            question["question_id"],
+            superseded_by_question_id=None,
+            created_at=timestamp,
+            updated_at=timestamp,
+        )
+
+    batch_notes = _load_notes(client, [batch_note_id])
+
+    with _request_api(client) as api:
+        packet = api.build_batch_graph_context(batch_notes)
+
+    aliases = packet["projects"][0]["known_aliases"]
+    assert any(
+        alias.get("relationship") == "superseded_alias_for_replacement"
+        and alias.get("entity_id") == replacement["question_id"]
+        and alias.get("superseded_entity_id") == old_alias["question_id"]
+        for alias in aliases
+    )
 
 
 def test_batch_context_spans_multiple_projects_with_independent_blocks(

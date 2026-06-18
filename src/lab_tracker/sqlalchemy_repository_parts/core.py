@@ -455,12 +455,16 @@ class SQLAlchemyQuestionRepository(EntityRepository[Question]):
         created_by: str | None = None,
         parent_question_id: UUID | None = None,
         ancestor_question_id: UUID | None = None,
+        superseded_by_question_ids: set[UUID] | None = None,
         limit: int | None = None,
         offset: int = 0,
         recent_first: bool = False,
+        updated_first: bool = False,
     ) -> tuple[list[Question], int]:
         self._session.flush()
         if project_ids is not None and not project_ids:
+            return [], 0
+        if superseded_by_question_ids is not None and not superseded_by_question_ids:
             return [], 0
         stmt = select(QuestionModel)
         count_stmt = select(QuestionModel.question_id)
@@ -503,7 +507,18 @@ class SQLAlchemyQuestionRepository(EntityRepository[Question]):
             count_stmt = count_stmt.where(
                 QuestionModel.question_id.in_(select(descendants.c.question_id))
             )
-        if recent_first:
+        if superseded_by_question_ids is not None:
+            superseded_by_values = uuid_values(superseded_by_question_ids)
+            stmt = stmt.where(QuestionModel.superseded_by_question_id.in_(superseded_by_values))
+            count_stmt = count_stmt.where(
+                QuestionModel.superseded_by_question_id.in_(superseded_by_values)
+            )
+        if updated_first:
+            stmt = stmt.order_by(
+                QuestionModel.updated_at.desc(),
+                QuestionModel.question_id.desc(),
+            )
+        elif recent_first:
             stmt = stmt.order_by(
                 QuestionModel.created_at.desc(),
                 QuestionModel.question_id.desc(),
