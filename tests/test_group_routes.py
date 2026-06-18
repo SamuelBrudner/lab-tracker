@@ -3,6 +3,12 @@ from __future__ import annotations
 from uuid import uuid4
 
 from fastapi.testclient import TestClient
+from sqlalchemy import delete
+
+from lab_tracker.db_models import ProjectMembershipModel
+from lab_tracker.sqlalchemy_repository_parts.core import (
+    SQLAlchemyProjectMembershipRepository,
+)
 
 
 def _auth_headers(token: str) -> dict[str, str]:
@@ -286,6 +292,77 @@ def test_group_bulk_offboard_rejects_sole_project_owner_removal(
         "Cannot remove the last owner from projects:"
     )
     assert [item["project_id"] for item in still_visible.json()["data"]] == [project_id]
+
+
+def test_group_bulk_offboard_rechecks_owner_count_after_lock(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+    monkeypatch,
+):
+    editor_token, editor_user_id = _register_user(
+        client,
+        f"group-bulk-race-owner-{uuid4().hex[:8]}",
+        role="editor",
+        headers=admin_auth_headers,
+    )
+    editor_headers = _auth_headers(editor_token)
+    group = client.post(
+        "/groups",
+        json={"name": "Bulk offboard race group"},
+        headers=editor_headers,
+    ).json()["data"]
+    project_id = _create_project(
+        client,
+        editor_headers,
+        "Bulk offboard race project",
+        group_id=group["group_id"],
+    )
+    target_name = f"group-bulk-race-target-{uuid4().hex[:8]}"
+    _, target_user_id = _register_user(client, target_name)
+    onboard = client.post(
+        f"/groups/{group['group_id']}/project-memberships",
+        json={"username": target_name, "role": "owner"},
+        headers=editor_headers,
+    )
+    assert onboard.status_code == 200
+
+    original_lock = SQLAlchemyProjectMembershipRepository.lock_project_owners
+
+    def remove_other_owner_after_lock(
+        self: SQLAlchemyProjectMembershipRepository,
+        locked_project_id,
+    ) -> None:
+        original_lock(self, locked_project_id)
+        if str(locked_project_id) != project_id:
+            return
+        self._session.execute(
+            delete(ProjectMembershipModel).where(
+                ProjectMembershipModel.project_id == project_id,
+                ProjectMembershipModel.user_id == editor_user_id,
+            )
+        )
+        self._session.flush()
+
+    monkeypatch.setattr(
+        SQLAlchemyProjectMembershipRepository,
+        "lock_project_owners",
+        remove_other_owner_after_lock,
+    )
+
+    offboard = client.delete(
+        f"/groups/{group['group_id']}/project-memberships/{target_user_id}",
+        headers=editor_headers,
+    )
+    members = client.get(f"/projects/{project_id}/members", headers=editor_headers)
+
+    assert offboard.status_code == 422
+    assert offboard.json()["error"]["message"].startswith(
+        "Cannot remove the last owner from projects:"
+    )
+    owner_user_ids = {
+        item["user_id"] for item in members.json()["data"] if item["role"] == "owner"
+    }
+    assert {editor_user_id, target_user_id}.issubset(owner_user_ids)
 
 
 def test_group_bulk_upsert_rejects_sole_project_owner_demotion(

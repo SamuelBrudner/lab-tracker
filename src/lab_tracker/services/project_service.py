@@ -416,48 +416,47 @@ class ProjectService(BaseService):
     ) -> list[ProjectMembership]:
         self.authorization.require_group_owner(group_id, actor=actor)
         self.get_project_group(group_id)
-        projects = self.query_from_repository(
-            loader=lambda repository: repository.query_projects(
+        memberships: list[ProjectMembership] = []
+        sole_owner_project_ids: list[UUID] = []
+        with self.unit_of_work() as repository:
+            projects, _ = repository.query_projects(
                 group_id=group_id,
                 limit=None,
                 offset=0,
-            ),
-        )
-        memberships = [
-            membership
-            for project in projects
-            if (
-                membership := self.repository.get_project_membership(
+            )
+            project_ids = {project.project_id for project in projects}
+            for project in projects:
+                membership = repository.get_project_membership(
                     project_id=project.project_id,
                     user_id=user_id,
                 )
-            )
-            is not None
-        ]
-        sole_owner_project_ids: list[UUID] = []
-        for membership in memberships:
-            if membership.role != ProjectMembershipRole.OWNER:
-                continue
-            owner_count = sum(
-                1
-                for item in self.list_project_memberships(
-                    project_id=membership.project_id,
+                if membership is None:
+                    continue
+                if membership.role == ProjectMembershipRole.OWNER:
+                    repository.lock_project_owner_memberships(project.project_id)
+                    refreshed = repository.get_project_membership(
+                        project_id=project.project_id,
+                        user_id=user_id,
+                    )
+                    if refreshed is None:
+                        continue
+                    membership = refreshed
+                    if (
+                        membership.role == ProjectMembershipRole.OWNER
+                        and self._project_owner_count(repository, project.project_id) <= 1
+                    ):
+                        sole_owner_project_ids.append(project.project_id)
+                        continue
+                memberships.append(membership)
+            if sole_owner_project_ids:
+                project_list = ", ".join(
+                    str(project_id) for project_id in sole_owner_project_ids
                 )
-                if item.role == ProjectMembershipRole.OWNER
-            )
-            if owner_count <= 1:
-                sole_owner_project_ids.append(membership.project_id)
-        if sole_owner_project_ids:
-            project_list = ", ".join(str(project_id) for project_id in sole_owner_project_ids)
-            raise ValidationError(
-                "Cannot remove the last owner from projects: "
-                f"{project_list}."
-            )
-        self._ensure_offboarding_records_released(
-            user_id,
-            {project.project_id for project in projects},
-        )
-        with self.unit_of_work() as repository:
+                raise ValidationError(
+                    "Cannot remove the last owner from projects: "
+                    f"{project_list}."
+                )
+            self._ensure_offboarding_records_released(user_id, project_ids)
             for membership in memberships:
                 repository.project_memberships.delete(membership.membership_id)
         return memberships
