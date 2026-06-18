@@ -71,6 +71,28 @@ def test_import_folder_filters_limit_and_dry_run(tmp_path) -> None:
     assert all(request.method == "GET" for request in requests)
 
 
+def test_import_folder_discovery_skips_symlinked_files(tmp_path) -> None:
+    root = tmp_path / "inbox"
+    root.mkdir()
+    real_file = root / "capture.md"
+    real_file.write_text("capture text", encoding="utf-8")
+    outside_file = tmp_path / "outside-secret.txt"
+    outside_file.write_text("secret text", encoding="utf-8")
+    symlink = root / "linked-secret.txt"
+    try:
+        symlink.symlink_to(outside_file)
+    except (NotImplementedError, OSError) as exc:
+        pytest.skip(f"symlink creation is unavailable: {exc}")
+
+    discovered = lt_cli._discover_import_files(
+        root,
+        include_patterns=["*"],
+        exclude_patterns=[],
+    )
+
+    assert discovered == [real_file]
+
+
 def test_import_folder_imports_files_with_summary(tmp_path) -> None:
     evidence_path = tmp_path / "capture.md"
     evidence_path.write_text("capture text", encoding="utf-8")

@@ -35,6 +35,8 @@ formatted as `<root-uri>::<relative-path>` so two imported folders with the same
 file names do not share one dedupe namespace. It skips an item when a note
 already exists with the same project, source provider, external ID, and content
 hash. Changed file contents therefore create a new staged evidence note.
+Symlinked files are skipped during discovery and are not followed outside the
+configured import root.
 
 `lt import-folder` imports files as staged evidence notes that record where each
 file came from. Imported notes never become canonical graph records on import,

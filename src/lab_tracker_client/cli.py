@@ -283,7 +283,7 @@ def _discover_import_files(
     include_patterns: list[str],
     exclude_patterns: list[str],
 ) -> list[Path]:
-    files = [path for path in root.rglob("*") if path.is_file()]
+    files = [path for path in root.rglob("*") if not path.is_symlink() and path.is_file()]
     return [
         path
         for path in sorted(files, key=lambda item: item.relative_to(root).as_posix())

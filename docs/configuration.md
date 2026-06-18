@@ -190,6 +190,8 @@ The adapter records `evidence_source_*` metadata, skips duplicates by source ID
 and content hash, and never commits graph changes — imported files land as
 staged evidence notes, and human review remains the commit boundary. See
 [`evidence-source-metadata.md`](evidence-source-metadata.md).
+Symlinked files are skipped during discovery and are not followed outside the
+configured inbox root.
 
 The retained v1 runtime keeps note handling manual and uses direct substring
 search for query flows. Deferred concepts live in
