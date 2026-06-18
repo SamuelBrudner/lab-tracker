@@ -215,7 +215,7 @@ def test_batch_retry_and_dead_letter_paths_are_persisted(
 
     retry_response = client.post(
         "/batches/run-now",
-        json={"project_id": project_id, "until": "2026-12-30T00:00:00Z"},
+        json={"project_id": project_id},
         headers=admin_auth_headers,
     )
 
@@ -247,11 +247,7 @@ def test_batch_retry_and_dead_letter_paths_are_persisted(
 
     failed_response = client.post(
         "/batches/run-now",
-        json={
-            "project_id": project_id,
-            "since": "2026-01-01T00:00:00Z",
-            "until": "2026-12-31T00:00:00Z",
-        },
+        json={"project_id": project_id},
         headers=admin_auth_headers,
     )
 
