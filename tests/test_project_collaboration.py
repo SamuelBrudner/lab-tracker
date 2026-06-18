@@ -187,6 +187,32 @@ def test_project_member_patch_rejects_nonmembers_and_unknown_users(
     assert list_members.json()["data"] == []
 
 
+def test_project_member_create_checks_owner_before_resolving_user(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+):
+    nonowner_token, _ = _register_user_with_id(client, "member-create-nonowner")
+    _register_user_with_id(client, "member-create-target")
+    nonowner_headers = _auth_headers(nonowner_token)
+    project_id = _create_project(client, admin_auth_headers, "Membership create ordering")
+
+    missing_user = client.post(
+        f"/projects/{project_id}/members",
+        json={"username": "missing-member-create-target", "role": "viewer"},
+        headers=nonowner_headers,
+    )
+    existing_user = client.post(
+        f"/projects/{project_id}/members",
+        json={"username": "member-create-target", "role": "viewer"},
+        headers=nonowner_headers,
+    )
+
+    assert missing_user.status_code == 401
+    assert existing_user.status_code == 401
+    assert missing_user.json()["error"]["message"] == "Project owner access required."
+    assert existing_user.json()["error"]["message"] == "Project owner access required."
+
+
 def test_project_contributor_can_use_core_write_routes(
     client: TestClient,
     admin_auth_headers: dict[str, str],

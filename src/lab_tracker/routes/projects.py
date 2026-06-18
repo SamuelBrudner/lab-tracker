@@ -225,8 +225,10 @@ def build_projects_router(api: LabTrackerAPI) -> APIRouter:
         request: Request,
     ):
         actor = actor_from_request(request)
+        request_api = api_from_request(request, api)
+        request_api.require_project_owner(project_id, actor=actor)
         user_id = _resolve_member_user_id(request, payload)
-        membership = api_from_request(request, api).upsert_project_membership(
+        membership = request_api.upsert_project_membership(
             project_id,
             user_id,
             payload.role,
