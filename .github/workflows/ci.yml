@@ -12,12 +12,26 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
       - uses: astral-sh/setup-uv@v3
       - name: Create venv
         run: uv venv
       - name: Install dependencies
         run: uv pip install -e ".[test,lint]"
+      - name: Install frontend dependencies
+        run: npm ci
       - name: Lint
         run: uv run ruff check .
+      - name: Lint frontend
+        run: npm run lint:frontend -- --quiet
+      - name: Test frontend
+        run: npm run test:frontend
+      - name: Build frontend
+        run: npm run build:frontend
+      - name: Check frontend bundle is committed
+        run: git diff --exit-code -- src/lab_tracker/frontend
       - name: Test
         run: uv run pytest -q

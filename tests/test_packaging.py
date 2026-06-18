@@ -156,3 +156,34 @@ command.upgrade(_alembic_config(), "head")
         text=True,
     )
     assert db_path.exists()
+
+
+def test_wheel_installed_frontend_serves_pwa_assets(tmp_path: Path, built_wheel: Path):
+    target = tmp_path / "site"
+    with zipfile.ZipFile(built_wheel) as archive:
+        archive.extractall(target)
+
+    smoke_script = """
+from fastapi.testclient import TestClient
+from lab_tracker.app import create_app
+
+client = TestClient(create_app())
+sw_response = client.get("/app/sw.js")
+assert sw_response.status_code == 200
+assert "lab-tracker-shell-" in sw_response.text
+assert "/app/static/manifest.json" in sw_response.text
+
+manifest_response = client.get("/app/static/manifest.json")
+assert manifest_response.status_code == 200
+manifest = manifest_response.json()
+assert manifest["start_url"] == "/app/capture"
+assert any(icon["src"] == "/app/static/icon-192.png" for icon in manifest["icons"])
+"""
+    subprocess.run(
+        [sys.executable, "-c", smoke_script],
+        cwd=tmp_path,
+        env={**os.environ, "PYTHONPATH": str(target)},
+        check=True,
+        capture_output=True,
+        text=True,
+    )
