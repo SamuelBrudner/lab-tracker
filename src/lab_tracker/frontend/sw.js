@@ -1,7 +1,8 @@
 /* Lab Tracker service worker.
  *
  * Caches the app shell so the PWA loads when the network is unavailable.
- * Bump CACHE_VERSION when shipping changes that should invalidate old caches.
+ * CACHE_VERSION and the app.js/styles.css ?v tokens are stamped from those
+ * asset bytes by `npm run build:frontend`.
  *
  * The upload-retry queue lives in page JS (see shared/upload-queue.js); the
  * service worker intentionally does not intercept POSTs to
@@ -9,12 +10,12 @@
  * one place.
  */
 
-const CACHE_VERSION = "v18";
+const CACHE_VERSION = "v-eb01c6bdca5e";
 const CACHE_NAME = `lab-tracker-shell-${CACHE_VERSION}`;
 const SHELL_ASSETS = [
   "/app/",
-  "/app/static/app.js?v=18",
-  "/app/static/styles.css?v=18",
+  "/app/static/app.js?v=eb01c6bdca5e",
+  "/app/static/styles.css?v=eb01c6bdca5e",
   "/app/static/manifest.json",
   "/app/static/icon-180.png",
   "/app/static/icon-192.png",

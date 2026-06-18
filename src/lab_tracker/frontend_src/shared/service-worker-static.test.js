@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 
@@ -11,19 +12,33 @@ const indexHtmlSource = readFileSync(
   resolve(process.cwd(), "src/lab_tracker/frontend/index.html"),
   "utf8"
 );
+const frontendStaticDir = resolve(process.cwd(), "src/lab_tracker/frontend");
 
 function extractVersionedShellAssets(source) {
   return Object.fromEntries(
     source
-      .matchAll(/\/app\/static\/(?<asset>app\.js|styles\.css)\?v=(?<version>\d+)/g)
+      .matchAll(
+        /\/app\/static\/(?<asset>app\.js|styles\.css)\?v=(?<version>[a-f0-9]{12})/g
+      )
       .map((match) => [match.groups.asset, match.groups.version])
   );
 }
 
 function extractCacheVersion(source) {
-  const match = source.match(/const CACHE_VERSION = "(?<version>v\d+)"/);
+  const match = source.match(/const CACHE_VERSION = "(?<version>v-[a-f0-9]{12})"/);
   expect(match, "service worker CACHE_VERSION").not.toBeNull();
   return match.groups.version;
+}
+
+function expectedStaticAssetVersion() {
+  const hash = createHash("sha256");
+  for (const filename of ["app.js", "styles.css"]) {
+    hash.update(filename);
+    hash.update("\0");
+    hash.update(readFileSync(resolve(frontendStaticDir, filename)));
+    hash.update("\0");
+  }
+  return hash.digest("hex").slice(0, 12);
 }
 
 describe("service worker source", () => {
@@ -51,10 +66,11 @@ describe("service worker source", () => {
 
   it("keeps cache and asset versions aligned across the shell files", () => {
     const cacheVersion = extractCacheVersion(serviceWorkerSource);
-    const expectedAssetVersion = cacheVersion.replace(/^v/, "");
+    const expectedAssetVersion = expectedStaticAssetVersion();
     const indexAssetVersions = extractVersionedShellAssets(indexHtmlSource);
     const serviceWorkerAssetVersions = extractVersionedShellAssets(serviceWorkerSource);
 
+    expect(cacheVersion).toBe(`v-${expectedAssetVersion}`);
     expect(indexAssetVersions).toEqual({
       "app.js": expectedAssetVersion,
       "styles.css": expectedAssetVersion,

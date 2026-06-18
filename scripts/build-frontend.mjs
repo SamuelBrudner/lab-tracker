@@ -1,15 +1,60 @@
-import { rm } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { readFile, rm, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { build } from "esbuild";
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+const frontendDir = resolve(repoRoot, "src/lab_tracker/frontend");
+
+async function staticAssetVersion() {
+  const hash = createHash("sha256");
+  for (const filename of ["app.js", "styles.css"]) {
+    hash.update(filename);
+    hash.update("\0");
+    hash.update(await readFile(resolve(frontendDir, filename)));
+    hash.update("\0");
+  }
+  return hash.digest("hex").slice(0, 12);
+}
+
+async function stampShellAssetVersion(version) {
+  const indexPath = resolve(frontendDir, "index.html");
+  const swPath = resolve(frontendDir, "sw.js");
+  const [indexHtml, serviceWorker] = await Promise.all([
+    readFile(indexPath, "utf8"),
+    readFile(swPath, "utf8"),
+  ]);
+  await Promise.all([
+    writeFile(
+      indexPath,
+      indexHtml.replace(
+        /\/app\/static\/(app\.js|styles\.css)\?v=[^"']+/g,
+        (match, asset) => `/app/static/${asset}?v=${version}`
+      ),
+      "utf8"
+    ),
+    writeFile(
+      swPath,
+      serviceWorker
+        .replace(
+          /const CACHE_VERSION = "v[^"]+";/,
+          `const CACHE_VERSION = "v-${version}";`
+        )
+        .replace(
+          /\/app\/static\/(app\.js|styles\.css)\?v=[^"']+/g,
+          (match, asset) => `/app/static/${asset}?v=${version}`
+        ),
+      "utf8"
+    ),
+  ]);
+}
 
 await build({
   absWorkingDir: repoRoot,
   entryPoints: ["././src/lab_tracker/frontend_src/app.jsx"],
-  outfile: resolve(repoRoot, "src/lab_tracker/frontend/app.js"),
+  outfile: resolve(frontendDir, "app.js"),
   bundle: true,
   minify: true,
   sourcemap: false,
@@ -23,4 +68,5 @@ await build({
   },
 });
 
-await rm(resolve(repoRoot, "src/lab_tracker/frontend/app.js.map"), { force: true });
+await rm(resolve(frontendDir, "app.js.map"), { force: true });
+await stampShellAssetVersion(await staticAssetVersion());

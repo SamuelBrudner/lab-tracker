@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { cp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -7,6 +8,17 @@ const outDir = resolve(repoRoot, process.argv[2] || "dist/pages-demo");
 const frontendDir = resolve(repoRoot, "src/lab_tracker/frontend");
 const appDir = resolve(outDir, "app");
 const staticDir = resolve(appDir, "static");
+
+async function staticAssetVersion() {
+  const hash = createHash("sha256");
+  for (const filename of ["app.js", "styles.css"]) {
+    hash.update(filename);
+    hash.update("\0");
+    hash.update(await readFile(resolve(frontendDir, filename)));
+    hash.update("\0");
+  }
+  return hash.digest("hex").slice(0, 12);
+}
 
 await rm(outDir, { force: true, recursive: true });
 await mkdir(staticDir, { recursive: true });
@@ -41,6 +53,7 @@ await writeFile(
   "utf-8"
 );
 
+const assetVersion = await staticAssetVersion();
 const appHtml = `<!doctype html>
 <html lang="en">
   <head>
@@ -51,10 +64,10 @@ const appHtml = `<!doctype html>
     <link rel="manifest" href="static/manifest.json" />
     <link rel="apple-touch-icon" href="static/icon-180.png" />
     <link rel="icon" type="image/png" sizes="192x192" href="static/icon-192.png" />
-    <link rel="stylesheet" href="static/styles.css?v=18" />
+    <link rel="stylesheet" href="static/styles.css?v=${assetVersion}" />
     <link rel="stylesheet" href="static/app.css" />
     <script>window.__LAB_TRACKER_STATIC_DEMO__ = true;</script>
-    <script src="static/app.js?v=18" defer></script>
+    <script src="static/app.js?v=${assetVersion}" defer></script>
   </head>
   <body>
     <div id="app-root"></div>
