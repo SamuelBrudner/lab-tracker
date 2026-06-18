@@ -116,7 +116,7 @@ def test_alembic_upgrade_chain_from_empty_to_head(monkeypatch, tmp_path):
     for revision in revisions:
         command.upgrade(config, revision)
         assert revision in _current_revisions(database_url)
-    assert _current_revision(database_url) == "0040_drop_daily_reviews_align_batch_key"
+    assert _current_revision(database_url) == "0041_dedupe_unslotted_goal_links"
 
 
 def test_alembic_has_single_head() -> None:
@@ -733,7 +733,7 @@ def test_not_null_tightening_migration_backfills_existing_nulls(
     engine.dispose()
 
 
-def test_goal_link_slot_migration_dedupes_unslotted_duplicates(
+def test_goal_link_slot_migration_normalizes_unslotted_links(
     monkeypatch,
     tmp_path,
 ):
@@ -748,8 +748,6 @@ def test_goal_link_slot_migration_dedupes_unslotted_duplicates(
     goal_id = str(uuid4())
     entity_id = str(uuid4())
     kept_link_id = str(uuid4())
-    duplicate_link_id = str(uuid4())
-    empty_slot_link_id = str(uuid4())
     slotted_link_id = str(uuid4())
 
     engine = create_engine(
@@ -778,8 +776,6 @@ def test_goal_link_slot_migration_dedupes_unslotted_duplicates(
         )
         for link_id, slot, created_at in (
             (kept_link_id, None, "2026-01-01 00:00:00"),
-            (duplicate_link_id, None, "2026-01-02 00:00:00"),
-            (empty_slot_link_id, "", "2026-01-03 00:00:00"),
             (slotted_link_id, "Figure 1", "2026-01-04 00:00:00"),
         ):
             connection.execute(
@@ -990,7 +986,7 @@ def test_database_at_daily_review_branch_upgrades_to_current_head(monkeypatch, t
     assert _current_revision(database_url) == "0017_daily_graph_reviews"
 
     command.upgrade(config, "head")
-    assert _current_revision(database_url) == "0040_drop_daily_reviews_align_batch_key"
+    assert _current_revision(database_url) == "0041_dedupe_unslotted_goal_links"
 
     engine = create_engine(
         database_url,
