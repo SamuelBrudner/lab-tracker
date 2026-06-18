@@ -277,6 +277,7 @@ function MobileCaptureCard({
   const [claimId, setClaimId] = useState("");
   const [uploadedNoteId, setUploadedNoteId] = useState("");
   const [uploadedVoiceNoteId, setUploadedVoiceNoteId] = useState("");
+  const [uploadedBundleId, setUploadedBundleId] = useState("");
   const [pendingDrafts, setPendingDrafts] = useState([]);
   const [pendingNotes, setPendingNotes] = useState([]);
   const [pendingActionById, setPendingActionById] = useState({});
@@ -397,10 +398,15 @@ function MobileCaptureCard({
     return targets;
   }
 
-  function chooseCaptureMode(mode) {
-    setCaptureMode(mode);
+  function clearUploadProgress() {
     setUploadedNoteId("");
     setUploadedVoiceNoteId("");
+    setUploadedBundleId("");
+  }
+
+  function chooseCaptureMode(mode) {
+    setCaptureMode(mode);
+    clearUploadProgress();
   }
 
   function needsPhoto() {
@@ -421,8 +427,7 @@ function MobileCaptureCard({
 
   function handleComposerTextChange(event) {
     const value = event.target.value;
-    setUploadedNoteId("");
-    setUploadedVoiceNoteId("");
+    clearUploadProgress();
     if (photoFile || audioFile) {
       setHint(value);
       return;
@@ -435,8 +440,7 @@ function MobileCaptureCard({
 
   function handlePhotoFileChange(event) {
     const file = event.target.files?.[0] || null;
-    setUploadedNoteId("");
-    setUploadedVoiceNoteId("");
+    clearUploadProgress();
     setPhotoFile(file);
     if (file) {
       if (textNote.trim() && !hint.trim()) {
@@ -450,8 +454,7 @@ function MobileCaptureCard({
 
   function handleAudioFileChange(event) {
     const file = event.target.files?.[0] || null;
-    setUploadedNoteId("");
-    setUploadedVoiceNoteId("");
+    clearUploadProgress();
     setAudioFile(file);
     if (file) {
       if (textNote.trim() && !hint.trim()) {
@@ -465,8 +468,7 @@ function MobileCaptureCard({
 
   function clearPhotoFile() {
     setPhotoFile(null);
-    setUploadedNoteId("");
-    setUploadedVoiceNoteId("");
+    clearUploadProgress();
     if (audioFile) {
       setCaptureMode("voice");
       return;
@@ -480,8 +482,7 @@ function MobileCaptureCard({
 
   function clearAudioFile() {
     setAudioFile(null);
-    setUploadedNoteId("");
-    setUploadedVoiceNoteId("");
+    clearUploadProgress();
     if (photoFile) {
       setCaptureMode("photo");
       return;
@@ -745,70 +746,75 @@ function MobileCaptureCard({
     setFlash("", "");
     try {
       let noteId = uploadedNoteId;
+      let voiceNoteId = uploadedVoiceNoteId;
       let queuedOffline = false;
-      if (!noteId) {
-        const bundleId = captureMode === "bundle" ? newBundleId() : "";
-        let photoNote = null;
-        let voiceNote = null;
-        let textCapture = null;
-        if (needsPhoto()) {
-          const result = await uploadOrQueueRawFile({
-            fileToUpload: photoFile,
-            metadata: baseMetadata({ draft, kind: "image", bundleId, file: photoFile }),
-          });
-          if (result === OFFLINE_QUEUED) {
-            queuedOffline = true;
-          } else {
-            photoNote = result;
-            noteId = photoNote.note_id;
+      let noteCreated = false;
+      const bundleId =
+        captureMode === "bundle" ? uploadedBundleId || newBundleId() : "";
+      if (bundleId && !uploadedBundleId) {
+        setUploadedBundleId(bundleId);
+      }
+
+      if (needsPhoto() && !noteId) {
+        const result = await uploadOrQueueRawFile({
+          fileToUpload: photoFile,
+          metadata: baseMetadata({ draft, kind: "image", bundleId, file: photoFile }),
+        });
+        if (result === OFFLINE_QUEUED) {
+          queuedOffline = true;
+        } else {
+          noteId = result.note_id;
+          noteCreated = true;
+          setUploadedNoteId(noteId);
+        }
+      }
+
+      if (needsVoice() && !voiceNoteId && !queuedOffline) {
+        const result = await uploadOrQueueRawFile({
+          fileToUpload: audioFile,
+          metadata: baseMetadata({ draft, kind: "voice", bundleId, file: audioFile }),
+        });
+        if (result === OFFLINE_QUEUED) {
+          queuedOffline = true;
+        } else {
+          voiceNoteId = result.note_id;
+          noteCreated = true;
+          setUploadedVoiceNoteId(voiceNoteId);
+          if (!noteId) {
+            noteId = voiceNoteId;
+            setUploadedNoteId(noteId);
           }
         }
-        if (needsVoice() && !queuedOffline) {
-          const result = await uploadOrQueueRawFile({
-            fileToUpload: audioFile,
-            metadata: baseMetadata({ draft, kind: "voice", bundleId, file: audioFile }),
-          });
-          if (result === OFFLINE_QUEUED) {
-            queuedOffline = true;
-          } else {
-            voiceNote = result;
-            setUploadedVoiceNoteId(voiceNote.note_id);
-            if (!noteId) {
-              noteId = voiceNote.note_id;
-            }
-            if (draft) {
-              voiceNote = await apiRequest(`/notes/${voiceNote.note_id}/transcript`, {
-                body: hint.trim() ? { prompt: hint.trim() } : {},
-                method: "POST",
-                token,
-              });
-            }
-          }
-        } else if (needsVoice() && queuedOffline) {
-          await queueRawFileNoteOffline({
-            fileToUpload: audioFile,
-            metadata: baseMetadata({ draft, kind: "voice", bundleId, file: audioFile }),
-          });
-        }
-        if (needsText() && !queuedOffline) {
-          textCapture = await createTextCapture({ draft });
-          noteId = textCapture.note_id;
-        }
-        if (queuedOffline) {
-          setFlash("Capture queued — will upload when you're back online.");
-          setPhotoFile(null);
-          setAudioFile(null);
-          setTextNote("");
-          return;
-        }
+      } else if (needsVoice() && !voiceNoteId && queuedOffline) {
+        await queueRawFileNoteOffline({
+          fileToUpload: audioFile,
+          metadata: baseMetadata({ draft, kind: "voice", bundleId, file: audioFile }),
+        });
+      }
+
+      if (needsText() && !noteId && !queuedOffline) {
+        const textCapture = await createTextCapture({ draft });
+        noteId = textCapture.note_id;
+        noteCreated = true;
         setUploadedNoteId(noteId);
+      }
+
+      if (queuedOffline) {
+        setFlash("Capture queued — will upload when you're back online.");
+        setPhotoFile(null);
+        setAudioFile(null);
+        setTextNote("");
+        return;
+      }
+
+      if (noteCreated) {
         await Promise.all([
           refreshProjectCounts(selectedProjectId),
           refreshRecentNotes(selectedProjectId),
         ]);
       }
-      if (draft && uploadedVoiceNoteId) {
-        await apiRequest(`/notes/${uploadedVoiceNoteId}/transcript`, {
+      if (draft && voiceNoteId) {
+        await apiRequest(`/notes/${voiceNoteId}/transcript`, {
           body: hint.trim() ? { prompt: hint.trim() } : {},
           method: "POST",
           token,
