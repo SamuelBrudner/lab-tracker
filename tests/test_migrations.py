@@ -116,7 +116,7 @@ def test_alembic_upgrade_chain_from_empty_to_head(monkeypatch, tmp_path):
     for revision in revisions:
         command.upgrade(config, revision)
         assert revision in _current_revisions(database_url)
-    assert _current_revision(database_url) == "0039_not_null_tightening_0014_0024"
+    assert _current_revision(database_url) == "0040_drop_daily_reviews_align_batch_key"
 
 
 def test_alembic_has_single_head() -> None:
@@ -167,8 +167,6 @@ def test_alembic_upgrade_head_creates_expected_tables(monkeypatch, tmp_path):
         "visualization_claims",
         "graph_change_sets",
         "graph_change_operations",
-        "daily_graph_reviews",
-        "daily_graph_review_change_sets",
         "graph_draft_batch_settings",
         "graph_draft_batch_runs",
         "project_memberships",
@@ -181,6 +179,8 @@ def test_alembic_upgrade_head_creates_expected_tables(monkeypatch, tmp_path):
     }
     assert expected.issubset(table_names)
     assert "dataset_reviews" not in table_names
+    assert "daily_graph_reviews" not in table_names
+    assert "daily_graph_review_change_sets" not in table_names
     assert "note_extracted_entities" not in table_names
     assert "note_tag_suggestions" not in table_names
 
@@ -339,6 +339,13 @@ def test_alembic_upgrade_head_creates_expected_tables(monkeypatch, tmp_path):
         "batch_window_start",
         "batch_window_end",
     }.issubset(graph_change_columns)
+    _assert_unique_constraint(
+        inspector,
+        "graph_change_sets",
+        "uq_graph_change_sets_batch_key",
+        {"batch_key"},
+    )
+    _assert_no_index(inspector, "graph_change_sets", "ix_graph_change_sets_batch_key")
     operation_columns = {
         column["name"] for column in inspector.get_columns("graph_change_operations")
     }
@@ -821,6 +828,158 @@ def test_goal_link_slot_migration_dedupes_unslotted_duplicates(
     engine.dispose()
 
 
+def test_schema_cleanup_migration_preserves_graph_change_children(
+    monkeypatch,
+    tmp_path,
+):
+    db_path = tmp_path / "schema-cleanup.db"
+    database_url = f"sqlite+pysqlite:///{db_path}"
+    config = _alembic_config()
+    _set_database_url(monkeypatch, database_url)
+
+    command.upgrade(config, "0039_not_null_tightening_0014_0024")
+
+    project_id = str(uuid4())
+    note_id = str(uuid4())
+    change_set_id = str(uuid4())
+    operation_id = str(uuid4())
+    batch_run_id = str(uuid4())
+    review_id = str(uuid4())
+    batch_key = f"batch-{uuid4()}"
+
+    engine = create_engine(
+        database_url,
+        future=True,
+        connect_args={"check_same_thread": False},
+    )
+    with engine.begin() as connection:
+        connection.execute(
+            text(
+                "INSERT INTO projects "
+                "(project_id, name, description, status, created_at, updated_at) "
+                "VALUES (:project_id, 'Schema cleanup project', '', 'active', "
+                "CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
+            ),
+            {"project_id": project_id},
+        )
+        connection.execute(
+            text(
+                "INSERT INTO notes "
+                "(note_id, project_id, raw_content, status, origin, created_at, "
+                "updated_at) VALUES (:note_id, :project_id, 'raw', 'staged', "
+                "'user', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
+            ),
+            {"note_id": note_id, "project_id": project_id},
+        )
+        connection.execute(
+            text(
+                "INSERT INTO graph_change_sets "
+                "(change_set_id, project_id, source_note_id, source_note_ids, "
+                "provider, model, prompt_version, draft_mode, context_packet, "
+                "summary, uncertain_fields, clarification_requests, status, "
+                "error_metadata, created_at, updated_at, batch_key) "
+                "VALUES (:change_set_id, :project_id, :note_id, '[]', "
+                "'openai', 'test-model', 'v1', 'graph_context', '{}', '', "
+                "'[]', '[]', 'drafting', '{}', CURRENT_TIMESTAMP, "
+                "CURRENT_TIMESTAMP, :batch_key)"
+            ),
+            {
+                "change_set_id": change_set_id,
+                "project_id": project_id,
+                "note_id": note_id,
+                "batch_key": batch_key,
+            },
+        )
+        connection.execute(
+            text(
+                "INSERT INTO graph_change_operations "
+                "(operation_id, change_set_id, sequence, op, entity_type, "
+                "payload, rationale, source_refs, status, error_metadata, "
+                "created_at, updated_at) VALUES (:operation_id, :change_set_id, "
+                "1, 'create', 'question', '{}', '', '[]', 'proposed', '{}', "
+                "CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
+            ),
+            {
+                "operation_id": operation_id,
+                "change_set_id": change_set_id,
+            },
+        )
+        connection.execute(
+            text(
+                "INSERT INTO graph_draft_batch_runs "
+                "(run_id, project_id, trigger, status, window_start, window_end, "
+                "note_count, batch_key, change_set_id, summary, error_metadata, "
+                "created_at, updated_at, started_at) "
+                "VALUES (:run_id, :project_id, 'manual', 'ready', "
+                "CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, 1, :batch_key, "
+                ":change_set_id, '', '{}', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, "
+                "CURRENT_TIMESTAMP)"
+            ),
+            {
+                "run_id": batch_run_id,
+                "project_id": project_id,
+                "batch_key": f"run-{batch_key}",
+                "change_set_id": change_set_id,
+            },
+        )
+        connection.execute(
+            text(
+                "INSERT INTO daily_graph_reviews "
+                "(review_id, project_id, window_start, window_end, status) "
+                "VALUES (:review_id, :project_id, CURRENT_TIMESTAMP, "
+                "CURRENT_TIMESTAMP, 'ready')"
+            ),
+            {"review_id": review_id, "project_id": project_id},
+        )
+        connection.execute(
+            text(
+                "INSERT INTO daily_graph_review_change_sets "
+                "(review_id, change_set_id, sequence) "
+                "VALUES (:review_id, :change_set_id, 1)"
+            ),
+            {"review_id": review_id, "change_set_id": change_set_id},
+        )
+    engine.dispose()
+
+    command.upgrade(config, "head")
+
+    engine = create_engine(
+        database_url,
+        future=True,
+        connect_args={"check_same_thread": False},
+    )
+    inspector = inspect(engine)
+    table_names = set(inspector.get_table_names())
+    assert "daily_graph_reviews" not in table_names
+    assert "daily_graph_review_change_sets" not in table_names
+    _assert_unique_constraint(
+        inspector,
+        "graph_change_sets",
+        "uq_graph_change_sets_batch_key",
+        {"batch_key"},
+    )
+    _assert_no_index(inspector, "graph_change_sets", "ix_graph_change_sets_batch_key")
+    with engine.connect() as connection:
+        operation_count = connection.execute(
+            text(
+                "SELECT COUNT(*) FROM graph_change_operations "
+                "WHERE operation_id = :operation_id"
+            ),
+            {"operation_id": operation_id},
+        ).scalar_one()
+        batch_run_change_set_id = connection.execute(
+            text(
+                "SELECT change_set_id FROM graph_draft_batch_runs "
+                "WHERE run_id = :batch_run_id"
+            ),
+            {"batch_run_id": batch_run_id},
+        ).scalar_one()
+
+    assert operation_count == 1
+    assert batch_run_change_set_id == change_set_id
+    engine.dispose()
+
+
 def test_database_at_daily_review_branch_upgrades_to_current_head(monkeypatch, tmp_path):
     db_path = tmp_path / "daily-review-branch.db"
     database_url = f"sqlite+pysqlite:///{db_path}"
@@ -831,7 +990,7 @@ def test_database_at_daily_review_branch_upgrades_to_current_head(monkeypatch, t
     assert _current_revision(database_url) == "0017_daily_graph_reviews"
 
     command.upgrade(config, "head")
-    assert _current_revision(database_url) == "0039_not_null_tightening_0014_0024"
+    assert _current_revision(database_url) == "0040_drop_daily_reviews_align_batch_key"
 
     engine = create_engine(
         database_url,
@@ -841,8 +1000,6 @@ def test_database_at_daily_review_branch_upgrades_to_current_head(monkeypatch, t
     inspector = inspect(engine)
     table_names = set(inspector.get_table_names())
     assert {
-        "daily_graph_reviews",
-        "daily_graph_review_change_sets",
         "device_tokens",
         "device_enrollments",
         "project_memberships",
@@ -854,6 +1011,8 @@ def test_database_at_daily_review_branch_upgrades_to_current_head(monkeypatch, t
         "ownership_reassignments",
         "record_export_events",
     }.issubset(table_names)
+    assert "daily_graph_reviews" not in table_names
+    assert "daily_graph_review_change_sets" not in table_names
     engine.dispose()
 
 
@@ -990,6 +1149,25 @@ def _assert_origin_backlink_columns(inspector, table_name: str) -> None:
 def _assert_index(inspector, table_name: str, index_name: str) -> None:
     indexes = {index["name"] for index in inspector.get_indexes(table_name)}
     assert index_name in indexes
+
+
+def _assert_no_index(inspector, table_name: str, index_name: str) -> None:
+    indexes = {index["name"] for index in inspector.get_indexes(table_name)}
+    assert index_name not in indexes
+
+
+def _assert_unique_constraint(
+    inspector,
+    table_name: str,
+    constraint_name: str,
+    column_names: set[str],
+) -> None:
+    unique_constraints = inspector.get_unique_constraints(table_name)
+    assert any(
+        constraint["name"] == constraint_name
+        and set(constraint["column_names"]) == column_names
+        for constraint in unique_constraints
+    )
 
 
 def _assert_fk(
