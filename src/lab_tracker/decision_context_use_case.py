@@ -22,8 +22,6 @@ from lab_tracker.decision_context_constants import (
 from lab_tracker.decision_context_selection import (
     envelope_items,
     merge_entities,
-    meta_total,
-    project_ids_from_search,
     project_lookup,
     search_items,
 )
@@ -374,24 +372,15 @@ def _project_ids_with_search_matches(
     query: str,
     projects: list[JsonObject],
 ) -> set[str]:
-    project_ids: set[str] = set()
-    for project in projects:
-        project_id = project.get("project_id")
-        if project_id is None:
-            continue
-        project_id_text = str(project_id)
-        payload = reader.search(query, project_id=project_id_text, limit=1)
-        if _search_payload_has_matches(payload):
-            project_ids.add(project_id_text)
-        else:
-            project_ids.update(project_ids_from_search(payload))
-    return project_ids
-
-
-def _search_payload_has_matches(payload: JsonObject) -> bool:
-    question_count = meta_total(payload, "questions_count") or 0
-    note_count = meta_total(payload, "notes_count") or 0
-    return question_count > 0 or note_count > 0
+    known_project_ids = {
+        str(project["project_id"])
+        for project in projects
+        if project.get("project_id")
+    }
+    return reader.project_ids_with_search_matches(
+        query,
+        limit=CONTEXT_LOOKUP_LIMIT,
+    ) & known_project_ids
 
 
 def _compact_notes(notes: list[JsonObject]) -> list[JsonObject]:

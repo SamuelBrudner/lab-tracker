@@ -78,6 +78,9 @@ class DecisionContextReader(Protocol):
     ) -> JsonObject:
         ...
 
+    def project_ids_with_search_matches(self, query: str, *, limit: int = 50) -> set[str]:
+        ...
+
     def list_sessions(
         self,
         *,

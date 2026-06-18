@@ -120,6 +120,9 @@ class FakeDecisionContextReader:
             "meta": {"questions_count": 1, "notes_count": 1},
         }
 
+    def project_ids_with_search_matches(self, query: str, *, limit: int = 50) -> set[str]:
+        return {"project-1"}
+
     def list_questions(
         self,
         *,
@@ -319,13 +322,15 @@ def test_build_decision_context_orchestrates_reader_selection_and_builders() -> 
     assert data["truncation"] == {"was_truncated": False, "sections": []}
 
 
-def test_build_decision_context_uses_per_project_counts_for_auto_resolution() -> None:
+def test_build_decision_context_uses_one_scoped_lookup_for_auto_resolution() -> None:
     class AmbiguousSearchReader(FakeDecisionContextReader):
         second_project = {
             "project_id": "project-2",
             "name": "Second Project",
             "status": "active",
         }
+        project_id_lookup_calls = 0
+        search_calls = 0
 
         def list_projects(
             self,
@@ -352,23 +357,23 @@ def test_build_decision_context_uses_per_project_counts_for_auto_resolution() ->
             limit: int = 20,
             offset: int = 0,
         ) -> JsonObject:
-            if project_id is None:
-                return {
-                    "data": {"questions": [self.question], "notes": []},
-                    "meta": {"questions_count": 1, "notes_count": 0},
-                }
-            if project_id in {"project-1", "project-2"}:
-                return {
-                    "data": {"questions": [{"project_id": project_id}], "notes": []},
-                    "meta": {"questions_count": 1, "notes_count": 0},
-                }
-            return {
-                "data": {"questions": [], "notes": []},
-                "meta": {"questions_count": 0, "notes_count": 0},
-            }
+            self.search_calls += 1
+            raise AssertionError("auto-resolution must not search one project at a time")
 
+        def project_ids_with_search_matches(
+            self,
+            query: str,
+            *,
+            limit: int = 50,
+        ) -> set[str]:
+            self.project_id_lookup_calls += 1
+            assert query == "baseline"
+            assert limit == 500
+            return {"project-1", "project-2"}
+
+    reader = AmbiguousSearchReader()
     payload = build_decision_context(
-        AmbiguousSearchReader(),
+        reader,
         task_kind="summary",
         query="baseline",
         limit=1,
@@ -379,3 +384,5 @@ def test_build_decision_context_uses_per_project_counts_for_auto_resolution() ->
         "project-1",
         "project-2",
     }
+    assert reader.project_id_lookup_calls == 1
+    assert reader.search_calls == 0
