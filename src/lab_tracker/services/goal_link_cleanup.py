@@ -62,19 +62,13 @@ def remove_goal_links_to_targets(
     if not targets:
         return
 
-    affected_goals: dict[UUID, Goal] = {}
-    for entity_type, entity_id in sorted(
-        targets,
-        key=lambda target: (target[0].value, str(target[1])),
-    ):
-        goals, _ = repository.query_goals(
-            target_entity_type=entity_type.value,
-            target_entity_id=entity_id,
-            limit=None,
-            offset=0,
-        )
-        for goal in goals:
-            affected_goals[goal.goal_id] = goal
+    target_keys = {(entity_type.value, entity_id) for entity_type, entity_id in targets}
+    goals, _ = repository.query_goals(
+        target_entity_keys=target_keys,
+        limit=None,
+        offset=0,
+    )
+    affected_goals = {goal.goal_id: goal for goal in goals}
 
     for goal in affected_goals.values():
         remaining_links = [

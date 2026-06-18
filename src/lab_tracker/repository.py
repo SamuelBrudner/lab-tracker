@@ -350,6 +350,7 @@ class LabTrackerRepository(Protocol):
         status: str | None = None,
         target_entity_type: str | None = None,
         target_entity_id: UUID | None = None,
+        target_entity_keys: set[tuple[str, UUID]] | None = None,
         limit: int | None = None,
         offset: int = 0,
         recent_first: bool = False,

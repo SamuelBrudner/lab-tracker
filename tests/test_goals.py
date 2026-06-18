@@ -128,6 +128,72 @@ def test_goals_round_trip_links_and_reverse_lookup_through_repository():
     assert [item.goal_id for item in reverse] == [goal.goal_id]
 
 
+def test_query_goals_filters_distinct_goals_by_multiple_targets():
+    api, actor, project, question = _api_project_question()
+    other_question = api.create_question(
+        project_id=project.project_id,
+        text="Does the second target find goals?",
+        question_type=QuestionType.DESCRIPTIVE,
+        status=QuestionStatus.ACTIVE,
+        actor=actor,
+    )
+    first_goal = api.create_goal(
+        project.project_id,
+        goal_type=GoalType.PAPER,
+        title="Multi-linked paper",
+        links=[
+            GoalLinkSpec(
+                target=EntityRef(
+                    entity_type=EntityType.QUESTION,
+                    entity_id=question.question_id,
+                ),
+                relation=GoalRelation.ADDRESSES,
+            ),
+            GoalLinkSpec(
+                target=EntityRef(
+                    entity_type=EntityType.QUESTION,
+                    entity_id=other_question.question_id,
+                ),
+                relation=GoalRelation.CANDIDATE_FIGURE,
+            ),
+        ],
+        actor=actor,
+    )
+    second_goal = api.create_goal(
+        project.project_id,
+        goal_type=GoalType.TALK,
+        title="Second linked talk",
+        links=[
+            GoalLinkSpec(
+                target=EntityRef(
+                    entity_type=EntityType.QUESTION,
+                    entity_id=other_question.question_id,
+                ),
+                relation=GoalRelation.ADDRESSES,
+            )
+        ],
+        actor=actor,
+    )
+    api.create_goal(
+        project.project_id,
+        goal_type=GoalType.OTHER,
+        title="Unmatched goal",
+        actor=actor,
+    )
+
+    goals, total = api.goals.repository.query_goals(
+        target_entity_keys={
+            (EntityType.QUESTION.value, question.question_id),
+            (EntityType.QUESTION.value, other_question.question_id),
+        },
+        limit=None,
+        offset=0,
+    )
+
+    assert total == 2
+    assert {goal.goal_id for goal in goals} == {first_goal.goal_id, second_goal.goal_id}
+
+
 def test_goal_links_are_removed_when_target_question_is_deleted():
     api, actor, project, question = _api_project_question()
     goal = api.create_goal(
@@ -207,6 +273,68 @@ def test_project_delete_removes_projectless_goal_links_to_cascaded_entities():
     assert all(
         session.get(GoalLinkModel, str(link_id)) is None for link_id in removed_link_ids
     )
+
+
+def test_project_delete_batches_goal_reverse_lookup_for_cascaded_entities():
+    api = repository_backed_api()
+    actor = _actor()
+    removed_project = api.create_project("Deleted batched goal lookup", actor=actor)
+    questions = [
+        api.create_question(
+            project_id=removed_project.project_id,
+            text=f"Batched cleanup question {index}",
+            question_type=QuestionType.DESCRIPTIVE,
+            status=QuestionStatus.ACTIVE,
+            actor=actor,
+        )
+        for index in range(3)
+    ]
+    for question in questions:
+        api.create_goal(
+            None,
+            goal_type=GoalType.GRANT,
+            title=f"Goal for {question.text}",
+            links=[
+                GoalLinkSpec(
+                    target=EntityRef(
+                        entity_type=EntityType.PROJECT,
+                        entity_id=removed_project.project_id,
+                    ),
+                    relation=GoalRelation.CONTRIBUTES_TO,
+                ),
+                GoalLinkSpec(
+                    target=EntityRef(
+                        entity_type=EntityType.QUESTION,
+                        entity_id=question.question_id,
+                    ),
+                    relation=GoalRelation.ADDRESSES,
+                ),
+            ],
+            actor=actor,
+        )
+    repository = api.goals.repository
+    original_query_goals = repository.query_goals
+    reverse_lookup_calls: list[dict[str, object]] = []
+
+    def counting_query_goals(**kwargs):
+        if kwargs.get("target_entity_keys") is not None or (
+            kwargs.get("target_entity_type") is not None
+            and kwargs.get("target_entity_id") is not None
+        ):
+            reverse_lookup_calls.append(kwargs)
+        return original_query_goals(**kwargs)
+
+    repository.query_goals = counting_query_goals  # type: ignore[method-assign]
+
+    api.delete_project(removed_project.project_id, actor=actor)
+
+    assert len(reverse_lookup_calls) == 1
+    target_keys = reverse_lookup_calls[0]["target_entity_keys"]
+    assert isinstance(target_keys, set)
+    assert (EntityType.PROJECT.value, removed_project.project_id) in target_keys
+    assert {
+        (EntityType.QUESTION.value, question.question_id) for question in questions
+    }.issubset(target_keys)
 
 
 def test_projectless_goal_requires_project_link_scope():

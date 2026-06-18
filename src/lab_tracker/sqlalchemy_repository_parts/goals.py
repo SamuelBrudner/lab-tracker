@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from uuid import UUID
 
-from sqlalchemy import and_, or_, select
+from sqlalchemy import and_, or_, select, tuple_
 from sqlalchemy.orm import Session as OrmSession
 from sqlalchemy.orm import aliased
 
@@ -96,6 +96,7 @@ class SQLAlchemyGoalRepository(EntityRepository[Goal]):
         status: str | None = None,
         target_entity_type: str | None = None,
         target_entity_id: UUID | None = None,
+        target_entity_keys: set[tuple[str, UUID]] | None = None,
         limit: int | None = None,
         offset: int = 0,
         recent_first: bool = False,
@@ -120,18 +121,27 @@ class SQLAlchemyGoalRepository(EntityRepository[Goal]):
         if status is not None:
             stmt = stmt.where(GoalModel.status == status)
             count_stmt = count_stmt.where(GoalModel.status == status)
-        if target_entity_type is not None and target_entity_id is not None:
+        target_values = _target_values(
+            target_entity_type=target_entity_type,
+            target_entity_id=target_entity_id,
+            target_entity_keys=target_entity_keys,
+        )
+        if target_values is not None and not target_values:
+            return [], 0
+        if target_values:
             distinct_required = True
             stmt = stmt.join(GoalLinkModel, GoalLinkModel.goal_id == GoalModel.goal_id).where(
-                GoalLinkModel.entity_type == target_entity_type,
-                GoalLinkModel.entity_id == str(target_entity_id),
+                tuple_(GoalLinkModel.entity_type, GoalLinkModel.entity_id).in_(
+                    target_values
+                )
             )
             count_stmt = count_stmt.join(
                 GoalLinkModel,
                 GoalLinkModel.goal_id == GoalModel.goal_id,
             ).where(
-                GoalLinkModel.entity_type == target_entity_type,
-                GoalLinkModel.entity_id == str(target_entity_id),
+                tuple_(GoalLinkModel.entity_type, GoalLinkModel.entity_id).in_(
+                    target_values
+                )
             )
         if distinct_required:
             stmt = stmt.distinct()
@@ -188,3 +198,24 @@ class SQLAlchemyGoalRepository(EntityRepository[Goal]):
         total = count_from_statement(self._session, count_stmt)
         rows = list(self._session.scalars(apply_pagination(stmt, limit=limit, offset=offset)))
         return [goal_link_from_model(row) for row in rows], total
+
+
+def _target_values(
+    *,
+    target_entity_type: str | None,
+    target_entity_id: UUID | None,
+    target_entity_keys: set[tuple[str, UUID]] | None,
+) -> list[tuple[str, str]] | None:
+    values: set[tuple[str, str]] = set()
+    if target_entity_type is not None and target_entity_id is not None:
+        values.add((target_entity_type, str(target_entity_id)))
+    if target_entity_keys is not None:
+        values.update(
+            (entity_type, str(entity_id))
+            for entity_type, entity_id in target_entity_keys
+        )
+        if not values:
+            return []
+    if not values:
+        return None
+    return sorted(values)
