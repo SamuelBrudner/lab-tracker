@@ -64,6 +64,8 @@ class ProjectService(BaseService):
         )
         with self.unit_of_work() as repository:
             repository.projects.save(project)
+            # Flush the project before the request-managed owner membership insert.
+            repository.projects.get(project.project_id)
         if actor is not None and not self.authorization.has_global_admin(actor):
             membership = ProjectMembership(
                 membership_id=uuid4(),

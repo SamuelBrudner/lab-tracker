@@ -5,6 +5,8 @@ from uuid import uuid4
 
 from fastapi.testclient import TestClient
 
+from lab_tracker.auth import Role
+
 
 def _auth_headers(token: str) -> dict[str, str]:
     return {"Authorization": f"Bearer {token}"}
@@ -24,6 +26,25 @@ def _register_user_with_id(
     assert response.status_code == 201
     data = response.json()["data"]
     return data["access_token"], data["user"]["user_id"]
+
+
+def _register_user_with_role(
+    client: TestClient,
+    username: str,
+    role: str,
+    password: str = "secret",
+) -> tuple[str, str]:
+    user = client.app.state.auth_service.register_user(
+        username=username,
+        password=password,
+        role=Role(role),
+    )
+    login_response = client.post(
+        "/auth/login",
+        json={"username": username, "password": password},
+    )
+    assert login_response.status_code == 200
+    return login_response.json()["data"]["access_token"], str(user.user_id)
 
 
 def _create_project(client: TestClient, headers: dict[str, str], name: str) -> str:
@@ -134,7 +155,8 @@ def test_project_member_patch_updates_existing_member_without_creating_new_one(
     client: TestClient,
     admin_auth_headers: dict[str, str],
 ):
-    _, member_user_id = _register_user_with_id(client, "membership-patch-target")
+    member_token, member_user_id = _register_user_with_id(client, "membership-patch-target")
+    member_headers = _auth_headers(member_token)
     project_id = _create_project(client, admin_auth_headers, "Membership patch")
 
     create_member = client.post(
@@ -144,6 +166,13 @@ def test_project_member_patch_updates_existing_member_without_creating_new_one(
     )
     assert create_member.status_code == 201
 
+    denied_note = client.post(
+        "/notes",
+        json={"project_id": project_id, "raw_content": "Viewer cannot write yet."},
+        headers=member_headers,
+    )
+    assert denied_note.status_code == 401
+
     update_member = client.patch(
         f"/projects/{project_id}/members/{member_user_id}",
         json={"role": "contributor"},
@@ -152,6 +181,12 @@ def test_project_member_patch_updates_existing_member_without_creating_new_one(
 
     assert update_member.status_code == 200
     assert update_member.json()["data"]["role"] == "contributor"
+    allowed_note = client.post(
+        "/notes",
+        json={"project_id": project_id, "raw_content": "Contributor can write now."},
+        headers=member_headers,
+    )
+    assert allowed_note.status_code == 201
     list_members = client.get(f"/projects/{project_id}/members", headers=admin_auth_headers)
     matching_members = [
         item for item in list_members.json()["data"] if item["user_id"] == member_user_id
@@ -211,6 +246,68 @@ def test_project_member_create_checks_owner_before_resolving_user(
     assert existing_user.status_code == 401
     assert missing_user.json()["error"]["message"] == "Project owner access required."
     assert existing_user.json()["error"]["message"] == "Project owner access required."
+
+
+def test_project_member_delete_revokes_project_access(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+):
+    member_token, member_user_id = _register_user_with_id(client, "membership-delete-target")
+    member_headers = _auth_headers(member_token)
+    project_id = _create_project(client, admin_auth_headers, "Membership delete")
+    create_member = client.post(
+        f"/projects/{project_id}/members",
+        json={"user_id": member_user_id, "role": "viewer"},
+        headers=admin_auth_headers,
+    )
+    assert create_member.status_code == 201
+    visible_before = client.get(f"/projects/{project_id}", headers=member_headers)
+    assert visible_before.status_code == 200
+
+    delete_member = client.delete(
+        f"/projects/{project_id}/members/{member_user_id}",
+        headers=admin_auth_headers,
+    )
+
+    assert delete_member.status_code == 200
+    assert delete_member.json()["data"]["user_id"] == member_user_id
+    hidden_after = client.get(f"/projects/{project_id}", headers=member_headers)
+    assert hidden_after.status_code == 401
+    list_members = client.get(f"/projects/{project_id}/members", headers=admin_auth_headers)
+    assert member_user_id not in {item["user_id"] for item in list_members.json()["data"]}
+
+
+def test_project_member_patch_and_delete_keep_at_least_one_owner(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+):
+    owner_token, owner_user_id = _register_user_with_role(
+        client,
+        "membership-sole-owner",
+        "editor",
+    )
+    owner_headers = _auth_headers(owner_token)
+    project_id = _create_project(client, owner_headers, "Membership sole owner")
+
+    demote_owner = client.patch(
+        f"/projects/{project_id}/members/{owner_user_id}",
+        json={"role": "viewer"},
+        headers=owner_headers,
+    )
+    delete_owner = client.delete(
+        f"/projects/{project_id}/members/{owner_user_id}",
+        headers=owner_headers,
+    )
+
+    assert demote_owner.status_code == 422
+    assert demote_owner.json()["error"]["message"] == "Projects must keep at least one owner."
+    assert delete_owner.status_code == 422
+    assert delete_owner.json()["error"]["message"] == "Projects must keep at least one owner."
+    list_members = client.get(f"/projects/{project_id}/members", headers=owner_headers)
+    assert list_members.status_code == 200
+    assert [
+        item["role"] for item in list_members.json()["data"] if item["user_id"] == owner_user_id
+    ] == ["owner"]
 
 
 def test_project_contributor_can_use_core_write_routes(
