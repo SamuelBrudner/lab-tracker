@@ -48,7 +48,11 @@ from lab_tracker.schemas import (
 )
 from lab_tracker.sqlalchemy_mapper_parts.common import as_utc
 from lab_tracker.sqlalchemy_mapper_parts.projects import project_group_from_model
-from lab_tracker.sqlalchemy_repository_parts.common import apply_pagination, count_from_statement
+from lab_tracker.sqlalchemy_repository_parts.common import (
+    apply_pagination,
+    count_from_statement,
+    uuid_values,
+)
 
 STALE_PROJECT_AFTER = timedelta(days=30)
 OPEN_GOAL_STATUSES = {GoalStatus.PLANNED.value, GoalStatus.IN_PROGRESS.value}
@@ -66,7 +70,7 @@ def portfolio_summary_groups(
 
     session.flush()
     accessible_ids = (
-        _uuid_values(accessible_project_ids)
+        uuid_values(accessible_project_ids)
         if accessible_project_ids is not None
         else None
     )
@@ -107,10 +111,6 @@ def portfolio_summary_groups(
         for row in group_rows
     ]
     return groups, total_groups
-
-
-def _uuid_values(values: set[UUID]) -> list[str]:
-    return [str(value) for value in sorted(values, key=str)]
 
 
 def _project_filters(
