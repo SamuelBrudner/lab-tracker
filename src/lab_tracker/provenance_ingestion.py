@@ -291,7 +291,13 @@ def _optional_int_value(item: Mapping[str, Any], *keys: str) -> int | None:
     value = _text_value(item, *keys)
     if value is None:
         return None
-    return int(value)
+    try:
+        return int(value)
+    except ValueError:
+        try:
+            return int(float(value))
+        except (OverflowError, ValueError):
+            return None
 
 
 def _string_metadata(metadata: Mapping[str, str] | None) -> dict[str, str]:

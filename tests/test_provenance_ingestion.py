@@ -66,6 +66,23 @@ outs:
     ]
 
 
+def test_dvc_manifest_accepts_float_formatted_size():
+    manifest_input = dataset_manifest_from_dvc_manifest(
+        {
+            "outs": [
+                {
+                    "md5": "abc123",
+                    "size": "2048.0",
+                    "path": "sub-001/behavior.nwb",
+                }
+            ],
+        },
+        manifest_uri="dvc://lab/plume-navigation/raw.dvc?rev=abc123",
+    )
+
+    assert manifest_input.files[0].size_bytes == 2048
+
+
 def test_datalad_manifest_import_exports_provenance_and_question_edge():
     dataset_id = UUID("aaaaaaaa-5555-5555-5555-aaaaaaaaaaaa")
     question_id = UUID("bbbbbbbb-6666-6666-6666-bbbbbbbbbbbb")
@@ -132,3 +149,20 @@ def test_datalad_manifest_import_exports_provenance_and_question_edge():
     assert commit_node["questionLink"] == [{"@id": question_link_node["@id"]}]
     assert artifact_node["@type"] == "prov:Entity"
     assert artifact_node["externalSourceSystem"] == "datalad"
+
+
+def test_datalad_manifest_accepts_float_formatted_bytesize():
+    manifest_input = dataset_manifest_from_datalad_manifest(
+        {
+            "dataset": "lab/plume-navigation",
+            "files": [
+                {
+                    "path": "sub-001/behavior.nwb",
+                    "checksum": "sha256:file456",
+                    "bytesize": "2048.0",
+                }
+            ],
+        }
+    )
+
+    assert manifest_input.files[0].size_bytes == 2048
