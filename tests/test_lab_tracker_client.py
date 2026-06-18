@@ -413,6 +413,49 @@ def test_list_limit_is_total_cap_not_page_size() -> None:
     assert requests == [("3", "0")]
 
 
+def test_upsert_note_finds_existing_marker_after_first_page() -> None:
+    notes = [
+        {
+            "note_id": f"note-{index}",
+            "project_id": "project-1",
+            "raw_content": f"# marker {index}\n\nBody",
+        }
+        for index in range(250)
+    ]
+    notes[240]["raw_content"] = "# target marker\n\nExisting body"
+    requests: list[tuple[str, str]] = []
+    post_count = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal post_count
+        if request.method == "GET" and request.url.path == "/notes":
+            assert request.url.params["project_id"] == "project-1"
+            limit = int(request.url.params["limit"])
+            offset = int(request.url.params["offset"])
+            requests.append((str(limit), str(offset)))
+            return _json_response(
+                200,
+                {
+                    "data": notes[offset : offset + limit],
+                    "meta": {"limit": limit, "offset": offset, "total": len(notes)},
+                },
+            )
+        if request.method == "POST" and request.url.path == "/notes":
+            post_count += 1
+            return _json_response(201, {"data": {"note_id": "duplicate-note"}})
+        return _json_response(404, {"error": {"message": "not found"}})
+
+    with LabTracker(base_url="http://testserver", transport=httpx.MockTransport(handler)) as lt:
+        note = lt.upsert_note(
+            project_id="project-1",
+            content="# target marker\n\nReplacement body",
+        )
+
+    assert note.id == "note-240"
+    assert requests == [("200", "0"), ("200", "200")]
+    assert post_count == 0
+
+
 def test_transport_errors_use_client_error_hierarchy() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         raise httpx.ConnectError("offline", request=request)

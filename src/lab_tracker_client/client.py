@@ -6,7 +6,7 @@ import hashlib
 import json
 import mimetypes
 import os
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterator, Mapping, Sequence
 from contextlib import suppress
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -492,7 +492,7 @@ class LabTracker:
 
     def find_project_by_name(self, name: str) -> LTRecord | None:
         cleaned = _require_non_empty(name, "name")
-        for project in self.list_projects():
+        for project in self._iter_all("/projects"):
             if project.get("name") == cleaned:
                 return project
         return None
@@ -526,7 +526,7 @@ class LabTracker:
 
     def find_question_by_text(self, project_id: str, text: str) -> LTRecord | None:
         cleaned = _require_non_empty(text, "text")
-        for question in self.list_questions(project_id=str(project_id)):
+        for question in self._iter_all("/questions", params={"project_id": str(project_id)}):
             if question.get("text") == cleaned:
                 return question
         return None
@@ -572,7 +572,7 @@ class LabTracker:
 
     def find_note_by_marker(self, project_id: str, marker: str) -> LTRecord | None:
         cleaned = _require_non_empty(marker, "marker")
-        for note in self.list_notes(project_id=str(project_id)):
+        for note in self._iter_all("/notes", params={"project_id": str(project_id)}):
             if first_line_marker(str(note.get("raw_content") or "")) == cleaned:
                 return note
         return None
@@ -592,14 +592,14 @@ class LabTracker:
         )
         digest = _require_non_empty(content_hash, "content_hash")
         evidence_key = (provider, external_id, digest)
-        for note in self.list_notes(project_id=str(project_id)):
+        for note in self._iter_all("/notes", params={"project_id": str(project_id)}):
             if _evidence_note_key(note) == evidence_key:
                 return note
         return None
 
     def build_evidence_note_index(self, *, project_id: str) -> EvidenceNoteIndex:
         index: EvidenceNoteIndex = {}
-        for note in self.list_notes(project_id=str(project_id)):
+        for note in self._iter_all("/notes", params={"project_id": str(project_id)}):
             key = _evidence_note_key(note)
             if key is not None:
                 index.setdefault(key, note)
@@ -834,6 +834,41 @@ class LabTracker:
             metadata=evidence_metadata,
             note=note,
         )
+
+    def _iter_all(
+        self,
+        path: str,
+        *,
+        params: JsonObject | None = None,
+        offset: int = 0,
+    ) -> Iterator[LTRecord]:
+        current_offset = _validate_offset(offset)
+        while True:
+            payload = self._request(
+                "GET",
+                path,
+                params={
+                    **(params or {}),
+                    "limit": MAX_PAGE_SIZE,
+                    "offset": current_offset,
+                },
+            )
+            page_items = payload.get("data")
+            if not isinstance(page_items, list):
+                raise LTAPIError(f"{path} response did not include a list data field.")
+            for item in page_items:
+                yield _record(item)
+            meta = payload.get("meta")
+            returned_count = len(page_items)
+            if not isinstance(meta, dict):
+                if returned_count < MAX_PAGE_SIZE:
+                    break
+                current_offset += returned_count
+                continue
+            total = int(meta.get("total") or 0)
+            current_offset += returned_count
+            if current_offset >= total or returned_count == 0:
+                break
 
     def _list_all(
         self,
