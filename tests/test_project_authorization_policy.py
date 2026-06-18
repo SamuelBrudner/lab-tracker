@@ -297,3 +297,59 @@ def test_group_owner_cannot_remove_the_last_direct_project_owner() -> None:
             direct_owner.user_id,
             actor=group_owner,
         )
+
+
+def test_cannot_demote_the_last_direct_project_owner() -> None:
+    api, admin, project = _project_with_admin()
+    owner = _registered_actor(api, Role.VIEWER)
+    api.upsert_project_membership(
+        project.project_id,
+        owner.user_id,
+        ProjectMembershipRole.OWNER,
+        actor=admin,
+    )
+
+    with pytest.raises(ValidationError, match="Projects must keep at least one owner."):
+        api.upsert_project_membership(
+            project.project_id,
+            owner.user_id,
+            ProjectMembershipRole.VIEWER,
+            actor=owner,
+        )
+
+    membership = api.get_project_membership_for_user(project.project_id, owner.user_id)
+    assert membership is not None
+    assert membership.role == ProjectMembershipRole.OWNER
+
+
+def test_can_demote_project_owner_when_another_direct_owner_remains() -> None:
+    api, admin, project = _project_with_admin()
+    demoted_owner = _registered_actor(api, Role.VIEWER)
+    retained_owner = _registered_actor(api, Role.VIEWER)
+    api.upsert_project_membership(
+        project.project_id,
+        demoted_owner.user_id,
+        ProjectMembershipRole.OWNER,
+        actor=admin,
+    )
+    api.upsert_project_membership(
+        project.project_id,
+        retained_owner.user_id,
+        ProjectMembershipRole.OWNER,
+        actor=admin,
+    )
+
+    membership = api.upsert_project_membership(
+        project.project_id,
+        demoted_owner.user_id,
+        ProjectMembershipRole.CONTRIBUTOR,
+        actor=demoted_owner,
+    )
+
+    retained_membership = api.get_project_membership_for_user(
+        project.project_id,
+        retained_owner.user_id,
+    )
+    assert membership.role == ProjectMembershipRole.CONTRIBUTOR
+    assert retained_membership is not None
+    assert retained_membership.role == ProjectMembershipRole.OWNER

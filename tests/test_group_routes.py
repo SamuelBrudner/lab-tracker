@@ -286,3 +286,51 @@ def test_group_bulk_offboard_rejects_sole_project_owner_removal(
         "Cannot remove the last owner from projects:"
     )
     assert [item["project_id"] for item in still_visible.json()["data"]] == [project_id]
+
+
+def test_group_bulk_upsert_rejects_sole_project_owner_demotion(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+):
+    editor_token, _ = _register_user(
+        client,
+        f"group-bulk-demote-owner-{uuid4().hex[:8]}",
+        role="editor",
+        headers=admin_auth_headers,
+    )
+    editor_headers = _auth_headers(editor_token)
+    group = client.post(
+        "/groups",
+        json={"name": "Bulk demotion guard group"},
+        headers=editor_headers,
+    ).json()["data"]
+    project_id = _create_project(
+        client,
+        admin_auth_headers,
+        "Bulk demotion guarded project",
+        group_id=group["group_id"],
+    )
+    viewer_name = f"group-bulk-demotee-{uuid4().hex[:8]}"
+    _, viewer_user_id = _register_user(client, viewer_name)
+    onboard = client.post(
+        f"/groups/{group['group_id']}/project-memberships",
+        json={"username": viewer_name, "role": "owner"},
+        headers=editor_headers,
+    )
+    assert onboard.status_code == 200
+
+    demote = client.post(
+        f"/groups/{group['group_id']}/project-memberships",
+        json={"username": viewer_name, "role": "viewer"},
+        headers=editor_headers,
+    )
+    members = client.get(f"/projects/{project_id}/members", headers=editor_headers)
+
+    assert demote.status_code == 422
+    assert demote.json()["error"]["message"].startswith(
+        "Cannot demote the last owner from projects:"
+    )
+    matching_members = [
+        item for item in members.json()["data"] if item["user_id"] == viewer_user_id
+    ]
+    assert [item["role"] for item in matching_members] == ["owner"]

@@ -205,6 +205,9 @@ class SQLAlchemyLabTrackerRepository(LabTrackerRepository):
             user_id=user_id,
         )
 
+    def lock_project_owner_memberships(self, project_id: UUID) -> None:
+        self.project_memberships.lock_project_owners(project_id)
+
     def query_group_memberships(
         self,
         *,

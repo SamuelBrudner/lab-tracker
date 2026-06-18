@@ -126,6 +126,9 @@ class LabTrackerRepository(Protocol):
     ) -> ProjectMembership | None:
         """Return one project membership by project and user."""
 
+    def lock_project_owner_memberships(self, project_id: UUID) -> None:
+        """Lock direct owner membership rows for a project during invariant checks."""
+
     def query_group_memberships(
         self,
         *,
