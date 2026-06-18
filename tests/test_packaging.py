@@ -80,6 +80,23 @@ def test_dockerfile_copy_sources_exist_in_build_context():
     assert not missing, f"Dockerfile COPYs missing build-context paths: {missing}"
 
 
+def test_dockerfile_runs_app_as_non_root_user():
+    repo_root = Path(__file__).resolve().parent.parent
+    dockerfile = (repo_root / "Dockerfile").read_text(encoding="utf-8")
+
+    assert "adduser --system --ingroup labtracker" in dockerfile
+    assert "chown -R labtracker:labtracker /app /var/data" in dockerfile
+    assert "USER labtracker" in dockerfile
+
+
+def test_docker_entrypoint_has_short_migration_retry_budget():
+    repo_root = Path(__file__).resolve().parent.parent
+    entrypoint = (repo_root / "docker-entrypoint.sh").read_text(encoding="utf-8")
+
+    assert 'max_attempts="${MIGRATION_MAX_ATTEMPTS:-3}"' in entrypoint
+    assert "fix the migration or database before restarting the container" in entrypoint
+
+
 def test_frontend_package_data_covers_all_bundle_files():
     repo_root = Path(__file__).resolve().parent.parent
     package_root = repo_root / "src" / "lab_tracker"

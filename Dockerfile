@@ -7,6 +7,9 @@ WORKDIR /app
 
 ENV PATH="/app/.venv/bin:${PATH}"
 
+RUN addgroup --system labtracker \
+    && adduser --system --ingroup labtracker --home /app --no-create-home labtracker
+
 RUN apt-get update \
     && apt-get install --no-install-recommends -y ca-certificates \
     && rm -rf /var/lib/apt/lists/*
@@ -18,7 +21,11 @@ RUN pip install --no-cache-dir uv \
     && uv sync --frozen --no-dev --no-editable --compile-bytecode
 
 COPY docker-entrypoint.sh /app/docker-entrypoint.sh
-RUN chmod +x /app/docker-entrypoint.sh
+RUN chmod +x /app/docker-entrypoint.sh \
+    && mkdir -p /app/data /var/data \
+    && chown -R labtracker:labtracker /app /var/data
+
+USER labtracker
 
 EXPOSE 8000
 

@@ -53,16 +53,16 @@ if [ -z "${LAB_TRACKER_BOOTSTRAP_ADMIN_TOKEN:-}" ]; then
     export LAB_TRACKER_BOOTSTRAP_ADMIN_TOKEN
 fi
 
-max_attempts="${MIGRATION_MAX_ATTEMPTS:-30}"
+max_attempts="${MIGRATION_MAX_ATTEMPTS:-3}"
 sleep_seconds="${MIGRATION_SLEEP_SECONDS:-2}"
 attempt=1
 
 until alembic upgrade head; do
     if [ "$attempt" -ge "$max_attempts" ]; then
-        echo "Migration failed after ${attempt} attempts." >&2
+        echo "Database migration failed after ${attempt} attempt(s); fix the migration or database before restarting the container." >&2
         exit 1
     fi
-    echo "Migration attempt ${attempt} failed; retrying in ${sleep_seconds}s..." >&2
+    echo "Database migration attempt ${attempt}/${max_attempts} failed; retrying in ${sleep_seconds}s..." >&2
     attempt=$((attempt + 1))
     sleep "$sleep_seconds"
 done
