@@ -28,9 +28,10 @@ On Windows:
 .\scripts\serve-lan.ps1 -UsePostgres
 ```
 
-Both helpers print a normal app URL and a phone capture URL. The macOS/Linux
-helper also prints a terminal QR code when the `segno` Python package is
-available.
+The macOS/Linux helper prints both the normal app URL and the phone capture URL.
+It also prints a terminal QR code when the `segno` Python package is available.
+The Windows helper prints the health and app URLs; append `/capture` to the app
+URL for phone capture.
 
 ## Firewall Checks
 
@@ -45,5 +46,5 @@ available.
 ## Write Access
 
 Viewer accounts can open the app but cannot capture notes. Use `Request edit
-access` from the app, or ask an admin to grant an editor/admin global role or a
-project contributor/owner role.
+access` from the app, or ask an admin to grant the admin global role or a
+project contributor/owner membership.

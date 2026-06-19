@@ -17,9 +17,9 @@ from importlib import resources
 from pathlib import Path
 from textwrap import dedent
 
-from alembic import command
 from alembic.config import Config
 
+from alembic import command
 from lab_tracker.decision_context_constants import (
     CLAUDE_BLOCK_BEGIN,
     CLAUDE_BLOCK_END,

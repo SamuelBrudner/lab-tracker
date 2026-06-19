@@ -1,7 +1,8 @@
 # Mobile-First, Multimodal Graph-Aware Note-to-Graph Draft Review
 
 Status: Implemented for the v1 core photo, voice, photo+voice bundle, and text
-capture workflow; offline queued capture remains deferred.
+capture workflow, including offline queued capture with reconnect and boot-time
+sync. A durable unsynced-status indicator remains follow-up work.
 
 Tracking:
 
@@ -156,34 +157,36 @@ image + optional user hint + graph context packet + allowed operation schema
 
 It should produce draft graph operations, not direct writes.
 
-Example output:
+Example output shape. The graph patch operation schema is the real contract:
+`op` is `create` or `update`, `entity_type` names the retained graph entity,
+`semantic_type` names the allowed semantic operation, and `payload_json` is a
+JSON object string matching the API payload.
 
 ```json
 {
+  "summary": "Drafted one staged note from the whiteboard capture.",
+  "uncertain_fields": [
+    "Whether Fly 12 should be represented as a formal subject/entity"
+  ],
+  "clarification_requests": [],
   "operations": [
     {
-      "op": "create_note",
-      "target_type": "session",
-      "target_id": "session_2026_05_14_rig2",
-      "text": "Rig 2 gradient protocol. Fly 12 tracked well. Turning appeared stronger after pulse onset.",
-      "confidence": 0.86
-    },
-    {
-      "op": "link_note_to_question",
-      "note_ref": "new_note",
-      "question_id": "q_gradient_climbing",
-      "confidence": 0.82
-    },
-    {
-      "op": "suggest_followup",
-      "text": "Compare turning after pulse onset against smoother plume condition from prior sessions.",
-      "linked_question_id": "q_plume_statistics",
-      "confidence": 0.61
+      "client_ref": "note1",
+      "op": "create",
+      "entity_type": "note",
+      "semantic_type": "create_note",
+      "target_entity_id": null,
+      "payload_json": "{\"project_id\":\"project_gradient\",\"raw_content\":\"Rig 2 gradient protocol. Fly 12 tracked well. Turning appeared stronger after pulse onset.\",\"status\":\"staged\",\"targets\":[{\"entity_type\":\"session\",\"entity_id\":\"session_2026_05_14_rig2\"}]}",
+      "rationale": "The capture records a staged note tied to the rig session.",
+      "confidence": 0.86,
+      "source_refs": [
+        {
+          "label": "whiteboard",
+          "quote": "Turning appeared stronger after pulse onset.",
+          "region": null
+        }
+      ]
     }
-  ],
-  "uncertain_fields": [
-    "Exact identity of 'last week's smoother plume condition'",
-    "Whether Fly 12 should be represented as a formal subject/entity"
   ]
 }
 ```
@@ -277,12 +280,14 @@ narrow:
 
 ### Offline / Unreliable Network Tolerance
 
-Nice-to-have for later, but important for real lab settings:
+Implemented for phone capture:
 
-- allow local queued captures if network drops;
-- sync when connection returns;
-- preserve timestamp and user;
-- show unsynced status clearly.
+- local queued captures are stored when the network drops;
+- the queue drains when the browser comes back online and again at boot;
+- capture metadata preserves timestamp and user/device context;
+- the UI tells the user when a capture was queued.
+
+Remaining follow-up: show a durable unsynced-status indicator across the app.
 
 ### Minimal Capture Friction
 
@@ -524,7 +529,8 @@ Implemented defaults:
   machinery.
 - Review is hybrid: typed controls for common operations with JSON as the
   advanced escape hatch.
-- Offline local queued capture is deferred.
+- Offline local queued capture is implemented; a durable unsynced-status
+  indicator remains follow-up work.
 
 ### Suggested Milestones
 

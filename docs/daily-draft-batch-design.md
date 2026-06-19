@@ -1,8 +1,8 @@
-# Daily Draft Pass: How Should It Be Triggered?
+# Scheduled Draft Pass: How Should It Be Triggered?
 
-Companion to the "Daily AI graph-draft batch" epic (`lab-tracker-cw3`).
-This note exists to settle one product question — schedule vs. user-tap —
-before implementation begins.
+Companion to the "Scheduled AI graph-draft batch (user-set cadence)" epic
+(`lab-tracker-cw3`). This note settled one product question - schedule vs.
+user-tap - before the feature shipped.
 
 ## What is and isn't at stake
 

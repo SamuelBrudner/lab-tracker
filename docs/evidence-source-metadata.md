@@ -43,6 +43,7 @@ file came from. Imported notes never become canonical graph records on import,
 and graph changes are never committed automatically — humans review the staged
 notes, and human review remains the commit boundary.
 
-> Deferred / future, not part of v1: automated batch drafting that proposes
-> reviewable graph changes from staged notes could be layered on later, but it is
-> not shipping today.
+Shipped retained-v1 batch graph drafting can propose reviewable graph changes
+from staged notes, either on the configured cadence or from a user-triggered run.
+Those drafts still require human edit, accept, or reject review before any graph
+commit.

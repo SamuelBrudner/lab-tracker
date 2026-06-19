@@ -73,31 +73,11 @@ interpreter:
 }
 ```
 
-Available tools:
-
-- `lab_tracker_health`
-- `lab_tracker_readiness`
-- `lab_tracker_describe_schema`
-- `lab_tracker_get_decision_context`
-- `lab_tracker_list_projects`
-- `lab_tracker_list_questions`
-- `lab_tracker_list_notes`
-- `lab_tracker_list_sessions`
-- `lab_tracker_list_datasets`
-- `lab_tracker_list_analyses`
-- `lab_tracker_list_claims`
-- `lab_tracker_list_visualizations`
-- `lab_tracker_get_dataset_provenance`
-- `lab_tracker_get_analysis_provenance`
-- `lab_tracker_search`
-- `lab_tracker_create_project`
-- `lab_tracker_create_question`
-- `lab_tracker_create_note`
-- `lab_tracker_create_dataset`
-- `lab_tracker_create_analysis`
-- `lab_tracker_create_claim`
-- `lab_tracker_create_visualization`
-- `lab_tracker_record_evidence_bundle`
+The authoritative MCP tool inventory is generated in
+[`skills/lab-tracker/SKILL.md`](../skills/lab-tracker/SKILL.md) from the
+registered `READ_TOOLS` and `WRITE_TOOLS` tuples. Do not duplicate the list in
+this document; run `python scripts/generate_lab_tracker_skill_reference.py` after
+changing MCP tool registration.
 
 Decision-context tooling for assistant clients is specified in
 [`docs/mcp-decision-context-tooling.md`](mcp-decision-context-tooling.md). That

@@ -162,6 +162,34 @@ Response shape:
       "caveats": [],
       "missing_evidence": []
     },
+    "write_front_door": {
+      "allowed_task_kinds": [
+        "plot",
+        "analysis",
+        "slides",
+        "experiment_plan",
+        "summary",
+        "research_writing"
+      ],
+      "resolved_scope": {
+        "project_id": "uuid",
+        "project": {
+          "entity_type": "project",
+          "entity_id": "uuid",
+          "label": "Mosquito Optogenetics"
+        },
+        "anchors": []
+      },
+      "candidate_ids": {
+        "questions": [],
+        "sessions": [],
+        "datasets": [],
+        "analyses": [],
+        "claims": [],
+        "visualizations": []
+      },
+      "create_guidance": []
+    },
     "questions": [],
     "notes": [],
     "sessions": [],
@@ -189,8 +217,8 @@ Every returned entity must include:
 - short label or summary;
 - status;
 - timestamps when available;
-- relevance reason, such as `anchor`, `parent_question`, `child_question`,
-  `linked_dataset`, `search_match`, or `recent_activity`.
+- `relevance_reasons`, a list containing `anchor`, `search_match`, and/or
+  `recent_activity`.
 
 ### Low-Level Read Tools
 
@@ -231,17 +259,11 @@ The decision-context tool should use a deterministic retrieval policy.
      other anchors share it.
    - If no project is supplied, search active projects and questions. If multiple
      projects plausibly match, return ambiguity metadata with candidate projects.
-3. Retrieve anchor neighborhoods.
-   - For question anchors, include parent questions, child questions, notes
-     targeted to the question, datasets linked to the question, analyses linked
-     through those datasets or question filters, related claims, and related
-     visualizations.
-   - For dataset anchors, include primary and secondary question links, commit
-     manifest summary, notes, analyses, claims, and visualizations.
-   - For analysis anchors, include datasets, linked questions, claims,
-     visualizations, and provenance.
-   - For claim and visualization anchors, walk backward to analyses, datasets,
-     and questions.
+3. Return explicit anchors as direct entities.
+   - Anchor-neighborhood expansion is deferred. The current implementation keeps
+     the anchored entities, then adds project-scoped search matches and bounded
+     recent records instead of walking parent/child, dataset, analysis, claim, or
+     visualization neighborhoods.
 4. Search retained text surfaces using the query.
    - Use substring search across questions and notes.
    - Include matching questions and notes with match snippets.

@@ -6,8 +6,10 @@ import argparse
 from pathlib import Path
 from typing import Any
 
-BEGIN_MARKER = "<!-- BEGIN GENERATED API REFERENCE -->"
-END_MARKER = "<!-- END GENERATED API REFERENCE -->"
+API_BEGIN_MARKER = "<!-- BEGIN GENERATED API REFERENCE -->"
+API_END_MARKER = "<!-- END GENERATED API REFERENCE -->"
+MCP_TOOLS_BEGIN_MARKER = "<!-- BEGIN GENERATED MCP TOOL LIST -->"
+MCP_TOOLS_END_MARKER = "<!-- END GENERATED MCP TOOL LIST -->"
 
 REQUEST_SCHEMAS = (
     ("Projects", "ProjectCreate"),
@@ -53,9 +55,21 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     skill_path = Path(args.skill_path)
-    generated = generate_reference(build_openapi_schema())
+    generated_tools = generate_mcp_tool_list()
+    generated_api = generate_reference(build_openapi_schema())
     current = skill_path.read_text(encoding="utf-8")
-    updated = replace_generated_section(current, generated)
+    updated = replace_generated_section(
+        current,
+        MCP_TOOLS_BEGIN_MARKER,
+        MCP_TOOLS_END_MARKER,
+        generated_tools,
+    )
+    updated = replace_generated_section(
+        updated,
+        API_BEGIN_MARKER,
+        API_END_MARKER,
+        generated_api,
+    )
     if args.check:
         if updated != current:
             print(f"{skill_path} has a stale generated API reference.")
@@ -80,7 +94,7 @@ def build_openapi_schema() -> dict[str, Any]:
 def generate_reference(openapi: dict[str, Any]) -> str:
     components = openapi.get("components", {}).get("schemas", {})
     lines: list[str] = [
-        BEGIN_MARKER,
+        API_BEGIN_MARKER,
         "## API Fields And Enums (Generated)",
         "",
         "Generated from the FastAPI OpenAPI schema. Do not edit this section by hand; "
@@ -130,15 +144,49 @@ def generate_reference(openapi: dict[str, Any]) -> str:
                 description += "; minimum 0 from shared route validation"
             lines.append(f"- `{name}` ({required_text}): {description}")
 
-    lines.extend([END_MARKER, ""])
+    lines.extend([API_END_MARKER, ""])
     return "\n".join(lines)
 
 
-def replace_generated_section(skill_text: str, generated: str) -> str:
-    if BEGIN_MARKER not in skill_text or END_MARKER not in skill_text:
-        raise ValueError("Skill file does not contain generated API reference markers.")
-    before, rest = skill_text.split(BEGIN_MARKER, 1)
-    _, after = rest.split(END_MARKER, 1)
+def generate_mcp_tool_list() -> str:
+    from lab_tracker.mcp_tools import READ_TOOLS, WRITE_TOOLS
+
+    lines = [
+        MCP_TOOLS_BEGIN_MARKER,
+        "Use these tools when available. This list is generated from "
+        "`lab_tracker.mcp_tools.READ_TOOLS` and `WRITE_TOOLS`; do not edit it by hand.",
+        "",
+        "Read tools:",
+    ]
+    lines.extend(tool_bullets(READ_TOOLS))
+    lines.extend(["", "Write tools:"])
+    lines.extend(tool_bullets(WRITE_TOOLS))
+    lines.extend([MCP_TOOLS_END_MARKER, ""])
+    return "\n".join(lines)
+
+
+def tool_bullets(tools: tuple[Any, ...]) -> list[str]:
+    return [f"- `{tool.__name__}`: {tool_description(tool)}" for tool in tools]
+
+
+def tool_description(tool: Any) -> str:
+    doc = (tool.__doc__ or "").strip()
+    first_line = doc.splitlines()[0].strip() if doc else "Registered MCP tool."
+    if first_line.endswith("."):
+        return first_line
+    return first_line + "."
+
+
+def replace_generated_section(
+    skill_text: str,
+    begin_marker: str,
+    end_marker: str,
+    generated: str,
+) -> str:
+    if begin_marker not in skill_text or end_marker not in skill_text:
+        raise ValueError(f"Skill file does not contain {begin_marker} markers.")
+    before, rest = skill_text.split(begin_marker, 1)
+    _, after = rest.split(end_marker, 1)
     return before.rstrip() + "\n\n" + generated.rstrip() + "\n\n" + after.lstrip("\n")
 
 

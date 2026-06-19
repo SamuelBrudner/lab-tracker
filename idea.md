@@ -308,9 +308,10 @@ Import: From documents, project plans, or existing trackers.
 
 Phase Q2: Question Staging
 
-Captured question candidates land in a Question Staging Inbox:
+In shipped v1, users create staged questions explicitly. A future assisted flow
+could let captured question candidates land in a Question Staging Inbox:
 
-Extracted candidate questions are shown as suggestions.
+Extracted candidate questions would be shown as suggestions.
 
 User confirms/edits:
 
@@ -444,7 +445,7 @@ a stable HTTP API for everyone else
 Component	Technology	Rationale
 API Server	FastAPI (Python)	Async, typed, OpenAPI documentation
 Database	PostgreSQL	Mature, concurrent writes, institutional support
-Vector Store	ChromaDB	Semantic search for notes and questions
+Future/deferred Vector Store	ChromaDB or adapter	Semantic search for notes and questions after retained-v1 substring search is no longer enough
 Web UI	React + TypeScript	Rich interactions, type safety
 OCR/AI	Extraction engine (pluggable)	Mixed handwriting/diagrams; graceful fallback supported
 6.2 Server Requirements
@@ -556,7 +557,8 @@ PI + trainee write 3 candidate questions on a whiteboard.
 
 Trainee takes a photo via the mobile app.
 
-System extracts candidate questions into Question Staging.
+In shipped v1, the trainee enters staged questions explicitly. A future assist
+could extract candidate questions into Question Staging.
 
 Trainee confirms text, sets minimal types, and commits (activates) two questions.
 

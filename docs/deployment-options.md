@@ -67,11 +67,13 @@ Windows:
 
 See [`docs/phone-capture-quickstart.md`](phone-capture-quickstart.md).
 
-## Hosted Demo Requirement
+## Hosted Read-Only Demo
 
-A public hosted demo should be seeded, resettable or read-only, and linked from
-the repository homepage. Until that infrastructure is available, the README
-screenshots are the non-build preview path.
+The seeded read-only demo is live at
+[`samuelbrudner.github.io/lab-tracker/app/`](https://samuelbrudner.github.io/lab-tracker/app/)
+and linked from the repository homepage. It is the primary non-build preview
+path; README screenshots remain the fallback when the hosted demo is
+unavailable.
 
 ## Managed Lab Deployment
 

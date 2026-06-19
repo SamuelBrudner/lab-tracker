@@ -8,6 +8,10 @@ intentionally omitted unless they participate in the retained v1 runtime.
 
 Each HTTP request gets an explicit `LabTrackerRequestContext` in
 [`src/lab_tracker/request_context.py`](../src/lab_tracker/request_context.py).
+The scope machinery lives in
+[`src/lab_tracker/api.py`](../src/lab_tracker/api.py), and the database
+middleware that creates the request scope lives in
+[`src/lab_tracker/app_parts/middleware.py`](../src/lab_tracker/app_parts/middleware.py).
 
 The lifecycle is:
 

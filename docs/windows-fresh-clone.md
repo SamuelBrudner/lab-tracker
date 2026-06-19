@@ -24,7 +24,8 @@ bd context
 
 ## Application Setup
 
-The README uses Unix activation commands. In PowerShell, the pip/venv path is:
+The setup guide (`docs/setup.md`) uses Unix activation commands. In PowerShell,
+the pip/venv path is:
 
 ```powershell
 python -m venv .venv
@@ -42,7 +43,14 @@ npm.cmd run lint:frontend
 npm.cmd run build
 ```
 
-Start the local API with:
+Start the local app with the preferred launcher:
+
+```powershell
+.\.venv\Scripts\lab-tracker.exe serve
+```
+
+That launcher applies migrations and opens the browser. If you need the raw ASGI
+developer server instead, use:
 
 ```powershell
 .\.venv\Scripts\python.exe -m uvicorn lab_tracker.asgi:app --host 127.0.0.1 --port 8000

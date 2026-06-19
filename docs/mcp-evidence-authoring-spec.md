@@ -40,12 +40,18 @@ The core user story is:
 
 ## Current State
 
+Status update: the core evidence-authoring MCP tools described in this spec have
+since shipped. Treat the older "add this tool" language below as historical
+design notes unless it names a remaining follow-up.
+
 The MCP server exposes:
 
 - reads for projects, questions, notes, sessions, datasets, analyses, claims, and
   visualizations;
 - provenance reads for datasets and analyses;
-- creates for projects, questions, and text notes only.
+- creates for projects, questions, notes, datasets, analyses, claims,
+  visualizations, goals, claim edges, and goal links;
+- `lab_tracker_record_evidence_bundle` for the one-result convenience workflow.
 
 The API exposes write routes for:
 
@@ -55,8 +61,8 @@ The API exposes write routes for:
 - `POST /visualizations`
 - `POST /notes`
 
-The `lab-tracker` skill documents the read tools and the three current create
-tools, but it does not describe how an agent should author an evidence map.
+The `lab-tracker` skill documents the shipped read and write tools, including the
+evidence-map authoring order.
 
 ## Product Requirements
 
@@ -92,6 +98,7 @@ Required shape should mirror `POST /datasets`:
 - `project_id`
 - `primary_question_id`
 - optional `secondary_question_ids`
+- optional `commit_hash`
 - optional `commit_manifest`
 - optional `status`
 
@@ -150,6 +157,8 @@ Required shape should mirror `POST /claims`:
 - optional `status`
 - optional `supported_by_dataset_ids`
 - optional `supported_by_analysis_ids`
+- optional `answers_question_ids`
+- optional `external_citations`
 
 Recommended status rules:
 
@@ -207,17 +216,19 @@ Acceptance criteria:
   figures versus generated plot files, and prefers managed uploads when plot
   files exist.
 
-### 6. Optional Convenience: Commit Analysis With Claims And Visualizations
+### 6. Shipped Convenience: Record Evidence Bundle
 
-Expose `lab_tracker_commit_analysis` as a follow-up convenience tool, not as the
-minimum viable feature.
+`lab_tracker_record_evidence_bundle` shipped as the one-result convenience tool.
+The dedicated `lab_tracker_commit_analysis` name did not ship; use the bundle
+tool for the compact dataset -> analysis -> claim -> visualization workflow.
 
-Required shape should mirror `POST /analyses/{analysis_id}/commit`:
+The bundle input covers:
 
-- `analysis_id`
-- optional `environment_hash`
-- optional `claims`
-- optional `visualizations`
+- source note information;
+- dataset identity and manifest/hash fields;
+- analysis method/code provenance;
+- claim text, confidence, and question/support links;
+- visualization metadata or managed file upload details.
 
 Rationale: this supports a compact "record the analysis output" workflow after
 datasets and analysis are already staged. It should not replace the individual
@@ -225,10 +236,10 @@ create tools because agents often need to build evidence maps incrementally.
 
 Acceptance criteria:
 
-- MCP can commit a staged analysis and atomically create claims/visualizations
-  through existing API behavior.
+- MCP can plan or record a one-result evidence bundle through existing strict API
+  create/upload behavior.
 - Skill guidance recommends individual create tools for incremental graph
-  population and commit for one-shot analysis-output recording.
+  population and the bundle helper for one-shot analysis-output recording.
 
 ## Skill Updates
 
@@ -259,7 +270,7 @@ Add these MCP tools:
 - `lab_tracker_create_claim`
 - `lab_tracker_create_visualization`
 - `lab_tracker_upload_visualization_file`
-- `lab_tracker_commit_analysis` (optional follow-up)
+- `lab_tracker_record_evidence_bundle`
 
 Extend:
 
@@ -331,5 +342,5 @@ Ship the first pass as:
 6. skill/doc updates;
 7. tests for the end-to-end evidence-authoring flow.
 
-Leave `lab_tracker_commit_analysis`, update/delete tools, and any model changes
-for follow-up work.
+Leave a dedicated `lab_tracker_commit_analysis` tool, update/delete tools, and
+any model changes for follow-up work.

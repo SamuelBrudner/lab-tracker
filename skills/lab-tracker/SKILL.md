@@ -65,71 +65,52 @@ LAB_TRACKER_MCP_PASSWORD=<service-account-password>
 MCP username/password are only required when `LAB_TRACKER_AUTH_ENABLED=true`.
 Local auth-disabled testing can omit them.
 
-Use these tools when available:
+<!-- BEGIN GENERATED MCP TOOL LIST -->
+Use these tools when available. This list is generated from `lab_tracker.mcp_tools.READ_TOOLS` and `WRITE_TOOLS`; do not edit it by hand.
 
-- `lab_tracker_get_decision_context` returns bounded graph context before
-  research-facing decisions such as choosing plots, analyses, slides, experiment
-  plans, summaries, or research writing. Call it before research-facing
-  read-then-write tasks; its `write_front_door` block returns resolved project
-  scope, anchor IDs, candidate entity IDs, allowed task kinds, and follow-on
-  create guidance.
-- `lab_tracker_health` checks the API health endpoint.
-- `lab_tracker_readiness` checks database and storage readiness.
-- `lab_tracker_describe_schema` returns source-derived create/update fields,
-  required fields, allowed enum values, and known status lifecycle transitions.
-- `lab_tracker_list_projects` lists active or archived projects.
-- `lab_tracker_list_questions` filters questions by project, status, type,
-  search text, direct parent, or recursive ancestor.
-- `lab_tracker_list_notes` filters notes by project, status, search text, or
-  target.
-- `lab_tracker_list_sessions` lists sessions by project, status, or type.
-- `lab_tracker_list_datasets` lists datasets by project or status.
-- `lab_tracker_list_analyses` lists analyses by project, dataset, question, or
-  status.
-- `lab_tracker_list_claims` lists claims by project, status, dataset, or
-  analysis.
-- `lab_tracker_list_claim_edges` lists typed outgoing logic edges from a claim.
-- `lab_tracker_list_visualizations` lists visualizations by project, analysis,
-  or claim.
-- `lab_tracker_get_dataset_provenance` returns dataset provenance JSON-LD.
-- `lab_tracker_get_analysis_provenance` returns analysis provenance JSON-LD.
-- `lab_tracker_get_claim_provenance` returns claim-centric provenance JSON-LD
-  with analysis, dataset, code/environment, and question ancestry.
-- `lab_tracker_publication_readiness` checks ARA-Seal L1 structural readiness
-  for a project.
-- `lab_tracker_export_goal_artifact` compiles a Goal into a layered Ara artifact.
-  Pass `layer` as `logic`, `src`, `trace`, or `evidence` to retrieve one layer.
-- `lab_tracker_export_question_subtree` compiles a question subtree into a
-  layered Ara artifact. Pass `layer` for one independently retrievable layer.
-- `lab_tracker_search` searches questions and notes together.
-- `lab_tracker_create_project` creates a project.
-- `lab_tracker_create_question` creates a question in a project; pass
-  `parent_question_ids` to place atomic child questions under broader motivating
-  questions.
-- `lab_tracker_create_note` creates a text note in a project. Note statuses are
-  `staged`, `committed`, and `archived`; do not use question statuses such as
-  `active`. Pass `targets` to attach notes to projects, questions, sessions,
-  datasets, analyses, claims, visualizations, or other notes. Metadata values may
-  be strings, numbers, or booleans and are stored as strings; nested metadata
-  objects and arrays are unsupported.
-- `lab_tracker_create_dataset` creates a dataset linked to a primary question
-  and optional secondary questions.
-- `lab_tracker_create_analysis` creates an analysis linked to one or more
-  datasets.
-- `lab_tracker_create_claim` creates a claim, optionally linked to supporting
-  datasets or analyses.
-- `lab_tracker_create_claim_edge` links one claim to another with a typed logic
-  relation such as `extends`, `refutes`, or `depends_on`.
-- `lab_tracker_create_visualization` creates a visualization linked to an
-  analysis and optional related claims.
-- `lab_tracker_upload_visualization_file` uploads a local file into managed Lab
-  Tracker storage for a visualization node. Use this when a plot or extracted
-  figure exists on disk and should be available to remote clients through the
-  API rather than only by local filesystem path.
-- `lab_tracker_record_evidence_bundle` plans or records one result across
-  dataset, analysis, claim, visualization, and optional source note records.
-  `dry_run` defaults to true; use an `idempotency_key` and concrete provenance
-  values so retries reuse existing records instead of creating duplicates.
+Read tools:
+- `lab_tracker_health`: Check Lab Tracker API health; fail softly if the service is unavailable.
+- `lab_tracker_readiness`: Check Lab Tracker database and storage readiness.
+- `lab_tracker_describe_schema`: Describe fields/enums before create_* calls; use after context lookup.
+- `lab_tracker_list_projects`: List visible projects when scoping a follow-up Lab Tracker read.
+- `lab_tracker_list_questions`: List/search questions when inspecting known project/question scope.
+- `lab_tracker_list_notes`: List notes for known scope; use decision context first for research choices.
+- `lab_tracker_search`: Search questions and notes when the project or anchor IDs are not known.
+- `lab_tracker_list_sessions`: List acquisition/experiment sessions for a known project scope.
+- `lab_tracker_list_datasets`: List datasets; create-order is dataset -> analysis -> claim -> visualization.
+- `lab_tracker_list_analyses`: List analyses; use after datasets and before claims/visualizations.
+- `lab_tracker_list_claims`: List claims for known evidence; claims come after datasets and analyses.
+- `lab_tracker_list_claim_edges`: List typed outgoing logic edges for a claim.
+- `lab_tracker_list_visualizations`: List visualizations after resolving related analyses or claims.
+- `lab_tracker_list_goals`: List goals/outputs when deciding what research objective to advance.
+- `lab_tracker_get_goal`: Get one goal with node links before advancing or updating it.
+- `lab_tracker_publication_readiness`: Check ARA-Seal L1 structural readiness for one project.
+- `lab_tracker_list_node_goals`: List goals linked to one project graph node.
+- `lab_tracker_get_dataset_provenance`: Get dataset provenance JSON-LD before reusing evidence.
+- `lab_tracker_get_analysis_provenance`: Get analysis provenance JSON-LD before reusing derived evidence.
+- `lab_tracker_get_claim_provenance`: Get claim-centric provenance JSON-LD with analysis/dataset/question ancestry.
+- `lab_tracker_export_goal_artifact`: Compile a goal into an Ara artifact; pass layer logic/src/trace/evidence for one layer.
+- `lab_tracker_export_question_subtree`: Compile a question subtree into layered Ara JSON-LD.
+- `lab_tracker_get_decision_context`: CALL THIS FIRST before research-facing decisions.
+- `lab_tracker_next_questions`: Rank open active/staged questions on planned/in-progress goals.
+
+Write tools:
+- `lab_tracker_create_project`: Create a project only when the user explicitly asks for a new scope.
+- `lab_tracker_create_question`: Create a question after project/goal scope is known.
+- `lab_tracker_refactor_question`: Supersede a question with a replacement and optional child/note moves.
+- `lab_tracker_list_question_refactors`: List refactor history where a question is the source or replacement.
+- `lab_tracker_create_note`: Create a text note when the user asks to record source context.
+- `lab_tracker_create_dataset`: Create a dataset before analyses, claims, and visualizations.
+- `lab_tracker_create_analysis`: Create an analysis after datasets and before claims or figures.
+- `lab_tracker_create_claim`: Create a claim after linking supporting datasets or analyses.
+- `lab_tracker_create_claim_edge`: Create a typed claim-to-claim logic edge such as refutes or extends.
+- `lab_tracker_create_visualization`: Register a visualization after its analysis and related claims exist.
+- `lab_tracker_create_goal`: Create a goal/output before linking questions, datasets, or claims.
+- `lab_tracker_update_goal`: Update a Lab Tracker goal/output.
+- `lab_tracker_link_node_to_goal`: Tag an existing graph node in relation to a goal/output.
+- `lab_tracker_upload_visualization_file`: Upload a local file into managed storage for a visualization node.
+- `lab_tracker_record_evidence_bundle`: Preview or record a dataset-analysis-claim-visualization evidence bundle.
+<!-- END GENERATED MCP TOOL LIST -->
 
 Creation tools write through the API, using the configured service account when
 authentication is enabled. Be explicit before creating or mutating research
@@ -175,8 +156,8 @@ explicitly before proceeding.
 For MCP clients on other computers, point `LAB_TRACKER_MCP_BASE_URL` at the
 serving machine, preferably the durable HTTPS Funnel URL above. Same-tailnet or
 LAN-only clients can also use `http://<host-ip>:8000` when the server is
-explicitly bound for LAN serving. Use `docs/workstation-https-serving.md` and
-`docs/lan-shared-graph.md` for the current serving modes.
+explicitly bound for LAN serving. Use `docs/lan-shared-graph.md` for the
+current serving modes.
 
 ## Question Staging Workflow
 
