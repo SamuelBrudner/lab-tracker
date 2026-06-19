@@ -29,6 +29,7 @@ from lab_tracker.models import (
     QuestionLink,
     QuestionLinkRole,
     RecordExportRecords,
+    Session,
     SupervisionEdge,
     Visualization,
 )
@@ -86,6 +87,7 @@ def _context(base_url: str) -> dict[str, object]:
         "environmentHash": "lab:environmentHash",
         "entityId": "lab:entityId",
         "entityType": "lab:entityType",
+        "endedAt": "lab:endedAt",
         "executedAt": "lab:executedAt",
         "evidence": {"@id": "lab:evidence", "@type": "@id"},
         "externalArtifact": {"@id": "lab:externalArtifact", "@type": "@id"},
@@ -107,6 +109,7 @@ def _context(base_url: str) -> dict[str, object]:
         "nwbMetadata": {"@id": "lab:nwbMetadata", "@type": "@json"},
         "outcomeStatus": "lab:outcomeStatus",
         "origin": "lab:origin",
+        "primaryQuestion": {"@id": "lab:primaryQuestion", "@type": "@id"},
         "question": {"@id": "lab:question", "@type": "@id"},
         "questionLink": {"@id": "lab:questionLink", "@type": "@id"},
         "questionType": "lab:questionType",
@@ -121,12 +124,15 @@ def _context(base_url: str) -> dict[str, object]:
         "supportsAnalysis": {"@id": "lab:supportsAnalysis", "@type": "@id"},
         "supportsDataset": {"@id": "lab:supportsDataset", "@type": "@id"},
         "sha256": "lab:sha256",
+        "sessionType": "lab:sessionType",
         "supervisionEndedAt": "lab:supervisionEndedAt",
         "supervisionStartedAt": "lab:supervisionStartedAt",
+        "startedAt": "lab:startedAt",
         "target": {"@id": "lab:target", "@type": "@id"},
         "terminalReason": "lab:terminalReason",
         "text": "lab:text",
         "transcribedText": "lab:transcribedText",
+        "updatedAt": "lab:updatedAt",
         "userId": "lab:userId",
         "versionNumber": "lab:versionNumber",
         "vizType": "lab:vizType",
@@ -280,9 +286,7 @@ def _apply_origin_provenance(
     if origin == EntityOrigin.USER_REVISED:
         # The companion "before" node is materialized by _origin_provenance_nodes so
         # this reference resolves within @graph.
-        node["prov:wasRevisionOf"] = {
-            "@id": _before_revision_iri(str(node["@id"]), change_set_id)
-        }
+        node["prov:wasRevisionOf"] = {"@id": _before_revision_iri(str(node["@id"]), change_set_id)}
         _append_id_ref(node, "prov:wasInformedBy", draft_activity)
     elif _node_type_includes(node, "prov:Activity"):
         _append_id_ref(node, "prov:wasInformedBy", draft_activity)
@@ -632,8 +636,7 @@ def _analysis_summary_node(
         node["environmentHash"] = analysis.environment_hash
     if datasets:
         node["prov:used"] = [
-            {"@id": _resource_iri(base_url, "datasets", dataset.dataset_id)}
-            for dataset in datasets
+            {"@id": _resource_iri(base_url, "datasets", dataset.dataset_id)} for dataset in datasets
         ]
     for artifact in analysis.external_artifacts:
         if artifact.kind == ExternalArtifactKind.ENTITY:
@@ -715,10 +718,7 @@ def build_claim_provenance_document(
     attributed_user_ids = _unique_user_ids(
         [
             claim_creator_user_id,
-            *[
-                dataset_attribution.get(dataset_id)
-                for dataset_id in claim.supported_by_dataset_ids
-            ],
+            *[dataset_attribution.get(dataset_id) for dataset_id in claim.supported_by_dataset_ids],
             *[
                 analysis_attribution.get(analysis_id)
                 for analysis_id in claim.supported_by_analysis_ids
@@ -798,9 +798,7 @@ def _claim_node(
             {"@id": _resource_iri(base_url, "questions", question_id)}
             for question_id in claim.answers_question_ids
         ]
-    outgoing_edges = [
-        edge for edge in claim_edges or [] if edge.claim_id == claim.claim_id
-    ]
+    outgoing_edges = [edge for edge in claim_edges or [] if edge.claim_id == claim.claim_id]
     if outgoing_edges:
         node["claimRelation"] = [
             {"@id": _claim_relation_iri(base_url, edge)} for edge in outgoing_edges
@@ -819,9 +817,7 @@ def _claim_relation_node(base_url: str, edge: ClaimEdge) -> dict[str, object]:
         "@id": _claim_relation_iri(base_url, edge),
         "@type": "lab:ClaimRelation",
         "claimRelationSource": {"@id": _resource_iri(base_url, "claims", edge.claim_id)},
-        "claimRelationTarget": {
-            "@id": _resource_iri(base_url, "claims", edge.target_claim_id)
-        },
+        "claimRelationTarget": {"@id": _resource_iri(base_url, "claims", edge.target_claim_id)},
         "claimRelationType": edge.relation.value,
         "createdAt": _isoformat(edge.created_at),
     }
@@ -986,14 +982,10 @@ def build_analysis_provenance_document(
             )
         )
         graph.extend(_origin_provenance_nodes(base_url, claim))
-        graph.extend(
-            _external_artifact_node(citation) for citation in claim.external_citations
-        )
+        graph.extend(_external_artifact_node(citation) for citation in claim.external_citations)
     claim_ids = {claim.claim_id for claim in claims}
     graph.extend(
-        _claim_relation_node(base_url, edge)
-        for edge in claim_edges
-        if edge.claim_id in claim_ids
+        _claim_relation_node(base_url, edge) for edge in claim_edges if edge.claim_id in claim_ids
     )
     for visualization in visualizations:
         visualization_creator_user_id = _creator_user_id(
@@ -1110,6 +1102,41 @@ def _note_node(
             base_url,
             creator_user_id,
             activity_time=note.created_at,
+            supervision_edges=supervision_edges,
+        )
+    return node
+
+
+def _session_node(
+    base_url: str,
+    session: Session,
+    *,
+    people: dict[str, dict[str, object]],
+    supervision_edges: list[SupervisionEdge],
+) -> dict[str, object]:
+    node: dict[str, object] = {
+        "@id": _resource_iri(base_url, "sessions", session.session_id),
+        "@type": "prov:Activity",
+        "sessionType": session.session_type.value,
+        "status": session.status.value,
+        "startedAt": _isoformat(session.started_at),
+        "updatedAt": _isoformat(session.updated_at),
+    }
+    if session.ended_at is not None:
+        node["endedAt"] = _isoformat(session.ended_at)
+    if session.primary_question_id is not None:
+        node["primaryQuestion"] = {
+            "@id": _resource_iri(base_url, "questions", session.primary_question_id)
+        }
+    _apply_origin_provenance(base_url, node, session)
+    creator_user_id = _creator_user_id(session.created_by_user_id, session.created_by)
+    if creator_user_id is not None:
+        node["prov:wasAssociatedWith"] = {"@id": _agent_iri(base_url, creator_user_id)}
+        _add_person_with_supervision(
+            people,
+            base_url,
+            creator_user_id,
+            activity_time=session.started_at,
             supervision_edges=supervision_edges,
         )
     return node
@@ -1316,6 +1343,7 @@ def _ara_logic_graph(
     if records.goal is not None:
         goal_node = _goal_node(base_url, records.goal)
         merged[str(goal_node["@id"])] = goal_node
+        _merge_graph_nodes(merged, _origin_provenance_nodes(base_url, records.goal))
     for link in records.goal_links or []:
         link_node = _goal_link_node(base_url, link)
         merged[str(link_node["@id"])] = link_node
@@ -1671,6 +1699,16 @@ def build_record_export_provenance_document(
         merged.setdefault(str(node["@id"]), node)
         _merge_graph_nodes(merged, _origin_provenance_nodes(base_url, note))
 
+    for session in records.sessions:
+        node = _session_node(
+            base_url,
+            session,
+            people=people,
+            supervision_edges=supervision_edges,
+        )
+        merged.setdefault(str(node["@id"]), node)
+        _merge_graph_nodes(merged, _origin_provenance_nodes(base_url, session))
+
     for dataset in records.datasets:
         document = build_dataset_provenance_document(
             base_url,
@@ -1723,6 +1761,33 @@ def build_record_export_provenance_document(
         analysis.analysis_id: _creator_user_id(analysis.executed_by_user_id, analysis.executed_by)
         for analysis in records.analyses
     }
+    for visualization in records.visualizations:
+        visualization_creator_user_id = _creator_user_id(
+            visualization.created_by_user_id,
+            visualization.created_by,
+        )
+        attributed_user_ids = _unique_user_ids(
+            [
+                visualization_creator_user_id,
+                analysis_attribution.get(visualization.analysis_id),
+            ]
+        )
+        for user_id in attributed_user_ids:
+            _add_person_with_supervision(
+                people,
+                base_url,
+                user_id,
+                activity_time=visualization.created_at,
+                supervision_edges=supervision_edges,
+            )
+        node = _visualization_node(
+            base_url,
+            visualization,
+            attributed_user_ids=attributed_user_ids,
+        )
+        merged.setdefault(str(node["@id"]), node)
+        _merge_graph_nodes(merged, _origin_provenance_nodes(base_url, visualization))
+
     for claim in records.claims:
         if claim.claim_id in covered_claim_ids:
             continue

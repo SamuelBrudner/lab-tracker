@@ -15,8 +15,12 @@ from lab_tracker.models import (
     DatasetFile,
     DatasetStatus,
     EntityOrigin,
+    EntityType,
     ExternalArtifactKind,
     ExternalArtifactReference,
+    Goal,
+    GoalStatus,
+    GoalType,
     OutcomeStatus,
     Question,
     QuestionLink,
@@ -29,7 +33,9 @@ from lab_tracker.models import (
     VisualizationAsset,
 )
 from lab_tracker.provenance import (
+    AraArtifactRecords,
     build_analysis_provenance_document,
+    build_ara_artifact_document,
     build_dataset_provenance_document,
     build_record_export_provenance_document,
 )
@@ -275,6 +281,62 @@ def test_analysis_provenance_distinguishes_ai_suggested_and_user_revised_nodes()
     assert agent_node["aiProvider"] == "openai"
     assert agent_node["aiModel"] == "fake-gpt"
     assert agent_node["aiPromptVersion"] == "multimodal-graph-draft-v1"
+
+
+def test_goal_ara_logic_layer_materializes_origin_nodes():
+    goal_id = UUID("aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee")
+    change_set_id = UUID("99999999-8888-4777-8666-555555555555")
+    goal = Goal(
+        goal_id=goal_id,
+        project_id=uuid4(),
+        goal_type=GoalType.PAPER,
+        title="AI-revised goal",
+        status=GoalStatus.IN_PROGRESS,
+        origin=EntityOrigin.USER_REVISED,
+        change_set_id=change_set_id,
+        origin_provider="openai",
+        origin_model="fake-gpt",
+        origin_prompt_version="goal-draft-v1",
+    )
+
+    document = build_ara_artifact_document(
+        "http://example.test",
+        scope_type=EntityType.GOAL,
+        scope_id=goal_id,
+        records=AraArtifactRecords(
+            questions=[],
+            datasets=[],
+            analyses=[],
+            claims=[],
+            claim_edges=[],
+            notes=[],
+            visualizations=[],
+            entity_versions=[],
+            goal=goal,
+        ),
+        generated_at=datetime(2026, 6, 19, tzinfo=timezone.utc),
+        layer_name="logic",
+    )
+
+    goal_iri = f"http://example.test/goals/{goal_id}"
+    draft_iri = f"http://example.test/graph-drafts/{change_set_id}"
+    agent_iri = f"{draft_iri}/software-agent"
+    before_iri = f"{goal_iri}/versions/before/{change_set_id}"
+    goal_node = _node_by_id(document, goal_iri)
+    draft_node = _node_by_id(document, draft_iri)
+    agent_node = _node_by_id(document, agent_iri)
+    before_node = _node_by_id(document, before_iri)
+
+    assert goal_node["origin"] == "user_revised"
+    assert goal_node["prov:wasRevisionOf"] == {"@id": before_iri}
+    assert goal_node["changeSet"] == {"@id": draft_iri}
+    assert before_node["origin"] == "ai_suggested"
+    assert before_node["changeSet"] == {"@id": draft_iri}
+    assert draft_node["prov:wasAssociatedWith"] == {"@id": agent_iri}
+    assert _node_type_includes(agent_node, "prov:SoftwareAgent")
+    assert agent_node["aiProvider"] == "openai"
+    assert agent_node["aiModel"] == "fake-gpt"
+    assert agent_node["aiPromptVersion"] == "goal-draft-v1"
 
 
 def test_dataset_provenance_uses_inline_context_and_json_metadata():

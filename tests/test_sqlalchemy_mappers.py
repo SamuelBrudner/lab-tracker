@@ -302,9 +302,7 @@ def test_dataset_mapper_reads_legacy_external_artifact_metadata():
         question_links=[],
         commit_manifest=DatasetCommitManifest(
             metadata={
-                EXTERNAL_ARTIFACTS_METADATA_KEY: encode_external_artifacts(
-                    [artifact, artifact]
-                )
+                EXTERNAL_ARTIFACTS_METADATA_KEY: encode_external_artifacts([artifact, artifact])
             },
         ),
     )
@@ -374,6 +372,7 @@ def test_note_mapper_round_trip_for_supported_fields():
         transcribed_text="signal is stable",
         targets=targets,
         metadata={"device": "np2"},
+        client_capture_id="capture-round-trip",
         status=NoteStatus.COMMITTED,
         created_by="operator-1",
         created_at=_ts(),
@@ -386,4 +385,5 @@ def test_note_mapper_round_trip_for_supported_fields():
     )
     assert mapped.raw_asset is None
     assert mapped.metadata == {"device": "np2"}
+    assert mapped.client_capture_id == "capture-round-trip"
     assert mapped.targets == targets

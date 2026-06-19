@@ -588,6 +588,25 @@ class GraphDraftService(BaseService):
         due_settings = self.repository.list_due_graph_draft_batch_settings(current_time)
         runs: list[GraphDraftBatchRun] = []
         for batch_settings in due_settings:
+            if batch_settings.next_run_at is None:
+                continue
+            claimed_next_run_at = _next_run_at(
+                cadence_minutes=batch_settings.cadence_minutes,
+                run_at_local_time=batch_settings.run_at_local_time,
+                timezone_name=batch_settings.timezone_name,
+                now=current_time,
+            )
+            with self.unit_of_work() as repository:
+                claimed_settings = repository.claim_due_graph_draft_batch_settings(
+                    batch_settings.settings_id,
+                    observed_next_run_at=batch_settings.next_run_at,
+                    next_run_at=claimed_next_run_at,
+                    updated_at=utc_now(),
+                    updated_by=actor_user_id(actor),
+                )
+            if claimed_settings is None:
+                continue
+            batch_settings = claimed_settings
             try:
                 self.projects.get_project(batch_settings.project_id)
             except NotFoundError:
@@ -621,16 +640,6 @@ class GraphDraftService(BaseService):
                     if callable(close):
                         close()
             runs.append(run)
-            batch_settings.next_run_at = _next_run_at(
-                cadence_minutes=batch_settings.cadence_minutes,
-                run_at_local_time=batch_settings.run_at_local_time,
-                timezone_name=batch_settings.timezone_name,
-                now=current_time,
-            )
-            batch_settings.updated_at = utc_now()
-            batch_settings.updated_by = actor_user_id(actor)
-            with self.unit_of_work() as repository:
-                repository.graph_draft_batch_settings.save(batch_settings)
         return runs
 
     def _record_failed_scheduled_batch_run(

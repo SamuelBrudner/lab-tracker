@@ -56,11 +56,14 @@ allow_env_creation = true
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]
+markers = [
+  "postgres: requires LAB_TRACKER_POSTGRES_TEST_DATABASE_URL and a reachable Postgres server",
+]
 
 [tool.ruff]
 line-length = 100
 target-version = "py310"
-extend-exclude = ["src/lab_tracker/alembic"]
+extend-exclude = ["src/lab_tracker/alembic", "build"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "B", "UP", "SIM"]

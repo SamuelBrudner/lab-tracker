@@ -207,10 +207,8 @@ class LabTracker:
             base_url=os.getenv("LAB_TRACKER_BASE_URL")
             or os.getenv("LAB_TRACKER_MCP_BASE_URL")
             or DEFAULT_BASE_URL,
-            username=os.getenv("LAB_TRACKER_USERNAME")
-            or os.getenv("LAB_TRACKER_MCP_USERNAME"),
-            password=os.getenv("LAB_TRACKER_PASSWORD")
-            or os.getenv("LAB_TRACKER_MCP_PASSWORD"),
+            username=os.getenv("LAB_TRACKER_USERNAME") or os.getenv("LAB_TRACKER_MCP_USERNAME"),
+            password=os.getenv("LAB_TRACKER_PASSWORD") or os.getenv("LAB_TRACKER_MCP_PASSWORD"),
             access_token=os.getenv("LAB_TRACKER_ACCESS_TOKEN"),
             default_project_id=os.getenv("LAB_TRACKER_PROJECT_ID"),
             timeout_seconds=float(
@@ -483,9 +481,7 @@ class LabTracker:
         claims: list[JsonObject] = []
         for lookup_project_id in project_ids:
             for status in OPEN_QUESTION_STATUSES:
-                questions.extend(
-                    self.list_questions(project_id=lookup_project_id, status=status)
-                )
+                questions.extend(self.list_questions(project_id=lookup_project_id, status=status))
             claims.extend(self.list_claims(project_id=lookup_project_id))
 
         return build_next_questions_payload(goals, questions, claims, limit=limit)
@@ -629,6 +625,13 @@ class LabTracker:
         resolved_metadata = _validate_metadata(metadata)
         existing = self.find_note_by_marker(project_id, marker)
         if existing is not None:
+            existing_content = str(existing.get("raw_content") or "")
+            if _canonical_note_content(existing_content) != _canonical_note_content(content):
+                raise LTValidationError(
+                    "Existing note with the same first-line marker has different "
+                    "content. Use a unique marker or update the existing note "
+                    f"explicitly. Marker: {marker!r}."
+                )
             return existing
         return self._data_record(
             self._request(
@@ -654,6 +657,7 @@ class LabTracker:
         content_type: str = "text/plain",
         metadata: Mapping[str, NoteMetadataScalar] | None = None,
         source: str | None = None,
+        client_capture_id: str | None = None,
     ) -> LTRecord:
         resolved_project_id = project_id or self.default_project_id
         if not resolved_project_id:
@@ -667,6 +671,11 @@ class LabTracker:
         if source:
             resolved_metadata["source"] = source
         data: dict[str, str] = {"project_id": str(resolved_project_id)}
+        if client_capture_id:
+            data["client_capture_id"] = _require_non_empty(
+                client_capture_id,
+                "client_capture_id",
+            )
         if resolved_metadata:
             data["metadata"] = json.dumps(resolved_metadata)
         return self._data_record(
@@ -687,6 +696,7 @@ class LabTracker:
         status: str = NoteStatus.STAGED.value,
         content_type: str | None = None,
         transcribed_text: str | None = None,
+        client_capture_id: str | None = None,
     ) -> LTRecord:
         path = Path(file_path).expanduser()
         payload = _read_non_empty_file(
@@ -701,6 +711,7 @@ class LabTracker:
             status=status,
             content_type=content_type,
             transcribed_text=transcribed_text,
+            client_capture_id=client_capture_id,
         )
 
     def _upload_note_file_payload(
@@ -713,6 +724,7 @@ class LabTracker:
         status: str = NoteStatus.STAGED.value,
         content_type: str | None = None,
         transcribed_text: str | None = None,
+        client_capture_id: str | None = None,
     ) -> LTRecord:
         if not payload:
             raise LTValidationError("file_path must point to a non-empty file.")
@@ -723,14 +735,17 @@ class LabTracker:
         )
         resolved_metadata = _validate_metadata(metadata)
         resolved_content_type = (
-            content_type
-            or mimetypes.guess_type(path.name)[0]
-            or "application/octet-stream"
+            content_type or mimetypes.guess_type(path.name)[0] or "application/octet-stream"
         )
         data: dict[str, str] = {
             "project_id": _require_non_empty(str(project_id), "project_id"),
             "status": resolved_status,
         }
+        if client_capture_id:
+            data["client_capture_id"] = _require_non_empty(
+                client_capture_id,
+                "client_capture_id",
+            )
         if resolved_metadata:
             data["metadata"] = json.dumps(resolved_metadata, sort_keys=True)
         if transcribed_text:
@@ -1016,6 +1031,10 @@ def first_line_marker(content: str) -> str:
     return ""
 
 
+def _canonical_note_content(content: str) -> str:
+    return content.replace("\r\n", "\n").replace("\r", "\n").strip()
+
+
 def file_sha256(path: str | Path) -> str:
     digest = hashlib.sha256()
     resolved = Path(path).expanduser()
@@ -1115,8 +1134,7 @@ def ids(path: str | Path = "lt_ids.json") -> dict[str, str]:
     except FileNotFoundError as exc:
         raise LTError(f"{resolved} not found.") from exc
     if not isinstance(payload, dict) or not all(
-        isinstance(key, str) and isinstance(value, str)
-        for key, value in payload.items()
+        isinstance(key, str) and isinstance(value, str) for key, value in payload.items()
     ):
         raise LTValidationError(f"{resolved} must contain a JSON object of string ids.")
     return payload
@@ -1269,11 +1287,7 @@ def _project_ids_for_next_question_lookup(
     if project_id is not None:
         return [project_id]
     goal_project_ids = sorted(
-        {
-            str(goal["project_id"])
-            for goal in goals
-            if goal.get("project_id") is not None
-        }
+        {str(goal["project_id"]) for goal in goals if goal.get("project_id") is not None}
     )
     return goal_project_ids or [None]
 
@@ -1312,9 +1326,7 @@ def _validate_enum(
     cleaned = str(value).strip().lower()
     if cleaned not in allowed_values:
         allowed_text = ", ".join(allowed_values)
-        raise LTValidationError(
-            f"Invalid {field_name} {value!r}. Allowed values: {allowed_text}."
-        )
+        raise LTValidationError(f"Invalid {field_name} {value!r}. Allowed values: {allowed_text}.")
     return cleaned
 
 
@@ -1328,9 +1340,7 @@ def _validate_metadata(
         if not isinstance(key, str) or not key.strip():
             raise LTValidationError("metadata keys must be non-empty strings.")
         if not isinstance(value, (str, bool, int, float)):
-            raise LTValidationError(
-                "metadata values must be strings, numbers, or booleans."
-            )
+            raise LTValidationError("metadata values must be strings, numbers, or booleans.")
         validated[key] = value
     return validated
 

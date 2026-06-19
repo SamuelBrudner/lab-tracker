@@ -66,6 +66,11 @@ def _create_project_bundle(
         json={"project_id": project_id, "raw_content": f"{project_name} note"},
         headers=headers,
     ).json()["data"]["note_id"]
+    session_id = client.post(
+        "/sessions",
+        json={"project_id": project_id, "session_type": "operational"},
+        headers=headers,
+    ).json()["data"]["session_id"]
     analysis_id = client.post(
         "/analyses",
         json={
@@ -87,13 +92,26 @@ def _create_project_bundle(
         },
         headers=headers,
     ).json()["data"]["claim_id"]
+    viz_id = client.post(
+        "/visualizations",
+        json={
+            "analysis_id": analysis_id,
+            "viz_type": "line",
+            "file_path": f"figures/{project_name}.png",
+            "caption": f"{project_name} figure",
+            "related_claim_ids": [claim_id],
+        },
+        headers=headers,
+    ).json()["data"]["viz_id"]
     return {
         "project_id": project_id,
         "question_id": question_id,
         "dataset_id": dataset_id,
         "note_id": note_id,
+        "session_id": session_id,
         "analysis_id": analysis_id,
         "claim_id": claim_id,
+        "viz_id": viz_id,
     }
 
 
@@ -337,6 +355,10 @@ def test_record_export_returns_scoped_dump_and_provenance_for_user_and_group(
         group_records["dataset_id"],
         outside_records["dataset_id"],
     }
+    assert {item["session_id"] for item in global_payload["records"]["sessions"]} == {
+        group_records["session_id"],
+        outside_records["session_id"],
+    }
     assert {item["analysis_id"] for item in global_payload["records"]["analyses"]} == {
         group_records["analysis_id"],
         outside_records["analysis_id"],
@@ -349,13 +371,19 @@ def test_record_export_returns_scoped_dump_and_provenance_for_user_and_group(
         group_records["note_id"],
         outside_records["note_id"],
     }
+    assert {item["viz_id"] for item in global_payload["records"]["visualizations"]} == {
+        group_records["viz_id"],
+        outside_records["viz_id"],
+    }
 
     graph_ids = _graph_ids(global_payload)
     assert f"http://testserver/agents/{source_user_id}" in graph_ids
     assert f"http://testserver/datasets/{group_records['dataset_id']}" in graph_ids
+    assert f"http://testserver/sessions/{group_records['session_id']}" in graph_ids
     assert f"http://testserver/analyses/{outside_records['analysis_id']}" in graph_ids
     assert f"http://testserver/claims/{group_records['claim_id']}" in graph_ids
     assert f"http://testserver/notes/{outside_records['note_id']}" in graph_ids
+    assert f"http://testserver/visualizations/{outside_records['viz_id']}" in graph_ids
 
     group_export = client.post(
         f"/groups/{group_id}/record-exports/users/{source_user_id}",
@@ -372,6 +400,9 @@ def test_record_export_returns_scoped_dump_and_provenance_for_user_and_group(
     assert [item["dataset_id"] for item in group_payload["records"]["datasets"]] == [
         group_records["dataset_id"]
     ]
+    assert [item["session_id"] for item in group_payload["records"]["sessions"]] == [
+        group_records["session_id"]
+    ]
     assert [item["analysis_id"] for item in group_payload["records"]["analyses"]] == [
         group_records["analysis_id"]
     ]
@@ -381,10 +412,15 @@ def test_record_export_returns_scoped_dump_and_provenance_for_user_and_group(
     assert [item["note_id"] for item in group_payload["records"]["notes"]] == [
         group_records["note_id"]
     ]
+    assert [item["viz_id"] for item in group_payload["records"]["visualizations"]] == [
+        group_records["viz_id"]
+    ]
 
     group_graph_ids = _graph_ids(group_payload)
     assert f"http://testserver/datasets/{group_records['dataset_id']}" in group_graph_ids
     assert f"http://testserver/datasets/{outside_records['dataset_id']}" not in group_graph_ids
+    assert f"http://testserver/sessions/{group_records['session_id']}" in group_graph_ids
+    assert f"http://testserver/visualizations/{outside_records['viz_id']}" not in group_graph_ids
 
 
 def test_record_export_returns_not_found_for_missing_user(

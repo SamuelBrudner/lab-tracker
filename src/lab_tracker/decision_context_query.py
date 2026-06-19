@@ -171,34 +171,34 @@ class RepositoryDecisionContextReader:
             if project_id is not None
             else self._accessible_project_ids
         )
-        questions = (
-            self._repository.query_questions(
+        if not include_set or "questions" in include_set:
+            questions, questions_total = self._repository.query_questions(
                 project_id=None,
                 project_ids=project_ids,
                 search=query,
                 limit=limit,
                 offset=offset,
-            )[0]
-            if not include_set or "questions" in include_set
-            else []
-        )
-        notes = (
-            self._repository.query_notes(
+                recent_first=True,
+            )
+        else:
+            questions, questions_total = [], 0
+        if not include_set or "notes" in include_set:
+            notes, notes_total = self._repository.query_notes(
                 project_id=None,
                 project_ids=project_ids,
                 search=query,
                 limit=limit,
                 offset=offset,
-            )[0]
-            if not include_set or "notes" in include_set
-            else []
-        )
+                recent_first=True,
+            )
+        else:
+            notes, notes_total = [], 0
         return {
             "data": {
                 "questions": [_entity_to_json(item) for item in questions],
                 "notes": [_entity_to_json(item) for item in notes],
             },
-            "meta": {"questions_count": len(questions), "notes_count": len(notes)},
+            "meta": {"questions_count": questions_total, "notes_count": notes_total},
         }
 
     def project_ids_with_search_matches(self, query: str, *, limit: int = 50) -> set[str]:

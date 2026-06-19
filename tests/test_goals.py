@@ -13,6 +13,10 @@ from lab_tracker.db_models import GoalLinkModel
 from lab_tracker.errors import ValidationError
 from lab_tracker.goals_attributes import validate_goal_attributes
 from lab_tracker.models import (
+    AnalysisStatus,
+    DatasetCommitManifestInput,
+    DatasetFile,
+    DatasetStatus,
     EntityRef,
     EntityType,
     GoalLinkStatus,
@@ -212,6 +216,54 @@ def test_goal_links_are_removed_when_target_question_is_deleted():
     _, session = api._test_resources  # type: ignore[attr-defined]
 
     api.delete_question(question.question_id, actor=actor)
+
+    assert api.get_goal(goal.goal_id).links == []
+    assert session.get(GoalLinkModel, str(link.link_id)) is None
+
+
+def test_analysis_delete_removes_goal_links_to_cascaded_visualizations():
+    api, actor, project, question = _api_project_question()
+    dataset = api.create_dataset(
+        project_id=project.project_id,
+        primary_question_id=question.question_id,
+        status=DatasetStatus.COMMITTED,
+        commit_manifest=DatasetCommitManifestInput(
+            files=[DatasetFile(path="data.csv", checksum="abc123")]
+        ),
+        actor=actor,
+    )
+    analysis = api.create_analysis(
+        project_id=project.project_id,
+        dataset_ids=[dataset.dataset_id],
+        method_hash="method-goal-cleanup",
+        code_version="v1",
+        status=AnalysisStatus.COMMITTED,
+        actor=actor,
+    )
+    visualization = api.create_visualization(
+        analysis_id=analysis.analysis_id,
+        viz_type="line",
+        file_path="figures/line.png",
+        actor=actor,
+    )
+    goal = api.create_goal(
+        project.project_id,
+        goal_type=GoalType.PAPER,
+        title="Visualization-linked paper",
+        actor=actor,
+    )
+    link = api.link_node_to_goal(
+        goal.goal_id,
+        target=EntityRef(
+            entity_type=EntityType.VISUALIZATION,
+            entity_id=visualization.viz_id,
+        ),
+        relation=GoalRelation.CANDIDATE_FIGURE,
+        actor=actor,
+    )
+    _, session = api._test_resources  # type: ignore[attr-defined]
+
+    api.delete_analysis(analysis.analysis_id, actor=actor)
 
     assert api.get_goal(goal.goal_id).links == []
     assert session.get(GoalLinkModel, str(link.link_id)) is None

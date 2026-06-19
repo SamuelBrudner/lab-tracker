@@ -558,6 +558,55 @@ def test_write_tool_appends_structured_next_action(monkeypatch) -> None:
     assert payload["next_action"]["tool"] == "lab_tracker_create_analysis"
 
 
+def test_write_tool_returns_structured_api_errors(monkeypatch) -> None:
+    from lab_tracker.mcp_tools import write as write_tools
+
+    class InvalidClient:
+        def create_note(self, **_kwargs):
+            raise mcp_server.LabTrackerAPIValidationError(
+                "Request validation failed. Issues: raw_content: Required.",
+                status_code=422,
+                code="request_validation_error",
+                issues=[{"field": "raw_content", "message": "Required"}],
+            )
+
+        def close(self) -> None:
+            return None
+
+    monkeypatch.setattr(write_tools, "client_from_env", lambda: InvalidClient())
+
+    payload = write_tools.lab_tracker_create_note(
+        project_id="project-1",
+        raw_content="",
+    )
+
+    assert payload["error"]["code"] == "request_validation_error"
+    assert payload["error"]["status_code"] == 422
+    assert payload["error"]["issues"] == [{"field": "raw_content", "message": "Required"}]
+    assert payload["data"] is None
+    assert payload["next_action"]["action"] == "revise_request_or_credentials"
+
+
+def test_write_tool_returns_unavailable_contract_when_api_is_down(monkeypatch) -> None:
+    from lab_tracker.mcp_tools import write as write_tools
+
+    class BrokenClient:
+        def create_project(self, **_kwargs):
+            raise mcp_server.LabTrackerAPIUnavailableError("HTTP 503 offline")
+
+        def close(self) -> None:
+            return None
+
+    monkeypatch.setattr(write_tools, "client_from_env", lambda: BrokenClient())
+
+    payload = write_tools.lab_tracker_create_project(name="Unavailable")
+
+    assert payload["error"]["code"] == "lab_tracker_unavailable"
+    assert payload["error"]["operation"] == "lab_tracker_create_project"
+    assert payload["data"] is None
+    assert payload["next_action"]["action"] == "proceed_without_graph_context"
+
+
 def test_client_retries_once_after_expired_token() -> None:
     calls: list[tuple[str, str, str | None]] = []
 

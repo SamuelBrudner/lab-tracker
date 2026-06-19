@@ -6,6 +6,7 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
 import tomllib
 
 from lab_tracker.cli import _open_browser_when_ready, init_consumer_repo, serve_app
@@ -209,6 +210,7 @@ def test_serve_app_can_skip_migrations_and_browser() -> None:
 
     serve_app(
         host="0.0.0.0",
+        insecure_allow_lan=True,
         open_browser=False,
         run_migrations=False,
         server_runner=fake_runner,
@@ -220,3 +222,23 @@ def test_serve_app_can_skip_migrations_and_browser() -> None:
             ("lab_tracker.asgi:app", {"host": "0.0.0.0", "port": 8000, "reload": False}),
         )
     ]
+
+
+def test_serve_app_refuses_lan_bind_when_auth_is_disabled(monkeypatch) -> None:
+    calls: list[tuple[str, object]] = []
+
+    monkeypatch.setenv("LAB_TRACKER_ENVIRONMENT", "local")
+    monkeypatch.setenv("LAB_TRACKER_AUTH_ENABLED", "false")
+
+    def fake_runner(app_path: str, **kwargs):
+        calls.append(("runner", (app_path, kwargs)))
+
+    with pytest.raises(SystemExit, match="Refusing to bind Lab Tracker"):
+        serve_app(
+            host="0.0.0.0",
+            open_browser=False,
+            run_migrations=False,
+            server_runner=fake_runner,
+        )
+
+    assert calls == []

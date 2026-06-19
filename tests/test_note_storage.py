@@ -55,7 +55,7 @@ def test_upload_note_raw_preserves_manual_transcript(tmp_path):
 
     note = api.upload_note_raw(
         project_id=project.project_id,
-        content=b"\xFF\xD8\xFF\x00\x00binary-image",
+        content=b"\xff\xd8\xff\x00\x00binary-image",
         filename="note.jpg",
         content_type="image/jpeg",
         transcribed_text="manual transcript",
@@ -111,6 +111,27 @@ def test_local_note_storage_rejects_oversized_stream_and_cleans_partial_file(tmp
             filename="too-large.jpg",
             content_type="image/jpeg",
             chunk_size=3,
+        )
+
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_local_note_storage_cleans_temp_file_when_atomic_replace_fails(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    storage = LocalNoteStorage(tmp_path)
+
+    def failing_replace(_source, _target):
+        raise OSError("replace failed")
+
+    monkeypatch.setattr("lab_tracker.note_storage.os.replace", failing_replace)
+
+    with pytest.raises(OSError, match="replace failed"):
+        storage.store(
+            b"raw-capture",
+            filename="capture.txt",
+            content_type="text/plain",
         )
 
     assert list(tmp_path.iterdir()) == []

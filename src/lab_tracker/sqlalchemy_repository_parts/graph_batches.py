@@ -6,7 +6,7 @@ from datetime import datetime
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.orm import Session as OrmSession
 
 from lab_tracker.db_models import (
@@ -192,6 +192,36 @@ class SQLAlchemyGraphDraftBatchSettingsRepository(
             )
         )
         return [settings_from_model(row) for row in rows]
+
+    def claim_due(
+        self,
+        settings_id: UUID,
+        *,
+        observed_next_run_at: datetime,
+        next_run_at: datetime,
+        updated_at: datetime,
+        updated_by: str | None,
+    ) -> GraphDraftBatchSettings | None:
+        self._session.flush()
+        result = self._session.execute(
+            update(GraphDraftBatchSettingsModel)
+            .where(GraphDraftBatchSettingsModel.settings_id == str(settings_id))
+            .where(GraphDraftBatchSettingsModel.enabled.is_(True))
+            .where(GraphDraftBatchSettingsModel.next_run_at == observed_next_run_at)
+            .values(
+                next_run_at=next_run_at,
+                updated_at=updated_at,
+                updated_by=updated_by,
+            )
+            .execution_options(synchronize_session=False)
+        )
+        if result.rowcount != 1:
+            return None
+        row = self._session.get(GraphDraftBatchSettingsModel, str(settings_id))
+        if row is None:
+            return None
+        self._session.refresh(row)
+        return settings_from_model(row)
 
     def save(self, entity: GraphDraftBatchSettings) -> None:
         self._session.flush()

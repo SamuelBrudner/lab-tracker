@@ -73,15 +73,19 @@ class AcquisitionOutputWatcher:
             retry_after = self._retry_after.get(file_path)
             if retry_after is not None and retry_after > now:
                 continue
-            new_fingerprint = self._stable_fingerprint(file_path)
-            if new_fingerprint is None:
+            try:
+                current_stat = file_path.stat()
+            except (FileNotFoundError, PermissionError):
                 continue
             fingerprint = self._fingerprints.get(file_path)
             if (
                 fingerprint
-                and fingerprint.size_bytes == new_fingerprint.size_bytes
-                and fingerprint.mtime == new_fingerprint.mtime
+                and fingerprint.size_bytes == current_stat.st_size
+                and fingerprint.mtime == current_stat.st_mtime
             ):
+                continue
+            new_fingerprint = self._stable_fingerprint(file_path)
+            if new_fingerprint is None:
                 continue
             if fingerprint and fingerprint.checksum == new_fingerprint.checksum:
                 self._fingerprints[file_path] = new_fingerprint

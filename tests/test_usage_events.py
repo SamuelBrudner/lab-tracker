@@ -115,9 +115,7 @@ def test_usage_event_routes_export_search_without_query_terms(
     assert summary_response.status_code == 200
     summary = summary_response.json()["data"]
     assert any(
-        row["verb"] == "search"
-        and row["resource_type"] == "search"
-        and row["event_count"] == 1
+        row["verb"] == "search" and row["resource_type"] == "search" and row["event_count"] == 1
         for row in summary
     )
 
@@ -128,15 +126,9 @@ def test_usage_event_routes_export_search_without_query_terms(
     )
     assert export_response.status_code == 200
     assert "hidden retention sentinel" not in export_response.text
-    rows = [
-        json.loads(line)
-        for line in export_response.text.splitlines()
-        if line.strip()
-    ]
+    rows = [json.loads(line) for line in export_response.text.splitlines() if line.strip()]
     search_rows = [
-        row
-        for row in rows
-        if row["verb"] == "search" and row["resource_type"] == "search"
+        row for row in rows if row["verb"] == "search" and row["resource_type"] == "search"
     ]
     assert len(search_rows) == 1
     assert search_rows[0]["result_count"] == 2
@@ -205,6 +197,61 @@ def test_usage_event_retention_rolls_up_and_prunes_raw_events(
         ).one()
         assert rollup.event_count == 1
         assert rollup.total_duration_ms == 7
+
+
+def test_usage_event_retention_merges_existing_null_dimension_rollup(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+):
+    client.app.state.settings.usage_events = True
+    occurred_at = datetime.now(timezone.utc) - timedelta(days=366)
+
+    for duration_ms, result_count in ((7, 2), (4, 5)):
+        with client.app.state.db_session_factory() as session:
+            session.add(
+                UsageEventModel(
+                    event_id=str(uuid4()),
+                    occurred_at=occurred_at,
+                    verb="view",
+                    resource_type="usage_event",
+                    resource_id=None,
+                    actor_user_id=None,
+                    actor_role=None,
+                    principal_type=None,
+                    surface=None,
+                    project_id=None,
+                    outcome="ok",
+                    duration_ms=duration_ms,
+                    result_count=result_count,
+                )
+            )
+            session.commit()
+
+        retention_response = client.post(
+            "/usage-events/retention/run",
+            headers=admin_auth_headers,
+        )
+        assert retention_response.status_code == 200
+        assert retention_response.json()["data"]["raw_events_pruned"] == 1
+
+    with client.app.state.db_session_factory() as session:
+        rollups = list(
+            session.scalars(
+                select(UsageEventRollupModel).where(
+                    UsageEventRollupModel.verb == "view",
+                    UsageEventRollupModel.resource_type == "usage_event",
+                    UsageEventRollupModel.project_id.is_(None),
+                    UsageEventRollupModel.actor_role.is_(None),
+                    UsageEventRollupModel.principal_type.is_(None),
+                    UsageEventRollupModel.surface.is_(None),
+                )
+            )
+        )
+        assert len(rollups) == 1
+        [rollup] = rollups
+        assert rollup.event_count == 2
+        assert rollup.total_duration_ms == 11
+        assert rollup.total_result_count == 7
 
 
 def test_mcp_api_client_sends_surface_header():

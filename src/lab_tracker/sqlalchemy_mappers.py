@@ -214,9 +214,7 @@ def project_membership_from_model(row: ProjectMembershipModel) -> ProjectMembers
         username=username,
         user_global_role=user_global_role,
         created_by=row.created_by,
-        created_by_user_id=(
-            _uuid(row.created_by_user_id) if row.created_by_user_id else None
-        ),
+        created_by_user_id=(_uuid(row.created_by_user_id) if row.created_by_user_id else None),
         created_at=_as_utc(row.created_at),
         updated_at=_as_utc(row.updated_at),
     )
@@ -291,9 +289,7 @@ def question_from_model(
             _uuid(row.supersedes_question_id) if row.supersedes_question_id else None
         ),
         created_by=row.created_by,
-        created_by_user_id=(
-            _uuid(row.created_by_user_id) if row.created_by_user_id else None
-        ),
+        created_by_user_id=(_uuid(row.created_by_user_id) if row.created_by_user_id else None),
         **_origin_domain_kwargs(row),
         created_at=_as_utc(row.created_at),
         updated_at=_as_utc(row.updated_at),
@@ -329,9 +325,7 @@ def apply_question_to_model(row: QuestionModel, question: Question) -> None:
     )
     row.created_by = question.created_by
     row.created_by_user_id = (
-        _uuid_str(question.created_by_user_id)
-        if question.created_by_user_id is not None
-        else None
+        _uuid_str(question.created_by_user_id) if question.created_by_user_id is not None else None
     )
     _apply_origin_to_model(row, question)
     row.created_at = question.created_at
@@ -369,9 +363,7 @@ def question_refactor_from_model(row: QuestionRefactorModel) -> QuestionRefactor
         replacement_snapshot=dict(row.replacement_snapshot or {}),
         relationship_changes=dict(row.relationship_changes or {}),
         created_by=row.created_by,
-        created_by_user_id=(
-            _uuid(row.created_by_user_id) if row.created_by_user_id else None
-        ),
+        created_by_user_id=(_uuid(row.created_by_user_id) if row.created_by_user_id else None),
         created_at=_as_utc(row.created_at),
     )
 
@@ -389,9 +381,7 @@ def apply_question_refactor_to_model(
     row.relationship_changes = dict(refactor.relationship_changes)
     row.created_by = refactor.created_by
     row.created_by_user_id = (
-        _uuid_str(refactor.created_by_user_id)
-        if refactor.created_by_user_id is not None
-        else None
+        _uuid_str(refactor.created_by_user_id) if refactor.created_by_user_id is not None else None
     )
     row.created_at = refactor.created_at
 
@@ -472,9 +462,7 @@ def dataset_from_model(
         status=DatasetStatus(row.status),
         terminal_reason=getattr(row, "terminal_reason", None),
         created_by=row.created_by,
-        created_by_user_id=(
-            _uuid(row.created_by_user_id) if row.created_by_user_id else None
-        ),
+        created_by_user_id=(_uuid(row.created_by_user_id) if row.created_by_user_id else None),
         **_origin_domain_kwargs(row),
         created_at=_as_utc(row.created_at),
         updated_at=_as_utc(row.updated_at),
@@ -519,9 +507,7 @@ def apply_dataset_to_model(row: DatasetModel, dataset: Dataset) -> None:
     row.terminal_reason = dataset.terminal_reason
     row.created_by = dataset.created_by
     row.created_by_user_id = (
-        _uuid_str(dataset.created_by_user_id)
-        if dataset.created_by_user_id is not None
-        else None
+        _uuid_str(dataset.created_by_user_id) if dataset.created_by_user_id is not None else None
     )
     _apply_origin_to_model(row, dataset)
     row.created_at = dataset.created_at
@@ -542,12 +528,11 @@ def note_to_model(note: Note) -> NoteModel:
         raw_checksum=note.raw_asset.checksum if note.raw_asset is not None else None,
         transcribed_text=note.transcribed_text,
         note_metadata=dict(note.metadata),
+        client_capture_id=note.client_capture_id,
         status=note.status.value,
         created_by=note.created_by,
         created_by_user_id=(
-            _uuid_str(note.created_by_user_id)
-            if note.created_by_user_id is not None
-            else None
+            _uuid_str(note.created_by_user_id) if note.created_by_user_id is not None else None
         ),
         **_origin_model_kwargs(note),
         created_at=note.created_at,
@@ -577,11 +562,10 @@ def note_from_model(
         transcribed_text=row.transcribed_text,
         targets=list(targets),
         metadata=dict(getattr(row, "note_metadata", {}) or {}),
+        client_capture_id=getattr(row, "client_capture_id", None),
         status=NoteStatus(row.status),
         created_by=row.created_by,
-        created_by_user_id=(
-            _uuid(row.created_by_user_id) if row.created_by_user_id else None
-        ),
+        created_by_user_id=(_uuid(row.created_by_user_id) if row.created_by_user_id else None),
         **_origin_domain_kwargs(row),
         created_at=_as_utc(row.created_at),
         updated_at=_as_utc(row.updated_at),
@@ -618,12 +602,11 @@ def apply_note_to_model(row: NoteModel, note: Note) -> None:
     row.raw_checksum = note.raw_asset.checksum if note.raw_asset is not None else None
     row.transcribed_text = note.transcribed_text
     row.note_metadata = dict(note.metadata)
+    row.client_capture_id = note.client_capture_id
     row.status = note.status.value
     row.created_by = note.created_by
     row.created_by_user_id = (
-        _uuid_str(note.created_by_user_id)
-        if note.created_by_user_id is not None
-        else None
+        _uuid_str(note.created_by_user_id) if note.created_by_user_id is not None else None
     )
     _apply_origin_to_model(row, note)
     row.created_at = note.created_at
@@ -666,9 +649,7 @@ def session_from_model(row: SessionModel) -> Session:
         started_at=_as_utc(row.started_at),
         ended_at=_as_utc_optional(row.ended_at),
         created_by=row.created_by,
-        created_by_user_id=(
-            _uuid(row.created_by_user_id) if row.created_by_user_id else None
-        ),
+        created_by_user_id=(_uuid(row.created_by_user_id) if row.created_by_user_id else None),
         **_origin_domain_kwargs(row),
         updated_at=_as_utc(row.updated_at),
     )
@@ -685,9 +666,7 @@ def apply_session_to_model(row: SessionModel, session: Session) -> None:
     row.ended_at = session.ended_at
     row.created_by = session.created_by
     row.created_by_user_id = (
-        _uuid_str(session.created_by_user_id)
-        if session.created_by_user_id is not None
-        else None
+        _uuid_str(session.created_by_user_id) if session.created_by_user_id is not None else None
     )
     _apply_origin_to_model(row, session)
     row.updated_at = session.updated_at
@@ -766,9 +745,7 @@ def analysis_from_model(
         environment_hash=row.environment_hash,
         external_artifacts=_external_artifacts_from_json(getattr(row, "external_artifacts", None)),
         executed_by=row.executed_by,
-        executed_by_user_id=(
-            _uuid(row.executed_by_user_id) if row.executed_by_user_id else None
-        ),
+        executed_by_user_id=(_uuid(row.executed_by_user_id) if row.executed_by_user_id else None),
         executed_at=_as_utc(row.executed_at),
         status=AnalysisStatus(row.status),
         terminal_reason=getattr(row, "terminal_reason", None),
@@ -819,9 +796,7 @@ def claim_to_model(claim: Claim) -> ClaimModel:
         external_citations=_external_artifacts_to_json(claim.external_citations),
         created_by=claim.created_by,
         created_by_user_id=(
-            _uuid_str(claim.created_by_user_id)
-            if claim.created_by_user_id is not None
-            else None
+            _uuid_str(claim.created_by_user_id) if claim.created_by_user_id is not None else None
         ),
         **_origin_model_kwargs(claim),
         created_at=claim.created_at,
@@ -846,14 +821,10 @@ def claim_from_model(
         supported_by_dataset_ids=list(supported_by_dataset_ids),
         supported_by_analysis_ids=list(supported_by_analysis_ids),
         answers_question_ids=list(answers_question_ids),
-        external_citations=_external_artifacts_from_json(
-            getattr(row, "external_citations", None)
-        ),
+        external_citations=_external_artifacts_from_json(getattr(row, "external_citations", None)),
         created_by=getattr(row, "created_by", None),
         created_by_user_id=(
-            _uuid(row.created_by_user_id)
-            if getattr(row, "created_by_user_id", None)
-            else None
+            _uuid(row.created_by_user_id) if getattr(row, "created_by_user_id", None) else None
         ),
         **_origin_domain_kwargs(row),
         created_at=_as_utc(row.created_at),
@@ -900,9 +871,7 @@ def apply_claim_to_model(row: ClaimModel, claim: Claim) -> None:
     row.external_citations = _external_artifacts_to_json(claim.external_citations)
     row.created_by = claim.created_by
     row.created_by_user_id = (
-        _uuid_str(claim.created_by_user_id)
-        if claim.created_by_user_id is not None
-        else None
+        _uuid_str(claim.created_by_user_id) if claim.created_by_user_id is not None else None
     )
     _apply_origin_to_model(row, claim)
     row.created_at = claim.created_at
@@ -917,9 +886,7 @@ def claim_edge_to_model(edge: ClaimEdge) -> ClaimEdgeModel:
         relation=edge.relation.value,
         created_by=edge.created_by,
         created_by_user_id=(
-            _uuid_str(edge.created_by_user_id)
-            if edge.created_by_user_id is not None
-            else None
+            _uuid_str(edge.created_by_user_id) if edge.created_by_user_id is not None else None
         ),
         created_at=edge.created_at,
     )
@@ -933,9 +900,7 @@ def claim_edge_from_model(row: ClaimEdgeModel) -> ClaimEdge:
         relation=ClaimRelation(row.relation),
         created_by=getattr(row, "created_by", None),
         created_by_user_id=(
-            _uuid(row.created_by_user_id)
-            if getattr(row, "created_by_user_id", None)
-            else None
+            _uuid(row.created_by_user_id) if getattr(row, "created_by_user_id", None) else None
         ),
         created_at=_as_utc(row.created_at),
     )
@@ -947,9 +912,7 @@ def apply_claim_edge_to_model(row: ClaimEdgeModel, edge: ClaimEdge) -> None:
     row.relation = edge.relation.value
     row.created_by = edge.created_by
     row.created_by_user_id = (
-        _uuid_str(edge.created_by_user_id)
-        if edge.created_by_user_id is not None
-        else None
+        _uuid_str(edge.created_by_user_id) if edge.created_by_user_id is not None else None
     )
     row.created_at = edge.created_at
 
@@ -986,9 +949,7 @@ def entity_version_from_model(row: EntityVersionModel) -> EntityVersion:
         committed_at=_as_utc_optional(row.committed_at),
         created_at=_as_utc(row.created_at),
         created_by=row.created_by,
-        created_by_user_id=(
-            _uuid(row.created_by_user_id) if row.created_by_user_id else None
-        ),
+        created_by_user_id=(_uuid(row.created_by_user_id) if row.created_by_user_id else None),
     )
 
 
@@ -1007,9 +968,7 @@ def apply_entity_version_to_model(
     row.created_at = version.created_at
     row.created_by = version.created_by
     row.created_by_user_id = (
-        _uuid_str(version.created_by_user_id)
-        if version.created_by_user_id is not None
-        else None
+        _uuid_str(version.created_by_user_id) if version.created_by_user_id is not None else None
     )
 
 
@@ -1026,9 +985,7 @@ def goal_to_model(goal: Goal) -> GoalModel:
         attributes=dict(goal.attributes),
         created_by=goal.created_by,
         created_by_user_id=(
-            _uuid_str(goal.created_by_user_id)
-            if goal.created_by_user_id is not None
-            else None
+            _uuid_str(goal.created_by_user_id) if goal.created_by_user_id is not None else None
         ),
         **_origin_model_kwargs(goal),
         created_at=goal.created_at,
@@ -1053,9 +1010,7 @@ def goal_from_model(
         attributes=dict(row.attributes or {}),
         links=list(links),
         created_by=row.created_by,
-        created_by_user_id=(
-            _uuid(row.created_by_user_id) if row.created_by_user_id else None
-        ),
+        created_by_user_id=(_uuid(row.created_by_user_id) if row.created_by_user_id else None),
         **_origin_domain_kwargs(row),
         created_at=_as_utc(row.created_at),
         updated_at=_as_utc(row.updated_at),
@@ -1073,9 +1028,7 @@ def apply_goal_to_model(row: GoalModel, goal: Goal) -> None:
     row.attributes = dict(goal.attributes)
     row.created_by = goal.created_by
     row.created_by_user_id = (
-        _uuid_str(goal.created_by_user_id)
-        if goal.created_by_user_id is not None
-        else None
+        _uuid_str(goal.created_by_user_id) if goal.created_by_user_id is not None else None
     )
     _apply_origin_to_model(row, goal)
     row.created_at = goal.created_at
@@ -1094,9 +1047,7 @@ def goal_link_from_model(row: GoalLinkModel) -> GoalLink:
         link_status=GoalLinkStatus(row.link_status),
         slot=row.slot or None,
         created_by=row.created_by,
-        created_by_user_id=(
-            _uuid(row.created_by_user_id) if row.created_by_user_id else None
-        ),
+        created_by_user_id=(_uuid(row.created_by_user_id) if row.created_by_user_id else None),
         created_at=_as_utc(row.created_at),
     )
 
@@ -1112,9 +1063,7 @@ def goal_link_to_model(link: GoalLink) -> GoalLinkModel:
         slot=link.slot or "",
         created_by=link.created_by,
         created_by_user_id=(
-            _uuid_str(link.created_by_user_id)
-            if link.created_by_user_id is not None
-            else None
+            _uuid_str(link.created_by_user_id) if link.created_by_user_id is not None else None
         ),
         created_at=link.created_at,
     )
@@ -1132,9 +1081,7 @@ def visualization_to_model(visualization: Visualization) -> VisualizationModel:
         file_path=visualization.file_path,
         caption=visualization.caption,
         asset_storage_id=(
-            _uuid_str(visualization.asset.storage_id)
-            if visualization.asset is not None
-            else None
+            _uuid_str(visualization.asset.storage_id) if visualization.asset is not None else None
         ),
         asset_filename=visualization.asset.filename if visualization.asset is not None else None,
         asset_content_type=(
@@ -1182,9 +1129,7 @@ def visualization_from_model(
         asset=asset,
         created_by=getattr(row, "created_by", None),
         created_by_user_id=(
-            _uuid(row.created_by_user_id)
-            if getattr(row, "created_by_user_id", None)
-            else None
+            _uuid(row.created_by_user_id) if getattr(row, "created_by_user_id", None) else None
         ),
         **_origin_domain_kwargs(row),
         created_at=_as_utc(row.created_at),

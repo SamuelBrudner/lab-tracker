@@ -398,12 +398,9 @@ class ProjectService(BaseService):
                 saved = repository.project_memberships.get(membership.membership_id)
                 memberships.append(saved or membership)
             if sole_owner_project_ids:
-                project_list = ", ".join(
-                    str(project_id) for project_id in sole_owner_project_ids
-                )
+                project_list = ", ".join(str(project_id) for project_id in sole_owner_project_ids)
                 raise ValidationError(
-                    "Cannot demote the last owner from projects: "
-                    f"{project_list}."
+                    f"Cannot demote the last owner from projects: {project_list}."
                 )
         return memberships
 
@@ -449,12 +446,9 @@ class ProjectService(BaseService):
                         continue
                 memberships.append(membership)
             if sole_owner_project_ids:
-                project_list = ", ".join(
-                    str(project_id) for project_id in sole_owner_project_ids
-                )
+                project_list = ", ".join(str(project_id) for project_id in sole_owner_project_ids)
                 raise ValidationError(
-                    "Cannot remove the last owner from projects: "
-                    f"{project_list}."
+                    f"Cannot remove the last owner from projects: {project_list}."
                 )
             self._ensure_offboarding_records_released(user_id, project_ids)
             for membership in memberships:
@@ -641,17 +635,23 @@ class ProjectService(BaseService):
             user_id=user_id,
             project_ids=candidate_project_ids,
         )
-        return {
+        project_ids = {
             item.project_id
             for collection in (
                 records.questions,
                 records.datasets,
+                records.sessions,
                 records.notes,
                 records.analyses,
                 records.claims,
             )
             for item in collection
         }
+        for visualization in records.visualizations:
+            analysis = self.repository.analyses.get(visualization.analysis_id)
+            if analysis is not None:
+                project_ids.add(analysis.project_id)
+        return project_ids
 
     def accessible_project_ids(self, actor: AuthContext | None) -> set[UUID] | None:
         return self.authorization.accessible_project_ids(actor)

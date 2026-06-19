@@ -49,24 +49,41 @@ def upgrade() -> None:
         "group_memberships",
         ["group_id", "role"],
     )
-    with op.batch_alter_table("projects") as batch_op:
-        batch_op.add_column(sa.Column("group_id", sa.String(length=36), nullable=True))
-        batch_op.create_foreign_key(
-            "fk_projects_group_id_project_groups",
-            "project_groups",
-            ["group_id"],
-            ["group_id"],
-            ondelete="SET NULL",
-        )
+    _set_sqlite_foreign_keys(enabled=False)
+    try:
+        with op.batch_alter_table("projects") as batch_op:
+            batch_op.add_column(sa.Column("group_id", sa.String(length=36), nullable=True))
+            batch_op.create_foreign_key(
+                "fk_projects_group_id_project_groups",
+                "project_groups",
+                ["group_id"],
+                ["group_id"],
+                ondelete="SET NULL",
+            )
+    finally:
+        _set_sqlite_foreign_keys(enabled=True)
     op.create_index("ix_projects_group_id", "projects", ["group_id"])
 
 
 def downgrade() -> None:
     op.drop_index("ix_projects_group_id", table_name="projects")
-    with op.batch_alter_table("projects") as batch_op:
-        batch_op.drop_constraint("fk_projects_group_id_project_groups", type_="foreignkey")
-        batch_op.drop_column("group_id")
+    _set_sqlite_foreign_keys(enabled=False)
+    try:
+        with op.batch_alter_table("projects") as batch_op:
+            batch_op.drop_constraint(
+                "fk_projects_group_id_project_groups",
+                type_="foreignkey",
+            )
+            batch_op.drop_column("group_id")
+    finally:
+        _set_sqlite_foreign_keys(enabled=True)
     op.drop_index("ix_group_memberships_group_role", table_name="group_memberships")
     op.drop_index("ix_group_memberships_user_group", table_name="group_memberships")
     op.drop_table("group_memberships")
     op.drop_table("project_groups")
+
+
+def _set_sqlite_foreign_keys(*, enabled: bool) -> None:
+    if op.get_context().dialect.name == "sqlite":
+        value = "ON" if enabled else "OFF"
+        op.execute(f"PRAGMA foreign_keys={value}")

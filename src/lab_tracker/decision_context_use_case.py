@@ -344,6 +344,26 @@ def build_decision_context(
             "evidence_map": evidence_map,
             "truncation": truncation(
                 [
+                    (
+                        "search.questions",
+                        _search_truncation_payload(
+                            search_payload,
+                            "questions",
+                            "questions_count",
+                            resolved_limit,
+                        ),
+                        None,
+                    ),
+                    (
+                        "search.notes",
+                        _search_truncation_payload(
+                            search_payload,
+                            "notes",
+                            "notes_count",
+                            resolved_limit,
+                        ),
+                        None,
+                    ),
                     ("questions", questions_payload, None),
                     ("notes", notes_payload, None),
                     ("sessions", sessions_payload, None),
@@ -385,6 +405,25 @@ def _project_ids_with_search_matches(
 
 def _compact_notes(notes: list[JsonObject]) -> list[JsonObject]:
     return [_compact_note(note) for note in notes]
+
+
+def _search_truncation_payload(
+    search_payload: JsonObject,
+    key: str,
+    total_key: str,
+    limit: int,
+) -> JsonObject:
+    items = search_items(search_payload, key)
+    meta = search_payload.get("meta")
+    total = meta.get(total_key) if isinstance(meta, dict) else None
+    return {
+        "data": items,
+        "meta": {
+            "limit": limit,
+            "offset": 0,
+            "total": total if isinstance(total, int) else len(items),
+        },
+    }
 
 
 def _compact_note(note: JsonObject) -> JsonObject:

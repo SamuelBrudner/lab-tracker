@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import sqlite3
 from collections.abc import Iterator
 from dataclasses import dataclass
@@ -9,8 +10,9 @@ from uuid import uuid4
 import pytest
 from alembic.config import Config
 from fastapi.testclient import TestClient
-from sqlalchemy import event
+from sqlalchemy import create_engine, event, text
 from sqlalchemy.engine import Engine
+from sqlalchemy.engine.url import make_url
 
 from alembic import command
 from lab_tracker.app import create_app
@@ -122,6 +124,58 @@ def migrated_sqlite_database_url(
 
 
 @pytest.fixture()
+def migrated_postgres_database_url(monkeypatch, tmp_path) -> Iterator[str]:
+    base_database_url = os.getenv("LAB_TRACKER_POSTGRES_TEST_DATABASE_URL")
+    if not base_database_url:
+        pytest.skip("LAB_TRACKER_POSTGRES_TEST_DATABASE_URL is not set")
+
+    normalized_base_url = _normalize_postgres_url(base_database_url)
+    base_url = make_url(normalized_base_url)
+    database_name = f"lab_tracker_test_{uuid4().hex}"
+    admin_url = base_url.set(database=base_url.database or "postgres")
+    target_url = base_url.set(database=database_name)
+    admin_engine = create_engine(
+        admin_url.render_as_string(hide_password=False),
+        future=True,
+        isolation_level="AUTOCOMMIT",
+    )
+    with admin_engine.connect() as connection:
+        connection.execute(text(f'CREATE DATABASE "{database_name}"'))
+    admin_engine.dispose()
+
+    target_database_url = target_url.render_as_string(hide_password=False)
+    monkeypatch.setenv("LAB_TRACKER_DATABASE_URL", target_database_url)
+    monkeypatch.setenv("LAB_TRACKER_ENVIRONMENT", "local")
+    monkeypatch.setenv("LAB_TRACKER_FILE_STORAGE_PATH", str(tmp_path / "file-storage"))
+    monkeypatch.setenv("LAB_TRACKER_NOTE_STORAGE_PATH", str(tmp_path / "note-storage"))
+    monkeypatch.setenv("LAB_TRACKER_AUTH_SECRET_KEY", "test-secret")
+    monkeypatch.setenv("LAB_TRACKER_AUTH_ENABLED", "true")
+
+    config = Config(str(_repo_root() / "alembic.ini"))
+    command.upgrade(config, "head")
+    try:
+        yield target_database_url
+    finally:
+        cleanup_engine = create_engine(
+            admin_url.render_as_string(hide_password=False),
+            future=True,
+            isolation_level="AUTOCOMMIT",
+        )
+        with cleanup_engine.connect() as connection:
+            connection.execute(text(f'DROP DATABASE IF EXISTS "{database_name}" WITH (FORCE)'))
+        cleanup_engine.dispose()
+
+
+def _normalize_postgres_url(value: str) -> str:
+    cleaned = value.strip()
+    if cleaned.startswith("postgres://"):
+        return f"postgresql+psycopg://{cleaned.removeprefix('postgres://')}"
+    if cleaned.startswith("postgresql://"):
+        return f"postgresql+psycopg://{cleaned.removeprefix('postgresql://')}"
+    return cleaned
+
+
+@pytest.fixture()
 def app(migrated_sqlite_database_url: str):
     return create_app()
 
@@ -129,6 +183,17 @@ def app(migrated_sqlite_database_url: str):
 @pytest.fixture()
 def client(app):
     with TestClient(app) as test_client:
+        yield test_client
+
+
+@pytest.fixture()
+def postgres_app(migrated_postgres_database_url: str):
+    return create_app()
+
+
+@pytest.fixture()
+def postgres_client(postgres_app):
+    with TestClient(postgres_app) as test_client:
         yield test_client
 
 
@@ -142,6 +207,24 @@ def admin_auth_headers(client: TestClient) -> dict[str, str]:
         role=Role.ADMIN,
     )
     login_response = client.post(
+        "/auth/login",
+        json={"username": username, "password": password},
+    )
+    assert login_response.status_code == 200
+    token = login_response.json()["data"]["access_token"]
+    return _auth_headers(token)
+
+
+@pytest.fixture()
+def postgres_admin_auth_headers(postgres_client: TestClient) -> dict[str, str]:
+    username = f"pg-admin-{uuid4().hex[:8]}"
+    password = "secret"
+    postgres_client.app.state.auth_service.register_user(
+        username=username,
+        password=password,
+        role=Role.ADMIN,
+    )
+    login_response = postgres_client.post(
         "/auth/login",
         json={"username": username, "password": password},
     )

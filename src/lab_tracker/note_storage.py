@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import hashlib
+import os
+import tempfile
+from contextlib import suppress
 from pathlib import Path
 from typing import BinaryIO
 from uuid import UUID, uuid4
@@ -54,12 +57,14 @@ class LocalNoteStorage:
         storage_id = uuid4()
         path = self._path_for(storage_id)
         path.parent.mkdir(parents=True, exist_ok=True)
+        tmp_name: str | None = None
 
         checksum = hashlib.sha256()
         size_bytes = 0
         resolved_max_bytes = self._max_bytes if max_bytes is None else max_bytes
         try:
-            with path.open("wb") as handle:
+            with tempfile.NamedTemporaryFile("wb", delete=False, dir=path.parent) as handle:
+                tmp_name = handle.name
                 while True:
                     chunk = stream.read(chunk_size)
                     if not chunk:
@@ -68,8 +73,14 @@ class LocalNoteStorage:
                     size_bytes += len(chunk)
                     enforce_stream_size_limit(size_bytes, max_bytes=resolved_max_bytes)
                     handle.write(chunk)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(tmp_name, path)
+            tmp_name = None
         except BaseException:
-            path.unlink(missing_ok=True)
+            if tmp_name is not None:
+                with suppress(FileNotFoundError):
+                    Path(tmp_name).unlink()
             raise
 
         if size_bytes == 0:
@@ -105,7 +116,20 @@ class LocalNoteStorage:
     def _write_bytes(self, storage_id: UUID, content: bytes) -> None:
         path = self._path_for(storage_id)
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_bytes(content)
+        tmp_name: str | None = None
+        try:
+            with tempfile.NamedTemporaryFile("wb", delete=False, dir=path.parent) as handle:
+                tmp_name = handle.name
+                handle.write(content)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(tmp_name, path)
+            tmp_name = None
+        except BaseException:
+            if tmp_name is not None:
+                with suppress(FileNotFoundError):
+                    Path(tmp_name).unlink()
+            raise
 
     def _path_for(self, storage_id: UUID) -> Path:
         return self._base_path / storage_id.hex

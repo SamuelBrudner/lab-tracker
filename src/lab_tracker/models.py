@@ -662,6 +662,7 @@ class Note(_DomainModel):
     transcribed_text: str | None = None
     targets: list[EntityRef] = Field(default_factory=list)
     metadata: dict[str, str] = Field(default_factory=dict)
+    client_capture_id: str | None = None
     status: NoteStatus = NoteStatus.STAGED
     created_at: datetime = Field(default_factory=utc_now)
     created_by: str | None = None
@@ -876,10 +877,12 @@ class Visualization(_DomainModel):
 class RecordExportRecords(_DomainModel):
     questions: list[Question] = Field(default_factory=list)
     datasets: list[Dataset] = Field(default_factory=list)
+    sessions: list[Session] = Field(default_factory=list)
     analyses: list[Analysis] = Field(default_factory=list)
     claims: list[Claim] = Field(default_factory=list)
     claim_edges: list[ClaimEdge] = Field(default_factory=list)
     notes: list[Note] = Field(default_factory=list)
+    visualizations: list[Visualization] = Field(default_factory=list)
 
 
 class PublicationReadinessUnsupportedClaim(_DomainModel):
@@ -914,18 +917,10 @@ class PublicationReadinessBrokenExternalRef(_DomainModel):
 
 class PublicationReadinessReport(_DomainModel):
     project_id: UUID
-    unsupported_claims: list[PublicationReadinessUnsupportedClaim] = Field(
-        default_factory=list
-    )
-    ungrounded_questions: list[PublicationReadinessUngroundedQuestion] = Field(
-        default_factory=list
-    )
-    orphaned_entities: list[PublicationReadinessOrphanedEntity] = Field(
-        default_factory=list
-    )
-    broken_external_refs: list[PublicationReadinessBrokenExternalRef] = Field(
-        default_factory=list
-    )
+    unsupported_claims: list[PublicationReadinessUnsupportedClaim] = Field(default_factory=list)
+    ungrounded_questions: list[PublicationReadinessUngroundedQuestion] = Field(default_factory=list)
+    orphaned_entities: list[PublicationReadinessOrphanedEntity] = Field(default_factory=list)
+    broken_external_refs: list[PublicationReadinessBrokenExternalRef] = Field(default_factory=list)
     seal_level: Literal["blocked", "ara_l1"] = "blocked"
 
 

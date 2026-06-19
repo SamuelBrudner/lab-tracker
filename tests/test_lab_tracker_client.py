@@ -102,7 +102,7 @@ def test_upsert_project_question_and_note_are_idempotent() -> None:
         )
         same_note = lt.upsert_note(
             project_id=project.id,
-            content="# Fig. 1 marker\n\nUpdated body that should not duplicate",
+            content="# Fig. 1 marker\n\nBody text",
             targets=[("question", question.id)],
         )
 
@@ -113,6 +113,31 @@ def test_upsert_project_question_and_note_are_idempotent() -> None:
     assert note.id == same_note.id == "note-1"
     assert notes[0]["targets"] == [{"entity_type": "question", "entity_id": "question-1"}]
     assert post_counts == {"/projects": 1, "/questions": 1, "/notes": 1}
+
+
+def test_upsert_note_raises_when_marker_matches_different_content() -> None:
+    notes = [{"note_id": "note-1", "raw_content": "# marker\n\nOriginal body"}]
+    post_count = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal post_count
+        if request.method == "GET" and request.url.path == "/notes":
+            return _json_response(
+                200,
+                {"data": notes, "meta": {"limit": 200, "offset": 0, "total": len(notes)}},
+            )
+        if request.method == "POST" and request.url.path == "/notes":
+            post_count += 1
+            return _json_response(201, {"data": {"note_id": "duplicate-note"}})
+        return _json_response(404, {"error": {"message": "not found"}})
+
+    with (
+        LabTracker(base_url="http://testserver", transport=httpx.MockTransport(handler)) as lt,
+        pytest.raises(LTValidationError, match="same first-line marker"),
+    ):
+        lt.upsert_note(project_id="project-1", content="# marker\n\nNew body")
+
+    assert post_count == 0
 
 
 def test_bad_enum_values_fail_before_request() -> None:
@@ -162,6 +187,7 @@ def test_quick_capture_posts_text_as_multipart_file() -> None:
         assert b"agent observation" in request.content
         assert b"quick.txt" in request.content
         assert b'"source": "cli"' in request.content
+        assert b"client-capture-quick" in request.content
         return _json_response(
             202,
             {
@@ -182,6 +208,7 @@ def test_quick_capture_posts_text_as_multipart_file() -> None:
             "agent observation",
             filename="quick.txt",
             source="cli",
+            client_capture_id="client-capture-quick",
         )
 
     assert note.id == "note-quick"
@@ -214,6 +241,7 @@ def test_upload_note_file_posts_staged_evidence_multipart(tmp_path) -> None:
         assert b"evidence_source_provider" in body
         assert b"local-folder" in body
         assert b"evidence_content_hash" in body
+        assert b"client-capture-file" in body
         return _json_response(
             201,
             {
@@ -231,6 +259,7 @@ def test_upload_note_file_posts_staged_evidence_multipart(tmp_path) -> None:
             project_id="project-1",
             file_path=evidence_path,
             metadata=metadata,
+            client_capture_id="client-capture-file",
         )
 
     assert note.id == "note-file"
@@ -448,7 +477,7 @@ def test_upsert_note_finds_existing_marker_after_first_page() -> None:
     with LabTracker(base_url="http://testserver", transport=httpx.MockTransport(handler)) as lt:
         note = lt.upsert_note(
             project_id="project-1",
-            content="# target marker\n\nReplacement body",
+            content="# target marker\n\nExisting body",
         )
 
     assert note.id == "note-240"

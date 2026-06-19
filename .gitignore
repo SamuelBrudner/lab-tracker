@@ -1,6 +1,7 @@
 __pycache__/
 *.py[cod]
 *.egg-info/
+build/
 docs/runs/
 node_modules/
 .env

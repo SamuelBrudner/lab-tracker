@@ -128,9 +128,47 @@ def test_promote_operational_session_to_dataset_over_http(
     assert dataset["status"] == "committed"
     assert dataset["commit_manifest"]["source_session_id"] == session["session_id"]
     assert dataset["commit_manifest"]["metadata"] == {"source": "session-route-test"}
-    assert [
-        file["path"] for file in dataset["commit_manifest"]["files"]
-    ] == ["sessions/run-001.nwb"]
+    assert [file["path"] for file in dataset["commit_manifest"]["files"]] == [
+        "sessions/run-001.nwb"
+    ]
+
+
+def test_delete_session_rejects_promoted_dataset_source(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+) -> None:
+    project_id = _create_project(client, admin_auth_headers, "HTTP session source guard")
+    question_id = _create_question(client, admin_auth_headers, project_id)
+    session = _create_operational_session(client, admin_auth_headers, project_id)
+    output = client.post(
+        f"/sessions/{session['session_id']}/outputs",
+        json={
+            "file_path": "sessions/guarded-run.nwb",
+            "checksum": "sha256:guarded-session-output",
+        },
+        headers=admin_auth_headers,
+    )
+    assert output.status_code == 201
+    promoted = client.post(
+        f"/sessions/{session['session_id']}/promote-to-dataset",
+        json={"primary_question_id": question_id},
+        headers=admin_auth_headers,
+    )
+    assert promoted.status_code == 201
+    assert promoted.json()["data"]["status"] == "committed"
+
+    delete_response = client.delete(
+        f"/sessions/{session['session_id']}",
+        headers=admin_auth_headers,
+    )
+    lookup_response = client.get(
+        f"/sessions/{session['session_id']}",
+        headers=admin_auth_headers,
+    )
+
+    assert delete_response.status_code == 422
+    assert "non-staged datasets reference" in delete_response.json()["error"]["message"]
+    assert lookup_response.status_code == 200
 
 
 def test_close_and_delete_session_over_http(

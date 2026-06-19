@@ -6,10 +6,11 @@ from pathlib import Path
 from uuid import uuid4
 
 from fastapi.testclient import TestClient
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from lab_tracker.auth import Role
-from lab_tracker.db_models import AnalysisModel
+from lab_tracker.db_models import AnalysisModel, NoteModel
 
 
 def _ids(payload: list[dict[str, object]], key: str) -> set[str]:
@@ -591,9 +592,7 @@ def test_evidence_authoring_routes_create_and_filter_graph_records(
     dataset_payload = dataset_response.json()["data"]
     dataset_id = dataset_payload["dataset_id"]
     assert dataset_payload["status"] == "staged"
-    assert {
-        (link["question_id"], link["role"]) for link in dataset_payload["question_links"]
-    } == {
+    assert {(link["question_id"], link["role"]) for link in dataset_payload["question_links"]} == {
         (primary_question_id, "primary"),
         (secondary_question_id, "secondary"),
     }
@@ -667,9 +666,7 @@ def test_evidence_authoring_routes_create_and_filter_graph_records(
         json={
             "project_id": project_id,
             "raw_content": "Source note for visualization.",
-            "targets": [
-                {"entity_type": "visualization", "entity_id": visualization_id}
-            ],
+            "targets": [{"entity_type": "visualization", "entity_id": visualization_id}],
         },
         headers=headers,
     )
@@ -722,9 +719,7 @@ def test_evidence_authoring_routes_create_and_filter_graph_records(
 
     assert dataset_id in _ids(datasets.json()["data"], "dataset_id")
     assert analysis_id in _ids(analyses.json()["data"], "analysis_id")
-    assert {proposed_claim_id, supported_claim_id}.issubset(
-        _ids(claims.json()["data"], "claim_id")
-    )
+    assert {proposed_claim_id, supported_claim_id}.issubset(_ids(claims.json()["data"], "claim_id"))
     assert visualization_id in _ids(visualizations.json()["data"], "viz_id")
     assert claim_notes.json()["data"][0]["targets"] == [
         {"entity_type": "claim", "entity_id": supported_claim_id}
@@ -1040,8 +1035,7 @@ def test_question_refactor_routes_persist_supersession_and_relationship_moves(
     assert replacement_history.status_code == 200
     assert source_history.json()["data"][0]["refactor_id"] == payload["refactor"]["refactor_id"]
     assert (
-        replacement_history.json()["data"][0]["refactor_id"]
-        == payload["refactor"]["refactor_id"]
+        replacement_history.json()["data"][0]["refactor_id"] == payload["refactor"]["refactor_id"]
     )
 
 
@@ -1102,14 +1096,10 @@ def test_note_routes_support_target_filters_and_multipart_upload(
     multipart_payload = multipart_upload.json()["data"]
     assert multipart_payload["transcribed_text"] == "typed capture"
     assert multipart_payload["metadata"]["source"] == "camera"
-    assert (
-        multipart_payload["metadata"]["source_file_created_at"]
-        == "2026-04-20T01:02:03+00:00"
-    )
+    assert multipart_payload["metadata"]["source_file_created_at"] == "2026-04-20T01:02:03+00:00"
     assert multipart_payload["metadata"]["source_file_last_modified_ms"] == "1769904000000"
     assert (
-        multipart_payload["metadata"]["source_file_last_modified_at"]
-        == "2026-02-01T00:00:00+00:00"
+        multipart_payload["metadata"]["source_file_last_modified_at"] == "2026-02-01T00:00:00+00:00"
     )
     _assert_source_file_metadata(
         multipart_payload["metadata"],
@@ -1246,9 +1236,7 @@ def test_note_multipart_upload_cleans_up_raw_asset_when_request_commit_fails(app
 
         assert response.status_code == 500
         remaining = (
-            sorted(path.name for path in storage_root.iterdir())
-            if storage_root.exists()
-            else []
+            sorted(path.name for path in storage_root.iterdir()) if storage_root.exists() else []
         )
         assert remaining == []
 
@@ -1460,9 +1448,7 @@ def test_note_raw_download_sanitizes_attachment_filename(
     raw_download = client.get(f"/notes/{note_id}/raw", headers=headers)
     assert raw_download.status_code == 200
     assert raw_download.content == b"raw-capture"
-    assert raw_download.headers["content-disposition"] == (
-        'attachment; filename="bad\'__name.txt"'
-    )
+    assert raw_download.headers["content-disposition"] == ('attachment; filename="bad\'__name.txt"')
 
 
 def test_quick_capture_stages_note_with_minimal_payload(
@@ -1508,6 +1494,61 @@ def test_quick_capture_stages_note_with_minimal_payload(
         )
         assert raw_download.status_code == 200
         assert raw_download.content == content
+
+
+def test_capture_upload_reuses_client_capture_id_on_retry(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+):
+    headers = admin_auth_headers
+    project_id = client.post(
+        "/projects",
+        json={"name": "Capture idempotency"},
+        headers=headers,
+    ).json()["data"]["project_id"]
+
+    for endpoint, first_status in (
+        ("/notes/quick-capture", 202),
+        ("/notes/upload-file", 201),
+    ):
+        client_capture_id = f"capture-{endpoint.rsplit('/', 1)[-1]}"
+        first = client.post(
+            endpoint,
+            data={
+                "project_id": project_id,
+                "client_capture_id": client_capture_id,
+            },
+            files={"file": ("first.txt", b"first-capture", "text/plain")},
+            headers=headers,
+        )
+        retry = client.post(
+            endpoint,
+            data={
+                "project_id": project_id,
+                "client_capture_id": client_capture_id,
+            },
+            files={"file": ("retry.txt", b"retry-capture", "text/plain")},
+            headers=headers,
+        )
+
+        assert first.status_code == first_status, first.text
+        assert retry.status_code == 200, retry.text
+        first_payload = first.json()["data"]
+        retry_payload = retry.json()["data"]
+        assert retry_payload["note_id"] == first_payload["note_id"]
+        assert retry_payload["raw_asset"]["filename"] == "first.txt"
+        assert retry_payload["client_capture_id"] == client_capture_id
+
+        with client.app.state.db_session_factory() as session:
+            rows = list(
+                session.scalars(
+                    select(NoteModel).where(
+                        NoteModel.project_id == project_id,
+                        NoteModel.client_capture_id == client_capture_id,
+                    )
+                )
+            )
+        assert len(rows) == 1
 
 
 def test_quick_capture_rejects_missing_required_fields(

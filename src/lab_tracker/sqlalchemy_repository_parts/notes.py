@@ -36,7 +36,9 @@ class SQLAlchemyNoteRepository(EntityRepository[Note]):
         if not note_ids:
             return target_map
         target_rows = list(
-            self._session.scalars(select(NoteTargetModel).where(NoteTargetModel.note_id.in_(note_ids)))
+            self._session.scalars(
+                select(NoteTargetModel).where(NoteTargetModel.note_id.in_(note_ids))
+            )
         )
         for row in target_rows:
             target_map.setdefault(row.note_id, []).append(row)
@@ -102,6 +104,7 @@ class SQLAlchemyNoteRepository(EntityRepository[Note]):
         status: str | None = None,
         search: str | None = None,
         created_by: str | None = None,
+        client_capture_id: str | None = None,
         target_entity_type: str | None = None,
         target_entity_id: UUID | None = None,
         limit: int | None = None,
@@ -126,6 +129,9 @@ class SQLAlchemyNoteRepository(EntityRepository[Note]):
         if created_by is not None:
             stmt = stmt.where(NoteModel.created_by_user_id == created_by)
             count_stmt = count_stmt.where(NoteModel.created_by_user_id == created_by)
+        if client_capture_id is not None:
+            stmt = stmt.where(NoteModel.client_capture_id == client_capture_id)
+            count_stmt = count_stmt.where(NoteModel.client_capture_id == client_capture_id)
         pattern = substring_pattern(search)
         if pattern is not None:
             search_clause = or_(

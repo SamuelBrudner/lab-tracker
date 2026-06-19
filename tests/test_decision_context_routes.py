@@ -188,7 +188,7 @@ def test_decision_context_route_reports_truncation_metadata(
     assert {
         (item["section"], item["returned"], item["total"])
         for item in truncation["sections"]
-    } >= {("questions", 1, 2)}
+    } >= {("search.questions", 1, 2), ("questions", 1, 2)}
 
 
 def test_decision_context_route_resolves_question_anchor_by_id(
@@ -280,6 +280,47 @@ def test_decision_context_route_returns_newest_recent_activity(
     questions = response.json()["data"]["questions"]
     assert [item["text"] for item in questions] == ["Newer recent question"]
     assert questions[0]["relevance_reasons"] == ["recent_activity"]
+
+
+def test_decision_context_route_returns_newest_search_match(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+) -> None:
+    project_id = client.post(
+        "/projects",
+        json={"name": "Search Context Project", "description": ""},
+        headers=admin_auth_headers,
+    ).json()["data"]["project_id"]
+    for text in ["Older search needle question", "Newer search needle question"]:
+        client.post(
+            "/questions",
+            json={
+                "project_id": project_id,
+                "text": text,
+                "question_type": "descriptive",
+                "status": "active",
+            },
+            headers=admin_auth_headers,
+        )
+
+    response = client.post(
+        "/assistant/decision-context",
+        json={
+            "task_kind": "summary",
+            "query": "search needle",
+            "project_id": project_id,
+            "limit": 1,
+        },
+        headers=admin_auth_headers,
+    )
+
+    assert response.status_code == 200
+    questions = response.json()["data"]["questions"]
+    assert [item["text"] for item in questions] == ["Newer search needle question"]
+    assert questions[0]["relevance_reasons"] == [
+        "search_match",
+        "recent_activity",
+    ]
 
 
 def test_decision_context_route_truncates_long_note_fields(

@@ -277,6 +277,13 @@ class DatasetFileModel(Base):
 
 class NoteModel(Base):
     __tablename__ = "notes"
+    __table_args__ = (
+        UniqueConstraint(
+            "project_id",
+            "client_capture_id",
+            name="uq_notes_project_client_capture",
+        ),
+    )
 
     note_id: Mapped[str] = mapped_column(
         String(36),
@@ -296,6 +303,7 @@ class NoteModel(Base):
     raw_checksum: Mapped[str | None] = mapped_column(String(64))
     transcribed_text: Mapped[str | None] = mapped_column(Text)
     note_metadata: Mapped[dict[str, str]] = mapped_column("metadata", JSON, default=dict)
+    client_capture_id: Mapped[str | None] = mapped_column(String(120))
     status: Mapped[str] = mapped_column(String(20), default="staged")
     created_by: Mapped[str | None] = mapped_column(String(255))
     created_by_user_id: Mapped[str | None] = mapped_column(
@@ -305,7 +313,12 @@ class NoteModel(Base):
     origin: Mapped[str] = mapped_column(String(32), nullable=False, default="user")
     change_set_id: Mapped[str | None] = mapped_column(
         String(36),
-        ForeignKey("graph_change_sets.change_set_id", ondelete="SET NULL"),
+        ForeignKey(
+            "graph_change_sets.change_set_id",
+            ondelete="SET NULL",
+            name="fk_notes_change_set_id_graph_change_sets",
+            use_alter=True,
+        ),
     )
     origin_provider: Mapped[str | None] = mapped_column(String(80))
     origin_model: Mapped[str | None] = mapped_column(String(255))
@@ -332,9 +345,7 @@ class NoteTargetModel(Base):
 
 class GraphChangeSetModel(Base):
     __tablename__ = "graph_change_sets"
-    __table_args__ = (
-        UniqueConstraint("batch_key", name="uq_graph_change_sets_batch_key"),
-    )
+    __table_args__ = (UniqueConstraint("batch_key", name="uq_graph_change_sets_batch_key"),)
 
     change_set_id: Mapped[str] = mapped_column(
         String(36),
@@ -466,9 +477,7 @@ class EntityVersionModel(Base):
 
 class GraphDraftBatchSettingsModel(Base):
     __tablename__ = "graph_draft_batch_settings"
-    __table_args__ = (
-        UniqueConstraint("project_id", name="uq_graph_draft_batch_settings_project"),
-    )
+    __table_args__ = (UniqueConstraint("project_id", name="uq_graph_draft_batch_settings_project"),)
 
     settings_id: Mapped[str] = mapped_column(
         String(36),
@@ -500,9 +509,7 @@ class GraphDraftBatchSettingsModel(Base):
 
 class GraphDraftBatchRunModel(Base):
     __tablename__ = "graph_draft_batch_runs"
-    __table_args__ = (
-        UniqueConstraint("batch_key", name="uq_graph_draft_batch_runs_batch_key"),
-    )
+    __table_args__ = (UniqueConstraint("batch_key", name="uq_graph_draft_batch_runs_batch_key"),)
 
     run_id: Mapped[str] = mapped_column(
         String(36),
@@ -1180,9 +1187,7 @@ class GroupMembershipModel(Base):
 
 class DeviceTokenModel(Base):
     __tablename__ = "device_tokens"
-    __table_args__ = (
-        UniqueConstraint("token_hash", name="uq_device_tokens_token_hash"),
-    )
+    __table_args__ = (UniqueConstraint("token_hash", name="uq_device_tokens_token_hash"),)
 
     device_token_id: Mapped[str] = mapped_column(
         String(36),

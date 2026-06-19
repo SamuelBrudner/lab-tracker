@@ -17,7 +17,9 @@ from lab_tracker.db_models import (
     DatasetModel,
     NoteModel,
     QuestionModel,
+    SessionModel,
     UserModel,
+    VisualizationModel,
 )
 from lab_tracker.models import (
     AcquisitionOutput,
@@ -46,6 +48,7 @@ from lab_tracker.models import (
     Visualization,
 )
 from lab_tracker.repository import LabTrackerRepository
+from lab_tracker.sqlalchemy_mappers import session_from_model
 
 from .analyses import (
     SQLAlchemyAnalysisRepository,
@@ -394,6 +397,17 @@ class SQLAlchemyLabTrackerRepository(LabTrackerRepository):
                 ).order_by(NoteModel.created_at, NoteModel.note_id)
             )
         )
+        session_rows = list(
+            self._session.scalars(
+                self._attributed_record_statement(
+                    SessionModel,
+                    created_by_column=SessionModel.created_by,
+                    user_id_column=SessionModel.created_by_user_id,
+                    user_id=user_id,
+                    project_filter=project_filter,
+                ).order_by(SessionModel.started_at, SessionModel.session_id)
+            )
+        )
         analysis_rows = list(
             self._session.scalars(
                 self._attributed_record_statement(
@@ -413,6 +427,14 @@ class SQLAlchemyLabTrackerRepository(LabTrackerRepository):
                 )
             )
         )
+        visualization_rows = list(
+            self._session.scalars(
+                self._attributed_visualization_statement(
+                    user_id=user_id,
+                    project_filter=project_filter,
+                ).order_by(VisualizationModel.created_at, VisualizationModel.viz_id)
+            )
+        )
         claims = self.claims.claims_from_rows(claim_rows)
         claim_ids = {claim.claim_id for claim in claims}
         claim_edges = self._claim_edges_for_record_claims(
@@ -422,10 +444,12 @@ class SQLAlchemyLabTrackerRepository(LabTrackerRepository):
         return RecordExportRecords(
             questions=self.questions.questions_from_rows(question_rows),
             datasets=self.datasets.datasets_from_rows(dataset_rows),
+            sessions=[session_from_model(row) for row in session_rows],
             notes=self.notes.notes_from_rows(note_rows),
             analyses=self.analyses.analyses_from_rows(analysis_rows),
             claims=claims,
             claim_edges=claim_edges,
+            visualizations=self.visualizations.visualizations_from_rows(visualization_rows),
         )
 
     def _attributed_record_statement(
@@ -490,6 +514,27 @@ class SQLAlchemyLabTrackerRepository(LabTrackerRepository):
         if project_filter:
             stmt = stmt.where(ClaimModel.project_id.in_(project_filter))
         return stmt.order_by(ClaimModel.created_at, ClaimModel.claim_id)
+
+    def _attributed_visualization_statement(
+        self,
+        *,
+        user_id: UUID,
+        project_filter: list[str],
+    ):
+        stmt = (
+            select(VisualizationModel)
+            .join(AnalysisModel, AnalysisModel.analysis_id == VisualizationModel.analysis_id)
+            .where(
+                self._attribution_predicate(
+                    created_by_column=VisualizationModel.created_by,
+                    user_id_column=VisualizationModel.created_by_user_id,
+                    user_id=user_id,
+                )
+            )
+        )
+        if project_filter:
+            stmt = stmt.where(AnalysisModel.project_id.in_(project_filter))
+        return stmt
 
     def _claim_edges_for_record_claims(
         self,
@@ -607,6 +652,7 @@ class SQLAlchemyLabTrackerRepository(LabTrackerRepository):
         status: str | None = None,
         search: str | None = None,
         created_by: str | None = None,
+        client_capture_id: str | None = None,
         target_entity_type: str | None = None,
         target_entity_id: UUID | None = None,
         limit: int | None = None,
@@ -619,6 +665,7 @@ class SQLAlchemyLabTrackerRepository(LabTrackerRepository):
             status=status,
             search=search,
             created_by=created_by,
+            client_capture_id=client_capture_id,
             target_entity_type=target_entity_type,
             target_entity_id=target_entity_id,
             limit=limit,
@@ -658,9 +705,7 @@ class SQLAlchemyLabTrackerRepository(LabTrackerRepository):
             note_stmt = note_stmt.where(NoteModel.project_id.in_(project_values))
 
         matching_projects = question_stmt.union(note_stmt).subquery()
-        stmt = select(matching_projects.c.project_id).order_by(
-            matching_projects.c.project_id
-        )
+        stmt = select(matching_projects.c.project_id).order_by(matching_projects.c.project_id)
         rows = self._session.scalars(apply_pagination(stmt, limit=limit, offset=0))
         return {UUID(project_id) for project_id in rows}
 
@@ -902,6 +947,23 @@ class SQLAlchemyLabTrackerRepository(LabTrackerRepository):
         now: datetime,
     ) -> list[GraphDraftBatchSettings]:
         return self.graph_draft_batch_settings.list_due(now)
+
+    def claim_due_graph_draft_batch_settings(
+        self,
+        settings_id: UUID,
+        *,
+        observed_next_run_at: datetime,
+        next_run_at: datetime,
+        updated_at: datetime,
+        updated_by: str | None,
+    ) -> GraphDraftBatchSettings | None:
+        return self.graph_draft_batch_settings.claim_due(
+            settings_id,
+            observed_next_run_at=observed_next_run_at,
+            next_run_at=next_run_at,
+            updated_at=updated_at,
+            updated_by=updated_by,
+        )
 
     def get_graph_draft_batch_run_by_key(self, batch_key: str) -> GraphDraftBatchRun | None:
         return self.graph_draft_batch_runs.get_by_batch_key(batch_key)

@@ -191,6 +191,7 @@ class SessionService(BaseService):
     def delete_session(self, session_id: UUID, *, actor: AuthContext | None = None) -> Session:
         session = self.get_session(session_id)
         self.authorization.require_contributor(session.project_id, actor=actor)
+        self._ensure_session_can_be_deleted(session)
         with self.unit_of_work() as repository:
             remove_goal_links_to_entity(
                 repository,
@@ -199,6 +200,23 @@ class SessionService(BaseService):
             )
             repository.sessions.delete(session_id)
         return session
+
+    def _ensure_session_can_be_deleted(self, session: Session) -> None:
+        datasets = self.query_from_repository(
+            loader=lambda repository: repository.query_datasets(
+                project_id=session.project_id,
+                limit=None,
+                offset=0,
+            ),
+        )
+        for dataset in datasets:
+            if (
+                dataset.status != DatasetStatus.STAGED
+                and dataset.commit_manifest.source_session_id == session.session_id
+            ):
+                raise ValidationError(
+                    "Session cannot be deleted while non-staged datasets reference it."
+                )
 
     def register_acquisition_output(
         self,

@@ -105,6 +105,7 @@ class NoteService(BaseService):
         transcribed_text: str | None = None,
         targets: Iterable[EntityRef] | None = None,
         metadata: dict[str, NoteMetadataScalar] | None = None,
+        client_capture_id: str | None = None,
         status: NoteStatus = NoteStatus.STAGED,
         actor: AuthContext | None = None,
         origin: EntityOrigin = EntityOrigin.USER,
@@ -115,6 +116,14 @@ class NoteService(BaseService):
     ) -> Note:
         self.authorization.require_contributor(project_id, actor=actor)
         self.projects.get_project(project_id)
+        resolved_client_capture_id = _normalize_client_capture_id(client_capture_id)
+        if resolved_client_capture_id is not None:
+            existing = self._find_client_capture_note(
+                project_id,
+                resolved_client_capture_id,
+            )
+            if existing is not None:
+                return existing
         raw_text = raw_content.strip() if raw_content else ""
         if not raw_text and raw_asset is None:
             raise ValidationError("raw_content or raw_asset must be provided.")
@@ -130,6 +139,7 @@ class NoteService(BaseService):
             transcribed_text=transcribed_text.strip() if transcribed_text else None,
             targets=resolved_targets,
             metadata=resolved_metadata,
+            client_capture_id=resolved_client_capture_id,
             status=status,
             created_by=actor_user_id(actor),
             created_by_user_id=actor_user_fk(actor, self.repository),
@@ -177,11 +187,24 @@ class NoteService(BaseService):
         transcribed_text: str | None = None,
         targets: Iterable[EntityRef] | None = None,
         metadata: dict[str, NoteMetadataScalar] | None = None,
+        client_capture_id: str | None = None,
         status: NoteStatus = NoteStatus.STAGED,
         actor: AuthContext | None = None,
     ) -> Note:
         if self.raw_storage is None:
             raise ValidationError("Raw storage backend is not configured.")
+        self.authorization.require_contributor(project_id, actor=actor)
+        self.projects.get_project(project_id)
+        resolved_client_capture_id = _normalize_client_capture_id(client_capture_id)
+        if resolved_client_capture_id is not None:
+            existing = self._find_client_capture_note(
+                project_id,
+                resolved_client_capture_id,
+            )
+            if existing is not None:
+                if raw_asset is not None and owns_raw_asset:
+                    self._delete_raw_asset(raw_asset)
+                return existing
         asset = raw_asset
         created_asset = False
         if asset is None:
@@ -202,6 +225,7 @@ class NoteService(BaseService):
                 transcribed_text=resolved_transcribed_text,
                 targets=targets,
                 metadata=metadata,
+                client_capture_id=resolved_client_capture_id,
                 status=status,
                 actor=actor,
             )
@@ -212,6 +236,35 @@ class NoteService(BaseService):
         if asset is not None and (created_asset or owns_raw_asset):
             self.run_after_rollback(lambda asset=asset: self._delete_raw_asset(asset))
         return note
+
+    def find_note_by_client_capture_id(
+        self,
+        project_id: UUID,
+        client_capture_id: str | None,
+        *,
+        actor: AuthContext | None = None,
+    ) -> Note | None:
+        self.authorization.require_contributor(project_id, actor=actor)
+        self.projects.get_project(project_id)
+        resolved_client_capture_id = _normalize_client_capture_id(client_capture_id)
+        if resolved_client_capture_id is None:
+            return None
+        return self._find_client_capture_note(project_id, resolved_client_capture_id)
+
+    def _find_client_capture_note(
+        self,
+        project_id: UUID,
+        client_capture_id: str,
+    ) -> Note | None:
+        notes = self.query_from_repository(
+            loader=lambda repository: repository.query_notes(
+                project_id=project_id,
+                client_capture_id=client_capture_id,
+                limit=1,
+                offset=0,
+            ),
+        )
+        return notes[0] if notes else None
 
     def transcribe_voice_note(
         self,
@@ -379,13 +432,10 @@ class NoteService(BaseService):
             ),
         )
         if any(
-            change_set.source_note_id == note.note_id
-            or note.note_id in change_set.source_note_ids
+            change_set.source_note_id == note.note_id or note.note_id in change_set.source_note_ids
             for change_set in change_sets
         ):
-            raise ValidationError(
-                "Note cannot be deleted while graph drafts reference it."
-            )
+            raise ValidationError("Note cannot be deleted while graph drafts reference it.")
 
     def _ensure_target_exists(self, target: EntityRef, project_id: UUID) -> None:
         entity_getters = {
@@ -421,3 +471,14 @@ def _transcript_text(transcript: Any) -> str:
         if isinstance(text, str):
             return text.strip()
     return ""
+
+
+def _normalize_client_capture_id(client_capture_id: str | None) -> str | None:
+    if client_capture_id is None:
+        return None
+    value = client_capture_id.strip()
+    if not value:
+        return None
+    if len(value) > 120:
+        raise ValidationError("client_capture_id must be 120 characters or fewer.")
+    return value

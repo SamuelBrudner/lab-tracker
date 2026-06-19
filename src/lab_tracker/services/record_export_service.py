@@ -237,9 +237,7 @@ class RecordExportService(BaseService):
             analyses.update({item.analysis_id: item for item in project_records.analyses})
             claims.update({item.claim_id: item for item in project_records.claims})
             notes.update({item.note_id: item for item in project_records.notes})
-            visualizations.update(
-                {item.viz_id: item for item in project_records.visualizations}
-            )
+            visualizations.update({item.viz_id: item for item in project_records.visualizations})
 
         records = self._close_artifact_scope(
             project_ids=scope_project_ids,
@@ -535,8 +533,7 @@ class RecordExportService(BaseService):
         target_map: dict[EntityType, set[UUID]],
     ) -> bool:
         return any(
-            target.entity_id in target_map.get(target.entity_type, set())
-            for target in note.targets
+            target.entity_id in target_map.get(target.entity_type, set()) for target in note.targets
         )
 
     def _claim_edges_for_claims(
@@ -679,9 +676,11 @@ class RecordExportService(BaseService):
         project_ids = {
             *[item.project_id for item in records.questions],
             *[item.project_id for item in records.datasets],
+            *[item.project_id for item in records.sessions],
             *[item.project_id for item in records.analyses],
             *[item.project_id for item in records.claims],
             *[item.project_id for item in records.notes],
+            *[self._visualization_project_id(item) for item in records.visualizations],
         }
         return sorted(project_ids, key=str)
 
@@ -689,8 +688,10 @@ class RecordExportService(BaseService):
         return {
             "questions": len(records.questions),
             "datasets": len(records.datasets),
+            "sessions": len(records.sessions),
             "analyses": len(records.analyses),
             "claims": len(records.claims),
             "claim_edges": len(records.claim_edges),
             "notes": len(records.notes),
+            "visualizations": len(records.visualizations),
         }

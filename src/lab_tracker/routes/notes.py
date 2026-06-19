@@ -73,6 +73,7 @@ def build_notes_router(api: LabTrackerAPI) -> APIRouter:
             transcribed_text=payload.transcribed_text,
             targets=payload.targets,
             metadata=payload.metadata,
+            client_capture_id=payload.client_capture_id,
             status=payload.status or note_default_status(),
             actor=actor,
         )
@@ -85,16 +86,26 @@ def build_notes_router(api: LabTrackerAPI) -> APIRouter:
     )
     def upload_note_file(
         request: Request,
+        response: Response,
         file: Annotated[UploadFile, File()],
         project_id: Annotated[UUID, Form()],
         transcribed_text: Annotated[str | None, Form()] = None,
         targets: Annotated[str | None, Form()] = None,
         metadata: Annotated[str | None, Form()] = None,
+        client_capture_id: Annotated[str | None, Form()] = None,
         status: Annotated[NoteStatus | None, Form()] = None,
     ):
         actor = actor_from_request(request)
         ensure_project_contributor(request, project_id)
         request_api = api_from_request(request, api)
+        existing = request_api.find_note_by_client_capture_id(
+            project_id,
+            client_capture_id,
+            actor=actor,
+        )
+        if existing is not None:
+            response.status_code = http_status.HTTP_200_OK
+            return Envelope(data=existing)
         filename = (file.filename or "").strip()
         if not filename:
             raise ValidationError("filename must not be empty.")
@@ -118,6 +129,7 @@ def build_notes_router(api: LabTrackerAPI) -> APIRouter:
             transcribed_text=transcribed_text,
             targets=parsed_targets,
             metadata=enriched_metadata,
+            client_capture_id=client_capture_id,
             status=status or note_default_status(),
             actor=actor,
         )
@@ -130,12 +142,22 @@ def build_notes_router(api: LabTrackerAPI) -> APIRouter:
     )
     def quick_capture_note(
         request: Request,
+        response: Response,
         file: Annotated[UploadFile, File()],
         project_id: Annotated[UUID, Form()],
         metadata: Annotated[str | None, Form()] = None,
+        client_capture_id: Annotated[str | None, Form()] = None,
     ):
         actor = actor_from_request(request)
         request_api = api_from_request(request, api)
+        existing = request_api.find_note_by_client_capture_id(
+            project_id,
+            client_capture_id,
+            actor=actor,
+        )
+        if existing is not None:
+            response.status_code = http_status.HTTP_200_OK
+            return Envelope(data=existing)
         filename = (file.filename or "").strip()
         if not filename:
             raise ValidationError("filename must not be empty.")
@@ -156,6 +178,7 @@ def build_notes_router(api: LabTrackerAPI) -> APIRouter:
             raw_asset=asset,
             owns_raw_asset=True,
             metadata=enriched_metadata,
+            client_capture_id=client_capture_id,
             status=NoteStatus.STAGED,
             actor=actor,
         )
@@ -210,9 +233,7 @@ def build_notes_router(api: LabTrackerAPI) -> APIRouter:
         accept = (request.headers.get("accept") or "").lower()
         if "application/json" not in accept:
             headers = {
-                "Content-Disposition": content_disposition_header(
-                    "attachment", raw_asset.filename
-                ),
+                "Content-Disposition": content_disposition_header("attachment", raw_asset.filename),
                 "Content-Length": str(raw_asset.size_bytes),
             }
             return Response(content=content, media_type=raw_asset.content_type, headers=headers)
@@ -295,9 +316,7 @@ def source_file_metadata(
     if created_at is not None:
         source_metadata["source_file_created_at"] = created_at
 
-    last_modified_at = _optional_iso_datetime(
-        metadata.get("source_file_last_modified_at")
-    )
+    last_modified_at = _optional_iso_datetime(metadata.get("source_file_last_modified_at"))
     last_modified_ms = _optional_epoch_ms(metadata.get("source_file_last_modified_ms"))
     if last_modified_ms is not None:
         source_metadata["source_file_last_modified_ms"] = last_modified_ms

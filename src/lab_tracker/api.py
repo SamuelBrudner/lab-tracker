@@ -70,27 +70,23 @@ class LabTrackerAPI:
 
     def _compose_services(self) -> None:
         context = self._service_context
-        self.project_authorization: ProjectAuthorizationPolicy = ProjectAuthorizationPolicy(
-            context
-        )
+        self.project_authorization: ProjectAuthorizationPolicy = ProjectAuthorizationPolicy(context)
         self.projects: ProjectService = ProjectService(
             context,
             authorization=self.project_authorization,
         )
         self.supervision: SupervisionService = SupervisionService(context)
-        self.ownership_reassignments: OwnershipReassignmentService = (
-            OwnershipReassignmentService(context)
+        self.ownership_reassignments: OwnershipReassignmentService = OwnershipReassignmentService(
+            context
         )
         self.record_exports: RecordExportService = RecordExportService(
             context,
             authorization=self.project_authorization,
         )
-        self.publication_readiness: PublicationReadinessService = (
-            PublicationReadinessService(
-                context,
-                projects=self.projects,
-                authorization=self.project_authorization,
-            )
+        self.publication_readiness: PublicationReadinessService = PublicationReadinessService(
+            context,
+            projects=self.projects,
+            authorization=self.project_authorization,
         )
         self.entity_versions: EntityVersionService = EntityVersionService(context)
         self.questions: QuestionService = QuestionService(
@@ -724,6 +720,9 @@ class LabTrackerAPI:
 
     def store_note_raw_asset(self, *args: Any, **kwargs: Any) -> Any:
         return self.notes.store_note_raw_asset(*args, **kwargs)
+
+    def find_note_by_client_capture_id(self, *args: Any, **kwargs: Any) -> Any:
+        return self.notes.find_note_by_client_capture_id(*args, **kwargs)
 
     def upload_note_raw(self, *args: Any, **kwargs: Any) -> Any:
         return self._with_usage_event(

@@ -18,6 +18,13 @@ const MAX_RETRY_ATTEMPTS = 5;
 const AUTH_RETRY_STATUSES = new Set([401, 403]);
 const PERMANENT_CLIENT_REJECTION_STATUSES = new Set([400, 404, 409, 410, 413, 415, 422]);
 
+function defaultClientCaptureId() {
+  if (globalThis.crypto?.randomUUID) {
+    return globalThis.crypto.randomUUID();
+  }
+  return `capture-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+}
+
 function openIndexedDb() {
   return new Promise((resolve, reject) => {
     const request = globalThis.indexedDB.open(DB_NAME, DB_VERSION);
@@ -155,7 +162,12 @@ async function keepQueuedForAuth(adapter, item, { status, now }) {
   return { ...item, ...patch };
 }
 
-function createUploadQueue({ storage, fetch: fetchImpl = globalThis.fetch, now = () => Date.now() } = {}) {
+function createUploadQueue({
+  storage,
+  fetch: fetchImpl = globalThis.fetch,
+  now = () => Date.now(),
+  createClientCaptureId = defaultClientCaptureId,
+} = {}) {
   const adapter = storage || createIndexedDbStorage();
   const listeners = new Set();
   let activeDrain = null;
@@ -180,13 +192,15 @@ function createUploadQueue({ storage, fetch: fetchImpl = globalThis.fetch, now =
     if (!fields.project_id) {
       throw new Error("enqueue requires fields.project_id");
     }
+    const clientCaptureId = fields.client_capture_id || createClientCaptureId();
     const record = {
       endpoint,
       file,
-      fields: { ...fields },
+      fields: { ...fields, client_capture_id: clientCaptureId },
       filename: filename || file.name || "capture",
       contentType: contentType || file.type || "application/octet-stream",
       token,
+      clientCaptureId,
       enqueuedAt: now(),
     };
     const id = await adapter.add(record);
@@ -207,18 +221,32 @@ function createUploadQueue({ storage, fetch: fetchImpl = globalThis.fetch, now =
     const items = await adapter.list();
     const results = { dropped: [], uploaded: [], stillQueued: [] };
     for (const item of items) {
+      let queuedItem = item;
       const payload = new FormData();
-      payload.append("file", item.file, item.filename);
-      const fields = item.fields || { project_id: item.projectId };
+      payload.append("file", queuedItem.file, queuedItem.filename);
+      let fields = queuedItem.fields || { project_id: queuedItem.projectId };
+      if (!fields.client_capture_id) {
+        const clientCaptureId = queuedItem.clientCaptureId || createClientCaptureId();
+        fields = { ...fields, client_capture_id: clientCaptureId };
+        const patch = { fields, clientCaptureId };
+        if (typeof adapter.update === "function") {
+          queuedItem = (await adapter.update(queuedItem.id, patch)) || {
+            ...queuedItem,
+            ...patch,
+          };
+        } else {
+          queuedItem = { ...queuedItem, ...patch };
+        }
+      }
       for (const [key, value] of Object.entries(fields)) {
         if (value === undefined || value === null) {
           continue;
         }
         payload.append(key, value);
       }
-      const bearerToken = token || item.token || "";
+      const bearerToken = token || queuedItem.token || "";
       const headers = bearerToken ? { Authorization: `Bearer ${bearerToken}` } : {};
-      const endpoint = item.endpoint || QUICK_CAPTURE_PATH;
+      const endpoint = queuedItem.endpoint || QUICK_CAPTURE_PATH;
       let response;
       try {
         response = await fetchImpl(endpoint, {
@@ -227,43 +255,43 @@ function createUploadQueue({ storage, fetch: fetchImpl = globalThis.fetch, now =
           body: payload,
         });
       } catch {
-        results.stillQueued.push(item);
+        results.stillQueued.push(queuedItem);
         continue;
       }
       if (response && response.ok) {
-        await adapter.remove(item.id);
-        results.uploaded.push(item);
+        await adapter.remove(queuedItem.id);
+        results.uploaded.push(queuedItem);
       } else if (response && response.status >= 400 && response.status < 500) {
         if (AUTH_RETRY_STATUSES.has(response.status)) {
-          const queuedItem = await keepQueuedForAuth(adapter, item, {
+          const authQueuedItem = await keepQueuedForAuth(adapter, queuedItem, {
             now,
             status: response.status,
           });
-          results.stillQueued.push(queuedItem);
+          results.stillQueued.push(authQueuedItem);
           continue;
         }
         // Keep retryable timeout/rate-limit failures queued; drop permanent validation failures.
         if (isPermanentClientRejection(response.status)) {
-          await adapter.remove(item.id);
-          results.dropped.push({ ...item, rejectedStatus: response.status });
+          await adapter.remove(queuedItem.id);
+          results.dropped.push({ ...queuedItem, rejectedStatus: response.status });
           continue;
         }
-        const queuedItem = await keepQueuedForRetry(adapter, item, {
+        const retryQueuedItem = await keepQueuedForRetry(adapter, queuedItem, {
           now,
           status: response.status,
         });
-        if (queuedItem.retryCount >= MAX_RETRY_ATTEMPTS) {
-          await adapter.remove(item.id);
+        if (retryQueuedItem.retryCount >= MAX_RETRY_ATTEMPTS) {
+          await adapter.remove(queuedItem.id);
           results.dropped.push({
-            ...queuedItem,
+            ...retryQueuedItem,
             rejectedStatus: response.status,
             dropReason: "retry_limit",
           });
         } else {
-          results.stillQueued.push(queuedItem);
+          results.stillQueued.push(retryQueuedItem);
         }
       } else {
-        results.stillQueued.push(item);
+        results.stillQueued.push(queuedItem);
       }
     }
     notify();

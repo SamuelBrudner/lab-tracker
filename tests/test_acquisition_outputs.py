@@ -132,6 +132,35 @@ def test_acquisition_output_watcher_registers_outputs(tmp_path):
     assert watcher.scan() == []
 
 
+def test_acquisition_output_watcher_skips_hash_for_unchanged_files(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    api = repository_backed_api()
+    actor = _actor()
+    _, session = _operational_session(api, actor)
+    output_path = tmp_path / "output.bin"
+    output_path.write_text("hello")
+    hash_calls: list[str] = []
+
+    def counting_hash(path):
+        hash_calls.append(path.name)
+        return "sha256:counted"
+
+    monkeypatch.setattr("lab_tracker.acquisition_watcher._hash_file", counting_hash)
+    watcher = AcquisitionOutputWatcher(
+        api,
+        session.session_id,
+        [tmp_path],
+        actor=actor,
+        base_path=tmp_path,
+    )
+
+    assert len(watcher.scan()) == 1
+    assert watcher.scan() == []
+    assert hash_calls == ["output.bin"]
+
+
 def test_acquisition_output_watcher_hidden_checks_are_relative(tmp_path):
     api = repository_backed_api()
     actor = _actor()

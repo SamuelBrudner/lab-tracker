@@ -38,7 +38,12 @@ afterEach(() => {
 describe("createUploadQueue", () => {
   it("enqueues a multipart payload and reports pending count", async () => {
     const storage = createMemoryStorage();
-    const queue = createUploadQueue({ storage, fetch: vi.fn() });
+    let nextCaptureId = 1;
+    const queue = createUploadQueue({
+      storage,
+      fetch: vi.fn(),
+      createClientCaptureId: () => `capture-${nextCaptureId++}`,
+    });
 
     await queue.enqueue({
       endpoint: UPLOAD_FILE_PATH,
@@ -54,6 +59,10 @@ describe("createUploadQueue", () => {
     expect(await queue.pendingCount()).toBe(2);
     const pending = await queue.listPending();
     expect(pending.map((item) => item.filename)).toEqual(["snap.jpg", "two.jpg"]);
+    expect(pending.map((item) => item.fields.client_capture_id)).toEqual([
+      "capture-1",
+      "capture-2",
+    ]);
   });
 
   it("requires endpoint, file, and project_id field", async () => {
@@ -72,7 +81,11 @@ describe("createUploadQueue", () => {
   it("uploads queued items on drain and forwards all fields", async () => {
     const storage = createMemoryStorage();
     const fetchImpl = vi.fn(async () => ({ ok: true, status: 201 }));
-    const queue = createUploadQueue({ storage, fetch: fetchImpl });
+    const queue = createUploadQueue({
+      storage,
+      fetch: fetchImpl,
+      createClientCaptureId: () => "capture-forward",
+    });
 
     await queue.enqueue({
       endpoint: UPLOAD_FILE_PATH,
@@ -96,9 +109,44 @@ describe("createUploadQueue", () => {
     expect(init.headers.Authorization).toBe("Bearer tok-1");
     const body = init.body;
     expect(body.get("project_id")).toBe("proj-a");
+    expect(body.get("client_capture_id")).toBe("capture-forward");
     expect(body.get("metadata")).toBe(JSON.stringify({ source: "camera" }));
     expect(body.get("targets")).toBe(JSON.stringify([{ entity_type: "question", entity_id: "q-1" }]));
     expect(body.get("file")).toBeInstanceOf(File);
+  });
+
+  it("persists a generated client capture id for legacy queued records before retry", async () => {
+    const storage = createMemoryStorage();
+    const fetchImpl = vi
+      .fn()
+      .mockRejectedValueOnce(new Error("offline"))
+      .mockResolvedValueOnce({ ok: true, status: 201 });
+    const queue = createUploadQueue({
+      storage,
+      fetch: fetchImpl,
+      createClientCaptureId: () => "legacy-capture-id",
+    });
+    await storage.add({
+      endpoint: UPLOAD_FILE_PATH,
+      file: makeFile(),
+      fields: { project_id: "proj-a" },
+      filename: "snap.jpg",
+      contentType: "image/jpeg",
+      token: "tok-1",
+      enqueuedAt: 123,
+    });
+
+    const failed = await queue.drain();
+    expect(failed.stillQueued).toHaveLength(1);
+    expect(failed.stillQueued[0].fields.client_capture_id).toBe("legacy-capture-id");
+    expect((await queue.listPending())[0].fields.client_capture_id).toBe(
+      "legacy-capture-id"
+    );
+
+    await queue.drain();
+    const secondBody = fetchImpl.mock.calls[1][1].body;
+    expect(secondBody.get("client_capture_id")).toBe("legacy-capture-id");
+    expect(await queue.pendingCount()).toBe(0);
   });
 
   it("routes each item to its own endpoint", async () => {

@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import csv
 import subprocess
+import warnings
 from pathlib import Path
 
 import pytest
 from sqlalchemy import Column, MetaData, String, Table, create_engine, insert
+from sqlalchemy.exc import SAWarning
 
 from lab_tracker import dolt_mirror
 from lab_tracker.db import Base
@@ -53,6 +55,18 @@ def test_retained_table_exports_exclude_users() -> None:
     assert "notes" in table_names
     assert "graph_change_sets" in table_names
     assert "graph_change_operations" in table_names
+
+
+def test_retained_tables_sort_without_graph_change_note_fk_cycle_warning() -> None:
+    with warnings.catch_warnings():
+        warnings.filterwarnings(
+            "error",
+            message="Cannot correctly sort tables.*graph_change_sets, notes",
+            category=SAWarning,
+        )
+        table_names = {table.name for table in dolt_mirror.retained_tables()}
+
+    assert {"graph_change_sets", "notes"}.issubset(table_names)
 
 
 def test_export_tables_writes_deterministic_primary_key_order(

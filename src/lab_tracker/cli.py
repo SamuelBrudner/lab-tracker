@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import ipaddress
 import json
 import math
 import sys
@@ -20,6 +21,7 @@ from textwrap import dedent
 from alembic.config import Config
 
 from alembic import command
+from lab_tracker.config import get_settings
 from lab_tracker.decision_context_constants import (
     CLAUDE_BLOCK_BEGIN,
     CLAUDE_BLOCK_END,
@@ -70,9 +72,19 @@ def serve_app(
     reload: bool = False,
     run_migrations: bool = True,
     open_browser: bool = True,
+    insecure_allow_lan: bool = False,
     server_runner: Callable[..., None] | None = None,
     browser_opener: Callable[[str], object] | None = None,
 ) -> None:
+    if _is_non_loopback_host(host) and not insecure_allow_lan:
+        settings = get_settings()
+        if not settings.is_auth_enabled():
+            raise SystemExit(
+                "Refusing to bind Lab Tracker to a non-loopback interface while "
+                "authentication is disabled. Enable auth or pass "
+                "--insecure-allow-lan if this is intentional."
+            )
+
     if run_migrations:
         alembic_config = _alembic_config()
         command.upgrade(alembic_config, "head")
@@ -148,6 +160,16 @@ def _http_ready(url: str) -> bool:
         return False
 
 
+def _is_non_loopback_host(host: str) -> bool:
+    normalized = host.strip().lower()
+    if normalized in {"localhost", "127.0.0.1", "::1"}:
+        return False
+    try:
+        return not ipaddress.ip_address(normalized).is_loopback
+    except ValueError:
+        return True
+
+
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(prog="lab_tracker")
     subcommands = parser.add_subparsers(dest="command", required=True)
@@ -192,6 +214,14 @@ def main(argv: list[str] | None = None) -> None:
         action="store_true",
         help="Start the server without running alembic upgrade head first.",
     )
+    serve_parser.add_argument(
+        "--insecure-allow-lan",
+        action="store_true",
+        help=(
+            "Allow binding to a non-loopback interface even when authentication "
+            "is disabled."
+        ),
+    )
 
     args = parser.parse_args(argv)
     if args.command == "init":
@@ -209,6 +239,7 @@ def main(argv: list[str] | None = None) -> None:
                 reload=args.reload,
                 run_migrations=not args.skip_migrations,
                 open_browser=not args.no_browser,
+                insecure_allow_lan=args.insecure_allow_lan,
             )
         except Exception as exc:
             print(f"Failed to start Lab Tracker: {exc}", file=sys.stderr)
@@ -330,9 +361,9 @@ def _agents_fragment() -> str:
         - Use `python -m scripts.lt quick "..." --project <PROJECT_ID>` for scratch
           observations that do not need their own committed script.
 
-        Notes are idempotent by the first non-blank line of the note body. Treat that
-        first line as a stable marker; change it intentionally when you mean to create
-        a new Lab Tracker note.
+        Notes are idempotent by the first non-blank line of the note body when the
+        existing body is identical. Treat that first line as a stable marker; change
+        it intentionally when you mean to create a new Lab Tracker note.
 
         Configure the MCP server with the generated `.mcp.json`. It uses the portable
         `lt-mcp` command, so consumer repos should not hard-code local Lab Tracker

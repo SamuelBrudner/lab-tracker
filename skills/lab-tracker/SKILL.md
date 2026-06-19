@@ -232,6 +232,7 @@ List/search endpoints use `limit` between 1 and 200 and `offset` of 0 or greater
 
 #### Notes: `NoteCreate`
 - Required: `project_id`, `raw_content`
+- `client_capture_id` (optional): string | null
 - `metadata` (optional): object | null
 - `project_id` (required): string(uuid)
 - `raw_content` (required): string; min length 1

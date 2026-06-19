@@ -279,6 +279,7 @@ class LabTrackerRepository(Protocol):
         status: str | None = None,
         search: str | None = None,
         created_by: str | None = None,
+        client_capture_id: str | None = None,
         target_entity_type: str | None = None,
         target_entity_id: UUID | None = None,
         limit: int | None = None,
@@ -453,6 +454,17 @@ class LabTrackerRepository(Protocol):
         now: datetime,
     ) -> list[GraphDraftBatchSettings]:
         """Return batch settings whose next_run_at is due."""
+
+    def claim_due_graph_draft_batch_settings(
+        self,
+        settings_id: UUID,
+        *,
+        observed_next_run_at: datetime,
+        next_run_at: datetime,
+        updated_at: datetime,
+        updated_by: str | None,
+    ) -> GraphDraftBatchSettings | None:
+        """Advance a due batch settings row only if its observed schedule is unchanged."""
 
     def get_graph_draft_batch_run_by_key(self, batch_key: str) -> GraphDraftBatchRun | None:
         """Return one batch run by idempotency key."""

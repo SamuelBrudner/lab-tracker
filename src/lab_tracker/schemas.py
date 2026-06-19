@@ -403,6 +403,7 @@ class NoteCreate(RequestModel):
     transcribed_text: str | None = None
     targets: list[EntityRef] | None = None
     metadata: dict[str, NoteMetadataScalar] | None = None
+    client_capture_id: str | None = None
     status: NoteStatus | None = None
 
     @field_validator("metadata")

@@ -266,26 +266,50 @@ def rollup_usage_events_before(session: OrmSession, cutoff: datetime) -> int:
             surface,
             outcome,
         ) = key
-        rollup = UsageEventRollup(
-            rollup_id=uuid4(),
-            day=day,
-            verb=UsageEventVerb(verb),
-            resource_type=UsageEventResourceType(resource_type),
-            project_id=_uuid_from_db_optional(project_id),
-            actor_role=actor_role,
-            principal_type=principal_type,
-            surface=UsageEventSurface(surface) if surface is not None else None,
-            outcome=UsageEventOutcome(outcome),
-            event_count=values["event_count"],
-            total_duration_ms=values["duration"],
-            total_result_count=values["result_count"],
-        )
-        session.add(usage_event_rollup_to_model(rollup))
+        existing = session.scalars(
+            select(UsageEventRollupModel).where(
+                UsageEventRollupModel.day == day,
+                UsageEventRollupModel.verb == verb,
+                UsageEventRollupModel.resource_type == resource_type,
+                _nullable_bucket_match(UsageEventRollupModel.project_id, project_id),
+                _nullable_bucket_match(UsageEventRollupModel.actor_role, actor_role),
+                _nullable_bucket_match(UsageEventRollupModel.principal_type, principal_type),
+                _nullable_bucket_match(UsageEventRollupModel.surface, surface),
+                UsageEventRollupModel.outcome == outcome,
+            )
+        ).first()
+        if existing is not None:
+            existing.event_count += values["event_count"]
+            existing.total_duration_ms += values["duration"]
+            existing.total_result_count += values["result_count"]
+        else:
+            rollup = UsageEventRollup(
+                rollup_id=uuid4(),
+                day=day,
+                verb=UsageEventVerb(verb),
+                resource_type=UsageEventResourceType(resource_type),
+                project_id=_uuid_from_db_optional(project_id),
+                actor_role=actor_role,
+                principal_type=principal_type,
+                surface=UsageEventSurface(surface) if surface is not None else None,
+                outcome=UsageEventOutcome(outcome),
+                event_count=values["event_count"],
+                total_duration_ms=values["duration"],
+                total_result_count=values["result_count"],
+            )
+            session.add(usage_event_rollup_to_model(rollup))
     deleted = session.execute(
-        delete(UsageEventModel).where(UsageEventModel.occurred_at < cutoff)
+        delete(UsageEventModel)
+        .where(UsageEventModel.occurred_at < cutoff)
         .execution_options(synchronize_session=False)
     ).rowcount
     return int(deleted or 0)
+
+
+def _nullable_bucket_match(column, value: object):
+    if value is None:
+        return column.is_(None)
+    return column == value
 
 
 def _uuid_to_db_optional(value: UUID | None) -> str | None:

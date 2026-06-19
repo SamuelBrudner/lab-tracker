@@ -11,6 +11,7 @@ from sqlalchemy import select
 from lab_tracker.auth import Role
 from lab_tracker.db_models import GraphDraftBatchSettingsModel, NoteModel
 from lab_tracker.graph_drafting import GraphDraftingError
+from lab_tracker.sqlalchemy_repository_parts.repository import SQLAlchemyLabTrackerRepository
 
 
 class FakeBatchDraftClient:
@@ -531,6 +532,111 @@ def test_run_due_isolates_project_errors_and_continues(
         tzinfo=timezone.utc,
     )
     assert _api_datetime(settings.json()["data"]["next_run_at"]) == expected_next_run_at
+
+
+def test_batch_settings_claim_requires_observed_next_run_at(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+) -> None:
+    project_id = _project(client, admin_auth_headers)
+    response = client.patch(
+        f"/projects/{project_id}/graph-draft-batch-settings",
+        json={"enabled": True},
+        headers=admin_auth_headers,
+    )
+    assert response.status_code == 200
+    past = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    first_next_run_at = datetime(2026, 1, 2, tzinfo=timezone.utc)
+    second_next_run_at = datetime(2026, 1, 3, tzinfo=timezone.utc)
+
+    with client.app.state.db_session_factory() as session:
+        settings = session.scalar(
+            select(GraphDraftBatchSettingsModel).where(
+                GraphDraftBatchSettingsModel.project_id == project_id
+            )
+        )
+        settings.next_run_at = past
+        session.commit()
+
+    with client.app.state.db_session_factory() as session:
+        repository = SQLAlchemyLabTrackerRepository(session)
+        due_settings = repository.list_due_graph_draft_batch_settings(
+            datetime(2026, 1, 1, 1, tzinfo=timezone.utc)
+        )
+        observed_next_run_at = due_settings[0].next_run_at
+
+        claimed = repository.claim_due_graph_draft_batch_settings(
+            due_settings[0].settings_id,
+            observed_next_run_at=observed_next_run_at,
+            next_run_at=first_next_run_at,
+            updated_at=datetime(2026, 1, 1, 0, 1, tzinfo=timezone.utc),
+            updated_by="scheduler",
+        )
+        stale = repository.claim_due_graph_draft_batch_settings(
+            due_settings[0].settings_id,
+            observed_next_run_at=observed_next_run_at,
+            next_run_at=second_next_run_at,
+            updated_at=datetime(2026, 1, 1, 0, 2, tzinfo=timezone.utc),
+            updated_by="scheduler",
+        )
+        session.commit()
+
+    assert claimed is not None
+    assert claimed.next_run_at == first_next_run_at
+    assert stale is None
+    with client.app.state.db_session_factory() as session:
+        persisted = session.scalar(
+            select(GraphDraftBatchSettingsModel).where(
+                GraphDraftBatchSettingsModel.project_id == project_id
+            )
+        )
+        persisted_next_run_at = persisted.next_run_at
+        if persisted_next_run_at.tzinfo is None:
+            persisted_next_run_at = persisted_next_run_at.replace(tzinfo=timezone.utc)
+        else:
+            persisted_next_run_at = persisted_next_run_at.astimezone(timezone.utc)
+        assert persisted_next_run_at == first_next_run_at
+
+
+def test_run_due_skips_settings_lost_to_concurrent_claim(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+    monkeypatch,
+) -> None:
+    project_id = _project(client, admin_auth_headers)
+    _note(client, admin_auth_headers, project_id, "This due note must not draft.")
+    response = client.patch(
+        f"/projects/{project_id}/graph-draft-batch-settings",
+        json={"enabled": True},
+        headers=admin_auth_headers,
+    )
+    assert response.status_code == 200
+    with client.app.state.db_session_factory() as session:
+        settings = session.scalar(
+            select(GraphDraftBatchSettingsModel).where(
+                GraphDraftBatchSettingsModel.project_id == project_id
+            )
+        )
+        settings.next_run_at = datetime.now(timezone.utc) - timedelta(minutes=5)
+        session.commit()
+
+    def lost_claim(self, *args, **kwargs):  # noqa: ANN001, ANN002, ANN003
+        return None
+
+    def factory(settings):  # noqa: ANN001
+        raise AssertionError("lost scheduled claims must not start a draft client")
+
+    monkeypatch.setattr(
+        SQLAlchemyLabTrackerRepository,
+        "claim_due_graph_draft_batch_settings",
+        lost_claim,
+    )
+    client.app.state.graph_draft_client_factory = factory
+
+    response = client.post("/batches/run-due", headers=admin_auth_headers)
+
+    assert response.status_code == 200
+    assert response.json()["data"] == []
 
 
 def test_run_due_rejects_non_admin_user(

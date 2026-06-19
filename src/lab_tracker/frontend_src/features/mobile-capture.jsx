@@ -620,11 +620,12 @@ function MobileCaptureCard({
     return metadata;
   }
 
-  async function uploadRawFileNote({ fileToUpload, metadata }) {
+  async function uploadRawFileNote({ fileToUpload, metadata, clientCaptureId }) {
     const payload = new FormData();
     payload.append("file", fileToUpload);
     payload.append("project_id", selectedProjectId);
     payload.append("metadata", JSON.stringify(metadata));
+    payload.append("client_capture_id", clientCaptureId);
     const targets = selectedTargets();
     if (targets.length > 0) {
       payload.append("targets", JSON.stringify(targets));
@@ -636,7 +637,7 @@ function MobileCaptureCard({
     });
   }
 
-  async function queueRawFileNoteOffline({ fileToUpload, metadata }) {
+  async function queueRawFileNoteOffline({ fileToUpload, metadata, clientCaptureId }) {
     const queue = getUploadQueue();
     if (!queue) {
       return false;
@@ -644,6 +645,7 @@ function MobileCaptureCard({
     const fields = {
       project_id: selectedProjectId,
       metadata: JSON.stringify(metadata),
+      client_capture_id: clientCaptureId,
     };
     const targets = selectedTargets();
     if (targets.length > 0) {
@@ -659,14 +661,19 @@ function MobileCaptureCard({
   }
 
   async function uploadOrQueueRawFile({ fileToUpload, metadata }) {
+    const clientCaptureId = newBundleId();
     try {
-      return await uploadRawFileNote({ fileToUpload, metadata });
+      return await uploadRawFileNote({ fileToUpload, metadata, clientCaptureId });
     } catch (err) {
       // err.status is set by apiFetch for server-rejected responses; absence
       // means the fetch itself failed (offline, DNS, CORS, etc.). Only queue
       // in that case — real validation/auth errors must surface as before.
       if (err && err.status === undefined) {
-        const queued = await queueRawFileNoteOffline({ fileToUpload, metadata });
+        const queued = await queueRawFileNoteOffline({
+          fileToUpload,
+          metadata,
+          clientCaptureId,
+        });
         if (queued) {
           return OFFLINE_QUEUED;
         }

@@ -821,6 +821,7 @@ def test_goal_link_slot_migration_normalizes_unslotted_links(
     goal_id = str(uuid4())
     entity_id = str(uuid4())
     kept_link_id = str(uuid4())
+    deduped_link_id = str(uuid4())
     slotted_link_id = str(uuid4())
 
     engine = create_engine(
@@ -849,6 +850,7 @@ def test_goal_link_slot_migration_normalizes_unslotted_links(
         )
         for link_id, slot, created_at in (
             (kept_link_id, None, "2026-01-01 00:00:00"),
+            (deduped_link_id, None, "2026-01-02 00:00:00"),
             (slotted_link_id, "Figure 1", "2026-01-04 00:00:00"),
         ):
             connection.execute(
@@ -868,7 +870,7 @@ def test_goal_link_slot_migration_normalizes_unslotted_links(
             )
     engine.dispose()
 
-    command.upgrade(config, "0023_goal_link_slot_not_null")
+    command.upgrade(config, "head")
 
     engine = create_engine(
         database_url,
