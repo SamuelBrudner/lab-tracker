@@ -53,6 +53,7 @@ from .analyses import (
     SQLAlchemyClaimRepository,
     SQLAlchemyVisualizationRepository,
 )
+from .common import apply_pagination, substring_pattern, uuid_values
 from .core import (
     SQLAlchemyGroupMembershipRepository,
     SQLAlchemyProjectGroupRepository,
@@ -578,6 +579,44 @@ class SQLAlchemyLabTrackerRepository(LabTrackerRepository):
             offset=offset,
             recent_first=recent_first,
         )
+
+    def project_ids_with_search_matches(
+        self,
+        *,
+        search: str,
+        project_ids: set[UUID] | None = None,
+        limit: int | None = None,
+    ) -> set[UUID]:
+        self._session.flush()
+        if project_ids is not None and not project_ids:
+            return set()
+        pattern = substring_pattern(search)
+        if pattern is None:
+            return set()
+
+        project_values = uuid_values(project_ids) if project_ids is not None else None
+        question_stmt = select(QuestionModel.project_id).where(
+            or_(
+                QuestionModel.text.ilike(pattern, escape="\\"),
+                QuestionModel.hypothesis.ilike(pattern, escape="\\"),
+            )
+        )
+        note_stmt = select(NoteModel.project_id).where(
+            or_(
+                NoteModel.raw_content.ilike(pattern, escape="\\"),
+                NoteModel.transcribed_text.ilike(pattern, escape="\\"),
+            )
+        )
+        if project_values is not None:
+            question_stmt = question_stmt.where(QuestionModel.project_id.in_(project_values))
+            note_stmt = note_stmt.where(NoteModel.project_id.in_(project_values))
+
+        matching_projects = question_stmt.union(note_stmt).subquery()
+        stmt = select(matching_projects.c.project_id).order_by(
+            matching_projects.c.project_id
+        )
+        rows = self._session.scalars(apply_pagination(stmt, limit=limit, offset=0))
+        return {UUID(project_id) for project_id in rows}
 
     def query_sessions(
         self,

@@ -8,6 +8,7 @@ from lab_tracker.models import EntityType, Goal, GoalLink, utc_now
 from lab_tracker.repository import LabTrackerRepository
 
 TargetKey = tuple[EntityType, UUID]
+_GOAL_TARGET_QUERY_CHUNK_SIZE = 400
 
 
 def remove_goal_links_to_entity(
@@ -63,12 +64,14 @@ def remove_goal_links_to_targets(
         return
 
     target_keys = {(entity_type.value, entity_id) for entity_type, entity_id in targets}
-    goals, _ = repository.query_goals(
-        target_entity_keys=target_keys,
-        limit=None,
-        offset=0,
-    )
-    affected_goals = {goal.goal_id: goal for goal in goals}
+    affected_goals: dict[UUID, Goal] = {}
+    for target_chunk in _target_key_chunks(target_keys):
+        goals, _ = repository.query_goals(
+            target_entity_keys=target_chunk,
+            limit=None,
+            offset=0,
+        )
+        affected_goals.update((goal.goal_id, goal) for goal in goals)
 
     for goal in affected_goals.values():
         remaining_links = [
@@ -86,6 +89,16 @@ def remove_goal_links_to_targets(
 
 def _target_key(link: GoalLink) -> TargetKey:
     return link.target.entity_type, link.target.entity_id
+
+
+def _target_key_chunks(
+    target_keys: set[tuple[str, UUID]],
+) -> list[set[tuple[str, UUID]]]:
+    ordered_keys = sorted(target_keys, key=lambda item: (item[0], str(item[1])))
+    return [
+        set(ordered_keys[index : index + _GOAL_TARGET_QUERY_CHUNK_SIZE])
+        for index in range(0, len(ordered_keys), _GOAL_TARGET_QUERY_CHUNK_SIZE)
+    ]
 
 
 def _projectless_goal_would_lose_scope(goal: Goal, links: list[GoalLink]) -> bool:

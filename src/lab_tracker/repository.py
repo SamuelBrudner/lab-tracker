@@ -257,6 +257,15 @@ class LabTrackerRepository(Protocol):
     ) -> tuple[list[Note], int]:
         """Query notes with filters and pagination."""
 
+    def project_ids_with_search_matches(
+        self,
+        *,
+        search: str,
+        project_ids: set[UUID] | None = None,
+        limit: int | None = None,
+    ) -> set[UUID]:
+        """Return distinct project IDs whose questions or notes match search."""
+
     def query_sessions(
         self,
         *,

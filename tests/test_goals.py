@@ -25,6 +25,7 @@ from lab_tracker.models import (
     QuestionStatus,
     QuestionType,
 )
+from lab_tracker.services import goal_link_cleanup
 from lab_tracker.services.goal_service import GoalLinkSpec
 
 
@@ -335,6 +336,82 @@ def test_project_delete_batches_goal_reverse_lookup_for_cascaded_entities():
     assert {
         (EntityType.QUESTION.value, question.question_id) for question in questions
     }.issubset(target_keys)
+
+
+def test_project_delete_chunks_goal_reverse_lookup_for_many_cascaded_entities(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    api = repository_backed_api()
+    actor = _actor()
+    removed_project = api.create_project("Deleted chunked goal lookup", actor=actor)
+    retained_project = api.create_project("Retained chunked goal scope", actor=actor)
+    questions = [
+        api.create_question(
+            project_id=removed_project.project_id,
+            text=f"Chunked cleanup question {index}",
+            question_type=QuestionType.DESCRIPTIVE,
+            status=QuestionStatus.ACTIVE,
+            actor=actor,
+        )
+        for index in range(3)
+    ]
+    goal = api.create_goal(
+        None,
+        goal_type=GoalType.GRANT,
+        title="Chunked cleanup grant",
+        links=[
+            GoalLinkSpec(
+                target=EntityRef(
+                    entity_type=EntityType.PROJECT,
+                    entity_id=retained_project.project_id,
+                ),
+                relation=GoalRelation.CONTRIBUTES_TO,
+            ),
+            GoalLinkSpec(
+                target=EntityRef(
+                    entity_type=EntityType.PROJECT,
+                    entity_id=removed_project.project_id,
+                ),
+                relation=GoalRelation.CONTRIBUTES_TO,
+            ),
+            *[
+                GoalLinkSpec(
+                    target=EntityRef(
+                        entity_type=EntityType.QUESTION,
+                        entity_id=question.question_id,
+                    ),
+                    relation=GoalRelation.ADDRESSES,
+                )
+                for question in questions
+            ],
+        ],
+        actor=actor,
+    )
+    monkeypatch.setattr(goal_link_cleanup, "_GOAL_TARGET_QUERY_CHUNK_SIZE", 2)
+    repository = api.goals.repository
+    original_query_goals = repository.query_goals
+    reverse_lookup_calls: list[set[tuple[str, object]]] = []
+
+    def counting_query_goals(**kwargs):
+        if kwargs.get("target_entity_keys") is not None:
+            reverse_lookup_calls.append(set(kwargs["target_entity_keys"]))
+        return original_query_goals(**kwargs)
+
+    repository.query_goals = counting_query_goals  # type: ignore[method-assign]
+
+    api.delete_project(removed_project.project_id, actor=actor)
+
+    assert len(reverse_lookup_calls) == 2
+    assert all(len(target_keys) <= 2 for target_keys in reverse_lookup_calls)
+    all_target_keys = set().union(*reverse_lookup_calls)
+    assert (EntityType.PROJECT.value, removed_project.project_id) in all_target_keys
+    assert {
+        (EntityType.QUESTION.value, question.question_id) for question in questions
+    }.issubset(all_target_keys)
+    reloaded = api.get_goal(goal.goal_id)
+    assert [(link.target.entity_type, link.target.entity_id) for link in reloaded.links] == [
+        (EntityType.PROJECT, retained_project.project_id)
+    ]
 
 
 def test_projectless_goal_requires_project_link_scope():

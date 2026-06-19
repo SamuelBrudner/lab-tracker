@@ -48,17 +48,6 @@ def project_lookup(projects: list[JsonObject]) -> dict[str, JsonObject]:
     }
 
 
-def project_ids_from_search(search_payload: JsonObject) -> set[str]:
-    project_ids: set[str] = set()
-    for question in search_items(search_payload, "questions"):
-        if question.get("project_id") is not None:
-            project_ids.add(str(question["project_id"]))
-    for note in search_items(search_payload, "notes"):
-        if note.get("project_id") is not None:
-            project_ids.add(str(note["project_id"]))
-    return project_ids
-
-
 def merge_entities(
     id_key: str,
     *groups: tuple[list[JsonObject], str],

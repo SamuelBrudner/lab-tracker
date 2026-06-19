@@ -1,14 +1,26 @@
 from __future__ import annotations
 
+from uuid import uuid4
+
+from api_helpers import repository_backed_api
+from sqlalchemy import event
+
+from lab_tracker.auth import AuthContext, Role
 from lab_tracker.decision_context_builders import (
     build_evidence_map,
     task_guidance,
     truncation,
 )
 from lab_tracker.decision_context_constants import TASK_KIND_VALUES
-from lab_tracker.decision_context_selection import merge_entities, project_ids_from_search
+from lab_tracker.decision_context_query import RepositoryDecisionContextReader
+from lab_tracker.decision_context_selection import merge_entities
 from lab_tracker.decision_context_types import JsonObject
 from lab_tracker.decision_context_use_case import build_decision_context
+from lab_tracker.models import (
+    NoteStatus,
+    QuestionStatus,
+    QuestionType,
+)
 
 
 def _envelope(
@@ -240,18 +252,6 @@ def test_merge_entities_preserves_first_record_and_combines_reasons() -> None:
     ]
 
 
-def test_project_ids_from_search_uses_question_and_note_payloads() -> None:
-    payload = {
-        "data": {
-            "questions": [{"project_id": "project-1"}],
-            "notes": [{"project_id": "project-2"}],
-        },
-        "meta": {"questions_count": 1, "notes_count": 1},
-    }
-
-    assert project_ids_from_search(payload) == {"project-1", "project-2"}
-
-
 def test_builders_report_evidence_guidance_and_truncation() -> None:
     reader = FakeDecisionContextReader()
     evidence = build_evidence_map(
@@ -386,3 +386,109 @@ def test_build_decision_context_uses_one_scoped_lookup_for_auto_resolution() -> 
     }
     assert reader.project_id_lookup_calls == 1
     assert reader.search_calls == 0
+
+
+def test_repository_reader_project_match_lookup_finds_scoped_question_and_note_matches() -> None:
+    api = repository_backed_api()
+    actor = AuthContext(user_id=uuid4(), role=Role.ADMIN)
+    question_project = api.create_project("Question match project", actor=actor)
+    note_project = api.create_project("Note match project", actor=actor)
+    hidden_project = api.create_project("Hidden match project", actor=actor)
+    api.create_question(
+        project_id=question_project.project_id,
+        text="Does the basalt odor protocol need a baseline?",
+        question_type=QuestionType.DESCRIPTIVE,
+        status=QuestionStatus.ACTIVE,
+        actor=actor,
+    )
+    api.create_note(
+        project_id=note_project.project_id,
+        raw_content="Basalt odor only appears in the free-text note.",
+        status=NoteStatus.COMMITTED,
+        actor=actor,
+    )
+    api.create_question(
+        project_id=hidden_project.project_id,
+        text="Basalt should not leak from inaccessible projects.",
+        question_type=QuestionType.DESCRIPTIVE,
+        status=QuestionStatus.ACTIVE,
+        actor=actor,
+    )
+    reader = RepositoryDecisionContextReader(
+        api._repository,  # type: ignore[arg-type,attr-defined]
+        accessible_project_ids={question_project.project_id, note_project.project_id},
+    )
+
+    select_count = 0
+
+    def before_cursor_execute(
+        conn,
+        cursor,
+        statement,
+        parameters,
+        context,
+        executemany,
+    ):
+        nonlocal select_count
+        if statement.lstrip().upper().startswith("SELECT"):
+            select_count += 1
+
+    engine = api._test_resources[0]  # type: ignore[attr-defined]
+    event.listen(engine, "before_cursor_execute", before_cursor_execute)
+    try:
+        matching_project_ids = reader.project_ids_with_search_matches("basalt", limit=500)
+    finally:
+        event.remove(engine, "before_cursor_execute", before_cursor_execute)
+
+    assert matching_project_ids == {
+        str(question_project.project_id),
+        str(note_project.project_id),
+    }
+    assert select_count == 1
+
+
+def test_repository_reader_project_match_lookup_preserves_ambiguity_after_many_matches() -> None:
+    api = repository_backed_api()
+    actor = AuthContext(user_id=uuid4(), role=Role.ADMIN)
+    crowded_project = api.create_project("Crowded match project", actor=actor)
+    sparse_project = api.create_project("Sparse match project", actor=actor)
+    hidden_project = api.create_project("Hidden crowded project", actor=actor)
+    for index in range(501):
+        api.create_question(
+            project_id=crowded_project.project_id,
+            text=f"Chronicle high-volume match {index}",
+            question_type=QuestionType.DESCRIPTIVE,
+            status=QuestionStatus.ACTIVE,
+            actor=actor,
+        )
+    api.create_question(
+        project_id=sparse_project.project_id,
+        text="Chronicle sparse project match",
+        question_type=QuestionType.DESCRIPTIVE,
+        status=QuestionStatus.ACTIVE,
+        actor=actor,
+    )
+    api.create_question(
+        project_id=hidden_project.project_id,
+        text="Chronicle hidden project match",
+        question_type=QuestionType.DESCRIPTIVE,
+        status=QuestionStatus.ACTIVE,
+        actor=actor,
+    )
+    reader = RepositoryDecisionContextReader(
+        api._repository,  # type: ignore[arg-type,attr-defined]
+        accessible_project_ids={crowded_project.project_id, sparse_project.project_id},
+    )
+
+    payload = build_decision_context(
+        reader,
+        task_kind="summary",
+        query="chronicle",
+        limit=1,
+    )
+
+    assert payload["error"]["code"] == "ambiguous_project"
+    assert {item["project_id"] for item in payload["error"]["candidate_projects"]} == {
+        str(crowded_project.project_id),
+        str(sparse_project.project_id),
+    }

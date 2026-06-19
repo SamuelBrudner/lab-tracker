@@ -202,22 +202,12 @@ class RepositoryDecisionContextReader:
         }
 
     def project_ids_with_search_matches(self, query: str, *, limit: int = 50) -> set[str]:
-        questions = self._repository.query_questions(
-            project_ids=self._accessible_project_ids,
+        project_ids = self._repository.project_ids_with_search_matches(
             search=query,
-            limit=limit,
-            offset=0,
-        )[0]
-        notes = self._repository.query_notes(
             project_ids=self._accessible_project_ids,
-            search=query,
             limit=limit,
-            offset=0,
-        )[0]
-        return {
-            str(item.project_id)
-            for item in [*questions, *notes]
-        }
+        )
+        return {str(project_id) for project_id in project_ids}
 
     def list_sessions(
         self,
