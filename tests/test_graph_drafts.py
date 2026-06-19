@@ -83,6 +83,22 @@ class FakeDraftClient:
             raise GraphDraftingError(self.error)
         return self.patch
 
+    def draft_from_analysis_evidence(
+        self,
+        *,
+        evidence_text: str,
+        project_context: dict[str, Any],
+    ) -> dict[str, Any]:
+        self.calls.append(
+            {
+                "evidence_text": evidence_text,
+                "project_context": project_context,
+            }
+        )
+        if self.error:
+            raise GraphDraftingError(self.error)
+        return self.patch
+
     def transcribe_audio(
         self,
         *,
@@ -455,6 +471,60 @@ def test_openai_graph_draft_client_draft_from_batch_requires_api_key() -> None:
     client.close()
 
 
+def test_openai_graph_draft_client_drafts_from_analysis_evidence_sends_packet() -> None:
+    requests: list[dict[str, Any]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/v1/responses"
+        requests.append(json.loads(request.content.decode("utf-8")))
+        return httpx.Response(
+            200,
+            json={
+                "output_text": json.dumps(
+                    {
+                        "summary": "analysis ok",
+                        "uncertain_fields": [],
+                        "clarification_requests": [],
+                        "operations": [],
+                    }
+                )
+            },
+        )
+
+    client = OpenAIGraphDraftClient(
+        api_key="test-key",
+        model="gpt-analysis-test",
+        transport=httpx.MockTransport(handler),
+    )
+
+    result = client.draft_from_analysis_evidence(
+        evidence_text="method_hash=abc123\nFitted firing rate vs contrast.",
+        project_context={"project": {"id": "p1"}},
+    )
+
+    assert result["summary"] == "analysis ok"
+    request = requests[0]
+    assert request["model"] == "gpt-analysis-test"
+    assert "analysis evidence" in request["instructions"]
+    user_text = request["input"][0]["content"][0]["text"]
+    assert "method_hash=abc123" in user_text
+    assert "\"id\": \"p1\"" in user_text
+    assert request["text"]["format"]["schema"]["additionalProperties"] is False
+    client.close()
+
+
+def test_openai_graph_draft_client_analysis_evidence_requires_text() -> None:
+    client = OpenAIGraphDraftClient(
+        api_key="test-key",
+        model="gpt-analysis-test",
+        transport=httpx.MockTransport(lambda request: httpx.Response(200, json={})),
+    )
+
+    with pytest.raises(GraphDraftingError, match="evidence is empty"):
+        client.draft_from_analysis_evidence(evidence_text="   ", project_context={})
+    client.close()
+
+
 def test_make_graph_draft_client_returns_openai_by_default() -> None:
     settings = Settings(
         environment="local",
@@ -734,6 +804,74 @@ def test_image_note_draft_stores_operations_and_context(
     assert fake_client.calls[0]["graph_context"]["project"]["id"] == project_id
     assert fake_client.calls[0]["source_artifacts"][0]["type"] == "image"
     assert fake_client.calls[0]["user_hint"] is None
+    assert fake_client.closed is True
+
+
+def _analysis_note(client: TestClient, headers: dict[str, str], project_id: str) -> str:
+    response = client.post(
+        "/notes",
+        json={
+            "project_id": project_id,
+            "raw_content": (
+                "# Analysis run\n\nmethod_hash=abc123 code_version=deadbeef\n"
+                "Fitted firing rate vs contrast; slope significant."
+            ),
+        },
+        headers=headers,
+    )
+    assert response.status_code == 201
+    return response.json()["data"]["note_id"]
+
+
+def test_analysis_note_draft_stores_operations_and_context(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+) -> None:
+    project_id = _project(client, admin_auth_headers)
+    note_id = _analysis_note(client, admin_auth_headers, project_id)
+    fake_client = FakeDraftClient(_draft_patch(project_id))
+    client.app.state.graph_draft_client_factory = lambda settings: fake_client
+
+    response = client.post(
+        f"/notes/{note_id}/analysis-graph-drafts", headers=admin_auth_headers
+    )
+
+    assert response.status_code == 201
+    payload = response.json()["data"]
+    assert payload["status"] == "ready"
+    assert payload["draft_mode"] == "graph_context"
+    assert payload["prompt_version"] == "analysis-graph-draft-v1"
+    assert payload["source_note_id"] == note_id
+    assert payload["source_content_type"] == "text/markdown"
+    assert payload["context_packet"]["project"]["id"] == project_id
+    assert [operation["entity_type"] for operation in payload["operations"]] == [
+        "question",
+        "note",
+    ]
+    # The model receives the full note evidence text, not just a preview.
+    assert "method_hash=abc123" in fake_client.calls[0]["evidence_text"]
+    assert fake_client.calls[0]["project_context"]["project"]["id"] == project_id
+    assert fake_client.closed is True
+
+
+def test_analysis_note_draft_records_model_failure(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+) -> None:
+    project_id = _project(client, admin_auth_headers)
+    note_id = _analysis_note(client, admin_auth_headers, project_id)
+    fake_client = FakeDraftClient(error="model unavailable")
+    client.app.state.graph_draft_client_factory = lambda settings: fake_client
+
+    response = client.post(
+        f"/notes/{note_id}/analysis-graph-drafts", headers=admin_auth_headers
+    )
+
+    assert response.status_code == 201
+    payload = response.json()["data"]
+    assert payload["status"] == "failed"
+    assert payload["error_metadata"]["message"] == "model unavailable"
+    assert payload["operations"] == []
     assert fake_client.closed is True
 
 

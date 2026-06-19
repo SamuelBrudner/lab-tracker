@@ -529,6 +529,9 @@ class LabTrackerAPI:
     def create_graph_draft_from_note(self, *args: Any, **kwargs: Any) -> Any:
         return self.graph_drafts.create_graph_draft_from_note(*args, **kwargs)
 
+    def create_analysis_graph_draft_from_note(self, *args: Any, **kwargs: Any) -> Any:
+        return self.graph_drafts.create_analysis_graph_draft_from_note(*args, **kwargs)
+
     def create_batch_graph_draft(self, *args: Any, **kwargs: Any) -> Any:
         return self.graph_drafts.create_batch_graph_draft(*args, **kwargs)
 

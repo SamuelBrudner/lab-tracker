@@ -13,6 +13,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from lab_tracker.auth import AuthContext
 from lab_tracker.errors import AuthError, NotFoundError, ValidationError
 from lab_tracker.graph_drafting import (
+    ANALYSIS_PROMPT_VERSION,
     BATCH_PROMPT_VERSION,
     PROMPT_VERSION,
     PROVIDER,
@@ -178,6 +179,68 @@ class GraphDraftService(BaseService):
                 source_artifacts=prepared["source_artifacts"],
                 image_bytes=prepared["image_bytes"],
                 image_content_type=prepared["image_content_type"],
+            )
+            self.patch_validator.validate_top_level(graph_patch)
+            change_set.operations = self.patch_validator.operations_from_graph_patch(
+                change_set,
+                graph_patch,
+            )
+            change_set.summary = str(graph_patch.get("summary") or "")
+            change_set.uncertain_fields = string_list(graph_patch.get("uncertain_fields"))
+            change_set.clarification_requests = string_list(
+                graph_patch.get("clarification_requests")
+            )
+            change_set.status = GraphChangeSetStatus.READY
+            change_set.error_metadata = {}
+        except GraphDraftingError as exc:
+            change_set.status = GraphChangeSetStatus.FAILED
+            change_set.error_metadata = {"message": str(exc)}
+        finally:
+            change_set.updated_at = utc_now()
+            self._save_graph_change_set(change_set)
+        return change_set
+
+    def create_analysis_graph_draft_from_note(
+        self,
+        note_id: UUID,
+        *,
+        draft_client: Any,
+        actor: AuthContext | None = None,
+    ) -> GraphChangeSet:
+        note = self.notes.get_note(note_id)
+        self.authorization.require_contributor(note.project_id, actor=actor)
+        evidence_text = self._analysis_evidence_from_note(note)
+        context_packet = self.context_builder.build_graph_context_packet(
+            note,
+            source_notes=[note],
+            user_hint=None,
+            actor=actor,
+        )
+        change_set = GraphChangeSet(
+            change_set_id=uuid4(),
+            project_id=note.project_id,
+            source_note_id=note.note_id,
+            source_note_ids=[note.note_id],
+            source_checksum=_text_checksum(evidence_text),
+            source_content_type="text/markdown",
+            source_filename=(
+                note.raw_asset.filename
+                if note.raw_asset is not None
+                else "analysis-evidence-note.md"
+            ),
+            provider=getattr(draft_client, "provider", PROVIDER),
+            model=getattr(draft_client, "model", "unknown"),
+            prompt_version=ANALYSIS_PROMPT_VERSION,
+            draft_mode=GraphDraftMode.GRAPH_CONTEXT,
+            context_packet=context_packet,
+            created_by=actor_user_id(actor),
+            created_by_user_id=actor_user_fk(actor, self.repository),
+        )
+        self._save_graph_change_set(change_set)
+        try:
+            graph_patch = draft_client.draft_from_analysis_evidence(
+                evidence_text=evidence_text,
+                project_context=context_packet,
             )
             self.patch_validator.validate_top_level(graph_patch)
             change_set.operations = self.patch_validator.operations_from_graph_patch(
@@ -1028,6 +1091,40 @@ class GraphDraftService(BaseService):
                 return operation
         raise NotFoundError("Graph draft operation does not exist.")
 
+    def _analysis_evidence_from_note(self, note: Note) -> str:
+        parts: list[str] = []
+        if note.raw_content.strip():
+            parts.append("## Note raw content\n\n" + note.raw_content.strip())
+        if note.transcribed_text and note.transcribed_text.strip():
+            parts.append("## Note transcribed text\n\n" + note.transcribed_text.strip())
+        if note.raw_asset is not None:
+            raw_asset, content = self.notes.download_note_raw(note.note_id)
+            parts.append(
+                "\n".join(
+                    [
+                        "## Raw asset metadata",
+                        "",
+                        f"- filename: {raw_asset.filename}",
+                        f"- content_type: {raw_asset.content_type}",
+                        f"- checksum: {raw_asset.checksum}",
+                        f"- size_bytes: {raw_asset.size_bytes}",
+                    ]
+                )
+            )
+            if _is_text_asset(raw_asset.content_type):
+                try:
+                    raw_text = content.decode("utf-8").strip()
+                except UnicodeDecodeError as exc:
+                    raise ValidationError(
+                        "Analysis graph drafting requires UTF-8 text evidence."
+                    ) from exc
+                if raw_text:
+                    parts.append("## Raw asset text\n\n" + raw_text)
+        evidence_text = "\n\n".join(parts).strip()
+        if not evidence_text:
+            raise ValidationError("Analysis graph drafting requires text evidence on the note.")
+        return evidence_text
+
     def build_graph_context_for_note(
         self,
         note_id: UUID,
@@ -1091,6 +1188,21 @@ class GraphDraftService(BaseService):
                 draft_mode=draft_mode.value,
             )
         raise GraphDraftingError("Configured draft client does not support this note source.")
+
+
+def _text_checksum(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def _is_text_asset(content_type: str) -> bool:
+    normalized = (content_type or "").split(";", 1)[0].strip().lower()
+    return normalized.startswith("text/") or normalized in {
+        "application/json",
+        "application/ld+json",
+        "application/markdown",
+        "application/x-ndjson",
+        "application/xml",
+    }
 
 
 def _batch_key(

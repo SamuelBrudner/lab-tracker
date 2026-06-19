@@ -20,6 +20,7 @@ from lab_tracker.config import Settings
 
 PROMPT_VERSION = "multimodal-graph-draft-v1"
 BATCH_PROMPT_VERSION = "daily-batch-graph-draft-v1"
+ANALYSIS_PROMPT_VERSION = "analysis-graph-draft-v1"
 PROVIDER = "openai"
 
 SEMANTIC_TYPES = [
@@ -152,6 +153,14 @@ class GraphDraftClient(Protocol):
         *,
         batch_context: dict[str, Any],
         user_hint: str | None = ...,
+    ) -> dict[str, Any]:
+        ...
+
+    def draft_from_analysis_evidence(
+        self,
+        *,
+        evidence_text: str,
+        project_context: dict[str, Any],
     ) -> dict[str, Any]:
         ...
 
@@ -376,6 +385,59 @@ class OpenAIGraphDraftClient:
             raise GraphDraftingError("GPT graph patch did not include an operations list.")
         return parsed
 
+    def draft_from_analysis_evidence(
+        self,
+        *,
+        evidence_text: str,
+        project_context: dict[str, Any],
+    ) -> dict[str, Any]:
+        if not self._api_key:
+            raise GraphDraftingError(
+                "LAB_TRACKER_OPENAI_API_KEY must be set before drafting graph changes."
+            )
+        cleaned_evidence = evidence_text.strip()
+        if not cleaned_evidence:
+            raise GraphDraftingError("Analysis evidence is empty.")
+        response = _post_provider_request(
+            self._client,
+            "OpenAI",
+            "/responses",
+            headers={
+                "Authorization": f"Bearer {self._api_key}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "model": self.model,
+                "instructions": _analysis_instructions(),
+                "input": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "input_text",
+                                "text": _analysis_prompt_text(
+                                    evidence_text=cleaned_evidence,
+                                    project_context=project_context,
+                                ),
+                            }
+                        ],
+                    }
+                ],
+                "text": {
+                    "format": {
+                        "type": "json_schema",
+                        "name": "lab_tracker_graph_patch",
+                        "schema": graph_patch_response_schema(),
+                        "strict": True,
+                    }
+                },
+            },
+        )
+        if response.status_code >= 400:
+            raise GraphDraftingError(_response_error(response))
+        payload = _response_json(response)
+        return _parse_graph_patch_text(_extract_output_text(payload), "OpenAI")
+
     def transcribe_audio(
         self,
         *,
@@ -514,6 +576,30 @@ class AnthropicGraphDraftClient:
         ]
         return self._messages_graph_patch(content=content, instructions=_batch_instructions())
 
+    def draft_from_analysis_evidence(
+        self,
+        *,
+        evidence_text: str,
+        project_context: dict[str, Any],
+    ) -> dict[str, Any]:
+        if not self._api_key:
+            raise GraphDraftingError(
+                "LAB_TRACKER_ANTHROPIC_API_KEY must be set before drafting graph changes."
+            )
+        cleaned_evidence = evidence_text.strip()
+        if not cleaned_evidence:
+            raise GraphDraftingError("Analysis evidence is empty.")
+        content = [
+            {
+                "type": "text",
+                "text": _analysis_prompt_text(
+                    evidence_text=cleaned_evidence,
+                    project_context=project_context,
+                ),
+            }
+        ]
+        return self._messages_graph_patch(content=content, instructions=_analysis_instructions())
+
     def transcribe_audio(
         self,
         *,
@@ -641,6 +727,31 @@ class GoogleGraphDraftClient:
         return self._generate_graph_patch(
             parts=[{"text": _batch_prompt_text(batch_context=batch_context, user_hint=user_hint)}],
             instructions=_batch_instructions(),
+        )
+
+    def draft_from_analysis_evidence(
+        self,
+        *,
+        evidence_text: str,
+        project_context: dict[str, Any],
+    ) -> dict[str, Any]:
+        if not self._api_key:
+            raise GraphDraftingError(
+                "LAB_TRACKER_GOOGLE_API_KEY must be set before drafting graph changes."
+            )
+        cleaned_evidence = evidence_text.strip()
+        if not cleaned_evidence:
+            raise GraphDraftingError("Analysis evidence is empty.")
+        return self._generate_graph_patch(
+            parts=[
+                {
+                    "text": _analysis_prompt_text(
+                        evidence_text=cleaned_evidence,
+                        project_context=project_context,
+                    )
+                }
+            ],
+            instructions=_analysis_instructions(),
         )
 
     def transcribe_audio(
@@ -824,6 +935,43 @@ def _batch_prompt_text(
         f"User hint: {user_hint or '(none)'}\n"
         "Batch context packet:\n"
         f"{json.dumps(batch_context, sort_keys=True)}"
+    )
+
+
+def _analysis_prompt_text(
+    *,
+    evidence_text: str,
+    project_context: dict[str, Any],
+) -> str:
+    return (
+        "Draft Lab Tracker graph updates from this analysis evidence. "
+        "Use this current project context:\n"
+        f"{json.dumps(project_context, sort_keys=True)}\n\n"
+        "Analysis evidence:\n"
+        f"{evidence_text.strip()}"
+    )
+
+
+def _analysis_instructions() -> str:
+    return (
+        "You convert analysis evidence into proposed Lab Tracker graph changes. Think "
+        "through the evidence and current context before proposing anything. Propose only "
+        "changes supported by the evidence and context, and prefer updating or linking "
+        "existing entities over creating duplicates. Use create or update operations for "
+        "project, question, note, session, dataset, analysis, claim, or visualization "
+        "entities. Use payload_json as a JSON object string matching the existing Lab "
+        "Tracker API request shape. For analysis entities, include dataset_ids, "
+        "method_hash, code_version, optional environment_hash, and use staged status unless "
+        "the evidence clearly records a completed committed analysis. For claims, remember "
+        "the claim payload confidence field uses a 0 to 100 scale, while the graph "
+        "operation confidence field uses 0 to 1. For visualizations, link to an existing "
+        "or drafted analysis and include the artifact path when evidence provides one. "
+        "For questions, prefer small atomic experimental, method, control, or analysis "
+        "questions linked under broader motivating questions with parent_question_ids. "
+        "For created objects that later operations should reference, set client_ref to a "
+        "short stable name and use {\"$ref\":\"name\"} inside later payload_json fields. "
+        "Use source_refs with short quotes or artifact labels from the evidence. Never "
+        "claim a canonical update happened; these are drafts for human review."
     )
 
 
