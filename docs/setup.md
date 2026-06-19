@@ -56,7 +56,9 @@ lab-tracker serve
 ```
 
 That command runs `alembic upgrade head`, opens `http://127.0.0.1:8000/app`,
-and starts the server.
+and starts the server. When the configured database is file-backed SQLite, it
+first writes a migration-safety snapshot to `LAB_TRACKER_BACKUP_PATH`
+(`~/.lab-tracker/backups` by default).
 
 ### Double-click launchers
 
@@ -170,6 +172,18 @@ uv run alembic upgrade head
 
 `lab-tracker serve` and the LAN helpers run this for you. The Alembic head and
 branch policy lives in the project `CLAUDE.md`.
+
+For local SQLite databases, create an explicit backup before risky changes:
+
+```bash
+lab-tracker backup --to /path/to/off-machine-or-synced-backups
+```
+
+Restore only after stopping Lab Tracker:
+
+```bash
+lab-tracker restore /path/to/backup.sqlite3 --force
+```
 
 ## First-admin setup
 

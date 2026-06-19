@@ -22,12 +22,19 @@ suitable for local development.
 ### Database and storage
 
 - `LAB_TRACKER_DATABASE_URL`: SQLAlchemy database URL (default: `sqlite+pysqlite:///./lab_tracker.db`)
+- `LAB_TRACKER_BACKUP_PATH`: SQLite snapshot directory used by `lab-tracker
+  serve` and `lab-tracker backup` (default: `~/.lab-tracker/backups`)
+- `LAB_TRACKER_BACKUP_KEEP`: number of newest SQLite snapshots to keep when a
+  backup runs (default: `10`)
 - `LAB_TRACKER_FILE_STORAGE_PATH`: file storage directory (default: `./file_storage`)
 - `LAB_TRACKER_NOTE_STORAGE_PATH`: note storage directory (default: `./note_storage`)
 
 SQLite is the default single-client local fallback. For multi-client runtimes,
 point `LAB_TRACKER_DATABASE_URL` at Postgres and keep writes behind the Lab
-Tracker API.
+Tracker API. `lab-tracker serve` creates a SQLite snapshot before applying
+migrations when the configured database is file-backed SQLite. For a backup on
+another disk or synced destination, run `lab-tracker backup --to <path>` and copy
+that destination through your normal off-machine backup process.
 
 ### Authentication and invitations
 

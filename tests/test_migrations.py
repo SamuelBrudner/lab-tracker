@@ -10,6 +10,7 @@ from sqlalchemy import create_engine, inspect, text
 
 from lab_tracker.api import LabTrackerAPI
 from lab_tracker.auth import AuthContext, Role
+from lab_tracker.backup import create_sqlite_backup, restore_sqlite_backup
 from lab_tracker.db import get_session_factory
 from lab_tracker.models import EntityRef, EntityType, ExplorationNodeType, QuestionType
 from lab_tracker.sqlalchemy_repository import SQLAlchemyLabTrackerRepository
@@ -1447,3 +1448,53 @@ def test_migrated_database_supports_api_round_trip(monkeypatch, tmp_path):
         }
 
     engine.dispose()
+
+
+def test_restored_migrated_database_supports_api_round_trip(monkeypatch, tmp_path):
+    db_path = tmp_path / "migrations-restore-source.db"
+    restored_path = tmp_path / "migrations-restore-target.db"
+    database_url = f"sqlite+pysqlite:///{db_path}"
+    restored_database_url = f"sqlite+pysqlite:///{restored_path}"
+    _upgrade_head(database_url, monkeypatch)
+    actor = _actor()
+
+    engine = create_engine(
+        database_url,
+        future=True,
+        connect_args={"check_same_thread": False},
+    )
+    session_factory = get_session_factory(engine=engine)
+
+    with session_factory() as session:
+        api = LabTrackerAPI(repository=SQLAlchemyLabTrackerRepository(session))
+        project = api.create_project("Restored migrated DB", actor=actor)
+        question = api.create_question(
+            project_id=project.project_id,
+            text="Does restore preserve the migrated API database?",
+            question_type=QuestionType.DESCRIPTIVE,
+            actor=actor,
+        )
+        dataset = api.create_dataset(
+            project_id=project.project_id,
+            primary_question_id=question.question_id,
+            actor=actor,
+        )
+
+    backup = create_sqlite_backup(database_url, backup_dir=tmp_path / "backups")
+    assert backup.backup_path is not None
+    restore_sqlite_backup(backup.backup_path, restored_database_url)
+    engine.dispose()
+
+    restored_engine = create_engine(
+        restored_database_url,
+        future=True,
+        connect_args={"check_same_thread": False},
+    )
+    restored_session_factory = get_session_factory(engine=restored_engine)
+    with restored_session_factory() as session:
+        api = LabTrackerAPI(repository=SQLAlchemyLabTrackerRepository(session))
+        assert api.get_project(project.project_id).name == "Restored migrated DB"
+        assert api.get_question(question.question_id).project_id == project.project_id
+        assert api.get_dataset(dataset.dataset_id).primary_question_id == question.question_id
+
+    restored_engine.dispose()

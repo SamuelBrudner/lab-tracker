@@ -22,6 +22,8 @@ class Settings(BaseSettings):
     environment: str = "local"
     log_level: str = "INFO"
     database_url: str = "sqlite+pysqlite:///./lab_tracker.db"
+    backup_path: str = "~/.lab-tracker/backups"
+    backup_keep: int = 10
     file_storage_path: str = "./file_storage"
     note_storage_path: str = "./note_storage"
     auth_secret_key: str = DEFAULT_AUTH_SECRET_KEY
@@ -88,6 +90,8 @@ class Settings(BaseSettings):
             )
         if self.max_upload_bytes < 1:
             raise ValueError("LAB_TRACKER_MAX_UPLOAD_BYTES must be at least 1.")
+        if self.backup_keep < 1:
+            raise ValueError("LAB_TRACKER_BACKUP_KEEP must be at least 1.")
         if self.auth_rate_limit_attempts < 1:
             raise ValueError("LAB_TRACKER_AUTH_RATE_LIMIT_ATTEMPTS must be at least 1.")
         if self.auth_rate_limit_window_seconds < 1:
