@@ -16,11 +16,11 @@ const frontendStaticDir = resolve(process.cwd(), "src/lab_tracker/frontend");
 
 function extractVersionedShellAssets(source) {
   return Object.fromEntries(
-    source
-      .matchAll(
+    Array.from(
+      source.matchAll(
         /\/app\/static\/(?<asset>app\.js|styles\.css)\?v=(?<version>[a-f0-9]{12})/g
       )
-      .map((match) => [match.groups.asset, match.groups.version])
+    ).map((match) => [match.groups.asset, match.groups.version])
   );
 }
 

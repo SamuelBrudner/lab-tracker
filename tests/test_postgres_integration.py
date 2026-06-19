@@ -110,6 +110,7 @@ def _create_representative_project_tree(
                     {
                         "source_system": "s3",
                         "uri": "s3://lab-tracker/postgres-run",
+                        "content_hash": "sha256:postgres-run",
                         "metadata": {"backend": "postgres"},
                     }
                 ],

@@ -3235,11 +3235,17 @@ describe("App", () => {
     render(<App />);
 
     expect(await screen.findByRole("heading", { name: "Sessions" })).toBeInTheDocument();
+    await waitFor(() => {
+      expect(screen.getByLabelText("Active project")).toHaveValue("project-1");
+    });
+    await waitFor(() => {
+      expect(screen.getByLabelText("Primary question (required)")).toHaveValue("question-1");
+    });
 
     fireEvent.click(screen.getByRole("button", { name: "Start session" }));
 
-    expect(await screen.findByText("Session started.")).toBeInTheDocument();
     expect(await screen.findByText("ABC123")).toBeInTheDocument();
+    expect(await screen.findByText("Session started.")).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: "Close session" }));
 
