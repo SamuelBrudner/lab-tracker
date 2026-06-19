@@ -16,6 +16,7 @@ from lab_tracker.models import (
     EntityType,
     EntityVersion,
     EntityVersionDiff,
+    UsageEventResourceType,
 )
 from lab_tracker.schemas import ClaimCreate, ClaimEdgeCreate, ClaimUpdate, Envelope, ListEnvelope
 
@@ -27,6 +28,7 @@ from .shared import (
     ensure_project_read,
     list_response,
     paginate,
+    record_usage_view,
     repository_from_request,
     validate_pagination,
 )
@@ -89,6 +91,12 @@ def build_claims_router(api: LabTrackerAPI) -> APIRouter:
     def get_claim(claim_id: UUID, request: Request):
         claim = api_from_request(request, api).get_claim(claim_id)
         ensure_project_read(request, claim.project_id)
+        record_usage_view(
+            request,
+            resource_type=UsageEventResourceType.CLAIM,
+            resource_id=claim.claim_id,
+            project_id=claim.project_id,
+        )
         return Envelope(data=claim)
 
     @router.get("/claims/{claim_id}/versions", response_model=ListEnvelope[EntityVersion])

@@ -3,12 +3,20 @@
 from __future__ import annotations
 
 import logging
+import time
 from collections.abc import Callable
 from types import TracebackType
 from typing import Any, TypeVar
 from uuid import UUID
 
-from lab_tracker.models import Note, Question
+from lab_tracker.config import Settings, get_settings
+from lab_tracker.models import (
+    Note,
+    Question,
+    UsageEventOutcome,
+    UsageEventResourceType,
+    UsageEventVerb,
+)
 from lab_tracker.note_storage import LocalNoteStorage
 from lab_tracker.repository import LabTrackerRepository
 from lab_tracker.request_context import LabTrackerRequestContext
@@ -43,14 +51,20 @@ class LabTrackerAPI:
         raw_storage: LocalNoteStorage | None = None,
         repository: LabTrackerRepository | None = None,
         request_context: LabTrackerRequestContext | None = None,
+        settings: Settings | None = None,
+        surface: str | None = None,
     ) -> None:
         self._raw_storage = raw_storage
         self._repository = repository
         self._request_context = request_context
+        self._settings = settings or get_settings()
+        self._surface = surface
         self._service_context = ServiceContext(
             raw_storage=raw_storage,
             repository=repository,
             request_context=request_context,
+            settings=self._settings,
+            surface=surface,
         )
         self._compose_services()
 
@@ -173,15 +187,22 @@ class LabTrackerAPI:
             raw_storage=self._raw_storage,
             repository=request_context.repository,
             request_context=request_context,
+            settings=self._settings,
         )
 
     def request_scope(
         self,
         repository: LabTrackerRepository,
         *,
+        surface: str | None = None,
         close: Callable[[], None] | None = None,
     ) -> LabTrackerRequestScope:
-        return LabTrackerRequestScope(root_api=self, repository=repository, close=close)
+        return LabTrackerRequestScope(
+            root_api=self,
+            repository=repository,
+            surface=surface,
+            close=close,
+        )
 
     def _run_deferred_actions(
         self,
@@ -208,8 +229,54 @@ class LabTrackerAPI:
             return
         self._request_context.after_rollback_actions.append(action)
 
+    def record_usage_event(self, *args: Any, **kwargs: Any) -> Any:
+        return self.projects.record_usage_event(*args, **kwargs)
+
+    def _with_usage_event(
+        self,
+        action: Callable[[], Any],
+        *,
+        verb: UsageEventVerb,
+        resource_type: UsageEventResourceType,
+        actor: Any = None,
+        resource_id: UUID | None = None,
+        project_id: UUID | None = None,
+        resource_id_attr: str | None = None,
+        project_id_attr: str | None = "project_id",
+    ) -> Any:
+        start = time.perf_counter()
+        try:
+            result = action()
+        except Exception:
+            self.record_usage_event(
+                verb=verb,
+                resource_type=resource_type,
+                resource_id=resource_id,
+                project_id=project_id,
+                actor=actor,
+                outcome=UsageEventOutcome.ERROR,
+                duration_ms=_elapsed_ms(start),
+            )
+            raise
+        self.record_usage_event(
+            verb=verb,
+            resource_type=resource_type,
+            resource_id=resource_id or _uuid_attr(result, resource_id_attr),
+            project_id=project_id or _uuid_attr(result, project_id_attr),
+            actor=actor,
+            duration_ms=_elapsed_ms(start),
+        )
+        return result
+
     def create_project(self, *args: Any, **kwargs: Any) -> Any:
-        return self.projects.create_project(*args, **kwargs)
+        return self._with_usage_event(
+            lambda: self.projects.create_project(*args, **kwargs),
+            verb=UsageEventVerb.CREATE,
+            resource_type=UsageEventResourceType.PROJECT,
+            actor=kwargs.get("actor"),
+            resource_id_attr="project_id",
+            project_id_attr="project_id",
+        )
 
     def get_project(self, *args: Any, **kwargs: Any) -> Any:
         return self.projects.get_project(*args, **kwargs)
@@ -218,13 +285,38 @@ class LabTrackerAPI:
         return self.projects.list_projects(*args, **kwargs)
 
     def update_project(self, *args: Any, **kwargs: Any) -> Any:
-        return self.projects.update_project(*args, **kwargs)
+        return self._with_usage_event(
+            lambda: self.projects.update_project(*args, **kwargs),
+            verb=UsageEventVerb.UPDATE,
+            resource_type=UsageEventResourceType.PROJECT,
+            actor=kwargs.get("actor"),
+            resource_id=_first_uuid(args),
+            project_id=_first_uuid(args),
+            resource_id_attr="project_id",
+            project_id_attr="project_id",
+        )
 
     def delete_project(self, *args: Any, **kwargs: Any) -> Any:
-        return self.projects.delete_project(*args, **kwargs)
+        return self._with_usage_event(
+            lambda: self.projects.delete_project(*args, **kwargs),
+            verb=UsageEventVerb.DELETE,
+            resource_type=UsageEventResourceType.PROJECT,
+            actor=kwargs.get("actor"),
+            resource_id=_first_uuid(args),
+            project_id=_first_uuid(args),
+            resource_id_attr="project_id",
+            project_id_attr="project_id",
+        )
 
     def create_project_group(self, *args: Any, **kwargs: Any) -> Any:
-        return self.projects.create_project_group(*args, **kwargs)
+        return self._with_usage_event(
+            lambda: self.projects.create_project_group(*args, **kwargs),
+            verb=UsageEventVerb.CREATE,
+            resource_type=UsageEventResourceType.PROJECT_GROUP,
+            actor=kwargs.get("actor"),
+            resource_id_attr="group_id",
+            project_id_attr=None,
+        )
 
     def get_project_group(self, *args: Any, **kwargs: Any) -> Any:
         return self.projects.get_project_group(*args, **kwargs)
@@ -233,10 +325,26 @@ class LabTrackerAPI:
         return self.projects.list_project_groups(*args, **kwargs)
 
     def update_project_group(self, *args: Any, **kwargs: Any) -> Any:
-        return self.projects.update_project_group(*args, **kwargs)
+        return self._with_usage_event(
+            lambda: self.projects.update_project_group(*args, **kwargs),
+            verb=UsageEventVerb.UPDATE,
+            resource_type=UsageEventResourceType.PROJECT_GROUP,
+            actor=kwargs.get("actor"),
+            resource_id=_first_uuid(args),
+            resource_id_attr="group_id",
+            project_id_attr=None,
+        )
 
     def delete_project_group(self, *args: Any, **kwargs: Any) -> Any:
-        return self.projects.delete_project_group(*args, **kwargs)
+        return self._with_usage_event(
+            lambda: self.projects.delete_project_group(*args, **kwargs),
+            verb=UsageEventVerb.DELETE,
+            resource_type=UsageEventResourceType.PROJECT_GROUP,
+            actor=kwargs.get("actor"),
+            resource_id=_first_uuid(args),
+            resource_id_attr="group_id",
+            project_id_attr=None,
+        )
 
     def get_project_membership(self, *args: Any, **kwargs: Any) -> Any:
         return self.projects.get_project_membership(*args, **kwargs)
@@ -248,13 +356,33 @@ class LabTrackerAPI:
         return self.projects.list_project_memberships(*args, **kwargs)
 
     def upsert_project_membership(self, *args: Any, **kwargs: Any) -> Any:
-        return self.projects.upsert_project_membership(*args, **kwargs)
+        return self._with_usage_event(
+            lambda: self.projects.upsert_project_membership(*args, **kwargs),
+            verb=UsageEventVerb.UPDATE,
+            resource_type=UsageEventResourceType.PROJECT_MEMBERSHIP,
+            actor=kwargs.get("actor"),
+            resource_id_attr="membership_id",
+        )
 
     def update_project_membership(self, *args: Any, **kwargs: Any) -> Any:
-        return self.projects.update_project_membership(*args, **kwargs)
+        return self._with_usage_event(
+            lambda: self.projects.update_project_membership(*args, **kwargs),
+            verb=UsageEventVerb.UPDATE,
+            resource_type=UsageEventResourceType.PROJECT_MEMBERSHIP,
+            actor=kwargs.get("actor"),
+            resource_id=_first_uuid(args),
+            resource_id_attr="membership_id",
+        )
 
     def delete_project_membership(self, *args: Any, **kwargs: Any) -> Any:
-        return self.projects.delete_project_membership(*args, **kwargs)
+        return self._with_usage_event(
+            lambda: self.projects.delete_project_membership(*args, **kwargs),
+            verb=UsageEventVerb.DELETE,
+            resource_type=UsageEventResourceType.PROJECT_MEMBERSHIP,
+            actor=kwargs.get("actor"),
+            resource_id=_first_uuid(args),
+            resource_id_attr="membership_id",
+        )
 
     def get_group_membership(self, *args: Any, **kwargs: Any) -> Any:
         return self.projects.get_group_membership(*args, **kwargs)
@@ -266,22 +394,57 @@ class LabTrackerAPI:
         return self.projects.list_group_memberships(*args, **kwargs)
 
     def upsert_group_membership(self, *args: Any, **kwargs: Any) -> Any:
-        return self.projects.upsert_group_membership(*args, **kwargs)
+        return self._with_usage_event(
+            lambda: self.projects.upsert_group_membership(*args, **kwargs),
+            verb=UsageEventVerb.UPDATE,
+            resource_type=UsageEventResourceType.GROUP_MEMBERSHIP,
+            actor=kwargs.get("actor"),
+            resource_id_attr="membership_id",
+            project_id_attr=None,
+        )
 
     def delete_group_membership(self, *args: Any, **kwargs: Any) -> Any:
-        return self.projects.delete_group_membership(*args, **kwargs)
+        return self._with_usage_event(
+            lambda: self.projects.delete_group_membership(*args, **kwargs),
+            verb=UsageEventVerb.DELETE,
+            resource_type=UsageEventResourceType.GROUP_MEMBERSHIP,
+            actor=kwargs.get("actor"),
+            resource_id_attr="membership_id",
+            project_id_attr=None,
+        )
 
     def upsert_group_project_memberships(self, *args: Any, **kwargs: Any) -> Any:
-        return self.projects.upsert_group_project_memberships(*args, **kwargs)
+        return self._with_usage_event(
+            lambda: self.projects.upsert_group_project_memberships(*args, **kwargs),
+            verb=UsageEventVerb.UPDATE,
+            resource_type=UsageEventResourceType.PROJECT_MEMBERSHIP,
+            actor=kwargs.get("actor"),
+            resource_id=_first_uuid(args),
+            project_id_attr=None,
+        )
 
     def delete_group_project_memberships(self, *args: Any, **kwargs: Any) -> Any:
-        return self.projects.delete_group_project_memberships(*args, **kwargs)
+        return self._with_usage_event(
+            lambda: self.projects.delete_group_project_memberships(*args, **kwargs),
+            verb=UsageEventVerb.DELETE,
+            resource_type=UsageEventResourceType.PROJECT_MEMBERSHIP,
+            actor=kwargs.get("actor"),
+            resource_id=_first_uuid(args),
+            project_id_attr=None,
+        )
 
     def accessible_project_ids(self, *args: Any, **kwargs: Any) -> Any:
         return self.project_authorization.accessible_project_ids(*args, **kwargs)
 
     def create_supervision_edge(self, *args: Any, **kwargs: Any) -> Any:
-        return self.supervision.create_supervision_edge(*args, **kwargs)
+        return self._with_usage_event(
+            lambda: self.supervision.create_supervision_edge(*args, **kwargs),
+            verb=UsageEventVerb.CREATE,
+            resource_type=UsageEventResourceType.SUPERVISION_EDGE,
+            actor=kwargs.get("actor"),
+            resource_id_attr="edge_id",
+            project_id_attr=None,
+        )
 
     def get_supervision_edge(self, *args: Any, **kwargs: Any) -> Any:
         return self.supervision.get_supervision_edge(*args, **kwargs)
@@ -290,10 +453,26 @@ class LabTrackerAPI:
         return self.supervision.list_supervision_edges(*args, **kwargs)
 
     def update_supervision_edge(self, *args: Any, **kwargs: Any) -> Any:
-        return self.supervision.update_supervision_edge(*args, **kwargs)
+        return self._with_usage_event(
+            lambda: self.supervision.update_supervision_edge(*args, **kwargs),
+            verb=UsageEventVerb.UPDATE,
+            resource_type=UsageEventResourceType.SUPERVISION_EDGE,
+            actor=kwargs.get("actor"),
+            resource_id=_first_uuid(args),
+            resource_id_attr="edge_id",
+            project_id_attr=None,
+        )
 
     def delete_supervision_edge(self, *args: Any, **kwargs: Any) -> Any:
-        return self.supervision.delete_supervision_edge(*args, **kwargs)
+        return self._with_usage_event(
+            lambda: self.supervision.delete_supervision_edge(*args, **kwargs),
+            verb=UsageEventVerb.DELETE,
+            resource_type=UsageEventResourceType.SUPERVISION_EDGE,
+            actor=kwargs.get("actor"),
+            resource_id=_first_uuid(args),
+            resource_id_attr="edge_id",
+            project_id_attr=None,
+        )
 
     def reassign_ownership(self, *args: Any, **kwargs: Any) -> Any:
         return self.ownership_reassignments.reassign_ownership(*args, **kwargs)
@@ -308,13 +487,34 @@ class LabTrackerAPI:
         )
 
     def export_user_records(self, *args: Any, **kwargs: Any) -> Any:
-        return self.record_exports.export_user_records(*args, **kwargs)
+        return self._with_usage_event(
+            lambda: self.record_exports.export_user_records(*args, **kwargs),
+            verb=UsageEventVerb.EXPORT,
+            resource_type=UsageEventResourceType.RECORD_EXPORT,
+            actor=kwargs.get("actor"),
+            project_id=None,
+            project_id_attr=None,
+        )
 
     def export_goal_artifact(self, *args: Any, **kwargs: Any) -> Any:
-        return self.record_exports.export_goal_artifact(*args, **kwargs)
+        return self._with_usage_event(
+            lambda: self.record_exports.export_goal_artifact(*args, **kwargs),
+            verb=UsageEventVerb.EXPORT,
+            resource_type=UsageEventResourceType.GOAL,
+            actor=kwargs.get("actor"),
+            resource_id=_first_uuid(args) or kwargs.get("goal_id"),
+            project_id_attr="project_id",
+        )
 
     def export_question_subtree(self, *args: Any, **kwargs: Any) -> Any:
-        return self.record_exports.export_question_subtree(*args, **kwargs)
+        return self._with_usage_event(
+            lambda: self.record_exports.export_question_subtree(*args, **kwargs),
+            verb=UsageEventVerb.EXPORT,
+            resource_type=UsageEventResourceType.QUESTION,
+            actor=kwargs.get("actor"),
+            resource_id=_first_uuid(args) or kwargs.get("question_id"),
+            project_id_attr="project_id",
+        )
 
     def check_publication_readiness(self, *args: Any, **kwargs: Any) -> Any:
         return self.publication_readiness.check(*args, **kwargs)
@@ -341,7 +541,13 @@ class LabTrackerAPI:
         return self.project_authorization.require_group_owner(*args, **kwargs)
 
     def create_question(self, *args: Any, **kwargs: Any) -> Any:
-        return self.questions.create_question(*args, **kwargs)
+        return self._with_usage_event(
+            lambda: self.questions.create_question(*args, **kwargs),
+            verb=UsageEventVerb.CREATE,
+            resource_type=UsageEventResourceType.QUESTION,
+            actor=kwargs.get("actor"),
+            resource_id_attr="question_id",
+        )
 
     def get_question(self, *args: Any, **kwargs: Any) -> Any:
         return self.questions.get_question(*args, **kwargs)
@@ -353,16 +559,37 @@ class LabTrackerAPI:
         return self.questions.list_questions_filtered(*args, **kwargs)
 
     def update_question(self, *args: Any, **kwargs: Any) -> Any:
-        return self.questions.update_question(*args, **kwargs)
+        return self._with_usage_event(
+            lambda: self.questions.update_question(*args, **kwargs),
+            verb=UsageEventVerb.UPDATE,
+            resource_type=UsageEventResourceType.QUESTION,
+            actor=kwargs.get("actor"),
+            resource_id=_first_uuid(args),
+            resource_id_attr="question_id",
+        )
 
     def list_question_refactors(self, *args: Any, **kwargs: Any) -> Any:
         return self.questions.list_question_refactors(*args, **kwargs)
 
     def refactor_question(self, *args: Any, **kwargs: Any) -> Any:
-        return self.questions.refactor_question(*args, **kwargs)
+        return self._with_usage_event(
+            lambda: self.questions.refactor_question(*args, **kwargs),
+            verb=UsageEventVerb.UPDATE,
+            resource_type=UsageEventResourceType.QUESTION_REFACTOR,
+            actor=kwargs.get("actor"),
+            resource_id=_first_uuid(args),
+            project_id_attr=None,
+        )
 
     def delete_question(self, *args: Any, **kwargs: Any) -> Any:
-        return self.questions.delete_question(*args, **kwargs)
+        return self._with_usage_event(
+            lambda: self.questions.delete_question(*args, **kwargs),
+            verb=UsageEventVerb.DELETE,
+            resource_type=UsageEventResourceType.QUESTION,
+            actor=kwargs.get("actor"),
+            resource_id=_first_uuid(args),
+            resource_id_attr="question_id",
+        )
 
     def list_entity_versions(self, *args: Any, **kwargs: Any) -> Any:
         return self.entity_versions.list_entity_versions(*args, **kwargs)
@@ -371,7 +598,13 @@ class LabTrackerAPI:
         return self.entity_versions.diff_entity_versions(*args, **kwargs)
 
     def create_dataset(self, *args: Any, **kwargs: Any) -> Any:
-        return self.datasets.create_dataset(*args, **kwargs)
+        return self._with_usage_event(
+            lambda: self.datasets.create_dataset(*args, **kwargs),
+            verb=UsageEventVerb.CREATE,
+            resource_type=UsageEventResourceType.DATASET,
+            actor=kwargs.get("actor"),
+            resource_id_attr="dataset_id",
+        )
 
     def get_dataset(self, *args: Any, **kwargs: Any) -> Any:
         return self.datasets.get_dataset(*args, **kwargs)
@@ -380,13 +613,33 @@ class LabTrackerAPI:
         return self.datasets.list_datasets(*args, **kwargs)
 
     def update_dataset(self, *args: Any, **kwargs: Any) -> Any:
-        return self.datasets.update_dataset(*args, **kwargs)
+        return self._with_usage_event(
+            lambda: self.datasets.update_dataset(*args, **kwargs),
+            verb=UsageEventVerb.UPDATE,
+            resource_type=UsageEventResourceType.DATASET,
+            actor=kwargs.get("actor"),
+            resource_id=_first_uuid(args),
+            resource_id_attr="dataset_id",
+        )
 
     def delete_dataset(self, *args: Any, **kwargs: Any) -> Any:
-        return self.datasets.delete_dataset(*args, **kwargs)
+        return self._with_usage_event(
+            lambda: self.datasets.delete_dataset(*args, **kwargs),
+            verb=UsageEventVerb.DELETE,
+            resource_type=UsageEventResourceType.DATASET,
+            actor=kwargs.get("actor"),
+            resource_id=_first_uuid(args),
+            resource_id_attr="dataset_id",
+        )
 
     def create_session(self, *args: Any, **kwargs: Any) -> Any:
-        return self.sessions.create_session(*args, **kwargs)
+        return self._with_usage_event(
+            lambda: self.sessions.create_session(*args, **kwargs),
+            verb=UsageEventVerb.CREATE,
+            resource_type=UsageEventResourceType.SESSION,
+            actor=kwargs.get("actor"),
+            resource_id_attr="session_id",
+        )
 
     def get_session(self, *args: Any, **kwargs: Any) -> Any:
         return self.sessions.get_session(*args, **kwargs)
@@ -398,37 +651,97 @@ class LabTrackerAPI:
         return self.sessions.list_sessions(*args, **kwargs)
 
     def update_session(self, *args: Any, **kwargs: Any) -> Any:
-        return self.sessions.update_session(*args, **kwargs)
+        return self._with_usage_event(
+            lambda: self.sessions.update_session(*args, **kwargs),
+            verb=UsageEventVerb.UPDATE,
+            resource_type=UsageEventResourceType.SESSION,
+            actor=kwargs.get("actor"),
+            resource_id=_first_uuid(args),
+            resource_id_attr="session_id",
+        )
 
     def delete_session(self, *args: Any, **kwargs: Any) -> Any:
-        return self.sessions.delete_session(*args, **kwargs)
+        return self._with_usage_event(
+            lambda: self.sessions.delete_session(*args, **kwargs),
+            verb=UsageEventVerb.DELETE,
+            resource_type=UsageEventResourceType.SESSION,
+            actor=kwargs.get("actor"),
+            resource_id=_first_uuid(args),
+            resource_id_attr="session_id",
+        )
 
     def register_acquisition_output(self, *args: Any, **kwargs: Any) -> Any:
-        return self.sessions.register_acquisition_output(*args, **kwargs)
+        return self._with_usage_event(
+            lambda: self.sessions.register_acquisition_output(*args, **kwargs),
+            verb=UsageEventVerb.CREATE,
+            resource_type=UsageEventResourceType.ACQUISITION_OUTPUT,
+            actor=kwargs.get("actor"),
+            resource_id_attr="output_id",
+            project_id_attr=None,
+        )
 
     def list_acquisition_outputs(self, *args: Any, **kwargs: Any) -> Any:
         return self.sessions.list_acquisition_outputs(*args, **kwargs)
 
     def delete_acquisition_output(self, *args: Any, **kwargs: Any) -> Any:
-        return self.sessions.delete_acquisition_output(*args, **kwargs)
+        return self._with_usage_event(
+            lambda: self.sessions.delete_acquisition_output(*args, **kwargs),
+            verb=UsageEventVerb.DELETE,
+            resource_type=UsageEventResourceType.ACQUISITION_OUTPUT,
+            actor=kwargs.get("actor"),
+            resource_id=_first_uuid(args),
+            resource_id_attr="output_id",
+            project_id_attr=None,
+        )
 
     def promote_operational_session(self, *args: Any, **kwargs: Any) -> Any:
-        return self.sessions.promote_operational_session(*args, **kwargs)
+        return self._with_usage_event(
+            lambda: self.sessions.promote_operational_session(*args, **kwargs),
+            verb=UsageEventVerb.UPDATE,
+            resource_type=UsageEventResourceType.SESSION,
+            actor=kwargs.get("actor"),
+            resource_id=_first_uuid(args),
+            resource_id_attr="session_id",
+        )
 
     def promote_operational_session_to_dataset(self, *args: Any, **kwargs: Any) -> Any:
-        return self.sessions.promote_operational_session_to_dataset(*args, **kwargs)
+        return self._with_usage_event(
+            lambda: self.sessions.promote_operational_session_to_dataset(*args, **kwargs),
+            verb=UsageEventVerb.CREATE,
+            resource_type=UsageEventResourceType.DATASET,
+            actor=kwargs.get("actor"),
+            resource_id_attr="dataset_id",
+        )
 
     def create_note(self, *args: Any, **kwargs: Any) -> Any:
-        return self.notes.create_note(*args, **kwargs)
+        return self._with_usage_event(
+            lambda: self.notes.create_note(*args, **kwargs),
+            verb=UsageEventVerb.CREATE,
+            resource_type=UsageEventResourceType.NOTE,
+            actor=kwargs.get("actor"),
+            resource_id_attr="note_id",
+        )
 
     def store_note_raw_asset(self, *args: Any, **kwargs: Any) -> Any:
         return self.notes.store_note_raw_asset(*args, **kwargs)
 
     def upload_note_raw(self, *args: Any, **kwargs: Any) -> Any:
-        return self.notes.upload_note_raw(*args, **kwargs)
+        return self._with_usage_event(
+            lambda: self.notes.upload_note_raw(*args, **kwargs),
+            verb=UsageEventVerb.UPLOAD,
+            resource_type=UsageEventResourceType.NOTE,
+            actor=kwargs.get("actor"),
+            resource_id_attr="note_id",
+        )
 
     def transcribe_voice_note(self, *args: Any, **kwargs: Any) -> Any:
-        return self.notes.transcribe_voice_note(*args, **kwargs)
+        return self._with_usage_event(
+            lambda: self.notes.transcribe_voice_note(*args, **kwargs),
+            verb=UsageEventVerb.TRANSCRIBE,
+            resource_type=UsageEventResourceType.NOTE,
+            actor=kwargs.get("actor"),
+            resource_id_attr="note_id",
+        )
 
     def get_note(self, *args: Any, **kwargs: Any) -> Any:
         return self.notes.get_note(*args, **kwargs)
@@ -437,16 +750,36 @@ class LabTrackerAPI:
         return self.notes.list_notes(*args, **kwargs)
 
     def update_note(self, *args: Any, **kwargs: Any) -> Any:
-        return self.notes.update_note(*args, **kwargs)
+        return self._with_usage_event(
+            lambda: self.notes.update_note(*args, **kwargs),
+            verb=UsageEventVerb.UPDATE,
+            resource_type=UsageEventResourceType.NOTE,
+            actor=kwargs.get("actor"),
+            resource_id=_first_uuid(args),
+            resource_id_attr="note_id",
+        )
 
     def download_note_raw(self, *args: Any, **kwargs: Any) -> Any:
         return self.notes.download_note_raw(*args, **kwargs)
 
     def delete_note(self, *args: Any, **kwargs: Any) -> Any:
-        return self.notes.delete_note(*args, **kwargs)
+        return self._with_usage_event(
+            lambda: self.notes.delete_note(*args, **kwargs),
+            verb=UsageEventVerb.DELETE,
+            resource_type=UsageEventResourceType.NOTE,
+            actor=kwargs.get("actor"),
+            resource_id=_first_uuid(args),
+            resource_id_attr="note_id",
+        )
 
     def create_analysis(self, *args: Any, **kwargs: Any) -> Any:
-        return self.analyses.create_analysis(*args, **kwargs)
+        return self._with_usage_event(
+            lambda: self.analyses.create_analysis(*args, **kwargs),
+            verb=UsageEventVerb.CREATE,
+            resource_type=UsageEventResourceType.ANALYSIS,
+            actor=kwargs.get("actor"),
+            resource_id_attr="analysis_id",
+        )
 
     def get_analysis(self, *args: Any, **kwargs: Any) -> Any:
         return self.analyses.get_analysis(*args, **kwargs)
@@ -455,16 +788,43 @@ class LabTrackerAPI:
         return self.analyses.list_analyses(*args, **kwargs)
 
     def update_analysis(self, *args: Any, **kwargs: Any) -> Any:
-        return self.analyses.update_analysis(*args, **kwargs)
+        return self._with_usage_event(
+            lambda: self.analyses.update_analysis(*args, **kwargs),
+            verb=UsageEventVerb.UPDATE,
+            resource_type=UsageEventResourceType.ANALYSIS,
+            actor=kwargs.get("actor"),
+            resource_id=_first_uuid(args),
+            resource_id_attr="analysis_id",
+        )
 
     def delete_analysis(self, *args: Any, **kwargs: Any) -> Any:
-        return self.analyses.delete_analysis(*args, **kwargs)
+        return self._with_usage_event(
+            lambda: self.analyses.delete_analysis(*args, **kwargs),
+            verb=UsageEventVerb.DELETE,
+            resource_type=UsageEventResourceType.ANALYSIS,
+            actor=kwargs.get("actor"),
+            resource_id=_first_uuid(args),
+            resource_id_attr="analysis_id",
+        )
 
     def commit_analysis(self, *args: Any, **kwargs: Any) -> Any:
-        return self.analyses.commit_analysis(*args, **kwargs)
+        return self._with_usage_event(
+            lambda: self.analyses.commit_analysis(*args, **kwargs),
+            verb=UsageEventVerb.COMMIT,
+            resource_type=UsageEventResourceType.ANALYSIS,
+            actor=kwargs.get("actor"),
+            resource_id=_first_uuid(args),
+            resource_id_attr="analysis_id",
+        )
 
     def create_claim(self, *args: Any, **kwargs: Any) -> Any:
-        return self.claims.create_claim(*args, **kwargs)
+        return self._with_usage_event(
+            lambda: self.claims.create_claim(*args, **kwargs),
+            verb=UsageEventVerb.CREATE,
+            resource_type=UsageEventResourceType.CLAIM,
+            actor=kwargs.get("actor"),
+            resource_id_attr="claim_id",
+        )
 
     def get_claim(self, *args: Any, **kwargs: Any) -> Any:
         return self.claims.get_claim(*args, **kwargs)
@@ -473,19 +833,46 @@ class LabTrackerAPI:
         return self.claims.list_claims(*args, **kwargs)
 
     def update_claim(self, *args: Any, **kwargs: Any) -> Any:
-        return self.claims.update_claim(*args, **kwargs)
+        return self._with_usage_event(
+            lambda: self.claims.update_claim(*args, **kwargs),
+            verb=UsageEventVerb.UPDATE,
+            resource_type=UsageEventResourceType.CLAIM,
+            actor=kwargs.get("actor"),
+            resource_id=_first_uuid(args),
+            resource_id_attr="claim_id",
+        )
 
     def delete_claim(self, *args: Any, **kwargs: Any) -> Any:
-        return self.claims.delete_claim(*args, **kwargs)
+        return self._with_usage_event(
+            lambda: self.claims.delete_claim(*args, **kwargs),
+            verb=UsageEventVerb.DELETE,
+            resource_type=UsageEventResourceType.CLAIM,
+            actor=kwargs.get("actor"),
+            resource_id=_first_uuid(args),
+            resource_id_attr="claim_id",
+        )
 
     def create_claim_edge(self, *args: Any, **kwargs: Any) -> Any:
-        return self.claims.create_claim_edge(*args, **kwargs)
+        return self._with_usage_event(
+            lambda: self.claims.create_claim_edge(*args, **kwargs),
+            verb=UsageEventVerb.CREATE,
+            resource_type=UsageEventResourceType.CLAIM_EDGE,
+            actor=kwargs.get("actor"),
+            resource_id_attr="edge_id",
+            project_id_attr=None,
+        )
 
     def list_claim_edges(self, *args: Any, **kwargs: Any) -> Any:
         return self.claims.list_claim_edges(*args, **kwargs)
 
     def create_goal(self, *args: Any, **kwargs: Any) -> Any:
-        return self.goals.create_goal(*args, **kwargs)
+        return self._with_usage_event(
+            lambda: self.goals.create_goal(*args, **kwargs),
+            verb=UsageEventVerb.CREATE,
+            resource_type=UsageEventResourceType.GOAL,
+            actor=kwargs.get("actor"),
+            resource_id_attr="goal_id",
+        )
 
     def get_goal(self, *args: Any, **kwargs: Any) -> Any:
         return self.goals.get_goal(*args, **kwargs)
@@ -494,25 +881,68 @@ class LabTrackerAPI:
         return self.goals.list_goals(*args, **kwargs)
 
     def update_goal(self, *args: Any, **kwargs: Any) -> Any:
-        return self.goals.update_goal(*args, **kwargs)
+        return self._with_usage_event(
+            lambda: self.goals.update_goal(*args, **kwargs),
+            verb=UsageEventVerb.UPDATE,
+            resource_type=UsageEventResourceType.GOAL,
+            actor=kwargs.get("actor"),
+            resource_id=_first_uuid(args),
+            resource_id_attr="goal_id",
+        )
 
     def delete_goal(self, *args: Any, **kwargs: Any) -> Any:
-        return self.goals.delete_goal(*args, **kwargs)
+        return self._with_usage_event(
+            lambda: self.goals.delete_goal(*args, **kwargs),
+            verb=UsageEventVerb.DELETE,
+            resource_type=UsageEventResourceType.GOAL,
+            actor=kwargs.get("actor"),
+            resource_id=_first_uuid(args),
+            resource_id_attr="goal_id",
+        )
 
     def link_node_to_goal(self, *args: Any, **kwargs: Any) -> Any:
-        return self.goals.link_node_to_goal(*args, **kwargs)
+        return self._with_usage_event(
+            lambda: self.goals.link_node_to_goal(*args, **kwargs),
+            verb=UsageEventVerb.CREATE,
+            resource_type=UsageEventResourceType.GOAL_LINK,
+            actor=kwargs.get("actor"),
+            resource_id_attr="link_id",
+            project_id_attr=None,
+        )
 
     def update_goal_link(self, *args: Any, **kwargs: Any) -> Any:
-        return self.goals.update_goal_link(*args, **kwargs)
+        return self._with_usage_event(
+            lambda: self.goals.update_goal_link(*args, **kwargs),
+            verb=UsageEventVerb.UPDATE,
+            resource_type=UsageEventResourceType.GOAL_LINK,
+            actor=kwargs.get("actor"),
+            resource_id=_first_uuid(args),
+            resource_id_attr="link_id",
+            project_id_attr=None,
+        )
 
     def delete_goal_link(self, *args: Any, **kwargs: Any) -> Any:
-        return self.goals.delete_goal_link(*args, **kwargs)
+        return self._with_usage_event(
+            lambda: self.goals.delete_goal_link(*args, **kwargs),
+            verb=UsageEventVerb.DELETE,
+            resource_type=UsageEventResourceType.GOAL_LINK,
+            actor=kwargs.get("actor"),
+            resource_id=_first_uuid(args),
+            resource_id_attr="link_id",
+            project_id_attr=None,
+        )
 
     def list_node_goals(self, *args: Any, **kwargs: Any) -> Any:
         return self.goals.list_node_goals(*args, **kwargs)
 
     def create_visualization(self, *args: Any, **kwargs: Any) -> Any:
-        return self.visualizations.create_visualization(*args, **kwargs)
+        return self._with_usage_event(
+            lambda: self.visualizations.create_visualization(*args, **kwargs),
+            verb=UsageEventVerb.CREATE,
+            resource_type=UsageEventResourceType.VISUALIZATION,
+            actor=kwargs.get("actor"),
+            resource_id_attr="viz_id",
+        )
 
     def get_visualization(self, *args: Any, **kwargs: Any) -> Any:
         return self.visualizations.get_visualization(*args, **kwargs)
@@ -521,19 +951,51 @@ class LabTrackerAPI:
         return self.visualizations.list_visualizations(*args, **kwargs)
 
     def update_visualization(self, *args: Any, **kwargs: Any) -> Any:
-        return self.visualizations.update_visualization(*args, **kwargs)
+        return self._with_usage_event(
+            lambda: self.visualizations.update_visualization(*args, **kwargs),
+            verb=UsageEventVerb.UPDATE,
+            resource_type=UsageEventResourceType.VISUALIZATION,
+            actor=kwargs.get("actor"),
+            resource_id=_first_uuid(args),
+            resource_id_attr="viz_id",
+        )
 
     def delete_visualization(self, *args: Any, **kwargs: Any) -> Any:
-        return self.visualizations.delete_visualization(*args, **kwargs)
+        return self._with_usage_event(
+            lambda: self.visualizations.delete_visualization(*args, **kwargs),
+            verb=UsageEventVerb.DELETE,
+            resource_type=UsageEventResourceType.VISUALIZATION,
+            actor=kwargs.get("actor"),
+            resource_id=_first_uuid(args),
+            resource_id_attr="viz_id",
+        )
 
     def create_graph_draft_from_note(self, *args: Any, **kwargs: Any) -> Any:
-        return self.graph_drafts.create_graph_draft_from_note(*args, **kwargs)
+        return self._with_usage_event(
+            lambda: self.graph_drafts.create_graph_draft_from_note(*args, **kwargs),
+            verb=UsageEventVerb.CREATE,
+            resource_type=UsageEventResourceType.GRAPH_CHANGE_SET,
+            actor=kwargs.get("actor"),
+            resource_id_attr="change_set_id",
+        )
 
     def create_analysis_graph_draft_from_note(self, *args: Any, **kwargs: Any) -> Any:
-        return self.graph_drafts.create_analysis_graph_draft_from_note(*args, **kwargs)
+        return self._with_usage_event(
+            lambda: self.graph_drafts.create_analysis_graph_draft_from_note(*args, **kwargs),
+            verb=UsageEventVerb.CREATE,
+            resource_type=UsageEventResourceType.GRAPH_CHANGE_SET,
+            actor=kwargs.get("actor"),
+            resource_id_attr="change_set_id",
+        )
 
     def create_batch_graph_draft(self, *args: Any, **kwargs: Any) -> Any:
-        return self.graph_drafts.create_batch_graph_draft(*args, **kwargs)
+        return self._with_usage_event(
+            lambda: self.graph_drafts.create_batch_graph_draft(*args, **kwargs),
+            verb=UsageEventVerb.CREATE,
+            resource_type=UsageEventResourceType.GRAPH_CHANGE_SET,
+            actor=kwargs.get("actor"),
+            resource_id_attr="change_set_id",
+        )
 
     def get_graph_change_set(self, *args: Any, **kwargs: Any) -> Any:
         return self.graph_drafts.get_graph_change_set(*args, **kwargs)
@@ -548,19 +1010,47 @@ class LabTrackerAPI:
         return self.graph_drafts.list_batch_graph_drafts(*args, **kwargs)
 
     def update_graph_change_operation(self, *args: Any, **kwargs: Any) -> Any:
-        return self.graph_drafts.update_graph_change_operation(*args, **kwargs)
+        return self._with_usage_event(
+            lambda: self.graph_drafts.update_graph_change_operation(*args, **kwargs),
+            verb=UsageEventVerb.UPDATE,
+            resource_type=UsageEventResourceType.GRAPH_CHANGE_SET,
+            actor=kwargs.get("actor"),
+            resource_id=_first_uuid(args),
+            project_id_attr=None,
+        )
 
     def submit_graph_change_set(self, *args: Any, **kwargs: Any) -> Any:
-        return self.graph_drafts.submit_graph_change_set(*args, **kwargs)
+        return self._with_usage_event(
+            lambda: self.graph_drafts.submit_graph_change_set(*args, **kwargs),
+            verb=UsageEventVerb.SUBMIT,
+            resource_type=UsageEventResourceType.GRAPH_CHANGE_SET,
+            actor=kwargs.get("actor"),
+            resource_id=_first_uuid(args),
+            resource_id_attr="change_set_id",
+        )
 
     def review_graph_change_set(self, *args: Any, **kwargs: Any) -> Any:
-        return self.graph_drafts.review_graph_change_set(*args, **kwargs)
+        return self._with_usage_event(
+            lambda: self.graph_drafts.review_graph_change_set(*args, **kwargs),
+            verb=UsageEventVerb.REVIEW,
+            resource_type=UsageEventResourceType.GRAPH_CHANGE_SET,
+            actor=kwargs.get("actor"),
+            resource_id=_first_uuid(args),
+            resource_id_attr="change_set_id",
+        )
 
     def revise_graph_change_set(self, *args: Any, **kwargs: Any) -> Any:
         return self.graph_drafts.revise_graph_change_set(*args, **kwargs)
 
     def commit_graph_change_set(self, *args: Any, **kwargs: Any) -> Any:
-        return self.graph_drafts.commit_graph_change_set(*args, **kwargs)
+        return self._with_usage_event(
+            lambda: self.graph_drafts.commit_graph_change_set(*args, **kwargs),
+            verb=UsageEventVerb.COMMIT,
+            resource_type=UsageEventResourceType.GRAPH_CHANGE_SET,
+            actor=kwargs.get("actor"),
+            resource_id=_first_uuid(args),
+            resource_id_attr="change_set_id",
+        )
 
     def build_graph_context_for_note(self, *args: Any, **kwargs: Any) -> Any:
         return self.graph_drafts.build_graph_context_for_note(*args, **kwargs)
@@ -572,10 +1062,22 @@ class LabTrackerAPI:
         return self.graph_drafts.get_graph_draft_batch_settings(*args, **kwargs)
 
     def update_graph_draft_batch_settings(self, *args: Any, **kwargs: Any) -> Any:
-        return self.graph_drafts.update_graph_draft_batch_settings(*args, **kwargs)
+        return self._with_usage_event(
+            lambda: self.graph_drafts.update_graph_draft_batch_settings(*args, **kwargs),
+            verb=UsageEventVerb.UPDATE,
+            resource_type=UsageEventResourceType.GRAPH_DRAFT_BATCH_SETTINGS,
+            actor=kwargs.get("actor"),
+            resource_id_attr="settings_id",
+        )
 
     def run_graph_draft_batch_for_project(self, *args: Any, **kwargs: Any) -> Any:
-        return self.graph_drafts.run_graph_draft_batch_for_project(*args, **kwargs)
+        return self._with_usage_event(
+            lambda: self.graph_drafts.run_graph_draft_batch_for_project(*args, **kwargs),
+            verb=UsageEventVerb.CREATE,
+            resource_type=UsageEventResourceType.GRAPH_DRAFT_BATCH_RUN,
+            actor=kwargs.get("actor"),
+            resource_id_attr="run_id",
+        )
 
     def run_due_graph_draft_batches(self, *args: Any, **kwargs: Any) -> Any:
         return self.graph_drafts.run_due_graph_draft_batches(*args, **kwargs)
@@ -617,6 +1119,36 @@ class LabTrackerAPI:
         )
         return notes
 
+    def query_usage_events(self, *args: Any, **kwargs: Any) -> Any:
+        repository = self._service_context.active_repository()
+        return repository.query_usage_events(*args, **kwargs)
+
+    def usage_event_summary(self, *args: Any, **kwargs: Any) -> Any:
+        repository = self._service_context.active_repository()
+        return repository.usage_event_summary(*args, **kwargs)
+
+    def rollup_usage_events_before(self, *args: Any, **kwargs: Any) -> Any:
+        repository = self._service_context.active_repository()
+        return repository.rollup_usage_events_before(*args, **kwargs)
+
+
+def _elapsed_ms(start: float) -> int:
+    return max(0, round((time.perf_counter() - start) * 1000))
+
+
+def _first_uuid(values: tuple[Any, ...]) -> UUID | None:
+    for value in values:
+        if isinstance(value, UUID):
+            return value
+    return None
+
+
+def _uuid_attr(value: Any, attr: str | None) -> UUID | None:
+    if attr is None:
+        return None
+    candidate = getattr(value, attr, None)
+    return candidate if isinstance(candidate, UUID) else None
+
 
 class LabTrackerRequestScope:
     def __init__(
@@ -624,10 +1156,11 @@ class LabTrackerRequestScope:
         *,
         root_api: LabTrackerAPI,
         repository: LabTrackerRepository,
+        surface: str | None = None,
         close: Callable[[], None] | None = None,
     ) -> None:
         self._root_api = root_api
-        self._context = LabTrackerRequestContext(repository=repository)
+        self._context = LabTrackerRequestContext(repository=repository, surface=surface)
         self._close = close
         self._completed = False
         self.api = root_api._for_request_context(self._context)

@@ -73,6 +73,13 @@ def _ordered_revisions(config: Config) -> list[str]:
     return [revision.revision for revision in revisions]
 
 
+def _single_script_head(config: Config) -> str:
+    script = ScriptDirectory.from_config(config)
+    heads = script.get_heads()
+    assert len(heads) == 1
+    return heads[0]
+
+
 def _current_revision(database_url: str) -> str | None:
     revisions = _current_revisions(database_url)
     if not revisions:
@@ -116,7 +123,7 @@ def test_alembic_upgrade_chain_from_empty_to_head(monkeypatch, tmp_path):
     for revision in revisions:
         command.upgrade(config, revision)
         assert revision in _current_revisions(database_url)
-    assert _current_revision(database_url) == "0041_dedupe_unslotted_goal_links"
+    assert _current_revision(database_url) == _single_script_head(config)
 
 
 def test_alembic_has_single_head() -> None:
@@ -175,6 +182,8 @@ def test_alembic_upgrade_head_creates_expected_tables(monkeypatch, tmp_path):
         "supervision_edges",
         "ownership_reassignments",
         "record_export_events",
+        "usage_events",
+        "usage_event_rollups",
         "invitations",
     }
     assert expected.issubset(table_names)
@@ -208,6 +217,12 @@ def test_alembic_upgrade_head_creates_expected_tables(monkeypatch, tmp_path):
     }
     record_export_columns = {
         column["name"] for column in inspector.get_columns("record_export_events")
+    }
+    usage_event_columns = {
+        column["name"]: column for column in inspector.get_columns("usage_events")
+    }
+    usage_event_rollup_columns = {
+        column["name"]: column for column in inspector.get_columns("usage_event_rollups")
     }
     invitation_columns = {column["name"] for column in inspector.get_columns("invitations")}
     entity_version_columns = {
@@ -466,6 +481,64 @@ def test_alembic_upgrade_head_creates_expected_tables(monkeypatch, tmp_path):
         "record_export_events",
         "ix_record_export_events_created_by_user_id",
     )
+    assert {
+        "event_id",
+        "occurred_at",
+        "verb",
+        "resource_type",
+        "resource_id",
+        "actor_user_id",
+        "actor_role",
+        "principal_type",
+        "surface",
+        "project_id",
+        "outcome",
+        "duration_ms",
+        "result_count",
+    }.issubset(usage_event_columns)
+    assert {
+        "rollup_id",
+        "day",
+        "verb",
+        "resource_type",
+        "project_id",
+        "actor_role",
+        "principal_type",
+        "surface",
+        "outcome",
+        "event_count",
+        "total_duration_ms",
+        "total_result_count",
+        "created_at",
+    }.issubset(usage_event_rollup_columns)
+    _assert_fk(
+        inspector,
+        "usage_events",
+        column="project_id",
+        referred_table="projects",
+    )
+    _assert_fk(
+        inspector,
+        "usage_event_rollups",
+        column="project_id",
+        referred_table="projects",
+    )
+    for index_name in {
+        "ix_usage_events_occurred_at",
+        "ix_usage_events_verb",
+        "ix_usage_events_resource_type",
+        "ix_usage_events_project_id",
+        "ix_usage_events_actor_user_id",
+        "ix_usage_event_rollups_day",
+        "ix_usage_event_rollups_bucket",
+    }:
+        table_name = "usage_event_rollups" if "rollups" in index_name else "usage_events"
+        _assert_index(inspector, table_name, index_name)
+    for columns in (usage_event_columns, usage_event_rollup_columns):
+        for column in columns.values():
+            column_type = str(column["type"]).upper()
+            assert "TEXT" not in column_type
+            assert "JSON" not in column_type
     assert {
         "invitation_id",
         "email",
@@ -986,7 +1059,7 @@ def test_database_at_daily_review_branch_upgrades_to_current_head(monkeypatch, t
     assert _current_revision(database_url) == "0017_daily_graph_reviews"
 
     command.upgrade(config, "head")
-    assert _current_revision(database_url) == "0041_dedupe_unslotted_goal_links"
+    assert _current_revision(database_url) == _single_script_head(config)
 
     engine = create_engine(
         database_url,
@@ -1006,6 +1079,8 @@ def test_database_at_daily_review_branch_upgrades_to_current_head(monkeypatch, t
         "supervision_edges",
         "ownership_reassignments",
         "record_export_events",
+        "usage_events",
+        "usage_event_rollups",
     }.issubset(table_names)
     assert "daily_graph_reviews" not in table_names
     assert "daily_graph_review_change_sets" not in table_names

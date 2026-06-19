@@ -17,6 +17,7 @@ from lab_tracker.models import (
     QuestionRefactor,
     QuestionStatus,
     QuestionType,
+    UsageEventResourceType,
 )
 from lab_tracker.schemas import (
     Envelope,
@@ -36,6 +37,7 @@ from .shared import (
     list_response,
     paginate,
     question_default_status,
+    record_usage_view,
     repository_from_request,
     validate_pagination,
 )
@@ -102,6 +104,12 @@ def build_questions_router(api: LabTrackerAPI) -> APIRouter:
     def get_question(question_id: UUID, request: Request):
         question = api_from_request(request, api).get_question(question_id)
         ensure_project_read(request, question.project_id)
+        record_usage_view(
+            request,
+            resource_type=UsageEventResourceType.QUESTION,
+            resource_id=question.question_id,
+            project_id=question.project_id,
+        )
         return Envelope(data=question)
 
     @router.get("/questions/{question_id}/versions", response_model=ListEnvelope[EntityVersion])

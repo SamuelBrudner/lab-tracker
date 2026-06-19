@@ -11,7 +11,7 @@ from starlette.requests import Request
 
 from lab_tracker.api import LabTrackerAPI
 from lab_tracker.db_models import VisualizationModel
-from lab_tracker.models import Analysis, AnalysisStatus
+from lab_tracker.models import Analysis, AnalysisStatus, UsageEventResourceType
 from lab_tracker.schemas import (
     AnalysisCommitRequest,
     AnalysisCommitResult,
@@ -31,6 +31,7 @@ from .shared import (
     ensure_project_read,
     file_storage_from_request,
     list_response,
+    record_usage_view,
     repository_from_request,
     validate_pagination,
 )
@@ -95,6 +96,12 @@ def build_analyses_router(api: LabTrackerAPI) -> APIRouter:
     def get_analysis(analysis_id: UUID, request: Request):
         analysis = api_from_request(request, api).get_analysis(analysis_id)
         ensure_project_read(request, analysis.project_id)
+        record_usage_view(
+            request,
+            resource_type=UsageEventResourceType.ANALYSIS,
+            resource_id=analysis.analysis_id,
+            project_id=analysis.project_id,
+        )
         return Envelope(data=analysis)
 
     @router.patch("/analyses/{analysis_id}", response_model=Envelope[Analysis])

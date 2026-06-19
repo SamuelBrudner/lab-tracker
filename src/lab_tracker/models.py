@@ -113,6 +113,58 @@ class NoteStatus(str, Enum):
     ARCHIVED = "archived"
 
 
+class UsageEventVerb(str, Enum):
+    CREATE = "create"
+    UPDATE = "update"
+    DELETE = "delete"
+    SUBMIT = "submit"
+    REVIEW = "review"
+    COMMIT = "commit"
+    SEARCH = "search"
+    VIEW = "view"
+    EXPORT = "export"
+    TRANSCRIBE = "transcribe"
+    UPLOAD = "upload"
+    CLOSE = "close"
+
+
+class UsageEventResourceType(str, Enum):
+    PROJECT = "project"
+    PROJECT_GROUP = "project_group"
+    GROUP_MEMBERSHIP = "group_membership"
+    PROJECT_MEMBERSHIP = "project_membership"
+    QUESTION = "question"
+    QUESTION_REFACTOR = "question_refactor"
+    NOTE = "note"
+    SESSION = "session"
+    DATASET = "dataset"
+    ANALYSIS = "analysis"
+    CLAIM = "claim"
+    CLAIM_EDGE = "claim_edge"
+    VISUALIZATION = "visualization"
+    GOAL = "goal"
+    GOAL_LINK = "goal_link"
+    GRAPH_CHANGE_SET = "graph_change_set"
+    GRAPH_DRAFT_BATCH_SETTINGS = "graph_draft_batch_settings"
+    GRAPH_DRAFT_BATCH_RUN = "graph_draft_batch_run"
+    RECORD_EXPORT = "record_export"
+    SEARCH = "search"
+    SUPERVISION_EDGE = "supervision_edge"
+    ACQUISITION_OUTPUT = "acquisition_output"
+    USAGE_EVENT = "usage_event"
+
+
+class UsageEventOutcome(str, Enum):
+    OK = "ok"
+    ERROR = "error"
+
+
+class UsageEventSurface(str, Enum):
+    HTTP = "http"
+    MCP = "mcp"
+    CLI = "cli"
+
+
 class SessionStatus(str, Enum):
     ACTIVE = "active"
     CLOSED = "closed"
@@ -896,3 +948,35 @@ class RecordExport(_DomainModel):
     generated_at: datetime = Field(default_factory=utc_now)
     records: RecordExportRecords
     provenance: dict[str, Any] = Field(default_factory=dict)
+
+
+class UsageEvent(_DomainModel):
+    event_id: UUID
+    occurred_at: datetime = Field(default_factory=utc_now)
+    verb: UsageEventVerb
+    resource_type: UsageEventResourceType
+    resource_id: UUID | None = None
+    actor_user_id: UUID | None = None
+    actor_role: str | None = None
+    principal_type: str | None = None
+    surface: UsageEventSurface | None = None
+    project_id: UUID | None = None
+    outcome: UsageEventOutcome = UsageEventOutcome.OK
+    duration_ms: int | None = None
+    result_count: int | None = None
+
+
+class UsageEventRollup(_DomainModel):
+    rollup_id: UUID
+    day: date
+    verb: UsageEventVerb
+    resource_type: UsageEventResourceType
+    project_id: UUID | None = None
+    actor_role: str | None = None
+    principal_type: str | None = None
+    surface: UsageEventSurface | None = None
+    outcome: UsageEventOutcome = UsageEventOutcome.OK
+    event_count: int = 0
+    total_duration_ms: int = 0
+    total_result_count: int = 0
+    created_at: datetime = Field(default_factory=utc_now)

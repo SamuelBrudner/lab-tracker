@@ -11,7 +11,7 @@ from starlette.requests import Request
 
 from lab_tracker.api import LabTrackerAPI
 from lab_tracker.db_models import DatasetFileModel
-from lab_tracker.models import Dataset, DatasetStatus
+from lab_tracker.models import Dataset, DatasetStatus, UsageEventResourceType
 from lab_tracker.schemas import DatasetCreate, DatasetUpdate, Envelope, ListEnvelope
 
 from .dataset_files import _delete_stored_dataset_file
@@ -25,6 +25,7 @@ from .shared import (
     ensure_project_read,
     file_storage_from_request,
     list_response,
+    record_usage_view,
     repository_from_request,
     validate_pagination,
 )
@@ -81,6 +82,12 @@ def build_datasets_router(api: LabTrackerAPI) -> APIRouter:
     def get_dataset(dataset_id: UUID, request: Request):
         dataset = api_from_request(request, api).get_dataset(dataset_id)
         ensure_project_read(request, dataset.project_id)
+        record_usage_view(
+            request,
+            resource_type=UsageEventResourceType.DATASET,
+            resource_id=dataset.dataset_id,
+            project_id=dataset.project_id,
+        )
         return Envelope(data=dataset)
 
     @router.patch("/datasets/{dataset_id}", response_model=Envelope[Dataset])

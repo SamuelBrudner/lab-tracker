@@ -15,7 +15,7 @@ from starlette.responses import StreamingResponse
 from lab_tracker.api import LabTrackerAPI
 from lab_tracker.db_models import VisualizationModel
 from lab_tracker.errors import NotFoundError, ValidationError
-from lab_tracker.models import Visualization, utc_now
+from lab_tracker.models import UsageEventResourceType, Visualization, utc_now
 from lab_tracker.schemas import Envelope, ListEnvelope, VisualizationCreate, VisualizationUpdate
 from lab_tracker.upload_security import (
     enforce_request_content_length_limit,
@@ -32,6 +32,7 @@ from .shared import (
     ensure_project_read,
     file_storage_from_request,
     list_response,
+    record_usage_view,
     repository_from_request,
     validate_pagination,
 )
@@ -103,6 +104,12 @@ def build_visualizations_router(api: LabTrackerAPI) -> APIRouter:
         visualization = api_from_request(request, api).get_visualization(viz_id)
         analysis = api_from_request(request, api).get_analysis(visualization.analysis_id)
         ensure_project_read(request, analysis.project_id)
+        record_usage_view(
+            request,
+            resource_type=UsageEventResourceType.VISUALIZATION,
+            resource_id=visualization.viz_id,
+            project_id=analysis.project_id,
+        )
         return Envelope(data=visualization)
 
     @router.post(

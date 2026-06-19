@@ -16,6 +16,7 @@ from lab_tracker.models import (
     Session,
     SessionStatus,
     SessionType,
+    UsageEventResourceType,
 )
 from lab_tracker.schemas import (
     AcquisitionOutputCreate,
@@ -33,6 +34,7 @@ from .shared import (
     api_from_request,
     ensure_project_read,
     list_response,
+    record_usage_view,
     repository_from_request,
     validate_pagination,
 )
@@ -85,12 +87,24 @@ def build_sessions_router(api: LabTrackerAPI) -> APIRouter:
     def get_session_by_link_code(link_code: str, request: Request):
         session = api_from_request(request, api).get_session_by_link_code(link_code)
         ensure_project_read(request, session.project_id)
+        record_usage_view(
+            request,
+            resource_type=UsageEventResourceType.SESSION,
+            resource_id=session.session_id,
+            project_id=session.project_id,
+        )
         return Envelope(data=session)
 
     @router.get("/sessions/{session_id}", response_model=Envelope[Session])
     def get_session(session_id: UUID, request: Request):
         session = api_from_request(request, api).get_session(session_id)
         ensure_project_read(request, session.project_id)
+        record_usage_view(
+            request,
+            resource_type=UsageEventResourceType.SESSION,
+            resource_id=session.session_id,
+            project_id=session.project_id,
+        )
         return Envelope(data=session)
 
     @router.patch("/sessions/{session_id}", response_model=Envelope[Session])

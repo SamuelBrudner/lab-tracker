@@ -1045,6 +1045,69 @@ class RecordExportEventModel(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utc_now)
 
 
+class UsageEventModel(Base):
+    __tablename__ = "usage_events"
+
+    event_id: Mapped[str] = mapped_column(
+        String(36),
+        primary_key=True,
+        default=lambda: str(uuid4()),
+    )
+    occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utc_now)
+    verb: Mapped[str] = mapped_column(String(30), nullable=False)
+    resource_type: Mapped[str] = mapped_column(String(40), nullable=False)
+    resource_id: Mapped[str | None] = mapped_column(String(36))
+    actor_user_id: Mapped[str | None] = mapped_column(String(36))
+    actor_role: Mapped[str | None] = mapped_column(String(30))
+    principal_type: Mapped[str | None] = mapped_column(String(20))
+    surface: Mapped[str | None] = mapped_column(String(20))
+    project_id: Mapped[str | None] = mapped_column(
+        String(36),
+        ForeignKey("projects.project_id", ondelete="SET NULL"),
+    )
+    outcome: Mapped[str] = mapped_column(String(20), nullable=False)
+    duration_ms: Mapped[int | None] = mapped_column(Integer)
+    result_count: Mapped[int | None] = mapped_column(Integer)
+
+
+class UsageEventRollupModel(Base):
+    __tablename__ = "usage_event_rollups"
+    __table_args__ = (
+        UniqueConstraint(
+            "day",
+            "verb",
+            "resource_type",
+            "project_id",
+            "actor_role",
+            "principal_type",
+            "surface",
+            "outcome",
+            name="uq_usage_event_rollup_bucket",
+        ),
+    )
+
+    rollup_id: Mapped[str] = mapped_column(
+        String(36),
+        primary_key=True,
+        default=lambda: str(uuid4()),
+    )
+    day: Mapped[date] = mapped_column(Date, nullable=False)
+    verb: Mapped[str] = mapped_column(String(30), nullable=False)
+    resource_type: Mapped[str] = mapped_column(String(40), nullable=False)
+    project_id: Mapped[str | None] = mapped_column(
+        String(36),
+        ForeignKey("projects.project_id", ondelete="SET NULL"),
+    )
+    actor_role: Mapped[str | None] = mapped_column(String(30))
+    principal_type: Mapped[str | None] = mapped_column(String(20))
+    surface: Mapped[str | None] = mapped_column(String(20))
+    outcome: Mapped[str] = mapped_column(String(20), nullable=False)
+    event_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    total_duration_ms: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    total_result_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utc_now)
+
+
 class ProjectMembershipModel(Base):
     __tablename__ = "project_memberships"
     __table_args__ = (
@@ -1297,6 +1360,18 @@ Index(
 Index(
     "ix_record_export_events_created_by_user_id",
     RecordExportEventModel.created_by_user_id,
+)
+Index("ix_usage_events_occurred_at", UsageEventModel.occurred_at)
+Index("ix_usage_events_verb", UsageEventModel.verb)
+Index("ix_usage_events_resource_type", UsageEventModel.resource_type)
+Index("ix_usage_events_project_id", UsageEventModel.project_id)
+Index("ix_usage_events_actor_user_id", UsageEventModel.actor_user_id)
+Index("ix_usage_event_rollups_day", UsageEventRollupModel.day)
+Index(
+    "ix_usage_event_rollups_bucket",
+    UsageEventRollupModel.verb,
+    UsageEventRollupModel.resource_type,
+    UsageEventRollupModel.day,
 )
 Index(
     "uq_supervision_edges_active_pair",

@@ -22,6 +22,7 @@ def test_local_environment_allows_default_auth_secret(monkeypatch):
     settings = _settings_from_environment()
     assert settings.auth_secret_key == DEFAULT_AUTH_SECRET_KEY
     assert settings.is_auth_enabled() is False
+    assert settings.is_usage_events_enabled() is False
 
 
 def test_local_environment_rejects_default_auth_secret_when_auth_enabled(monkeypatch):
@@ -119,6 +120,21 @@ def test_non_local_environment_accepts_custom_auth_secret(monkeypatch):
     settings = _settings_from_environment()
     assert settings.auth_secret_key == "custom-secret"
     assert settings.is_auth_enabled() is True
+    assert settings.is_usage_events_enabled() is True
+
+
+def test_usage_events_flag_overrides_environment(monkeypatch):
+    _clear_auth_env(monkeypatch)
+    monkeypatch.setenv("LAB_TRACKER_ENVIRONMENT", "local")
+    monkeypatch.setenv("LAB_TRACKER_USAGE_EVENTS", "true")
+    settings = _settings_from_environment()
+    assert settings.is_usage_events_enabled() is True
+
+    monkeypatch.setenv("LAB_TRACKER_ENVIRONMENT", "production")
+    monkeypatch.setenv("LAB_TRACKER_AUTH_SECRET_KEY", "custom-secret")
+    monkeypatch.setenv("LAB_TRACKER_USAGE_EVENTS", "false")
+    settings = _settings_from_environment()
+    assert settings.is_usage_events_enabled() is False
 
 
 def test_non_local_environment_rejects_disabled_auth(monkeypatch):

@@ -45,6 +45,8 @@ Tracker API.
 - `LAB_TRACKER_AUTH_ENABLED`: enable login and role enforcement (default: `false`
   in `local`, `true` otherwise; non-local environments cannot disable auth)
 - `LAB_TRACKER_PUBLIC_BASE_URL`: public URL used in email invitation links
+- `LAB_TRACKER_USAGE_EVENTS`: enable local usage telemetry writes (default:
+  `false` in `local`, `true` otherwise)
 
 ### Uploads and managed files
 
@@ -112,6 +114,27 @@ auth-enabled instance shows first-admin setup when
 `LAB_TRACKER_BOOTSTRAP_ADMIN_TOKEN` is configured. `/health` remains public for
 uptime probes; `/readiness` and `/metrics` require credentials when
 authentication is enabled.
+
+## Usage telemetry
+
+Usage telemetry is local-only. When `LAB_TRACKER_USAGE_EVENTS` is enabled, Lab
+Tracker writes rows to the local `usage_events` table through the same API
+transaction lifecycle used by HTTP, MCP, and CLI requests. The table records
+only verb, resource type, resource UUID, actor UUID/role/principal type, surface
+(`http`, `mcp`, or `cli`), project UUID, outcome, timing, and result counts.
+
+Usage events never store titles, bodies, descriptions, transcripts, filenames,
+search terms, request bodies, or raw URL paths, and they are intentionally not
+included in PROV-O/JSON-LD provenance exports. Admins can inspect aggregate
+counts at `GET /usage-events/summary`, export raw usage rows as CSV or JSONL at
+`GET /usage-events/export`, and run the one-year raw-event rollup/prune at
+`POST /usage-events/retention/run`.
+
+The current egress decision is local-only Postgres/SQLite storage. Actor identity
+is stored as the raw local user UUID so operators can answer adoption and support
+questions inside their own deployment; changing to a salted per-instance
+pseudonym or external sink should happen only behind the existing
+`record_usage_event` seam.
 
 ## Multimodal graph draft review
 

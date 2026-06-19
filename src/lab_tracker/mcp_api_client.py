@@ -816,7 +816,7 @@ class LabTrackerAPIClient:
         files: dict[str, Any] | None = None,
         retry_on_unauthorized: bool = True,
     ) -> JsonObject:
-        headers: dict[str, str] = {}
+        headers: dict[str, str] = {"X-LabTracker-Surface": "mcp"}
         if authenticated and self._has_credentials():
             headers["Authorization"] = f"Bearer {self._token()}"
         response = self._send(

@@ -24,6 +24,7 @@ from lab_tracker.models import (
     ProjectMembership,
     ProjectStatus,
     PublicationReadinessReport,
+    UsageEventResourceType,
 )
 from lab_tracker.schemas import (
     Envelope,
@@ -45,6 +46,7 @@ from .shared import (
     list_response,
     paginate,
     project_default_status,
+    record_usage_view,
     repository_from_request,
     validate_pagination,
 )
@@ -105,6 +107,12 @@ def build_projects_router(api: LabTrackerAPI) -> APIRouter:
     def get_project(project_id: UUID, request: Request):
         project = api_from_request(request, api).get_project(project_id)
         ensure_project_read(request, project.project_id)
+        record_usage_view(
+            request,
+            resource_type=UsageEventResourceType.PROJECT,
+            resource_id=project.project_id,
+            project_id=project.project_id,
+        )
         return Envelope(data=project)
 
     @router.get(

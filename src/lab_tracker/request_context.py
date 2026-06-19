@@ -11,6 +11,7 @@ from lab_tracker.repository import LabTrackerRepository
 @dataclass
 class LabTrackerRequestContext:
     repository: LabTrackerRepository
+    surface: str | None = None
     after_commit_actions: list[Callable[[], None]] = field(default_factory=list)
     after_rollback_actions: list[Callable[[], None]] = field(default_factory=list)
 

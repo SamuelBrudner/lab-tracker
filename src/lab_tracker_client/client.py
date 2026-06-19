@@ -920,7 +920,7 @@ class LabTracker:
         files: dict[str, Any] | None = None,
         retry_on_unauthorized: bool = True,
     ) -> JsonObject:
-        headers: dict[str, str] = {}
+        headers: dict[str, str] = {"X-LabTracker-Surface": "cli"}
         supplied_token_used = bool(self._access_token and self._supplied_access_token)
         if authenticated:
             token = self._bearer_token(required=False)

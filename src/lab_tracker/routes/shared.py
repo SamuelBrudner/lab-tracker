@@ -7,6 +7,7 @@ import unicodedata
 from datetime import datetime
 from typing import Annotated, Any
 from urllib.parse import quote, unquote
+from uuid import UUID
 
 from fastapi import Query
 from sqlalchemy.orm import Session
@@ -25,6 +26,8 @@ from lab_tracker.models import (
     ProjectStatus,
     QuestionStatus,
     SessionStatus,
+    UsageEventResourceType,
+    UsageEventVerb,
 )
 from lab_tracker.repository import LabTrackerRepository
 from lab_tracker.schemas import (
@@ -106,6 +109,22 @@ def ensure_group_read(request: Request, group_id: Any) -> None:
 def ensure_group_owner(request: Request, group_id: Any) -> None:
     actor = actor_from_request(request)
     api_from_request(request).require_group_owner(group_id, actor=actor)
+
+
+def record_usage_view(
+    request: Request,
+    *,
+    resource_type: UsageEventResourceType,
+    resource_id: UUID,
+    project_id: UUID | None = None,
+) -> None:
+    api_from_request(request).record_usage_event(
+        verb=UsageEventVerb.VIEW,
+        resource_type=resource_type,
+        resource_id=resource_id,
+        project_id=project_id,
+        actor=actor_from_request(request),
+    )
 
 
 def filter_project_scoped_items(request: Request, items: list[Any]) -> list[Any]:

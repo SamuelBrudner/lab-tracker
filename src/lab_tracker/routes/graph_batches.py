@@ -17,6 +17,7 @@ from lab_tracker.models import (
     GraphDraftBatchRun,
     GraphDraftBatchRunStatus,
     GraphDraftBatchSettings,
+    UsageEventResourceType,
 )
 from lab_tracker.schemas import (
     Envelope,
@@ -34,6 +35,7 @@ from .shared import (
     filter_project_scoped_items,
     list_response,
     paginate,
+    record_usage_view,
     validate_pagination,
 )
 
@@ -81,6 +83,12 @@ def build_graph_batches_router(api: LabTrackerAPI) -> APIRouter:
     def get_batch(change_set_id: UUID, request: Request):
         change_set = api_from_request(request, api).get_graph_change_set(change_set_id)
         ensure_project_read(request, change_set.project_id)
+        record_usage_view(
+            request,
+            resource_type=UsageEventResourceType.GRAPH_CHANGE_SET,
+            resource_id=change_set.change_set_id,
+            project_id=change_set.project_id,
+        )
         return Envelope(data=attach_graph_usernames(request, change_set))
 
     @router.get(
@@ -92,6 +100,12 @@ def build_graph_batches_router(api: LabTrackerAPI) -> APIRouter:
         settings = api_from_request(request, api).get_graph_draft_batch_settings(
             project_id,
             actor=actor,
+        )
+        record_usage_view(
+            request,
+            resource_type=UsageEventResourceType.GRAPH_DRAFT_BATCH_SETTINGS,
+            resource_id=settings.settings_id,
+            project_id=settings.project_id,
         )
         return Envelope(data=settings)
 

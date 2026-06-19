@@ -81,6 +81,7 @@ def build_app_runtime(settings: Settings) -> AppRuntime:
     )
     lab_tracker_api = LabTrackerAPI(
         raw_storage=raw_note_storage,
+        settings=settings,
     )
     auth_rate_limiter = InMemoryRateLimiter(
         max_attempts=settings.auth_rate_limit_attempts,

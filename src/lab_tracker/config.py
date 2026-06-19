@@ -30,6 +30,7 @@ class Settings(BaseSettings):
     auth_rate_limit_attempts: int = 10
     auth_rate_limit_window_seconds: int = 60
     auth_public_viewer_registration_enabled: bool = True
+    usage_events: bool | None = None
     bootstrap_admin_token: str = ""
     bootstrap_admin_token_disclosure: Literal["local", "first_run", "never"] = "local"
     auth_enabled: bool | None = None
@@ -53,6 +54,11 @@ class Settings(BaseSettings):
     def is_auth_enabled(self) -> bool:
         if self.auth_enabled is not None:
             return self.auth_enabled
+        return self.environment.strip().lower() != "local"
+
+    def is_usage_events_enabled(self) -> bool:
+        if self.usage_events is not None:
+            return self.usage_events
         return self.environment.strip().lower() != "local"
 
     @field_validator("database_url")

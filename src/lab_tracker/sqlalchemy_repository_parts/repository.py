@@ -76,6 +76,12 @@ from .ownership import (
 )
 from .sessions import SQLAlchemyAcquisitionOutputRepository, SQLAlchemySessionRepository
 from .supervision import SQLAlchemySupervisionEdgeRepository
+from .usage import (
+    SQLAlchemyUsageEventRepository,
+    SQLAlchemyUsageEventRollupRepository,
+    rollup_usage_events_before,
+    summarize_usage_events,
+)
 from .versions import SQLAlchemyEntityVersionRepository
 
 
@@ -91,6 +97,8 @@ class SQLAlchemyLabTrackerRepository(LabTrackerRepository):
         self.supervision_edges = SQLAlchemySupervisionEdgeRepository(session)
         self.ownership_reassignments = SQLAlchemyOwnershipReassignmentRepository(session)
         self.record_export_events = SQLAlchemyRecordExportEventRepository(session)
+        self.usage_events = SQLAlchemyUsageEventRepository(session)
+        self.usage_event_rollups = SQLAlchemyUsageEventRollupRepository(session)
         self.questions = SQLAlchemyQuestionRepository(session)
         self.question_refactors = SQLAlchemyQuestionRefactorRepository(session)
         self.datasets = SQLAlchemyDatasetRepository(session)
@@ -304,6 +312,44 @@ class SQLAlchemyLabTrackerRepository(LabTrackerRepository):
             limit=limit,
             offset=offset,
         )
+
+    def query_usage_events(
+        self,
+        *,
+        project_id: UUID | None = None,
+        verb: str | None = None,
+        resource_type: str | None = None,
+        surface: str | None = None,
+        outcome: str | None = None,
+        occurred_before: datetime | None = None,
+        occurred_on_or_after: datetime | None = None,
+        limit: int | None = None,
+        offset: int = 0,
+    ):
+        return self.usage_events.query(
+            project_id=project_id,
+            verb=verb,
+            resource_type=resource_type,
+            surface=surface,
+            outcome=outcome,
+            occurred_before=occurred_before,
+            occurred_on_or_after=occurred_on_or_after,
+            limit=limit,
+            offset=offset,
+        )
+
+    def usage_event_summary(
+        self,
+        *,
+        start: datetime | None = None,
+        end: datetime | None = None,
+    ) -> list[dict[str, object]]:
+        self._session.flush()
+        return summarize_usage_events(self._session, start=start, end=end)
+
+    def rollup_usage_events_before(self, cutoff: datetime) -> int:
+        self._session.flush()
+        return rollup_usage_events_before(self._session, cutoff)
 
     def records_attributed_to_user(
         self,

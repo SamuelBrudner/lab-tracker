@@ -5,9 +5,18 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import TypeVar
-from uuid import UUID
+from uuid import UUID, uuid4
 
+from lab_tracker.auth import AuthContext
+from lab_tracker.config import Settings, get_settings
 from lab_tracker.errors import NotFoundError
+from lab_tracker.models import (
+    UsageEvent,
+    UsageEventOutcome,
+    UsageEventResourceType,
+    UsageEventSurface,
+    UsageEventVerb,
+)
 from lab_tracker.note_storage import LocalNoteStorage
 from lab_tracker.repository import LabTrackerRepository
 from lab_tracker.request_context import LabTrackerRequestContext
@@ -20,6 +29,8 @@ class ServiceContext:
     raw_storage: LocalNoteStorage | None = None
     repository: LabTrackerRepository | None = None
     request_context: LabTrackerRequestContext | None = None
+    settings: Settings | None = None
+    surface: str | None = None
 
     def active_repository(self) -> LabTrackerRepository:
         if self.request_context is not None:
@@ -30,6 +41,18 @@ class ServiceContext:
 
     def is_request_managed(self) -> bool:
         return self.request_context is not None
+
+    def active_settings(self) -> Settings:
+        return self.settings or get_settings()
+
+    def active_surface(self) -> UsageEventSurface | None:
+        surface = self.request_context.surface if self.request_context is not None else self.surface
+        if surface is None:
+            return None
+        try:
+            return UsageEventSurface(surface)
+        except ValueError:
+            return None
 
 
 class RepositoryUnitOfWork:
@@ -112,3 +135,53 @@ class BaseService:
         if self._context.request_context is None:
             return
         self._context.request_context.after_rollback_actions.append(action)
+
+    def record_usage_event(
+        self,
+        *,
+        verb: UsageEventVerb | str,
+        resource_type: UsageEventResourceType | str,
+        resource_id: UUID | None = None,
+        project_id: UUID | None = None,
+        actor: AuthContext | None = None,
+        outcome: UsageEventOutcome | str = UsageEventOutcome.OK,
+        duration_ms: int | None = None,
+        result_count: int | None = None,
+        surface: UsageEventSurface | str | None = None,
+    ) -> None:
+        if not self._context.active_settings().is_usage_events_enabled():
+            return
+        resolved_surface = _coerce_surface(surface) or self._context.active_surface()
+        event = UsageEvent(
+            event_id=uuid4(),
+            verb=UsageEventVerb(verb),
+            resource_type=UsageEventResourceType(resource_type),
+            resource_id=resource_id,
+            project_id=project_id,
+            actor_user_id=actor.user_id if actor is not None else None,
+            actor_role=actor.role.value if actor is not None else None,
+            principal_type=actor.principal_type.value if actor is not None else None,
+            surface=resolved_surface,
+            outcome=UsageEventOutcome(outcome),
+            duration_ms=duration_ms,
+            result_count=result_count,
+        )
+
+        def persist_event() -> None:
+            repository = self._context.active_repository()
+            repository.usage_events.save(event)
+            repository.commit()
+
+        if event.outcome == UsageEventOutcome.ERROR:
+            self.run_after_rollback(persist_event)
+        else:
+            self.run_after_commit(persist_event)
+
+
+def _coerce_surface(value: UsageEventSurface | str | None) -> UsageEventSurface | None:
+    if value is None:
+        return None
+    try:
+        return UsageEventSurface(value)
+    except ValueError:
+        return None

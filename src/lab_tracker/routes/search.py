@@ -9,11 +9,12 @@ from starlette.requests import Request
 
 from lab_tracker.api import LabTrackerAPI
 from lab_tracker.errors import ValidationError
-from lab_tracker.models import EntityType
+from lab_tracker.models import EntityType, UsageEventResourceType, UsageEventVerb
 from lab_tracker.schemas import Envelope, SearchResults
 
 from .shared import (
     accessible_project_ids_from_request,
+    actor_from_request,
     api_from_request,
     ensure_project_read,
     repository_from_request,
@@ -94,9 +95,22 @@ def build_search_router(api: LabTrackerAPI) -> APIRouter:
             questions = questions[offset : offset + limit]
         if linked_note_ids is not None:
             notes = notes[offset : offset + limit]
+        api_from_request(request, api).record_usage_event(
+            verb=UsageEventVerb.SEARCH,
+            resource_type=UsageEventResourceType.SEARCH,
+            project_id=_single_project_id(project_ids),
+            actor=actor_from_request(request),
+            result_count=len(questions) + len(notes),
+        )
         return Envelope(
             data=SearchResults(questions=questions, notes=notes),
             meta={"questions_count": len(questions), "notes_count": len(notes)},
         )
 
     return router
+
+
+def _single_project_id(project_ids: set[UUID] | None) -> UUID | None:
+    if project_ids is None or len(project_ids) != 1:
+        return None
+    return next(iter(project_ids))

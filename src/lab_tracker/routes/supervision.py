@@ -10,7 +10,7 @@ from starlette import status as http_status
 from starlette.requests import Request
 
 from lab_tracker.api import LabTrackerAPI
-from lab_tracker.models import SupervisionEdge
+from lab_tracker.models import SupervisionEdge, UsageEventResourceType
 from lab_tracker.schemas import (
     Envelope,
     ListEnvelope,
@@ -18,7 +18,13 @@ from lab_tracker.schemas import (
     SupervisionEdgeUpdate,
 )
 
-from .shared import actor_from_request, api_from_request, list_response, validate_pagination
+from .shared import (
+    actor_from_request,
+    api_from_request,
+    list_response,
+    record_usage_view,
+    validate_pagination,
+)
 
 
 def build_supervision_router(api: LabTrackerAPI) -> APIRouter:
@@ -70,6 +76,11 @@ def build_supervision_router(api: LabTrackerAPI) -> APIRouter:
     def get_supervision_edge(edge_id: UUID, request: Request):
         actor = actor_from_request(request)
         edge = api_from_request(request, api).get_supervision_edge(edge_id, actor=actor)
+        record_usage_view(
+            request,
+            resource_type=UsageEventResourceType.SUPERVISION_EDGE,
+            resource_id=edge.edge_id,
+        )
         return Envelope(data=edge)
 
     @router.patch(

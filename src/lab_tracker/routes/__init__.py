@@ -31,6 +31,7 @@ from .schema import build_schema_router
 from .search import build_search_router
 from .sessions import build_sessions_router
 from .supervision import build_supervision_router
+from .usage_events import build_usage_events_router
 from .visualizations import build_visualizations_router
 
 
@@ -71,6 +72,7 @@ def register_routes(
     app.include_router(build_graph_batches_router(api))
     app.include_router(build_provenance_router(api))
     app.include_router(build_search_router(api))
+    app.include_router(build_usage_events_router(api))
     app.include_router(build_schema_router())
     app.include_router(build_assistant_router())
     app.include_router(build_sessions_router(api))

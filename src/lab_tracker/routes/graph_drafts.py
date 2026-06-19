@@ -11,7 +11,7 @@ from starlette.requests import Request
 from lab_tracker.api import LabTrackerAPI
 from lab_tracker.config import get_settings
 from lab_tracker.graph_drafting import make_graph_draft_client
-from lab_tracker.models import GraphChangeSet, GraphChangeSetStatus
+from lab_tracker.models import GraphChangeSet, GraphChangeSetStatus, UsageEventResourceType
 from lab_tracker.schemas import (
     Envelope,
     GraphChangeSetSummary,
@@ -29,6 +29,7 @@ from .shared import (
     api_from_request,
     ensure_project_read,
     list_response,
+    record_usage_view,
     validate_pagination,
 )
 
@@ -121,6 +122,12 @@ def build_graph_drafts_router(api: LabTrackerAPI) -> APIRouter:
     def get_graph_draft(change_set_id: UUID, request: Request):
         change_set = api_from_request(request, api).get_graph_change_set(change_set_id)
         ensure_project_read(request, change_set.project_id)
+        record_usage_view(
+            request,
+            resource_type=UsageEventResourceType.GRAPH_CHANGE_SET,
+            resource_id=change_set.change_set_id,
+            project_id=change_set.project_id,
+        )
         return Envelope(data=_attach_graph_usernames(request, change_set))
 
     @router.patch(

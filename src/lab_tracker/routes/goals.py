@@ -17,6 +17,7 @@ from lab_tracker.models import (
     GoalLinkStatus,
     GoalStatus,
     GoalType,
+    UsageEventResourceType,
 )
 from lab_tracker.schemas import (
     Envelope,
@@ -35,6 +36,7 @@ from .shared import (
     ensure_project_read,
     list_response,
     paginate,
+    record_usage_view,
     validate_pagination,
 )
 
@@ -142,6 +144,12 @@ def build_goals_router(api: LabTrackerAPI) -> APIRouter:
         actor = actor_from_request(request)
         goal = request_api.get_goal(goal_id)
         request_api.goals.require_goal_read(goal, actor=actor)
+        record_usage_view(
+            request,
+            resource_type=UsageEventResourceType.GOAL,
+            resource_id=goal.goal_id,
+            project_id=goal.project_id,
+        )
         return Envelope(data=goal)
 
     @router.patch("/goals/{goal_id}", response_model=Envelope[Goal])

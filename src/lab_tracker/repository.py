@@ -31,6 +31,8 @@ from lab_tracker.models import (
     RecordExportRecords,
     Session,
     SupervisionEdge,
+    UsageEvent,
+    UsageEventRollup,
     Visualization,
 )
 
@@ -63,6 +65,8 @@ class LabTrackerRepository(Protocol):
     supervision_edges: EntityRepository[SupervisionEdge]
     ownership_reassignments: EntityRepository[OwnershipReassignment]
     record_export_events: EntityRepository[RecordExportEvent]
+    usage_events: EntityRepository[UsageEvent]
+    usage_event_rollups: EntityRepository[UsageEventRollup]
     questions: EntityRepository[Question]
     question_refactors: EntityRepository[QuestionRefactor]
     datasets: EntityRepository[Dataset]
@@ -191,6 +195,32 @@ class LabTrackerRepository(Protocol):
         offset: int = 0,
     ) -> tuple[list[RecordExportEvent], int]:
         """Query user record export audit events."""
+
+    def query_usage_events(
+        self,
+        *,
+        project_id: UUID | None = None,
+        verb: str | None = None,
+        resource_type: str | None = None,
+        surface: str | None = None,
+        outcome: str | None = None,
+        occurred_before: datetime | None = None,
+        occurred_on_or_after: datetime | None = None,
+        limit: int | None = None,
+        offset: int = 0,
+    ) -> tuple[list[UsageEvent], int]:
+        """Query local usage telemetry events."""
+
+    def usage_event_summary(
+        self,
+        *,
+        start: datetime | None = None,
+        end: datetime | None = None,
+    ) -> list[dict[str, object]]:
+        """Return usage event counts by day, verb, and resource type."""
+
+    def rollup_usage_events_before(self, cutoff: datetime) -> int:
+        """Summarize and delete raw usage events older than cutoff."""
 
     def records_attributed_to_user(
         self,

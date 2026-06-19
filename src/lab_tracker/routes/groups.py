@@ -15,6 +15,7 @@ from lab_tracker.models import (
     ProjectGroup,
     ProjectGroupKind,
     ProjectMembership,
+    UsageEventResourceType,
 )
 from lab_tracker.schemas import (
     Envelope,
@@ -33,6 +34,7 @@ from .shared import (
     ensure_group_read,
     list_response,
     paginate,
+    record_usage_view,
     validate_pagination,
 )
 
@@ -75,6 +77,11 @@ def build_groups_router(api: LabTrackerAPI) -> APIRouter:
     def get_group(group_id: UUID, request: Request):
         group = api_from_request(request, api).get_project_group(group_id)
         ensure_group_read(request, group.group_id)
+        record_usage_view(
+            request,
+            resource_type=UsageEventResourceType.PROJECT_GROUP,
+            resource_id=group.group_id,
+        )
         return Envelope(data=group)
 
     @router.patch("/groups/{group_id:uuid}", response_model=Envelope[ProjectGroup])

@@ -174,7 +174,11 @@ def configure_database_session_middleware(
         request.state.db_session = db_session
         repository = SQLAlchemyLabTrackerRepository(db_session)
         request.state.lab_tracker_repository = repository
-        request_scope = api.request_scope(repository, close=db_session.close)
+        request_scope = api.request_scope(
+            repository,
+            surface=_usage_surface_from_request(request),
+            close=db_session.close,
+        )
         request_scope.__enter__()
         try:
             request.state.lab_tracker_api = request_scope.api
@@ -195,3 +199,10 @@ def _complete_request_scope_response(request_scope, response):
         return request_scope.complete_response(response)
     finally:
         request_scope.__exit__(None, None, None)
+
+
+def _usage_surface_from_request(request: Request) -> str:
+    surface = (request.headers.get("X-LabTracker-Surface") or "").strip().lower()
+    if surface in {"mcp", "cli"}:
+        return surface
+    return "http"

@@ -22,6 +22,7 @@ from lab_tracker.models import (
     NoteMetadataScalar,
     NoteRawAsset,
     NoteStatus,
+    UsageEventResourceType,
     utc_now,
 )
 from lab_tracker.schemas import (
@@ -49,6 +50,7 @@ from .shared import (
     note_default_status,
     parse_entity_refs_form,
     parse_metadata_form,
+    record_usage_view,
     repository_from_request,
     validate_pagination,
 )
@@ -192,6 +194,12 @@ def build_notes_router(api: LabTrackerAPI) -> APIRouter:
     def get_note(note_id: UUID, request: Request):
         note = api_from_request(request, api).get_note(note_id)
         ensure_project_read(request, note.project_id)
+        record_usage_view(
+            request,
+            resource_type=UsageEventResourceType.NOTE,
+            resource_id=note.note_id,
+            project_id=note.project_id,
+        )
         return Envelope(data=note)
 
     @router.get("/notes/{note_id:uuid}/raw")

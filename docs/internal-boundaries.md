@@ -47,6 +47,7 @@ The SQLAlchemy repository is now split into focused modules under
 - `graph_batches.py`: graph-draft batch settings, runs, and batch summaries
 - `ownership.py`: ownership reassignment and record export events
 - `supervision.py`: supervision edges
+- `usage.py`: local usage telemetry events and one-year rollups
 - `versions.py`: entity version records
 - `repository.py`: the top-level `SQLAlchemyLabTrackerRepository` query surface
 
@@ -112,6 +113,20 @@ Routes keep their existing URLs, envelopes, pagination, and auth requirements.
 behavior documented in
 [`docs/retained-v1-surface.md`](retained-v1-surface.md),
 not semantic/vector retrieval.
+
+## Usage Telemetry Boundary
+
+Usage telemetry is a local operator signal, not research provenance. Events enter
+through `BaseService.record_usage_event(...)` and are persisted after the domain
+commit or after an explicit request rollback for error outcomes. The active sink
+is the local `usage_events` table; the seam exists so a future deployment can
+replace it without changing route or service code.
+
+Usage events must remain fixed-shape metadata: verb, resource type, UUIDs,
+surface, actor role/principal, outcome, duration, and result count. They must not
+contain titles, note bodies, descriptions, transcripts, filenames, search query
+strings, request bodies, or raw URL paths. The telemetry export routes are
+separate from `provenance.py`; usage rows are not part of PROV-O/JSON-LD export.
 
 ## Frontend Data Loading and Downloads
 
