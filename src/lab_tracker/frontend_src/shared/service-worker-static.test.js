@@ -14,6 +14,10 @@ const indexHtmlSource = readFileSync(
 );
 const frontendStaticDir = resolve(process.cwd(), "src/lab_tracker/frontend");
 
+function normalizeTextAssetBytes(buffer) {
+  return Buffer.from(buffer.toString("utf8").replace(/\r\n/g, "\n"), "utf8");
+}
+
 function extractVersionedShellAssets(source) {
   return Object.fromEntries(
     Array.from(
@@ -35,7 +39,9 @@ function expectedStaticAssetVersion() {
   for (const filename of ["app.js", "styles.css"]) {
     hash.update(filename);
     hash.update("\0");
-    hash.update(readFileSync(resolve(frontendStaticDir, filename)));
+    hash.update(
+      normalizeTextAssetBytes(readFileSync(resolve(frontendStaticDir, filename)))
+    );
     hash.update("\0");
   }
   return hash.digest("hex").slice(0, 12);

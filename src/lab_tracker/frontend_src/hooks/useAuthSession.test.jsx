@@ -295,6 +295,8 @@ describe("useAuthSession", () => {
     await waitFor(() =>
       expect(screen.getByTestId("bootstrap-token")).toHaveTextContent("bootstrap-secret")
     );
-    expect(screen.getByTestId("auth-mode")).toHaveTextContent("setup");
+    await waitFor(() =>
+      expect(screen.getByTestId("auth-mode")).toHaveTextContent("setup")
+    );
   });
 });

@@ -9,12 +9,18 @@ const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const frontendDir = resolve(repoRoot, "src/lab_tracker/frontend");
 const watchMode = process.argv.includes("--watch");
 
+function normalizeTextAssetBytes(buffer) {
+  return Buffer.from(buffer.toString("utf8").replace(/\r\n/g, "\n"), "utf8");
+}
+
 async function staticAssetVersion() {
   const hash = createHash("sha256");
   for (const filename of ["app.js", "styles.css"]) {
     hash.update(filename);
     hash.update("\0");
-    hash.update(await readFile(resolve(frontendDir, filename)));
+    hash.update(
+      normalizeTextAssetBytes(await readFile(resolve(frontendDir, filename)))
+    );
     hash.update("\0");
   }
   return hash.digest("hex").slice(0, 12);
