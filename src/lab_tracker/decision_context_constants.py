@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterable
+
 TASK_KIND_VALUES = (
     "plot",
     "analysis",
@@ -72,3 +74,51 @@ def managed_claude_block() -> str:
             "",
         ]
     )
+
+
+def code_facing_idioms(*, symbols: Iterable[str] | None = None) -> str:
+    """Return canonical code-facing idioms for consumer repositories."""
+
+    if symbols is None:
+        from lab_tracker_client import __all__ as client_symbols
+
+        symbols = client_symbols
+    symbol_set = set(symbols)
+    sections = [
+        "# Lab Tracker Code-Facing Idioms",
+        "",
+        "The package-pinned Python client surface has these stable code idioms:",
+        "",
+        "- `first_line_marker()` with `upsert_note()` gives notes a durable "
+        "first-line idempotency key, so repeated syncs address the same note when "
+        "the marker and body match.",
+        "- `EntityRef` represents note targets as explicit `entity_type` plus "
+        "`entity_id` pairs; note attachments stay typed instead of depending on "
+        "free-text references.",
+        "- `ids()` reads the project-local `lt_ids.json` mapping, keeping "
+        "`project_id` and related identifiers as data loaded by the consumer repo.",
+        "- `import_evidence_file()` records external files as staged evidence notes "
+        "with `evidence_source_uri` and `evidence_content_hash` metadata, so byte "
+        "duplicates are recognized by content hash.",
+        "",
+        "Citation annotation tokens are inert provenance hints that can travel "
+        "beside ordinary citations:",
+        "",
+        "- Markdown form: `<!-- lt-cite: 00000000-0000-0000-0000-000000000000 -->`",
+        "- LaTeX form: `% lt-cite: 00000000-0000-0000-0000-000000000000`",
+        "",
+        "Strip UUID-bearing citation tokens before external sharing unless the "
+        "recipient is meant to see Lab Tracker-local identifiers.",
+    ]
+    if {"savefig", "capture_figures"}.issubset(symbol_set):
+        sections.extend(
+            [
+                "",
+                "Figure capture is available through `savefig()` and "
+                "`capture_figures()`: saved figure bytes keep their full "
+                "`evidence_content_hash`, while Lab Tracker receives only a "
+                "bounded review image or pointer note. `run_context()` contributes "
+                "scalar git/run metadata without creating Analysis records.",
+            ]
+        )
+    return "\n".join(sections) + "\n"

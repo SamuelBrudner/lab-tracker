@@ -26,6 +26,18 @@ research record:
 - Manual note capture, including text notes, multipart raw file upload, raw file
   download, raw voice notes with editable transcripts, and attaching notes to
   retained entities.
+- Consumer-side figure capture through the Python client (`savefig`,
+  `capture_figures`, and `run_context`) as a fail-soft staged-note workflow:
+  Lab Tracker stores a bounded review image or pointer plus source URI and
+  content-hash metadata, while full figure files remain in the consumer repo.
+- Package-pinned code-facing idiom teaching rendered from one generator into
+  consent-gated managed agent surfaces, with the advisory
+  `lab-tracker://code-conventions` MCP resource treating the package text as
+  canonical.
+- Inert citation annotation tokens for local provenance hints, including
+  Markdown and LaTeX comment forms; UUID-bearing tokens should be stripped
+  before external sharing unless the recipient should see Lab Tracker-local
+  identifiers.
 - Human-gated graph draft review for uploaded image notes, voice-note
   transcripts, photo+voice bundles, and scheduled or user-triggered batches over
   staged notes. Drafting may be note-scoped or batch-scoped, but every proposed
