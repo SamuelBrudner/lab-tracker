@@ -19,7 +19,7 @@
     "esbuild": "^0.28.0",
     "eslint": "^9.25.1",
     "eslint-plugin-react": "^7.37.5",
-    "eslint-plugin-react-hooks": "^5.2.0",
+    "eslint-plugin-react-hooks": "^7.1.1",
     "fake-indexeddb": "^6.2.5",
     "globals": "^15.14.0",
     "jsdom": "^26.1.0",
