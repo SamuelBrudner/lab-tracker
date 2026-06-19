@@ -380,6 +380,7 @@ List/search endpoints use `limit` between 1 and 200 and `offset` of 0 or greater
 - `question_id` (optional): string(uuid) | null
 - `status` (optional): AnalysisStatus enum: staged, committed, archived | null
 - `created_by` (optional): string | null
+- `recent_first` (optional): boolean; default False
 - `limit` (optional): integer; default 50; maximum 200 from shared route validation
 - `offset` (optional): integer; default 0; minimum 0 from shared route validation
 
