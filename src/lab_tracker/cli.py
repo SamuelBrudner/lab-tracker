@@ -21,12 +21,16 @@ from textwrap import dedent
 from alembic.config import Config
 
 from alembic import command
+from lab_tracker.api import LabTrackerAPI
 from lab_tracker.config import get_settings
+from lab_tracker.db import get_engine, get_session_factory
 from lab_tracker.decision_context_constants import (
     CLAUDE_BLOCK_BEGIN,
     CLAUDE_BLOCK_END,
     managed_claude_block,
 )
+from lab_tracker.demo_seed import DemoSeedResult, seed_demo_data
+from lab_tracker.sqlalchemy_repository import SQLAlchemyLabTrackerRepository
 
 
 @dataclass
@@ -104,6 +108,30 @@ def serve_app(
 
         server_runner = uvicorn.run
     server_runner("lab_tracker.asgi:app", host=host, port=port, reload=reload)
+
+
+def seed_demo_database(
+    *,
+    run_migrations: bool = True,
+    allow_duplicates: bool = False,
+) -> DemoSeedResult:
+    if run_migrations:
+        alembic_config = _alembic_config()
+        command.upgrade(alembic_config, "head")
+
+    settings = get_settings()
+    engine = get_engine(settings)
+    session_factory = get_session_factory(engine=engine)
+    try:
+        with session_factory() as session:
+            repository = SQLAlchemyLabTrackerRepository(session)
+            root_api = LabTrackerAPI(settings=settings)
+            with root_api.request_scope(repository, surface="cli") as scope:
+                result = seed_demo_data(scope.api, allow_duplicates=allow_duplicates)
+                scope.commit()
+                return result
+    finally:
+        engine.dispose()
 
 
 def _start_browser_when_ready(
@@ -222,6 +250,20 @@ def main(argv: list[str] | None = None) -> None:
             "is disabled."
         ),
     )
+    seed_parser = subcommands.add_parser(
+        "seed-demo",
+        help="Populate the configured database with a local-development demo project.",
+    )
+    seed_parser.add_argument(
+        "--skip-migrations",
+        action="store_true",
+        help="Seed without running alembic upgrade head first.",
+    )
+    seed_parser.add_argument(
+        "--allow-duplicates",
+        action="store_true",
+        help="Create a fresh demo project even if the default demo already exists.",
+    )
 
     args = parser.parse_args(argv)
     if args.command == "init":
@@ -244,6 +286,16 @@ def main(argv: list[str] | None = None) -> None:
         except Exception as exc:
             print(f"Failed to start Lab Tracker: {exc}", file=sys.stderr)
             raise SystemExit(1) from exc
+    elif args.command == "seed-demo":
+        try:
+            result = seed_demo_database(
+                run_migrations=not args.skip_migrations,
+                allow_duplicates=args.allow_duplicates,
+            )
+        except Exception as exc:
+            print(f"Failed to seed Lab Tracker demo data: {exc}", file=sys.stderr)
+            raise SystemExit(1) from exc
+        print(json.dumps(result.as_dict(), indent=2))
 
 
 def _alembic_config() -> Config:

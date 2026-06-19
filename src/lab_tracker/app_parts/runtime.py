@@ -54,6 +54,7 @@ def build_app_runtime(settings: Settings) -> AppRuntime:
     engine = get_engine(settings)
     session_factory = get_session_factory(engine=engine)
     auth_enabled = settings.is_auth_enabled()
+    _log_startup_config_summary(settings, engine=engine, auth_enabled=auth_enabled)
     if not auth_enabled:
         try:
             ensure_local_auth_user(session_factory)
@@ -129,3 +130,17 @@ def configure_app_state(app: FastAPI, runtime: AppRuntime) -> None:
     app.state.lab_tracker_api = runtime.lab_tracker_api
     app.state.graph_draft_client_factory = runtime.graph_draft_client_factory
     app.state.auth_rate_limiter = runtime.auth_rate_limiter
+
+
+def _log_startup_config_summary(
+    settings: Settings,
+    *,
+    engine: Engine,
+    auth_enabled: bool,
+) -> None:
+    _logger.info(
+        "Lab Tracker startup: environment=%s database_backend=%s auth_enabled=%s",
+        settings.environment,
+        engine.dialect.name,
+        auth_enabled,
+    )

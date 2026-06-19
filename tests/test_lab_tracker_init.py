@@ -5,11 +5,20 @@ import os
 import subprocess
 import sys
 from pathlib import Path
+from uuid import uuid4
 
 import pytest
 import tomllib
 
-from lab_tracker.cli import _open_browser_when_ready, init_consumer_repo, serve_app
+from lab_tracker.cli import (
+    _open_browser_when_ready,
+    init_consumer_repo,
+    serve_app,
+)
+from lab_tracker.cli import (
+    main as lab_tracker_main,
+)
+from lab_tracker.demo_seed import DemoSeedResult
 from lab_tracker_client.cli import main as lt_main
 
 
@@ -107,6 +116,40 @@ def test_lab_tracker_init_console_entrypoints_are_packaged() -> None:
     assert scripts["lab_tracker"] == "lab_tracker.cli:main"
     assert scripts["lab-tracker"] == "lab_tracker.cli:main"
     assert scripts["lt"] == "lab_tracker_client.cli:main"
+
+
+def test_seed_demo_cli_prints_json_summary(monkeypatch, capsys) -> None:
+    project_id = uuid4()
+    calls: list[dict[str, bool]] = []
+
+    def fake_seed_demo_database(*, run_migrations: bool, allow_duplicates: bool):
+        calls.append(
+            {
+                "run_migrations": run_migrations,
+                "allow_duplicates": allow_duplicates,
+            }
+        )
+        return DemoSeedResult(
+            created=True,
+            project_id=project_id,
+            project_name="Demo",
+            question_count=1,
+            dataset_count=1,
+            note_count=1,
+            analysis_count=1,
+            claim_count=1,
+            visualization_count=1,
+        )
+
+    monkeypatch.setattr("lab_tracker.cli.seed_demo_database", fake_seed_demo_database)
+
+    lab_tracker_main(["seed-demo", "--skip-migrations", "--allow-duplicates"])
+
+    assert calls == [{"run_migrations": False, "allow_duplicates": True}]
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["created"] is True
+    assert payload["project_id"] == str(project_id)
+    assert payload["question_count"] == 1
 
 
 def test_lt_prime_non_research_prompt_emits_nothing(capsys) -> None:

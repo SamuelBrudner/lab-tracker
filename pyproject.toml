@@ -23,6 +23,7 @@ dependencies = [
 [project.optional-dependencies]
 test = [
   "pytest",
+  "pytest-cov",
 ]
 lint = [
   "ruff",
@@ -56,6 +57,7 @@ allow_env_creation = true
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]
+addopts = ["--cov=lab_tracker"]
 markers = [
   "postgres: requires LAB_TRACKER_POSTGRES_TEST_DATABASE_URL and a reachable Postgres server",
 ]

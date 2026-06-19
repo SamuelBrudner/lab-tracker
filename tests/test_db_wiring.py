@@ -9,9 +9,11 @@ from sqlalchemy.orm import Session
 from starlette.responses import JSONResponse
 
 from lab_tracker.app import create_app
+from lab_tracker.app_parts.runtime import _log_startup_config_summary
 from lab_tracker.config import Settings
 from lab_tracker.db import Base, get_engine
 from lab_tracker.db_models import ProjectModel, QuestionModel
+from lab_tracker.errors import ValidationError
 from lab_tracker.sqlalchemy_repository import SQLAlchemyLabTrackerRepository
 
 
@@ -39,6 +41,20 @@ class _SessionFactorySpy:
         session = _SessionSpy()
         self.sessions.append(session)
         return session
+
+
+class _LoggerSpy:
+    def __init__(self) -> None:
+        self.records: list[tuple[str, str, tuple[object, ...], dict[str, object]]] = []
+
+    def info(self, message: str, *args: object, **kwargs: object) -> None:
+        self.records.append(("info", message, args, kwargs))
+
+    def warning(self, message: str, *args: object, **kwargs: object) -> None:
+        self.records.append(("warning", message, args, kwargs))
+
+    def error(self, message: str, *args: object, **kwargs: object) -> None:
+        self.records.append(("error", message, args, kwargs))
 
 
 def test_db_session_middleware_commits_and_closes_on_success():
@@ -75,6 +91,57 @@ def test_db_session_middleware_rolls_back_and_closes_on_error():
     assert session.commits == 0
     assert session.rollbacks == 1
     assert session.closes == 1
+
+
+def test_unhandled_exceptions_return_error_envelope_and_log(monkeypatch):
+    app = create_app()
+    logger = _LoggerSpy()
+    monkeypatch.setattr("lab_tracker.routes.errors._logger", logger)
+
+    @app.get("/_test/unhandled")
+    def unhandled_route():
+        raise RuntimeError("intentional failure")
+
+    with TestClient(app, raise_server_exceptions=False) as client:
+        response = client.get("/_test/unhandled")
+
+    assert response.status_code == 500
+    assert response.json() == {
+        "error": {
+            "code": "internal_server_error",
+            "message": "Internal server error.",
+            "issues": None,
+        }
+    }
+    assert logger.records
+    level, message, args, kwargs = logger.records[0]
+    assert level == "error"
+    assert "Unhandled HTTP exception" in message
+    assert args == ("GET", "/_test/unhandled", 500)
+    assert "exc_info" in kwargs
+
+
+def test_handled_lab_tracker_errors_are_logged(monkeypatch):
+    app = create_app()
+    logger = _LoggerSpy()
+    monkeypatch.setattr("lab_tracker.routes.errors._logger", logger)
+
+    @app.get("/_test/handled")
+    def handled_route():
+        raise ValidationError("bad request")
+
+    with TestClient(app, raise_server_exceptions=False) as client:
+        response = client.get("/_test/handled")
+
+    assert response.status_code == 422
+    assert response.json()["error"]["code"] == "validation_error"
+    assert logger.records
+    level, message, args, kwargs = logger.records[0]
+    assert level == "warning"
+    assert "Handled HTTP error" in message
+    assert args[:4] == ("GET", "/_test/handled", 422, "validation_error")
+    assert str(args[4]) == "bad request"
+    assert kwargs == {}
 
 
 def test_global_repository_dependency_is_wired():
@@ -136,6 +203,34 @@ def test_sqlite_engine_enforces_foreign_keys_and_busy_wal_pragmas(tmp_path):
             )
             is None
         )
+
+
+def test_startup_config_summary_logs_environment_db_backend_and_auth(
+    tmp_path,
+    monkeypatch,
+):
+    settings = Settings(
+        database_url=f"sqlite+pysqlite:///{tmp_path / 'startup-summary.db'}",
+        environment="local",
+        auth_enabled=False,
+        _env_file=None,
+    )
+    engine = get_engine(settings)
+    logger = _LoggerSpy()
+    monkeypatch.setattr("lab_tracker.app_parts.runtime._logger", logger)
+    try:
+        _log_startup_config_summary(settings, engine=engine, auth_enabled=False)
+    finally:
+        engine.dispose()
+
+    assert logger.records == [
+        (
+            "info",
+            "Lab Tracker startup: environment=%s database_backend=%s auth_enabled=%s",
+            ("local", "sqlite", False),
+            {},
+        )
+    ]
 
 
 def test_raw_sqlite_test_engines_enforce_foreign_keys_and_busy_wal_pragmas(tmp_path):

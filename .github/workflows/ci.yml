@@ -31,6 +31,8 @@ jobs:
         run: npm run build:frontend
       - name: Check frontend bundle is committed
         run: git diff --exit-code -- src/lab_tracker/frontend
+      - name: Check skill API reference is current
+        run: uv run python scripts/generate_lab_tracker_skill_reference.py --check
       - name: Test
         run: uv run pytest -q
 
