@@ -18,9 +18,9 @@ from importlib import resources
 from pathlib import Path
 from textwrap import dedent
 
+from alembic import command
 from alembic.config import Config
 
-from alembic import command
 from lab_tracker.api import LabTrackerAPI
 from lab_tracker.config import get_settings
 from lab_tracker.db import get_engine, get_session_factory
