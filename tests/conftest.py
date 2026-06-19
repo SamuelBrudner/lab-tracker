@@ -8,13 +8,13 @@ from pathlib import Path
 from uuid import uuid4
 
 import pytest
+from alembic import command
 from alembic.config import Config
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, event, text
 from sqlalchemy.engine import Engine
 from sqlalchemy.engine.url import make_url
 
-from alembic import command
 from lab_tracker.app import create_app
 from lab_tracker.auth import Role
 

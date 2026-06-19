@@ -104,7 +104,6 @@ class SQLAlchemyGoalRepository(EntityRepository[Goal]):
         self._session.flush()
         stmt = select(GoalModel)
         count_stmt = select(GoalModel.goal_id)
-        distinct_required = False
         if project_id is not None:
             project_clause = self._project_scope_clause({project_id})
             stmt = stmt.where(project_clause)
@@ -129,23 +128,17 @@ class SQLAlchemyGoalRepository(EntityRepository[Goal]):
         if target_values is not None and not target_values:
             return [], 0
         if target_values:
-            distinct_required = True
-            stmt = stmt.join(GoalLinkModel, GoalLinkModel.goal_id == GoalModel.goal_id).where(
-                tuple_(GoalLinkModel.entity_type, GoalLinkModel.entity_id).in_(
-                    target_values
+            matching_goal_ids = (
+                select(GoalLinkModel.goal_id)
+                .where(
+                    tuple_(GoalLinkModel.entity_type, GoalLinkModel.entity_id).in_(
+                        target_values
+                    )
                 )
+                .distinct()
             )
-            count_stmt = count_stmt.join(
-                GoalLinkModel,
-                GoalLinkModel.goal_id == GoalModel.goal_id,
-            ).where(
-                tuple_(GoalLinkModel.entity_type, GoalLinkModel.entity_id).in_(
-                    target_values
-                )
-            )
-        if distinct_required:
-            stmt = stmt.distinct()
-            count_stmt = count_stmt.distinct()
+            stmt = stmt.where(GoalModel.goal_id.in_(matching_goal_ids))
+            count_stmt = count_stmt.where(GoalModel.goal_id.in_(matching_goal_ids))
         if recent_first:
             stmt = stmt.order_by(GoalModel.created_at.desc(), GoalModel.goal_id.desc())
         else:

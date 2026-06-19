@@ -69,3 +69,6 @@ extend-exclude = ["src/lab_tracker/alembic", "build"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "B", "UP", "SIM"]
+
+[tool.ruff.lint.isort]
+known-third-party = ["alembic"]

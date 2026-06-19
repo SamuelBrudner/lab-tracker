@@ -11,14 +11,20 @@ from sqlalchemy.exc import IntegrityError
 
 from lab_tracker import dolt_mirror
 from lab_tracker.db_models import (
+    AnalysisDatasetModel,
     AnalysisModel,
+    ClaimAnalysisModel,
+    ClaimDatasetModel,
     ClaimModel,
+    ClaimQuestionModel,
     DatasetModel,
     GraphDraftBatchSettingsModel,
     NoteModel,
+    NoteTargetModel,
     ProjectModel,
     QuestionModel,
     SessionModel,
+    VisualizationClaimModel,
     VisualizationModel,
 )
 
@@ -27,119 +33,116 @@ pytestmark = pytest.mark.postgres
 
 def _create_representative_project_tree(
     client: TestClient,
-    headers: dict[str, str],
 ) -> dict[str, str]:
-    project_response = client.post(
-        "/projects",
-        json={"name": "Postgres cascade project"},
-        headers=headers,
-    )
-    assert project_response.status_code == 201
-    project_id = project_response.json()["data"]["project_id"]
+    project_id = str(uuid4())
+    question_id = str(uuid4())
+    dataset_id = str(uuid4())
+    note_id = str(uuid4())
+    session_id = str(uuid4())
+    analysis_id = str(uuid4())
+    claim_id = str(uuid4())
+    viz_id = str(uuid4())
 
-    question_response = client.post(
-        "/questions",
-        json={
-            "project_id": project_id,
-            "text": "Does Postgres preserve cascade semantics?",
-            "question_type": "descriptive",
-            "status": "active",
-        },
-        headers=headers,
-    )
-    assert question_response.status_code == 201
-    question_id = question_response.json()["data"]["question_id"]
-
-    dataset_response = client.post(
-        "/datasets",
-        json={
-            "project_id": project_id,
-            "primary_question_id": question_id,
-            "status": "committed",
-            "commit_manifest": {
-                "files": [{"path": "data/postgres.csv", "checksum": "sha256:pg"}],
-                "metadata": {"backend": "postgres"},
-            },
-        },
-        headers=headers,
-    )
-    assert dataset_response.status_code == 201
-    dataset_id = dataset_response.json()["data"]["dataset_id"]
-
-    note_response = client.post(
-        "/notes",
-        json={
-            "project_id": project_id,
-            "raw_content": "Postgres JSON/boolean/FK representative note.",
-            "metadata": {"backend": "postgres"},
-            "targets": [{"entity_type": "dataset", "entity_id": dataset_id}],
-        },
-        headers=headers,
-    )
-    assert note_response.status_code == 201
-    note_id = note_response.json()["data"]["note_id"]
-
-    session_response = client.post(
-        "/sessions",
-        json={
-            "project_id": project_id,
-            "session_type": "scientific",
-            "primary_question_id": question_id,
-        },
-        headers=headers,
-    )
-    assert session_response.status_code == 201
-    session_id = session_response.json()["data"]["session_id"]
-
-    analysis_response = client.post(
-        "/analyses",
-        json={
-            "project_id": project_id,
-            "dataset_ids": [dataset_id],
-            "method_hash": "postgres-method",
-            "code_version": "postgres-v1",
-            "status": "committed",
-            "external_artifacts": [
-                {
-                    "source_system": "s3",
-                    "uri": "s3://lab-tracker/postgres-run",
-                    "metadata": {"backend": "postgres"},
-                }
-            ],
-        },
-        headers=headers,
-    )
-    assert analysis_response.status_code == 201
-    analysis_id = analysis_response.json()["data"]["analysis_id"]
-
-    claim_response = client.post(
-        "/claims",
-        json={
-            "project_id": project_id,
-            "statement": "The Postgres cascade path remains coherent.",
-            "confidence": 0.9,
-            "status": "supported",
-            "supported_by_dataset_ids": [dataset_id],
-            "supported_by_analysis_ids": [analysis_id],
-            "answers_question_ids": [question_id],
-        },
-        headers=headers,
-    )
-    assert claim_response.status_code == 201
-    claim_id = claim_response.json()["data"]["claim_id"]
-
-    visualization_response = client.post(
-        "/visualizations",
-        json={
-            "analysis_id": analysis_id,
-            "viz_type": "line",
-            "file_path": "figures/postgres.png",
-            "related_claim_ids": [claim_id],
-        },
-        headers=headers,
-    )
-    assert visualization_response.status_code == 201
-    viz_id = visualization_response.json()["data"]["viz_id"]
+    with client.app.state.db_session_factory() as session:
+        session.add(
+            ProjectModel(
+                project_id=project_id,
+                name="Postgres cascade project",
+                description="",
+                status="active",
+            )
+        )
+        session.flush()
+        session.add(
+            QuestionModel(
+                question_id=question_id,
+                project_id=project_id,
+                text="Does Postgres preserve cascade semantics?",
+                question_type="descriptive",
+                status="active",
+            )
+        )
+        session.flush()
+        session.add(
+            DatasetModel(
+                dataset_id=dataset_id,
+                project_id=project_id,
+                commit_hash="sha256:pg",
+                primary_question_id=question_id,
+                manifest_files=[{"path": "data/postgres.csv", "checksum": "sha256:pg"}],
+                manifest_metadata={"backend": "postgres"},
+                status="committed",
+            )
+        )
+        session.add(
+            NoteModel(
+                note_id=note_id,
+                project_id=project_id,
+                raw_content="Postgres JSON/boolean/FK representative note.",
+                note_metadata={"backend": "postgres"},
+                status="staged",
+            )
+        )
+        session.add(
+            SessionModel(
+                session_id=session_id,
+                project_id=project_id,
+                session_type="scientific",
+                status="active",
+                primary_question_id=question_id,
+            )
+        )
+        session.flush()
+        session.add(
+            NoteTargetModel(
+                note_id=note_id,
+                entity_type="dataset",
+                entity_id=dataset_id,
+            )
+        )
+        session.add(
+            AnalysisModel(
+                analysis_id=analysis_id,
+                project_id=project_id,
+                method_hash="postgres-method",
+                code_version="postgres-v1",
+                external_artifacts=[
+                    {
+                        "source_system": "s3",
+                        "uri": "s3://lab-tracker/postgres-run",
+                        "content_hash": "sha256:postgres-run",
+                        "metadata": {"backend": "postgres"},
+                    }
+                ],
+                status="committed",
+            )
+        )
+        session.flush()
+        session.add(AnalysisDatasetModel(analysis_id=analysis_id, dataset_id=dataset_id))
+        session.add(
+            ClaimModel(
+                claim_id=claim_id,
+                project_id=project_id,
+                statement="The Postgres cascade path remains coherent.",
+                confidence=0.9,
+                status="supported",
+            )
+        )
+        session.flush()
+        session.add(ClaimDatasetModel(claim_id=claim_id, dataset_id=dataset_id))
+        session.add(ClaimAnalysisModel(claim_id=claim_id, analysis_id=analysis_id))
+        session.add(ClaimQuestionModel(claim_id=claim_id, question_id=question_id))
+        session.add(
+            VisualizationModel(
+                viz_id=viz_id,
+                analysis_id=analysis_id,
+                viz_type="line",
+                file_path="figures/postgres.png",
+            )
+        )
+        session.flush()
+        session.add(VisualizationClaimModel(viz_id=viz_id, claim_id=claim_id))
+        session.commit()
 
     return {
         "project_id": project_id,
@@ -157,7 +160,7 @@ def test_postgres_project_delete_cascades_representative_entity_tree(
     postgres_client: TestClient,
     postgres_admin_auth_headers: dict[str, str],
 ) -> None:
-    ids = _create_representative_project_tree(postgres_client, postgres_admin_auth_headers)
+    ids = _create_representative_project_tree(postgres_client)
 
     response = postgres_client.delete(
         f"/projects/{ids['project_id']}",
@@ -204,7 +207,7 @@ def test_postgres_dolt_export_reads_repeatable_snapshot(
     postgres_admin_auth_headers: dict[str, str],
     tmp_path: Path,
 ) -> None:
-    ids = _create_representative_project_tree(postgres_client, postgres_admin_auth_headers)
+    ids = _create_representative_project_tree(postgres_client)
 
     exports = dolt_mirror.export_tables(tmp_path / "postgres-export")
 
@@ -223,7 +226,7 @@ def test_postgres_json_and_boolean_round_trip(
     postgres_client: TestClient,
     postgres_admin_auth_headers: dict[str, str],
 ) -> None:
-    ids = _create_representative_project_tree(postgres_client, postgres_admin_auth_headers)
+    ids = _create_representative_project_tree(postgres_client)
     settings_response = postgres_client.patch(
         f"/projects/{ids['project_id']}/graph-draft-batch-settings",
         json={"enabled": True},
