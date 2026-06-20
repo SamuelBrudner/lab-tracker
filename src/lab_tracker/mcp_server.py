@@ -51,6 +51,7 @@ from lab_tracker.mcp_tools.read import (
 )
 from lab_tracker.mcp_tools.resources import (
     lab_tracker_agent_consultation_policy,
+    lab_tracker_code_conventions,
     lab_tracker_quickstart,
     lab_tracker_surface,
 )
@@ -96,6 +97,7 @@ __all__ = [
     "SERVER_NAME",
     "client_from_env",
     "lab_tracker_agent_consultation_policy",
+    "lab_tracker_code_conventions",
     "lab_tracker_create_analysis",
     "lab_tracker_create_claim",
     "lab_tracker_create_claim_edge",

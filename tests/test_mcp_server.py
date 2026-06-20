@@ -9,6 +9,7 @@ import pytest
 import tomllib
 
 from lab_tracker import mcp_server
+from lab_tracker.decision_context_constants import code_facing_idioms
 
 
 def _json_response(status_code: int, payload: dict) -> httpx.Response:
@@ -62,6 +63,15 @@ def test_fastmcp_registers_agent_consultation_policy_resource() -> None:
 
     uris = {str(resource.uri) for resource in resources}
     assert "lab-tracker://agent-consultation-policy" in uris
+    assert "lab-tracker://code-conventions" in uris
+
+
+def test_code_conventions_resource_matches_package_generator() -> None:
+    assert mcp_server.lab_tracker_code_conventions() == code_facing_idioms()
+    assert "lab-tracker://code-conventions" in mcp_server.server.instructions
+    instructions = (mcp_server.server.instructions or "").lower()
+    for forbidden in ("pip install", "execute", "curl "):
+        assert forbidden not in instructions
 
 
 def test_lt_mcp_console_entrypoint_is_packaged() -> None:

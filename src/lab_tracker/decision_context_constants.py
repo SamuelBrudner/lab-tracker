@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import hashlib
 from collections.abc import Iterable
+from importlib import metadata
 
 TASK_KIND_VALUES = (
     "plot",
@@ -44,12 +46,19 @@ MCP_SERVER_INSTRUCTIONS = " ".join(
         "Use lab_tracker_get_decision_context, or lab_tracker_next_questions when "
         "the user asks what research thread to advance.",
         "Read lab-tracker://quickstart for setup.",
+        "Code-facing conventions are available at lab-tracker://code-conventions; "
+        "package text remains canonical.",
         "Do not create or mutate records unless the user explicitly asks.",
     )
 )
 
 CLAUDE_BLOCK_BEGIN = "<!-- BEGIN LAB TRACKER MCP ACTIVATION -->"
 CLAUDE_BLOCK_END = "<!-- END LAB TRACKER MCP ACTIVATION -->"
+CODE_CONVENTIONS_BLOCK_BEGIN = "<!-- BEGIN LAB TRACKER CODE CONVENTIONS -->"
+CODE_CONVENTIONS_BLOCK_END = "<!-- END LAB TRACKER CODE CONVENTIONS -->"
+AGENTS_CODE_CONVENTIONS_BLOCK_BEGIN = "<!-- BEGIN LAB TRACKER AGENTS CODE CONVENTIONS -->"
+AGENTS_CODE_CONVENTIONS_BLOCK_END = "<!-- END LAB TRACKER AGENTS CODE CONVENTIONS -->"
+_CODE_CONVENTIONS_VERSION_PREFIX = "<!-- lab-tracker-code-conventions"
 
 
 def managed_claude_block() -> str:
@@ -122,3 +131,47 @@ def code_facing_idioms(*, symbols: Iterable[str] | None = None) -> str:
             ]
         )
     return "\n".join(sections) + "\n"
+
+
+def managed_code_conventions_block(
+    *,
+    begin_marker: str = CODE_CONVENTIONS_BLOCK_BEGIN,
+    end_marker: str = CODE_CONVENTIONS_BLOCK_END,
+) -> str:
+    """Return a marked code-conventions block with a splitter-ignored version line."""
+
+    body = code_facing_idioms()
+    return "\n".join(
+        [
+            begin_marker,
+            body.rstrip(),
+            end_marker,
+            code_conventions_version_line(body),
+            "",
+        ]
+    )
+
+
+def cursor_rules_mdc() -> str:
+    """Return Cursor rules content with a managed Lab Tracker conventions region."""
+
+    return (
+        "---\n"
+        "description: Lab Tracker code-facing conventions\n"
+        "alwaysApply: true\n"
+        "---\n\n"
+        f"{managed_code_conventions_block()}"
+    )
+
+
+def code_conventions_version_line(body: str | None = None) -> str:
+    resolved_body = body if body is not None else code_facing_idioms()
+    digest = hashlib.sha256(resolved_body.encode("utf-8")).hexdigest()[:12]
+    return f"{_CODE_CONVENTIONS_VERSION_PREFIX} version={package_version()} sha256={digest} -->"
+
+
+def package_version() -> str:
+    try:
+        return metadata.version("lab-tracker")
+    except metadata.PackageNotFoundError:
+        return "0+unknown"

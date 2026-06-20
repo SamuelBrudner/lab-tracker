@@ -11,12 +11,26 @@ import pytest
 import tomllib
 
 from lab_tracker.cli import (
+    _doctor,
+    _extract_managed_body,
+    _extract_version_line,
     _open_browser_when_ready,
+    _upsert_managed_block,
     init_consumer_repo,
     serve_app,
 )
 from lab_tracker.cli import (
     main as lab_tracker_main,
+)
+from lab_tracker.decision_context_constants import (
+    AGENTS_CODE_CONVENTIONS_BLOCK_BEGIN,
+    AGENTS_CODE_CONVENTIONS_BLOCK_END,
+    CLAUDE_BLOCK_BEGIN,
+    CODE_CONVENTIONS_BLOCK_BEGIN,
+    CODE_CONVENTIONS_BLOCK_END,
+    code_conventions_version_line,
+    code_facing_idioms,
+    managed_code_conventions_block,
 )
 from lab_tracker.demo_seed import DemoSeedResult
 from lab_tracker_client.cli import main as lt_main
@@ -46,6 +60,11 @@ def test_init_creates_portable_consumer_files(tmp_path: Path) -> None:
     ids = json.loads((tmp_path / "lt_ids.json").read_text(encoding="utf-8"))
     assert ids == {"project_id": "", "project_name": "Consumer Project"}
     assert "first non-blank line" in (tmp_path / "AGENTS.lt.md").read_text(encoding="utf-8")
+    assert "Managed code-facing conventions" in (
+        tmp_path / "AGENTS.lt.md"
+    ).read_text(encoding="utf-8")
+    assert not (tmp_path / "AGENTS.md").exists()
+    assert not (tmp_path / ".cursor" / "rules" / "lab-tracker.mdc").exists()
     claude_settings = json.loads(
         (tmp_path / ".claude" / "settings.json").read_text(encoding="utf-8")
     )
@@ -90,6 +109,169 @@ def test_init_force_overwrites_existing_files(tmp_path: Path) -> None:
     assert json.loads(custom.read_text(encoding="utf-8"))["mcpServers"]["lab-tracker"][
         "command"
     ] == "lt-mcp"
+
+
+def test_init_yes_writes_managed_code_conventions_blocks(tmp_path: Path) -> None:
+    agents = tmp_path / "AGENTS.md"
+    agents.write_text(
+        "# Existing Agents\n\n<!-- BEGIN BEADS -->\nbeads block\n<!-- END BEADS -->\n",
+        encoding="utf-8",
+    )
+
+    init_consumer_repo(tmp_path, yes=True)
+
+    expected_body = code_facing_idioms()
+    expected_version = code_conventions_version_line(expected_body)
+    claude_content = (tmp_path / "CLAUDE.md").read_text(encoding="utf-8")
+    agents_content = agents.read_text(encoding="utf-8")
+    cursor_content = (tmp_path / ".cursor" / "rules" / "lab-tracker.mdc").read_text(
+        encoding="utf-8"
+    )
+
+    assert CLAUDE_BLOCK_BEGIN in claude_content
+    assert claude_content.count(CODE_CONVENTIONS_BLOCK_BEGIN) == 1
+    assert agents_content.count(AGENTS_CODE_CONVENTIONS_BLOCK_BEGIN) == 1
+    assert "<!-- BEGIN BEADS -->" in agents_content
+    assert cursor_content.startswith("---\ndescription: Lab Tracker code-facing conventions")
+    assert (
+        _extract_managed_body(
+            claude_content,
+            begin_marker=CODE_CONVENTIONS_BLOCK_BEGIN,
+            end_marker=CODE_CONVENTIONS_BLOCK_END,
+        )
+        == expected_body
+    )
+    assert (
+        _extract_managed_body(
+            agents_content,
+            begin_marker=AGENTS_CODE_CONVENTIONS_BLOCK_BEGIN,
+            end_marker=AGENTS_CODE_CONVENTIONS_BLOCK_END,
+        )
+        == expected_body
+    )
+    assert (
+        _extract_managed_body(
+            cursor_content,
+            begin_marker=CODE_CONVENTIONS_BLOCK_BEGIN,
+            end_marker=CODE_CONVENTIONS_BLOCK_END,
+        )
+        == expected_body
+    )
+    assert _extract_version_line(claude_content, end_marker=CODE_CONVENTIONS_BLOCK_END) == (
+        expected_version
+    )
+
+
+def test_init_dry_run_returns_diffs_without_writing(tmp_path: Path) -> None:
+    result = init_consumer_repo(tmp_path, yes=True, dry_run=True)
+
+    assert list(tmp_path.iterdir()) == []
+    assert result.created
+    assert result.diffs
+    assert str(tmp_path / "AGENTS.md") in result.as_dict()["diffs"]
+
+
+def test_init_cli_dry_run_writes_nothing(tmp_path: Path, capsys) -> None:
+    lab_tracker_main(["init", "--target", str(tmp_path), "--yes", "--dry-run"])
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["diffs"]
+    assert str(tmp_path / "AGENTS.md") in payload["diffs"]
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_init_uninstall_strips_managed_blocks_preserving_surroundings(tmp_path: Path) -> None:
+    agents = tmp_path / "AGENTS.md"
+    agents.write_text("# Existing Agents\n", encoding="utf-8")
+    init_consumer_repo(tmp_path, yes=True)
+
+    result = init_consumer_repo(tmp_path, uninstall=True)
+
+    claude_content = (tmp_path / "CLAUDE.md").read_text(encoding="utf-8")
+    agents_content = agents.read_text(encoding="utf-8")
+    cursor_content = (tmp_path / ".cursor" / "rules" / "lab-tracker.mdc").read_text(
+        encoding="utf-8"
+    )
+    assert tmp_path / "CLAUDE.md" in result.stripped
+    assert CLAUDE_BLOCK_BEGIN not in claude_content
+    assert CODE_CONVENTIONS_BLOCK_BEGIN not in claude_content
+    assert AGENTS_CODE_CONVENTIONS_BLOCK_BEGIN not in agents_content
+    assert "# Existing Agents" in agents_content
+    assert CODE_CONVENTIONS_BLOCK_BEGIN not in cursor_content
+
+
+def test_init_cli_yes_then_uninstall(tmp_path: Path, capsys) -> None:
+    lab_tracker_main(["init", "--target", str(tmp_path), "--yes"])
+    capsys.readouterr()
+
+    lab_tracker_main(["init", "--target", str(tmp_path), "--uninstall"])
+
+    payload = json.loads(capsys.readouterr().out)
+    assert str(tmp_path / "CLAUDE.md") in payload["stripped"]
+    assert CODE_CONVENTIONS_BLOCK_BEGIN not in (
+        tmp_path / "CLAUDE.md"
+    ).read_text(encoding="utf-8")
+
+
+def test_upsert_managed_block_replaces_single_marker_corruption() -> None:
+    block = managed_code_conventions_block()
+    existing = f"# Existing\n\n{CODE_CONVENTIONS_BLOCK_BEGIN}\nstale body\n"
+
+    content = _upsert_managed_block(
+        existing,
+        block,
+        begin_marker=CODE_CONVENTIONS_BLOCK_BEGIN,
+        end_marker=CODE_CONVENTIONS_BLOCK_END,
+    )
+
+    assert content.count(CODE_CONVENTIONS_BLOCK_BEGIN) == 1
+    assert content.count(CODE_CONVENTIONS_BLOCK_END) == 1
+    assert "stale body" not in content
+    assert "# Existing" in content
+    assert block in content
+
+
+def test_doctor_reports_code_conventions_drift(tmp_path: Path, capsys) -> None:
+    init_consumer_repo(tmp_path, yes=True)
+
+    healthy = _doctor(tmp_path)
+    assert all(target["present"] and target["in_sync"] for target in healthy["targets"])
+    assert code_facing_idioms() in healthy["code_facing_idioms"]
+
+    lab_tracker_main(["doctor", "--target", str(tmp_path)])
+    assert json.loads(capsys.readouterr().out)["command"] == "doctor"
+
+    agents = tmp_path / "AGENTS.md"
+    agents.write_text(
+        agents.read_text(encoding="utf-8").replace("EntityRef", "EntityRefDrift", 1),
+        encoding="utf-8",
+    )
+
+    drifted = _doctor(tmp_path)
+    assert any(not target["in_sync"] for target in drifted["targets"])
+    with pytest.raises(SystemExit):
+        lab_tracker_main(["check-idioms", "--target", str(tmp_path)])
+
+
+def test_lt_doctor_delegates_and_honors_fail_silent(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    init_consumer_repo(tmp_path, yes=True)
+
+    lt_main(["doctor", "--target", str(tmp_path)])
+    assert json.loads(capsys.readouterr().out)["command"] == "doctor"
+
+    agents = tmp_path / "AGENTS.md"
+    agents.write_text(
+        agents.read_text(encoding="utf-8").replace("EntityRef", "EntityRefDrift", 1),
+        encoding="utf-8",
+    )
+
+    lt_main(["doctor", "--target", str(tmp_path), "--fail-silent"])
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == ""
 
 
 def test_generated_scripts_lt_help_runs(tmp_path: Path) -> None:

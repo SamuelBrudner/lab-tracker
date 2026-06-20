@@ -3,7 +3,15 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-from lab_tracker.decision_context_constants import code_facing_idioms
+import lab_tracker_client
+from lab_tracker.decision_context_constants import (
+    CODE_CONVENTIONS_BLOCK_BEGIN,
+    CODE_CONVENTIONS_BLOCK_END,
+    code_conventions_version_line,
+    code_facing_idioms,
+    cursor_rules_mdc,
+    managed_code_conventions_block,
+)
 from lab_tracker_client import __all__ as client_symbols
 
 
@@ -56,3 +64,32 @@ def test_retained_surface_records_code_idiom_and_citation_decisions() -> None:
     assert "lab-tracker://code-conventions" in doc
     assert "citation annotation tokens" in doc
     assert "UUID-bearing tokens should be stripped" in doc
+
+
+def test_managed_code_conventions_block_has_stable_markers_and_version_line() -> None:
+    body = code_facing_idioms()
+    block = managed_code_conventions_block()
+
+    assert "version=" not in CODE_CONVENTIONS_BLOCK_BEGIN
+    assert "sha256=" not in CODE_CONVENTIONS_BLOCK_BEGIN
+    assert "version=" not in CODE_CONVENTIONS_BLOCK_END
+    assert "sha256=" not in CODE_CONVENTIONS_BLOCK_END
+    assert block.split(CODE_CONVENTIONS_BLOCK_BEGIN, 1)[1].split(
+        CODE_CONVENTIONS_BLOCK_END,
+        1,
+    )[0].strip() == body.strip()
+    assert code_conventions_version_line(body) in block
+
+    cursor = cursor_rules_mdc()
+    assert cursor.startswith("---\n")
+    assert body.strip() in cursor
+
+
+def test_package_docstring_names_first_wave_idioms() -> None:
+    doc = " ".join((lab_tracker_client.__doc__ or "").split())
+
+    assert "first-line note markers" in doc
+    assert "EntityRef note targets" in doc
+    assert "lt_ids.json" in doc
+    assert "content-hash evidence imports" in doc
+    assert "fail-soft figure capture" in doc

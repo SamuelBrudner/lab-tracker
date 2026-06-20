@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 from lab_tracker.decision_context import AGENT_CONSULTATION_POLICY
+from lab_tracker.decision_context_constants import code_facing_idioms
 
 
 def lab_tracker_quickstart() -> str:
@@ -40,6 +41,10 @@ def lab_tracker_agent_consultation_policy() -> str:
     return AGENT_CONSULTATION_POLICY
 
 
+def lab_tracker_code_conventions() -> str:
+    return code_facing_idioms()
+
+
 def register_resources(server: Any) -> None:
     server.resource(
         "lab-tracker://quickstart",
@@ -56,3 +61,8 @@ def register_resources(server: Any) -> None:
         name="Lab Tracker Agent Consultation Policy",
         mime_type="text/markdown",
     )(lab_tracker_agent_consultation_policy)
+    server.resource(
+        "lab-tracker://code-conventions",
+        name="Lab Tracker Code Conventions",
+        mime_type="text/markdown",
+    )(lab_tracker_code_conventions)

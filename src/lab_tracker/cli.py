@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import difflib
 import ipaddress
 import json
 import math
@@ -25,9 +26,18 @@ from lab_tracker.api import LabTrackerAPI
 from lab_tracker.config import get_settings
 from lab_tracker.db import get_engine, get_session_factory
 from lab_tracker.decision_context_constants import (
+    AGENTS_CODE_CONVENTIONS_BLOCK_BEGIN,
+    AGENTS_CODE_CONVENTIONS_BLOCK_END,
     CLAUDE_BLOCK_BEGIN,
     CLAUDE_BLOCK_END,
+    CODE_CONVENTIONS_BLOCK_BEGIN,
+    CODE_CONVENTIONS_BLOCK_END,
+    code_conventions_version_line,
+    code_facing_idioms,
+    cursor_rules_mdc,
     managed_claude_block,
+    managed_code_conventions_block,
+    package_version,
 )
 from lab_tracker.demo_seed import DemoSeedResult, seed_demo_data
 from lab_tracker.sqlalchemy_repository import SQLAlchemyLabTrackerRepository
@@ -38,12 +48,19 @@ class InitResult:
     created: list[Path] = field(default_factory=list)
     skipped: list[Path] = field(default_factory=list)
     overwritten: list[Path] = field(default_factory=list)
+    stripped: list[Path] = field(default_factory=list)
+    diffs: dict[Path, str] = field(default_factory=dict)
+    offers: list[str] = field(default_factory=list)
+    _preview_contents: dict[Path, str] = field(default_factory=dict, repr=False)
 
-    def as_dict(self) -> dict[str, list[str]]:
+    def as_dict(self) -> dict[str, object]:
         return {
             "created": [str(path) for path in self.created],
             "skipped": [str(path) for path in self.skipped],
             "overwritten": [str(path) for path in self.overwritten],
+            "stripped": [str(path) for path in self.stripped],
+            "diffs": {str(path): diff for path, diff in self.diffs.items()},
+            "offers": list(self.offers),
         }
 
 
@@ -52,10 +69,44 @@ def init_consumer_repo(
     *,
     project_name: str | None = None,
     force: bool = False,
+    yes: bool = False,
+    dry_run: bool = False,
+    uninstall: bool = False,
 ) -> InitResult:
     root = Path(target).expanduser().resolve()
-    root.mkdir(parents=True, exist_ok=True)
+    if not dry_run:
+        root.mkdir(parents=True, exist_ok=True)
     result = InitResult()
+    if uninstall:
+        _strip_managed_block(
+            root / "CLAUDE.md",
+            begin_marker=CLAUDE_BLOCK_BEGIN,
+            end_marker=CLAUDE_BLOCK_END,
+            result=result,
+            dry_run=dry_run,
+        )
+        _strip_managed_block(
+            root / "CLAUDE.md",
+            begin_marker=CODE_CONVENTIONS_BLOCK_BEGIN,
+            end_marker=CODE_CONVENTIONS_BLOCK_END,
+            result=result,
+            dry_run=dry_run,
+        )
+        _strip_managed_block(
+            root / "AGENTS.md",
+            begin_marker=AGENTS_CODE_CONVENTIONS_BLOCK_BEGIN,
+            end_marker=AGENTS_CODE_CONVENTIONS_BLOCK_END,
+            result=result,
+            dry_run=dry_run,
+        )
+        _strip_managed_block(
+            root / ".cursor" / "rules" / "lab-tracker.mdc",
+            begin_marker=CODE_CONVENTIONS_BLOCK_BEGIN,
+            end_marker=CODE_CONVENTIONS_BLOCK_END,
+            result=result,
+            dry_run=dry_run,
+        )
+        return result
     files = {
         root / ".mcp.json": _mcp_json(),
         root / ".claude" / "settings.json": _claude_settings_json(),
@@ -64,8 +115,41 @@ def init_consumer_repo(
         root / "lt_ids.json": _ids_placeholder(project_name),
     }
     for path, content in files.items():
-        _write_scaffold_file(path, content, force=force, result=result)
-    _write_managed_claude_block(root / "CLAUDE.md", result=result)
+        _write_scaffold_file(path, content, force=force, result=result, dry_run=dry_run)
+    _write_managed_claude_block(root / "CLAUDE.md", result=result, dry_run=dry_run)
+    if yes:
+        _write_managed_block(
+            root / "CLAUDE.md",
+            managed_code_conventions_block(),
+            begin_marker=CODE_CONVENTIONS_BLOCK_BEGIN,
+            end_marker=CODE_CONVENTIONS_BLOCK_END,
+            result=result,
+            dry_run=dry_run,
+        )
+        _write_managed_block(
+            root / "AGENTS.md",
+            managed_code_conventions_block(
+                begin_marker=AGENTS_CODE_CONVENTIONS_BLOCK_BEGIN,
+                end_marker=AGENTS_CODE_CONVENTIONS_BLOCK_END,
+            ),
+            begin_marker=AGENTS_CODE_CONVENTIONS_BLOCK_BEGIN,
+            end_marker=AGENTS_CODE_CONVENTIONS_BLOCK_END,
+            result=result,
+            dry_run=dry_run,
+        )
+        _write_managed_block(
+            root / ".cursor" / "rules" / "lab-tracker.mdc",
+            cursor_rules_mdc(),
+            begin_marker=CODE_CONVENTIONS_BLOCK_BEGIN,
+            end_marker=CODE_CONVENTIONS_BLOCK_END,
+            result=result,
+            dry_run=dry_run,
+        )
+    else:
+        result.offers.append(
+            "Managed code-facing convention blocks are available with "
+            "`lab_tracker init --yes`."
+        )
     return result
 
 
@@ -221,6 +305,21 @@ def main(argv: list[str] | None = None) -> None:
         action="store_true",
         help="Overwrite existing scaffolded files.",
     )
+    init_parser.add_argument(
+        "--yes",
+        action="store_true",
+        help="Consent to recommended managed code-conventions blocks.",
+    )
+    init_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Show scaffold and managed-block diffs without writing files.",
+    )
+    init_parser.add_argument(
+        "--uninstall",
+        action="store_true",
+        help="Strip Lab Tracker managed blocks while preserving surrounding content.",
+    )
     serve_parser = subcommands.add_parser(
         "serve",
         help="Run migrations, open the browser, and start the Lab Tracker web app.",
@@ -264,6 +363,16 @@ def main(argv: list[str] | None = None) -> None:
         action="store_true",
         help="Create a fresh demo project even if the default demo already exists.",
     )
+    doctor_parser = subcommands.add_parser(
+        "doctor",
+        aliases=["check-idioms"],
+        help="Check managed code-facing idiom blocks for drift.",
+    )
+    doctor_parser.add_argument(
+        "--target",
+        default=".",
+        help="Consumer repo path to inspect. Defaults to the current directory.",
+    )
 
     args = parser.parse_args(argv)
     if args.command == "init":
@@ -271,6 +380,9 @@ def main(argv: list[str] | None = None) -> None:
             args.target,
             project_name=args.project_name,
             force=args.force,
+            yes=args.yes,
+            dry_run=args.dry_run,
+            uninstall=args.uninstall,
         )
         print(json.dumps(result.as_dict(), indent=2))
     elif args.command == "serve":
@@ -296,6 +408,11 @@ def main(argv: list[str] | None = None) -> None:
             print(f"Failed to seed Lab Tracker demo data: {exc}", file=sys.stderr)
             raise SystemExit(1) from exc
         print(json.dumps(result.as_dict(), indent=2))
+    elif args.command in {"doctor", "check-idioms"}:
+        payload = _doctor(args.target)
+        print(json.dumps(payload, indent=2))
+        if _doctor_exit_code(payload):
+            raise SystemExit(1)
 
 
 def _alembic_config() -> Config:
@@ -310,12 +427,21 @@ def _write_scaffold_file(
     *,
     force: bool,
     result: InitResult,
+    dry_run: bool = False,
 ) -> None:
     if path.exists() and not force:
         result.skipped.append(path)
         return
-    path.parent.mkdir(parents=True, exist_ok=True)
+    existing = _planned_or_disk_text(path, result)
+    if dry_run:
+        _record_dry_run_change(path, existing, content, result)
+        if path.exists():
+            result.overwritten.append(path)
+        else:
+            result.created.append(path)
+        return
     existed = path.exists()
+    path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(content, encoding="utf-8")
     if existed:
         result.overwritten.append(path)
@@ -323,29 +449,262 @@ def _write_scaffold_file(
         result.created.append(path)
 
 
-def _write_managed_claude_block(path: Path, *, result: InitResult) -> None:
-    block = managed_claude_block()
-    if path.exists():
-        existing = path.read_text(encoding="utf-8")
-        content = _upsert_managed_block(existing, block)
+def _write_managed_claude_block(
+    path: Path,
+    *,
+    result: InitResult,
+    dry_run: bool = False,
+) -> None:
+    _write_managed_block(
+        path,
+        managed_claude_block(),
+        begin_marker=CLAUDE_BLOCK_BEGIN,
+        end_marker=CLAUDE_BLOCK_END,
+        result=result,
+        dry_run=dry_run,
+    )
+
+
+def _write_managed_block(
+    path: Path,
+    block: str,
+    *,
+    begin_marker: str,
+    end_marker: str,
+    result: InitResult,
+    dry_run: bool = False,
+) -> None:
+    if path.exists() or path in result._preview_contents:
+        existing = _planned_or_disk_text(path, result)
+        content = _upsert_managed_block(
+            existing,
+            block,
+            begin_marker=begin_marker,
+            end_marker=end_marker,
+        )
         if content == existing:
             result.skipped.append(path)
             return
+        if dry_run:
+            _record_dry_run_change(path, existing, content, result)
+            result.overwritten.append(path)
+            return
+        path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(content, encoding="utf-8")
         result.overwritten.append(path)
         return
+    if dry_run:
+        _record_dry_run_change(path, "", block, result)
+        result.created.append(path)
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(block, encoding="utf-8")
     result.created.append(path)
 
 
-def _upsert_managed_block(existing: str, block: str) -> str:
-    if CLAUDE_BLOCK_BEGIN in existing and CLAUDE_BLOCK_END in existing:
-        prefix, rest = existing.split(CLAUDE_BLOCK_BEGIN, 1)
-        _old_block, suffix = rest.split(CLAUDE_BLOCK_END, 1)
-        return f"{prefix.rstrip()}\n\n{block}{suffix.lstrip()}"
+def _upsert_managed_block(
+    existing: str,
+    block: str,
+    *,
+    begin_marker: str = CLAUDE_BLOCK_BEGIN,
+    end_marker: str = CLAUDE_BLOCK_END,
+) -> str:
+    prefix, suffix, removed = _managed_block_parts(existing, begin_marker, end_marker)
+    if removed:
+        return _join_surrounding_block(prefix, block, suffix)
     if existing.strip():
         return f"{existing.rstrip()}\n\n{block}"
     return block
+
+
+def _strip_managed_block(
+    path: Path,
+    *,
+    begin_marker: str,
+    end_marker: str,
+    result: InitResult,
+    dry_run: bool = False,
+) -> None:
+    if not path.exists() and path not in result._preview_contents:
+        result.skipped.append(path)
+        return
+    existing = _planned_or_disk_text(path, result)
+    prefix, suffix, removed = _managed_block_parts(existing, begin_marker, end_marker)
+    if not removed:
+        result.skipped.append(path)
+        return
+    content = _join_surrounding_text(prefix, suffix)
+    if path not in result.stripped:
+        result.stripped.append(path)
+    if dry_run:
+        _record_dry_run_change(path, existing, content, result)
+        return
+    path.write_text(content, encoding="utf-8")
+    result.overwritten.append(path)
+
+
+def _managed_block_parts(
+    existing: str,
+    begin_marker: str,
+    end_marker: str,
+) -> tuple[str, str, bool]:
+    has_begin = begin_marker in existing
+    has_end = end_marker in existing
+    if has_begin and has_end:
+        prefix, rest = existing.split(begin_marker, 1)
+        _old_block, suffix = rest.split(end_marker, 1)
+        return prefix, _drop_trailing_version_line(suffix), True
+    if has_begin:
+        prefix, _rest = existing.split(begin_marker, 1)
+        return prefix, "", True
+    if has_end:
+        _old_block, suffix = existing.split(end_marker, 1)
+        return "", _drop_trailing_version_line(suffix), True
+    return existing, "", False
+
+
+def _join_surrounding_block(prefix: str, block: str, suffix: str) -> str:
+    if prefix.strip():
+        return f"{prefix.rstrip()}\n\n{block}{suffix.lstrip()}"
+    return f"{block}{suffix.lstrip()}"
+
+
+def _join_surrounding_text(prefix: str, suffix: str) -> str:
+    if prefix.strip() and suffix.strip():
+        return f"{prefix.rstrip()}\n\n{suffix.lstrip()}"
+    if prefix.strip():
+        return prefix.rstrip() + "\n"
+    return suffix.lstrip()
+
+
+def _drop_trailing_version_line(suffix: str) -> str:
+    stripped = suffix.lstrip()
+    if stripped.startswith("<!-- lab-tracker-code-conventions"):
+        _version_line, separator, rest = stripped.partition("\n")
+        return rest if separator else ""
+    return suffix
+
+
+def _planned_or_disk_text(path: Path, result: InitResult) -> str:
+    if path in result._preview_contents:
+        return result._preview_contents[path]
+    if path.exists():
+        return path.read_text(encoding="utf-8")
+    return ""
+
+
+def _record_dry_run_change(
+    path: Path,
+    existing: str,
+    content: str,
+    result: InitResult,
+) -> None:
+    result._preview_contents[path] = content
+    result.diffs[path] = _text_diff(path, existing, content)
+
+
+def _text_diff(path: Path, existing: str, content: str) -> str:
+    return "\n".join(
+        difflib.unified_diff(
+            existing.splitlines(),
+            content.splitlines(),
+            fromfile=f"{path} (current)",
+            tofile=f"{path} (proposed)",
+            lineterm="",
+        )
+    )
+
+
+def _extract_managed_body(
+    content: str,
+    *,
+    begin_marker: str,
+    end_marker: str,
+) -> str | None:
+    if begin_marker not in content or end_marker not in content:
+        return None
+    _prefix, rest = content.split(begin_marker, 1)
+    body, _suffix = rest.split(end_marker, 1)
+    return body.strip() + "\n"
+
+
+def _extract_version_line(
+    content: str,
+    *,
+    end_marker: str,
+) -> str:
+    if end_marker not in content:
+        return ""
+    _prefix, suffix = content.split(end_marker, 1)
+    stripped = suffix.lstrip()
+    if not stripped.startswith("<!-- lab-tracker-code-conventions"):
+        return ""
+    return stripped.splitlines()[0]
+
+
+def _doctor(target: str | Path = ".") -> dict[str, object]:
+    root = Path(target).expanduser().resolve()
+    body = code_facing_idioms()
+    version_line = code_conventions_version_line(body)
+    checks = [
+        (
+            "CLAUDE.md",
+            root / "CLAUDE.md",
+            CODE_CONVENTIONS_BLOCK_BEGIN,
+            CODE_CONVENTIONS_BLOCK_END,
+        ),
+        (
+            "AGENTS.md",
+            root / "AGENTS.md",
+            AGENTS_CODE_CONVENTIONS_BLOCK_BEGIN,
+            AGENTS_CODE_CONVENTIONS_BLOCK_END,
+        ),
+        (
+            ".cursor/rules/lab-tracker.mdc",
+            root / ".cursor" / "rules" / "lab-tracker.mdc",
+            CODE_CONVENTIONS_BLOCK_BEGIN,
+            CODE_CONVENTIONS_BLOCK_END,
+        ),
+    ]
+    targets: list[dict[str, object]] = []
+    for name, path, begin_marker, end_marker in checks:
+        content = path.read_text(encoding="utf-8") if path.exists() else ""
+        found_body = _extract_managed_body(
+            content,
+            begin_marker=begin_marker,
+            end_marker=end_marker,
+        )
+        found_version = _extract_version_line(content, end_marker=end_marker)
+        present = found_body is not None
+        body_in_sync = found_body == body
+        version_in_sync = found_version == version_line
+        targets.append(
+            {
+                "name": name,
+                "path": str(path),
+                "present": present,
+                "in_sync": present and body_in_sync and version_in_sync,
+                "body_in_sync": body_in_sync,
+                "version_in_sync": version_in_sync,
+                "version_line": found_version,
+            }
+        )
+    return {
+        "command": "doctor",
+        "package_version": package_version(),
+        "expected_version_line": version_line,
+        "code_facing_idioms": body,
+        "targets": targets,
+    }
+
+
+def _doctor_exit_code(payload: object) -> int:
+    if not isinstance(payload, dict) or payload.get("command") != "doctor":
+        return 0
+    targets = payload.get("targets")
+    if not isinstance(targets, list):
+        return 1
+    return 0 if all(isinstance(target, dict) and target.get("in_sync") for target in targets) else 1
 
 
 def _mcp_json() -> str:
@@ -412,6 +771,10 @@ def _agents_fragment() -> str:
           findings notes that should stay synced with code, plots, and tables.
         - Use `python -m scripts.lt quick "..." --project <PROJECT_ID>` for scratch
           observations that do not need their own committed script.
+
+        Managed code-facing conventions live in package text and can be rendered
+        into CLAUDE.md, AGENTS.md, and .cursor/rules/lab-tracker.mdc during
+        consenting init runs.
 
         Notes are idempotent by the first non-blank line of the note body when the
         existing body is identical. Treat that first line as a stable marker; change
