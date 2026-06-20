@@ -676,8 +676,9 @@ def _doctor(target: str | Path = ".") -> dict[str, object]:
         )
         found_version = _extract_version_line(content, end_marker=end_marker)
         present = found_body is not None
-        body_in_sync = found_body == body
-        version_in_sync = found_version == version_line
+        body_in_sync = present and found_body == body
+        version_in_sync = present and found_version == version_line
+        drifted = present and not (body_in_sync and version_in_sync)
         targets.append(
             {
                 "name": name,
@@ -686,6 +687,7 @@ def _doctor(target: str | Path = ".") -> dict[str, object]:
                 "in_sync": present and body_in_sync and version_in_sync,
                 "body_in_sync": body_in_sync,
                 "version_in_sync": version_in_sync,
+                "drifted": drifted,
                 "version_line": found_version,
             }
         )
@@ -704,7 +706,10 @@ def _doctor_exit_code(payload: object) -> int:
     targets = payload.get("targets")
     if not isinstance(targets, list):
         return 1
-    return 0 if all(isinstance(target, dict) and target.get("in_sync") for target in targets) else 1
+    all_targets_clean = all(
+        isinstance(target, dict) and not target.get("drifted") for target in targets
+    )
+    return 0 if all_targets_clean else 1
 
 
 def _mcp_json() -> str:

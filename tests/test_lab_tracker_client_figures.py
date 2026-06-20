@@ -7,6 +7,7 @@ from pathlib import Path
 import httpx
 import pytest
 
+import lab_tracker_client.figure as figure_module
 from lab_tracker_client import LabTracker, capture_figures, run_context, savefig
 from lab_tracker_client.figure import (
     FIGURE_CAPTURE_TIMEOUT_SECONDS,
@@ -102,6 +103,40 @@ def test_savefig_forwards_kwargs_and_uploads_under_cap(tmp_path: Path) -> None:
     assert len(seen) == 1
 
 
+def test_savefig_clamps_supplied_client_timeout_for_capture_calls(tmp_path: Path) -> None:
+    figure_path = tmp_path / "plot.png"
+    seen_timeout: dict[str, float] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen_timeout.update(request.extensions["timeout"])
+        metadata = json.loads(_multipart_field(request.content, "metadata"))
+        return _json_response(
+            201,
+            {
+                "data": {
+                    "note_id": "note-timeout",
+                    "project_id": "project-1",
+                    "status": "staged",
+                    "metadata": metadata,
+                }
+            },
+        )
+
+    with LabTracker(
+        base_url="http://testserver",
+        default_project_id="project-1",
+        timeout_seconds=15,
+        transport=httpx.MockTransport(handler),
+    ) as lt:
+        result = savefig(FakeFigure(), figure_path, client=lt)
+        restored_timeout = lt._client.timeout
+
+    assert result.action == "imported"
+    assert seen_timeout
+    assert all(value <= FIGURE_CAPTURE_TIMEOUT_SECONDS for value in seen_timeout.values())
+    assert restored_timeout.connect == 15
+
+
 def test_savefig_is_fail_soft_and_circuit_breaker_short_circuits(tmp_path: Path) -> None:
     error_path = tmp_path / "error.png"
 
@@ -155,6 +190,37 @@ def test_savefig_is_fail_soft_and_circuit_breaker_short_circuits(tmp_path: Path)
     assert attempts == 1
 
 
+def test_circuit_open_skips_env_client_construction(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def connect_handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("offline", request=request)
+
+    with LabTracker(
+        base_url="http://testserver",
+        default_project_id="project-1",
+        transport=httpx.MockTransport(connect_handler),
+    ) as lt:
+        failed = savefig(FakeFigure(b"one"), tmp_path / "one.png", client=lt)
+
+    assert failed.action == "failed"
+    monkeypatch.setenv("LAB_TRACKER_PROJECT_ID", "project-1")
+    monkeypatch.setenv("LAB_TRACKER_BASE_URL", "http://testserver")
+    monkeypatch.setenv("LAB_TRACKER_ACCESS_TOKEN", "token")
+
+    class ForbiddenAutoClient:
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            raise AssertionError("circuit-open capture should not build an env client")
+
+    monkeypatch.setattr(figure_module, "LabTracker", ForbiddenAutoClient)
+
+    skipped = savefig(FakeFigure(b"two"), tmp_path / "two.png")
+
+    assert skipped.action == "skipped"
+    assert skipped.reason == "circuit_open"
+
+
 def test_unconfigured_savefig_warns_once_without_network(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
@@ -181,6 +247,8 @@ def test_changed_coalesced_capture_patches_metadata_preserving_first_evidence_ke
         "evidence_content_hash": "oldhash",
         "evidence_adapter": "lab-tracker-client-figure",
         "evidence_title": "plot.png",
+        "figure_no_preview": True,
+        "figure_preview_size_bytes": 321,
         "kept": "yes",
     }
     patched_metadata: dict[str, object] = {}
@@ -227,8 +295,49 @@ def test_changed_coalesced_capture_patches_metadata_preserving_first_evidence_ke
     assert patched_metadata["evidence_content_hash"] == "oldhash"
     assert patched_metadata["figure_content_hash_current"] == new_hash
     assert patched_metadata["content_hash_current"] == new_hash
+    assert patched_metadata["figure_no_preview"] is True
+    assert patched_metadata["figure_preview_size_bytes"] == 321
     assert patched_metadata["figure_review_bytes_stale"] is True
     assert patched_metadata["kept"] == "yes"
+
+
+def test_coalesced_metadata_patch_transport_failure_opens_circuit(tmp_path: Path) -> None:
+    figure_path = tmp_path / "plot.png"
+    posts = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal posts
+        if request.method == "POST" and request.url.path == "/notes/upload-file":
+            posts += 1
+            return _json_response(
+                200,
+                {
+                    "data": {
+                        "note_id": "note-existing",
+                        "project_id": "project-1",
+                        "status": "staged",
+                        "metadata": {"evidence_content_hash": "oldhash"},
+                    }
+                },
+            )
+        if request.method == "PATCH" and request.url.path == "/notes/note-existing":
+            raise httpx.ConnectError("offline", request=request)
+        return _json_response(404, {"error": {"message": "not found"}})
+
+    with LabTracker(
+        base_url="http://testserver",
+        default_project_id="project-1",
+        transport=httpx.MockTransport(handler),
+    ) as lt:
+        first = savefig(FakeFigure(b"one"), figure_path, client=lt)
+        second = savefig(FakeFigure(b"two"), tmp_path / "second.png", client=lt)
+
+    assert first.action == "coalesced"
+    assert first.reason == "metadata_patch_failed"
+    assert first.stale_review_bytes is True
+    assert second.action == "skipped"
+    assert second.reason == "circuit_open"
+    assert posts == 1
 
 
 def test_over_cap_without_renderer_uploads_pointer_only(
@@ -267,6 +376,44 @@ def test_over_cap_without_renderer_uploads_pointer_only(
     assert b"too-large-for-preview" not in bodies[0]
     assert b"Lab Tracker figure pointer" in bodies[0]
     assert "bounded preview" in capsys.readouterr().err
+
+
+def test_preview_cap_is_clamped_to_server_upload_limit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(figure_module, "FIGURE_UPLOAD_MAX_BYTES", 300)
+    figure_path = tmp_path / "big.png"
+    figure_path.write_bytes(b"x" * 400)
+    bodies: list[bytes] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        bodies.append(request.content)
+        metadata = json.loads(_multipart_field(request.content, "metadata"))
+        assert metadata["figure_no_preview"] is True
+        return _json_response(
+            201,
+            {
+                "data": {
+                    "note_id": "note-pointer",
+                    "project_id": "project-1",
+                    "status": "staged",
+                    "metadata": metadata,
+                }
+            },
+        )
+
+    with LabTracker(
+        base_url="http://testserver",
+        default_project_id="project-1",
+        transport=httpx.MockTransport(handler),
+    ) as lt:
+        result = savefig(None, figure_path, client=lt, preview_max_bytes=10_000)
+
+    assert result.action == "imported"
+    assert result.no_preview is True
+    assert b"x" * 100 not in bodies[0]
+    assert b"Lab Tracker figure pointer" in bodies[0]
 
 
 def test_run_context_adds_scalar_metadata_and_expires(tmp_path: Path) -> None:

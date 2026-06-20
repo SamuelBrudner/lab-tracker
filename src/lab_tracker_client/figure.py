@@ -9,7 +9,7 @@ import subprocess
 import sys
 import time
 from collections.abc import Iterable, Mapping
-from contextlib import suppress
+from contextlib import contextmanager, suppress
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -31,10 +31,17 @@ from lab_tracker_client.client import (
 
 FIGURE_CAPTURE_TIMEOUT_SECONDS = 2.5
 FIGURE_PREVIEW_MAX_BYTES = 2_000_000
+FIGURE_UPLOAD_MAX_BYTES = 100 * 1024 * 1024
 _DEFAULT_IMAGE_PATTERNS = ("*.png", "*.jpg", "*.jpeg", "*.svg", "*.pdf", "*.tif", "*.tiff")
 _RUN_CONTEXT: ContextVar[RunContext | None] = ContextVar("lab_tracker_run_context", default=None)
 _CIRCUIT_OPEN = False
 _WARNED: set[str] = set()
+_FIRST_CAPTURE_REVIEW_METADATA_KEYS = frozenset(
+    {
+        "figure_no_preview",
+        "figure_preview_size_bytes",
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -88,7 +95,7 @@ class RunContext:
     extra: dict[str, NoteMetadataScalar] = field(default_factory=dict)
 
     def expired(self) -> bool:
-        return time.monotonic() > self.expires_at
+        return time.monotonic() >= self.expires_at
 
     def to_metadata(self) -> dict[str, NoteMetadataScalar]:
         metadata: dict[str, NoteMetadataScalar] = {
@@ -300,10 +307,6 @@ def _capture_saved_figure(
             logical_id=logical_id,
             content_hash=content_hash if version_every_change else None,
         )
-        resolved_client, resolved_project_id, close_client = _resolve_capture_client(
-            client=client,
-            project_id=project_id,
-        )
         base_metadata = _base_figure_metadata(
             path=resolved_path,
             source_uri=source_uri,
@@ -330,6 +333,10 @@ def _capture_saved_figure(
             return FigureCaptureResult(
                 **{**result_defaults, "action": "skipped", "reason": "circuit_open"}
             )
+        resolved_client, resolved_project_id, close_client = _resolve_capture_client(
+            client=client,
+            project_id=project_id,
+        )
         if resolved_client is None or resolved_project_id is None:
             _warn_once(
                 "unconfigured",
@@ -340,51 +347,52 @@ def _capture_saved_figure(
                 **{**result_defaults, "action": "skipped", "reason": "unconfigured"}
             )
         try:
-            preview = _preview_payload(
-                fig=fig,
-                path=resolved_path,
-                full_payload=full_payload,
-                max_bytes=preview_max_bytes,
-                source_uri=source_uri,
-                content_hash=content_hash,
-            )
-            upload_metadata = dict(base_metadata)
-            upload_metadata.update(
-                {
-                    "figure_no_preview": preview.no_preview,
-                    "figure_preview_size_bytes": preview.size_bytes,
-                    "figure_review_bytes_stale": False,
-                }
-            )
-            note, status_code = resolved_client._upload_note_file_payload_with_status(
-                project_id=resolved_project_id,
-                path=preview.path,
-                payload=preview.payload,
-                metadata=upload_metadata,
-                status="staged",
-                content_type=preview.content_type,
-                client_capture_id=client_capture_id,
-            )
-            if status_code == 200:
-                return _coalesced_result(
-                    client=resolved_client,
-                    note=note,
-                    result_defaults=result_defaults,
-                    current_metadata=upload_metadata,
-                    content_hash=content_hash,
+            with _capture_timeout(resolved_client):
+                preview = _preview_payload(
+                    fig=fig,
+                    path=resolved_path,
+                    full_payload=full_payload,
+                    max_bytes=preview_max_bytes,
                     source_uri=source_uri,
-                    source_external_id=client_capture_id,
-                    no_preview=preview.no_preview,
+                    content_hash=content_hash,
                 )
-            return FigureCaptureResult(
-                **{
-                    **result_defaults,
-                    "action": "imported",
-                    "metadata": upload_metadata,
-                    "note": note,
-                    "no_preview": preview.no_preview,
-                }
-            )
+                upload_metadata = dict(base_metadata)
+                upload_metadata.update(
+                    {
+                        "figure_no_preview": preview.no_preview,
+                        "figure_preview_size_bytes": preview.size_bytes,
+                        "figure_review_bytes_stale": False,
+                    }
+                )
+                note, status_code = resolved_client._upload_note_file_payload_with_status(
+                    project_id=resolved_project_id,
+                    path=preview.path,
+                    payload=preview.payload,
+                    metadata=upload_metadata,
+                    status="staged",
+                    content_type=preview.content_type,
+                    client_capture_id=client_capture_id,
+                )
+                if status_code == 200:
+                    return _coalesced_result(
+                        client=resolved_client,
+                        note=note,
+                        result_defaults=result_defaults,
+                        current_metadata=upload_metadata,
+                        content_hash=content_hash,
+                        source_uri=source_uri,
+                        source_external_id=client_capture_id,
+                        no_preview=preview.no_preview,
+                    )
+                return FigureCaptureResult(
+                    **{
+                        **result_defaults,
+                        "action": "imported",
+                        "metadata": upload_metadata,
+                        "note": note,
+                        "no_preview": preview.no_preview,
+                    }
+                )
         finally:
             if close_client:
                 resolved_client.close()
@@ -438,6 +446,8 @@ def _coalesced_result(
     try:
         note = client._patch_note_metadata(str(note.id), merged_metadata, status="staged")
     except Exception as exc:
+        if _is_transport_failure(exc):
+            _trip_circuit()
         return FigureCaptureResult(
             **{
                 **result_defaults,
@@ -515,6 +525,8 @@ def _merge_current_metadata(
     for key, value in current_metadata.items():
         if key.startswith("evidence_") and key in merged:
             continue
+        if key in _FIRST_CAPTURE_REVIEW_METADATA_KEYS and key in merged:
+            continue
         merged[key] = value
     merged.update(
         {
@@ -537,7 +549,7 @@ def _preview_payload(
     source_uri: str,
     content_hash: str,
 ) -> _PreviewPayload:
-    resolved_max_bytes = max(1, int(max_bytes))
+    resolved_max_bytes = max(1, min(int(max_bytes), FIGURE_UPLOAD_MAX_BYTES))
     if len(full_payload) <= resolved_max_bytes:
         return _PreviewPayload(
             payload=full_payload,
@@ -609,6 +621,39 @@ def _render_downscaled_png(fig: Any, *, max_bytes: int) -> bytes | None:
     except Exception:
         return None
     return None
+
+
+@contextmanager
+def _capture_timeout(client: LabTracker) -> Iterable[None]:
+    http_client = getattr(client, "_client", None)
+    if http_client is None or not hasattr(http_client, "timeout"):
+        yield
+        return
+    original_timeout = http_client.timeout
+    http_client.timeout = _clamped_timeout(original_timeout)
+    try:
+        yield
+    finally:
+        http_client.timeout = original_timeout
+
+
+def _clamped_timeout(timeout: Any) -> httpx.Timeout:
+    with suppress(AttributeError):
+        return httpx.Timeout(
+            connect=_clamped_timeout_value(timeout.connect),
+            read=_clamped_timeout_value(timeout.read),
+            write=_clamped_timeout_value(timeout.write),
+            pool=_clamped_timeout_value(timeout.pool),
+        )
+    return httpx.Timeout(_clamped_timeout_value(timeout))
+
+
+def _clamped_timeout_value(value: Any) -> float:
+    if value is None:
+        return FIGURE_CAPTURE_TIMEOUT_SECONDS
+    with suppress(TypeError, ValueError):
+        return min(float(value), FIGURE_CAPTURE_TIMEOUT_SECONDS)
+    return FIGURE_CAPTURE_TIMEOUT_SECONDS
 
 
 def _resolve_capture_client(

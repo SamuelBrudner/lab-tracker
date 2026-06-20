@@ -354,6 +354,6 @@ def _payload_exit_code(payload: Any) -> int:
         targets = payload.get("targets")
         if not isinstance(targets, list):
             return 1
-        if not all(isinstance(target, dict) and target.get("in_sync") for target in targets):
+        if not all(isinstance(target, dict) and not target.get("drifted") for target in targets):
             return 1
     return 0
