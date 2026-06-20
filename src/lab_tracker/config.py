@@ -35,6 +35,8 @@ class Settings(BaseSettings):
     bootstrap_admin_token_disclosure: Literal["local", "first_run", "never"] = "local"
     auth_enabled: bool | None = None
     max_upload_bytes: int = 100 * 1024 * 1024
+    scheduler_enabled: bool = False
+    scheduler_interval_seconds: int = 300
     graph_draft_provider: str = "openai"
     public_base_url: str = ""
     openai_api_key: str = ""
@@ -94,6 +96,8 @@ class Settings(BaseSettings):
             raise ValueError(
                 "LAB_TRACKER_AUTH_RATE_LIMIT_WINDOW_SECONDS must be at least 1."
             )
+        if self.scheduler_interval_seconds < 1:
+            raise ValueError("LAB_TRACKER_SCHEDULER_INTERVAL_SECONDS must be at least 1.")
         return self
 
     model_config = SettingsConfigDict(

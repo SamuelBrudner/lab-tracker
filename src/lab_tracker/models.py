@@ -488,6 +488,22 @@ class GraphChangeSet(_DomainModel):
     def source_note_count(self) -> int:
         return len(self.source_note_ids or [self.source_note_id])
 
+    @computed_field
+    @property
+    def meeting_note_count(self) -> int:
+        """Number of meeting-tagged notes in this draft's batch context.
+
+        Derived from the stored context packet's summary so review surfaces can
+        nudge ("a meeting is waiting to be fleshed out") without re-reading the
+        source notes. Zero for note-scoped drafts and batches without meetings.
+        """
+        summary = self.context_packet.get("context_summary") if self.context_packet else None
+        counts = summary.get("counts") if isinstance(summary, dict) else None
+        value = counts.get("meeting_notes") if isinstance(counts, dict) else None
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            return 0
+        return int(value)
+
 
 class GraphDraftBatchSettings(_DomainModel):
     settings_id: UUID

@@ -25,7 +25,7 @@ def create_app() -> FastAPI:
     runtime = build_app_runtime(settings)
     app = FastAPI(
         title=settings.app_name,
-        lifespan=make_lifespan(runtime.engine),
+        lifespan=make_lifespan(runtime),
     )
     configure_app_state(app, runtime)
     configure_auth_middleware(app)

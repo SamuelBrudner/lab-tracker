@@ -39,6 +39,13 @@ if TYPE_CHECKING:
 WRITE_ROLES = {Role.ADMIN, Role.EDITOR}
 StatusT = TypeVar("StatusT", bound=Enum)
 
+# Free-form note metadata convention for marking a captured note as a meeting.
+# Stored under the existing notes.metadata JSON column, so this needs no schema
+# change. Centralized here so the batch context builder, the draft prompt, and
+# the review nudge all agree on the exact key/value.
+NOTE_TYPE_METADATA_KEY = "note_type"
+MEETING_NOTE_TYPE = "meeting"
+
 
 def actor_user_id(actor: AuthContext | None) -> str | None:
     if actor is None:
@@ -104,6 +111,16 @@ def normalize_note_metadata(metadata: dict[str, NoteMetadataScalar] | None) -> d
         cleaned_value = value.strip() if isinstance(value, str) else str(value)
         cleaned[cleaned_key] = cleaned_value
     return cleaned
+
+
+def is_meeting_note(note: Note) -> bool:
+    """Return True when a note is tagged as a meeting via free-form metadata.
+
+    The marker is ``metadata[NOTE_TYPE_METADATA_KEY] == MEETING_NOTE_TYPE``.
+    Note metadata values are stringified on write (see normalize_note_metadata),
+    so the comparison is against the canonical string.
+    """
+    return note.metadata.get(NOTE_TYPE_METADATA_KEY) == MEETING_NOTE_TYPE
 
 
 def _normalized_query(query: str) -> str:

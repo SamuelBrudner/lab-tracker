@@ -50,9 +50,13 @@ function PendingBatchBanner({ enabled = true, token, navigate }) {
     return null;
   }
 
-  const label =
-    batches.length === 1 ? "1 graph-draft batch ready" : `${batches.length} graph-draft batches ready`;
-  const firstBatch = batches[0];
+  const meetingBatch = batches.find((batch) => (batch?.meeting_note_count || 0) > 0);
+  const label = meetingBatch
+    ? "A meeting is waiting to be fleshed out — review its scientific content"
+    : batches.length === 1
+      ? "1 graph-draft batch ready"
+      : `${batches.length} graph-draft batches ready`;
+  const firstBatch = meetingBatch || batches[0];
   return (
     <div className="flash ok batch-banner" role="status">
       <span>{label}</span>

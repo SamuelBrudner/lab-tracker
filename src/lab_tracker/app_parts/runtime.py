@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import logging
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
@@ -105,13 +107,24 @@ def build_app_runtime(settings: Settings) -> AppRuntime:
     )
 
 
-def make_lifespan(engine: Engine):
+def make_lifespan(runtime: AppRuntime):
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+        scheduler_task: asyncio.Task[None] | None = None
+        if runtime.settings.scheduler_enabled:
+            # Imported lazily to avoid a runtime import cycle (scheduler only
+            # type-imports AppRuntime).
+            from lab_tracker.app_parts.scheduler import run_due_batch_scheduler
+
+            scheduler_task = asyncio.create_task(run_due_batch_scheduler(runtime))
         try:
             yield
         finally:
-            engine.dispose()
+            if scheduler_task is not None:
+                scheduler_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await scheduler_task
+            runtime.engine.dispose()
 
     return lifespan
 

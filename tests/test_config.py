@@ -144,3 +144,31 @@ def test_non_local_environment_rejects_disabled_auth(monkeypatch):
     monkeypatch.setenv("LAB_TRACKER_AUTH_SECRET_KEY", "custom-secret")
     with pytest.raises(ValidationError, match="LAB_TRACKER_AUTH_ENABLED=false"):
         _settings_from_environment()
+
+
+def test_scheduler_defaults_off(monkeypatch):
+    _clear_auth_env(monkeypatch)
+    monkeypatch.delenv("LAB_TRACKER_SCHEDULER_ENABLED", raising=False)
+    monkeypatch.delenv("LAB_TRACKER_SCHEDULER_INTERVAL_SECONDS", raising=False)
+    monkeypatch.setenv("LAB_TRACKER_ENVIRONMENT", "local")
+    settings = _settings_from_environment()
+    assert settings.scheduler_enabled is False
+    assert settings.scheduler_interval_seconds == 300
+
+
+def test_scheduler_env_overrides(monkeypatch):
+    _clear_auth_env(monkeypatch)
+    monkeypatch.setenv("LAB_TRACKER_ENVIRONMENT", "local")
+    monkeypatch.setenv("LAB_TRACKER_SCHEDULER_ENABLED", "true")
+    monkeypatch.setenv("LAB_TRACKER_SCHEDULER_INTERVAL_SECONDS", "30")
+    settings = _settings_from_environment()
+    assert settings.scheduler_enabled is True
+    assert settings.scheduler_interval_seconds == 30
+
+
+def test_scheduler_interval_must_be_positive(monkeypatch):
+    _clear_auth_env(monkeypatch)
+    monkeypatch.setenv("LAB_TRACKER_ENVIRONMENT", "local")
+    monkeypatch.setenv("LAB_TRACKER_SCHEDULER_INTERVAL_SECONDS", "0")
+    with pytest.raises(ValidationError, match="SCHEDULER_INTERVAL_SECONDS must be at least 1"):
+        _settings_from_environment()

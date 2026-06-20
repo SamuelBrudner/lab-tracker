@@ -5,6 +5,7 @@ from types import SimpleNamespace
 from typing import Any
 from uuid import UUID, uuid4
 
+from lab_tracker.graph_drafting import BATCH_PROMPT_VERSION, _batch_instructions
 from lab_tracker.models import (
     EntityRef,
     EntityType,
@@ -17,8 +18,14 @@ from lab_tracker.models import (
     Project,
 )
 from lab_tracker.services.graph_draft_applier import GraphPatchApplier
-from lab_tracker.services.graph_draft_context import GraphContextBuilder
+from lab_tracker.services.graph_draft_context import (
+    GraphContextBuilder,
+    _compact_note,
+    _graph_batch_context_summary,
+    _source_artifact_packet,
+)
 from lab_tracker.services.graph_draft_validation import GraphPatchValidator
+from lab_tracker.services.shared import MEETING_NOTE_TYPE, NOTE_TYPE_METADATA_KEY, is_meeting_note
 
 
 def _change_set(project_id: UUID) -> GraphChangeSet:
@@ -227,3 +234,93 @@ def test_graph_patch_applier_resolves_client_refs_before_create_service_call() -
         EntityRef(entity_type=EntityType.QUESTION, entity_id=question_id)
     ]
     assert captured["actor"] is None
+
+
+def _meeting_note() -> Note:
+    return Note(
+        note_id=uuid4(),
+        project_id=uuid4(),
+        raw_content="Lab meeting: discussed PV inhibition follow-ups",
+        metadata={NOTE_TYPE_METADATA_KEY: MEETING_NOTE_TYPE},
+    )
+
+
+def _plain_note() -> Note:
+    return Note(
+        note_id=uuid4(),
+        project_id=uuid4(),
+        raw_content="Bench note",
+        metadata={"capture_source": "mobile"},
+    )
+
+
+def test_is_meeting_note_keys_off_metadata_note_type() -> None:
+    assert is_meeting_note(_meeting_note()) is True
+    assert is_meeting_note(_plain_note()) is False
+    # A different note_type value is not a meeting.
+    other = Note(
+        note_id=uuid4(),
+        project_id=uuid4(),
+        raw_content="x",
+        metadata={"note_type": "memo"},
+    )
+    assert is_meeting_note(other) is False
+
+
+def test_compact_note_and_source_artifact_expose_is_meeting() -> None:
+    meeting = _meeting_note()
+    plain = _plain_note()
+    assert _compact_note(meeting)["is_meeting"] is True
+    assert _compact_note(plain)["is_meeting"] is False
+    assert _source_artifact_packet(meeting)["is_meeting"] is True
+    assert _source_artifact_packet(plain)["is_meeting"] is False
+
+
+def test_graph_batch_context_summary_counts_meeting_notes() -> None:
+    packet = {
+        "batch_notes": [
+            {"id": "a", "is_meeting": True},
+            {"id": "b", "is_meeting": False},
+            {"id": "c", "is_meeting": True},
+        ],
+        "source_artifacts": [],
+        "projects": [],
+        "truncated_note_count": 0,
+    }
+    summary = _graph_batch_context_summary(packet)
+    assert summary["counts"]["meeting_notes"] == 2
+    assert summary["counts"]["batch_notes"] == 3
+
+
+def test_graph_change_set_meeting_note_count_reads_context_packet() -> None:
+    with_meetings = GraphChangeSet(
+        change_set_id=uuid4(),
+        project_id=uuid4(),
+        source_note_id=uuid4(),
+        model="fake-gpt",
+        prompt_version="test",
+        context_packet={"context_summary": {"counts": {"meeting_notes": 3}}},
+    )
+    assert with_meetings.meeting_note_count == 3
+
+    # Note-scoped drafts (no batch summary) and malformed packets count as zero.
+    assert _change_set(uuid4()).meeting_note_count == 0
+    malformed = GraphChangeSet(
+        change_set_id=uuid4(),
+        project_id=uuid4(),
+        source_note_id=uuid4(),
+        model="fake-gpt",
+        prompt_version="test",
+        context_packet={"context_summary": {"counts": {"meeting_notes": True}}},
+    )
+    assert malformed.meeting_note_count == 0
+
+
+def test_batch_instructions_flesh_out_meeting_notes_without_version_bump() -> None:
+    instructions = _batch_instructions()
+    assert "meeting" in instructions.lower()
+    assert "flesh out the scientific content" in instructions.lower()
+    # Stays subordinate to the supported-changes guardrail.
+    assert "supported by the source artifacts" in instructions
+    # Provenance version is additive-only; it must not change.
+    assert BATCH_PROMPT_VERSION == "daily-batch-graph-draft-v1"

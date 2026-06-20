@@ -102,6 +102,20 @@ def _set_note_created_at(
         session.close()
 
 
+def _set_note_metadata(client: TestClient, note_id: str, metadata: dict[str, str]) -> None:
+    session = client.app.state.db_session_factory()
+    try:
+        row = session.get(NoteModel, note_id)
+        assert row is not None
+        row.note_metadata = dict(metadata)
+        session.commit()
+    except Exception:
+        session.rollback()
+        raise
+    finally:
+        session.close()
+
+
 def _set_question_timestamps(
     client: TestClient,
     question_id: str,
@@ -545,3 +559,38 @@ def test_batch_context_handles_empty_batch(
     )
     # Sanity-check serializability of the empty packet.
     json.dumps(packet, sort_keys=True, default=str)
+
+
+def test_batch_context_flags_and_counts_meeting_notes(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+):
+    project_id = _create_project(client, admin_auth_headers, "Lab Meetings")
+    meeting_note_id = _quick_capture(
+        client,
+        admin_auth_headers,
+        project_id=project_id,
+        filename="lab-meeting.txt",
+        body=b"PI + trainee: list of follow-up questions",
+        content_type="text/plain",
+    )
+    plain_note_id = _quick_capture(
+        client,
+        admin_auth_headers,
+        project_id=project_id,
+        filename="bench.txt",
+        body=b"bench observation",
+        content_type="text/plain",
+    )
+    _set_note_metadata(client, meeting_note_id, {"note_type": "meeting"})
+
+    batch_notes = _load_notes(client, [meeting_note_id, plain_note_id])
+    with _request_api(client) as api:
+        packet = api.build_batch_graph_context(batch_notes)
+
+    notes_by_id = {note["id"]: note for note in packet["batch_notes"]}
+    assert notes_by_id[meeting_note_id]["is_meeting"] is True
+    assert notes_by_id[plain_note_id]["is_meeting"] is False
+    artifacts_by_id = {a["note_id"]: a for a in packet["source_artifacts"]}
+    assert artifacts_by_id[meeting_note_id]["is_meeting"] is True
+    assert packet["context_summary"]["counts"]["meeting_notes"] == 1
