@@ -1,134 +1,124 @@
-# Scheduling the daily review
+# Make the daily review run on its own
 
-Lab Tracker's "daily review" is the human-gated **graph-draft batch**: it windows
-over your staged notes (including notes tagged as meetings, see below), asks the
-model to propose graph changes — for meeting notes, to *flesh out the scientific
-content* (questions, follow-ups, claims) — and lands them in a change set that a
-human accepts or rejects. Nothing commits automatically.
+Lab Tracker's **daily review** gathers your staged captures (notes, photos, voice
+memos — including notes tagged as meetings) and proposes how they fit your graph,
+in one review queue you accept or reject. It can run **on demand** (the **Run
+now** button on the Batches page) or **on a schedule**.
 
-Lab Tracker does **not** run an in-process scheduler. The app is a plain FastAPI
-server; firing the review on a cadence is the job of an **external scheduled
-trigger** that calls one endpoint:
+Lab Tracker itself does not run a background scheduler — it's a plain web app. To
+fire the review automatically you point a small **external scheduler** at one
+endpoint, `POST /batches/run-due`. This page sets that up in one step.
 
-```
-POST /batches/run-due        # admin-only, no body
-```
+> **The model only ever proposes.** The scheduled job triggers *drafting* — a
+> human still accepts or rejects every proposal before anything is committed.
 
-`run-due` runs every project whose batch settings are **enabled and due**,
-advances each project's `next_run_at`, and is idempotent: a compare-and-set
-(`claim_due`) plus a deterministic `batch_key` mean it is safe to call from more
-than one trigger, and a redundant call simply finds nothing due. So the trigger
-can be dumb and frequent; the *per-project* settings decide when work actually
-happens.
+---
 
-> **Retained-v1 guardrail.** The scheduled job triggers **drafting only**. The
-> resulting change set still requires a human to edit/accept/reject before
-> anything is committed. Do not wire a job that auto-accepts or auto-commits —
-> Lab Tracker does not delegate graph commits to autonomous agents.
+## Quick start (one command)
 
-## 1. Configure per-project cadence (once)
+Suggested configuration: a local Lab Tracker (`http://127.0.0.1:8000`), polled
+every 15 minutes. Each project still fires only at the time *you* set for it.
 
-`run-due` only fires projects whose batch settings are enabled. Set this per
-project, either in the UI (the **Batches** page at `/app/batches`) or via the
-API:
+**Windows** — double-click [`scripts/install-daily-review.cmd`](../scripts/install-daily-review.cmd),
+or run:
 
-```
-PATCH /projects/{project_id}/graph-draft-batch-settings
-{
-  "enabled": true,
-  "cadence_minutes": 1440,          // daily
-  "run_at_local_time": "06:00",
-  "timezone_name": "America/New_York"
-}
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/install-daily-review.ps1
 ```
 
-`run_at_local_time` + `timezone_name` decide *when each day* a project becomes
-due. Because of that, the external trigger should **poll on a short interval**
-(every 15–30 minutes is plenty) rather than once a day — each project fires near
-its configured local time, and off-time polls find nothing due and cost nothing.
+**macOS / Linux**:
 
-## 2. Tag a note as a meeting (so the draft fleshes out its science)
-
-A note becomes a "meeting" by carrying the free-form metadata key
-`note_type=meeting`. Any draft over that note gets a meeting-framed instruction
-and the **Batches** banner shows *"A meeting is waiting to be fleshed out."*
-(There is not yet a one-click "mark as meeting" control in the capture UI —
-tracked as a follow-up — so for now set it on the note's `metadata`.)
-
-## 3. Pick a scheduler
-
-Reachability decides which fits:
-
-| Where Lab Tracker runs | Use |
-| --- | --- |
-| Local dev (`127.0.0.1:8000`) | A **local** scheduler: OS cron / Task Scheduler, or a **local** Claude Code scheduled task / Codex automation. Cloud routines cannot reach localhost. |
-| Deployed / reachable URL | Any of the below, including **cloud** Claude routines and Codex automations, pointed at the public base URL with an admin token. |
-
-### Auth
-
-- **Auth disabled** (local default, `LAB_TRACKER_ENVIRONMENT=local` with auth
-  off): the local principal is admin — no token needed.
-- **Auth enabled** (deployed): obtain an admin bearer token, then call `run-due`
-  with it. Access tokens are short-lived (`LAB_TRACKER_AUTH_TOKEN_TTL_MINUTES`,
-  default 12h), so the job should log in each run rather than cache a token.
-
-### Variant A — cron + curl (portable baseline)
-
-```bash
-#!/usr/bin/env bash
-set -euo pipefail
-BASE="${LAB_TRACKER_BASE_URL:-http://127.0.0.1:8000}"
-
-# Auth-enabled deployments: mint a fresh admin token each run.
-if [ -n "${LAB_TRACKER_ADMIN_USER:-}" ]; then
-  TOKEN=$(curl -fsS -X POST "$BASE/auth/login" \
-    -H 'Content-Type: application/json' \
-    -d "{\"username\":\"$LAB_TRACKER_ADMIN_USER\",\"password\":\"$LAB_TRACKER_ADMIN_PASS\"}" \
-    | jq -r '.data.access_token')
-  AUTH=(-H "Authorization: Bearer $TOKEN")
-else
-  AUTH=()   # local, auth disabled
-fi
-
-curl -fsS -X POST "$BASE/batches/run-due" "${AUTH[@]}"
+```sh
+scripts/install-daily-review.sh
 ```
+
+That registers a scheduled job (a Windows Scheduled Task, or a `cron` entry) that
+nudges the review every 15 minutes. Re-running it just updates the existing job.
+
+### One thing to turn on first
+
+The job does nothing until at least one project has the daily review **enabled**.
+Open the **Batches** page at `/app/batches`, pick a project, and set its cadence
+(default: daily at 06:00 in your timezone). That per-project setting decides when
+each project actually runs; the scheduled job is just a frequent, cheap poll.
+
+### Try it without waiting
+
+- **Run now** on the Batches page, or
+- run the trigger once yourself:
+  `scripts/daily-review-run-due.sh` (or `scripts/daily-review-run-due.ps1`).
+
+Then review the queue at `/app/batches`.
+
+### Remove it
+
+- **Windows:** `Unregister-ScheduledTask -TaskName LabTrackerDailyReview -Confirm:$false`
+- **macOS / Linux:** `crontab -l | grep -v '# lab-tracker-daily-review' | crontab -`
+
+---
+
+## Running against a server (with login)
+
+The Quick Start assumes a local instance with authentication disabled, so no
+credentials are needed. Two things change when Lab Tracker is **deployed** and
+**auth is enabled**:
+
+- **Reachability.** A cloud scheduler (a Claude routine, a Codex automation, a
+  hosted cron) can only reach a Lab Tracker that has a public URL. A localhost
+  instance must be driven by a scheduler on the **same machine**.
+- **Auth.** `run-due` is admin-only. Provide admin credentials via the
+  environment; the trigger logs in and mints a fresh short-lived token each run:
+
+  ```sh
+  export LAB_TRACKER_BASE_URL="https://lab.example.org"
+  export LAB_TRACKER_ADMIN_USER="…"
+  export LAB_TRACKER_ADMIN_PASS="…"
+  ```
+
+  Pass a non-local URL to the installer with `-BaseUrl` (Windows) or as the
+  second argument (`install-daily-review.sh 15 https://lab.example.org`).
+
+---
+
+## Other schedulers
+
+The installers above wrap a one-line trigger you can drive from anything.
+
+### Plain cron / curl
 
 ```cron
-# Poll every 15 minutes; per-project run_at_local_time decides the real time.
-*/15 * * * * /usr/local/bin/lab-tracker-run-due.sh >> /var/log/lab-tracker-review.log 2>&1
+# Poll every 15 min; per-project run_at_local_time decides the real time.
+*/15 * * * * /path/to/lab-tracker/scripts/daily-review-run-due.sh >> ~/.lab-tracker-daily-review.log 2>&1
 ```
 
-On Windows, register the same script with Task Scheduler on a 15-minute
-repeating trigger.
+### Claude routine
 
-### Variant B — Claude routine (scheduled cloud agent)
+Create a routine (the `/schedule` skill, or a Claude Code scheduled task) with a
+one-line instruction:
 
-Create a routine with the `/schedule` skill (or a Claude Code scheduled task).
-Two shapes:
-
-- **Thin** (recommended, matches this design): the routine's prompt is just
-  *"POST `$BASE/batches/run-due` with the admin bearer token and report the run
-  summary."* Equivalent to Variant A, scheduled by Claude.
-- **Agentic** (future, out of scope here): a routine that uses the lab-tracker
-  MCP to find the day's meeting notes, trigger drafting, and surface a richer
-  prompt. Still must stop at drafts — no auto-commit.
+> Every 15 minutes, `POST {BASE_URL}/batches/run-due` with the admin bearer token
+> and report the run summary. Do not accept or commit any drafts.
 
 Use a **local** scheduled task for a localhost instance; a **cloud** routine only
-for a deployed, reachable Lab Tracker.
+for a deployed, reachable URL.
 
-### Variant C — Codex automation
+### Codex automation
 
-Configure a Codex scheduled automation whose task runs the Variant A trigger
-(the repo's `AGENTS.md` already orients Codex to the project). Same reachability
-and auth rules apply: local automation for localhost, remote for a deployed URL.
+Configure a Codex scheduled automation whose task runs the trigger script
+(`scripts/daily-review-run-due.sh`). The repo's `AGENTS.md` already orients Codex
+to the project. Same reachability and auth rules as above.
 
-## Manual / testing
+> Whichever you pick, keep the job to **triggering drafts only**. Lab Tracker
+> deliberately does not delegate graph commits to autonomous agents — a person
+> reviews the queue and commits what they keep.
 
-To fire one project immediately without waiting for its cadence (owner-gated):
+---
 
-```
-POST /batches/run-now
-{ "project_id": "<uuid>" }
-```
+## How it behaves (why frequent polling is fine)
 
-Then open `/app/batches` to review and accept/reject the draft.
+`POST /batches/run-due` runs every project whose batch settings are enabled and
+due, then advances each project's `next_run_at`. It is idempotent: a
+compare-and-set (`claim_due`) plus a deterministic `batch_key` mean concurrent or
+redundant calls never double-fire a project, and an off-time poll simply finds
+nothing due and returns immediately. So the trigger can be dumb and frequent; the
+*per-project* cadence does the real scheduling.
