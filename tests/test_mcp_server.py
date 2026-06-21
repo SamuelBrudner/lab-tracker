@@ -159,6 +159,93 @@ def test_mcp_target_guard_refuses_remote_auth_disabled_target(monkeypatch) -> No
         )
 
 
+def test_mcp_runtime_settings_from_env_for_streamable_http(monkeypatch) -> None:
+    monkeypatch.setenv("LAB_TRACKER_MCP_TRANSPORT", "streamable-http")
+    monkeypatch.setenv("LAB_TRACKER_MCP_HOST", "127.0.0.1")
+    monkeypatch.setenv("LAB_TRACKER_MCP_PORT", "9000")
+    monkeypatch.setenv("LAB_TRACKER_MCP_PATH", "mcp")
+
+    settings = mcp_server.MCPServerRuntimeSettings.from_env()
+
+    assert settings.transport == "streamable-http"
+    assert settings.host == "127.0.0.1"
+    assert settings.port == 9000
+    assert settings.path == "/mcp"
+
+
+def test_mcp_runtime_settings_reject_invalid_transport_and_port(monkeypatch) -> None:
+    monkeypatch.setenv("LAB_TRACKER_MCP_TRANSPORT", "sse")
+    with pytest.raises(SystemExit, match="LAB_TRACKER_MCP_TRANSPORT"):
+        mcp_server.MCPServerRuntimeSettings.from_env()
+
+    monkeypatch.setenv("LAB_TRACKER_MCP_TRANSPORT", "streamable-http")
+    monkeypatch.setenv("LAB_TRACKER_MCP_PORT", "not-a-port")
+    with pytest.raises(SystemExit, match="LAB_TRACKER_MCP_PORT"):
+        mcp_server.MCPServerRuntimeSettings.from_env()
+
+
+def test_build_server_for_streamable_http_uses_private_stateless_settings() -> None:
+    runtime_server = mcp_server.build_server(
+        mcp_server.MCPServerRuntimeSettings(
+            transport="streamable-http",
+            host="127.0.0.1",
+            port=9000,
+            path="/mcp",
+        )
+    )
+
+    assert runtime_server.settings.host == "127.0.0.1"
+    assert runtime_server.settings.port == 9000
+    assert runtime_server.settings.streamable_http_path == "/mcp"
+    assert runtime_server.settings.stateless_http is True
+    assert runtime_server.settings.json_response is True
+
+
+def test_main_runs_streamable_http_transport_from_env(monkeypatch) -> None:
+    guard_calls: list[str] = []
+    built_settings: list[mcp_server.MCPServerRuntimeSettings] = []
+    run_calls: list[str] = []
+
+    class FakeServer:
+        def run(self, transport: str) -> None:
+            run_calls.append(transport)
+
+    def fake_build(settings: mcp_server.MCPServerRuntimeSettings | None = None):
+        assert settings is not None
+        built_settings.append(settings)
+        return FakeServer()
+
+    monkeypatch.setenv("LAB_TRACKER_MCP_TRANSPORT", "streamable-http")
+    monkeypatch.setenv("LAB_TRACKER_MCP_HOST", "127.0.0.1")
+    monkeypatch.setenv("LAB_TRACKER_MCP_PORT", "9000")
+    monkeypatch.setenv("LAB_TRACKER_MCP_PATH", "/mcp")
+    monkeypatch.setattr(mcp_server, "_ensure_mcp_target_safe", lambda: guard_calls.append("guard"))
+    monkeypatch.setattr(mcp_server, "build_server", fake_build)
+
+    mcp_server.main()
+
+    assert guard_calls == ["guard"]
+    assert [settings.transport for settings in built_settings] == ["streamable-http"]
+    assert run_calls == ["streamable-http"]
+
+
+def test_hosted_mcp_compose_and_caddy_configs_are_private_read_only() -> None:
+    compose = Path("docker-compose.yml").read_text(encoding="utf-8")
+    caddy = Path("deploy/mcp/Caddyfile").read_text(encoding="utf-8")
+
+    assert "  mcp:" in compose
+    assert "LAB_TRACKER_MCP_TRANSPORT: streamable-http" in compose
+    assert "LAB_TRACKER_MCP_BASE_URL: ${LAB_TRACKER_MCP_BASE_URL:-http://app:8000}" in compose
+    assert "LAB_TRACKER_MCP_API_KEY: ${LT_MCP_READONLY_TOKEN:" in compose
+    assert '"127.0.0.1:${LAB_TRACKER_MCP_HOST_PORT:-9000}:${LAB_TRACKER_MCP_PORT:-8000}"' in compose
+    assert "LAB_TRACKER_MCP_USERNAME" not in compose.split("  postgres:", 1)[0]
+
+    assert "respond @badorigin 403" in caddy
+    assert "respond @badhost 421" in caddy
+    assert "request>headers>Authorization delete" in caddy
+    assert "Access-Control-Allow-Origin" not in caddy
+
+
 def test_lt_mcp_console_entrypoint_is_packaged() -> None:
     pyproject = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))
 

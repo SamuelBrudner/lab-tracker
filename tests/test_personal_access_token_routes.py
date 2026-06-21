@@ -74,16 +74,54 @@ def test_read_only_personal_access_token_can_read_but_not_write_or_auth(
     pat_headers = _bearer(issued["secret"])
 
     listing = client.get("/projects", headers=pat_headers)
-    forbidden_write = client.post(
-        "/projects",
-        json={"name": "Blocked"},
-        headers=pat_headers,
-    )
     forbidden_auth = client.get("/auth/me", headers=pat_headers)
+    write_attempts = [
+        client.post("/projects", json={"name": "Blocked"}, headers=pat_headers),
+        client.post(
+            "/datasets",
+            json={
+                "project_id": str(uuid4()),
+                "commit_hash": "abc123",
+                "primary_question_id": str(uuid4()),
+            },
+            headers=pat_headers,
+        ),
+        client.post(
+            "/analyses",
+            json={
+                "dataset_id": str(uuid4()),
+                "analysis_type": "notebook",
+                "summary": "blocked",
+            },
+            headers=pat_headers,
+        ),
+        client.post(
+            "/claims",
+            json={
+                "analysis_id": str(uuid4()),
+                "text": "blocked",
+                "status": "proposed",
+            },
+            headers=pat_headers,
+        ),
+        client.post(
+            "/visualizations",
+            json={
+                "analysis_id": str(uuid4()),
+                "viz_type": "figure",
+                "file_path": "blocked.png",
+            },
+            headers=pat_headers,
+        ),
+    ]
 
     assert listing.status_code == 200, listing.text
-    assert forbidden_write.status_code == 403
-    assert forbidden_write.json()["error"]["code"] == "service_forbidden"
+    assert [response.status_code for response in write_attempts] == [403] * len(
+        write_attempts
+    )
+    assert {response.json()["error"]["code"] for response in write_attempts} == {
+        "service_forbidden"
+    }
     assert forbidden_auth.status_code == 403
 
 

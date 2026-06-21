@@ -41,6 +41,18 @@ and does not call `/auth/login`. Otherwise it logs in with the configured
 username/password and retries once after a 401. Credentials are only required
 when `LAB_TRACKER_AUTH_ENABLED=true`; local auth-disabled testing can omit them.
 
+For a private hosted read-only MCP endpoint, use the compose `mcp` service:
+
+```bash
+LT_MCP_READONLY_TOKEN=lpat_... docker compose up mcp
+```
+
+It runs `lt-mcp` with `LAB_TRACKER_MCP_TRANSPORT=streamable-http`, points the MCP
+process at the internal API hop (`http://app:8000`), and publishes only
+`127.0.0.1:9000` on the host. Put a private TLS proxy in front of that loopback
+port; `deploy/mcp/Caddyfile` is the checked-in example with Origin/Host checks,
+Authorization log redaction, and no permissive CORS.
+
 Portable consumer `.mcp.json` files should use the console entry point rather
 than a hardcoded absolute Python path:
 

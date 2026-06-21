@@ -37,6 +37,25 @@ The token secret is returned once. Lab Tracker stores only its SHA-256 hash, and
 the MCP client sends it as `Authorization: Bearer ...` without calling
 `/auth/login`.
 
+## Private Hosted Read-Only Endpoint
+
+For a shared lab endpoint, run the optional compose MCP service with a read-only
+`lpat_` token:
+
+```bash
+LT_MCP_READONLY_TOKEN=lpat_... docker compose up mcp
+```
+
+The service starts Lab Tracker MCP with `LAB_TRACKER_MCP_TRANSPORT=streamable-http`
+and publishes it on host loopback as `127.0.0.1:9000` by default. Put a private
+TLS proxy or `tailscale serve` in front of that loopback port; do not expose it
+publicly. The example proxy config lives at `deploy/mcp/Caddyfile` and strips
+Authorization from logs while rejecting unrecognized Origin/Host values.
+
+The hosted mode is read-only by construction: use a token issued with
+`read_only=true` and a viewer role. Write tools remain present for local stdio
+clients, but the API denies writes made through that hosted token.
+
 ## Visual Studio
 
 Visual Studio uses the same top-level `servers` shape as VS Code. This repo keeps

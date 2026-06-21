@@ -1,6 +1,6 @@
 # GitHub Copilot MCP Support — Design
 
-Status: **DESIGN**; P0a/P0b/P0c are implemented in this branch, P1 remains open.
+Status: **DESIGN**; P0a/P0b/P0c/P1 are implemented in this branch.
 Audience: repo maintainer.
 
 Scope anchor: `docs/retained-v1-surface.md` wins over README prose. Product
@@ -29,8 +29,9 @@ product (OpenAPI/declarative-agent integration) and is an explicit non-goal.
 ## Current state (verified against the working tree)
 
 - The MCP server is a **standalone process** that is an **HTTP client** of the
-  Lab Tracker API. `mcp_server.py` `main()` calls `server.run(transport="stdio")`
-  — **stdio only**, not mounted in the FastAPI app.
+  Lab Tracker API. `mcp_server.py` `main()` reads `LAB_TRACKER_MCP_TRANSPORT`
+  and runs stdio by default or streamable HTTP for the hosted endpoint. It is
+  **not mounted** in the FastAPI app.
 - **39 tools** (25 read / 14 write after reclassifying
   `list_question_refactors`; write tools include `record_evidence_bundle`, whose
   `dry_run` defaults to `True`). P0b registers MCP annotations:
@@ -247,7 +248,7 @@ tailnet-private `tailscale serve` or a LAN reverse proxy.
     command: uv run python -m lab_tracker.mcp_server
     environment:
       LAB_TRACKER_MCP_TRANSPORT: streamable-http
-      LAB_TRACKER_MCP_HOST: 127.0.0.1            # never publish 0.0.0.0
+      LAB_TRACKER_MCP_HOST: 0.0.0.0              # container bind; host publish below is loopback-only
       LAB_TRACKER_MCP_PORT: "8000"
       LAB_TRACKER_MCP_BASE_URL: http://app:8000  # hop-2 target (must report auth ON)
       LAB_TRACKER_MCP_API_KEY: ${LT_MCP_READONLY_TOKEN}   # a read-only lpat_
@@ -309,11 +310,12 @@ read-only token blocked on every write incl. `record_evidence_bundle(dry_run=fal
 client skips `/auth/login` with a key; no `lpat_` substring in returned errors;
 `test_alembic_has_single_head` green.
 
-**P1 — HTTP transport + private read-only hosted endpoint.** B4 + compose `mcp`
-service (loopback) + Caddyfile (Origin allowlist + log-strip) + tailnet-private
-exposure. No migration. Read-only only. Test gates: boots streamable-http on
-loopback; reverse-proxy Origin 403; hosted `lpat_` cannot write; `/mcp` sets no
-permissive CORS; doctor refuses an auth-off hop-2 target.
+**P1 — HTTP transport + private read-only hosted endpoint.** Implemented: B4 +
+compose `mcp` service (host-loopback publish) + Caddyfile (Origin allowlist +
+log-strip) + tailnet-private deployment docs. No migration. Read-only only. Test
+gates: boots streamable-http on loopback; reverse-proxy Origin 403; hosted
+`lpat_` cannot write; `/mcp` sets no permissive CORS; startup guard refuses an
+auth-off hop-2 target.
 
 **Deferred (not in current scope):** per-request token forwarding (only if remote
 writes are ever wanted), OAuth 2.1 PRM, the autonomous coding agent, PyPI publish
