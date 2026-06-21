@@ -187,6 +187,7 @@ def register_observability_routes(
         payload = {
             "status": status,
             "timestamp": datetime.now(timezone.utc).isoformat(),
+            "auth": {"enabled": bool(app.state.auth_enabled)},
             "checks": checks,
         }
         if status == "ok":

@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import ipaddress
+from urllib.parse import urlparse
+
 from mcp.server.fastmcp import FastMCP
 
 from lab_tracker.decision_context_constants import MCP_SERVER_INSTRUCTIONS
@@ -17,6 +20,7 @@ from lab_tracker.mcp_api_client import (
     LabTrackerAPIValidationError,
     MCPSettings,
     client_from_env,
+    lab_tracker_api_error,
 )
 from lab_tracker.mcp_tools import (
     register_read_tools,
@@ -41,6 +45,7 @@ from lab_tracker.mcp_tools.read import (
     lab_tracker_list_node_goals,
     lab_tracker_list_notes,
     lab_tracker_list_projects,
+    lab_tracker_list_question_refactors,
     lab_tracker_list_questions,
     lab_tracker_list_sessions,
     lab_tracker_list_visualizations,
@@ -66,7 +71,6 @@ from lab_tracker.mcp_tools.write import (
     lab_tracker_create_question,
     lab_tracker_create_visualization,
     lab_tracker_link_node_to_goal,
-    lab_tracker_list_question_refactors,
     lab_tracker_record_evidence_bundle,
     lab_tracker_refactor_question,
     lab_tracker_update_goal,
@@ -80,7 +84,39 @@ register_resources(server)
 
 
 def main() -> None:
+    _ensure_mcp_target_safe()
     server.run(transport="stdio")
+
+
+def _ensure_mcp_target_safe(settings: MCPSettings | None = None) -> None:
+    settings = settings or MCPSettings.from_env()
+    if _is_loopback_url(settings.base_url):
+        return
+    client = LabTrackerAPIClient(settings)
+    try:
+        payload = client.readiness()
+    except LabTrackerAPIAuthError:
+        return
+    except LabTrackerAPIError:
+        return
+    finally:
+        client.close()
+    auth = payload.get("auth")
+    if isinstance(auth, dict) and auth.get("enabled") is False:
+        raise SystemExit(
+            "Refusing to start Lab Tracker MCP against a non-loopback auth-disabled "
+            f"API target: {settings.base_url}"
+        )
+
+
+def _is_loopback_url(value: str) -> bool:
+    host = (urlparse(value).hostname or "").strip().lower()
+    if host in {"localhost", "ip6-localhost"}:
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
 
 
 __all__ = [
@@ -96,6 +132,7 @@ __all__ = [
     "MCP_SERVER_INSTRUCTIONS",
     "SERVER_NAME",
     "client_from_env",
+    "lab_tracker_api_error",
     "lab_tracker_agent_consultation_policy",
     "lab_tracker_code_conventions",
     "lab_tracker_create_analysis",

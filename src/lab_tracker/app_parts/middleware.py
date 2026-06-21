@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+
 from fastapi import FastAPI, Request
 from starlette.concurrency import run_in_threadpool
 from starlette.responses import JSONResponse
@@ -10,13 +12,15 @@ from lab_tracker.api import LabTrackerAPI
 from lab_tracker.auth import (
     DEVICE_TOKEN_PREFIX,
     LOCAL_AUTH_USER_ID,
+    LPAT_TOKEN_PREFIX,
     AuthContext,
     PrincipalType,
     Role,
     device_principal_can_access,
     extract_bearer_token,
+    service_principal_can_access,
 )
-from lab_tracker.errors import AuthError
+from lab_tracker.errors import AuthError, RateLimitError
 from lab_tracker.schemas import ErrorEnvelope, ErrorInfo
 from lab_tracker.sqlalchemy_repository import SQLAlchemyLabTrackerRepository
 
@@ -72,6 +76,16 @@ def _device_forbidden_response(message: str) -> JSONResponse:
     return JSONResponse(status_code=403, content=payload.model_dump())
 
 
+def _service_forbidden_response(message: str) -> JSONResponse:
+    payload = ErrorEnvelope(error=ErrorInfo(code="service_forbidden", message=message))
+    return JSONResponse(status_code=403, content=payload.model_dump())
+
+
+def _rate_limited_response(message: str) -> JSONResponse:
+    payload = ErrorEnvelope(error=ErrorInfo(code="rate_limited", message=message))
+    return JSONResponse(status_code=429, content=payload.model_dump())
+
+
 def local_auth_context() -> AuthContext:
     return AuthContext(user_id=LOCAL_AUTH_USER_ID, role=Role.ADMIN)
 
@@ -120,6 +134,37 @@ def configure_auth_middleware(app: FastAPI) -> None:
                     principal_type=PrincipalType.DEVICE,
                     device_token_id=principal.device_token_id,
                 )
+            elif token.startswith(LPAT_TOKEN_PREFIX):
+                pat_rate_key = _pat_rate_key(request, token)
+                app.state.pat_rate_limiter.check(pat_rate_key)
+                principal = await run_in_threadpool(
+                    app.state.personal_access_token_service.verify_token,
+                    token,
+                )
+                if principal is None:
+                    app.state.pat_rate_limiter.record_failure(pat_rate_key)
+                    raise AuthError("Invalid personal access token.")
+                if not service_principal_can_access(
+                    request.method,
+                    request.url.path,
+                    read_only=principal.read_only,
+                    role=principal.role,
+                ):
+                    app.state.pat_rate_limiter.record_failure(pat_rate_key)
+                    return _service_forbidden_response("Not permitted for this token.")
+                user = await run_in_threadpool(
+                    app.state.auth_service.get_user_by_id,
+                    principal.user_id,
+                )
+                if user is None:
+                    app.state.pat_rate_limiter.record_failure(pat_rate_key)
+                    raise AuthError("Invalid personal access token.")
+                app.state.pat_rate_limiter.reset(pat_rate_key)
+                request.state.auth_context = AuthContext(
+                    user_id=principal.user_id,
+                    role=principal.role,
+                    principal_type=PrincipalType.SERVICE,
+                )
             else:
                 claims = await run_in_threadpool(
                     app.state.token_service.verify_access_token,
@@ -132,6 +177,8 @@ def configure_auth_middleware(app: FastAPI) -> None:
                 if user is None:
                     raise AuthError("Invalid token.")
                 request.state.auth_context = AuthContext(user_id=user.user_id, role=user.role)
+        except RateLimitError as exc:
+            return _rate_limited_response(str(exc))
         except AuthError as exc:
             return _auth_error_response(str(exc))
         return await call_next(request)
@@ -161,6 +208,12 @@ def _should_apply_csp(path: str) -> bool:
     if path == "/" or path.startswith("/openapi"):
         return False
     return any(path.startswith(prefix) for prefix in _CSP_PATH_PREFIXES)
+
+
+def _pat_rate_key(request: Request, token: str) -> str:
+    client_host = request.client.host if request.client is not None else "unknown"
+    token_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()
+    return f"lpat:{client_host}:{token_hash[:24]}"
 
 
 def configure_database_session_middleware(

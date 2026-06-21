@@ -5,7 +5,13 @@ from __future__ import annotations
 from fastapi import FastAPI
 
 from lab_tracker.api import LabTrackerAPI
-from lab_tracker.auth import AuthService, DeviceAuthService, InvitationTokenService, TokenService
+from lab_tracker.auth import (
+    AuthService,
+    DeviceAuthService,
+    InvitationTokenService,
+    PersonalAccessTokenService,
+    TokenService,
+)
 
 from .analyses import build_analyses_router
 from .assistant import build_assistant_router
@@ -21,6 +27,7 @@ from .graph_drafts import build_graph_drafts_router
 from .groups import build_groups_router
 from .notes import build_notes_router
 from .ownership import build_ownership_router
+from .personal_access_tokens import build_personal_access_tokens_router
 from .portfolio import build_portfolio_router
 from .project_graph import build_project_graph_router
 from .projects import build_projects_router
@@ -43,6 +50,7 @@ def register_routes(
     token_service: TokenService,
     invitation_token_service: InvitationTokenService,
     device_auth_service: DeviceAuthService,
+    personal_access_token_service: PersonalAccessTokenService,
     bootstrap_admin_token: str | None = None,
 ) -> None:
     register_error_handlers(app)
@@ -56,6 +64,12 @@ def register_routes(
     )
     app.include_router(
         build_device_auth_router(device_auth_service=device_auth_service)
+    )
+    app.include_router(
+        build_personal_access_tokens_router(
+            auth_service=auth_service,
+            personal_access_token_service=personal_access_token_service,
+        )
     )
     app.include_router(build_projects_router(api))
     app.include_router(build_groups_router(api))

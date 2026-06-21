@@ -9,7 +9,9 @@ import pytest
 import tomllib
 
 from lab_tracker import mcp_server
+from lab_tracker.cli import _mcp_json
 from lab_tracker.decision_context_constants import code_facing_idioms
+from lab_tracker.mcp_tools import READ_TOOLS, WRITE_TOOLS
 
 
 def _json_response(status_code: int, payload: dict) -> httpx.Response:
@@ -51,11 +53,45 @@ def test_fastmcp_registers_lab_tracker_tools() -> None:
     assert "lab_tracker_link_node_to_goal" in names
     assert "lab_tracker_upload_visualization_file" in names
     assert "lab_tracker_record_evidence_bundle" in names
+    assert "lab_tracker_list_question_refactors" in names
     assert mcp_server.server.instructions is not None
     assert "CALL THIS FIRST before research-facing decisions" in (
         mcp_server.server.instructions
     )
     assert "what to plot" in mcp_server.server.instructions
+    assert "AI can suggest; only a person commits" in mcp_server.server.instructions
+
+
+def test_fastmcp_tool_annotations_mark_reads_and_writes_for_copilot() -> None:
+    tools = asyncio.run(mcp_server.server.list_tools())
+    tools_by_name = {tool.name: tool for tool in tools}
+
+    health = tools_by_name["lab_tracker_health"]
+    assert health.annotations is not None
+    assert health.annotations.title == "Lab Tracker Health"
+    assert health.annotations.readOnlyHint is True
+    assert health.annotations.openWorldHint is True
+
+    refactor_history = tools_by_name["lab_tracker_list_question_refactors"]
+    assert refactor_history.annotations is not None
+    assert refactor_history.annotations.readOnlyHint is True
+    assert "lab_tracker_list_question_refactors" in {tool.__name__ for tool in READ_TOOLS}
+    assert "lab_tracker_list_question_refactors" not in {tool.__name__ for tool in WRITE_TOOLS}
+
+    create_note = tools_by_name["lab_tracker_create_note"]
+    assert create_note.annotations is not None
+    assert create_note.annotations.readOnlyHint is False
+    assert create_note.annotations.destructiveHint is False
+
+    refactor = tools_by_name["lab_tracker_refactor_question"]
+    update_goal = tools_by_name["lab_tracker_update_goal"]
+    assert refactor.annotations is not None
+    assert refactor.annotations.destructiveHint is True
+    assert update_goal.annotations is not None
+    assert update_goal.annotations.destructiveHint is True
+
+    evidence_bundle = tools_by_name["lab_tracker_record_evidence_bundle"]
+    assert (evidence_bundle.description or "").startswith("Defaults to dry-run")
 
 
 def test_fastmcp_registers_agent_consultation_policy_resource() -> None:
@@ -72,6 +108,55 @@ def test_code_conventions_resource_matches_package_generator() -> None:
     instructions = (mcp_server.server.instructions or "").lower()
     for forbidden in ("pip install", "execute", "curl "):
         assert forbidden not in instructions
+
+
+def test_copilot_mcp_configs_use_servers_schema() -> None:
+    for config_path in (Path(".vscode/mcp.json"), Path("mcp.visualstudio.json")):
+        config = json.loads(config_path.read_text(encoding="utf-8"))
+        server = config["servers"]["lab-tracker"]
+        env = server["env"]
+
+        assert "mcpServers" not in config
+        assert server["type"] == "stdio"
+        assert server["command"] == "lt-mcp"
+        assert env["LAB_TRACKER_MCP_BASE_URL"] == "http://127.0.0.1:8000"
+        assert env["LAB_TRACKER_MCP_API_KEY"] == "${input:lt-token}"
+        assert env["LAB_TRACKER_MCP_USERNAME"] == "${input:lt-username}"
+        assert env["LAB_TRACKER_MCP_PASSWORD"] == "${input:lt-password}"
+
+
+def test_committed_mcp_json_matches_init_template() -> None:
+    assert json.loads(Path(".mcp.json").read_text(encoding="utf-8")) == json.loads(_mcp_json())
+
+
+def test_mcp_target_guard_allows_loopback_without_probe(monkeypatch) -> None:
+    def fail_client(_settings):
+        raise AssertionError("loopback targets should not probe readiness")
+
+    monkeypatch.setattr(mcp_server, "LabTrackerAPIClient", fail_client)
+
+    mcp_server._ensure_mcp_target_safe(
+        mcp_server.MCPSettings(base_url="http://127.0.0.1:8000")
+    )
+
+
+def test_mcp_target_guard_refuses_remote_auth_disabled_target(monkeypatch) -> None:
+    class FakeClient:
+        def __init__(self, _settings):
+            self.closed = False
+
+        def readiness(self):
+            return {"status": "ok", "auth": {"enabled": False}}
+
+        def close(self) -> None:
+            self.closed = True
+
+    monkeypatch.setattr(mcp_server, "LabTrackerAPIClient", FakeClient)
+
+    with pytest.raises(SystemExit, match="auth-disabled"):
+        mcp_server._ensure_mcp_target_safe(
+            mcp_server.MCPSettings(base_url="http://lab.example.test")
+        )
 
 
 def test_lt_mcp_console_entrypoint_is_packaged() -> None:
@@ -111,6 +196,81 @@ def test_client_service_login_sends_bearer_auth_to_protected_routes() -> None:
         ("POST", "/auth/login", None),
         ("GET", "/projects", "Bearer token-1"),
     ]
+
+
+def test_client_static_api_key_skips_login_and_sends_bearer() -> None:
+    seen: list[tuple[str, str, str | None]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append((request.method, request.url.path, request.headers.get("authorization")))
+        if request.url.path == "/auth/login":
+            return _json_response(500, {"error": {"message": "login should not run"}})
+        if request.url.path == "/projects":
+            return _json_response(200, {"data": [], "meta": {"total": 0}})
+        return _json_response(404, {"error": {"message": "not found"}})
+
+    client = mcp_server.LabTrackerAPIClient(
+        mcp_server.MCPSettings(
+            base_url="http://testserver",
+            username="mcp-user",
+            password="mcp-pass",
+            api_key="lpat_secret",
+        ),
+        transport=httpx.MockTransport(handler),
+    )
+
+    try:
+        payload = client.list_projects()
+    finally:
+        client.close()
+
+    assert payload["data"] == []
+    assert seen == [("GET", "/projects", "Bearer lpat_secret")]
+
+
+def test_client_static_api_key_does_not_retry_revoked_token() -> None:
+    seen: list[tuple[str, str, str | None]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append((request.method, request.url.path, request.headers.get("authorization")))
+        return _json_response(401, {"error": {"message": "revoked lpat_secret"}})
+
+    client = mcp_server.LabTrackerAPIClient(
+        mcp_server.MCPSettings(base_url="http://testserver", api_key="lpat_secret"),
+        transport=httpx.MockTransport(handler),
+    )
+
+    try:
+        with pytest.raises(mcp_server.LabTrackerAPIAuthError, match="revoked"):
+            client.list_projects()
+    finally:
+        client.close()
+
+    assert seen == [("GET", "/projects", "Bearer lpat_secret")]
+
+
+def test_mcp_settings_from_env_accepts_api_key_aliases(monkeypatch) -> None:
+    monkeypatch.setenv("LAB_TRACKER_MCP_API_KEY", "lpat_primary")
+    monkeypatch.setenv("LAB_TRACKER_MCP_TOKEN", "lpat_alias")
+    assert mcp_server.MCPSettings.from_env().api_key == "lpat_primary"
+
+    monkeypatch.delenv("LAB_TRACKER_MCP_API_KEY")
+    assert mcp_server.MCPSettings.from_env().api_key == "lpat_alias"
+
+
+def test_mcp_api_error_redacts_bearer_and_lpat_secrets() -> None:
+    exc = mcp_server.LabTrackerAPIUnavailableError(
+        "GET failed with Authorization: Bearer lpat_supersecret",
+        issues=[{"message": "token lpat_supersecret failed"}],
+    )
+
+    payload = mcp_server.lab_tracker_api_error("lab_tracker_readiness", exc)
+
+    message = payload["error"]["message"]
+    issues = payload["error"]["issues"]
+    assert "lpat_supersecret" not in message
+    assert "Bearer [REDACTED]" in message
+    assert "lpat_supersecret" not in json.dumps(issues)
 
 
 def test_client_list_questions_sends_hierarchy_filters() -> None:

@@ -491,7 +491,7 @@ class GraphDraftBatchSettingsModel(Base):
     )
     enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     cadence_minutes: Mapped[int] = mapped_column(Integer, nullable=False, default=24 * 60)
-    run_at_local_time: Mapped[str] = mapped_column(String(5), nullable=False, default="06:00")
+    run_at_local_time: Mapped[str] = mapped_column(String(5), nullable=False, default="18:00")
     timezone_name: Mapped[str] = mapped_column(
         String(100),
         nullable=False,
@@ -966,6 +966,34 @@ class InvitationModel(Base):
         String(36),
         ForeignKey("users.user_id", ondelete="SET NULL"),
     )
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class PersonalAccessTokenModel(Base):
+    __tablename__ = "personal_access_tokens"
+    __table_args__ = (
+        UniqueConstraint("token_hash", name="uq_personal_access_tokens_token_hash"),
+        Index("ix_personal_access_tokens_user_created", "user_id", "created_at"),
+        Index("ix_personal_access_tokens_expires_at", "expires_at"),
+    )
+
+    token_id: Mapped[str] = mapped_column(
+        String(36),
+        primary_key=True,
+        default=lambda: str(uuid4()),
+    )
+    user_id: Mapped[str] = mapped_column(
+        String(36),
+        ForeignKey("users.user_id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    label: Mapped[str] = mapped_column(String(150), nullable=False)
+    token_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    role: Mapped[str] = mapped_column(String(20), nullable=False)
+    read_only: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utc_now)
+    last_used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 

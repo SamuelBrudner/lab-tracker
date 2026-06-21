@@ -1,0 +1,37 @@
+{
+  "inputs": [
+    {
+      "type": "promptString",
+      "id": "lt-token",
+      "description": "Lab Tracker MCP token (lpat_) - leave blank if auth is disabled or username/password are used",
+      "password": true
+    },
+    {
+      "type": "promptString",
+      "id": "lt-username",
+      "description": "Lab Tracker username - leave blank if auth is disabled or using an lpat_ token"
+    },
+    {
+      "type": "promptString",
+      "id": "lt-password",
+      "description": "Lab Tracker password - leave blank if auth is disabled or using an lpat_ token",
+      "password": true
+    }
+  ],
+  "servers": {
+    "lab-tracker": {
+      "type": "stdio",
+      "command": "lt-mcp",
+      "env": {
+        "LAB_TRACKER_MCP_BASE_URL": "http://127.0.0.1:8000",
+        "LAB_TRACKER_MCP_API_KEY": "${input:lt-token}",
+        "LAB_TRACKER_MCP_USERNAME": "${input:lt-username}",
+        "LAB_TRACKER_MCP_PASSWORD": "${input:lt-password}",
+        "FASTMCP_NO_BANNER": "1",
+        "FASTMCP_QUIET": "1",
+        "FASTMCP_SILENT": "1",
+        "MCP_QUIET": "1"
+      }
+    }
+  }
+}

@@ -18,6 +18,7 @@ from lab_tracker.auth import (
     AuthService,
     DeviceAuthService,
     InvitationTokenService,
+    PersonalAccessTokenService,
     TokenService,
     ensure_local_auth_user,
 )
@@ -40,6 +41,7 @@ class AppRuntime:
     auth_enabled: bool
     auth_service: AuthService
     device_auth_service: DeviceAuthService
+    personal_access_token_service: PersonalAccessTokenService
     invitation_token_service: InvitationTokenService
     token_service: TokenService
     file_storage_backend: LocalFileStorageBackend
@@ -47,6 +49,7 @@ class AppRuntime:
     lab_tracker_api: LabTrackerAPI
     graph_draft_client_factory: Callable[..., Any]
     auth_rate_limiter: InMemoryRateLimiter
+    pat_rate_limiter: InMemoryRateLimiter
 
 
 def build_app_runtime(settings: Settings) -> AppRuntime:
@@ -63,6 +66,9 @@ def build_app_runtime(settings: Settings) -> AppRuntime:
 
     auth_service = AuthService(session_factory=session_factory)
     device_auth_service = DeviceAuthService(session_factory=session_factory)
+    personal_access_token_service = PersonalAccessTokenService(
+        session_factory=session_factory
+    )
     token_service = TokenService(
         settings.auth_secret_key,
         ttl_minutes=settings.auth_token_ttl_minutes,
@@ -88,6 +94,10 @@ def build_app_runtime(settings: Settings) -> AppRuntime:
         max_attempts=settings.auth_rate_limit_attempts,
         window_seconds=settings.auth_rate_limit_window_seconds,
     )
+    pat_rate_limiter = InMemoryRateLimiter(
+        max_attempts=settings.auth_rate_limit_attempts,
+        window_seconds=settings.auth_rate_limit_window_seconds,
+    )
     return AppRuntime(
         settings=settings,
         engine=engine,
@@ -95,6 +105,7 @@ def build_app_runtime(settings: Settings) -> AppRuntime:
         auth_enabled=auth_enabled,
         auth_service=auth_service,
         device_auth_service=device_auth_service,
+        personal_access_token_service=personal_access_token_service,
         invitation_token_service=invitation_token_service,
         token_service=token_service,
         file_storage_backend=file_storage_backend,
@@ -102,6 +113,7 @@ def build_app_runtime(settings: Settings) -> AppRuntime:
         lab_tracker_api=lab_tracker_api,
         graph_draft_client_factory=make_graph_draft_client,
         auth_rate_limiter=auth_rate_limiter,
+        pat_rate_limiter=pat_rate_limiter,
     )
 
 
@@ -121,6 +133,7 @@ def configure_app_state(app: FastAPI, runtime: AppRuntime) -> None:
     app.state.db_session_factory = runtime.session_factory
     app.state.auth_service = runtime.auth_service
     app.state.device_auth_service = runtime.device_auth_service
+    app.state.personal_access_token_service = runtime.personal_access_token_service
     app.state.invitation_token_service = runtime.invitation_token_service
     app.state.auth_enabled = runtime.auth_enabled
     app.state.settings = runtime.settings
@@ -130,6 +143,7 @@ def configure_app_state(app: FastAPI, runtime: AppRuntime) -> None:
     app.state.lab_tracker_api = runtime.lab_tracker_api
     app.state.graph_draft_client_factory = runtime.graph_draft_client_factory
     app.state.auth_rate_limiter = runtime.auth_rate_limiter
+    app.state.pat_rate_limiter = runtime.pat_rate_limiter
 
 
 def _log_startup_config_summary(

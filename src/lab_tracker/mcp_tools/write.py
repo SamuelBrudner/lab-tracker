@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 import httpx
+from mcp.types import ToolAnnotations
 
 from lab_tracker.mcp_api_client import (
     QUESTION_STATUS_TEXT,
@@ -39,6 +40,25 @@ def _write_tool(
     finally:
         if client is not None:
             client.close()
+
+
+def _tool_title(tool: Any) -> str:
+    name = str(getattr(tool, "__name__", "lab_tracker_tool"))
+    return "Lab Tracker " + name.removeprefix("lab_tracker_").replace("_", " ").title()
+
+
+def _write_tool_annotations(tool: Any) -> ToolAnnotations:
+    name = str(getattr(tool, "__name__", ""))
+    return ToolAnnotations(
+        title=_tool_title(tool),
+        readOnlyHint=False,
+        destructiveHint=name
+        in {
+            "lab_tracker_refactor_question",
+            "lab_tracker_update_goal",
+        },
+        openWorldHint=True,
+    )
 
 
 def lab_tracker_create_project(
@@ -148,22 +168,6 @@ def _refactor_question(
         reason=reason,
         child_question_ids_to_reparent=child_question_ids_to_reparent,
         note_ids_to_retarget=note_ids_to_retarget,
-    )
-
-
-def lab_tracker_list_question_refactors(
-    question_id: str,
-    limit: int = 50,
-    offset: int = 0,
-) -> JsonObject:
-    """List refactor history where a question is the source or replacement."""
-    return _write_tool(
-        "lab_tracker_list_question_refactors",
-        lambda client: client.list_question_refactors(
-            question_id=question_id,
-            limit=limit,
-            offset=offset,
-        ),
     )
 
 
@@ -432,11 +436,11 @@ def lab_tracker_record_evidence_bundle(
     dry_run: bool = True,
     idempotency_key: str | None = None,
 ) -> JsonObject:
-    """Preview or record a dataset-analysis-claim-visualization evidence bundle.
+    """Defaults to dry-run; pass dry_run=false to write an evidence bundle.
 
-    dry_run defaults to true. With dry_run=false, this tool still writes only
-    through the existing strict create/upload API endpoints and returns created
-    or reused stable IDs.
+    Preview or record a dataset-analysis-claim-visualization evidence bundle.
+    With dry_run=false, this tool still writes only through the existing strict
+    create/upload API endpoints and returns created or reused stable IDs.
     """
     return _write_tool(
         "lab_tracker_record_evidence_bundle",
@@ -463,7 +467,6 @@ WRITE_TOOLS = (
     lab_tracker_create_project,
     lab_tracker_create_question,
     lab_tracker_refactor_question,
-    lab_tracker_list_question_refactors,
     lab_tracker_create_note,
     lab_tracker_create_dataset,
     lab_tracker_create_analysis,
@@ -480,4 +483,5 @@ WRITE_TOOLS = (
 
 def register_write_tools(server: Any) -> None:
     for tool in WRITE_TOOLS:
-        server.tool()(tool)
+        title = _tool_title(tool)
+        server.tool(title=title, annotations=_write_tool_annotations(tool))(tool)

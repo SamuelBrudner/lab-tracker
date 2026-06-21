@@ -48,6 +48,7 @@ MCP_SERVER_INSTRUCTIONS = " ".join(
         "Read lab-tracker://quickstart for setup.",
         "Code-facing conventions are available at lab-tracker://code-conventions; "
         "package text remains canonical.",
+        "AI can suggest; only a person commits.",
         "Do not create or mutate records unless the user explicitly asks.",
     )
 )
