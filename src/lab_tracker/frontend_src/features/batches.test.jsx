@@ -46,7 +46,7 @@ describe("PendingBatchBanner", () => {
 
     render(<PendingBatchBanner token="token-1" navigate={vi.fn()} />);
 
-    expect(await screen.findByText("1 graph-draft batch ready")).toBeInTheDocument();
+    expect(await screen.findByText("1 daily review ready")).toBeInTheDocument();
   });
 
   it("deep-links Review to the meeting batch even when it is not first", async () => {

@@ -858,7 +858,7 @@ describe("App", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Draft graph update" }));
 
-    expect(await screen.findByRole("heading", { name: "Graph Draft Review" })).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "Review" })).toBeInTheDocument();
     expect(await screen.findByText("Graph draft ready for review.")).toBeInTheDocument();
   });
 
@@ -1012,7 +1012,7 @@ describe("App", () => {
 
     render(<App />);
 
-    expect(await screen.findByRole("heading", { name: "Graph Draft Review" })).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "Review" })).toBeInTheDocument();
     expect(await screen.findByText("Drafted one question from the whiteboard.")).toBeInTheDocument();
     expect(screen.getByText("Context summary")).toBeInTheDocument();
     expect(screen.getByText("~1234 bytes")).toBeInTheDocument();
@@ -1151,7 +1151,7 @@ describe("App", () => {
 
     render(<App />);
 
-    expect(await screen.findByRole("heading", { name: "Graph Draft Review" })).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "Review" })).toBeInTheDocument();
     await waitFor(() => {
       expect(screen.getByLabelText("Commit message")).toBeEnabled();
     });
@@ -1421,8 +1421,8 @@ describe("App", () => {
 
     render(<App />);
 
-    expect(await screen.findByText("1 graph-draft batch ready")).toBeInTheDocument();
-    expect(await screen.findByRole("heading", { name: "Graph-Draft Batches" })).toBeInTheDocument();
+    expect(await screen.findByText("1 daily review ready")).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "Daily review" })).toBeInTheDocument();
     expect(screen.getAllByText("Batch drafted one question").length).toBeGreaterThanOrEqual(1);
     expect(screen.getAllByText("2 notes").length).toBeGreaterThanOrEqual(1);
     expect(screen.getByText("1 ops")).toBeInTheDocument();
@@ -1692,7 +1692,7 @@ describe("App", () => {
     });
     fireEvent.click(screen.getByRole("button", { name: "Upload and draft" }));
 
-    expect(await screen.findByRole("heading", { name: "Graph Draft Review" })).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "Review" })).toBeInTheDocument();
     expect(await screen.findByText("Mobile capture draft")).toBeInTheDocument();
   });
 
@@ -1945,7 +1945,7 @@ describe("App", () => {
     });
     fireEvent.click(screen.getByRole("button", { name: "Upload and draft" }));
 
-    expect(await screen.findByRole("heading", { name: "Graph Draft Review" })).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "Review" })).toBeInTheDocument();
     expect(await screen.findByText("Bundle draft")).toBeInTheDocument();
     expect(screen.getByText("Fly 12 tracked better after pulse onset.")).toBeInTheDocument();
     expect(uploadCount).toBe(2);
@@ -2149,7 +2149,7 @@ describe("App", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Upload and draft" }));
 
-    expect(await screen.findByRole("heading", { name: "Graph Draft Review" })).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "Review" })).toBeInTheDocument();
     expect(await screen.findByText("Bundle draft after retry")).toBeInTheDocument();
     expect(uploadCount).toBe(2);
     expect(transcriptCount).toBe(2);
@@ -2375,7 +2375,7 @@ describe("App", () => {
 
     fireEvent.click(within(readyImageRow).getByRole("button", { name: "Draft" }));
 
-    expect(await screen.findByRole("heading", { name: "Graph Draft Review" })).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "Review" })).toBeInTheDocument();
     expect(await screen.findByText("Pending bundle draft")).toBeInTheDocument();
   });
 

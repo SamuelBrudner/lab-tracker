@@ -491,7 +491,7 @@ function GraphDraftDetailCard({
   return (
     <article className="card span-12">
       <div className="item-head">
-        <h2>Graph Draft Review</h2>
+        <h2>Review</h2>
         {loading ? <span className="pill">Loading...</span> : null}
       </div>
       {error ? <p className="flash error">{error}</p> : null}
@@ -534,7 +534,7 @@ function GraphDraftDetailCard({
               </div>
               {(changeSet.source_note_ids || []).length > 1 ? (
                 <div>
-                  <div className="subtle">Batch notes</div>
+                  <div className="subtle">Notes in this review</div>
                   <div className="inline">
                     {(changeSet.source_note_ids || []).map((noteId) => (
                       <span className="pill mono" key={noteId}>

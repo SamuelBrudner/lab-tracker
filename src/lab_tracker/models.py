@@ -510,7 +510,7 @@ class GraphDraftBatchSettings(_DomainModel):
     project_id: UUID
     enabled: bool = True
     cadence_minutes: int = 24 * 60
-    run_at_local_time: str = "06:00"
+    run_at_local_time: str = "18:00"
     timezone_name: str = "America/New_York"
     next_run_at: datetime | None = None
     created_at: datetime = Field(default_factory=utc_now)

@@ -58,7 +58,7 @@ from lab_tracker.services.visualization_service import VisualizationService
 _BATCH_NOTE_LIMIT = 100
 _BATCH_RETRY_ATTEMPTS = 3
 _DEFAULT_BATCH_CADENCE_MINUTES = 24 * 60
-_DEFAULT_BATCH_RUN_TIME = "06:00"
+_DEFAULT_BATCH_RUN_TIME = "18:00"
 _DEFAULT_BATCH_TIMEZONE = "America/New_York"
 _BATCH_ACTIVE_STATUSES = {
     GraphChangeSetStatus.DRAFTING,

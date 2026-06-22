@@ -31,17 +31,20 @@
 
 ## 4. The graph, by example — *4 min*
 
-- Two design principles, shown through one concrete thread rather than stated abstractly:
+- Three design principles, shown through one concrete thread rather than stated abstractly:
   - **Questions are first-class** and linked from broad to atomic: a motivating question sits above the specific experimental, control, and analysis questions beneath it. This records rationale before result.
+  - **Everything hangs off a question.** A dataset cannot be committed without naming the question it addresses (it may tag secondary ones, marking whether the data supported or refuted each); notes, sessions, and claims attach to questions directly, and analyses and visualizations inherit theirs from the data and claims they are built on. Evidence is never orphaned from its rationale.
   - **Claims are "supported" only when backed by a dataset or analysis**; otherwise they remain "proposed." The model enforces this evidence discipline for human- and AI-authored claims alike.
 - Trace one result from end to end:
   - Activate the question *"Does lateral inhibition normalize PN output?"*; run a Rig2 session and capture a bench note; promote it into the committed dataset `2025_12_10_Rig2_session001.nwb` with a provenance manifest; record the *divisive-normalization fit* linked to that dataset and question; assert the supported claim *"background odor scales PN gain ~0.6× (n = 18)"*; and attach **Figure 3b**.
   - Then traverse backward: from Figure 3b to every dataset, note, and decision behind it. The figure is not merely an output; it is evidence for a claim about a question.
 
-## 5. Capture keeps the graph current — *2 min*
+## 5. Capture all day, confirm once — *2 min*
 
-- This is the mechanism that reduces the maintenance cost. At `/app/capture`, a researcher captures a photo, voice note, photo-and-voice pair, or text; the system assembles a project-scoped context packet; the model returns reviewable draft operations; the researcher edits, accepts, rejects, or defers them; and the result is committed through the same validation as any manual entry.
-- Maintenance becomes the model drafting the structured entry from a photo or voice note, with the researcher reviewing and approving it.
+- This is the mechanism that reduces the maintenance cost, and it splits into two moments:
+  - **At the bench — capture (beat 3).** A researcher captures a photo, voice note, photo-and-voice pair, or text at `/app/capture`, and figures register themselves from analysis code (`savefig`). Capture is frictionless: it asks nothing about which question the note belongs to, and it works offline. Each capture lands *staged*, not yet in the graph.
+  - **End of day — the daily review (beat 4).** On a cadence the project sets (evening by default, or on demand), the system gathers the day's staged captures, assembles a project-scoped context packet, and the model returns reviewable draft operations: link this capture to a question, draft a note, suggest a sub-question, or flag uncertainty. The researcher works one review queue — edit, accept, reject, or defer — and the result commits through the same validation as any manual entry.
+- Maintenance becomes the model drafting the structured entries from the day's photos and voice notes, with the researcher confirming them in one sitting.
 - Guarantees: nothing is committed automatically; drafts that reference unknown entities are rejected; and human approval is always required.
 
 ## 6. The AI-harness role — *1.5 min*

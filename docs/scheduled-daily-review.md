@@ -39,8 +39,10 @@ nudges the review every 15 minutes. Re-running it just updates the existing job.
 
 The job does nothing until at least one project has the daily review **enabled**.
 Open the **Batches** page at `/app/batches`, pick a project, and set its cadence
-(default: daily at 06:00 in your timezone). That per-project setting decides when
-each project actually runs; the scheduled job is just a frequent, cheap poll.
+(default: daily at **18:00** — early evening — in your timezone, so you confirm
+the day's captures before you head out; switch it to `06:00` for a next-morning
+review instead). That per-project setting decides when each project actually
+runs; the scheduled job is just a frequent, cheap poll.
 
 ### Try it without waiting
 

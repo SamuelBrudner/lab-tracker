@@ -70,7 +70,7 @@ function Dashboard({
           Open graph
         </button>
         <button type="button" className="btn-secondary" onClick={onOpenBatches}>
-          Open batches
+          Open daily review
         </button>
       </div>
 

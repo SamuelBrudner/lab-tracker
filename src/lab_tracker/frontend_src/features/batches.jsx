@@ -54,8 +54,8 @@ function PendingBatchBanner({ enabled = true, token, navigate }) {
   const label = meetingBatch
     ? "A meeting is waiting to be fleshed out — review its scientific content"
     : batches.length === 1
-      ? "1 graph-draft batch ready"
-      : `${batches.length} graph-draft batches ready`;
+      ? "1 daily review ready"
+      : `${batches.length} daily reviews ready`;
   const firstBatch = meetingBatch || batches[0];
   return (
     <div className="flash ok batch-banner" role="status">
@@ -90,7 +90,7 @@ function BatchReviewPage({
   const [loading, setLoading] = useState(false);
   const [enabled, setEnabled] = useState(true);
   const [cadenceMinutes, setCadenceMinutes] = useState("1440");
-  const [runAtLocalTime, setRunAtLocalTime] = useState("06:00");
+  const [runAtLocalTime, setRunAtLocalTime] = useState("18:00");
   const [timezoneName, setTimezoneName] = useState("America/New_York");
 
   const activeProject = useMemo(
@@ -116,7 +116,7 @@ function BatchReviewPage({
       setBatches(batchData || []);
       setRuns(runData || []);
     } catch (err) {
-      setFlash("", err.message || "Failed to load graph-draft batches.");
+      setFlash("", err.message || "Failed to load daily reviews.");
     } finally {
       setLoading(false);
     }
@@ -135,7 +135,7 @@ function BatchReviewPage({
       setSettings(nextSettings);
       setEnabled(Boolean(nextSettings.enabled));
       setCadenceMinutes(String(nextSettings.cadence_minutes || 1440));
-      setRunAtLocalTime(nextSettings.run_at_local_time || "06:00");
+      setRunAtLocalTime(nextSettings.run_at_local_time || "18:00");
       setTimezoneName(nextSettings.timezone_name || "America/New_York");
     } catch (err) {
       setSettings(null);
@@ -173,7 +173,7 @@ function BatchReviewPage({
         }
       );
       setSettings(nextSettings);
-      setFlash("Batch cadence updated.");
+      setFlash("Daily review schedule updated.");
     } catch (err) {
       setFlash("", err.message || "Failed to update batch cadence.");
     } finally {
@@ -200,7 +200,7 @@ function BatchReviewPage({
         setFlash(run.summary || "No staged notes found for this batch window.");
       }
     } catch (err) {
-      setFlash("", err.message || "Failed to run graph-draft batch.");
+      setFlash("", err.message || "Failed to run the daily review.");
     } finally {
       setBusy(false);
     }
@@ -209,7 +209,7 @@ function BatchReviewPage({
   return (
     <article className="card span-12">
       <div className="item-head">
-        <h2>Graph-Draft Batches</h2>
+        <h2>Daily review</h2>
         {loading ? <span className="pill">Loading...</span> : null}
       </div>
 
@@ -229,12 +229,12 @@ function BatchReviewPage({
 
           <div className="stack">
             {batches.length === 0 ? (
-              <p className="subtle">No pending graph-draft batches.</p>
+              <p className="subtle">No daily reviews waiting.</p>
             ) : (
               batches.map((batch) => (
                 <article className="item" key={batch.change_set_id}>
                   <div className="item-head">
-                    <strong>{batch.summary || "Pending batch"}</strong>
+                    <strong>{batch.summary || "Pending review"}</strong>
                     <span className={pendingBatchStatus(batch.status)}>{batch.status}</span>
                   </div>
                   <div className="inline">
@@ -291,6 +291,30 @@ function BatchReviewPage({
                 onChange={(event) => setRunAtLocalTime(event.target.value)}
               />
             </label>
+            <div className="inline">
+              <button
+                type="button"
+                className="btn-secondary"
+                aria-pressed={runAtLocalTime === "18:00"}
+                disabled={!canManageGraph || !selectedProjectId}
+                onClick={() => setRunAtLocalTime("18:00")}
+              >
+                Evening (6:00 PM)
+              </button>
+              <button
+                type="button"
+                className="btn-secondary"
+                aria-pressed={runAtLocalTime === "06:00"}
+                disabled={!canManageGraph || !selectedProjectId}
+                onClick={() => setRunAtLocalTime("06:00")}
+              >
+                Morning (6:00 AM)
+              </button>
+            </div>
+            <p className="subtle">
+              When the review runs each day. Most labs pick the evening, to confirm the
+              day&apos;s captures while the work is fresh — but mornings work too.
+            </p>
             <label>
               Time zone
               <input
