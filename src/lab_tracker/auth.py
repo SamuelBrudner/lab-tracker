@@ -22,6 +22,7 @@ from lab_tracker.db_models import (
     DeviceEnrollmentModel,
     DeviceTokenModel,
     InvitationModel,
+    PersonalAccessTokenModel,
     UserModel,
 )
 from lab_tracker.errors import AuthError, ConflictError, NotFoundError, ValidationError
@@ -45,6 +46,7 @@ class Role(str, Enum):
 class PrincipalType(str, Enum):
     USER = "user"
     DEVICE = "device"
+    SERVICE = "service"
 
 
 @dataclass(frozen=True)
@@ -57,6 +59,10 @@ class AuthContext:
     @property
     def is_device(self) -> bool:
         return self.principal_type == PrincipalType.DEVICE
+
+    @property
+    def is_service(self) -> bool:
+        return self.principal_type == PrincipalType.SERVICE
 
 
 @dataclass
@@ -553,7 +559,15 @@ class InvitationTokenService:
 DEVICE_TOKEN_PREFIX = "ldev_"
 ENROLLMENT_OFFER_PREFIX = "lpair_"
 INVITATION_TOKEN_PREFIX = "linv_"
+LPAT_TOKEN_PREFIX = "lpat_"
 DEVICE_LAST_USED_UPDATE_INTERVAL = timedelta(minutes=5)
+PERSONAL_ACCESS_TOKEN_LAST_USED_UPDATE_INTERVAL = timedelta(minutes=5)
+PERSONAL_ACCESS_TOKEN_MAX_TTL = timedelta(days=90)
+_ROLE_RANK = {
+    Role.VIEWER: 0,
+    Role.EDITOR: 1,
+    Role.ADMIN: 2,
+}
 
 
 def device_principal_can_access(method: str, path: str) -> bool:
@@ -580,6 +594,24 @@ def device_principal_can_access(method: str, path: str) -> bool:
         return True
     segments = [segment for segment in path.split("/") if segment]
     return len(segments) == 3 and segments[0] == "notes" and segments[2] == "transcript"
+
+
+def service_principal_can_access(
+    method: str,
+    path: str,
+    *,
+    read_only: bool,
+    role: Role,
+) -> bool:
+    """Coarse-grained policy for lpat_ service principals."""
+    method = method.upper()
+    if path.startswith("/auth"):
+        return False
+    if method in {"GET", "HEAD", "OPTIONS"}:
+        return True
+    if read_only:
+        return False
+    return role in {Role.ADMIN, Role.EDITOR}
 
 
 @dataclass(frozen=True)
@@ -617,6 +649,42 @@ class DevicePrincipal:
     label: str
 
 
+@dataclass(frozen=True)
+class PersonalAccessToken:
+    token_id: UUID
+    user_id: UUID
+    label: str
+    role: Role
+    read_only: bool
+    expires_at: datetime
+    created_at: datetime
+    last_used_at: datetime | None
+    revoked_at: datetime | None
+
+    @property
+    def revoked(self) -> bool:
+        return self.revoked_at is not None
+
+    @property
+    def expired(self) -> bool:
+        return self.expires_at <= utc_now()
+
+
+@dataclass(frozen=True)
+class IssuedPersonalAccessToken:
+    token: PersonalAccessToken
+    secret: str
+
+
+@dataclass(frozen=True)
+class PersonalAccessTokenPrincipal:
+    user_id: UUID
+    token_id: UUID
+    label: str
+    role: Role
+    read_only: bool
+
+
 def _hash_token(token: str) -> str:
     return hashlib.sha256(token.encode("utf-8")).hexdigest()
 
@@ -630,6 +698,20 @@ def _device_token_from_model(model: DeviceTokenModel) -> DeviceToken:
         device_token_id=UUID(model.device_token_id),
         user_id=UUID(model.user_id),
         label=model.label,
+        created_at=model.created_at,
+        last_used_at=model.last_used_at,
+        revoked_at=model.revoked_at,
+    )
+
+
+def _personal_access_token_from_model(model: PersonalAccessTokenModel) -> PersonalAccessToken:
+    return PersonalAccessToken(
+        token_id=UUID(model.token_id),
+        user_id=UUID(model.user_id),
+        label=model.label,
+        role=Role(model.role),
+        read_only=bool(model.read_only),
+        expires_at=model.expires_at,
         created_at=model.created_at,
         last_used_at=model.last_used_at,
         revoked_at=model.revoked_at,
@@ -794,6 +876,105 @@ class DeviceAuthService:
             )
 
 
+class PersonalAccessTokenService:
+    """Issues, verifies, and revokes lpat_ personal access tokens."""
+
+    def __init__(self, session_factory: sessionmaker[Session]) -> None:
+        if session_factory is None:
+            raise ValidationError("PersonalAccessTokenService requires a session_factory.")
+        self._session_factory = session_factory
+
+    def issue_token(
+        self,
+        user: User,
+        *,
+        label: str,
+        role: Role,
+        read_only: bool = True,
+        expires_at: datetime,
+    ) -> IssuedPersonalAccessToken:
+        if not label or not label.strip():
+            raise ValidationError("Token label must not be empty.")
+        now = utc_now()
+        expires_at = _as_utc(expires_at)
+        if expires_at <= now:
+            raise ValidationError("Token expiration must be in the future.")
+        if expires_at - now > PERSONAL_ACCESS_TOKEN_MAX_TTL:
+            raise ValidationError("Token expiration exceeds the maximum token TTL.")
+        capped_role = _cap_role(role, issuer_role=user.role)
+        secret = _generate_secret(LPAT_TOKEN_PREFIX)
+        row = PersonalAccessTokenModel(
+            token_id=str(uuid4()),
+            user_id=str(user.user_id),
+            label=label.strip(),
+            token_hash=_hash_token(secret),
+            role=capped_role.value,
+            read_only=bool(read_only),
+            expires_at=expires_at,
+            created_at=now,
+        )
+        with self._session_factory() as session:
+            if session.get(UserModel, str(user.user_id)) is None:
+                raise NotFoundError("User does not exist.")
+            session.add(row)
+            session.commit()
+            session.refresh(row)
+            return IssuedPersonalAccessToken(
+                token=_personal_access_token_from_model(row),
+                secret=secret,
+            )
+
+    def list_tokens(self, user_id: UUID) -> list[PersonalAccessToken]:
+        with self._session_factory() as session:
+            rows = list(
+                session.scalars(
+                    select(PersonalAccessTokenModel)
+                    .where(PersonalAccessTokenModel.user_id == str(user_id))
+                    .order_by(PersonalAccessTokenModel.created_at.desc())
+                )
+            )
+            return [_personal_access_token_from_model(row) for row in rows]
+
+    def revoke_token(self, user_id: UUID, token_id: UUID) -> PersonalAccessToken:
+        with self._session_factory() as session:
+            row = session.get(PersonalAccessTokenModel, str(token_id))
+            if row is None or row.user_id != str(user_id):
+                raise NotFoundError("Personal access token does not exist.")
+            if row.revoked_at is None:
+                row.revoked_at = utc_now()
+                session.commit()
+                session.refresh(row)
+            return _personal_access_token_from_model(row)
+
+    def verify_token(self, token: str) -> PersonalAccessTokenPrincipal | None:
+        if not token or not token.startswith(LPAT_TOKEN_PREFIX):
+            return None
+        token_hash = _hash_token(token)
+        with self._session_factory() as session:
+            row = session.scalar(
+                select(PersonalAccessTokenModel).where(
+                    PersonalAccessTokenModel.token_hash == token_hash
+                )
+            )
+            now = utc_now()
+            if row is None or row.revoked_at is not None or _as_utc(row.expires_at) <= now:
+                return None
+            last_used_at = _as_utc(row.last_used_at) if row.last_used_at is not None else None
+            if (
+                last_used_at is None
+                or now - last_used_at >= PERSONAL_ACCESS_TOKEN_LAST_USED_UPDATE_INTERVAL
+            ):
+                row.last_used_at = now
+                session.commit()
+            return PersonalAccessTokenPrincipal(
+                user_id=UUID(row.user_id),
+                token_id=UUID(row.token_id),
+                label=row.label,
+                role=Role(row.role),
+                read_only=bool(row.read_only),
+            )
+
+
 def extract_bearer_token(authorization_header: str | None) -> str:
     if authorization_header is None:
         raise AuthError("Missing Authorization header.")
@@ -808,6 +989,12 @@ def require_role(actor: AuthContext | None, allowed_roles: Iterable[Role]) -> No
         raise AuthError("Authentication required.")
     if actor.role not in set(allowed_roles):
         raise AuthError("Insufficient role.")
+
+
+def _cap_role(role: Role, *, issuer_role: Role) -> Role:
+    if _ROLE_RANK[role] <= _ROLE_RANK[issuer_role]:
+        return role
+    return issuer_role
 
 
 def _ensure_non_empty(value: str, field_name: str) -> None:

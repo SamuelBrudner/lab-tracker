@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+import hashlib
+from collections.abc import Iterable
+from importlib import metadata
+
 TASK_KIND_VALUES = (
     "plot",
     "analysis",
@@ -42,12 +46,20 @@ MCP_SERVER_INSTRUCTIONS = " ".join(
         "Use lab_tracker_get_decision_context, or lab_tracker_next_questions when "
         "the user asks what research thread to advance.",
         "Read lab-tracker://quickstart for setup.",
+        "Code-facing conventions are available at lab-tracker://code-conventions; "
+        "package text remains canonical.",
+        "AI can suggest; only a person commits.",
         "Do not create or mutate records unless the user explicitly asks.",
     )
 )
 
 CLAUDE_BLOCK_BEGIN = "<!-- BEGIN LAB TRACKER MCP ACTIVATION -->"
 CLAUDE_BLOCK_END = "<!-- END LAB TRACKER MCP ACTIVATION -->"
+CODE_CONVENTIONS_BLOCK_BEGIN = "<!-- BEGIN LAB TRACKER CODE CONVENTIONS -->"
+CODE_CONVENTIONS_BLOCK_END = "<!-- END LAB TRACKER CODE CONVENTIONS -->"
+AGENTS_CODE_CONVENTIONS_BLOCK_BEGIN = "<!-- BEGIN LAB TRACKER AGENTS CODE CONVENTIONS -->"
+AGENTS_CODE_CONVENTIONS_BLOCK_END = "<!-- END LAB TRACKER AGENTS CODE CONVENTIONS -->"
+_CODE_CONVENTIONS_VERSION_PREFIX = "<!-- lab-tracker-code-conventions"
 
 
 def managed_claude_block() -> str:
@@ -72,3 +84,95 @@ def managed_claude_block() -> str:
             "",
         ]
     )
+
+
+def code_facing_idioms(*, symbols: Iterable[str] | None = None) -> str:
+    """Return canonical code-facing idioms for consumer repositories."""
+
+    if symbols is None:
+        from lab_tracker_client import __all__ as client_symbols
+
+        symbols = client_symbols
+    symbol_set = set(symbols)
+    sections = [
+        "# Lab Tracker Code-Facing Idioms",
+        "",
+        "The package-pinned Python client surface has these stable code idioms:",
+        "",
+        "- `first_line_marker()` with `upsert_note()` gives notes a durable "
+        "first-line idempotency key, so repeated syncs address the same note when "
+        "the marker and body match.",
+        "- `EntityRef` represents note targets as explicit `entity_type` plus "
+        "`entity_id` pairs; note attachments stay typed instead of depending on "
+        "free-text references.",
+        "- `ids()` reads the project-local `lt_ids.json` mapping, keeping "
+        "`project_id` and related identifiers as data loaded by the consumer repo.",
+        "- `import_evidence_file()` records external files as staged evidence notes "
+        "with `evidence_source_uri` and `evidence_content_hash` metadata, so byte "
+        "duplicates are recognized by content hash.",
+        "",
+        "Citation annotation tokens are inert provenance hints that can travel "
+        "beside ordinary citations:",
+        "",
+        "- Markdown form: `<!-- lt-cite: 00000000-0000-0000-0000-000000000000 -->`",
+        "- LaTeX form: `% lt-cite: 00000000-0000-0000-0000-000000000000`",
+        "",
+        "Strip UUID-bearing citation tokens before external sharing unless the "
+        "recipient is meant to see Lab Tracker-local identifiers.",
+    ]
+    if {"savefig", "capture_figures"}.issubset(symbol_set):
+        sections.extend(
+            [
+                "",
+                "Figure capture is available through `savefig()` and "
+                "`capture_figures()`: saved figure bytes keep their full "
+                "`evidence_content_hash`, while Lab Tracker receives only a "
+                "bounded review image or pointer note. `run_context()` contributes "
+                "scalar git/run metadata without creating Analysis records.",
+            ]
+        )
+    return "\n".join(sections) + "\n"
+
+
+def managed_code_conventions_block(
+    *,
+    begin_marker: str = CODE_CONVENTIONS_BLOCK_BEGIN,
+    end_marker: str = CODE_CONVENTIONS_BLOCK_END,
+) -> str:
+    """Return a marked code-conventions block with a splitter-ignored version line."""
+
+    body = code_facing_idioms()
+    return "\n".join(
+        [
+            begin_marker,
+            body.rstrip(),
+            end_marker,
+            code_conventions_version_line(body),
+            "",
+        ]
+    )
+
+
+def cursor_rules_mdc() -> str:
+    """Return Cursor rules content with a managed Lab Tracker conventions region."""
+
+    return (
+        "---\n"
+        "description: Lab Tracker code-facing conventions\n"
+        "alwaysApply: true\n"
+        "---\n\n"
+        f"{managed_code_conventions_block()}"
+    )
+
+
+def code_conventions_version_line(body: str | None = None) -> str:
+    resolved_body = body if body is not None else code_facing_idioms()
+    digest = hashlib.sha256(resolved_body.encode("utf-8")).hexdigest()[:12]
+    return f"{_CODE_CONVENTIONS_VERSION_PREFIX} version={package_version()} sha256={digest} -->"
+
+
+def package_version() -> str:
+    try:
+        return metadata.version("lab-tracker")
+    except metadata.PackageNotFoundError:
+        return "0+unknown"

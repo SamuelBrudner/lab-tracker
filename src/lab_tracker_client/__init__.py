@@ -1,4 +1,9 @@
-"""Public Python client helpers for Lab Tracker consumers."""
+"""Public Python client helpers for Lab Tracker consumers.
+
+Key Lab Tracker idioms include first-line note markers for idempotent notes,
+EntityRef note targets, project ids loaded from lt_ids.json, content-hash
+evidence imports, and fail-soft figure capture with savefig/capture_figures.
+"""
 
 from lab_tracker_client.client import (
     ENTITY_TYPE_VALUES,
@@ -44,6 +49,13 @@ from lab_tracker_client.client import (
     upsert_project,
     upsert_question,
 )
+from lab_tracker_client.figure import (
+    FigureCaptureResult,
+    RunContext,
+    capture_figures,
+    run_context,
+    savefig,
+)
 
 __all__ = [
     "ENTITY_TYPE_VALUES",
@@ -54,12 +66,15 @@ __all__ = [
     "QUESTION_TYPE_VALUES",
     "EvidenceImportResult",
     "EntityRef",
+    "FigureCaptureResult",
     "LTAPIError",
     "LTError",
     "LTRecord",
     "LTValidationError",
     "LabTracker",
+    "RunContext",
     "build_evidence_metadata",
+    "capture_figures",
     "client",
     "client_from_env",
     "evidence_note_matches",
@@ -84,6 +99,8 @@ __all__ = [
     "next_questions",
     "quick_capture",
     "readiness",
+    "run_context",
+    "savefig",
     "upload_note_file",
     "upsert_note",
     "upsert_project",

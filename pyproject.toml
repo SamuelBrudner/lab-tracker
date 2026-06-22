@@ -28,6 +28,10 @@ test = [
 lint = [
   "ruff",
 ]
+figure = [
+  "matplotlib",
+  "pillow",
+]
 
 [project.scripts]
 lab-tracker = "lab_tracker.cli:main"

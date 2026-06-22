@@ -74,6 +74,7 @@ Read tools:
 - `lab_tracker_describe_schema`: Describe fields/enums before create_* calls; use after context lookup.
 - `lab_tracker_list_projects`: List visible projects when scoping a follow-up Lab Tracker read.
 - `lab_tracker_list_questions`: List/search questions when inspecting known project/question scope.
+- `lab_tracker_list_question_refactors`: List refactor history where a question is the source or replacement.
 - `lab_tracker_list_notes`: List notes for known scope; use decision context first for research choices.
 - `lab_tracker_search`: Search questions and notes when the project or anchor IDs are not known.
 - `lab_tracker_list_sessions`: List acquisition/experiment sessions for a known project scope.
@@ -98,7 +99,6 @@ Write tools:
 - `lab_tracker_create_project`: Create a project only when the user explicitly asks for a new scope.
 - `lab_tracker_create_question`: Create a question after project/goal scope is known.
 - `lab_tracker_refactor_question`: Supersede a question with a replacement and optional child/note moves.
-- `lab_tracker_list_question_refactors`: List refactor history where a question is the source or replacement.
 - `lab_tracker_create_note`: Create a text note when the user asks to record source context.
 - `lab_tracker_create_dataset`: Create a dataset before analyses, claims, and visualizations.
 - `lab_tracker_create_analysis`: Create an analysis after datasets and before claims or figures.
@@ -109,7 +109,7 @@ Write tools:
 - `lab_tracker_update_goal`: Update a Lab Tracker goal/output.
 - `lab_tracker_link_node_to_goal`: Tag an existing graph node in relation to a goal/output.
 - `lab_tracker_upload_visualization_file`: Upload a local file into managed storage for a visualization node.
-- `lab_tracker_record_evidence_bundle`: Preview or record a dataset-analysis-claim-visualization evidence bundle.
+- `lab_tracker_record_evidence_bundle`: Defaults to dry-run; pass dry_run=false to write an evidence bundle.
 <!-- END GENERATED MCP TOOL LIST -->
 
 Creation tools write through the API, using the configured service account when

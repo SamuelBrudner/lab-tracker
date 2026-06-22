@@ -32,6 +32,7 @@ from lab_tracker.services.note_service import NoteService
 from lab_tracker.services.project_service import ProjectService
 from lab_tracker.services.question_service import QuestionService
 from lab_tracker.services.session_service import SessionService
+from lab_tracker.services.shared import is_meeting_note
 from lab_tracker.services.visualization_service import VisualizationService
 
 EntityResult = (
@@ -537,6 +538,8 @@ def _graph_batch_context_summary(packet: dict[str, Any]) -> dict[str, Any]:
     if truncated:
         warnings.append(f"batch truncated; {truncated} note(s) omitted")
     projects = packet.get("projects") or []
+    batch_notes = [item for item in packet.get("batch_notes") or [] if isinstance(item, dict)]
+    meeting_note_count = sum(1 for item in batch_notes if item.get("is_meeting"))
     return {
         "approximate_size_bytes": len(
             json.dumps(packet, sort_keys=True, default=str).encode("utf-8")
@@ -544,6 +547,7 @@ def _graph_batch_context_summary(packet: dict[str, Any]) -> dict[str, Any]:
         "counts": {
             "projects": len(projects),
             "batch_notes": len(packet.get("batch_notes") or []),
+            "meeting_notes": meeting_note_count,
             "source_artifacts": len(source_artifacts),
             "active_or_staged_questions": sum(
                 len(p.get("active_or_staged_questions") or []) for p in projects
@@ -603,6 +607,7 @@ def _compact_note(note: Note, *, include_raw_asset: bool = False) -> dict[str, A
             for target in note.targets
         ],
         "metadata": dict(note.metadata),
+        "is_meeting": is_meeting_note(note),
     }
     if include_raw_asset and note.raw_asset is not None:
         payload["raw_asset"] = {
@@ -649,6 +654,7 @@ def _source_artifact_packet(note: Note) -> dict[str, Any]:
         "created_at": note.created_at.isoformat(),
         "status": note.status.value,
         "metadata": dict(note.metadata),
+        "is_meeting": is_meeting_note(note),
         "targets": [
             {"entity_type": target.entity_type.value, "entity_id": str(target.entity_id)}
             for target in note.targets

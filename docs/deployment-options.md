@@ -51,6 +51,16 @@ The first-admin token is stored in the app data volume. Open the app through
 `Create First Admin`; the setup screen loads the generated token while no users
 exist.
 
+Optional GitHub Copilot MCP hosting is a separate read-only service:
+
+```bash
+LT_MCP_READONLY_TOKEN=lpat_... docker compose up mcp
+```
+
+The MCP service uses streamable HTTP and is published only on host loopback
+(`127.0.0.1:9000` by default). Put a private TLS proxy or tailnet serve layer in
+front of it; the checked-in Caddy example is `deploy/mcp/Caddyfile`.
+
 ### LAN Phone Capture
 
 macOS/Linux:

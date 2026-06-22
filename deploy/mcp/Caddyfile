@@ -1,0 +1,31 @@
+# Private Lab Tracker MCP reverse proxy.
+#
+# Replace mcp.lab.internal with the tailnet/VPN hostname you will serve. This
+# file intentionally does not configure permissive CORS; the MCP endpoint should
+# stay private and token-authenticated.
+
+mcp.lab.internal {
+    @badhost not host mcp.lab.internal
+    respond @badhost 421
+
+    # Placeholder allowlist: confirm real GitHub Copilot IDE Origin values
+    # against live logs before enforcing in production.
+    @badorigin {
+        header Origin *
+        not header_regexp Origin ^https://(github\.com|[A-Za-z0-9.-]+\.githubcopilot\.com)$
+    }
+    respond @badorigin 403
+
+    log {
+        output stdout
+        format filter {
+            request>headers>Authorization delete
+            request>headers>Proxy-Authorization delete
+            request>headers>Cookie delete
+        }
+    }
+
+    reverse_proxy 127.0.0.1:9000 {
+        header_up X-Forwarded-Proto {scheme}
+    }
+}

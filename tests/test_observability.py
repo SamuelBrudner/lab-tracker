@@ -48,6 +48,7 @@ def test_readiness_endpoint(monkeypatch, tmp_path):
     assert response.status_code == 200
     payload = response.json()
     assert payload["status"] == "ok"
+    assert payload["auth"] == {"enabled": False}
     assert "timestamp" in payload
     checks = payload["checks"]
     assert any(check["name"] == "database" and check["status"] == "ok" for check in checks)
@@ -167,6 +168,7 @@ def test_readiness_and_metrics_require_auth_when_auth_enabled(monkeypatch, tmp_p
 
     assert readiness.status_code == 200
     assert readiness.json()["checks"][0]["name"] == "database"
+    assert readiness.json()["auth"] == {"enabled": True}
     assert metrics.status_code == 200
     assert metrics.json()["store"]["projects"] == 0
 

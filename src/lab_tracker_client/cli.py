@@ -23,18 +23,23 @@ def main(argv: list[str] | None = None) -> None:
     parser = _build_parser()
     args = parser.parse_args(argv)
     try:
-        client = LabTracker.from_env()
-        try:
-            payload = args.func(client, args)
-        finally:
-            client.close()
+        if getattr(args, "needs_client", True):
+            client = LabTracker.from_env()
+            try:
+                payload = args.func(client, args)
+            finally:
+                client.close()
+        else:
+            payload = args.func(args)
     except Exception:
         if getattr(args, "fail_silent", False):
             return
         raise
+    exit_code = _payload_exit_code(payload)
+    if exit_code and getattr(args, "fail_silent", False):
+        return
     if payload is not None:
         print(json.dumps(_jsonable(payload), indent=2))
-    exit_code = _payload_exit_code(payload)
     if exit_code:
         raise SystemExit(exit_code)
 
@@ -54,6 +59,22 @@ def _build_parser() -> argparse.ArgumentParser:
     subcommands.add_parser("ids", help="Print lt_ids.json.").set_defaults(
         func=lambda _client, _args: ids()
     )
+    doctor_parser = subcommands.add_parser(
+        "doctor",
+        aliases=["check-idioms"],
+        help="Check managed Lab Tracker code-facing idiom blocks.",
+    )
+    doctor_parser.add_argument(
+        "--target",
+        default=".",
+        help="Consumer repo path to inspect. Defaults to the current directory.",
+    )
+    doctor_parser.add_argument(
+        "--fail-silent",
+        action="store_true",
+        help="Suppress drift exit codes and errors for prompt hooks.",
+    )
+    doctor_parser.set_defaults(func=_cmd_doctor, needs_client=False)
 
     prime_parser = subcommands.add_parser(
         "prime",
@@ -270,6 +291,12 @@ def _cmd_list_notes(client: LabTracker, args: argparse.Namespace) -> Any:
     return client.list_notes(project_id=args.project, status=args.status)
 
 
+def _cmd_doctor(args: argparse.Namespace) -> Any:
+    from lab_tracker.cli import _doctor
+
+    return _doctor(args.target)
+
+
 def _target(value: str) -> EntityRef:
     entity_type, separator, entity_id = value.partition(":")
     if not separator:
@@ -323,4 +350,10 @@ def _payload_exit_code(payload: Any) -> int:
         and payload.get("errors")
     ):
         return 1
+    if isinstance(payload, dict) and payload.get("command") == "doctor":
+        targets = payload.get("targets")
+        if not isinstance(targets, list):
+            return 1
+        if not all(isinstance(target, dict) and not target.get("drifted") for target in targets):
+            return 1
     return 0

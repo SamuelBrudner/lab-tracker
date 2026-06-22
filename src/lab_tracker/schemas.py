@@ -163,6 +163,28 @@ class AuthTokenRead(BaseModel):
     user: AuthUserRead
 
 
+class PersonalAccessTokenCreate(RequestModel):
+    label: Annotated[str, Field(min_length=1, max_length=150), AfterValidator(_non_blank_string)]
+    role: Role = Role.VIEWER
+    read_only: bool = True
+    expires_at: datetime
+
+
+class PersonalAccessTokenRead(BaseModel):
+    token_id: UUID
+    label: str
+    role: Role
+    read_only: bool
+    expires_at: datetime
+    created_at: datetime
+    last_used_at: datetime | None = None
+    revoked_at: datetime | None = None
+
+
+class PersonalAccessTokenIssuedRead(PersonalAccessTokenRead):
+    secret: str
+
+
 class AuthRegisterRequest(RequestModel):
     username: NonBlankStr
     password: NonBlankStr

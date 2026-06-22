@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import mimetypes
 import os
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -50,6 +51,8 @@ GOAL_TYPE_VALUES = tuple(goal_type.value for goal_type in GoalType)
 GOAL_TYPE_TEXT = ", ".join(GOAL_TYPE_VALUES)
 GOAL_LINK_STATUS_VALUES = tuple(status.value for status in GoalLinkStatus)
 GOAL_LINK_STATUS_TEXT = ", ".join(GOAL_LINK_STATUS_VALUES)
+_BEARER_SECRET_RE = re.compile(r"Bearer\s+[^\s\"'\\,}\]]+", re.IGNORECASE)
+_LPAT_SECRET_RE = re.compile(r"lpat_[A-Za-z0-9_-]+")
 
 
 class LabTrackerAPIError(RuntimeError):
@@ -63,10 +66,10 @@ class LabTrackerAPIError(RuntimeError):
         code: str | None = None,
         issues: list[JsonObject] | None = None,
     ) -> None:
-        super().__init__(message)
+        super().__init__(redact_auth_secrets(message))
         self.status_code = status_code
         self.code = code
-        self.issues = issues
+        self.issues = _redact_error_issues(issues)
 
 
 class LabTrackerAPIUnavailableError(LabTrackerAPIError):
@@ -86,6 +89,7 @@ class MCPSettings:
     base_url: str = DEFAULT_BASE_URL
     username: str | None = None
     password: str | None = None
+    api_key: str | None = None
     timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS
 
     @classmethod
@@ -94,6 +98,8 @@ class MCPSettings:
             base_url=os.getenv("LAB_TRACKER_MCP_BASE_URL", DEFAULT_BASE_URL).rstrip("/"),
             username=os.getenv("LAB_TRACKER_MCP_USERNAME"),
             password=os.getenv("LAB_TRACKER_MCP_PASSWORD"),
+            api_key=os.getenv("LAB_TRACKER_MCP_API_KEY")
+            or os.getenv("LAB_TRACKER_MCP_TOKEN"),
             timeout_seconds=float(
                 os.getenv("LAB_TRACKER_MCP_TIMEOUT_SECONDS", str(DEFAULT_TIMEOUT_SECONDS))
             ),
@@ -817,8 +823,12 @@ class LabTrackerAPIClient:
         retry_on_unauthorized: bool = True,
     ) -> JsonObject:
         headers: dict[str, str] = {"X-LabTracker-Surface": "mcp"}
-        if authenticated and self._has_credentials():
-            headers["Authorization"] = f"Bearer {self._token()}"
+        if authenticated:
+            static_key = self._static_api_key()
+            if static_key:
+                headers["Authorization"] = f"Bearer {static_key}"
+            elif self._has_credentials():
+                headers["Authorization"] = f"Bearer {self._token()}"
         response = self._send(
             method,
             path,
@@ -828,6 +838,8 @@ class LabTrackerAPIClient:
             headers=headers,
         )
         if response.status_code == 401 and authenticated and retry_on_unauthorized:
+            if self._static_api_key():
+                raise _api_error_from_response(response)
             self._access_token = None
             if not self._has_credentials():
                 raise LabTrackerAPIAuthError(
@@ -860,6 +872,9 @@ class LabTrackerAPIClient:
 
     def _has_credentials(self) -> bool:
         return bool((self._settings.username or "").strip() and self._settings.password)
+
+    def _static_api_key(self) -> str:
+        return (self._settings.api_key or "").strip()
 
     def _token(self) -> str:
         if self._access_token:
@@ -1024,13 +1039,13 @@ def lab_tracker_unavailable(operation: str, **metadata: object) -> JsonObject:
 def lab_tracker_api_error(operation: str, exc: LabTrackerAPIError) -> JsonObject:
     error: JsonObject = {
         "code": exc.code or "lab_tracker_api_error",
-        "message": str(exc),
+        "message": redact_auth_secrets(str(exc)),
         "operation": operation,
     }
     if exc.status_code is not None:
         error["status_code"] = exc.status_code
     if exc.issues:
-        error["issues"] = exc.issues
+        error["issues"] = _redact_error_issues(exc.issues)
     return {
         "error": error,
         "data": None,
@@ -1044,6 +1059,24 @@ def lab_tracker_api_error(operation: str, exc: LabTrackerAPIError) -> JsonObject
             ),
         },
     }
+
+
+def redact_auth_secrets(value: object) -> str:
+    text = str(value)
+    text = _BEARER_SECRET_RE.sub("Bearer [REDACTED]", text)
+    return _LPAT_SECRET_RE.sub("lpat_[REDACTED]", text)
+
+
+def _redact_error_issues(issues: list[JsonObject] | None) -> list[JsonObject] | None:
+    if not issues:
+        return None
+    redacted: list[JsonObject] = []
+    for issue in issues:
+        cleaned: JsonObject = {}
+        for key, value in issue.items():
+            cleaned[key] = redact_auth_secrets(value) if isinstance(value, str) else value
+        redacted.append(cleaned)
+    return redacted
 
 
 def _payload_items(payload: JsonObject) -> list[JsonObject]:

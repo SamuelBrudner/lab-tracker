@@ -726,6 +726,30 @@ class LabTracker:
         transcribed_text: str | None = None,
         client_capture_id: str | None = None,
     ) -> LTRecord:
+        note, _status_code = self._upload_note_file_payload_with_status(
+            project_id=project_id,
+            path=path,
+            payload=payload,
+            metadata=metadata,
+            status=status,
+            content_type=content_type,
+            transcribed_text=transcribed_text,
+            client_capture_id=client_capture_id,
+        )
+        return note
+
+    def _upload_note_file_payload_with_status(
+        self,
+        *,
+        project_id: str,
+        path: Path,
+        payload: bytes,
+        metadata: Mapping[str, NoteMetadataScalar] | None = None,
+        status: str = NoteStatus.STAGED.value,
+        content_type: str | None = None,
+        transcribed_text: str | None = None,
+        client_capture_id: str | None = None,
+    ) -> tuple[LTRecord, int]:
         if not payload:
             raise LTValidationError("file_path must point to a non-empty file.")
         resolved_status = _validate_enum(
@@ -750,12 +774,33 @@ class LabTracker:
             data["metadata"] = json.dumps(resolved_metadata, sort_keys=True)
         if transcribed_text:
             data["transcribed_text"] = transcribed_text
+        response_payload, status_code = self._request_with_status(
+            "POST",
+            "/notes/upload-file",
+            data=data,
+            files={"file": (path.name, payload, resolved_content_type)},
+        )
+        return self._data_record(response_payload), status_code
+
+    def _patch_note_metadata(
+        self,
+        note_id: str,
+        metadata: Mapping[str, NoteMetadataScalar],
+        *,
+        status: str | None = None,
+    ) -> LTRecord:
+        payload: JsonObject = {"metadata": _validate_metadata(metadata) or {}}
+        if status is not None:
+            payload["status"] = _validate_enum(
+                status,
+                field_name="note status",
+                allowed_values=NOTE_STATUS_VALUES,
+            )
         return self._data_record(
             self._request(
-                "POST",
-                "/notes/upload-file",
-                data=data,
-                files={"file": (path.name, payload, resolved_content_type)},
+                "PATCH",
+                f"/notes/{_require_non_empty(str(note_id), 'note_id')}",
+                json_payload=payload,
             )
         )
 
@@ -935,6 +980,30 @@ class LabTracker:
         files: dict[str, Any] | None = None,
         retry_on_unauthorized: bool = True,
     ) -> JsonObject:
+        payload, _status_code = self._request_with_status(
+            method,
+            path,
+            authenticated=authenticated,
+            params=params,
+            json_payload=json_payload,
+            data=data,
+            files=files,
+            retry_on_unauthorized=retry_on_unauthorized,
+        )
+        return payload
+
+    def _request_with_status(
+        self,
+        method: str,
+        path: str,
+        *,
+        authenticated: bool = True,
+        params: JsonObject | None = None,
+        json_payload: JsonObject | None = None,
+        data: Mapping[str, str] | None = None,
+        files: dict[str, Any] | None = None,
+        retry_on_unauthorized: bool = True,
+    ) -> tuple[JsonObject, int]:
         headers: dict[str, str] = {"X-LabTracker-Surface": "cli"}
         supplied_token_used = bool(self._access_token and self._supplied_access_token)
         if authenticated:
@@ -974,7 +1043,7 @@ class LabTracker:
             raise LTValidationError(_response_error(response))
         if response.status_code >= 400:
             raise LTAPIError(_response_error(response))
-        return _response_json(response)
+        return _response_json(response), response.status_code
 
     def _send(self, method: str, path: str, **kwargs: Any) -> httpx.Response:
         try:

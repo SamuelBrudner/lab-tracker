@@ -32,6 +32,27 @@ services:
       retries: 3
       start_period: 20s
 
+  mcp:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: uv run python -m lab_tracker.mcp_server
+    depends_on:
+      app:
+        condition: service_healthy
+    environment:
+      LAB_TRACKER_MCP_TRANSPORT: streamable-http
+      # Docker needs the process reachable on the container interface; the
+      # published host port below is still loopback-only.
+      LAB_TRACKER_MCP_HOST: ${LAB_TRACKER_MCP_HOST:-0.0.0.0}
+      LAB_TRACKER_MCP_PORT: ${LAB_TRACKER_MCP_PORT:-8000}
+      LAB_TRACKER_MCP_PATH: ${LAB_TRACKER_MCP_PATH:-/mcp}
+      LAB_TRACKER_MCP_BASE_URL: ${LAB_TRACKER_MCP_BASE_URL:-http://app:8000}
+      LAB_TRACKER_MCP_API_KEY: ${LT_MCP_READONLY_TOKEN:?Set LT_MCP_READONLY_TOKEN to a read-only lpat_ token}
+    ports:
+      - "127.0.0.1:${LAB_TRACKER_MCP_HOST_PORT:-9000}:${LAB_TRACKER_MCP_PORT:-8000}"
+    restart: unless-stopped
+
   postgres:
     image: postgres:16-alpine
     environment:

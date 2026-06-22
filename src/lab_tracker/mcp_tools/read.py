@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 import httpx
+from mcp.types import ToolAnnotations
 
 from lab_tracker.mcp_api_client import (
     JsonObject,
@@ -51,6 +52,16 @@ def _read_tool(
         return lab_tracker_unavailable(tool_name, detail=str(exc))
     except LabTrackerAPIError as exc:
         return lab_tracker_api_error(tool_name, exc)
+
+
+def _tool_title(tool: Any) -> str:
+    name = str(getattr(tool, "__name__", "lab_tracker_tool"))
+    return "Lab Tracker " + name.removeprefix("lab_tracker_").replace("_", " ").title()
+
+
+def _read_tool_annotations(tool: Any) -> ToolAnnotations:
+    title = _tool_title(tool)
+    return ToolAnnotations(title=title, readOnlyHint=True, openWorldHint=True)
 
 
 def lab_tracker_health() -> JsonObject:
@@ -137,6 +148,26 @@ def lab_tracker_list_questions(
         hint=next_action(
             "lab_tracker_get_decision_context",
             "Load bounded graph context before using a question to plan analysis or writing.",
+        ),
+    )
+
+
+def lab_tracker_list_question_refactors(
+    question_id: str,
+    limit: int = 50,
+    offset: int = 0,
+) -> JsonObject:
+    """List refactor history where a question is the source or replacement."""
+    return _read_tool(
+        "lab_tracker_list_question_refactors",
+        lambda client: client.list_question_refactors(
+            question_id=question_id,
+            limit=limit,
+            offset=offset,
+        ),
+        hint=next_action(
+            "lab_tracker_list_questions",
+            "Inspect the current replacement or child questions before writing.",
         ),
     )
 
@@ -545,6 +576,7 @@ READ_TOOLS = (
     lab_tracker_describe_schema,
     lab_tracker_list_projects,
     lab_tracker_list_questions,
+    lab_tracker_list_question_refactors,
     lab_tracker_list_notes,
     lab_tracker_search,
     lab_tracker_list_sessions,
@@ -569,4 +601,5 @@ READ_TOOLS = (
 
 def register_read_tools(server: Any) -> None:
     for tool in READ_TOOLS:
-        server.tool()(tool)
+        title = _tool_title(tool)
+        server.tool(title=title, annotations=_read_tool_annotations(tool))(tool)

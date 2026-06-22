@@ -230,7 +230,11 @@ describe("SessionDetailCard", () => {
       />
     );
 
-    fireEvent.click(await screen.findByRole("button", { name: "Promote to scientific" }));
+    const promoteButton = await screen.findByRole("button", { name: "Promote to scientific" });
+    // Wait for the /questions fetch to populate the selection before clicking;
+    // otherwise the button is still disabled and the click is a no-op (flaky under load).
+    await waitFor(() => expect(promoteButton).toBeEnabled());
+    fireEvent.click(promoteButton);
 
     await waitFor(() => {
       expect(onPromoteSession).toHaveBeenCalledWith("session-1", "question-1", "project-1");

@@ -185,6 +185,7 @@ def test_alembic_upgrade_head_creates_expected_tables(monkeypatch, tmp_path):
         "usage_events",
         "usage_event_rollups",
         "invitations",
+        "personal_access_tokens",
     }
     assert expected.issubset(table_names)
     assert "dataset_reviews" not in table_names
@@ -225,6 +226,9 @@ def test_alembic_upgrade_head_creates_expected_tables(monkeypatch, tmp_path):
         column["name"]: column for column in inspector.get_columns("usage_event_rollups")
     }
     invitation_columns = {column["name"] for column in inspector.get_columns("invitations")}
+    personal_access_token_columns = {
+        column["name"] for column in inspector.get_columns("personal_access_tokens")
+    }
     entity_version_columns = {
         column["name"] for column in inspector.get_columns("entity_versions")
     }
@@ -558,6 +562,34 @@ def test_alembic_upgrade_head_creates_expected_tables(monkeypatch, tmp_path):
     )
     _assert_index(inspector, "invitations", "ix_invitations_email_created")
     _assert_index(inspector, "invitations", "ix_invitations_expires_at")
+    assert {
+        "token_id",
+        "user_id",
+        "label",
+        "token_hash",
+        "role",
+        "read_only",
+        "expires_at",
+        "created_at",
+        "last_used_at",
+        "revoked_at",
+    }.issubset(personal_access_token_columns)
+    _assert_fk(
+        inspector,
+        "personal_access_tokens",
+        column="user_id",
+        referred_table="users",
+    )
+    _assert_index(
+        inspector,
+        "personal_access_tokens",
+        "ix_personal_access_tokens_user_created",
+    )
+    _assert_index(
+        inspector,
+        "personal_access_tokens",
+        "ix_personal_access_tokens_expires_at",
+    )
     assert {
         "asset_storage_id",
         "asset_filename",

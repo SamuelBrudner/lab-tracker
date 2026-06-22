@@ -2,30 +2,45 @@
 
 A file named `2025_12_10_Rig2_session001.nwb` tells you *when*, *where*, and *what* — but not *why* you collected it, what you expected, or what you actually saw at the bench. That reasoning lives on paper towels, on whiteboards, and in people's heads — and it walks out the door when they do. Lab Tracker gives it a durable place to live, next to the data.
 
-## See it live
-
 **[Open the read-only demo →](https://samuelbrudner.github.io/lab-tracker/app/)** — seeded fly-olfaction data, no install, no login. Click around for 60 seconds.
 
-The whole project as a graph — questions, sessions, datasets, and the notes that connect them:
-
-![The full project graph in Lab Tracker](docs/screenshots/project-graph-full.png)
-
-Questions are first-class. You see how a broad question breaks down into the atomic ones you can actually answer at the rig:
+## Start with the question graph
 
 ![The question hierarchy for a project](docs/screenshots/project-graph-questions.png)
 
-Snap a photo or record a voice note from your phone, and Lab Tracker drafts the graph changes. You edit and accept — nothing touches your record until you do:
+The spine of every project is a graph of **questions** — your broad motivating question at the top, broken down into the atomic ones you can actually answer at the rig. Questions are first-class: you write them down *first*, before any data exists, and they persist whether the experiment works or not. A question can roll up to more than one parent, so the structure branches and converges as your thinking does.
 
-![Reviewing an AI-drafted graph change from a phone capture](docs/screenshots/capture-draft-review.png)
+## Everything hangs off a question
 
-## What you can do
+![The whole project as a graph](docs/screenshots/project-graph-full.png)
 
-- **Write down the question first.** Create questions, stage and activate them, and link a broad question down to the small ones you can answer — so the *why* is a durable record, not a buried comment.
-- **Capture at the bench.** Add notes as text, file attachments, or voice notes (with transcripts you can edit), pinned to the project, question, session, dataset, analysis, or claim they describe.
-- **Track what happened at the rig.** Log acquisition sessions, then turn a finished one into a dataset — every dataset commit records its provenance automatically.
-- **Connect findings to evidence.** Analyses, claims, and visualizations are explicit records that link back to the datasets and questions they answer.
-- **Draft from your phone, accept on review.** From a photo or voice note, Lab Tracker proposes graph changes from your project's context. You edit, accept, and commit through the same checks as any normal write — no silent automation. AI can suggest; only a person commits.
-- **Find old context later.** Keyword search runs across your questions and notes, so context you captured months ago is findable when you need it.
+Once the questions exist, the rest of your record points back at them:
+
+- **A dataset must name the question it addresses** — you can't commit one without it. Tag secondary questions too, and mark whether the data supported, refuted, or was inconclusive for each.
+- **Notes** pin to the question (or session, or dataset) they describe.
+- **Sessions** at the rig point at the question you're collecting for.
+- **Claims** answer questions — and only count as *supported* once a real dataset or analysis backs them.
+- **Analyses and visualizations** inherit their questions from the data and claims they're built on.
+
+So from any figure you can walk backward — to the claim, the analysis, the dataset, the question, and the note you scribbled the morning you ran it. Nothing is orphaned.
+
+## All you need to do at the bench is capture
+
+![Capturing a note from a phone, and the draft it produces](docs/screenshots/capture-draft-review.png)
+
+No forms, no filing. Pair your phone once (scan a QR), then the whole loop is: **type a note, snap a photo, or record a voice memo — and tap send.** Running analysis from code instead? Swap `plt.savefig(...)` for `lab_tracker_client.savefig(...)`, or wrap your plotting in `with capture_figures():`, and every figure you save is captured automatically with its content hash and git commit.
+
+Either way, captures land *staged* — held for review, never written straight into your graph. You pick the project; the system fills in the rest. It even works with no signal: captures queue and upload when you reconnect.
+
+## Then confirm — the daily review
+
+<!-- TODO: dedicated screenshot of the daily-review queue at /app/batches -->
+
+Once a day — on a cadence you set, or on demand — **the daily review** gathers your staged captures and proposes how they fit the graph: *link this photo to that question, draft a note from this voice memo, suggest a new sub-question, flag this one as unclear.* You get **one review queue**. Accept, edit, or reject each proposal; commit the ones you keep.
+
+The model only ever proposes. Nothing touches your record until a person says yes — **AI can suggest; only a person commits.**
+
+Want it to run on its own? One command — or one double-click on Windows — sets up the schedule. See [Make the daily review run on its own](docs/scheduled-daily-review.md).
 
 ## Who it's for
 
@@ -81,6 +96,7 @@ What ships today is the minimum that preserves the core research record. The aut
 - [Phone capture quickstart](docs/phone-capture-quickstart.md) — pair a phone for LAN capture
 - [Evidence source metadata](docs/evidence-source-metadata.md) — import a synced folder as staged evidence notes with `lt import-folder`
 - [MCP server, skills, and Dolt mirror](docs/lab-tracker-mcp-skills.md) — wire up assistants and the export-only versioned mirror
+- [GitHub Copilot MCP setup](docs/lab-tracker-copilot.md) — connect Copilot IDEs to the local Lab Tracker MCP server
 
 **Scope and vision**
 - [Supported v1 surface (authoritative)](docs/retained-v1-surface.md) — the definitive list of what ships

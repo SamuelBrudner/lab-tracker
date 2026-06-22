@@ -20,6 +20,7 @@ Environment for read/write tools:
 
 ```bash
 LAB_TRACKER_MCP_BASE_URL=http://127.0.0.1:8000
+LAB_TRACKER_MCP_API_KEY=<lpat-personal-access-token>
 LAB_TRACKER_MCP_USERNAME=<service-account-username>
 LAB_TRACKER_MCP_PASSWORD=<service-account-password>
 ```
@@ -29,13 +30,28 @@ workstation HTTPS base URL:
 
 ```bash
 LAB_TRACKER_MCP_BASE_URL=https://mwcppc01ysbc155.tail79f9d8.ts.net
+LAB_TRACKER_MCP_API_KEY=<read-only-lpat-token>
 LAB_TRACKER_MCP_USERNAME=<service-account-username>
 LAB_TRACKER_MCP_PASSWORD=<service-account-password>
 ```
 
-The server does not store bearer tokens. It logs in with the configured service
-account and retries once after a 401. The username/password are only required
+The server does not store bearer tokens. When `LAB_TRACKER_MCP_API_KEY` (or
+`LAB_TRACKER_MCP_TOKEN`) is set, the client sends that `lpat_` token directly
+and does not call `/auth/login`. Otherwise it logs in with the configured
+username/password and retries once after a 401. Credentials are only required
 when `LAB_TRACKER_AUTH_ENABLED=true`; local auth-disabled testing can omit them.
+
+For a private hosted read-only MCP endpoint, use the compose `mcp` service:
+
+```bash
+LT_MCP_READONLY_TOKEN=lpat_... docker compose up mcp
+```
+
+It runs `lt-mcp` with `LAB_TRACKER_MCP_TRANSPORT=streamable-http`, points the MCP
+process at the internal API hop (`http://app:8000`), and publishes only
+`127.0.0.1:9000` on the host. Put a private TLS proxy in front of that loopback
+port; `deploy/mcp/Caddyfile` is the checked-in example with Origin/Host checks,
+Authorization log redaction, and no permissive CORS.
 
 Portable consumer `.mcp.json` files should use the console entry point rather
 than a hardcoded absolute Python path:
@@ -47,6 +63,7 @@ than a hardcoded absolute Python path:
       "command": "lt-mcp",
       "env": {
         "LAB_TRACKER_MCP_BASE_URL": "http://127.0.0.1:8000",
+        "LAB_TRACKER_MCP_API_KEY": "<lpat-personal-access-token>",
         "LAB_TRACKER_MCP_USERNAME": "<service-account-username>",
         "LAB_TRACKER_MCP_PASSWORD": "<service-account-password>"
       }

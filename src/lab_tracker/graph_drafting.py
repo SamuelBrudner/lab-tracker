@@ -854,8 +854,16 @@ def _batch_instructions() -> str:
         "the evidence supports it; when several notes describe the same "
         "observation, propose a single consolidated note rather than duplicates; "
         "and surface ambiguities via uncertain_fields or clarification_requests "
-        "rather than guessing. Every operation is a draft for human review; "
-        "nothing commits without explicit acceptance."
+        "rather than guessing. Some staged notes are meeting notes (flagged with "
+        "is_meeting=true, i.e. metadata note_type=meeting). For meeting notes, go "
+        "beyond literal transcription and flesh out the scientific content the "
+        "meeting discussed: prefer suggest_new_question and suggest_followup for "
+        "the questions and next steps it raised, and create or update claim "
+        "entities for findings it asserted. Keep every such proposal supported by "
+        "the note, and route anything inferred-but-unsupported through "
+        "uncertain_fields or clarification_requests instead of inventing it. "
+        "Every operation is a draft for human review; nothing commits without "
+        "explicit acceptance."
     )
 
 
