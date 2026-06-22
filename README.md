@@ -34,7 +34,7 @@ Either way, captures land *staged* — held for review, never written straight i
 
 ## Then confirm — the daily review
 
-<!-- TODO: dedicated screenshot of the daily-review queue at /app/batches -->
+![The daily review — AI-proposed graph changes from the day's captures, each waiting for you to accept, edit, or reject](docs/screenshots/daily-review-queue.png)
 
 At the end of each day — on a cadence you set, or on demand — **the daily review** gathers your staged captures and proposes how they fit the graph: *link this photo to that question, draft a note from this voice memo, suggest a new sub-question, flag this one as unclear.* You get **one review queue**. Accept, edit, or reject each proposal; commit the ones you keep.
 
