@@ -19,15 +19,15 @@
     "esbuild": "^0.28.0",
     "eslint": "^9.25.1",
     "eslint-plugin-react": "^7.37.5",
-    "eslint-plugin-react-hooks": "^5.2.0",
+    "eslint-plugin-react-hooks": "^7.1.1",
     "fake-indexeddb": "^6.2.5",
-    "globals": "^15.14.0",
+    "globals": "^17.6.0",
     "jsdom": "^26.1.0",
-    "react": "^18.2.0",
-    "react-dom": "^18.2.0",
-    "vitest": "^4.1.5"
+    "react": "^19.2.7",
+    "react-dom": "^19.2.7",
+    "vitest": "^4.1.9"
   },
   "dependencies": {
-    "@xyflow/react": "^12.10.2"
+    "@xyflow/react": "^12.11.0"
   }
 }

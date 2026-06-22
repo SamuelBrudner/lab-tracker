@@ -45,6 +45,7 @@ export default [
       "react/jsx-uses-react": "error",
       "react/jsx-uses-vars": "error",
       ...reactHooks.configs.recommended.rules,
+      "react-hooks/set-state-in-effect": "off",
     },
   },
   {

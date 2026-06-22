@@ -555,7 +555,7 @@ describe("App", () => {
     render(<App />);
 
     expect(await screen.findByRole("heading", { name: "Portfolio Home" })).toBeInTheDocument();
-    expect(screen.getByText("Olfaction lab")).toBeInTheDocument();
+    expect(await screen.findByText("Olfaction lab")).toBeInTheDocument();
     expect(screen.getByText("Local single-user mode: per-trainee differentiation is unavailable until multi-user auth is enabled.")).toBeInTheDocument();
     expect(screen.getByText("Unanswered questions: 2")).toBeInTheDocument();
     expect(screen.getByText("Overdue goals: 1")).toBeInTheDocument();
@@ -2660,6 +2660,9 @@ describe("App", () => {
     render(<App />);
 
     expect(await screen.findByRole("heading", { name: "Question Staging & Commit" })).toBeInTheDocument();
+    await waitFor(() => {
+      expect(screen.getByLabelText("Active project")).toHaveValue("project-1");
+    });
 
     fireEvent.change(screen.getByLabelText("Question text"), {
       target: { value: "How stable is the rig?" },
@@ -3150,6 +3153,9 @@ describe("App", () => {
     render(<App />);
 
     expect(await screen.findByRole("heading", { name: "Note Capture" })).toBeInTheDocument();
+    await waitFor(() => {
+      expect(screen.getByLabelText("Active project")).toHaveValue("project-1");
+    });
 
     const file = new File(["note-bytes"], "note.txt", { type: "text/plain" });
     fireEvent.change(screen.getByLabelText("Select file"), {
@@ -3318,7 +3324,7 @@ describe("App", () => {
 
     expect(requestedUrls(fetchMock)).not.toContain(datasetFilesPath("dataset-1"));
 
-    fireEvent.click(screen.getByRole("button", { name: "Manage files" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Manage files" }));
 
     expect(await screen.findByText("staged/file-1.bin")).toBeInTheDocument();
     expect(requestedUrls(fetchMock).filter((url) => url === datasetFilesPath("dataset-1"))).toHaveLength(1);
