@@ -26,7 +26,7 @@ So from any figure you can walk backward — to the claim, the analysis, the dat
 
 ## All you need to do at the bench is capture
 
-![Capturing a note from a phone, and the draft it produces](docs/screenshots/capture-draft-review.png)
+![The capture composer — a quick note, photo, or voice memo, sent for review](docs/screenshots/capture-draft-review.png)
 
 No forms, no filing. Pair your phone once (scan a QR), then the whole loop is: **type a note, snap a photo, or record a voice memo — and tap send.** Running analysis from code instead? Swap `plt.savefig(...)` for `lab_tracker_client.savefig(...)`, or wrap your plotting in `with capture_figures():`, and every figure you save is captured automatically with its content hash and git commit.
 
@@ -34,13 +34,24 @@ Either way, captures land *staged* — held for review, never written straight i
 
 ## Then confirm — the daily review
 
-<!-- TODO: dedicated screenshot of the daily-review queue at /app/batches -->
+![The daily review — AI-proposed graph changes from the day's captures, each waiting for you to accept, edit, or reject](docs/screenshots/daily-review-queue.png)
 
-Once a day — on a cadence you set, or on demand — **the daily review** gathers your staged captures and proposes how they fit the graph: *link this photo to that question, draft a note from this voice memo, suggest a new sub-question, flag this one as unclear.* You get **one review queue**. Accept, edit, or reject each proposal; commit the ones you keep.
+At the end of each day — on a cadence you set, or on demand — **the daily review** gathers your staged captures and proposes how they fit the graph: *link this photo to that question, draft a note from this voice memo, suggest a new sub-question, flag this one as unclear.* You get **one review queue**. Accept, edit, or reject each proposal; commit the ones you keep.
 
 The model only ever proposes. Nothing touches your record until a person says yes — **AI can suggest; only a person commits.**
 
 Want it to run on its own? One command — or one double-click on Windows — sets up the schedule. See [Make the daily review run on its own](docs/scheduled-daily-review.md).
+
+## The daily routine
+
+The whole thing is built to cost you almost nothing while you work, and a few minutes before you head home.
+
+- **At the bench — just capture.** As you work, you capture without stopping to file anything: snap the prep, record a thirty-second voice note on what looked off, type a one-line observation. Tap send and keep going. Nothing asks you which question it belongs to — that's for the evening review. If a result makes you ask something new, say it into a voice note; it becomes a candidate question.
+- **Running analysis — figures file themselves.** When you plot results, `lab_tracker_client.savefig(...)` (or a `with capture_figures():` block) registers each figure as staged evidence with its content hash and the exact git commit that produced it. You upload nothing by hand.
+- **Evening — confirm the day (~5 min).** Before you head out, you open the daily review and see what the model made of the day's captures: this whiteboard photo attaches to *"Does PV inhibition broaden tuning?"*, this voice note becomes a research note on the session, these two observations suggest a new sub-question. Accept what's right, fix anything it misread, reject the rest, and commit. You leave with the graph current and the day's reasoning preserved while it's still fresh. (Prefer mornings? It's a setting — point the review at whatever time fits your bench.)
+- **Over months — nothing is orphaned.** Because every dataset named its question and every claim names its evidence, the folder of `.nwb` files you (or whoever inherits them) open next year still says *why*. From any figure you can walk back to the analysis, the dataset, the question, and the note you scribbled the morning you ran it.
+
+Capture all day, confirm before you leave. The structure builds itself in the background, and a person is always the one who says yes.
 
 ## Who it's for
 

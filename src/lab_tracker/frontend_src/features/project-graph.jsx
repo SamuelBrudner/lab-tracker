@@ -349,7 +349,16 @@ function ProjectGraphExplorer({
   setFlash,
   token,
 }) {
-  const [view, setView] = React.useState("evidence");
+  const [view, setView] = React.useState(() => {
+    const requested = new URLSearchParams(window.location.search).get("view");
+    return GRAPH_VIEWS.some((option) => option.id === requested) ? requested : "evidence";
+  });
+  const selectView = React.useCallback((nextView) => {
+    setView(nextView);
+    const url = new URL(window.location.href);
+    url.searchParams.set("view", nextView);
+    window.history.replaceState(window.history.state, "", url);
+  }, []);
   const [graph, setGraph] = React.useState(null);
   const [loading, setLoading] = React.useState(false);
   const [error, setError] = React.useState("");
@@ -489,7 +498,7 @@ function ProjectGraphExplorer({
             aria-selected={view === graphView.id}
             className={view === graphView.id ? "tab active" : "tab"}
             key={graphView.id}
-            onClick={() => setView(graphView.id)}
+            onClick={() => selectView(graphView.id)}
           >
             {graphView.label}
           </button>

@@ -687,7 +687,7 @@ function demoPayload(url) {
       project_id: PROJECT_ID,
       enabled: false,
       cadence_minutes: 1440,
-      run_at_local_time: "06:00",
+      run_at_local_time: "18:00",
       timezone_name: "America/New_York",
       next_run_at: null,
       updated_at: "2026-06-05T10:10:03.260000Z",
