@@ -497,37 +497,341 @@ function GraphDraftDetailCard({
       {error ? <p className="flash error">{error}</p> : null}
 
       {changeSet ? (
-        <div className="review-layout">
-          <section className="review-pane">
-            <div className="inline">
-              <span className={statusClass(changeSet.status)}>{changeSet.status}</span>
-              <span className="pill">{changeSet.draft_mode || "graph_context"}</span>
-              <span className="pill">{changeSet.model}</span>
-              <span className="pill">{changeSet.provider}</span>
+        <div className="daily-review-report">
+          <p className="review-lead">
+            {changeSet.source_note_count || (changeSet.source_note_ids || []).length || 1}{" "}
+            {(changeSet.source_note_count || (changeSet.source_note_ids || []).length || 1) === 1
+              ? "capture"
+              : "captures"}{" "}
+            from this review became{" "}
+            {(changeSet.operations || []).length === 1
+              ? "1 proposal"
+              : `${(changeSet.operations || []).length} proposals`}{" "}
+            for your graph. Keep what&apos;s right, then commit — nothing changes until you do.
+          </p>
+          {changeSet.summary ? <p className="review-summary">{changeSet.summary}</p> : null}
+          {changeSet.error_metadata?.message ? (
+            <p className="flash error">{changeSet.error_metadata.message}</p>
+          ) : null}
+
+          {sourceImage ? (
+            <div className="source-image-frame">
+              <img
+                className="note-image"
+                src={sourceImage}
+                alt={changeSet.source_filename || "Source note"}
+              />
+              {visibleSourceRegions.map((region, index) => (
+                <div
+                  aria-label={`Source region ${index + 1}: ${
+                    region.ref?.label || operationTitle(region.operation)
+                  }`}
+                  className="source-region-box"
+                  key={`${region.operation.operation_id}-${index}`}
+                  style={region.style}
+                  title={sourceRefText(region.ref)}
+                >
+                  <span>{index + 1}</span>
+                </div>
+              ))}
             </div>
-            {sourceImage ? (
-              <div className="source-image-frame">
-                <img
-                  className="note-image"
-                  src={sourceImage}
-                  alt={changeSet.source_filename || "Source note"}
-                />
-                {visibleSourceRegions.map((region, index) => (
-                  <div
-                    aria-label={`Source region ${index + 1}: ${
-                      region.ref?.label || operationTitle(region.operation)
-                    }`}
-                    className="source-region-box"
-                    key={`${region.operation.operation_id}-${index}`}
-                    style={region.style}
-                    title={sourceRefText(region.ref)}
-                  >
-                    <span>{index + 1}</span>
+          ) : null}
+
+          <div className="review-report">
+            {(changeSet.operations || []).map((operation) => {
+              const parsed =
+                parsedPayloadFromText(payloads[operation.operation_id]) || operation.payload || {};
+              const proposed =
+                parsed.text ||
+                parsed.raw_content ||
+                parsed.label ||
+                parsed.prompt ||
+                parsed.statement ||
+                "";
+              const linkType = semanticLinkTargetType(operation);
+              return (
+                <div className="review-proposal" key={operation.operation_id}>
+                  <div className="review-proposal-body">
+                    <p className="review-proposal-intent subtle">{operationIntent(operation)}</p>
+                    <p className="review-proposal-text">
+                      {proposed || operationTitle(operation)}
+                    </p>
+                    {operation.rationale ? (
+                      <p className="review-because">
+                        <span className="subtle">Model inference</span> {operation.rationale}
+                        {operation.confidence !== null && operation.confidence !== undefined
+                          ? ` · ${Math.round(operation.confidence * 100)}% confident`
+                          : ""}
+                      </p>
+                    ) : null}
+                    {(operation.source_refs || []).length > 0 ? (
+                      <div className="review-evidence">
+                        <div className="subtle">Source evidence</div>
+                        {(operation.source_refs || []).map((ref, index) => (
+                          <p
+                            className="source-snippet"
+                            key={`${operation.operation_id}-${index}`}
+                          >
+                            {sourceRefText(ref)}
+                          </p>
+                        ))}
+                      </div>
+                    ) : null}
+                    {operation.error_metadata?.message ? (
+                      <p className="flash error">{operation.error_metadata.message}</p>
+                    ) : null}
+                    {operation.result_entity_id ? (
+                      <p className="review-result subtle">
+                        Created <span className="mono">{operation.result_entity_id}</span>
+                      </p>
+                    ) : null}
+                    <details className="context-details review-edit">
+                      <summary>Edit this proposal</summary>
+                      <div className="stack">
+                        {linkType ? (
+                          <label>
+                            Link target
+                            <select
+                              disabled={!canEditDraft}
+                              onChange={(event) =>
+                                patchOperationPayload(operation, (payload) =>
+                                  nextPayloadWithTarget(payload, linkType, event.target.value)
+                                )
+                              }
+                              value={payloadTargetId(
+                                parsedPayloadFromText(payloads[operation.operation_id]) || {},
+                                linkType
+                              )}
+                            >
+                              <option value="">No linked {linkType}</option>
+                              {contextOptions(changeSet, linkType).map((item) => (
+                                <option key={item.id} value={item.id}>
+                                  {item.label || item.id}
+                                </option>
+                              ))}
+                            </select>
+                          </label>
+                        ) : null}
+                        {Object.prototype.hasOwnProperty.call(operation.payload || {}, "text") ? (
+                          <label>
+                            Text
+                            <textarea
+                              value={
+                                parsedPayloadFromText(payloads[operation.operation_id])?.text || ""
+                              }
+                              disabled={!canEditDraft}
+                              onChange={(event) =>
+                                patchOperationPayload(operation, (payload) => ({
+                                  ...payload,
+                                  text: event.target.value,
+                                }))
+                              }
+                            />
+                          </label>
+                        ) : null}
+                        {Object.prototype.hasOwnProperty.call(
+                          operation.payload || {},
+                          "raw_content"
+                        ) ? (
+                          <label>
+                            Note text
+                            <textarea
+                              value={
+                                parsedPayloadFromText(payloads[operation.operation_id])
+                                  ?.raw_content || ""
+                              }
+                              disabled={!canEditDraft}
+                              onChange={(event) =>
+                                patchOperationPayload(operation, (payload) => ({
+                                  ...payload,
+                                  raw_content: event.target.value,
+                                }))
+                              }
+                            />
+                          </label>
+                        ) : null}
+                        <details className="context-details advanced-json">
+                          <summary>Payload JSON (advanced)</summary>
+                          <label>
+                            Edit JSON payload
+                            <textarea
+                              className="mono"
+                              value={payloads[operation.operation_id] || ""}
+                              onChange={(event) =>
+                                updatePayloadText(operation.operation_id, event.target.value)
+                              }
+                              disabled={!canEditDraft}
+                            />
+                          </label>
+                        </details>
+                        <label>
+                          Decision note
+                          <textarea
+                            value={operationReviewNotes[operation.operation_id] || ""}
+                            disabled={!canEditDraft}
+                            onChange={(event) =>
+                              updateOperationReviewNote(operation.operation_id, event.target.value)
+                            }
+                          />
+                        </label>
+                        <div className="inline">
+                          <button
+                            type="button"
+                            className="btn-secondary"
+                            disabled={!canEditDraft}
+                            onClick={() => saveOperation(operation)}
+                            title="Save your edits to this proposal without changing its decision"
+                          >
+                            Save edit
+                          </button>
+                        </div>
+                      </div>
+                    </details>
                   </div>
+                  <aside className="review-proposal-actions">
+                    <span className={statusClass(operation.status)}>{operation.status}</span>
+                    <button
+                      type="button"
+                      className="btn-primary"
+                      disabled={!canEditDraft}
+                      onClick={() => saveOperation(operation, "accepted")}
+                    >
+                      Accept
+                    </button>
+                    <button
+                      type="button"
+                      className="btn-secondary"
+                      disabled={!canEditDraft}
+                      onClick={() => saveOperation(operation, "proposed")}
+                    >
+                      Defer
+                    </button>
+                    <button
+                      type="button"
+                      className="btn-danger"
+                      disabled={!canEditDraft}
+                      onClick={() => saveOperation(operation, "rejected")}
+                    >
+                      Reject
+                    </button>
+                  </aside>
+                </div>
+              );
+            })}
+          </div>
+
+          {(changeSet.uncertain_fields || []).length > 0 ||
+          (changeSet.clarification_requests || []).length > 0 ? (
+            <div className="review-unsure">
+              <div className="subtle">The model wasn&apos;t sure about</div>
+              <ul className="compact-list">
+                {(changeSet.clarification_requests || []).map((item) => (
+                  <li key={item}>{item}</li>
                 ))}
-              </div>
-            ) : null}
+                {(changeSet.uncertain_fields || []).map((item) => (
+                  <li key={item}>{item}</li>
+                ))}
+              </ul>
+            </div>
+          ) : null}
+
+          <div className="review-actions">
+            <div className="review-tally">
+              <strong>
+                {acceptedCount} of {(changeSet.operations || []).length} kept
+              </strong>
+              <button
+                type="button"
+                className="btn-secondary"
+                disabled={!canEditDraft}
+                onClick={acceptAll}
+              >
+                Accept all
+              </button>
+            </div>
+
+            <div className="ai-revise">
+              <div className="subtle">Revise with AI</div>
+              <textarea
+                className="ai-revise-input"
+                rows={2}
+                placeholder="Tell the AI how to revise these proposals — e.g. 'drop the dataset link; the claim isn't supported yet, make it a clarification instead'."
+                value={reviseFeedback}
+                disabled={!canEditDraft}
+                onChange={(event) => setReviseFeedback(event.target.value)}
+              />
+              <button
+                type="button"
+                className="btn-secondary"
+                disabled={!canEditDraft || !reviseFeedback.trim()}
+                onClick={reviseDraft}
+              >
+                Revise with AI
+              </button>
+            </div>
+
+            <div className="inline">
+              <button
+                type="button"
+                className="btn-secondary"
+                disabled={!canSubmitDraft}
+                onClick={submitDraft}
+              >
+                Submit for review
+              </button>
+            </div>
+
+            <form className="form" onSubmit={commitDraft}>
+              {canReviewDraft ? (
+                <label>
+                  Review note
+                  <textarea
+                    value={reviewNote}
+                    onChange={(event) => setReviewNote(event.target.value)}
+                  />
+                </label>
+              ) : null}
+              {canReviewDraft ? (
+                <div className="inline">
+                  <button
+                    type="button"
+                    className="btn-secondary"
+                    onClick={() => reviewDraft("changes_requested")}
+                  >
+                    Request changes
+                  </button>
+                  <button
+                    type="button"
+                    className="btn-danger"
+                    onClick={() => reviewDraft("rejected")}
+                  >
+                    Reject draft
+                  </button>
+                </div>
+              ) : null}
+              <label>
+                Commit message
+                <input
+                  value={commitMessage}
+                  onChange={(event) => setCommitMessage(event.target.value)}
+                  disabled={!canCommitDraft}
+                />
+              </label>
+              <button className="btn-primary" disabled={!canCommitDraft || acceptedCount === 0}>
+                Commit accepted changes
+              </button>
+            </form>
+          </div>
+
+          <details className="context-details review-meta">
+            <summary>Details &amp; provenance</summary>
             <div className="stack">
+              <div className="inline">
+                <span className={statusClass(changeSet.status)}>{changeSet.status}</span>
+                <span className="pill">{changeSet.draft_mode || "graph_context"}</span>
+                <span className="pill">{changeSet.model}</span>
+                <span className="pill">{changeSet.provider}</span>
+              </div>
               <div>
                 <div className="subtle">Source note</div>
                 <div className="mono">{changeSet.source_note_id}</div>
@@ -544,10 +848,6 @@ function GraphDraftDetailCard({
                   </div>
                 </div>
               ) : null}
-              <div>
-                <div className="subtle">Source file</div>
-                <div className="mono">{changeSet.source_filename || "(none)"}</div>
-              </div>
               {(changeSet.context_packet?.source_artifacts || []).length > 0 ? (
                 <div>
                   <div className="subtle">Source artifacts and transcripts</div>
@@ -610,45 +910,6 @@ function GraphDraftDetailCard({
                   </div>
                 </div>
               ) : null}
-              <div className="inline">
-                <button
-                  type="button"
-                  className="btn-secondary"
-                  disabled={!canSubmitDraft}
-                  onClick={submitDraft}
-                >
-                  Submit for review
-                </button>
-              </div>
-              {changeSet.error_metadata?.message ? (
-                <p className="flash error">{changeSet.error_metadata.message}</p>
-              ) : null}
-              {changeSet.summary ? (
-                <div>
-                  <div className="subtle">Draft summary</div>
-                  <p>{changeSet.summary}</p>
-                </div>
-              ) : null}
-              {(changeSet.uncertain_fields || []).length > 0 ? (
-                <div>
-                  <div className="subtle">Uncertain fields</div>
-                  <ul className="compact-list">
-                    {changeSet.uncertain_fields.map((item) => (
-                      <li key={item}>{item}</li>
-                    ))}
-                  </ul>
-                </div>
-              ) : null}
-              {(changeSet.clarification_requests || []).length > 0 ? (
-                <div>
-                  <div className="subtle">Clarification requests</div>
-                  <ul className="compact-list">
-                    {changeSet.clarification_requests.map((item) => (
-                      <li key={item}>{item}</li>
-                    ))}
-                  </ul>
-                </div>
-              ) : null}
               {changeSet.context_packet?.context_summary ? (
                 <div>
                   <div className="subtle">Context summary</div>
@@ -676,15 +937,6 @@ function GraphDraftDetailCard({
                         .join(", ")}
                     </p>
                   ) : null}
-                  {(changeSet.context_packet.context_summary.selected_targets || []).length > 0 ? (
-                    <ul className="compact-list">
-                      {changeSet.context_packet.context_summary.selected_targets.map((target) => (
-                        <li key={`${target.entity_type}-${target.entity_id}`}>
-                          {target.entity_type}: {target.label || target.entity_id}
-                        </li>
-                      ))}
-                    </ul>
-                  ) : null}
                   {(changeSet.context_packet.context_summary.warnings || []).length > 0 ? (
                     <ul className="compact-list">
                       {changeSet.context_packet.context_summary.warnings.map((warning) => (
@@ -703,248 +955,7 @@ function GraphDraftDetailCard({
                 </details>
               ) : null}
             </div>
-          </section>
-
-          <section className="review-pane">
-            <div className="item-head">
-              <h3>Operations</h3>
-              <button
-                type="button"
-                className="btn-secondary"
-                disabled={!canEditDraft}
-                onClick={acceptAll}
-              >
-                Accept all
-              </button>
-            </div>
-            <div className="ai-revise">
-              <div className="subtle">Revise with AI</div>
-              <textarea
-                className="ai-revise-input"
-                rows={2}
-                placeholder="Tell the AI how to revise these proposals — e.g. 'drop the dataset link; the claim isn't supported yet, make it a clarification instead'."
-                value={reviseFeedback}
-                disabled={!canEditDraft}
-                onChange={(event) => setReviseFeedback(event.target.value)}
-              />
-              <button
-                type="button"
-                className="btn-secondary"
-                disabled={!canEditDraft || !reviseFeedback.trim()}
-                onClick={reviseDraft}
-              >
-                Revise with AI
-              </button>
-              <p className="subtle">
-                Re-runs the model with your feedback and the current proposals, then
-                replaces the operation list for you to review again.
-              </p>
-            </div>
-            <div className="stack">
-              {(changeSet.operations || []).map((operation) => (
-                <article className="item graph-operation-card" key={operation.operation_id}>
-                  <div className="item-head">
-                    <strong>{operationTitle(operation)}</strong>
-                    <span className={statusClass(operation.status)}>{operation.status}</span>
-                  </div>
-                  <div className="inline">
-                    <span className="pill">{operationIntent(operation)}</span>
-                    {operation.client_ref ? <span className="pill">{operation.client_ref}</span> : null}
-                    {operation.confidence !== null && operation.confidence !== undefined ? (
-                      <span className="pill">{Math.round(operation.confidence * 100)}%</span>
-                    ) : null}
-                    {operation.result_entity_id ? (
-                      <span className="pill mono">{operation.result_entity_id}</span>
-                    ) : null}
-                  </div>
-                  {operation.rationale ? (
-                    <div>
-                      <div className="subtle">Model inference</div>
-                      <p>{operation.rationale}</p>
-                    </div>
-                  ) : null}
-                  {(operation.source_refs || []).length > 0 ? (
-                    <div>
-                      <div className="subtle">Source evidence</div>
-                      {(operation.source_refs || []).map((ref, index) => (
-                        <p className="source-snippet" key={`${operation.operation_id}-${index}`}>
-                          {sourceRefText(ref)}
-                        </p>
-                      ))}
-                    </div>
-                  ) : null}
-                  {semanticLinkTargetType(operation) ? (
-                    <label>
-                      Link target
-                      <select
-                        disabled={!canEditDraft}
-                        onChange={(event) =>
-                          patchOperationPayload(operation, (payload) =>
-                            nextPayloadWithTarget(
-                              payload,
-                              semanticLinkTargetType(operation),
-                              event.target.value
-                            )
-                          )
-                        }
-                        value={payloadTargetId(
-                          parsedPayloadFromText(payloads[operation.operation_id]) || {},
-                          semanticLinkTargetType(operation)
-                        )}
-                      >
-                        <option value="">No linked {semanticLinkTargetType(operation)}</option>
-                        {contextOptions(changeSet, semanticLinkTargetType(operation)).map((item) => (
-                          <option key={item.id} value={item.id}>
-                            {item.label || item.id}
-                          </option>
-                        ))}
-                      </select>
-                    </label>
-                  ) : null}
-                  {Object.prototype.hasOwnProperty.call(operation.payload || {}, "text") ? (
-                    <label>
-                      Text
-                      <textarea
-                        value={
-                          parsedPayloadFromText(payloads[operation.operation_id])?.text || ""
-                        }
-                        disabled={!canEditDraft}
-                        onChange={(event) =>
-                          patchOperationPayload(operation, (payload) => ({
-                            ...payload,
-                            text: event.target.value,
-                          }))
-                        }
-                      />
-                    </label>
-                  ) : null}
-                  {Object.prototype.hasOwnProperty.call(operation.payload || {}, "raw_content") ? (
-                    <label>
-                      Note text
-                      <textarea
-                        value={
-                          parsedPayloadFromText(payloads[operation.operation_id])?.raw_content || ""
-                        }
-                        disabled={!canEditDraft}
-                        onChange={(event) =>
-                          patchOperationPayload(operation, (payload) => ({
-                            ...payload,
-                            raw_content: event.target.value,
-                          }))
-                        }
-                      />
-                    </label>
-                  ) : null}
-                  <details className="context-details advanced-json">
-                    <summary>Payload JSON (advanced)</summary>
-                    <label>
-                      Edit JSON payload
-                      <textarea
-                        className="mono"
-                        value={payloads[operation.operation_id] || ""}
-                        onChange={(event) =>
-                          updatePayloadText(operation.operation_id, event.target.value)
-                        }
-                        disabled={!canEditDraft}
-                      />
-                    </label>
-                  </details>
-                  <label>
-                    Decision note
-                    <textarea
-                      value={operationReviewNotes[operation.operation_id] || ""}
-                      disabled={!canEditDraft}
-                      onChange={(event) =>
-                        updateOperationReviewNote(operation.operation_id, event.target.value)
-                      }
-                    />
-                  </label>
-                  {operation.error_metadata?.message ? (
-                    <p className="flash error">{operation.error_metadata.message}</p>
-                  ) : null}
-                  <div className="inline">
-                    <button
-                      type="button"
-                      className="btn-secondary"
-                      disabled={!canEditDraft}
-                      onClick={() => saveOperation(operation)}
-                      title="Save your edits to this operation without changing its decision"
-                    >
-                      Save edit
-                    </button>
-                    <button
-                      type="button"
-                      className="btn-primary"
-                      disabled={!canEditDraft}
-                      onClick={() => saveOperation(operation, "accepted")}
-                    >
-                      Accept
-                    </button>
-                    <button
-                      type="button"
-                      className="btn-secondary"
-                      disabled={!canEditDraft}
-                      onClick={() => saveOperation(operation, "proposed")}
-                    >
-                      Defer
-                    </button>
-                    <button
-                      type="button"
-                      className="btn-danger"
-                      disabled={!canEditDraft}
-                      onClick={() => saveOperation(operation, "rejected")}
-                    >
-                      Reject
-                    </button>
-                  </div>
-                </article>
-              ))}
-            </div>
-
-            <form className="form" onSubmit={commitDraft}>
-              {canReviewDraft ? (
-                <label>
-                  Review note
-                  <textarea
-                    value={reviewNote}
-                    onChange={(event) => setReviewNote(event.target.value)}
-                  />
-                </label>
-              ) : null}
-              {canReviewDraft ? (
-                <div className="inline">
-                  <button
-                    type="button"
-                    className="btn-secondary"
-                    onClick={() => reviewDraft("changes_requested")}
-                  >
-                    Request changes
-                  </button>
-                  <button
-                    type="button"
-                    className="btn-danger"
-                    onClick={() => reviewDraft("rejected")}
-                  >
-                    Reject draft
-                  </button>
-                </div>
-              ) : null}
-              <label>
-                Commit message
-                <input
-                  value={commitMessage}
-                  onChange={(event) => setCommitMessage(event.target.value)}
-                  disabled={!canCommitDraft}
-                />
-              </label>
-              <button
-                className="btn-primary"
-                disabled={!canCommitDraft || acceptedCount === 0}
-              >
-                Commit accepted changes
-              </button>
-            </form>
-          </section>
+          </details>
         </div>
       ) : null}
 
