@@ -272,12 +272,15 @@ List/search endpoints use `limit` between 1 and 200 and `offset` of 0 or greater
 - `answers_question_ids` (optional): list[string(uuid)] | null
 - `confidence` (required): number; minimum 0.0, maximum 100.0
 - `external_citations` (optional): list[object] | null
+- `falsification_criteria` (optional): string; min length 1 | null
 - `project_id` (required): string(uuid)
+- `refuting_outcome` (optional): string; min length 1 | null
 - `statement` (required): string; min length 1
-- `status` (optional): ClaimStatus enum: proposed, supported, rejected | null
+- `status` (optional): ClaimStatus enum: proposed, testing, supported, rejected | null
 - `supported_by_analysis_ids` (optional): list[string(uuid)] | null
 - `supported_by_dataset_ids` (optional): list[string(uuid)] | null
 - `terminal_reason` (optional): string; min length 1 | null
+- `verification_plan` (optional): string; min length 1 | null
 
 #### Goals: `GoalCreateFields`
 - Required: `goal_type`, `title`
@@ -377,7 +380,7 @@ List/search endpoints use `limit` between 1 and 200 and `offset` of 0 or greater
 
 #### `GET /claims`
 - `project_id` (optional): string(uuid) | null
-- `status` (optional): ClaimStatus enum: proposed, supported, rejected | null
+- `status` (optional): ClaimStatus enum: proposed, testing, supported, rejected | null
 - `dataset_id` (optional): string(uuid) | null
 - `analysis_id` (optional): string(uuid) | null
 - `created_by` (optional): string | null

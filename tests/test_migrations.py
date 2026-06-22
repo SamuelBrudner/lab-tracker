@@ -11,7 +11,7 @@ from sqlalchemy import create_engine, inspect, text
 from lab_tracker.api import LabTrackerAPI
 from lab_tracker.auth import AuthContext, Role
 from lab_tracker.db import get_session_factory
-from lab_tracker.models import QuestionType
+from lab_tracker.models import EntityRef, EntityType, ExplorationNodeType, QuestionType
 from lab_tracker.sqlalchemy_repository import SQLAlchemyLabTrackerRepository
 
 _NOT_NULL_TIGHTENING_COLUMNS_0014_0024 = {
@@ -1397,11 +1397,53 @@ def test_migrated_database_supports_api_round_trip(monkeypatch, tmp_path):
             primary_question_id=question.question_id,
             actor=actor,
         )
+        claim = api.create_claim(
+            project_id=project.project_id,
+            statement="The migrated database preserves claim links.",
+            confidence=50,
+            supported_by_dataset_ids=[dataset.dataset_id],
+            actor=actor,
+        )
+        decision = api.create_exploration_node(
+            project_id=project.project_id,
+            node_type=ExplorationNodeType.DECISION,
+            title="Choose migrated exploration path",
+            target=EntityRef(entity_type=EntityType.QUESTION, entity_id=question.question_id),
+            choice="Use migrated API path",
+            alternatives_considered=["Direct SQL fixture"],
+            rationale="The API round trip verifies mapper wiring.",
+            actor=actor,
+        )
+        pivot = api.create_exploration_node(
+            project_id=project.project_id,
+            node_type=ExplorationNodeType.PIVOT,
+            title="Pivot migrated path",
+            target=EntityRef(entity_type=EntityType.CLAIM, entity_id=claim.claim_id),
+            trigger="Migration smoke needs edge data.",
+            rationale="Persist invalidation and dependency fields.",
+            invalidates_node_id=decision.node_id,
+            parent_node_ids=[decision.node_id],
+            actor=actor,
+        )
 
     with session_factory() as session:
         api = LabTrackerAPI(repository=SQLAlchemyLabTrackerRepository(session))
         assert api.get_project(project.project_id).name == "Migrated DB"
         assert api.get_question(question.question_id).project_id == project.project_id
         assert api.get_dataset(dataset.dataset_id).primary_question_id == question.question_id
+        assert api.get_claim(claim.claim_id).supported_by_dataset_ids == [dataset.dataset_id]
+        reloaded_decision = api.get_exploration_node(decision.node_id)
+        reloaded_pivot = api.get_exploration_node(pivot.node_id)
+        assert reloaded_decision.target.entity_id == question.question_id
+        assert reloaded_pivot.invalidates_node_id == decision.node_id
+        assert reloaded_pivot.parent_node_ids == [decision.node_id]
+        exploration_node_ids = {
+            node.node_id
+            for node in api.list_exploration_nodes(project_id=project.project_id)
+        }
+        assert exploration_node_ids == {
+            decision.node_id,
+            pivot.node_id,
+        }
 
     engine.dispose()

@@ -268,6 +268,428 @@ def test_exploration_nodes_preserve_decisions_dead_ends_and_pivots():
         )
 
 
+def _create_exploration_context():
+    api = repository_backed_api()
+    actor = _actor()
+    project = api.create_project("Exploration Validation Project", actor=actor)
+    question = api.create_question(
+        project_id=project.project_id,
+        text="Which exploration path should carry forward?",
+        question_type=QuestionType.DESCRIPTIVE,
+        actor=actor,
+    )
+    dataset = api.create_dataset(
+        project_id=project.project_id,
+        primary_question_id=question.question_id,
+        actor=actor,
+    )
+    claim = api.create_claim(
+        project_id=project.project_id,
+        statement="The initial analysis path was underpowered.",
+        confidence=45,
+        supported_by_dataset_ids=[dataset.dataset_id],
+        actor=actor,
+    )
+    return api, actor, project, question, dataset, claim
+
+
+def _create_decision_node(api, project, question, actor, *, title: str):
+    return api.create_exploration_node(
+        project_id=project.project_id,
+        node_type=ExplorationNodeType.DECISION,
+        title=title,
+        target=EntityRef(entity_type=EntityType.QUESTION, entity_id=question.question_id),
+        choice="Use the mixed model path",
+        alternatives_considered=["Bootstrap", "Permutation test"],
+        rationale="The model can represent the acquisition structure.",
+        actor=actor,
+    )
+
+
+def test_exploration_nodes_reject_invalid_invalidation_shapes():
+    api, actor, project, question, _dataset, claim = _create_exploration_context()
+    decision = _create_decision_node(
+        api,
+        project,
+        question,
+        actor,
+        title="Baseline decision",
+    )
+
+    with pytest.raises(ValidationError, match="exactly one"):
+        api.create_exploration_node(
+            project_id=project.project_id,
+            node_type=ExplorationNodeType.PIVOT,
+            title="Pivot without an invalidation",
+            target=EntityRef(
+                entity_type=EntityType.QUESTION,
+                entity_id=question.question_id,
+            ),
+            trigger="A later run changed the interpretation.",
+            rationale="We need to record why the path changed.",
+            actor=actor,
+        )
+
+    with pytest.raises(ValidationError, match="exactly one"):
+        api.create_exploration_node(
+            project_id=project.project_id,
+            node_type=ExplorationNodeType.PIVOT,
+            title="Pivot with two invalidations",
+            target=EntityRef(
+                entity_type=EntityType.QUESTION,
+                entity_id=question.question_id,
+            ),
+            trigger="Two old records appear stale.",
+            rationale="This should be split into separate pivots.",
+            invalidates_node_id=decision.node_id,
+            invalidates_claim_id=claim.claim_id,
+            actor=actor,
+        )
+
+    with pytest.raises(ValidationError, match="Only pivot"):
+        api.create_exploration_node(
+            project_id=project.project_id,
+            node_type=ExplorationNodeType.DECISION,
+            title="Decision cannot invalidate",
+            target=EntityRef(
+                entity_type=EntityType.QUESTION,
+                entity_id=question.question_id,
+            ),
+            choice="Keep the current model",
+            alternatives_considered=["Refit all sessions"],
+            rationale="This is a decision, not a pivot.",
+            invalidates_node_id=decision.node_id,
+            actor=actor,
+        )
+
+    with pytest.raises(ValidationError, match="Only pivot"):
+        api.create_exploration_node(
+            project_id=project.project_id,
+            node_type=ExplorationNodeType.DEAD_END,
+            title="Dead end cannot invalidate",
+            target=EntityRef(entity_type=EntityType.CLAIM, entity_id=claim.claim_id),
+            hypothesis="The stale claim could be invalidated here.",
+            failure_mode="Dead ends record failure, not replacement.",
+            lesson="Use a pivot to invalidate prior graph records.",
+            invalidates_claim_id=claim.claim_id,
+            actor=actor,
+        )
+
+    editable_decision = _create_decision_node(
+        api,
+        project,
+        question,
+        actor,
+        title="Editable decision",
+    )
+    with pytest.raises(ValidationError, match="Only pivot"):
+        api.update_exploration_node(
+            editable_decision.node_id,
+            invalidates_node_id=decision.node_id,
+            actor=actor,
+        )
+
+
+@pytest.mark.parametrize(
+    ("node_type", "field_kwargs", "match"),
+    [
+        (
+            ExplorationNodeType.DECISION,
+            {"alternatives_considered": ["Mixed model"], "rationale": "Structured."},
+            "choice",
+        ),
+        (
+            ExplorationNodeType.DECISION,
+            {"choice": "Mixed model", "rationale": "Structured."},
+            "alternatives_considered",
+        ),
+        (
+            ExplorationNodeType.DECISION,
+            {"choice": "Mixed model", "alternatives_considered": ["Bootstrap"]},
+            "rationale",
+        ),
+        (
+            ExplorationNodeType.DEAD_END,
+            {"failure_mode": "Intervals stayed wide.", "lesson": "Model first."},
+            "hypothesis",
+        ),
+        (
+            ExplorationNodeType.DEAD_END,
+            {"hypothesis": "Bootstrap would separate.", "lesson": "Model first."},
+            "failure_mode",
+        ),
+        (
+            ExplorationNodeType.DEAD_END,
+            {
+                "hypothesis": "Bootstrap would separate.",
+                "failure_mode": "Intervals stayed wide.",
+            },
+            "lesson",
+        ),
+        (
+            ExplorationNodeType.PIVOT,
+            {"rationale": "The old path is stale.", "invalidates_node_id": "decision"},
+            "trigger",
+        ),
+        (
+            ExplorationNodeType.PIVOT,
+            {"trigger": "New evidence.", "invalidates_node_id": "decision"},
+            "rationale",
+        ),
+    ],
+)
+def test_exploration_nodes_require_type_specific_fields(
+    node_type,
+    field_kwargs,
+    match,
+):
+    api, actor, project, question, _dataset, _claim = _create_exploration_context()
+    decision = _create_decision_node(
+        api,
+        project,
+        question,
+        actor,
+        title="Decision target for pivot tests",
+    )
+    if field_kwargs.get("invalidates_node_id") == "decision":
+        field_kwargs = {**field_kwargs, "invalidates_node_id": decision.node_id}
+
+    with pytest.raises(ValidationError, match=match):
+        api.create_exploration_node(
+            project_id=project.project_id,
+            node_type=node_type,
+            title=f"Missing {match}",
+            target=EntityRef(
+                entity_type=EntityType.QUESTION,
+                entity_id=question.question_id,
+            ),
+            actor=actor,
+            **field_kwargs,
+        )
+
+
+def test_exploration_nodes_reject_committed_edits_and_cycles():
+    api, actor, project, question, _dataset, _claim = _create_exploration_context()
+    committed = _create_decision_node(
+        api,
+        project,
+        question,
+        actor,
+        title="Committed decision",
+    )
+    api.update_exploration_node(
+        committed.node_id,
+        status=ExplorationNodeStatus.COMMITTED,
+        actor=actor,
+    )
+    with pytest.raises(ValidationError, match="Only staged"):
+        api.update_exploration_node(
+            committed.node_id,
+            title="Edited after commit",
+            actor=actor,
+        )
+
+    self_loop = _create_decision_node(
+        api,
+        project,
+        question,
+        actor,
+        title="Self-loop candidate",
+    )
+    with pytest.raises(ValidationError, match="depend on themselves"):
+        api.update_exploration_node(
+            self_loop.node_id,
+            parent_node_ids=[self_loop.node_id],
+            actor=actor,
+        )
+
+    direct_parent = _create_decision_node(
+        api,
+        project,
+        question,
+        actor,
+        title="Direct parent",
+    )
+    direct_child = _create_decision_node(
+        api,
+        project,
+        question,
+        actor,
+        title="Direct child",
+    )
+    api.update_exploration_node(
+        direct_child.node_id,
+        parent_node_ids=[direct_parent.node_id],
+        actor=actor,
+    )
+    with pytest.raises(ValidationError, match="acyclic"):
+        api.update_exploration_node(
+            direct_parent.node_id,
+            parent_node_ids=[direct_child.node_id],
+            actor=actor,
+        )
+
+    first = _create_decision_node(api, project, question, actor, title="First")
+    second = _create_decision_node(api, project, question, actor, title="Second")
+    third = _create_decision_node(api, project, question, actor, title="Third")
+    api.update_exploration_node(
+        second.node_id,
+        parent_node_ids=[first.node_id],
+        actor=actor,
+    )
+    api.update_exploration_node(
+        third.node_id,
+        parent_node_ids=[second.node_id],
+        actor=actor,
+    )
+    with pytest.raises(ValidationError, match="acyclic"):
+        api.update_exploration_node(
+            first.node_id,
+            also_depends_on_node_ids=[third.node_id],
+            actor=actor,
+        )
+
+    mixed_parent = _create_decision_node(
+        api,
+        project,
+        question,
+        actor,
+        title="Mixed parent",
+    )
+    mixed_child = _create_decision_node(
+        api,
+        project,
+        question,
+        actor,
+        title="Mixed child",
+    )
+    api.update_exploration_node(
+        mixed_child.node_id,
+        parent_node_ids=[mixed_parent.node_id],
+        actor=actor,
+    )
+    with pytest.raises(ValidationError, match="acyclic"):
+        api.update_exploration_node(
+            mixed_parent.node_id,
+            parent_node_ids=[mixed_child.node_id],
+            also_depends_on_node_ids=[direct_child.node_id],
+            actor=actor,
+        )
+
+
+def test_exploration_nodes_reject_cross_project_references():
+    api, actor, project, question, _dataset, claim = _create_exploration_context()
+    other_project = api.create_project("Other Exploration Project", actor=actor)
+    other_question = api.create_question(
+        project_id=other_project.project_id,
+        text="Other project question?",
+        question_type=QuestionType.DESCRIPTIVE,
+        actor=actor,
+    )
+    other_dataset = api.create_dataset(
+        project_id=other_project.project_id,
+        primary_question_id=other_question.question_id,
+        actor=actor,
+    )
+    other_claim = api.create_claim(
+        project_id=other_project.project_id,
+        statement="Other project claim.",
+        confidence=30,
+        supported_by_dataset_ids=[other_dataset.dataset_id],
+        actor=actor,
+    )
+    node = _create_decision_node(
+        api,
+        project,
+        question,
+        actor,
+        title="Project-local decision",
+    )
+    other_node = api.create_exploration_node(
+        project_id=other_project.project_id,
+        node_type=ExplorationNodeType.DECISION,
+        title="Other project decision",
+        target=EntityRef(
+            entity_type=EntityType.QUESTION,
+            entity_id=other_question.question_id,
+        ),
+        choice="Other choice",
+        alternatives_considered=["Other alternative"],
+        rationale="This belongs elsewhere.",
+        actor=actor,
+    )
+
+    with pytest.raises(ValidationError, match="target must belong"):
+        api.create_exploration_node(
+            project_id=project.project_id,
+            node_type=ExplorationNodeType.DECISION,
+            title="Cross-project target",
+            target=EntityRef(
+                entity_type=EntityType.QUESTION,
+                entity_id=other_question.question_id,
+            ),
+            choice="Invalid",
+            alternatives_considered=["Stay local"],
+            rationale="Targets must stay local.",
+            actor=actor,
+        )
+
+    with pytest.raises(ValidationError, match="evidence_refs must belong"):
+        api.create_exploration_node(
+            project_id=project.project_id,
+            node_type=ExplorationNodeType.DEAD_END,
+            title="Cross-project evidence",
+            target=EntityRef(entity_type=EntityType.CLAIM, entity_id=claim.claim_id),
+            evidence_refs=[
+                EntityRef(
+                    entity_type=EntityType.QUESTION,
+                    entity_id=other_question.question_id,
+                )
+            ],
+            hypothesis="External evidence would explain this.",
+            failure_mode="It belongs to another project.",
+            lesson="Keep evidence refs project-local.",
+            actor=actor,
+        )
+
+    with pytest.raises(ValidationError, match="edges must stay within"):
+        api.update_exploration_node(
+            node.node_id,
+            parent_node_ids=[other_node.node_id],
+            actor=actor,
+        )
+
+    with pytest.raises(ValidationError, match="Invalidated exploration nodes"):
+        api.create_exploration_node(
+            project_id=project.project_id,
+            node_type=ExplorationNodeType.PIVOT,
+            title="Cross-project invalidated node",
+            target=EntityRef(
+                entity_type=EntityType.QUESTION,
+                entity_id=question.question_id,
+            ),
+            trigger="A cross-project node looks stale.",
+            rationale="This must stay local.",
+            invalidates_node_id=other_node.node_id,
+            actor=actor,
+        )
+
+    with pytest.raises(ValidationError, match="Invalidated claims"):
+        api.create_exploration_node(
+            project_id=project.project_id,
+            node_type=ExplorationNodeType.PIVOT,
+            title="Cross-project invalidated claim",
+            target=EntityRef(
+                entity_type=EntityType.QUESTION,
+                entity_id=question.question_id,
+            ),
+            trigger="A cross-project claim looks stale.",
+            rationale="This must stay local.",
+            invalidates_claim_id=other_claim.claim_id,
+            actor=actor,
+        )
+
+
 def test_dataset_requires_primary_question():
     api = repository_backed_api()
     actor = _actor()

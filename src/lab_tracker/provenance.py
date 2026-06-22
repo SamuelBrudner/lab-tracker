@@ -904,11 +904,13 @@ def _exploration_node_node(
             {"@id": _exploration_node_iri(base_url, dependency_id)}
             for dependency_id in node.also_depends_on_node_ids
         ]
+    if node.invalidates_node_id is not None and node.invalidates_claim_id is not None:
+        raise ValueError("Exploration nodes can invalidate at most one node or claim.")
     if node.invalidates_node_id is not None:
         payload["invalidates"] = {
             "@id": _exploration_node_iri(base_url, node.invalidates_node_id)
         }
-    if node.invalidates_claim_id is not None:
+    elif node.invalidates_claim_id is not None:
         payload["invalidates"] = {
             "@id": _resource_iri(base_url, "claims", node.invalidates_claim_id)
         }

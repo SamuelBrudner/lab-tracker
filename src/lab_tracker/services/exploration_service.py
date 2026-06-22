@@ -302,6 +302,8 @@ class ExplorationService(BaseService):
             ensure_non_empty(node.trigger or "", "trigger")
             ensure_non_empty(node.rationale or "", "rationale")
             self._ensure_invalidated_refs(node)
+        if node.node_type != ExplorationNodeType.PIVOT:
+            self._ensure_no_invalidated_refs(node)
         self._resolve_invalidated_refs(node)
         self._resolve_edge_refs(node)
         self._ensure_dag(node)
@@ -313,6 +315,10 @@ class ExplorationService(BaseService):
         ]
         if refs.count(True) != 1:
             raise ValidationError("Pivot nodes must invalidate exactly one node or claim.")
+
+    def _ensure_no_invalidated_refs(self, node: ExplorationNode) -> None:
+        if node.invalidates_node_id is not None or node.invalidates_claim_id is not None:
+            raise ValidationError("Only pivot exploration nodes can invalidate nodes or claims.")
 
     def _resolve_invalidated_refs(self, node: ExplorationNode) -> None:
         if node.invalidates_node_id is not None:

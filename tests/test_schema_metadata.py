@@ -72,6 +72,16 @@ def test_schema_description_status_lifecycle_comes_from_service_rules() -> None:
     payload = build_schema_description(entity_type="claim")
 
     claim = payload["entities"]["claim"]
+    assert {
+        "falsification_criteria",
+        "verification_plan",
+        "refuting_outcome",
+    }.issubset(claim["create"]["fields"])
+    assert {
+        "falsification_criteria",
+        "verification_plan",
+        "refuting_outcome",
+    }.issubset(claim["update"]["fields"])
     assert claim["status"]["allowed_values"] == [
         status.value for status in ClaimStatus
     ]
