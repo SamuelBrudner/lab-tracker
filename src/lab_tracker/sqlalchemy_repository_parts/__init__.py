@@ -13,6 +13,9 @@ from lab_tracker.sqlalchemy_repository_parts.core import (
     SQLAlchemyQuestionRepository,
 )
 from lab_tracker.sqlalchemy_repository_parts.datasets import SQLAlchemyDatasetRepository
+from lab_tracker.sqlalchemy_repository_parts.exploration import (
+    SQLAlchemyExplorationNodeRepository,
+)
 from lab_tracker.sqlalchemy_repository_parts.goals import SQLAlchemyGoalRepository
 from lab_tracker.sqlalchemy_repository_parts.notes import SQLAlchemyNoteRepository
 from lab_tracker.sqlalchemy_repository_parts.ownership import (
@@ -37,6 +40,7 @@ __all__ = [
     "SQLAlchemyClaimRepository",
     "SQLAlchemyDatasetRepository",
     "SQLAlchemyEntityVersionRepository",
+    "SQLAlchemyExplorationNodeRepository",
     "SQLAlchemyGoalRepository",
     "SQLAlchemyGroupMembershipRepository",
     "SQLAlchemyLabTrackerRepository",

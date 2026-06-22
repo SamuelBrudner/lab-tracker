@@ -168,6 +168,8 @@ def test_alembic_upgrade_head_creates_expected_tables(monkeypatch, tmp_path):
         "claim_analyses",
         "claim_questions",
         "claim_edges",
+        "exploration_nodes",
+        "exploration_node_edges",
         "entity_versions",
         "goals",
         "goal_links",
@@ -254,6 +256,7 @@ def test_alembic_upgrade_head_creates_expected_tables(monkeypatch, tmp_path):
     _assert_created_by_user_fk(inspector, "graph_draft_batch_runs")
     _assert_created_by_user_fk(inspector, "sessions")
     _assert_created_by_user_fk(inspector, "claims")
+    _assert_created_by_user_fk(inspector, "exploration_nodes")
     _assert_created_by_user_fk(inspector, "entity_versions")
     _assert_created_by_user_fk(inspector, "goals")
     _assert_created_by_user_fk(inspector, "goal_links")
@@ -267,6 +270,7 @@ def test_alembic_upgrade_head_creates_expected_tables(monkeypatch, tmp_path):
         "sessions",
         "analyses",
         "claims",
+        "exploration_nodes",
         "goals",
         "visualizations",
     ):
@@ -297,6 +301,11 @@ def test_alembic_upgrade_head_creates_expected_tables(monkeypatch, tmp_path):
     claim_columns = {column["name"] for column in inspector.get_columns("claims")}
     assert "terminal_reason" in claim_columns
     assert "external_citations" in claim_columns
+    assert {
+        "falsification_criteria",
+        "verification_plan",
+        "refuting_outcome",
+    }.issubset(claim_columns)
     claim_edge_columns = {column["name"] for column in inspector.get_columns("claim_edges")}
     assert {
         "edge_id",
@@ -322,6 +331,77 @@ def test_alembic_upgrade_head_creates_expected_tables(monkeypatch, tmp_path):
         "claim_edges",
         column="created_by_user_id",
         referred_table="users",
+    )
+    exploration_columns = {
+        column["name"] for column in inspector.get_columns("exploration_nodes")
+    }
+    assert {
+        "node_id",
+        "project_id",
+        "node_type",
+        "title",
+        "target_entity_type",
+        "target_entity_id",
+        "status",
+        "choice",
+        "alternatives_considered",
+        "rationale",
+        "evidence_refs",
+        "hypothesis",
+        "failure_mode",
+        "lesson",
+        "tooling_context",
+        "trigger",
+        "invalidates_node_id",
+        "invalidates_claim_id",
+        "created_by",
+        "created_by_user_id",
+        "origin",
+        "change_set_id",
+        "origin_provider",
+        "origin_model",
+        "origin_prompt_version",
+        "created_at",
+        "updated_at",
+    }.issubset(exploration_columns)
+    exploration_edge_columns = {
+        column["name"] for column in inspector.get_columns("exploration_node_edges")
+    }
+    assert {
+        "edge_id",
+        "source_node_id",
+        "target_node_id",
+        "relation",
+        "created_at",
+    }.issubset(exploration_edge_columns)
+    _assert_index(inspector, "exploration_nodes", "ix_exploration_nodes_project_created_at")
+    _assert_index(inspector, "exploration_nodes", "ix_exploration_nodes_target")
+    _assert_index(inspector, "exploration_node_edges", "ix_exploration_node_edges_source")
+    _assert_index(inspector, "exploration_node_edges", "ix_exploration_node_edges_target")
+    _assert_fk(inspector, "exploration_nodes", column="project_id", referred_table="projects")
+    _assert_fk(
+        inspector,
+        "exploration_nodes",
+        column="invalidates_node_id",
+        referred_table="exploration_nodes",
+    )
+    _assert_fk(
+        inspector,
+        "exploration_nodes",
+        column="invalidates_claim_id",
+        referred_table="claims",
+    )
+    _assert_fk(
+        inspector,
+        "exploration_node_edges",
+        column="source_node_id",
+        referred_table="exploration_nodes",
+    )
+    _assert_fk(
+        inspector,
+        "exploration_node_edges",
+        column="target_node_id",
+        referred_table="exploration_nodes",
     )
     assert {
         "version_id",

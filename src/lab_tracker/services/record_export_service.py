@@ -14,6 +14,7 @@ from lab_tracker.models import (
     Dataset,
     EntityRef,
     EntityType,
+    ExplorationNode,
     Goal,
     Note,
     Question,
@@ -206,6 +207,7 @@ class RecordExportService(BaseService):
         datasets: dict[UUID, Dataset] = {}
         analyses: dict[UUID, Analysis] = {}
         claims: dict[UUID, Claim] = {}
+        exploration_nodes: dict[UUID, ExplorationNode] = {}
         notes: dict[UUID, Note] = {}
         visualizations: dict[UUID, Visualization] = {}
         project_full_exports: set[UUID] = set()
@@ -236,6 +238,9 @@ class RecordExportService(BaseService):
             datasets.update({item.dataset_id: item for item in project_records.datasets})
             analyses.update({item.analysis_id: item for item in project_records.analyses})
             claims.update({item.claim_id: item for item in project_records.claims})
+            exploration_nodes.update(
+                {item.node_id: item for item in project_records.exploration_nodes}
+            )
             notes.update({item.note_id: item for item in project_records.notes})
             visualizations.update({item.viz_id: item for item in project_records.visualizations})
 
@@ -245,6 +250,7 @@ class RecordExportService(BaseService):
             datasets=datasets,
             analyses=analyses,
             claims=claims,
+            exploration_nodes=exploration_nodes,
             notes=notes,
             visualizations=visualizations,
         )
@@ -305,6 +311,7 @@ class RecordExportService(BaseService):
             datasets=datasets,
             analyses=analyses,
             claims=claims,
+            exploration_nodes={},
             notes=notes,
             visualizations=visualizations,
         )
@@ -317,6 +324,7 @@ class RecordExportService(BaseService):
         datasets: dict[UUID, Dataset],
         analyses: dict[UUID, Analysis],
         claims: dict[UUID, Claim],
+        exploration_nodes: dict[UUID, ExplorationNode],
         notes: dict[UUID, Note],
         visualizations: dict[UUID, Visualization],
     ) -> AraArtifactRecords:
@@ -341,14 +349,78 @@ class RecordExportService(BaseService):
                 )
                 for claim_id in visualization.related_claim_ids:
                     changed |= self._put_if_missing(claims, claim_id, self._get_claim)
+            for exploration_node in list(exploration_nodes.values()):
+                changed |= self._put_entity_ref_if_missing(
+                    exploration_node.target,
+                    questions=questions,
+                    datasets=datasets,
+                    analyses=analyses,
+                    claims=claims,
+                    notes=notes,
+                    visualizations=visualizations,
+                )
+                for evidence_ref in exploration_node.evidence_refs:
+                    changed |= self._put_entity_ref_if_missing(
+                        evidence_ref,
+                        questions=questions,
+                        datasets=datasets,
+                        analyses=analyses,
+                        claims=claims,
+                        notes=notes,
+                        visualizations=visualizations,
+                    )
+                if exploration_node.invalidates_claim_id is not None:
+                    changed |= self._put_if_missing(
+                        claims,
+                        exploration_node.invalidates_claim_id,
+                        self._get_claim,
+                    )
+                if exploration_node.invalidates_node_id is not None:
+                    changed |= self._put_if_missing(
+                        exploration_nodes,
+                        exploration_node.invalidates_node_id,
+                        self._get_exploration_node,
+                    )
+                for related_node_id in [
+                    *exploration_node.parent_node_ids,
+                    *exploration_node.also_depends_on_node_ids,
+                ]:
+                    changed |= self._put_if_missing(
+                        exploration_nodes,
+                        related_node_id,
+                        self._get_exploration_node,
+                    )
             for dataset in list(datasets.values()):
                 for link in dataset.question_links:
                     changed |= self._put_if_missing(questions, link.question_id, self._get_question)
                 for note_id in dataset.commit_manifest.note_ids:
                     changed |= self._put_if_missing(notes, note_id, self._get_note)
+            for related_node in self._exploration_nodes_for_records(
+                project_ids=project_ids,
+                questions=questions,
+                datasets=datasets,
+                analyses=analyses,
+                claims=claims,
+                notes=notes,
+                visualizations=visualizations,
+                exploration_nodes=exploration_nodes,
+            ):
+                changed |= self._put_if_missing(
+                    exploration_nodes,
+                    related_node.node_id,
+                    lambda _node_id, item=related_node: item,
+                )
 
         if project_ids:
-            self._drop_out_of_scope(project_ids, questions, datasets, analyses, claims, notes)
+            self._drop_out_of_scope(
+                project_ids,
+                questions,
+                datasets,
+                analyses,
+                claims,
+                exploration_nodes,
+                notes,
+            )
         project_visualizations = self._visualizations_for_records(project_ids, analyses, claims)
         visualizations.update({item.viz_id: item for item in project_visualizations})
         notes.update(
@@ -376,6 +448,11 @@ class RecordExportService(BaseService):
             notes=self._sorted(notes.values(), "created_at", "note_id"),
             visualizations=self._sorted(visualizations.values(), "created_at", "viz_id"),
             entity_versions=self._sorted(entity_versions, "created_at", "version_id"),
+            exploration_nodes=self._sorted(
+                exploration_nodes.values(),
+                "created_at",
+                "node_id",
+            ),
         )
 
     def _collect_project_records(self, project_id: UUID) -> AraArtifactRecords:
@@ -414,6 +491,11 @@ class RecordExportService(BaseService):
             limit=None,
             offset=0,
         )
+        exploration_nodes, _ = self.repository.query_exploration_nodes(
+            project_id=project_id,
+            limit=None,
+            offset=0,
+        )
         return AraArtifactRecords(
             questions=questions,
             datasets=datasets,
@@ -422,6 +504,7 @@ class RecordExportService(BaseService):
             claim_edges=claim_edges,
             notes=notes,
             visualizations=visualizations,
+            exploration_nodes=exploration_nodes,
             entity_versions=self._entity_versions_for_records(
                 {question.question_id: question for question in questions},
                 {claim.claim_id: claim for claim in claims},
@@ -452,6 +535,35 @@ class RecordExportService(BaseService):
         target[entity_id] = loader(entity_id)
         return True
 
+    def _put_entity_ref_if_missing(
+        self,
+        ref: EntityRef,
+        *,
+        questions: dict[UUID, Question],
+        datasets: dict[UUID, Dataset],
+        analyses: dict[UUID, Analysis],
+        claims: dict[UUID, Claim],
+        notes: dict[UUID, Note],
+        visualizations: dict[UUID, Visualization],
+    ) -> bool:
+        if ref.entity_type == EntityType.QUESTION:
+            return self._put_if_missing(questions, ref.entity_id, self._get_question)
+        if ref.entity_type == EntityType.DATASET:
+            return self._put_if_missing(datasets, ref.entity_id, self._get_dataset)
+        if ref.entity_type == EntityType.ANALYSIS:
+            return self._put_if_missing(analyses, ref.entity_id, self._get_analysis)
+        if ref.entity_type == EntityType.CLAIM:
+            return self._put_if_missing(claims, ref.entity_id, self._get_claim)
+        if ref.entity_type == EntityType.NOTE:
+            return self._put_if_missing(notes, ref.entity_id, self._get_note)
+        if ref.entity_type == EntityType.VISUALIZATION:
+            return self._put_if_missing(
+                visualizations,
+                ref.entity_id,
+                self._get_visualization,
+            )
+        return False
+
     def _drop_out_of_scope(
         self,
         project_ids: set[UUID],
@@ -459,9 +571,10 @@ class RecordExportService(BaseService):
         datasets: dict[UUID, Dataset],
         analyses: dict[UUID, Analysis],
         claims: dict[UUID, Claim],
+        exploration_nodes: dict[UUID, ExplorationNode],
         notes: dict[UUID, Note],
     ) -> None:
-        for mapping in (questions, datasets, analyses, claims, notes):
+        for mapping in (questions, datasets, analyses, claims, exploration_nodes, notes):
             for entity_id, entity in list(mapping.items()):
                 if getattr(entity, "project_id", None) not in project_ids:
                     del mapping[entity_id]
@@ -526,6 +639,45 @@ class RecordExportService(BaseService):
                 if self._note_targets_any(note, target_map):
                     scoped_notes[note.note_id] = note
         return list(scoped_notes.values())
+
+    def _exploration_nodes_for_records(
+        self,
+        *,
+        project_ids: set[UUID],
+        questions: dict[UUID, Question],
+        datasets: dict[UUID, Dataset],
+        analyses: dict[UUID, Analysis],
+        claims: dict[UUID, Claim],
+        notes: dict[UUID, Note],
+        visualizations: dict[UUID, Visualization],
+        exploration_nodes: dict[UUID, ExplorationNode],
+    ) -> list[ExplorationNode]:
+        if not project_ids:
+            return list(exploration_nodes.values())
+        target_map = {
+            EntityType.QUESTION: set(questions),
+            EntityType.DATASET: set(datasets),
+            EntityType.ANALYSIS: set(analyses),
+            EntityType.CLAIM: set(claims),
+            EntityType.NOTE: set(notes),
+            EntityType.VISUALIZATION: set(visualizations),
+        }
+        known_node_ids = set(exploration_nodes)
+        related: dict[UUID, ExplorationNode] = {}
+        for project_id in project_ids:
+            project_nodes, _ = self.repository.query_exploration_nodes(
+                project_id=project_id,
+                limit=None,
+                offset=0,
+            )
+            for node in project_nodes:
+                if _exploration_node_matches_records(
+                    node,
+                    target_map=target_map,
+                    known_node_ids=known_node_ids,
+                ):
+                    related[node.node_id] = node
+        return list(related.values())
 
     def _note_targets_any(
         self,
@@ -615,6 +767,12 @@ class RecordExportService(BaseService):
             raise NotFoundError("Claim does not exist.")
         return claim
 
+    def _get_exploration_node(self, node_id: UUID) -> ExplorationNode:
+        node = self.repository.exploration_nodes.get(node_id)
+        if node is None:
+            raise NotFoundError("Exploration node does not exist.")
+        return node
+
     def _get_note(self, note_id: UUID) -> Note:
         note = self.repository.notes.get(note_id)
         if note is None:
@@ -679,6 +837,7 @@ class RecordExportService(BaseService):
             *[item.project_id for item in records.sessions],
             *[item.project_id for item in records.analyses],
             *[item.project_id for item in records.claims],
+            *[item.project_id for item in records.exploration_nodes],
             *[item.project_id for item in records.notes],
             *[self._visualization_project_id(item) for item in records.visualizations],
         }
@@ -692,6 +851,30 @@ class RecordExportService(BaseService):
             "analyses": len(records.analyses),
             "claims": len(records.claims),
             "claim_edges": len(records.claim_edges),
+            "exploration_nodes": len(records.exploration_nodes),
             "notes": len(records.notes),
             "visualizations": len(records.visualizations),
         }
+
+
+def _exploration_node_matches_records(
+    node: ExplorationNode,
+    *,
+    target_map: dict[EntityType, set[UUID]],
+    known_node_ids: set[UUID],
+) -> bool:
+    if node.node_id in known_node_ids:
+        return True
+    if node.target.entity_id in target_map.get(node.target.entity_type, set()):
+        return True
+    if any(
+        ref.entity_id in target_map.get(ref.entity_type, set())
+        for ref in node.evidence_refs
+    ):
+        return True
+    if node.invalidates_claim_id in target_map.get(EntityType.CLAIM, set()):
+        return True
+    related_node_ids = {*node.parent_node_ids, *node.also_depends_on_node_ids}
+    if node.invalidates_node_id is not None:
+        related_node_ids.add(node.invalidates_node_id)
+    return bool(related_node_ids & known_node_ids)

@@ -43,6 +43,11 @@ from lab_tracker.services.shared import (
         (
             _ensure_claim_status_transition,
             ClaimStatus.PROPOSED,
+            ClaimStatus.TESTING,
+        ),
+        (
+            _ensure_claim_status_transition,
+            ClaimStatus.TESTING,
             ClaimStatus.SUPPORTED,
         ),
     ],

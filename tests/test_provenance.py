@@ -15,7 +15,11 @@ from lab_tracker.models import (
     DatasetFile,
     DatasetStatus,
     EntityOrigin,
+    EntityRef,
     EntityType,
+    ExplorationNode,
+    ExplorationNodeStatus,
+    ExplorationNodeType,
     ExternalArtifactKind,
     ExternalArtifactReference,
     Goal,
@@ -136,6 +140,73 @@ def test_record_export_provenance_includes_terminal_reasons():
         _node_by_id(document, f"http://example.test/claims/{claim_id}")["terminalReason"]
         == "A later analysis refuted the interpretation."
     )
+
+
+def test_record_export_provenance_includes_exploration_nodes_and_falsification_fields():
+    project_id = uuid4()
+    question_id = UUID("11111111-c0de-c0de-c0de-111111111111")
+    claim_id = UUID("22222222-c0de-c0de-c0de-222222222222")
+    node_id = UUID("33333333-c0de-c0de-c0de-333333333333")
+    question = Question(
+        question_id=question_id,
+        project_id=project_id,
+        text="Which path failed?",
+        question_type=QuestionType.DESCRIPTIVE,
+        status=QuestionStatus.ACTIVE,
+    )
+    claim = Claim(
+        claim_id=claim_id,
+        project_id=project_id,
+        statement="The bootstrap path was underpowered.",
+        confidence=55,
+        status=ClaimStatus.TESTING,
+        falsification_criteria="A larger bootstrap sample separates the groups.",
+        verification_plan="Repeat with the preregistered mixed model and bootstrap.",
+        refuting_outcome="Bootstrap intervals separate cleanly.",
+        answers_question_ids=[question_id],
+    )
+    exploration_node = ExplorationNode(
+        node_id=node_id,
+        project_id=project_id,
+        node_type=ExplorationNodeType.DEAD_END,
+        title="Bootstrap dead end",
+        target=EntityRef(entity_type=EntityType.CLAIM, entity_id=claim_id),
+        status=ExplorationNodeStatus.COMMITTED,
+        evidence_refs=[EntityRef(entity_type=EntityType.QUESTION, entity_id=question_id)],
+        hypothesis="Bootstrap would make the effect obvious.",
+        failure_mode="Intervals stayed wide.",
+        lesson="Model first, bootstrap for presentation later.",
+    )
+
+    document = build_record_export_provenance_document(
+        "http://example.test",
+        RecordExportRecords(
+            questions=[question],
+            claims=[claim],
+            exploration_nodes=[exploration_node],
+        ),
+    )
+
+    claim_node = _node_by_id(document, f"http://example.test/claims/{claim_id}")
+    exploration_jsonld = _node_by_id(
+        document,
+        f"http://example.test/exploration-nodes/{node_id}",
+    )
+    assert claim_node["falsificationCriteria"] == claim.falsification_criteria
+    assert claim_node["verificationPlan"] == claim.verification_plan
+    assert claim_node["refutingOutcome"] == claim.refuting_outcome
+    assert _node_type_includes(exploration_jsonld, "lab:ExplorationNode")
+    assert exploration_jsonld["explorationNodeType"] == "dead_end"
+    assert exploration_jsonld["target"] == {
+        "@id": f"http://example.test/claims/{claim_id}",
+        "entityType": "claim",
+        "entityId": str(claim_id),
+    }
+    assert exploration_jsonld["evidence"] == [
+        {"@id": f"http://example.test/questions/{question_id}"}
+    ]
+    assert exploration_jsonld["failureMode"] == "Intervals stayed wide."
+    assert exploration_jsonld["lesson"] == "Model first, bootstrap for presentation later."
 
 
 def test_claim_relations_and_external_citations_are_exported_in_provenance():

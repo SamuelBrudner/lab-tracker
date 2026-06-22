@@ -210,7 +210,13 @@ _SESSION_STATUS_TRANSITIONS: dict[SessionStatus, set[SessionStatus]] = {
 }
 
 _CLAIM_STATUS_TRANSITIONS: dict[ClaimStatus, set[ClaimStatus]] = {
-    ClaimStatus.PROPOSED: {ClaimStatus.PROPOSED, ClaimStatus.SUPPORTED, ClaimStatus.REJECTED},
+    ClaimStatus.PROPOSED: {
+        ClaimStatus.PROPOSED,
+        ClaimStatus.TESTING,
+        ClaimStatus.SUPPORTED,
+        ClaimStatus.REJECTED,
+    },
+    ClaimStatus.TESTING: {ClaimStatus.TESTING, ClaimStatus.SUPPORTED, ClaimStatus.REJECTED},
     ClaimStatus.SUPPORTED: {ClaimStatus.SUPPORTED},
     ClaimStatus.REJECTED: {ClaimStatus.REJECTED},
 }

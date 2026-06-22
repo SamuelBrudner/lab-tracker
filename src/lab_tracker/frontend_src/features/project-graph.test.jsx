@@ -149,4 +149,27 @@ describe("buildFlowGraph edge dedupe", () => {
     expect(byId.G.style.clipPath).toContain("polygon");
     expect(goalEdge.style.strokeDasharray).toBe("5 5");
   });
+
+  it("places exploration nodes between claims and visualizations", () => {
+    const graph = {
+      nodes: [
+        q("Q", "question"),
+        { id: "C", entity_type: "claim", label: "claim" },
+        { id: "E", entity_type: "exploration_node", label: "dead end" },
+        { id: "V", entity_type: "visualization", label: "figure" },
+      ],
+      edges: [
+        edge("e1", "C", "Q", "claim_question_answers"),
+        edge("e2", "C", "E", "exploration_target", "concerns"),
+        edge("e3", "C", "V", "visualization_claim", "related claim"),
+      ],
+    };
+    const byId = Object.fromEntries(
+      buildFlowGraph(graph, "evidence").nodes.map((node) => [node.id, node]),
+    );
+
+    expect(byId.E.data.entityType).toBe("exploration_node");
+    expect(byId.E.position.x).toBeGreaterThan(byId.C.position.x);
+    expect(byId.V.position.x).toBeGreaterThan(byId.E.position.x);
+  });
 });

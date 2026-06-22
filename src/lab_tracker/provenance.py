@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
 from urllib.parse import quote
@@ -20,6 +20,7 @@ from lab_tracker.models import (
     EntityRef,
     EntityType,
     EntityVersion,
+    ExplorationNode,
     ExternalArtifactKind,
     ExternalArtifactReference,
     Goal,
@@ -90,6 +91,8 @@ def _context(base_url: str) -> dict[str, object]:
         "endedAt": "lab:endedAt",
         "executedAt": "lab:executedAt",
         "evidence": {"@id": "lab:evidence", "@type": "@id"},
+        "explorationNode": {"@id": "lab:explorationNode", "@type": "@id"},
+        "explorationNodeType": "lab:explorationNodeType",
         "externalArtifact": {"@id": "lab:externalArtifact", "@type": "@id"},
         "externalContentHash": "lab:externalContentHash",
         "externalMetadata": {"@id": "lab:externalMetadata", "@type": "@json"},
@@ -98,6 +101,8 @@ def _context(base_url: str) -> dict[str, object]:
         "fileName": "lab:fileName",
         "filePath": "lab:filePath",
         "filename": "lab:filename",
+        "falsificationCriteria": "lab:falsificationCriteria",
+        "failureMode": "lab:failureMode",
         "groundingDataset": {"@id": "lab:groundingDataset", "@type": "@id"},
         "generatedAt": "lab:generatedAt",
         "goalLink": {"@id": "lab:goalLink", "@type": "@id"},
@@ -109,12 +114,20 @@ def _context(base_url: str) -> dict[str, object]:
         "nwbMetadata": {"@id": "lab:nwbMetadata", "@type": "@json"},
         "outcomeStatus": "lab:outcomeStatus",
         "origin": "lab:origin",
+        "choice": "lab:choice",
+        "alternativesConsidered": {"@id": "lab:alternativesConsidered", "@type": "@json"},
+        "alsoDependsOn": {"@id": "lab:alsoDependsOn", "@type": "@id"},
+        "hypothesis": "lab:hypothesis",
+        "invalidates": {"@id": "lab:invalidates", "@type": "@id"},
+        "lesson": "lab:lesson",
         "primaryQuestion": {"@id": "lab:primaryQuestion", "@type": "@id"},
         "question": {"@id": "lab:question", "@type": "@id"},
         "questionLink": {"@id": "lab:questionLink", "@type": "@id"},
         "questionType": "lab:questionType",
         "rawContent": "lab:rawContent",
         "relatedClaim": {"@id": "lab:relatedClaim", "@type": "@id"},
+        "refutingOutcome": "lab:refutingOutcome",
+        "rationale": "lab:rationale",
         "role": "lab:role",
         "scope": {"@id": "lab:scope", "@type": "@id"},
         "sizeBytes": "lab:sizeBytes",
@@ -131,10 +144,13 @@ def _context(base_url: str) -> dict[str, object]:
         "target": {"@id": "lab:target", "@type": "@id"},
         "terminalReason": "lab:terminalReason",
         "text": "lab:text",
+        "toolingContext": "lab:toolingContext",
+        "trigger": "lab:trigger",
         "transcribedText": "lab:transcribedText",
         "updatedAt": "lab:updatedAt",
         "userId": "lab:userId",
         "versionNumber": "lab:versionNumber",
+        "verificationPlan": "lab:verificationPlan",
         "vizType": "lab:vizType",
         "wasAttributedTo": {"@id": "prov:wasAttributedTo", "@type": "@id"},
         "wasDerivedFrom": {"@id": "prov:wasDerivedFrom", "@type": "@id"},
@@ -251,6 +267,7 @@ _ORIGIN_ENTITY_RESOURCES = {
     "Question": ("question_id", "questions"),
     "Note": ("note_id", "notes"),
     "Goal": ("goal_id", "goals"),
+    "ExplorationNode": ("node_id", "exploration-nodes"),
 }
 
 
@@ -780,6 +797,12 @@ def _claim_node(
     }
     if claim.terminal_reason:
         node["terminalReason"] = claim.terminal_reason
+    if claim.falsification_criteria:
+        node["falsificationCriteria"] = claim.falsification_criteria
+    if claim.verification_plan:
+        node["verificationPlan"] = claim.verification_plan
+    if claim.refuting_outcome:
+        node["refutingOutcome"] = claim.refuting_outcome
     _apply_origin_provenance(base_url, node, claim)
     if attributed_user_ids:
         node["prov:wasAttributedTo"] = _attribution_value(base_url, attributed_user_ids)
@@ -821,6 +844,86 @@ def _claim_relation_node(base_url: str, edge: ClaimEdge) -> dict[str, object]:
         "claimRelationType": edge.relation.value,
         "createdAt": _isoformat(edge.created_at),
     }
+
+
+def _exploration_node_iri(base_url: str, node_id: UUID) -> str:
+    return _resource_iri(base_url, "exploration-nodes", node_id)
+
+
+def _exploration_node_node(
+    base_url: str,
+    node: ExplorationNode,
+    *,
+    people: dict[str, dict[str, object]],
+    supervision_edges: list[SupervisionEdge],
+) -> dict[str, object]:
+    node_iri = _exploration_node_iri(base_url, node.node_id)
+    payload: dict[str, object] = {
+        "@id": node_iri,
+        "@type": ["prov:Entity", "lab:ExplorationNode"],
+        "entityType": "exploration_node",
+        "entityId": str(node.node_id),
+        "explorationNodeType": node.node_type.value,
+        "text": node.title,
+        "status": node.status.value,
+        "createdAt": _isoformat(node.created_at),
+        "target": {
+            "@id": _entity_ref_iri(base_url, node.target),
+            "entityType": node.target.entity_type.value,
+            "entityId": str(node.target.entity_id),
+        },
+    }
+    if node.choice:
+        payload["choice"] = node.choice
+    if node.alternatives_considered:
+        payload["alternativesConsidered"] = list(node.alternatives_considered)
+    if node.rationale:
+        payload["rationale"] = node.rationale
+    if node.evidence_refs:
+        payload["evidence"] = [
+            {"@id": _entity_ref_iri(base_url, evidence_ref)}
+            for evidence_ref in node.evidence_refs
+        ]
+    if node.hypothesis:
+        payload["hypothesis"] = node.hypothesis
+    if node.failure_mode:
+        payload["failureMode"] = node.failure_mode
+    if node.lesson:
+        payload["lesson"] = node.lesson
+    if node.tooling_context:
+        payload["toolingContext"] = node.tooling_context
+    if node.trigger:
+        payload["trigger"] = node.trigger
+    if node.parent_node_ids:
+        payload["prov:wasDerivedFrom"] = [
+            {"@id": _exploration_node_iri(base_url, parent_id)}
+            for parent_id in node.parent_node_ids
+        ]
+    if node.also_depends_on_node_ids:
+        payload["alsoDependsOn"] = [
+            {"@id": _exploration_node_iri(base_url, dependency_id)}
+            for dependency_id in node.also_depends_on_node_ids
+        ]
+    if node.invalidates_node_id is not None:
+        payload["invalidates"] = {
+            "@id": _exploration_node_iri(base_url, node.invalidates_node_id)
+        }
+    if node.invalidates_claim_id is not None:
+        payload["invalidates"] = {
+            "@id": _resource_iri(base_url, "claims", node.invalidates_claim_id)
+        }
+    _apply_origin_provenance(base_url, payload, node)
+    creator_user_id = _creator_user_id(node.created_by_user_id, node.created_by)
+    if creator_user_id is not None:
+        payload["prov:wasAttributedTo"] = {"@id": _agent_iri(base_url, creator_user_id)}
+        _add_person_with_supervision(
+            people,
+            base_url,
+            creator_user_id,
+            activity_time=node.created_at,
+            supervision_edges=supervision_edges,
+        )
+    return payload
 
 
 def _visualization_node(
@@ -1146,6 +1249,7 @@ _ENTITY_RESOURCE_NAMES = {
     "analysis": "analyses",
     "claim": "claims",
     "dataset": "datasets",
+    "exploration_node": "exploration-nodes",
     "goal": "goals",
     "note": "notes",
     "project": "projects",
@@ -1175,6 +1279,7 @@ class AraArtifactRecords:
     notes: list[Note]
     visualizations: list[Visualization]
     entity_versions: list[EntityVersion]
+    exploration_nodes: list[ExplorationNode] = field(default_factory=list)
     goal: Goal | None = None
     goal_links: list[GoalLink] | None = None
 
@@ -1340,6 +1445,15 @@ def _ara_logic_graph(
         merged,
         [_claim_relation_node(base_url, edge) for edge in records.claim_edges],
     )
+    for exploration_node in records.exploration_nodes:
+        node = _exploration_node_node(
+            base_url,
+            exploration_node,
+            people=people,
+            supervision_edges=supervision_edges,
+        )
+        merged[str(node["@id"])] = node
+        _merge_graph_nodes(merged, _origin_provenance_nodes(base_url, exploration_node))
     if records.goal is not None:
         goal_node = _goal_node(base_url, records.goal)
         merged[str(goal_node["@id"])] = goal_node
@@ -1430,6 +1544,15 @@ def _ara_trace_graph(
         node = _visualization_node(base_url, visualization, attributed_user_ids=[])
         merged[str(node["@id"])] = node
         _merge_graph_nodes(merged, _origin_provenance_nodes(base_url, visualization))
+    for exploration_node in records.exploration_nodes:
+        node = _exploration_node_node(
+            base_url,
+            exploration_node,
+            people=people,
+            supervision_edges=supervision_edges,
+        )
+        merged[str(node["@id"])] = node
+        _merge_graph_nodes(merged, _origin_provenance_nodes(base_url, exploration_node))
     for version in records.entity_versions:
         node = _entity_version_node(base_url, version)
         merged[str(node["@id"])] = node
@@ -1486,6 +1609,15 @@ def _ara_evidence_graph(
         )
         merged[str(node["@id"])] = node
         _merge_graph_nodes(merged, _origin_provenance_nodes(base_url, note))
+    for exploration_node in records.exploration_nodes:
+        node = _exploration_node_node(
+            base_url,
+            exploration_node,
+            people=people,
+            supervision_edges=supervision_edges,
+        )
+        merged[str(node["@id"])] = node
+        _merge_graph_nodes(merged, _origin_provenance_nodes(base_url, exploration_node))
     for user_id in sorted(people):
         person = people[user_id]
         merged[str(person["@id"])] = person
@@ -1577,6 +1709,18 @@ def _claim_cross_layer_bindings(
     for note in records.notes:
         for target in note.targets:
             notes_by_target.setdefault((target.entity_type, target.entity_id), []).append(note)
+    exploration_by_claim: dict[UUID, list[ExplorationNode]] = {}
+    for exploration_node in records.exploration_nodes:
+        if exploration_node.target.entity_type == EntityType.CLAIM:
+            exploration_by_claim.setdefault(
+                exploration_node.target.entity_id,
+                [],
+            ).append(exploration_node)
+        if exploration_node.invalidates_claim_id is not None:
+            exploration_by_claim.setdefault(
+                exploration_node.invalidates_claim_id,
+                [],
+            ).append(exploration_node)
 
     bindings: list[dict[str, object]] = []
     for claim in sorted(records.claims, key=lambda item: (item.created_at, str(item.claim_id))):
@@ -1621,6 +1765,13 @@ def _claim_cross_layer_bindings(
             key=lambda item: (item.created_at, str(item.note_id)),
         ):
             evidence_refs.append({"@id": _resource_iri(base_url, "notes", note.note_id)})
+        for exploration_node in sorted(
+            exploration_by_claim.get(claim.claim_id, []),
+            key=lambda item: (item.created_at, str(item.node_id)),
+        ):
+            evidence_refs.append(
+                {"@id": _exploration_node_iri(base_url, exploration_node.node_id)}
+            )
         layer_refs: dict[str, dict[str, str]] = {
             name: {"@id": _ara_layer_iri(base_url, scope_type, scope_id, name)}
             for name in ARA_LAYER_NAMES
@@ -1833,6 +1984,16 @@ def build_record_export_provenance_document(
                 if edge.claim_id == claim.claim_id
             ],
         )
+
+    for exploration_node in records.exploration_nodes:
+        node = _exploration_node_node(
+            base_url,
+            exploration_node,
+            people=people,
+            supervision_edges=supervision_edges,
+        )
+        merged.setdefault(str(node["@id"]), node)
+        _merge_graph_nodes(merged, _origin_provenance_nodes(base_url, exploration_node))
 
     for user_id in sorted(people):
         person = people[user_id]

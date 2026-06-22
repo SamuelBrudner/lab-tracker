@@ -16,6 +16,8 @@ from lab_tracker.models import (
     EntityOrigin,
     EntityRef,
     EntityType,
+    ExplorationNodeStatus,
+    ExplorationNodeType,
     ExternalArtifactReference,
     GraphChangeSet,
     GraphChangeSetStatus,
@@ -139,6 +141,131 @@ def test_direct_claim_and_visualization_writes_record_creator_and_user_origin():
     assert visualization.created_by == str(actor.user_id)
     assert visualization.origin == EntityOrigin.USER
     assert visualization.change_set_id is None
+
+
+def test_claims_track_falsification_plan_and_testing_status():
+    api = repository_backed_api()
+    actor = _actor()
+    project = api.create_project("Falsification Project", actor=actor)
+    question = api.create_question(
+        project_id=project.project_id,
+        text="Does the manipulation alter tuning?",
+        question_type=QuestionType.HYPOTHESIS_DRIVEN,
+        actor=actor,
+    )
+    dataset = api.create_dataset(
+        project_id=project.project_id,
+        primary_question_id=question.question_id,
+        actor=actor,
+    )
+
+    claim = api.create_claim(
+        project_id=project.project_id,
+        statement="The manipulation narrows tuning.",
+        confidence=62,
+        status=ClaimStatus.TESTING,
+        falsification_criteria="No narrowing relative to paired controls.",
+        verification_plan="Fit the tuning-width mixed model on the committed dataset.",
+        refuting_outcome="The manipulation coefficient is >= 0.",
+        supported_by_dataset_ids=[dataset.dataset_id],
+        answers_question_ids=[question.question_id],
+        actor=actor,
+    )
+
+    assert claim.status == ClaimStatus.TESTING
+    assert claim.falsification_criteria == "No narrowing relative to paired controls."
+    assert claim.verification_plan.startswith("Fit the tuning-width")
+    assert claim.refuting_outcome == "The manipulation coefficient is >= 0."
+
+    supported = api.update_claim(
+        claim.claim_id,
+        status=ClaimStatus.SUPPORTED,
+        actor=actor,
+    )
+    assert supported.status == ClaimStatus.SUPPORTED
+    assert supported.falsification_criteria == claim.falsification_criteria
+
+
+def test_exploration_nodes_preserve_decisions_dead_ends_and_pivots():
+    api = repository_backed_api()
+    actor = _actor()
+    project = api.create_project("Exploration Project", actor=actor)
+    question = api.create_question(
+        project_id=project.project_id,
+        text="Which analysis should carry the claim?",
+        question_type=QuestionType.DESCRIPTIVE,
+        actor=actor,
+    )
+    dataset = api.create_dataset(
+        project_id=project.project_id,
+        primary_question_id=question.question_id,
+        actor=actor,
+    )
+    claim = api.create_claim(
+        project_id=project.project_id,
+        statement="The first analysis path was underpowered.",
+        confidence=40,
+        falsification_criteria="A larger sample rescues the effect.",
+        supported_by_dataset_ids=[dataset.dataset_id],
+        actor=actor,
+    )
+
+    decision = api.create_exploration_node(
+        project_id=project.project_id,
+        node_type=ExplorationNodeType.DECISION,
+        title="Use paired bootstrap first",
+        target=EntityRef(entity_type=EntityType.QUESTION, entity_id=question.question_id),
+        choice="Paired bootstrap",
+        alternatives_considered=["Mixed model", "Permutation test"],
+        rationale="It matches the paired acquisition design.",
+        actor=actor,
+    )
+    dead_end = api.create_exploration_node(
+        project_id=project.project_id,
+        node_type=ExplorationNodeType.DEAD_END,
+        title="Bootstrap path underpowered",
+        target=EntityRef(entity_type=EntityType.DATASET, entity_id=dataset.dataset_id),
+        evidence_refs=[
+            EntityRef(entity_type=EntityType.CLAIM, entity_id=claim.claim_id),
+        ],
+        hypothesis="Bootstrap confidence intervals would separate the groups.",
+        failure_mode="Intervals were too wide for the observed sample size.",
+        lesson="Use the mixed model before revisiting bootstrap summaries.",
+        parent_node_ids=[decision.node_id],
+        actor=actor,
+    )
+    pivot = api.create_exploration_node(
+        project_id=project.project_id,
+        node_type=ExplorationNodeType.PIVOT,
+        title="Pivot to mixed model",
+        target=EntityRef(entity_type=EntityType.QUESTION, entity_id=question.question_id),
+        trigger="Dead-end bootstrap result",
+        rationale="The model can borrow strength across cells.",
+        invalidates_node_id=decision.node_id,
+        parent_node_ids=[dead_end.node_id],
+        also_depends_on_node_ids=[decision.node_id],
+        actor=actor,
+    )
+
+    committed = api.update_exploration_node(
+        dead_end.node_id,
+        status=ExplorationNodeStatus.COMMITTED,
+        actor=actor,
+    )
+    assert committed.status == ExplorationNodeStatus.COMMITTED
+
+    nodes = api.list_exploration_nodes(project_id=project.project_id)
+    by_id = {node.node_id: node for node in nodes}
+    assert by_id[dead_end.node_id].parent_node_ids == [decision.node_id]
+    assert by_id[pivot.node_id].also_depends_on_node_ids == [decision.node_id]
+    assert by_id[pivot.node_id].invalidates_node_id == decision.node_id
+
+    with pytest.raises(ValidationError, match="acyclic"):
+        api.update_exploration_node(
+            decision.node_id,
+            parent_node_ids=[pivot.node_id],
+            actor=actor,
+        )
 
 
 def test_dataset_requires_primary_question():

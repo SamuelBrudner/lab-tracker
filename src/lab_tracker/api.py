@@ -25,6 +25,7 @@ from lab_tracker.services import (
     ClaimService,
     DatasetService,
     EntityVersionService,
+    ExplorationService,
     GoalService,
     GraphDraftService,
     NoteService,
@@ -125,6 +126,10 @@ class LabTrackerAPI:
             questions=self.questions,
             analyses_provider=lambda: self.analyses,
             versions=self.entity_versions,
+            authorization=self.project_authorization,
+        )
+        self.exploration: ExplorationService = ExplorationService(
+            context,
             authorization=self.project_authorization,
         )
         self.visualizations: VisualizationService = VisualizationService(
@@ -859,6 +864,41 @@ class LabTrackerAPI:
             actor=kwargs.get("actor"),
             resource_id=_first_uuid(args),
             resource_id_attr="claim_id",
+        )
+
+    def create_exploration_node(self, *args: Any, **kwargs: Any) -> Any:
+        return self._with_usage_event(
+            lambda: self.exploration.create_exploration_node(*args, **kwargs),
+            verb=UsageEventVerb.CREATE,
+            resource_type=UsageEventResourceType.EXPLORATION_NODE,
+            actor=kwargs.get("actor"),
+            resource_id_attr="node_id",
+        )
+
+    def get_exploration_node(self, *args: Any, **kwargs: Any) -> Any:
+        return self.exploration.get_exploration_node(*args, **kwargs)
+
+    def list_exploration_nodes(self, *args: Any, **kwargs: Any) -> Any:
+        return self.exploration.list_exploration_nodes(*args, **kwargs)
+
+    def update_exploration_node(self, *args: Any, **kwargs: Any) -> Any:
+        return self._with_usage_event(
+            lambda: self.exploration.update_exploration_node(*args, **kwargs),
+            verb=UsageEventVerb.UPDATE,
+            resource_type=UsageEventResourceType.EXPLORATION_NODE,
+            actor=kwargs.get("actor"),
+            resource_id=_first_uuid(args),
+            resource_id_attr="node_id",
+        )
+
+    def delete_exploration_node(self, *args: Any, **kwargs: Any) -> Any:
+        return self._with_usage_event(
+            lambda: self.exploration.delete_exploration_node(*args, **kwargs),
+            verb=UsageEventVerb.DELETE,
+            resource_type=UsageEventResourceType.EXPLORATION_NODE,
+            actor=kwargs.get("actor"),
+            resource_id=_first_uuid(args),
+            resource_id_attr="node_id",
         )
 
     def create_claim_edge(self, *args: Any, **kwargs: Any) -> Any:
