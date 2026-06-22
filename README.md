@@ -26,7 +26,7 @@ So from any figure you can walk backward — to the claim, the analysis, the dat
 
 ## All you need to do at the bench is capture
 
-![Capturing a note from a phone, and the draft it produces](docs/screenshots/capture-draft-review.png)
+![The capture composer — a quick note, photo, or voice memo, sent for review](docs/screenshots/capture-draft-review.png)
 
 No forms, no filing. Pair your phone once (scan a QR), then the whole loop is: **type a note, snap a photo, or record a voice memo — and tap send.** Running analysis from code instead? Swap `plt.savefig(...)` for `lab_tracker_client.savefig(...)`, or wrap your plotting in `with capture_figures():`, and every figure you save is captured automatically with its content hash and git commit.
 

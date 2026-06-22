@@ -1331,8 +1331,13 @@ button:disabled {
   --shadow: 0 16px 34px rgba(0, 0, 0, 0.5);
 }
 
+:root[data-theme="dark"],
 :root[data-theme="dark"] body {
   background: radial-gradient(circle at 20% 0, #181b21 0%, #141619 45%, #121316 100%);
+}
+
+:root[data-theme="dark"] .react-flow__minimap {
+  background: #14161a;
 }
 
 :root[data-theme="dark"] .hero {
@@ -1433,8 +1438,13 @@ button:disabled {
     --shadow: 0 16px 34px rgba(0, 0, 0, 0.5);
   }
 
+  :root,
   body {
     background: radial-gradient(circle at 20% 0, #181b21 0%, #141619 45%, #121316 100%);
+  }
+
+  .react-flow__minimap {
+    background: #14161a;
   }
 
   .hero {
