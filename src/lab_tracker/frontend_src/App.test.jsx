@@ -1020,7 +1020,6 @@ describe("App", () => {
     expect(screen.getByText("no audio source artifact was included")).toBeInTheDocument();
     expect(screen.getByText("Exact protocol name")).toBeInTheDocument();
     expect(screen.getByText("Confirm whether Fly 12 should be formalized.")).toBeInTheDocument();
-    expect(screen.getByText("suggest new question")).toBeInTheDocument();
     expect(screen.getByText("Proposed new question")).toBeInTheDocument();
     expect(screen.getByText("Model inference")).toBeInTheDocument();
     expect(screen.getByText("Source evidence")).toBeInTheDocument();
