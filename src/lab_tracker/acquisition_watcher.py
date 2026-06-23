@@ -12,6 +12,7 @@ from uuid import UUID
 
 from lab_tracker.api import LabTrackerAPI
 from lab_tracker.auth import AuthContext
+from lab_tracker.file_watch import discover_files
 from lab_tracker.models import AcquisitionOutput
 
 
@@ -145,22 +146,4 @@ class AcquisitionOutputWatcher:
         for root in self._watch_paths:
             if not root.exists():
                 continue
-            resolved_root = root.resolve()
-            if root.is_file():
-                if self._ignore_hidden and _is_hidden_relative(
-                    resolved_root,
-                    relative_to=resolved_root.parent,
-                ):
-                    continue
-                yield resolved_root
-                continue
-            for candidate in sorted(root.rglob("*")):
-                if not candidate.is_file():
-                    continue
-                resolved_candidate = candidate.resolve()
-                if self._ignore_hidden and _is_hidden_relative(
-                    resolved_candidate,
-                    relative_to=resolved_root,
-                ):
-                    continue
-                yield resolved_candidate
+            yield from discover_files(root, ignore_hidden=self._ignore_hidden)

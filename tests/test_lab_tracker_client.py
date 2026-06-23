@@ -418,6 +418,25 @@ def test_visualization_record_id_prefers_visualization_id() -> None:
     assert record.id == "viz-1"
 
 
+def test_create_analysis_graph_draft_posts_note_route() -> None:
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        assert request.method == "POST"
+        assert request.url.path == "/notes/note-1/analysis-graph-drafts"
+        return _json_response(
+            201,
+            {"data": {"change_set_id": "draft-1", "project_id": "project-1"}},
+        )
+
+    with LabTracker(base_url="http://testserver", transport=httpx.MockTransport(handler)) as lt:
+        draft = lt.create_analysis_graph_draft("note-1")
+
+    assert draft.id == "draft-1"
+    assert len(seen) == 1
+
+
 def test_list_limit_is_total_cap_not_page_size() -> None:
     requests: list[tuple[str, str]] = []
 
