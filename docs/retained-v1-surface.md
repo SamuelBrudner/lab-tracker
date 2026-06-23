@@ -30,6 +30,12 @@ research record:
   `capture_figures`, and `run_context`) as a fail-soft staged-note workflow:
   Lab Tracker stores a bounded review image or pointer plus source URI and
   content-hash metadata, while full figure files remain in the consumer repo.
+- Consumer-side HPC analysis capture through the `lt hpc` CLI as an
+  offline-first staged-note workflow: Slurm/HPC submit, begin, finish, and
+  watch-folder manifest events write durable local outbox records that sync
+  compact scheduler facts, git context, metrics, log excerpts, and external
+  artifact pointers. Large outputs remain outside Lab Tracker, and any proposed
+  analysis/question/claim meaning remains human-gated through graph drafts.
 - Package-pinned code-facing idiom teaching rendered from one generator into
   consent-gated managed agent surfaces, with the advisory
   `lab-tracker://code-conventions` MCP resource treating the package text as

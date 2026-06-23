@@ -63,6 +63,7 @@ _ID_FIELDS = (
     "visualization_id",
     "analysis_id",
     "claim_id",
+    "change_set_id",
     "project_id",
     "goal_id",
 )
@@ -847,6 +848,16 @@ class LabTracker:
             )
         )
 
+    def create_analysis_graph_draft(self, note_id: str) -> LTRecord:
+        """Request a human-reviewed analysis graph draft from an evidence note."""
+
+        return self._data_record(
+            self._request(
+                "POST",
+                f"/notes/{_require_non_empty(str(note_id), 'note_id')}/analysis-graph-drafts",
+            )
+        )
+
     def import_evidence_file(
         self,
         *,
@@ -1366,6 +1377,10 @@ def upload_note_file(**kwargs: Any) -> LTRecord:
 
 def import_evidence_file(**kwargs: Any) -> EvidenceImportResult:
     return client.import_evidence_file(**kwargs)
+
+
+def create_analysis_graph_draft(note_id: str) -> LTRecord:
+    return client.create_analysis_graph_draft(note_id)
 
 
 def _record(payload: Any) -> LTRecord:
