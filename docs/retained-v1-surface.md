@@ -45,6 +45,14 @@ research record:
   validation.
 - Per-project graph-draft batch settings and run history for configured
   cadence, run-now, and run-due drafting over staged notes.
+- Durable curation provenance that keeps the committed graph honest about
+  itself: each accepted graph-draft operation records how it was accepted
+  (`human_selected`, `bulk_accepted`, or `auto_accepted`) plus the accepting
+  actor and time, with an explicit `accept-all` action that marks a batch as
+  bulk-accepted rather than laundering it as per-operation review. Archiving a
+  captured note is a first-class action that names a reason (including
+  `archived_unreviewed`), so a skipped review degrades visible coverage rather
+  than silent trust. See [curation-states.md](curation-states.md).
 - Paired-device enrollment for phone capture, including one-time enrollment
   URLs, device-token capture, and revocation.
 - Project graph views and exports for inspecting the retained question,
@@ -57,12 +65,18 @@ research record:
   including managed file storage for visualization assets.
 - Bounded recent analysis retrieval through `GET /analyses?recent_first=true`,
   so workspace summaries can load the newest committed analyses without scanning
-  a project's full analysis history.
+  a project's full analysis history. The analysis and visualization list
+  endpoints also accept `since`/`until` time-window bounds, so an assistant can
+  pull the advances and plots committed within a window (e.g. since last July)
+  as the retrieval backbone for a progress-report draft.
 - Goals and goal links as explicit planning and evidence-spanning records
   connected to retained graph entities.
 - PROV-O/JSON-LD provenance export, record export events, and external artifact
   references that preserve semantic edges to outside tools without
-  reimplementing their workflows.
+  reimplementing their workflows. The `lt export` consumer-side command writes
+  these documents as self-contained sidecar files that survive without a running
+  instance, optionally co-located next to the data files they describe. See
+  [provenance-export.md](provenance-export.md).
 - Read-only assistant and MCP decision-context endpoints over the retained
   graph. Assistants may inspect context through these surfaces, but retained v1
   does not delegate graph commits to autonomous agents.
