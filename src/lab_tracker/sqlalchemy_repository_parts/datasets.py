@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections import defaultdict
+from datetime import datetime
 from uuid import UUID
 
 from sqlalchemy import select
@@ -106,6 +107,8 @@ class SQLAlchemyDatasetRepository(EntityRepository[Dataset]):
         project_ids: set[UUID] | None = None,
         status: str | None = None,
         created_by: str | None = None,
+        since: datetime | None = None,
+        until: datetime | None = None,
         limit: int | None = None,
         offset: int = 0,
         recent_first: bool = False,
@@ -128,6 +131,12 @@ class SQLAlchemyDatasetRepository(EntityRepository[Dataset]):
         if created_by is not None:
             stmt = stmt.where(DatasetModel.created_by_user_id == created_by)
             count_stmt = count_stmt.where(DatasetModel.created_by_user_id == created_by)
+        if since is not None:
+            stmt = stmt.where(DatasetModel.created_at >= since)
+            count_stmt = count_stmt.where(DatasetModel.created_at >= since)
+        if until is not None:
+            stmt = stmt.where(DatasetModel.created_at < until)
+            count_stmt = count_stmt.where(DatasetModel.created_at < until)
         if recent_first:
             stmt = stmt.order_by(
                 DatasetModel.created_at.desc(),

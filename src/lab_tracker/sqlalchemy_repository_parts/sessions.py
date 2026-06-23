@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from uuid import UUID
 
 from sqlalchemy import select
@@ -40,6 +41,9 @@ class SQLAlchemySessionRepository(SQLAlchemyModelRepository[Session, SessionMode
         project_ids: set[UUID] | None = None,
         status: str | None = None,
         session_type: str | None = None,
+        created_by: str | None = None,
+        since: datetime | None = None,
+        until: datetime | None = None,
         limit: int | None = None,
         offset: int = 0,
         recent_first: bool = False,
@@ -62,6 +66,17 @@ class SQLAlchemySessionRepository(SQLAlchemyModelRepository[Session, SessionMode
         if session_type is not None:
             stmt = stmt.where(SessionModel.session_type == session_type)
             count_stmt = count_stmt.where(SessionModel.session_type == session_type)
+        if created_by is not None:
+            stmt = stmt.where(SessionModel.created_by_user_id == created_by)
+            count_stmt = count_stmt.where(SessionModel.created_by_user_id == created_by)
+        # Sessions filter on started_at — the bench-activity time the briefing is
+        # about ("what ran since last meeting") — matching the recent_first order.
+        if since is not None:
+            stmt = stmt.where(SessionModel.started_at >= since)
+            count_stmt = count_stmt.where(SessionModel.started_at >= since)
+        if until is not None:
+            stmt = stmt.where(SessionModel.started_at < until)
+            count_stmt = count_stmt.where(SessionModel.started_at < until)
         if recent_first:
             stmt = stmt.order_by(
                 SessionModel.started_at.desc(),

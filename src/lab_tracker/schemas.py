@@ -559,6 +559,9 @@ class AssistantDecisionContextRequest(RequestModel):
     analysis_id: UUID | None = None
     claim_id: UUID | None = None
     visualization_id: UUID | None = None
+    created_by: UUID | None = None
+    since: datetime | None = None
+    until: datetime | None = None
     limit: int = Field(default=20, ge=1, le=100)
 
 

@@ -312,6 +312,8 @@ class SQLAlchemyClaimRepository(EntityRepository[Claim]):
         dataset_id: UUID | None = None,
         analysis_id: UUID | None = None,
         created_by: str | None = None,
+        since: datetime | None = None,
+        until: datetime | None = None,
         limit: int | None = None,
         offset: int = 0,
         recent_first: bool = False,
@@ -355,6 +357,12 @@ class SQLAlchemyClaimRepository(EntityRepository[Claim]):
             )
             stmt = stmt.where(created_by_clause)
             count_stmt = count_stmt.where(created_by_clause)
+        if since is not None:
+            stmt = stmt.where(ClaimModel.created_at >= since)
+            count_stmt = count_stmt.where(ClaimModel.created_at >= since)
+        if until is not None:
+            stmt = stmt.where(ClaimModel.created_at < until)
+            count_stmt = count_stmt.where(ClaimModel.created_at < until)
         if dataset_id is not None:
             distinct_required = True
             stmt = stmt.join(
@@ -563,6 +571,7 @@ class SQLAlchemyVisualizationRepository(EntityRepository[Visualization]):
         project_ids: set[UUID] | None = None,
         analysis_id: UUID | None = None,
         claim_id: UUID | None = None,
+        created_by: str | None = None,
         since: datetime | None = None,
         until: datetime | None = None,
         limit: int | None = None,
@@ -613,6 +622,9 @@ class SQLAlchemyVisualizationRepository(EntityRepository[Visualization]):
                 VisualizationClaimModel,
                 VisualizationClaimModel.viz_id == VisualizationModel.viz_id,
             ).where(VisualizationClaimModel.claim_id == str(claim_id))
+        if created_by is not None:
+            stmt = stmt.where(VisualizationModel.created_by_user_id == created_by)
+            count_stmt = count_stmt.where(VisualizationModel.created_by_user_id == created_by)
         if since is not None:
             stmt = stmt.where(VisualizationModel.created_at >= since)
             count_stmt = count_stmt.where(VisualizationModel.created_at >= since)

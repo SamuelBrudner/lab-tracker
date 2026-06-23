@@ -15,6 +15,13 @@ Two honest caveats, because they're the difference between this helping and hurt
 - The draft is only as trustworthy as the record behind it. Lab Tracker tracks **how each piece of the graph was curated** — whether you reviewed an AI suggestion one at a time or accepted a batch in bulk — so a synthesis can lean on what you actually scrutinized rather than laundering an unreviewed guess into your grant.
 - It assembles *your* committed records; it does not invent results. If a window is thin, the report is thin — which is itself a useful signal.
 
+The same windowed-by-person retrieval pays off on a weekly cadence, not just at report time:
+
+- **Before a trainee meeting, a PI gets a briefing.** Ahead of the weekly one-on-one, pull what a trainee committed *since last week's meeting* — the sessions they ran, the analyses and figures they produced, the claims they advanced — across every project the PI oversees. (Cross-project scope is automatic: a PI's view already spans the projects under their oversight, governed by the same access rules as everything else.) The assistant turns it into a two-minute briefing so the meeting starts from *"here's what moved"* instead of *"so, what have you been up to?"*
+- **Before lab meeting, a trainee pulls their own thread.** Presenting again? Ask for everything *you've* done since you last presented, and walk in with the arc already assembled.
+
+In both cases you supply the date — *"since last Tuesday"* — and trust your own calendar; Lab Tracker doesn't try to own your meeting schedule. It just filters the record by **who** and **when**.
+
 ## Start with the question graph
 
 ![The question hierarchy for a project](docs/screenshots/project-graph-questions.png)

@@ -65,10 +65,15 @@ research record:
   including managed file storage for visualization assets.
 - Bounded recent analysis retrieval through `GET /analyses?recent_first=true`,
   so workspace summaries can load the newest committed analyses without scanning
-  a project's full analysis history. The analysis and visualization list
-  endpoints also accept `since`/`until` time-window bounds, so an assistant can
-  pull the advances and plots committed within a window (e.g. since last July)
-  as the retrieval backbone for a progress-report draft.
+  a project's full analysis history. The note, session, dataset, analysis,
+  claim, and visualization list endpoints accept `created_by` (author) and
+  `since`/`until` time-window bounds, so an assistant can pull what a given
+  person committed within a window (e.g. a trainee's work since last week's
+  meeting, or your own advances and plots since last July). The decision-context
+  endpoint exposes the same `created_by`/`since`/`until` filters plus a
+  `progress_review` task kind, assembling a person-scoped, windowed briefing in
+  one call. The caller supplies the window; Lab Tracker stores no meeting
+  schedule.
 - Goals and goal links as explicit planning and evidence-spanning records
   connected to retained graph entities.
 - PROV-O/JSON-LD provenance export, record export events, and external artifact

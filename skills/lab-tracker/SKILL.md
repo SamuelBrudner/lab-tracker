@@ -306,12 +306,15 @@ List/search endpoints use `limit` between 1 and 200 and `offset` of 0 or greater
 - Required: `task_kind`, `query`
 - `analysis_id` (optional): string(uuid) | null
 - `claim_id` (optional): string(uuid) | null
+- `created_by` (optional): string(uuid) | null
 - `dataset_id` (optional): string(uuid) | null
 - `limit` (optional): integer; minimum 1.0, maximum 100.0, default 20
 - `project_id` (optional): string(uuid) | null
 - `query` (required): string; min length 1
 - `question_id` (optional): string(uuid) | null
+- `since` (optional): string(date-time) | null
 - `task_kind` (required): string; min length 1
+- `until` (optional): string(date-time) | null
 - `visualization_id` (optional): string(uuid) | null
 
 ### List/Search Query Parameters
@@ -337,6 +340,8 @@ List/search endpoints use `limit` between 1 and 200 and `offset` of 0 or greater
 - `project_id` (optional): string(uuid) | null
 - `status` (optional): NoteStatus enum: staged, committed, archived | null
 - `created_by` (optional): string | null
+- `since` (optional): string(date-time) | null
+- `until` (optional): string(date-time) | null
 - `target_entity_type` (optional): EntityType enum: project, question, dataset, note, session, analysis, claim, visualization, goal | null
 - `target_entity_id` (optional): string(uuid) | null
 - `limit` (optional): integer; default 50; maximum 200 from shared route validation
@@ -353,6 +358,8 @@ List/search endpoints use `limit` between 1 and 200 and `offset` of 0 or greater
 - `project_id` (optional): string(uuid) | null
 - `status` (optional): DatasetStatus enum: staged, committed, archived | null
 - `created_by` (optional): string | null
+- `since` (optional): string(date-time) | null
+- `until` (optional): string(date-time) | null
 - `limit` (optional): integer; default 50; maximum 200 from shared route validation
 - `offset` (optional): integer; default 0; minimum 0 from shared route validation
 
@@ -374,6 +381,8 @@ List/search endpoints use `limit` between 1 and 200 and `offset` of 0 or greater
 - `dataset_id` (optional): string(uuid) | null
 - `analysis_id` (optional): string(uuid) | null
 - `created_by` (optional): string | null
+- `since` (optional): string(date-time) | null
+- `until` (optional): string(date-time) | null
 - `limit` (optional): integer; default 50; maximum 200 from shared route validation
 - `offset` (optional): integer; default 0; minimum 0 from shared route validation
 
@@ -388,6 +397,7 @@ List/search endpoints use `limit` between 1 and 200 and `offset` of 0 or greater
 - `project_id` (optional): string(uuid) | null
 - `analysis_id` (optional): string(uuid) | null
 - `claim_id` (optional): string(uuid) | null
+- `created_by` (optional): string | null
 - `since` (optional): string(date-time) | null
 - `until` (optional): string(date-time) | null
 - `recent_first` (optional): boolean; default False

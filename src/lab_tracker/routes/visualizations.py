@@ -24,6 +24,7 @@ from lab_tracker.upload_security import (
 )
 
 from .shared import (
+    CreatedByFilter,
     accessible_project_ids_from_request,
     actor_from_request,
     api_from_request,
@@ -81,6 +82,7 @@ def build_visualizations_router(api: LabTrackerAPI) -> APIRouter:
         project_id: UUID | None = None,
         analysis_id: UUID | None = None,
         claim_id: UUID | None = None,
+        created_by: CreatedByFilter = None,
         since: datetime | None = None,
         until: datetime | None = None,
         recent_first: bool = False,
@@ -98,6 +100,7 @@ def build_visualizations_router(api: LabTrackerAPI) -> APIRouter:
             project_ids=project_ids,
             analysis_id=analysis_id,
             claim_id=claim_id,
+            created_by=created_by,
             since=since,
             until=until,
             limit=limit,
