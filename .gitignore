@@ -18,3 +18,7 @@ lab_tracker.db.backup-*
 .dolt/
 *.db
 .beads-credential-key
+
+# Test/coverage artifacts
+.coverage
+.coverage.*
