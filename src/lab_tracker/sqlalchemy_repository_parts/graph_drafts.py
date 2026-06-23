@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session as OrmSession
 
 from lab_tracker.db_models import GraphChangeOperationModel, GraphChangeSetModel, UserModel
 from lab_tracker.models import (
+    AcceptanceMode,
     EntityType,
     GraphChangeOp,
     GraphChangeOperation,
@@ -67,6 +68,12 @@ def operation_to_model(operation: GraphChangeOperation) -> GraphChangeOperationM
         source_refs=[dict(item) for item in operation.source_refs],
         status=operation.status.value,
         review_note=operation.review_note,
+        acceptance_mode=(
+            operation.acceptance_mode.value if operation.acceptance_mode is not None else None
+        ),
+        accepted_by=operation.accepted_by,
+        accepted_by_user_id=_uuid_str(operation.accepted_by_user_id),
+        accepted_at=operation.accepted_at,
         result_entity_id=_uuid_str(operation.result_entity_id),
         error_metadata=dict(operation.error_metadata),
         created_at=operation.created_at,
@@ -92,6 +99,12 @@ def operation_from_model(row: GraphChangeOperationModel) -> GraphChangeOperation
         source_refs=_list(row.source_refs),
         status=GraphChangeOperationStatus(row.status),
         review_note=row.review_note,
+        acceptance_mode=(
+            AcceptanceMode(row.acceptance_mode) if row.acceptance_mode else None
+        ),
+        accepted_by=row.accepted_by,
+        accepted_by_user_id=_uuid(row.accepted_by_user_id),
+        accepted_at=as_utc(row.accepted_at) if row.accepted_at else None,
         result_entity_id=_uuid(row.result_entity_id),
         error_metadata=_dict(row.error_metadata),
         created_at=as_utc(row.created_at),

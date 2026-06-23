@@ -113,6 +113,20 @@ class NoteStatus(str, Enum):
     ARCHIVED = "archived"
 
 
+class NoteArchiveReason(str, Enum):
+    """Why a captured note was set aside.
+
+    Archiving requires naming a reason so captures are never silently dropped:
+    a skipped review degrades visible *coverage*, not silent *trust*.
+    ``ARCHIVED_UNREVIEWED`` records that a capture was set aside without ever
+    being reviewed against the graph.
+    """
+
+    REVIEWED_NOT_RELEVANT = "reviewed_not_relevant"
+    ARCHIVED_UNREVIEWED = "archived_unreviewed"
+    SUPERSEDED = "superseded"
+
+
 class UsageEventVerb(str, Enum):
     CREATE = "create"
     UPDATE = "update"
@@ -273,6 +287,21 @@ class GraphChangeOperationStatus(str, Enum):
     REJECTED = "rejected"
     APPLIED = "applied"
     FAILED = "failed"
+
+
+class AcceptanceMode(str, Enum):
+    """How an AI-proposed operation came to be accepted.
+
+    Recorded so the committed graph stays honest about its own curation: a
+    per-operation human accept (``HUMAN_SELECTED``) is durably distinguished
+    from a single rubber-stamp over the whole batch (``BULK_ACCEPTED``) and from
+    any future non-interactive accept (``AUTO_ACCEPTED``). Without this, a
+    bulk-accepted AI guess is indistinguishable from a human-authored edge.
+    """
+
+    HUMAN_SELECTED = "human_selected"
+    BULK_ACCEPTED = "bulk_accepted"
+    AUTO_ACCEPTED = "auto_accepted"
 
 
 class GraphChangeOp(str, Enum):
@@ -437,6 +466,10 @@ class GraphChangeOperation(_DomainModel):
     source_refs: list[dict[str, Any]] = Field(default_factory=list)
     status: GraphChangeOperationStatus = GraphChangeOperationStatus.PROPOSED
     review_note: str | None = None
+    acceptance_mode: AcceptanceMode | None = None
+    accepted_by: str | None = None
+    accepted_by_user_id: UUID | None = None
+    accepted_at: datetime | None = None
     result_entity_id: UUID | None = None
     error_metadata: dict[str, Any] = Field(default_factory=dict)
     created_at: datetime = Field(default_factory=utc_now)
@@ -680,6 +713,10 @@ class Note(_DomainModel):
     metadata: dict[str, str] = Field(default_factory=dict)
     client_capture_id: str | None = None
     status: NoteStatus = NoteStatus.STAGED
+    archived_reason: NoteArchiveReason | None = None
+    archived_at: datetime | None = None
+    archived_by: str | None = None
+    archived_by_user_id: UUID | None = None
     created_at: datetime = Field(default_factory=utc_now)
     created_by: str | None = None
     created_by_user_id: UUID | None = None

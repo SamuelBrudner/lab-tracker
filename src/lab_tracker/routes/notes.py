@@ -28,6 +28,7 @@ from lab_tracker.models import (
 from lab_tracker.schemas import (
     Envelope,
     ListEnvelope,
+    NoteArchiveRequest,
     NoteCreate,
     NoteRawDownloadRead,
     NoteTranscriptRequest,
@@ -284,6 +285,23 @@ def build_notes_router(api: LabTrackerAPI) -> APIRouter:
             close = getattr(transcription_client, "close", None)
             if callable(close):
                 close()
+        return Envelope(data=note)
+
+    @router.post("/notes/{note_id:uuid}/archive", response_model=Envelope[Note])
+    def archive_note(
+        note_id: UUID,
+        request: Request,
+        payload: NoteArchiveRequest | None = None,
+    ):
+        actor = actor_from_request(request)
+        note = api_from_request(request, api).get_note(note_id)
+        ensure_project_contributor(request, note.project_id)
+        archive_payload = payload or NoteArchiveRequest()
+        note = api_from_request(request, api).archive_note(
+            note_id,
+            reason=archive_payload.reason,
+            actor=actor,
+        )
         return Envelope(data=note)
 
     @router.delete("/notes/{note_id:uuid}", response_model=Envelope[Note])

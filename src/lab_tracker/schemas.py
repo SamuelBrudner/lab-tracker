@@ -38,6 +38,7 @@ from lab_tracker.models import (
     GraphDraftMode,
     GroupMembership,
     Note,
+    NoteArchiveReason,
     NoteMetadataScalar,
     NoteStatus,
     OwnershipReassignment,
@@ -454,6 +455,10 @@ class NoteUpdate(RequestModel):
 
 class NoteTranscriptRequest(RequestModel):
     prompt: NonBlankStr | None = None
+
+
+class NoteArchiveRequest(RequestModel):
+    reason: NoteArchiveReason = NoteArchiveReason.ARCHIVED_UNREVIEWED
 
 
 class GraphDraftOperationUpdate(RequestModel):
