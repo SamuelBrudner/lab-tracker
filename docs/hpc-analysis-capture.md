@@ -9,6 +9,11 @@ The boundary is intentional: scheduler facts, git state, artifact pointers, log
 excerpts, and metrics can be captured automatically. Claims, question links, and
 analysis meaning still require human review.
 
+`lt hpc` is the scheduler-aware adapter for the generic watch-folder capture
+pattern described in [watch-folder-capture.md](watch-folder-capture.md). Use
+`lt watch` for non-HPC evidence folders, acquisition-session outputs, and
+generic manifests; use `lt hpc` when Slurm/HPC job lifecycle details matter.
+
 ## Setup
 
 Run this once in the analysis repository or HPC checkout:
@@ -113,8 +118,10 @@ Then scan the folder:
 lt hpc watch --root /scratch/snb6/project-runs
 ```
 
-The watch command writes the same outbox event format as the wrapper and hook
-modes.
+The HPC watch command writes the same HPC outbox event format as the wrapper and
+hook modes. Generic `lt watch --mode manifest` uses
+`lab-tracker-evidence.json`; `lt hpc watch` keeps the HPC-specific
+`lab-tracker-hpc-run.json` manifest for compatibility.
 
 ## Sync And Review
 

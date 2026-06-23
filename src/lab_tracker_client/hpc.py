@@ -221,16 +221,21 @@ def make_event(
     resolved_event_type = _event_type(event_type)
     resolved_cwd = str(Path(cwd or Path.cwd()).expanduser().resolve())
     resolved_run_id = _non_empty(run_id or os.getenv("LAB_TRACKER_HPC_RUN_ID") or new_run_id())
+    resolved_summary = summary or _default_summary(resolved_event_type, resolved_run_id)
+    resolved_project_id = _non_empty(project_id or config.project_id, "project_id")
+    resolved_question_id = _optional_str(question_id or config.default_question_id)
+    resolved_dataset_ids = [str(item) for item in dataset_ids or [] if str(item).strip()]
+    resolved_tags = [str(item) for item in tags or [] if str(item).strip()]
     payload: JsonObject = {
         "version": EVENT_VERSION,
         "run_id": resolved_run_id,
         "event_id": event_id or uuid.uuid4().hex,
         "event_type": resolved_event_type,
         "observed_at": observed_at or utc_now(),
-        "project_id": _non_empty(project_id or config.project_id, "project_id"),
-        "question_id": _optional_str(question_id or config.default_question_id),
-        "dataset_ids": [str(item) for item in dataset_ids or [] if str(item).strip()],
-        "tags": [str(item) for item in tags or [] if str(item).strip()],
+        "project_id": resolved_project_id,
+        "question_id": resolved_question_id,
+        "dataset_ids": resolved_dataset_ids,
+        "tags": resolved_tags,
         "command": [str(item) for item in command or []],
         "cwd": resolved_cwd,
         "source": {
@@ -245,7 +250,22 @@ def make_event(
         "artifacts": [_artifact_payload(item) for item in artifacts or []],
         "metrics": _json_mapping(metrics or {}),
         "log_excerpt": log_excerpt or "",
-        "summary": summary or _default_summary(resolved_event_type, resolved_run_id),
+        "summary": resolved_summary,
+        "capture_id": resolved_run_id,
+        "capture_kind": "hpc_run_event",
+        "adapter": HPC_EVIDENCE_ADAPTER,
+        "sink": "staged-note",
+        "context": {
+            "project_id": resolved_project_id,
+            "question_id": resolved_question_id,
+            "dataset_ids": resolved_dataset_ids,
+            "tags": resolved_tags,
+        },
+        "payload": {
+            "title": f"HPC {resolved_event_type} {resolved_run_id}",
+            "summary": resolved_summary,
+            "status": "staged",
+        },
         "sync": {"status": "pending", "attempts": 0},
     }
     return validate_event(payload)

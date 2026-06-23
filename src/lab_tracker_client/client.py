@@ -64,6 +64,7 @@ _ID_FIELDS = (
     "analysis_id",
     "claim_id",
     "change_set_id",
+    "output_id",
     "project_id",
     "goal_id",
 )
@@ -355,6 +356,30 @@ class LabTracker:
             },
             limit=limit,
             offset=offset,
+        )
+
+    def register_acquisition_output(
+        self,
+        session_id: str,
+        *,
+        file_path: str,
+        checksum: str,
+        size_bytes: int | None = None,
+    ) -> LTRecord:
+        payload: JsonObject = {
+            "file_path": _require_non_empty(file_path, "file_path"),
+            "checksum": _require_non_empty(checksum, "checksum"),
+        }
+        if size_bytes is not None:
+            if size_bytes < 0:
+                raise LTValidationError("size_bytes must be 0 or greater.")
+            payload["size_bytes"] = size_bytes
+        return self._data_record(
+            self._request(
+                "POST",
+                f"/sessions/{_require_non_empty(str(session_id), 'session_id')}/outputs",
+                json_payload=payload,
+            )
         )
 
     def list_datasets(
@@ -1313,6 +1338,10 @@ def list_notes(**kwargs: Any) -> list[LTRecord]:
 
 def list_sessions(**kwargs: Any) -> list[LTRecord]:
     return client.list_sessions(**kwargs)
+
+
+def register_acquisition_output(session_id: str, **kwargs: Any) -> LTRecord:
+    return client.register_acquisition_output(session_id, **kwargs)
 
 
 def list_datasets(**kwargs: Any) -> list[LTRecord]:

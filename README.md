@@ -44,7 +44,7 @@ The whole thing is built to cost you almost nothing while you work, and a focuse
 
 - **At the bench — just capture.** As you work, you capture without stopping to file anything: snap the prep, record a thirty-second voice note on what looked off, type a one-line observation. Tap send and keep going. Nothing asks you which question it belongs to — that's for the evening review. If a result makes you ask something new, say it into a voice note; it becomes a candidate question.
 - **Running analysis — figures file themselves.** When you plot results, `lab_tracker_client.savefig(...)` (or a `with capture_figures():` block) registers each figure as staged evidence with its content hash and the exact git commit that produced it. You upload nothing by hand.
-- **Running on HPC — jobs leave breadcrumbs.** If your analysis lives on Slurm, `lt hpc` can capture submit, begin, finish, and watch-folder events into a local outbox, then sync compact run summaries and artifact pointers as staged evidence notes.
+- **Watching folders — outputs leave breadcrumbs.** `lt watch` can scan folders or workflow-written manifests into a local outbox, then sync raw evidence files as staged notes or register acquisition outputs against a session. If your analysis lives on Slurm, `lt hpc` adds scheduler-aware submit, begin, finish, and run-manifest capture on top of the same offline-first idea.
 - **Evening — confirm the day.** Before you head out, you open the daily review and see what the model made of the day's captures: this whiteboard photo attaches to *"Does PV inhibition broaden tuning?"*, this voice note becomes a research note on the session, these two observations suggest a new sub-question. This is real work, not a rubber stamp — read each proposal, fix what it misread, reject the rest, and commit. (Some days that's five minutes; some days it deserves longer. Prefer mornings? It's a setting — point the review at whatever time fits your bench.)
 - **When you write it up — pull the window.** Quarterly report, committee update, grant renewal: ask your assistant for the advances and plots committed since the last one, and start from your assembled year instead of a blank page.
 - **Over months — nothing is orphaned.** Because every dataset named its question and every claim names its evidence, the folder of `.nwb` files you (or whoever inherits them) open next year still says *why*. From any figure you can walk back to the analysis, the dataset, the question, and the note you scribbled the morning you ran it. And with `lt export`, that *why* can ride as a plaintext sidecar right next to the data, so it outlives this app too.
@@ -112,7 +112,7 @@ What ships today is the minimum that preserves the core research record:
 
 - Projects, groups, roles, and memberships for bounded access.
 - Question graphs, notes, sessions, datasets, analyses, claims, visualizations, goals, and goal links.
-- Phone capture, figure capture from Python, staged notes, human-gated graph draft review, and scheduled daily batches.
+- Phone capture, figure capture from Python, generic watch-folder capture, staged notes, human-gated graph draft review, and scheduled daily batches.
 - Curation provenance that distinguishes careful per-operation review from bulk acceptance.
 - Read-only assistant/MCP context, provenance sidecar export, and external artifact references.
 
@@ -133,6 +133,7 @@ The authoritative list of what's supported is **[docs/retained-v1-surface.md](do
 
 **Capture and integrate**
 - [Phone capture quickstart](docs/phone-capture-quickstart.md) — pair a phone for LAN capture
+- [Watch folder capture](docs/watch-folder-capture.md) — scan evidence folders, manifest outputs, and acquisition-session outputs into an offline outbox
 - [Evidence source metadata](docs/evidence-source-metadata.md) — import a synced folder as staged evidence notes with `lt import-folder`
 - [HPC analysis capture](docs/hpc-analysis-capture.md) — capture Slurm/HPC run summaries, logs, metrics, and artifact pointers with `lt hpc`
 - [Curation states](docs/curation-states.md) — how the graph records the way each edge was reviewed, and why captures are archived with a reason

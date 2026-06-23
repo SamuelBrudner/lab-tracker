@@ -3,18 +3,19 @@
 from __future__ import annotations
 
 import argparse
-import fnmatch
 import json
 import sys
 from pathlib import Path
 from typing import Any
 
+import lab_tracker_client.watch as watch_capture
 from lab_tracker.assistant_next_questions import is_research_facing_prompt
 from lab_tracker_client.client import (
     NOTE_STATUS_VALUES,
     EntityRef,
     EvidenceImportResult,
     LabTracker,
+    LTValidationError,
     ids,
 )
 from lab_tracker_client.hpc import (
@@ -177,6 +178,7 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     import_folder_parser.set_defaults(func=_cmd_import_folder)
 
+    _add_watch_parsers(subcommands)
     _add_hpc_parsers(subcommands)
 
     export_parser = subcommands.add_parser(
@@ -215,6 +217,93 @@ def _build_parser() -> argparse.ArgumentParser:
     notes_parser.set_defaults(func=_cmd_list_notes)
 
     return parser
+
+
+def _add_watch_parsers(subcommands: argparse._SubParsersAction) -> None:
+    watch_parser = subcommands.add_parser(
+        "watch",
+        help="Capture watched folders into an offline Lab Tracker outbox.",
+    )
+    watch_commands = watch_parser.add_subparsers(dest="watch_command", required=True)
+
+    init_parser = watch_commands.add_parser("init", help="Create .lab-tracker/watch.json.")
+    init_parser.add_argument("--project", help="Default Lab Tracker project UUID.")
+    init_parser.add_argument(
+        "--outbox",
+        default=watch_capture.DEFAULT_OUTBOX,
+        help=f"Outbox path. Defaults to {watch_capture.DEFAULT_OUTBOX}.",
+    )
+    init_parser.add_argument("--config", help="Config path. Defaults to .lab-tracker/watch.json.")
+    init_parser.add_argument("--force", action="store_true", help="Overwrite an existing config.")
+    init_parser.set_defaults(func=_cmd_watch_init, needs_client=False)
+
+    scan_parser = watch_commands.add_parser(
+        "scan",
+        help="Scan configured or CLI-specified folders into the watch outbox.",
+    )
+    scan_parser.add_argument("--config", help="Config path. Defaults to discovered config.")
+    scan_parser.add_argument("--root", help="Folder or file to scan. Omit to scan config watches.")
+    scan_parser.add_argument(
+        "--mode",
+        choices=sorted(watch_capture.ALLOWED_MODES),
+        default=watch_capture.MODE_FILES,
+        help="Capture mode. Defaults to files.",
+    )
+    scan_parser.add_argument(
+        "--sink",
+        choices=sorted(watch_capture.ALLOWED_SINKS),
+        default=watch_capture.SINK_STAGED_NOTE,
+        help="Sync sink for captured events. Defaults to staged-note.",
+    )
+    scan_parser.add_argument(
+        "--pattern",
+        default=watch_capture.DEFAULT_MANIFEST_PATTERN,
+        help=f"Manifest filename pattern. Defaults to {watch_capture.DEFAULT_MANIFEST_PATTERN}.",
+    )
+    scan_parser.add_argument(
+        "--include",
+        action="append",
+        default=[],
+        help="Glob for relative paths to include in files mode. Repeatable.",
+    )
+    scan_parser.add_argument(
+        "--exclude",
+        action="append",
+        default=[],
+        help="Glob for relative paths to exclude in files mode. Repeatable.",
+    )
+    scan_parser.add_argument("--project", help="Override project UUID from config.")
+    scan_parser.add_argument("--question", help="Candidate question UUID recorded in metadata.")
+    scan_parser.add_argument(
+        "--dataset",
+        action="append",
+        default=[],
+        help="Candidate dataset UUID.",
+    )
+    scan_parser.add_argument("--tag", action="append", default=[], help="Tag. Repeatable.")
+    scan_parser.add_argument("--session", help="Session UUID for acquisition-output sink.")
+    scan_parser.add_argument(
+        "--provider",
+        help="Evidence source provider for files mode. Defaults to local-folder.",
+    )
+    scan_parser.add_argument("--adapter", help="Adapter identifier recorded in metadata.")
+    scan_parser.add_argument("--limit", type=int, help="Maximum items to process.")
+    scan_parser.add_argument("--dry-run", action="store_true")
+    scan_parser.set_defaults(func=_cmd_watch_scan, needs_client=False)
+
+    status_parser = watch_commands.add_parser("status", help="Summarize local watch outbox state.")
+    status_parser.add_argument("--config", help="Config path. Defaults to discovered config.")
+    status_parser.set_defaults(func=_cmd_watch_status, needs_client=False)
+
+    sync_parser = watch_commands.add_parser(
+        "sync",
+        help="Sync watch outbox events into Lab Tracker.",
+    )
+    sync_parser.add_argument("--config", help="Config path. Defaults to discovered config.")
+    sync_parser.add_argument("--dry-run", action="store_true")
+    sync_parser.add_argument("--request-draft", action="store_true")
+    sync_parser.add_argument("--limit", type=int, help="Maximum events to process.")
+    sync_parser.set_defaults(func=_cmd_watch_sync)
 
 
 def _add_hpc_parsers(subcommands: argparse._SubParsersAction) -> None:
@@ -327,6 +416,81 @@ def _add_hpc_context_args(parser: argparse.ArgumentParser) -> None:
         help="Candidate dataset UUID. Repeatable.",
     )
     parser.add_argument("--tag", action="append", default=[], help="Tag. Repeatable.")
+
+
+def _cmd_watch_init(args: argparse.Namespace) -> Any:
+    config = watch_capture.init_config(
+        project_id=args.project,
+        outbox=args.outbox,
+        config_path=args.config,
+        force=args.force,
+    )
+    return {
+        "command": "watch-init",
+        "config": str(config.config_path),
+        "outbox": str(config.outbox_path()),
+        "project_id": config.project_id,
+        "watches": config.watches,
+    }
+
+
+def _cmd_watch_scan(args: argparse.Namespace) -> Any:
+    if args.limit is not None and args.limit < 0:
+        raise SystemExit("--limit must be 0 or greater.")
+    try:
+        config = watch_capture.load_config(config_path=args.config)
+    except LTValidationError:
+        if not args.root:
+            raise
+        config = watch_capture.WatchConfig(project_id=args.project)
+    if not args.root:
+        return watch_capture.scan_configured(
+            config,
+            dry_run=args.dry_run,
+            limit=args.limit,
+        )
+    return watch_capture.scan_watch(
+        config,
+        mode=args.mode,
+        root=args.root,
+        sink=args.sink,
+        pattern=args.pattern,
+        include_patterns=args.include or None,
+        exclude_patterns=args.exclude or None,
+        limit=args.limit,
+        project_id=args.project,
+        question_id=args.question,
+        dataset_ids=args.dataset,
+        tags=args.tag,
+        session_id=args.session,
+        source_provider=args.provider,
+        adapter=args.adapter,
+        dry_run=args.dry_run,
+    )
+
+
+def _cmd_watch_status(args: argparse.Namespace) -> Any:
+    config = watch_capture.load_config(config_path=args.config)
+    summary = watch_capture.outbox_status(config.outbox_path())
+    summary.update(
+        {
+            "command": "watch-status",
+            "config": str(config.config_path),
+            "project_id": config.project_id,
+        }
+    )
+    return summary
+
+
+def _cmd_watch_sync(client: LabTracker, args: argparse.Namespace) -> Any:
+    config = watch_capture.load_config(config_path=args.config)
+    return watch_capture.sync_outbox(
+        client,
+        config,
+        dry_run=args.dry_run,
+        request_draft=args.request_draft,
+        limit=args.limit,
+    )
 
 
 def _cmd_note(client: LabTracker, args: argparse.Namespace) -> Any:
@@ -594,27 +758,19 @@ def _discover_import_files(
     include_patterns: list[str],
     exclude_patterns: list[str],
 ) -> list[Path]:
-    files = [path for path in root.rglob("*") if not path.is_symlink() and path.is_file()]
-    return [
-        path
-        for path in sorted(files, key=lambda item: item.relative_to(root).as_posix())
-        if _matches_any(path, root=root, patterns=include_patterns)
-        and not _matches_any(path, root=root, patterns=exclude_patterns)
-    ]
-
-
-def _matches_any(path: Path, *, root: Path, patterns: list[str]) -> bool:
-    if not patterns:
-        return False
-    relative_path = path.relative_to(root).as_posix()
-    return any(
-        fnmatch.fnmatch(relative_path, pattern) or fnmatch.fnmatch(path.name, pattern)
-        for pattern in patterns
+    return watch_capture.discover_files(
+        root,
+        include_patterns=include_patterns,
+        exclude_patterns=exclude_patterns,
     )
 
 
+def _matches_any(path: Path, *, root: Path, patterns: list[str]) -> bool:
+    return watch_capture.matches_any(path, root=root, patterns=patterns)
+
+
 def _local_folder_external_id(root: Path, relative_path: str) -> str:
-    return f"{root.as_uri()}::{relative_path}"
+    return watch_capture.local_folder_external_id(root, relative_path)
 
 
 def _strip_remainder(command: list[str]) -> list[str]:
@@ -651,6 +807,12 @@ def _payload_exit_code(payload: Any) -> int:
     if (
         isinstance(payload, dict)
         and payload.get("command") in {"hpc-sync", "hpc-watch"}
+        and payload.get("errors")
+    ):
+        return 1
+    if (
+        isinstance(payload, dict)
+        and payload.get("command") in {"watch-scan", "watch-sync"}
         and payload.get("errors")
     ):
         return 1
