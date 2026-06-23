@@ -1120,7 +1120,7 @@ describe("App", () => {
     render(<App />);
 
     expect(await screen.findByRole("heading", { name: "Review" })).toBeInTheDocument();
-    fireEvent.change(screen.getByPlaceholderText(/Tell the AI how to revise/), {
+    fireEvent.change(await screen.findByPlaceholderText(/Tell the AI how to revise/), {
       target: { value: "Use the corrected schematic." },
     });
     const file = new File(["png-bytes"], "schematic.png", { type: "image/png" });
