@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime
 from uuid import uuid4
 
 from api_helpers import repository_backed_api
@@ -155,6 +156,9 @@ class FakeDecisionContextReader:
         *,
         project_id: str | None = None,
         status: str | None = None,
+        created_by: str | None = None,
+        since: datetime | None = None,
+        until: datetime | None = None,
         target_entity_type: str | None = None,
         target_entity_id: str | None = None,
         limit: int = 50,
@@ -169,6 +173,9 @@ class FakeDecisionContextReader:
         project_id: str | None = None,
         status: str | None = None,
         session_type: str | None = None,
+        created_by: str | None = None,
+        since: datetime | None = None,
+        until: datetime | None = None,
         limit: int = 50,
         offset: int = 0,
         recent_first: bool = False,
@@ -180,6 +187,9 @@ class FakeDecisionContextReader:
         *,
         project_id: str | None = None,
         status: str | None = None,
+        created_by: str | None = None,
+        since: datetime | None = None,
+        until: datetime | None = None,
         limit: int = 50,
         offset: int = 0,
         recent_first: bool = False,
@@ -193,6 +203,9 @@ class FakeDecisionContextReader:
         dataset_id: str | None = None,
         question_id: str | None = None,
         status: str | None = None,
+        created_by: str | None = None,
+        since: datetime | None = None,
+        until: datetime | None = None,
         limit: int = 50,
         offset: int = 0,
         recent_first: bool = False,
@@ -206,6 +219,9 @@ class FakeDecisionContextReader:
         status: str | None = None,
         dataset_id: str | None = None,
         analysis_id: str | None = None,
+        created_by: str | None = None,
+        since: datetime | None = None,
+        until: datetime | None = None,
         limit: int = 50,
         offset: int = 0,
         recent_first: bool = False,
@@ -218,6 +234,9 @@ class FakeDecisionContextReader:
         project_id: str | None = None,
         analysis_id: str | None = None,
         claim_id: str | None = None,
+        created_by: str | None = None,
+        since: datetime | None = None,
+        until: datetime | None = None,
         limit: int = 50,
         offset: int = 0,
         recent_first: bool = False,

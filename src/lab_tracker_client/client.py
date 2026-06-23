@@ -295,6 +295,9 @@ class LabTracker:
         *,
         project_id: str | None = None,
         status: str | None = None,
+        created_by: str | None = None,
+        since: str | None = None,
+        until: str | None = None,
         target_entity_type: str | None = None,
         target_entity_id: str | None = None,
         limit: int = MAX_PAGE_SIZE,
@@ -315,6 +318,9 @@ class LabTracker:
             params={
                 "project_id": project_id,
                 "status": resolved_status,
+                "created_by": created_by,
+                "since": since,
+                "until": until,
                 "target_entity_type": resolved_target_type,
                 "target_entity_id": target_entity_id,
             },
@@ -355,6 +361,9 @@ class LabTracker:
         *,
         project_id: str | None = None,
         status: str | None = None,
+        created_by: str | None = None,
+        since: str | None = None,
+        until: str | None = None,
         limit: int = MAX_PAGE_SIZE,
         offset: int = 0,
     ) -> list[LTRecord]:
@@ -367,6 +376,9 @@ class LabTracker:
                     field_name="dataset status",
                     allowed_values=DATASET_STATUS_VALUES,
                 ),
+                "created_by": created_by,
+                "since": since,
+                "until": until,
             },
             limit=limit,
             offset=offset,
@@ -379,6 +391,9 @@ class LabTracker:
         dataset_id: str | None = None,
         question_id: str | None = None,
         status: str | None = None,
+        created_by: str | None = None,
+        since: str | None = None,
+        until: str | None = None,
         limit: int = MAX_PAGE_SIZE,
         offset: int = 0,
     ) -> list[LTRecord]:
@@ -393,6 +408,9 @@ class LabTracker:
                     field_name="analysis status",
                     allowed_values=ANALYSIS_STATUS_VALUES,
                 ),
+                "created_by": created_by,
+                "since": since,
+                "until": until,
             },
             limit=limit,
             offset=offset,
@@ -405,6 +423,9 @@ class LabTracker:
         status: str | None = None,
         dataset_id: str | None = None,
         analysis_id: str | None = None,
+        created_by: str | None = None,
+        since: str | None = None,
+        until: str | None = None,
         limit: int = MAX_PAGE_SIZE,
         offset: int = 0,
     ) -> list[LTRecord]:
@@ -419,6 +440,9 @@ class LabTracker:
                 ),
                 "dataset_id": dataset_id,
                 "analysis_id": analysis_id,
+                "created_by": created_by,
+                "since": since,
+                "until": until,
             },
             limit=limit,
             offset=offset,
@@ -430,6 +454,8 @@ class LabTracker:
         project_id: str | None = None,
         analysis_id: str | None = None,
         claim_id: str | None = None,
+        since: str | None = None,
+        until: str | None = None,
         limit: int = MAX_PAGE_SIZE,
         offset: int = 0,
     ) -> list[LTRecord]:
@@ -439,10 +465,27 @@ class LabTracker:
                 "project_id": project_id,
                 "analysis_id": analysis_id,
                 "claim_id": claim_id,
+                "since": since,
+                "until": until,
             },
             limit=limit,
             offset=offset,
         )
+
+    def provenance(self, entity_type: str, entity_id: str) -> JsonObject:
+        """Fetch the PROV-O/JSON-LD provenance document for one record.
+
+        ``entity_type`` is the plural route segment: ``datasets``, ``analyses``,
+        or ``claims``. The returned document is self-contained JSON-LD, readable
+        without a running Lab Tracker instance once written to disk.
+        """
+
+        allowed = {"datasets", "analyses", "claims"}
+        if entity_type not in allowed:
+            raise LTValidationError(
+                f"provenance entity_type must be one of {sorted(allowed)}; got {entity_type!r}."
+            )
+        return self._request("GET", f"/{entity_type}/{entity_id}/provenance")
 
     def list_goals(
         self,

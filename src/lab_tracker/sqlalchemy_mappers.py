@@ -55,6 +55,7 @@ from lab_tracker.models import (
     GoalStatus,
     GoalType,
     Note,
+    NoteArchiveReason,
     NoteRawAsset,
     NoteStatus,
     OutcomeStatus,
@@ -530,6 +531,12 @@ def note_to_model(note: Note) -> NoteModel:
         note_metadata=dict(note.metadata),
         client_capture_id=note.client_capture_id,
         status=note.status.value,
+        archived_reason=note.archived_reason.value if note.archived_reason is not None else None,
+        archived_at=note.archived_at,
+        archived_by=note.archived_by,
+        archived_by_user_id=(
+            _uuid_str(note.archived_by_user_id) if note.archived_by_user_id is not None else None
+        ),
         created_by=note.created_by,
         created_by_user_id=(
             _uuid_str(note.created_by_user_id) if note.created_by_user_id is not None else None
@@ -564,6 +571,14 @@ def note_from_model(
         metadata=dict(getattr(row, "note_metadata", {}) or {}),
         client_capture_id=getattr(row, "client_capture_id", None),
         status=NoteStatus(row.status),
+        archived_reason=(
+            NoteArchiveReason(row.archived_reason) if row.archived_reason else None
+        ),
+        archived_at=_as_utc(row.archived_at) if row.archived_at else None,
+        archived_by=getattr(row, "archived_by", None),
+        archived_by_user_id=(
+            _uuid(row.archived_by_user_id) if row.archived_by_user_id else None
+        ),
         created_by=row.created_by,
         created_by_user_id=(_uuid(row.created_by_user_id) if row.created_by_user_id else None),
         **_origin_domain_kwargs(row),
@@ -604,6 +619,12 @@ def apply_note_to_model(row: NoteModel, note: Note) -> None:
     row.note_metadata = dict(note.metadata)
     row.client_capture_id = note.client_capture_id
     row.status = note.status.value
+    row.archived_reason = note.archived_reason.value if note.archived_reason is not None else None
+    row.archived_at = note.archived_at
+    row.archived_by = note.archived_by
+    row.archived_by_user_id = (
+        _uuid_str(note.archived_by_user_id) if note.archived_by_user_id is not None else None
+    )
     row.created_by = note.created_by
     row.created_by_user_id = (
         _uuid_str(note.created_by_user_id) if note.created_by_user_id is not None else None

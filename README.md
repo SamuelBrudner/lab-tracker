@@ -4,6 +4,24 @@ A file named `2025_12_10_Rig2_session001.nwb` tells you *when*, *where*, and *wh
 
 **[Open the read-only demo →](https://samuelbrudner.github.io/lab-tracker/app/)** — seeded fly-olfaction data, no install, no login. Click around for 60 seconds.
 
+## Write your next progress report from your own captured year
+
+The work you put in shouldn't only pay off for whoever inherits your data years from now — it should pay off for *you*, this quarter, on the report you already dread.
+
+Because every analysis, claim, and figure is committed against the question it answers, you can pull a bounded slice of your own record — *"the advances and plots committed since last July"* — and hand it to an assistant to draft the progress report, grant renewal, or thesis related-work section. The retrieval is windowed and scoped to what you can read; the assistant turns it into prose. You still write the report — but you start from your year, assembled, instead of a blank page.
+
+Two honest caveats, because they're the difference between this helping and hurting:
+
+- The draft is only as trustworthy as the record behind it. Lab Tracker tracks **how each piece of the graph was curated** — whether you reviewed an AI suggestion one at a time or accepted a batch in bulk — so a synthesis can lean on what you actually scrutinized rather than laundering an unreviewed guess into your grant.
+- It assembles *your* committed records; it does not invent results. If a window is thin, the report is thin — which is itself a useful signal.
+
+The same windowed-by-person retrieval pays off on a weekly cadence, not just at report time:
+
+- **Before a trainee meeting, a PI gets a briefing.** Ahead of the weekly one-on-one, pull what a trainee committed *since last week's meeting* — the sessions they ran, the analyses and figures they produced, the claims they advanced — across every project the PI oversees. (Cross-project scope is automatic: a PI's view already spans the projects under their oversight, governed by the same access rules as everything else.) The assistant turns it into a two-minute briefing so the meeting starts from *"here's what moved"* instead of *"so, what have you been up to?"*
+- **Before lab meeting, a trainee pulls their own thread.** Presenting again? Ask for everything *you've* done since you last presented, and walk in with the arc already assembled.
+
+In both cases you supply the date — *"since last Tuesday"* — and trust your own calendar; Lab Tracker doesn't try to own your meeting schedule. It just filters the record by **who** and **when**.
+
 ## Start with the question graph
 
 ![The question hierarchy for a project](docs/screenshots/project-graph-questions.png)
@@ -40,18 +58,21 @@ At the end of each day — on a cadence you set, or on demand — **the daily re
 
 The model only ever proposes. Nothing touches your record until a person says yes — **AI can suggest; only a person commits.**
 
+The review is where the real thinking happens, so it's built to reward attention rather than rush it: accept the proposals you've actually scrutinized one at a time, or accept a batch in bulk when you've skimmed it — and the record remembers which you did, so a bulk rubber-stamp is never mistaken later for a considered call. Some people print the queue and sit with it on paper before replying; that's a feature, not a workaround. Captures you don't get to stay **staged and visible** — never silently dropped — and when you do set one aside, you say *why* (not relevant, superseded, or simply archived-unreviewed). A skipped evening costs you visible coverage, never silent trust.
+
 Want it to run on its own? One command — or one double-click on Windows — sets up the schedule. See [Make the daily review run on its own](docs/scheduled-daily-review.md).
 
 ## The daily routine
 
-The whole thing is built to cost you almost nothing while you work, and a few minutes before you head home.
+The whole thing is built to cost you almost nothing while you work, and a focused sitting before you head home.
 
 - **At the bench — just capture.** As you work, you capture without stopping to file anything: snap the prep, record a thirty-second voice note on what looked off, type a one-line observation. Tap send and keep going. Nothing asks you which question it belongs to — that's for the evening review. If a result makes you ask something new, say it into a voice note; it becomes a candidate question.
 - **Running analysis — figures file themselves.** When you plot results, `lab_tracker_client.savefig(...)` (or a `with capture_figures():` block) registers each figure as staged evidence with its content hash and the exact git commit that produced it. You upload nothing by hand.
-- **Evening — confirm the day (~5 min).** Before you head out, you open the daily review and see what the model made of the day's captures: this whiteboard photo attaches to *"Does PV inhibition broaden tuning?"*, this voice note becomes a research note on the session, these two observations suggest a new sub-question. Accept what's right, fix anything it misread, reject the rest, and commit. You leave with the graph current and the day's reasoning preserved while it's still fresh. (Prefer mornings? It's a setting — point the review at whatever time fits your bench.)
-- **Over months — nothing is orphaned.** Because every dataset named its question and every claim names its evidence, the folder of `.nwb` files you (or whoever inherits them) open next year still says *why*. From any figure you can walk back to the analysis, the dataset, the question, and the note you scribbled the morning you ran it.
+- **Evening — confirm the day.** Before you head out, you open the daily review and see what the model made of the day's captures: this whiteboard photo attaches to *"Does PV inhibition broaden tuning?"*, this voice note becomes a research note on the session, these two observations suggest a new sub-question. This is real work, not a rubber stamp — read each proposal, fix what it misread, reject the rest, and commit. (Some days that's five minutes; some days it deserves longer. Prefer mornings? It's a setting — point the review at whatever time fits your bench.)
+- **When you write it up — pull the window.** Quarterly report, committee update, grant renewal: ask your assistant for the advances and plots committed since the last one, and start from your assembled year instead of a blank page.
+- **Over months — nothing is orphaned.** Because every dataset named its question and every claim names its evidence, the folder of `.nwb` files you (or whoever inherits them) open next year still says *why*. From any figure you can walk back to the analysis, the dataset, the question, and the note you scribbled the morning you ran it. And with `lt export`, that *why* can ride as a plaintext sidecar right next to the data, so it outlives this app too.
 
-Capture all day, confirm before you leave. The structure builds itself in the background, and a person is always the one who says yes.
+Capture all day, confirm before you leave, and the year assembles itself for when you need to report on it. A person is always the one who says yes.
 
 ## Who it's for
 
@@ -106,6 +127,8 @@ What ships today is the minimum that preserves the core research record. The aut
 **Capture and integrate**
 - [Phone capture quickstart](docs/phone-capture-quickstart.md) — pair a phone for LAN capture
 - [Evidence source metadata](docs/evidence-source-metadata.md) — import a synced folder as staged evidence notes with `lt import-folder`
+- [Curation states](docs/curation-states.md) — how the graph records the way each edge was reviewed, and why captures are archived with a reason
+- [Provenance export](docs/provenance-export.md) — write `lt export` sidecars that survive without a running instance
 - [MCP server, skills, and Dolt mirror](docs/lab-tracker-mcp-skills.md) — wire up assistants and the export-only versioned mirror
 - [GitHub Copilot MCP setup](docs/lab-tracker-copilot.md) — connect Copilot IDEs to the local Lab Tracker MCP server
 

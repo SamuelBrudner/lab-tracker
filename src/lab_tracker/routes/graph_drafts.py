@@ -154,6 +154,20 @@ def build_graph_drafts_router(api: LabTrackerAPI) -> APIRouter:
         return Envelope(data=_attach_graph_usernames(request, change_set))
 
     @router.post(
+        "/graph-drafts/{change_set_id:uuid}/accept-all",
+        response_model=Envelope[GraphChangeSet],
+    )
+    def accept_all_graph_draft_operations(change_set_id: UUID, request: Request):
+        actor = actor_from_request(request)
+        change_set = api_from_request(request, api).get_graph_change_set(change_set_id)
+        ensure_project_read(request, change_set.project_id)
+        change_set = api_from_request(request, api).bulk_accept_graph_change_operations(
+            change_set_id,
+            actor=actor,
+        )
+        return Envelope(data=_attach_graph_usernames(request, change_set))
+
+    @router.post(
         "/graph-drafts/{change_set_id:uuid}/submit",
         response_model=Envelope[GraphChangeSet],
     )

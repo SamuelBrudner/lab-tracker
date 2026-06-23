@@ -305,6 +305,13 @@ class NoteModel(Base):
     note_metadata: Mapped[dict[str, str]] = mapped_column("metadata", JSON, default=dict)
     client_capture_id: Mapped[str | None] = mapped_column(String(120))
     status: Mapped[str] = mapped_column(String(20), default="staged")
+    archived_reason: Mapped[str | None] = mapped_column(String(32))
+    archived_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    archived_by: Mapped[str | None] = mapped_column(String(255))
+    archived_by_user_id: Mapped[str | None] = mapped_column(
+        String(36),
+        ForeignKey("users.user_id", ondelete="SET NULL"),
+    )
     created_by: Mapped[str | None] = mapped_column(String(255))
     created_by_user_id: Mapped[str | None] = mapped_column(
         String(36),
@@ -432,6 +439,10 @@ class GraphChangeOperationModel(Base):
     source_refs: Mapped[list[dict[str, object]]] = mapped_column(JSON, default=list)
     status: Mapped[str] = mapped_column(String(20), nullable=False, default="proposed")
     review_note: Mapped[str | None] = mapped_column(Text)
+    acceptance_mode: Mapped[str | None] = mapped_column(String(20))
+    accepted_by: Mapped[str | None] = mapped_column(String(255))
+    accepted_by_user_id: Mapped[str | None] = mapped_column(String(36))
+    accepted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     result_entity_id: Mapped[str | None] = mapped_column(String(36))
     error_metadata: Mapped[dict[str, object]] = mapped_column(JSON, default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utc_now)

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from uuid import UUID
 
 from sqlalchemy import or_, select
@@ -104,6 +105,8 @@ class SQLAlchemyNoteRepository(EntityRepository[Note]):
         status: str | None = None,
         search: str | None = None,
         created_by: str | None = None,
+        since: datetime | None = None,
+        until: datetime | None = None,
         client_capture_id: str | None = None,
         target_entity_type: str | None = None,
         target_entity_id: UUID | None = None,
@@ -129,6 +132,12 @@ class SQLAlchemyNoteRepository(EntityRepository[Note]):
         if created_by is not None:
             stmt = stmt.where(NoteModel.created_by_user_id == created_by)
             count_stmt = count_stmt.where(NoteModel.created_by_user_id == created_by)
+        if since is not None:
+            stmt = stmt.where(NoteModel.created_at >= since)
+            count_stmt = count_stmt.where(NoteModel.created_at >= since)
+        if until is not None:
+            stmt = stmt.where(NoteModel.created_at < until)
+            count_stmt = count_stmt.where(NoteModel.created_at < until)
         if client_capture_id is not None:
             stmt = stmt.where(NoteModel.client_capture_id == client_capture_id)
             count_stmt = count_stmt.where(NoteModel.client_capture_id == client_capture_id)

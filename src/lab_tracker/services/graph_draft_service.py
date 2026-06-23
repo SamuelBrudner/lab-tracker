@@ -20,6 +20,7 @@ from lab_tracker.graph_drafting import (
     GraphDraftingError,
 )
 from lab_tracker.models import (
+    AcceptanceMode,
     GraphChangeOperation,
     GraphChangeOperationStatus,
     GraphChangeSet,
@@ -768,6 +769,7 @@ class GraphDraftService(BaseService):
         payload: dict[str, Any] | None = None,
         status: GraphChangeOperationStatus | None = None,
         review_note: str | None = None,
+        acceptance_mode: AcceptanceMode = AcceptanceMode.HUMAN_SELECTED,
         actor: AuthContext | None = None,
     ) -> GraphChangeSet:
         change_set = self.get_graph_change_set(change_set_id)
@@ -823,9 +825,71 @@ class GraphDraftService(BaseService):
                 }
                 if operation.status == GraphChangeOperationStatus.ACCEPTED:
                     operation.status = GraphChangeOperationStatus.PROPOSED
+        self._stamp_operation_acceptance(operation, acceptance_mode, actor)
         operation.updated_at = utc_now()
         change_set.updated_at = utc_now()
         self._save_graph_change_set(change_set)
+        return change_set
+
+    def _stamp_operation_acceptance(
+        self,
+        operation: GraphChangeOperation,
+        acceptance_mode: AcceptanceMode,
+        actor: AuthContext | None,
+    ) -> None:
+        """Record how an operation came to be accepted, or clear it otherwise.
+
+        Stamps acceptance provenance only when the operation's final status is
+        ACCEPTED, so the committed graph durably distinguishes a per-operation
+        human accept from a bulk rubber-stamp. Any other status clears the
+        stamp, so a re-opened operation never carries a stale acceptance record.
+        """
+
+        if operation.status == GraphChangeOperationStatus.ACCEPTED:
+            operation.acceptance_mode = acceptance_mode
+            operation.accepted_by = actor_user_id(actor)
+            operation.accepted_by_user_id = actor_user_fk(actor, self.repository)
+            operation.accepted_at = utc_now()
+        else:
+            operation.acceptance_mode = None
+            operation.accepted_by = None
+            operation.accepted_by_user_id = None
+            operation.accepted_at = None
+
+    def bulk_accept_graph_change_operations(
+        self,
+        change_set_id: UUID,
+        *,
+        actor: AuthContext | None = None,
+    ) -> GraphChangeSet:
+        """Accept every still-proposed operation in one action, marked as bulk.
+
+        This is the honest counterpart to clicking "accept all": the operations
+        are stamped ``BULK_ACCEPTED`` so the record never launders a
+        rubber-stamped batch as scrutinized, per-operation human review.
+        """
+
+        change_set = self.get_graph_change_set(change_set_id)
+        self._ensure_graph_change_set_editable(change_set, actor=actor)
+        accepted_any = False
+        for operation in change_set.operations:
+            if operation.status != GraphChangeOperationStatus.PROPOSED:
+                continue
+            try:
+                self.patch_validator.validate_operation(operation, operation.payload)
+            except ValidationError:
+                # Leave invalid operations proposed so they surface for editing
+                # rather than silently entering the graph.
+                continue
+            operation.status = GraphChangeOperationStatus.ACCEPTED
+            self._stamp_operation_acceptance(
+                operation, AcceptanceMode.BULK_ACCEPTED, actor
+            )
+            operation.updated_at = utc_now()
+            accepted_any = True
+        if accepted_any:
+            change_set.updated_at = utc_now()
+            self._save_graph_change_set(change_set)
         return change_set
 
     def submit_graph_change_set(

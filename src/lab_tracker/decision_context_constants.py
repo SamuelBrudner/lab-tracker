@@ -13,6 +13,7 @@ TASK_KIND_VALUES = (
     "experiment_plan",
     "summary",
     "research_writing",
+    "progress_review",
 )
 TASK_KIND_TEXT = ", ".join(TASK_KIND_VALUES)
 CONTEXT_LOOKUP_LIMIT = 500

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from uuid import UUID
 
 from fastapi import APIRouter
@@ -59,6 +60,8 @@ def build_datasets_router(api: LabTrackerAPI) -> APIRouter:
         project_id: UUID | None = None,
         status: DatasetStatus | None = None,
         created_by: CreatedByFilter = None,
+        since: datetime | None = None,
+        until: datetime | None = None,
         limit: int = 50,
         offset: int = 0,
     ):
@@ -73,6 +76,8 @@ def build_datasets_router(api: LabTrackerAPI) -> APIRouter:
             project_ids=project_ids,
             status=status.value if status is not None else None,
             created_by=created_by,
+            since=since,
+            until=until,
             limit=limit,
             offset=offset,
         )

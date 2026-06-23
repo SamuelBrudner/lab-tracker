@@ -15,6 +15,7 @@ from lab_tracker.models import (
     EntityRef,
     EntityType,
     Note,
+    NoteArchiveReason,
     NoteMetadataScalar,
     NoteRawAsset,
     NoteStatus,
@@ -393,6 +394,33 @@ class NoteService(BaseService):
         if origin_prompt_version is not None:
             note.origin_prompt_version = origin_prompt_version
         note.updated_at = utc_now()
+        with self.unit_of_work() as repository:
+            repository.notes.save(note)
+        return note
+
+    def archive_note(
+        self,
+        note_id: UUID,
+        *,
+        reason: NoteArchiveReason,
+        actor: AuthContext | None = None,
+    ) -> Note:
+        """Set a captured note aside, recording why and by whom.
+
+        Archiving always names a reason so a capture is never silently dropped:
+        the record stays visible as archived (including
+        ``archived_unreviewed``), so a skipped review degrades visible coverage
+        rather than silent trust.
+        """
+
+        note = self.get_note(note_id)
+        self.authorization.require_contributor(note.project_id, actor=actor)
+        note.status = NoteStatus.ARCHIVED
+        note.archived_reason = reason
+        note.archived_at = utc_now()
+        note.archived_by = actor_user_id(actor)
+        note.archived_by_user_id = actor_user_fk(actor, self.repository)
+        note.updated_at = note.archived_at
         with self.unit_of_work() as repository:
             repository.notes.save(note)
         return note

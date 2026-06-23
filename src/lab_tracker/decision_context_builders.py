@@ -166,6 +166,14 @@ def task_guidance(
         candidate_outputs = [
             entity_ref("claim", item, "claim_id") for item in claims[:5]
         ] + [entity_ref("visualization", item, "viz_id") for item in visualizations[:5]]
+    elif task_kind == "progress_review":
+        # A meeting briefing reviews what was done in the window: the advances
+        # (analyses), the plots (visualizations), and the claims they support.
+        candidate_outputs = (
+            [entity_ref("analysis", item, "analysis_id") for item in analyses[:5]]
+            + [entity_ref("visualization", item, "viz_id") for item in visualizations[:5]]
+            + [entity_ref("claim", item, "claim_id") for item in claims[:5]]
+        )
     else:
         candidate_outputs = [
             entity_ref("question", item, "question_id") for item in questions[:5]

@@ -28,6 +28,7 @@ from lab_tracker.models import (
 from lab_tracker.schemas import (
     Envelope,
     ListEnvelope,
+    NoteArchiveRequest,
     NoteCreate,
     NoteRawDownloadRead,
     NoteTranscriptRequest,
@@ -190,6 +191,8 @@ def build_notes_router(api: LabTrackerAPI) -> APIRouter:
         project_id: UUID | None = None,
         status: NoteStatus | None = None,
         created_by: CreatedByFilter = None,
+        since: datetime | None = None,
+        until: datetime | None = None,
         target_entity_type: EntityType | None = None,
         target_entity_id: UUID | None = None,
         limit: int = 50,
@@ -206,6 +209,8 @@ def build_notes_router(api: LabTrackerAPI) -> APIRouter:
             project_ids=project_ids,
             status=status.value if status is not None else None,
             created_by=created_by,
+            since=since,
+            until=until,
             target_entity_type=target_entity_type.value if target_entity_type is not None else None,
             target_entity_id=target_entity_id,
             limit=limit,
@@ -284,6 +289,23 @@ def build_notes_router(api: LabTrackerAPI) -> APIRouter:
             close = getattr(transcription_client, "close", None)
             if callable(close):
                 close()
+        return Envelope(data=note)
+
+    @router.post("/notes/{note_id:uuid}/archive", response_model=Envelope[Note])
+    def archive_note(
+        note_id: UUID,
+        request: Request,
+        payload: NoteArchiveRequest | None = None,
+    ):
+        actor = actor_from_request(request)
+        note = api_from_request(request, api).get_note(note_id)
+        ensure_project_contributor(request, note.project_id)
+        archive_payload = payload or NoteArchiveRequest()
+        note = api_from_request(request, api).archive_note(
+            note_id,
+            reason=archive_payload.reason,
+            actor=actor,
+        )
         return Envelope(data=note)
 
     @router.delete("/notes/{note_id:uuid}", response_model=Envelope[Note])

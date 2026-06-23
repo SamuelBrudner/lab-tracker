@@ -165,6 +165,30 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     import_folder_parser.set_defaults(func=_cmd_import_folder)
 
+    export_parser = subcommands.add_parser(
+        "export",
+        help="Write PROV-O/JSON-LD provenance sidecars that survive without a server.",
+    )
+    export_parser.add_argument("--project", required=True, help="Project UUID.")
+    export_parser.add_argument(
+        "--out",
+        default="lab-tracker-export",
+        help="Directory for sidecar files. Defaults to ./lab-tracker-export.",
+    )
+    export_parser.add_argument(
+        "--since",
+        help="ISO 8601 lower bound (inclusive) for windowed analyses.",
+    )
+    export_parser.add_argument(
+        "--until",
+        help="ISO 8601 upper bound (exclusive) for windowed analyses.",
+    )
+    export_parser.add_argument(
+        "--data-root",
+        help="Resolve dataset file paths under this root and co-locate sidecars beside the data.",
+    )
+    export_parser.set_defaults(func=_cmd_export)
+
     questions_parser = subcommands.add_parser("list-questions")
     questions_parser.add_argument("--project", required=True)
     questions_parser.add_argument("--status")
@@ -202,6 +226,20 @@ def _cmd_prime(client: LabTracker, args: argparse.Namespace) -> Any:
     if args.if_research_facing and not is_research_facing_prompt(prompt or ""):
         return None
     return client.next_questions(project_id=args.project, limit=args.limit)
+
+
+def _cmd_export(client: LabTracker, args: argparse.Namespace) -> Any:
+    from lab_tracker_client.export import export_project_provenance
+
+    result = export_project_provenance(
+        client,
+        project_id=args.project,
+        out_dir=args.out,
+        since=args.since,
+        until=args.until,
+        data_root=args.data_root,
+    )
+    return result.to_dict()
 
 
 def _cmd_import_folder(client: LabTracker, args: argparse.Namespace) -> Any:

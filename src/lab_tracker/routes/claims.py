@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from uuid import UUID
 
 from fastapi import APIRouter
@@ -66,6 +67,8 @@ def build_claims_router(api: LabTrackerAPI) -> APIRouter:
         dataset_id: UUID | None = None,
         analysis_id: UUID | None = None,
         created_by: CreatedByFilter = None,
+        since: datetime | None = None,
+        until: datetime | None = None,
         limit: int = 50,
         offset: int = 0,
     ):
@@ -82,6 +85,8 @@ def build_claims_router(api: LabTrackerAPI) -> APIRouter:
             dataset_id=dataset_id,
             analysis_id=analysis_id,
             created_by=created_by,
+            since=since,
+            until=until,
             limit=limit,
             offset=offset,
         )

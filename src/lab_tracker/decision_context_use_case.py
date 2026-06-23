@@ -41,6 +41,9 @@ def build_decision_context(
     analysis_id: str | None = None,
     claim_id: str | None = None,
     visualization_id: str | None = None,
+    created_by: str | None = None,
+    since: datetime | None = None,
+    until: datetime | None = None,
     limit: int = 20,
 ) -> JsonObject:
     cleaned_task_kind = (task_kind or "").strip()
@@ -212,31 +215,49 @@ def build_decision_context(
     )
     notes_payload = reader.list_notes(
         project_id=resolved_project_id,
+        created_by=created_by,
+        since=since,
+        until=until,
         limit=resolved_limit,
         recent_first=True,
     )
     sessions_payload = reader.list_sessions(
         project_id=resolved_project_id,
+        created_by=created_by,
+        since=since,
+        until=until,
         limit=resolved_limit,
         recent_first=True,
     )
     datasets_payload = reader.list_datasets(
         project_id=resolved_project_id,
+        created_by=created_by,
+        since=since,
+        until=until,
         limit=resolved_limit,
         recent_first=True,
     )
     analyses_payload = reader.list_analyses(
         project_id=resolved_project_id,
+        created_by=created_by,
+        since=since,
+        until=until,
         limit=resolved_limit,
         recent_first=True,
     )
     claims_payload = reader.list_claims(
         project_id=resolved_project_id,
+        created_by=created_by,
+        since=since,
+        until=until,
         limit=resolved_limit,
         recent_first=True,
     )
     visualizations_payload = reader.list_visualizations(
         project_id=resolved_project_id,
+        created_by=created_by,
+        since=since,
+        until=until,
         limit=resolved_limit,
         recent_first=True,
     )

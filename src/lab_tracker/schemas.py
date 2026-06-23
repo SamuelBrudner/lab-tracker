@@ -38,6 +38,7 @@ from lab_tracker.models import (
     GraphDraftMode,
     GroupMembership,
     Note,
+    NoteArchiveReason,
     NoteMetadataScalar,
     NoteStatus,
     OwnershipReassignment,
@@ -456,6 +457,10 @@ class NoteTranscriptRequest(RequestModel):
     prompt: NonBlankStr | None = None
 
 
+class NoteArchiveRequest(RequestModel):
+    reason: NoteArchiveReason = NoteArchiveReason.ARCHIVED_UNREVIEWED
+
+
 class GraphDraftOperationUpdate(RequestModel):
     payload: dict[str, Any] | None = None
     status: GraphChangeOperationStatus | None = None
@@ -554,6 +559,9 @@ class AssistantDecisionContextRequest(RequestModel):
     analysis_id: UUID | None = None
     claim_id: UUID | None = None
     visualization_id: UUID | None = None
+    created_by: UUID | None = None
+    since: datetime | None = None
+    until: datetime | None = None
     limit: int = Field(default=20, ge=1, le=100)
 
 

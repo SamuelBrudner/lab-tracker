@@ -50,6 +50,9 @@ def build_assistant_router() -> APIRouter:
             visualization_id=(
                 str(payload.visualization_id) if payload.visualization_id else None
             ),
+            created_by=str(payload.created_by) if payload.created_by else None,
+            since=payload.since,
+            until=payload.until,
             limit=payload.limit,
         )
 

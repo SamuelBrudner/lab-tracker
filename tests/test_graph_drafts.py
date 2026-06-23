@@ -1992,3 +1992,101 @@ def test_revise_graph_draft_keeps_draft_on_model_failure(
     ).json()["data"]
     assert len(after["operations"]) == 2
     assert after["status"] == "ready"
+
+
+def test_per_operation_accept_records_human_selected_mode(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+) -> None:
+    project_id = _project(client, admin_auth_headers)
+    note_id = _image_note(client, admin_auth_headers, project_id)
+    client.app.state.graph_draft_client_factory = lambda settings: FakeDraftClient(
+        _draft_patch(project_id)
+    )
+    draft = client.post(f"/notes/{note_id}/graph-drafts", headers=admin_auth_headers)
+    change_set_id = draft.json()["data"]["change_set_id"]
+    question_op = draft.json()["data"]["operations"][0]
+
+    accepted = client.patch(
+        f"/graph-drafts/{change_set_id}/operations/{question_op['operation_id']}",
+        json={"payload": question_op["payload"], "status": "accepted"},
+        headers=admin_auth_headers,
+    )
+    assert accepted.status_code == 200
+    op = next(
+        item
+        for item in accepted.json()["data"]["operations"]
+        if item["operation_id"] == question_op["operation_id"]
+    )
+    assert op["acceptance_mode"] == "human_selected"
+    assert op["accepted_at"] is not None
+    assert op["accepted_by"] is not None
+
+
+def test_accept_all_records_bulk_accepted_mode(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+) -> None:
+    project_id = _project(client, admin_auth_headers)
+    note_id = _image_note(client, admin_auth_headers, project_id)
+    client.app.state.graph_draft_client_factory = lambda settings: FakeDraftClient(
+        _draft_patch(project_id)
+    )
+    draft = client.post(f"/notes/{note_id}/graph-drafts", headers=admin_auth_headers)
+    data = draft.json()["data"]
+    change_set_id = data["change_set_id"]
+    question_op = data["operations"][0]
+
+    # Scrutinize one operation by hand first; it must stay marked as such.
+    client.patch(
+        f"/graph-drafts/{change_set_id}/operations/{question_op['operation_id']}",
+        json={"payload": question_op["payload"], "status": "accepted"},
+        headers=admin_auth_headers,
+    )
+
+    accepted_all = client.post(
+        f"/graph-drafts/{change_set_id}/accept-all",
+        headers=admin_auth_headers,
+    )
+    assert accepted_all.status_code == 200
+    modes = {
+        item["client_ref"]: item["acceptance_mode"]
+        for item in accepted_all.json()["data"]["operations"]
+    }
+    # The hand-reviewed op keeps its human mark; the rest are honestly bulk-marked.
+    assert modes["q1"] == "human_selected"
+    assert modes["note1"] == "bulk_accepted"
+
+
+def test_reopening_operation_clears_acceptance_mark(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+) -> None:
+    project_id = _project(client, admin_auth_headers)
+    note_id = _image_note(client, admin_auth_headers, project_id)
+    client.app.state.graph_draft_client_factory = lambda settings: FakeDraftClient(
+        _draft_patch(project_id)
+    )
+    draft = client.post(f"/notes/{note_id}/graph-drafts", headers=admin_auth_headers)
+    change_set_id = draft.json()["data"]["change_set_id"]
+    question_op = draft.json()["data"]["operations"][0]
+    op_url = f"/graph-drafts/{change_set_id}/operations/{question_op['operation_id']}"
+
+    client.patch(
+        op_url,
+        json={"payload": question_op["payload"], "status": "accepted"},
+        headers=admin_auth_headers,
+    )
+    reopened = client.patch(
+        op_url,
+        json={"payload": question_op["payload"], "status": "proposed"},
+        headers=admin_auth_headers,
+    )
+    assert reopened.status_code == 200
+    op = next(
+        item
+        for item in reopened.json()["data"]["operations"]
+        if item["operation_id"] == question_op["operation_id"]
+    )
+    assert op["acceptance_mode"] is None
+    assert op["accepted_at"] is None

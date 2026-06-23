@@ -758,6 +758,16 @@ class LabTrackerAPI:
             resource_id_attr="note_id",
         )
 
+    def archive_note(self, *args: Any, **kwargs: Any) -> Any:
+        return self._with_usage_event(
+            lambda: self.notes.archive_note(*args, **kwargs),
+            verb=UsageEventVerb.UPDATE,
+            resource_type=UsageEventResourceType.NOTE,
+            actor=kwargs.get("actor"),
+            resource_id=_first_uuid(args),
+            resource_id_attr="note_id",
+        )
+
     def download_note_raw(self, *args: Any, **kwargs: Any) -> Any:
         return self.notes.download_note_raw(*args, **kwargs)
 
@@ -1016,6 +1026,16 @@ class LabTrackerAPI:
             actor=kwargs.get("actor"),
             resource_id=_first_uuid(args),
             project_id_attr=None,
+        )
+
+    def bulk_accept_graph_change_operations(self, *args: Any, **kwargs: Any) -> Any:
+        return self._with_usage_event(
+            lambda: self.graph_drafts.bulk_accept_graph_change_operations(*args, **kwargs),
+            verb=UsageEventVerb.UPDATE,
+            resource_type=UsageEventResourceType.GRAPH_CHANGE_SET,
+            actor=kwargs.get("actor"),
+            resource_id=_first_uuid(args),
+            resource_id_attr="change_set_id",
         )
 
     def submit_graph_change_set(self, *args: Any, **kwargs: Any) -> Any:

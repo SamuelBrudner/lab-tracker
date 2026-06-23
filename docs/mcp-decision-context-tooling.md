@@ -90,6 +90,14 @@ The first supported `task_kind` values are:
 | `experiment_plan` | Choosing experimental controls, conditions, protocols, or next measurements. | Active method-development questions, notes, sessions, datasets, open caveats, unresolved controls. |
 | `summary` | Summarizing project or question state. | Project hierarchy, active and answered questions, recent notes, datasets, analyses, claims, visualizations. |
 | `research_writing` | Writing manuscripts, grants, abstracts, result sections, discussion text, figure legends, paper outlines, or talk prose. | Evidence map from questions to claims to datasets/analyses/visualizations, unsupported claims, caveats, missing controls, suggested figures and tables. |
+| `progress_review` | Briefing on what a person did in a window — a PI's pre-meeting briefing on a trainee, or a trainee's own pre-lab-meeting recap. | Sessions, analyses, visualizations, claims, datasets, and notes committed by the named `created_by` within `since`/`until`, surfaced as the advances and plots under review. |
+
+When the caller supplies `created_by` (a user UUID) and/or `since`/`until`
+(ISO 8601 bounds), the assembled context — notes, sessions, datasets, analyses,
+claims, and visualizations — is filtered to that person and window. This is how
+a `progress_review` briefing is scoped; the caller supplies the meeting date
+(Lab Tracker stores no schedule), and cross-project scope follows the requester's
+existing access (a PI sees the projects they oversee).
 
 Future task kinds may be added, but assistants should treat unknown values as
 errors rather than silently falling back to generic context.
@@ -169,7 +177,8 @@ Response shape:
         "slides",
         "experiment_plan",
         "summary",
-        "research_writing"
+        "research_writing",
+        "progress_review"
       ],
       "resolved_scope": {
         "project_id": "uuid",
