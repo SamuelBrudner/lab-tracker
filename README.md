@@ -4,43 +4,19 @@ A file named `2025_12_10_Rig2_session001.nwb` tells you *when*, *where*, and *wh
 
 **[Open the read-only demo →](https://samuelbrudner.github.io/lab-tracker/app/)** — seeded fly-olfaction data, no install, no login. Click around for 60 seconds.
 
-## Write your next progress report from your own captured year
+## Write your next progress report from your captured year
 
-The work you put in shouldn't only pay off for whoever inherits your data years from now — it should pay off for *you*, this quarter, on the report you already dread.
+This workflow should not only pay off for whoever inherits your data years from now. It should pay off for *you* on the next progress report, renewal, lab meeting, or committee update you already owe.
 
-Because every analysis, claim, and figure is committed against the question it answers, you can pull a bounded slice of your own record — *"the advances and plots committed since last July"* — and hand it to an assistant to draft the progress report, grant renewal, or thesis related-work section. The retrieval is windowed and scoped to what you can read; the assistant turns it into prose. You still write the report — but you start from your year, assembled, instead of a blank page.
+Because every analysis, claim, and figure is committed against the question it answers, you can pull a bounded slice of your own record — *"the advances and plots for project X since last July"* — and hand it to an assistant to draft a progress report or grant renewal. The retrieval is windowed and scoped to what you can read; the assistant turns it into prose. You still write the report — but you start from your year, assembled, instead of a blank page.
 
-Two honest caveats, because they're the difference between this helping and hurting:
+The same scoped retrieval pays off on a weekly cadence, not just at report time:
 
-- The draft is only as trustworthy as the record behind it. Lab Tracker tracks **how each piece of the graph was curated** — whether you reviewed an AI suggestion one at a time or accepted a batch in bulk — so a synthesis can lean on what you actually scrutinized rather than laundering an unreviewed guess into your grant.
-- It assembles *your* committed records; it does not invent results. If a window is thin, the report is thin — which is itself a useful signal.
-
-The same windowed-by-person retrieval pays off on a weekly cadence, not just at report time:
-
-- **Before a trainee meeting, a PI gets a briefing.** Ahead of the weekly one-on-one, pull what a trainee committed *since last week's meeting* — the sessions they ran, the analyses and figures they produced, the claims they advanced — across every project the PI oversees. (Cross-project scope is automatic: a PI's view already spans the projects under their oversight, governed by the same access rules as everything else.) The assistant turns it into a two-minute briefing so the meeting starts from *"here's what moved"* instead of *"so, what have you been up to?"*
+- **Before a trainee meeting, a PI can request a briefing.** Ahead of the weekly one-on-one, pull what a trainee committed *since last week's meeting* — the sessions they ran, the analyses and figures they produced, the claims they advanced — across every project the PI oversees. (Cross-project scope is automatic: a PI's view already spans the projects under their oversight, governed by the same access rules as everything else.) The assistant turns it into a two-minute briefing so the meeting starts from *"here's what moved"* instead of *"so, what have you been up to?"*
 - **Before lab meeting, a trainee pulls their own thread.** Presenting again? Ask for everything *you've* done since you last presented, and walk in with the arc already assembled.
 
 In both cases you supply the date — *"since last Tuesday"* — and trust your own calendar; Lab Tracker doesn't try to own your meeting schedule. It just filters the record by **who** and **when**.
 
-## Start with the question graph
-
-![The question hierarchy for a project](docs/screenshots/project-graph-questions.png)
-
-The spine of every project is a graph of **questions** — your broad motivating question at the top, broken down into the atomic ones you can actually answer at the rig. Questions are first-class: you write them down *first*, before any data exists, and they persist whether the experiment works or not. A question can roll up to more than one parent, so the structure branches and converges as your thinking does.
-
-## Everything hangs off a question
-
-![The whole project as a graph](docs/screenshots/project-graph-full.png)
-
-Once the questions exist, the rest of your record points back at them:
-
-- **A dataset must name the question it addresses** — you can't commit one without it. Tag secondary questions too, and mark whether the data supported, refuted, or was inconclusive for each.
-- **Notes** pin to the question (or session, or dataset) they describe.
-- **Sessions** at the rig point at the question you're collecting for.
-- **Claims** answer questions — and only count as *supported* once a real dataset or analysis backs them.
-- **Analyses and visualizations** inherit their questions from the data and claims they're built on.
-
-So from any figure you can walk backward — to the claim, the analysis, the dataset, the question, and the note you scribbled the morning you ran it. Nothing is orphaned.
 
 ## All you need to do at the bench is capture
 
@@ -73,6 +49,28 @@ The whole thing is built to cost you almost nothing while you work, and a focuse
 - **Over months — nothing is orphaned.** Because every dataset named its question and every claim names its evidence, the folder of `.nwb` files you (or whoever inherits them) open next year still says *why*. From any figure you can walk back to the analysis, the dataset, the question, and the note you scribbled the morning you ran it. And with `lt export`, that *why* can ride as a plaintext sidecar right next to the data, so it outlives this app too.
 
 Capture all day, confirm before you leave, and the year assembles itself for when you need to report on it. A person is always the one who says yes.
+
+## Why the graph starts with questions
+
+The capture loop can stay light because the underlying record is opinionated.
+
+![The question hierarchy for a project](docs/screenshots/project-graph-questions.png)
+
+The spine of every project is a graph of **questions** — your broad motivating question at the top, broken down into the atomic ones you can actually answer at the rig. Questions are first-class: you write them down *first*, before any data exists, and they persist whether the experiment works or not. A question can roll up to more than one parent, so the structure branches and converges as your thinking does.
+
+## Everything else hangs off a question
+
+![The whole project as a graph](docs/screenshots/project-graph-full.png)
+
+Once the questions exist, the rest of your record points back at them:
+
+- **A dataset must name the question it addresses** — you can't commit one without it. Tag secondary questions too, and mark whether the data supported, refuted, or was inconclusive for each.
+- **Notes** pin to the question (or session, or dataset) they describe.
+- **Sessions** at the rig point at the question you're collecting for.
+- **Claims** answer questions — and only count as *supported* once a real dataset or analysis backs them.
+- **Analyses and visualizations** inherit their questions from the data and claims they're built on.
+
+So from any figure you can walk backward — to the claim, the analysis, the dataset, the question, and the note you scribbled the morning you ran it. Nothing is orphaned.
 
 ## Who it's for
 
@@ -109,7 +107,15 @@ Full install, configuration, and deployment instructions live in the docs below 
 
 ## What ships today
 
-What ships today is the minimum that preserves the core research record. The authoritative list of what's supported is **[docs/retained-v1-surface.md](docs/retained-v1-surface.md)** — if this README disagrees with it, that document wins. The broader vision (OCR, semantic search, PI review gates) lives in [idea.md](idea.md) and is explicitly deferred.
+What ships today is the minimum that preserves the core research record:
+
+- Projects, groups, roles, and memberships for bounded access.
+- Question graphs, notes, sessions, datasets, analyses, claims, visualizations, goals, and goal links.
+- Phone capture, figure capture from Python, staged notes, human-gated graph draft review, and scheduled daily batches.
+- Curation provenance that distinguishes careful per-operation review from bulk acceptance.
+- Read-only assistant/MCP context, provenance sidecar export, and external artifact references.
+
+The authoritative list of what's supported is **[docs/retained-v1-surface.md](docs/retained-v1-surface.md)** — if this README disagrees with it, that document wins. The broader vision (OCR, semantic search, PI review gates) lives in [idea.md](idea.md) and is explicitly deferred.
 
 ## Documentation
 
@@ -135,3 +141,10 @@ What ships today is the minimum that preserves the core research record. The aut
 **Scope and vision**
 - [Supported v1 surface (authoritative)](docs/retained-v1-surface.md) — the definitive list of what ships
 - [Deferred long-term vision](idea.md) — OCR, vector search, and PI review gates, explicitly out of v1
+
+## Caveats
+
+- Lab Tracker assembles the record you actually captured and committed. It does not invent missing experiments, results, or evidence.
+- Assistant-written summaries are only as trustworthy as the curated graph behind them. The app records how graph changes were accepted so a bulk review is not later mistaken for a careful one.
+- AI features require provider configuration, and model output remains proposal-only: every graph change still needs a person to accept, edit, or reject it.
+- This README is an orientation. For supported behavior, deployment assumptions, and deferred workflows, treat [docs/retained-v1-surface.md](docs/retained-v1-surface.md) as canonical.
