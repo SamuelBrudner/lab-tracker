@@ -1041,6 +1041,103 @@ describe("App", () => {
     expect(await screen.findByText(questionId)).toBeInTheDocument();
   });
 
+  it("revises a graph draft with typed feedback and an attached image", async () => {
+    const noteId = "11111111-1111-4111-8111-111111111111";
+    const draftId = "22222222-2222-4222-8222-222222222222";
+    const operationId = "33333333-3333-4333-8333-333333333333";
+    const draftBase = {
+      change_set_id: draftId,
+      clarification_requests: [],
+      context_packet: { mode: "graph_context", project: { id: "project-1", label: "Project One" } },
+      created_at: "2026-04-20T00:00:00Z",
+      draft_mode: "graph_context",
+      model: "gpt-5.4-mini",
+      operations: [
+        {
+          change_set_id: draftId,
+          client_ref: "q1",
+          confidence: 0.82,
+          created_at: "2026-04-20T00:00:00Z",
+          entity_type: "question",
+          error_metadata: {},
+          op: "create",
+          operation_id: operationId,
+          payload: { project_id: "project-1", question_type: "descriptive", text: "Drafted question" },
+          rationale: "The whiteboard asks this explicitly.",
+          result_entity_id: null,
+          sequence: 1,
+          semantic_type: "suggest_new_question",
+          source_refs: [],
+          status: "proposed",
+          target_entity_id: null,
+          updated_at: "2026-04-20T00:00:00Z",
+        },
+      ],
+      project_id: "project-1",
+      prompt_version: "image-graph-draft-v2",
+      provider: "openai",
+      source_content_type: "image/jpeg",
+      source_filename: "whiteboard.jpg",
+      source_note_id: noteId,
+      status: "ready",
+      summary: "Drafted one question from the whiteboard.",
+      uncertain_fields: [],
+      updated_at: "2026-04-20T00:00:00Z",
+    };
+
+    localStorage.setItem(TOKEN_STORAGE_KEY, "token-graph-draft-revise");
+    window.history.replaceState({}, "", `/app/graph-drafts/${draftId}`);
+
+    let revisePayload = null;
+    installFetchMock([
+      { match: "/auth/me", response: apiResponse({ role: "admin", username: "sam" }) },
+      { match: projectsPath, response: apiResponse([]) },
+      { match: `/graph-drafts/${draftId}`, response: apiResponse(draftBase) },
+      {
+        match: `/notes/${noteId}/raw`,
+        response: apiResponse({
+          checksum: "abc",
+          content_base64: "aW1n",
+          content_type: "image/jpeg",
+          filename: "whiteboard.jpg",
+          size_bytes: 4,
+          storage_id: "55555555-5555-4555-8555-555555555555",
+        }),
+      },
+      {
+        match: `/graph-drafts/${draftId}/revise`,
+        method: "POST",
+        response: (request) => {
+          revisePayload = request.init.body;
+          return apiResponse({
+            ...draftBase,
+            summary: "Revised from feedback and attached schematic.",
+          });
+        },
+      },
+    ]);
+
+    render(<App />);
+
+    expect(await screen.findByRole("heading", { name: "Review" })).toBeInTheDocument();
+    fireEvent.change(screen.getByPlaceholderText(/Tell the AI how to revise/), {
+      target: { value: "Use the corrected schematic." },
+    });
+    const file = new File(["png-bytes"], "schematic.png", { type: "image/png" });
+    fireEvent.change(screen.getByLabelText("Attach image"), {
+      target: { files: [file] },
+    });
+    expect(await screen.findByText("schematic.png")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Revise with AI" }));
+
+    expect(await screen.findByText("Revised from feedback and attached schematic.")).toBeInTheDocument();
+    expect(revisePayload).toBeInstanceOf(FormData);
+    expect(revisePayload.get("feedback")).toBe("Use the corrected schematic.");
+    const attached = revisePayload.getAll("attachments");
+    expect(attached).toHaveLength(1);
+    expect(attached[0].name).toBe("schematic.png");
+  });
+
   it("uses the draft project membership for graph-draft commit controls", async () => {
     const draftId = "22222222-2222-4222-8222-222222222222";
     const operationId = "33333333-3333-4333-8333-333333333333";

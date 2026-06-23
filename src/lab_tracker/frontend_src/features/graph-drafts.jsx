@@ -3,7 +3,34 @@ import * as React from "react";
 import { apiListRequest, apiRequest, buildApiPath } from "../shared/api.js";
 import { formatDate } from "../shared/formatters.js";
 
-const { useCallback, useEffect, useMemo, useState } = React;
+const { useCallback, useEffect, useMemo, useRef, useState } = React;
+
+const AUDIO_MIME_CANDIDATES = ["audio/webm", "audio/mp4", "audio/ogg"];
+
+function pickAudioMimeType() {
+  if (typeof MediaRecorder === "undefined" || typeof MediaRecorder.isTypeSupported !== "function") {
+    return "";
+  }
+  return AUDIO_MIME_CANDIDATES.find((type) => MediaRecorder.isTypeSupported(type)) || "";
+}
+
+function audioExtensionForMime(mimeType) {
+  if (mimeType.includes("mp4")) {
+    return "m4a";
+  }
+  if (mimeType.includes("ogg")) {
+    return "ogg";
+  }
+  return "webm";
+}
+
+function canRecordAudio() {
+  return (
+    typeof navigator !== "undefined" &&
+    Boolean(navigator.mediaDevices?.getUserMedia) &&
+    typeof MediaRecorder !== "undefined"
+  );
+}
 
 function statusClass(status) {
   if (status === "accepted" || status === "applied" || status === "committed") {
@@ -206,6 +233,12 @@ function GraphDraftDetailCard({
   const [commitMessage, setCommitMessage] = useState("");
   const [reviewNote, setReviewNote] = useState("");
   const [reviseFeedback, setReviseFeedback] = useState("");
+  const [reviseAttachments, setReviseAttachments] = useState([]);
+  const [reviseAudio, setReviseAudio] = useState(null);
+  const [isRecording, setIsRecording] = useState(false);
+  const mediaRecorderRef = useRef(null);
+  const audioChunksRef = useRef([]);
+  const audioStreamRef = useRef(null);
 
   const acceptedCount = useMemo(
     () =>
@@ -460,19 +493,135 @@ function GraphDraftDetailCard({
     }
   }
 
+  const stopAudioStream = useCallback(() => {
+    const stream = audioStreamRef.current;
+    if (stream) {
+      stream.getTracks().forEach((track) => track.stop());
+      audioStreamRef.current = null;
+    }
+  }, []);
+
+  useEffect(
+    () => () => {
+      stopAudioStream();
+      if (reviseAudio?.url) {
+        URL.revokeObjectURL(reviseAudio.url);
+      }
+    },
+    [reviseAudio, stopAudioStream]
+  );
+
+  function handleAttachmentChange(event) {
+    const files = Array.from(event.target.files || []);
+    if (files.length) {
+      setReviseAttachments((current) => [...current, ...files]);
+    }
+    // Reset so selecting the same file again still fires onChange.
+    event.target.value = "";
+  }
+
+  function removeAttachment(index) {
+    setReviseAttachments((current) => current.filter((_, position) => position !== index));
+  }
+
+  function clearReviseAudio() {
+    setReviseAudio((current) => {
+      if (current?.url) {
+        URL.revokeObjectURL(current.url);
+      }
+      return null;
+    });
+  }
+
+  async function startRecording() {
+    if (!canRecordAudio()) {
+      setFlash("", "This browser does not support microphone recording.");
+      return;
+    }
+    setFlash("", "");
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      audioStreamRef.current = stream;
+      const mimeType = pickAudioMimeType();
+      const recorder = new MediaRecorder(stream, mimeType ? { mimeType } : undefined);
+      audioChunksRef.current = [];
+      recorder.addEventListener("dataavailable", (event) => {
+        if (event.data && event.data.size > 0) {
+          audioChunksRef.current.push(event.data);
+        }
+      });
+      recorder.addEventListener("stop", () => {
+        stopAudioStream();
+        const type = recorder.mimeType || mimeType || "audio/webm";
+        const blob = new Blob(audioChunksRef.current, { type });
+        audioChunksRef.current = [];
+        if (blob.size > 0) {
+          const file = new File([blob], `dictated-feedback.${audioExtensionForMime(type)}`, {
+            type,
+          });
+          setReviseAudio((current) => {
+            if (current?.url) {
+              URL.revokeObjectURL(current.url);
+            }
+            return { file, url: URL.createObjectURL(blob) };
+          });
+        }
+        setIsRecording(false);
+      });
+      mediaRecorderRef.current = recorder;
+      recorder.start();
+      setIsRecording(true);
+    } catch {
+      stopAudioStream();
+      setIsRecording(false);
+      setFlash("", "Could not access the microphone. Check browser permissions.");
+    }
+  }
+
+  function stopRecording() {
+    const recorder = mediaRecorderRef.current;
+    if (recorder && recorder.state !== "inactive") {
+      recorder.stop();
+    }
+    mediaRecorderRef.current = null;
+  }
+
+  function toggleRecording() {
+    if (isRecording) {
+      stopRecording();
+    } else {
+      startRecording();
+    }
+  }
+
   async function reviseDraft() {
     if (!changeSet || !canEditDraft) {
       return;
     }
-    if (!reviseFeedback.trim()) {
-      setFlash("", "Enter feedback for the AI to revise the draft.");
+    if (isRecording) {
+      setFlash("", "Stop the recording before revising.");
+      return;
+    }
+    const feedback = reviseFeedback.trim();
+    if (!feedback && !reviseAudio && reviseAttachments.length === 0) {
+      setFlash("", "Add feedback, a voice note, or a file for the AI to revise the draft.");
       return;
     }
     setBusy(true);
     setFlash("", "");
     try {
+      const formData = new FormData();
+      if (feedback) {
+        formData.append("feedback", feedback);
+      }
+      if (reviseAudio?.file) {
+        formData.append("audio", reviseAudio.file, reviseAudio.file.name);
+      }
+      reviseAttachments.forEach((file) => {
+        formData.append("attachments", file, file.name);
+      });
       const nextChangeSet = await apiRequest(`/graph-drafts/${changeSet.change_set_id}/revise`, {
-        body: { feedback: reviseFeedback.trim() },
+        body: formData,
         method: "POST",
         token,
       });
@@ -480,6 +629,8 @@ function GraphDraftDetailCard({
       setPayloads(payloadText(nextChangeSet));
       setOperationReviewNotes(operationReviewNoteText(nextChangeSet));
       setReviseFeedback("");
+      setReviseAttachments([]);
+      clearReviseAudio();
       setFlash("Draft revised from your feedback.");
     } catch (err) {
       setFlash("", err.message || "Failed to revise graph draft.");
@@ -755,15 +906,75 @@ function GraphDraftDetailCard({
               <textarea
                 className="ai-revise-input"
                 rows={2}
-                placeholder="Tell the AI how to revise these proposals — e.g. 'drop the dataset link; the claim isn't supported yet, make it a clarification instead'."
+                placeholder="Tell the AI how to revise these proposals — e.g. 'drop the dataset link; the claim isn't supported yet, make it a clarification instead'. You can also dictate feedback or attach an image."
                 value={reviseFeedback}
-                disabled={!canEditDraft}
+                disabled={!canEditDraft || isRecording}
                 onChange={(event) => setReviseFeedback(event.target.value)}
               />
+              <div className="ai-revise-tools">
+                <button
+                  type="button"
+                  className={`btn-secondary${isRecording ? " recording" : ""}`}
+                  disabled={!canEditDraft}
+                  onClick={toggleRecording}
+                  aria-pressed={isRecording}
+                >
+                  {isRecording ? "Stop recording" : "Dictate feedback"}
+                </button>
+                <label
+                  className={`btn-secondary ai-revise-attach${
+                    canEditDraft ? "" : " disabled"
+                  }`}
+                >
+                  Attach image
+                  <input
+                    type="file"
+                    accept="image/*"
+                    multiple
+                    className="sr-only"
+                    disabled={!canEditDraft}
+                    onChange={handleAttachmentChange}
+                  />
+                </label>
+              </div>
+              {reviseAudio ? (
+                <div className="ai-revise-attachment">
+                  <audio controls src={reviseAudio.url} className="ai-revise-audio" />
+                  <button
+                    type="button"
+                    className="btn-link"
+                    onClick={clearReviseAudio}
+                    disabled={!canEditDraft}
+                  >
+                    Remove voice note
+                  </button>
+                </div>
+              ) : null}
+              {reviseAttachments.length ? (
+                <ul className="ai-revise-files">
+                  {reviseAttachments.map((file, index) => (
+                    <li key={`${file.name}-${index}`} className="ai-revise-attachment">
+                      <span className="ai-revise-file-name">{file.name}</span>
+                      <button
+                        type="button"
+                        className="btn-link"
+                        onClick={() => removeAttachment(index)}
+                        disabled={!canEditDraft}
+                      >
+                        Remove
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              ) : null}
               <button
                 type="button"
                 className="btn-secondary"
-                disabled={!canEditDraft || !reviseFeedback.trim()}
+                disabled={
+                  !canEditDraft ||
+                  isRecording ||
+                  (!reviseFeedback.trim() && !reviseAudio && reviseAttachments.length === 0)
+                }
                 onClick={reviseDraft}
               >
                 Revise with AI

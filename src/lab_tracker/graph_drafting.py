@@ -145,6 +145,7 @@ class GraphDraftClient(Protocol):
         source_artifacts: list[dict[str, Any]] | None = ...,
         image_bytes: bytes | None = ...,
         image_content_type: str | None = ...,
+        extra_images: list[dict[str, Any]] | None = ...,
     ) -> dict[str, Any]:
         ...
 
@@ -249,6 +250,7 @@ class OpenAIGraphDraftClient:
         source_artifacts: list[dict[str, Any]] | None = None,
         image_bytes: bytes | None = None,
         image_content_type: str | None = None,
+        extra_images: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         if not self._api_key:
             raise GraphDraftingError(
@@ -256,11 +258,12 @@ class OpenAIGraphDraftClient:
             )
         resolved_context = graph_context if graph_context is not None else project_context or {}
         artifacts = list(source_artifacts or [])
+        normalized_extra = _normalize_extra_images(extra_images)
         has_text_source = any(
             str(item.get("transcript_text") or item.get("raw_content_preview") or "").strip()
             for item in artifacts
         )
-        if not image_bytes and not has_text_source:
+        if not image_bytes and not normalized_extra and not has_text_source:
             raise GraphDraftingError("Source note has no image or transcript text to draft from.")
         content: list[dict[str, Any]] = [
             {
@@ -281,6 +284,16 @@ class OpenAIGraphDraftClient:
                 raise GraphDraftingError("Source image content type is required.")
             image_url = _data_url(image_bytes=image_bytes, content_type=image_content_type)
             content.append({"type": "input_image", "image_url": image_url})
+        for extra in normalized_extra:
+            content.append(
+                {
+                    "type": "input_image",
+                    "image_url": _data_url(
+                        image_bytes=extra["image_bytes"],
+                        content_type=extra["content_type"],
+                    ),
+                }
+            )
         response = _post_provider_request(
             self._client,
             "OpenAI",
@@ -517,6 +530,7 @@ class AnthropicGraphDraftClient:
         source_artifacts: list[dict[str, Any]] | None = None,
         image_bytes: bytes | None = None,
         image_content_type: str | None = None,
+        extra_images: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         if not self._api_key:
             raise GraphDraftingError(
@@ -524,7 +538,8 @@ class AnthropicGraphDraftClient:
             )
         resolved_context = graph_context if graph_context is not None else project_context or {}
         artifacts = list(source_artifacts or [])
-        if not image_bytes and not _has_text_source(artifacts):
+        normalized_extra = _normalize_extra_images(extra_images)
+        if not image_bytes and not normalized_extra and not _has_text_source(artifacts):
             raise GraphDraftingError("Source note has no image or transcript text to draft from.")
         content: list[dict[str, Any]] = [
             {
@@ -547,6 +562,17 @@ class AnthropicGraphDraftClient:
                         "type": "base64",
                         "media_type": image_content_type,
                         "data": base64.b64encode(image_bytes).decode("ascii"),
+                    },
+                }
+            )
+        for extra in normalized_extra:
+            content.append(
+                {
+                    "type": "image",
+                    "source": {
+                        "type": "base64",
+                        "media_type": extra["content_type"],
+                        "data": base64.b64encode(extra["image_bytes"]).decode("ascii"),
                     },
                 }
             )
@@ -686,6 +712,7 @@ class GoogleGraphDraftClient:
         source_artifacts: list[dict[str, Any]] | None = None,
         image_bytes: bytes | None = None,
         image_content_type: str | None = None,
+        extra_images: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         if not self._api_key:
             raise GraphDraftingError(
@@ -693,7 +720,8 @@ class GoogleGraphDraftClient:
             )
         resolved_context = graph_context if graph_context is not None else project_context or {}
         artifacts = list(source_artifacts or [])
-        if not image_bytes and not _has_text_source(artifacts):
+        normalized_extra = _normalize_extra_images(extra_images)
+        if not image_bytes and not normalized_extra and not _has_text_source(artifacts):
             raise GraphDraftingError("Source note has no image or transcript text to draft from.")
         parts: list[dict[str, Any]] = [
             {
@@ -709,6 +737,8 @@ class GoogleGraphDraftClient:
             if not image_content_type:
                 raise GraphDraftingError("Source image content type is required.")
             parts.append(_gemini_inline_data(image_bytes, image_content_type))
+        for extra in normalized_extra:
+            parts.append(_gemini_inline_data(extra["image_bytes"], extra["content_type"]))
         return self._generate_graph_patch(parts=parts, instructions=_instructions())
 
     def draft_from_batch(
@@ -904,6 +934,34 @@ def _instructions() -> str:
 def _data_url(*, image_bytes: bytes, content_type: str) -> str:
     encoded = base64.b64encode(image_bytes).decode("ascii")
     return f"data:{content_type};base64,{encoded}"
+
+
+def _normalize_extra_images(
+    extra_images: list[dict[str, Any]] | None,
+) -> list[dict[str, Any]]:
+    """Validate reviewer-supplied images and return ``{image_bytes, content_type}`` dicts.
+
+    Reviewer attachments arrive alongside the source artifact(s) on a revision
+    request; each must carry bytes and an image content type so providers can
+    embed them as additional visual context.
+    """
+
+    normalized: list[dict[str, Any]] = []
+    for index, item in enumerate(extra_images or []):
+        image_bytes = item.get("image_bytes")
+        content_type = (item.get("content_type") or "").strip()
+        if not image_bytes:
+            raise GraphDraftingError(f"Attached image #{index + 1} is empty.")
+        if not content_type:
+            raise GraphDraftingError(
+                f"Attached image #{index + 1} is missing a content type."
+            )
+        if not content_type.lower().startswith("image/"):
+            raise GraphDraftingError(
+                f"Attached file {content_type!r} is not a supported image type."
+            )
+        normalized.append({"image_bytes": image_bytes, "content_type": content_type})
+    return normalized
 
 
 def _has_text_source(artifacts: list[dict[str, Any]]) -> bool:
