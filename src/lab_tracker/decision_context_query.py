@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from uuid import UUID
 
 from lab_tracker.decision_context_types import JsonObject
@@ -263,6 +264,8 @@ class RepositoryDecisionContextReader:
         question_id: str | None = None,
         status: str | None = None,
         created_by: str | None = None,
+        since: datetime | None = None,
+        until: datetime | None = None,
         limit: int = 50,
         offset: int = 0,
         recent_first: bool = False,
@@ -276,6 +279,8 @@ class RepositoryDecisionContextReader:
             question_id=_uuid_or_none(question_id),
             status=status,
             created_by=created_by,
+            since=since,
+            until=until,
             limit=limit,
             offset=offset,
             recent_first=recent_first,

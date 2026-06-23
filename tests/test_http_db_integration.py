@@ -548,6 +548,113 @@ def test_list_analyses_supports_recent_first_bounded_order(client: TestClient):
     assert payload["meta"]["total"] == 6
 
 
+def test_list_analyses_supports_time_window_for_progress_reports(client: TestClient):
+    """A 'since last July' window returns only in-range committed analyses.
+
+    This is the retrieval backbone of the progress-report use case: pull the
+    advances committed within a window so an assistant can synthesize them.
+    """
+
+    headers = _admin_headers(client)
+    project_id = client.post(
+        "/projects",
+        json={"name": "Windowed analyses"},
+        headers=headers,
+    ).json()["data"]["project_id"]
+    question_id = client.post(
+        "/questions",
+        json={
+            "project_id": project_id,
+            "text": "Which analyses fall in the window?",
+            "question_type": "descriptive",
+            "status": "active",
+        },
+        headers=headers,
+    ).json()["data"]["question_id"]
+    dataset_id = client.post(
+        "/datasets",
+        json={
+            "project_id": project_id,
+            "primary_question_id": question_id,
+            "status": "committed",
+            "commit_manifest": {
+                "external_artifacts": [
+                    {
+                        "kind": "entity",
+                        "source_system": "s3",
+                        "uri": "s3://lab-tracker/windowed/manifest.json",
+                        "content_hash": "sha256:windowed",
+                    }
+                ]
+            },
+        },
+        headers=headers,
+    ).json()["data"]["dataset_id"]
+
+    analysis_ids: list[str] = []
+    for index in range(3):
+        analysis = client.post(
+            "/analyses",
+            json={
+                "project_id": project_id,
+                "dataset_ids": [dataset_id],
+                "method_hash": f"windowed-method-{index}",
+                "code_version": "v1",
+                "status": "committed",
+            },
+            headers=headers,
+        )
+        assert analysis.status_code == 201
+        analysis_ids.append(analysis.json()["data"]["analysis_id"])
+
+    # Spread the analyses across a year: one before July, two after.
+    stamps = [
+        datetime(2025, 3, 1, 12, 0, tzinfo=timezone.utc),
+        datetime(2025, 9, 1, 12, 0, tzinfo=timezone.utc),
+        datetime(2025, 11, 1, 12, 0, tzinfo=timezone.utc),
+    ]
+    with client.app.state.db_session_factory() as session:
+        for analysis_id, stamp in zip(analysis_ids, stamps, strict=True):
+            row = session.get(AnalysisModel, analysis_id)
+            row.created_at = stamp
+            row.updated_at = stamp
+        session.commit()
+
+    response = client.get(
+        "/analyses",
+        params={
+            "project_id": project_id,
+            "status": "committed",
+            "since": "2025-07-01T00:00:00+00:00",
+            "recent_first": "true",
+        },
+        headers=headers,
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    # Only the two post-July analyses, newest first; the March one is excluded.
+    assert [item["analysis_id"] for item in payload["data"]] == [
+        analysis_ids[2],
+        analysis_ids[1],
+    ]
+    assert payload["meta"]["total"] == 2
+
+    # An upper bound excludes everything after it.
+    bounded = client.get(
+        "/analyses",
+        params={
+            "project_id": project_id,
+            "status": "committed",
+            "since": "2025-07-01T00:00:00+00:00",
+            "until": "2025-10-01T00:00:00+00:00",
+        },
+        headers=headers,
+    )
+    assert bounded.status_code == 200
+    assert [item["analysis_id"] for item in bounded.json()["data"]] == [analysis_ids[1]]
+
+
 def test_evidence_authoring_routes_create_and_filter_graph_records(
     client: TestClient,
     admin_auth_headers: dict[str, str],

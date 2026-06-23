@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 from contextlib import suppress
+from datetime import datetime
 from typing import Annotated
 from uuid import UUID
 
@@ -80,6 +81,9 @@ def build_visualizations_router(api: LabTrackerAPI) -> APIRouter:
         project_id: UUID | None = None,
         analysis_id: UUID | None = None,
         claim_id: UUID | None = None,
+        since: datetime | None = None,
+        until: datetime | None = None,
+        recent_first: bool = False,
         limit: int = 50,
         offset: int = 0,
     ):
@@ -94,8 +98,11 @@ def build_visualizations_router(api: LabTrackerAPI) -> APIRouter:
             project_ids=project_ids,
             analysis_id=analysis_id,
             claim_id=claim_id,
+            since=since,
+            until=until,
             limit=limit,
             offset=offset,
+            recent_first=recent_first,
         )
         return list_response(visualizations, limit=limit, offset=offset, total=total)
 
