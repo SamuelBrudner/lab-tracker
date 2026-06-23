@@ -379,6 +379,8 @@ class LabTracker:
         dataset_id: str | None = None,
         question_id: str | None = None,
         status: str | None = None,
+        since: str | None = None,
+        until: str | None = None,
         limit: int = MAX_PAGE_SIZE,
         offset: int = 0,
     ) -> list[LTRecord]:
@@ -393,6 +395,8 @@ class LabTracker:
                     field_name="analysis status",
                     allowed_values=ANALYSIS_STATUS_VALUES,
                 ),
+                "since": since,
+                "until": until,
             },
             limit=limit,
             offset=offset,
@@ -430,6 +434,8 @@ class LabTracker:
         project_id: str | None = None,
         analysis_id: str | None = None,
         claim_id: str | None = None,
+        since: str | None = None,
+        until: str | None = None,
         limit: int = MAX_PAGE_SIZE,
         offset: int = 0,
     ) -> list[LTRecord]:
@@ -439,10 +445,27 @@ class LabTracker:
                 "project_id": project_id,
                 "analysis_id": analysis_id,
                 "claim_id": claim_id,
+                "since": since,
+                "until": until,
             },
             limit=limit,
             offset=offset,
         )
+
+    def provenance(self, entity_type: str, entity_id: str) -> JsonObject:
+        """Fetch the PROV-O/JSON-LD provenance document for one record.
+
+        ``entity_type`` is the plural route segment: ``datasets``, ``analyses``,
+        or ``claims``. The returned document is self-contained JSON-LD, readable
+        without a running Lab Tracker instance once written to disk.
+        """
+
+        allowed = {"datasets", "analyses", "claims"}
+        if entity_type not in allowed:
+            raise LTValidationError(
+                f"provenance entity_type must be one of {sorted(allowed)}; got {entity_type!r}."
+            )
+        return self._request("GET", f"/{entity_type}/{entity_id}/provenance")
 
     def list_goals(
         self,
