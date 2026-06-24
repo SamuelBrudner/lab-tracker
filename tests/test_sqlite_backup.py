@@ -3,17 +3,22 @@ from __future__ import annotations
 import json
 import sqlite3
 from contextlib import closing
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 
 import pytest
 
 from lab_tracker.backup import (
     BackupError,
+    _copy_sqlite_database,
+    _lock_path_for,
+    _sqlite_ro_uri,
     create_sqlite_backup,
+    database_lock_path,
     restore_sqlite_backup,
     sqlite_database_path,
 )
 from lab_tracker.cli import main
+from lab_tracker.process_lock import ProcessLock
 
 
 def _sqlite_url(path: Path) -> str:
@@ -108,6 +113,64 @@ def test_restore_refuses_locked_target_database(tmp_path: Path) -> None:
         lock_connection.close()
 
     assert _read_values(target_path) == ["target"]
+
+
+def test_restore_refuses_when_database_lock_is_held(tmp_path: Path) -> None:
+    # Simulates a *running* server: it holds the advisory lock but has no active
+    # SQLite transaction (an idle WAL pool connection), which the old
+    # BEGIN EXCLUSIVE probe could not detect.
+    backup_path = tmp_path / "backup.sqlite3"
+    target_path = tmp_path / "target.db"
+    _write_example_database(backup_path, "backup")
+    _write_example_database(target_path, "target")
+
+    server_lock = ProcessLock(_lock_path_for(target_path.resolve()))
+    assert server_lock.acquire()
+    try:
+        with pytest.raises(BackupError, match="appears to be running"):
+            restore_sqlite_backup(backup_path, _sqlite_url(target_path), force=True)
+    finally:
+        server_lock.release()
+
+    assert _read_values(target_path) == ["target"]
+
+    # Once the "server" releases the lock, restore proceeds normally.
+    result = restore_sqlite_backup(backup_path, _sqlite_url(target_path), force=True)
+    assert result.restored_path == target_path.resolve()
+    assert _read_values(target_path) == ["backup"]
+
+
+def test_database_lock_path_only_for_file_backed_sqlite(tmp_path: Path) -> None:
+    db_path = tmp_path / "lab.db"
+    assert database_lock_path(_sqlite_url(db_path)) == _lock_path_for(db_path.resolve())
+    assert database_lock_path("sqlite+pysqlite:///:memory:") is None
+    assert database_lock_path("postgresql+psycopg://example") is None
+
+
+def test_copy_sqlite_database_round_trips_path_with_special_characters(
+    tmp_path: Path,
+) -> None:
+    # '?' and '#' are legal POSIX filename characters but URI delimiters; the
+    # old f"file:{as_posix()}?mode=ro" form addressed the wrong (empty) database.
+    source_path = tmp_path / "weird ? name #1.db"
+    destination_path = tmp_path / "copy.db"
+    _write_example_database(source_path, "special")
+
+    _copy_sqlite_database(source_path, destination_path)
+
+    assert _read_values(destination_path) == ["special"]
+
+
+def test_sqlite_ro_uri_is_absolute_and_escaped() -> None:
+    posix_uri = _sqlite_ro_uri(Path("/var/lib/lab tracker.db"))
+    assert posix_uri.startswith("file:///")
+    assert posix_uri.endswith("?mode=ro")
+    assert "%20" in posix_uri  # space is percent-encoded, not left bare
+
+    # A Windows drive-letter path must yield file:///C:/..., not a relative
+    # file:C:/... that SQLite resolves against the current directory.
+    windows_uri = _sqlite_ro_uri(PureWindowsPath("C:/Users/sam/lab.db"))
+    assert windows_uri == "file:///C:/Users/sam/lab.db?mode=ro"
 
 
 def test_restore_replaces_target_database_with_backup(tmp_path: Path) -> None:

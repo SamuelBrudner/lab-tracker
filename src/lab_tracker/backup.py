@@ -11,6 +11,8 @@ from uuid import uuid4
 
 from sqlalchemy.engine import make_url
 
+from lab_tracker.process_lock import ProcessLock
+
 DEFAULT_BACKUP_KEEP = 10
 
 
@@ -54,6 +56,35 @@ def sqlite_database_path(database_url: str) -> Path | None:
     if not database or database == ":memory:":
         return None
     return Path(database).expanduser().resolve()
+
+
+def database_lock_path(database_url: str) -> Path | None:
+    """Path of the advisory lock sidecar for a file-backed SQLite database.
+
+    Returns ``None`` for non-SQLite or in-memory databases, which need no lock
+    coordination between the server and the offline restore tool.
+    """
+
+    db_path = sqlite_database_path(database_url)
+    if db_path is None:
+        return None
+    return _lock_path_for(db_path)
+
+
+def _lock_path_for(db_path: Path) -> Path:
+    return db_path.with_name(f"{db_path.name}.lock")
+
+
+def _sqlite_ro_uri(path: Path) -> str:
+    """Read-only SQLite ``file:`` URI for an absolute path.
+
+    Uses ``Path.as_uri()`` so the result is a valid *absolute* URI on every
+    platform (``file:///C:/...`` on Windows) and percent-encodes characters such
+    as ``?`` and ``#`` that would otherwise be parsed as URI query/fragment
+    delimiters and silently address the wrong (or an empty) database.
+    """
+
+    return f"{path.as_uri()}?mode=ro"
 
 
 def create_sqlite_backup(
@@ -117,20 +148,35 @@ def restore_sqlite_backup(
         raise BackupError(
             f"Refusing to overwrite {target_path}. Re-run with --force after stopping Lab Tracker."
         )
-    if target_path.exists():
-        _assert_database_not_locked(target_path)
 
     target_path.parent.mkdir(parents=True, exist_ok=True)
-    temp_path = target_path.with_name(f".{target_path.name}.restore-{uuid4().hex}.tmp")
+    lock = ProcessLock(_lock_path_for(target_path))
+    if not lock.acquire():
+        raise BackupError(
+            "Refusing to restore because Lab Tracker appears to be running "
+            f"(could not acquire the database lock for {target_path}). "
+            "Stop the server and retry."
+        )
     try:
-        _copy_sqlite_database(source_path, temp_path)
-        _assert_sqlite_integrity(temp_path)
-        _remove_sqlite_sidecars(target_path)
-        temp_path.replace(target_path)
-        _remove_sqlite_sidecars(target_path)
+        # Secondary guard: catches an active transaction held by any tool. This
+        # is NOT sufficient on its own — an idle WAL pool connection does not
+        # hold a transaction lock — which is why the advisory lock above is the
+        # primary in-use check.
+        if target_path.exists():
+            _assert_database_not_locked(target_path)
+
+        temp_path = target_path.with_name(f".{target_path.name}.restore-{uuid4().hex}.tmp")
+        try:
+            _copy_sqlite_database(source_path, temp_path)
+            _assert_sqlite_integrity(temp_path)
+            _remove_sqlite_sidecars(target_path)
+            temp_path.replace(target_path)
+            _remove_sqlite_sidecars(target_path)
+        finally:
+            if temp_path.exists():
+                temp_path.unlink()
     finally:
-        if temp_path.exists():
-            temp_path.unlink()
+        lock.release()
     return RestoreResult(backup_path=source_path, restored_path=target_path)
 
 
@@ -140,9 +186,8 @@ def _backup_filename(source_path: Path) -> str:
 
 
 def _copy_sqlite_database(source_path: Path, destination_path: Path) -> None:
-    uri = source_path.as_posix()
     with (
-        closing(sqlite3.connect(f"file:{uri}?mode=ro", uri=True)) as source,
+        closing(sqlite3.connect(_sqlite_ro_uri(source_path), uri=True)) as source,
         closing(sqlite3.connect(destination_path)) as destination,
         source,
         destination,
@@ -151,7 +196,10 @@ def _copy_sqlite_database(source_path: Path, destination_path: Path) -> None:
 
 
 def _assert_sqlite_integrity(path: Path) -> None:
-    with closing(sqlite3.connect(path)) as connection, connection:
+    # Open read-only: the source/backup snapshots checked here must never be
+    # mutated (touched mtime, spawned -wal/-shm sidecars, or write-locked on
+    # read-only media) just to verify them.
+    with closing(sqlite3.connect(_sqlite_ro_uri(path), uri=True)) as connection:
         result = connection.execute("PRAGMA integrity_check").fetchone()
     if result is None or result[0] != "ok":
         raise BackupError(f"SQLite integrity check failed for {path}.")
