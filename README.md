@@ -140,6 +140,7 @@ The authoritative list of what's supported is **[docs/retained-v1-surface.md](do
 - [Provenance export](docs/provenance-export.md) — write `lt export` sidecars that survive without a running instance
 - [MCP server, skills, and Dolt mirror](docs/lab-tracker-mcp-skills.md) — wire up assistants and the export-only versioned mirror
 - [GitHub Copilot MCP setup](docs/lab-tracker-copilot.md) — connect Copilot IDEs to the local Lab Tracker MCP server
+- [Cursor MCP setup](docs/lab-tracker-cursor.md) — connect Cursor to the local Lab Tracker MCP server via `.cursor/mcp.json`
 
 **Scope and vision**
 - [Supported v1 surface (authoritative)](docs/retained-v1-surface.md) — the definitive list of what ships

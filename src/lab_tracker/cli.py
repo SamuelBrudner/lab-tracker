@@ -110,6 +110,7 @@ def init_consumer_repo(
         return result
     files = {
         root / ".mcp.json": _mcp_json(),
+        root / ".cursor" / "mcp.json": _cursor_mcp_json(),
         root / ".claude" / "settings.json": _claude_settings_json(),
         root / "scripts" / "lt.py": _lt_shim(),
         root / "AGENTS.lt.md": _agents_fragment(),
@@ -792,6 +793,14 @@ def _mcp_json() -> str:
         }
     }
     return json.dumps(payload, indent=2) + "\n"
+
+
+def _cursor_mcp_json() -> str:
+    # Cursor reads project MCP config from .cursor/mcp.json using the same
+    # top-level `mcpServers` shape as .mcp.json (it does not auto-read root
+    # .mcp.json, and it does not use Copilot's `servers` schema). Keep the two
+    # byte-identical so Cursor and Claude/Codex stay in lockstep.
+    return _mcp_json()
 
 
 def _claude_settings_json() -> str:

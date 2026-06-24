@@ -41,6 +41,7 @@ def test_init_creates_portable_consumer_files(tmp_path: Path) -> None:
 
     assert sorted(path.relative_to(tmp_path).as_posix() for path in result.created) == [
         ".claude/settings.json",
+        ".cursor/mcp.json",
         ".mcp.json",
         "AGENTS.lt.md",
         "CLAUDE.md",
@@ -52,6 +53,18 @@ def test_init_creates_portable_consumer_files(tmp_path: Path) -> None:
     assert server["command"] == "lt-mcp"
     assert "python.exe" not in json.dumps(mcp_config).lower()
     assert "C:\\" not in json.dumps(mcp_config)
+
+    # Cursor reads .cursor/mcp.json (top-level mcpServers shape, not Copilot's
+    # `servers` schema). It must stay portable and in lockstep with .mcp.json.
+    cursor_config = json.loads(
+        (tmp_path / ".cursor" / "mcp.json").read_text(encoding="utf-8")
+    )
+    cursor_server = cursor_config["mcpServers"]["lab-tracker"]
+    assert cursor_server["command"] == "lt-mcp"
+    assert "servers" not in cursor_config
+    assert "python.exe" not in json.dumps(cursor_config).lower()
+    assert "C:\\" not in json.dumps(cursor_config)
+    assert cursor_config == mcp_config
 
     shim = (tmp_path / "scripts" / "lt.py").read_text(encoding="utf-8")
     assert "from lab_tracker_client import *" in shim
