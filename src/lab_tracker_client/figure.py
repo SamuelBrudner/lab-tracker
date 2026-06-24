@@ -550,6 +550,26 @@ def _preview_payload(
     content_hash: str,
 ) -> _PreviewPayload:
     resolved_max_bytes = max(1, min(int(max_bytes), FIGURE_UPLOAD_MAX_BYTES))
+    if _is_pdf_path(path):
+        rendered = _render_pdf_preview_png(fig=fig, path=path, max_bytes=resolved_max_bytes)
+        if rendered is not None and len(rendered) <= resolved_max_bytes:
+            return _PreviewPayload(
+                payload=rendered,
+                path=path.with_suffix(path.suffix + ".preview.png"),
+                content_type="image/png",
+                no_preview=False,
+            )
+        _warn_once(
+            "pdf-preview-unavailable",
+            "Lab Tracker figure capture could not render a PDF preview; "
+            "uploading a pointer note.",
+        )
+        return _pointer_preview_payload(
+            path=path,
+            source_uri=source_uri,
+            content_hash=content_hash,
+            full_size_bytes=len(full_payload),
+        )
     if len(full_payload) <= resolved_max_bytes:
         return _PreviewPayload(
             payload=full_payload,
@@ -570,12 +590,27 @@ def _preview_payload(
         "Lab Tracker figure capture could not render a bounded preview; "
         "matplotlib/Pillow may be unavailable. Uploading a pointer note.",
     )
+    return _pointer_preview_payload(
+        path=path,
+        source_uri=source_uri,
+        content_hash=content_hash,
+        full_size_bytes=len(full_payload),
+    )
+
+
+def _pointer_preview_payload(
+    *,
+    path: Path,
+    source_uri: str,
+    content_hash: str,
+    full_size_bytes: int,
+) -> _PreviewPayload:
     pointer = "\n".join(
         [
             "Lab Tracker figure pointer",
             f"source_uri: {source_uri}",
             f"evidence_content_hash: {content_hash}",
-            f"full_size_bytes: {len(full_payload)}",
+            f"full_size_bytes: {full_size_bytes}",
             "",
         ]
     ).encode("utf-8")
@@ -587,12 +622,69 @@ def _preview_payload(
     )
 
 
+def _is_pdf_path(path: Path) -> bool:
+    return path.suffix.lower() == ".pdf"
+
+
+def _render_pdf_preview_png(*, fig: Any, path: Path, max_bytes: int) -> bytes | None:
+    rendered_from_figure = _render_downscaled_png(fig, max_bytes=max_bytes)
+    if rendered_from_figure is not None:
+        return rendered_from_figure
+    rendered_from_pdf = _render_pdfium_preview_png(path, max_bytes=max_bytes)
+    if rendered_from_pdf is not None:
+        return rendered_from_pdf
+    return _render_pymupdf_preview_png(path, max_bytes=max_bytes)
+
+
+def _render_pdfium_preview_png(path: Path, *, max_bytes: int) -> bytes | None:
+    try:
+        import pypdfium2 as pdfium
+    except ImportError:
+        return None
+    try:
+        pdf = pdfium.PdfDocument(str(path))
+        try:
+            if len(pdf) == 0:
+                return None
+            page = pdf[0]
+            image = page.render(scale=2).to_pil()
+            return _encode_bounded_png(image, max_bytes=max_bytes)
+        finally:
+            with suppress(Exception):
+                pdf.close()
+    except Exception:
+        return None
+
+
+def _render_pymupdf_preview_png(path: Path, *, max_bytes: int) -> bytes | None:
+    try:
+        import fitz
+        from PIL import Image
+    except ImportError:
+        return None
+    try:
+        document = fitz.open(str(path))
+        try:
+            if document.page_count == 0:
+                return None
+            page = document.load_page(0)
+            pixmap = page.get_pixmap(matrix=fitz.Matrix(2, 2), alpha=False)
+            payload = pixmap.tobytes("png")
+            if len(payload) <= max_bytes:
+                return payload
+            image = Image.open(io.BytesIO(payload))
+            return _encode_bounded_png(image, max_bytes=max_bytes)
+        finally:
+            document.close()
+    except Exception:
+        return None
+
+
 def _render_downscaled_png(fig: Any, *, max_bytes: int) -> bytes | None:
     if fig is None:
         return None
     try:
         from matplotlib.backends.backend_agg import FigureCanvasAgg
-        from PIL import Image
     except ImportError:
         return None
     try:
@@ -602,7 +694,26 @@ def _render_downscaled_png(fig: Any, *, max_bytes: int) -> bytes | None:
         payload = buffer.getvalue()
         if len(payload) <= max_bytes:
             return payload
+        from PIL import Image
+
         image = Image.open(io.BytesIO(payload))
+        return _encode_bounded_png(image, max_bytes=max_bytes)
+    except Exception:
+        return None
+    return None
+
+
+def _encode_bounded_png(image: Any, *, max_bytes: int) -> bytes | None:
+    try:
+        from PIL import Image
+    except ImportError:
+        return None
+    try:
+        output = io.BytesIO()
+        image.save(output, format="PNG", optimize=True)
+        payload = output.getvalue()
+        if len(payload) <= max_bytes:
+            return payload
         resampling = Image.Resampling.LANCZOS if hasattr(Image, "Resampling") else Image.LANCZOS
         for scale in (0.75, 0.5, 0.33, 0.25, 0.16, 0.1):
             candidate = image.copy()

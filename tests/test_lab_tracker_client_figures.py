@@ -103,6 +103,102 @@ def test_savefig_forwards_kwargs_and_uploads_under_cap(tmp_path: Path) -> None:
     assert len(seen) == 1
 
 
+def test_pdf_savefig_uploads_rendered_png_preview_under_cap(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    figure_path = tmp_path / "plot.pdf"
+    raw_pdf = b"%PDF-raw-figure"
+    rendered_png = b"\x89PNG\r\nrendered-preview"
+    bodies: list[bytes] = []
+    metadata_seen: dict[str, object] = {}
+
+    def fake_render_pdf_preview_png(*, fig: object, path: Path, max_bytes: int) -> bytes:
+        assert isinstance(fig, FakeFigure)
+        assert path == figure_path.resolve()
+        assert max_bytes > len(rendered_png)
+        return rendered_png
+
+    monkeypatch.setattr(figure_module, "_render_pdf_preview_png", fake_render_pdf_preview_png)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        bodies.append(request.content)
+        metadata_seen.update(json.loads(_multipart_field(request.content, "metadata")))
+        return _json_response(
+            201,
+            {
+                "data": {
+                    "note_id": "note-pdf",
+                    "project_id": "project-1",
+                    "status": "staged",
+                    "metadata": metadata_seen,
+                }
+            },
+        )
+
+    with LabTracker(
+        base_url="http://testserver",
+        default_project_id="project-1",
+        transport=httpx.MockTransport(handler),
+    ) as lt:
+        result = savefig(FakeFigure(raw_pdf), figure_path, client=lt)
+
+    full_hash = sha256(raw_pdf).hexdigest()
+    assert result.action == "imported"
+    assert result.no_preview is False
+    assert metadata_seen["evidence_content_hash"] == full_hash
+    assert metadata_seen["figure_no_preview"] is False
+    assert metadata_seen["figure_preview_size_bytes"] == len(rendered_png)
+    assert b'filename="plot.pdf.preview.png"' in bodies[0]
+    assert b"Content-Type: image/png" in bodies[0]
+    assert rendered_png in bodies[0]
+    assert raw_pdf not in bodies[0]
+
+
+def test_pdf_without_renderer_uploads_pointer_only_under_cap(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    figure_path = tmp_path / "plot.pdf"
+    raw_pdf = b"%PDF-without-renderer"
+    figure_path.write_bytes(raw_pdf)
+    bodies: list[bytes] = []
+
+    monkeypatch.setattr(figure_module, "_render_pdf_preview_png", lambda **_kwargs: None)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        bodies.append(request.content)
+        metadata = json.loads(_multipart_field(request.content, "metadata"))
+        assert metadata["figure_no_preview"] is True
+        return _json_response(
+            201,
+            {
+                "data": {
+                    "note_id": "note-pdf-pointer",
+                    "project_id": "project-1",
+                    "status": "staged",
+                    "metadata": metadata,
+                }
+            },
+        )
+
+    with LabTracker(
+        base_url="http://testserver",
+        default_project_id="project-1",
+        transport=httpx.MockTransport(handler),
+    ) as lt:
+        result = savefig(None, figure_path, client=lt)
+
+    assert result.action == "imported"
+    assert result.no_preview is True
+    assert b'filename="plot.pdf.pointer.txt"' in bodies[0]
+    assert b"Content-Type: text/plain" in bodies[0]
+    assert b"Lab Tracker figure pointer" in bodies[0]
+    assert raw_pdf not in bodies[0]
+    assert "PDF preview" in capsys.readouterr().err
+
+
 def test_savefig_clamps_supplied_client_timeout_for_capture_calls(tmp_path: Path) -> None:
     figure_path = tmp_path / "plot.png"
     seen_timeout: dict[str, float] = {}

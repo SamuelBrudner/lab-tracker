@@ -31,6 +31,7 @@ lint = [
 figure = [
   "matplotlib",
   "pillow",
+  "pypdfium2",
 ]
 
 [project.scripts]
