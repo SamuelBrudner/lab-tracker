@@ -30,7 +30,7 @@ from .graph_drafts import attach_graph_usernames
 from .shared import (
     actor_from_request,
     api_from_request,
-    ensure_project_owner,
+    ensure_project_contributor,
     ensure_project_read,
     filter_project_scoped_items,
     list_response,
@@ -155,7 +155,7 @@ def build_graph_batches_router(api: LabTrackerAPI) -> APIRouter:
     )
     def run_batch_now(payload: GraphDraftBatchRunRequest, request: Request):
         actor = actor_from_request(request)
-        ensure_project_owner(request, payload.project_id)
+        ensure_project_contributor(request, payload.project_id)
         draft_client = _draft_client_from_request(request)
         try:
             run = api_from_request(request, api).run_graph_draft_batch_for_project(

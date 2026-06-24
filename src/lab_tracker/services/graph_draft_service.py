@@ -460,7 +460,9 @@ class GraphDraftService(BaseService):
         timezone_name: str | None = None,
         actor: AuthContext | None = None,
     ) -> GraphDraftBatchSettings:
-        self.authorization.require_owner(project_id, actor=actor)
+        # Contributors may schedule their own project's daily batch (run-now is
+        # likewise contributor-gated); reading settings only needs read access.
+        self.authorization.require_contributor(project_id, actor=actor)
         settings = self.repository.get_graph_draft_batch_settings_by_project(project_id)
         if settings is None:
             settings = _default_batch_settings(project_id=project_id, actor=actor)

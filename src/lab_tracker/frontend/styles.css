@@ -663,6 +663,11 @@ button:disabled {
   outline: none;
 }
 
+.capture-composer-input::placeholder {
+  color: var(--ink-soft);
+  opacity: 1;
+}
+
 .capture-attachment-menu {
   display: grid;
   gap: 0.5rem;
@@ -1602,6 +1607,34 @@ button:disabled {
   color: #e6c878;
 }
 
+:root[data-theme="dark"] .capture-composer {
+  background: #23272f;
+  border-color: var(--line);
+}
+
+:root[data-theme="dark"] .capture-composer-input {
+  background: #181b21;
+  border-color: var(--line);
+  color: var(--ink);
+}
+
+:root[data-theme="dark"] .capture-composer-icon {
+  background: #262a32;
+  color: var(--ink);
+}
+
+:root[data-theme="dark"] .capture-attachment-option,
+:root[data-theme="dark"] .capture-attachment-chip {
+  background: #181b21;
+  border-color: var(--line);
+  color: var(--ink);
+}
+
+:root[data-theme="dark"] .capture-attachment-chip button {
+  background: #262a32;
+  color: var(--ink-soft);
+}
+
 @media (prefers-color-scheme: dark) {
   :root {
     --bg: #14161a;
@@ -1707,6 +1740,34 @@ button:disabled {
     background: #2e2616;
     border-color: #5c4a1f;
     color: #e6c878;
+  }
+
+  .capture-composer {
+    background: #23272f;
+    border-color: var(--line);
+  }
+
+  .capture-composer-input {
+    background: #181b21;
+    border-color: var(--line);
+    color: var(--ink);
+  }
+
+  .capture-composer-icon {
+    background: #262a32;
+    color: var(--ink);
+  }
+
+  .capture-attachment-option,
+  .capture-attachment-chip {
+    background: #181b21;
+    border-color: var(--line);
+    color: var(--ink);
+  }
+
+  .capture-attachment-chip button {
+    background: #262a32;
+    color: var(--ink-soft);
   }
 }
 

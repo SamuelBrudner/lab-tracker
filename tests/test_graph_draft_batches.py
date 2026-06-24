@@ -176,6 +176,96 @@ def test_run_now_persists_pending_batch_with_source_traceability(
     assert listed.json()["data"][0]["change_set_id"] == run["change_set_id"]
 
 
+def _register_project_member(
+    client: TestClient,
+    *,
+    owner_headers: dict[str, str],
+    project_id: str,
+    role: str,
+    global_role: Role,
+) -> dict[str, str]:
+    username = f"member-{role}-{uuid4().hex[:8]}"
+    client.app.state.auth_service.register_user(
+        username=username,
+        password="secret",
+        role=global_role,
+    )
+    login = client.post("/auth/login", json={"username": username, "password": "secret"})
+    assert login.status_code == 200
+    member_headers = _auth_headers(login.json()["data"]["access_token"])
+    added = client.post(
+        f"/projects/{project_id}/members",
+        json={"username": username, "role": role},
+        headers=owner_headers,
+    )
+    assert added.status_code == 201
+    return member_headers
+
+
+def test_contributor_can_schedule_and_run_project_batch(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+) -> None:
+    project_id = _project(client, admin_auth_headers)
+    contributor_headers = _register_project_member(
+        client,
+        owner_headers=admin_auth_headers,
+        project_id=project_id,
+        role="contributor",
+        global_role=Role.EDITOR,
+    )
+
+    # A contributor may configure their own project's batch cadence (schedule).
+    settings = client.patch(
+        f"/projects/{project_id}/graph-draft-batch-settings",
+        json={"enabled": True, "run_at_local_time": "06:00"},
+        headers=contributor_headers,
+    )
+    assert settings.status_code == 200
+    assert settings.json()["data"]["enabled"] is True
+    assert settings.json()["data"]["run_at_local_time"] == "06:00"
+
+    # A contributor may run their own project's batch now.
+    _note(client, contributor_headers, project_id, "Contributor captured a staged note.")
+    fake_client = FakeBatchDraftClient(_batch_patch(project_id))
+    client.app.state.graph_draft_client_factory = lambda _settings: fake_client
+    run = client.post(
+        "/batches/run-now",
+        json={"project_id": project_id},
+        headers=contributor_headers,
+    )
+    assert run.status_code == 201
+    assert run.json()["data"]["status"] == "ready"
+
+
+def test_viewer_cannot_schedule_or_run_project_batch(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+) -> None:
+    project_id = _project(client, admin_auth_headers)
+    viewer_headers = _register_project_member(
+        client,
+        owner_headers=admin_auth_headers,
+        project_id=project_id,
+        role="viewer",
+        global_role=Role.VIEWER,
+    )
+
+    settings = client.patch(
+        f"/projects/{project_id}/graph-draft-batch-settings",
+        json={"enabled": True},
+        headers=viewer_headers,
+    )
+    assert settings.status_code == 401
+
+    run = client.post(
+        "/batches/run-now",
+        json={"project_id": project_id},
+        headers=viewer_headers,
+    )
+    assert run.status_code == 401
+
+
 def test_batch_run_is_idempotent_for_same_window(
     client: TestClient,
     admin_auth_headers: dict[str, str],
