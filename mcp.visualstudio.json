@@ -3,7 +3,7 @@
     {
       "type": "promptString",
       "id": "lt-token",
-      "description": "Lab Tracker MCP token (lpat_) - leave blank if auth is disabled or username/password are used",
+      "description": "Lab Tracker bearer token (lpat_) - leave blank if auth is disabled or username/password fallback is used",
       "password": true
     },
     {
@@ -23,10 +23,10 @@
       "type": "stdio",
       "command": "lt-mcp",
       "env": {
-        "LAB_TRACKER_MCP_BASE_URL": "http://127.0.0.1:8000",
-        "LAB_TRACKER_MCP_API_KEY": "${input:lt-token}",
-        "LAB_TRACKER_MCP_USERNAME": "${input:lt-username}",
-        "LAB_TRACKER_MCP_PASSWORD": "${input:lt-password}",
+        "LAB_TRACKER_BASE_URL": "http://127.0.0.1:8000",
+        "LAB_TRACKER_TOKEN": "${input:lt-token}",
+        "LAB_TRACKER_USERNAME": "${input:lt-username}",
+        "LAB_TRACKER_PASSWORD": "${input:lt-password}",
         "FASTMCP_NO_BANNER": "1",
         "FASTMCP_QUIET": "1",
         "FASTMCP_SILENT": "1",

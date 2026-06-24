@@ -581,18 +581,34 @@ def test_from_env_accepts_bearer_token_aliases(monkeypatch: pytest.MonkeyPatch) 
     ):
         monkeypatch.delenv(key, raising=False)
 
-    monkeypatch.setenv("LAB_TRACKER_MCP_API_KEY", "lpat_primary")
-    monkeypatch.setenv("LAB_TRACKER_MCP_TOKEN", "lpat_alias")
+    monkeypatch.setenv("LAB_TRACKER_TOKEN", "lpat_canonical")
+    monkeypatch.setenv("LAB_TRACKER_ACCESS_TOKEN", "lpat_access_alias")
+    monkeypatch.setenv("LAB_TRACKER_MCP_API_KEY", "lpat_mcp_api_alias")
+    monkeypatch.setenv("LAB_TRACKER_MCP_TOKEN", "lpat_mcp_token_alias")
     lt = LabTracker.from_env()
     try:
-        assert lt.access_token == "lpat_primary"
+        assert lt.access_token == "lpat_canonical"
+    finally:
+        lt.close()
+
+    monkeypatch.delenv("LAB_TRACKER_TOKEN")
+    lt = LabTracker.from_env()
+    try:
+        assert lt.access_token == "lpat_access_alias"
+    finally:
+        lt.close()
+
+    monkeypatch.delenv("LAB_TRACKER_ACCESS_TOKEN")
+    lt = LabTracker.from_env()
+    try:
+        assert lt.access_token == "lpat_mcp_api_alias"
     finally:
         lt.close()
 
     monkeypatch.delenv("LAB_TRACKER_MCP_API_KEY")
     lt = LabTracker.from_env()
     try:
-        assert lt.access_token == "lpat_alias"
+        assert lt.access_token == "lpat_mcp_token_alias"
     finally:
         lt.close()
 

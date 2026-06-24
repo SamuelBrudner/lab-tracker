@@ -37,10 +37,11 @@ product (OpenAPI/declarative-agent integration) and is an explicit non-goal.
   `dry_run` defaults to `True`). P0b registers MCP annotations:
   read tools carry `readOnlyHint=True`; write tools leave `readOnlyHint=False`;
   `refactor_question` and `update_goal` carry `destructiveHint=True`.
-- Auth: `LAB_TRACKER_MCP_API_KEY`/`LAB_TRACKER_MCP_TOKEN` sends a static
-  `lpat_` bearer and skips `/auth/login`; otherwise
-  `LAB_TRACKER_MCP_USERNAME`/`_PASSWORD` → `POST /auth/login` → cached Bearer,
-  one 401 retry (`mcp_api_client.py`). The MCP client sends
+- Auth: `LAB_TRACKER_TOKEN` sends a static `lpat_` bearer and skips
+  `/auth/login`; compatibility aliases `LAB_TRACKER_MCP_API_KEY`,
+  `LAB_TRACKER_MCP_TOKEN`, and `LAB_TRACKER_ACCESS_TOKEN` remain accepted.
+  Without a bearer token, username/password are a fallback/local service-account
+  login path with one 401 retry (`mcp_api_client.py`). The MCP client sends
   `X-LabTracker-Surface: mcp`.
 - Committed client configs now include `.mcp.json` in **Claude/Codex shape**
   (top-level `mcpServers`) plus Copilot-shaped examples `.vscode/mcp.json` and
@@ -93,15 +94,15 @@ top-level `servers` key and `inputs` for a prompted secret:
 ```jsonc
 {
   "inputs": [
-    { "type": "promptString", "id": "lt-token", "description": "Lab Tracker MCP token (lpat_…) — leave blank if auth is disabled", "password": true }
+    { "type": "promptString", "id": "lt-token", "description": "Lab Tracker bearer token (lpat_...) - leave blank if auth is disabled", "password": true }
   ],
   "servers": {
     "lab-tracker": {
       "type": "stdio",
       "command": "lt-mcp",
       "env": {
-        "LAB_TRACKER_MCP_BASE_URL": "http://127.0.0.1:8000",
-        "LAB_TRACKER_MCP_API_KEY": "${input:lt-token}"
+        "LAB_TRACKER_BASE_URL": "http://127.0.0.1:8000",
+        "LAB_TRACKER_TOKEN": "${input:lt-token}"
       }
     }
   }
@@ -118,7 +119,7 @@ launch:
       "type": "stdio",
       "command": "uvx",
       "args": ["--from", "git+https://github.com/SamuelBrudner/lab-tracker", "lt-mcp"],
-      "env": { "LAB_TRACKER_MCP_BASE_URL": "http://127.0.0.1:8000" }
+      "env": { "LAB_TRACKER_BASE_URL": "http://127.0.0.1:8000" }
     }
   }
 }
@@ -205,10 +206,12 @@ endpoints (`device_principal_can_access`), wrong for a read-everything assistant
 
 ### B3 — MCP client static API key
 
-In `mcp_api_client.py`: add `LAB_TRACKER_MCP_API_KEY` (alias
-`LAB_TRACKER_MCP_TOKEN`) to `MCPSettings`. When present, send it directly as
-`Authorization: Bearer <lpat_…>` and **skip `/auth/login`** and the token cache; a
-401 means revoked/expired (fail fast, no replay).
+In `mcp_api_client.py`: accept the canonical `LAB_TRACKER_TOKEN` plus
+compatibility aliases `LAB_TRACKER_MCP_API_KEY`, `LAB_TRACKER_MCP_TOKEN`, and
+`LAB_TRACKER_ACCESS_TOKEN` in `MCPSettings`. When present, send it directly as
+`Authorization: Bearer <lpat_...>` and **skip `/auth/login`** and the token
+cache; a 401 means revoked/expired (fail fast, no replay). MCP-specific aliases
+take precedence inside MCP-only runtime config to preserve existing deployments.
 
 **Secret-in-logs hygiene (load-bearing).** `lab_tracker_api_error()` and
 `LabTrackerAPIUnavailableError` serialize request lines into tool output returned
@@ -278,8 +281,8 @@ mcp.lab.internal {
 `environment=local`), the internal `app` service is a fully open ADMIN endpoint.
 The hosted `app` MUST set a non-local `LAB_TRACKER_ENVIRONMENT` **and** a real
 `LAB_TRACKER_AUTH_SECRET_KEY`. The MCP startup guard refuses to start against a
-non-loopback `LAB_TRACKER_MCP_BASE_URL` target that reports `auth.enabled=false`
-from `/readiness`.
+non-loopback target (`LAB_TRACKER_MCP_BASE_URL` or `LAB_TRACKER_BASE_URL`) that
+reports `auth.enabled=false` from `/readiness`.
 
 ## Guardrail enforcement
 

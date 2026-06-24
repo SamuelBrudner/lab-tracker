@@ -19,27 +19,33 @@ manual debugging.
 Environment for read/write tools:
 
 ```bash
-LAB_TRACKER_MCP_BASE_URL=http://127.0.0.1:8000
-LAB_TRACKER_MCP_API_KEY=<lpat-personal-access-token>
-LAB_TRACKER_MCP_USERNAME=<service-account-username>
-LAB_TRACKER_MCP_PASSWORD=<service-account-password>
+LAB_TRACKER_BASE_URL=http://127.0.0.1:8000
+LAB_TRACKER_TOKEN=<lpat-personal-access-token>
+# Fallback/local service account only:
+LAB_TRACKER_USERNAME=<service-account-username>
+LAB_TRACKER_PASSWORD=<service-account-password>
 ```
 
 For agents that are not running on the graph workstation, use the current
 workstation HTTPS base URL:
 
 ```bash
-LAB_TRACKER_MCP_BASE_URL=https://mwcppc01ysbc155.tail79f9d8.ts.net
-LAB_TRACKER_MCP_API_KEY=<read-only-lpat-token>
-LAB_TRACKER_MCP_USERNAME=<service-account-username>
-LAB_TRACKER_MCP_PASSWORD=<service-account-password>
+LAB_TRACKER_BASE_URL=https://mwcppc01ysbc155.tail79f9d8.ts.net
+LAB_TRACKER_TOKEN=<read-only-lpat-token>
+# Fallback/local service account only:
+LAB_TRACKER_USERNAME=<service-account-username>
+LAB_TRACKER_PASSWORD=<service-account-password>
 ```
 
-The server does not store bearer tokens. When `LAB_TRACKER_MCP_API_KEY` (or
-`LAB_TRACKER_MCP_TOKEN`) is set, the client sends that `lpat_` token directly
-and does not call `/auth/login`. Otherwise it logs in with the configured
-username/password and retries once after a 401. Credentials are only required
-when `LAB_TRACKER_AUTH_ENABLED=true`; local auth-disabled testing can omit them.
+The server does not store bearer tokens. When `LAB_TRACKER_TOKEN` is set, the
+client sends that `lpat_` token directly and does not call `/auth/login`.
+Existing configs can keep using `LAB_TRACKER_MCP_API_KEY`,
+`LAB_TRACKER_MCP_TOKEN`, `LAB_TRACKER_ACCESS_TOKEN`, or
+`LAB_TRACKER_MCP_BASE_URL`; the MCP-only runtime prefers MCP-specific aliases
+when both forms are present. Without a bearer token, it logs in with the
+configured username/password fallback and retries once after a 401. Credentials
+are only required when `LAB_TRACKER_AUTH_ENABLED=true`; local auth-disabled
+testing can omit them.
 
 For a private hosted read-only MCP endpoint, use the compose `mcp` service:
 
@@ -62,10 +68,10 @@ than a hardcoded absolute Python path:
     "lab-tracker": {
       "command": "lt-mcp",
       "env": {
-        "LAB_TRACKER_MCP_BASE_URL": "http://127.0.0.1:8000",
-        "LAB_TRACKER_MCP_API_KEY": "<lpat-personal-access-token>",
-        "LAB_TRACKER_MCP_USERNAME": "<service-account-username>",
-        "LAB_TRACKER_MCP_PASSWORD": "<service-account-password>"
+        "LAB_TRACKER_BASE_URL": "http://127.0.0.1:8000",
+        "LAB_TRACKER_TOKEN": "<lpat-personal-access-token>",
+        "LAB_TRACKER_USERNAME": "<service-account-username>",
+        "LAB_TRACKER_PASSWORD": "<service-account-password>"
       }
     }
   }
@@ -83,7 +89,7 @@ interpreter:
       "command": "${LAB_TRACKER_PYTHON:-python}",
       "args": ["-m", "lab_tracker.mcp_server"],
       "env": {
-        "LAB_TRACKER_MCP_BASE_URL": "http://127.0.0.1:8000"
+        "LAB_TRACKER_BASE_URL": "http://127.0.0.1:8000"
       }
     }
   }
@@ -192,13 +198,13 @@ For MCP clients on other computers, use the reachable shared-server URL instead
 of localhost, for example:
 
 ```powershell
-$env:LAB_TRACKER_MCP_BASE_URL = "http://<host-or-tailnet-ip>:8000"
+$env:LAB_TRACKER_BASE_URL = "http://<host-or-tailnet-ip>:8000"
 ```
 
 For off-network agents, prefer the durable Tailscale Funnel endpoint:
 
 ```powershell
-$env:LAB_TRACKER_MCP_BASE_URL = "https://mwcppc01ysbc155.tail79f9d8.ts.net"
+$env:LAB_TRACKER_BASE_URL = "https://mwcppc01ysbc155.tail79f9d8.ts.net"
 ```
 
 See [`docs/lan-shared-graph.md`](lan-shared-graph.md) for same-LAN, VPN, and

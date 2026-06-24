@@ -48,22 +48,27 @@ and does not write directly to the database.
 MCP environment:
 
 ```bash
-LAB_TRACKER_MCP_BASE_URL=http://127.0.0.1:8000
-LAB_TRACKER_MCP_USERNAME=<service-account-username>
-LAB_TRACKER_MCP_PASSWORD=<service-account-password>
+LAB_TRACKER_BASE_URL=http://127.0.0.1:8000
+LAB_TRACKER_TOKEN=<lpat-personal-access-token>
+# Fallback/local service account only:
+LAB_TRACKER_USERNAME=<service-account-username>
+LAB_TRACKER_PASSWORD=<service-account-password>
 ```
 
 For agents running somewhere other than this workstation, use the public
 Tailscale Funnel base URL instead of localhost:
 
 ```bash
-LAB_TRACKER_MCP_BASE_URL=https://mwcppc01ysbc155.tail79f9d8.ts.net
-LAB_TRACKER_MCP_USERNAME=<service-account-username>
-LAB_TRACKER_MCP_PASSWORD=<service-account-password>
+LAB_TRACKER_BASE_URL=https://mwcppc01ysbc155.tail79f9d8.ts.net
+LAB_TRACKER_TOKEN=<read-only-lpat-token>
+# Fallback/local service account only:
+LAB_TRACKER_USERNAME=<service-account-username>
+LAB_TRACKER_PASSWORD=<service-account-password>
 ```
 
-MCP username/password are only required when `LAB_TRACKER_AUTH_ENABLED=true`.
-Local auth-disabled testing can omit them.
+Prefer `LAB_TRACKER_TOKEN` with an `lpat_` bearer token when
+`LAB_TRACKER_AUTH_ENABLED=true`. Username/password are a fallback/local
+service-account option. Local auth-disabled testing can omit credentials.
 
 <!-- BEGIN GENERATED MCP TOOL LIST -->
 Use these tools when available. This list is generated from `lab_tracker.mcp_tools.READ_TOOLS` and `WRITE_TOOLS`; do not edit it by hand.
@@ -153,11 +158,10 @@ research writing such as manuscripts, grants, abstracts, results, discussion
 text, and figure legends. If Lab Tracker is unavailable or ambiguous, state that
 explicitly before proceeding.
 
-For MCP clients on other computers, point `LAB_TRACKER_MCP_BASE_URL` at the
-serving machine, preferably the durable HTTPS Funnel URL above. Same-tailnet or
-LAN-only clients can also use `http://<host-ip>:8000` when the server is
-explicitly bound for LAN serving. Use `docs/lan-shared-graph.md` for the
-current serving modes.
+For MCP clients on other computers, point `LAB_TRACKER_BASE_URL` at the serving
+machine, preferably the durable HTTPS Funnel URL above. Same-tailnet or LAN-only
+clients can also use `http://<host-ip>:8000` when the server is explicitly bound
+for LAN serving. Use `docs/lan-shared-graph.md` for the current serving modes.
 
 ## Question Staging Workflow
 

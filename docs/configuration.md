@@ -195,6 +195,40 @@ Raw images and draft operations are not committed automatically. Accepted
 operations still pass through the normal API validation path, and model output
 that references unknown entity IDs or unsupported semantic operations is rejected.
 
+## Client Credential Surfaces
+
+Non-browser Lab Tracker clients use one canonical environment surface:
+
+```bash
+LAB_TRACKER_BASE_URL=http://127.0.0.1:8000
+LAB_TRACKER_PROJECT_ID=<project-id>
+LAB_TRACKER_TOKEN=<lpat-personal-access-token>
+```
+
+Use `LAB_TRACKER_TOKEN` for scripts, notebooks, MCP clients, CI hooks, and
+figure capture. Existing deployments can keep using `LAB_TRACKER_ACCESS_TOKEN`,
+`LAB_TRACKER_MCP_API_KEY`, `LAB_TRACKER_MCP_TOKEN`,
+`LAB_TRACKER_MCP_BASE_URL`, `LAB_TRACKER_MCP_USERNAME`, and
+`LAB_TRACKER_MCP_PASSWORD`; MCP-only runtime config prefers the MCP-specific
+aliases when both forms are set.
+
+There are four distinct trust flows:
+
+- Browser user login is for interactive web sessions.
+- `lpat_` bearer tokens via `LAB_TRACKER_TOKEN` are for scripts, MCP, agents,
+  notebooks, CI hooks, and figure capture.
+- Paired-device tokens are for phone capture only.
+- `LAB_TRACKER_BOOTSTRAP_ADMIN_TOKEN` is for first-admin setup only, and only
+  when the user table is empty.
+
+Username/password automation remains available as a fallback for local service
+accounts:
+
+```bash
+LAB_TRACKER_USERNAME=<service-account-username>
+LAB_TRACKER_PASSWORD=<service-account-password>
+```
+
 ### Review metadata and evaluation
 
 The review screen records enough metadata to compare `graph_context` and
@@ -211,8 +245,10 @@ evidence notes. This works for folders synced by Google Drive, Dropbox, OneDrive
 or similar tools without adding a provider-specific OAuth workflow:
 
 ```bash
-LAB_TRACKER_BASE_URL=http://127.0.0.1:8000 \
-LAB_TRACKER_PROJECT_ID=<project-id> \
+export LAB_TRACKER_BASE_URL=http://127.0.0.1:8000
+export LAB_TRACKER_PROJECT_ID=<project-id>
+# For auth-enabled targets:
+# export LAB_TRACKER_TOKEN=<lpat-personal-access-token>
 lt import-folder --project "$LAB_TRACKER_PROJECT_ID" --root /path/to/lab-inbox
 ```
 

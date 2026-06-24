@@ -139,7 +139,7 @@ On Windows:
 ```
 
 Then open `http://<host-ip>:8000/app` from the other computer, or set
-`LAB_TRACKER_MCP_BASE_URL=http://<host-ip>:8000` for MCP clients. If remote
+`LAB_TRACKER_BASE_URL=http://<host-ip>:8000` for MCP clients. If remote
 clients time out, your OS firewall may need an inbound rule for TCP port 8000.
 The LAN helpers refuse to bind `0.0.0.0` when authentication is disabled unless
 you pass the explicit insecure-demo override documented in the LAN guide.

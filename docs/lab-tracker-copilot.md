@@ -76,7 +76,7 @@ The installed console script is the preferred portable command:
       "type": "stdio",
       "command": "lt-mcp",
       "env": {
-        "LAB_TRACKER_MCP_BASE_URL": "http://127.0.0.1:8000"
+        "LAB_TRACKER_BASE_URL": "http://127.0.0.1:8000"
       }
     }
   }
@@ -97,7 +97,7 @@ For a machine without `lt-mcp` on `PATH`, use `uvx` against the repository:
         "lt-mcp"
       ],
       "env": {
-        "LAB_TRACKER_MCP_BASE_URL": "http://127.0.0.1:8000"
+        "LAB_TRACKER_BASE_URL": "http://127.0.0.1:8000"
       }
     }
   }

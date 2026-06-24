@@ -72,10 +72,10 @@ unified diff context.
 
 Required environment:
 
-- `LAB_TRACKER_BASE_URL` or `LAB_TRACKER_MCP_BASE_URL`
+- `LAB_TRACKER_BASE_URL` (or compatibility alias `LAB_TRACKER_MCP_BASE_URL`)
 - one of:
   - `LAB_TRACKER_TOKEN`
-  - `LAB_TRACKER_USERNAME` and `LAB_TRACKER_PASSWORD`
+  - fallback/local service account `LAB_TRACKER_USERNAME` and `LAB_TRACKER_PASSWORD`
   - no auth variables when the target API has local auth disabled
 
 The script prints the created note id and the stored change set as JSON. Run it from

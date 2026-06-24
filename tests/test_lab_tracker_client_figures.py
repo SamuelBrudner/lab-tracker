@@ -306,7 +306,7 @@ def test_circuit_open_skips_env_client_construction(
     assert failed.action == "failed"
     monkeypatch.setenv("LAB_TRACKER_PROJECT_ID", "project-1")
     monkeypatch.setenv("LAB_TRACKER_BASE_URL", "http://testserver")
-    monkeypatch.setenv("LAB_TRACKER_ACCESS_TOKEN", "token")
+    monkeypatch.setenv("LAB_TRACKER_TOKEN", "token")
 
     class ForbiddenAutoClient:
         def __init__(self, *_args: object, **_kwargs: object) -> None:
@@ -346,6 +346,30 @@ def test_env_capture_client_allows_auth_disabled_local_project(
         assert resolved_client is not None
         assert resolved_client.base_url == "http://127.0.0.1:8000"
         assert resolved_client.access_token is None
+        assert resolved_project_id == "project-1"
+        assert close_client is True
+    finally:
+        if resolved_client is not None:
+            resolved_client.close()
+
+
+def test_env_capture_client_prefers_canonical_bearer_token(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("LAB_TRACKER_PROJECT_ID", "project-1")
+    monkeypatch.setenv("LAB_TRACKER_BASE_URL", "https://lab.example.test/")
+    monkeypatch.setenv("LAB_TRACKER_TOKEN", "lpat_canonical")
+    monkeypatch.setenv("LAB_TRACKER_ACCESS_TOKEN", "lpat_access_alias")
+    monkeypatch.setenv("LAB_TRACKER_MCP_API_KEY", "lpat_mcp_alias")
+
+    resolved_client, resolved_project_id, close_client = figure_module._resolve_capture_client(
+        client=None,
+        project_id=None,
+    )
+    try:
+        assert resolved_client is not None
+        assert resolved_client.base_url == "https://lab.example.test"
+        assert resolved_client.access_token == "lpat_canonical"
         assert resolved_project_id == "project-1"
         assert close_client is True
     finally:

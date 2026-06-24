@@ -1102,7 +1102,7 @@ class LabTracker:
             if supplied_token_used and not self._has_login_credentials():
                 raise LTAPIError(
                     "Configured Lab Tracker bearer token was rejected by the API. "
-                    "Refresh the token or set LAB_TRACKER_USERNAME and "
+                    "Refresh LAB_TRACKER_TOKEN or set LAB_TRACKER_USERNAME and "
                     "LAB_TRACKER_PASSWORD so the client can log in."
                 )
             self._access_token = None
@@ -1141,8 +1141,9 @@ class LabTracker:
         if not username or not password:
             if required:
                 raise LTAPIError(
-                    "LAB_TRACKER_USERNAME and LAB_TRACKER_PASSWORD are required "
-                    "when the Lab Tracker API has authentication enabled."
+                    "Set LAB_TRACKER_TOKEN or LAB_TRACKER_USERNAME and "
+                    "LAB_TRACKER_PASSWORD when the Lab Tracker API has "
+                    "authentication enabled."
                 )
             return None
         response = self._send(
@@ -1297,8 +1298,8 @@ _default_client_instance: LabTracker | None = None
 
 def _env_access_token() -> str | None:
     for key in (
-        "LAB_TRACKER_ACCESS_TOKEN",
         "LAB_TRACKER_TOKEN",
+        "LAB_TRACKER_ACCESS_TOKEN",
         "LAB_TRACKER_MCP_API_KEY",
         "LAB_TRACKER_MCP_TOKEN",
     ):

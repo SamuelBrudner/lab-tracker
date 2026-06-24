@@ -50,6 +50,7 @@ def test_init_creates_portable_consumer_files(tmp_path: Path) -> None:
     mcp_config = json.loads((tmp_path / ".mcp.json").read_text(encoding="utf-8"))
     server = mcp_config["mcpServers"]["lab-tracker"]
     assert server["command"] == "lt-mcp"
+    assert server["env"] == {"LAB_TRACKER_BASE_URL": "http://127.0.0.1:8000"}
     assert "python.exe" not in json.dumps(mcp_config).lower()
     assert "C:\\" not in json.dumps(mcp_config)
 

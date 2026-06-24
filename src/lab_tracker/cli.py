@@ -786,7 +786,7 @@ def _mcp_json() -> str:
             "lab-tracker": {
                 "command": "lt-mcp",
                 "env": {
-                    "LAB_TRACKER_MCP_BASE_URL": "http://127.0.0.1:8000",
+                    "LAB_TRACKER_BASE_URL": "http://127.0.0.1:8000",
                 },
             }
         }

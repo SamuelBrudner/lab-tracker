@@ -93,11 +93,12 @@ On another computer connected to the same LAN or VPN:
 For MCP clients on other computers, set:
 
 ```powershell
-$env:LAB_TRACKER_MCP_BASE_URL = "http://<lan-ip>:8000"
+$env:LAB_TRACKER_BASE_URL = "http://<lan-ip>:8000"
 ```
 
-When authentication is enabled, also set `LAB_TRACKER_MCP_USERNAME` and
-`LAB_TRACKER_MCP_PASSWORD` in that client environment.
+When authentication is enabled, prefer `LAB_TRACKER_TOKEN` with an `lpat_`
+bearer token. `LAB_TRACKER_USERNAME` and `LAB_TRACKER_PASSWORD` are a
+fallback/local service-account option.
 
 For phone pairing and capture details, see
 [`docs/phone-capture-quickstart.md`](phone-capture-quickstart.md).

@@ -95,11 +95,18 @@ class MCPSettings:
     @classmethod
     def from_env(cls) -> MCPSettings:
         return cls(
-            base_url=os.getenv("LAB_TRACKER_MCP_BASE_URL", DEFAULT_BASE_URL).rstrip("/"),
-            username=os.getenv("LAB_TRACKER_MCP_USERNAME"),
-            password=os.getenv("LAB_TRACKER_MCP_PASSWORD"),
-            api_key=os.getenv("LAB_TRACKER_MCP_API_KEY")
-            or os.getenv("LAB_TRACKER_MCP_TOKEN"),
+            base_url=(
+                _first_env("LAB_TRACKER_MCP_BASE_URL", "LAB_TRACKER_BASE_URL")
+                or DEFAULT_BASE_URL
+            ).rstrip("/"),
+            username=_first_env("LAB_TRACKER_MCP_USERNAME", "LAB_TRACKER_USERNAME"),
+            password=_first_env("LAB_TRACKER_MCP_PASSWORD", "LAB_TRACKER_PASSWORD"),
+            api_key=_first_env(
+                "LAB_TRACKER_MCP_API_KEY",
+                "LAB_TRACKER_MCP_TOKEN",
+                "LAB_TRACKER_TOKEN",
+                "LAB_TRACKER_ACCESS_TOKEN",
+            ),
             timeout_seconds=float(
                 os.getenv("LAB_TRACKER_MCP_TIMEOUT_SECONDS", str(DEFAULT_TIMEOUT_SECONDS))
             ),
@@ -849,8 +856,8 @@ class LabTrackerAPIClient:
             self._access_token = None
             if not self._has_credentials():
                 raise LabTrackerAPIAuthError(
-                    "LAB_TRACKER_MCP_USERNAME and LAB_TRACKER_MCP_PASSWORD are required "
-                    "when the Lab Tracker API has authentication enabled.",
+                    "Set LAB_TRACKER_TOKEN or username/password when the Lab Tracker API "
+                    "has authentication enabled.",
                     status_code=response.status_code,
                     code="auth_error",
                 )
@@ -889,8 +896,8 @@ class LabTrackerAPIClient:
         password = self._settings.password or ""
         if not username or not password:
             raise LabTrackerAPIAuthError(
-                "LAB_TRACKER_MCP_USERNAME and LAB_TRACKER_MCP_PASSWORD are required "
-                "for authenticated Lab Tracker MCP tools.",
+                "Set LAB_TRACKER_TOKEN or username/password for authenticated Lab Tracker "
+                "MCP tools.",
                 code="auth_error",
             )
         response = self._send(
@@ -913,6 +920,14 @@ def _drop_empty(payload: JsonObject | None) -> JsonObject | None:
     if payload is None:
         return None
     return {key: value for key, value in payload.items() if value is not None}
+
+
+def _first_env(*keys: str) -> str | None:
+    for key in keys:
+        value = os.getenv(key)
+        if value:
+            return value
+    return None
 
 
 def _is_note_metadata_scalar(value: object) -> bool:

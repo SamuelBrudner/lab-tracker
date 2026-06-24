@@ -119,10 +119,10 @@ def test_copilot_mcp_configs_use_servers_schema() -> None:
         assert "mcpServers" not in config
         assert server["type"] == "stdio"
         assert server["command"] == "lt-mcp"
-        assert env["LAB_TRACKER_MCP_BASE_URL"] == "http://127.0.0.1:8000"
-        assert env["LAB_TRACKER_MCP_API_KEY"] == "${input:lt-token}"
-        assert env["LAB_TRACKER_MCP_USERNAME"] == "${input:lt-username}"
-        assert env["LAB_TRACKER_MCP_PASSWORD"] == "${input:lt-password}"
+        assert env["LAB_TRACKER_BASE_URL"] == "http://127.0.0.1:8000"
+        assert env["LAB_TRACKER_TOKEN"] == "${input:lt-token}"
+        assert env["LAB_TRACKER_USERNAME"] == "${input:lt-username}"
+        assert env["LAB_TRACKER_PASSWORD"] == "${input:lt-password}"
 
 
 def test_committed_mcp_json_matches_init_template() -> None:
@@ -336,13 +336,51 @@ def test_client_static_api_key_does_not_retry_revoked_token() -> None:
     assert seen == [("GET", "/projects", "Bearer lpat_secret")]
 
 
-def test_mcp_settings_from_env_accepts_api_key_aliases(monkeypatch) -> None:
-    monkeypatch.setenv("LAB_TRACKER_MCP_API_KEY", "lpat_primary")
-    monkeypatch.setenv("LAB_TRACKER_MCP_TOKEN", "lpat_alias")
-    assert mcp_server.MCPSettings.from_env().api_key == "lpat_primary"
+def test_mcp_settings_from_env_accepts_canonical_and_preserves_mcp_precedence(
+    monkeypatch,
+) -> None:
+    for key in (
+        "LAB_TRACKER_BASE_URL",
+        "LAB_TRACKER_USERNAME",
+        "LAB_TRACKER_PASSWORD",
+        "LAB_TRACKER_TOKEN",
+        "LAB_TRACKER_ACCESS_TOKEN",
+        "LAB_TRACKER_MCP_BASE_URL",
+        "LAB_TRACKER_MCP_USERNAME",
+        "LAB_TRACKER_MCP_PASSWORD",
+        "LAB_TRACKER_MCP_API_KEY",
+        "LAB_TRACKER_MCP_TOKEN",
+    ):
+        monkeypatch.delenv(key, raising=False)
+
+    monkeypatch.setenv("LAB_TRACKER_BASE_URL", "http://generic.example.test:8123/")
+    monkeypatch.setenv("LAB_TRACKER_USERNAME", "generic-user")
+    monkeypatch.setenv("LAB_TRACKER_PASSWORD", "generic-pass")
+    monkeypatch.setenv("LAB_TRACKER_TOKEN", "lpat_canonical")
+
+    settings = mcp_server.MCPSettings.from_env()
+    assert settings.base_url == "http://generic.example.test:8123"
+    assert settings.username == "generic-user"
+    assert settings.password == "generic-pass"
+    assert settings.api_key == "lpat_canonical"
+
+    monkeypatch.setenv("LAB_TRACKER_MCP_BASE_URL", "http://mcp.example.test:9000/")
+    monkeypatch.setenv("LAB_TRACKER_MCP_USERNAME", "mcp-user")
+    monkeypatch.setenv("LAB_TRACKER_MCP_PASSWORD", "mcp-pass")
+    monkeypatch.setenv("LAB_TRACKER_MCP_API_KEY", "lpat_mcp_api")
+    monkeypatch.setenv("LAB_TRACKER_MCP_TOKEN", "lpat_mcp_token")
+
+    settings = mcp_server.MCPSettings.from_env()
+    assert settings.base_url == "http://mcp.example.test:9000"
+    assert settings.username == "mcp-user"
+    assert settings.password == "mcp-pass"
+    assert settings.api_key == "lpat_mcp_api"
 
     monkeypatch.delenv("LAB_TRACKER_MCP_API_KEY")
-    assert mcp_server.MCPSettings.from_env().api_key == "lpat_alias"
+    assert mcp_server.MCPSettings.from_env().api_key == "lpat_mcp_token"
+
+    monkeypatch.delenv("LAB_TRACKER_MCP_TOKEN")
+    assert mcp_server.MCPSettings.from_env().api_key == "lpat_canonical"
 
 
 def test_mcp_api_error_redacts_bearer_and_lpat_secrets() -> None:
@@ -1276,7 +1314,7 @@ def test_authenticated_tool_requires_service_credentials_when_api_requires_auth(
         ),
     )
 
-    with pytest.raises(mcp_server.LabTrackerAPIError, match="LAB_TRACKER_MCP_USERNAME"):
+    with pytest.raises(mcp_server.LabTrackerAPIError, match="LAB_TRACKER_TOKEN"):
         client.list_projects()
 
     client.close()
