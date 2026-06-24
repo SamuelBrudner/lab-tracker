@@ -98,8 +98,32 @@ describe("buildFlowGraph edge dedupe", () => {
     };
     const { nodes } = buildFlowGraph(graph, "evidence");
     expect(nodes[0].position.y).toBe(0);
-    expect(nodes[1].position.y).toBe(118);
+    expect(nodes[1].position.y).toBe(154);
     expect(nodes[0].position.x).toBe(nodes[1].position.x);
+  });
+
+  it("builds compact custom nodes and passes visualization asset metadata", () => {
+    const graph = {
+      nodes: [
+        {
+          id: "V",
+          entity_type: "visualization",
+          label: "figure",
+          metadata: {
+            asset: { content_type: "image/png", filename: "figure.png" },
+            asset_download_path: "/visualizations/V/file/download",
+          },
+        },
+      ],
+      edges: [],
+    };
+    const { nodes } = buildFlowGraph(graph, "evidence", "token-1");
+
+    expect(nodes[0].type).toBe("labTrackerGraphNode");
+    expect(nodes[0].style.width).toBe(210);
+    expect(nodes[0].style.height).toBe(116);
+    expect(nodes[0].data.token).toBe("token-1");
+    expect(nodes[0].data.metadata.asset.filename).toBe("figure.png");
   });
 
   it("anchors a downstream node to its source's row, not the top of the column", () => {

@@ -5,6 +5,16 @@ import { formatDate } from "../shared/formatters.js";
 import { useApiResource } from "../hooks/useApiResource.js";
 
 const { useEffect, useMemo, useState } = React;
+const RECENT_NOTE_EXPAND_THRESHOLD = 180;
+
+function notePreviewText(note) {
+  return (
+    note.transcribed_text ||
+    note.raw_content ||
+    note.raw_asset?.filename ||
+    "(binary upload)"
+  );
+}
 
 function NotePanel({
   canWrite,
@@ -25,6 +35,24 @@ function NotePanel({
   notes,
   navigate,
 }) {
+  const [expandedNoteIds, setExpandedNoteIds] = React.useState(() => new Set());
+
+  React.useEffect(() => {
+    setExpandedNoteIds(new Set());
+  }, [selectedProjectId]);
+
+  function toggleExpandedNote(noteId) {
+    setExpandedNoteIds((current) => {
+      const next = new Set(current);
+      if (next.has(noteId)) {
+        next.delete(noteId);
+      } else {
+        next.add(noteId);
+      }
+      return next;
+    });
+  }
+
   return (
     <article className="card span-6">
       <div className="item-head">
@@ -105,17 +133,40 @@ function NotePanel({
       {!loading && !error && notes.length === 0 ? (
         <p className="subtle">No recent notes for this project.</p>
       ) : null}
-      <div className="stack">
-        {notes.map((note) => (
-          <article className="item" key={note.note_id}>
-            <div className="item-head">
-              <span className="pill">{note.status}</span>
-              <span className="subtle">{formatDate(note.created_at)}</span>
-            </div>
-            <p>{note.transcribed_text || note.raw_content || "(binary upload)"}</p>
-            <p className="mono">{note.note_id}</p>
-          </article>
-        ))}
+      <div className="stack recent-notes-list">
+        {notes.map((note) => {
+          const content = notePreviewText(note);
+          const isExpanded = expandedNoteIds.has(note.note_id);
+          const canExpand = content.length > RECENT_NOTE_EXPAND_THRESHOLD;
+          return (
+            <article className="item recent-note-item" key={note.note_id}>
+              <div className="item-head">
+                <span className="pill">{note.status}</span>
+                <span className="subtle">{formatDate(note.created_at)}</span>
+              </div>
+              <p
+                className={
+                  isExpanded
+                    ? "recent-note-text recent-note-text-expanded"
+                    : "recent-note-text"
+                }
+              >
+                {content}
+              </p>
+              {canExpand ? (
+                <button
+                  type="button"
+                  className="btn-link recent-note-toggle"
+                  aria-expanded={isExpanded}
+                  onClick={() => toggleExpandedNote(note.note_id)}
+                >
+                  {isExpanded ? "Show less" : "See more"}
+                </button>
+              ) : null}
+              <p className="mono recent-note-id">{note.note_id}</p>
+            </article>
+          );
+        })}
       </div>
     </article>
   );

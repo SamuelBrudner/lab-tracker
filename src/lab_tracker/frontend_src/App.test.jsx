@@ -5,7 +5,13 @@ import { fireEvent, render, screen, waitFor, within } from "@testing-library/rea
 import { App } from "./app-shell.jsx";
 import { buildApiPath } from "./shared/api.js";
 import { TOKEN_STORAGE_KEY } from "./shared/constants.js";
-import { apiResponse, errorResponse, installFetchMock, textResponse } from "./test/utils.js";
+import {
+  apiResponse,
+  binaryResponse,
+  errorResponse,
+  installFetchMock,
+  textResponse,
+} from "./test/utils.js";
 
 const projectsPath = buildApiPath("/projects", { limit: 200, offset: 0 });
 
@@ -40,7 +46,12 @@ function noteCountPath(projectId) {
 }
 
 function recentNotesPath(projectId) {
-  return buildApiPath("/notes", { limit: 5, offset: 0, project_id: projectId });
+  return buildApiPath("/notes", {
+    limit: 5,
+    offset: 0,
+    project_id: projectId,
+    recent_first: true,
+  });
 }
 
 function targetedQuestionNotesPath(projectId, questionId) {
@@ -302,6 +313,7 @@ function graphNode({
   entityId,
   entityType,
   label,
+  metadata = {},
   route = null,
   status = null,
 } = {}) {
@@ -311,7 +323,7 @@ function graphNode({
     entity_type: entityType,
     id: `${entityType}:${entityId}`,
     label,
-    metadata: {},
+    metadata,
     route,
     status,
   };
@@ -444,6 +456,84 @@ describe("App", () => {
     expect(screen.getAllByText("Temporal odor project").length).toBeGreaterThan(0);
     await waitFor(() => expect(screen.getAllByText("Odor timing?").length).toBeGreaterThan(0));
     expect(requestedUrls(fetchMock)).toContain(projectsPath);
+  });
+
+  it("loads newest-first recent notes and expands long note text inline", async () => {
+    const longNote = `First pass note ${"verylongunbrokenword".repeat(16)}`;
+    const fetchMock = installFetchMock([
+      {
+        match: "/auth/me",
+        response: apiResponse(
+          { role: "admin", username: "local-tester" },
+          200,
+          { auth_enabled: false }
+        ),
+      },
+      {
+        match: projectsPath,
+        response: apiResponse([project("project-1", "Temporal odor project")]),
+      },
+      {
+        match: questionListPath("project-1"),
+        response: paged([question({ projectId: "project-1", text: "Odor timing?" })]),
+      },
+      {
+        match: datasetListPath("project-1"),
+        response: paged([]),
+      },
+      {
+        match: noteCountPath("project-1"),
+        response: paged([], { limit: 1, offset: 0, total: 2 }),
+      },
+      {
+        match: recentNotesPath("project-1"),
+        response: paged([
+          note({
+            createdAt: "2026-04-20T03:00:00Z",
+            noteId: "newest-note",
+            rawContent: longNote,
+            transcribedText: "",
+          }),
+          note({
+            createdAt: "2026-04-20T02:00:00Z",
+            noteId: "older-note",
+            rawContent: "Shorter older note.",
+            transcribedText: "",
+          }),
+        ]),
+      },
+      {
+        match: activeSessionsPath("project-1"),
+        response: paged([]),
+      },
+      {
+        match: stagedAnalysesPath("project-1"),
+        response: paged([]),
+      },
+      {
+        match: committedAnalysesPath("project-1"),
+        response: paged([], { limit: 1, offset: 0, total: 0 }),
+      },
+    ]);
+
+    render(<App />);
+
+    const longText = await screen.findByText(longNote);
+    const noteItem = longText.closest(".recent-note-item");
+    expect(requestedUrls(fetchMock)).toContain(recentNotesPath("project-1"));
+    expect(longText).toHaveClass("recent-note-text");
+    expect(longText).not.toHaveClass("recent-note-text-expanded");
+    expect(noteItem).toHaveClass("recent-note-item");
+
+    const toggle = within(noteItem).getByRole("button", { name: "See more" });
+    fireEvent.click(toggle);
+
+    expect(longText).toHaveClass("recent-note-text-expanded");
+    expect(toggle).toHaveTextContent("Show less");
+
+    fireEvent.click(toggle);
+    expect(longText).not.toHaveClass("recent-note-text-expanded");
+    expect(toggle).toHaveTextContent("See more");
   });
 
   it("shows portfolio home for multi-project local auth sessions", async () => {
@@ -763,6 +853,77 @@ describe("App", () => {
     fireEvent.click(screen.getByRole("button", { name: "Dataset commit-1" }));
     await waitFor(() => expect(window.location.pathname).toBe(`/app/datasets/${datasetId}`));
     expect(await screen.findByRole("heading", { name: "Dataset Detail" })).toBeInTheDocument();
+  });
+
+  it("renders managed visualization image thumbnails in the project graph", async () => {
+    window.history.replaceState({}, "", "/app/graph");
+    const vizId = "33333333-3333-4333-8333-333333333333";
+    const graph = projectGraph({
+      nodes: [
+        graphNode({
+          detail: "figures/plot.png",
+          entityId: vizId,
+          entityType: "visualization",
+          label: "Main figure",
+          metadata: {
+            asset: {
+              checksum: "sha256-thumb",
+              content_type: "image/png",
+              filename: "figure-thumb.png",
+            },
+            asset_download_path: `/visualizations/${vizId}/file/download`,
+            viz_type: "line plot",
+          },
+          route: `/app/visualizations/${vizId}`,
+        }),
+      ],
+    });
+    const fetchMock = installFetchMock([
+      {
+        match: "/auth/me",
+        response: apiResponse(
+          { role: "admin", username: "local-tester" },
+          200,
+          { auth_enabled: false }
+        ),
+      },
+      {
+        match: projectsPath,
+        response: apiResponse([project("project-1", "Temporal odor project")]),
+      },
+      {
+        match: questionCountPath("project-1"),
+        response: paged([], { limit: 1, offset: 0, total: 0 }),
+      },
+      {
+        match: datasetCountPath("project-1"),
+        response: paged([], { limit: 1, offset: 0, total: 0 }),
+      },
+      {
+        match: noteCountPath("project-1"),
+        response: paged([], { limit: 1, offset: 0, total: 0 }),
+      },
+      {
+        match: projectGraphPath("project-1", "evidence"),
+        response: apiResponse(graph),
+      },
+      {
+        match: `/visualizations/${vizId}/file/download`,
+        response: binaryResponse({
+          body: new Blob(["thumb-bytes"], { type: "image/png" }),
+          contentType: "image/png",
+        }),
+      },
+    ]);
+
+    render(<App />);
+
+    expect(await screen.findByRole("heading", { name: "Project Graph" })).toBeInTheDocument();
+    const thumbnail = await screen.findByRole("img", { name: "figure-thumb.png" });
+    expect(thumbnail.getAttribute("src")).toMatch(/^blob:/);
+    expect(screen.getByRole("button", { name: "Main figure" })).toBeInTheDocument();
+    expect(screen.queryByText("figures/plot.png")).not.toBeInTheDocument();
+    expect(requestedUrls(fetchMock)).toContain(`/visualizations/${vizId}/file/download`);
   });
 
   it("previews an image note and starts a graph draft", async () => {

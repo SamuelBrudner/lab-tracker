@@ -399,6 +399,34 @@ def test_project_graph_evidence_and_full_views_include_expected_links(
     }.issubset(_edge_ids(full["edges"]))
 
 
+def test_project_graph_visualization_nodes_include_managed_image_asset_metadata(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+):
+    ids = _create_graph_fixture(client, admin_auth_headers)
+    upload = client.post(
+        f"/visualizations/{ids['viz_id']}/file",
+        files={"file": ("figure-thumb.png", b"\x89PNG\r\n\x1a\nfigure", "image/png")},
+        headers=admin_auth_headers,
+    )
+    assert upload.status_code == 201
+
+    response = client.get(
+        f"/projects/{ids['project_id']}/graph",
+        headers=admin_auth_headers,
+    )
+
+    assert response.status_code == 200
+    nodes = {item["id"]: item for item in response.json()["data"]["nodes"]}
+    metadata = nodes[f"visualization:{ids['viz_id']}"]["metadata"]
+    assert metadata["asset_download_path"] == f"/visualizations/{ids['viz_id']}/file/download"
+    assert metadata["asset"] == {
+        "checksum": upload.json()["data"]["asset"]["checksum"],
+        "content_type": "image/png",
+        "filename": "figure-thumb.png",
+    }
+
+
 def test_project_graph_full_view_truncates_long_note_and_claim_labels(
     client: TestClient,
     admin_auth_headers: dict[str, str],

@@ -30,6 +30,7 @@ function useProjectNoteData({ token, selectedProjectId, setFlash, enabled = true
             limit: NOTE_PAGE_SIZE,
             offset: 0,
             project_id: projectId,
+            recent_first: true,
           }),
           { token }
         );

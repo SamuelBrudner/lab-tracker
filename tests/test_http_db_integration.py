@@ -548,6 +548,53 @@ def test_list_analyses_supports_recent_first_bounded_order(client: TestClient):
     assert payload["meta"]["total"] == 6
 
 
+def test_list_notes_supports_recent_first_bounded_order(client: TestClient):
+    headers = _admin_headers(client)
+    project_id = client.post(
+        "/projects",
+        json={"name": "Recent notes"},
+        headers=headers,
+    ).json()["data"]["project_id"]
+
+    note_ids: list[str] = []
+    for index in range(6):
+        note = client.post(
+            "/notes",
+            json={
+                "project_id": project_id,
+                "raw_content": f"recent note {index}",
+            },
+            headers=headers,
+        )
+        assert note.status_code == 201
+        note_ids.append(note.json()["data"]["note_id"])
+
+    base_created_at = datetime(2026, 6, 18, 12, 0, tzinfo=timezone.utc)
+    with client.app.state.db_session_factory() as session:
+        for index, note_id in enumerate(note_ids):
+            row = session.get(NoteModel, note_id)
+            assert row is not None
+            row.created_at = base_created_at + timedelta(minutes=index)
+            row.updated_at = row.created_at
+        session.commit()
+
+    response = client.get(
+        "/notes",
+        params={
+            "project_id": project_id,
+            "limit": 5,
+            "recent_first": "true",
+        },
+        headers=headers,
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert [item["note_id"] for item in payload["data"]] == list(reversed(note_ids[-5:]))
+    assert payload["meta"]["limit"] == 5
+    assert payload["meta"]["total"] == 6
+
+
 def test_list_analyses_supports_time_window_for_progress_reports(client: TestClient):
     """A 'since last July' window returns only in-range committed analyses.
 

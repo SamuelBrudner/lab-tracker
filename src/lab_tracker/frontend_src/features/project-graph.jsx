@@ -91,8 +91,10 @@ const VIEW_AXIS_TYPES = {
 };
 
 // Column width per entity-type layer, and row height per stacked node.
-const COL_WIDTH = 265;
-const ROW_HEIGHT = 118;
+const COL_WIDTH = 250;
+const ROW_HEIGHT = 154;
+const FLOW_NODE_WIDTH = 210;
+const FLOW_NODE_HEIGHT = 116;
 // Questions form a hierarchy (parent / supersede), so they are laid out as a
 // tree from their edges instead of a single insertion-ordered column. We key
 // off the stable machine `relationship` field (NOT the human display `label`,
@@ -104,7 +106,83 @@ const QUESTION_DOWN_RELATIONSHIPS = new Set([
   "question_superseded_by",
 ]);
 const Q_TREE_COL = 250; // depth spacing in the all-questions tree view
-const Q_TREE_ROW = 120; // sibling spacing in the all-questions tree view
+const Q_TREE_ROW = 148; // sibling spacing in the all-questions tree view
+
+function GraphFlowNode({ data }) {
+  const [imagePreview, setImagePreview] = React.useState("");
+  const metadata = data?.metadata || {};
+  const asset = metadata.asset || null;
+  const assetDownloadPath = metadata.asset_download_path || "";
+  const token = data?.token || "";
+  const isVisualization = data?.entityType === "visualization";
+  const isImageAsset = Boolean(
+    isVisualization &&
+      assetDownloadPath &&
+      typeof asset?.content_type === "string" &&
+      asset.content_type.toLowerCase().startsWith("image/")
+  );
+
+  React.useEffect(() => {
+    let canceled = false;
+    let objectUrl = "";
+    setImagePreview("");
+    if (!isImageAsset) {
+      return () => {
+        canceled = true;
+      };
+    }
+    const headers = token ? { Authorization: `Bearer ${token}` } : {};
+    fetch(assetDownloadPath, { headers })
+      .then((response) => {
+        if (!response.ok) {
+          throw new Error("Unable to load graph thumbnail.");
+        }
+        return response.blob();
+      })
+      .then((blob) => {
+        objectUrl = URL.createObjectURL(blob);
+        if (canceled) {
+          URL.revokeObjectURL(objectUrl);
+          return;
+        }
+        setImagePreview(objectUrl);
+      })
+      .catch(() => {
+        if (!canceled) {
+          setImagePreview("");
+        }
+      });
+    return () => {
+      canceled = true;
+      if (objectUrl) {
+        URL.revokeObjectURL(objectUrl);
+      }
+    };
+  }, [assetDownloadPath, isImageAsset, token]);
+
+  const typeLabel = TYPE_LABELS[data?.entityType] || data?.entityType || "Record";
+  const showDetail = Boolean(data?.detail && !isVisualization);
+
+  return (
+    <div className={`graph-node graph-node-${data?.entityType || "unknown"}`}>
+      <div className="graph-node-type">{typeLabel}</div>
+      {imagePreview ? (
+        <div className="graph-node-thumbnail">
+          <img
+            src={imagePreview}
+            alt={asset?.filename || data?.label || "Visualization thumbnail"}
+            draggable="false"
+          />
+        </div>
+      ) : null}
+      <div className="graph-node-title">{data?.label || "Record"}</div>
+      <div className="graph-node-footer">
+        {data?.status ? <span className="graph-node-status">{data.status}</span> : null}
+        {showDetail ? <span className="graph-node-detail">{data.detail}</span> : null}
+      </div>
+    </div>
+  );
+}
 
 function groupByType(nodes) {
   return nodes.reduce((groups, node) => {
@@ -266,7 +344,7 @@ function computeNodePositions(nodes, edges, view, layerByType, qLayout) {
   return positions;
 }
 
-function graphNodeToFlowNode(node, positions) {
+function graphNodeToFlowNode(node, positions, token = "") {
   const style = TYPE_STYLES[node.entity_type] || {};
   const goalShape =
     node.entity_type === "goal"
@@ -274,12 +352,15 @@ function graphNodeToFlowNode(node, positions) {
       : {};
   return {
     id: node.id,
+    type: "labTrackerGraphNode",
     data: {
       detail: node.detail,
       entityType: node.entity_type,
       label: node.label,
+      metadata: node.metadata || {},
       route: node.route,
       status: node.status,
+      token,
     },
     position: positions.get(node.id) || { x: 0, y: 0 },
     style: {
@@ -287,8 +368,8 @@ function graphNodeToFlowNode(node, positions) {
       borderWidth: 1,
       color: "#1f2933",
       ...goalShape,
-      maxWidth: 220,
-      width: 220,
+      height: FLOW_NODE_HEIGHT,
+      width: FLOW_NODE_WIDTH,
     },
   };
 }
@@ -308,7 +389,7 @@ function graphEdgeToFlowEdge(edge) {
   };
 }
 
-export function buildFlowGraph(graph, view) {
+export function buildFlowGraph(graph, view, token = "") {
   const layerByType = TYPE_LAYER_BY_VIEW[view] || TYPE_LAYER_BY_VIEW.evidence;
   const qLayout = computeQuestionLayout(graph?.nodes || [], graph?.edges || []);
   const positions = computeNodePositions(
@@ -335,7 +416,7 @@ export function buildFlowGraph(graph, view) {
   });
   return {
     edges: dedupedEdges.map(graphEdgeToFlowEdge),
-    nodes: (graph?.nodes || []).map((node) => graphNodeToFlowNode(node, positions)),
+    nodes: (graph?.nodes || []).map((node) => graphNodeToFlowNode(node, positions, token)),
   };
 }
 
@@ -417,7 +498,8 @@ function ProjectGraphExplorer({
     };
   }, [selectedProjectId, token, view]);
 
-  const flowGraph = React.useMemo(() => buildFlowGraph(graph, view), [graph, view]);
+  const flowGraph = React.useMemo(() => buildFlowGraph(graph, view, token), [graph, token, view]);
+  const nodeTypes = React.useMemo(() => ({ labTrackerGraphNode: GraphFlowNode }), []);
   const nodeGroups = React.useMemo(() => groupByType(graph?.nodes || []), [graph]);
   const legendTypes = React.useMemo(
     () => legendTypesForView(view, nodeGroups),
@@ -580,6 +662,7 @@ function ProjectGraphExplorer({
               nodes={flowGraph.nodes}
               edges={flowGraph.edges}
               fitView
+              nodeTypes={nodeTypes}
               nodesDraggable={false}
               nodesConnectable={false}
               elementsSelectable={false}

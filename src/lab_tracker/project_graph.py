@@ -366,6 +366,16 @@ def _external_artifact_node(artifact: ExternalArtifactReference) -> ProjectGraph
 
 
 def _visualization_node(visualization: Visualization) -> ProjectGraphNode:
+    asset_metadata: dict[str, Any] = {}
+    if visualization.asset is not None:
+        asset_metadata = {
+            "asset": {
+                "filename": visualization.asset.filename,
+                "content_type": visualization.asset.content_type,
+                "checksum": visualization.asset.checksum,
+            },
+            "asset_download_path": visualization.asset_download_path,
+        }
     return ProjectGraphNode(
         id=_entity_node_id("visualization", visualization.viz_id),
         entity_type="visualization",
@@ -373,7 +383,7 @@ def _visualization_node(visualization: Visualization) -> ProjectGraphNode:
         label=_visualization_label(visualization),
         detail=visualization.file_path,
         route=f"/app/visualizations/{visualization.viz_id}",
-        metadata={"viz_type": visualization.viz_type},
+        metadata={"viz_type": visualization.viz_type, **asset_metadata},
     )
 
 

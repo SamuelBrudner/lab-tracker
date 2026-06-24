@@ -195,6 +195,7 @@ def build_notes_router(api: LabTrackerAPI) -> APIRouter:
         until: datetime | None = None,
         target_entity_type: EntityType | None = None,
         target_entity_id: UUID | None = None,
+        recent_first: bool = False,
         limit: int = 50,
         offset: int = 0,
     ):
@@ -215,6 +216,7 @@ def build_notes_router(api: LabTrackerAPI) -> APIRouter:
             target_entity_id=target_entity_id,
             limit=limit,
             offset=offset,
+            recent_first=recent_first,
         )
         return list_response(notes, limit=limit, offset=offset, total=total)
 
