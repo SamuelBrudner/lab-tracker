@@ -1,9 +1,9 @@
 import * as React from "react";
 
-import { fireEvent, render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { vi } from "vitest";
 
-import { PendingBatchBanner } from "./batches.jsx";
+import { BatchReviewPage, PendingBatchBanner } from "./batches.jsx";
 import { apiResponse, installFetchMock } from "../test/utils.js";
 
 describe("PendingBatchBanner", () => {
@@ -75,5 +75,86 @@ describe("PendingBatchBanner", () => {
 
     fireEvent.click(await screen.findByRole("button", { name: "Review" }));
     expect(navigate).toHaveBeenCalledWith("/app/batches/cs-meeting");
+  });
+});
+
+describe("BatchReviewPage", () => {
+  it("saves cadence as the project settings consumed by run-due", async () => {
+    let settingsBody = null;
+    const fetchMock = installFetchMock([
+      {
+        match: "/batches?project_id=project-1&limit=100",
+        response: apiResponse([], 200, { limit: 100, offset: 0, total: 0 }),
+      },
+      {
+        match: "/batches/runs?project_id=project-1&limit=20",
+        response: apiResponse([], 200, { limit: 20, offset: 0, total: 0 }),
+      },
+      {
+        match: "/projects/project-1/graph-draft-batch-settings",
+        response: [
+          apiResponse({
+            cadence_minutes: 720,
+            enabled: false,
+            next_run_at: null,
+            project_id: "project-1",
+            run_at_local_time: "06:00",
+            settings_id: "settings-1",
+            timezone_name: "America/New_York",
+          }),
+          apiResponse({
+            cadence_minutes: 1440,
+            enabled: true,
+            next_run_at: "2026-06-25T22:00:00Z",
+            project_id: "project-1",
+            run_at_local_time: "18:00",
+            settings_id: "settings-1",
+            timezone_name: "America/New_York",
+          }),
+        ],
+      },
+      {
+        match: "/projects/project-1/graph-draft-batch-settings",
+        method: "PATCH",
+        response: (request) => {
+          settingsBody = JSON.parse(request.init.body);
+          return apiResponse({
+            ...settingsBody,
+            next_run_at: "2026-06-25T22:00:00Z",
+            project_id: "project-1",
+            settings_id: "settings-1",
+          });
+        },
+      },
+    ]);
+
+    render(
+      <BatchReviewPage
+        token="token-1"
+        projects={[{ name: "Project One", project_id: "project-1" }]}
+        selectedProjectId="project-1"
+        onSelectedProjectChange={vi.fn()}
+        navigate={vi.fn()}
+        canManageGraph={true}
+        setBusy={vi.fn()}
+        setFlash={vi.fn()}
+      />
+    );
+
+    expect(await screen.findByRole("heading", { name: "Cadence" })).toBeInTheDocument();
+    fireEvent.click(screen.getByLabelText("Enabled"));
+    fireEvent.change(screen.getByLabelText("Cadence"), { target: { value: "1440" } });
+    fireEvent.change(screen.getByLabelText("Local run time"), { target: { value: "18:00" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save cadence" }));
+
+    await waitFor(() => {
+      expect(settingsBody).toEqual({
+        cadence_minutes: 1440,
+        enabled: true,
+        run_at_local_time: "18:00",
+        timezone_name: "America/New_York",
+      });
+    });
+    expect(fetchMock).toHaveBeenCalled();
   });
 });
