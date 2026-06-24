@@ -23,6 +23,7 @@ from alembic import command
 from alembic.config import Config
 
 from lab_tracker.api import LabTrackerAPI
+from lab_tracker.backup import BackupError, create_sqlite_backup, restore_sqlite_backup
 from lab_tracker.config import get_settings
 from lab_tracker.db import get_engine, get_session_factory
 from lab_tracker.decision_context_constants import (
@@ -174,6 +175,14 @@ def serve_app(
             )
 
     if run_migrations:
+        settings = get_settings()
+        create_sqlite_backup(
+            settings.database_url,
+            backup_dir=settings.backup_path,
+            keep=settings.backup_keep,
+            skip_missing=True,
+            skip_unsupported=True,
+        )
         alembic_config = _alembic_config()
         command.upgrade(alembic_config, "head")
 
@@ -373,6 +382,41 @@ def main(argv: list[str] | None = None) -> None:
         default=".",
         help="Consumer repo path to inspect. Defaults to the current directory.",
     )
+    backup_parser = subcommands.add_parser(
+        "backup",
+        help="Create a SQLite backup snapshot with the online backup API.",
+    )
+    backup_parser.add_argument(
+        "--to",
+        default=None,
+        help="Backup directory. Defaults to LAB_TRACKER_BACKUP_PATH.",
+    )
+    backup_parser.add_argument(
+        "--keep",
+        default=None,
+        type=int,
+        help="Number of newest snapshots to keep. Defaults to LAB_TRACKER_BACKUP_KEEP.",
+    )
+    backup_parser.add_argument(
+        "--database-url",
+        default=None,
+        help="SQLite database URL. Defaults to LAB_TRACKER_DATABASE_URL.",
+    )
+    restore_parser = subcommands.add_parser(
+        "restore",
+        help="Restore a SQLite backup snapshot into the configured database.",
+    )
+    restore_parser.add_argument("backup_path", help="Path to a backup snapshot.")
+    restore_parser.add_argument(
+        "--database-url",
+        default=None,
+        help="SQLite database URL to restore into. Defaults to LAB_TRACKER_DATABASE_URL.",
+    )
+    restore_parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Overwrite the target database after you have stopped Lab Tracker.",
+    )
 
     args = parser.parse_args(argv)
     if args.command == "init":
@@ -413,6 +457,30 @@ def main(argv: list[str] | None = None) -> None:
         print(json.dumps(payload, indent=2))
         if _doctor_exit_code(payload):
             raise SystemExit(1)
+    elif args.command == "backup":
+        settings = get_settings()
+        try:
+            result = create_sqlite_backup(
+                args.database_url or settings.database_url,
+                backup_dir=args.to or settings.backup_path,
+                keep=args.keep if args.keep is not None else settings.backup_keep,
+            )
+        except BackupError as exc:
+            print(f"Backup failed: {exc}", file=sys.stderr)
+            raise SystemExit(1) from exc
+        print(json.dumps(result.as_dict(), indent=2))
+    elif args.command == "restore":
+        settings = get_settings()
+        try:
+            result = restore_sqlite_backup(
+                args.backup_path,
+                args.database_url or settings.database_url,
+                force=args.force,
+            )
+        except BackupError as exc:
+            print(f"Restore failed: {exc}", file=sys.stderr)
+            raise SystemExit(1) from exc
+        print(json.dumps(result.as_dict(), indent=2))
 
 
 def _alembic_config() -> Config:

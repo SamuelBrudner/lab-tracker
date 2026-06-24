@@ -370,6 +370,9 @@ def test_lt_prime_non_research_prompt_emits_nothing(capsys) -> None:
 def test_serve_app_runs_migrations_schedules_browser_and_starts_server(monkeypatch) -> None:
     calls: list[tuple[str, object]] = []
 
+    def fake_backup(database_url: str, **kwargs):
+        calls.append(("backup", (database_url, kwargs)))
+
     def fake_upgrade(config, revision):
         script_location = Path(config.get_main_option("script_location"))
         assert script_location.name == "alembic"
@@ -396,6 +399,7 @@ def test_serve_app_runs_migrations_schedules_browser_and_starts_server(monkeypat
     def fake_runner(app_path: str, **kwargs):
         calls.append(("runner", (app_path, kwargs)))
 
+    monkeypatch.setattr("lab_tracker.cli.create_sqlite_backup", fake_backup)
     monkeypatch.setattr("lab_tracker.cli.command.upgrade", fake_upgrade)
     monkeypatch.setattr(
         "lab_tracker.cli._start_browser_when_ready",
@@ -409,8 +413,20 @@ def test_serve_app_runs_migrations_schedules_browser_and_starts_server(monkeypat
         server_runner=fake_runner,
     )
 
-    assert calls[0] == ("upgrade", "head")
-    assert calls[1] == (
+    assert calls[0] == (
+        "backup",
+        (
+            "sqlite+pysqlite:///./lab_tracker.db",
+            {
+                "backup_dir": "~/.lab-tracker/backups",
+                "keep": 10,
+                "skip_missing": True,
+                "skip_unsupported": True,
+            },
+        ),
+    )
+    assert calls[1] == ("upgrade", "head")
+    assert calls[2] == (
         "schedule_browser",
         {
             "opener_is_fake": True,
@@ -418,7 +434,7 @@ def test_serve_app_runs_migrations_schedules_browser_and_starts_server(monkeypat
             "url": "http://127.0.0.1:8123/app",
         },
     )
-    assert calls[2] == (
+    assert calls[3] == (
         "runner",
         ("lab_tracker.asgi:app", {"host": "127.0.0.1", "port": 8123, "reload": True}),
     )
