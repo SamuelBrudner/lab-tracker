@@ -351,6 +351,7 @@ List/search endpoints use `limit` between 1 and 200 and `offset` of 0 or greater
 - `until` (optional): string(date-time) | null
 - `target_entity_type` (optional): EntityType enum: project, question, dataset, note, session, analysis, claim, visualization, goal | null
 - `target_entity_id` (optional): string(uuid) | null
+- `recent_first` (optional): boolean; default False
 - `limit` (optional): integer; default 50; maximum 200 from shared route validation
 - `offset` (optional): integer; default 0; minimum 0 from shared route validation
 
