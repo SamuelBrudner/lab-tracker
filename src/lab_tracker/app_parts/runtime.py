@@ -22,12 +22,14 @@ from lab_tracker.auth import (
     TokenService,
     ensure_local_auth_user,
 )
+from lab_tracker.backup import database_lock_path
 from lab_tracker.config import Settings
 from lab_tracker.db import get_engine, get_session_factory
 from lab_tracker.file_storage import LocalFileStorageBackend
 from lab_tracker.graph_drafting import make_graph_draft_client
 from lab_tracker.logging import configure_logging
 from lab_tracker.note_storage import LocalNoteStorage
+from lab_tracker.process_lock import ProcessLock
 from lab_tracker.rate_limit import InMemoryRateLimiter
 
 _logger = logging.getLogger(__name__)
@@ -120,12 +122,42 @@ def build_app_runtime(settings: Settings) -> AppRuntime:
 def make_lifespan(engine: Engine):
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+        lock = _acquire_database_lock(engine)
         try:
             yield
         finally:
+            if lock is not None:
+                lock.release()
             engine.dispose()
 
     return lifespan
+
+
+def _acquire_database_lock(engine: Engine) -> ProcessLock | None:
+    """Hold the advisory database lock for the server's lifetime.
+
+    This lets the offline ``restore`` command detect a live server (which holds
+    this lock) and refuse to clobber a database that is in use. Best-effort and
+    SQLite-only: Postgres/in-memory databases get no lock, and a failure to
+    acquire never blocks startup — it only means restore cannot rely on the lock
+    signal for this process.
+    """
+
+    try:
+        lock_path = database_lock_path(str(engine.url))
+    except Exception:  # pragma: no cover - defensive; never block startup
+        return None
+    if lock_path is None:
+        return None
+    lock = ProcessLock(lock_path)
+    if lock.acquire():
+        return lock
+    _logger.warning(
+        "Could not acquire the database lock at %s; another Lab Tracker process "
+        "may be using this database.",
+        lock_path,
+    )
+    return None
 
 
 def configure_app_state(app: FastAPI, runtime: AppRuntime) -> None:
