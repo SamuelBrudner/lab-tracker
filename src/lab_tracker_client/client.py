@@ -211,7 +211,7 @@ class LabTracker:
             or DEFAULT_BASE_URL,
             username=os.getenv("LAB_TRACKER_USERNAME") or os.getenv("LAB_TRACKER_MCP_USERNAME"),
             password=os.getenv("LAB_TRACKER_PASSWORD") or os.getenv("LAB_TRACKER_MCP_PASSWORD"),
-            access_token=os.getenv("LAB_TRACKER_ACCESS_TOKEN"),
+            access_token=_env_access_token(),
             default_project_id=os.getenv("LAB_TRACKER_PROJECT_ID"),
             timeout_seconds=float(
                 os.getenv("LAB_TRACKER_HTTP_TIMEOUT", str(DEFAULT_TIMEOUT_SECONDS))
@@ -1101,7 +1101,7 @@ class LabTracker:
         if response.status_code == 401 and authenticated and retry_on_unauthorized:
             if supplied_token_used and not self._has_login_credentials():
                 raise LTAPIError(
-                    "LAB_TRACKER_ACCESS_TOKEN was rejected by the Lab Tracker API. "
+                    "Configured Lab Tracker bearer token was rejected by the API. "
                     "Refresh the token or set LAB_TRACKER_USERNAME and "
                     "LAB_TRACKER_PASSWORD so the client can log in."
                 )
@@ -1293,6 +1293,19 @@ def client_from_env() -> LabTracker:
 
 
 _default_client_instance: LabTracker | None = None
+
+
+def _env_access_token() -> str | None:
+    for key in (
+        "LAB_TRACKER_ACCESS_TOKEN",
+        "LAB_TRACKER_TOKEN",
+        "LAB_TRACKER_MCP_API_KEY",
+        "LAB_TRACKER_MCP_TOKEN",
+    ):
+        value = os.getenv(key)
+        if value:
+            return value
+    return None
 
 
 def _default_client() -> LabTracker:

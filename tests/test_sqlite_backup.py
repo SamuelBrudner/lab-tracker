@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import sqlite3
 from contextlib import closing
-from pathlib import Path, PureWindowsPath
+from pathlib import Path, PurePosixPath, PureWindowsPath
 
 import pytest
 
@@ -150,9 +150,9 @@ def test_database_lock_path_only_for_file_backed_sqlite(tmp_path: Path) -> None:
 def test_copy_sqlite_database_round_trips_path_with_special_characters(
     tmp_path: Path,
 ) -> None:
-    # '?' and '#' are legal POSIX filename characters but URI delimiters; the
-    # old f"file:{as_posix()}?mode=ro" form addressed the wrong (empty) database.
-    source_path = tmp_path / "weird ? name #1.db"
+    # Spaces and '#' need URI escaping; the old f"file:{as_posix()}?mode=ro"
+    # form left them bare and could address the wrong database.
+    source_path = tmp_path / "weird name #1.db"
     destination_path = tmp_path / "copy.db"
     _write_example_database(source_path, "special")
 
@@ -162,7 +162,7 @@ def test_copy_sqlite_database_round_trips_path_with_special_characters(
 
 
 def test_sqlite_ro_uri_is_absolute_and_escaped() -> None:
-    posix_uri = _sqlite_ro_uri(Path("/var/lib/lab tracker.db"))
+    posix_uri = _sqlite_ro_uri(PurePosixPath("/var/lib/lab tracker.db"))
     assert posix_uri.startswith("file:///")
     assert posix_uri.endswith("?mode=ro")
     assert "%20" in posix_uri  # space is percent-encoded, not left bare

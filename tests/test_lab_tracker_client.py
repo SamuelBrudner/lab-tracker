@@ -528,7 +528,7 @@ def test_rejected_supplied_access_token_does_not_report_missing_credentials() ->
             access_token="stale-token",
             transport=httpx.MockTransport(handler),
         ) as lt,
-        pytest.raises(LTAPIError, match="LAB_TRACKER_ACCESS_TOKEN was rejected"),
+        pytest.raises(LTAPIError, match="bearer token was rejected"),
     ):
         lt.list_projects()
 
@@ -568,6 +568,31 @@ def test_from_env_uses_mcp_base_url_fallback(monkeypatch: pytest.MonkeyPatch) ->
     lt = LabTracker.from_env()
     try:
         assert lt.base_url == "http://lab.example.test:8123"
+    finally:
+        lt.close()
+
+
+def test_from_env_accepts_bearer_token_aliases(monkeypatch: pytest.MonkeyPatch) -> None:
+    for key in (
+        "LAB_TRACKER_ACCESS_TOKEN",
+        "LAB_TRACKER_TOKEN",
+        "LAB_TRACKER_MCP_API_KEY",
+        "LAB_TRACKER_MCP_TOKEN",
+    ):
+        monkeypatch.delenv(key, raising=False)
+
+    monkeypatch.setenv("LAB_TRACKER_MCP_API_KEY", "lpat_primary")
+    monkeypatch.setenv("LAB_TRACKER_MCP_TOKEN", "lpat_alias")
+    lt = LabTracker.from_env()
+    try:
+        assert lt.access_token == "lpat_primary"
+    finally:
+        lt.close()
+
+    monkeypatch.delenv("LAB_TRACKER_MCP_API_KEY")
+    lt = LabTracker.from_env()
+    try:
+        assert lt.access_token == "lpat_alias"
     finally:
         lt.close()
 

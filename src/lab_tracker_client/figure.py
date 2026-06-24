@@ -20,11 +20,13 @@ import httpx
 
 from lab_tracker.models import NoteMetadataScalar
 from lab_tracker_client.client import (
+    DEFAULT_BASE_URL,
     LabTracker,
     LTAPIError,
     LTRecord,
     LTValidationError,
     _bytes_sha256,
+    _env_access_token,
     _validate_metadata,
     build_evidence_metadata,
 )
@@ -779,12 +781,12 @@ def _resolve_capture_client(
     base_url = os.getenv("LAB_TRACKER_BASE_URL") or os.getenv("LAB_TRACKER_MCP_BASE_URL")
     username = os.getenv("LAB_TRACKER_USERNAME") or os.getenv("LAB_TRACKER_MCP_USERNAME")
     password = os.getenv("LAB_TRACKER_PASSWORD") or os.getenv("LAB_TRACKER_MCP_PASSWORD")
-    access_token = os.getenv("LAB_TRACKER_ACCESS_TOKEN")
-    if not resolved_project_id or not base_url or not (access_token or (username and password)):
+    access_token = _env_access_token()
+    if not resolved_project_id:
         return None, None, False
     return (
         LabTracker(
-            base_url=base_url,
+            base_url=base_url or DEFAULT_BASE_URL,
             username=username,
             password=password,
             access_token=access_token,
