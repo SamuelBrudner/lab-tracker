@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+from typing import Annotated
 from uuid import UUID
 
-from fastapi import APIRouter
+from fastapi import APIRouter, File, Form, UploadFile
 from starlette import status as http_status
 from starlette.requests import Request
 
@@ -19,8 +20,12 @@ from lab_tracker.schemas import (
     GraphDraftCreateRequest,
     GraphDraftOperationUpdate,
     GraphDraftReviewRequest,
-    GraphDraftReviseRequest,
     ListEnvelope,
+)
+from lab_tracker.services.graph_draft_service import RevisionInputs, RevisionUpload
+from lab_tracker.upload_security import (
+    enforce_request_content_length_limit,
+    validate_upload_content_type,
 )
 
 from .shared import (
@@ -203,15 +208,30 @@ def build_graph_drafts_router(api: LabTrackerAPI) -> APIRouter:
     )
     def revise_graph_draft(
         change_set_id: UUID,
-        payload: GraphDraftReviseRequest,
         request: Request,
+        feedback: Annotated[str | None, Form()] = None,
+        audio: Annotated[UploadFile | None, File()] = None,
+        attachments: Annotated[list[UploadFile] | None, File()] = None,
     ):
         actor = actor_from_request(request)
+        enforce_request_content_length_limit(
+            request,
+            max_bytes=request.app.state.settings.max_upload_bytes,
+        )
+        inputs = RevisionInputs(
+            audio=_read_revision_upload(audio),
+            attachments=[
+                upload
+                for item in attachments or []
+                if (upload := _read_revision_upload(item)) is not None
+            ],
+        )
         draft_client = _draft_client_from_request(request)
         try:
             change_set = api_from_request(request, api).revise_graph_change_set(
                 change_set_id,
-                feedback=payload.feedback,
+                feedback=feedback,
+                inputs=inputs,
                 draft_client=draft_client,
                 actor=actor,
             )
@@ -239,6 +259,25 @@ def build_graph_drafts_router(api: LabTrackerAPI) -> APIRouter:
         return Envelope(data=_attach_graph_usernames(request, change_set))
 
     return router
+
+
+def _read_revision_upload(upload: UploadFile | None) -> RevisionUpload | None:
+    """Read an uploaded revision file into memory, or ``None`` when absent."""
+
+    if upload is None:
+        return None
+    filename = (upload.filename or "").strip()
+    if not filename:
+        return None
+    content = upload.file.read()
+    if not content:
+        return None
+    content_type = validate_upload_content_type(upload.content_type)
+    return RevisionUpload(
+        content=content,
+        filename=filename,
+        content_type=content_type,
+    )
 
 
 def _draft_client_from_request(request: Request):

@@ -44,6 +44,7 @@ class FakeDraftClient:
         source_artifacts: list[dict[str, Any]] | None = None,
         image_bytes: bytes | None = None,
         image_content_type: str | None = None,
+        extra_images: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         self.calls.append(
             {
@@ -51,6 +52,7 @@ class FakeDraftClient:
                 "draft_mode": draft_mode,
                 "graph_context": graph_context,
                 "image_bytes": image_bytes,
+                "extra_images": extra_images or [],
                 "source_artifacts": source_artifacts or [],
                 "user_hint": user_hint,
             }
@@ -289,6 +291,59 @@ def test_openai_graph_draft_client_sends_responses_image_and_strict_schema() -> 
     assert request["text"]["format"]["type"] == "json_schema"
     assert request["text"]["format"]["strict"] is True
     assert request["text"]["format"]["schema"]["additionalProperties"] is False
+    client.close()
+
+
+def test_openai_graph_draft_client_embeds_extra_reviewer_images() -> None:
+    requests: list[dict[str, Any]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(json.loads(request.content.decode("utf-8")))
+        return httpx.Response(
+            200,
+            json={
+                "output_text": json.dumps(
+                    {
+                        "summary": "ok",
+                        "uncertain_fields": [],
+                        "clarification_requests": [],
+                        "operations": [],
+                    }
+                )
+            },
+        )
+
+    client = OpenAIGraphDraftClient(
+        api_key="test-key",
+        model="gpt-test",
+        transport=httpx.MockTransport(handler),
+    )
+
+    client.draft_from_note(
+        graph_context={"project": {"name": "Context"}},
+        source_artifacts=[{"transcript_text": "existing note text"}],
+        extra_images=[{"image_bytes": b"reviewer-image", "content_type": "image/png"}],
+    )
+
+    content = requests[0]["input"][0]["content"]
+    image_items = [item for item in content if item["type"] == "input_image"]
+    assert len(image_items) == 1
+    assert image_items[0]["image_url"].startswith("data:image/png;base64,")
+    client.close()
+
+
+def test_openai_graph_draft_client_rejects_non_image_extra() -> None:
+    client = OpenAIGraphDraftClient(
+        api_key="test-key",
+        model="gpt-test",
+        transport=httpx.MockTransport(lambda request: httpx.Response(200, json={})),
+    )
+    with pytest.raises(GraphDraftingError):
+        client.draft_from_note(
+            graph_context={},
+            source_artifacts=[{"transcript_text": "existing note text"}],
+            extra_images=[{"image_bytes": b"data", "content_type": "application/pdf"}],
+        )
     client.close()
 
 
@@ -1921,7 +1976,7 @@ def test_revise_graph_draft_regenerates_operations_from_feedback(
     feedback = "Drop the note operation; keep only the protocol question."
     response = client.post(
         f"/graph-drafts/{change_set_id}/revise",
-        json={"feedback": feedback},
+        data={"feedback": feedback},
         headers=admin_auth_headers,
     )
 
@@ -1956,7 +2011,138 @@ def test_revise_graph_draft_requires_feedback(
 
     response = client.post(
         f"/graph-drafts/{change_set_id}/revise",
-        json={"feedback": "   "},
+        data={"feedback": "   "},
+        headers=admin_auth_headers,
+    )
+    assert response.status_code == 422
+
+
+def test_revise_graph_draft_transcribes_dictated_audio(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+) -> None:
+    project_id = _project(client, admin_auth_headers)
+    note_id = _image_note(client, admin_auth_headers, project_id)
+    initial = FakeDraftClient(_draft_patch(project_id))
+    client.app.state.graph_draft_client_factory = lambda settings: initial
+    change_set_id = client.post(
+        f"/notes/{note_id}/graph-drafts", headers=admin_auth_headers
+    ).json()["data"]["change_set_id"]
+
+    revised_client = FakeDraftClient(_revised_draft_patch(project_id))
+    client.app.state.graph_draft_client_factory = lambda settings: revised_client
+    response = client.post(
+        f"/graph-drafts/{change_set_id}/revise",
+        files={"audio": ("feedback.webm", b"fake-audio-bytes", "audio/webm")},
+        headers=admin_auth_headers,
+    )
+
+    assert response.status_code == 200
+    # The dictated audio was transcribed and seeded into the model hint.
+    assert len(revised_client.transcription_calls) == 1
+    assert revised_client.transcription_calls[0]["content_type"] == "audio/webm"
+    hint = revised_client.calls[0]["user_hint"]
+    assert "Fly 12 tracked better after pulse onset." in hint
+
+
+def test_revise_graph_draft_combines_typed_and_dictated_feedback(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+) -> None:
+    project_id = _project(client, admin_auth_headers)
+    note_id = _image_note(client, admin_auth_headers, project_id)
+    initial = FakeDraftClient(_draft_patch(project_id))
+    client.app.state.graph_draft_client_factory = lambda settings: initial
+    change_set_id = client.post(
+        f"/notes/{note_id}/graph-drafts", headers=admin_auth_headers
+    ).json()["data"]["change_set_id"]
+
+    revised_client = FakeDraftClient(_revised_draft_patch(project_id))
+    client.app.state.graph_draft_client_factory = lambda settings: revised_client
+    response = client.post(
+        f"/graph-drafts/{change_set_id}/revise",
+        data={"feedback": "Also drop the dataset link."},
+        files={"audio": ("feedback.webm", b"fake-audio-bytes", "audio/webm")},
+        headers=admin_auth_headers,
+    )
+
+    assert response.status_code == 200
+    hint = revised_client.calls[0]["user_hint"]
+    assert "Also drop the dataset link." in hint
+    assert "Fly 12 tracked better after pulse onset." in hint
+
+
+def test_revise_graph_draft_passes_image_attachment_to_model(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+) -> None:
+    project_id = _project(client, admin_auth_headers)
+    note_id = _image_note(client, admin_auth_headers, project_id)
+    initial = FakeDraftClient(_draft_patch(project_id))
+    client.app.state.graph_draft_client_factory = lambda settings: initial
+    change_set_id = client.post(
+        f"/notes/{note_id}/graph-drafts", headers=admin_auth_headers
+    ).json()["data"]["change_set_id"]
+
+    revised_client = FakeDraftClient(_revised_draft_patch(project_id))
+    client.app.state.graph_draft_client_factory = lambda settings: revised_client
+    response = client.post(
+        f"/graph-drafts/{change_set_id}/revise",
+        data={"feedback": "Use the corrected schematic I attached."},
+        files={"attachments": ("schematic.png", b"fake-png-bytes", "image/png")},
+        headers=admin_auth_headers,
+    )
+
+    assert response.status_code == 200
+    extra_images = revised_client.calls[0]["extra_images"]
+    assert len(extra_images) == 1
+    assert extra_images[0]["content_type"] == "image/png"
+    assert extra_images[0]["image_bytes"] == b"fake-png-bytes"
+    # The attachment is referenced in the model hint for grounding.
+    assert "schematic.png" in revised_client.calls[0]["user_hint"]
+
+
+def test_revise_graph_draft_image_only_attachment_without_text(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+) -> None:
+    project_id = _project(client, admin_auth_headers)
+    note_id = _image_note(client, admin_auth_headers, project_id)
+    initial = FakeDraftClient(_draft_patch(project_id))
+    client.app.state.graph_draft_client_factory = lambda settings: initial
+    change_set_id = client.post(
+        f"/notes/{note_id}/graph-drafts", headers=admin_auth_headers
+    ).json()["data"]["change_set_id"]
+
+    revised_client = FakeDraftClient(_revised_draft_patch(project_id))
+    client.app.state.graph_draft_client_factory = lambda settings: revised_client
+    response = client.post(
+        f"/graph-drafts/{change_set_id}/revise",
+        files={"attachments": ("schematic.png", b"fake-png-bytes", "image/png")},
+        headers=admin_auth_headers,
+    )
+
+    assert response.status_code == 200
+    assert len(revised_client.calls[0]["extra_images"]) == 1
+
+
+def test_revise_graph_draft_rejects_non_image_attachment(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+) -> None:
+    project_id = _project(client, admin_auth_headers)
+    note_id = _image_note(client, admin_auth_headers, project_id)
+    client.app.state.graph_draft_client_factory = lambda settings: FakeDraftClient(
+        _draft_patch(project_id)
+    )
+    change_set_id = client.post(
+        f"/notes/{note_id}/graph-drafts", headers=admin_auth_headers
+    ).json()["data"]["change_set_id"]
+
+    response = client.post(
+        f"/graph-drafts/{change_set_id}/revise",
+        data={"feedback": "Consider this spreadsheet."},
+        files={"attachments": ("data.csv", b"a,b,c", "text/csv")},
         headers=admin_auth_headers,
     )
     assert response.status_code == 422
@@ -1981,7 +2167,7 @@ def test_revise_graph_draft_keeps_draft_on_model_failure(
     client.app.state.graph_draft_client_factory = lambda settings: failing
     response = client.post(
         f"/graph-drafts/{change_set_id}/revise",
-        json={"feedback": "Try again with fewer operations."},
+        data={"feedback": "Try again with fewer operations."},
         headers=admin_auth_headers,
     )
     assert response.status_code == 422

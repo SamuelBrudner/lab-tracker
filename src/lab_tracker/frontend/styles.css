@@ -986,6 +986,55 @@ button:disabled {
   margin: 0.4rem 0 0.5rem;
 }
 
+.ai-revise-tools {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin-bottom: 0.5rem;
+}
+
+.ai-revise-attach {
+  display: inline-flex;
+  align-items: center;
+  cursor: pointer;
+}
+
+.ai-revise-attach.disabled {
+  cursor: not-allowed;
+  opacity: 0.6;
+}
+
+.ai-revise-tools .recording {
+  border-color: var(--danger, #c0392b);
+  color: var(--danger, #c0392b);
+}
+
+.ai-revise-files {
+  list-style: none;
+  margin: 0 0 0.5rem;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+}
+
+.ai-revise-attachment {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-bottom: 0.4rem;
+}
+
+.ai-revise-file-name {
+  font-size: 0.85rem;
+  word-break: break-all;
+}
+
+.ai-revise-audio {
+  height: 2rem;
+  max-width: 16rem;
+}
+
 .advanced-json {
   margin-top: 0.6rem;
 }

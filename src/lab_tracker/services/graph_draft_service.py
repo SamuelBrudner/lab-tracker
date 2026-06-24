@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import time
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any
 from uuid import UUID, uuid4
@@ -55,6 +56,36 @@ from lab_tracker.services.question_service import QuestionService
 from lab_tracker.services.session_service import SessionService
 from lab_tracker.services.shared import actor_user_fk, actor_user_id
 from lab_tracker.services.visualization_service import VisualizationService
+
+
+@dataclass(frozen=True)
+class RevisionUpload:
+    """A reviewer-supplied file attached to a ``revise`` request.
+
+    Used for both spoken feedback (audio, transcribed before drafting) and
+    image attachments (passed to the draft client as extra visual context).
+    """
+
+    content: bytes
+    filename: str
+    content_type: str
+
+    @property
+    def is_audio(self) -> bool:
+        return self.content_type.lower().startswith("audio/")
+
+    @property
+    def is_image(self) -> bool:
+        return self.content_type.lower().startswith("image/")
+
+
+@dataclass
+class RevisionInputs:
+    """Optional rich inputs accompanying reviewer revision feedback."""
+
+    audio: RevisionUpload | None = None
+    attachments: list[RevisionUpload] = field(default_factory=list)
+
 
 _BATCH_NOTE_LIMIT = 100
 _BATCH_RETRY_ATTEMPTS = 3
@@ -948,7 +979,8 @@ class GraphDraftService(BaseService):
         self,
         change_set_id: UUID,
         *,
-        feedback: str,
+        feedback: str | None = None,
+        inputs: RevisionInputs | None = None,
         draft_client: Any,
         actor: AuthContext | None = None,
     ) -> GraphChangeSet:
@@ -956,20 +988,38 @@ class GraphDraftService(BaseService):
 
         Reuses the same model + validation + persistence path as the initial
         draft, but seeds the model with the current operations and the reviewer's
-        feedback. A model/validation failure leaves the existing draft intact.
+        feedback. Reviewers may dictate feedback (``inputs.audio`` is transcribed
+        and merged with any typed text) and/or attach images (``inputs.attachments``
+        are passed to the draft client as extra visual context). A model or
+        validation failure leaves the existing draft intact.
         """
         change_set = self.get_graph_change_set(change_set_id)
         self._ensure_graph_change_set_editable(change_set, actor=actor)
-        cleaned = (feedback or "").strip()
-        if not cleaned:
-            raise ValidationError("Reviewer feedback is required to revise a draft.")
+        revision_inputs = inputs or RevisionInputs()
+        cleaned, transcript = self._resolve_revision_feedback(
+            feedback,
+            revision_inputs.audio,
+            draft_client,
+        )
+        extra_images, attachment_labels = self._prepare_revision_attachments(
+            revision_inputs.attachments
+        )
+        if not cleaned and not extra_images:
+            raise ValidationError(
+                "Reviewer feedback, dictated audio, or an attached image is "
+                "required to revise a draft."
+            )
         mode = change_set.draft_mode
         prepared = self.context_builder.prepare_note_sources_for_graph_draft(
             change_set.source_note_id,
             mode=mode,
         )
         note = prepared["source_note"]
-        revise_hint = self._compose_revise_hint(change_set.operations, cleaned)
+        revise_hint = self._compose_revise_hint(
+            change_set.operations,
+            cleaned,
+            attachment_labels=attachment_labels,
+        )
         if mode == GraphDraftMode.GRAPH_CONTEXT:
             context_packet = self.context_builder.build_graph_context_packet(
                 note,
@@ -994,6 +1044,7 @@ class GraphDraftService(BaseService):
                 source_artifacts=prepared["source_artifacts"],
                 image_bytes=prepared["image_bytes"],
                 image_content_type=prepared["image_content_type"],
+                extra_images=extra_images,
             )
             self.patch_validator.validate_top_level(graph_patch)
             # Build the new operations before mutating change_set so a model or
@@ -1007,7 +1058,15 @@ class GraphDraftService(BaseService):
         revisions: list[dict[str, Any]] = []
         if isinstance(change_set.context_packet, dict):
             revisions = list(change_set.context_packet.get("reviewer_revisions") or [])
-        revisions.append({"feedback": cleaned, "at": utc_now().isoformat()})
+        revision_record: dict[str, Any] = {
+            "feedback": cleaned,
+            "at": utc_now().isoformat(),
+        }
+        if transcript:
+            revision_record["dictated"] = True
+        if attachment_labels:
+            revision_record["attachments"] = attachment_labels
+        revisions.append(revision_record)
         change_set.operations = new_operations
         change_set.summary = str(graph_patch.get("summary") or "")
         change_set.uncertain_fields = string_list(graph_patch.get("uncertain_fields"))
@@ -1024,9 +1083,74 @@ class GraphDraftService(BaseService):
         return change_set
 
     @staticmethod
+    def _resolve_revision_feedback(
+        feedback: str | None,
+        audio: RevisionUpload | None,
+        draft_client: Any,
+    ) -> tuple[str, str]:
+        """Return ``(combined_feedback, transcript)`` for a revision request.
+
+        Typed ``feedback`` and any dictated ``audio`` (transcribed via the draft
+        client) are merged so the model sees a single feedback string.
+        """
+
+        typed = (feedback or "").strip()
+        transcript = ""
+        if audio is not None:
+            if not audio.is_audio:
+                raise ValidationError("Dictated feedback must be an audio upload.")
+            transcribe_audio = getattr(draft_client, "transcribe_audio", None)
+            if not callable(transcribe_audio):
+                raise ValidationError(
+                    "Configured draft client does not support audio transcription."
+                )
+            try:
+                response = transcribe_audio(
+                    audio_bytes=audio.content,
+                    filename=audio.filename,
+                    content_type=audio.content_type,
+                    prompt=typed or None,
+                )
+            except GraphDraftingError as exc:
+                raise ValidationError(f"Could not transcribe dictated feedback: {exc}") from exc
+            transcript = _revision_transcript_text(response)
+            if not transcript:
+                raise ValidationError("Dictated feedback transcription returned no text.")
+        combined = "\n\n".join(part for part in (typed, transcript) if part).strip()
+        return combined, transcript
+
+    @staticmethod
+    def _prepare_revision_attachments(
+        attachments: list[RevisionUpload],
+    ) -> tuple[list[dict[str, Any]], list[str]]:
+        """Turn image attachments into draft-client ``extra_images`` + labels."""
+
+        extra_images: list[dict[str, Any]] = []
+        labels: list[str] = []
+        for attachment in attachments:
+            if not attachment.is_image:
+                raise ValidationError(
+                    f"Attached file {attachment.content_type!r} is not a supported image type."
+                )
+            if not attachment.content:
+                raise ValidationError(
+                    f"Attached image {attachment.filename!r} is empty."
+                )
+            extra_images.append(
+                {
+                    "image_bytes": attachment.content,
+                    "content_type": attachment.content_type,
+                }
+            )
+            labels.append(attachment.filename or "image")
+        return extra_images, labels
+
+    @staticmethod
     def _compose_revise_hint(
         operations: list[GraphChangeOperation],
         feedback: str,
+        *,
+        attachment_labels: list[str] | None = None,
     ) -> str:
         lines = []
         for operation in operations:
@@ -1044,11 +1168,20 @@ class GraphDraftService(BaseService):
                 f"on {operation.entity_type.value}: {payload_text}"
             )
         prior = "\n".join(lines) if lines else "(none)"
+        feedback_text = feedback or "(none — see attached image(s))"
+        attachment_note = ""
+        if attachment_labels:
+            joined = ", ".join(attachment_labels)
+            attachment_note = (
+                f"\n\nThe reviewer attached image(s) as additional visual "
+                f"context: {joined}."
+            )
         return (
             "REVISION REQUEST. You previously proposed the graph operations below. "
             "Return a complete, corrected operation set (not a diff) that honors the "
             "reviewer's feedback while staying grounded in the note and graph context."
-            f"\n\nPreviously proposed operations:\n{prior}\n\nReviewer feedback: {feedback}"
+            f"\n\nPreviously proposed operations:\n{prior}"
+            f"\n\nReviewer feedback: {feedback_text}{attachment_note}"
         )
 
     def commit_graph_change_set(
@@ -1240,6 +1373,7 @@ class GraphDraftService(BaseService):
         source_artifacts: list[dict[str, Any]],
         image_bytes: bytes | None,
         image_content_type: str | None,
+        extra_images: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         draft_from_note = getattr(draft_client, "draft_from_note", None)
         if callable(draft_from_note):
@@ -1250,6 +1384,7 @@ class GraphDraftService(BaseService):
                 source_artifacts=source_artifacts,
                 image_bytes=image_bytes,
                 image_content_type=image_content_type,
+                extra_images=extra_images or [],
             )
         draft_from_image = getattr(draft_client, "draft_from_image", None)
         if callable(draft_from_image) and image_bytes and image_content_type:
@@ -1261,6 +1396,16 @@ class GraphDraftService(BaseService):
                 draft_mode=draft_mode.value,
             )
         raise GraphDraftingError("Configured draft client does not support this note source.")
+
+
+def _revision_transcript_text(transcript: Any) -> str:
+    if isinstance(transcript, str):
+        return transcript.strip()
+    if isinstance(transcript, dict):
+        text = transcript.get("text")
+        if isinstance(text, str):
+            return text.strip()
+    return ""
 
 
 def _text_checksum(text: str) -> str:

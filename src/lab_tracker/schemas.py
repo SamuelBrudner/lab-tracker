@@ -481,10 +481,6 @@ class GraphDraftReviewRequest(RequestModel):
     note: NonBlankStr | None = None
 
 
-class GraphDraftReviseRequest(RequestModel):
-    feedback: NonBlankStr
-
-
 class GraphChangeSetSummary(BaseModel):
     change_set_id: UUID
     project_id: UUID
