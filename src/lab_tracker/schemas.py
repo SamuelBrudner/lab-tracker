@@ -25,6 +25,9 @@ from lab_tracker.models import (
     DatasetStatus,
     EntityRef,
     EntityType,
+    ExplorationNode,
+    ExplorationNodeStatus,
+    ExplorationNodeType,
     ExternalArtifactReference,
     Goal,
     GoalLink,
@@ -625,6 +628,9 @@ class ClaimCreate(RequestModel):
     confidence: float = Field(..., ge=0.0, le=100.0)
     status: ClaimStatus | None = None
     terminal_reason: NonBlankStr | None = None
+    falsification_criteria: NonBlankStr | None = None
+    verification_plan: NonBlankStr | None = None
+    refuting_outcome: NonBlankStr | None = None
     supported_by_dataset_ids: list[UUID] | None = None
     supported_by_analysis_ids: list[UUID] | None = None
     answers_question_ids: list[UUID] | None = None
@@ -643,6 +649,9 @@ class ClaimUpdate(RequestModel):
     confidence: float | None = Field(None, ge=0.0, le=100.0)
     status: ClaimStatus | None = None
     terminal_reason: NonBlankStr | None = None
+    falsification_criteria: NonBlankStr | None = None
+    verification_plan: NonBlankStr | None = None
+    refuting_outcome: NonBlankStr | None = None
     supported_by_dataset_ids: list[UUID] | None = None
     supported_by_analysis_ids: list[UUID] | None = None
     answers_question_ids: list[UUID] | None = None
@@ -659,6 +668,58 @@ class ClaimUpdate(RequestModel):
 class ClaimEdgeCreate(RequestModel):
     target_claim_id: UUID
     relation: ClaimRelation
+
+
+class ExplorationNodeCreate(RequestModel):
+    project_id: UUID
+    node_type: ExplorationNodeType
+    title: NonBlankStr
+    target: EntityRef
+    status: ExplorationNodeStatus | None = None
+    choice: NonBlankStr | None = None
+    alternatives_considered: list[NonBlankStr] | None = None
+    rationale: NonBlankStr | None = None
+    evidence_refs: list[EntityRef] | None = None
+    hypothesis: NonBlankStr | None = None
+    failure_mode: NonBlankStr | None = None
+    lesson: NonBlankStr | None = None
+    tooling_context: NonBlankStr | None = None
+    trigger: NonBlankStr | None = None
+    invalidates_node_id: UUID | None = None
+    invalidates_claim_id: UUID | None = None
+    parent_node_ids: list[UUID] | None = None
+    also_depends_on_node_ids: list[UUID] | None = None
+
+    @field_validator("parent_node_ids", "also_depends_on_node_ids")
+    @classmethod
+    def _node_ids_unique(cls, value: list[UUID] | None) -> list[UUID] | None:
+        return _unique_uuid_list(value)
+
+
+class ExplorationNodeUpdate(RequestModel):
+    title: NonBlankStr | None = None
+    status: ExplorationNodeStatus | None = None
+    choice: NonBlankStr | None = None
+    alternatives_considered: list[NonBlankStr] | None = None
+    rationale: NonBlankStr | None = None
+    evidence_refs: list[EntityRef] | None = None
+    hypothesis: NonBlankStr | None = None
+    failure_mode: NonBlankStr | None = None
+    lesson: NonBlankStr | None = None
+    tooling_context: NonBlankStr | None = None
+    trigger: NonBlankStr | None = None
+    invalidates_node_id: UUID | None = None
+    invalidates_claim_id: UUID | None = None
+    parent_node_ids: list[UUID] | None = None
+    also_depends_on_node_ids: list[UUID] | None = None
+
+    @field_validator("parent_node_ids", "also_depends_on_node_ids")
+    @classmethod
+    def _node_ids_unique(cls, value: list[UUID] | None) -> list[UUID] | None:
+        return _unique_uuid_list(value)
+
+
+ExplorationNodeRead = ExplorationNode
 
 
 class GoalCreateFields(RequestModel):

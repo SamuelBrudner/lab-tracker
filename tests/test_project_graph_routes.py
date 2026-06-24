@@ -38,6 +38,9 @@ class _QuestionsOnlyGraphRepository:
     def query_claim_edges(self, **_):
         raise AssertionError("questions view should not query claim edges")
 
+    def query_exploration_nodes(self, **_):
+        raise AssertionError("questions view should not query exploration nodes")
+
     def query_visualizations(self, **_):
         raise AssertionError("questions view should not query visualizations")
 
@@ -172,6 +175,49 @@ def _create_graph_fixture(
         },
         headers=headers,
     ).json()["data"]["claim_id"]
+    decision_node_id = client.post(
+        "/exploration-nodes",
+        json={
+            "project_id": project_id,
+            "node_type": "decision",
+            "title": "Trust the linked evidence chain",
+            "target": {"entity_type": "claim", "entity_id": claim_id},
+            "choice": "Use the committed analysis",
+            "alternatives_considered": ["Wait for more data"],
+            "rationale": "The dataset and analysis are already linked.",
+        },
+        headers=headers,
+    ).json()["data"]["node_id"]
+    dead_end_node_id = client.post(
+        "/exploration-nodes",
+        json={
+            "project_id": project_id,
+            "node_type": "dead_end",
+            "title": "Discard unlinked side analysis",
+            "target": {"entity_type": "dataset", "entity_id": dataset_id},
+            "evidence_refs": [{"entity_type": "claim", "entity_id": claim_id}],
+            "hypothesis": "The side analysis would strengthen the claim.",
+            "failure_mode": "It did not reuse the committed dataset.",
+            "lesson": "Keep the graph spine intact before interpreting figures.",
+            "parent_node_ids": [decision_node_id],
+        },
+        headers=headers,
+    ).json()["data"]["node_id"]
+    pivot_node_id = client.post(
+        "/exploration-nodes",
+        json={
+            "project_id": project_id,
+            "node_type": "pivot",
+            "title": "Pivot back to the linked analysis",
+            "target": {"entity_type": "claim", "entity_id": claim_id},
+            "trigger": "Dead-end side analysis",
+            "rationale": "The retained graph has a complete support path.",
+            "invalidates_claim_id": claim_id,
+            "parent_node_ids": [dead_end_node_id],
+            "also_depends_on_node_ids": [decision_node_id],
+        },
+        headers=headers,
+    ).json()["data"]["node_id"]
     viz_id = client.post(
         "/visualizations",
         json={
@@ -207,9 +253,12 @@ def _create_graph_fixture(
         "child_question_id": child_question_id,
         "claim_id": claim_id,
         "dataset_id": dataset_id,
+        "dead_end_node_id": dead_end_node_id,
+        "decision_node_id": decision_node_id,
         "goal_id": goal_id,
         "note_id": note_id,
         "project_id": project_id,
+        "pivot_node_id": pivot_node_id,
         "replacement_question_id": replacement_question_id,
         "root_question_id": root_question_id,
         "scientific_session_id": scientific_session_id,
@@ -304,6 +353,28 @@ def test_project_graph_evidence_and_full_views_include_expected_links(
         f"claim_dataset_support:dataset:{ids['dataset_id']}->claim:{ids['claim_id']}",
         f"claim_analysis_support:analysis:{ids['analysis_id']}->claim:{ids['claim_id']}",
         f"claim_question_answers:claim:{ids['claim_id']}->question:{ids['child_question_id']}",
+        (
+            "exploration_target:"
+            f"claim:{ids['claim_id']}->exploration_node:{ids['decision_node_id']}"
+        ),
+        (
+            "exploration_evidence:"
+            f"claim:{ids['claim_id']}->exploration_node:{ids['dead_end_node_id']}"
+        ),
+        (
+            "exploration_parent:"
+            f"exploration_node:{ids['decision_node_id']}"
+            f"->exploration_node:{ids['dead_end_node_id']}"
+        ),
+        (
+            "exploration_dependency:"
+            f"exploration_node:{ids['decision_node_id']}"
+            f"->exploration_node:{ids['pivot_node_id']}"
+        ),
+        (
+            "exploration_invalidates_claim:"
+            f"exploration_node:{ids['pivot_node_id']}->claim:{ids['claim_id']}"
+        ),
         f"visualization_analysis:analysis:{ids['analysis_id']}->visualization:{ids['viz_id']}",
         f"visualization_dataset:dataset:{ids['dataset_id']}->visualization:{ids['viz_id']}",
         f"visualization_claim:claim:{ids['claim_id']}->visualization:{ids['viz_id']}",
@@ -311,6 +382,7 @@ def test_project_graph_evidence_and_full_views_include_expected_links(
     }.issubset(_edge_ids(evidence["edges"]))
 
     assert f"goal:{ids['goal_id']}" in _ids(evidence["nodes"])
+    assert f"exploration_node:{ids['decision_node_id']}" in _ids(evidence["nodes"])
     assert f"note:{ids['note_id']}" in _ids(full["nodes"])
     assert f"session:{ids['scientific_session_id']}" in _ids(full["nodes"])
     assert f"session:{ids['source_session_id']}" in _ids(full["nodes"])

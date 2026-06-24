@@ -14,6 +14,7 @@ const TYPE_LABELS = {
   analysis: "Analysis",
   claim: "Claim",
   dataset: "Dataset",
+  exploration_node: "Exploration",
   goal: "Goal",
   note: "Note",
   question: "Question",
@@ -27,8 +28,9 @@ const TYPE_LAYER_BY_VIEW = {
     dataset: 1,
     analysis: 2,
     claim: 3,
-    visualization: 4,
-    goal: 5,
+    exploration_node: 4,
+    visualization: 5,
+    goal: 6,
   },
   questions: {
     question: 0,
@@ -40,8 +42,9 @@ const TYPE_LAYER_BY_VIEW = {
     dataset: 3,
     analysis: 4,
     claim: 5,
-    visualization: 6,
-    goal: 7,
+    exploration_node: 6,
+    visualization: 7,
+    goal: 8,
   },
 };
 
@@ -49,6 +52,7 @@ const TYPE_STYLES = {
   analysis: { background: "#eef3f9", borderColor: "#8ba3c7" },
   claim: { background: "#f7f0f4", borderColor: "#c98da9" },
   dataset: { background: "#edf5ed", borderColor: "#85aa83" },
+  exploration_node: { background: "#eef6f7", borderColor: "#579aa5" },
   goal: { background: "#fff4cf", borderColor: "#c99724" },
   note: { background: "#fbf3e7", borderColor: "#d3a96b" },
   question: { background: "#f6f2eb", borderColor: "#b8a77d" },
@@ -63,8 +67,26 @@ const VIEW_AXIS_LABELS = {
 };
 
 const VIEW_AXIS_TYPES = {
-  evidence: ["question", "dataset", "analysis", "claim", "visualization", "goal"],
-  full: ["note", "question", "session", "dataset", "analysis", "claim", "visualization", "goal"],
+  evidence: [
+    "question",
+    "dataset",
+    "analysis",
+    "claim",
+    "exploration_node",
+    "visualization",
+    "goal",
+  ],
+  full: [
+    "note",
+    "question",
+    "session",
+    "dataset",
+    "analysis",
+    "claim",
+    "exploration_node",
+    "visualization",
+    "goal",
+  ],
   questions: ["question"],
 };
 

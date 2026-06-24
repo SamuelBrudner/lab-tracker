@@ -11,7 +11,7 @@ from sqlalchemy import create_engine, inspect, text
 from lab_tracker.api import LabTrackerAPI
 from lab_tracker.auth import AuthContext, Role
 from lab_tracker.db import get_session_factory
-from lab_tracker.models import QuestionType
+from lab_tracker.models import EntityRef, EntityType, ExplorationNodeType, QuestionType
 from lab_tracker.sqlalchemy_repository import SQLAlchemyLabTrackerRepository
 
 _NOT_NULL_TIGHTENING_COLUMNS_0014_0024 = {
@@ -168,6 +168,8 @@ def test_alembic_upgrade_head_creates_expected_tables(monkeypatch, tmp_path):
         "claim_analyses",
         "claim_questions",
         "claim_edges",
+        "exploration_nodes",
+        "exploration_node_edges",
         "entity_versions",
         "goals",
         "goal_links",
@@ -254,6 +256,7 @@ def test_alembic_upgrade_head_creates_expected_tables(monkeypatch, tmp_path):
     _assert_created_by_user_fk(inspector, "graph_draft_batch_runs")
     _assert_created_by_user_fk(inspector, "sessions")
     _assert_created_by_user_fk(inspector, "claims")
+    _assert_created_by_user_fk(inspector, "exploration_nodes")
     _assert_created_by_user_fk(inspector, "entity_versions")
     _assert_created_by_user_fk(inspector, "goals")
     _assert_created_by_user_fk(inspector, "goal_links")
@@ -267,6 +270,7 @@ def test_alembic_upgrade_head_creates_expected_tables(monkeypatch, tmp_path):
         "sessions",
         "analyses",
         "claims",
+        "exploration_nodes",
         "goals",
         "visualizations",
     ):
@@ -297,6 +301,11 @@ def test_alembic_upgrade_head_creates_expected_tables(monkeypatch, tmp_path):
     claim_columns = {column["name"] for column in inspector.get_columns("claims")}
     assert "terminal_reason" in claim_columns
     assert "external_citations" in claim_columns
+    assert {
+        "falsification_criteria",
+        "verification_plan",
+        "refuting_outcome",
+    }.issubset(claim_columns)
     claim_edge_columns = {column["name"] for column in inspector.get_columns("claim_edges")}
     assert {
         "edge_id",
@@ -322,6 +331,77 @@ def test_alembic_upgrade_head_creates_expected_tables(monkeypatch, tmp_path):
         "claim_edges",
         column="created_by_user_id",
         referred_table="users",
+    )
+    exploration_columns = {
+        column["name"] for column in inspector.get_columns("exploration_nodes")
+    }
+    assert {
+        "node_id",
+        "project_id",
+        "node_type",
+        "title",
+        "target_entity_type",
+        "target_entity_id",
+        "status",
+        "choice",
+        "alternatives_considered",
+        "rationale",
+        "evidence_refs",
+        "hypothesis",
+        "failure_mode",
+        "lesson",
+        "tooling_context",
+        "trigger",
+        "invalidates_node_id",
+        "invalidates_claim_id",
+        "created_by",
+        "created_by_user_id",
+        "origin",
+        "change_set_id",
+        "origin_provider",
+        "origin_model",
+        "origin_prompt_version",
+        "created_at",
+        "updated_at",
+    }.issubset(exploration_columns)
+    exploration_edge_columns = {
+        column["name"] for column in inspector.get_columns("exploration_node_edges")
+    }
+    assert {
+        "edge_id",
+        "source_node_id",
+        "target_node_id",
+        "relation",
+        "created_at",
+    }.issubset(exploration_edge_columns)
+    _assert_index(inspector, "exploration_nodes", "ix_exploration_nodes_project_created_at")
+    _assert_index(inspector, "exploration_nodes", "ix_exploration_nodes_target")
+    _assert_index(inspector, "exploration_node_edges", "ix_exploration_node_edges_source")
+    _assert_index(inspector, "exploration_node_edges", "ix_exploration_node_edges_target")
+    _assert_fk(inspector, "exploration_nodes", column="project_id", referred_table="projects")
+    _assert_fk(
+        inspector,
+        "exploration_nodes",
+        column="invalidates_node_id",
+        referred_table="exploration_nodes",
+    )
+    _assert_fk(
+        inspector,
+        "exploration_nodes",
+        column="invalidates_claim_id",
+        referred_table="claims",
+    )
+    _assert_fk(
+        inspector,
+        "exploration_node_edges",
+        column="source_node_id",
+        referred_table="exploration_nodes",
+    )
+    _assert_fk(
+        inspector,
+        "exploration_node_edges",
+        column="target_node_id",
+        referred_table="exploration_nodes",
     )
     assert {
         "version_id",
@@ -1317,11 +1397,53 @@ def test_migrated_database_supports_api_round_trip(monkeypatch, tmp_path):
             primary_question_id=question.question_id,
             actor=actor,
         )
+        claim = api.create_claim(
+            project_id=project.project_id,
+            statement="The migrated database preserves claim links.",
+            confidence=50,
+            supported_by_dataset_ids=[dataset.dataset_id],
+            actor=actor,
+        )
+        decision = api.create_exploration_node(
+            project_id=project.project_id,
+            node_type=ExplorationNodeType.DECISION,
+            title="Choose migrated exploration path",
+            target=EntityRef(entity_type=EntityType.QUESTION, entity_id=question.question_id),
+            choice="Use migrated API path",
+            alternatives_considered=["Direct SQL fixture"],
+            rationale="The API round trip verifies mapper wiring.",
+            actor=actor,
+        )
+        pivot = api.create_exploration_node(
+            project_id=project.project_id,
+            node_type=ExplorationNodeType.PIVOT,
+            title="Pivot migrated path",
+            target=EntityRef(entity_type=EntityType.CLAIM, entity_id=claim.claim_id),
+            trigger="Migration smoke needs edge data.",
+            rationale="Persist invalidation and dependency fields.",
+            invalidates_node_id=decision.node_id,
+            parent_node_ids=[decision.node_id],
+            actor=actor,
+        )
 
     with session_factory() as session:
         api = LabTrackerAPI(repository=SQLAlchemyLabTrackerRepository(session))
         assert api.get_project(project.project_id).name == "Migrated DB"
         assert api.get_question(question.question_id).project_id == project.project_id
         assert api.get_dataset(dataset.dataset_id).primary_question_id == question.question_id
+        assert api.get_claim(claim.claim_id).supported_by_dataset_ids == [dataset.dataset_id]
+        reloaded_decision = api.get_exploration_node(decision.node_id)
+        reloaded_pivot = api.get_exploration_node(pivot.node_id)
+        assert reloaded_decision.target.entity_id == question.question_id
+        assert reloaded_pivot.invalidates_node_id == decision.node_id
+        assert reloaded_pivot.parent_node_ids == [decision.node_id]
+        exploration_node_ids = {
+            node.node_id
+            for node in api.list_exploration_nodes(project_id=project.project_id)
+        }
+        assert exploration_node_ids == {
+            decision.node_id,
+            pivot.node_id,
+        }
 
     engine.dispose()

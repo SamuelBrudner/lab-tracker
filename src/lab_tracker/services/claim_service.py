@@ -73,6 +73,9 @@ class ClaimService(BaseService):
         *,
         status: ClaimStatus = ClaimStatus.PROPOSED,
         terminal_reason: str | None = None,
+        falsification_criteria: str | None = None,
+        verification_plan: str | None = None,
+        refuting_outcome: str | None = None,
         supported_by_dataset_ids: Iterable[UUID] | None = None,
         supported_by_analysis_ids: Iterable[UUID] | None = None,
         answers_question_ids: Iterable[UUID] | None = None,
@@ -110,6 +113,9 @@ class ClaimService(BaseService):
             confidence=confidence,
             status=status,
             terminal_reason=resolved_terminal_reason,
+            falsification_criteria=_normalize_optional_text(falsification_criteria),
+            verification_plan=_normalize_optional_text(verification_plan),
+            refuting_outcome=_normalize_optional_text(refuting_outcome),
             supported_by_dataset_ids=dataset_ids,
             supported_by_analysis_ids=analysis_ids,
             answers_question_ids=question_ids,
@@ -167,6 +173,9 @@ class ClaimService(BaseService):
         confidence: float | None = None,
         status: ClaimStatus | None = None,
         terminal_reason: str | None = None,
+        falsification_criteria: str | None = None,
+        verification_plan: str | None = None,
+        refuting_outcome: str | None = None,
         supported_by_dataset_ids: Iterable[UUID] | None = None,
         supported_by_analysis_ids: Iterable[UUID] | None = None,
         answers_question_ids: Iterable[UUID] | None = None,
@@ -196,6 +205,9 @@ class ClaimService(BaseService):
             or supported_by_analysis_ids is not None
             or answers_question_ids is not None
             or external_citations is not None
+            or falsification_criteria is not None
+            or verification_plan is not None
+            or refuting_outcome is not None
         ):
             raise ValidationError("Only proposed claims can be edited.")
         if statement is not None:
@@ -222,6 +234,12 @@ class ClaimService(BaseService):
             )
         if external_citations is not None:
             claim.external_citations = _normalize_external_citations(external_citations)
+        if falsification_criteria is not None:
+            claim.falsification_criteria = _normalize_optional_text(falsification_criteria)
+        if verification_plan is not None:
+            claim.verification_plan = _normalize_optional_text(verification_plan)
+        if refuting_outcome is not None:
+            claim.refuting_outcome = _normalize_optional_text(refuting_outcome)
         _ensure_claim_support_links(
             next_status, claim.supported_by_dataset_ids, claim.supported_by_analysis_ids
         )
@@ -353,6 +371,13 @@ class ClaimService(BaseService):
             if question.project_id != project_id:
                 raise ValidationError("Answered questions must belong to the same project.")
         return resolved_question_ids
+
+
+def _normalize_optional_text(value: str | None) -> str | None:
+    if value is None:
+        return None
+    cleaned = value.strip()
+    return cleaned or None
 
 
 def _normalize_external_citations(

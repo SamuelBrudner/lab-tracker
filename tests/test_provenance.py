@@ -3,6 +3,8 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from uuid import UUID, uuid4
 
+import pytest
+
 from lab_tracker.models import (
     Analysis,
     AnalysisStatus,
@@ -15,7 +17,11 @@ from lab_tracker.models import (
     DatasetFile,
     DatasetStatus,
     EntityOrigin,
+    EntityRef,
     EntityType,
+    ExplorationNode,
+    ExplorationNodeStatus,
+    ExplorationNodeType,
     ExternalArtifactKind,
     ExternalArtifactReference,
     Goal,
@@ -136,6 +142,180 @@ def test_record_export_provenance_includes_terminal_reasons():
         _node_by_id(document, f"http://example.test/claims/{claim_id}")["terminalReason"]
         == "A later analysis refuted the interpretation."
     )
+
+
+def test_record_export_provenance_includes_exploration_nodes_and_falsification_fields():
+    project_id = uuid4()
+    question_id = UUID("11111111-c0de-c0de-c0de-111111111111")
+    claim_id = UUID("22222222-c0de-c0de-c0de-222222222222")
+    node_id = UUID("33333333-c0de-c0de-c0de-333333333333")
+    question = Question(
+        question_id=question_id,
+        project_id=project_id,
+        text="Which path failed?",
+        question_type=QuestionType.DESCRIPTIVE,
+        status=QuestionStatus.ACTIVE,
+    )
+    claim = Claim(
+        claim_id=claim_id,
+        project_id=project_id,
+        statement="The bootstrap path was underpowered.",
+        confidence=55,
+        status=ClaimStatus.TESTING,
+        falsification_criteria="A larger bootstrap sample separates the groups.",
+        verification_plan="Repeat with the preregistered mixed model and bootstrap.",
+        refuting_outcome="Bootstrap intervals separate cleanly.",
+        answers_question_ids=[question_id],
+    )
+    exploration_node = ExplorationNode(
+        node_id=node_id,
+        project_id=project_id,
+        node_type=ExplorationNodeType.DEAD_END,
+        title="Bootstrap dead end",
+        target=EntityRef(entity_type=EntityType.CLAIM, entity_id=claim_id),
+        status=ExplorationNodeStatus.COMMITTED,
+        evidence_refs=[EntityRef(entity_type=EntityType.QUESTION, entity_id=question_id)],
+        hypothesis="Bootstrap would make the effect obvious.",
+        failure_mode="Intervals stayed wide.",
+        lesson="Model first, bootstrap for presentation later.",
+    )
+
+    document = build_record_export_provenance_document(
+        "http://example.test",
+        RecordExportRecords(
+            questions=[question],
+            claims=[claim],
+            exploration_nodes=[exploration_node],
+        ),
+    )
+
+    claim_node = _node_by_id(document, f"http://example.test/claims/{claim_id}")
+    exploration_jsonld = _node_by_id(
+        document,
+        f"http://example.test/exploration-nodes/{node_id}",
+    )
+    assert claim_node["falsificationCriteria"] == claim.falsification_criteria
+    assert claim_node["verificationPlan"] == claim.verification_plan
+    assert claim_node["refutingOutcome"] == claim.refuting_outcome
+    assert _node_type_includes(exploration_jsonld, "lab:ExplorationNode")
+    assert exploration_jsonld["explorationNodeType"] == "dead_end"
+    assert exploration_jsonld["target"] == {
+        "@id": f"http://example.test/claims/{claim_id}",
+        "entityType": "claim",
+        "entityId": str(claim_id),
+    }
+    assert exploration_jsonld["evidence"] == [
+        {"@id": f"http://example.test/questions/{question_id}"}
+    ]
+    assert exploration_jsonld["failureMode"] == "Intervals stayed wide."
+    assert exploration_jsonld["lesson"] == "Model first, bootstrap for presentation later."
+
+
+def test_record_export_provenance_includes_exploration_edges_and_invalidation_links():
+    project_id = uuid4()
+    question_id = UUID("11111111-eeee-eeee-eeee-111111111111")
+    claim_id = UUID("22222222-eeee-eeee-eeee-222222222222")
+    parent_node_id = UUID("33333333-eeee-eeee-eeee-333333333333")
+    dependency_node_id = UUID("44444444-eeee-eeee-eeee-444444444444")
+    pivot_node_id = UUID("55555555-eeee-eeee-eeee-555555555555")
+    question = Question(
+        question_id=question_id,
+        project_id=project_id,
+        text="Which path should supersede the old claim?",
+        question_type=QuestionType.DESCRIPTIVE,
+        status=QuestionStatus.ACTIVE,
+    )
+    claim = Claim(
+        claim_id=claim_id,
+        project_id=project_id,
+        statement="The old bootstrap interpretation still holds.",
+        confidence=35,
+        status=ClaimStatus.TESTING,
+    )
+    parent_node = ExplorationNode(
+        node_id=parent_node_id,
+        project_id=project_id,
+        node_type=ExplorationNodeType.DECISION,
+        title="Try bootstrap first",
+        target=EntityRef(entity_type=EntityType.QUESTION, entity_id=question_id),
+        status=ExplorationNodeStatus.COMMITTED,
+        choice="Bootstrap",
+        alternatives_considered=["Mixed model"],
+        rationale="It was the fastest path.",
+    )
+    dependency_node = ExplorationNode(
+        node_id=dependency_node_id,
+        project_id=project_id,
+        node_type=ExplorationNodeType.DEAD_END,
+        title="Bootstrap stalled",
+        target=EntityRef(entity_type=EntityType.CLAIM, entity_id=claim_id),
+        status=ExplorationNodeStatus.COMMITTED,
+        hypothesis="Bootstrap would support the claim.",
+        failure_mode="Intervals stayed too wide.",
+        lesson="The claim needs a stronger analysis.",
+    )
+    pivot_node = ExplorationNode(
+        node_id=pivot_node_id,
+        project_id=project_id,
+        node_type=ExplorationNodeType.PIVOT,
+        title="Pivot away from stale claim",
+        target=EntityRef(entity_type=EntityType.QUESTION, entity_id=question_id),
+        status=ExplorationNodeStatus.COMMITTED,
+        trigger="The dead end refuted the old bootstrap path.",
+        rationale="The stale claim should no longer guide the analysis.",
+        parent_node_ids=[parent_node_id],
+        also_depends_on_node_ids=[dependency_node_id],
+        invalidates_claim_id=claim_id,
+    )
+
+    document = build_record_export_provenance_document(
+        "http://example.test",
+        RecordExportRecords(
+            questions=[question],
+            claims=[claim],
+            exploration_nodes=[parent_node, dependency_node, pivot_node],
+        ),
+    )
+
+    pivot_jsonld = _node_by_id(
+        document,
+        f"http://example.test/exploration-nodes/{pivot_node_id}",
+    )
+    assert pivot_jsonld["prov:wasDerivedFrom"] == [
+        {"@id": f"http://example.test/exploration-nodes/{parent_node_id}"}
+    ]
+    assert pivot_jsonld["alsoDependsOn"] == [
+        {"@id": f"http://example.test/exploration-nodes/{dependency_node_id}"}
+    ]
+    assert pivot_jsonld["invalidates"] == {
+        "@id": f"http://example.test/claims/{claim_id}"
+    }
+
+
+def test_record_export_provenance_rejects_two_exploration_invalidation_refs():
+    project_id = uuid4()
+    question_id = UUID("11111111-f00d-f00d-f00d-111111111111")
+    claim_id = UUID("22222222-f00d-f00d-f00d-222222222222")
+    invalidated_node_id = UUID("33333333-f00d-f00d-f00d-333333333333")
+    pivot_node_id = UUID("44444444-f00d-f00d-f00d-444444444444")
+    pivot_node = ExplorationNode(
+        node_id=pivot_node_id,
+        project_id=project_id,
+        node_type=ExplorationNodeType.PIVOT,
+        title="Impossible double invalidation",
+        target=EntityRef(entity_type=EntityType.QUESTION, entity_id=question_id),
+        status=ExplorationNodeStatus.COMMITTED,
+        trigger="Malformed legacy data.",
+        rationale="The exporter should not silently drop either link.",
+        invalidates_node_id=invalidated_node_id,
+        invalidates_claim_id=claim_id,
+    )
+
+    with pytest.raises(ValueError, match="at most one"):
+        build_record_export_provenance_document(
+            "http://example.test",
+            RecordExportRecords(exploration_nodes=[pivot_node]),
+        )
 
 
 def test_claim_relations_and_external_citations_are_exported_in_provenance():

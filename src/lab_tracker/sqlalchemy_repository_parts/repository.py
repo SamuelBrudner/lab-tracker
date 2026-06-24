@@ -15,6 +15,7 @@ from lab_tracker.db_models import (
     ClaimEdgeModel,
     ClaimModel,
     DatasetModel,
+    ExplorationNodeModel,
     NoteModel,
     QuestionModel,
     SessionModel,
@@ -29,6 +30,7 @@ from lab_tracker.models import (
     Dataset,
     DatasetFile,
     EntityVersion,
+    ExplorationNode,
     Goal,
     GoalLink,
     GraphChangeSet,
@@ -66,6 +68,7 @@ from .core import (
     SQLAlchemyQuestionRepository,
 )
 from .datasets import SQLAlchemyDatasetRepository
+from .exploration import SQLAlchemyExplorationNodeRepository
 from .goals import SQLAlchemyGoalRepository
 from .graph_batches import (
     SQLAlchemyGraphDraftBatchRunRepository,
@@ -111,6 +114,7 @@ class SQLAlchemyLabTrackerRepository(LabTrackerRepository):
         self.analyses = SQLAlchemyAnalysisRepository(session)
         self.claims = SQLAlchemyClaimRepository(session)
         self.claim_edges = SQLAlchemyClaimEdgeRepository(session)
+        self.exploration_nodes = SQLAlchemyExplorationNodeRepository(session)
         self.entity_versions = SQLAlchemyEntityVersionRepository(session)
         self.goals = SQLAlchemyGoalRepository(session)
         self.visualizations = SQLAlchemyVisualizationRepository(session)
@@ -435,6 +439,17 @@ class SQLAlchemyLabTrackerRepository(LabTrackerRepository):
                 ).order_by(VisualizationModel.created_at, VisualizationModel.viz_id)
             )
         )
+        exploration_node_rows = list(
+            self._session.scalars(
+                self._attributed_record_statement(
+                    ExplorationNodeModel,
+                    created_by_column=ExplorationNodeModel.created_by,
+                    user_id_column=ExplorationNodeModel.created_by_user_id,
+                    user_id=user_id,
+                    project_filter=project_filter,
+                ).order_by(ExplorationNodeModel.created_at, ExplorationNodeModel.node_id)
+            )
+        )
         claims = self.claims.claims_from_rows(claim_rows)
         claim_ids = {claim.claim_id for claim in claims}
         claim_edges = self._claim_edges_for_record_claims(
@@ -449,6 +464,7 @@ class SQLAlchemyLabTrackerRepository(LabTrackerRepository):
             analyses=self.analyses.analyses_from_rows(analysis_rows),
             claims=claims,
             claim_edges=claim_edges,
+            exploration_nodes=self.exploration_nodes.nodes_from_rows(exploration_node_rows),
             visualizations=self.visualizations.visualizations_from_rows(visualization_rows),
         )
 
@@ -841,6 +857,33 @@ class SQLAlchemyLabTrackerRepository(LabTrackerRepository):
             relation=relation,
             limit=limit,
             offset=offset,
+        )
+
+    def query_exploration_nodes(
+        self,
+        *,
+        project_id: UUID | None = None,
+        project_ids: set[UUID] | None = None,
+        node_type: str | None = None,
+        status: str | None = None,
+        target_entity_type: str | None = None,
+        target_entity_id: UUID | None = None,
+        created_by: str | None = None,
+        limit: int | None = None,
+        offset: int = 0,
+        recent_first: bool = False,
+    ) -> tuple[list[ExplorationNode], int]:
+        return self.exploration_nodes.query(
+            project_id=project_id,
+            project_ids=project_ids,
+            node_type=node_type,
+            status=status,
+            target_entity_type=target_entity_type,
+            target_entity_id=target_entity_id,
+            created_by=created_by,
+            limit=limit,
+            offset=offset,
+            recent_first=recent_first,
         )
 
     def query_entity_versions(

@@ -6,6 +6,8 @@ from lab_tracker.decision_context_constants import TASK_KIND_VALUES
 from lab_tracker.errors import ValidationError
 from lab_tracker.models import (
     ClaimStatus,
+    ExplorationNodeStatus,
+    ExplorationNodeType,
     GoalLinkStatus,
     GoalRelation,
     GoalType,
@@ -70,16 +72,53 @@ def test_schema_description_status_lifecycle_comes_from_service_rules() -> None:
     payload = build_schema_description(entity_type="claim")
 
     claim = payload["entities"]["claim"]
+    assert {
+        "falsification_criteria",
+        "verification_plan",
+        "refuting_outcome",
+    }.issubset(claim["create"]["fields"])
+    assert {
+        "falsification_criteria",
+        "verification_plan",
+        "refuting_outcome",
+    }.issubset(claim["update"]["fields"])
     assert claim["status"]["allowed_values"] == [
         status.value for status in ClaimStatus
     ]
     assert claim["status_lifecycle"][ClaimStatus.PROPOSED.value] == [
         ClaimStatus.PROPOSED.value,
+        ClaimStatus.TESTING.value,
+        ClaimStatus.SUPPORTED.value,
+        ClaimStatus.REJECTED.value,
+    ]
+    assert claim["status_lifecycle"][ClaimStatus.TESTING.value] == [
+        ClaimStatus.TESTING.value,
         ClaimStatus.SUPPORTED.value,
         ClaimStatus.REJECTED.value,
     ]
     assert claim["status_lifecycle"][ClaimStatus.SUPPORTED.value] == [
         ClaimStatus.SUPPORTED.value
+    ]
+
+
+def test_schema_description_exposes_exploration_node_metadata() -> None:
+    payload = build_schema_description(entity_type="exploration_node")
+
+    exploration = payload["entities"]["exploration_node"]
+    assert exploration["create"]["required_fields"] == [
+        "project_id",
+        "node_type",
+        "title",
+        "target",
+    ]
+    assert exploration["create"]["fields"]["node_type"]["controlled_values"][
+        "allowed_values"
+    ] == [node_type.value for node_type in ExplorationNodeType]
+    assert exploration["status"]["allowed_values"] == [
+        status.value for status in ExplorationNodeStatus
+    ]
+    assert payload["shared_enums"]["exploration_node_type"]["allowed_values"] == [
+        node_type.value for node_type in ExplorationNodeType
     ]
 
 

@@ -155,6 +155,7 @@ class UsageEventResourceType(str, Enum):
     ANALYSIS = "analysis"
     CLAIM = "claim"
     CLAIM_EDGE = "claim_edge"
+    EXPLORATION_NODE = "exploration_node"
     VISUALIZATION = "visualization"
     GOAL = "goal"
     GOAL_LINK = "goal_link"
@@ -197,6 +198,7 @@ class AnalysisStatus(str, Enum):
 
 class ClaimStatus(str, Enum):
     PROPOSED = "proposed"
+    TESTING = "testing"
     SUPPORTED = "supported"
     REJECTED = "rejected"
 
@@ -207,6 +209,18 @@ class ClaimRelation(str, Enum):
     REFUTES = "refutes"
     DEPENDS_ON = "depends_on"
     SUPERSEDES = "supersedes"
+
+
+class ExplorationNodeType(str, Enum):
+    DECISION = "decision"
+    DEAD_END = "dead_end"
+    PIVOT = "pivot"
+
+
+class ExplorationNodeStatus(str, Enum):
+    STAGED = "staged"
+    COMMITTED = "committed"
+    ARCHIVED = "archived"
 
 
 class GoalType(str, Enum):
@@ -790,6 +804,9 @@ class ClaimInput(_DomainModel):
     confidence: float
     status: ClaimStatus = ClaimStatus.PROPOSED
     terminal_reason: str | None = None
+    falsification_criteria: str | None = None
+    verification_plan: str | None = None
+    refuting_outcome: str | None = None
     supported_by_dataset_ids: list[UUID] = Field(default_factory=list)
     supported_by_analysis_ids: list[UUID] = Field(default_factory=list)
     answers_question_ids: list[UUID] = Field(default_factory=list)
@@ -803,6 +820,9 @@ class Claim(_DomainModel):
     confidence: float
     status: ClaimStatus = ClaimStatus.PROPOSED
     terminal_reason: str | None = None
+    falsification_criteria: str | None = None
+    verification_plan: str | None = None
+    refuting_outcome: str | None = None
     supported_by_dataset_ids: list[UUID] = Field(default_factory=list)
     supported_by_analysis_ids: list[UUID] = Field(default_factory=list)
     answers_question_ids: list[UUID] = Field(default_factory=list)
@@ -826,6 +846,37 @@ class ClaimEdge(_DomainModel):
     created_at: datetime = Field(default_factory=utc_now)
     created_by: str | None = None
     created_by_user_id: UUID | None = None
+
+
+class ExplorationNode(_DomainModel):
+    node_id: UUID
+    project_id: UUID
+    node_type: ExplorationNodeType
+    title: str
+    target: EntityRef
+    status: ExplorationNodeStatus = ExplorationNodeStatus.STAGED
+    choice: str | None = None
+    alternatives_considered: list[str] = Field(default_factory=list)
+    rationale: str | None = None
+    evidence_refs: list[EntityRef] = Field(default_factory=list)
+    hypothesis: str | None = None
+    failure_mode: str | None = None
+    lesson: str | None = None
+    tooling_context: str | None = None
+    trigger: str | None = None
+    invalidates_node_id: UUID | None = None
+    invalidates_claim_id: UUID | None = None
+    parent_node_ids: list[UUID] = Field(default_factory=list)
+    also_depends_on_node_ids: list[UUID] = Field(default_factory=list)
+    created_at: datetime = Field(default_factory=utc_now)
+    created_by: str | None = None
+    created_by_user_id: UUID | None = None
+    origin: EntityOrigin = EntityOrigin.USER
+    change_set_id: UUID | None = None
+    origin_provider: str | None = None
+    origin_model: str | None = None
+    origin_prompt_version: str | None = None
+    updated_at: datetime = Field(default_factory=utc_now)
 
 
 class EntityVersion(_DomainModel):
@@ -934,6 +985,7 @@ class RecordExportRecords(_DomainModel):
     analyses: list[Analysis] = Field(default_factory=list)
     claims: list[Claim] = Field(default_factory=list)
     claim_edges: list[ClaimEdge] = Field(default_factory=list)
+    exploration_nodes: list[ExplorationNode] = Field(default_factory=list)
     notes: list[Note] = Field(default_factory=list)
     visualizations: list[Visualization] = Field(default_factory=list)
 

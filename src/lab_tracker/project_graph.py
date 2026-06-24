@@ -12,6 +12,7 @@ from lab_tracker.models import (
     ClaimEdge,
     Dataset,
     EntityType,
+    ExplorationNode,
     ExternalArtifactReference,
     Goal,
     Note,
@@ -36,9 +37,10 @@ _NODE_TYPE_ORDER = {
     "dataset": 3,
     "analysis": 4,
     "claim": 5,
-    "external_artifact": 6,
-    "visualization": 7,
-    "goal": 8,
+    "exploration_node": 6,
+    "external_artifact": 7,
+    "visualization": 8,
+    "goal": 9,
 }
 _QUESTION_LINK_ROLE_ORDER = {"primary": 0, "secondary": 1}
 _GRAPH_LABEL_LIMIT = 180
@@ -58,6 +60,7 @@ def build_project_graph(
     analyses: list[Analysis] = []
     claims: list[Claim] = []
     claim_edges: list[ClaimEdge] = []
+    exploration_nodes: list[ExplorationNode] = []
     visualizations: list[Visualization] = []
     goals: list[Goal] = []
     notes: list[Note] = []
@@ -73,6 +76,11 @@ def build_project_graph(
         )
         goals, _ = repository.query_goals(project_id=project_id, limit=None, offset=0)
         claim_edges, _ = repository.query_claim_edges(
+            project_id=project_id,
+            limit=None,
+            offset=0,
+        )
+        exploration_nodes, _ = repository.query_exploration_nodes(
             project_id=project_id,
             limit=None,
             offset=0,
@@ -98,6 +106,8 @@ def build_project_graph(
             builder.add_node(_claim_node(claim))
             for citation in sorted(claim.external_citations, key=_external_artifact_sort_key):
                 builder.add_node(_external_artifact_node(citation))
+        for node in _sort_entities(exploration_nodes, "node_id", _exploration_node_label):
+            builder.add_node(_exploration_node_node(node))
         for visualization in _sort_entities(visualizations, "viz_id", _visualization_label):
             builder.add_node(_visualization_node(visualization))
         for goal in _sort_entities(goals, "goal_id", _goal_label):
@@ -111,6 +121,7 @@ def build_project_graph(
             analyses,
             claims,
             claim_edges,
+            exploration_nodes,
             visualizations,
             goals,
         )
@@ -246,6 +257,10 @@ def _claim_label(claim: Claim) -> str:
     return _truncate_graph_label(claim.statement)
 
 
+def _exploration_node_label(node: ExplorationNode) -> str:
+    return _truncate_graph_label(node.title)
+
+
 def _visualization_label(visualization: Visualization) -> str:
     return visualization.caption or visualization.viz_type
 
@@ -316,6 +331,22 @@ def _claim_node(claim: Claim) -> ProjectGraphNode:
         label=_claim_label(claim),
         detail=f"confidence {claim.confidence:g}",
         status=_enum_value(claim.status),
+    )
+
+
+def _exploration_node_node(node: ExplorationNode) -> ProjectGraphNode:
+    return ProjectGraphNode(
+        id=_entity_node_id("exploration_node", node.node_id),
+        entity_type="exploration_node",
+        entity_id=str(node.node_id),
+        label=_exploration_node_label(node),
+        detail=node.node_type.value.replace("_", " "),
+        status=_enum_value(node.status),
+        metadata={
+            "target_entity_type": node.target.entity_type.value,
+            "target_entity_id": str(node.target.entity_id),
+            "origin": node.origin.value,
+        },
     )
 
 
@@ -417,6 +448,7 @@ def _add_evidence_edges(
     analyses: list[Analysis],
     claims: list[Claim],
     claim_edges: list[ClaimEdge],
+    exploration_nodes: list[ExplorationNode],
     visualizations: list[Visualization],
     goals: list[Goal],
 ) -> None:
@@ -480,6 +512,7 @@ def _add_evidence_edges(
             relation.replace("_", " "),
             f"claim_relation_{relation}",
         )
+    _add_exploration_edges(builder, exploration_nodes)
     for visualization in _sort_entities(visualizations, "viz_id", _visualization_label):
         visualization_id = _entity_node_id("visualization", visualization.viz_id)
         builder.add_edge(
@@ -565,6 +598,61 @@ def _add_full_edges(
             "source session",
             "dataset_source_session",
         )
+
+
+def _add_exploration_edges(
+    builder: _ProjectGraphBuilder,
+    exploration_nodes: list[ExplorationNode],
+) -> None:
+    for node in _sort_entities(exploration_nodes, "node_id", _exploration_node_label):
+        node_id = _entity_node_id("exploration_node", node.node_id)
+        builder.add_edge(
+            _entity_node_id(_entity_type_value(node.target.entity_type), node.target.entity_id),
+            node_id,
+            "concerns",
+            "exploration_target",
+        )
+        for evidence_ref in sorted(
+            node.evidence_refs,
+            key=lambda ref: (_entity_type_value(ref.entity_type), str(ref.entity_id)),
+        ):
+            builder.add_edge(
+                _entity_node_id(
+                    _entity_type_value(evidence_ref.entity_type),
+                    evidence_ref.entity_id,
+                ),
+                node_id,
+                "evidence",
+                "exploration_evidence",
+            )
+        for parent_id in sorted(node.parent_node_ids, key=str):
+            builder.add_edge(
+                _entity_node_id("exploration_node", parent_id),
+                node_id,
+                "parent",
+                "exploration_parent",
+            )
+        for dependency_id in sorted(node.also_depends_on_node_ids, key=str):
+            builder.add_edge(
+                _entity_node_id("exploration_node", dependency_id),
+                node_id,
+                "depends on",
+                "exploration_dependency",
+            )
+        if node.invalidates_node_id is not None:
+            builder.add_edge(
+                node_id,
+                _entity_node_id("exploration_node", node.invalidates_node_id),
+                "invalidates",
+                "exploration_invalidates_node",
+            )
+        if node.invalidates_claim_id is not None:
+            builder.add_edge(
+                node_id,
+                _entity_node_id("claim", node.invalidates_claim_id),
+                "invalidates",
+                "exploration_invalidates_claim",
+            )
 
 
 def _sorted_question_links(dataset: Dataset) -> list[QuestionLink]:

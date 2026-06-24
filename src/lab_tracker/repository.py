@@ -14,6 +14,7 @@ from lab_tracker.models import (
     Dataset,
     DatasetFile,
     EntityVersion,
+    ExplorationNode,
     Goal,
     GoalLink,
     GraphChangeSet,
@@ -76,6 +77,7 @@ class LabTrackerRepository(Protocol):
     analyses: EntityRepository[Analysis]
     claims: EntityRepository[Claim]
     claim_edges: EntityRepository[ClaimEdge]
+    exploration_nodes: EntityRepository[ExplorationNode]
     entity_versions: EntityRepository[EntityVersion]
     goals: EntityRepository[Goal]
     visualizations: EntityRepository[Visualization]
@@ -369,6 +371,22 @@ class LabTrackerRepository(Protocol):
         offset: int = 0,
     ) -> tuple[list[ClaimEdge], int]:
         """Query typed claim-to-claim edges with filters and pagination."""
+
+    def query_exploration_nodes(
+        self,
+        *,
+        project_id: UUID | None = None,
+        project_ids: set[UUID] | None = None,
+        node_type: str | None = None,
+        status: str | None = None,
+        target_entity_type: str | None = None,
+        target_entity_id: UUID | None = None,
+        created_by: str | None = None,
+        limit: int | None = None,
+        offset: int = 0,
+        recent_first: bool = False,
+    ) -> tuple[list[ExplorationNode], int]:
+        """Query exploration trajectory nodes with filters and pagination."""
 
     def query_entity_versions(
         self,

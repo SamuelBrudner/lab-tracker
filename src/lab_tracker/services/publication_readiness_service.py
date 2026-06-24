@@ -125,18 +125,29 @@ class PublicationReadinessService(BaseService):
 def _unsupported_claims(
     claims: list[Claim],
 ) -> list[PublicationReadinessUnsupportedClaim]:
-    return [
-        PublicationReadinessUnsupportedClaim(
-            claim_id=claim.claim_id,
-            statement=claim.statement,
-            status=claim.status,
-            reason="Supported claim has no dataset or analysis evidence.",
-        )
-        for claim in claims
-        if claim.status == ClaimStatus.SUPPORTED
-        and not claim.supported_by_dataset_ids
-        and not claim.supported_by_analysis_ids
-    ]
+    unsupported: list[PublicationReadinessUnsupportedClaim] = []
+    for claim in claims:
+        if claim.status != ClaimStatus.SUPPORTED:
+            continue
+        if not claim.supported_by_dataset_ids and not claim.supported_by_analysis_ids:
+            unsupported.append(
+                PublicationReadinessUnsupportedClaim(
+                    claim_id=claim.claim_id,
+                    statement=claim.statement,
+                    status=claim.status,
+                    reason="Supported claim has no dataset or analysis evidence.",
+                )
+            )
+        if not claim.falsification_criteria:
+            unsupported.append(
+                PublicationReadinessUnsupportedClaim(
+                    claim_id=claim.claim_id,
+                    statement=claim.statement,
+                    status=claim.status,
+                    reason="Supported claim has no falsification criteria.",
+                )
+            )
+    return unsupported
 
 
 def _ungrounded_questions(

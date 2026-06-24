@@ -704,6 +704,9 @@ class ClaimModel(Base):
     confidence: Mapped[float] = mapped_column(Float, nullable=False)
     status: Mapped[str] = mapped_column(String(20), default="proposed")
     terminal_reason: Mapped[str | None] = mapped_column(Text)
+    falsification_criteria: Mapped[str | None] = mapped_column(Text)
+    verification_plan: Mapped[str | None] = mapped_column(Text)
+    refuting_outcome: Mapped[str | None] = mapped_column(Text)
     external_citations: Mapped[list[dict[str, object]]] = mapped_column(JSON, default=list)
     created_by: Mapped[str | None] = mapped_column(String(255))
     created_by_user_id: Mapped[str | None] = mapped_column(
@@ -803,6 +806,92 @@ class ClaimEdgeModel(Base):
         String(36),
         ForeignKey("users.user_id", ondelete="SET NULL"),
     )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utc_now)
+
+
+class ExplorationNodeModel(Base):
+    __tablename__ = "exploration_nodes"
+
+    node_id: Mapped[str] = mapped_column(
+        String(36),
+        primary_key=True,
+        default=lambda: str(uuid4()),
+    )
+    project_id: Mapped[str] = mapped_column(
+        String(36),
+        ForeignKey("projects.project_id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    node_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    title: Mapped[str] = mapped_column(Text, nullable=False)
+    target_entity_type: Mapped[str] = mapped_column(String(40), nullable=False)
+    target_entity_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="staged")
+    choice: Mapped[str | None] = mapped_column(Text)
+    alternatives_considered: Mapped[list[str]] = mapped_column(JSON, default=list)
+    rationale: Mapped[str | None] = mapped_column(Text)
+    evidence_refs: Mapped[list[dict[str, str]]] = mapped_column(JSON, default=list)
+    hypothesis: Mapped[str | None] = mapped_column(Text)
+    failure_mode: Mapped[str | None] = mapped_column(Text)
+    lesson: Mapped[str | None] = mapped_column(Text)
+    tooling_context: Mapped[str | None] = mapped_column(Text)
+    trigger: Mapped[str | None] = mapped_column(Text)
+    invalidates_node_id: Mapped[str | None] = mapped_column(
+        String(36),
+        ForeignKey("exploration_nodes.node_id", ondelete="SET NULL"),
+    )
+    invalidates_claim_id: Mapped[str | None] = mapped_column(
+        String(36),
+        ForeignKey("claims.claim_id", ondelete="SET NULL"),
+    )
+    created_by: Mapped[str | None] = mapped_column(String(255))
+    created_by_user_id: Mapped[str | None] = mapped_column(
+        String(36),
+        ForeignKey("users.user_id", ondelete="SET NULL"),
+    )
+    origin: Mapped[str] = mapped_column(String(32), nullable=False, default="user")
+    change_set_id: Mapped[str | None] = mapped_column(
+        String(36),
+        ForeignKey("graph_change_sets.change_set_id", ondelete="SET NULL"),
+    )
+    origin_provider: Mapped[str | None] = mapped_column(String(80))
+    origin_model: Mapped[str | None] = mapped_column(String(255))
+    origin_prompt_version: Mapped[str | None] = mapped_column(String(120))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utc_now)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=_utc_now,
+        onupdate=_utc_now,
+    )
+
+
+class ExplorationNodeEdgeModel(Base):
+    __tablename__ = "exploration_node_edges"
+    __table_args__ = (
+        UniqueConstraint(
+            "source_node_id",
+            "target_node_id",
+            "relation",
+            name="uq_exploration_node_edges_source_target_relation",
+        ),
+    )
+
+    edge_id: Mapped[str] = mapped_column(
+        String(36),
+        primary_key=True,
+        default=lambda: str(uuid4()),
+    )
+    source_node_id: Mapped[str] = mapped_column(
+        String(36),
+        ForeignKey("exploration_nodes.node_id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    target_node_id: Mapped[str] = mapped_column(
+        String(36),
+        ForeignKey("exploration_nodes.node_id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    relation: Mapped[str] = mapped_column(String(32), nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utc_now)
 
 
@@ -1285,6 +1374,7 @@ Index("ix_graph_draft_batch_runs_created_by_user_id", GraphDraftBatchRunModel.cr
 Index("ix_sessions_created_by_user_id", SessionModel.created_by_user_id)
 Index("ix_analyses_executed_by_user_id", AnalysisModel.executed_by_user_id)
 Index("ix_claims_created_by_user_id", ClaimModel.created_by_user_id)
+Index("ix_exploration_nodes_created_by_user_id", ExplorationNodeModel.created_by_user_id)
 Index("ix_goals_created_by_user_id", GoalModel.created_by_user_id)
 Index("ix_goal_links_created_by_user_id", GoalLinkModel.created_by_user_id)
 Index("ix_visualizations_created_by_user_id", VisualizationModel.created_by_user_id)
@@ -1296,6 +1386,7 @@ Index("ix_notes_change_set_id", NoteModel.change_set_id)
 Index("ix_sessions_change_set_id", SessionModel.change_set_id)
 Index("ix_analyses_change_set_id", AnalysisModel.change_set_id)
 Index("ix_claims_change_set_id", ClaimModel.change_set_id)
+Index("ix_exploration_nodes_change_set_id", ExplorationNodeModel.change_set_id)
 Index("ix_goals_change_set_id", GoalModel.change_set_id)
 Index("ix_visualizations_change_set_id", VisualizationModel.change_set_id)
 Index(
@@ -1440,6 +1531,20 @@ Index("ix_claims_project_created_at", ClaimModel.project_id, ClaimModel.created_
 Index("ix_claim_edges_claim_id", ClaimEdgeModel.claim_id)
 Index("ix_claim_edges_target_claim_id", ClaimEdgeModel.target_claim_id)
 Index("ix_claim_edges_created_by_user_id", ClaimEdgeModel.created_by_user_id)
+Index(
+    "ix_exploration_nodes_project_created_at",
+    ExplorationNodeModel.project_id,
+    ExplorationNodeModel.created_at,
+)
+Index("ix_exploration_nodes_type", ExplorationNodeModel.node_type)
+Index("ix_exploration_nodes_status", ExplorationNodeModel.status)
+Index(
+    "ix_exploration_nodes_target",
+    ExplorationNodeModel.target_entity_type,
+    ExplorationNodeModel.target_entity_id,
+)
+Index("ix_exploration_node_edges_source", ExplorationNodeEdgeModel.source_node_id)
+Index("ix_exploration_node_edges_target", ExplorationNodeEdgeModel.target_node_id)
 Index("ix_dataset_question_links_question_id", DatasetQuestionLinkModel.question_id)
 Index("ix_goals_project_created_at", GoalModel.project_id, GoalModel.created_at)
 Index(

@@ -126,7 +126,12 @@ def test_publication_readiness_flags_structural_failures(
     assert response.status_code == 200
     report = response.json()["data"]
     assert report["seal_level"] == "blocked"
-    assert [item["claim_id"] for item in report["unsupported_claims"]] == [claim_id]
+    assert [
+        (item["claim_id"], item["reason"]) for item in report["unsupported_claims"]
+    ] == [
+        (claim_id, "Supported claim has no dataset or analysis evidence."),
+        (claim_id, "Supported claim has no falsification criteria."),
+    ]
     assert [item["question_id"] for item in report["ungrounded_questions"]] == [
         answered_question_id
     ]
@@ -172,6 +177,7 @@ def test_publication_readiness_passes_clean_project(
             "statement": "The clean project is grounded.",
             "confidence": 0.9,
             "status": "supported",
+            "falsification_criteria": "A repeat committed dataset refutes the effect.",
             "supported_by_dataset_ids": [dataset_id],
         },
         headers=admin_auth_headers,

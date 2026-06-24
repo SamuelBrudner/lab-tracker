@@ -19,6 +19,8 @@ from lab_tracker.db_models import (
     DatasetModel,
     DatasetQuestionLinkModel,
     EntityVersionModel,
+    ExplorationNodeEdgeModel,
+    ExplorationNodeModel,
     GoalLinkModel,
     GoalModel,
     NoteModel,
@@ -47,6 +49,9 @@ from lab_tracker.models import (
     EntityRef,
     EntityType,
     EntityVersion,
+    ExplorationNode,
+    ExplorationNodeStatus,
+    ExplorationNodeType,
     ExternalArtifactReference,
     Goal,
     GoalLink,
@@ -814,6 +819,9 @@ def claim_to_model(claim: Claim) -> ClaimModel:
         confidence=claim.confidence,
         status=claim.status.value,
         terminal_reason=claim.terminal_reason,
+        falsification_criteria=claim.falsification_criteria,
+        verification_plan=claim.verification_plan,
+        refuting_outcome=claim.refuting_outcome,
         external_citations=_external_artifacts_to_json(claim.external_citations),
         created_by=claim.created_by,
         created_by_user_id=(
@@ -839,6 +847,9 @@ def claim_from_model(
         confidence=row.confidence,
         status=ClaimStatus(row.status),
         terminal_reason=getattr(row, "terminal_reason", None),
+        falsification_criteria=getattr(row, "falsification_criteria", None),
+        verification_plan=getattr(row, "verification_plan", None),
+        refuting_outcome=getattr(row, "refuting_outcome", None),
         supported_by_dataset_ids=list(supported_by_dataset_ids),
         supported_by_analysis_ids=list(supported_by_analysis_ids),
         answers_question_ids=list(answers_question_ids),
@@ -889,6 +900,9 @@ def apply_claim_to_model(row: ClaimModel, claim: Claim) -> None:
     row.confidence = claim.confidence
     row.status = claim.status.value
     row.terminal_reason = claim.terminal_reason
+    row.falsification_criteria = claim.falsification_criteria
+    row.verification_plan = claim.verification_plan
+    row.refuting_outcome = claim.refuting_outcome
     row.external_citations = _external_artifacts_to_json(claim.external_citations)
     row.created_by = claim.created_by
     row.created_by_user_id = (
@@ -936,6 +950,160 @@ def apply_claim_edge_to_model(row: ClaimEdgeModel, edge: ClaimEdge) -> None:
         _uuid_str(edge.created_by_user_id) if edge.created_by_user_id is not None else None
     )
     row.created_at = edge.created_at
+
+
+def _entity_refs_to_json(refs: Iterable[EntityRef]) -> list[dict[str, str]]:
+    return [ref.model_dump(mode="json") for ref in refs]
+
+
+def _entity_refs_from_json(raw_refs: Iterable[object] | None) -> list[EntityRef]:
+    if not raw_refs:
+        return []
+    return [EntityRef.model_validate(ref) for ref in raw_refs]
+
+
+def exploration_node_to_model(node: ExplorationNode) -> ExplorationNodeModel:
+    return ExplorationNodeModel(
+        node_id=_uuid_str(node.node_id),
+        project_id=_uuid_str(node.project_id),
+        node_type=node.node_type.value,
+        title=node.title,
+        target_entity_type=node.target.entity_type.value,
+        target_entity_id=_uuid_str(node.target.entity_id),
+        status=node.status.value,
+        choice=node.choice,
+        alternatives_considered=list(node.alternatives_considered),
+        rationale=node.rationale,
+        evidence_refs=_entity_refs_to_json(node.evidence_refs),
+        hypothesis=node.hypothesis,
+        failure_mode=node.failure_mode,
+        lesson=node.lesson,
+        tooling_context=node.tooling_context,
+        trigger=node.trigger,
+        invalidates_node_id=(
+            _uuid_str(node.invalidates_node_id)
+            if node.invalidates_node_id is not None
+            else None
+        ),
+        invalidates_claim_id=(
+            _uuid_str(node.invalidates_claim_id)
+            if node.invalidates_claim_id is not None
+            else None
+        ),
+        created_by=node.created_by,
+        created_by_user_id=(
+            _uuid_str(node.created_by_user_id)
+            if node.created_by_user_id is not None
+            else None
+        ),
+        **_origin_model_kwargs(node),
+        created_at=node.created_at,
+        updated_at=node.updated_at,
+    )
+
+
+def exploration_node_from_model(
+    row: ExplorationNodeModel,
+    *,
+    parent_node_ids: Iterable[UUID] = (),
+    also_depends_on_node_ids: Iterable[UUID] = (),
+) -> ExplorationNode:
+    return ExplorationNode(
+        node_id=_uuid(row.node_id),
+        project_id=_uuid(row.project_id),
+        node_type=ExplorationNodeType(row.node_type),
+        title=row.title,
+        target=EntityRef(
+            entity_type=EntityType(row.target_entity_type),
+            entity_id=_uuid(row.target_entity_id),
+        ),
+        status=ExplorationNodeStatus(row.status),
+        choice=getattr(row, "choice", None),
+        alternatives_considered=list(getattr(row, "alternatives_considered", None) or []),
+        rationale=getattr(row, "rationale", None),
+        evidence_refs=_entity_refs_from_json(getattr(row, "evidence_refs", None)),
+        hypothesis=getattr(row, "hypothesis", None),
+        failure_mode=getattr(row, "failure_mode", None),
+        lesson=getattr(row, "lesson", None),
+        tooling_context=getattr(row, "tooling_context", None),
+        trigger=getattr(row, "trigger", None),
+        invalidates_node_id=(
+            _uuid(row.invalidates_node_id)
+            if getattr(row, "invalidates_node_id", None)
+            else None
+        ),
+        invalidates_claim_id=(
+            _uuid(row.invalidates_claim_id)
+            if getattr(row, "invalidates_claim_id", None)
+            else None
+        ),
+        parent_node_ids=list(parent_node_ids),
+        also_depends_on_node_ids=list(also_depends_on_node_ids),
+        created_by=getattr(row, "created_by", None),
+        created_by_user_id=(
+            _uuid(row.created_by_user_id)
+            if getattr(row, "created_by_user_id", None)
+            else None
+        ),
+        **_origin_domain_kwargs(row),
+        created_at=_as_utc(row.created_at),
+        updated_at=_as_utc(row.updated_at),
+    )
+
+
+def apply_exploration_node_to_model(
+    row: ExplorationNodeModel,
+    node: ExplorationNode,
+) -> None:
+    row.project_id = _uuid_str(node.project_id)
+    row.node_type = node.node_type.value
+    row.title = node.title
+    row.target_entity_type = node.target.entity_type.value
+    row.target_entity_id = _uuid_str(node.target.entity_id)
+    row.status = node.status.value
+    row.choice = node.choice
+    row.alternatives_considered = list(node.alternatives_considered)
+    row.rationale = node.rationale
+    row.evidence_refs = _entity_refs_to_json(node.evidence_refs)
+    row.hypothesis = node.hypothesis
+    row.failure_mode = node.failure_mode
+    row.lesson = node.lesson
+    row.tooling_context = node.tooling_context
+    row.trigger = node.trigger
+    row.invalidates_node_id = (
+        _uuid_str(node.invalidates_node_id) if node.invalidates_node_id is not None else None
+    )
+    row.invalidates_claim_id = (
+        _uuid_str(node.invalidates_claim_id) if node.invalidates_claim_id is not None else None
+    )
+    row.created_by = node.created_by
+    row.created_by_user_id = (
+        _uuid_str(node.created_by_user_id) if node.created_by_user_id is not None else None
+    )
+    _apply_origin_to_model(row, node)
+    row.created_at = node.created_at
+    row.updated_at = node.updated_at
+
+
+def exploration_node_edge_models(node: ExplorationNode) -> list[ExplorationNodeEdgeModel]:
+    rows: list[ExplorationNodeEdgeModel] = []
+    for parent_id in node.parent_node_ids:
+        rows.append(
+            ExplorationNodeEdgeModel(
+                source_node_id=_uuid_str(parent_id),
+                target_node_id=_uuid_str(node.node_id),
+                relation="parent",
+            )
+        )
+    for dependency_id in node.also_depends_on_node_ids:
+        rows.append(
+            ExplorationNodeEdgeModel(
+                source_node_id=_uuid_str(dependency_id),
+                target_node_id=_uuid_str(node.node_id),
+                relation="also_depends_on",
+            )
+        )
+    return rows
 
 
 def entity_version_to_model(version: EntityVersion) -> EntityVersionModel:
