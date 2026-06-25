@@ -1,0 +1,17 @@
+cff-version: "1.2.0"
+type: software
+title: "Lab Tracker"
+message: "Citation is required for scholarly, public, or derivative use of Lab Tracker. Cite this software using the metadata from this file."
+authors:
+  - family-names: "Brudner"
+    given-names: "Samuel"
+repository-code: "https://github.com/SamuelBrudner/lab-tracker"
+url: "https://samuelbrudner.github.io/lab-tracker/app/"
+version: "0.1.0"
+license: "PolyForm-Noncommercial-1.0.0"
+abstract: "Lab Tracker preserves the reasoning behind lab datasets, analyses, claims, figures, and notes in a curated project graph."
+keywords:
+  - "research data management"
+  - "electronic lab notebook"
+  - "provenance"
+  - "scientific software"

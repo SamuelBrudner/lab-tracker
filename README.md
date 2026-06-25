@@ -151,3 +151,9 @@ The authoritative list of what's supported is **[docs/retained-v1-surface.md](do
 - Assistant-written summaries are only as trustworthy as the curated graph behind them. The app records how graph changes were accepted so a bulk review is not later mistaken for a careful one.
 - AI features require provider configuration, and model output remains proposal-only: every graph change still needs a person to accept, edit, or reject it.
 - This README is an orientation. For supported behavior, deployment assumptions, and deferred workflows, treat [docs/retained-v1-surface.md](docs/retained-v1-surface.md) as canonical.
+
+## License and citation
+
+Lab Tracker is licensed under the [PolyForm Noncommercial License 1.0.0](LICENSE). Commercial reuse is not permitted without separate written permission from the copyright holders.
+
+Citation is required for scholarly, public, or derivative use. Use the metadata in [CITATION.cff](CITATION.cff), and preserve the required notices in [LICENSE](LICENSE) when sharing copies or modifications.

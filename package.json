@@ -1,6 +1,7 @@
 {
   "name": "lab-tracker-frontend",
   "private": true,
+  "license": "PolyForm-Noncommercial-1.0.0",
   "engines": {
     "node": ">=20"
   },
