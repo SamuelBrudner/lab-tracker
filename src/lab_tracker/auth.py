@@ -47,6 +47,7 @@ class PrincipalType(str, Enum):
     USER = "user"
     DEVICE = "device"
     SERVICE = "service"
+    SYSTEM = "system"
 
 
 @dataclass(frozen=True)
@@ -63,6 +64,26 @@ class AuthContext:
     @property
     def is_service(self) -> bool:
         return self.principal_type == PrincipalType.SERVICE
+
+    @property
+    def is_system(self) -> bool:
+        return self.principal_type == PrincipalType.SYSTEM
+
+    @property
+    def is_interactive(self) -> bool:
+        """Whether a human drove this request.
+
+        Accept and commit gates require an interactive principal so an
+        unattended automation actor (``SYSTEM``) can DRAFT but never launder AI
+        proposals into the committed graph. Allow-list rather than deny-list so
+        a future non-interactive principal type is fail-closed (excluded) until
+        it is deliberately admitted here.
+        """
+        return self.principal_type in {
+            PrincipalType.USER,
+            PrincipalType.DEVICE,
+            PrincipalType.SERVICE,
+        }
 
 
 @dataclass

@@ -19,6 +19,16 @@ function pendingBatchStatus(status) {
   return "pill";
 }
 
+function triggerLabel(trigger) {
+  if (trigger === "scheduled") {
+    return "Scheduled";
+  }
+  if (trigger === "manual") {
+    return "Manual";
+  }
+  return trigger || "";
+}
+
 function PendingBatchBanner({ enabled = true, token, navigate }) {
   const [batches, setBatches] = useState([]);
 
@@ -97,6 +107,16 @@ function BatchReviewPage({
     () => projects.find((project) => project.project_id === selectedProjectId) || null,
     [projects, selectedProjectId]
   );
+
+  const triggerByChangeSet = useMemo(() => {
+    const map = {};
+    for (const run of runs) {
+      if (run.change_set_id) {
+        map[run.change_set_id] = run.trigger;
+      }
+    }
+    return map;
+  }, [runs]);
 
   const loadBatches = useCallback(async () => {
     setLoading(true);
@@ -242,6 +262,11 @@ function BatchReviewPage({
                     <span className="pill">{batchNoteCount(batch)} notes</span>
                     <span className="pill">{(batch.operations || []).length} ops</span>
                     {batch.model ? <span className="pill">{batch.model}</span> : null}
+                    {triggerByChangeSet[batch.change_set_id] === "scheduled" ? (
+                      <span className="pill" title="Produced by the scheduled daily review">
+                        Scheduled
+                      </span>
+                    ) : null}
                   </div>
                   <button
                     type="button"
@@ -350,7 +375,7 @@ function BatchReviewPage({
                 <article className="item" key={run.run_id}>
                   <div className="item-head">
                     <strong>{run.status}</strong>
-                    <span className="pill">{run.trigger}</span>
+                    <span className="pill">{triggerLabel(run.trigger)}</span>
                   </div>
                   <div className="inline">
                     <span className="pill">{run.note_count} notes</span>

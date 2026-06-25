@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections.abc import AsyncIterator, Callable
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass
 from typing import Any
 
@@ -12,8 +13,10 @@ from fastapi import FastAPI
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session, sessionmaker
+from starlette.concurrency import run_in_threadpool
 
 from lab_tracker.api import LabTrackerAPI
+from lab_tracker.app_parts.middleware import system_auth_context
 from lab_tracker.auth import (
     AuthService,
     DeviceAuthService,
@@ -31,6 +34,7 @@ from lab_tracker.logging import configure_logging
 from lab_tracker.note_storage import LocalNoteStorage
 from lab_tracker.process_lock import ProcessLock
 from lab_tracker.rate_limit import InMemoryRateLimiter
+from lab_tracker.sqlalchemy_repository import SQLAlchemyLabTrackerRepository
 
 _logger = logging.getLogger(__name__)
 
@@ -123,14 +127,103 @@ def make_lifespan(engine: Engine):
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         lock = _acquire_database_lock(engine)
+        scheduler_task = _start_daily_review_scheduler(app)
         try:
             yield
         finally:
+            if scheduler_task is not None:
+                scheduler_task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await scheduler_task
             if lock is not None:
                 lock.release()
             engine.dispose()
 
     return lifespan
+
+
+def _start_daily_review_scheduler(app: FastAPI) -> asyncio.Task[None] | None:
+    """Start the opt-in in-process daily-review scheduler when enabled.
+
+    Off by default: only when ``LAB_TRACKER_DAILY_REVIEW_IN_PROCESS_SCHEDULER``
+    is set does the process run its own clock for run-due drafting, replacing
+    the external cron/Scheduled Task. The external trigger keeps working either
+    way, so this is a reversible convenience layer, not a new surface.
+    """
+
+    settings = getattr(app.state, "settings", None)
+    if settings is None or not getattr(
+        settings, "daily_review_in_process_scheduler", False
+    ):
+        return None
+    poll_seconds = max(1, getattr(settings, "daily_review_poll_seconds", 900))
+    _logger.info(
+        "Starting in-process daily-review scheduler (polling every %ds).",
+        poll_seconds,
+    )
+    return asyncio.create_task(_daily_review_scheduler_loop(app, poll_seconds))
+
+
+def _daily_review_tick(app: FastAPI) -> list[Any]:
+    """Run one scheduled drafting pass as the non-interactive system actor.
+
+    Mirrors ``POST /batches/run-due`` but originates inside the process. The
+    system actor can DRAFT (admin) yet is structurally barred from accepting or
+    committing (``ProjectAuthorizationPolicy.require_interactive``), so this only
+    ever produces READY proposals for human review -- never a commit. Runs
+    synchronously; callers offload it off the event loop.
+    """
+
+    session = app.state.db_session_factory()
+    try:
+        repository = SQLAlchemyLabTrackerRepository(session)
+        api = app.state.lab_tracker_api.for_request(repository)
+        draft_client_factory = getattr(
+            app.state, "graph_draft_client_factory", make_graph_draft_client
+        )
+        runs = api.run_due_graph_draft_batches(
+            draft_client_factory=draft_client_factory,
+            app_settings=app.state.settings,
+            actor=system_auth_context(),
+        )
+        session.commit()
+        return runs
+    except Exception:
+        session.rollback()
+        raise
+    finally:
+        session.close()
+
+
+def _run_daily_review_tick_safely(app: FastAPI) -> None:
+    """Run one tick, logging and swallowing any failure.
+
+    A transient model or database error must never escape to kill the scheduler
+    loop and silently stop reviews; the next tick simply tries again.
+    """
+
+    try:
+        runs = _daily_review_tick(app)
+    except Exception:
+        _logger.exception("In-process daily-review scheduler tick failed.")
+        return
+    _logger.info(
+        "In-process daily-review scheduler tick completed (%d run(s)).",
+        len(runs),
+    )
+
+
+async def _daily_review_scheduler_loop(app: FastAPI, poll_seconds: int) -> None:
+    """Poll for due daily-review batches on a fixed interval until cancelled.
+
+    The blocking drafting pass runs off the event loop so it never stalls
+    request handling, and cancellation (on shutdown) propagates out of the
+    sleep to end the loop cleanly.
+    """
+
+    while True:
+        await asyncio.sleep(poll_seconds)
+        await run_in_threadpool(_run_daily_review_tick_safely, app)
 
 
 def _acquire_database_lock(engine: Engine) -> ProcessLock | None:

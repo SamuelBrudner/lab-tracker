@@ -52,6 +52,8 @@ class Settings(BaseSettings):
     google_model: str = "gemini-2.5-flash"
     google_base_url: str = "https://generativelanguage.googleapis.com/v1beta"
     google_timeout_seconds: float = 60.0
+    daily_review_in_process_scheduler: bool = False
+    daily_review_poll_seconds: int = 900
 
     def is_auth_enabled(self) -> bool:
         if self.auth_enabled is not None:
@@ -98,6 +100,8 @@ class Settings(BaseSettings):
             raise ValueError(
                 "LAB_TRACKER_AUTH_RATE_LIMIT_WINDOW_SECONDS must be at least 1."
             )
+        if self.daily_review_poll_seconds < 1:
+            raise ValueError("LAB_TRACKER_DAILY_REVIEW_POLL_SECONDS must be at least 1.")
         return self
 
     model_config = SettingsConfigDict(

@@ -90,6 +90,21 @@ def local_auth_context() -> AuthContext:
     return AuthContext(user_id=LOCAL_AUTH_USER_ID, role=Role.ADMIN)
 
 
+def system_auth_context() -> AuthContext:
+    """Non-interactive automation principal for in-process background work.
+
+    Carries admin role so it can enumerate due batches and DRAFT graph
+    proposals, but its ``SYSTEM`` principal_type is non-interactive, so the
+    accept and commit gates reject it: automation proposes, humans commit.
+    """
+
+    return AuthContext(
+        user_id=LOCAL_AUTH_USER_ID,
+        role=Role.ADMIN,
+        principal_type=PrincipalType.SYSTEM,
+    )
+
+
 def _is_public_path(path: str) -> bool:
     if path in _PUBLIC_PATHS:
         return True

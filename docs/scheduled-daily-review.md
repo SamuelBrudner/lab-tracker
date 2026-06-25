@@ -5,9 +5,12 @@ memos — including notes tagged as meetings) and proposes how they fit your gra
 in one review queue you accept or reject. It can run **on demand** (the **Run
 now** button on the Batches page) or **on a schedule**.
 
-Lab Tracker itself does not run a background scheduler — it's a plain web app. To
-fire the review automatically you point a small **external scheduler** at one
-endpoint, `POST /batches/run-due`. This page sets that up in one step.
+By default Lab Tracker does not run a background scheduler — it's a plain web app,
+and you fire the review by pointing a small **external scheduler** at one endpoint,
+`POST /batches/run-due`. This page sets that up in one step. If you would rather the
+server keep its own clock, there is also an
+[opt-in in-process scheduler](#run-it-inside-the-process-opt-in) — pick exactly one
+of the two.
 
 > **The model only ever proposes.** The scheduled job triggers *drafting* — a
 > human still accepts or rejects every proposal before anything is committed.
@@ -113,6 +116,39 @@ to the project. Same reachability and auth rules as above.
 > Whichever you pick, keep the job to **triggering drafts only**. Lab Tracker
 > deliberately does not delegate graph commits to autonomous agents — a person
 > reviews the queue and commits what they keep.
+
+---
+
+## Run it inside the process (opt-in)
+
+On a single-machine deployment you can skip the external scheduler entirely and let
+the server keep its own clock. It is **off by default**; enable it with two settings:
+
+```sh
+export LAB_TRACKER_DAILY_REVIEW_IN_PROCESS_SCHEDULER=true
+export LAB_TRACKER_DAILY_REVIEW_POLL_SECONDS=900   # optional; defaults to 900 (15 min)
+```
+
+When enabled, the process runs the same `run-due` drafting pass on that interval —
+no cron, no Scheduled Task, no admin token to manage. The drafting call runs off the
+request path, and a failing tick is logged and retried on the next poll rather than
+killing the loop.
+
+It carries the same guarantee as every other trigger: a non-interactive **system**
+principal that may *draft* but is structurally barred from accepting or committing,
+so the in-process scheduler can only ever produce proposals for human review.
+
+Two constraints:
+
+- **Prefer a single worker.** Each worker process starts its own clock. Running
+  several is still *correct* — the idempotent `claim_due` stops any project from
+  drafting twice — just wasteful, since every worker polls. If you serve with
+  multiple workers, run one worker or leave this off and use an external trigger.
+- **Pick exactly one trigger.** The in-process scheduler and an external
+  cron/Scheduled Task are both safe to run at once — the idempotent `claim_due`
+  prevents double-drafting — but running both is needless and confusing, so choose
+  one. The external scripts remain the documented fallback and, unlike the in-process
+  clock, keep firing across app restarts and survive a crashed process.
 
 ---
 

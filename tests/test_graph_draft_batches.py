@@ -1,15 +1,24 @@
 from __future__ import annotations
 
 import json
+from contextlib import contextmanager
 from datetime import datetime, time, timedelta, timezone
 from typing import Any
-from uuid import uuid4
+from uuid import UUID, uuid4
 
+import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import select
 
+from lab_tracker.app_parts.middleware import system_auth_context
+from lab_tracker.app_parts.runtime import (
+    _daily_review_tick,
+    _run_daily_review_tick_safely,
+)
 from lab_tracker.auth import Role
+from lab_tracker.config import Settings
 from lab_tracker.db_models import GraphDraftBatchSettingsModel, NoteModel
+from lab_tracker.errors import AuthError
 from lab_tracker.graph_drafting import GraphDraftingError
 from lab_tracker.sqlalchemy_repository_parts.repository import SQLAlchemyLabTrackerRepository
 
@@ -673,3 +682,169 @@ def test_run_due_rejects_non_admin_user(
         "message": "Only admins can run scheduled batch drafts.",
         "issues": None,
     }
+
+
+# --- Autonomy invariants (lab-tracker-09ok.3): the scheduled path drafts, never commits ---
+
+
+@contextmanager
+def _request_api(client: TestClient):
+    """Request-scoped API bound to a fresh session, for in-process actor calls."""
+    session = client.app.state.db_session_factory()
+    try:
+        repository = SQLAlchemyLabTrackerRepository(session)
+        yield client.app.state.lab_tracker_api.for_request(repository)
+        session.commit()
+    except Exception:
+        session.rollback()
+        raise
+    finally:
+        session.close()
+
+
+def _ready_batch(client: TestClient, headers: dict[str, str]) -> dict[str, Any]:
+    """Run a scheduled-style batch draft and return its change-set payload."""
+    project_id = _project(client, headers)
+    _note(client, headers, project_id, "Gel photo A looked clean.")
+    _note(client, headers, project_id, "Voice memo: same gel, lane 2.")
+    client.app.state.graph_draft_client_factory = lambda settings: FakeBatchDraftClient(
+        _batch_patch(project_id)
+    )
+    run = client.post(
+        "/batches/run-now",
+        json={"project_id": project_id},
+        headers=headers,
+    )
+    assert run.status_code == 201
+    change_set_id = run.json()["data"]["change_set_id"]
+    draft = client.get(f"/batches/{change_set_id}", headers=headers)
+    assert draft.status_code == 200
+    return draft.json()["data"]
+
+
+def test_scheduled_batch_draft_stays_proposed_and_unaccepted(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+) -> None:
+    """A scheduled draft reaches READY with every operation still PROPOSED and unstamped."""
+    payload = _ready_batch(client, admin_auth_headers)
+    assert payload["status"] == "ready"
+    assert payload["operations"]
+    for operation in payload["operations"]:
+        assert operation["status"] == "proposed"
+        assert operation["acceptance_mode"] is None
+        assert operation["accepted_by"] is None
+        assert operation["accepted_at"] is None
+
+
+def test_all_proposed_batch_draft_cannot_commit(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+) -> None:
+    """An untouched (all-PROPOSED) draft is refused by commit in isolation."""
+    payload = _ready_batch(client, admin_auth_headers)
+    commit = client.post(
+        f"/graph-drafts/{payload['change_set_id']}/commit",
+        json={"message": "commit without accepting anything"},
+        headers=admin_auth_headers,
+    )
+    assert commit.status_code == 422
+    assert "at least one accepted operation" in commit.json()["error"]["message"].lower()
+
+
+def test_system_actor_cannot_commit_ready_batch_draft(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+) -> None:
+    """The scheduler's own actor cannot commit the draft it produced."""
+    payload = _ready_batch(client, admin_auth_headers)
+    with _request_api(client) as api, pytest.raises(AuthError):
+        api.commit_graph_change_set(
+            UUID(payload["change_set_id"]),
+            message="auto-commit",
+            actor=system_auth_context(),
+        )
+
+
+def test_human_accepted_batch_operations_are_never_auto_accepted(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+) -> None:
+    """Operations entering the graph carry only honest human acceptance modes."""
+    payload = _ready_batch(client, admin_auth_headers)
+    change_set_id = payload["change_set_id"]
+    accept_all = client.post(
+        f"/graph-drafts/{change_set_id}/accept-all", headers=admin_auth_headers
+    )
+    assert accept_all.status_code == 200
+    operations = accept_all.json()["data"]["operations"]
+    assert operations
+    for operation in operations:
+        assert operation["acceptance_mode"] in {"human_selected", "bulk_accepted"}
+    commit = client.post(
+        f"/graph-drafts/{change_set_id}/commit",
+        json={"message": "human commit"},
+        headers=admin_auth_headers,
+    )
+    assert commit.status_code == 200
+
+
+# --- In-process scheduler (lab-tracker-09ok.4): opt-in, drafting only ---
+
+
+def _make_due_batch(client: TestClient, headers: dict[str, str]) -> str:
+    project_id = _project(client, headers)
+    _note(client, headers, project_id, "A staged note awaiting review.")
+    enable = client.patch(
+        f"/projects/{project_id}/graph-draft-batch-settings",
+        json={"enabled": True},
+        headers=headers,
+    )
+    assert enable.status_code == 200
+    with client.app.state.db_session_factory() as session:
+        settings = session.scalar(
+            select(GraphDraftBatchSettingsModel).where(
+                GraphDraftBatchSettingsModel.project_id == project_id
+            )
+        )
+        settings.next_run_at = datetime.now(timezone.utc) - timedelta(hours=1)
+        session.commit()
+    return project_id
+
+
+def test_daily_review_scheduler_is_off_by_default() -> None:
+    fields = Settings.model_fields
+    assert fields["daily_review_in_process_scheduler"].default is False
+    assert fields["daily_review_poll_seconds"].default == 900
+
+
+def test_in_process_tick_drafts_due_batches_as_system_actor(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+) -> None:
+    project_id = _make_due_batch(client, admin_auth_headers)
+    fake_client = FakeBatchDraftClient(_batch_patch(project_id))
+    client.app.state.graph_draft_client_factory = lambda settings: fake_client
+
+    runs = _daily_review_tick(client.app)
+
+    assert [run.status.value for run in runs] == ["ready"]
+    assert runs[0].project_id == UUID(project_id)
+    assert fake_client.calls, "the system actor must be allowed to DRAFT"
+    # The produced draft is a proposal: nothing accepted or committed.
+    draft = client.get(f"/batches/{runs[0].change_set_id}", headers=admin_auth_headers)
+    assert draft.status_code == 200
+    payload = draft.json()["data"]
+    assert payload["status"] == "ready"
+    for operation in payload["operations"]:
+        assert operation["status"] == "proposed"
+        assert operation["acceptance_mode"] is None
+
+
+def test_scheduler_tick_swallows_failures(client: TestClient, monkeypatch) -> None:
+    def boom() -> None:
+        raise RuntimeError("database unavailable")
+
+    monkeypatch.setattr(client.app.state, "db_session_factory", boom)
+    # The safe wrapper must never propagate: a dead tick cannot kill the loop.
+    _run_daily_review_tick_safely(client.app)
