@@ -5,6 +5,12 @@ import { formatDate } from "../shared/formatters.js";
 
 const { useCallback, useEffect, useMemo, useState } = React;
 
+const BATCH_CADENCE_OPTIONS = [
+  { label: "Daily", value: "1440" },
+  { label: "Every 12 hours", value: "720" },
+  { label: "Weekly", value: "10080" },
+];
+
 function batchNoteCount(batch) {
   return batch?.source_note_count || batch?.source_note_ids?.length || 1;
 }
@@ -272,15 +278,18 @@ function BatchReviewPage({
               Enabled
             </label>
             <label>
-              Cadence minutes
-              <input
-                type="number"
-                min="60"
-                step="60"
+              Cadence
+              <select
                 value={cadenceMinutes}
                 disabled={!canManageGraph || !selectedProjectId}
                 onChange={(event) => setCadenceMinutes(event.target.value)}
-              />
+              >
+                {BATCH_CADENCE_OPTIONS.map((option) => (
+                  <option key={option.value} value={option.value}>
+                    {option.label}
+                  </option>
+                ))}
+              </select>
             </label>
             <label>
               Local run time
@@ -312,8 +321,9 @@ function BatchReviewPage({
               </button>
             </div>
             <p className="subtle">
-              When the review runs each day. Most labs pick the evening, to confirm the
-              day&apos;s captures while the work is fresh — but mornings work too.
+              The server poller checks for due projects; this setting decides when this
+              project becomes due. Most labs pick evening to confirm the day&apos;s captures
+              while the work is fresh, but mornings work too.
             </p>
             <label>
               Time zone
