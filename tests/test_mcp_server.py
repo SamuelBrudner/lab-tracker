@@ -9,7 +9,7 @@ import pytest
 import tomllib
 
 from lab_tracker import mcp_server
-from lab_tracker.cli import _mcp_json
+from lab_tracker.cli import _cursor_mcp_json, _mcp_json
 from lab_tracker.decision_context_constants import code_facing_idioms
 from lab_tracker.mcp_tools import READ_TOOLS, WRITE_TOOLS
 
@@ -127,6 +127,15 @@ def test_copilot_mcp_configs_use_servers_schema() -> None:
 
 def test_committed_mcp_json_matches_init_template() -> None:
     assert json.loads(Path(".mcp.json").read_text(encoding="utf-8")) == json.loads(_mcp_json())
+
+
+def test_committed_cursor_mcp_json_uses_mcpservers_and_matches_template() -> None:
+    config = json.loads(Path(".cursor/mcp.json").read_text(encoding="utf-8"))
+
+    # Cursor uses the top-level mcpServers shape, not Copilot's `servers` schema.
+    assert "servers" not in config
+    assert config["mcpServers"]["lab-tracker"]["command"] == "lt-mcp"
+    assert config == json.loads(_cursor_mcp_json())
 
 
 def test_mcp_target_guard_allows_loopback_without_probe(monkeypatch) -> None:
