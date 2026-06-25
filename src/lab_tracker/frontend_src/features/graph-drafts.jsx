@@ -239,6 +239,7 @@ function GraphDraftDetailCard({
   const mediaRecorderRef = useRef(null);
   const audioChunksRef = useRef([]);
   const audioStreamRef = useRef(null);
+  const startingRef = useRef(false);
 
   const acceptedCount = useMemo(
     () =>
@@ -258,6 +259,7 @@ function GraphDraftDetailCard({
     : Boolean(canManageGraph);
   const canEditDraft =
     effectiveCanWrite && ["ready", "changes_requested"].includes(changeSet?.status || "");
+  const recordingSupported = canRecordAudio();
   const canSubmitDraft =
     effectiveCanWrite && ["ready", "changes_requested"].includes(changeSet?.status || "");
   const canReviewDraft = effectiveCanManageGraph && changeSet?.status === "submitted";
@@ -534,10 +536,18 @@ function GraphDraftDetailCard({
   }
 
   async function startRecording() {
+    // getUserMedia stays pending while the permission prompt is open, and
+    // isRecording only flips true once it resolves. Guard the in-flight window
+    // so a second click can't start a second stream and orphan the first one
+    // (which would leak a live microphone).
+    if (startingRef.current || mediaRecorderRef.current) {
+      return;
+    }
     if (!canRecordAudio()) {
       setFlash("", "This browser does not support microphone recording.");
       return;
     }
+    startingRef.current = true;
     setFlash("", "");
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
@@ -575,16 +585,27 @@ function GraphDraftDetailCard({
       stopAudioStream();
       setIsRecording(false);
       setFlash("", "Could not access the microphone. Check browser permissions.");
+    } finally {
+      startingRef.current = false;
     }
   }
 
-  function stopRecording() {
+  const stopRecording = useCallback(() => {
     const recorder = mediaRecorderRef.current;
     if (recorder && recorder.state !== "inactive") {
       recorder.stop();
     }
     mediaRecorderRef.current = null;
-  }
+  }, []);
+
+  // If the draft leaves the editable state mid-recording (e.g. its status
+  // changes from an action elsewhere), the Stop control is gated on
+  // canEditDraft and would strand a live mic — so auto-stop to release it.
+  useEffect(() => {
+    if (isRecording && !canEditDraft) {
+      stopRecording();
+    }
+  }, [isRecording, canEditDraft, stopRecording]);
 
   function toggleRecording() {
     if (isRecording) {
@@ -915,7 +936,12 @@ function GraphDraftDetailCard({
                 <button
                   type="button"
                   className={`btn-secondary${isRecording ? " recording" : ""}`}
-                  disabled={!canEditDraft}
+                  disabled={isRecording ? false : !canEditDraft || !recordingSupported}
+                  title={
+                    recordingSupported
+                      ? undefined
+                      : "Microphone recording isn't supported in this browser."
+                  }
                   onClick={toggleRecording}
                   aria-pressed={isRecording}
                 >
