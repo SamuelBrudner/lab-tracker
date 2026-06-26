@@ -240,7 +240,7 @@ function BatchReviewPage({
               batches.map((batch) => (
                 <article className="item" key={batch.change_set_id}>
                   <div className="item-head">
-                    <strong>{batch.summary || "Pending review"}</strong>
+                    <strong className="summary-clamp">{batch.summary || "Pending review"}</strong>
                     <span className={pendingBatchStatus(batch.status)}>{batch.status}</span>
                   </div>
                   <div className="inline">
@@ -366,7 +366,7 @@ function BatchReviewPage({
                     <span className="pill">{run.note_count} notes</span>
                     <span className="pill">{formatDate(run.window_end)}</span>
                   </div>
-                  {run.summary ? <p>{run.summary}</p> : null}
+                  {run.summary ? <p className="summary-clamp">{run.summary}</p> : null}
                 </article>
               ))
             )}

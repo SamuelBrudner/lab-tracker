@@ -6,13 +6,14 @@ import json
 from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from fastapi.testclient import TestClient
 
 from lab_tracker.api import LabTrackerAPI
 from lab_tracker.db_models import NoteModel, QuestionModel
-from lab_tracker.models import Note
+from lab_tracker.models import Note, Session, SessionType
+from lab_tracker.services.graph_draft_context import _capture_placement
 from lab_tracker.sqlalchemy_repository import SQLAlchemyLabTrackerRepository
 
 
@@ -211,9 +212,19 @@ def test_batch_context_groups_per_project_with_questions_and_recent_neighborhood
         packet = api.build_batch_graph_context(batch_notes)
 
     assert packet["mode"] == "graph_batch"
-    assert packet["batch_window"] is None
+    # No explicit window: day boundaries are derived from the captures so the
+    # narrative has real start/end times instead of inventing them.
+    captured_at = sorted(note.created_at for note in batch_notes)
+    assert packet["batch_window"] == {
+        "since": captured_at[0].isoformat(),
+        "until": captured_at[-1].isoformat(),
+    }
     assert packet["current_user"] is None
     assert packet["truncated_note_count"] == 0
+    # Each capture gets a placement hint; with no sessions here it is unplaced.
+    placement = packet["capture_placement"]
+    assert {entry["note_id"] for entry in placement} == {str(note_a_id), str(note_b_id)}
+    assert all(entry["in_session"] is None for entry in placement)
     assert {note["id"] for note in packet["batch_notes"]} == {note_a_id, note_b_id}
     assert {artifact["note_id"] for artifact in packet["source_artifacts"]} == {
         note_a_id,
@@ -594,3 +605,42 @@ def test_batch_context_flags_and_counts_meeting_notes(
     artifacts_by_id = {a["note_id"]: a for a in packet["source_artifacts"]}
     assert artifacts_by_id[meeting_note_id]["is_meeting"] is True
     assert packet["context_summary"]["counts"]["meeting_notes"] == 1
+
+
+def test_capture_placement_matches_session_window_and_passes_bundle() -> None:
+    project_id = uuid4()
+    session = Session(
+        session_id=uuid4(),
+        project_id=project_id,
+        session_type=SessionType.SCIENTIFIC,
+        started_at=datetime(2026, 6, 25, 9, 0, tzinfo=timezone.utc),
+        ended_at=datetime(2026, 6, 25, 12, 0, tzinfo=timezone.utc),
+    )
+    inside = Note(
+        note_id=uuid4(),
+        project_id=project_id,
+        raw_content="Rig 2 Fly 12",
+        created_at=datetime(2026, 6, 25, 10, 30, tzinfo=timezone.utc),
+        metadata={"capture_bundle_id": "bundle-1"},
+    )
+    outside = Note(
+        note_id=uuid4(),
+        project_id=project_id,
+        raw_content="Rig 2 Fly 13",
+        created_at=datetime(2026, 6, 25, 18, 0, tzinfo=timezone.utc),
+    )
+
+    placed = _capture_placement(inside, [session])
+    assert placed["in_session"] == {
+        "id": str(session.session_id),
+        "label": (
+            f"{session.session_type.value} session "
+            f"{session.started_at.date().isoformat()}"
+        ),
+    }
+    assert placed["capture_bundle_id"] == "bundle-1"
+
+    # A capture outside every session window is unplaceable -> a clarification gap.
+    unplaced = _capture_placement(outside, [session])
+    assert unplaced["in_session"] is None
+    assert unplaced["capture_bundle_id"] is None

@@ -670,7 +670,18 @@ function GraphDraftDetailCard({
 
       {changeSet ? (
         <div className="daily-review-report">
-          <p className="review-lead">
+          {changeSet.summary ? (
+            <div className="review-summary">
+              {String(changeSet.summary)
+                .split(/\n{2,}/)
+                .map((para) => para.trim())
+                .filter(Boolean)
+                .map((para, index) => (
+                  <p key={index}>{para}</p>
+                ))}
+            </div>
+          ) : null}
+          <p className="review-lead subtle">
             {changeSet.source_note_count || (changeSet.source_note_ids || []).length || 1}{" "}
             {(changeSet.source_note_count || (changeSet.source_note_ids || []).length || 1) === 1
               ? "capture"
@@ -681,7 +692,6 @@ function GraphDraftDetailCard({
               : `${(changeSet.operations || []).length} proposals`}{" "}
             for your graph. Keep what&apos;s right, then commit — nothing changes until you do.
           </p>
-          {changeSet.summary ? <p className="review-summary">{changeSet.summary}</p> : null}
           {changeSet.error_metadata?.message ? (
             <p className="flash error">{changeSet.error_metadata.message}</p>
           ) : null}
