@@ -16,11 +16,13 @@ from typing import Any
 
 from lab_tracker.models import NoteMetadataScalar
 from lab_tracker_client.client import (
+    CAPTURE_HOST_METADATA_KEYS,
     EvidenceNoteIndex,
     LabTracker,
     LTRecord,
     LTValidationError,
     build_evidence_metadata,
+    capture_host_metadata,
 )
 
 CONFIG_VERSION = 1
@@ -266,6 +268,7 @@ def make_event(
             "summary": resolved_summary,
             "status": "staged",
         },
+        "host": _json_mapping(capture_host_metadata()),
         "sync": {"status": "pending", "attempts": 0},
     }
     return validate_event(payload)
@@ -316,6 +319,7 @@ def validate_event(payload: Mapping[str, Any]) -> JsonObject:
     event["metrics"] = _json_mapping(event.get("metrics") or {})
     event["log_excerpt"] = str(event.get("log_excerpt") or "")
     event["summary"] = str(event.get("summary") or "")
+    event["host"] = _json_mapping(event.get("host") or {})
     sync = event.get("sync") if isinstance(event.get("sync"), Mapping) else {}
     event["sync"] = {
         "status": str(sync.get("status") or "pending"),
@@ -913,6 +917,10 @@ def event_metadata(
     if source.get("git_commit"):
         metadata["hpc_git_commit"] = str(source["git_commit"])
         metadata["hpc_git_dirty"] = bool(source.get("git_dirty"))
+    host = payload.get("host") if isinstance(payload.get("host"), Mapping) else {}
+    for key in CAPTURE_HOST_METADATA_KEYS:
+        if host.get(key):
+            metadata[key] = str(host[key])
     return build_evidence_metadata(
         source_provider=HPC_EVIDENCE_PROVIDER,
         source_uri=source_uri,
