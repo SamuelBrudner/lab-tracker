@@ -529,7 +529,8 @@ def lab_tracker_get_decision_context(
     candidate entity IDs, evidence links, and guidance for subsequent create
     calls. Use for what to plot, which analysis/control to run, figures,
     summaries, slides, and manuscript/grant/abstract text. Allowed task_kind
-    values: plot, analysis, slides, experiment_plan, summary, research_writing.
+    values: plot, analysis, slides, experiment_plan, summary, research_writing,
+    progress_review.
     """
     return _read_tool(
         "lab_tracker_get_decision_context",

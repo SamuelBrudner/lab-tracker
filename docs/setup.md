@@ -44,6 +44,15 @@ pip install -e ".[test,lint]"
 
 Commands below use `uv run`. If you used pip/venv instead, drop the `uv run` prefix.
 
+The `[test,lint]` extras pull in the backend test and lint tooling. To capture
+Matplotlib figures with the Python client (`lab_tracker_client.savefig`,
+`capture_figures`), also install the `figure` extra, which adds `matplotlib`
+and `pillow`:
+
+```bash
+uv pip install -e ".[test,lint,figure]"
+```
+
 Windows fresh-clone notes, including Beads/Dolt setup, are in
 [`windows-fresh-clone.md`](windows-fresh-clone.md).
 
@@ -93,6 +102,25 @@ curl http://127.0.0.1:8000/health
 ```
 
 Then open the app at `http://127.0.0.1:8000/app`.
+
+### Seed demo data
+
+To populate the configured database with a local-development demo project:
+
+```bash
+lab-tracker seed-demo
+```
+
+It runs migrations first (skip with `--skip-migrations`) and is a no-op if the
+default demo project already exists (force a fresh one with `--allow-duplicates`).
+This is the same seeded data behind the read-only public demo.
+
+### Check managed idiom blocks
+
+`lab-tracker doctor` (alias `check-idioms`) checks the package-pinned,
+code-facing idiom blocks in a consumer repo for drift against the installed
+package. Pass `--target <path>` to inspect a repo other than the current
+directory.
 
 ## Multi-client Postgres runtime
 

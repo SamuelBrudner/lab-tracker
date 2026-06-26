@@ -75,6 +75,19 @@ research record:
   an approval gate.
 - Analysis, claim, and visualization records as explicit user-driven flows,
   including managed file storage for visualization assets.
+- Exploration nodes for the divergent research trajectory — `decision`,
+  `dead_end`, and `pivot` records that each target a retained question,
+  dataset, analysis, or claim and link into a DAG through `parent` and
+  `also_depends_on` edges. They render in the project graph between claims and
+  visualizations and export as `lab:ExplorationNode` PROV-O records. Like other
+  graph entities they are created directly today; any future agent-harvested
+  nodes stay human-gated through graph-draft review. See
+  [ara-exploration-graph-design.md](ara-exploration-graph-design.md).
+- A per-project publication-readiness report
+  (`GET /projects/{project_id}/publication-readiness`) that scans the retained
+  graph for gaps before write-up — supported claims missing dataset/analysis
+  evidence or falsification criteria, answered questions without committed
+  dataset evidence, and broken external-artifact references.
 - Bounded recent analysis retrieval through `GET /analyses?recent_first=true`,
   so workspace summaries can load the newest committed analyses without scanning
   a project's full analysis history. The note, session, dataset, analysis,

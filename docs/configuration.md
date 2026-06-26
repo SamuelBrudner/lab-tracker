@@ -1,8 +1,10 @@
 # Configuration reference
 
-This is the configuration reference for Lab Tracker: the full `LAB_TRACKER_*`
-environment variable list, the multimodal graph-draft-review configuration and
-behavior, and the local evidence-inbox import (`lt import-folder`) configuration.
+This is the configuration reference for Lab Tracker: the `LAB_TRACKER_*`
+environment variables read by the application, the MCP service-client and
+export-only Dolt-mirror variables read outside the FastAPI app, the multimodal
+graph-draft-review configuration and behavior, and the local evidence-inbox
+import (`lt import-folder`) configuration.
 
 The supported runtime surface is defined in
 [`retained-v1-surface.md`](retained-v1-surface.md); if it and this document
@@ -105,6 +107,38 @@ that destination through your normal off-machine backup process.
   (default: `https://generativelanguage.googleapis.com/v1beta`)
 - `LAB_TRACKER_GOOGLE_TIMEOUT_SECONDS`: Google graph draft API timeout in
   seconds (default: `60`)
+
+### MCP service client (`lt-mcp`)
+
+These variables are read by the MCP server process, not the FastAPI app. The
+MCP setup guides ([`lab-tracker-mcp-skills.md`](lab-tracker-mcp-skills.md),
+[`lab-tracker-copilot.md`](lab-tracker-copilot.md), and
+[`lab-tracker-cursor.md`](lab-tracker-cursor.md)) cover them in context.
+
+- `LAB_TRACKER_MCP_BASE_URL`: Lab Tracker API the MCP server reads from (default:
+  `http://127.0.0.1:8000`)
+- `LAB_TRACKER_MCP_API_KEY` / `LAB_TRACKER_MCP_TOKEN`: bearer token; either name
+  works and bypasses `/auth/login`
+- `LAB_TRACKER_MCP_USERNAME` / `LAB_TRACKER_MCP_PASSWORD`: login credentials used
+  when no token is set and the target instance has auth enabled
+- `LAB_TRACKER_MCP_TIMEOUT_SECONDS`: API request timeout (default: `10`)
+
+The hosted read-only MCP endpoint (the optional `mcp` docker-compose service)
+adds:
+
+- `LT_MCP_READONLY_TOKEN`: required bearer token for the hosted endpoint
+- `LAB_TRACKER_MCP_TRANSPORT`: `stdio` (default) or `streamable-http`
+- `LAB_TRACKER_MCP_HOST` / `LAB_TRACKER_MCP_PORT` / `LAB_TRACKER_MCP_PATH`: bind
+  host, port, and path for `streamable-http` (defaults: `127.0.0.1`, `8000`,
+  `/mcp`)
+- `LAB_TRACKER_MCP_HOST_PORT`: host loopback port the compose `mcp` service is
+  published on (default: `9000`)
+
+### Export-only Dolt mirror
+
+- `LAB_TRACKER_DOLT_BIN`: Dolt executable (default: `dolt`)
+- `LAB_TRACKER_DOLT_MIRROR_PATH`: local mirror directory (default:
+  `.lab-tracker-dolt`)
 
 ## Authentication behavior
 
