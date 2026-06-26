@@ -316,11 +316,21 @@ def test_graph_change_set_meeting_note_count_reads_context_packet() -> None:
     assert malformed.meeting_note_count == 0
 
 
-def test_batch_instructions_flesh_out_meeting_notes_without_version_bump() -> None:
+def test_batch_instructions_are_narrative_first_with_terse_capture_guardrail() -> None:
     instructions = _batch_instructions()
-    assert "meeting" in instructions.lower()
-    assert "flesh out the scientific content" in instructions.lower()
+    lowered = instructions.lower()
+    # Narrative-first: the summary becomes a day-narrative, not a one-liner.
+    assert "narrative of the user's day" in lowered
+    assert "in time order" in lowered
+    # Terse-capture guardrail folded into the narrative frame.
+    assert "a bare label or identifier is not a finding" in lowered
+    assert "rig 2 fly 12" in lowered
+    assert "clarification_requests" in instructions
+    # Meeting notes still get fleshed out, but only where content exists.
+    assert "meeting" in lowered
+    assert "flesh out what the meeting discussed" in lowered
+    assert "never fabricate content for an identifier-only capture" in lowered
     # Stays subordinate to the supported-changes guardrail.
     assert "supported by the source artifacts" in instructions
-    # Provenance version is additive-only; it must not change.
-    assert BATCH_PROMPT_VERSION == "daily-batch-graph-draft-v1"
+    # The summary contract changed (now a narrative), so the version bumps.
+    assert BATCH_PROMPT_VERSION == "daily-batch-graph-draft-v2"

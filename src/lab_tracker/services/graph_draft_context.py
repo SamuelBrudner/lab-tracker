@@ -87,12 +87,18 @@ class GraphContextBuilder:
         reported as truncated_note_count.
         """
         truncated_note_count = max(0, len(notes) - batch_note_limit)
-        batch_notes = list(notes[:batch_note_limit])
+        # Chronological order gives the day a contractual timeline rather than
+        # relying on incidental input ordering.
+        batch_notes = sorted(
+            notes[:batch_note_limit],
+            key=lambda item: (item.created_at, str(item.note_id)),
+        )
 
         notes_by_project: dict[UUID, list[Note]] = {}
         for note in batch_notes:
             notes_by_project.setdefault(note.project_id, []).append(note)
 
+        sessions_by_project: dict[UUID, list[Session]] = {}
         project_blocks: list[dict[str, Any]] = []
         for project_id, project_notes in notes_by_project.items():
             try:
@@ -103,6 +109,7 @@ class GraphContextBuilder:
             active_or_staged, superseded = self._question_context(project_id)
             recent_notes = self._recent_notes_excluding(project_id, batch_ids_in_project)
             recent_sessions = self._recent_sessions(project_id)
+            sessions_by_project[project_id] = recent_sessions
             recent_datasets = self._recent_datasets(project_id)
             recent_analyses = self._recent_analyses(project_id)
             recent_claims = self._recent_claims(project_id)
@@ -142,13 +149,13 @@ class GraphContextBuilder:
 
         packet: dict[str, Any] = {
             "mode": "graph_batch",
-            "batch_window": (
-                {"since": window[0].isoformat(), "until": window[1].isoformat()}
-                if window is not None
-                else None
-            ),
+            "batch_window": _batch_window(window, batch_notes),
             "current_user": _compact_actor(actor),
             "batch_notes": [_compact_note(item, include_raw_asset=True) for item in batch_notes],
+            "capture_placement": [
+                _capture_placement(note, sessions_by_project.get(note.project_id, []))
+                for note in batch_notes
+            ],
             "source_artifacts": [_source_artifact_packet(item) for item in batch_notes],
             "projects": project_blocks,
             "truncated_note_count": truncated_note_count,
@@ -591,6 +598,58 @@ def _add_origin_context(payload: dict[str, Any], entity: Any) -> None:
     origin_prompt_version = getattr(entity, "origin_prompt_version", None)
     if origin_prompt_version:
         payload["origin_prompt_version"] = origin_prompt_version
+
+
+def _batch_window(
+    window: tuple[Any, Any] | None,
+    batch_notes: list[Note],
+) -> dict[str, str] | None:
+    """Day boundaries for the batch.
+
+    Prefer the caller's explicit window; otherwise derive it from the captures
+    so the day-narrative has real start/end times instead of inventing them.
+    """
+
+    if window is not None:
+        return {"since": window[0].isoformat(), "until": window[1].isoformat()}
+    if not batch_notes:
+        return None
+    timestamps = [note.created_at for note in batch_notes]
+    return {"since": min(timestamps).isoformat(), "until": max(timestamps).isoformat()}
+
+
+def _capture_placement(note: Note, sessions: list[Session]) -> dict[str, Any]:
+    """Where a capture lands in the day.
+
+    Pre-computes the most recent session window (if any) that contains the
+    note's capture time, plus the bundle it belongs to, so terse
+    identifier-only captures can be placed -- or surfaced as unplaceable --
+    rather than guessed.
+    """
+
+    candidates = [
+        session
+        for session in sessions
+        if session.started_at <= note.created_at
+        and (session.ended_at is None or note.created_at <= session.ended_at)
+    ]
+    in_session: dict[str, str] | None = None
+    if candidates:
+        best = max(candidates, key=lambda session: session.started_at)
+        in_session = {
+            "id": str(best.session_id),
+            "label": (
+                f"{best.session_type.value} session "
+                f"{best.started_at.date().isoformat()}"
+            ),
+        }
+    return {
+        "note_id": str(note.note_id),
+        "created_at": note.created_at.isoformat(),
+        "project_id": str(note.project_id),
+        "capture_bundle_id": note.metadata.get("capture_bundle_id"),
+        "in_session": in_session,
+    }
 
 
 def _compact_note(note: Note, *, include_raw_asset: bool = False) -> dict[str, Any]:
