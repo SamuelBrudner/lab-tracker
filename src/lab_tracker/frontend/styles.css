@@ -1184,15 +1184,30 @@ button:disabled {
 }
 
 .review-lead {
-  font-size: 1.04rem;
-  line-height: 1.6;
+  font-size: 0.92rem;
+  line-height: 1.5;
   margin: 0;
 }
 
 .review-summary {
-  margin: 0;
-  color: var(--ink-soft);
-  line-height: 1.55;
+  margin: 0 0 0.5rem;
+  font-size: 1.02rem;
+  line-height: 1.6;
+}
+
+.review-summary p {
+  margin: 0 0 0.7rem;
+}
+
+.review-summary p:last-child {
+  margin-bottom: 0;
+}
+
+.summary-clamp {
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
 }
 
 .review-report {
