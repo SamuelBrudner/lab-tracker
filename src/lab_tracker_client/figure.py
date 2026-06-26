@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import hashlib
 import io
 import mimetypes
 import os
 import subprocess
 import sys
 import time
+import uuid
 from collections.abc import Iterable, Mapping
 from contextlib import contextmanager, suppress
 from contextvars import ContextVar
@@ -27,6 +29,8 @@ from lab_tracker_client.client import (
     _bytes_sha256,
     _validate_metadata,
     build_evidence_metadata,
+    capture_host_metadata,
+    file_sha256,
 )
 
 FIGURE_CAPTURE_TIMEOUT_SECONDS = 2.5
@@ -90,8 +94,14 @@ class RunContext:
 
     captured_at: str
     expires_at: float
+    run_id: str = ""
     git_commit: str = ""
     git_dirty: bool = False
+    repo_remote_url: str = ""
+    code_file: str = ""
+    code_symbol: str = ""
+    code_line: int = 0
+    code_region_hash: str = ""
     extra: dict[str, NoteMetadataScalar] = field(default_factory=dict)
 
     def expired(self) -> bool:
@@ -102,8 +112,20 @@ class RunContext:
             "run_captured_at": self.captured_at,
             "run_git_dirty": self.git_dirty,
         }
+        if self.run_id:
+            metadata["run_id"] = self.run_id
         if self.git_commit:
             metadata["run_git_commit"] = self.git_commit
+        if self.repo_remote_url:
+            metadata["run_repo_remote_url"] = self.repo_remote_url
+        if self.code_file:
+            metadata["run_code_file"] = self.code_file
+        if self.code_symbol:
+            metadata["run_code_symbol"] = self.code_symbol
+        if self.code_line:
+            metadata["run_code_line"] = self.code_line
+        if self.code_region_hash:
+            metadata["run_code_region_hash"] = self.code_region_hash
         for key, value in self.extra.items():
             metadata[f"run_{key}"] = value
         return metadata
@@ -208,14 +230,77 @@ def run_context(
     """Return a context manager that adds run metadata to figure captures."""
 
     resolved_extra = dict(_validate_metadata(extra) or {})
+    pointer = _run_code_pointer()
     context = RunContext(
         captured_at=datetime.now(timezone.utc).isoformat(),
         expires_at=time.monotonic() + max(0.0, float(ttl_seconds)),
+        run_id=uuid.uuid4().hex,
         git_commit=_git_output("rev-parse", "HEAD"),
         git_dirty=bool(_git_output("status", "--porcelain")),
+        repo_remote_url=_git_output("config", "--get", "remote.origin.url"),
+        code_file=str(pointer.get("code_file", "")),
+        code_symbol=str(pointer.get("code_symbol", "")),
+        code_line=int(pointer.get("code_line", 0) or 0),
+        code_region_hash=str(pointer.get("code_region_hash", "")),
         extra=resolved_extra,
     )
     return _RunContextManager(context)
+
+
+def _run_code_pointer() -> dict[str, NoteMetadataScalar]:
+    """Best-effort repo-relative code pointer for the run's call site.
+
+    Walks past frames inside this module so it lands on the user's code that
+    opened the run context. Fail-soft: returns whatever it could resolve.
+    """
+
+    pointer: dict[str, NoteMetadataScalar] = {}
+    frame: Any = None
+    with suppress(Exception):
+        frame = sys._getframe(1)
+        while frame is not None and frame.f_code.co_filename == __file__:
+            frame = frame.f_back
+    if frame is None:
+        return pointer
+    with suppress(Exception):
+        filename = frame.f_code.co_filename
+        lineno = int(frame.f_lineno)
+        symbol = getattr(frame.f_code, "co_qualname", None) or frame.f_code.co_name
+        relative = _repo_relative_file(filename)
+        if relative:
+            pointer["code_file"] = relative
+        if symbol:
+            pointer["code_symbol"] = str(symbol)
+        if lineno:
+            pointer["code_line"] = lineno
+        region = _code_region_hash(filename, lineno)
+        if region:
+            pointer["code_region_hash"] = region
+    return pointer
+
+
+def _repo_relative_file(filename: str) -> str:
+    with suppress(Exception):
+        path = Path(filename).resolve()
+        toplevel = _git_output("rev-parse", "--show-toplevel")
+        if toplevel:
+            with suppress(ValueError):
+                return path.relative_to(Path(toplevel).resolve()).as_posix()
+        return path.name
+    return ""
+
+
+def _code_region_hash(filename: str, lineno: int, *, context_lines: int = 3) -> str:
+    with suppress(Exception):
+        lines = Path(filename).read_text(encoding="utf-8", errors="replace").splitlines()
+        if not lines:
+            return ""
+        start = max(0, lineno - 1 - context_lines)
+        end = min(len(lines), lineno + context_lines)
+        region = "\n".join(lines[start:end])
+        if region:
+            return hashlib.sha256(region.encode("utf-8")).hexdigest()
+    return ""
 
 
 def savefig(
@@ -296,10 +381,19 @@ def _capture_saved_figure(
         "client_capture_id": "",
     }
     try:
-        full_payload = resolved_path.read_bytes()
-        if not full_payload:
+        file_size = resolved_path.stat().st_size
+        if file_size <= 0:
             raise LTValidationError("Figure file must not be empty.")
-        content_hash = _bytes_sha256(full_payload)
+        if file_size > FIGURE_UPLOAD_MAX_BYTES:
+            # Never read an oversized artifact into memory: stream-hash it and
+            # let _preview_payload emit a pointer (or a fig-rendered preview).
+            full_payload: bytes | None = None
+            content_hash = file_sha256(resolved_path)
+        else:
+            full_payload = resolved_path.read_bytes()
+            if not full_payload:
+                raise LTValidationError("Figure file must not be empty.")
+            content_hash = _bytes_sha256(full_payload)
         resolved_path = resolved_path.resolve()
         source_uri = resolved_path.as_uri()
         client_capture_id = _client_capture_id(
@@ -312,7 +406,7 @@ def _capture_saved_figure(
             source_uri=source_uri,
             source_external_id=client_capture_id,
             content_hash=content_hash,
-            payload_size=len(full_payload),
+            payload_size=file_size,
             metadata=metadata,
         )
         result_defaults.update(
@@ -352,6 +446,7 @@ def _capture_saved_figure(
                     fig=fig,
                     path=resolved_path,
                     full_payload=full_payload,
+                    full_size_bytes=file_size,
                     max_bytes=preview_max_bytes,
                     source_uri=source_uri,
                     content_hash=content_hash,
@@ -482,6 +577,7 @@ def _base_figure_metadata(
     metadata: Mapping[str, NoteMetadataScalar] | None,
 ) -> dict[str, NoteMetadataScalar]:
     merged = dict(_validate_metadata(metadata) or {})
+    merged.update(capture_host_metadata())
     context = _active_run_context()
     if context is not None:
         merged.update(context.to_metadata())
@@ -544,13 +640,14 @@ def _preview_payload(
     *,
     fig: Any,
     path: Path,
-    full_payload: bytes,
+    full_payload: bytes | None,
+    full_size_bytes: int,
     max_bytes: int,
     source_uri: str,
     content_hash: str,
 ) -> _PreviewPayload:
     resolved_max_bytes = max(1, min(int(max_bytes), FIGURE_UPLOAD_MAX_BYTES))
-    if len(full_payload) <= resolved_max_bytes:
+    if full_payload is not None and len(full_payload) <= resolved_max_bytes:
         return _PreviewPayload(
             payload=full_payload,
             path=path,
@@ -568,14 +665,15 @@ def _preview_payload(
     _warn_once(
         "preview-unavailable",
         "Lab Tracker figure capture could not render a bounded preview; "
-        "matplotlib/Pillow may be unavailable. Uploading a pointer note.",
+        "the file exceeds the upload cap or matplotlib/Pillow is unavailable. "
+        "Uploading a pointer note.",
     )
     pointer = "\n".join(
         [
             "Lab Tracker figure pointer",
             f"source_uri: {source_uri}",
             f"evidence_content_hash: {content_hash}",
-            f"full_size_bytes: {len(full_payload)}",
+            f"full_size_bytes: {full_size_bytes}",
             "",
         ]
     ).encode("utf-8")
@@ -702,8 +800,6 @@ def _client_capture_id(
         base = f"{base}:{content_hash[:12]}"
     if len(base) <= 120:
         return base
-    import hashlib
-
     suffix = hashlib.sha256(base.encode("utf-8")).hexdigest()[:12]
     return f"{base[:104]}:{suffix}"
 

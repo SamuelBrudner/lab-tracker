@@ -488,3 +488,102 @@ def test_capture_figures_captures_new_and_modified_files_after_body_exception(
     assert "figure:modified.png" in uploaded_names
     assert "figure:new.png" in uploaded_names
     assert "figure:untouched.png" not in uploaded_names
+
+
+def test_oversized_capture_streams_hash_without_reading_bytes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # cap1.1: an oversized artifact must never be read into RAM. Force the cap
+    # low and make a full read explode; capture must still succeed via streaming.
+    monkeypatch.setattr(figure_module, "FIGURE_UPLOAD_MAX_BYTES", 4)
+    figure_path = tmp_path / "huge.png"
+    figure_path.write_bytes(b"way-bigger-than-the-cap")
+    expected_hash = sha256(figure_path.read_bytes()).hexdigest()
+
+    def boom_read_bytes(self: Path) -> bytes:  # pragma: no cover - must not run
+        raise AssertionError("oversized capture must not read the file into memory")
+
+    monkeypatch.setattr(Path, "read_bytes", boom_read_bytes)
+    metadata_seen: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        metadata = json.loads(_multipart_field(request.content, "metadata"))
+        metadata_seen.update(metadata)
+        return _json_response(
+            201,
+            {"data": {"note_id": "n", "project_id": "project-1", "status": "staged",
+                      "metadata": metadata}},
+        )
+
+    with LabTracker(
+        base_url="http://testserver",
+        default_project_id="project-1",
+        transport=httpx.MockTransport(handler),
+    ) as lt:
+        result = savefig(None, figure_path, client=lt)
+
+    assert result.action == "imported"
+    assert result.no_preview is True
+    assert result.content_hash == expected_hash
+    assert metadata_seen["evidence_content_hash"] == expected_hash
+    assert metadata_seen["figure_full_size_bytes"] == len(b"way-bigger-than-the-cap")
+
+
+def test_capture_records_host_identity(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # cap1.3: each capture records the machine that produced it.
+    monkeypatch.setenv("LAB_TRACKER_CAPTURE_HOST", "rig-2")
+    monkeypatch.setenv("LAB_TRACKER_CONFIG_DIR", str(tmp_path / "cfg"))
+    metadata_seen: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        metadata_seen.update(json.loads(_multipart_field(request.content, "metadata")))
+        return _json_response(
+            201,
+            {"data": {"note_id": "n", "project_id": "project-1", "status": "staged",
+                      "metadata": metadata_seen}},
+        )
+
+    with LabTracker(
+        base_url="http://testserver",
+        default_project_id="project-1",
+        transport=httpx.MockTransport(handler),
+    ) as lt:
+        savefig(FakeFigure(), tmp_path / "plot.png", client=lt)
+
+    assert metadata_seen["capture_host_label"] == "rig-2"
+    assert isinstance(metadata_seen["capture_install_id"], str)
+    assert len(str(metadata_seen["capture_install_id"])) == 32
+    assert "capture_platform" in metadata_seen
+    assert (tmp_path / "cfg" / "install-id").exists()
+
+
+def test_run_context_records_run_id_and_code_pointer(
+    tmp_path: Path,
+) -> None:
+    # cap1.4: run_context carries a run id and a repo-relative code pointer.
+    metadata_seen: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        metadata_seen.update(json.loads(_multipart_field(request.content, "metadata")))
+        return _json_response(
+            201,
+            {"data": {"note_id": "n", "project_id": "project-1", "status": "staged",
+                      "metadata": metadata_seen}},
+        )
+
+    with LabTracker(
+        base_url="http://testserver",
+        default_project_id="project-1",
+        transport=httpx.MockTransport(handler),
+    ) as lt, run_context():
+        savefig(FakeFigure(), tmp_path / "ctx.png", client=lt)
+
+    assert len(str(metadata_seen["run_id"])) == 32
+    assert str(metadata_seen["run_code_file"]).endswith("test_lab_tracker_client_figures.py")
+    assert "test_run_context_records_run_id_and_code_pointer" in str(
+        metadata_seen["run_code_symbol"]
+    )
+    assert metadata_seen["run_code_line"]
+    assert len(str(metadata_seen["run_code_region_hash"])) == 64
