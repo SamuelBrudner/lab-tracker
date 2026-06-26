@@ -26,6 +26,9 @@ from lab_tracker.models import (
     Goal,
     GoalLink,
     Note,
+    ProvenanceLink,
+    ProvenanceLinkRelation,
+    ProvenanceLinkStatus,
     Question,
     QuestionLink,
     QuestionLinkRole,
@@ -1169,12 +1172,39 @@ def _question_node(
     return node
 
 
+def _accepted_note_derivation_map(
+    base_url: str, links: list[ProvenanceLink]
+) -> dict[UUID, list[str]]:
+    """Map each derived note id to antecedent note IRIs for accepted derivations.
+
+    Only ``accepted`` ``was_derived_from`` note-to-note links render in PROV-O;
+    proposed and rejected links stay curation-only and are invisible here.
+    """
+
+    mapping: dict[UUID, list[str]] = {}
+    for link in links:
+        if link.status != ProvenanceLinkStatus.ACCEPTED:
+            continue
+        if link.relation != ProvenanceLinkRelation.WAS_DERIVED_FROM:
+            continue
+        if (
+            link.source.entity_type != EntityType.NOTE
+            or link.target.entity_type != EntityType.NOTE
+        ):
+            continue
+        mapping.setdefault(link.source.entity_id, []).append(
+            _resource_iri(base_url, "notes", link.target.entity_id)
+        )
+    return mapping
+
+
 def _note_node(
     base_url: str,
     note: Note,
     *,
     people: dict[str, dict[str, object]],
     supervision_edges: list[SupervisionEdge],
+    derived_from_iris: list[str] | None = None,
 ) -> dict[str, object]:
     node: dict[str, object] = {
         "@id": _resource_iri(base_url, "notes", note.note_id),
@@ -1183,6 +1213,8 @@ def _note_node(
         "status": note.status.value,
         "createdAt": _isoformat(note.created_at),
     }
+    if derived_from_iris:
+        node["prov:wasDerivedFrom"] = [{"@id": iri} for iri in derived_from_iris]
     if note.transcribed_text:
         node["transcribedText"] = note.transcribed_text
     _apply_origin_provenance(base_url, node, note)
@@ -1282,6 +1314,7 @@ class AraArtifactRecords:
     visualizations: list[Visualization]
     entity_versions: list[EntityVersion]
     exploration_nodes: list[ExplorationNode] = field(default_factory=list)
+    provenance_links: list[ProvenanceLink] = field(default_factory=list)
     goal: Goal | None = None
     goal_links: list[GoalLink] | None = None
 
@@ -1602,12 +1635,14 @@ def _ara_evidence_graph(
         )
         merged[str(node["@id"])] = node
         _merge_graph_nodes(merged, _origin_provenance_nodes(base_url, visualization))
+    note_derivations = _accepted_note_derivation_map(base_url, records.provenance_links)
     for note in records.notes:
         node = _note_node(
             base_url,
             note,
             people=people,
             supervision_edges=supervision_edges,
+            derived_from_iris=note_derivations.get(note.note_id),
         )
         merged[str(node["@id"])] = node
         _merge_graph_nodes(merged, _origin_provenance_nodes(base_url, note))

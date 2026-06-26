@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -52,10 +53,13 @@ from lab_tracker.services.graph_draft_validation import GraphPatchValidator, str
 from lab_tracker.services.note_service import NoteService
 from lab_tracker.services.project_authorization import ProjectAuthorizationPolicy
 from lab_tracker.services.project_service import ProjectService
+from lab_tracker.services.provenance_link_service import ProvenanceLinkService
 from lab_tracker.services.question_service import QuestionService
 from lab_tracker.services.session_service import SessionService
 from lab_tracker.services.shared import actor_user_fk, actor_user_id
 from lab_tracker.services.visualization_service import VisualizationService
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -117,6 +121,7 @@ class GraphDraftService(BaseService):
         goals: GoalService,
         versions: EntityVersionService,
         authorization: ProjectAuthorizationPolicy,
+        provenance_links: ProvenanceLinkService | None = None,
     ) -> None:
         super().__init__(context)
         self.projects = projects
@@ -130,6 +135,7 @@ class GraphDraftService(BaseService):
         self.goals = goals
         self.versions = versions
         self.authorization = authorization
+        self.provenance_links = provenance_links
         self.context_builder = GraphContextBuilder(
             projects=projects,
             questions=questions,
@@ -526,6 +532,16 @@ class GraphDraftService(BaseService):
             exclude_note_ids=already_drafted_note_ids,
         )
         notes, window_end = _limit_notes_to_draft(notes, window_end=window_end)
+        # Independent, best-effort deterministic stage: propose content-hash
+        # provenance links for human review. A failure here must never flip the
+        # LLM batch to FAILED or block drafting.
+        if self.provenance_links is not None:
+            try:
+                self.provenance_links.propose_links_from_content_hash(project_id, actor=actor)
+            except Exception:
+                logger.exception(
+                    "provenance-link detector failed for project %s", project_id
+                )
         note_ids = [note.note_id for note in notes]
         batch_key = _batch_key(
             project_id=project_id,

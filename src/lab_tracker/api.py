@@ -32,6 +32,7 @@ from lab_tracker.services import (
     OwnershipReassignmentService,
     ProjectAuthorizationPolicy,
     ProjectService,
+    ProvenanceLinkService,
     PublicationReadinessService,
     QuestionService,
     RecordExportService,
@@ -132,6 +133,10 @@ class LabTrackerAPI:
             context,
             authorization=self.project_authorization,
         )
+        self.provenance_links: ProvenanceLinkService = ProvenanceLinkService(
+            context,
+            authorization=self.project_authorization,
+        )
         self.visualizations: VisualizationService = VisualizationService(
             context,
             analyses=self.analyses,
@@ -175,6 +180,7 @@ class LabTrackerAPI:
             goals=self.goals,
             versions=self.entity_versions,
             authorization=self.project_authorization,
+            provenance_links=self.provenance_links,
         )
 
     def for_request(self, repository: LabTrackerRepository) -> LabTrackerAPI:
@@ -899,6 +905,22 @@ class LabTrackerAPI:
             actor=kwargs.get("actor"),
             resource_id=_first_uuid(args),
             resource_id_attr="node_id",
+        )
+
+    def get_provenance_link(self, *args: Any, **kwargs: Any) -> Any:
+        return self.provenance_links.get_provenance_link(*args, **kwargs)
+
+    def list_provenance_links(self, *args: Any, **kwargs: Any) -> Any:
+        return self.provenance_links.list_provenance_links(*args, **kwargs)
+
+    def update_provenance_link_status(self, *args: Any, **kwargs: Any) -> Any:
+        return self._with_usage_event(
+            lambda: self.provenance_links.update_status(*args, **kwargs),
+            verb=UsageEventVerb.UPDATE,
+            resource_type=UsageEventResourceType.PROVENANCE_LINK,
+            actor=kwargs.get("actor"),
+            resource_id=_first_uuid(args),
+            resource_id_attr="link_id",
         )
 
     def create_claim_edge(self, *args: Any, **kwargs: Any) -> Any:

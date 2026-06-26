@@ -88,6 +88,13 @@ research record:
   graph for gaps before write-up — supported claims missing dataset/analysis
   evidence or falsification criteria, answered questions without committed
   dataset evidence, and broken external-artifact references.
+- Human-gated provenance links over `GET`/`PATCH /provenance-links`. The daily
+  batch run deterministically proposes a `was_derived_from` link whenever two
+  captured artifacts share a content hash (e.g. an acquisition output reused as
+  an analysis input, possibly across machines); a person accepts or rejects each
+  one, and only accepted links render as `prov:wasDerivedFrom` in PROV-O export.
+  Nothing is auto-committed and there is no machine-driven create path — the
+  detector only writes proposals into the existing review gate.
 - Bounded recent analysis retrieval through `GET /analyses?recent_first=true`,
   so workspace summaries can load the newest committed analyses without scanning
   a project's full analysis history. The note, session, dataset, analysis,
