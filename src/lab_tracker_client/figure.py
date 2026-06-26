@@ -6,6 +6,7 @@ import hashlib
 import io
 import mimetypes
 import os
+import stat
 import subprocess
 import sys
 import time
@@ -40,12 +41,8 @@ _DEFAULT_IMAGE_PATTERNS = ("*.png", "*.jpg", "*.jpeg", "*.svg", "*.pdf", "*.tif"
 _RUN_CONTEXT: ContextVar[RunContext | None] = ContextVar("lab_tracker_run_context", default=None)
 _CIRCUIT_OPEN = False
 _WARNED: set[str] = set()
-_FIRST_CAPTURE_REVIEW_METADATA_KEYS = frozenset(
-    {
-        "figure_no_preview",
-        "figure_preview_size_bytes",
-    }
-)
+def _first_capture_review_keys(kind: str) -> frozenset[str]:
+    return frozenset({f"{kind}_no_preview", f"{kind}_preview_size_bytes"})
 
 
 @dataclass(frozen=True)
@@ -157,14 +154,21 @@ class _PreviewPayload:
         return len(self.payload)
 
 
-class FigureCaptureContext:
-    """Context manager returned by capture_figures()."""
+class CaptureContext:
+    """Context manager returned by capture()/capture_figures().
+
+    Snapshots matching files under ``root`` on enter and captures any that are
+    created or modified inside the body. Format-agnostic: ``kind`` only labels
+    the evidence (provider/adapter/metadata namespace); bytes are never
+    interpreted, and anything over the upload cap degrades to a pointer note.
+    """
 
     def __init__(
         self,
         root: str | Path,
         *,
         patterns: Iterable[str] = _DEFAULT_IMAGE_PATTERNS,
+        kind: str = "figure",
         recursive: bool = True,
         client: LabTracker | None = None,
         project_id: str | None = None,
@@ -175,6 +179,7 @@ class FigureCaptureContext:
     ) -> None:
         self.root = Path(root).expanduser()
         self.patterns = tuple(patterns)
+        self.kind = kind
         self.recursive = recursive
         self.client = client
         self.project_id = project_id
@@ -186,13 +191,13 @@ class FigureCaptureContext:
         self.errors: list[str] = []
         self._snapshot: dict[Path, int] = {}
 
-    def __enter__(self) -> FigureCaptureContext:
-        self._snapshot = _snapshot_image_mtimes(self.root, self.patterns, recursive=self.recursive)
+    def __enter__(self) -> CaptureContext:
+        self._snapshot = _snapshot_file_mtimes(self.root, self.patterns, recursive=self.recursive)
         return self
 
     def __exit__(self, *_: object) -> bool:
         try:
-            after = _snapshot_image_mtimes(self.root, self.patterns, recursive=self.recursive)
+            after = _snapshot_file_mtimes(self.root, self.patterns, recursive=self.recursive)
             for path, mtime in sorted(after.items(), key=lambda item: item[0].as_posix()):
                 if self._snapshot.get(path) == mtime:
                     continue
@@ -211,6 +216,7 @@ class FigureCaptureContext:
                         metadata=self.metadata,
                         preview_max_bytes=self.preview_max_bytes,
                         version_every_change=self.version_every_change,
+                        kind=self.kind,
                     )
                 )
         except Exception as exc:  # pragma: no cover - defensive guard for body exceptions.
@@ -220,6 +226,10 @@ class FigureCaptureContext:
                 f"Lab Tracker figure capture could not scan saved figures: {exc}",
             )
         return False
+
+
+# Back-compat alias: figure capture is now one kind of the generic CaptureContext.
+FigureCaptureContext = CaptureContext
 
 
 def run_context(
@@ -346,9 +356,50 @@ def capture_figures(
 ) -> FigureCaptureContext:
     """Capture image files created or modified inside a context body."""
 
-    return FigureCaptureContext(
+    return CaptureContext(
         root,
         patterns=patterns,
+        kind="figure",
+        recursive=recursive,
+        client=client,
+        project_id=project_id,
+        metadata=metadata,
+        logical_prefix=logical_prefix,
+        preview_max_bytes=preview_max_bytes,
+        version_every_change=version_every_change,
+    )
+
+
+def capture(
+    root: str | Path,
+    *,
+    patterns: Iterable[str],
+    kind: str,
+    recursive: bool = True,
+    client: LabTracker | None = None,
+    project_id: str | None = None,
+    metadata: Mapping[str, NoteMetadataScalar] | None = None,
+    logical_prefix: str | None = None,
+    preview_max_bytes: int = FIGURE_PREVIEW_MAX_BYTES,
+    version_every_change: bool = False,
+) -> CaptureContext:
+    """Capture any files matching ``patterns`` written inside the context body.
+
+    Format-agnostic staged-evidence capture (csv, html, pickle, ...). ``patterns``
+    and ``kind`` are required: ``patterns`` keeps the watch bounded (no implicit
+    whole-tree walk) and ``kind`` labels the evidence. Files over the upload cap
+    become pointer notes; bytes are never interpreted. For directory stores
+    (zarr) or large data, use ``lt watch`` instead.
+    """
+
+    if not tuple(patterns):
+        raise LTValidationError("capture() requires at least one file pattern.")
+    if not str(kind).strip():
+        raise LTValidationError("capture() requires a non-empty kind.")
+    return CaptureContext(
+        root,
+        patterns=patterns,
+        kind=str(kind).strip(),
         recursive=recursive,
         client=client,
         project_id=project_id,
@@ -369,6 +420,7 @@ def _capture_saved_figure(
     metadata: Mapping[str, NoteMetadataScalar] | None,
     preview_max_bytes: int,
     version_every_change: bool,
+    kind: str = "figure",
 ) -> FigureCaptureResult:
     resolved_path = Path(path).expanduser()
     result_defaults: dict[str, Any] = {
@@ -383,7 +435,7 @@ def _capture_saved_figure(
     try:
         file_size = resolved_path.stat().st_size
         if file_size <= 0:
-            raise LTValidationError("Figure file must not be empty.")
+            raise LTValidationError(f"Captured {kind} file must not be empty.")
         if file_size > FIGURE_UPLOAD_MAX_BYTES:
             # Never read an oversized artifact into memory: stream-hash it and
             # let _preview_payload emit a pointer (or a fig-rendered preview).
@@ -392,7 +444,7 @@ def _capture_saved_figure(
         else:
             full_payload = resolved_path.read_bytes()
             if not full_payload:
-                raise LTValidationError("Figure file must not be empty.")
+                raise LTValidationError(f"Captured {kind} file must not be empty.")
             content_hash = _bytes_sha256(full_payload)
         resolved_path = resolved_path.resolve()
         source_uri = resolved_path.as_uri()
@@ -400,6 +452,7 @@ def _capture_saved_figure(
             resolved_path,
             logical_id=logical_id,
             content_hash=content_hash if version_every_change else None,
+            kind=kind,
         )
         base_metadata = _base_figure_metadata(
             path=resolved_path,
@@ -408,6 +461,7 @@ def _capture_saved_figure(
             content_hash=content_hash,
             payload_size=file_size,
             metadata=metadata,
+            kind=kind,
         )
         result_defaults.update(
             {
@@ -454,9 +508,9 @@ def _capture_saved_figure(
                 upload_metadata = dict(base_metadata)
                 upload_metadata.update(
                     {
-                        "figure_no_preview": preview.no_preview,
-                        "figure_preview_size_bytes": preview.size_bytes,
-                        "figure_review_bytes_stale": False,
+                        f"{kind}_no_preview": preview.no_preview,
+                        f"{kind}_preview_size_bytes": preview.size_bytes,
+                        f"{kind}_review_bytes_stale": False,
                     }
                 )
                 note, status_code = resolved_client._upload_note_file_payload_with_status(
@@ -478,6 +532,7 @@ def _capture_saved_figure(
                         source_uri=source_uri,
                         source_external_id=client_capture_id,
                         no_preview=preview.no_preview,
+                        kind=kind,
                     )
                 return FigureCaptureResult(
                     **{
@@ -515,6 +570,7 @@ def _coalesced_result(
     source_uri: str,
     source_external_id: str,
     no_preview: bool,
+    kind: str = "figure",
 ) -> FigureCaptureResult:
     note_metadata = note.get("metadata")
     existing_metadata = dict(note_metadata) if isinstance(note_metadata, Mapping) else {}
@@ -537,6 +593,7 @@ def _coalesced_result(
         source_uri=source_uri,
         source_external_id=source_external_id,
         stale_review_bytes=True,
+        kind=kind,
     )
     try:
         note = client._patch_note_metadata(str(note.id), merged_metadata, status="staged")
@@ -575,6 +632,7 @@ def _base_figure_metadata(
     content_hash: str,
     payload_size: int,
     metadata: Mapping[str, NoteMetadataScalar] | None,
+    kind: str = "figure",
 ) -> dict[str, NoteMetadataScalar]:
     merged = dict(_validate_metadata(metadata) or {})
     merged.update(capture_host_metadata())
@@ -582,23 +640,23 @@ def _base_figure_metadata(
     if context is not None:
         merged.update(context.to_metadata())
     evidence = build_evidence_metadata(
-        source_provider="local-figure",
+        source_provider=f"local-{kind}",
         source_uri=source_uri,
         source_external_id=source_external_id,
         content_hash=content_hash,
-        capture_kind="figure",
-        adapter="lab-tracker-client-figure",
+        capture_kind=kind,
+        adapter=f"lab-tracker-client-{kind}",
         title=path.name,
         metadata=merged,
     )
     evidence.update(
         {
             "content_hash_current": content_hash,
-            "figure_content_hash_current": content_hash,
-            "figure_source_uri_current": source_uri,
-            "figure_source_external_id_current": source_external_id,
-            "figure_client_capture_id": source_external_id,
-            "figure_full_size_bytes": payload_size,
+            f"{kind}_content_hash_current": content_hash,
+            f"{kind}_source_uri_current": source_uri,
+            f"{kind}_source_external_id_current": source_external_id,
+            f"{kind}_client_capture_id": source_external_id,
+            f"{kind}_full_size_bytes": payload_size,
         }
     )
     return evidence
@@ -612,7 +670,9 @@ def _merge_current_metadata(
     source_uri: str,
     source_external_id: str,
     stale_review_bytes: bool,
+    kind: str = "figure",
 ) -> dict[str, NoteMetadataScalar]:
+    first_capture_keys = _first_capture_review_keys(kind)
     merged: dict[str, NoteMetadataScalar] = {
         str(key): value
         for key, value in existing_metadata.items()
@@ -621,16 +681,16 @@ def _merge_current_metadata(
     for key, value in current_metadata.items():
         if key.startswith("evidence_") and key in merged:
             continue
-        if key in _FIRST_CAPTURE_REVIEW_METADATA_KEYS and key in merged:
+        if key in first_capture_keys and key in merged:
             continue
         merged[key] = value
     merged.update(
         {
             "content_hash_current": content_hash,
-            "figure_content_hash_current": content_hash,
-            "figure_source_uri_current": source_uri,
-            "figure_source_external_id_current": source_external_id,
-            "figure_review_bytes_stale": stale_review_bytes,
+            f"{kind}_content_hash_current": content_hash,
+            f"{kind}_source_uri_current": source_uri,
+            f"{kind}_source_external_id_current": source_external_id,
+            f"{kind}_review_bytes_stale": stale_review_bytes,
         }
     )
     return merged
@@ -788,6 +848,7 @@ def _client_capture_id(
     *,
     logical_id: str | None,
     content_hash: str | None,
+    kind: str = "figure",
 ) -> str:
     if logical_id is None:
         logical_id = _project_relative_path(path)
@@ -795,7 +856,7 @@ def _client_capture_id(
     cleaned = cleaned.strip("/")
     if not cleaned:
         cleaned = path.name
-    base = f"figure:{cleaned}"
+    base = f"{kind}:{cleaned}"
     if content_hash:
         base = f"{base}:{content_hash[:12]}"
     if len(base) <= 120:
@@ -823,7 +884,12 @@ def _capture_context_logical_id(
     return f"{logical_prefix.strip('/')}/{path.name}" if logical_prefix else path.name
 
 
-def _snapshot_image_mtimes(
+_SNAPSHOT_SKIP_DIRS = frozenset(
+    {".git", ".hg", ".svn", ".venv", "venv", "node_modules", "__pycache__", ".mypy_cache"}
+)
+
+
+def _snapshot_file_mtimes(
     root: Path,
     patterns: Iterable[str],
     *,
@@ -833,9 +899,14 @@ def _snapshot_image_mtimes(
     for pattern in patterns:
         iterator = root.rglob(pattern) if recursive else root.glob(pattern)
         for path in iterator:
+            if _SNAPSHOT_SKIP_DIRS.intersection(path.parts):
+                continue
             try:
-                if path.is_file():
-                    snapshot[path.resolve()] = path.stat().st_mtime_ns
+                stat_result = path.stat()
+                # Regular files only: skip dirs, FIFOs, sockets, devices — a
+                # read on a FIFO would block the capture forever.
+                if stat.S_ISREG(stat_result.st_mode):
+                    snapshot[path.resolve()] = stat_result.st_mtime_ns
             except OSError:
                 continue
     return snapshot

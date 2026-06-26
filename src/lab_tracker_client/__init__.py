@@ -52,8 +52,10 @@ from lab_tracker_client.client import (
     upsert_question,
 )
 from lab_tracker_client.figure import (
+    CaptureContext,
     FigureCaptureResult,
     RunContext,
+    capture,
     capture_figures,
     run_context,
     savefig,
@@ -90,8 +92,10 @@ __all__ = [
     "LTRecord",
     "LTValidationError",
     "LabTracker",
+    "CaptureContext",
     "RunContext",
     "build_evidence_metadata",
+    "capture",
     "capture_figures",
     "client",
     "client_from_env",

@@ -8,7 +8,14 @@ import httpx
 import pytest
 
 import lab_tracker_client.figure as figure_module
-from lab_tracker_client import LabTracker, capture_figures, run_context, savefig
+from lab_tracker_client import (
+    LabTracker,
+    LTValidationError,
+    capture,
+    capture_figures,
+    run_context,
+    savefig,
+)
 from lab_tracker_client.figure import (
     FIGURE_CAPTURE_TIMEOUT_SECONDS,
     _reset_figure_capture_state_for_tests,
@@ -587,3 +594,46 @@ def test_run_context_records_run_id_and_code_pointer(
     )
     assert metadata_seen["run_code_line"]
     assert len(str(metadata_seen["run_code_region_hash"])) == 64
+
+
+def test_capture_generic_kind_namespaces_metadata(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # cap1.2: capture(kind=...) captures any file and labels it by kind.
+    monkeypatch.setenv("LAB_TRACKER_CONFIG_DIR", str(tmp_path / "cfg"))
+    seen: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        meta = json.loads(_multipart_field(request.content, "metadata"))
+        seen["cid"] = _multipart_field(request.content, "client_capture_id")
+        seen["meta"] = meta
+        return _json_response(
+            201,
+            {"data": {"note_id": "n", "project_id": "project-1", "status": "staged",
+                      "metadata": meta}},
+        )
+
+    with LabTracker(
+        base_url="http://testserver",
+        default_project_id="project-1",
+        transport=httpx.MockTransport(handler),
+    ) as lt, capture(tmp_path, patterns=["*.csv"], kind="dataset", client=lt):
+        (tmp_path / "results.csv").write_text("a,b\n1,2\n", encoding="utf-8")
+
+    meta = seen["meta"]
+    assert isinstance(meta, dict)
+    assert seen["cid"] == "dataset:results.csv"
+    assert meta["evidence_source_provider"] == "local-dataset"
+    assert meta["evidence_capture_kind"] == "dataset"
+    assert meta["evidence_adapter"] == "lab-tracker-client-dataset"
+    assert meta["dataset_content_hash_current"] == meta["evidence_content_hash"]
+    assert meta["dataset_no_preview"] is False
+    # No leakage of the figure namespace onto a non-figure capture.
+    assert not any(str(key).startswith("figure_") for key in meta)
+
+
+def test_capture_requires_patterns_and_kind(tmp_path: Path) -> None:
+    with pytest.raises(LTValidationError):
+        capture(tmp_path, patterns=[], kind="dataset")
+    with pytest.raises(LTValidationError):
+        capture(tmp_path, patterns=["*.csv"], kind="   ")
