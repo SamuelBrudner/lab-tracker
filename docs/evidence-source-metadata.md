@@ -29,6 +29,17 @@ lt import-folder \
   --include "*.md"
 ```
 
+`--include` and `--exclude` are both repeatable relative-path globs (omit
+`--include` to match all files). Other options:
+
+- `--dry-run`: report what would be imported without creating notes.
+- `--limit <n>`: cap the number of matched files processed.
+- `--provider <name>`: evidence source provider name (default: `local-folder`).
+- `--adapter-name <name>`: adapter identifier recorded in metadata (default:
+  `lt-import-folder`).
+- `--status <staged|committed|archived>`: note status for imported files
+  (default: `staged`).
+
 The adapter uses a root-qualified POSIX path as `evidence_source_external_id`
 and the absolute `file://` URI as `evidence_source_uri`. The external ID is
 formatted as `<root-uri>::<relative-path>` so two imported folders with the same

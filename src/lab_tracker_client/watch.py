@@ -35,11 +35,13 @@ from lab_tracker.file_watch import (
 )
 from lab_tracker.models import NoteMetadataScalar
 from lab_tracker_client.client import (
+    CAPTURE_HOST_METADATA_KEYS,
     EvidenceNoteIndex,
     LabTracker,
     LTRecord,
     LTValidationError,
     build_evidence_metadata,
+    capture_host_metadata,
 )
 
 CONFIG_VERSION = 1
@@ -425,6 +427,7 @@ def make_event(
         "metrics": _json_mapping(metrics or {}),
         "log_excerpt": log_excerpt or "",
         "payload": _json_mapping(payload or {}),
+        "host": _json_mapping(capture_host_metadata()),
         "sync": {"status": "pending", "attempts": 0},
     }
     return validate_event(event)
@@ -450,6 +453,7 @@ def validate_event(payload: Mapping[str, Any]) -> JsonObject:
     event["metrics"] = _json_mapping(event.get("metrics") or {})
     event["log_excerpt"] = str(event.get("log_excerpt") or "")
     event["payload"] = _json_mapping(event.get("payload") or {})
+    event["host"] = _json_mapping(event.get("host") or {})
     sync = event.get("sync") if isinstance(event.get("sync"), Mapping) else {}
     event["sync"] = {
         "status": str(sync.get("status") or "pending"),
@@ -1129,6 +1133,10 @@ def _event_metadata(event: Mapping[str, Any]) -> dict[str, NoteMetadataScalar]:
     for key in ("relative_path", "content_hash", "size_bytes", "manifest_content_hash"):
         if source.get(key) is not None:
             metadata[f"watch_{key}"] = source[key]
+    host = payload.get("host") if isinstance(payload.get("host"), Mapping) else {}
+    for key in CAPTURE_HOST_METADATA_KEYS:
+        if host.get(key):
+            metadata[key] = str(host[key])
     return metadata
 
 

@@ -10,6 +10,8 @@ node_modules/
 note_storage/
 lab_tracker.db
 lab_tracker.db.backup-*
+lab_tracker.db.lock
+*.db.lock
 .npm-cache/
 .codex/
 .lab-tracker-dolt/

@@ -8,6 +8,7 @@ from lab_tracker_client import LabTracker
 from lab_tracker_client.watch import (
     SINK_ACQUISITION_OUTPUT,
     SINK_STAGED_NOTE,
+    _event_metadata,
     event_from_manifest,
     init_config,
     outbox_status,
@@ -42,6 +43,27 @@ def test_scan_files_writes_idempotent_staged_note_event(tmp_path, monkeypatch) -
     assert event["sink"] == SINK_STAGED_NOTE
     assert event["context"]["project_id"] == "project-1"
     assert outbox_status(config.outbox_path())["pending"] == 1
+
+
+def test_scan_records_capture_host_on_event_and_note_metadata(tmp_path, monkeypatch) -> None:
+    monkeypatch.delenv("LAB_TRACKER_WATCH_CONFIG", raising=False)
+    monkeypatch.delenv("LAB_TRACKER_WATCH_OUTBOX", raising=False)
+    monkeypatch.setenv("LAB_TRACKER_CAPTURE_HOST", "rig-7")
+    monkeypatch.setenv("LAB_TRACKER_CONFIG_DIR", str(tmp_path / "cfg"))
+    monkeypatch.chdir(tmp_path)
+    config = init_config(project_id="project-1")
+    inbox = tmp_path / "inbox"
+    inbox.mkdir()
+    (inbox / "capture.md").write_text("capture text", encoding="utf-8")
+
+    scan_watch(config, mode="files", root=inbox)
+    event = read_event(next(iter(config.outbox_path().glob("*.json"))))
+
+    assert event["host"]["capture_host_label"] == "rig-7"
+    assert len(event["host"]["capture_install_id"]) == 32
+    note_metadata = _event_metadata(event)
+    assert note_metadata["capture_host_label"] == "rig-7"
+    assert note_metadata["capture_install_id"] == event["host"]["capture_install_id"]
 
 
 def test_sync_file_event_uploads_staged_note_and_requests_draft(tmp_path, monkeypatch) -> None:

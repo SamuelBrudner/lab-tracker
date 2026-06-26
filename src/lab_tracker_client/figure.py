@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import hashlib
 import io
 import mimetypes
 import os
+import stat
 import subprocess
 import sys
 import time
+import uuid
 from collections.abc import Iterable, Mapping
 from contextlib import contextmanager, suppress
 from contextvars import ContextVar
@@ -27,6 +30,8 @@ from lab_tracker_client.client import (
     _bytes_sha256,
     _validate_metadata,
     build_evidence_metadata,
+    capture_host_metadata,
+    file_sha256,
 )
 
 FIGURE_CAPTURE_TIMEOUT_SECONDS = 2.5
@@ -36,12 +41,8 @@ _DEFAULT_IMAGE_PATTERNS = ("*.png", "*.jpg", "*.jpeg", "*.svg", "*.pdf", "*.tif"
 _RUN_CONTEXT: ContextVar[RunContext | None] = ContextVar("lab_tracker_run_context", default=None)
 _CIRCUIT_OPEN = False
 _WARNED: set[str] = set()
-_FIRST_CAPTURE_REVIEW_METADATA_KEYS = frozenset(
-    {
-        "figure_no_preview",
-        "figure_preview_size_bytes",
-    }
-)
+def _first_capture_review_keys(kind: str) -> frozenset[str]:
+    return frozenset({f"{kind}_no_preview", f"{kind}_preview_size_bytes"})
 
 
 @dataclass(frozen=True)
@@ -90,8 +91,14 @@ class RunContext:
 
     captured_at: str
     expires_at: float
+    run_id: str = ""
     git_commit: str = ""
     git_dirty: bool = False
+    repo_remote_url: str = ""
+    code_file: str = ""
+    code_symbol: str = ""
+    code_line: int = 0
+    code_region_hash: str = ""
     extra: dict[str, NoteMetadataScalar] = field(default_factory=dict)
 
     def expired(self) -> bool:
@@ -102,8 +109,20 @@ class RunContext:
             "run_captured_at": self.captured_at,
             "run_git_dirty": self.git_dirty,
         }
+        if self.run_id:
+            metadata["run_id"] = self.run_id
         if self.git_commit:
             metadata["run_git_commit"] = self.git_commit
+        if self.repo_remote_url:
+            metadata["run_repo_remote_url"] = self.repo_remote_url
+        if self.code_file:
+            metadata["run_code_file"] = self.code_file
+        if self.code_symbol:
+            metadata["run_code_symbol"] = self.code_symbol
+        if self.code_line:
+            metadata["run_code_line"] = self.code_line
+        if self.code_region_hash:
+            metadata["run_code_region_hash"] = self.code_region_hash
         for key, value in self.extra.items():
             metadata[f"run_{key}"] = value
         return metadata
@@ -135,14 +154,21 @@ class _PreviewPayload:
         return len(self.payload)
 
 
-class FigureCaptureContext:
-    """Context manager returned by capture_figures()."""
+class CaptureContext:
+    """Context manager returned by capture()/capture_figures().
+
+    Snapshots matching files under ``root`` on enter and captures any that are
+    created or modified inside the body. Format-agnostic: ``kind`` only labels
+    the evidence (provider/adapter/metadata namespace); bytes are never
+    interpreted, and anything over the upload cap degrades to a pointer note.
+    """
 
     def __init__(
         self,
         root: str | Path,
         *,
         patterns: Iterable[str] = _DEFAULT_IMAGE_PATTERNS,
+        kind: str = "figure",
         recursive: bool = True,
         client: LabTracker | None = None,
         project_id: str | None = None,
@@ -153,6 +179,7 @@ class FigureCaptureContext:
     ) -> None:
         self.root = Path(root).expanduser()
         self.patterns = tuple(patterns)
+        self.kind = kind
         self.recursive = recursive
         self.client = client
         self.project_id = project_id
@@ -164,13 +191,13 @@ class FigureCaptureContext:
         self.errors: list[str] = []
         self._snapshot: dict[Path, int] = {}
 
-    def __enter__(self) -> FigureCaptureContext:
-        self._snapshot = _snapshot_image_mtimes(self.root, self.patterns, recursive=self.recursive)
+    def __enter__(self) -> CaptureContext:
+        self._snapshot = _snapshot_file_mtimes(self.root, self.patterns, recursive=self.recursive)
         return self
 
     def __exit__(self, *_: object) -> bool:
         try:
-            after = _snapshot_image_mtimes(self.root, self.patterns, recursive=self.recursive)
+            after = _snapshot_file_mtimes(self.root, self.patterns, recursive=self.recursive)
             for path, mtime in sorted(after.items(), key=lambda item: item[0].as_posix()):
                 if self._snapshot.get(path) == mtime:
                     continue
@@ -189,6 +216,7 @@ class FigureCaptureContext:
                         metadata=self.metadata,
                         preview_max_bytes=self.preview_max_bytes,
                         version_every_change=self.version_every_change,
+                        kind=self.kind,
                     )
                 )
         except Exception as exc:  # pragma: no cover - defensive guard for body exceptions.
@@ -200,6 +228,10 @@ class FigureCaptureContext:
         return False
 
 
+# Back-compat alias: figure capture is now one kind of the generic CaptureContext.
+FigureCaptureContext = CaptureContext
+
+
 def run_context(
     *,
     ttl_seconds: float = 1800,
@@ -208,14 +240,77 @@ def run_context(
     """Return a context manager that adds run metadata to figure captures."""
 
     resolved_extra = dict(_validate_metadata(extra) or {})
+    pointer = _run_code_pointer()
     context = RunContext(
         captured_at=datetime.now(timezone.utc).isoformat(),
         expires_at=time.monotonic() + max(0.0, float(ttl_seconds)),
+        run_id=uuid.uuid4().hex,
         git_commit=_git_output("rev-parse", "HEAD"),
         git_dirty=bool(_git_output("status", "--porcelain")),
+        repo_remote_url=_git_output("config", "--get", "remote.origin.url"),
+        code_file=str(pointer.get("code_file", "")),
+        code_symbol=str(pointer.get("code_symbol", "")),
+        code_line=int(pointer.get("code_line", 0) or 0),
+        code_region_hash=str(pointer.get("code_region_hash", "")),
         extra=resolved_extra,
     )
     return _RunContextManager(context)
+
+
+def _run_code_pointer() -> dict[str, NoteMetadataScalar]:
+    """Best-effort repo-relative code pointer for the run's call site.
+
+    Walks past frames inside this module so it lands on the user's code that
+    opened the run context. Fail-soft: returns whatever it could resolve.
+    """
+
+    pointer: dict[str, NoteMetadataScalar] = {}
+    frame: Any = None
+    with suppress(Exception):
+        frame = sys._getframe(1)
+        while frame is not None and frame.f_code.co_filename == __file__:
+            frame = frame.f_back
+    if frame is None:
+        return pointer
+    with suppress(Exception):
+        filename = frame.f_code.co_filename
+        lineno = int(frame.f_lineno)
+        symbol = getattr(frame.f_code, "co_qualname", None) or frame.f_code.co_name
+        relative = _repo_relative_file(filename)
+        if relative:
+            pointer["code_file"] = relative
+        if symbol:
+            pointer["code_symbol"] = str(symbol)
+        if lineno:
+            pointer["code_line"] = lineno
+        region = _code_region_hash(filename, lineno)
+        if region:
+            pointer["code_region_hash"] = region
+    return pointer
+
+
+def _repo_relative_file(filename: str) -> str:
+    with suppress(Exception):
+        path = Path(filename).resolve()
+        toplevel = _git_output("rev-parse", "--show-toplevel")
+        if toplevel:
+            with suppress(ValueError):
+                return path.relative_to(Path(toplevel).resolve()).as_posix()
+        return path.name
+    return ""
+
+
+def _code_region_hash(filename: str, lineno: int, *, context_lines: int = 3) -> str:
+    with suppress(Exception):
+        lines = Path(filename).read_text(encoding="utf-8", errors="replace").splitlines()
+        if not lines:
+            return ""
+        start = max(0, lineno - 1 - context_lines)
+        end = min(len(lines), lineno + context_lines)
+        region = "\n".join(lines[start:end])
+        if region:
+            return hashlib.sha256(region.encode("utf-8")).hexdigest()
+    return ""
 
 
 def savefig(
@@ -261,9 +356,50 @@ def capture_figures(
 ) -> FigureCaptureContext:
     """Capture image files created or modified inside a context body."""
 
-    return FigureCaptureContext(
+    return CaptureContext(
         root,
         patterns=patterns,
+        kind="figure",
+        recursive=recursive,
+        client=client,
+        project_id=project_id,
+        metadata=metadata,
+        logical_prefix=logical_prefix,
+        preview_max_bytes=preview_max_bytes,
+        version_every_change=version_every_change,
+    )
+
+
+def capture(
+    root: str | Path,
+    *,
+    patterns: Iterable[str],
+    kind: str,
+    recursive: bool = True,
+    client: LabTracker | None = None,
+    project_id: str | None = None,
+    metadata: Mapping[str, NoteMetadataScalar] | None = None,
+    logical_prefix: str | None = None,
+    preview_max_bytes: int = FIGURE_PREVIEW_MAX_BYTES,
+    version_every_change: bool = False,
+) -> CaptureContext:
+    """Capture any files matching ``patterns`` written inside the context body.
+
+    Format-agnostic staged-evidence capture (csv, html, pickle, ...). ``patterns``
+    and ``kind`` are required: ``patterns`` keeps the watch bounded (no implicit
+    whole-tree walk) and ``kind`` labels the evidence. Files over the upload cap
+    become pointer notes; bytes are never interpreted. For directory stores
+    (zarr) or large data, use ``lt watch`` instead.
+    """
+
+    if not tuple(patterns):
+        raise LTValidationError("capture() requires at least one file pattern.")
+    if not str(kind).strip():
+        raise LTValidationError("capture() requires a non-empty kind.")
+    return CaptureContext(
+        root,
+        patterns=patterns,
+        kind=str(kind).strip(),
         recursive=recursive,
         client=client,
         project_id=project_id,
@@ -284,6 +420,7 @@ def _capture_saved_figure(
     metadata: Mapping[str, NoteMetadataScalar] | None,
     preview_max_bytes: int,
     version_every_change: bool,
+    kind: str = "figure",
 ) -> FigureCaptureResult:
     resolved_path = Path(path).expanduser()
     result_defaults: dict[str, Any] = {
@@ -296,24 +433,35 @@ def _capture_saved_figure(
         "client_capture_id": "",
     }
     try:
-        full_payload = resolved_path.read_bytes()
-        if not full_payload:
-            raise LTValidationError("Figure file must not be empty.")
-        content_hash = _bytes_sha256(full_payload)
+        file_size = resolved_path.stat().st_size
+        if file_size <= 0:
+            raise LTValidationError(f"Captured {kind} file must not be empty.")
+        if file_size > FIGURE_UPLOAD_MAX_BYTES:
+            # Never read an oversized artifact into memory: stream-hash it and
+            # let _preview_payload emit a pointer (or a fig-rendered preview).
+            full_payload: bytes | None = None
+            content_hash = file_sha256(resolved_path)
+        else:
+            full_payload = resolved_path.read_bytes()
+            if not full_payload:
+                raise LTValidationError(f"Captured {kind} file must not be empty.")
+            content_hash = _bytes_sha256(full_payload)
         resolved_path = resolved_path.resolve()
         source_uri = resolved_path.as_uri()
         client_capture_id = _client_capture_id(
             resolved_path,
             logical_id=logical_id,
             content_hash=content_hash if version_every_change else None,
+            kind=kind,
         )
         base_metadata = _base_figure_metadata(
             path=resolved_path,
             source_uri=source_uri,
             source_external_id=client_capture_id,
             content_hash=content_hash,
-            payload_size=len(full_payload),
+            payload_size=file_size,
             metadata=metadata,
+            kind=kind,
         )
         result_defaults.update(
             {
@@ -352,6 +500,7 @@ def _capture_saved_figure(
                     fig=fig,
                     path=resolved_path,
                     full_payload=full_payload,
+                    full_size_bytes=file_size,
                     max_bytes=preview_max_bytes,
                     source_uri=source_uri,
                     content_hash=content_hash,
@@ -359,9 +508,9 @@ def _capture_saved_figure(
                 upload_metadata = dict(base_metadata)
                 upload_metadata.update(
                     {
-                        "figure_no_preview": preview.no_preview,
-                        "figure_preview_size_bytes": preview.size_bytes,
-                        "figure_review_bytes_stale": False,
+                        f"{kind}_no_preview": preview.no_preview,
+                        f"{kind}_preview_size_bytes": preview.size_bytes,
+                        f"{kind}_review_bytes_stale": False,
                     }
                 )
                 note, status_code = resolved_client._upload_note_file_payload_with_status(
@@ -383,6 +532,7 @@ def _capture_saved_figure(
                         source_uri=source_uri,
                         source_external_id=client_capture_id,
                         no_preview=preview.no_preview,
+                        kind=kind,
                     )
                 return FigureCaptureResult(
                     **{
@@ -420,6 +570,7 @@ def _coalesced_result(
     source_uri: str,
     source_external_id: str,
     no_preview: bool,
+    kind: str = "figure",
 ) -> FigureCaptureResult:
     note_metadata = note.get("metadata")
     existing_metadata = dict(note_metadata) if isinstance(note_metadata, Mapping) else {}
@@ -442,6 +593,7 @@ def _coalesced_result(
         source_uri=source_uri,
         source_external_id=source_external_id,
         stale_review_bytes=True,
+        kind=kind,
     )
     try:
         note = client._patch_note_metadata(str(note.id), merged_metadata, status="staged")
@@ -480,29 +632,31 @@ def _base_figure_metadata(
     content_hash: str,
     payload_size: int,
     metadata: Mapping[str, NoteMetadataScalar] | None,
+    kind: str = "figure",
 ) -> dict[str, NoteMetadataScalar]:
     merged = dict(_validate_metadata(metadata) or {})
+    merged.update(capture_host_metadata())
     context = _active_run_context()
     if context is not None:
         merged.update(context.to_metadata())
     evidence = build_evidence_metadata(
-        source_provider="local-figure",
+        source_provider=f"local-{kind}",
         source_uri=source_uri,
         source_external_id=source_external_id,
         content_hash=content_hash,
-        capture_kind="figure",
-        adapter="lab-tracker-client-figure",
+        capture_kind=kind,
+        adapter=f"lab-tracker-client-{kind}",
         title=path.name,
         metadata=merged,
     )
     evidence.update(
         {
             "content_hash_current": content_hash,
-            "figure_content_hash_current": content_hash,
-            "figure_source_uri_current": source_uri,
-            "figure_source_external_id_current": source_external_id,
-            "figure_client_capture_id": source_external_id,
-            "figure_full_size_bytes": payload_size,
+            f"{kind}_content_hash_current": content_hash,
+            f"{kind}_source_uri_current": source_uri,
+            f"{kind}_source_external_id_current": source_external_id,
+            f"{kind}_client_capture_id": source_external_id,
+            f"{kind}_full_size_bytes": payload_size,
         }
     )
     return evidence
@@ -516,7 +670,9 @@ def _merge_current_metadata(
     source_uri: str,
     source_external_id: str,
     stale_review_bytes: bool,
+    kind: str = "figure",
 ) -> dict[str, NoteMetadataScalar]:
+    first_capture_keys = _first_capture_review_keys(kind)
     merged: dict[str, NoteMetadataScalar] = {
         str(key): value
         for key, value in existing_metadata.items()
@@ -525,16 +681,16 @@ def _merge_current_metadata(
     for key, value in current_metadata.items():
         if key.startswith("evidence_") and key in merged:
             continue
-        if key in _FIRST_CAPTURE_REVIEW_METADATA_KEYS and key in merged:
+        if key in first_capture_keys and key in merged:
             continue
         merged[key] = value
     merged.update(
         {
             "content_hash_current": content_hash,
-            "figure_content_hash_current": content_hash,
-            "figure_source_uri_current": source_uri,
-            "figure_source_external_id_current": source_external_id,
-            "figure_review_bytes_stale": stale_review_bytes,
+            f"{kind}_content_hash_current": content_hash,
+            f"{kind}_source_uri_current": source_uri,
+            f"{kind}_source_external_id_current": source_external_id,
+            f"{kind}_review_bytes_stale": stale_review_bytes,
         }
     )
     return merged
@@ -544,13 +700,14 @@ def _preview_payload(
     *,
     fig: Any,
     path: Path,
-    full_payload: bytes,
+    full_payload: bytes | None,
+    full_size_bytes: int,
     max_bytes: int,
     source_uri: str,
     content_hash: str,
 ) -> _PreviewPayload:
     resolved_max_bytes = max(1, min(int(max_bytes), FIGURE_UPLOAD_MAX_BYTES))
-    if len(full_payload) <= resolved_max_bytes:
+    if full_payload is not None and len(full_payload) <= resolved_max_bytes:
         return _PreviewPayload(
             payload=full_payload,
             path=path,
@@ -568,14 +725,15 @@ def _preview_payload(
     _warn_once(
         "preview-unavailable",
         "Lab Tracker figure capture could not render a bounded preview; "
-        "matplotlib/Pillow may be unavailable. Uploading a pointer note.",
+        "the file exceeds the upload cap or matplotlib/Pillow is unavailable. "
+        "Uploading a pointer note.",
     )
     pointer = "\n".join(
         [
             "Lab Tracker figure pointer",
             f"source_uri: {source_uri}",
             f"evidence_content_hash: {content_hash}",
-            f"full_size_bytes: {len(full_payload)}",
+            f"full_size_bytes: {full_size_bytes}",
             "",
         ]
     ).encode("utf-8")
@@ -690,6 +848,7 @@ def _client_capture_id(
     *,
     logical_id: str | None,
     content_hash: str | None,
+    kind: str = "figure",
 ) -> str:
     if logical_id is None:
         logical_id = _project_relative_path(path)
@@ -697,13 +856,11 @@ def _client_capture_id(
     cleaned = cleaned.strip("/")
     if not cleaned:
         cleaned = path.name
-    base = f"figure:{cleaned}"
+    base = f"{kind}:{cleaned}"
     if content_hash:
         base = f"{base}:{content_hash[:12]}"
     if len(base) <= 120:
         return base
-    import hashlib
-
     suffix = hashlib.sha256(base.encode("utf-8")).hexdigest()[:12]
     return f"{base[:104]}:{suffix}"
 
@@ -727,7 +884,12 @@ def _capture_context_logical_id(
     return f"{logical_prefix.strip('/')}/{path.name}" if logical_prefix else path.name
 
 
-def _snapshot_image_mtimes(
+_SNAPSHOT_SKIP_DIRS = frozenset(
+    {".git", ".hg", ".svn", ".venv", "venv", "node_modules", "__pycache__", ".mypy_cache"}
+)
+
+
+def _snapshot_file_mtimes(
     root: Path,
     patterns: Iterable[str],
     *,
@@ -737,9 +899,14 @@ def _snapshot_image_mtimes(
     for pattern in patterns:
         iterator = root.rglob(pattern) if recursive else root.glob(pattern)
         for path in iterator:
+            if _SNAPSHOT_SKIP_DIRS.intersection(path.parts):
+                continue
             try:
-                if path.is_file():
-                    snapshot[path.resolve()] = path.stat().st_mtime_ns
+                stat_result = path.stat()
+                # Regular files only: skip dirs, FIFOs, sockets, devices — a
+                # read on a FIFO would block the capture forever.
+                if stat.S_ISREG(stat_result.st_mode):
+                    snapshot[path.resolve()] = stat_result.st_mtime_ns
             except OSError:
                 continue
     return snapshot

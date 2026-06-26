@@ -41,6 +41,7 @@ from lab_tracker.models import (
     OwnershipReassignment,
     Project,
     ProjectGroup,
+    ProvenanceLink,
     Question,
     QuestionRefactor,
     RecordExportEvent,
@@ -80,6 +81,7 @@ from .ownership import (
     SQLAlchemyOwnershipReassignmentRepository,
     SQLAlchemyRecordExportEventRepository,
 )
+from .provenance_links import SQLAlchemyProvenanceLinkRepository
 from .sessions import SQLAlchemyAcquisitionOutputRepository, SQLAlchemySessionRepository
 from .supervision import SQLAlchemySupervisionEdgeRepository
 from .usage import (
@@ -115,6 +117,7 @@ class SQLAlchemyLabTrackerRepository(LabTrackerRepository):
         self.claims = SQLAlchemyClaimRepository(session)
         self.claim_edges = SQLAlchemyClaimEdgeRepository(session)
         self.exploration_nodes = SQLAlchemyExplorationNodeRepository(session)
+        self.provenance_links = SQLAlchemyProvenanceLinkRepository(session)
         self.entity_versions = SQLAlchemyEntityVersionRepository(session)
         self.goals = SQLAlchemyGoalRepository(session)
         self.visualizations = SQLAlchemyVisualizationRepository(session)
@@ -881,6 +884,25 @@ class SQLAlchemyLabTrackerRepository(LabTrackerRepository):
             target_entity_type=target_entity_type,
             target_entity_id=target_entity_id,
             created_by=created_by,
+            limit=limit,
+            offset=offset,
+            recent_first=recent_first,
+        )
+
+    def query_provenance_links(
+        self,
+        *,
+        project_id: UUID | None = None,
+        project_ids: set[UUID] | None = None,
+        status: str | None = None,
+        limit: int | None = None,
+        offset: int = 0,
+        recent_first: bool = False,
+    ) -> tuple[list[ProvenanceLink], int]:
+        return self.provenance_links.query(
+            project_id=project_id,
+            project_ids=project_ids,
+            status=status,
             limit=limit,
             offset=offset,
             recent_first=recent_first,

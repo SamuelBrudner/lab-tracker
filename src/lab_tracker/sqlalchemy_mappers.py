@@ -26,6 +26,7 @@ from lab_tracker.db_models import (
     NoteModel,
     NoteTargetModel,
     ProjectMembershipModel,
+    ProvenanceLinkModel,
     QuestionModel,
     QuestionParentModel,
     QuestionRefactorModel,
@@ -34,6 +35,7 @@ from lab_tracker.db_models import (
     VisualizationModel,
 )
 from lab_tracker.models import (
+    AcceptanceMode,
     AcquisitionOutput,
     Analysis,
     AnalysisStatus,
@@ -66,6 +68,11 @@ from lab_tracker.models import (
     OutcomeStatus,
     ProjectMembership,
     ProjectMembershipRole,
+    ProvenanceLink,
+    ProvenanceLinkBasis,
+    ProvenanceLinkOrigin,
+    ProvenanceLinkRelation,
+    ProvenanceLinkStatus,
     Question,
     QuestionLink,
     QuestionLinkRole,
@@ -950,6 +957,92 @@ def apply_claim_edge_to_model(row: ClaimEdgeModel, edge: ClaimEdge) -> None:
         _uuid_str(edge.created_by_user_id) if edge.created_by_user_id is not None else None
     )
     row.created_at = edge.created_at
+
+
+def provenance_link_to_model(link: ProvenanceLink) -> ProvenanceLinkModel:
+    return ProvenanceLinkModel(
+        link_id=_uuid_str(link.link_id),
+        project_id=_uuid_str(link.project_id),
+        source_entity_type=link.source.entity_type.value,
+        source_entity_id=_uuid_str(link.source.entity_id),
+        target_entity_type=link.target.entity_type.value,
+        target_entity_id=_uuid_str(link.target.entity_id),
+        relation=link.relation.value,
+        basis=link.basis.value,
+        content_hash=link.content_hash,
+        status=link.status.value,
+        origin=link.origin.value,
+        acceptance_mode=link.acceptance_mode.value if link.acceptance_mode is not None else None,
+        accepted_by=link.accepted_by,
+        accepted_by_user_id=(
+            _uuid_str(link.accepted_by_user_id) if link.accepted_by_user_id is not None else None
+        ),
+        accepted_at=link.accepted_at,
+        created_by=link.created_by,
+        created_by_user_id=(
+            _uuid_str(link.created_by_user_id) if link.created_by_user_id is not None else None
+        ),
+        created_at=link.created_at,
+        updated_at=link.updated_at,
+    )
+
+
+def provenance_link_from_model(row: ProvenanceLinkModel) -> ProvenanceLink:
+    return ProvenanceLink(
+        link_id=_uuid(row.link_id),
+        project_id=_uuid(row.project_id),
+        source=EntityRef(
+            entity_type=EntityType(row.source_entity_type),
+            entity_id=_uuid(row.source_entity_id),
+        ),
+        target=EntityRef(
+            entity_type=EntityType(row.target_entity_type),
+            entity_id=_uuid(row.target_entity_id),
+        ),
+        relation=ProvenanceLinkRelation(row.relation),
+        basis=ProvenanceLinkBasis(row.basis),
+        content_hash=row.content_hash,
+        status=ProvenanceLinkStatus(row.status),
+        origin=ProvenanceLinkOrigin(row.origin),
+        acceptance_mode=(
+            AcceptanceMode(row.acceptance_mode) if row.acceptance_mode is not None else None
+        ),
+        accepted_by=row.accepted_by,
+        accepted_by_user_id=(
+            _uuid(row.accepted_by_user_id) if row.accepted_by_user_id else None
+        ),
+        accepted_at=_as_utc_optional(row.accepted_at),
+        created_by=row.created_by,
+        created_by_user_id=(
+            _uuid(row.created_by_user_id) if row.created_by_user_id else None
+        ),
+        created_at=_as_utc(row.created_at),
+        updated_at=_as_utc_optional(row.updated_at),
+    )
+
+
+def apply_provenance_link_to_model(row: ProvenanceLinkModel, link: ProvenanceLink) -> None:
+    row.project_id = _uuid_str(link.project_id)
+    row.source_entity_type = link.source.entity_type.value
+    row.source_entity_id = _uuid_str(link.source.entity_id)
+    row.target_entity_type = link.target.entity_type.value
+    row.target_entity_id = _uuid_str(link.target.entity_id)
+    row.relation = link.relation.value
+    row.basis = link.basis.value
+    row.content_hash = link.content_hash
+    row.status = link.status.value
+    row.origin = link.origin.value
+    row.acceptance_mode = link.acceptance_mode.value if link.acceptance_mode is not None else None
+    row.accepted_by = link.accepted_by
+    row.accepted_by_user_id = (
+        _uuid_str(link.accepted_by_user_id) if link.accepted_by_user_id is not None else None
+    )
+    row.accepted_at = link.accepted_at
+    row.created_by = link.created_by
+    row.created_by_user_id = (
+        _uuid_str(link.created_by_user_id) if link.created_by_user_id is not None else None
+    )
+    row.updated_at = link.updated_at
 
 
 def _entity_refs_to_json(refs: Iterable[EntityRef]) -> list[dict[str, str]]:
