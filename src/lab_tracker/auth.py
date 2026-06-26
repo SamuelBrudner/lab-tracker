@@ -609,6 +609,8 @@ def service_principal_can_access(
         return False
     if method in {"GET", "HEAD", "OPTIONS"}:
         return True
+    if method == "POST" and path == "/batches/run-due":
+        return role is Role.ADMIN
     if read_only:
         return False
     return role in {Role.ADMIN, Role.EDITOR}
