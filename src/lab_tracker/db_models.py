@@ -809,6 +809,51 @@ class ClaimEdgeModel(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utc_now)
 
 
+class ProvenanceLinkModel(Base):
+    __tablename__ = "provenance_links"
+    __table_args__ = (
+        UniqueConstraint(
+            "source_entity_id",
+            "target_entity_id",
+            "relation",
+            name="uq_provenance_links_source_target_relation",
+        ),
+        Index("ix_provenance_links_project_status", "project_id", "status"),
+    )
+
+    link_id: Mapped[str] = mapped_column(
+        String(36),
+        primary_key=True,
+        default=lambda: str(uuid4()),
+    )
+    project_id: Mapped[str] = mapped_column(
+        String(36),
+        ForeignKey("projects.project_id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    source_entity_type: Mapped[str] = mapped_column(String(40), nullable=False)
+    source_entity_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    target_entity_type: Mapped[str] = mapped_column(String(40), nullable=False)
+    target_entity_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    relation: Mapped[str] = mapped_column(String(32), nullable=False)
+    basis: Mapped[str] = mapped_column(String(32), nullable=False)
+    content_hash: Mapped[str | None] = mapped_column(String(64))
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="proposed")
+    origin: Mapped[str] = mapped_column(String(32), nullable=False, default="system_detected")
+    acceptance_mode: Mapped[str | None] = mapped_column(String(20))
+    accepted_by: Mapped[str | None] = mapped_column(String(255))
+    accepted_by_user_id: Mapped[str | None] = mapped_column(String(36))
+    accepted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_by: Mapped[str | None] = mapped_column(String(255))
+    created_by_user_id: Mapped[str | None] = mapped_column(String(36))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utc_now)
+    updated_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        default=_utc_now,
+        onupdate=_utc_now,
+    )
+
+
 class ExplorationNodeModel(Base):
     __tablename__ = "exploration_nodes"
 

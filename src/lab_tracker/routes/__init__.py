@@ -33,6 +33,7 @@ from .portfolio import build_portfolio_router
 from .project_graph import build_project_graph_router
 from .projects import build_projects_router
 from .provenance import build_provenance_router
+from .provenance_links import build_provenance_links_router
 from .questions import build_questions_router
 from .record_exports import build_record_exports_router
 from .schema import build_schema_router
@@ -94,6 +95,7 @@ def register_routes(
     app.include_router(build_analyses_router(api))
     app.include_router(build_claims_router(api))
     app.include_router(build_exploration_router(api))
+    app.include_router(build_provenance_links_router(api))
     app.include_router(build_goals_router(api))
     app.include_router(build_visualizations_router(api))
 

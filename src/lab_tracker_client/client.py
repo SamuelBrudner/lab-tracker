@@ -6,6 +6,8 @@ import hashlib
 import json
 import mimetypes
 import os
+import platform
+import uuid
 from collections.abc import Iterator, Mapping, Sequence
 from contextlib import suppress
 from dataclasses import dataclass, field
@@ -79,6 +81,58 @@ EVIDENCE_METADATA_KEYS = (
     "evidence_adapter",
     "evidence_title",
 )
+
+CAPTURE_HOST_METADATA_KEYS = (
+    "capture_host_label",
+    "capture_install_id",
+    "capture_platform",
+)
+
+
+def _install_id_path() -> Path:
+    base = os.getenv("LAB_TRACKER_CONFIG_DIR")
+    root = Path(base).expanduser() if base else Path.home() / ".lab-tracker"
+    return root / "install-id"
+
+
+def _resolve_install_id() -> str:
+    """Read or lazily create a stable per-install id; fail-soft to ""."""
+    path = _install_id_path()
+    with suppress(OSError):
+        if path.exists():
+            existing = path.read_text(encoding="utf-8").strip()
+            if existing:
+                return existing
+    new_id = uuid.uuid4().hex
+    with suppress(OSError):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(new_id + "\n", encoding="utf-8")
+    return new_id
+
+
+def capture_host_metadata() -> dict[str, NoteMetadataScalar]:
+    """Stable, fail-soft identity for the machine performing a capture or push.
+
+    A configurable ``LAB_TRACKER_CAPTURE_HOST`` label (hostname fallback) plus a
+    persisted per-install id and the OS family. Used to disambiguate the
+    cross-machine content-hash join and to record which computer pushed evidence.
+    """
+
+    metadata: dict[str, NoteMetadataScalar] = {}
+    label = os.getenv("LAB_TRACKER_CAPTURE_HOST", "").strip()
+    if not label:
+        with suppress(Exception):
+            label = platform.node().strip()
+    if label:
+        metadata["capture_host_label"] = label
+    install_id = _resolve_install_id()
+    if install_id:
+        metadata["capture_install_id"] = install_id
+    with suppress(Exception):
+        system = platform.system().strip()
+        if system:
+            metadata["capture_platform"] = system
+    return metadata
 
 
 class LTError(RuntimeError):

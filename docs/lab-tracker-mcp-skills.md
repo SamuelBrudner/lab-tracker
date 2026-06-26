@@ -102,7 +102,8 @@ tooling lets assistants request bounded graph context before choosing plots,
 analyses, slides, experiment plans, summaries, or research writing.
 
 `lab_tracker_get_decision_context` accepts `task_kind` values `plot`,
-`analysis`, `slides`, `experiment_plan`, `summary`, and `research_writing`.
+`analysis`, `slides`, `experiment_plan`, `summary`, `research_writing`, and
+`progress_review`.
 It returns bounded project graph context, task guidance, stable IDs, relevance
 reasons, an evidence map, truncation metadata, and a `write_front_door` block
 with resolved project scope, anchor IDs, candidate entity IDs, allowed task

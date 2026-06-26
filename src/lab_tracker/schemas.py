@@ -50,6 +50,8 @@ from lab_tracker.models import (
     ProjectMembership,
     ProjectMembershipRole,
     ProjectStatus,
+    ProvenanceLink,
+    ProvenanceLinkStatus,
     Question,
     QuestionLink,
     QuestionRefactor,
@@ -720,6 +722,20 @@ class ExplorationNodeUpdate(RequestModel):
 
 
 ExplorationNodeRead = ExplorationNode
+
+
+class ProvenanceLinkStatusUpdate(RequestModel):
+    status: ProvenanceLinkStatus
+
+    @field_validator("status")
+    @classmethod
+    def _accept_or_reject_only(cls, value: ProvenanceLinkStatus) -> ProvenanceLinkStatus:
+        if value not in {ProvenanceLinkStatus.ACCEPTED, ProvenanceLinkStatus.REJECTED}:
+            raise ValueError("status must be 'accepted' or 'rejected'.")
+        return value
+
+
+ProvenanceLinkRead = ProvenanceLink
 
 
 class GoalCreateFields(RequestModel):

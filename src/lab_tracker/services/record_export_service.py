@@ -17,6 +17,8 @@ from lab_tracker.models import (
     ExplorationNode,
     Goal,
     Note,
+    ProvenanceLink,
+    ProvenanceLinkStatus,
     Question,
     RecordExport,
     RecordExportEvent,
@@ -453,6 +455,7 @@ class RecordExportService(BaseService):
                 "created_at",
                 "node_id",
             ),
+            provenance_links=self._accepted_provenance_links(project_ids=project_ids),
         )
 
     def _collect_project_records(self, project_id: UUID) -> AraArtifactRecords:
@@ -509,7 +512,23 @@ class RecordExportService(BaseService):
                 {question.question_id: question for question in questions},
                 {claim.claim_id: claim for claim in claims},
             ),
+            provenance_links=self._accepted_provenance_links(project_id=project_id),
         )
+
+    def _accepted_provenance_links(
+        self,
+        *,
+        project_id: UUID | None = None,
+        project_ids: set[UUID] | None = None,
+    ) -> list[ProvenanceLink]:
+        links, _ = self.repository.query_provenance_links(
+            project_id=project_id,
+            project_ids=project_ids,
+            status=ProvenanceLinkStatus.ACCEPTED.value,
+            limit=None,
+            offset=0,
+        )
+        return links
 
     def _add_question_subtree(
         self,

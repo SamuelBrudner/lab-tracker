@@ -156,6 +156,7 @@ class UsageEventResourceType(str, Enum):
     CLAIM = "claim"
     CLAIM_EDGE = "claim_edge"
     EXPLORATION_NODE = "exploration_node"
+    PROVENANCE_LINK = "provenance_link"
     VISUALIZATION = "visualization"
     GOAL = "goal"
     GOAL_LINK = "goal_link"
@@ -846,6 +847,61 @@ class ClaimEdge(_DomainModel):
     created_at: datetime = Field(default_factory=utc_now)
     created_by: str | None = None
     created_by_user_id: UUID | None = None
+
+
+class ProvenanceLinkRelation(str, Enum):
+    """PROV-O relation a provenance link expresses between two artifacts."""
+
+    WAS_DERIVED_FROM = "was_derived_from"
+    USED = "used"
+
+
+class ProvenanceLinkBasis(str, Enum):
+    """How a provenance link was detected/justified."""
+
+    CONTENT_HASH_MATCH = "content_hash_match"
+
+
+class ProvenanceLinkStatus(str, Enum):
+    """Curation lifecycle of a proposed provenance link (human-gated)."""
+
+    PROPOSED = "proposed"
+    ACCEPTED = "accepted"
+    REJECTED = "rejected"
+
+
+class ProvenanceLinkOrigin(str, Enum):
+    """Who produced the link."""
+
+    SYSTEM_DETECTED = "system_detected"
+
+
+class ProvenanceLink(_DomainModel):
+    """A human-gated lineage edge: ``source`` was derived from / used ``target``.
+
+    Proposed by the deterministic content-hash detector during the daily/batch
+    run; only a human accept makes it canonical (and only accepted links render
+    in PROV-O export). Carries the same curation-provenance triple as accepted
+    graph-draft operations.
+    """
+
+    link_id: UUID
+    project_id: UUID
+    source: EntityRef
+    target: EntityRef
+    relation: ProvenanceLinkRelation
+    basis: ProvenanceLinkBasis
+    content_hash: str | None = None
+    status: ProvenanceLinkStatus = ProvenanceLinkStatus.PROPOSED
+    origin: ProvenanceLinkOrigin = ProvenanceLinkOrigin.SYSTEM_DETECTED
+    acceptance_mode: AcceptanceMode | None = None
+    accepted_by: str | None = None
+    accepted_by_user_id: UUID | None = None
+    accepted_at: datetime | None = None
+    created_by: str | None = None
+    created_by_user_id: UUID | None = None
+    created_at: datetime = Field(default_factory=utc_now)
+    updated_at: datetime | None = None
 
 
 class ExplorationNode(_DomainModel):

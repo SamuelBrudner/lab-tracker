@@ -1,6 +1,6 @@
 # Build-vs-Buy Boundaries
 
-Validated: June 1, 2026.
+Validated: June 1, 2026. Pipeline and lineage boundary added June 26, 2026.
 
 This document records the Lab Tracker responsibility boundary decisions from
 `lab-tracker-m3l`. It extends the retained-v1 surface rather than replacing it.
@@ -34,6 +34,7 @@ The PROV-O export and ingestion vocabulary is the integration seam.
 | Byte and asset storage | Integrate behind a pluggable object-storage interface; keep local filesystem fallback. | Lab Tracker stores stable object references and checksums. Durability, transfer, lifecycle, and cross-workstation availability belong to S3-compatible/object storage. |
 | Dataset versioning | Integrate via optional adapters; prefer DataLad/DANDI for neuroscience datasets, DVC for local/Git-adjacent workflows, and lakeFS for object-store/lakehouse teams. | Dataset bytes and version history stay in the substrate. Lab Tracker ingests manifests and keeps question/claim/session/note edges plus NWB/BIDS metadata. |
 | Experiment tracking | Integrate via adapter, with MLflow as the default open-source run reference target and W&B as a supported external reference. Keep bespoke analysis records only as semantic graph activities. | External trackers own run metrics, params, artifacts, and run UI. Lab Tracker stores run URI/id, code/environment pointers, dataset usage, and claim support edges. |
+| Pipeline / workflow orchestration | Integrate via a framework hook; do not build. Kedro is the reference data-pipeline framework; DVC pipelines, Snakemake, and Nextflow are adjacent targets. | The framework owns the data catalog, node/pipeline authoring, runners/execution, and the mechanical file-to-file lineage DAG. Lab Tracker ingests the inputs/outputs a run *declares* (via the hook) as PROV-O `used`/`wasGeneratedBy` edges onto questions, datasets, analyses, and claims. See [Pipeline and Lineage Boundary](#pipeline-and-lineage-boundary). |
 | ELN and lab notebook scope | Link/integrate; do not become an ELN. | ELNs own rich notebook pages, signatures, templates, collaboration, and compliance workflows. Lab Tracker notes remain lightweight graph/evidence notes with optional external ELN entry URI/hash and entity targets. |
 | PROV-O external ingestion | Build in-house as a small contract and adapters. | This is part of the semantic core: external artifacts become PROV entities/activities with semantic edges into Lab Tracker's graph. Adapters must stay thin and optional. |
 
@@ -61,6 +62,57 @@ manifest/content hashes, and semantic graph edges while leaving byte durability,
 transfer, lifecycle, and browsing to object stores or data-versioning
 substrates.
 
+## Pipeline and Lineage Boundary
+
+Input-to-output lineage is where Lab Tracker most resembles a data-pipeline tool
+(Kedro, DVC pipelines, MLflow), so the boundary needs to be explicit. The
+distinction is altitude, not subject:
+
+- **Mechanical lineage** — the file-to-file transformation DAG
+  (`raw.h5 -> clean.parquet -> features.parquet -> model.pt`), every
+  intermediate, execution-shaped. This belongs to the pipeline/versioning tool.
+  Lab Tracker does not build a data catalog, a runner, or versioned byte storage
+  to reconstruct it.
+- **Epistemic lineage** — `question -> dataset -> analysis -> claim`, the
+  human-curated edges that terminate on a question or a claim. This is the
+  product core and already lives in the graph: datasets name their question,
+  claims name their evidence, analyses inherit questions from their data.
+
+Litmus test for "is this edge ours to draw":
+
+> Does the edge terminate on a question or a claim? If yes, it is epistemic —
+> Lab Tracker records it. If it is file-to-file with no epistemic node on either
+> end, it is mechanical — defer it to the pipeline tool, or ingest it through
+> that tool's hook.
+
+The rule is: **defer the mechanical lineage, keep the epistemic lineage, and
+bridge the two with the content hash.** When a captured output's bytes later
+reappear as an input — the same content hash on a different machine, path, or
+run — the link is proposed in review on the hash match alone, with no read
+interception and no catalog. The content hash is the cross-tool, cross-machine
+join key; the human-gated review turns a match into a `used`/`wasDerivedFrom`
+edge.
+
+Consequences for capture:
+
+- **Output capture stays in-house.** Figures and run outputs become staged
+  evidence notes tied to questions; no pipeline tool models that.
+- **Explicit input *declaration* is a deferred convenience, not core.** An
+  `input(path_or_uri)` call at capture time would pre-populate a `used` edge,
+  but most of its value is already covered by the content-hash join and the
+  existing graph, and it carries the highest catalog-duplication risk. Add it
+  only if review-time inference proves insufficient, and only as a dumb,
+  fail-soft declaration — never a load-by-name dataset registry.
+- **Never auto-intercept reads** (`open()` / audit hooks). Reads are far noisier
+  than writes, and interception drifts toward owning I/O, which is the
+  framework's job.
+
+The integration shape is a framework hook: Kedro already knows each node's
+declared inputs and outputs, so a hook emits Lab Tracker `used`/`wasGeneratedBy`
+edges against questions and claims with no double-entry. Labs that run a pipeline
+framework get the epistemic layer for free; labs that run ad-hoc scripts get the
+same edges from output capture plus the content-hash join.
+
 ## Anti-Scope Guardrails
 
 Lab Tracker should not add:
@@ -73,6 +125,8 @@ Lab Tracker should not add:
   registry features.
 - ELN page editors, wet-lab templates, signatures, inventory, compliance, or rich
   document collaboration.
+- A data catalog (load/save datasets by name), a pipeline runner, or a mechanical
+  file-to-file lineage DAG that duplicates Kedro/DVC pipelines.
 
 It may add:
 
@@ -112,6 +166,9 @@ decisions:
 - Sacred remains a lighter Python experiment framework but is not the default
   integration target:
   https://sacred.readthedocs.io/en/stable/experiment.html
+- Kedro remains the active reference data-pipeline framework (data catalog,
+  nodes/pipelines, runners, Kedro-Viz lineage), checked June 26, 2026:
+  https://docs.kedro.org/
 - S3 and MinIO remain object-storage targets:
   https://docs.aws.amazon.com/AmazonS3/latest/userguide/ and
   https://docs.min.io/community/minio-object-store/

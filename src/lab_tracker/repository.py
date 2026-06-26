@@ -26,6 +26,7 @@ from lab_tracker.models import (
     Project,
     ProjectGroup,
     ProjectMembership,
+    ProvenanceLink,
     Question,
     QuestionRefactor,
     RecordExportEvent,
@@ -78,6 +79,7 @@ class LabTrackerRepository(Protocol):
     claims: EntityRepository[Claim]
     claim_edges: EntityRepository[ClaimEdge]
     exploration_nodes: EntityRepository[ExplorationNode]
+    provenance_links: EntityRepository[ProvenanceLink]
     entity_versions: EntityRepository[EntityVersion]
     goals: EntityRepository[Goal]
     visualizations: EntityRepository[Visualization]
@@ -387,6 +389,18 @@ class LabTrackerRepository(Protocol):
         recent_first: bool = False,
     ) -> tuple[list[ExplorationNode], int]:
         """Query exploration trajectory nodes with filters and pagination."""
+
+    def query_provenance_links(
+        self,
+        *,
+        project_id: UUID | None = None,
+        project_ids: set[UUID] | None = None,
+        status: str | None = None,
+        limit: int | None = None,
+        offset: int = 0,
+        recent_first: bool = False,
+    ) -> tuple[list[ProvenanceLink], int]:
+        """Query provenance links with project scope, status, and pagination."""
 
     def query_entity_versions(
         self,
