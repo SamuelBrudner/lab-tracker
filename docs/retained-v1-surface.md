@@ -27,9 +27,11 @@ research record:
   download, raw voice notes with editable transcripts, and attaching notes to
   retained entities.
 - Consumer-side figure capture through the Python client (`savefig`,
-  `capture_figures`, and `run_context`) as a fail-soft staged-note workflow:
-  Lab Tracker stores a bounded review image or pointer plus source URI and
-  content-hash metadata, while full figure files remain in the consumer repo.
+  `capture_figures`, and `run_context`) and MATLAB package
+  (`labtracker.savefig` and `labtracker.uploadFigure`) as fail-soft
+  staged-note workflows: Lab Tracker stores a bounded review image or pointer
+  plus source URI and content-hash metadata, while full figure files remain in
+  the consumer repo.
 - Consumer-side watch-folder capture through the `lt watch` CLI as an
   offline-first adapter workflow: watched files and workflow-written manifests
   write durable local outbox records that later sync into staged evidence notes
