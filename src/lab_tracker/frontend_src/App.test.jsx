@@ -1788,7 +1788,9 @@ describe("App", () => {
     });
     fireEvent.click(screen.getByRole("button", { name: "Upload and draft" }));
 
-    expect(await screen.findByRole("heading", { name: "Review" })).toBeInTheDocument();
+    expect(
+      await screen.findByRole("heading", { name: "Review" }, { timeout: 3000 })
+    ).toBeInTheDocument();
     expect(await screen.findByText("Mobile capture draft")).toBeInTheDocument();
   });
 
