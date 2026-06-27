@@ -68,8 +68,16 @@ credentials are needed. Two things change when Lab Tracker is **deployed** and
 - **Reachability.** A cloud scheduler (a Claude routine, a Codex automation, a
   hosted cron) can only reach a Lab Tracker that has a public URL. A localhost
   instance must be driven by a scheduler on the **same machine**.
-- **Auth.** `run-due` is admin-only. Provide admin credentials via the
-  environment; the trigger logs in and mints a fresh short-lived token each run:
+- **Auth.** `run-due` is admin-only. Prefer an admin personal access token for
+  scheduled automations:
+
+  ```sh
+  export LAB_TRACKER_BASE_URL="https://lab.example.org"
+  export LAB_TRACKER_API_KEY="lpat_…"
+  ```
+
+  Username/password credentials also work; the trigger logs in and mints a
+  fresh short-lived token each run:
 
   ```sh
   export LAB_TRACKER_BASE_URL="https://lab.example.org"

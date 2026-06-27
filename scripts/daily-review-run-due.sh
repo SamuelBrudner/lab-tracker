@@ -7,6 +7,7 @@
 #
 # Configuration (all optional):
 #   LAB_TRACKER_BASE_URL    API base URL          (default http://127.0.0.1:8000)
+#   LAB_TRACKER_API_KEY     bearer token          (preferred for automations)
 #   LAB_TRACKER_ADMIN_USER  admin username        (only when auth is enabled)
 #   LAB_TRACKER_ADMIN_PASS  admin password        (only when auth is enabled)
 #
@@ -16,7 +17,9 @@ set -eu
 BASE_URL="${LAB_TRACKER_BASE_URL:-http://127.0.0.1:8000}"
 
 auth_header=""
-if [ -n "${LAB_TRACKER_ADMIN_USER:-}" ]; then
+if [ -n "${LAB_TRACKER_API_KEY:-}" ]; then
+  auth_header="Authorization: Bearer $LAB_TRACKER_API_KEY"
+elif [ -n "${LAB_TRACKER_ADMIN_USER:-}" ]; then
   # Mint a fresh short-lived admin token each run (tokens expire), no jq needed.
   token="$(curl -fsS -X POST "$BASE_URL/auth/login" \
     -H 'Content-Type: application/json' \
