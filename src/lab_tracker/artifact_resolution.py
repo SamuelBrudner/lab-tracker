@@ -1,0 +1,352 @@
+"""On-demand resolution of external artifact pointers.
+
+An :class:`~lab_tracker.models.ExternalArtifactReference` is a *pointer* — a
+``source_system`` + ``uri`` + ``content_hash`` — not bytes. This module turns
+that pointer into a bounded, integrity-checked view of its content on demand, so
+an assistant reasoning over the graph can pull content that was never captured in
+the original metadata snapshot.
+
+Design: ``docs/external-artifact-resolution-design.md`` and
+``docs/data-store-registry-design.md``.
+
+Key invariants:
+
+* **Content hash is the integrity gate.** Every resolve recomputes the digest of
+  the bytes it fetched and compares it to the reference's ``content_hash``. The
+  result is tri-state — ``VERIFIED`` (bytes match the captured artifact),
+  ``DRIFTED`` (reachable but the digest differs — the artifact moved or changed),
+  or ``UNRESOLVED`` (no adapter, unreachable, denied, or unverifiable).
+* **Bounding is independent of verification.** ``max_bytes`` (and an optional
+  ``byte_range``) bound only the *returned* payload. The whole artifact is still
+  streamed through the hasher, so a truncated read is still ``VERIFIED``.
+* **Never hand over uncertified content.** If the digest cannot be recomputed and
+  checked, the resolver returns ``UNRESOLVED`` rather than silently returning
+  bytes that may not match what the graph reasoned about.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import mimetypes
+import os
+from abc import ABC, abstractmethod
+from collections.abc import Iterable, Sequence
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from enum import Enum
+from pathlib import Path
+from urllib.parse import unquote, urlsplit
+
+from lab_tracker.models import ExternalArtifactReference
+
+# Default cap on the bytes returned inline to a caller. Bounds payload size, not
+# verification: the full artifact is always hashed regardless of this cap.
+DEFAULT_MAX_BYTES = 8 * 1024 * 1024
+
+# Hash algorithms we can recompute to verify a fetched artifact. A reference
+# whose hash uses anything else (e.g. ``datalad-key:``) cannot be certified by
+# recomputation and resolves as UNRESOLVED.
+_VERIFIABLE_ALGORITHMS = frozenset(
+    {"sha256", "sha1", "sha224", "sha384", "sha512", "md5"}
+)
+
+_LOCAL_SOURCE_SYSTEMS = frozenset({"local", "local_fs", "file"})
+
+_STREAM_CHUNK_SIZE = 1024 * 1024
+
+
+class ResolutionStatus(str, Enum):
+    """Outcome of an attempt to dereference an external artifact pointer."""
+
+    VERIFIED = "verified"
+    DRIFTED = "drifted"
+    UNRESOLVED = "unresolved"
+
+
+@dataclass(frozen=True)
+class ResolvedArtifact:
+    """The result of resolving an :class:`ExternalArtifactReference`.
+
+    ``content`` holds the bounded, returned bytes (``None`` when unresolved).
+    ``size_bytes`` is the *full* artifact size, which may exceed the returned
+    payload when ``truncated`` is True.
+    """
+
+    status: ResolutionStatus
+    source_system: str
+    uri: str
+    expected_hash: str
+    fetched_at: datetime
+    observed_hash: str | None = None
+    content_type: str | None = None
+    size_bytes: int | None = None
+    content: bytes | None = None
+    truncated: bool = False
+    detail: str | None = None
+
+    @property
+    def is_verified(self) -> bool:
+        return self.status is ResolutionStatus.VERIFIED
+
+    @property
+    def returned_bytes(self) -> int:
+        return 0 if self.content is None else len(self.content)
+
+    def to_json_dict(self) -> dict[str, object]:
+        """Serialize the resolution envelope (without raw content bytes)."""
+
+        return {
+            "status": self.status.value,
+            "source_system": self.source_system,
+            "uri": self.uri,
+            "expected_hash": self.expected_hash,
+            "observed_hash": self.observed_hash,
+            "content_type": self.content_type,
+            "size_bytes": self.size_bytes,
+            "returned_bytes": self.returned_bytes,
+            "truncated": self.truncated,
+            "fetched_at": self.fetched_at.isoformat(),
+            "detail": self.detail,
+        }
+
+
+def _now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def parse_content_hash(content_hash: str) -> tuple[str, str]:
+    """Split a stored hash into ``(algorithm, hexdigest)``.
+
+    Hashes are stored as ``algorithm:hexdigest`` (e.g. ``sha256:abc…``). A bare
+    hex string with no prefix is assumed to be ``sha256``. Comparison is
+    case-insensitive.
+    """
+
+    cleaned = (content_hash or "").strip()
+    algorithm, separator, digest = cleaned.partition(":")
+    if not separator:
+        return "sha256", algorithm.lower()
+    return algorithm.lower(), digest.lower()
+
+
+def is_verifiable_hash(content_hash: str) -> bool:
+    algorithm, digest = parse_content_hash(content_hash)
+    return bool(digest) and algorithm in _VERIFIABLE_ALGORITHMS
+
+
+class ArtifactResolver(ABC):
+    """Dereferences external artifact pointers for a family of stores."""
+
+    @abstractmethod
+    def can_resolve(self, ref: ExternalArtifactReference) -> bool:
+        """Return True when this resolver handles ``ref``'s store."""
+
+    @abstractmethod
+    def resolve(
+        self,
+        ref: ExternalArtifactReference,
+        *,
+        max_bytes: int = DEFAULT_MAX_BYTES,
+        byte_range: tuple[int, int] | None = None,
+    ) -> ResolvedArtifact:
+        """Fetch a bounded view of ``ref`` and verify its content hash."""
+
+
+class ResolverRegistry:
+    """Dispatches a reference to the first resolver that can handle it."""
+
+    def __init__(self, resolvers: Iterable[ArtifactResolver] | None = None) -> None:
+        self._resolvers: list[ArtifactResolver] = list(resolvers or [])
+
+    def register(self, resolver: ArtifactResolver) -> None:
+        self._resolvers.append(resolver)
+
+    def resolve(
+        self,
+        ref: ExternalArtifactReference,
+        *,
+        max_bytes: int = DEFAULT_MAX_BYTES,
+        byte_range: tuple[int, int] | None = None,
+    ) -> ResolvedArtifact:
+        for resolver in self._resolvers:
+            if resolver.can_resolve(ref):
+                return resolver.resolve(ref, max_bytes=max_bytes, byte_range=byte_range)
+        return _unresolved(
+            ref,
+            detail=f"No resolver registered for source_system '{ref.source_system}'.",
+        )
+
+
+def _unresolved(ref: ExternalArtifactReference, *, detail: str) -> ResolvedArtifact:
+    return ResolvedArtifact(
+        status=ResolutionStatus.UNRESOLVED,
+        source_system=ref.source_system,
+        uri=ref.uri,
+        expected_hash=ref.content_hash,
+        fetched_at=_now(),
+        detail=detail,
+    )
+
+
+def _normalize_byte_range(byte_range: tuple[int, int] | None) -> tuple[int, int] | None:
+    if byte_range is None:
+        return None
+    start, end = byte_range
+    if start < 0 or end < 0:
+        raise ValueError("byte_range bounds must be non-negative.")
+    if end < start:
+        raise ValueError("byte_range end must be >= start.")
+    return start, end
+
+
+class LocalFilesystemResolver(ArtifactResolver):
+    """Resolves artifacts stored on this host's filesystem.
+
+    Handles ``source_system`` of ``local``/``local_fs``/``file`` and ``file://``
+    URIs. ``allowed_roots`` constrains which directories may be read; when set, a
+    path that escapes every root (after symlink resolution) is refused as
+    UNRESOLVED, so resolution cannot be used to read arbitrary host files.
+    """
+
+    def __init__(self, allowed_roots: Sequence[str | Path] | None = None) -> None:
+        self._allowed_roots: list[str] | None
+        if allowed_roots is None:
+            self._allowed_roots = None
+        else:
+            self._allowed_roots = [
+                os.path.realpath(Path(root).expanduser()) for root in allowed_roots
+            ]
+
+    def can_resolve(self, ref: ExternalArtifactReference) -> bool:
+        if ref.source_system.strip().lower() in _LOCAL_SOURCE_SYSTEMS:
+            return True
+        return urlsplit(ref.uri).scheme.lower() == "file"
+
+    def resolve(
+        self,
+        ref: ExternalArtifactReference,
+        *,
+        max_bytes: int = DEFAULT_MAX_BYTES,
+        byte_range: tuple[int, int] | None = None,
+    ) -> ResolvedArtifact:
+        try:
+            window = _normalize_byte_range(byte_range)
+        except ValueError as exc:
+            return _unresolved(ref, detail=str(exc))
+
+        if not is_verifiable_hash(ref.content_hash):
+            algorithm, _ = parse_content_hash(ref.content_hash)
+            return _unresolved(
+                ref,
+                detail=f"Cannot verify content hash with algorithm '{algorithm}'.",
+            )
+
+        path = self._local_path(ref.uri)
+        if path is None:
+            return _unresolved(ref, detail="Reference URI is not a local filesystem path.")
+
+        real_path = os.path.realpath(path)
+        if not self._within_allowed_roots(real_path):
+            return _unresolved(ref, detail="Path is outside the allowed resolver roots.")
+        if not os.path.isfile(real_path):
+            return _unresolved(ref, detail="Local artifact not found.")
+
+        algorithm, _ = parse_content_hash(ref.content_hash)
+        try:
+            content, total, truncated, observed = _read_and_hash(
+                real_path,
+                algorithm=algorithm,
+                max_bytes=max_bytes,
+                window=window,
+            )
+        except OSError as exc:
+            return _unresolved(ref, detail=f"Failed to read local artifact: {exc}")
+
+        _, expected_digest = parse_content_hash(ref.content_hash)
+        verified = parse_content_hash(observed)[1] == expected_digest
+        content_type, _ = mimetypes.guess_type(real_path)
+        return ResolvedArtifact(
+            status=ResolutionStatus.VERIFIED if verified else ResolutionStatus.DRIFTED,
+            source_system=ref.source_system,
+            uri=ref.uri,
+            expected_hash=ref.content_hash,
+            observed_hash=observed,
+            content_type=content_type or "application/octet-stream",
+            size_bytes=total,
+            content=content,
+            truncated=truncated,
+            fetched_at=_now(),
+            detail=None if verified else "Recomputed hash does not match content_hash.",
+        )
+
+    def _local_path(self, uri: str) -> str | None:
+        parsed = urlsplit(uri)
+        scheme = parsed.scheme.lower()
+        if scheme == "file":
+            # file:///abs/path -> /abs/path ; tolerate a localhost netloc.
+            return unquote(parsed.path) or None
+        if scheme == "":
+            return uri or None
+        return None
+
+    def _within_allowed_roots(self, real_path: str) -> bool:
+        if self._allowed_roots is None:
+            return True
+        return any(
+            real_path == root or real_path.startswith(root + os.sep)
+            for root in self._allowed_roots
+        )
+
+
+def _read_and_hash(
+    path: str,
+    *,
+    algorithm: str,
+    max_bytes: int,
+    window: tuple[int, int] | None,
+) -> tuple[bytes, int, bool, str]:
+    """Stream ``path`` through a hasher, collecting the bounded returned bytes.
+
+    Returns ``(content, total_size, truncated, observed_hash)``. The whole file
+    is hashed; ``content`` is either the first ``max_bytes`` (no window) or the
+    requested ``[start, end)`` slice.
+    """
+
+    hasher = hashlib.new(algorithm)
+    collected = bytearray()
+    total = 0
+    with open(path, "rb") as handle:
+        while True:
+            chunk = handle.read(_STREAM_CHUNK_SIZE)
+            if not chunk:
+                break
+            hasher.update(chunk)
+            chunk_start = total
+            total += len(chunk)
+            if window is None:
+                if len(collected) < max_bytes:
+                    collected.extend(chunk[: max_bytes - len(collected)])
+            else:
+                start, end = window
+                lo = max(start, chunk_start)
+                hi = min(end, total)
+                if hi > lo:
+                    collected.extend(chunk[lo - chunk_start : hi - chunk_start])
+
+    observed = f"{algorithm}:{hasher.hexdigest()}"
+    content = bytes(collected)
+    truncated = len(content) < total
+    return content, total, truncated, observed
+
+
+def default_registry(
+    *,
+    allowed_roots: Sequence[str | Path] | None = None,
+) -> ResolverRegistry:
+    """Build a registry with the adapters available in this slice.
+
+    Currently only the local-filesystem resolver. Network and store-backed
+    adapters (http, s3, ssh, rclone, database) register here as they land.
+    """
+
+    return ResolverRegistry([LocalFilesystemResolver(allowed_roots=allowed_roots)])
