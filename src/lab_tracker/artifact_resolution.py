@@ -27,10 +27,11 @@ Key invariants:
 from __future__ import annotations
 
 import hashlib
+import json
 import mimetypes
 import os
 from abc import ABC, abstractmethod
-from collections.abc import Iterable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import Enum
@@ -378,6 +379,149 @@ class HttpResolver(ArtifactResolver):
         )
 
 
+@dataclass(frozen=True)
+class RcloneCompleted:
+    """Result of one rclone invocation."""
+
+    returncode: int
+    stdout: bytes
+    stderr: bytes
+
+
+# A runner takes rclone argv (without the binary name) and returns its result.
+RcloneRunner = Callable[[list[str]], RcloneCompleted]
+
+
+def _subprocess_rclone_runner(binary: str) -> RcloneRunner:
+    def run(args: list[str]) -> RcloneCompleted:
+        import subprocess
+
+        completed = subprocess.run(  # noqa: S603 - args are built, not shell
+            [binary, *args],
+            capture_output=True,
+            check=False,
+        )
+        return RcloneCompleted(
+            returncode=completed.returncode,
+            stdout=completed.stdout,
+            stderr=completed.stderr,
+        )
+
+    return run
+
+
+class RcloneResolver(ArtifactResolver):
+    """Resolves artifacts via ``rclone``, the unifier for cloud and remote stores.
+
+    One adapter covers S3, SFTP, Dropbox, Google Drive, Box, OneDrive and the
+    rest of rclone's backends; credentials live host-side in rclone's own config,
+    never in Lab Tracker. References are addressed as ``rclone://<remote>/<path>``
+    (mapped to rclone's ``remote:path``). A ``runner`` may be injected for tests;
+    otherwise rclone is invoked as a subprocess.
+
+    The whole object is fetched (``rclone cat``) to certify its hash, so its size
+    is checked first (``rclone size``) and an object larger than
+    ``max_fetch_bytes`` is refused as UNRESOLVED rather than downloaded.
+    """
+
+    def __init__(
+        self,
+        *,
+        runner: RcloneRunner | None = None,
+        binary: str = "rclone",
+        max_fetch_bytes: int = DEFAULT_MAX_FETCH_BYTES,
+    ) -> None:
+        self._runner = runner or _subprocess_rclone_runner(binary)
+        self._max_fetch_bytes = max_fetch_bytes
+
+    def can_resolve(self, ref: ExternalArtifactReference) -> bool:
+        return urlsplit(ref.uri).scheme.lower() == "rclone"
+
+    def resolve(
+        self,
+        ref: ExternalArtifactReference,
+        *,
+        max_bytes: int = DEFAULT_MAX_BYTES,
+        byte_range: tuple[int, int] | None = None,
+    ) -> ResolvedArtifact:
+        try:
+            window = _normalize_byte_range(byte_range)
+        except ValueError as exc:
+            return _unresolved(ref, detail=str(exc))
+
+        if not is_verifiable_hash(ref.content_hash):
+            algorithm, _ = parse_content_hash(ref.content_hash)
+            return _unresolved(
+                ref,
+                detail=f"Cannot verify content hash with algorithm '{algorithm}'.",
+            )
+
+        target = self._rclone_target(ref.uri)
+        if target is None:
+            return _unresolved(ref, detail="Reference URI is not an rclone locator.")
+
+        try:
+            size = self._object_size(target)
+            if size is None:
+                return _unresolved(ref, detail="rclone could not stat the artifact.")
+            if size > self._max_fetch_bytes:
+                return _unresolved(
+                    ref,
+                    detail=(
+                        f"Artifact ({size} bytes) exceeds the "
+                        f"{self._max_fetch_bytes}-byte fetch limit."
+                    ),
+                )
+            cat = self._runner(["cat", target])
+        except OSError as exc:
+            return _unresolved(ref, detail=f"rclone is unavailable: {exc}")
+
+        if cat.returncode != 0:
+            return _unresolved(ref, detail=_rclone_error_detail(cat))
+
+        algorithm, _ = parse_content_hash(ref.content_hash)
+        content, total, truncated, observed = _hash_and_collect(
+            [cat.stdout],
+            algorithm=algorithm,
+            max_bytes=max_bytes,
+            window=window,
+        )
+        content_type, _ = mimetypes.guess_type(target)
+        return _build_resolved(
+            ref,
+            observed=observed,
+            content=content,
+            total=total,
+            truncated=truncated,
+            content_type=content_type or "application/octet-stream",
+        )
+
+    def _object_size(self, target: str) -> int | None:
+        completed = self._runner(["size", "--json", target])
+        if completed.returncode != 0:
+            return None
+        try:
+            payload = json.loads(completed.stdout.decode("utf-8") or "{}")
+        except (ValueError, UnicodeDecodeError):
+            return None
+        size = payload.get("bytes")
+        return size if isinstance(size, int) and size >= 0 else None
+
+    def _rclone_target(self, uri: str) -> str | None:
+        parsed = urlsplit(uri)
+        if parsed.scheme.lower() != "rclone" or not parsed.netloc:
+            return None
+        path = unquote(parsed.path).lstrip("/")
+        return f"{parsed.netloc}:{path}"
+
+
+def _rclone_error_detail(completed: RcloneCompleted) -> str:
+    stderr = completed.stderr.decode("utf-8", errors="replace").strip()
+    if stderr:
+        return f"rclone failed: {stderr.splitlines()[-1]}"
+    return f"rclone exited with status {completed.returncode}."
+
+
 class _FetchTooLarge(Exception):
     """Raised when a streamed artifact exceeds the verification fetch cap."""
 
@@ -473,14 +617,16 @@ def default_registry(
 ) -> ResolverRegistry:
     """Build a registry with the adapters available in this slice.
 
-    Local-filesystem and HTTP(S) resolvers. Store-backed adapters (s3, ssh,
-    rclone, database) register here as they land.
+    Local-filesystem, HTTP(S), and rclone resolvers. The rclone adapter degrades
+    to UNRESOLVED when the binary is absent, so including it is safe by default.
+    Native store-backed adapters (s3, ssh, database) register here as they land.
     """
 
     return ResolverRegistry(
         [
             LocalFilesystemResolver(allowed_roots=allowed_roots),
             HttpResolver(),
+            RcloneResolver(),
         ]
     )
 

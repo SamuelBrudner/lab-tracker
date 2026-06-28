@@ -9,6 +9,8 @@ from lab_tracker.artifact_resolution import (
     ArtifactResolver,
     HttpResolver,
     LocalFilesystemResolver,
+    RcloneCompleted,
+    RcloneResolver,
     ResolutionStatus,
     ResolvedArtifact,
     ResolverRegistry,
@@ -325,6 +327,131 @@ def test_default_registry_dispatches_http(monkeypatch):
     )
     result = registry.resolve(_http_ref("https://store.example/x", _sha256(body)))
     assert result.status is ResolutionStatus.VERIFIED
+
+
+# --- RcloneResolver -------------------------------------------------------
+
+
+def _rclone_ref(uri: str, content_hash: str) -> ExternalArtifactReference:
+    return ExternalArtifactReference(
+        source_system="rclone", uri=uri, content_hash=content_hash
+    )
+
+
+def _fake_rclone_runner(*, size_bytes: int | None, body: bytes, cat_returncode: int = 0):
+    calls: list[list[str]] = []
+
+    def runner(args):
+        calls.append(args)
+        if args[0] == "size":
+            if size_bytes is None:
+                return RcloneCompleted(1, b"", b"directory not found")
+            return RcloneCompleted(
+                0, f'{{"count":1,"bytes":{size_bytes},"sizeless":0}}'.encode(), b""
+            )
+        if args[0] == "cat":
+            return RcloneCompleted(cat_returncode, body, b"" if cat_returncode == 0 else b"boom")
+        raise AssertionError(f"unexpected rclone args: {args}")
+
+    runner.calls = calls
+    return runner
+
+
+def test_rclone_resolver_verifies_object():
+    data = b"object stored in onedrive via rclone"
+    runner = _fake_rclone_runner(size_bytes=len(data), body=data)
+    resolver = RcloneResolver(runner=runner)
+
+    result = resolver.resolve(
+        _rclone_ref("rclone://lab-onedrive/experiments/001/x.bin", _sha256(data))
+    )
+
+    assert result.status is ResolutionStatus.VERIFIED
+    assert result.content == data
+    assert result.size_bytes == len(data)
+    # rclone target maps rclone://remote/path -> remote:path
+    assert runner.calls[0] == ["size", "--json", "lab-onedrive:experiments/001/x.bin"]
+    assert runner.calls[1] == ["cat", "lab-onedrive:experiments/001/x.bin"]
+
+
+def test_rclone_resolver_reports_drift():
+    data = b"actual remote bytes"
+    runner = _fake_rclone_runner(size_bytes=len(data), body=data)
+    resolver = RcloneResolver(runner=runner)
+
+    result = resolver.resolve(_rclone_ref("rclone://r/x", _sha256(b"recorded")))
+
+    assert result.status is ResolutionStatus.DRIFTED
+
+
+def test_rclone_resolver_missing_object_is_unresolved():
+    runner = _fake_rclone_runner(size_bytes=None, body=b"")
+    resolver = RcloneResolver(runner=runner)
+
+    result = resolver.resolve(_rclone_ref("rclone://r/missing", _sha256(b"x")))
+
+    assert result.status is ResolutionStatus.UNRESOLVED
+    # cat must not run when the object cannot be stat-ed.
+    assert all(call[0] != "cat" for call in runner.calls)
+
+
+def test_rclone_resolver_refuses_oversized_object():
+    runner = _fake_rclone_runner(size_bytes=1_000_000, body=b"x")
+    resolver = RcloneResolver(runner=runner, max_fetch_bytes=1024)
+
+    result = resolver.resolve(_rclone_ref("rclone://r/big", _sha256(b"x")))
+
+    assert result.status is ResolutionStatus.UNRESOLVED
+    assert "limit" in (result.detail or "").lower()
+    assert all(call[0] != "cat" for call in runner.calls)
+
+
+def test_rclone_resolver_truncates_payload_but_verifies():
+    data = b"abcdefghij"
+    runner = _fake_rclone_runner(size_bytes=len(data), body=data)
+    resolver = RcloneResolver(runner=runner)
+
+    result = resolver.resolve(_rclone_ref("rclone://r/x", _sha256(data)), max_bytes=4)
+
+    assert result.status is ResolutionStatus.VERIFIED
+    assert result.content == b"abcd"
+    assert result.truncated is True
+
+
+def test_rclone_resolver_cat_failure_is_unresolved():
+    data = b"data"
+    runner = _fake_rclone_runner(size_bytes=len(data), body=data, cat_returncode=1)
+    resolver = RcloneResolver(runner=runner)
+
+    result = resolver.resolve(_rclone_ref("rclone://r/x", _sha256(data)))
+
+    assert result.status is ResolutionStatus.UNRESOLVED
+    assert "rclone" in (result.detail or "").lower()
+
+
+def test_rclone_resolver_missing_binary_is_unresolved():
+    def runner(args):
+        raise FileNotFoundError("rclone not installed")
+
+    result = RcloneResolver(runner=runner).resolve(
+        _rclone_ref("rclone://r/x", _sha256(b"x"))
+    )
+
+    assert result.status is ResolutionStatus.UNRESOLVED
+    assert "unavailable" in (result.detail or "").lower()
+
+
+def test_rclone_resolver_can_resolve_only_rclone_scheme():
+    resolver = RcloneResolver(runner=lambda args: RcloneCompleted(0, b"", b""))
+    assert resolver.can_resolve(_rclone_ref("rclone://r/x", _sha256(b"x"))) is True
+    assert (
+        resolver.can_resolve(
+            ExternalArtifactReference(
+                source_system="s3", uri="s3://b/k", content_hash=_sha256(b"x")
+            )
+        )
+        is False
+    )
 
 
 # --- ResolverRegistry -----------------------------------------------------
