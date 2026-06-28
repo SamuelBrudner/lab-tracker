@@ -1,11 +1,13 @@
 import hashlib
 from pathlib import Path
 
+import httpx
 import pytest
 
 from lab_tracker.artifact_resolution import (
     DEFAULT_MAX_BYTES,
     ArtifactResolver,
+    HttpResolver,
     LocalFilesystemResolver,
     ResolutionStatus,
     ResolvedArtifact,
@@ -210,6 +212,119 @@ def test_local_resolver_can_resolve_by_source_system_and_scheme(tmp_path):
     assert resolver.can_resolve(by_scheme) is True
     assert resolver.can_resolve(by_source) is True
     assert resolver.can_resolve(neither) is False
+
+
+# --- HttpResolver ---------------------------------------------------------
+
+
+def _http_ref(
+    url: str, content_hash: str, *, source_system: str = "http"
+) -> ExternalArtifactReference:
+    return ExternalArtifactReference(
+        source_system=source_system, uri=url, content_hash=content_hash
+    )
+
+
+def _mock_http_client(
+    *, body: bytes = b"", status: int = 200, content_type: str = "application/octet-stream"
+) -> httpx.Client:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(status, content=body, headers={"content-type": content_type})
+
+    return httpx.Client(transport=httpx.MockTransport(handler))
+
+
+def test_http_resolver_verifies_matching_body():
+    body = b"flow cytometry export"
+    client = _mock_http_client(body=body, content_type="text/csv; charset=utf-8")
+    resolver = HttpResolver(client=client)
+
+    result = resolver.resolve(_http_ref("https://store.example/sample.csv", _sha256(body)))
+
+    assert result.status is ResolutionStatus.VERIFIED
+    assert result.content == body
+    assert result.size_bytes == len(body)
+    assert result.content_type == "text/csv"
+
+
+def test_http_resolver_reports_drift_on_mismatch():
+    resolver = HttpResolver(client=_mock_http_client(body=b"actual bytes"))
+
+    result = resolver.resolve(_http_ref("https://store.example/x", _sha256(b"recorded bytes")))
+
+    assert result.status is ResolutionStatus.DRIFTED
+    assert result.observed_hash == _sha256(b"actual bytes")
+
+
+def test_http_resolver_http_error_status_is_unresolved():
+    resolver = HttpResolver(client=_mock_http_client(body=b"", status=404))
+
+    result = resolver.resolve(_http_ref("https://store.example/missing", _sha256(b"x")))
+
+    assert result.status is ResolutionStatus.UNRESOLVED
+    assert "404" in (result.detail or "")
+
+
+def test_http_resolver_refuses_oversized_fetch():
+    body = b"0123456789" * 10  # 100 bytes
+    resolver = HttpResolver(client=_mock_http_client(body=body), max_fetch_bytes=16)
+
+    result = resolver.resolve(_http_ref("https://store.example/big.bin", _sha256(body)))
+
+    assert result.status is ResolutionStatus.UNRESOLVED
+    assert "limit" in (result.detail or "").lower()
+    assert result.content is None
+
+
+def test_http_resolver_truncates_payload_but_verifies():
+    body = b"abcdefghij"
+    resolver = HttpResolver(client=_mock_http_client(body=body))
+
+    result = resolver.resolve(_http_ref("https://store.example/x", _sha256(body)), max_bytes=4)
+
+    assert result.status is ResolutionStatus.VERIFIED
+    assert result.content == b"abcd"
+    assert result.truncated is True
+    assert result.size_bytes == 10
+
+
+def test_http_resolver_connection_error_is_unresolved():
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("boom", request=request)
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    resolver = HttpResolver(client=client)
+
+    result = resolver.resolve(_http_ref("https://store.example/x", _sha256(b"x")))
+
+    assert result.status is ResolutionStatus.UNRESOLVED
+    assert "fetch" in (result.detail or "").lower()
+
+
+def test_http_resolver_can_resolve_only_http_schemes():
+    resolver = HttpResolver()
+    assert resolver.can_resolve(_http_ref("https://x/y", _sha256(b"x"))) is True
+    assert resolver.can_resolve(_http_ref("http://x/y", _sha256(b"x"))) is True
+    assert (
+        resolver.can_resolve(
+            ExternalArtifactReference(
+                source_system="s3", uri="s3://b/k", content_hash=_sha256(b"x")
+            )
+        )
+        is False
+    )
+
+
+def test_default_registry_dispatches_http(monkeypatch):
+    body = b"served over http"
+    # default_registry's HttpResolver creates its own client; patch it to a mock.
+    import lab_tracker.artifact_resolution as ar
+
+    registry = ar.ResolverRegistry(
+        [ar.HttpResolver(client=_mock_http_client(body=body))]
+    )
+    result = registry.resolve(_http_ref("https://store.example/x", _sha256(body)))
+    assert result.status is ResolutionStatus.VERIFIED
 
 
 # --- ResolverRegistry -----------------------------------------------------

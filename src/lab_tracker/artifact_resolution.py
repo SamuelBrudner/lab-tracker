@@ -51,6 +51,12 @@ _VERIFIABLE_ALGORITHMS = frozenset(
 )
 
 _LOCAL_SOURCE_SYSTEMS = frozenset({"local", "local_fs", "file"})
+_HTTP_SCHEMES = frozenset({"http", "https"})
+
+# Cap on the bytes an HTTP fetch will stream while verifying. The whole body must
+# be hashed to certify it, so an artifact larger than this is refused
+# (UNRESOLVED) rather than returned uncertified.
+DEFAULT_MAX_FETCH_BYTES = 64 * 1024 * 1024
 
 _STREAM_CHUNK_SIZE = 1024 * 1024
 
@@ -253,8 +259,8 @@ class LocalFilesystemResolver(ArtifactResolver):
 
         algorithm, _ = parse_content_hash(ref.content_hash)
         try:
-            content, total, truncated, observed = _read_and_hash(
-                real_path,
+            content, total, truncated, observed = _hash_and_collect(
+                _read_file_chunks(real_path),
                 algorithm=algorithm,
                 max_bytes=max_bytes,
                 window=window,
@@ -262,21 +268,14 @@ class LocalFilesystemResolver(ArtifactResolver):
         except OSError as exc:
             return _unresolved(ref, detail=f"Failed to read local artifact: {exc}")
 
-        _, expected_digest = parse_content_hash(ref.content_hash)
-        verified = parse_content_hash(observed)[1] == expected_digest
         content_type, _ = mimetypes.guess_type(real_path)
-        return ResolvedArtifact(
-            status=ResolutionStatus.VERIFIED if verified else ResolutionStatus.DRIFTED,
-            source_system=ref.source_system,
-            uri=ref.uri,
-            expected_hash=ref.content_hash,
-            observed_hash=observed,
-            content_type=content_type or "application/octet-stream",
-            size_bytes=total,
+        return _build_resolved(
+            ref,
+            observed=observed,
             content=content,
+            total=total,
             truncated=truncated,
-            fetched_at=_now(),
-            detail=None if verified else "Recomputed hash does not match content_hash.",
+            content_type=content_type or "application/octet-stream",
         )
 
     def _local_path(self, uri: str) -> str | None:
@@ -298,45 +297,174 @@ class LocalFilesystemResolver(ArtifactResolver):
         )
 
 
-def _read_and_hash(
-    path: str,
+class HttpResolver(ArtifactResolver):
+    """Resolves artifacts addressed by ``http(s)`` URLs.
+
+    Streams the full body through the hasher to verify it, capping the fetch at
+    ``max_fetch_bytes``; an artifact larger than that is refused as UNRESOLVED
+    rather than returned uncertified. A custom ``client`` may be injected (e.g.
+    for tests); otherwise a short-lived client is created per call.
+    """
+
+    def __init__(
+        self,
+        *,
+        client: object | None = None,
+        timeout: float = 30.0,
+        max_fetch_bytes: int = DEFAULT_MAX_FETCH_BYTES,
+    ) -> None:
+        self._client = client
+        self._timeout = timeout
+        self._max_fetch_bytes = max_fetch_bytes
+
+    def can_resolve(self, ref: ExternalArtifactReference) -> bool:
+        return urlsplit(ref.uri).scheme.lower() in _HTTP_SCHEMES
+
+    def resolve(
+        self,
+        ref: ExternalArtifactReference,
+        *,
+        max_bytes: int = DEFAULT_MAX_BYTES,
+        byte_range: tuple[int, int] | None = None,
+    ) -> ResolvedArtifact:
+        try:
+            window = _normalize_byte_range(byte_range)
+        except ValueError as exc:
+            return _unresolved(ref, detail=str(exc))
+
+        if not is_verifiable_hash(ref.content_hash):
+            algorithm, _ = parse_content_hash(ref.content_hash)
+            return _unresolved(
+                ref,
+                detail=f"Cannot verify content hash with algorithm '{algorithm}'.",
+            )
+
+        import httpx
+
+        algorithm, _ = parse_content_hash(ref.content_hash)
+        owns_client = self._client is None
+        client = self._client or httpx.Client(timeout=self._timeout)
+        try:
+            with client.stream("GET", ref.uri) as response:
+                if response.status_code >= 400:
+                    return _unresolved(
+                        ref, detail=f"HTTP {response.status_code} fetching artifact."
+                    )
+                content, total, truncated, observed = _hash_and_collect(
+                    response.iter_bytes(),
+                    algorithm=algorithm,
+                    max_bytes=max_bytes,
+                    window=window,
+                    max_total=self._max_fetch_bytes,
+                )
+                content_type = response.headers.get("content-type")
+        except _FetchTooLarge as exc:
+            return _unresolved(ref, detail=str(exc))
+        except httpx.HTTPError as exc:
+            return _unresolved(ref, detail=f"Failed to fetch artifact: {exc}")
+        finally:
+            if owns_client:
+                client.close()
+
+        if content_type:
+            content_type = content_type.split(";", 1)[0].strip()
+        return _build_resolved(
+            ref,
+            observed=observed,
+            content=content,
+            total=total,
+            truncated=truncated,
+            content_type=content_type or "application/octet-stream",
+        )
+
+
+class _FetchTooLarge(Exception):
+    """Raised when a streamed artifact exceeds the verification fetch cap."""
+
+    def __init__(self, limit: int) -> None:
+        super().__init__(f"Artifact exceeds the {limit}-byte fetch limit.")
+        self.limit = limit
+
+
+def _hash_and_collect(
+    chunks: Iterable[bytes],
     *,
     algorithm: str,
     max_bytes: int,
     window: tuple[int, int] | None,
+    max_total: int | None = None,
 ) -> tuple[bytes, int, bool, str]:
-    """Stream ``path`` through a hasher, collecting the bounded returned bytes.
+    """Stream ``chunks`` through a hasher, collecting the bounded returned bytes.
 
-    Returns ``(content, total_size, truncated, observed_hash)``. The whole file
+    Returns ``(content, total_size, truncated, observed_hash)``. The whole stream
     is hashed; ``content`` is either the first ``max_bytes`` (no window) or the
-    requested ``[start, end)`` slice.
+    requested ``[start, end)`` slice. Raises :class:`_FetchTooLarge` if the total
+    exceeds ``max_total`` (so an oversized artifact is refused rather than
+    returned uncertified).
     """
 
     hasher = hashlib.new(algorithm)
     collected = bytearray()
     total = 0
-    with open(path, "rb") as handle:
-        while True:
-            chunk = handle.read(_STREAM_CHUNK_SIZE)
-            if not chunk:
-                break
-            hasher.update(chunk)
-            chunk_start = total
-            total += len(chunk)
-            if window is None:
-                if len(collected) < max_bytes:
-                    collected.extend(chunk[: max_bytes - len(collected)])
-            else:
-                start, end = window
-                lo = max(start, chunk_start)
-                hi = min(end, total)
-                if hi > lo:
-                    collected.extend(chunk[lo - chunk_start : hi - chunk_start])
+    for chunk in chunks:
+        if not chunk:
+            continue
+        hasher.update(chunk)
+        chunk_start = total
+        total += len(chunk)
+        if max_total is not None and total > max_total:
+            raise _FetchTooLarge(max_total)
+        if window is None:
+            if len(collected) < max_bytes:
+                collected.extend(chunk[: max_bytes - len(collected)])
+        else:
+            start, end = window
+            lo = max(start, chunk_start)
+            hi = min(end, total)
+            if hi > lo:
+                collected.extend(chunk[lo - chunk_start : hi - chunk_start])
 
     observed = f"{algorithm}:{hasher.hexdigest()}"
     content = bytes(collected)
     truncated = len(content) < total
     return content, total, truncated, observed
+
+
+def _read_file_chunks(path: str) -> Iterable[bytes]:
+    with open(path, "rb") as handle:
+        while True:
+            chunk = handle.read(_STREAM_CHUNK_SIZE)
+            if not chunk:
+                break
+            yield chunk
+
+
+def _build_resolved(
+    ref: ExternalArtifactReference,
+    *,
+    observed: str,
+    content: bytes,
+    total: int,
+    truncated: bool,
+    content_type: str | None,
+) -> ResolvedArtifact:
+    """Verify a recomputed digest against the reference and build the result."""
+
+    _, expected_digest = parse_content_hash(ref.content_hash)
+    verified = parse_content_hash(observed)[1] == expected_digest
+    return ResolvedArtifact(
+        status=ResolutionStatus.VERIFIED if verified else ResolutionStatus.DRIFTED,
+        source_system=ref.source_system,
+        uri=ref.uri,
+        expected_hash=ref.content_hash,
+        observed_hash=observed,
+        content_type=content_type or "application/octet-stream",
+        size_bytes=total,
+        content=content,
+        truncated=truncated,
+        fetched_at=_now(),
+        detail=None if verified else "Recomputed hash does not match content_hash.",
+    )
 
 
 def default_registry(
@@ -345,8 +473,13 @@ def default_registry(
 ) -> ResolverRegistry:
     """Build a registry with the adapters available in this slice.
 
-    Currently only the local-filesystem resolver. Network and store-backed
-    adapters (http, s3, ssh, rclone, database) register here as they land.
+    Local-filesystem and HTTP(S) resolvers. Store-backed adapters (s3, ssh,
+    rclone, database) register here as they land.
     """
 
-    return ResolverRegistry([LocalFilesystemResolver(allowed_roots=allowed_roots)])
+    return ResolverRegistry(
+        [
+            LocalFilesystemResolver(allowed_roots=allowed_roots),
+            HttpResolver(),
+        ]
+    )
