@@ -240,6 +240,20 @@ your stores" — plus thin, optional adapters. That is precisely what
 `build-vs-buy-boundaries.md` permits under "Adapter configuration" and "Stable
 external URI and content-hash storage."
 
+## Implementation status
+
+Not yet built — this registry is the deferred schema layer. The resolver it
+dispatches through is implemented for the storeless case: references are resolved
+today by their `source_system`/`uri`/`content_hash` directly, with a
+`LocalFilesystemResolver`, `HttpResolver`, and `RcloneResolver` (the locked
+unifier, covering S3/SFTP/Dropbox/GDrive/Box/OneDrive). See the
+[resolution design's implementation status](external-artifact-resolution-design.md#implementation-status).
+
+When this registry lands it replaces the host-local mount table sketched above
+with first-class `DataStore` rows and `store://name/...` locators, and unlocks
+the two capabilities the storeless resolvers cannot provide: `versioned_snapshot`
+reads (S3 `versionId`, Iceberg/Delta) and the `database` (`query → rows`) adapter.
+
 ## Suggested first slice
 
 1. `DataStore` model + migration; project/group scoping and a single default;

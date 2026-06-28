@@ -211,20 +211,45 @@ and prompt-injection surface, so the resolver is bounded by construction:
 - **Read-only, no interception, no new edges.** It extends the assistant/MCP read
   surface and draws nothing into the graph.
 
-## Suggested first slice
+## Implementation status
 
-1. `artifact_resolution.py`: `ArtifactResolver` protocol, `ResolvedArtifact`,
-   `ResolverRegistry`, and a `LocalFilesystemResolver` + `HttpResolver`, with
-   mandatory hash verification and the tri-state result.
-2. Host-local resolver config (mount/endpoint table) with a local-FS default.
-3. `POST /external-artifacts/resolve` (+ HEAD variant), RBAC-gated to the owning
-   entity's project, with the size/range bounds.
-4. `lab_tracker_resolve_artifact` MCP read tool delegating to the endpoint.
-5. Tests: `verified` on a matching local file, `drifted` on a mutated file,
-   `unresolved` for an unknown `source_system`, and the size/range bounds.
+Shipped (`src/lab_tracker/artifact_resolution.py`, tested in
+`tests/test_artifact_resolution.py` and `tests/test_external_artifacts_routes.py`):
 
-Cloud-API adapters (OneDrive, Box, S3) and the optional content-addressed cache
-follow once the local + HTTP slice and its auth story are settled.
+- ✅ `ResolutionStatus` (`verified`/`drifted`/`unresolved`), the frozen
+  `ResolvedArtifact` result with `to_json_dict()`, the `ArtifactResolver`
+  protocol, and a `ResolverRegistry` that dispatches to the first capable
+  adapter and falls back to `UNRESOLVED`.
+- ✅ `LocalFilesystemResolver` — `file://` and `local`/`local_fs` sources, with
+  `allowed_roots` path-containment so resolution cannot read arbitrary host files.
+- ✅ `HttpResolver` — `http(s)`, full-body verify with a `max_fetch_bytes` cap
+  (oversized → `UNRESOLVED`, never uncertified bytes).
+- ✅ `RcloneResolver` — `rclone://<remote>/<path>`, the locked-in unifier for
+  S3 / SFTP / Dropbox / Google Drive / Box / OneDrive; stats then fetches, and
+  degrades to `UNRESOLVED` when the binary is absent.
+- ✅ Content hash is the integrity gate across all adapters (the whole object is
+  hashed; `max_bytes`/`byte_range` bound only the returned payload), via the
+  shared `_hash_and_collect` helper.
+- ✅ `POST /external-artifacts/resolve` — resolve-by-entity, RBAC-gated with
+  `ensure_project_read` on the owning entity's project; returns the envelope plus
+  base64 content. Registry comes from `request.app.state.resolver_registry` or
+  `registry_from_env()`; `LAB_TRACKER_RESOLVER_ALLOWED_ROOTS` gates local roots
+  (unset → local artifacts resolve `UNRESOLVED`; HTTP/rclone unaffected).
+- ✅ `lab_tracker_resolve_artifact` MCP read tool + `resolve_external_artifact`
+  client method.
+
+Deferred (depend on the data store registry or new dependencies):
+
+- ⏭️ Native `s3` (boto3) and `ssh` (paramiko) adapters — currently covered by
+  rclone; native versions add dependencies for mostly-redundant coverage, and
+  native S3 `versionId` snapshots belong with the registry's
+  `versioned_snapshot` capability. See
+  [`data-store-registry-design.md`](data-store-registry-design.md).
+- ⏭️ `database` adapter (`query → rows`, snapshot/`unversioned` semantics) —
+  needs the registry's connection config; do not smuggle a connection string
+  through the reference `uri`.
+- ⏭️ A `HEAD`-style metadata-only variant and the optional content-addressed
+  cache via `FileStorageBackend`.
 
 ## See also
 
