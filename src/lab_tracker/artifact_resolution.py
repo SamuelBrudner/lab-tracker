@@ -483,3 +483,20 @@ def default_registry(
             HttpResolver(),
         ]
     )
+
+
+# os.pathsep-separated list of directories the local resolver may read. When
+# unset, the local resolver is restricted to *no* roots, so filesystem artifacts
+# resolve as UNRESOLVED until an operator opts specific roots in. HTTP(S)
+# resolution is unaffected.
+LAB_TRACKER_RESOLVER_ALLOWED_ROOTS_ENV = "LAB_TRACKER_RESOLVER_ALLOWED_ROOTS"
+
+
+def registry_from_env() -> ResolverRegistry:
+    """Build the default registry, reading allowed local roots from the env."""
+
+    raw = os.environ.get(LAB_TRACKER_RESOLVER_ALLOWED_ROOTS_ENV)
+    allowed_roots = (
+        [part for part in raw.split(os.pathsep) if part.strip()] if raw else []
+    )
+    return default_registry(allowed_roots=allowed_roots)

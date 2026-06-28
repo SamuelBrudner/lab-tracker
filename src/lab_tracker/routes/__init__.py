@@ -22,6 +22,7 @@ from .datasets import build_datasets_router
 from .device_auth import build_device_auth_router
 from .errors import register_error_handlers
 from .exploration import build_exploration_router
+from .external_artifacts import build_external_artifacts_router
 from .goals import build_goals_router
 from .graph_batches import build_graph_batches_router
 from .graph_drafts import build_graph_drafts_router
@@ -96,6 +97,7 @@ def register_routes(
     app.include_router(build_claims_router(api))
     app.include_router(build_exploration_router(api))
     app.include_router(build_provenance_links_router(api))
+    app.include_router(build_external_artifacts_router(api))
     app.include_router(build_goals_router(api))
     app.include_router(build_visualizations_router(api))
 
