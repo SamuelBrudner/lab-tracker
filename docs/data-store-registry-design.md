@@ -191,6 +191,25 @@ is exactly the "credential/session plumbing" `build-vs-buy-boundaries.md` says t
 - **Lab Tracker owns neither tokens nor refresh flows.** It stores the store
   definition and a credential *reference*; the host resolves it.
 
+### Cross-platform, including Windows
+
+The lab is partly on Windows (see
+[`windows-fresh-clone.md`](windows-fresh-clone.md)), so the unifier must not be
+Unix-only:
+
+- **`rclone` is native on Windows** — a single static Go binary (`rclone.exe`,
+  amd64/386/arm64), no WSL/Cygwin/MSYS required. Its OAuth flows and config
+  (`%APPDATA%\rclone\rclone.conf`) work the same across Windows, macOS, and
+  Linux. This is the reason to prefer it over **`rsync`, which is *not* native on
+  Windows** (it needs WSL/Cygwin/cwRsync). The design uses rclone, never rsync.
+- **The common Windows case needs no rclone at all.** OneDrive on a Windows
+  workstation is normally a *synced local folder*, so it resolves through the
+  plain `local_fs` adapter with zero credentials. rclone is only the fallback
+  for stores that are **not** locally mounted (a headless server, an HPC node, or
+  an agent running where the drive isn't synced).
+- Native adapters are equally portable: `local_fs`, `s3`, and `database` are pure
+  Python; `ssh` via `paramiko`/`asyncssh` is cross-platform.
+
 > **Open decision for review:** rclone-as-default-unifier vs. native per-backend
 > adapters for the cloud drives. Recommendation above is rclone-first for breadth
 > + native for S3/SSH/DB/local. The alternative (native everywhere) is more code
