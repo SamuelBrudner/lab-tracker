@@ -210,11 +210,16 @@ Unix-only:
 - Native adapters are equally portable: `local_fs`, `s3`, and `database` are pure
   Python; `ssh` via `paramiko`/`asyncssh` is cross-platform.
 
-> **Open decision for review:** rclone-as-default-unifier vs. native per-backend
-> adapters for the cloud drives. Recommendation above is rclone-first for breadth
-> + native for S3/SSH/DB/local. The alternative (native everywhere) is more code
-> and more credential surface for marginal gain on the cloud drives. This is the
-> main fork in the design.
+### Decision (locked)
+
+**rclone-first for the cloud drives, native adapters for S3 / SSH / database /
+local_fs.** rclone is the single adapter for Dropbox, Google Drive, Box, and
+OneDrive (when not locally synced); the four native adapters earn their own code
+because of versioning, byte-range, query, or zero-dependency needs that rclone
+doesn't model. Native-everywhere was rejected: more code and more credential
+surface for marginal gain on the cloud drives, and it duplicates plumbing
+`build-vs-buy-boundaries.md` says to offload. This is the design's committed
+adapter strategy, not an open question.
 
 ## Capture writes store-relative references
 
