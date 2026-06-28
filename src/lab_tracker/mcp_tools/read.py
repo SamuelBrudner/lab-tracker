@@ -482,6 +482,42 @@ def lab_tracker_get_claim_provenance(claim_id: str) -> JsonObject:
     )
 
 
+def lab_tracker_resolve_artifact(
+    entity_type: str,
+    entity_id: str,
+    artifact_index: int = 0,
+    content_hash: str | None = None,
+    max_bytes: int | None = None,
+    byte_start: int | None = None,
+    byte_end: int | None = None,
+) -> JsonObject:
+    """Resolve an external artifact pointer to bounded, hash-verified content.
+
+    Use when reasoning needs the actual content of a file that was referenced but
+    not captured in the graph's metadata snapshot. entity_type is dataset,
+    analysis, or claim; artifact_index selects which embedded reference. Returns a
+    status of verified (bytes match the recorded content_hash), drifted (the
+    artifact changed since capture — do not trust it as the captured evidence), or
+    unresolved (no adapter, unreachable, or unverifiable), plus base64 content.
+    """
+    return _read_tool(
+        "lab_tracker_resolve_artifact",
+        lambda client: client.resolve_external_artifact(
+            entity_type=entity_type,
+            entity_id=entity_id,
+            artifact_index=artifact_index,
+            content_hash=content_hash,
+            max_bytes=max_bytes,
+            byte_start=byte_start,
+            byte_end=byte_end,
+        ),
+        hint=next_action(
+            "lab_tracker_get_claim_provenance",
+            "Trace how the resolved artifact supports claims before relying on it.",
+        ),
+    )
+
+
 def lab_tracker_export_goal_artifact(
     goal_id: str,
     layer: str | None = None,
@@ -593,6 +629,7 @@ READ_TOOLS = (
     lab_tracker_get_dataset_provenance,
     lab_tracker_get_analysis_provenance,
     lab_tracker_get_claim_provenance,
+    lab_tracker_resolve_artifact,
     lab_tracker_export_goal_artifact,
     lab_tracker_export_question_subtree,
     lab_tracker_get_decision_context,
