@@ -308,7 +308,7 @@ class NoteService(BaseService):
         metadata.update(
             {
                 "transcript_status": "ready",
-                "transcript_provider": PROVIDER,
+                "transcript_provider": str(getattr(transcription_client, "provider", PROVIDER)),
                 "transcript_model": str(
                     getattr(
                         transcription_client,

@@ -75,8 +75,8 @@ def lab_tracker_create_project(
             status=status,
         ),
         hint=next_action(
-            "lab_tracker_create_goal",
-            "Create or select the goal/output this project should advance.",
+            "lab_tracker_list_goals",
+            "Select or (if the user asks) create the goal/output this project should advance.",
         ),
     )
 
@@ -118,7 +118,11 @@ def lab_tracker_refactor_question(
     child_question_ids_to_reparent: list[str] | None = None,
     note_ids_to_retarget: list[str] | None = None,
 ) -> JsonObject:
-    """Supersede a question with a replacement and optional child/note moves."""
+    """Supersede a question with a replacement and optional child/note moves.
+
+    Destructive: this supersedes a canonical question and re-points its children/notes.
+    Only call it when the user explicitly asks; confirm before superseding.
+    """
     return _write_tool(
         "lab_tracker_refactor_question",
         lambda client: _refactor_question(
@@ -205,7 +209,11 @@ def lab_tracker_create_dataset(
     commit_hash: str | None = None,
     status: str | None = "staged",
 ) -> JsonObject:
-    """Create a dataset before analyses, claims, and visualizations."""
+    """Create a dataset before analyses, claims, and visualizations.
+
+    Only when the user asks. This commits a canonical record immediately; the staged
+    status is a lifecycle state, not a review gate that a human still has to accept.
+    """
     return _write_tool(
         "lab_tracker_create_dataset",
         lambda client: client.create_dataset(
@@ -231,7 +239,11 @@ def lab_tracker_create_analysis(
     environment_hash: str | None = None,
     status: str | None = "staged",
 ) -> JsonObject:
-    """Create an analysis after datasets and before claims or figures."""
+    """Create an analysis after datasets and before claims or figures.
+
+    Only when the user asks. This commits a canonical record immediately; the staged
+    status is a lifecycle state, not a review gate.
+    """
     return _write_tool(
         "lab_tracker_create_analysis",
         lambda client: client.create_analysis(
@@ -262,7 +274,11 @@ def lab_tracker_create_claim(
     answers_question_ids: list[str] | None = None,
     external_citations: list[JsonObject] | None = None,
 ) -> JsonObject:
-    """Create a claim after linking supporting datasets or analyses."""
+    """Create a claim after linking supporting datasets or analyses.
+
+    Only when the user asks. This commits a canonical record immediately; the proposed
+    status is a lifecycle state, not a review gate.
+    """
     return _write_tool(
         "lab_tracker_create_claim",
         lambda client: client.create_claim(
@@ -290,7 +306,11 @@ def lab_tracker_create_claim_edge(
     target_claim_id: str,
     relation: str,
 ) -> JsonObject:
-    """Create a typed claim-to-claim logic edge such as refutes or extends."""
+    """Create a typed claim-to-claim logic edge such as refutes or extends.
+
+    Create only when the user states the relationship; refutes/contradicts in particular
+    is a durable, strong epistemic claim in the graph.
+    """
     return _write_tool(
         "lab_tracker_create_claim_edge",
         lambda client: client.create_claim_edge(
@@ -308,7 +328,10 @@ def lab_tracker_create_visualization(
     caption: str | None = None,
     related_claim_ids: list[str] | None = None,
 ) -> JsonObject:
-    """Register a visualization after its analysis and related claims exist."""
+    """Register a visualization after its analysis and related claims exist.
+
+    Only when the user asks; this commits a canonical record immediately.
+    """
     return _write_tool(
         "lab_tracker_create_visualization",
         lambda client: client.create_visualization(
@@ -335,7 +358,10 @@ def lab_tracker_create_goal(
     external_ref: str | None = None,
     attributes: JsonObject | None = None,
 ) -> JsonObject:
-    """Create a goal/output before linking questions, datasets, or claims."""
+    """Create a goal/output before linking questions, datasets, or claims.
+
+    Only when the user asks; this commits a canonical record immediately.
+    """
     return _write_tool(
         "lab_tracker_create_goal",
         lambda client: client.create_goal(
@@ -365,7 +391,11 @@ def lab_tracker_update_goal(
     external_ref: str | None = None,
     attributes: JsonObject | None = None,
 ) -> JsonObject:
-    """Update a Lab Tracker goal/output."""
+    """Update a Lab Tracker goal/output.
+
+    Destructive: overwrites the canonical goal's fields in place. Only call it when the
+    user explicitly asks; confirm before overwriting.
+    """
     return _write_tool(
         "lab_tracker_update_goal",
         lambda client: client.update_goal(
@@ -442,11 +472,13 @@ def lab_tracker_record_evidence_bundle(
     dry_run: bool = True,
     idempotency_key: str | None = None,
 ) -> JsonObject:
-    """Defaults to dry-run; pass dry_run=false to write an evidence bundle.
+    """Preview a dataset-analysis-claim-visualization evidence bundle; defaults to dry-run.
 
-    Preview or record a dataset-analysis-claim-visualization evidence bundle.
-    With dry_run=false, this tool still writes only through the existing strict
-    create/upload API endpoints and returns created or reused stable IDs.
+    dry_run defaults to true and only previews. Pass dry_run=false to commit ONLY when
+    the user has explicitly asked you to record the bundle — the created dataset, analysis,
+    claim, and visualization are canonical graph records, not proposals for later review.
+    With dry_run=false this still writes only through the existing strict create/upload API
+    endpoints and returns created or reused stable IDs.
     """
     return _write_tool(
         "lab_tracker_record_evidence_bundle",
