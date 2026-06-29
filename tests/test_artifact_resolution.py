@@ -1,5 +1,6 @@
 import hashlib
 from pathlib import Path
+from uuid import uuid4
 
 import httpx
 import pytest
@@ -17,8 +18,9 @@ from lab_tracker.artifact_resolution import (
     default_registry,
     is_verifiable_hash,
     parse_content_hash,
+    store_relative_reference,
 )
-from lab_tracker.models import ExternalArtifactReference
+from lab_tracker.models import DataStore, ExternalArtifactReference, StoreKind
 
 
 def _sha256(data: bytes) -> str:
@@ -452,6 +454,52 @@ def test_rclone_resolver_can_resolve_only_rclone_scheme():
         )
         is False
     )
+
+
+# --- store_relative_reference --------------------------------------------
+
+
+def _data_store(kind: StoreKind, root: str, **overrides) -> DataStore:
+    fields = {
+        "store_id": uuid4(),
+        "project_id": uuid4(),
+        "name": "store",
+        "kind": kind,
+        "root": root,
+    }
+    fields.update(overrides)
+    return DataStore(**fields)
+
+
+def test_store_relative_reference_local_builds_file_uri():
+    store = _data_store(StoreKind.LOCAL_FS, "/data/store")
+    ref = store_relative_reference(store, path="exp/001/x.txt", content_hash=_sha256(b"x"))
+    assert ref is not None
+    assert ref.source_system == "local"
+    assert ref.uri == Path("/data/store/exp/001/x.txt").as_uri()
+
+
+def test_store_relative_reference_rclone_uses_credential_ref_as_remote():
+    store = _data_store(
+        StoreKind.ONEDRIVE, "experiments", name="lab", credential_ref="lab-onedrive"
+    )
+    ref = store_relative_reference(store, path="001/x.fcs", content_hash=_sha256(b"x"))
+    assert ref is not None
+    assert ref.source_system == "rclone"
+    assert ref.uri == "rclone://lab-onedrive/experiments/001/x.fcs"
+
+
+def test_store_relative_reference_http_joins_endpoint_or_root():
+    store = _data_store(StoreKind.HTTP, "https://files.example/base", name="web")
+    ref = store_relative_reference(store, path="x.bin", content_hash=_sha256(b"x"))
+    assert ref is not None
+    assert ref.source_system == "http"
+    assert ref.uri == "https://files.example/base/x.bin"
+
+
+def test_store_relative_reference_unsupported_kind_returns_none():
+    store = _data_store(StoreKind.DATABASE, "postgresql://lims", name="lims")
+    assert store_relative_reference(store, path="q", content_hash=_sha256(b"x")) is None
 
 
 # --- ResolverRegistry -----------------------------------------------------

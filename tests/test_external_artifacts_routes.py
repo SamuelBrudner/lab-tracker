@@ -166,6 +166,79 @@ def test_resolve_endpoint_rejects_unauthorized_caller(
     assert "content_base64" not in response.text
 
 
+def _create_store(client, headers, *, project_id, name, kind, root) -> None:
+    response = client.post(
+        "/data-stores",
+        json={"project_id": project_id, "name": name, "kind": kind, "root": root},
+        headers=headers,
+    )
+    assert response.status_code == 201, response.text
+
+
+def test_resolve_endpoint_resolves_store_locator(client, admin_auth_headers, tmp_path):
+    data = b"object addressed relative to a store"
+    (tmp_path / "exp").mkdir()
+    (tmp_path / "exp" / "x.txt").write_bytes(data)
+    _install_local_registry(client, tmp_path)
+
+    project_id = client.post(
+        "/projects", json={"name": "Store locator project"}, headers=admin_auth_headers
+    ).json()["data"]["project_id"]
+    _create_store(
+        client,
+        admin_auth_headers,
+        project_id=project_id,
+        name="lab-fs",
+        kind="local_fs",
+        root=str(tmp_path),
+    )
+    dataset_id = _create_dataset_with_artifact(
+        client,
+        admin_auth_headers,
+        project_id=project_id,
+        uri="store://lab-fs/exp/x.txt",
+        content_hash=_sha256(data),
+    )
+
+    response = client.post(
+        "/external-artifacts/resolve",
+        json={"entity_type": "dataset", "entity_id": dataset_id},
+        headers=admin_auth_headers,
+    )
+
+    assert response.status_code == 200, response.text
+    body = response.json()["data"]
+    assert body["status"] == "verified"
+    assert base64.b64decode(body["content_base64"]) == data
+    # The materialized concrete URI is reported.
+    assert body["uri"] == (tmp_path / "exp" / "x.txt").as_uri()
+
+
+def test_resolve_endpoint_unknown_store_is_unresolved(client, admin_auth_headers, tmp_path):
+    _install_local_registry(client, tmp_path)
+    project_id = client.post(
+        "/projects", json={"name": "Missing store project"}, headers=admin_auth_headers
+    ).json()["data"]["project_id"]
+    dataset_id = _create_dataset_with_artifact(
+        client,
+        admin_auth_headers,
+        project_id=project_id,
+        uri="store://nonexistent/x.txt",
+        content_hash=_sha256(b"x"),
+    )
+
+    response = client.post(
+        "/external-artifacts/resolve",
+        json={"entity_type": "dataset", "entity_id": dataset_id},
+        headers=admin_auth_headers,
+    )
+
+    assert response.status_code == 200
+    body = response.json()["data"]
+    assert body["status"] == "unresolved"
+    assert "nonexistent" in (body["detail"] or "")
+
+
 def test_resolve_endpoint_denies_local_paths_without_configured_roots(
     client, admin_auth_headers, tmp_path
 ):

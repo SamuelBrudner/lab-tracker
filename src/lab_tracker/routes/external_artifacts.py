@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import base64
 from typing import Any, Literal
+from urllib.parse import urlsplit
 from uuid import UUID
 
 from fastapi import APIRouter
@@ -26,12 +27,14 @@ from lab_tracker.artifact_resolution import (
     ResolvedArtifact,
     ResolverRegistry,
     registry_from_env,
+    store_relative_reference,
+    unresolved,
 )
 from lab_tracker.errors import NotFoundError, ValidationError
 from lab_tracker.models import ExternalArtifactReference
 from lab_tracker.schemas import Envelope
 
-from .shared import api_from_request, ensure_project_read
+from .shared import api_from_request, ensure_project_read, repository_from_request
 
 
 class ResolveExternalArtifactRequest(BaseModel):
@@ -85,6 +88,34 @@ def _locate_reference(
     return ref, project_id
 
 
+def _materialize_reference(
+    request: Request, ref: ExternalArtifactReference, project_id: UUID
+) -> ExternalArtifactReference | ResolvedArtifact:
+    """Translate a store:// locator into a concrete reference via its DataStore.
+
+    Returns the reference unchanged for non-store URIs, a concrete reference for a
+    resolvable store, or an UNRESOLVED result when the store is missing or its
+    kind is not resolvable yet.
+    """
+
+    parsed = urlsplit(ref.uri)
+    if parsed.scheme.lower() != "store":
+        return ref
+    name = parsed.netloc
+    path = parsed.path.lstrip("/")
+    if not name:
+        return unresolved(ref, detail="Store locator is missing a store name.")
+    store = repository_from_request(request).data_stores.get_by_name(project_id, name)
+    if store is None:
+        return unresolved(ref, detail=f"No data store named '{name}' in this project.")
+    concrete = store_relative_reference(store, path=path, content_hash=ref.content_hash)
+    if concrete is None:
+        return unresolved(
+            ref, detail=f"Store kind '{store.kind.value}' is not resolvable yet."
+        )
+    return concrete
+
+
 def _resolution_payload(
     result: ResolvedArtifact, payload: ResolveExternalArtifactRequest
 ) -> dict[str, Any]:
@@ -117,12 +148,16 @@ def build_external_artifacts_router(api: LabTrackerAPI) -> APIRouter:
                 )
             byte_range = (payload.byte_start, payload.byte_end)
 
-        registry = _resolver_registry_from_request(request)
-        result = registry.resolve(
-            ref,
-            max_bytes=payload.max_bytes or DEFAULT_MAX_BYTES,
-            byte_range=byte_range,
-        )
+        materialized = _materialize_reference(request, ref, project_id)
+        if isinstance(materialized, ResolvedArtifact):
+            result = materialized
+        else:
+            registry = _resolver_registry_from_request(request)
+            result = registry.resolve(
+                materialized,
+                max_bytes=payload.max_bytes or DEFAULT_MAX_BYTES,
+                byte_range=byte_range,
+            )
         return Envelope(data=_resolution_payload(result, payload))
 
     return router

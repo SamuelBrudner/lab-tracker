@@ -38,7 +38,7 @@ from enum import Enum
 from pathlib import Path
 from urllib.parse import unquote, urlsplit
 
-from lab_tracker.models import ExternalArtifactReference
+from lab_tracker.models import DataStore, ExternalArtifactReference, StoreKind
 
 # Default cap on the bytes returned inline to a caller. Bounds payload size, not
 # verification: the full artifact is always hashed regardless of this cap.
@@ -193,6 +193,66 @@ def _unresolved(ref: ExternalArtifactReference, *, detail: str) -> ResolvedArtif
         fetched_at=_now(),
         detail=detail,
     )
+
+
+def unresolved(ref: ExternalArtifactReference, *, detail: str) -> ResolvedArtifact:
+    """Public constructor for an UNRESOLVED result (e.g. a store lookup miss)."""
+
+    return _unresolved(ref, detail=detail)
+
+
+# Store kinds whose objects are fetched through the rclone adapter.
+_RCLONE_STORE_KINDS = frozenset(
+    {
+        StoreKind.S3,
+        StoreKind.GCS,
+        StoreKind.AZURE_BLOB,
+        StoreKind.DROPBOX,
+        StoreKind.GDRIVE,
+        StoreKind.BOX,
+        StoreKind.ONEDRIVE,
+        StoreKind.SSH,
+        StoreKind.RCLONE,
+    }
+)
+
+
+def _join_store_path(root: str, path: str) -> str:
+    return f"{root.rstrip('/')}/{path.lstrip('/')}" if path else root
+
+
+def store_relative_reference(
+    store: DataStore, *, path: str, content_hash: str
+) -> ExternalArtifactReference | None:
+    """Translate a ``store://<name>/<path>`` locator into a concrete reference.
+
+    Returns a reference one of the registered adapters can resolve, or ``None``
+    when the store kind is not resolvable yet (``object_table``/``database`` need
+    the deferred snapshot/query adapters). Credentials are never embedded — the
+    rclone remote name comes from the store's ``credential_ref``.
+    """
+
+    joined = _join_store_path(store.root, path)
+    if store.kind is StoreKind.LOCAL_FS:
+        return ExternalArtifactReference(
+            source_system="local",
+            uri=Path(joined).as_uri(),
+            content_hash=content_hash,
+        )
+    if store.kind is StoreKind.HTTP:
+        base = store.endpoint or store.root
+        uri = f"{base.rstrip('/')}/{path.lstrip('/')}" if path else base
+        return ExternalArtifactReference(
+            source_system="http", uri=uri, content_hash=content_hash
+        )
+    if store.kind in _RCLONE_STORE_KINDS:
+        remote = store.credential_ref or store.name
+        return ExternalArtifactReference(
+            source_system="rclone",
+            uri=f"rclone://{remote}/{joined.lstrip('/')}",
+            content_hash=content_hash,
+        )
+    return None
 
 
 def _normalize_byte_range(byte_range: tuple[int, int] | None) -> tuple[int, int] | None:
