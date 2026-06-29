@@ -75,6 +75,15 @@ def test_read_only_personal_access_token_can_read_but_not_write_or_auth(
 
     listing = client.get("/projects", headers=pat_headers)
     forbidden_auth = client.get("/auth/me", headers=pat_headers)
+    decision_context = client.post(
+        "/assistant/decision-context",
+        json={
+            "task_kind": "plot",
+            "query": "plot choice",
+            "project_id": project_response.json()["data"]["project_id"],
+        },
+        headers=pat_headers,
+    )
     write_attempts = [
         client.post("/projects", json={"name": "Blocked"}, headers=pat_headers),
         client.post(
@@ -116,6 +125,8 @@ def test_read_only_personal_access_token_can_read_but_not_write_or_auth(
     ]
 
     assert listing.status_code == 200, listing.text
+    assert decision_context.status_code == 200, decision_context.text
+    assert decision_context.json()["data"]["task_kind"] == "plot"
     assert [response.status_code for response in write_attempts] == [403] * len(
         write_attempts
     )
