@@ -282,6 +282,28 @@ class StoreCapability(str, Enum):
     QUERY = "query"
 
 
+_PATH_STORE_CAPABILITIES = [
+    StoreCapability.BYTES_BY_PATH,
+    StoreCapability.BYTE_RANGE,
+    StoreCapability.LIST,
+]
+_VERSIONED_PATH_STORE_CAPABILITIES = [*_PATH_STORE_CAPABILITIES, StoreCapability.VERSIONED_SNAPSHOT]
+
+
+def default_store_capabilities(kind: StoreKind) -> list[StoreCapability]:
+    """Default capability set for a store kind when none is supplied."""
+
+    if kind in {StoreKind.S3, StoreKind.GCS, StoreKind.AZURE_BLOB}:
+        return list(_VERSIONED_PATH_STORE_CAPABILITIES)
+    if kind is StoreKind.OBJECT_TABLE:
+        return [StoreCapability.VERSIONED_SNAPSHOT, StoreCapability.LIST]
+    if kind is StoreKind.DATABASE:
+        return [StoreCapability.QUERY]
+    if kind is StoreKind.HTTP:
+        return [StoreCapability.BYTES_BY_PATH, StoreCapability.BYTE_RANGE]
+    return list(_PATH_STORE_CAPABILITIES)
+
+
 class QuestionLinkRole(str, Enum):
     PRIMARY = "primary"
     SECONDARY = "secondary"

@@ -23,6 +23,7 @@ from lab_tracker.models import (
     ClaimStatus,
     DatasetCommitManifestInput,
     DatasetStatus,
+    DataStore,
     EntityRef,
     EntityType,
     ExplorationNode,
@@ -59,6 +60,8 @@ from lab_tracker.models import (
     QuestionType,
     SessionStatus,
     SessionType,
+    StoreCapability,
+    StoreKind,
     SupervisionEdge,
     Visualization,
     VisualizationInput,
@@ -791,6 +794,20 @@ class GoalLinkUpdate(RequestModel):
 
 GoalRead = Goal
 GoalLinkRead = GoalLink
+
+
+class DataStoreCreate(RequestModel):
+    project_id: UUID
+    name: NonBlankStr
+    kind: StoreKind
+    root: NonBlankStr
+    capabilities: list[StoreCapability] | None = None
+    endpoint: str | None = None
+    credential_ref: str | None = None
+    is_default: bool = False
+
+
+DataStoreRead = DataStore
 
 
 class VisualizationCreate(RequestModel):

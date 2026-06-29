@@ -17,6 +17,7 @@ from .analyses import build_analyses_router
 from .assistant import build_assistant_router
 from .auth import build_auth_router
 from .claims import build_claims_router
+from .data_stores import build_data_stores_router
 from .dataset_files import build_dataset_files_router
 from .datasets import build_datasets_router
 from .device_auth import build_device_auth_router
@@ -98,6 +99,7 @@ def register_routes(
     app.include_router(build_exploration_router(api))
     app.include_router(build_provenance_links_router(api))
     app.include_router(build_external_artifacts_router(api))
+    app.include_router(build_data_stores_router(api))
     app.include_router(build_goals_router(api))
     app.include_router(build_visualizations_router(api))
 
