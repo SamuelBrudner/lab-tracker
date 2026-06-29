@@ -13,6 +13,7 @@ from lab_tracker.models import (
     ClaimEdge,
     Dataset,
     DatasetFile,
+    DataStore,
     EntityVersion,
     ExplorationNode,
     Goal,
@@ -82,6 +83,7 @@ class LabTrackerRepository(Protocol):
     provenance_links: EntityRepository[ProvenanceLink]
     entity_versions: EntityRepository[EntityVersion]
     goals: EntityRepository[Goal]
+    data_stores: EntityRepository[DataStore]
     visualizations: EntityRepository[Visualization]
     graph_change_sets: EntityRepository[GraphChangeSet]
     graph_draft_batch_settings: EntityRepository[GraphDraftBatchSettings]

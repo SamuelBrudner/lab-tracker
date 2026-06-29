@@ -254,6 +254,34 @@ class GoalLinkStatus(str, Enum):
     DROPPED = "dropped"
 
 
+class StoreKind(str, Enum):
+    """Backend family of a registered data store."""
+
+    LOCAL_FS = "local_fs"
+    SSH = "ssh"
+    S3 = "s3"
+    GCS = "gcs"
+    AZURE_BLOB = "azure_blob"
+    DROPBOX = "dropbox"
+    GDRIVE = "gdrive"
+    BOX = "box"
+    ONEDRIVE = "onedrive"
+    OBJECT_TABLE = "object_table"
+    DATABASE = "database"
+    HTTP = "http"
+    RCLONE = "rclone"
+
+
+class StoreCapability(str, Enum):
+    """What a store backend supports, so resolvers dispatch by capability."""
+
+    BYTES_BY_PATH = "bytes_by_path"
+    BYTE_RANGE = "byte_range"
+    LIST = "list"
+    VERSIONED_SNAPSHOT = "versioned_snapshot"
+    QUERY = "query"
+
+
 class QuestionLinkRole(str, Enum):
     PRIMARY = "primary"
     SECONDARY = "secondary"
@@ -1005,6 +1033,30 @@ class VisualizationAsset(_DomainModel):
     content_type: str
     size_bytes: int
     checksum: str
+
+
+class DataStore(_DomainModel):
+    """A registered durable data-store location Lab Tracker resolves against.
+
+    Lab Tracker stores *where* a store is (kind, root, endpoint) and a credential
+    *reference* — never a secret. Artifacts are addressed relative to a store via
+    ``store://<name>/<path>`` locators. Project-scoped in this slice; group scope
+    is a deferred additive extension.
+    """
+
+    store_id: UUID
+    project_id: UUID
+    name: str
+    kind: StoreKind
+    capabilities: list[StoreCapability] = Field(default_factory=list)
+    root: str
+    endpoint: str | None = None
+    credential_ref: str | None = None
+    is_default: bool = False
+    created_at: datetime = Field(default_factory=utc_now)
+    created_by: str | None = None
+    created_by_user_id: UUID | None = None
+    updated_at: datetime = Field(default_factory=utc_now)
 
 
 class Visualization(_DomainModel):
