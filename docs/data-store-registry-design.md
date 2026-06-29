@@ -242,17 +242,32 @@ external URI and content-hash storage."
 
 ## Implementation status
 
-Not yet built — this registry is the deferred schema layer. The resolver it
-dispatches through is implemented for the storeless case: references are resolved
-today by their `source_system`/`uri`/`content_hash` directly, with a
-`LocalFilesystemResolver`, `HttpResolver`, and `RcloneResolver` (the locked
-unifier, covering S3/SFTP/Dropbox/GDrive/Box/OneDrive). See the
-[resolution design's implementation status](external-artifact-resolution-design.md#implementation-status).
+Shipped (project-scoped slice):
 
-When this registry lands it replaces the host-local mount table sketched above
-with first-class `DataStore` rows and `store://name/...` locators, and unlocks
-the two capabilities the storeless resolvers cannot provide: `versioned_snapshot`
-reads (S3 `versionId`, Iceberg/Delta) and the `database` (`query → rows`) adapter.
+- ✅ `DataStore` domain model + `StoreKind`/`StoreCapability` enums, the
+  `data_stores` table, and Alembic migration `0049_data_stores`. Project-scoped;
+  group scope is a deferred additive column. Capabilities default from the store
+  kind (`default_store_capabilities`).
+- ✅ `SQLAlchemyDataStoreRepository` (CRUD + `query`/`get_by_name`/`get_default`/
+  `clear_default`, at most one default per project), `DataStoreService` with
+  contributor/read RBAC and unique-name-per-project (`ConflictError`), and the
+  `LabTrackerAPI` facade.
+- ✅ Routes `POST /data-stores`, `GET /data-stores`, `GET /data-stores/{id}`.
+- ✅ `store://<name>/<path>` resolution: `store_relative_reference` translates a
+  locator into a concrete reference (`local_fs → file://`, `http → URL`, and the
+  rclone kinds → `rclone://` with the remote from `credential_ref`), and the
+  resolve endpoint materializes it via `data_stores.get_by_name` before
+  dispatching to the resolver. Credentials are never embedded.
+
+Deferred:
+
+- ⏭️ Group-scoped stores (additive `group_id` column + inheritance).
+- ⏭️ The capabilities the storeless adapters cannot provide: `versioned_snapshot`
+  reads (S3 `versionId`, Iceberg/Delta) and the `database` (`query → rows`)
+  adapter — `store_relative_reference` returns `None` for `object_table`/
+  `database` today, surfacing as a clean `UNRESOLVED`.
+- ⏭️ Registration health check; a `store_id`+`locator` form on
+  `ExternalArtifactReference` (the current locator travels in `uri`).
 
 ## Suggested first slice
 
