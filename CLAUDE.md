@@ -31,18 +31,18 @@ bd close <id>         # Complete work
 1. **File issues for remaining work** - Create issues for anything that needs follow-up
 2. **Run quality gates** (if code changed) - Tests, linters, builds
 3. **Update issue status** - Close finished work, update in-progress items
-4. **PUSH TO REMOTE** - This is MANDATORY:
+4. **Sync Beads mirror if configured** - Run `bd dolt remote list`; only run
+   `bd dolt push` when that command shows a configured remote.
+5. **PUSH TO REMOTE** - This is MANDATORY:
    ```bash
    git pull --rebase
    bd export
    git push
    git status  # MUST show "up to date with origin"
    ```
-   Only if `bd dolt remote list` shows a configured Dolt remote, also run
-   `bd dolt push` before `git push`. With no Dolt remote configured, skip it.
-5. **Clean up** - Clear stashes, prune remote branches
-6. **Verify** - All changes committed AND pushed
-7. **Hand off** - Provide context for next session
+6. **Clean up** - Clear stashes, prune remote branches
+7. **Verify** - All changes committed AND pushed
+8. **Hand off** - Provide context for next session
 
 **CRITICAL RULES:**
 - Work is NOT complete until `git push` succeeds

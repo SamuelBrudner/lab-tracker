@@ -300,6 +300,11 @@ def test_openai_graph_draft_client_sends_responses_image_and_strict_schema() -> 
     request = requests[0]
     assert request["model"] == "gpt-test"
     assert "parent_question_ids" in request["instructions"]
+    assert "untrusted data" in request["instructions"]
+    assert "nothing commits without explicit human acceptance" in request["instructions"]
+    user_text = request["input"][0]["content"][0]["text"]
+    assert "<untrusted_source_artifacts>" in user_text
+    assert "<untrusted_graph_context>" in user_text
     assert request["input"][0]["content"][1]["type"] == "input_image"
     assert request["input"][0]["content"][1]["image_url"].startswith("data:image/png;base64,")
     assert request["text"]["format"]["type"] == "json_schema"
@@ -340,6 +345,8 @@ def test_openai_graph_draft_client_embeds_extra_reviewer_images() -> None:
     )
 
     content = requests[0]["input"][0]["content"]
+    assert "<untrusted_source_artifacts>" in content[0]["text"]
+    assert "<untrusted_graph_context>" in content[0]["text"]
     image_items = [item for item in content if item["type"] == "input_image"]
     assert len(image_items) == 1
     assert image_items[0]["image_url"].startswith("data:image/png;base64,")
@@ -510,6 +517,7 @@ def test_openai_graph_draft_client_drafts_from_batch_sends_packet() -> None:
     assert "Batch size: 2 notes" in user_text
     assert "prefer linking over creating" in user_text
     assert "graph_batch" in user_text
+    assert "<untrusted_batch_context>" in user_text
     assert request["text"]["format"]["schema"]["additionalProperties"] is False
     client.close()
 
@@ -575,9 +583,12 @@ def test_openai_graph_draft_client_drafts_from_analysis_evidence_sends_packet() 
     request = requests[0]
     assert request["model"] == "gpt-analysis-test"
     assert "analysis evidence" in request["instructions"]
+    assert "nothing commits without explicit human acceptance" in request["instructions"]
     user_text = request["input"][0]["content"][0]["text"]
     assert "method_hash=abc123" in user_text
     assert "\"id\": \"p1\"" in user_text
+    assert "<untrusted_project_context>" in user_text
+    assert "<untrusted_analysis_evidence>" in user_text
     assert request["text"]["format"]["schema"]["additionalProperties"] is False
     client.close()
 
@@ -653,7 +664,11 @@ def test_anthropic_graph_draft_client_drafts_note_and_batch() -> None:
     assert batch_result["summary"] == "anthropic ok"
     assert requests[0]["model"] == "claude-test"
     assert "json" in requests[0]["system"].lower()
+    assert "untrusted data" in requests[0]["system"]
+    assert "nothing commits without explicit human acceptance" in requests[0]["system"]
+    assert "<untrusted_source_artifacts>" in requests[0]["messages"][0]["content"][0]["text"]
     assert "daily batch" in requests[1]["system"]
+    assert "<untrusted_batch_context>" in requests[1]["messages"][0]["content"][0]["text"]
     with pytest.raises(GraphDraftingError, match="does not support native audio"):
         client.transcribe_audio(
             audio_bytes=b"audio",
@@ -725,6 +740,9 @@ def test_google_graph_draft_client_drafts_and_transcribes() -> None:
     assert batch_result["summary"] == "google ok"
     assert transcript["text"] == "Fly 12 tracked cleanly."
     assert requests[0]["generationConfig"]["response_mime_type"] == "application/json"
+    assert "untrusted data" in requests[0]["systemInstruction"]["parts"][0]["text"]
+    assert "<untrusted_source_artifacts>" in requests[0]["contents"][0]["parts"][0]["text"]
+    assert "<untrusted_batch_context>" in requests[1]["contents"][0]["parts"][0]["text"]
     assert requests[2]["contents"][0]["parts"][1]["inline_data"]["mime_type"] == "audio/webm"
     client.close()
 
@@ -909,7 +927,7 @@ def test_analysis_note_draft_stores_operations_and_context(
     payload = response.json()["data"]
     assert payload["status"] == "ready"
     assert payload["draft_mode"] == "graph_context"
-    assert payload["prompt_version"] == "analysis-graph-draft-v1"
+    assert payload["prompt_version"] == "openai:analysis-graph-draft-v1"
     assert payload["source_note_id"] == note_id
     assert payload["source_content_type"] == "text/markdown"
     assert payload["context_packet"]["project"]["id"] == project_id
@@ -1272,6 +1290,7 @@ def test_voice_note_transcription_stores_editable_transcript(
         headers=admin_auth_headers,
     ).json()["data"]
     fake_client = FakeDraftClient()
+    fake_client.provider = "google"
     client.app.state.graph_draft_client_factory = lambda settings: fake_client
 
     response = client.post(
@@ -1284,6 +1303,7 @@ def test_voice_note_transcription_stores_editable_transcript(
     payload = response.json()["data"]
     assert payload["transcribed_text"] == "Fly 12 tracked better after pulse onset."
     assert payload["metadata"]["transcript_status"] == "ready"
+    assert payload["metadata"]["transcript_provider"] == "google"
     assert payload["metadata"]["transcript_model"] == "fake-transcribe"
     assert payload["metadata"]["transcript_source_storage_id"] == voice_note["raw_asset"][
         "storage_id"
@@ -1821,7 +1841,7 @@ def test_edit_accept_and_commit_resolves_refs_into_canonical_records(
     assert question_payload["change_set_id"] == change_set_id
     assert question_payload["origin_provider"] == "openai"
     assert question_payload["origin_model"] == "fake-gpt"
-    assert question_payload["origin_prompt_version"] == "multimodal-graph-draft-v1"
+    assert question_payload["origin_prompt_version"] == "openai:multimodal-graph-draft-v1"
 
     notes = client.get(
         f"/notes?project_id={project_id}&target_entity_type=question&target_entity_id={question_id}",
@@ -2007,6 +2027,8 @@ def test_revise_graph_draft_regenerates_operations_from_feedback(
     assert "REVISION REQUEST" in hint
     assert feedback in hint
     assert "Previously proposed operations" in hint
+    assert "<untrusted_prior_proposals>" in hint
+    assert "Reviewer feedback (human-authored instruction)" in hint
     assert "suggest_new_question" in hint
 
 

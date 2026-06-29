@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
-from lab_tracker.decision_context_constants import TASK_KIND_VALUES
+from lab_tracker.decision_context_constants import (
+    HUMAN_COMMIT_GATE,
+    TASK_KIND_VALUES,
+    UNTRUSTED_CONTEXT_CAVEAT,
+)
 from lab_tracker.decision_context_selection import envelope_items, meta_total
 from lab_tracker.decision_context_types import JsonObject
 
@@ -149,6 +153,7 @@ def task_guidance(
         )
     if any(item.get("status") == "staged" for item in datasets + analyses):
         caveats.append("Some returned datasets or analyses are staged rather than committed.")
+    caveats.append(UNTRUSTED_CONTEXT_CAVEAT)
 
     if task_kind == "plot":
         candidate_outputs = [
@@ -249,13 +254,12 @@ def write_front_door(
 
 def _create_guidance(task_kind: str) -> list[str]:
     guidance = [
-        "Propose these creates to the user; do not create or mutate canonical records "
-        "unless the user explicitly asks — a person commits.",
+        HUMAN_COMMIT_GATE,
         "Use resolved_scope.project_id as the project_id for follow-on create calls.",
         "Prefer candidate_ids and evidence_map before creating duplicate records.",
         "Call lab_tracker_describe_schema for required fields, enums, and lifecycle values.",
     ]
-    if task_kind in {"plot", "analysis", "research_writing"}:
+    if task_kind in {"plot", "analysis", "research_writing", "summary"}:
         guidance.append(
             "For evidence writes, keep the order dataset -> analysis -> claim -> "
             "visualization when new records are needed."

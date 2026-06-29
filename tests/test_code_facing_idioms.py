@@ -26,6 +26,7 @@ def test_code_facing_idioms_cover_shipped_idioms_and_citation_caveat() -> None:
     assert "import_evidence_file()" in body
     assert "<!-- lt-cite:" in body
     assert "% lt-cite:" in body
+    assert "Additional authoring convention (no tooling)" in body
     assert "Strip UUID-bearing citation tokens before external sharing" in body
     assert "savefig()" not in body
 
@@ -58,11 +59,12 @@ def test_code_facing_idioms_avoid_shell_or_install_directives() -> None:
 
 
 def test_retained_surface_records_code_idiom_and_citation_decisions() -> None:
-    doc = Path("docs/retained-v1-surface.md").read_text(encoding="utf-8")
+    doc = " ".join(Path("docs/retained-v1-surface.md").read_text(encoding="utf-8").split())
 
     assert "code-facing idiom teaching" in doc
     assert "lab-tracker://code-conventions" in doc
     assert "citation annotation tokens" in doc
+    assert "authoring convention with no runtime tooling" in doc
     assert "UUID-bearing tokens should be stripped" in doc
 
 
