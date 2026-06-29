@@ -22,7 +22,7 @@ In both cases you supply the date — *"since last Tuesday"* — and trust your 
 
 ![The capture composer — a quick note, photo, or voice memo, sent for review](docs/screenshots/capture-draft-review.png)
 
-No forms, no filing. Pair your phone once (scan a QR), then the whole loop is: **type a note, snap a photo, or record a voice memo — and tap send.** Running analysis from code instead? Swap `plt.savefig(...)` for `lab_tracker_client.savefig(...)`, or wrap your plotting in `with capture_figures():`, and every figure you save is captured automatically with its content hash — and its git commit too when you wrap the run in `with run_context():`.
+No forms, no filing. Pair your phone once (scan a QR), then the whole loop is: **type a note, snap a photo, or record a voice memo — and tap send.** Running analysis from code instead? In Python, swap `plt.savefig(...)` for `lab_tracker_client.savefig(...)`, or wrap your plotting in `with capture_figures():`; wrap the run in `with run_context():` and the exact git commit rides along. In MATLAB, call `labtracker.savefig(...)`. Either way, every figure you save is captured automatically with its content hash.
 
 Either way, captures land *staged* — held for review, never written straight into your graph. You pick the project; the system fills in the rest. It even works with no signal: captures queue and upload when you reconnect.
 
@@ -43,7 +43,7 @@ Want it to run on its own? One command — or one double-click on Windows — se
 The whole thing is built to cost you almost nothing while you work, and a focused sitting before you head home.
 
 - **At the bench — just capture.** As you work, you capture without stopping to file anything: snap the prep, record a thirty-second voice note on what looked off, type a one-line observation. Tap send and keep going. Nothing asks you which question it belongs to — that's for the evening review. If a result makes you ask something new, say it into a voice note; it becomes a candidate question.
-- **Running analysis — figures file themselves.** When you plot results, `lab_tracker_client.savefig(...)` (or a `with capture_figures():` block) registers each figure as staged evidence with its content hash; wrap the run in `with run_context():` and the exact git commit that produced it rides along. You upload nothing by hand.
+- **Running analysis — figures file themselves.** When you plot results, `lab_tracker_client.savefig(...)` (or a `with capture_figures():` block) in Python, and `labtracker.savefig(...)` in MATLAB, register each figure as staged evidence with its content hash; wrap Python runs in `with run_context():` and the exact git commit that produced them rides along. You upload nothing by hand.
 - **Watching folders — outputs leave breadcrumbs.** `lt watch` can scan folders or workflow-written manifests into a local outbox, then sync raw evidence files as staged notes or register acquisition outputs against a session. If your analysis lives on Slurm, `lt hpc` adds scheduler-aware submit, begin, finish, and run-manifest capture on top of the same offline-first idea.
 - **Evening — confirm the day.** Before you head out, you open the daily review and see what the model made of the day's captures: this whiteboard photo attaches to *"Does PV inhibition broaden tuning?"*, this voice note becomes a research note on the session, these two observations suggest a new sub-question. This is real work, not a rubber stamp — read each proposal, fix what it misread, reject the rest, and commit. (Some days that's five minutes; some days it deserves longer. Prefer mornings? It's a setting — point the review at whatever time fits your bench.)
 - **When you write it up — pull the window.** Quarterly report, committee update, grant renewal: ask your assistant for the advances and plots committed since the last one, and start from your assembled year instead of a blank page.
@@ -135,6 +135,7 @@ The authoritative list of what's supported is **[docs/retained-v1-surface.md](do
 **Capture and integrate**
 - [Phone capture quickstart](docs/phone-capture-quickstart.md) — pair a phone for LAN capture
 - [Watch folder capture](docs/watch-folder-capture.md) — scan evidence folders, manifest outputs, and acquisition-session outputs into an offline outbox
+- [MATLAB figure capture](docs/lab-tracker-matlab.md) — capture MATLAB figures as staged evidence notes without Python
 - [Evidence source metadata](docs/evidence-source-metadata.md) — import a synced folder as staged evidence notes with `lt import-folder`
 - [HPC analysis capture](docs/hpc-analysis-capture.md) — capture Slurm/HPC run summaries, logs, metrics, and artifact pointers with `lt hpc`
 - [Curation states](docs/curation-states.md) — how the graph records the way each edge was reviewed, and why captures are archived with a reason
