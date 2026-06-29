@@ -639,6 +639,50 @@ def test_run_due_skips_settings_lost_to_concurrent_claim(
     assert response.json()["data"] == []
 
 
+def test_read_only_admin_service_token_can_run_due_batches(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+) -> None:
+    project_id = _project(client, admin_auth_headers)
+    _note(client, admin_auth_headers, project_id, "Scheduled service token note.")
+    response = client.patch(
+        f"/projects/{project_id}/graph-draft-batch-settings",
+        json={"enabled": True},
+        headers=admin_auth_headers,
+    )
+    assert response.status_code == 200
+    with client.app.state.db_session_factory() as session:
+        settings = session.scalar(
+            select(GraphDraftBatchSettingsModel).where(
+                GraphDraftBatchSettingsModel.project_id == project_id
+            )
+        )
+        settings.next_run_at = datetime.now(timezone.utc) - timedelta(minutes=5)
+        session.commit()
+    issued = client.post(
+        "/auth/tokens",
+        json={
+            "label": "Daily review automation",
+            "role": "admin",
+            "read_only": True,
+            "expires_at": (datetime.now(timezone.utc) + timedelta(days=7)).isoformat(),
+        },
+        headers=admin_auth_headers,
+    )
+    assert issued.status_code == 201, issued.text
+    service_headers = _auth_headers(issued.json()["data"]["secret"])
+    fake_client = FakeBatchDraftClient(_batch_patch(project_id))
+    client.app.state.graph_draft_client_factory = lambda settings: fake_client
+
+    response = client.post("/batches/run-due", headers=service_headers)
+
+    assert response.status_code == 200, response.text
+    runs = response.json()["data"]
+    assert len(runs) == 1
+    assert runs[0]["status"] == "ready"
+    assert runs[0]["project_id"] == project_id
+
+
 def test_run_due_rejects_non_admin_user(
     client: TestClient,
     admin_auth_headers: dict[str, str],
