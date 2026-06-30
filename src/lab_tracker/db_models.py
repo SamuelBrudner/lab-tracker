@@ -944,7 +944,9 @@ class DataStoreModel(Base):
     __tablename__ = "data_stores"
     __table_args__ = (
         UniqueConstraint("project_id", "name", name="uq_data_stores_project_name"),
+        UniqueConstraint("group_id", "name", name="uq_data_stores_group_name"),
         Index("ix_data_stores_project_default", "project_id", "is_default"),
+        Index("ix_data_stores_group_default", "group_id", "is_default"),
     )
 
     store_id: Mapped[str] = mapped_column(
@@ -952,10 +954,13 @@ class DataStoreModel(Base):
         primary_key=True,
         default=lambda: str(uuid4()),
     )
-    project_id: Mapped[str] = mapped_column(
+    project_id: Mapped[str | None] = mapped_column(
         String(36),
         ForeignKey("projects.project_id", ondelete="CASCADE"),
-        nullable=False,
+    )
+    group_id: Mapped[str | None] = mapped_column(
+        String(36),
+        ForeignKey("project_groups.group_id", ondelete="CASCADE"),
     )
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     kind: Mapped[str] = mapped_column(String(40), nullable=False)

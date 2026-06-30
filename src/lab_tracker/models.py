@@ -18,7 +18,7 @@ from typing import Any, Literal
 from urllib.parse import urlsplit
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, computed_field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, computed_field, field_validator, model_validator
 
 NoteMetadataScalar = str | bool | int | float
 _EXTERNAL_ARTIFACT_URI_SCHEME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*$")
@@ -1062,12 +1062,14 @@ class DataStore(_DomainModel):
 
     Lab Tracker stores *where* a store is (kind, root, endpoint) and a credential
     *reference* — never a secret. Artifacts are addressed relative to a store via
-    ``store://<name>/<path>`` locators. Project-scoped in this slice; group scope
-    is a deferred additive extension.
+    ``store://<name>/<path>`` locators. A store is scoped to exactly one of a
+    project or a group (lab); a group-scoped store is inherited by every project
+    in that group.
     """
 
     store_id: UUID
-    project_id: UUID
+    project_id: UUID | None = None
+    group_id: UUID | None = None
     name: str
     kind: StoreKind
     capabilities: list[StoreCapability] = Field(default_factory=list)
@@ -1079,6 +1081,12 @@ class DataStore(_DomainModel):
     created_by: str | None = None
     created_by_user_id: UUID | None = None
     updated_at: datetime = Field(default_factory=utc_now)
+
+    @model_validator(mode="after")
+    def _exactly_one_scope(self) -> DataStore:
+        if (self.project_id is None) == (self.group_id is None):
+            raise ValueError("DataStore must be scoped to exactly one of project_id or group_id.")
+        return self
 
 
 class Visualization(_DomainModel):

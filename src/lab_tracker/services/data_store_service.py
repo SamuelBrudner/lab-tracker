@@ -6,7 +6,7 @@ from collections.abc import Iterable
 from uuid import UUID, uuid4
 
 from lab_tracker.auth import AuthContext
-from lab_tracker.errors import ConflictError
+from lab_tracker.errors import ConflictError, ValidationError
 from lab_tracker.models import (
     DataStore,
     StoreCapability,
@@ -34,7 +34,8 @@ class DataStoreService(BaseService):
     def create_data_store(
         self,
         *,
-        project_id: UUID,
+        project_id: UUID | None = None,
+        group_id: UUID | None = None,
         name: str,
         kind: StoreKind,
         root: str,
@@ -44,8 +45,17 @@ class DataStoreService(BaseService):
         is_default: bool = False,
         actor: AuthContext | None = None,
     ) -> DataStore:
-        self.projects.get_project(project_id)
-        self.authorization.require_contributor(project_id, actor=actor)
+        if (project_id is None) == (group_id is None):
+            raise ValidationError(
+                "A data store must be scoped to exactly one of project_id or group_id."
+            )
+        if project_id is not None:
+            self.projects.get_project(project_id)
+            self.authorization.require_contributor(project_id, actor=actor)
+            scope_label = "project"
+        else:
+            self.authorization.require_group_owner(group_id, actor=actor)
+            scope_label = "group"
         ensure_non_empty(name, "name")
         ensure_non_empty(root, "root")
         resolved_capabilities = (
@@ -54,6 +64,7 @@ class DataStoreService(BaseService):
         store = DataStore(
             store_id=uuid4(),
             project_id=project_id,
+            group_id=group_id,
             name=name.strip(),
             kind=kind,
             capabilities=resolved_capabilities,
@@ -65,14 +76,17 @@ class DataStoreService(BaseService):
             created_by_user_id=actor_user_fk(actor, self.repository),
         )
         with self.unit_of_work() as repository:
-            if repository.data_stores.get_by_name(project_id, store.name) is not None:
+            existing = repository.data_stores.scoped_store_by_name(
+                project_id=project_id, group_id=group_id, name=store.name
+            )
+            if existing is not None:
                 raise ConflictError(
-                    f"A data store named '{store.name}' already exists in this project."
+                    f"A data store named '{store.name}' already exists in this {scope_label}."
                 )
             repository.data_stores.save(store)
             if is_default:
                 repository.data_stores.clear_default(
-                    project_id, except_store_id=store.store_id
+                    project_id, group_id=group_id, except_store_id=store.store_id
                 )
         return store
 
@@ -87,11 +101,18 @@ class DataStoreService(BaseService):
         self,
         *,
         project_id: UUID | None = None,
+        group_id: UUID | None = None,
         actor: AuthContext | None = None,
     ) -> list[DataStore]:
+        if project_id is not None and group_id is not None:
+            raise ValidationError("Provide at most one of project_id or group_id.")
         if project_id is not None:
+            # Effective stores: the project's own plus those inherited from its group.
             self.authorization.require_read(project_id, actor=actor)
-            stores, _ = self.repository.data_stores.query(project_id=project_id)
+            return self.repository.data_stores.list_effective_for_project(project_id)
+        if group_id is not None:
+            self.authorization.require_group_read(group_id, actor=actor)
+            stores, _ = self.repository.data_stores.query(group_id=group_id)
             return stores
         project_ids = self.authorization.accessible_project_ids(actor)
         if project_ids is None:

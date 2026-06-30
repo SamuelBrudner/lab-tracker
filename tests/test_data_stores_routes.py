@@ -1,12 +1,64 @@
 from __future__ import annotations
 
+import base64
+import hashlib
+from pathlib import Path
+
 from starlette.testclient import TestClient
+
+from lab_tracker.artifact_resolution import LocalFilesystemResolver, ResolverRegistry
+
+
+def _sha256(data: bytes) -> str:
+    return "sha256:" + hashlib.sha256(data).hexdigest()
+
+
+def _install_local_registry(client: TestClient, allowed_root: Path) -> None:
+    client.app.state.resolver_registry = ResolverRegistry(
+        [LocalFilesystemResolver(allowed_roots=[allowed_root])]
+    )
 
 
 def _create_project(client: TestClient, headers: dict[str, str], name: str) -> str:
     response = client.post("/projects", json={"name": name}, headers=headers)
     assert response.status_code == 201, response.text
     return response.json()["data"]["project_id"]
+
+
+def _create_dataset_with_artifact(
+    client: TestClient,
+    headers: dict[str, str],
+    *,
+    project_id: str,
+    uri: str,
+    content_hash: str,
+) -> str:
+    question_id = client.post(
+        "/questions",
+        json={
+            "project_id": project_id,
+            "text": "Which artifact resolves?",
+            "question_type": "descriptive",
+            "status": "active",
+        },
+        headers=headers,
+    ).json()["data"]["question_id"]
+    response = client.post(
+        "/datasets",
+        json={
+            "project_id": project_id,
+            "primary_question_id": question_id,
+            "status": "committed",
+            "commit_manifest": {
+                "external_artifacts": [
+                    {"source_system": "store", "uri": uri, "content_hash": content_hash}
+                ]
+            },
+        },
+        headers=headers,
+    )
+    assert response.status_code == 201, response.text
+    return response.json()["data"]["dataset_id"]
 
 
 def _store_payload(project_id: str, **overrides) -> dict:
@@ -20,6 +72,22 @@ def _store_payload(project_id: str, **overrides) -> dict:
     }
     payload.update(overrides)
     return payload
+
+
+def _create_group(client: TestClient, headers: dict[str, str], name: str) -> str:
+    response = client.post("/groups", json={"name": name}, headers=headers)
+    assert response.status_code == 201, response.text
+    return response.json()["data"]["group_id"]
+
+
+def _create_project_in_group(
+    client: TestClient, headers: dict[str, str], name: str, group_id: str
+) -> str:
+    response = client.post(
+        "/projects", json={"name": name, "group_id": group_id}, headers=headers
+    )
+    assert response.status_code == 201, response.text
+    return response.json()["data"]["project_id"]
 
 
 def test_create_and_get_data_store(client, admin_auth_headers):
@@ -89,6 +157,101 @@ def test_duplicate_store_name_in_project_conflicts(client, admin_auth_headers):
         headers=admin_auth_headers,
     )
     assert duplicate.status_code == 409
+
+
+def test_group_store_inherited_by_project_listing(client, admin_auth_headers):
+    group_id = _create_group(client, admin_auth_headers, "Lab group")
+    project_id = _create_project_in_group(client, admin_auth_headers, "Member project", group_id)
+
+    created = client.post(
+        "/data-stores",
+        json={
+            "group_id": group_id,
+            "name": "lab-shared-s3",
+            "kind": "s3",
+            "root": "s3://lab-shared",
+        },
+        headers=admin_auth_headers,
+    )
+    assert created.status_code == 201, created.text
+
+    # The project lists the inherited group store as part of its effective set.
+    listed = client.get(
+        "/data-stores", params={"project_id": project_id}, headers=admin_auth_headers
+    )
+    assert listed.status_code == 200
+    names = {item["name"] for item in listed.json()["data"]}
+    assert "lab-shared-s3" in names
+
+
+def test_group_store_resolves_for_project(client, admin_auth_headers, tmp_path):
+    data = b"shared lab object"
+    (tmp_path / "exp").mkdir()
+    (tmp_path / "exp" / "x.txt").write_bytes(data)
+    _install_local_registry(client, tmp_path)
+
+    group_id = _create_group(client, admin_auth_headers, "Resolving lab")
+    project_id = _create_project_in_group(client, admin_auth_headers, "Lab project", group_id)
+    client.post(
+        "/data-stores",
+        json={"group_id": group_id, "name": "lab-fs", "kind": "local_fs", "root": str(tmp_path)},
+        headers=admin_auth_headers,
+    )
+    dataset_id = _create_dataset_with_artifact(
+        client,
+        admin_auth_headers,
+        project_id=project_id,
+        uri="store://lab-fs/exp/x.txt",
+        content_hash=_sha256(data),
+    )
+
+    response = client.post(
+        "/external-artifacts/resolve",
+        json={"entity_type": "dataset", "entity_id": dataset_id},
+        headers=admin_auth_headers,
+    )
+
+    assert response.status_code == 200, response.text
+    body = response.json()["data"]
+    # Resolved through the inherited group store.
+    assert body["status"] == "verified"
+    assert base64.b64decode(body["content_base64"]) == data
+
+
+def test_create_group_store_requires_group_owner(client, scoped_project_member, admin_auth_headers):
+    group_id = _create_group(client, admin_auth_headers, "Owned lab")
+
+    # The scoped member is not a member/owner of this group.
+    response = client.post(
+        "/data-stores",
+        json={"group_id": group_id, "name": "lab-fs", "kind": "s3", "root": "s3://x"},
+        headers=scoped_project_member.member_headers,
+    )
+    assert response.status_code == 401
+
+
+def test_create_data_store_requires_exactly_one_scope(client, admin_auth_headers):
+    project_id = _create_project(client, admin_auth_headers, "Scope project")
+
+    neither = client.post(
+        "/data-stores",
+        json={"name": "x", "kind": "s3", "root": "s3://x"},
+        headers=admin_auth_headers,
+    )
+    assert neither.status_code == 422
+
+    both = client.post(
+        "/data-stores",
+        json={
+            "project_id": project_id,
+            "group_id": project_id,
+            "name": "x",
+            "kind": "s3",
+            "root": "s3://x",
+        },
+        headers=admin_auth_headers,
+    )
+    assert both.status_code == 422
 
 
 def test_create_data_store_requires_contributor(client, scoped_project_member):

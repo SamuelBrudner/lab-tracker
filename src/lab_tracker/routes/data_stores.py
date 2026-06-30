@@ -34,6 +34,7 @@ def build_data_stores_router(api: LabTrackerAPI) -> APIRouter:
     def create_data_store(payload: DataStoreCreate, request: Request):
         store = api_from_request(request, api).create_data_store(
             project_id=payload.project_id,
+            group_id=payload.group_id,
             name=payload.name,
             kind=payload.kind,
             root=payload.root,
@@ -49,12 +50,14 @@ def build_data_stores_router(api: LabTrackerAPI) -> APIRouter:
     def list_data_stores(
         request: Request,
         project_id: UUID | None = None,
+        group_id: UUID | None = None,
         limit: int = 50,
         offset: int = 0,
     ):
         validate_pagination(limit, offset)
         stores = api_from_request(request, api).list_data_stores(
             project_id=project_id,
+            group_id=group_id,
             actor=actor_from_request(request),
         )
         page, total = paginate(stores, limit, offset)

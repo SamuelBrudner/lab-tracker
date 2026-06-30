@@ -1261,7 +1261,8 @@ def apply_entity_version_to_model(
 def data_store_to_model(store: DataStore) -> DataStoreModel:
     return DataStoreModel(
         store_id=_uuid_str(store.store_id),
-        project_id=_uuid_str(store.project_id),
+        project_id=_uuid_str(store.project_id) if store.project_id is not None else None,
+        group_id=_uuid_str(store.group_id) if store.group_id is not None else None,
         name=store.name,
         kind=store.kind.value,
         capabilities=[capability.value for capability in store.capabilities],
@@ -1283,7 +1284,8 @@ def data_store_to_model(store: DataStore) -> DataStoreModel:
 def data_store_from_model(row: DataStoreModel) -> DataStore:
     return DataStore(
         store_id=_uuid(row.store_id),
-        project_id=_uuid(row.project_id),
+        project_id=_uuid(row.project_id) if row.project_id else None,
+        group_id=_uuid(row.group_id) if row.group_id else None,
         name=row.name,
         kind=StoreKind(row.kind),
         capabilities=[StoreCapability(value) for value in (row.capabilities or [])],
@@ -1299,7 +1301,8 @@ def data_store_from_model(row: DataStoreModel) -> DataStore:
 
 
 def apply_data_store_to_model(row: DataStoreModel, store: DataStore) -> None:
-    row.project_id = _uuid_str(store.project_id)
+    row.project_id = _uuid_str(store.project_id) if store.project_id is not None else None
+    row.group_id = _uuid_str(store.group_id) if store.group_id is not None else None
     row.name = store.name
     row.kind = store.kind.value
     row.capabilities = [capability.value for capability in store.capabilities]

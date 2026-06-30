@@ -797,7 +797,8 @@ GoalLinkRead = GoalLink
 
 
 class DataStoreCreate(RequestModel):
-    project_id: UUID
+    project_id: UUID | None = None
+    group_id: UUID | None = None
     name: NonBlankStr
     kind: StoreKind
     root: NonBlankStr
@@ -805,6 +806,12 @@ class DataStoreCreate(RequestModel):
     endpoint: str | None = None
     credential_ref: str | None = None
     is_default: bool = False
+
+    @model_validator(mode="after")
+    def _exactly_one_scope(self) -> DataStoreCreate:
+        if (self.project_id is None) == (self.group_id is None):
+            raise ValueError("Provide exactly one of project_id or group_id.")
+        return self
 
 
 DataStoreRead = DataStore
