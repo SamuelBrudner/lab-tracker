@@ -1,30 +1,35 @@
 # Agent Instructions
 
-This project uses **bd** (beads) for issue tracking. Run `bd onboard` to get started.
+This project uses **bd** (beads) for issue tracking. Run `bd prime` to get started
+(same as CLAUDE.md).
 
 ## Quick Reference
 
 ```bash
 bd ready              # Find available work
 bd show <id>          # View issue details
-bd update <id> --status in_progress  # Claim work
+bd update <id> --claim  # Claim work
 bd close <id>         # Complete work
 bd export             # Refresh .beads/issues.jsonl for git
 ```
 
 ## Commit Messages
 
-Use this exact subject format:
+Use a Conventional Commits subject; when the work was prescribed by a bead, name
+it:
 
 ```
-(feat): <description of the work that was done> (prescribed by bead <ID>)
+feat: <description of the work> (prescribed by bead <ID>)
 ```
 
 Example:
 
 ```
-(feat): add core entity migrations (prescribed by bead lab-tracker-0sy)
+feat: add core entity migrations (prescribed by bead lab-tracker-0sy)
 ```
+
+Every commit must also include the session footer the harness mandates
+(`Co-Authored-By:` and `Claude-Session:` trailers).
 
 ## Lab Tracker Knowledge Graph Consultation
 
@@ -55,10 +60,11 @@ or mutate Lab Tracker records unless the user explicitly asks.
    ```bash
    git pull --rebase
    bd export
-   bd dolt push  # only when `bd dolt remote list` shows a configured remote
    git push
    git status  # MUST show "up to date with origin"
    ```
+   Only if `bd dolt remote list` shows a configured Dolt remote, also run
+   `bd dolt push` before `git push`. With no Dolt remote configured, skip it.
 5. **Clean up** - Clear stashes, prune remote branches
 6. **Verify** - All changes committed AND pushed
 7. **Hand off** - Provide context for next session

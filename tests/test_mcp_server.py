@@ -91,7 +91,9 @@ def test_fastmcp_tool_annotations_mark_reads_and_writes_for_copilot() -> None:
     assert update_goal.annotations.destructiveHint is True
 
     evidence_bundle = tools_by_name["lab_tracker_record_evidence_bundle"]
-    assert (evidence_bundle.description or "").startswith("Defaults to dry-run")
+    description = evidence_bundle.description or ""
+    assert description.startswith("Preview a dataset-analysis-claim-visualization evidence bundle")
+    assert "defaults to dry-run" in description
 
 
 def test_fastmcp_registers_agent_consultation_policy_resource() -> None:

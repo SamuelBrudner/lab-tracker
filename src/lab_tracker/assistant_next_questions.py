@@ -183,9 +183,12 @@ def _empty_payload(reason: str) -> JsonObject:
             "question_statuses": list(OPEN_QUESTION_STATUSES),
         },
         "next_action": {
-            "tool": "lab_tracker_create_goal",
+            "tool": "lab_tracker_list_goals",
             "arguments": {},
-            "reason": reason,
+            "reason": (
+                f"{reason} Review existing goals; ask the user before creating or "
+                "activating one — do not create a goal unprompted."
+            ),
         },
     }
 
