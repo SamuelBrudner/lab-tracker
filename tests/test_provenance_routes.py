@@ -220,7 +220,11 @@ def test_dataset_route_accepts_external_artifact_manifest_without_files(
     dataset = response.json()["data"]
     assert dataset["status"] == "committed"
     assert dataset["commit_manifest"]["files"] == []
-    assert dataset["commit_manifest"]["external_artifacts"] == [artifact]
+    # The response carries the optional store field-form keys (null for a
+    # non-store reference) alongside the posted fields.
+    assert dataset["commit_manifest"]["external_artifacts"] == [
+        {**artifact, "store_name": None, "locator": None}
+    ]
 
 
 def test_analysis_provenance_route_exports_related_entities(

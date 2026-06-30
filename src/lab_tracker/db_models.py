@@ -940,6 +940,48 @@ class ExplorationNodeEdgeModel(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utc_now)
 
 
+class DataStoreModel(Base):
+    __tablename__ = "data_stores"
+    __table_args__ = (
+        UniqueConstraint("project_id", "name", name="uq_data_stores_project_name"),
+        UniqueConstraint("group_id", "name", name="uq_data_stores_group_name"),
+        Index("ix_data_stores_project_default", "project_id", "is_default"),
+        Index("ix_data_stores_group_default", "group_id", "is_default"),
+    )
+
+    store_id: Mapped[str] = mapped_column(
+        String(36),
+        primary_key=True,
+        default=lambda: str(uuid4()),
+    )
+    project_id: Mapped[str | None] = mapped_column(
+        String(36),
+        ForeignKey("projects.project_id", ondelete="CASCADE"),
+    )
+    group_id: Mapped[str | None] = mapped_column(
+        String(36),
+        ForeignKey("project_groups.group_id", ondelete="CASCADE"),
+    )
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    kind: Mapped[str] = mapped_column(String(40), nullable=False)
+    capabilities: Mapped[list[object]] = mapped_column(JSON, default=list)
+    root: Mapped[str] = mapped_column(String(2000), nullable=False)
+    endpoint: Mapped[str | None] = mapped_column(String(2000))
+    credential_ref: Mapped[str | None] = mapped_column(String(255))
+    is_default: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    created_by: Mapped[str | None] = mapped_column(String(255))
+    created_by_user_id: Mapped[str | None] = mapped_column(
+        String(36),
+        ForeignKey("users.user_id", ondelete="SET NULL"),
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utc_now)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=_utc_now,
+        onupdate=_utc_now,
+    )
+
+
 class GoalModel(Base):
     __tablename__ = "goals"
 

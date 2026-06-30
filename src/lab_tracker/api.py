@@ -24,6 +24,7 @@ from lab_tracker.services import (
     AnalysisService,
     ClaimService,
     DatasetService,
+    DataStoreService,
     EntityVersionService,
     ExplorationService,
     GoalService,
@@ -153,6 +154,11 @@ class LabTrackerAPI:
             claims_provider=lambda: self.claims,
             visualizations_provider=lambda: self.visualizations,
             notes_provider=lambda: self.notes,
+            authorization=self.project_authorization,
+        )
+        self.data_stores: DataStoreService = DataStoreService(
+            context,
+            projects=self.projects,
             authorization=self.project_authorization,
         )
         self.notes: NoteService = NoteService(
@@ -950,6 +956,15 @@ class LabTrackerAPI:
 
     def list_goals(self, *args: Any, **kwargs: Any) -> Any:
         return self.goals.list_goals(*args, **kwargs)
+
+    def create_data_store(self, *args: Any, **kwargs: Any) -> Any:
+        return self.data_stores.create_data_store(*args, **kwargs)
+
+    def get_data_store(self, *args: Any, **kwargs: Any) -> Any:
+        return self.data_stores.get_data_store(*args, **kwargs)
+
+    def list_data_stores(self, *args: Any, **kwargs: Any) -> Any:
+        return self.data_stores.list_data_stores(*args, **kwargs)
 
     def update_goal(self, *args: Any, **kwargs: Any) -> Any:
         return self._with_usage_event(

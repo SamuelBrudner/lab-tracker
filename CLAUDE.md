@@ -35,10 +35,11 @@ bd close <id>         # Complete work
    ```bash
    git pull --rebase
    bd export
-   bd dolt push  # only when `bd dolt remote list` shows a configured remote
    git push
    git status  # MUST show "up to date with origin"
    ```
+   Only if `bd dolt remote list` shows a configured Dolt remote, also run
+   `bd dolt push` before `git push`. With no Dolt remote configured, skip it.
 5. **Clean up** - Clear stashes, prune remote branches
 6. **Verify** - All changes committed AND pushed
 7. **Hand off** - Provide context for next session
