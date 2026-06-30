@@ -262,10 +262,15 @@ Shipped (project-scoped slice):
   (directory stat for `local_fs`, HTTP `HEAD` for `http`, `rclone lsf` for the
   cloud/remote kinds; `object_table`/`database` report `unsupported`), exposed at
   `GET /data-stores/{id}/health`.
+- ✅ Group-scoped stores: a store is scoped to exactly one of a project or a
+  group (migration `0050`, nullable `project_id` + `group_id`). A group store is
+  inherited by every project in the group — `get_by_name` resolves a project's
+  own store first, then its group's, so `store://` resolution inherits with no
+  endpoint change. Group stores require group-owner RBAC; a project's listing
+  returns its effective (own + inherited) set.
 
 Deferred:
 
-- ⏭️ Group-scoped stores (additive `group_id` column + inheritance).
 - ⏭️ The capabilities the storeless adapters cannot provide: `versioned_snapshot`
   reads (S3 `versionId`, Iceberg/Delta) and the `database` (`query → rows`)
   adapter — `store_relative_reference` returns `None` for `object_table`/
