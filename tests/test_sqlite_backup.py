@@ -150,9 +150,10 @@ def test_database_lock_path_only_for_file_backed_sqlite(tmp_path: Path) -> None:
 def test_copy_sqlite_database_round_trips_path_with_special_characters(
     tmp_path: Path,
 ) -> None:
-    # '?' and '#' are legal POSIX filename characters but URI delimiters; the
-    # old f"file:{as_posix()}?mode=ro" form addressed the wrong (empty) database.
-    source_path = tmp_path / "weird ? name #1.db"
+    # '#' is a legal filename character on Windows and POSIX but a URI
+    # fragment delimiter; the old f"file:{as_posix()}?mode=ro" form addressed
+    # the wrong (empty) database. POSIX also permits '?', but Windows does not.
+    source_path = tmp_path / "weird #1 name.db"
     destination_path = tmp_path / "copy.db"
     _write_example_database(source_path, "special")
 
@@ -162,10 +163,10 @@ def test_copy_sqlite_database_round_trips_path_with_special_characters(
 
 
 def test_sqlite_ro_uri_is_absolute_and_escaped() -> None:
-    posix_uri = _sqlite_ro_uri(Path("/var/lib/lab tracker.db"))
-    assert posix_uri.startswith("file:///")
-    assert posix_uri.endswith("?mode=ro")
-    assert "%20" in posix_uri  # space is percent-encoded, not left bare
+    native_uri = _sqlite_ro_uri((Path.cwd() / "lab tracker.db").resolve())
+    assert native_uri.startswith("file:///")
+    assert native_uri.endswith("?mode=ro")
+    assert "%20" in native_uri  # space is percent-encoded, not left bare
 
     # A Windows drive-letter path must yield file:///C:/..., not a relative
     # file:C:/... that SQLite resolves against the current directory.

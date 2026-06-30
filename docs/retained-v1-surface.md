@@ -115,7 +115,11 @@ research record:
   reimplementing their workflows. The `lt export` consumer-side command writes
   these documents as self-contained sidecar files that survive without a running
   instance, optionally co-located next to the data files they describe. See
-  [provenance-export.md](provenance-export.md).
+  [provenance-export.md](provenance-export.md). Local external-artifact
+  resolution may, when explicitly enabled by the operator, recover a moved or
+  renamed local file by scanning only configured resolver roots for matching
+  content bytes. Recovery is read-only, bounded, never rewrites the stored URI,
+  and still re-hashes the recovered file before returning verified content.
 - Read-only assistant and MCP decision-context endpoints over the retained
   graph. Assistants may inspect context through these surfaces, but retained v1
   does not delegate graph commits to autonomous agents.

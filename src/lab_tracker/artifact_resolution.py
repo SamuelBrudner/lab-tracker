@@ -61,6 +61,11 @@ DEFAULT_MAX_FETCH_BYTES = 64 * 1024 * 1024
 
 _STREAM_CHUNK_SIZE = 1024 * 1024
 
+# Recovery is a best-effort fallback for missing local paths. These defaults
+# bound the amount of host filesystem content hashed when explicitly enabled.
+DEFAULT_RECOVERY_MAX_FILES = 5_000
+DEFAULT_RECOVERY_MAX_BYTES = 512 * 1024 * 1024
+
 
 class ResolutionStatus(str, Enum):
     """Outcome of an attempt to dereference an external artifact pointer."""
@@ -363,7 +368,14 @@ class LocalFilesystemResolver(ArtifactResolver):
     UNRESOLVED, so resolution cannot be used to read arbitrary host files.
     """
 
-    def __init__(self, allowed_roots: Sequence[str | Path] | None = None) -> None:
+    def __init__(
+        self,
+        allowed_roots: Sequence[str | Path] | None = None,
+        *,
+        recover_by_content_hash: bool = False,
+        recovery_max_files: int = DEFAULT_RECOVERY_MAX_FILES,
+        recovery_max_bytes: int = DEFAULT_RECOVERY_MAX_BYTES,
+    ) -> None:
         self._allowed_roots: list[str] | None
         if allowed_roots is None:
             self._allowed_roots = None
@@ -371,6 +383,9 @@ class LocalFilesystemResolver(ArtifactResolver):
             self._allowed_roots = [
                 os.path.realpath(Path(root).expanduser()) for root in allowed_roots
             ]
+        self._recover_by_content_hash = recover_by_content_hash
+        self._recovery_max_files = max(0, int(recovery_max_files))
+        self._recovery_max_bytes = max(0, int(recovery_max_bytes))
 
     def can_resolve(self, ref: ExternalArtifactReference) -> bool:
         if ref.source_system.strip().lower() in _LOCAL_SOURCE_SYSTEMS:
@@ -403,10 +418,19 @@ class LocalFilesystemResolver(ArtifactResolver):
         real_path = os.path.realpath(path)
         if not self._within_allowed_roots(real_path):
             return _unresolved(ref, detail="Path is outside the allowed resolver roots.")
+        algorithm, _ = parse_content_hash(ref.content_hash)
         if not os.path.isfile(real_path):
+            recovered = self._recover_missing_local_artifact(
+                ref,
+                missing_real_path=real_path,
+                algorithm=algorithm,
+                max_bytes=max_bytes,
+                window=window,
+            )
+            if recovered is not None:
+                return recovered
             return _unresolved(ref, detail="Local artifact not found.")
 
-        algorithm, _ = parse_content_hash(ref.content_hash)
         try:
             content, total, truncated, observed = _hash_and_collect(
                 _read_file_chunks(real_path),
@@ -432,7 +456,13 @@ class LocalFilesystemResolver(ArtifactResolver):
         scheme = parsed.scheme.lower()
         if scheme == "file":
             # file:///abs/path -> /abs/path ; tolerate a localhost netloc.
-            return unquote(parsed.path) or None
+            path = unquote(parsed.path)
+            if os.name == "nt":
+                if parsed.netloc and parsed.netloc.lower() != "localhost":
+                    return f"//{parsed.netloc}{path}" or None
+                if len(path) >= 3 and path[0] == "/" and path[2] == ":":
+                    path = path[1:]
+            return path or None
         if scheme == "":
             return uri or None
         return None
@@ -444,6 +474,96 @@ class LocalFilesystemResolver(ArtifactResolver):
             real_path == root or real_path.startswith(root + os.sep)
             for root in self._allowed_roots
         )
+
+    def _recover_missing_local_artifact(
+        self,
+        ref: ExternalArtifactReference,
+        *,
+        missing_real_path: str,
+        algorithm: str,
+        max_bytes: int,
+        window: tuple[int, int] | None,
+    ) -> ResolvedArtifact | None:
+        if (
+            not self._recover_by_content_hash
+            or not self._allowed_roots
+            or self._recovery_max_files <= 0
+            or self._recovery_max_bytes <= 0
+        ):
+            return None
+
+        _, expected_digest = parse_content_hash(ref.content_hash)
+        missing_basename = os.path.basename(missing_real_path)
+        files_hashed = 0
+        bytes_budgeted = 0
+        for candidate_real_path in self._recovery_candidate_paths(missing_basename):
+            if candidate_real_path == missing_real_path:
+                continue
+            try:
+                if not os.path.isfile(candidate_real_path) or not self._within_allowed_roots(
+                    candidate_real_path
+                ):
+                    continue
+                size_bytes = os.path.getsize(candidate_real_path)
+            except OSError:
+                continue
+            if files_hashed >= self._recovery_max_files:
+                return None
+            remaining_bytes = self._recovery_max_bytes - bytes_budgeted
+            if size_bytes > remaining_bytes:
+                return None
+
+            files_hashed += 1
+            bytes_budgeted += size_bytes
+            try:
+                content, total, truncated, observed = _hash_and_collect(
+                    _read_file_chunks(candidate_real_path),
+                    algorithm=algorithm,
+                    max_bytes=max_bytes,
+                    window=window,
+                    max_total=remaining_bytes,
+                )
+            except (OSError, _FetchTooLarge):
+                continue
+            if parse_content_hash(observed)[1] != expected_digest:
+                continue
+
+            content_type, _ = mimetypes.guess_type(candidate_real_path)
+            return _build_resolved(
+                ref,
+                observed=observed,
+                content=content,
+                total=total,
+                truncated=truncated,
+                content_type=content_type or "application/octet-stream",
+                detail=(
+                    "Recovered local artifact by content hash from "
+                    f"{candidate_real_path}."
+                ),
+            )
+        return None
+
+    def _recovery_candidate_paths(self, preferred_basename: str) -> Iterable[str]:
+        seen: set[str] = set()
+        for preferred_only in (True, False):
+            for root in self._allowed_roots or []:
+                if not os.path.isdir(root):
+                    continue
+                for dirpath, dirnames, filenames in os.walk(
+                    root, followlinks=False, onerror=lambda _exc: None
+                ):
+                    dirnames.sort()
+                    for filename in sorted(filenames):
+                        is_preferred = bool(preferred_basename) and (
+                            filename == preferred_basename
+                        )
+                        if is_preferred is not preferred_only:
+                            continue
+                        real_path = os.path.realpath(os.path.join(dirpath, filename))
+                        if real_path in seen:
+                            continue
+                        seen.add(real_path)
+                        yield real_path
 
 
 class HttpResolver(ArtifactResolver):
@@ -739,6 +859,7 @@ def _build_resolved(
     total: int,
     truncated: bool,
     content_type: str | None,
+    detail: str | None = None,
 ) -> ResolvedArtifact:
     """Verify a recomputed digest against the reference and build the result."""
 
@@ -755,13 +876,16 @@ def _build_resolved(
         content=content,
         truncated=truncated,
         fetched_at=_now(),
-        detail=None if verified else "Recomputed hash does not match content_hash.",
+        detail=detail if verified else "Recomputed hash does not match content_hash.",
     )
 
 
 def default_registry(
     *,
     allowed_roots: Sequence[str | Path] | None = None,
+    recover_local_by_content_hash: bool = False,
+    local_recovery_max_files: int = DEFAULT_RECOVERY_MAX_FILES,
+    local_recovery_max_bytes: int = DEFAULT_RECOVERY_MAX_BYTES,
 ) -> ResolverRegistry:
     """Build a registry with the adapters available in this slice.
 
@@ -772,7 +896,12 @@ def default_registry(
 
     return ResolverRegistry(
         [
-            LocalFilesystemResolver(allowed_roots=allowed_roots),
+            LocalFilesystemResolver(
+                allowed_roots=allowed_roots,
+                recover_by_content_hash=recover_local_by_content_hash,
+                recovery_max_files=local_recovery_max_files,
+                recovery_max_bytes=local_recovery_max_bytes,
+            ),
             HttpResolver(),
             RcloneResolver(),
         ]
@@ -784,6 +913,7 @@ def default_registry(
 # resolve as UNRESOLVED until an operator opts specific roots in. HTTP(S)
 # resolution is unaffected.
 LAB_TRACKER_RESOLVER_ALLOWED_ROOTS_ENV = "LAB_TRACKER_RESOLVER_ALLOWED_ROOTS"
+LAB_TRACKER_RESOLVER_RECOVERY_ENV = "LAB_TRACKER_RESOLVER_RECOVERY"
 
 
 def registry_from_env() -> ResolverRegistry:
@@ -793,4 +923,13 @@ def registry_from_env() -> ResolverRegistry:
     allowed_roots = (
         [part for part in raw.split(os.pathsep) if part.strip()] if raw else []
     )
-    return default_registry(allowed_roots=allowed_roots)
+    return default_registry(
+        allowed_roots=allowed_roots,
+        recover_local_by_content_hash=_env_truthy(
+            os.environ.get(LAB_TRACKER_RESOLVER_RECOVERY_ENV)
+        ),
+    )
+
+
+def _env_truthy(value: str | None) -> bool:
+    return (value or "").strip().lower() in {"1", "true", "yes", "on"}

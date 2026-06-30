@@ -222,6 +222,16 @@ Shipped (`src/lab_tracker/artifact_resolution.py`, tested in
   adapter and falls back to `UNRESOLVED`.
 - ✅ `LocalFilesystemResolver` — `file://` and `local`/`local_fs` sources, with
   `allowed_roots` path-containment so resolution cannot read arbitrary host files.
+- ✅ Opt-in local content-hash recovery for missing local paths. When
+  `LAB_TRACKER_RESOLVER_RECOVERY=true` and
+  `LAB_TRACKER_RESOLVER_ALLOWED_ROOTS` names one or more roots, the local
+  resolver can scan those roots for a byte-identical artifact after the recorded
+  path is missing. It prioritizes candidates with the same basename, then walks
+  the remaining files, bounded by `DEFAULT_RECOVERY_MAX_FILES` (5,000 files) and
+  `DEFAULT_RECOVERY_MAX_BYTES` (512 MiB hashed). A match flows through the same
+  `_build_resolved()` verification path and returns `verified`; no match within
+  budget degrades to `UNRESOLVED`, the stored URI is not rewritten, and recovery
+  never relaxes the content-hash integrity gate.
 - ✅ `HttpResolver` — `http(s)`, full-body verify with a `max_fetch_bytes` cap
   (oversized → `UNRESOLVED`, never uncertified bytes).
 - ✅ `RcloneResolver` — `rclone://<remote>/<path>`, the locked-in unifier for

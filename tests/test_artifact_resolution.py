@@ -7,6 +7,8 @@ import pytest
 
 from lab_tracker.artifact_resolution import (
     DEFAULT_MAX_BYTES,
+    LAB_TRACKER_RESOLVER_ALLOWED_ROOTS_ENV,
+    LAB_TRACKER_RESOLVER_RECOVERY_ENV,
     ArtifactResolver,
     HttpResolver,
     LocalFilesystemResolver,
@@ -20,6 +22,7 @@ from lab_tracker.artifact_resolution import (
     default_registry,
     is_verifiable_hash,
     parse_content_hash,
+    registry_from_env,
     store_relative_reference,
 )
 from lab_tracker.models import DataStore, ExternalArtifactReference, StoreKind
@@ -124,6 +127,116 @@ def test_local_resolver_missing_file_is_unresolved(tmp_path):
     assert result.status is ResolutionStatus.UNRESOLVED
     assert result.content is None
     assert "not found" in (result.detail or "").lower()
+
+
+def test_local_resolver_recovers_missing_file_by_hash_when_enabled(tmp_path):
+    allowed = tmp_path / "store"
+    recovered_dir = allowed / "moved"
+    recovered_dir.mkdir(parents=True)
+    data = b"survived under a new parent"
+    recovered_path = _write(recovered_dir, "artifact.txt", data)
+    missing = allowed / "original" / "artifact.txt"
+    ref = _local_ref(missing, _sha256(data))
+
+    result = LocalFilesystemResolver(
+        allowed_roots=[allowed],
+        recover_by_content_hash=True,
+    ).resolve(ref)
+
+    assert result.status is ResolutionStatus.VERIFIED
+    assert result.content == data
+    assert result.uri == ref.uri
+    assert str(recovered_path) in (result.detail or "")
+    assert "recovered" in (result.detail or "").lower()
+
+
+def test_local_resolver_recovery_is_disabled_by_default(tmp_path):
+    allowed = tmp_path / "store"
+    recovered_dir = allowed / "moved"
+    recovered_dir.mkdir(parents=True)
+    data = b"present but recovery is off"
+    _write(recovered_dir, "artifact.txt", data)
+    missing = allowed / "original" / "artifact.txt"
+
+    result = LocalFilesystemResolver(allowed_roots=[allowed]).resolve(
+        _local_ref(missing, _sha256(data))
+    )
+
+    assert result.status is ResolutionStatus.UNRESOLVED
+    assert result.content is None
+    assert result.detail == "Local artifact not found."
+
+
+def test_local_resolver_recovery_budget_exhaustion_is_unresolved(tmp_path):
+    allowed = tmp_path / "store"
+    allowed.mkdir()
+    data = b"matching bytes beyond the file budget"
+    _write(allowed, "a.bin", b"first non-match")
+    _write(allowed, "z.bin", data)
+    missing = allowed / "missing.bin"
+
+    result = LocalFilesystemResolver(
+        allowed_roots=[allowed],
+        recover_by_content_hash=True,
+        recovery_max_files=1,
+    ).resolve(_local_ref(missing, _sha256(data)))
+
+    assert result.status is ResolutionStatus.UNRESOLVED
+    assert result.content is None
+    assert result.detail == "Local artifact not found."
+
+
+def test_local_resolver_recovery_ignores_matches_outside_allowed_roots(tmp_path):
+    allowed = tmp_path / "store"
+    outside = tmp_path / "outside"
+    allowed.mkdir()
+    outside.mkdir()
+    data = b"outside the configured root"
+    _write(outside, "artifact.txt", data)
+    missing = allowed / "artifact.txt"
+
+    result = LocalFilesystemResolver(
+        allowed_roots=[allowed],
+        recover_by_content_hash=True,
+    ).resolve(_local_ref(missing, _sha256(data)))
+
+    assert result.status is ResolutionStatus.UNRESOLVED
+    assert result.content is None
+
+
+def test_local_resolver_recovery_rejects_same_name_wrong_bytes(tmp_path):
+    allowed = tmp_path / "store"
+    recovered_dir = allowed / "moved"
+    recovered_dir.mkdir(parents=True)
+    _write(recovered_dir, "artifact.txt", b"same name, wrong bytes")
+    missing = allowed / "original" / "artifact.txt"
+
+    result = LocalFilesystemResolver(
+        allowed_roots=[allowed],
+        recover_by_content_hash=True,
+    ).resolve(_local_ref(missing, _sha256(b"expected bytes")))
+
+    assert result.status is ResolutionStatus.UNRESOLVED
+    assert result.content is None
+
+
+def test_local_resolver_recovery_prioritizes_same_basename(tmp_path):
+    allowed = tmp_path / "store"
+    recovered_dir = allowed / "moved"
+    recovered_dir.mkdir(parents=True)
+    data = b"same basename wins within a one-file budget"
+    _write(allowed, "a.bin", b"would exhaust budget if hashed first")
+    _write(recovered_dir, "target.bin", data)
+    missing = allowed / "original" / "target.bin"
+
+    result = LocalFilesystemResolver(
+        allowed_roots=[allowed],
+        recover_by_content_hash=True,
+        recovery_max_files=1,
+    ).resolve(_local_ref(missing, _sha256(data)))
+
+    assert result.status is ResolutionStatus.VERIFIED
+    assert result.content == data
 
 
 def test_local_resolver_unverifiable_algorithm_is_unresolved(tmp_path):
@@ -504,12 +617,12 @@ def _data_store(kind: StoreKind, root: str, **overrides) -> DataStore:
     return DataStore(**fields)
 
 
-def test_store_relative_reference_local_builds_file_uri():
-    store = _data_store(StoreKind.LOCAL_FS, "/data/store")
+def test_store_relative_reference_local_builds_file_uri(tmp_path):
+    store = _data_store(StoreKind.LOCAL_FS, str(tmp_path / "store"))
     ref = store_relative_reference(store, path="exp/001/x.txt", content_hash=_sha256(b"x"))
     assert ref is not None
     assert ref.source_system == "local"
-    assert ref.uri == Path("/data/store/exp/001/x.txt").as_uri()
+    assert ref.uri == (tmp_path / "store" / "exp" / "001" / "x.txt").as_uri()
 
 
 def test_store_relative_reference_rclone_uses_credential_ref_as_remote():
@@ -651,6 +764,22 @@ def test_registry_allowed_roots_thread_through(tmp_path):
     result = registry.resolve(_local_ref(outside, _sha256(b"nope")))
 
     assert result.status is ResolutionStatus.UNRESOLVED
+
+
+def test_registry_from_env_enables_local_recovery(monkeypatch, tmp_path):
+    allowed = tmp_path / "store"
+    recovered_dir = allowed / "moved"
+    recovered_dir.mkdir(parents=True)
+    data = b"env-enabled recovery"
+    _write(recovered_dir, "artifact.txt", data)
+    missing = allowed / "original" / "artifact.txt"
+    monkeypatch.setenv(LAB_TRACKER_RESOLVER_ALLOWED_ROOTS_ENV, str(allowed))
+    monkeypatch.setenv(LAB_TRACKER_RESOLVER_RECOVERY_ENV, "true")
+
+    result = registry_from_env().resolve(_local_ref(missing, _sha256(data)))
+
+    assert result.status is ResolutionStatus.VERIFIED
+    assert result.content == data
 
 
 def test_registry_prefers_first_capable_resolver(tmp_path):
