@@ -258,6 +258,10 @@ Shipped (project-scoped slice):
   rclone kinds → `rclone://` with the remote from `credential_ref`), and the
   resolve endpoint materializes it via `data_stores.get_by_name` before
   dispatching to the resolver. Credentials are never embedded.
+- ✅ Registration health check: `check_store_health` probes reachability
+  (directory stat for `local_fs`, HTTP `HEAD` for `http`, `rclone lsf` for the
+  cloud/remote kinds; `object_table`/`database` report `unsupported`), exposed at
+  `GET /data-stores/{id}/health`.
 
 Deferred:
 
@@ -266,8 +270,8 @@ Deferred:
   reads (S3 `versionId`, Iceberg/Delta) and the `database` (`query → rows`)
   adapter — `store_relative_reference` returns `None` for `object_table`/
   `database` today, surfacing as a clean `UNRESOLVED`.
-- ⏭️ Registration health check; a `store_id`+`locator` form on
-  `ExternalArtifactReference` (the current locator travels in `uri`).
+- ⏭️ A `store_id`+`locator` form on `ExternalArtifactReference` (the current
+  locator travels in `uri`).
 
 ## Suggested first slice
 
