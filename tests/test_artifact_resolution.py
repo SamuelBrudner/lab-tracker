@@ -15,6 +15,8 @@ from lab_tracker.artifact_resolution import (
     ResolutionStatus,
     ResolvedArtifact,
     ResolverRegistry,
+    StoreHealthStatus,
+    check_store_health,
     default_registry,
     is_verifiable_hash,
     parse_content_hash,
@@ -500,6 +502,88 @@ def test_store_relative_reference_http_joins_endpoint_or_root():
 def test_store_relative_reference_unsupported_kind_returns_none():
     store = _data_store(StoreKind.DATABASE, "postgresql://lims", name="lims")
     assert store_relative_reference(store, path="q", content_hash=_sha256(b"x")) is None
+
+
+# --- check_store_health ---------------------------------------------------
+
+
+def test_check_store_health_local_fs_healthy(tmp_path):
+    store = _data_store(StoreKind.LOCAL_FS, str(tmp_path))
+    health = check_store_health(store)
+    assert health.status is StoreHealthStatus.HEALTHY
+    assert health.is_healthy is True
+
+
+def test_check_store_health_local_fs_missing_root(tmp_path):
+    store = _data_store(StoreKind.LOCAL_FS, str(tmp_path / "absent"))
+    health = check_store_health(store)
+    assert health.status is StoreHealthStatus.UNREACHABLE
+    assert "not found" in (health.detail or "").lower()
+
+
+def test_check_store_health_rclone_healthy_via_runner():
+    store = _data_store(
+        StoreKind.ONEDRIVE, "experiments", name="lab", credential_ref="lab-onedrive"
+    )
+    calls = []
+
+    def runner(args):
+        calls.append(args)
+        return RcloneCompleted(0, b"001/\n002/\n", b"")
+
+    health = check_store_health(store, rclone_runner=runner)
+    assert health.status is StoreHealthStatus.HEALTHY
+    assert calls[0] == ["lsf", "--max-depth", "1", "lab-onedrive:experiments"]
+
+
+def test_check_store_health_rclone_unreachable_via_runner():
+    store = _data_store(StoreKind.S3, "lab-archive", name="arch", credential_ref="s3")
+
+    def runner(args):
+        return RcloneCompleted(1, b"", b"directory not found")
+
+    health = check_store_health(store, rclone_runner=runner)
+    assert health.status is StoreHealthStatus.UNREACHABLE
+
+
+def test_check_store_health_rclone_missing_binary():
+    store = _data_store(StoreKind.BOX, "root", name="b", credential_ref="box")
+
+    def runner(args):
+        raise FileNotFoundError("rclone not installed")
+
+    health = check_store_health(store, rclone_runner=runner)
+    assert health.status is StoreHealthStatus.UNREACHABLE
+    assert "unavailable" in (health.detail or "").lower()
+
+
+def test_check_store_health_http_healthy_via_client():
+    store = _data_store(StoreKind.HTTP, "https://files.example/base", name="web")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.method == "HEAD"
+        return httpx.Response(200)
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    health = check_store_health(store, http_client=client)
+    assert health.status is StoreHealthStatus.HEALTHY
+
+
+def test_check_store_health_http_unreachable_via_client():
+    store = _data_store(StoreKind.HTTP, "https://files.example/base", name="web")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(500)
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    health = check_store_health(store, http_client=client)
+    assert health.status is StoreHealthStatus.UNREACHABLE
+
+
+def test_check_store_health_database_is_unsupported():
+    store = _data_store(StoreKind.DATABASE, "postgresql://lims", name="lims")
+    health = check_store_health(store)
+    assert health.status is StoreHealthStatus.UNSUPPORTED
 
 
 # --- ResolverRegistry -----------------------------------------------------

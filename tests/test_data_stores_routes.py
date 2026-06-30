@@ -101,6 +101,55 @@ def test_create_data_store_requires_contributor(client, scoped_project_member):
     assert response.status_code == 401
 
 
+def test_data_store_health_local_fs(client, admin_auth_headers, tmp_path):
+    project_id = _create_project(client, admin_auth_headers, "Health project")
+    store_id = client.post(
+        "/data-stores",
+        json=_store_payload(project_id, name="lab-fs", kind="local_fs", root=str(tmp_path)),
+        headers=admin_auth_headers,
+    ).json()["data"]["store_id"]
+
+    healthy = client.get(f"/data-stores/{store_id}/health", headers=admin_auth_headers)
+    assert healthy.status_code == 200, healthy.text
+    assert healthy.json()["data"]["status"] == "healthy"
+
+
+def test_data_store_health_local_fs_missing_root(client, admin_auth_headers, tmp_path):
+    project_id = _create_project(client, admin_auth_headers, "Unhealthy project")
+    missing = str(tmp_path / "does-not-exist")
+    store_id = client.post(
+        "/data-stores",
+        json=_store_payload(project_id, name="lab-fs", kind="local_fs", root=missing),
+        headers=admin_auth_headers,
+    ).json()["data"]["store_id"]
+
+    response = client.get(f"/data-stores/{store_id}/health", headers=admin_auth_headers)
+    assert response.status_code == 200
+    body = response.json()["data"]
+    assert body["status"] == "unreachable"
+    assert body["kind"] == "local_fs"
+
+
+def test_data_store_health_denied_for_unauthorized_project(
+    client, scoped_project_member, admin_auth_headers, tmp_path
+):
+    store_id = client.post(
+        "/data-stores",
+        json=_store_payload(
+            scoped_project_member.hidden_project_id,
+            name="lab-fs",
+            kind="local_fs",
+            root=str(tmp_path),
+        ),
+        headers=admin_auth_headers,
+    ).json()["data"]["store_id"]
+
+    response = client.get(
+        f"/data-stores/{store_id}/health", headers=scoped_project_member.member_headers
+    )
+    assert response.status_code == 401
+
+
 def test_get_data_store_denied_for_unauthorized_project(
     client, scoped_project_member, admin_auth_headers
 ):

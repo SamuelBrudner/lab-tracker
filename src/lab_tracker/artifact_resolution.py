@@ -255,6 +255,94 @@ def store_relative_reference(
     return None
 
 
+class StoreHealthStatus(str, Enum):
+    """Outcome of probing a registered store's reachability."""
+
+    HEALTHY = "healthy"
+    UNREACHABLE = "unreachable"
+    UNSUPPORTED = "unsupported"
+
+
+@dataclass(frozen=True)
+class StoreHealth:
+    status: StoreHealthStatus
+    detail: str | None = None
+
+    @property
+    def is_healthy(self) -> bool:
+        return self.status is StoreHealthStatus.HEALTHY
+
+    def to_json_dict(self) -> dict[str, object]:
+        return {"status": self.status.value, "detail": self.detail}
+
+
+def check_store_health(
+    store: DataStore,
+    *,
+    rclone_runner: RcloneRunner | None = None,
+    http_client: object | None = None,
+    http_timeout: float = 10.0,
+) -> StoreHealth:
+    """Probe whether a registered store is reachable from this host.
+
+    Lightweight and read-only: a directory stat for ``local_fs``, an HTTP ``HEAD``
+    for ``http``, and ``rclone lsf`` for the cloud/remote kinds. ``object_table``
+    and ``database`` are reported ``unsupported`` until their adapters land.
+    """
+
+    kind = store.kind
+    if kind is StoreKind.LOCAL_FS:
+        root = os.path.realpath(Path(store.root).expanduser())
+        if os.path.isdir(root):
+            return StoreHealth(StoreHealthStatus.HEALTHY)
+        return StoreHealth(
+            StoreHealthStatus.UNREACHABLE, f"Root directory not found: {store.root}"
+        )
+
+    if kind is StoreKind.HTTP:
+        return _check_http_store_health(store, http_client=http_client, timeout=http_timeout)
+
+    if kind in _RCLONE_STORE_KINDS:
+        runner = rclone_runner or _subprocess_rclone_runner("rclone")
+        remote = store.credential_ref or store.name
+        target = f"{remote}:{store.root.lstrip('/')}"
+        try:
+            completed = runner(["lsf", "--max-depth", "1", target])
+        except OSError as exc:
+            return StoreHealth(StoreHealthStatus.UNREACHABLE, f"rclone is unavailable: {exc}")
+        if completed.returncode == 0:
+            return StoreHealth(StoreHealthStatus.HEALTHY)
+        return StoreHealth(StoreHealthStatus.UNREACHABLE, _rclone_error_detail(completed))
+
+    return StoreHealth(
+        StoreHealthStatus.UNSUPPORTED,
+        f"Health checks for '{kind.value}' stores are not supported yet.",
+    )
+
+
+def _check_http_store_health(
+    store: DataStore, *, http_client: object | None, timeout: float
+) -> StoreHealth:
+    import httpx
+
+    base = store.endpoint or store.root
+    owns_client = http_client is None
+    client = http_client or httpx.Client(timeout=timeout)
+    try:
+        response = client.head(base)
+    except httpx.HTTPError as exc:
+        return StoreHealth(StoreHealthStatus.UNREACHABLE, f"Cannot reach {base}: {exc}")
+    finally:
+        if owns_client:
+            client.close()
+    if response.status_code < 400 or response.status_code in (403, 405):
+        # 403/405 mean the endpoint answered but refused HEAD — still reachable.
+        return StoreHealth(StoreHealthStatus.HEALTHY)
+    return StoreHealth(
+        StoreHealthStatus.UNREACHABLE, f"HEAD {base} returned {response.status_code}."
+    )
+
+
 def _normalize_byte_range(byte_range: tuple[int, int] | None) -> tuple[int, int] | None:
     if byte_range is None:
         return None

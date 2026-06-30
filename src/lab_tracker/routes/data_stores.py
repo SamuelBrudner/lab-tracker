@@ -9,6 +9,7 @@ from starlette import status as http_status
 from starlette.requests import Request
 
 from lab_tracker.api import LabTrackerAPI
+from lab_tracker.artifact_resolution import check_store_health
 from lab_tracker.models import DataStore
 from lab_tracker.schemas import DataStoreCreate, Envelope, ListEnvelope
 
@@ -64,5 +65,19 @@ def build_data_stores_router(api: LabTrackerAPI) -> APIRouter:
         store = api_from_request(request, api).get_data_store(store_id)
         ensure_project_read(request, store.project_id)
         return Envelope(data=store)
+
+    @router.get("/data-stores/{store_id}/health")
+    def data_store_health(store_id: UUID, request: Request):
+        store = api_from_request(request, api).get_data_store(store_id)
+        ensure_project_read(request, store.project_id)
+        checker = getattr(request.app.state, "store_health_checker", None)
+        health = checker(store) if checker is not None else check_store_health(store)
+        return Envelope(
+            data={
+                "store_id": str(store.store_id),
+                "kind": store.kind.value,
+                **health.to_json_dict(),
+            }
+        )
 
     return router
