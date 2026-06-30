@@ -19,6 +19,7 @@ lab_tracker.db.lock
 # Beads / Dolt files (added by bd init)
 .dolt/
 *.db
+*.db.lock
 .beads-credential-key
 
 # Test/coverage artifacts

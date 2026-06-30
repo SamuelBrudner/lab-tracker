@@ -141,8 +141,12 @@ def task_guidance(
         missing_evidence.append("No prior analyses were returned in this context.")
     if not claims:
         missing_evidence.append("No claims were returned in this context.")
-    if any(item.get("status") == "proposed" for item in claims):
-        caveats.append("Some returned claims are still proposed, not supported.")
+    if any(item.get("status") == "rejected" for item in claims):
+        caveats.append("Some returned claims are REJECTED — do not rely on them as evidence.")
+    if any(item.get("status") in {"proposed", "testing"} for item in claims):
+        caveats.append(
+            "Some returned claims are still proposed or under testing, not supported."
+        )
     if any(item.get("status") == "staged" for item in datasets + analyses):
         caveats.append("Some returned datasets or analyses are staged rather than committed.")
 
@@ -166,6 +170,13 @@ def task_guidance(
         candidate_outputs = [
             entity_ref("claim", item, "claim_id") for item in claims[:5]
         ] + [entity_ref("visualization", item, "viz_id") for item in visualizations[:5]]
+    elif task_kind == "summary":
+        # A summary draws on supported claims, the analyses behind them, and figures.
+        candidate_outputs = (
+            [entity_ref("claim", item, "claim_id") for item in claims[:5]]
+            + [entity_ref("analysis", item, "analysis_id") for item in analyses[:5]]
+            + [entity_ref("visualization", item, "viz_id") for item in visualizations[:5]]
+        )
     elif task_kind == "progress_review":
         # A meeting briefing reviews what was done in the window: the advances
         # (analyses), the plots (visualizations), and the claims they support.
@@ -203,7 +214,7 @@ def write_front_door(
     return {
         "call_first_for": (
             "Call lab_tracker_get_decision_context before research-facing "
-            "read-then-write tasks so subsequent creates can reuse stable IDs."
+            "read-then-write tasks so subsequent proposed creates can reuse stable IDs."
         ),
         "allowed_task_kinds": list(TASK_KIND_VALUES),
         "resolved_scope": {
@@ -238,6 +249,8 @@ def write_front_door(
 
 def _create_guidance(task_kind: str) -> list[str]:
     guidance = [
+        "Propose these creates to the user; do not create or mutate canonical records "
+        "unless the user explicitly asks — a person commits.",
         "Use resolved_scope.project_id as the project_id for follow-on create calls.",
         "Prefer candidate_ids and evidence_map before creating duplicate records.",
         "Call lab_tracker_describe_schema for required fields, enums, and lifecycle values.",

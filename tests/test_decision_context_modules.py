@@ -336,7 +336,10 @@ def test_build_decision_context_orchestrates_reader_selection_and_builders() -> 
     assert data["write_front_door"]["candidate_ids"]["claims"][0]["entity_id"] == (
         "claim-1"
     )
-    assert "lab_tracker_describe_schema" in data["write_front_door"]["create_guidance"][2]
+    create_guidance = data["write_front_door"]["create_guidance"]
+    assert any("lab_tracker_describe_schema" in item for item in create_guidance)
+    # The propose-not-commit gate leads the create guidance (cap apr H4).
+    assert any("a person commits" in item for item in create_guidance)
     assert data["evidence_map"][0]["entity"]["entity_type"] == "dataset"
     assert data["truncation"] == {"was_truncated": False, "sections": []}
 
