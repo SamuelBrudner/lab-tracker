@@ -568,6 +568,11 @@ _ROLE_RANK = {
     Role.EDITOR: 1,
     Role.ADMIN: 2,
 }
+_READ_ONLY_SERVICE_POST_PATHS = frozenset(
+    {
+        "/assistant/decision-context",
+    }
+)
 
 
 def device_principal_can_access(method: str, path: str) -> bool:
@@ -608,6 +613,8 @@ def service_principal_can_access(
     if path.startswith("/auth"):
         return False
     if method in {"GET", "HEAD", "OPTIONS"}:
+        return True
+    if method == "POST" and path in _READ_ONLY_SERVICE_POST_PATHS:
         return True
     if method == "POST" and path == "/batches/run-due":
         return role is Role.ADMIN

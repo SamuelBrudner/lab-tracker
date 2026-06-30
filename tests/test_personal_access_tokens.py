@@ -194,6 +194,12 @@ def test_service_principal_policy_is_read_only_by_default():
         "POST", "/projects", read_only=True, role=Role.ADMIN
     )
     assert service_principal_can_access(
+        "POST", "/assistant/decision-context", read_only=True, role=Role.VIEWER
+    )
+    assert service_principal_can_access(
+        "POST", "/assistant/decision-context", read_only=False, role=Role.VIEWER
+    )
+    assert service_principal_can_access(
         "POST", "/batches/run-due", read_only=True, role=Role.ADMIN
     )
     assert not service_principal_can_access(

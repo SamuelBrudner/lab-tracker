@@ -1,0 +1,1 @@
+{"id":"int-c12f36ef","kind":"field_change","created_at":"2026-06-30T20:56:24.8949793Z","actor":"Sam","issue_id":"lab-tracker-logs","extra":{"field":"status","new_value":"closed","old_value":"in_progress","reason":"Read-only service tokens may now call POST /assistant/decision-context, with policy and HTTP regression coverage."}}
