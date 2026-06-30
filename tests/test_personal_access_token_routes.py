@@ -72,15 +72,21 @@ def test_read_only_personal_access_token_can_read_but_not_write_or_auth(
     assert project_response.status_code == 201, project_response.text
     issued = _create_token(client, admin_auth_headers, role="admin", read_only=True)
     pat_headers = _bearer(issued["secret"])
+    decision_context_payload = {
+        "task_kind": "plot",
+        "query": "plot choice",
+        "project_id": project_response.json()["data"]["project_id"],
+    }
 
     listing = client.get("/projects", headers=pat_headers)
     decision_context = client.post(
         "/assistant/decision-context",
-        json={
-            "task_kind": "plot",
-            "query": "plot choice",
-            "project_id": project_response.json()["data"]["project_id"],
-        },
+        json=decision_context_payload,
+        headers=pat_headers,
+    )
+    decision_context_trailing_slash = client.post(
+        "/assistant/decision-context/",
+        json=decision_context_payload,
         headers=pat_headers,
     )
     forbidden_auth = client.get("/auth/me", headers=pat_headers)
@@ -127,6 +133,10 @@ def test_read_only_personal_access_token_can_read_but_not_write_or_auth(
     assert listing.status_code == 200, listing.text
     assert decision_context.status_code == 200, decision_context.text
     assert decision_context.json()["data"]["task_kind"] == "plot"
+    assert decision_context_trailing_slash.status_code == 200, (
+        decision_context_trailing_slash.text
+    )
+    assert decision_context_trailing_slash.json()["data"]["task_kind"] == "plot"
     assert [response.status_code for response in write_attempts] == [403] * len(
         write_attempts
     )

@@ -575,6 +575,12 @@ _READ_ONLY_SERVICE_POST_PATHS = frozenset(
 )
 
 
+def _canonical_service_path(path: str) -> str:
+    if path == "/":
+        return path
+    return path.rstrip("/") or "/"
+
+
 def device_principal_can_access(method: str, path: str) -> bool:
     """Coarse-grained policy for paired-device principals.
 
@@ -610,6 +616,7 @@ def service_principal_can_access(
 ) -> bool:
     """Coarse-grained policy for lpat_ service principals."""
     method = method.upper()
+    path = _canonical_service_path(path)
     if path.startswith("/auth"):
         return False
     if method in {"GET", "HEAD", "OPTIONS"}:
