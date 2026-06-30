@@ -68,6 +68,7 @@ from .core import (
     SQLAlchemyQuestionRefactorRepository,
     SQLAlchemyQuestionRepository,
 )
+from .data_stores import SQLAlchemyDataStoreRepository
 from .datasets import SQLAlchemyDatasetRepository
 from .exploration import SQLAlchemyExplorationNodeRepository
 from .goals import SQLAlchemyGoalRepository
@@ -120,6 +121,7 @@ class SQLAlchemyLabTrackerRepository(LabTrackerRepository):
         self.provenance_links = SQLAlchemyProvenanceLinkRepository(session)
         self.entity_versions = SQLAlchemyEntityVersionRepository(session)
         self.goals = SQLAlchemyGoalRepository(session)
+        self.data_stores = SQLAlchemyDataStoreRepository(session)
         self.visualizations = SQLAlchemyVisualizationRepository(session)
         self.graph_change_sets = SQLAlchemyGraphChangeSetRepository(session)
         self.graph_draft_batch_settings = SQLAlchemyGraphDraftBatchSettingsRepository(session)

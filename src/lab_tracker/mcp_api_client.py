@@ -382,6 +382,34 @@ class LabTrackerAPIClient:
     def get_claim_provenance(self, claim_id: str) -> JsonObject:
         return self._request("GET", f"/claims/{claim_id}/provenance")
 
+    def resolve_external_artifact(
+        self,
+        *,
+        entity_type: str,
+        entity_id: str,
+        artifact_index: int = 0,
+        content_hash: str | None = None,
+        max_bytes: int | None = None,
+        byte_start: int | None = None,
+        byte_end: int | None = None,
+    ) -> JsonObject:
+        payload: JsonObject = {
+            "entity_type": entity_type,
+            "entity_id": entity_id,
+            "artifact_index": artifact_index,
+        }
+        if content_hash is not None:
+            payload["content_hash"] = content_hash
+        if max_bytes is not None:
+            payload["max_bytes"] = max_bytes
+        if byte_start is not None:
+            payload["byte_start"] = byte_start
+        if byte_end is not None:
+            payload["byte_end"] = byte_end
+        return self._request(
+            "POST", "/external-artifacts/resolve", json_payload=payload
+        )
+
     def export_goal_artifact(
         self,
         goal_id: str,

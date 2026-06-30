@@ -18,6 +18,7 @@ from lab_tracker.db_models import (
     ClaimQuestionModel,
     DatasetModel,
     DatasetQuestionLinkModel,
+    DataStoreModel,
     EntityVersionModel,
     ExplorationNodeEdgeModel,
     ExplorationNodeModel,
@@ -47,6 +48,7 @@ from lab_tracker.models import (
     DatasetCommitManifest,
     DatasetFile,
     DatasetStatus,
+    DataStore,
     EntityOrigin,
     EntityRef,
     EntityType,
@@ -82,6 +84,8 @@ from lab_tracker.models import (
     Session,
     SessionStatus,
     SessionType,
+    StoreCapability,
+    StoreKind,
     Visualization,
     VisualizationAsset,
 )
@@ -1252,6 +1256,66 @@ def apply_entity_version_to_model(
     row.created_by_user_id = (
         _uuid_str(version.created_by_user_id) if version.created_by_user_id is not None else None
     )
+
+
+def data_store_to_model(store: DataStore) -> DataStoreModel:
+    return DataStoreModel(
+        store_id=_uuid_str(store.store_id),
+        project_id=_uuid_str(store.project_id) if store.project_id is not None else None,
+        group_id=_uuid_str(store.group_id) if store.group_id is not None else None,
+        name=store.name,
+        kind=store.kind.value,
+        capabilities=[capability.value for capability in store.capabilities],
+        root=store.root,
+        endpoint=store.endpoint,
+        credential_ref=store.credential_ref,
+        is_default=store.is_default,
+        created_by=store.created_by,
+        created_by_user_id=(
+            _uuid_str(store.created_by_user_id)
+            if store.created_by_user_id is not None
+            else None
+        ),
+        created_at=store.created_at,
+        updated_at=store.updated_at,
+    )
+
+
+def data_store_from_model(row: DataStoreModel) -> DataStore:
+    return DataStore(
+        store_id=_uuid(row.store_id),
+        project_id=_uuid(row.project_id) if row.project_id else None,
+        group_id=_uuid(row.group_id) if row.group_id else None,
+        name=row.name,
+        kind=StoreKind(row.kind),
+        capabilities=[StoreCapability(value) for value in (row.capabilities or [])],
+        root=row.root,
+        endpoint=row.endpoint,
+        credential_ref=row.credential_ref,
+        is_default=bool(row.is_default),
+        created_by=row.created_by,
+        created_by_user_id=(_uuid(row.created_by_user_id) if row.created_by_user_id else None),
+        created_at=_as_utc(row.created_at),
+        updated_at=_as_utc(row.updated_at),
+    )
+
+
+def apply_data_store_to_model(row: DataStoreModel, store: DataStore) -> None:
+    row.project_id = _uuid_str(store.project_id) if store.project_id is not None else None
+    row.group_id = _uuid_str(store.group_id) if store.group_id is not None else None
+    row.name = store.name
+    row.kind = store.kind.value
+    row.capabilities = [capability.value for capability in store.capabilities]
+    row.root = store.root
+    row.endpoint = store.endpoint
+    row.credential_ref = store.credential_ref
+    row.is_default = store.is_default
+    row.created_by = store.created_by
+    row.created_by_user_id = (
+        _uuid_str(store.created_by_user_id) if store.created_by_user_id is not None else None
+    )
+    row.created_at = store.created_at
+    row.updated_at = store.updated_at
 
 
 def goal_to_model(goal: Goal) -> GoalModel:

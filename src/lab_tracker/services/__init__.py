@@ -3,6 +3,7 @@
 from lab_tracker.services.analysis_service import AnalysisService
 from lab_tracker.services.base import BaseService, ServiceContext
 from lab_tracker.services.claim_service import ClaimService
+from lab_tracker.services.data_store_service import DataStoreService
 from lab_tracker.services.dataset_service import DatasetService
 from lab_tracker.services.entity_version_service import EntityVersionService
 from lab_tracker.services.exploration_service import ExplorationService
@@ -24,6 +25,7 @@ __all__ = [
     "AnalysisService",
     "BaseService",
     "ClaimService",
+    "DataStoreService",
     "DatasetService",
     "EntityVersionService",
     "ExplorationService",

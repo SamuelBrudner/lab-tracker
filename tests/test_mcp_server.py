@@ -496,6 +496,47 @@ def test_client_low_level_read_tools_call_retained_routes() -> None:
     ]
 
 
+def test_client_resolve_artifact_posts_to_resolve_route() -> None:
+    captured: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured.append(request)
+        if request.url.path == "/external-artifacts/resolve":
+            body = json.loads(request.content)
+            assert body["entity_type"] == "dataset"
+            assert body["entity_id"] == "dataset-1"
+            assert body["artifact_index"] == 2
+            assert body["max_bytes"] == 1024
+            return _json_response(200, {"data": {"status": "verified"}})
+        return _json_response(404, {"error": {"message": "not found"}})
+
+    client = mcp_server.LabTrackerAPIClient(
+        mcp_server.MCPSettings(base_url="http://testserver"),
+        transport=httpx.MockTransport(handler),
+    )
+    try:
+        result = client.resolve_external_artifact(
+            entity_type="dataset",
+            entity_id="dataset-1",
+            artifact_index=2,
+            max_bytes=1024,
+        )
+    finally:
+        client.close()
+
+    assert result["data"]["status"] == "verified"
+    assert [request.url.path for request in captured] == ["/external-artifacts/resolve"]
+    # Optional fields left unset are omitted, so extra="forbid" on the route is safe.
+    body = json.loads(captured[0].content)
+    assert "content_hash" not in body
+    assert "byte_start" not in body
+
+
+def test_resolve_artifact_is_registered_read_tool() -> None:
+    assert "lab_tracker_resolve_artifact" in {tool.__name__ for tool in READ_TOOLS}
+    assert "lab_tracker_resolve_artifact" not in {tool.__name__ for tool in WRITE_TOOLS}
+
+
 def test_client_describe_schema_calls_api_discovery_route() -> None:
     requests: list[httpx.Request] = []
 

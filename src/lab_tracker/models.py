@@ -18,7 +18,7 @@ from typing import Any, Literal
 from urllib.parse import urlsplit
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, computed_field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, computed_field, field_validator, model_validator
 
 NoteMetadataScalar = str | bool | int | float
 _EXTERNAL_ARTIFACT_URI_SCHEME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*$")
@@ -254,6 +254,56 @@ class GoalLinkStatus(str, Enum):
     DROPPED = "dropped"
 
 
+class StoreKind(str, Enum):
+    """Backend family of a registered data store."""
+
+    LOCAL_FS = "local_fs"
+    SSH = "ssh"
+    S3 = "s3"
+    GCS = "gcs"
+    AZURE_BLOB = "azure_blob"
+    DROPBOX = "dropbox"
+    GDRIVE = "gdrive"
+    BOX = "box"
+    ONEDRIVE = "onedrive"
+    OBJECT_TABLE = "object_table"
+    DATABASE = "database"
+    HTTP = "http"
+    RCLONE = "rclone"
+
+
+class StoreCapability(str, Enum):
+    """What a store backend supports, so resolvers dispatch by capability."""
+
+    BYTES_BY_PATH = "bytes_by_path"
+    BYTE_RANGE = "byte_range"
+    LIST = "list"
+    VERSIONED_SNAPSHOT = "versioned_snapshot"
+    QUERY = "query"
+
+
+_PATH_STORE_CAPABILITIES = [
+    StoreCapability.BYTES_BY_PATH,
+    StoreCapability.BYTE_RANGE,
+    StoreCapability.LIST,
+]
+_VERSIONED_PATH_STORE_CAPABILITIES = [*_PATH_STORE_CAPABILITIES, StoreCapability.VERSIONED_SNAPSHOT]
+
+
+def default_store_capabilities(kind: StoreKind) -> list[StoreCapability]:
+    """Default capability set for a store kind when none is supplied."""
+
+    if kind in {StoreKind.S3, StoreKind.GCS, StoreKind.AZURE_BLOB}:
+        return list(_VERSIONED_PATH_STORE_CAPABILITIES)
+    if kind is StoreKind.OBJECT_TABLE:
+        return [StoreCapability.VERSIONED_SNAPSHOT, StoreCapability.LIST]
+    if kind is StoreKind.DATABASE:
+        return [StoreCapability.QUERY]
+    if kind is StoreKind.HTTP:
+        return [StoreCapability.BYTES_BY_PATH, StoreCapability.BYTE_RANGE]
+    return list(_PATH_STORE_CAPABILITIES)
+
+
 class QuestionLinkRole(str, Enum):
     PRIMARY = "primary"
     SECONDARY = "secondary"
@@ -419,6 +469,8 @@ class ExternalArtifactReference(_DomainModel):
     source_system: str
     uri: str
     content_hash: str
+    store_name: str | None = None
+    locator: str | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
 
     @field_validator("source_system", "uri", "content_hash")
@@ -435,6 +487,44 @@ class ExternalArtifactReference(_DomainModel):
         if value is None:
             return {}
         return _normalize_external_metadata_mapping(value)
+
+    @model_validator(mode="after")
+    def _require_paired_store_fields(self) -> ExternalArtifactReference:
+        if (self.store_name is None) != (self.locator is None):
+            raise ValueError(
+                "store_name and locator must be provided together on an external "
+                "artifact reference."
+            )
+        return self
+
+    @classmethod
+    def for_store(
+        cls,
+        *,
+        store_name: str,
+        locator: str,
+        content_hash: str,
+        kind: ExternalArtifactKind = ExternalArtifactKind.ENTITY,
+        source_system: str = "store",
+        metadata: Mapping[str, Any] | None = None,
+    ) -> ExternalArtifactReference:
+        """Build a store-relative reference from explicit fields.
+
+        The ``store://<store_name>/<locator>`` URI is derived for display and
+        back-compatibility, while the structured ``store_name``/``locator`` fields
+        are what resolution reads — no URI string parsing required.
+        """
+
+        clean_locator = locator.strip().lstrip("/")
+        return cls(
+            kind=kind,
+            source_system=source_system,
+            uri=f"store://{store_name}/{clean_locator}",
+            content_hash=content_hash,
+            store_name=store_name,
+            locator=clean_locator,
+            metadata=dict(metadata or {}),
+        )
 
 
 class DatasetCommitManifestInput(_DomainModel):
@@ -1005,6 +1095,38 @@ class VisualizationAsset(_DomainModel):
     content_type: str
     size_bytes: int
     checksum: str
+
+
+class DataStore(_DomainModel):
+    """A registered durable data-store location Lab Tracker resolves against.
+
+    Lab Tracker stores *where* a store is (kind, root, endpoint) and a credential
+    *reference* — never a secret. Artifacts are addressed relative to a store via
+    ``store://<name>/<path>`` locators. A store is scoped to exactly one of a
+    project or a group (lab); a group-scoped store is inherited by every project
+    in that group.
+    """
+
+    store_id: UUID
+    project_id: UUID | None = None
+    group_id: UUID | None = None
+    name: str
+    kind: StoreKind
+    capabilities: list[StoreCapability] = Field(default_factory=list)
+    root: str
+    endpoint: str | None = None
+    credential_ref: str | None = None
+    is_default: bool = False
+    created_at: datetime = Field(default_factory=utc_now)
+    created_by: str | None = None
+    created_by_user_id: UUID | None = None
+    updated_at: datetime = Field(default_factory=utc_now)
+
+    @model_validator(mode="after")
+    def _exactly_one_scope(self) -> DataStore:
+        if (self.project_id is None) == (self.group_id is None):
+            raise ValueError("DataStore must be scoped to exactly one of project_id or group_id.")
+        return self
 
 
 class Visualization(_DomainModel):
