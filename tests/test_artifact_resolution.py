@@ -458,6 +458,37 @@ def test_rclone_resolver_can_resolve_only_rclone_scheme():
     )
 
 
+# --- ExternalArtifactReference.for_store (field form) ---------------------
+
+
+def test_external_artifact_reference_for_store_sets_fields_and_uri():
+    ref = ExternalArtifactReference.for_store(
+        store_name="lab-onedrive", locator="/exp/001/x.fcs", content_hash=_sha256(b"x")
+    )
+    assert ref.store_name == "lab-onedrive"
+    assert ref.locator == "exp/001/x.fcs"  # leading slash stripped
+    assert ref.uri == "store://lab-onedrive/exp/001/x.fcs"
+    assert ref.source_system == "store"
+
+
+def test_external_artifact_reference_rejects_unpaired_store_fields():
+    with pytest.raises(ValueError, match="together"):
+        ExternalArtifactReference(
+            source_system="store",
+            uri="store://lab/x",
+            content_hash=_sha256(b"x"),
+            store_name="lab",
+        )
+
+
+def test_external_artifact_reference_without_store_fields_is_valid():
+    ref = ExternalArtifactReference(
+        source_system="s3", uri="s3://bucket/key", content_hash=_sha256(b"x")
+    )
+    assert ref.store_name is None
+    assert ref.locator is None
+
+
 # --- store_relative_reference --------------------------------------------
 
 

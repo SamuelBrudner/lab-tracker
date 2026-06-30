@@ -469,6 +469,8 @@ class ExternalArtifactReference(_DomainModel):
     source_system: str
     uri: str
     content_hash: str
+    store_name: str | None = None
+    locator: str | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
 
     @field_validator("source_system", "uri", "content_hash")
@@ -485,6 +487,44 @@ class ExternalArtifactReference(_DomainModel):
         if value is None:
             return {}
         return _normalize_external_metadata_mapping(value)
+
+    @model_validator(mode="after")
+    def _require_paired_store_fields(self) -> ExternalArtifactReference:
+        if (self.store_name is None) != (self.locator is None):
+            raise ValueError(
+                "store_name and locator must be provided together on an external "
+                "artifact reference."
+            )
+        return self
+
+    @classmethod
+    def for_store(
+        cls,
+        *,
+        store_name: str,
+        locator: str,
+        content_hash: str,
+        kind: ExternalArtifactKind = ExternalArtifactKind.ENTITY,
+        source_system: str = "store",
+        metadata: Mapping[str, Any] | None = None,
+    ) -> ExternalArtifactReference:
+        """Build a store-relative reference from explicit fields.
+
+        The ``store://<store_name>/<locator>`` URI is derived for display and
+        back-compatibility, while the structured ``store_name``/``locator`` fields
+        are what resolution reads — no URI string parsing required.
+        """
+
+        clean_locator = locator.strip().lstrip("/")
+        return cls(
+            kind=kind,
+            source_system=source_system,
+            uri=f"store://{store_name}/{clean_locator}",
+            content_hash=content_hash,
+            store_name=store_name,
+            locator=clean_locator,
+            metadata=dict(metadata or {}),
+        )
 
 
 class DatasetCommitManifestInput(_DomainModel):

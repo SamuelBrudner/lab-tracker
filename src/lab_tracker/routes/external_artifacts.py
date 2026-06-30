@@ -98,13 +98,25 @@ def _materialize_reference(
     kind is not resolvable yet.
     """
 
+    # Prefer the structured field form; fall back to parsing a store:// URI.
+    if ref.store_name is not None and ref.locator is not None:
+        return _resolve_store(request, ref, project_id, ref.store_name, ref.locator)
     parsed = urlsplit(ref.uri)
     if parsed.scheme.lower() != "store":
         return ref
     name = parsed.netloc
-    path = parsed.path.lstrip("/")
     if not name:
         return unresolved(ref, detail="Store locator is missing a store name.")
+    return _resolve_store(request, ref, project_id, name, parsed.path.lstrip("/"))
+
+
+def _resolve_store(
+    request: Request,
+    ref: ExternalArtifactReference,
+    project_id: UUID,
+    name: str,
+    path: str,
+) -> ExternalArtifactReference | ResolvedArtifact:
     store = repository_from_request(request).data_stores.get_by_name(project_id, name)
     if store is None:
         return unresolved(ref, detail=f"No data store named '{name}' in this project.")

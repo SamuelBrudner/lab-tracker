@@ -214,6 +214,68 @@ def test_resolve_endpoint_resolves_store_locator(client, admin_auth_headers, tmp
     assert body["uri"] == (tmp_path / "exp" / "x.txt").as_uri()
 
 
+def test_resolve_endpoint_uses_store_field_form(client, admin_auth_headers, tmp_path):
+    data = b"resolved through the structured store fields"
+    (tmp_path / "exp").mkdir()
+    (tmp_path / "exp" / "x.txt").write_bytes(data)
+    _install_local_registry(client, tmp_path)
+
+    project_id = client.post(
+        "/projects", json={"name": "Field form project"}, headers=admin_auth_headers
+    ).json()["data"]["project_id"]
+    _create_store(
+        client,
+        admin_auth_headers,
+        project_id=project_id,
+        name="lab-fs",
+        kind="local_fs",
+        root=str(tmp_path),
+    )
+    question_id = client.post(
+        "/questions",
+        json={
+            "project_id": project_id,
+            "text": "Field form?",
+            "question_type": "descriptive",
+            "status": "active",
+        },
+        headers=admin_auth_headers,
+    ).json()["data"]["question_id"]
+    # The structured store_name/locator fields drive resolution; the URI names a
+    # different (non-existent) store to prove the fields take precedence.
+    dataset_id = client.post(
+        "/datasets",
+        json={
+            "project_id": project_id,
+            "primary_question_id": question_id,
+            "status": "committed",
+            "commit_manifest": {
+                "external_artifacts": [
+                    {
+                        "source_system": "store",
+                        "uri": "store://wrong-store/exp/x.txt",
+                        "content_hash": _sha256(data),
+                        "store_name": "lab-fs",
+                        "locator": "exp/x.txt",
+                    }
+                ]
+            },
+        },
+        headers=admin_auth_headers,
+    ).json()["data"]["dataset_id"]
+
+    response = client.post(
+        "/external-artifacts/resolve",
+        json={"entity_type": "dataset", "entity_id": dataset_id},
+        headers=admin_auth_headers,
+    )
+
+    assert response.status_code == 200, response.text
+    body = response.json()["data"]
+    assert body["status"] == "verified"
+    assert base64.b64decode(body["content_base64"]) == data
+
+
 def test_resolve_endpoint_unknown_store_is_unresolved(client, admin_auth_headers, tmp_path):
     _install_local_registry(client, tmp_path)
     project_id = client.post(
