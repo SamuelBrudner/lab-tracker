@@ -26,14 +26,27 @@ or run:
 powershell -ExecutionPolicy Bypass -File scripts/install-daily-review.ps1
 ```
 
-**macOS / Linux**:
+**macOS (recommended)** — install a launchd LaunchAgent (survives reboots, runs
+in your user session, managed with `launchctl`):
+
+```sh
+scripts/install-daily-review-launchd.sh
+```
+
+**Linux (or macOS via cron)**:
 
 ```sh
 scripts/install-daily-review.sh
 ```
 
-That registers a scheduled job (a Windows Scheduled Task, or a `cron` entry) that
-nudges the review every 15 minutes. Re-running it just updates the existing job.
+That registers a scheduled job (a Windows Scheduled Task, a launchd LaunchAgent,
+or a `cron` entry) that nudges the review every 15 minutes. Re-running it just
+updates the existing job. Both \*nix installers take the same optional arguments
+(`[interval_minutes] [base_url]`); when auth is enabled they read
+`LAB_TRACKER_ADMIN_USER` / `LAB_TRACKER_ADMIN_PASS` from the environment. The
+launchd installer writes those credentials to a `0600` file
+(`~/.config/lab-tracker/daily-review.env`) that the agent sources at run time,
+rather than into the world-readable plist.
 
 ### One thing to turn on first
 
@@ -55,7 +68,8 @@ Then review the queue at `/app/batches`.
 ### Remove it
 
 - **Windows:** `Unregister-ScheduledTask -TaskName LabTrackerDailyReview -Confirm:$false`
-- **macOS / Linux:** `crontab -l | grep -v '# lab-tracker-daily-review' | crontab -`
+- **macOS (launchd):** `launchctl bootout gui/$(id -u)/com.lab-tracker.daily-review; rm ~/Library/LaunchAgents/com.lab-tracker.daily-review.plist ~/.config/lab-tracker/daily-review.env`
+- **Linux / cron:** `crontab -l | grep -v '# lab-tracker-daily-review' | crontab -`
 
 ---
 
