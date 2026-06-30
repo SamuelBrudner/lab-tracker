@@ -268,6 +268,11 @@ Shipped (project-scoped slice):
   own store first, then its group's, so `store://` resolution inherits with no
   endpoint change. Group stores require group-owner RBAC; a project's listing
   returns its effective (own + inherited) set.
+- ✅ Structured field form: `ExternalArtifactReference` carries optional
+  `store_name` + `locator` (paired) with a `for_store(...)` constructor, so a
+  store-relative artifact is addressed by explicit fields instead of a parsed
+  `store://` URI. Resolution prefers the fields and falls back to the URI; the
+  field is the store *name* (not a UUID), matching name-based resolution.
 
 Deferred:
 
@@ -275,8 +280,6 @@ Deferred:
   reads (S3 `versionId`, Iceberg/Delta) and the `database` (`query → rows`)
   adapter — `store_relative_reference` returns `None` for `object_table`/
   `database` today, surfacing as a clean `UNRESOLVED`.
-- ⏭️ A `store_id`+`locator` form on `ExternalArtifactReference` (the current
-  locator travels in `uri`).
 
 ## Suggested first slice
 
