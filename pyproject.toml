@@ -24,6 +24,7 @@ dependencies = [
 test = [
   "pytest",
   "pytest-cov",
+  "pytest-xdist",
 ]
 lint = [
   "ruff",
@@ -61,7 +62,11 @@ allow_env_creation = true
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]
-addopts = ["--cov=lab_tracker"]
+# -n auto parallelises across CPU cores (pytest-xdist); tests use isolated
+# per-test in-memory/tmp databases, so parallel workers do not collide.
+# Measured on 4 cores: full suite ~11min -> ~3min. Override with `-n0` to
+# force serial (e.g. for pdb/debugging a single test).
+addopts = ["--cov=lab_tracker", "-n", "auto"]
 markers = [
   "postgres: requires LAB_TRACKER_POSTGRES_TEST_DATABASE_URL and a reachable Postgres server",
 ]
