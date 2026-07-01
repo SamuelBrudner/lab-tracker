@@ -405,7 +405,7 @@ def test_ownership_reassignment_moves_all_attribution_surfaces():
     analysis = session.get(AnalysisModel, str(analysis_id))
     assert analysis is not None
     assert analysis.executed_by == to_user
-    assert analysis.executed_by_user_id == to_user
+    assert str(analysis.executed_by_user_id) == to_user
 
 
 def test_ownership_reassignment_route_records_audit_and_requires_admin(

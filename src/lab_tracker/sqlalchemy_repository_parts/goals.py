@@ -44,7 +44,7 @@ class SQLAlchemyGoalRepository(EntityRepository[Goal]):
     def goals_from_rows(self, rows: list[GoalModel]) -> list[Goal]:
         goal_ids = [row.goal_id for row in rows]
         links = self.link_map(goal_ids)
-        return [goal_from_model(row, links=links.get(row.goal_id, [])) for row in rows]
+        return [goal_from_model(row, links=links.get(str(row.goal_id), [])) for row in rows]
 
     def get(self, entity_id: UUID) -> Goal | None:
         self._session.flush()

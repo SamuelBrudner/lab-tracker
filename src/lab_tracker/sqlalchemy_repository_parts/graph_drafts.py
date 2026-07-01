@@ -310,7 +310,7 @@ class SQLAlchemyGraphChangeSetRepository(EntityRepository[GraphChangeSet]):
             change_set_from_model(
                 row,
                 operations=operation_map.get(str(row.change_set_id), []),
-                operation_count=operation_counts.get(row.change_set_id, 0),
+                operation_count=operation_counts.get(str(row.change_set_id), 0),
                 usernames=usernames,
             )
             for row in rows

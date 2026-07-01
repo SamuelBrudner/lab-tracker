@@ -176,7 +176,7 @@ class SQLAlchemyDataStoreRepository(EntityRepository[DataStore]):
         )
         keep = str(except_store_id) if except_store_id is not None else None
         for row in rows:
-            if row.store_id != keep:
+            if str(row.store_id) != keep:
                 row.is_default = False
         self._session.flush()
 

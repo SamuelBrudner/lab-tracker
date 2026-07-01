@@ -94,7 +94,7 @@ def test_consume_enrollment_issues_device_token_and_marks_offer_consumed(session
         row = session.get(DeviceEnrollmentModel, str(offer.enrollment_id))
         assert row is not None
         assert row.consumed_at is not None
-        assert row.consumed_device_token_id == str(issued.device_token.device_token_id)
+        assert str(row.consumed_device_token_id) == str(issued.device_token.device_token_id)
 
 
 def test_consume_enrollment_rejects_expired_offer(session_factory):
@@ -171,7 +171,7 @@ def test_consume_enrollment_allows_only_one_concurrent_consumer(session_factory)
         row = session.get(DeviceEnrollmentModel, str(offer.enrollment_id))
         assert len(token_rows) == 1
         assert row is not None
-        assert row.consumed_device_token_id == issued_ids[0]
+        assert str(row.consumed_device_token_id) == issued_ids[0]
 
 
 def test_consume_enrollment_rejects_unknown_or_malformed_offers(session_factory):
