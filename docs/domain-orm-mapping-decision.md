@@ -161,3 +161,55 @@ captured by the `api_parts/` mixin split.
 - Should enum columns adopt SQLAlchemy's native `Enum` (a DB-level constraint) or
   a plain string-backed decorator? String-backed avoids enum-alter migrations
   and matches current storage; recommended for the first pass.
+
+## Revision — findings from the attempted sweep (2026-07-01)
+
+Steps 1–3 of the rollout landed cleanly and are committed:
+
+- **`t4x0.5`** mapping-completeness test (`tests/test_mapper_completeness.py`).
+- **`t4x0.6`** `db_types.py` (`GUID`, `EnumType`, `UtcDateTime`) + unit tests.
+- **`t4x0.7`** `Session` migrated end-to-end; full suite green.
+
+Step 4 (the full sweep, `t4x0.8`) was attempted and then **reverted**, because it
+falsified this ADR's central premise that the change is *storage-layer-local with
+no call-site churn*. Migrating every entity's columns broke **~60+ call sites
+across 20 files**, all because ORM id/enum attributes are consumed as **strings**
+throughout the codebase, not only inside the mapper:
+
+1. **`UUID(row.x)`** — 45 sites in `auth.py`, routes, and repository join-code.
+   Once the column returns a `UUID`, `UUID(uuid)` raises. (A tolerant
+   `ensure_uuid()` coercion fixes these, but they must be found.)
+2. **Python-level `row.<id> == str(x)`** — 5 sites (e.g. `auth.py` PAT/device
+   revoke). A loaded `UUID` never equals a `str`, so these silently invert
+   (raising spurious `NotFound`). Note: SQLAlchemy `.where(Model.col == str(x))`
+   query expressions are **safe** — the column type binds the value.
+3. **Dicts/sets keyed by `row.<id>`** in repository join-processing
+   (`analyses.py`, `exploration.py`, `graph_batches.py`, …). The fill side
+   becomes `UUID`-keyed while the lookup side stays `str`-keyed, so counts/joins
+   silently return empty (observed: `operation_count == 0`, default store lost).
+4. **`UtcDateTime` shifts `onupdate` timing.** Returning *aware* datetimes makes a
+   re-assigned `updated_at` compare equal to the loaded value, so SQLAlchemy drops
+   it from the UPDATE and the `onupdate=_utc_now` fallback fires. Benign in
+   production (services call `updated_at = utc_now()` before saving) but it
+   changes behaviour for any caller that pins timestamps.
+
+Enum migration itself proved **safe** — every enum is a `str, Enum`, so
+`member == "value"` holds and query binds accept raw strings.
+
+**Revised guidance:**
+
+- This is a **coordinated cross-cutting migration**, not a mechanical column
+  swap. Do it **per entity**: migrate the entity's columns, fix *its* consuming
+  call sites (audit `UUID(<attr>)`, `<attr> == str(...)`, and id-keyed
+  dict/set fills), clean its mapper, and confirm the full suite green — exactly
+  as `Session` was done. `Session` worked precisely because nothing consumed its
+  ids via those idioms in covered paths.
+- Introduce a tolerant `ensure_uuid()` helper first to make the id call-sites
+  safe during transition.
+- **Reconsider priority.** The payoff is removing ~300 mapper conversions, but the
+  cost is auditing id-consumption across auth/routes/repository. The string-id ORM
+  is a working status quo; this cleanup is legitimately **lower priority** than the
+  test-suite and facade wins already landed, and should only proceed entity-by-
+  entity with the completeness test + full suite as the gate. A safer first target
+  than a broad sweep may be to migrate only entities whose ids are *not* consumed
+  outside the mapper.
