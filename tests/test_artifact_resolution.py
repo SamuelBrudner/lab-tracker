@@ -12,6 +12,7 @@ from lab_tracker.artifact_resolution import (
     LocalFilesystemResolver,
     RcloneCompleted,
     RcloneResolver,
+    RecoveryPolicy,
     ResolutionStatus,
     ResolvedArtifact,
     ResolverRegistry,
@@ -20,6 +21,7 @@ from lab_tracker.artifact_resolution import (
     default_registry,
     is_verifiable_hash,
     parse_content_hash,
+    registry_from_env,
     store_relative_reference,
 )
 from lab_tracker.models import DataStore, ExternalArtifactReference, StoreKind
@@ -690,4 +692,160 @@ def test_resolved_artifact_to_json_dict_omits_raw_bytes(tmp_path):
     assert payload["returned_bytes"] == len(data)
     assert payload["size_bytes"] == len(data)
     assert "content" not in payload
-    assert payload["observed_hash"] == _sha256(data)
+
+
+# --- content-hash recovery of moved/renamed local artifacts ---------------
+
+
+def test_recovery_finds_moved_file_by_hash(tmp_path):
+    root = tmp_path / "store"
+    root.mkdir()
+    data = b"analysis output that was moved"
+    moved = root / "new" / "result.csv"
+    moved.parent.mkdir(parents=True)
+    moved.write_bytes(data)
+    missing = root / "old" / "result.csv"  # never existed here
+    resolver = LocalFilesystemResolver(
+        allowed_roots=[root], recovery=RecoveryPolicy(enabled=True)
+    )
+
+    result = resolver.resolve(_local_ref(missing, _sha256(data)))
+
+    assert result.status is ResolutionStatus.VERIFIED
+    assert result.content == data
+    assert result.observed_hash == _sha256(data)
+    assert "Recovered from" in (result.detail or "")
+
+
+def test_recovery_finds_renamed_file_by_hash(tmp_path):
+    root = tmp_path / "store"
+    root.mkdir()
+    data = b"same bytes, different name"
+    (root / "result_final.csv").write_bytes(data)
+    missing = root / "result.csv"
+    resolver = LocalFilesystemResolver(
+        allowed_roots=[root], recovery=RecoveryPolicy(enabled=True)
+    )
+
+    result = resolver.resolve(_local_ref(missing, _sha256(data)))
+
+    assert result.status is ResolutionStatus.VERIFIED
+    assert result.content == data
+
+
+def test_recovery_disabled_by_default_stays_unresolved(tmp_path):
+    root = tmp_path / "store"
+    root.mkdir()
+    data = b"present but recovery off"
+    (root / "moved.bin").write_bytes(data)
+    missing = root / "gone.bin"
+    resolver = LocalFilesystemResolver(allowed_roots=[root])  # recovery defaults off
+
+    result = resolver.resolve(_local_ref(missing, _sha256(data)))
+
+    assert result.status is ResolutionStatus.UNRESOLVED
+    assert "not found" in (result.detail or "").lower()
+
+
+def test_recovery_requires_allowed_roots(tmp_path):
+    # Enabled but unscoped: must not walk the whole filesystem.
+    data = b"unscoped recovery is refused"
+    (tmp_path / "present.bin").write_bytes(data)
+    missing = tmp_path / "gone.bin"
+    resolver = LocalFilesystemResolver(recovery=RecoveryPolicy(enabled=True))
+
+    result = resolver.resolve(_local_ref(missing, _sha256(data)))
+
+    assert result.status is ResolutionStatus.UNRESOLVED
+
+
+def test_recovery_never_reads_outside_allowed_roots(tmp_path):
+    root = tmp_path / "store"
+    root.mkdir()
+    data = b"secret bytes outside the store"
+    outside = tmp_path / "elsewhere" / "secret.bin"
+    outside.parent.mkdir()
+    outside.write_bytes(data)
+    missing = root / "gone.bin"
+    resolver = LocalFilesystemResolver(
+        allowed_roots=[root], recovery=RecoveryPolicy(enabled=True)
+    )
+
+    result = resolver.resolve(_local_ref(missing, _sha256(data)))
+
+    assert result.status is ResolutionStatus.UNRESOLVED
+
+
+def test_recovery_does_not_falsely_match_same_name_different_bytes(tmp_path):
+    root = tmp_path / "store"
+    root.mkdir()
+    (root / "result.csv").write_bytes(b"a decoy with the same name")
+    missing = root / "sub" / "result.csv"
+    resolver = LocalFilesystemResolver(
+        allowed_roots=[root], recovery=RecoveryPolicy(enabled=True)
+    )
+
+    result = resolver.resolve(_local_ref(missing, _sha256(b"the real content")))
+
+    assert result.status is ResolutionStatus.UNRESOLVED
+
+
+def test_recovery_respects_byte_budget(tmp_path):
+    root = tmp_path / "store"
+    root.mkdir()
+    data = b"z" * 1024
+    (root / "moved.bin").write_bytes(data)
+    missing = root / "gone.bin"
+    resolver = LocalFilesystemResolver(
+        allowed_roots=[root],
+        recovery=RecoveryPolicy(enabled=True, max_bytes=16),
+    )
+
+    result = resolver.resolve(_local_ref(missing, _sha256(data)))
+
+    assert result.status is ResolutionStatus.UNRESOLVED
+
+
+def test_recovery_respects_file_budget(tmp_path):
+    root = tmp_path / "store"
+    root.mkdir()
+    data = b"budget exhausted before hashing"
+    (root / "result.csv").write_bytes(data)
+    missing = root / "sub" / "result.csv"
+    resolver = LocalFilesystemResolver(
+        allowed_roots=[root],
+        recovery=RecoveryPolicy(enabled=True, max_files=0),
+    )
+
+    result = resolver.resolve(_local_ref(missing, _sha256(data)))
+
+    assert result.status is ResolutionStatus.UNRESOLVED
+
+
+def test_registry_from_env_enables_recovery(tmp_path, monkeypatch):
+    root = tmp_path / "store"
+    root.mkdir()
+    data = b"recovery wired through the environment"
+    (root / "moved.bin").write_bytes(data)
+    missing = root / "gone.bin"
+    monkeypatch.setenv("LAB_TRACKER_RESOLVER_ALLOWED_ROOTS", str(root))
+    monkeypatch.setenv("LAB_TRACKER_RESOLVER_RECOVERY", "1")
+
+    result = registry_from_env().resolve(_local_ref(missing, _sha256(data)))
+
+    assert result.status is ResolutionStatus.VERIFIED
+    assert result.content == data
+
+
+def test_registry_from_env_recovery_off_by_default(tmp_path, monkeypatch):
+    root = tmp_path / "store"
+    root.mkdir()
+    data = b"present but env flag unset"
+    (root / "moved.bin").write_bytes(data)
+    missing = root / "gone.bin"
+    monkeypatch.setenv("LAB_TRACKER_RESOLVER_ALLOWED_ROOTS", str(root))
+    monkeypatch.delenv("LAB_TRACKER_RESOLVER_RECOVERY", raising=False)
+
+    result = registry_from_env().resolve(_local_ref(missing, _sha256(data)))
+
+    assert result.status is ResolutionStatus.UNRESOLVED

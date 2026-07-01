@@ -31,8 +31,8 @@ import json
 import mimetypes
 import os
 from abc import ABC, abstractmethod
-from collections.abc import Callable, Iterable, Sequence
-from dataclasses import dataclass
+from collections.abc import Callable, Iterable, Iterator, Sequence
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
@@ -60,6 +60,30 @@ _HTTP_SCHEMES = frozenset({"http", "https"})
 DEFAULT_MAX_FETCH_BYTES = 64 * 1024 * 1024
 
 _STREAM_CHUNK_SIZE = 1024 * 1024
+
+# Recovery search: when a local artifact is missing at its URI (moved/renamed),
+# optionally scan the resolver's allowed roots for a file whose content hash
+# matches the reference, and return it VERIFIED instead of UNRESOLVED. Opt-in and
+# bounded — see :class:`RecoveryPolicy` and :class:`LocalFilesystemResolver`.
+DEFAULT_RECOVERY_MAX_FILES = 4096
+DEFAULT_RECOVERY_MAX_BYTES = 512 * 1024 * 1024
+
+
+@dataclass(frozen=True)
+class RecoveryPolicy:
+    """Bounds a content-hash recovery scan of a resolver's allowed roots.
+
+    Recovery only runs when ``enabled`` *and* the resolver was given explicit
+    allowed roots to scope the walk. ``max_files`` caps how many candidate files
+    the scan may examine and ``max_bytes`` how many bytes it may hash before
+    giving up (falling back to UNRESOLVED, i.e. today's behaviour). The integrity
+    gate is never relaxed: a recovered file is still verified by recomputing its
+    full digest before its bytes are returned.
+    """
+
+    enabled: bool = False
+    max_files: int = DEFAULT_RECOVERY_MAX_FILES
+    max_bytes: int = DEFAULT_RECOVERY_MAX_BYTES
 
 
 class ResolutionStatus(str, Enum):
@@ -361,9 +385,20 @@ class LocalFilesystemResolver(ArtifactResolver):
     URIs. ``allowed_roots`` constrains which directories may be read; when set, a
     path that escapes every root (after symlink resolution) is refused as
     UNRESOLVED, so resolution cannot be used to read arbitrary host files.
+
+    When ``recovery`` is enabled and allowed roots are configured, a reference
+    whose file is missing at its URI (moved/renamed) triggers a bounded
+    content-hash search of those roots: a file whose recomputed digest matches
+    the reference is returned VERIFIED instead of UNRESOLVED. The scan never
+    reads outside the allowed roots and never relaxes the integrity gate.
     """
 
-    def __init__(self, allowed_roots: Sequence[str | Path] | None = None) -> None:
+    def __init__(
+        self,
+        allowed_roots: Sequence[str | Path] | None = None,
+        *,
+        recovery: RecoveryPolicy | None = None,
+    ) -> None:
         self._allowed_roots: list[str] | None
         if allowed_roots is None:
             self._allowed_roots = None
@@ -371,6 +406,7 @@ class LocalFilesystemResolver(ArtifactResolver):
             self._allowed_roots = [
                 os.path.realpath(Path(root).expanduser()) for root in allowed_roots
             ]
+        self._recovery = recovery or RecoveryPolicy()
 
     def can_resolve(self, ref: ExternalArtifactReference) -> bool:
         if ref.source_system.strip().lower() in _LOCAL_SOURCE_SYSTEMS:
@@ -404,6 +440,11 @@ class LocalFilesystemResolver(ArtifactResolver):
         if not self._within_allowed_roots(real_path):
             return _unresolved(ref, detail="Path is outside the allowed resolver roots.")
         if not os.path.isfile(real_path):
+            recovered = self._recover_by_hash(
+                ref, max_bytes=max_bytes, window=window, missing_path=real_path
+            )
+            if recovered is not None:
+                return recovered
             return _unresolved(ref, detail="Local artifact not found.")
 
         algorithm, _ = parse_content_hash(ref.content_hash)
@@ -444,6 +485,93 @@ class LocalFilesystemResolver(ArtifactResolver):
             real_path == root or real_path.startswith(root + os.sep)
             for root in self._allowed_roots
         )
+
+    def _recover_by_hash(
+        self,
+        ref: ExternalArtifactReference,
+        *,
+        max_bytes: int,
+        window: tuple[int, int] | None,
+        missing_path: str,
+    ) -> ResolvedArtifact | None:
+        """Search the allowed roots for a file whose content matches ``ref``.
+
+        Returns a VERIFIED result recovered from a different path, or ``None``
+        when recovery is disabled, unscoped (no allowed roots), or nothing
+        matches within the :class:`RecoveryPolicy` budget. Callers reach this
+        only after the hash was confirmed verifiable and the URI's own file was
+        missing, so a match is exactly as trustworthy as one found at the URI.
+        """
+
+        if not self._recovery.enabled or not self._allowed_roots:
+            return None
+
+        algorithm, expected_digest = parse_content_hash(ref.content_hash)
+        target_name = os.path.basename(missing_path) or None
+
+        considered = 0
+        hashed_bytes = 0
+        # Two passes so a moved file that kept its name is found first and
+        # cheaply; skip the name-first pass when we have no basename to match.
+        passes = (True, False) if target_name is not None else (False,)
+        for prefer_name in passes:
+            for candidate in self._iter_candidate_files(target_name, prefer_name):
+                considered += 1
+                if considered > self._recovery.max_files:
+                    return None
+                real = os.path.realpath(candidate)
+                if not self._within_allowed_roots(real):
+                    continue
+                try:
+                    size = os.path.getsize(real)
+                except OSError:
+                    continue
+                if hashed_bytes + size > self._recovery.max_bytes:
+                    continue
+                try:
+                    content, total, truncated, observed = _hash_and_collect(
+                        _read_file_chunks(real),
+                        algorithm=algorithm,
+                        max_bytes=max_bytes,
+                        window=window,
+                    )
+                except OSError:
+                    continue
+                hashed_bytes += total
+                if parse_content_hash(observed)[1] != expected_digest:
+                    continue
+                content_type, _ = mimetypes.guess_type(real)
+                resolved = _build_resolved(
+                    ref,
+                    observed=observed,
+                    content=content,
+                    total=total,
+                    truncated=truncated,
+                    content_type=content_type or "application/octet-stream",
+                )
+                return replace(
+                    resolved,
+                    detail=f"Recovered from {real} (differs from reference URI).",
+                )
+        return None
+
+    def _iter_candidate_files(
+        self, target_name: str | None, prefer_name: bool
+    ) -> Iterator[str]:
+        """Yield files under the allowed roots for one recovery pass.
+
+        ``prefer_name`` True yields only files whose basename equals
+        ``target_name`` (the fast common case of a rename that kept the name);
+        False yields the remainder. Symlinks are not followed during the walk.
+        """
+
+        for root in self._allowed_roots or []:
+            for dirpath, _dirs, files in os.walk(root):
+                for name in files:
+                    is_match = target_name is not None and name == target_name
+                    if prefer_name != is_match:
+                        continue
+                    yield os.path.join(dirpath, name)
 
 
 class HttpResolver(ArtifactResolver):
@@ -762,17 +890,20 @@ def _build_resolved(
 def default_registry(
     *,
     allowed_roots: Sequence[str | Path] | None = None,
+    recovery: RecoveryPolicy | None = None,
 ) -> ResolverRegistry:
     """Build a registry with the adapters available in this slice.
 
     Local-filesystem, HTTP(S), and rclone resolvers. The rclone adapter degrades
     to UNRESOLVED when the binary is absent, so including it is safe by default.
     Native store-backed adapters (s3, ssh, database) register here as they land.
+    ``recovery`` opts the local resolver into content-hash recovery of missing
+    files within ``allowed_roots``.
     """
 
     return ResolverRegistry(
         [
-            LocalFilesystemResolver(allowed_roots=allowed_roots),
+            LocalFilesystemResolver(allowed_roots=allowed_roots, recovery=recovery),
             HttpResolver(),
             RcloneResolver(),
         ]
@@ -785,6 +916,45 @@ def default_registry(
 # resolution is unaffected.
 LAB_TRACKER_RESOLVER_ALLOWED_ROOTS_ENV = "LAB_TRACKER_RESOLVER_ALLOWED_ROOTS"
 
+# Opt-in flag for content-hash recovery of missing local artifacts (off unless
+# truthy). Recovery still only runs when allowed roots are configured. The two
+# budget vars override the RecoveryPolicy defaults when set to a positive int.
+LAB_TRACKER_RESOLVER_RECOVERY_ENV = "LAB_TRACKER_RESOLVER_RECOVERY"
+LAB_TRACKER_RESOLVER_RECOVERY_MAX_FILES_ENV = "LAB_TRACKER_RESOLVER_RECOVERY_MAX_FILES"
+LAB_TRACKER_RESOLVER_RECOVERY_MAX_BYTES_ENV = "LAB_TRACKER_RESOLVER_RECOVERY_MAX_BYTES"
+
+_TRUTHY = frozenset({"1", "true", "yes", "on"})
+
+
+def _env_flag(value: str | None) -> bool:
+    return value is not None and value.strip().lower() in _TRUTHY
+
+
+def _env_positive_int(value: str | None, default: int) -> int:
+    if value is None:
+        return default
+    try:
+        parsed = int(value.strip())
+    except ValueError:
+        return default
+    return parsed if parsed > 0 else default
+
+
+def recovery_from_env() -> RecoveryPolicy:
+    """Build a :class:`RecoveryPolicy` from the resolver recovery env vars."""
+
+    return RecoveryPolicy(
+        enabled=_env_flag(os.environ.get(LAB_TRACKER_RESOLVER_RECOVERY_ENV)),
+        max_files=_env_positive_int(
+            os.environ.get(LAB_TRACKER_RESOLVER_RECOVERY_MAX_FILES_ENV),
+            DEFAULT_RECOVERY_MAX_FILES,
+        ),
+        max_bytes=_env_positive_int(
+            os.environ.get(LAB_TRACKER_RESOLVER_RECOVERY_MAX_BYTES_ENV),
+            DEFAULT_RECOVERY_MAX_BYTES,
+        ),
+    )
+
 
 def registry_from_env() -> ResolverRegistry:
     """Build the default registry, reading allowed local roots from the env."""
@@ -793,4 +963,6 @@ def registry_from_env() -> ResolverRegistry:
     allowed_roots = (
         [part for part in raw.split(os.pathsep) if part.strip()] if raw else []
     )
-    return default_registry(allowed_roots=allowed_roots)
+    return default_registry(
+        allowed_roots=allowed_roots, recovery=recovery_from_env()
+    )

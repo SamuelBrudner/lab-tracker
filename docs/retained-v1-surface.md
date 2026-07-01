@@ -116,6 +116,11 @@ research record:
   these documents as self-contained sidecar files that survive without a running
   instance, optionally co-located next to the data files they describe. See
   [provenance-export.md](provenance-export.md).
+- On-demand resolution of external artifact references (content hash is the
+  integrity gate). Local resolution optionally recovers a moved/renamed file by
+  its content hash within operator-configured `allowed_roots`
+  (`LAB_TRACKER_RESOLVER_RECOVERY`, off by default, bounded, read-only). See
+  [external-artifact-resolution-design.md](external-artifact-resolution-design.md).
 - Read-only assistant and MCP decision-context endpoints over the retained
   graph. Assistants may inspect context through these surfaces, but retained v1
   does not delegate graph commits to autonomous agents.
