@@ -4,6 +4,75 @@ This document describes the active runtime boundaries only. Compatibility
 surfaces that still exist for historical data handling or staged cleanup are
 intentionally omitted unless they participate in the retained v1 runtime.
 
+## Architecture at a Glance
+
+A request traverses five layers. Every route reaches the rest of the system
+through a single per-request `LabTrackerAPI` facade; entities are represented as
+Pydantic domain models and SQLAlchemy ORM rows with an explicit mapper seam
+between them.
+
+```mermaid
+flowchart TD
+    client(["HTTP client · PWA · MCP · lt CLI"])
+
+    subgraph edge["Edge"]
+      mw["DB middleware<br/>app_parts/middleware.py<br/>opens request-scoped repo + LabTrackerRequestScope"]
+    end
+
+    routes["33 route modules · 166 endpoints<br/>routes/*.py"]
+
+    facade[["LabTrackerAPI facade<br/>api.py · 164 methods<br/>attached per request via api_from_request()"]]
+
+    subgraph app["Application / domain services"]
+      services["26 services · ~11k LOC<br/>services/*.py"]
+    end
+
+    subgraph data["Persistence"]
+      repo["18 repository parts · ~5.3k LOC<br/>sqlalchemy_repository_parts/*"]
+      orm[("44 ORM tables<br/>db_models.py")]
+    end
+
+    mappers{{"sqlalchemy_mappers.py<br/>37 domain to/from ORM fns"}}
+    domain["Pydantic domain models<br/>models.py"]
+
+    prov["provenance.py / provenance_ingestion.py<br/>PROV-O · JSON-LD export/ingest"]
+    usage[("usage_events sink<br/>local telemetry")]
+
+    client --> mw --> routes
+    routes -->|api_from_request| facade
+    facade --> services
+    services --> repo
+    repo --> orm
+    orm <--> mappers
+    mappers <--> domain
+    services -.-> domain
+    facade -.-> prov
+    services -.->|record_usage_event| usage
+
+    classDef chokepoint fill:#ffe0b2,stroke:#e65100,stroke-width:2px;
+    classDef seam fill:#e1f5fe,stroke:#0277bd;
+    class facade chokepoint;
+    class mappers,domain seam;
+```
+
+Reading the diagram:
+
+- **`LabTrackerAPI` (orange) is the central chokepoint.** All 33 route modules
+  delegate to this one per-request facade rather than importing services
+  directly, so it concentrates both wiring and change-risk. The scope machinery
+  that owns it is described under [Request Context Lifecycle](#request-context-lifecycle).
+- **The mapper + domain-model seam (blue) is the largest structural multiplier.**
+  Each retained entity exists as a Pydantic domain type (`models.py`) and a
+  SQLAlchemy row (`db_models.py`), joined by hand-written translators in
+  `sqlalchemy_mappers.py`. This buys persistence-independent domain types at the
+  cost of touching several layers per field change.
+- **`provenance.py` and the `usage_events` sink are side outputs**, not part of
+  the main read/write path — PROV-O export and local telemetry hang off the
+  facade and services respectively.
+
+Counts are approximate and drift as the code evolves; treat them as
+orientation, not a contract.
+
 ## Request Context Lifecycle
 
 Each HTTP request gets an explicit `LabTrackerRequestContext` in
