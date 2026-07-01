@@ -21,7 +21,7 @@ flowchart TD
 
     routes["33 route modules · 166 endpoints<br/>routes/*.py"]
 
-    facade[["LabTrackerAPI facade<br/>api.py · 164 methods<br/>attached per request via api_from_request()"]]
+    facade[["LabTrackerAPI facade<br/>api.py + api_parts/ mixins<br/>composition root + request scope<br/>attached per request via api_from_request()"]]
 
     subgraph app["Application / domain services"]
       services["26 services · ~11k LOC<br/>services/*.py"]
@@ -57,10 +57,23 @@ flowchart TD
 
 Reading the diagram:
 
-- **`LabTrackerAPI` (orange) is the central chokepoint.** All 33 route modules
-  delegate to this one per-request facade rather than importing services
-  directly, so it concentrates both wiring and change-risk. The scope machinery
-  that owns it is described under [Request Context Lifecycle](#request-context-lifecycle).
+- **`LabTrackerAPI` (orange) is the external boundary.** All 33 route modules
+  reach the services through this one per-request facade rather than importing
+  services directly. This is deliberate: the facade is the single place where
+  cross-cutting usage telemetry fires *exactly once per external call*. Services
+  call each other's methods directly for internal composition (e.g.
+  `graph_draft_applier` creating a claim), and those internal calls intentionally
+  do **not** emit usage events — so telemetry cannot be pushed down into the
+  service methods without double-counting. The scope machinery that owns the
+  facade is described under [Request Context Lifecycle](#request-context-lifecycle).
+- **The facade is composed, not monolithic.** `api.py` holds only the
+  composition root (`_compose_services`) and the request-scope lifecycle. The
+  ~150 delegation methods live in per-domain mixins under
+  [`src/lab_tracker/api_parts`](../src/lab_tracker/api_parts) (`projects.py`,
+  `notes.py`, `graph_drafts.py`, …), which `LabTrackerAPI` inherits. A change to
+  one domain's surface touches that domain's mixin, not a single 1300-line file.
+  The usage-telemetry helpers (`_with_usage_event`, `record_usage_event`) and the
+  UUID/timing helpers in `api_parts/_base.py` are shared by all mixins.
 - **The mapper + domain-model seam (blue) is the largest structural multiplier.**
   Each retained entity exists as a Pydantic domain type (`models.py`) and a
   SQLAlchemy row (`db_models.py`), joined by hand-written translators in
