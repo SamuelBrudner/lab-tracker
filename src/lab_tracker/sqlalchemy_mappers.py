@@ -110,8 +110,10 @@ from lab_tracker.sqlalchemy_mapper_parts.projects import (
 _logger = logging.getLogger(__name__)
 
 
-def _uuid(raw: str) -> UUID:
-    return UUID(raw)
+def _uuid(raw: str | UUID) -> UUID:
+    # Tolerant during the per-entity GUID migration: a migrated column's row
+    # attribute is already a UUID, while un-migrated ones are still str.
+    return raw if isinstance(raw, UUID) else UUID(raw)
 
 
 def _uuid_str(value: UUID) -> str:

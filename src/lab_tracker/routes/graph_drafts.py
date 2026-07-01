@@ -11,6 +11,7 @@ from starlette.requests import Request
 
 from lab_tracker.api import LabTrackerAPI
 from lab_tracker.config import get_settings
+from lab_tracker.db_types import ensure_uuid
 from lab_tracker.graph_drafting import make_graph_draft_client
 from lab_tracker.models import GraphChangeSet, GraphChangeSetStatus, UsageEventResourceType
 from lab_tracker.schemas import (
@@ -300,7 +301,7 @@ def _attach_graph_usernames(request: Request, change_set: GraphChangeSet) -> Gra
         if not user_id or getattr(change_set, username_field, None):
             continue
         try:
-            user = auth_service.get_user_by_id(UUID(str(user_id)))
+            user = auth_service.get_user_by_id(ensure_uuid(str(user_id)))
         except Exception:
             user = None
         if user is not None:

@@ -25,9 +25,10 @@ from lab_tracker.db_models import (
     PersonalAccessTokenModel,
     UserModel,
 )
+from lab_tracker.db_types import ensure_uuid
 from lab_tracker.errors import AuthError, ConflictError, NotFoundError, ValidationError
 
-LOCAL_AUTH_USER_ID = UUID("00000000-0000-4000-8000-000000000001")
+LOCAL_AUTH_USER_ID = ensure_uuid("00000000-0000-4000-8000-000000000001")
 LOCAL_AUTH_USERNAME = "local-tester"
 LOCAL_AUTH_PASSWORD_HASH = "local-auth-disabled"
 MIN_PASSWORD_LENGTH = 6
@@ -372,7 +373,7 @@ class TokenService:
             raise AuthError("Invalid token.")
         payload = _b64url_decode_json(payload_segment)
         try:
-            user_id = UUID(str(payload["sub"]))
+            user_id = ensure_uuid(str(payload["sub"]))
             role = Role(str(payload["role"]))
             issued_at = datetime.fromtimestamp(int(payload["iat"]), tz=timezone.utc)
             expires_at = datetime.fromtimestamp(int(payload["exp"]), tz=timezone.utc)
@@ -495,7 +496,7 @@ class InvitationTokenService:
     def revoke_invitation(self, invitation_id: UUID) -> Invitation:
         if self._session_factory is None:
             for row in self._memory_invitations_by_hash.values():
-                if row.invitation_id == str(invitation_id):
+                if str(row.invitation_id) == str(invitation_id):
                     if row.consumed_at is not None:
                         raise ValidationError("Consumed invitations cannot be revoked.")
                     if row.revoked_at is None:
@@ -697,8 +698,8 @@ def _generate_secret(prefix: str) -> str:
 
 def _device_token_from_model(model: DeviceTokenModel) -> DeviceToken:
     return DeviceToken(
-        device_token_id=UUID(model.device_token_id),
-        user_id=UUID(model.user_id),
+        device_token_id=ensure_uuid(model.device_token_id),
+        user_id=ensure_uuid(model.user_id),
         label=model.label,
         created_at=model.created_at,
         last_used_at=model.last_used_at,
@@ -708,8 +709,8 @@ def _device_token_from_model(model: DeviceTokenModel) -> DeviceToken:
 
 def _personal_access_token_from_model(model: PersonalAccessTokenModel) -> PersonalAccessToken:
     return PersonalAccessToken(
-        token_id=UUID(model.token_id),
-        user_id=UUID(model.user_id),
+        token_id=ensure_uuid(model.token_id),
+        user_id=ensure_uuid(model.user_id),
         label=model.label,
         role=Role(model.role),
         read_only=bool(model.read_only),
@@ -845,7 +846,7 @@ class DeviceAuthService:
     def revoke_device(self, user_id: UUID, device_token_id: UUID) -> DeviceToken:
         with self._session_factory() as session:
             row = session.get(DeviceTokenModel, str(device_token_id))
-            if row is None or row.user_id != str(user_id):
+            if row is None or str(row.user_id) != str(user_id):
                 raise NotFoundError("Device token does not exist.")
             if row.revoked_at is None:
                 row.revoked_at = utc_now()
@@ -872,8 +873,8 @@ class DeviceAuthService:
                 row.last_used_at = now
                 session.commit()
             return DevicePrincipal(
-                user_id=UUID(row.user_id),
-                device_token_id=UUID(row.device_token_id),
+                user_id=ensure_uuid(row.user_id),
+                device_token_id=ensure_uuid(row.device_token_id),
                 label=row.label,
             )
 
@@ -940,7 +941,7 @@ class PersonalAccessTokenService:
     def revoke_token(self, user_id: UUID, token_id: UUID) -> PersonalAccessToken:
         with self._session_factory() as session:
             row = session.get(PersonalAccessTokenModel, str(token_id))
-            if row is None or row.user_id != str(user_id):
+            if row is None or str(row.user_id) != str(user_id):
                 raise NotFoundError("Personal access token does not exist.")
             if row.revoked_at is None:
                 row.revoked_at = utc_now()
@@ -969,8 +970,8 @@ class PersonalAccessTokenService:
                 row.last_used_at = now
                 session.commit()
             return PersonalAccessTokenPrincipal(
-                user_id=UUID(row.user_id),
-                token_id=UUID(row.token_id),
+                user_id=ensure_uuid(row.user_id),
+                token_id=ensure_uuid(row.token_id),
                 label=row.label,
                 role=Role(row.role),
                 read_only=bool(row.read_only),
@@ -1044,20 +1045,22 @@ def _optional_as_utc(value: datetime | None) -> datetime | None:
 
 def _invitation_from_model(row: InvitationModel) -> Invitation:
     return Invitation(
-        invitation_id=UUID(row.invitation_id),
+        invitation_id=ensure_uuid(row.invitation_id),
         email=row.email,
         role=Role(row.role),
         expires_at=_as_utc(row.expires_at),
         created_at=_as_utc(row.created_at),
         consumed_at=_optional_as_utc(row.consumed_at),
-        consumed_by_user_id=UUID(row.consumed_by_user_id) if row.consumed_by_user_id else None,
+        consumed_by_user_id=(
+            ensure_uuid(row.consumed_by_user_id) if row.consumed_by_user_id else None
+        ),
         revoked_at=_optional_as_utc(row.revoked_at),
     )
 
 
 def _user_from_model(row: UserModel) -> User:
     return User(
-        user_id=UUID(row.user_id),
+        user_id=ensure_uuid(row.user_id),
         username=row.username,
         password_hash=row.password_hash,
         role=Role(row.role),

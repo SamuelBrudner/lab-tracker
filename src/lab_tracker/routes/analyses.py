@@ -12,6 +12,7 @@ from starlette.requests import Request
 
 from lab_tracker.api import LabTrackerAPI
 from lab_tracker.db_models import VisualizationModel
+from lab_tracker.db_types import ensure_uuid
 from lab_tracker.models import Analysis, AnalysisStatus, UsageEventResourceType
 from lab_tracker.schemas import (
     AnalysisCommitRequest,
@@ -154,7 +155,7 @@ def build_analyses_router(api: LabTrackerAPI) -> APIRouter:
         db_session = db_session_from_request(request)
         storage_backend = file_storage_from_request(request)
         storage_ids = [
-            UUID(value)
+            ensure_uuid(value)
             for value in db_session.scalars(
                 select(VisualizationModel.asset_storage_id).where(
                     VisualizationModel.analysis_id == str(analysis_id),

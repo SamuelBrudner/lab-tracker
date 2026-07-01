@@ -22,6 +22,7 @@ from lab_tracker.db_models import (
     UserModel,
     VisualizationModel,
 )
+from lab_tracker.db_types import ensure_uuid
 from lab_tracker.models import (
     AcquisitionOutput,
     Analysis,
@@ -580,7 +581,7 @@ class SQLAlchemyLabTrackerRepository(LabTrackerRepository):
         rows = list(self._session.scalars(stmt))
         edges: list[ClaimEdge] = []
         for row in rows:
-            edge = self.claim_edges.get(UUID(row.edge_id))
+            edge = self.claim_edges.get(ensure_uuid(row.edge_id))
             if edge is not None:
                 edges.append(edge)
         return edges
@@ -736,7 +737,7 @@ class SQLAlchemyLabTrackerRepository(LabTrackerRepository):
         matching_projects = question_stmt.union(note_stmt).subquery()
         stmt = select(matching_projects.c.project_id).order_by(matching_projects.c.project_id)
         rows = self._session.scalars(apply_pagination(stmt, limit=limit, offset=0))
-        return {UUID(project_id) for project_id in rows}
+        return {ensure_uuid(project_id) for project_id in rows}
 
     def query_sessions(
         self,

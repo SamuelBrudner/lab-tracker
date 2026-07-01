@@ -38,7 +38,7 @@ class SQLAlchemyGoalRepository(EntityRepository[Goal]):
             )
         )
         for row in rows:
-            link_map.setdefault(row.goal_id, []).append(goal_link_from_model(row))
+            link_map.setdefault(str(row.goal_id), []).append(goal_link_from_model(row))
         return link_map
 
     def goals_from_rows(self, rows: list[GoalModel]) -> list[Goal]:

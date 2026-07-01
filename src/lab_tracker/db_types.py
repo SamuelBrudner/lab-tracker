@@ -27,6 +27,17 @@ from sqlalchemy.engine.interfaces import Dialect
 from sqlalchemy.types import TypeDecorator
 
 
+def ensure_uuid(value: str | UUID) -> UUID:
+    """Coerce a value to :class:`UUID`, tolerating an already-``UUID`` input.
+
+    Call sites historically wrapped string-typed ORM id columns in ``UUID(...)``.
+    As those columns migrate to :class:`GUID` (returning ``UUID``), a bare
+    ``UUID(uuid_value)`` would raise; this helper accepts either form, so a
+    consuming site is correct whether or not its entity has been migrated yet.
+    """
+    return value if isinstance(value, UUID) else UUID(value)
+
+
 class GUID(TypeDecorator):
     """UUID stored as its 36-character string form.
 
