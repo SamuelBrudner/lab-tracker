@@ -213,3 +213,30 @@ Enum migration itself proved **safe** — every enum is a `str, Enum`, so
   entity with the completeness test + full suite as the gate. A safer first target
   than a broad sweep may be to migrate only entities whose ids are *not* consumed
   outside the mapper.
+
+### Completion (2026-07-01)
+
+`t4x0.8` was subsequently completed using a **tolerance-foundation** approach
+that resolved the cross-cutting-churn problem:
+
+1. **Phase 1 — tolerance layer (behavioural no-op, full suite green).** Made every
+   ORM-id consumer accept str-or-UUID *before* changing any column: an
+   `ensure_uuid()` coercion at `UUID(row.x)` sites; id-keyed repository maps
+   normalised to `str(...)` keys on fill *and* lookup; Python-level `row.id == str`
+   comparisons string-normalised; `_uuid`/`uuid_from_db` mapper helpers made
+   tolerant. Because this is a no-op on the still-String columns, it was verified
+   green (853 passed) independently of the type change.
+2. **Phase 2 — column migration.** Migrated all columns (153 `GUID`, 32
+   `EnumType`, 85 `UtcDateTime`); the tolerance layer absorbed the type change.
+   Surfaced two real facts the sweep had hidden: `DatasetFileModel.storage_id` is
+   an **opaque storage key, not a UUID** (kept `String`), and `updated_at` is
+   **DB-managed via `onupdate`** (benign — services bump it; one direct-repository
+   test adjusted). Enum comparisons are safe because every enum is a `str, Enum`.
+3. **Phase 3 — mapper cleanup.** Removed **268** now-redundant conversions
+   (`_uuid`/`_uuid_str`: 222→22, `_as_utc`: 38→3, enum read-conversions →0). Kept
+   enum `.value` on the write side (unambiguously correct; some columns remain
+   `String`).
+
+Each phase was a separate commit, full suite green (853 passed) at every step.
+The lesson stands: the key was decoupling *make-consumers-tolerant* (a verifiable
+no-op) from *migrate-columns*, rather than doing both at once.
