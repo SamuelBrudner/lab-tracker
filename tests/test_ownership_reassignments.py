@@ -398,7 +398,9 @@ def test_ownership_reassignment_moves_all_attribution_surfaces():
     for row in created_by_rows:
         assert row is not None
         assert row.created_by == to_user
-        assert row.created_by_user_id == to_user
+        # created_by_user_id is a GUID column on migrated models (returns UUID)
+        # and a str on not-yet-migrated ones; compare by string form.
+        assert str(row.created_by_user_id) == to_user
 
     analysis = session.get(AnalysisModel, str(analysis_id))
     assert analysis is not None

@@ -82,8 +82,6 @@ from lab_tracker.models import (
     QuestionStatus,
     QuestionType,
     Session,
-    SessionStatus,
-    SessionType,
     StoreCapability,
     StoreKind,
     Visualization,
@@ -652,23 +650,15 @@ def apply_note_to_model(row: NoteModel, note: Note) -> None:
 
 def session_to_model(session: Session) -> SessionModel:
     return SessionModel(
-        session_id=_uuid_str(session.session_id),
-        project_id=_uuid_str(session.project_id),
-        session_type=session.session_type.value,
-        status=session.status.value,
-        primary_question_id=(
-            _uuid_str(session.primary_question_id)
-            if session.primary_question_id is not None
-            else None
-        ),
+        session_id=session.session_id,
+        project_id=session.project_id,
+        session_type=session.session_type,
+        status=session.status,
+        primary_question_id=session.primary_question_id,
         started_at=session.started_at,
         ended_at=session.ended_at,
         created_by=session.created_by,
-        created_by_user_id=(
-            _uuid_str(session.created_by_user_id)
-            if session.created_by_user_id is not None
-            else None
-        ),
+        created_by_user_id=session.created_by_user_id,
         **_origin_model_kwargs(session),
         updated_at=session.updated_at,
     )
@@ -676,35 +666,29 @@ def session_to_model(session: Session) -> SessionModel:
 
 def session_from_model(row: SessionModel) -> Session:
     return Session(
-        session_id=_uuid(row.session_id),
-        project_id=_uuid(row.project_id),
-        session_type=SessionType(row.session_type),
-        status=SessionStatus(row.status),
-        primary_question_id=(
-            _uuid(row.primary_question_id) if row.primary_question_id is not None else None
-        ),
-        started_at=_as_utc(row.started_at),
-        ended_at=_as_utc_optional(row.ended_at),
+        session_id=row.session_id,
+        project_id=row.project_id,
+        session_type=row.session_type,
+        status=row.status,
+        primary_question_id=row.primary_question_id,
+        started_at=row.started_at,
+        ended_at=row.ended_at,
         created_by=row.created_by,
-        created_by_user_id=(_uuid(row.created_by_user_id) if row.created_by_user_id else None),
+        created_by_user_id=row.created_by_user_id,
         **_origin_domain_kwargs(row),
-        updated_at=_as_utc(row.updated_at),
+        updated_at=row.updated_at,
     )
 
 
 def apply_session_to_model(row: SessionModel, session: Session) -> None:
-    row.project_id = _uuid_str(session.project_id)
-    row.session_type = session.session_type.value
-    row.status = session.status.value
-    row.primary_question_id = (
-        _uuid_str(session.primary_question_id) if session.primary_question_id is not None else None
-    )
+    row.project_id = session.project_id
+    row.session_type = session.session_type
+    row.status = session.status
+    row.primary_question_id = session.primary_question_id
     row.started_at = session.started_at
     row.ended_at = session.ended_at
     row.created_by = session.created_by
-    row.created_by_user_id = (
-        _uuid_str(session.created_by_user_id) if session.created_by_user_id is not None else None
-    )
+    row.created_by_user_id = session.created_by_user_id
     _apply_origin_to_model(row, session)
     row.updated_at = session.updated_at
 

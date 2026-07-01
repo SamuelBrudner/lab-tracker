@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from datetime import date, datetime, timezone
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 from sqlalchemy import (
     JSON,
@@ -21,6 +21,8 @@ from sqlalchemy import (
 from sqlalchemy.orm import Mapped, mapped_column
 
 from lab_tracker.db import Base
+from lab_tracker.db_types import GUID, EnumType, UtcDateTime
+from lab_tracker.models import SessionStatus, SessionType
 
 
 def _utc_now() -> datetime:
@@ -562,27 +564,31 @@ class GraphDraftBatchRunModel(Base):
 class SessionModel(Base):
     __tablename__ = "sessions"
 
-    session_id: Mapped[str] = mapped_column(
-        String(36),
+    session_id: Mapped[UUID] = mapped_column(
+        GUID,
         primary_key=True,
-        default=lambda: str(uuid4()),
+        default=uuid4,
     )
-    project_id: Mapped[str] = mapped_column(
-        String(36),
+    project_id: Mapped[UUID] = mapped_column(
+        GUID,
         ForeignKey("projects.project_id", ondelete="CASCADE"),
         nullable=False,
     )
-    session_type: Mapped[str] = mapped_column(String(30), nullable=False)
-    status: Mapped[str] = mapped_column(String(20), default="active")
-    primary_question_id: Mapped[str | None] = mapped_column(
-        String(36),
+    session_type: Mapped[SessionType] = mapped_column(
+        EnumType(SessionType, length=30), nullable=False
+    )
+    status: Mapped[SessionStatus] = mapped_column(
+        EnumType(SessionStatus, length=20), default=SessionStatus.ACTIVE
+    )
+    primary_question_id: Mapped[UUID | None] = mapped_column(
+        GUID,
         ForeignKey("questions.question_id"),
     )
-    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utc_now)
-    ended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    started_at: Mapped[datetime] = mapped_column(UtcDateTime, default=_utc_now)
+    ended_at: Mapped[datetime | None] = mapped_column(UtcDateTime)
     created_by: Mapped[str | None] = mapped_column(String(255))
-    created_by_user_id: Mapped[str | None] = mapped_column(
-        String(36),
+    created_by_user_id: Mapped[UUID | None] = mapped_column(
+        GUID,
         ForeignKey("users.user_id", ondelete="SET NULL"),
     )
     origin: Mapped[str] = mapped_column(String(32), nullable=False, default="user")
@@ -594,7 +600,7 @@ class SessionModel(Base):
     origin_model: Mapped[str | None] = mapped_column(String(255))
     origin_prompt_version: Mapped[str | None] = mapped_column(String(120))
     updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True),
+        UtcDateTime,
         default=_utc_now,
         onupdate=_utc_now,
     )
