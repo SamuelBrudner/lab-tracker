@@ -107,7 +107,7 @@ Read tools:
 - `lab_tracker_list_visualizations`: List visualizations after resolving related analyses or claims.
 - `lab_tracker_list_goals`: List goals/outputs when deciding what research objective to advance.
 - `lab_tracker_get_goal`: Get one goal with node links before advancing or updating it.
-- `lab_tracker_publication_readiness`: Check publication readiness; payload seal_level is ara_l1 or blocked.
+- `lab_tracker_publication_readiness`: Check structural publication readiness for one project (seal_level ara_l1/blocked).
 - `lab_tracker_list_node_goals`: List goals linked to one project graph node.
 - `lab_tracker_get_dataset_provenance`: Get dataset provenance JSON-LD before reusing evidence.
 - `lab_tracker_get_analysis_provenance`: Get analysis provenance JSON-LD before reusing derived evidence.
@@ -132,7 +132,7 @@ Write tools:
 - `lab_tracker_update_goal`: Update a canonical goal/output only when the user explicitly asks.
 - `lab_tracker_link_node_to_goal`: Create a canonical goal link only when the user explicitly asks.
 - `lab_tracker_upload_visualization_file`: Upload a visualization file only when the user explicitly asks.
-- `lab_tracker_record_evidence_bundle`: Defaults to dry-run; pass dry_run=false only on explicit user request.
+- `lab_tracker_record_evidence_bundle`: Preview a dataset-analysis-claim-visualization evidence bundle; defaults to dry-run.
 <!-- END GENERATED MCP TOOL LIST -->
 
 Creation tools write through the API, using the configured service account when

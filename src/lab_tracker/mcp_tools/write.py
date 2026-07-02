@@ -66,7 +66,7 @@ def lab_tracker_create_project(
     description: str | None = None,
     status: str | None = None,
 ) -> JsonObject:
-    """Create a project only when the user explicitly asks for a new scope."""
+    """Create a canonical project only when the user explicitly asks."""
     return _write_tool(
         "lab_tracker_create_project",
         lambda client: client.create_project(
@@ -89,7 +89,10 @@ def lab_tracker_create_question(
     status: str | None = None,
     parent_question_ids: list[str] | None = None,
 ) -> JsonObject:
-    """Create a question after project/goal scope is known."""
+    """Create a canonical question only when the user explicitly asks.
+
+    The staged status is a research lifecycle state, not an approval queue.
+    """
     return _write_tool(
         "lab_tracker_create_question",
         lambda client: client.create_question(
@@ -118,7 +121,7 @@ def lab_tracker_refactor_question(
     child_question_ids_to_reparent: list[str] | None = None,
     note_ids_to_retarget: list[str] | None = None,
 ) -> JsonObject:
-    """Supersede a question with a replacement and optional child/note moves.
+    """Supersede a canonical question only when the user explicitly asks.
 
     Destructive: this supersedes a canonical question and re-points its children/notes.
     Only call it when the user explicitly asks; confirm before superseding.
@@ -183,7 +186,7 @@ def lab_tracker_create_note(
     metadata: dict[str, NoteMetadataScalar] | None = None,
     status: str | None = None,
 ) -> JsonObject:
-    """Create a text note when the user asks to record source context."""
+    """Create a canonical note only when the user asks to record source context."""
     return _write_tool(
         "lab_tracker_create_note",
         lambda client: client.create_note(
@@ -209,7 +212,7 @@ def lab_tracker_create_dataset(
     commit_hash: str | None = None,
     status: str | None = "staged",
 ) -> JsonObject:
-    """Create a dataset before analyses, claims, and visualizations.
+    """Create a canonical dataset only when the user explicitly asks.
 
     Only when the user asks. This commits a canonical record immediately; the staged
     status is a lifecycle state, not a review gate that a human still has to accept.
@@ -239,7 +242,7 @@ def lab_tracker_create_analysis(
     environment_hash: str | None = None,
     status: str | None = "staged",
 ) -> JsonObject:
-    """Create an analysis after datasets and before claims or figures.
+    """Create a canonical analysis only when the user explicitly asks.
 
     Only when the user asks. This commits a canonical record immediately; the staged
     status is a lifecycle state, not a review gate.
@@ -274,7 +277,7 @@ def lab_tracker_create_claim(
     answers_question_ids: list[str] | None = None,
     external_citations: list[JsonObject] | None = None,
 ) -> JsonObject:
-    """Create a claim after linking supporting datasets or analyses.
+    """Create a canonical claim only when the user explicitly asks.
 
     Only when the user asks. This commits a canonical record immediately; the proposed
     status is a lifecycle state, not a review gate.
@@ -306,7 +309,7 @@ def lab_tracker_create_claim_edge(
     target_claim_id: str,
     relation: str,
 ) -> JsonObject:
-    """Create a typed claim-to-claim logic edge such as refutes or extends.
+    """Create a canonical claim edge only when the user states the relation.
 
     Create only when the user states the relationship; refutes/contradicts in particular
     is a durable, strong epistemic claim in the graph.
@@ -328,7 +331,7 @@ def lab_tracker_create_visualization(
     caption: str | None = None,
     related_claim_ids: list[str] | None = None,
 ) -> JsonObject:
-    """Register a visualization after its analysis and related claims exist.
+    """Create a canonical visualization only when the user explicitly asks.
 
     Only when the user asks; this commits a canonical record immediately.
     """
@@ -358,7 +361,7 @@ def lab_tracker_create_goal(
     external_ref: str | None = None,
     attributes: JsonObject | None = None,
 ) -> JsonObject:
-    """Create a goal/output before linking questions, datasets, or claims.
+    """Create a canonical goal/output only when the user explicitly asks.
 
     Only when the user asks; this commits a canonical record immediately.
     """
@@ -391,7 +394,7 @@ def lab_tracker_update_goal(
     external_ref: str | None = None,
     attributes: JsonObject | None = None,
 ) -> JsonObject:
-    """Update a Lab Tracker goal/output.
+    """Update a canonical goal/output only when the user explicitly asks.
 
     Destructive: overwrites the canonical goal's fields in place. Only call it when the
     user explicitly asks; confirm before overwriting.
@@ -423,7 +426,7 @@ def lab_tracker_link_node_to_goal(
     link_status: str | None = "candidate",
     slot: str | None = None,
 ) -> JsonObject:
-    """Tag an existing graph node in relation to a goal/output."""
+    """Create a canonical goal link only when the user explicitly asks."""
     return _write_tool(
         "lab_tracker_link_node_to_goal",
         lambda client: client.link_node_to_goal(
@@ -446,7 +449,7 @@ def lab_tracker_upload_visualization_file(
     file_path: str,
     content_type: str | None = None,
 ) -> JsonObject:
-    """Upload a local file into managed storage for a visualization node."""
+    """Upload a visualization file only when the user explicitly asks."""
     return _write_tool(
         "lab_tracker_upload_visualization_file",
         lambda client: client.upload_visualization_file(
