@@ -54,6 +54,9 @@ MCP_SERVER_INSTRUCTIONS = " ".join(
         "Read lab-tracker://quickstart for setup.",
         "Code-facing conventions are available at lab-tracker://code-conventions; "
         "package text remains canonical.",
+        "When capture looks unconfigured or drifted, lab-tracker://setup-guide "
+        "describes the consent-gated guided-setup flow; read-only `lt setup "
+        "status` is safe to consult.",
     )
 )
 

@@ -1064,7 +1064,10 @@ def lab_tracker_unavailable(operation: str, **metadata: object) -> JsonObject:
             "arguments": {},
             "reason": (
                 "State that Lab Tracker is unavailable, then continue without graph "
-                "context instead of retrying indefinitely."
+                "context instead of retrying indefinitely. If this looks like an "
+                "unconfigured connection rather than an outage, the "
+                "lab-tracker://setup-guide resource and the read-only `lt setup "
+                "status` command can diagnose it."
             ),
         },
     }
