@@ -9,6 +9,7 @@ from sqlalchemy import or_, select
 from sqlalchemy.orm import Session as OrmSession
 
 from lab_tracker.db_models import ExplorationNodeEdgeModel, ExplorationNodeModel
+from lab_tracker.db_types import ensure_uuid
 from lab_tracker.models import ExplorationNode
 from lab_tracker.repository import EntityRepository
 from lab_tracker.sqlalchemy_mappers import (
@@ -37,9 +38,9 @@ class SQLAlchemyExplorationNodeRepository(EntityRepository[ExplorationNode]):
         )
         for row in rows:
             if row.relation == "parent":
-                parent_map[row.target_node_id].append(UUID(row.source_node_id))
+                parent_map[str(row.target_node_id)].append(ensure_uuid(row.source_node_id))
             elif row.relation == "also_depends_on":
-                dependency_map[row.target_node_id].append(UUID(row.source_node_id))
+                dependency_map[str(row.target_node_id)].append(ensure_uuid(row.source_node_id))
         return parent_map, dependency_map
 
     def nodes_from_rows(self, rows: list[ExplorationNodeModel]) -> list[ExplorationNode]:
@@ -48,8 +49,8 @@ class SQLAlchemyExplorationNodeRepository(EntityRepository[ExplorationNode]):
         return [
             exploration_node_from_model(
                 row,
-                parent_node_ids=parent_map.get(row.node_id, []),
-                also_depends_on_node_ids=dependency_map.get(row.node_id, []),
+                parent_node_ids=parent_map.get(str(row.node_id), []),
+                also_depends_on_node_ids=dependency_map.get(str(row.node_id), []),
             )
             for row in rows
         ]

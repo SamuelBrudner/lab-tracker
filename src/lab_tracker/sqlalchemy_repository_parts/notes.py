@@ -42,7 +42,7 @@ class SQLAlchemyNoteRepository(EntityRepository[Note]):
             )
         )
         for row in target_rows:
-            target_map.setdefault(row.note_id, []).append(row)
+            target_map.setdefault(str(row.note_id), []).append(row)
         return target_map
 
     def notes_from_rows(self, rows: list[NoteModel]) -> list[Note]:
@@ -51,7 +51,9 @@ class SQLAlchemyNoteRepository(EntityRepository[Note]):
         return [
             note_from_model(
                 row,
-                targets=[entity_ref_from_model(item) for item in target_map.get(row.note_id, [])],
+                targets=[
+                    entity_ref_from_model(item) for item in target_map.get(str(row.note_id), [])
+                ],
             )
             for row in rows
         ]

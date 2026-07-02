@@ -22,6 +22,7 @@ from lab_tracker.db_models import (
     VisualizationClaimModel,
     VisualizationModel,
 )
+from lab_tracker.db_types import ensure_uuid
 from lab_tracker.models import Analysis, Claim, ClaimEdge, Visualization
 from lab_tracker.repository import EntityRepository
 from lab_tracker.sqlalchemy_mappers import (
@@ -59,14 +60,14 @@ class SQLAlchemyAnalysisRepository(EntityRepository[Analysis]):
             select(AnalysisDatasetModel).where(AnalysisDatasetModel.analysis_id.in_(analysis_ids))
         )
         for row in rows:
-            dataset_map[row.analysis_id].append(UUID(row.dataset_id))
+            dataset_map[str(row.analysis_id)].append(ensure_uuid(row.dataset_id))
         return dataset_map
 
     def analyses_from_rows(self, rows: list[AnalysisModel]) -> list[Analysis]:
         analysis_ids = [row.analysis_id for row in rows]
         dataset_map = self.dataset_map(analysis_ids)
         return [
-            analysis_from_model(row, dataset_ids=dataset_map.get(row.analysis_id, []))
+            analysis_from_model(row, dataset_ids=dataset_map.get(str(row.analysis_id), []))
             for row in rows
         ]
 
@@ -208,7 +209,7 @@ class SQLAlchemyClaimRepository(EntityRepository[Claim]):
             select(ClaimDatasetModel).where(ClaimDatasetModel.claim_id.in_(claim_ids))
         )
         for row in rows:
-            dataset_map[row.claim_id].append(UUID(row.dataset_id))
+            dataset_map[str(row.claim_id)].append(ensure_uuid(row.dataset_id))
         return dataset_map
 
     def analysis_map(self, claim_ids: list[str]) -> dict[str, list[UUID]]:
@@ -219,7 +220,7 @@ class SQLAlchemyClaimRepository(EntityRepository[Claim]):
             select(ClaimAnalysisModel).where(ClaimAnalysisModel.claim_id.in_(claim_ids))
         )
         for row in rows:
-            analysis_map[row.claim_id].append(UUID(row.analysis_id))
+            analysis_map[str(row.claim_id)].append(ensure_uuid(row.analysis_id))
         return analysis_map
 
     def question_map(self, claim_ids: list[str]) -> dict[str, list[UUID]]:
@@ -230,7 +231,7 @@ class SQLAlchemyClaimRepository(EntityRepository[Claim]):
             select(ClaimQuestionModel).where(ClaimQuestionModel.claim_id.in_(claim_ids))
         )
         for row in rows:
-            question_map[row.claim_id].append(UUID(row.question_id))
+            question_map[str(row.claim_id)].append(ensure_uuid(row.question_id))
         return question_map
 
     def claims_from_rows(self, rows: list[ClaimModel]) -> list[Claim]:
@@ -241,9 +242,9 @@ class SQLAlchemyClaimRepository(EntityRepository[Claim]):
         return [
             claim_from_model(
                 row,
-                supported_by_dataset_ids=dataset_map.get(row.claim_id, []),
-                supported_by_analysis_ids=analysis_map.get(row.claim_id, []),
-                answers_question_ids=question_map.get(row.claim_id, []),
+                supported_by_dataset_ids=dataset_map.get(str(row.claim_id), []),
+                supported_by_analysis_ids=analysis_map.get(str(row.claim_id), []),
+                answers_question_ids=question_map.get(str(row.claim_id), []),
             )
             for row in rows
         ]
@@ -492,7 +493,7 @@ class SQLAlchemyVisualizationRepository(EntityRepository[Visualization]):
             )
         )
         for row in rows:
-            claim_map[row.viz_id].append(UUID(row.claim_id))
+            claim_map[str(row.viz_id)].append(ensure_uuid(row.claim_id))
         return claim_map
 
     def dataset_map(self, analysis_ids: list[str]) -> dict[str, list[UUID]]:
@@ -503,7 +504,7 @@ class SQLAlchemyVisualizationRepository(EntityRepository[Visualization]):
             select(AnalysisDatasetModel).where(AnalysisDatasetModel.analysis_id.in_(analysis_ids))
         )
         for row in rows:
-            dataset_map[row.analysis_id].append(UUID(row.dataset_id))
+            dataset_map[str(row.analysis_id)].append(ensure_uuid(row.dataset_id))
         return dataset_map
 
     def visualizations_from_rows(self, rows: list[VisualizationModel]) -> list[Visualization]:
@@ -514,8 +515,8 @@ class SQLAlchemyVisualizationRepository(EntityRepository[Visualization]):
         return [
             visualization_from_model(
                 row,
-                dataset_ids=sorted(dataset_map.get(row.analysis_id, []), key=str),
-                related_claim_ids=claim_map.get(row.viz_id, []),
+                dataset_ids=sorted(dataset_map.get(str(row.analysis_id), []), key=str),
+                related_claim_ids=claim_map.get(str(row.viz_id), []),
             )
             for row in rows
         ]

@@ -197,7 +197,7 @@ function App() {
   });
   const questionActions = useQuestionActions({
     token: auth.token,
-    canWrite: auth.canWrite,
+    canWrite: canContributeToProject,
     selectedProjectId: workspaceData.selectedProjectId,
     refreshProjectData: workspaceData.refreshProjectData,
     setBusy,
@@ -229,7 +229,7 @@ function App() {
   });
   const sessionActions = useSessionActions({
     token: auth.token,
-    canWrite: auth.canWrite,
+    canWrite: canContributeToProject,
     selectedProjectId: workspaceData.selectedProjectId,
     refreshActiveSessions: sessionData.refreshActiveSessions,
     setBusy,
@@ -240,7 +240,7 @@ function App() {
   });
   const dataset = useDatasetWorkflow({
     token: auth.token,
-    canWrite: auth.canWrite,
+    canWrite: canContributeToProject,
     selectedProjectId: workspaceData.selectedProjectId,
     questions: workspaceData.questions,
     datasets: workspaceData.stagedDatasets,
@@ -251,7 +251,7 @@ function App() {
   const analysis = useAnalysisWorkflow({
     enabled: isHomeRoute && apiEnabled,
     token: auth.token,
-    canWrite: auth.canWrite,
+    canWrite: canContributeToProject,
     selectedProjectId: workspaceData.selectedProjectId,
     setBusy,
     setFlash,
@@ -389,7 +389,7 @@ function App() {
           {route.kind === "devices" ? (
             <DevicesPage
               token={auth.token}
-              canWrite={auth.canWrite}
+              canWrite={Boolean(auth.user)}
               navigate={navigate}
               setFlash={setFlash}
             />
@@ -440,7 +440,7 @@ function App() {
               questions={workspaceData.questions}
               navigate={navigate}
               onSetActiveProject={workspaceData.setSelectedProjectId}
-              canWrite={auth.canWrite}
+              canWrite={canContributeToProject}
               setBusy={setBusy}
               setFlash={setFlash}
             />
@@ -493,7 +493,7 @@ function App() {
               projects={workspaceData.projects}
               navigate={navigate}
               onSetActiveProject={workspaceData.setSelectedProjectId}
-              canWrite={auth.canWrite}
+              canWrite={canContributeToProject}
               onCloseSession={sessionActions.handleCloseSession}
               onPromoteSession={sessionActions.handlePromoteSession}
             />

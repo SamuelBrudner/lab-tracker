@@ -3,13 +3,12 @@
 from __future__ import annotations
 
 from datetime import date, datetime, timezone
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 from sqlalchemy import (
     JSON,
     Boolean,
     Date,
-    DateTime,
     Float,
     ForeignKey,
     Index,
@@ -21,6 +20,36 @@ from sqlalchemy import (
 from sqlalchemy.orm import Mapped, mapped_column
 
 from lab_tracker.db import Base
+from lab_tracker.db_types import GUID, EnumType, UtcDateTime
+from lab_tracker.models import (
+    AcceptanceMode,
+    AnalysisStatus,
+    ClaimRelation,
+    ClaimStatus,
+    DatasetStatus,
+    EntityType,
+    ExplorationNodeStatus,
+    ExplorationNodeType,
+    GoalLinkStatus,
+    GoalRelation,
+    GoalStatus,
+    GoalType,
+    NoteStatus,
+    OutcomeStatus,
+    ProjectGroupKind,
+    ProjectMembershipRole,
+    ProjectStatus,
+    ProvenanceLinkBasis,
+    ProvenanceLinkOrigin,
+    ProvenanceLinkRelation,
+    ProvenanceLinkStatus,
+    QuestionLinkRole,
+    QuestionStatus,
+    QuestionType,
+    SessionStatus,
+    SessionType,
+    StoreKind,
+)
 
 
 def _utc_now() -> datetime:
@@ -30,23 +59,25 @@ def _utc_now() -> datetime:
 class ProjectGroupModel(Base):
     __tablename__ = "project_groups"
 
-    group_id: Mapped[str] = mapped_column(
-        String(36),
+    group_id: Mapped[UUID] = mapped_column(
+        GUID,
         primary_key=True,
-        default=lambda: str(uuid4()),
+        default=uuid4,
     )
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     description: Mapped[str] = mapped_column(String(1000), default="")
-    kind: Mapped[str] = mapped_column(String(30), nullable=False, default="lab")
+    kind: Mapped[ProjectGroupKind] = mapped_column(
+        EnumType(ProjectGroupKind, length=30), nullable=False, default="lab"
+    )
     group_read_all: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     created_by: Mapped[str | None] = mapped_column(String(255))
-    created_by_user_id: Mapped[str | None] = mapped_column(
-        String(36),
+    created_by_user_id: Mapped[UUID | None] = mapped_column(
+        GUID,
         ForeignKey("users.user_id", ondelete="SET NULL"),
     )
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utc_now)
+    created_at: Mapped[datetime] = mapped_column(UtcDateTime, default=_utc_now)
     updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True),
+        UtcDateTime,
         default=_utc_now,
         onupdate=_utc_now,
     )
@@ -55,26 +86,28 @@ class ProjectGroupModel(Base):
 class ProjectModel(Base):
     __tablename__ = "projects"
 
-    project_id: Mapped[str] = mapped_column(
-        String(36),
+    project_id: Mapped[UUID] = mapped_column(
+        GUID,
         primary_key=True,
-        default=lambda: str(uuid4()),
+        default=uuid4,
     )
-    group_id: Mapped[str | None] = mapped_column(
-        String(36),
+    group_id: Mapped[UUID | None] = mapped_column(
+        GUID,
         ForeignKey("project_groups.group_id", ondelete="SET NULL"),
     )
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     description: Mapped[str] = mapped_column(String(1000), default="")
-    status: Mapped[str] = mapped_column(String(20), default="active")
+    status: Mapped[ProjectStatus] = mapped_column(
+        EnumType(ProjectStatus, length=20), default="active"
+    )
     created_by: Mapped[str | None] = mapped_column(String(255))
-    created_by_user_id: Mapped[str | None] = mapped_column(
-        String(36),
+    created_by_user_id: Mapped[UUID | None] = mapped_column(
+        GUID,
         ForeignKey("users.user_id", ondelete="SET NULL"),
     )
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utc_now)
+    created_at: Mapped[datetime] = mapped_column(UtcDateTime, default=_utc_now)
     updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True),
+        UtcDateTime,
         default=_utc_now,
         onupdate=_utc_now,
     )
@@ -83,45 +116,49 @@ class ProjectModel(Base):
 class QuestionModel(Base):
     __tablename__ = "questions"
 
-    question_id: Mapped[str] = mapped_column(
-        String(36),
+    question_id: Mapped[UUID] = mapped_column(
+        GUID,
         primary_key=True,
-        default=lambda: str(uuid4()),
+        default=uuid4,
     )
-    project_id: Mapped[str] = mapped_column(
-        String(36),
+    project_id: Mapped[UUID] = mapped_column(
+        GUID,
         ForeignKey("projects.project_id", ondelete="CASCADE"),
         nullable=False,
     )
     text: Mapped[str] = mapped_column(Text, nullable=False)
-    question_type: Mapped[str] = mapped_column(String(40), nullable=False)
+    question_type: Mapped[QuestionType] = mapped_column(
+        EnumType(QuestionType, length=40), nullable=False
+    )
     hypothesis: Mapped[str | None] = mapped_column(Text)
-    status: Mapped[str] = mapped_column(String(20), default="staged")
+    status: Mapped[QuestionStatus] = mapped_column(
+        EnumType(QuestionStatus, length=20), default="staged"
+    )
     terminal_reason: Mapped[str | None] = mapped_column(Text)
-    superseded_by_question_id: Mapped[str | None] = mapped_column(
-        String(36),
+    superseded_by_question_id: Mapped[UUID | None] = mapped_column(
+        GUID,
         ForeignKey("questions.question_id", ondelete="SET NULL"),
     )
-    supersedes_question_id: Mapped[str | None] = mapped_column(
-        String(36),
+    supersedes_question_id: Mapped[UUID | None] = mapped_column(
+        GUID,
         ForeignKey("questions.question_id", ondelete="SET NULL"),
     )
     created_by: Mapped[str | None] = mapped_column(String(255))
-    created_by_user_id: Mapped[str | None] = mapped_column(
-        String(36),
+    created_by_user_id: Mapped[UUID | None] = mapped_column(
+        GUID,
         ForeignKey("users.user_id", ondelete="SET NULL"),
     )
     origin: Mapped[str] = mapped_column(String(32), nullable=False, default="user")
-    change_set_id: Mapped[str | None] = mapped_column(
-        String(36),
+    change_set_id: Mapped[UUID | None] = mapped_column(
+        GUID,
         ForeignKey("graph_change_sets.change_set_id", ondelete="SET NULL"),
     )
     origin_provider: Mapped[str | None] = mapped_column(String(80))
     origin_model: Mapped[str | None] = mapped_column(String(255))
     origin_prompt_version: Mapped[str | None] = mapped_column(String(120))
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utc_now)
+    created_at: Mapped[datetime] = mapped_column(UtcDateTime, default=_utc_now)
     updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True),
+        UtcDateTime,
         default=_utc_now,
         onupdate=_utc_now,
     )
@@ -130,13 +167,13 @@ class QuestionModel(Base):
 class QuestionParentModel(Base):
     __tablename__ = "question_parents"
 
-    question_id: Mapped[str] = mapped_column(
-        String(36),
+    question_id: Mapped[UUID] = mapped_column(
+        GUID,
         ForeignKey("questions.question_id", ondelete="CASCADE"),
         primary_key=True,
     )
-    parent_question_id: Mapped[str] = mapped_column(
-        String(36),
+    parent_question_id: Mapped[UUID] = mapped_column(
+        GUID,
         ForeignKey("questions.question_id", ondelete="CASCADE"),
         primary_key=True,
     )
@@ -145,23 +182,23 @@ class QuestionParentModel(Base):
 class QuestionRefactorModel(Base):
     __tablename__ = "question_refactors"
 
-    refactor_id: Mapped[str] = mapped_column(
-        String(36),
+    refactor_id: Mapped[UUID] = mapped_column(
+        GUID,
         primary_key=True,
-        default=lambda: str(uuid4()),
+        default=uuid4,
     )
-    project_id: Mapped[str] = mapped_column(
-        String(36),
+    project_id: Mapped[UUID] = mapped_column(
+        GUID,
         ForeignKey("projects.project_id", ondelete="CASCADE"),
         nullable=False,
     )
-    source_question_id: Mapped[str] = mapped_column(
-        String(36),
+    source_question_id: Mapped[UUID] = mapped_column(
+        GUID,
         ForeignKey("questions.question_id", ondelete="CASCADE"),
         nullable=False,
     )
-    replacement_question_id: Mapped[str] = mapped_column(
-        String(36),
+    replacement_question_id: Mapped[UUID] = mapped_column(
+        GUID,
         ForeignKey("questions.question_id", ondelete="CASCADE"),
         nullable=False,
     )
@@ -170,29 +207,29 @@ class QuestionRefactorModel(Base):
     replacement_snapshot: Mapped[dict[str, object]] = mapped_column(JSON, default=dict)
     relationship_changes: Mapped[dict[str, object]] = mapped_column(JSON, default=dict)
     created_by: Mapped[str | None] = mapped_column(String(255))
-    created_by_user_id: Mapped[str | None] = mapped_column(
-        String(36),
+    created_by_user_id: Mapped[UUID | None] = mapped_column(
+        GUID,
         ForeignKey("users.user_id", ondelete="SET NULL"),
     )
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utc_now)
+    created_at: Mapped[datetime] = mapped_column(UtcDateTime, default=_utc_now)
 
 
 class DatasetModel(Base):
     __tablename__ = "datasets"
 
-    dataset_id: Mapped[str] = mapped_column(
-        String(36),
+    dataset_id: Mapped[UUID] = mapped_column(
+        GUID,
         primary_key=True,
-        default=lambda: str(uuid4()),
+        default=uuid4,
     )
-    project_id: Mapped[str] = mapped_column(
-        String(36),
+    project_id: Mapped[UUID] = mapped_column(
+        GUID,
         ForeignKey("projects.project_id", ondelete="CASCADE"),
         nullable=False,
     )
     commit_hash: Mapped[str] = mapped_column(String(128), nullable=False)
-    primary_question_id: Mapped[str] = mapped_column(
-        String(36),
+    primary_question_id: Mapped[UUID] = mapped_column(
+        GUID,
         ForeignKey("questions.question_id"),
         nullable=False,
     )
@@ -205,25 +242,27 @@ class DatasetModel(Base):
     manifest_nwb_metadata: Mapped[dict[str, str]] = mapped_column(JSON, default=dict)
     manifest_bids_metadata: Mapped[dict[str, str]] = mapped_column(JSON, default=dict)
     manifest_note_ids: Mapped[list[str]] = mapped_column(JSON, default=list)
-    manifest_source_session_id: Mapped[str | None] = mapped_column(String(36))
-    status: Mapped[str] = mapped_column(String(20), default="staged")
+    manifest_source_session_id: Mapped[UUID | None] = mapped_column(GUID)
+    status: Mapped[DatasetStatus] = mapped_column(
+        EnumType(DatasetStatus, length=20), default="staged"
+    )
     terminal_reason: Mapped[str | None] = mapped_column(Text)
     created_by: Mapped[str | None] = mapped_column(String(255))
-    created_by_user_id: Mapped[str | None] = mapped_column(
-        String(36),
+    created_by_user_id: Mapped[UUID | None] = mapped_column(
+        GUID,
         ForeignKey("users.user_id", ondelete="SET NULL"),
     )
     origin: Mapped[str] = mapped_column(String(32), nullable=False, default="user")
-    change_set_id: Mapped[str | None] = mapped_column(
-        String(36),
+    change_set_id: Mapped[UUID | None] = mapped_column(
+        GUID,
         ForeignKey("graph_change_sets.change_set_id", ondelete="SET NULL"),
     )
     origin_provider: Mapped[str | None] = mapped_column(String(80))
     origin_model: Mapped[str | None] = mapped_column(String(255))
     origin_prompt_version: Mapped[str | None] = mapped_column(String(120))
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utc_now)
+    created_at: Mapped[datetime] = mapped_column(UtcDateTime, default=_utc_now)
     updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True),
+        UtcDateTime,
         default=_utc_now,
         onupdate=_utc_now,
     )
@@ -232,18 +271,22 @@ class DatasetModel(Base):
 class DatasetQuestionLinkModel(Base):
     __tablename__ = "dataset_question_links"
 
-    dataset_id: Mapped[str] = mapped_column(
-        String(36),
+    dataset_id: Mapped[UUID] = mapped_column(
+        GUID,
         ForeignKey("datasets.dataset_id", ondelete="CASCADE"),
         primary_key=True,
     )
-    question_id: Mapped[str] = mapped_column(
-        String(36),
+    question_id: Mapped[UUID] = mapped_column(
+        GUID,
         ForeignKey("questions.question_id", ondelete="CASCADE"),
         primary_key=True,
     )
-    role: Mapped[str] = mapped_column(String(20), nullable=False)
-    outcome_status: Mapped[str] = mapped_column(String(20), default="unknown")
+    role: Mapped[QuestionLinkRole] = mapped_column(
+        EnumType(QuestionLinkRole, length=20), nullable=False
+    )
+    outcome_status: Mapped[OutcomeStatus] = mapped_column(
+        EnumType(OutcomeStatus, length=20), default="unknown"
+    )
 
 
 class DatasetFileModel(Base):
@@ -256,23 +299,25 @@ class DatasetFileModel(Base):
         ),
     )
 
-    file_id: Mapped[str] = mapped_column(
-        String(36),
+    file_id: Mapped[UUID] = mapped_column(
+        GUID,
         primary_key=True,
-        default=lambda: str(uuid4()),
+        default=uuid4,
     )
-    dataset_id: Mapped[str] = mapped_column(
-        String(36),
+    dataset_id: Mapped[UUID] = mapped_column(
+        GUID,
         ForeignKey("datasets.dataset_id", ondelete="CASCADE"),
         nullable=False,
     )
+    # Opaque storage-backend key (not a UUID; the domain DatasetFile has no
+    # storage_id field), so it stays a plain String rather than GUID.
     storage_id: Mapped[str] = mapped_column(String(36), nullable=False)
     path: Mapped[str] = mapped_column(String(1000), nullable=False)
     filename: Mapped[str] = mapped_column(String(255), nullable=False)
     content_type: Mapped[str] = mapped_column(String(255), nullable=False)
     size_bytes: Mapped[int] = mapped_column(Integer, nullable=False)
     checksum: Mapped[str] = mapped_column(String(64), nullable=False)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utc_now)
+    created_at: Mapped[datetime] = mapped_column(UtcDateTime, default=_utc_now)
 
 
 class NoteModel(Base):
@@ -285,18 +330,18 @@ class NoteModel(Base):
         ),
     )
 
-    note_id: Mapped[str] = mapped_column(
-        String(36),
+    note_id: Mapped[UUID] = mapped_column(
+        GUID,
         primary_key=True,
-        default=lambda: str(uuid4()),
+        default=uuid4,
     )
-    project_id: Mapped[str] = mapped_column(
-        String(36),
+    project_id: Mapped[UUID] = mapped_column(
+        GUID,
         ForeignKey("projects.project_id", ondelete="CASCADE"),
         nullable=False,
     )
     raw_content: Mapped[str] = mapped_column(Text, nullable=False)
-    raw_storage_id: Mapped[str | None] = mapped_column(String(36))
+    raw_storage_id: Mapped[UUID | None] = mapped_column(GUID)
     raw_filename: Mapped[str | None] = mapped_column(String(255))
     raw_content_type: Mapped[str | None] = mapped_column(String(255))
     raw_size_bytes: Mapped[int | None] = mapped_column(Integer)
@@ -304,22 +349,22 @@ class NoteModel(Base):
     transcribed_text: Mapped[str | None] = mapped_column(Text)
     note_metadata: Mapped[dict[str, str]] = mapped_column("metadata", JSON, default=dict)
     client_capture_id: Mapped[str | None] = mapped_column(String(120))
-    status: Mapped[str] = mapped_column(String(20), default="staged")
+    status: Mapped[NoteStatus] = mapped_column(EnumType(NoteStatus, length=20), default="staged")
     archived_reason: Mapped[str | None] = mapped_column(String(32))
-    archived_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    archived_at: Mapped[datetime | None] = mapped_column(UtcDateTime)
     archived_by: Mapped[str | None] = mapped_column(String(255))
-    archived_by_user_id: Mapped[str | None] = mapped_column(
-        String(36),
+    archived_by_user_id: Mapped[UUID | None] = mapped_column(
+        GUID,
         ForeignKey("users.user_id", ondelete="SET NULL"),
     )
     created_by: Mapped[str | None] = mapped_column(String(255))
-    created_by_user_id: Mapped[str | None] = mapped_column(
-        String(36),
+    created_by_user_id: Mapped[UUID | None] = mapped_column(
+        GUID,
         ForeignKey("users.user_id", ondelete="SET NULL"),
     )
     origin: Mapped[str] = mapped_column(String(32), nullable=False, default="user")
-    change_set_id: Mapped[str | None] = mapped_column(
-        String(36),
+    change_set_id: Mapped[UUID | None] = mapped_column(
+        GUID,
         ForeignKey(
             "graph_change_sets.change_set_id",
             ondelete="SET NULL",
@@ -330,9 +375,9 @@ class NoteModel(Base):
     origin_provider: Mapped[str | None] = mapped_column(String(80))
     origin_model: Mapped[str | None] = mapped_column(String(255))
     origin_prompt_version: Mapped[str | None] = mapped_column(String(120))
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utc_now)
+    created_at: Mapped[datetime] = mapped_column(UtcDateTime, default=_utc_now)
     updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True),
+        UtcDateTime,
         default=_utc_now,
         onupdate=_utc_now,
     )
@@ -341,31 +386,33 @@ class NoteModel(Base):
 class NoteTargetModel(Base):
     __tablename__ = "note_targets"
 
-    note_id: Mapped[str] = mapped_column(
-        String(36),
+    note_id: Mapped[UUID] = mapped_column(
+        GUID,
         ForeignKey("notes.note_id", ondelete="CASCADE"),
         primary_key=True,
     )
-    entity_type: Mapped[str] = mapped_column(String(30), primary_key=True)
-    entity_id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    entity_type: Mapped[EntityType] = mapped_column(
+        EnumType(EntityType, length=30), primary_key=True
+    )
+    entity_id: Mapped[UUID] = mapped_column(GUID, primary_key=True)
 
 
 class GraphChangeSetModel(Base):
     __tablename__ = "graph_change_sets"
     __table_args__ = (UniqueConstraint("batch_key", name="uq_graph_change_sets_batch_key"),)
 
-    change_set_id: Mapped[str] = mapped_column(
-        String(36),
+    change_set_id: Mapped[UUID] = mapped_column(
+        GUID,
         primary_key=True,
-        default=lambda: str(uuid4()),
+        default=uuid4,
     )
-    project_id: Mapped[str] = mapped_column(
-        String(36),
+    project_id: Mapped[UUID] = mapped_column(
+        GUID,
         ForeignKey("projects.project_id", ondelete="CASCADE"),
         nullable=False,
     )
-    source_note_id: Mapped[str] = mapped_column(
-        String(36),
+    source_note_id: Mapped[UUID] = mapped_column(
+        GUID,
         ForeignKey("notes.note_id", ondelete="CASCADE"),
         nullable=False,
     )
@@ -374,8 +421,8 @@ class GraphChangeSetModel(Base):
     source_content_type: Mapped[str | None] = mapped_column(String(255))
     source_filename: Mapped[str | None] = mapped_column(String(255))
     batch_key: Mapped[str | None] = mapped_column(String(120))
-    batch_window_start: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    batch_window_end: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    batch_window_start: Mapped[datetime | None] = mapped_column(UtcDateTime)
+    batch_window_end: Mapped[datetime | None] = mapped_column(UtcDateTime)
     provider: Mapped[str] = mapped_column(String(40), nullable=False)
     model: Mapped[str] = mapped_column(String(100), nullable=False)
     prompt_version: Mapped[str] = mapped_column(String(80), nullable=False)
@@ -388,21 +435,21 @@ class GraphChangeSetModel(Base):
     commit_message: Mapped[str | None] = mapped_column(Text)
     error_metadata: Mapped[dict[str, object]] = mapped_column(JSON, default=dict)
     created_by: Mapped[str | None] = mapped_column(String(255))
-    created_by_user_id: Mapped[str | None] = mapped_column(
-        String(36),
+    created_by_user_id: Mapped[UUID | None] = mapped_column(
+        GUID,
         ForeignKey("users.user_id", ondelete="SET NULL"),
     )
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utc_now)
+    created_at: Mapped[datetime] = mapped_column(UtcDateTime, default=_utc_now)
     updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True),
+        UtcDateTime,
         default=_utc_now,
         onupdate=_utc_now,
     )
-    committed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    committed_at: Mapped[datetime | None] = mapped_column(UtcDateTime)
     committed_by: Mapped[str | None] = mapped_column(String(255))
-    submitted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    submitted_at: Mapped[datetime | None] = mapped_column(UtcDateTime)
     submitted_by: Mapped[str | None] = mapped_column(String(255))
-    reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    reviewed_at: Mapped[datetime | None] = mapped_column(UtcDateTime)
     reviewed_by: Mapped[str | None] = mapped_column(String(255))
     review_note: Mapped[str | None] = mapped_column(Text)
 
@@ -417,13 +464,13 @@ class GraphChangeOperationModel(Base):
         ),
     )
 
-    operation_id: Mapped[str] = mapped_column(
-        String(36),
+    operation_id: Mapped[UUID] = mapped_column(
+        GUID,
         primary_key=True,
-        default=lambda: str(uuid4()),
+        default=uuid4,
     )
-    change_set_id: Mapped[str] = mapped_column(
-        String(36),
+    change_set_id: Mapped[UUID] = mapped_column(
+        GUID,
         ForeignKey("graph_change_sets.change_set_id", ondelete="CASCADE"),
         nullable=False,
     )
@@ -431,7 +478,7 @@ class GraphChangeOperationModel(Base):
     op: Mapped[str] = mapped_column(String(20), nullable=False)
     entity_type: Mapped[str] = mapped_column(String(30), nullable=False)
     semantic_type: Mapped[str | None] = mapped_column(String(40))
-    target_entity_id: Mapped[str | None] = mapped_column(String(36))
+    target_entity_id: Mapped[UUID | None] = mapped_column(GUID)
     client_ref: Mapped[str | None] = mapped_column(String(80))
     payload: Mapped[dict[str, object]] = mapped_column(JSON, default=dict)
     rationale: Mapped[str] = mapped_column(Text, default="")
@@ -441,13 +488,13 @@ class GraphChangeOperationModel(Base):
     review_note: Mapped[str | None] = mapped_column(Text)
     acceptance_mode: Mapped[str | None] = mapped_column(String(20))
     accepted_by: Mapped[str | None] = mapped_column(String(255))
-    accepted_by_user_id: Mapped[str | None] = mapped_column(String(36))
-    accepted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    result_entity_id: Mapped[str | None] = mapped_column(String(36))
+    accepted_by_user_id: Mapped[UUID | None] = mapped_column(GUID)
+    accepted_at: Mapped[datetime | None] = mapped_column(UtcDateTime)
+    result_entity_id: Mapped[UUID | None] = mapped_column(GUID)
     error_metadata: Mapped[dict[str, object]] = mapped_column(JSON, default=dict)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utc_now)
+    created_at: Mapped[datetime] = mapped_column(UtcDateTime, default=_utc_now)
     updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True),
+        UtcDateTime,
         default=_utc_now,
         onupdate=_utc_now,
     )
@@ -464,24 +511,24 @@ class EntityVersionModel(Base):
         ),
     )
 
-    version_id: Mapped[str] = mapped_column(
-        String(36),
+    version_id: Mapped[UUID] = mapped_column(
+        GUID,
         primary_key=True,
-        default=lambda: str(uuid4()),
+        default=uuid4,
     )
-    entity_type: Mapped[str] = mapped_column(String(30), nullable=False)
-    entity_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    entity_type: Mapped[EntityType] = mapped_column(EnumType(EntityType, length=30), nullable=False)
+    entity_id: Mapped[UUID] = mapped_column(GUID, nullable=False)
     version_number: Mapped[int] = mapped_column(Integer, nullable=False)
     snapshot: Mapped[dict[str, object]] = mapped_column(JSON, default=dict)
-    change_set_id: Mapped[str | None] = mapped_column(
-        String(36),
+    change_set_id: Mapped[UUID | None] = mapped_column(
+        GUID,
         ForeignKey("graph_change_sets.change_set_id", ondelete="SET NULL"),
     )
-    committed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utc_now)
+    committed_at: Mapped[datetime | None] = mapped_column(UtcDateTime)
+    created_at: Mapped[datetime] = mapped_column(UtcDateTime, default=_utc_now)
     created_by: Mapped[str | None] = mapped_column(String(255))
-    created_by_user_id: Mapped[str | None] = mapped_column(
-        String(36),
+    created_by_user_id: Mapped[UUID | None] = mapped_column(
+        GUID,
         ForeignKey("users.user_id", ondelete="SET NULL"),
     )
 
@@ -490,13 +537,13 @@ class GraphDraftBatchSettingsModel(Base):
     __tablename__ = "graph_draft_batch_settings"
     __table_args__ = (UniqueConstraint("project_id", name="uq_graph_draft_batch_settings_project"),)
 
-    settings_id: Mapped[str] = mapped_column(
-        String(36),
+    settings_id: Mapped[UUID] = mapped_column(
+        GUID,
         primary_key=True,
-        default=lambda: str(uuid4()),
+        default=uuid4,
     )
-    project_id: Mapped[str] = mapped_column(
-        String(36),
+    project_id: Mapped[UUID] = mapped_column(
+        GUID,
         ForeignKey("projects.project_id", ondelete="CASCADE"),
         nullable=False,
     )
@@ -508,10 +555,10 @@ class GraphDraftBatchSettingsModel(Base):
         nullable=False,
         default="America/New_York",
     )
-    next_run_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utc_now)
+    next_run_at: Mapped[datetime | None] = mapped_column(UtcDateTime)
+    created_at: Mapped[datetime] = mapped_column(UtcDateTime, default=_utc_now)
     updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True),
+        UtcDateTime,
         default=_utc_now,
         onupdate=_utc_now,
     )
@@ -522,79 +569,83 @@ class GraphDraftBatchRunModel(Base):
     __tablename__ = "graph_draft_batch_runs"
     __table_args__ = (UniqueConstraint("batch_key", name="uq_graph_draft_batch_runs_batch_key"),)
 
-    run_id: Mapped[str] = mapped_column(
-        String(36),
+    run_id: Mapped[UUID] = mapped_column(
+        GUID,
         primary_key=True,
-        default=lambda: str(uuid4()),
+        default=uuid4,
     )
-    project_id: Mapped[str] = mapped_column(
-        String(36),
+    project_id: Mapped[UUID] = mapped_column(
+        GUID,
         ForeignKey("projects.project_id", ondelete="CASCADE"),
         nullable=False,
     )
     trigger: Mapped[str] = mapped_column(String(20), nullable=False, default="scheduled")
     status: Mapped[str] = mapped_column(String(20), nullable=False, default="running")
-    window_start: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
-    window_end: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    window_start: Mapped[datetime] = mapped_column(UtcDateTime, nullable=False)
+    window_end: Mapped[datetime] = mapped_column(UtcDateTime, nullable=False)
     note_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     batch_key: Mapped[str] = mapped_column(String(120), nullable=False)
-    change_set_id: Mapped[str | None] = mapped_column(
-        String(36),
+    change_set_id: Mapped[UUID | None] = mapped_column(
+        GUID,
         ForeignKey("graph_change_sets.change_set_id", ondelete="SET NULL"),
     )
     summary: Mapped[str] = mapped_column(Text, default="")
     error_metadata: Mapped[dict[str, object]] = mapped_column(JSON, default=dict)
     created_by: Mapped[str | None] = mapped_column(String(255))
-    created_by_user_id: Mapped[str | None] = mapped_column(
-        String(36),
+    created_by_user_id: Mapped[UUID | None] = mapped_column(
+        GUID,
         ForeignKey("users.user_id", ondelete="SET NULL"),
     )
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utc_now)
+    created_at: Mapped[datetime] = mapped_column(UtcDateTime, default=_utc_now)
     updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True),
+        UtcDateTime,
         default=_utc_now,
         onupdate=_utc_now,
     )
-    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utc_now)
-    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    started_at: Mapped[datetime] = mapped_column(UtcDateTime, default=_utc_now)
+    finished_at: Mapped[datetime | None] = mapped_column(UtcDateTime)
 
 
 class SessionModel(Base):
     __tablename__ = "sessions"
 
-    session_id: Mapped[str] = mapped_column(
-        String(36),
+    session_id: Mapped[UUID] = mapped_column(
+        GUID,
         primary_key=True,
-        default=lambda: str(uuid4()),
+        default=uuid4,
     )
-    project_id: Mapped[str] = mapped_column(
-        String(36),
+    project_id: Mapped[UUID] = mapped_column(
+        GUID,
         ForeignKey("projects.project_id", ondelete="CASCADE"),
         nullable=False,
     )
-    session_type: Mapped[str] = mapped_column(String(30), nullable=False)
-    status: Mapped[str] = mapped_column(String(20), default="active")
-    primary_question_id: Mapped[str | None] = mapped_column(
-        String(36),
+    session_type: Mapped[SessionType] = mapped_column(
+        EnumType(SessionType, length=30), nullable=False
+    )
+    status: Mapped[SessionStatus] = mapped_column(
+        EnumType(SessionStatus, length=20), default=SessionStatus.ACTIVE
+    )
+    primary_question_id: Mapped[UUID | None] = mapped_column(
+        GUID,
         ForeignKey("questions.question_id"),
     )
-    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utc_now)
-    ended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    started_at: Mapped[datetime] = mapped_column(UtcDateTime, default=_utc_now)
+    ended_at: Mapped[datetime | None] = mapped_column(UtcDateTime)
     created_by: Mapped[str | None] = mapped_column(String(255))
-    created_by_user_id: Mapped[str | None] = mapped_column(
-        String(36),
+    created_by_user_id: Mapped[UUID | None] = mapped_column(
+        GUID,
         ForeignKey("users.user_id", ondelete="SET NULL"),
     )
     origin: Mapped[str] = mapped_column(String(32), nullable=False, default="user")
-    change_set_id: Mapped[str | None] = mapped_column(
-        String(36),
+    change_set_id: Mapped[UUID | None] = mapped_column(
+        GUID,
         ForeignKey("graph_change_sets.change_set_id", ondelete="SET NULL"),
     )
     origin_provider: Mapped[str | None] = mapped_column(String(80))
     origin_model: Mapped[str | None] = mapped_column(String(255))
     origin_prompt_version: Mapped[str | None] = mapped_column(String(120))
     updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True),
+        UtcDateTime,
         default=_utc_now,
         onupdate=_utc_now,
     )
@@ -610,22 +661,22 @@ class AcquisitionOutputModel(Base):
         ),
     )
 
-    output_id: Mapped[str] = mapped_column(
-        String(36),
+    output_id: Mapped[UUID] = mapped_column(
+        GUID,
         primary_key=True,
-        default=lambda: str(uuid4()),
+        default=uuid4,
     )
-    session_id: Mapped[str] = mapped_column(
-        String(36),
+    session_id: Mapped[UUID] = mapped_column(
+        GUID,
         ForeignKey("sessions.session_id", ondelete="CASCADE"),
         nullable=False,
     )
     file_path: Mapped[str] = mapped_column(String(1000), nullable=False)
     checksum: Mapped[str] = mapped_column(String(64), nullable=False)
     size_bytes: Mapped[int | None] = mapped_column(Integer)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utc_now)
+    created_at: Mapped[datetime] = mapped_column(UtcDateTime, default=_utc_now)
     updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True),
+        UtcDateTime,
         default=_utc_now,
         onupdate=_utc_now,
     )
@@ -634,13 +685,13 @@ class AcquisitionOutputModel(Base):
 class AnalysisModel(Base):
     __tablename__ = "analyses"
 
-    analysis_id: Mapped[str] = mapped_column(
-        String(36),
+    analysis_id: Mapped[UUID] = mapped_column(
+        GUID,
         primary_key=True,
-        default=lambda: str(uuid4()),
+        default=uuid4,
     )
-    project_id: Mapped[str] = mapped_column(
-        String(36),
+    project_id: Mapped[UUID] = mapped_column(
+        GUID,
         ForeignKey("projects.project_id", ondelete="CASCADE"),
         nullable=False,
     )
@@ -649,24 +700,26 @@ class AnalysisModel(Base):
     environment_hash: Mapped[str | None] = mapped_column(String(255))
     external_artifacts: Mapped[list[dict[str, object]]] = mapped_column(JSON, default=list)
     executed_by: Mapped[str | None] = mapped_column(String(255))
-    executed_by_user_id: Mapped[str | None] = mapped_column(
-        String(36),
+    executed_by_user_id: Mapped[UUID | None] = mapped_column(
+        GUID,
         ForeignKey("users.user_id", ondelete="SET NULL"),
     )
-    executed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utc_now)
-    status: Mapped[str] = mapped_column(String(20), default="staged")
+    executed_at: Mapped[datetime] = mapped_column(UtcDateTime, default=_utc_now)
+    status: Mapped[AnalysisStatus] = mapped_column(
+        EnumType(AnalysisStatus, length=20), default="staged"
+    )
     terminal_reason: Mapped[str | None] = mapped_column(Text)
     origin: Mapped[str] = mapped_column(String(32), nullable=False, default="user")
-    change_set_id: Mapped[str | None] = mapped_column(
-        String(36),
+    change_set_id: Mapped[UUID | None] = mapped_column(
+        GUID,
         ForeignKey("graph_change_sets.change_set_id", ondelete="SET NULL"),
     )
     origin_provider: Mapped[str | None] = mapped_column(String(80))
     origin_model: Mapped[str | None] = mapped_column(String(255))
     origin_prompt_version: Mapped[str | None] = mapped_column(String(120))
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utc_now)
+    created_at: Mapped[datetime] = mapped_column(UtcDateTime, default=_utc_now)
     updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True),
+        UtcDateTime,
         default=_utc_now,
         onupdate=_utc_now,
     )
@@ -675,13 +728,13 @@ class AnalysisModel(Base):
 class AnalysisDatasetModel(Base):
     __tablename__ = "analysis_datasets"
 
-    analysis_id: Mapped[str] = mapped_column(
-        String(36),
+    analysis_id: Mapped[UUID] = mapped_column(
+        GUID,
         ForeignKey("analyses.analysis_id", ondelete="CASCADE"),
         primary_key=True,
     )
-    dataset_id: Mapped[str] = mapped_column(
-        String(36),
+    dataset_id: Mapped[UUID] = mapped_column(
+        GUID,
         ForeignKey("datasets.dataset_id", ondelete="CASCADE"),
         primary_key=True,
     )
@@ -690,40 +743,42 @@ class AnalysisDatasetModel(Base):
 class ClaimModel(Base):
     __tablename__ = "claims"
 
-    claim_id: Mapped[str] = mapped_column(
-        String(36),
+    claim_id: Mapped[UUID] = mapped_column(
+        GUID,
         primary_key=True,
-        default=lambda: str(uuid4()),
+        default=uuid4,
     )
-    project_id: Mapped[str] = mapped_column(
-        String(36),
+    project_id: Mapped[UUID] = mapped_column(
+        GUID,
         ForeignKey("projects.project_id", ondelete="CASCADE"),
         nullable=False,
     )
     statement: Mapped[str] = mapped_column(Text, nullable=False)
     confidence: Mapped[float] = mapped_column(Float, nullable=False)
-    status: Mapped[str] = mapped_column(String(20), default="proposed")
+    status: Mapped[ClaimStatus] = mapped_column(
+        EnumType(ClaimStatus, length=20), default="proposed"
+    )
     terminal_reason: Mapped[str | None] = mapped_column(Text)
     falsification_criteria: Mapped[str | None] = mapped_column(Text)
     verification_plan: Mapped[str | None] = mapped_column(Text)
     refuting_outcome: Mapped[str | None] = mapped_column(Text)
     external_citations: Mapped[list[dict[str, object]]] = mapped_column(JSON, default=list)
     created_by: Mapped[str | None] = mapped_column(String(255))
-    created_by_user_id: Mapped[str | None] = mapped_column(
-        String(36),
+    created_by_user_id: Mapped[UUID | None] = mapped_column(
+        GUID,
         ForeignKey("users.user_id", ondelete="SET NULL"),
     )
     origin: Mapped[str] = mapped_column(String(32), nullable=False, default="user")
-    change_set_id: Mapped[str | None] = mapped_column(
-        String(36),
+    change_set_id: Mapped[UUID | None] = mapped_column(
+        GUID,
         ForeignKey("graph_change_sets.change_set_id", ondelete="SET NULL"),
     )
     origin_provider: Mapped[str | None] = mapped_column(String(80))
     origin_model: Mapped[str | None] = mapped_column(String(255))
     origin_prompt_version: Mapped[str | None] = mapped_column(String(120))
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utc_now)
+    created_at: Mapped[datetime] = mapped_column(UtcDateTime, default=_utc_now)
     updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True),
+        UtcDateTime,
         default=_utc_now,
         onupdate=_utc_now,
     )
@@ -732,13 +787,13 @@ class ClaimModel(Base):
 class ClaimDatasetModel(Base):
     __tablename__ = "claim_datasets"
 
-    claim_id: Mapped[str] = mapped_column(
-        String(36),
+    claim_id: Mapped[UUID] = mapped_column(
+        GUID,
         ForeignKey("claims.claim_id", ondelete="CASCADE"),
         primary_key=True,
     )
-    dataset_id: Mapped[str] = mapped_column(
-        String(36),
+    dataset_id: Mapped[UUID] = mapped_column(
+        GUID,
         ForeignKey("datasets.dataset_id", ondelete="CASCADE"),
         primary_key=True,
     )
@@ -747,13 +802,13 @@ class ClaimDatasetModel(Base):
 class ClaimAnalysisModel(Base):
     __tablename__ = "claim_analyses"
 
-    claim_id: Mapped[str] = mapped_column(
-        String(36),
+    claim_id: Mapped[UUID] = mapped_column(
+        GUID,
         ForeignKey("claims.claim_id", ondelete="CASCADE"),
         primary_key=True,
     )
-    analysis_id: Mapped[str] = mapped_column(
-        String(36),
+    analysis_id: Mapped[UUID] = mapped_column(
+        GUID,
         ForeignKey("analyses.analysis_id", ondelete="CASCADE"),
         primary_key=True,
     )
@@ -762,13 +817,13 @@ class ClaimAnalysisModel(Base):
 class ClaimQuestionModel(Base):
     __tablename__ = "claim_questions"
 
-    claim_id: Mapped[str] = mapped_column(
-        String(36),
+    claim_id: Mapped[UUID] = mapped_column(
+        GUID,
         ForeignKey("claims.claim_id", ondelete="CASCADE"),
         primary_key=True,
     )
-    question_id: Mapped[str] = mapped_column(
-        String(36),
+    question_id: Mapped[UUID] = mapped_column(
+        GUID,
         ForeignKey("questions.question_id", ondelete="CASCADE"),
         primary_key=True,
     )
@@ -785,28 +840,30 @@ class ClaimEdgeModel(Base):
         ),
     )
 
-    edge_id: Mapped[str] = mapped_column(
-        String(36),
+    edge_id: Mapped[UUID] = mapped_column(
+        GUID,
         primary_key=True,
-        default=lambda: str(uuid4()),
+        default=uuid4,
     )
-    claim_id: Mapped[str] = mapped_column(
-        String(36),
+    claim_id: Mapped[UUID] = mapped_column(
+        GUID,
         ForeignKey("claims.claim_id", ondelete="CASCADE"),
         nullable=False,
     )
-    target_claim_id: Mapped[str] = mapped_column(
-        String(36),
+    target_claim_id: Mapped[UUID] = mapped_column(
+        GUID,
         ForeignKey("claims.claim_id", ondelete="CASCADE"),
         nullable=False,
     )
-    relation: Mapped[str] = mapped_column(String(32), nullable=False)
+    relation: Mapped[ClaimRelation] = mapped_column(
+        EnumType(ClaimRelation, length=32), nullable=False
+    )
     created_by: Mapped[str | None] = mapped_column(String(255))
-    created_by_user_id: Mapped[str | None] = mapped_column(
-        String(36),
+    created_by_user_id: Mapped[UUID | None] = mapped_column(
+        GUID,
         ForeignKey("users.user_id", ondelete="SET NULL"),
     )
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utc_now)
+    created_at: Mapped[datetime] = mapped_column(UtcDateTime, default=_utc_now)
 
 
 class ProvenanceLinkModel(Base):
@@ -821,34 +878,48 @@ class ProvenanceLinkModel(Base):
         Index("ix_provenance_links_project_status", "project_id", "status"),
     )
 
-    link_id: Mapped[str] = mapped_column(
-        String(36),
+    link_id: Mapped[UUID] = mapped_column(
+        GUID,
         primary_key=True,
-        default=lambda: str(uuid4()),
+        default=uuid4,
     )
-    project_id: Mapped[str] = mapped_column(
-        String(36),
+    project_id: Mapped[UUID] = mapped_column(
+        GUID,
         ForeignKey("projects.project_id", ondelete="CASCADE"),
         nullable=False,
     )
-    source_entity_type: Mapped[str] = mapped_column(String(40), nullable=False)
-    source_entity_id: Mapped[str] = mapped_column(String(36), nullable=False)
-    target_entity_type: Mapped[str] = mapped_column(String(40), nullable=False)
-    target_entity_id: Mapped[str] = mapped_column(String(36), nullable=False)
-    relation: Mapped[str] = mapped_column(String(32), nullable=False)
-    basis: Mapped[str] = mapped_column(String(32), nullable=False)
+    source_entity_type: Mapped[EntityType] = mapped_column(
+        EnumType(EntityType, length=40), nullable=False
+    )
+    source_entity_id: Mapped[UUID] = mapped_column(GUID, nullable=False)
+    target_entity_type: Mapped[EntityType] = mapped_column(
+        EnumType(EntityType, length=40), nullable=False
+    )
+    target_entity_id: Mapped[UUID] = mapped_column(GUID, nullable=False)
+    relation: Mapped[ProvenanceLinkRelation] = mapped_column(
+        EnumType(ProvenanceLinkRelation, length=32), nullable=False
+    )
+    basis: Mapped[ProvenanceLinkBasis] = mapped_column(
+        EnumType(ProvenanceLinkBasis, length=32), nullable=False
+    )
     content_hash: Mapped[str | None] = mapped_column(String(64))
-    status: Mapped[str] = mapped_column(String(20), nullable=False, default="proposed")
-    origin: Mapped[str] = mapped_column(String(32), nullable=False, default="system_detected")
-    acceptance_mode: Mapped[str | None] = mapped_column(String(20))
+    status: Mapped[ProvenanceLinkStatus] = mapped_column(
+        EnumType(ProvenanceLinkStatus, length=20), nullable=False, default="proposed"
+    )
+    origin: Mapped[ProvenanceLinkOrigin] = mapped_column(
+        EnumType(ProvenanceLinkOrigin, length=32), nullable=False, default="system_detected"
+    )
+    acceptance_mode: Mapped[AcceptanceMode | None] = mapped_column(
+        EnumType(AcceptanceMode, length=20)
+    )
     accepted_by: Mapped[str | None] = mapped_column(String(255))
-    accepted_by_user_id: Mapped[str | None] = mapped_column(String(36))
-    accepted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    accepted_by_user_id: Mapped[UUID | None] = mapped_column(GUID)
+    accepted_at: Mapped[datetime | None] = mapped_column(UtcDateTime)
     created_by: Mapped[str | None] = mapped_column(String(255))
-    created_by_user_id: Mapped[str | None] = mapped_column(String(36))
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utc_now)
+    created_by_user_id: Mapped[UUID | None] = mapped_column(GUID)
+    created_at: Mapped[datetime] = mapped_column(UtcDateTime, default=_utc_now)
     updated_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True),
+        UtcDateTime,
         default=_utc_now,
         onupdate=_utc_now,
     )
@@ -857,21 +928,27 @@ class ProvenanceLinkModel(Base):
 class ExplorationNodeModel(Base):
     __tablename__ = "exploration_nodes"
 
-    node_id: Mapped[str] = mapped_column(
-        String(36),
+    node_id: Mapped[UUID] = mapped_column(
+        GUID,
         primary_key=True,
-        default=lambda: str(uuid4()),
+        default=uuid4,
     )
-    project_id: Mapped[str] = mapped_column(
-        String(36),
+    project_id: Mapped[UUID] = mapped_column(
+        GUID,
         ForeignKey("projects.project_id", ondelete="CASCADE"),
         nullable=False,
     )
-    node_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    node_type: Mapped[ExplorationNodeType] = mapped_column(
+        EnumType(ExplorationNodeType, length=32), nullable=False
+    )
     title: Mapped[str] = mapped_column(Text, nullable=False)
-    target_entity_type: Mapped[str] = mapped_column(String(40), nullable=False)
-    target_entity_id: Mapped[str] = mapped_column(String(36), nullable=False)
-    status: Mapped[str] = mapped_column(String(20), nullable=False, default="staged")
+    target_entity_type: Mapped[EntityType] = mapped_column(
+        EnumType(EntityType, length=40), nullable=False
+    )
+    target_entity_id: Mapped[UUID] = mapped_column(GUID, nullable=False)
+    status: Mapped[ExplorationNodeStatus] = mapped_column(
+        EnumType(ExplorationNodeStatus, length=20), nullable=False, default="staged"
+    )
     choice: Mapped[str | None] = mapped_column(Text)
     alternatives_considered: Mapped[list[str]] = mapped_column(JSON, default=list)
     rationale: Mapped[str | None] = mapped_column(Text)
@@ -881,30 +958,30 @@ class ExplorationNodeModel(Base):
     lesson: Mapped[str | None] = mapped_column(Text)
     tooling_context: Mapped[str | None] = mapped_column(Text)
     trigger: Mapped[str | None] = mapped_column(Text)
-    invalidates_node_id: Mapped[str | None] = mapped_column(
-        String(36),
+    invalidates_node_id: Mapped[UUID | None] = mapped_column(
+        GUID,
         ForeignKey("exploration_nodes.node_id", ondelete="SET NULL"),
     )
-    invalidates_claim_id: Mapped[str | None] = mapped_column(
-        String(36),
+    invalidates_claim_id: Mapped[UUID | None] = mapped_column(
+        GUID,
         ForeignKey("claims.claim_id", ondelete="SET NULL"),
     )
     created_by: Mapped[str | None] = mapped_column(String(255))
-    created_by_user_id: Mapped[str | None] = mapped_column(
-        String(36),
+    created_by_user_id: Mapped[UUID | None] = mapped_column(
+        GUID,
         ForeignKey("users.user_id", ondelete="SET NULL"),
     )
     origin: Mapped[str] = mapped_column(String(32), nullable=False, default="user")
-    change_set_id: Mapped[str | None] = mapped_column(
-        String(36),
+    change_set_id: Mapped[UUID | None] = mapped_column(
+        GUID,
         ForeignKey("graph_change_sets.change_set_id", ondelete="SET NULL"),
     )
     origin_provider: Mapped[str | None] = mapped_column(String(80))
     origin_model: Mapped[str | None] = mapped_column(String(255))
     origin_prompt_version: Mapped[str | None] = mapped_column(String(120))
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utc_now)
+    created_at: Mapped[datetime] = mapped_column(UtcDateTime, default=_utc_now)
     updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True),
+        UtcDateTime,
         default=_utc_now,
         onupdate=_utc_now,
     )
@@ -921,23 +998,23 @@ class ExplorationNodeEdgeModel(Base):
         ),
     )
 
-    edge_id: Mapped[str] = mapped_column(
-        String(36),
+    edge_id: Mapped[UUID] = mapped_column(
+        GUID,
         primary_key=True,
-        default=lambda: str(uuid4()),
+        default=uuid4,
     )
-    source_node_id: Mapped[str] = mapped_column(
-        String(36),
+    source_node_id: Mapped[UUID] = mapped_column(
+        GUID,
         ForeignKey("exploration_nodes.node_id", ondelete="CASCADE"),
         nullable=False,
     )
-    target_node_id: Mapped[str] = mapped_column(
-        String(36),
+    target_node_id: Mapped[UUID] = mapped_column(
+        GUID,
         ForeignKey("exploration_nodes.node_id", ondelete="CASCADE"),
         nullable=False,
     )
     relation: Mapped[str] = mapped_column(String(32), nullable=False)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utc_now)
+    created_at: Mapped[datetime] = mapped_column(UtcDateTime, default=_utc_now)
 
 
 class DataStoreModel(Base):
@@ -949,34 +1026,34 @@ class DataStoreModel(Base):
         Index("ix_data_stores_group_default", "group_id", "is_default"),
     )
 
-    store_id: Mapped[str] = mapped_column(
-        String(36),
+    store_id: Mapped[UUID] = mapped_column(
+        GUID,
         primary_key=True,
-        default=lambda: str(uuid4()),
+        default=uuid4,
     )
-    project_id: Mapped[str | None] = mapped_column(
-        String(36),
+    project_id: Mapped[UUID | None] = mapped_column(
+        GUID,
         ForeignKey("projects.project_id", ondelete="CASCADE"),
     )
-    group_id: Mapped[str | None] = mapped_column(
-        String(36),
+    group_id: Mapped[UUID | None] = mapped_column(
+        GUID,
         ForeignKey("project_groups.group_id", ondelete="CASCADE"),
     )
     name: Mapped[str] = mapped_column(String(255), nullable=False)
-    kind: Mapped[str] = mapped_column(String(40), nullable=False)
+    kind: Mapped[StoreKind] = mapped_column(EnumType(StoreKind, length=40), nullable=False)
     capabilities: Mapped[list[object]] = mapped_column(JSON, default=list)
     root: Mapped[str] = mapped_column(String(2000), nullable=False)
     endpoint: Mapped[str | None] = mapped_column(String(2000))
     credential_ref: Mapped[str | None] = mapped_column(String(255))
     is_default: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     created_by: Mapped[str | None] = mapped_column(String(255))
-    created_by_user_id: Mapped[str | None] = mapped_column(
-        String(36),
+    created_by_user_id: Mapped[UUID | None] = mapped_column(
+        GUID,
         ForeignKey("users.user_id", ondelete="SET NULL"),
     )
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utc_now)
+    created_at: Mapped[datetime] = mapped_column(UtcDateTime, default=_utc_now)
     updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True),
+        UtcDateTime,
         default=_utc_now,
         onupdate=_utc_now,
     )
@@ -985,38 +1062,38 @@ class DataStoreModel(Base):
 class GoalModel(Base):
     __tablename__ = "goals"
 
-    goal_id: Mapped[str] = mapped_column(
-        String(36),
+    goal_id: Mapped[UUID] = mapped_column(
+        GUID,
         primary_key=True,
-        default=lambda: str(uuid4()),
+        default=uuid4,
     )
-    project_id: Mapped[str | None] = mapped_column(
-        String(36),
+    project_id: Mapped[UUID | None] = mapped_column(
+        GUID,
         ForeignKey("projects.project_id", ondelete="CASCADE"),
     )
-    goal_type: Mapped[str] = mapped_column(String(40), nullable=False)
+    goal_type: Mapped[GoalType] = mapped_column(EnumType(GoalType, length=40), nullable=False)
     title: Mapped[str] = mapped_column(String(255), nullable=False)
     summary: Mapped[str] = mapped_column(Text, default="")
-    status: Mapped[str] = mapped_column(String(20), default="planned")
+    status: Mapped[GoalStatus] = mapped_column(EnumType(GoalStatus, length=20), default="planned")
     target_date: Mapped[date | None] = mapped_column(Date)
     external_ref: Mapped[str | None] = mapped_column(String(1000))
     attributes: Mapped[dict[str, object]] = mapped_column(JSON, default=dict)
     created_by: Mapped[str | None] = mapped_column(String(255))
-    created_by_user_id: Mapped[str | None] = mapped_column(
-        String(36),
+    created_by_user_id: Mapped[UUID | None] = mapped_column(
+        GUID,
         ForeignKey("users.user_id", ondelete="SET NULL"),
     )
     origin: Mapped[str] = mapped_column(String(32), nullable=False, default="user")
-    change_set_id: Mapped[str | None] = mapped_column(
-        String(36),
+    change_set_id: Mapped[UUID | None] = mapped_column(
+        GUID,
         ForeignKey("graph_change_sets.change_set_id", ondelete="SET NULL"),
     )
     origin_provider: Mapped[str | None] = mapped_column(String(80))
     origin_model: Mapped[str | None] = mapped_column(String(255))
     origin_prompt_version: Mapped[str | None] = mapped_column(String(120))
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utc_now)
+    created_at: Mapped[datetime] = mapped_column(UtcDateTime, default=_utc_now)
     updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True),
+        UtcDateTime,
         default=_utc_now,
         onupdate=_utc_now,
     )
@@ -1035,66 +1112,70 @@ class GoalLinkModel(Base):
         ),
     )
 
-    link_id: Mapped[str] = mapped_column(
-        String(36),
+    link_id: Mapped[UUID] = mapped_column(
+        GUID,
         primary_key=True,
-        default=lambda: str(uuid4()),
+        default=uuid4,
     )
-    goal_id: Mapped[str] = mapped_column(
-        String(36),
+    goal_id: Mapped[UUID] = mapped_column(
+        GUID,
         ForeignKey("goals.goal_id", ondelete="CASCADE"),
         nullable=False,
     )
-    entity_type: Mapped[str] = mapped_column(String(30), nullable=False)
-    entity_id: Mapped[str] = mapped_column(String(36), nullable=False)
-    relation: Mapped[str] = mapped_column(String(40), nullable=False)
-    link_status: Mapped[str] = mapped_column(String(20), default="candidate")
+    entity_type: Mapped[EntityType] = mapped_column(EnumType(EntityType, length=30), nullable=False)
+    entity_id: Mapped[UUID] = mapped_column(GUID, nullable=False)
+    relation: Mapped[GoalRelation] = mapped_column(
+        EnumType(GoalRelation, length=40), nullable=False
+    )
+    link_status: Mapped[GoalLinkStatus] = mapped_column(
+        EnumType(GoalLinkStatus, length=20), default="candidate"
+    )
     slot: Mapped[str] = mapped_column(String(120), nullable=False, default="")
     created_by: Mapped[str | None] = mapped_column(String(255))
-    created_by_user_id: Mapped[str | None] = mapped_column(
-        String(36),
+    created_by_user_id: Mapped[UUID | None] = mapped_column(
+        GUID,
         ForeignKey("users.user_id", ondelete="SET NULL"),
     )
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utc_now)
+    created_at: Mapped[datetime] = mapped_column(UtcDateTime, default=_utc_now)
 
 
 class VisualizationModel(Base):
     __tablename__ = "visualizations"
 
-    viz_id: Mapped[str] = mapped_column(
-        String(36),
+    viz_id: Mapped[UUID] = mapped_column(
+        GUID,
         primary_key=True,
-        default=lambda: str(uuid4()),
+        default=uuid4,
     )
-    analysis_id: Mapped[str] = mapped_column(
-        String(36),
+    analysis_id: Mapped[UUID] = mapped_column(
+        GUID,
         ForeignKey("analyses.analysis_id", ondelete="CASCADE"),
         nullable=False,
     )
     viz_type: Mapped[str] = mapped_column(String(40), nullable=False)
     file_path: Mapped[str] = mapped_column(String(1000), nullable=False)
     caption: Mapped[str | None] = mapped_column(Text)
-    asset_storage_id: Mapped[str | None] = mapped_column(String(36))
+    asset_storage_id: Mapped[UUID | None] = mapped_column(GUID)
     asset_filename: Mapped[str | None] = mapped_column(String(255))
     asset_content_type: Mapped[str | None] = mapped_column(String(255))
     asset_size_bytes: Mapped[int | None] = mapped_column(Integer)
     asset_checksum: Mapped[str | None] = mapped_column(String(64))
     created_by: Mapped[str | None] = mapped_column(String(255))
-    created_by_user_id: Mapped[str | None] = mapped_column(
-        String(36),
+    created_by_user_id: Mapped[UUID | None] = mapped_column(
+        GUID,
         ForeignKey("users.user_id", ondelete="SET NULL"),
     )
     origin: Mapped[str] = mapped_column(String(32), nullable=False, default="user")
-    change_set_id: Mapped[str | None] = mapped_column(
-        String(36),
+    change_set_id: Mapped[UUID | None] = mapped_column(
+        GUID,
         ForeignKey("graph_change_sets.change_set_id", ondelete="SET NULL"),
     )
     origin_provider: Mapped[str | None] = mapped_column(String(80))
     origin_model: Mapped[str | None] = mapped_column(String(255))
     origin_prompt_version: Mapped[str | None] = mapped_column(String(120))
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utc_now)
+    created_at: Mapped[datetime] = mapped_column(UtcDateTime, default=_utc_now)
     updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True),
+        UtcDateTime,
         default=_utc_now,
         onupdate=_utc_now,
     )
@@ -1103,13 +1184,13 @@ class VisualizationModel(Base):
 class VisualizationClaimModel(Base):
     __tablename__ = "visualization_claims"
 
-    viz_id: Mapped[str] = mapped_column(
-        String(36),
+    viz_id: Mapped[UUID] = mapped_column(
+        GUID,
         ForeignKey("visualizations.viz_id", ondelete="CASCADE"),
         primary_key=True,
     )
-    claim_id: Mapped[str] = mapped_column(
-        String(36),
+    claim_id: Mapped[UUID] = mapped_column(
+        GUID,
         ForeignKey("claims.claim_id", ondelete="CASCADE"),
         primary_key=True,
     )
@@ -1119,15 +1200,15 @@ class UserModel(Base):
     __tablename__ = "users"
     __table_args__ = (UniqueConstraint("username", name="uq_users_username"),)
 
-    user_id: Mapped[str] = mapped_column(
-        String(36),
+    user_id: Mapped[UUID] = mapped_column(
+        GUID,
         primary_key=True,
-        default=lambda: str(uuid4()),
+        default=uuid4,
     )
     username: Mapped[str] = mapped_column(String(150), nullable=False)
     password_hash: Mapped[str] = mapped_column(String(255), nullable=False)
     role: Mapped[str] = mapped_column(String(20), nullable=False)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utc_now)
+    created_at: Mapped[datetime] = mapped_column(UtcDateTime, default=_utc_now)
 
 
 class InvitationModel(Base):
@@ -1138,22 +1219,22 @@ class InvitationModel(Base):
         Index("ix_invitations_expires_at", "expires_at"),
     )
 
-    invitation_id: Mapped[str] = mapped_column(
-        String(36),
+    invitation_id: Mapped[UUID] = mapped_column(
+        GUID,
         primary_key=True,
-        default=lambda: str(uuid4()),
+        default=uuid4,
     )
     email: Mapped[str] = mapped_column(String(255), nullable=False)
     role: Mapped[str] = mapped_column(String(20), nullable=False)
     token_hash: Mapped[str] = mapped_column(String(64), nullable=False)
-    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utc_now)
-    consumed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    consumed_by_user_id: Mapped[str | None] = mapped_column(
-        String(36),
+    expires_at: Mapped[datetime] = mapped_column(UtcDateTime, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(UtcDateTime, default=_utc_now)
+    consumed_at: Mapped[datetime | None] = mapped_column(UtcDateTime)
+    consumed_by_user_id: Mapped[UUID | None] = mapped_column(
+        GUID,
         ForeignKey("users.user_id", ondelete="SET NULL"),
     )
-    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    revoked_at: Mapped[datetime | None] = mapped_column(UtcDateTime)
 
 
 class PersonalAccessTokenModel(Base):
@@ -1164,13 +1245,13 @@ class PersonalAccessTokenModel(Base):
         Index("ix_personal_access_tokens_expires_at", "expires_at"),
     )
 
-    token_id: Mapped[str] = mapped_column(
-        String(36),
+    token_id: Mapped[UUID] = mapped_column(
+        GUID,
         primary_key=True,
-        default=lambda: str(uuid4()),
+        default=uuid4,
     )
-    user_id: Mapped[str] = mapped_column(
-        String(36),
+    user_id: Mapped[UUID] = mapped_column(
+        GUID,
         ForeignKey("users.user_id", ondelete="CASCADE"),
         nullable=False,
     )
@@ -1178,35 +1259,35 @@ class PersonalAccessTokenModel(Base):
     token_hash: Mapped[str] = mapped_column(String(64), nullable=False)
     role: Mapped[str] = mapped_column(String(20), nullable=False)
     read_only: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
-    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utc_now)
-    last_used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    expires_at: Mapped[datetime] = mapped_column(UtcDateTime, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(UtcDateTime, default=_utc_now)
+    last_used_at: Mapped[datetime | None] = mapped_column(UtcDateTime)
+    revoked_at: Mapped[datetime | None] = mapped_column(UtcDateTime)
 
 
 class SupervisionEdgeModel(Base):
     __tablename__ = "supervision_edges"
 
-    edge_id: Mapped[str] = mapped_column(
-        String(36),
+    edge_id: Mapped[UUID] = mapped_column(
+        GUID,
         primary_key=True,
-        default=lambda: str(uuid4()),
+        default=uuid4,
     )
-    supervisor_user_id: Mapped[str] = mapped_column(
-        String(36),
+    supervisor_user_id: Mapped[UUID] = mapped_column(
+        GUID,
         ForeignKey("users.user_id", ondelete="RESTRICT"),
         nullable=False,
     )
-    supervisee_user_id: Mapped[str] = mapped_column(
-        String(36),
+    supervisee_user_id: Mapped[UUID] = mapped_column(
+        GUID,
         ForeignKey("users.user_id", ondelete="RESTRICT"),
         nullable=False,
     )
-    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
-    ended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utc_now)
+    started_at: Mapped[datetime] = mapped_column(UtcDateTime, nullable=False)
+    ended_at: Mapped[datetime | None] = mapped_column(UtcDateTime)
+    created_at: Mapped[datetime] = mapped_column(UtcDateTime, default=_utc_now)
     updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True),
+        UtcDateTime,
         default=_utc_now,
         onupdate=_utc_now,
     )
@@ -1215,76 +1296,76 @@ class SupervisionEdgeModel(Base):
 class OwnershipReassignmentModel(Base):
     __tablename__ = "ownership_reassignments"
 
-    reassignment_id: Mapped[str] = mapped_column(
-        String(36),
+    reassignment_id: Mapped[UUID] = mapped_column(
+        GUID,
         primary_key=True,
-        default=lambda: str(uuid4()),
+        default=uuid4,
     )
-    from_user_id: Mapped[str] = mapped_column(
-        String(36),
+    from_user_id: Mapped[UUID] = mapped_column(
+        GUID,
         ForeignKey("users.user_id", ondelete="RESTRICT"),
         nullable=False,
     )
-    to_user_id: Mapped[str] = mapped_column(
-        String(36),
+    to_user_id: Mapped[UUID] = mapped_column(
+        GUID,
         ForeignKey("users.user_id", ondelete="RESTRICT"),
         nullable=False,
     )
     reason: Mapped[str] = mapped_column(Text, default="")
     record_counts: Mapped[dict[str, int]] = mapped_column(JSON, default=dict)
     created_by: Mapped[str | None] = mapped_column(String(255))
-    created_by_user_id: Mapped[str | None] = mapped_column(
-        String(36),
+    created_by_user_id: Mapped[UUID | None] = mapped_column(
+        GUID,
         ForeignKey("users.user_id", ondelete="SET NULL"),
     )
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utc_now)
+    created_at: Mapped[datetime] = mapped_column(UtcDateTime, default=_utc_now)
 
 
 class RecordExportEventModel(Base):
     __tablename__ = "record_export_events"
 
-    export_id: Mapped[str] = mapped_column(
-        String(36),
+    export_id: Mapped[UUID] = mapped_column(
+        GUID,
         primary_key=True,
-        default=lambda: str(uuid4()),
+        default=uuid4,
     )
-    user_id: Mapped[str] = mapped_column(
-        String(36),
+    user_id: Mapped[UUID] = mapped_column(
+        GUID,
         ForeignKey("users.user_id", ondelete="RESTRICT"),
         nullable=False,
     )
-    group_id: Mapped[str | None] = mapped_column(
-        String(36),
+    group_id: Mapped[UUID | None] = mapped_column(
+        GUID,
         ForeignKey("project_groups.group_id", ondelete="SET NULL"),
     )
     project_ids: Mapped[list[str]] = mapped_column(JSON, default=list)
     record_counts: Mapped[dict[str, int]] = mapped_column(JSON, default=dict)
     created_by: Mapped[str | None] = mapped_column(String(255))
-    created_by_user_id: Mapped[str | None] = mapped_column(
-        String(36),
+    created_by_user_id: Mapped[UUID | None] = mapped_column(
+        GUID,
         ForeignKey("users.user_id", ondelete="SET NULL"),
     )
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utc_now)
+    created_at: Mapped[datetime] = mapped_column(UtcDateTime, default=_utc_now)
 
 
 class UsageEventModel(Base):
     __tablename__ = "usage_events"
 
-    event_id: Mapped[str] = mapped_column(
-        String(36),
+    event_id: Mapped[UUID] = mapped_column(
+        GUID,
         primary_key=True,
-        default=lambda: str(uuid4()),
+        default=uuid4,
     )
-    occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utc_now)
+    occurred_at: Mapped[datetime] = mapped_column(UtcDateTime, default=_utc_now)
     verb: Mapped[str] = mapped_column(String(30), nullable=False)
     resource_type: Mapped[str] = mapped_column(String(40), nullable=False)
-    resource_id: Mapped[str | None] = mapped_column(String(36))
-    actor_user_id: Mapped[str | None] = mapped_column(String(36))
+    resource_id: Mapped[UUID | None] = mapped_column(GUID)
+    actor_user_id: Mapped[UUID | None] = mapped_column(GUID)
     actor_role: Mapped[str | None] = mapped_column(String(30))
     principal_type: Mapped[str | None] = mapped_column(String(20))
     surface: Mapped[str | None] = mapped_column(String(20))
-    project_id: Mapped[str | None] = mapped_column(
-        String(36),
+    project_id: Mapped[UUID | None] = mapped_column(
+        GUID,
         ForeignKey("projects.project_id", ondelete="SET NULL"),
     )
     outcome: Mapped[str] = mapped_column(String(20), nullable=False)
@@ -1308,16 +1389,16 @@ class UsageEventRollupModel(Base):
         ),
     )
 
-    rollup_id: Mapped[str] = mapped_column(
-        String(36),
+    rollup_id: Mapped[UUID] = mapped_column(
+        GUID,
         primary_key=True,
-        default=lambda: str(uuid4()),
+        default=uuid4,
     )
     day: Mapped[date] = mapped_column(Date, nullable=False)
     verb: Mapped[str] = mapped_column(String(30), nullable=False)
     resource_type: Mapped[str] = mapped_column(String(40), nullable=False)
-    project_id: Mapped[str | None] = mapped_column(
-        String(36),
+    project_id: Mapped[UUID | None] = mapped_column(
+        GUID,
         ForeignKey("projects.project_id", ondelete="SET NULL"),
     )
     actor_role: Mapped[str | None] = mapped_column(String(30))
@@ -1327,7 +1408,7 @@ class UsageEventRollupModel(Base):
     event_count: Mapped[int] = mapped_column(Integer, nullable=False)
     total_duration_ms: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     total_result_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utc_now)
+    created_at: Mapped[datetime] = mapped_column(UtcDateTime, default=_utc_now)
 
 
 class ProjectMembershipModel(Base):
@@ -1336,30 +1417,32 @@ class ProjectMembershipModel(Base):
         UniqueConstraint("project_id", "user_id", name="uq_project_memberships_project_user"),
     )
 
-    membership_id: Mapped[str] = mapped_column(
-        String(36),
+    membership_id: Mapped[UUID] = mapped_column(
+        GUID,
         primary_key=True,
-        default=lambda: str(uuid4()),
+        default=uuid4,
     )
-    project_id: Mapped[str] = mapped_column(
-        String(36),
+    project_id: Mapped[UUID] = mapped_column(
+        GUID,
         ForeignKey("projects.project_id", ondelete="CASCADE"),
         nullable=False,
     )
-    user_id: Mapped[str] = mapped_column(
-        String(36),
+    user_id: Mapped[UUID] = mapped_column(
+        GUID,
         ForeignKey("users.user_id", ondelete="CASCADE"),
         nullable=False,
     )
-    role: Mapped[str] = mapped_column(String(30), nullable=False)
+    role: Mapped[ProjectMembershipRole] = mapped_column(
+        EnumType(ProjectMembershipRole, length=30), nullable=False
+    )
     created_by: Mapped[str | None] = mapped_column(String(255))
-    created_by_user_id: Mapped[str | None] = mapped_column(
-        String(36),
+    created_by_user_id: Mapped[UUID | None] = mapped_column(
+        GUID,
         ForeignKey("users.user_id", ondelete="SET NULL"),
     )
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utc_now)
+    created_at: Mapped[datetime] = mapped_column(UtcDateTime, default=_utc_now)
     updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True),
+        UtcDateTime,
         default=_utc_now,
         onupdate=_utc_now,
     )
@@ -1371,30 +1454,30 @@ class GroupMembershipModel(Base):
         UniqueConstraint("group_id", "user_id", name="uq_group_memberships_group_user"),
     )
 
-    membership_id: Mapped[str] = mapped_column(
-        String(36),
+    membership_id: Mapped[UUID] = mapped_column(
+        GUID,
         primary_key=True,
-        default=lambda: str(uuid4()),
+        default=uuid4,
     )
-    group_id: Mapped[str] = mapped_column(
-        String(36),
+    group_id: Mapped[UUID] = mapped_column(
+        GUID,
         ForeignKey("project_groups.group_id", ondelete="CASCADE"),
         nullable=False,
     )
-    user_id: Mapped[str] = mapped_column(
-        String(36),
+    user_id: Mapped[UUID] = mapped_column(
+        GUID,
         ForeignKey("users.user_id", ondelete="CASCADE"),
         nullable=False,
     )
     role: Mapped[str] = mapped_column(String(30), nullable=False)
     created_by: Mapped[str | None] = mapped_column(String(255))
-    created_by_user_id: Mapped[str | None] = mapped_column(
-        String(36),
+    created_by_user_id: Mapped[UUID | None] = mapped_column(
+        GUID,
         ForeignKey("users.user_id", ondelete="SET NULL"),
     )
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utc_now)
+    created_at: Mapped[datetime] = mapped_column(UtcDateTime, default=_utc_now)
     updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True),
+        UtcDateTime,
         default=_utc_now,
         onupdate=_utc_now,
     )
@@ -1404,21 +1487,21 @@ class DeviceTokenModel(Base):
     __tablename__ = "device_tokens"
     __table_args__ = (UniqueConstraint("token_hash", name="uq_device_tokens_token_hash"),)
 
-    device_token_id: Mapped[str] = mapped_column(
-        String(36),
+    device_token_id: Mapped[UUID] = mapped_column(
+        GUID,
         primary_key=True,
-        default=lambda: str(uuid4()),
+        default=uuid4,
     )
-    user_id: Mapped[str] = mapped_column(
-        String(36),
+    user_id: Mapped[UUID] = mapped_column(
+        GUID,
         ForeignKey("users.user_id", ondelete="CASCADE"),
         nullable=False,
     )
     label: Mapped[str] = mapped_column(String(150), nullable=False)
     token_hash: Mapped[str] = mapped_column(String(255), nullable=False)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utc_now)
-    last_used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(UtcDateTime, default=_utc_now)
+    last_used_at: Mapped[datetime | None] = mapped_column(UtcDateTime, nullable=True)
+    revoked_at: Mapped[datetime | None] = mapped_column(UtcDateTime, nullable=True)
 
 
 class DeviceEnrollmentModel(Base):
@@ -1427,22 +1510,22 @@ class DeviceEnrollmentModel(Base):
         UniqueConstraint("offer_token_hash", name="uq_device_enrollments_offer_token_hash"),
     )
 
-    enrollment_id: Mapped[str] = mapped_column(
-        String(36),
+    enrollment_id: Mapped[UUID] = mapped_column(
+        GUID,
         primary_key=True,
-        default=lambda: str(uuid4()),
+        default=uuid4,
     )
-    user_id: Mapped[str] = mapped_column(
-        String(36),
+    user_id: Mapped[UUID] = mapped_column(
+        GUID,
         ForeignKey("users.user_id", ondelete="CASCADE"),
         nullable=False,
     )
     offer_token_hash: Mapped[str] = mapped_column(String(255), nullable=False)
-    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utc_now)
-    consumed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    consumed_device_token_id: Mapped[str | None] = mapped_column(
-        String(36),
+    expires_at: Mapped[datetime] = mapped_column(UtcDateTime, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(UtcDateTime, default=_utc_now)
+    consumed_at: Mapped[datetime | None] = mapped_column(UtcDateTime, nullable=True)
+    consumed_device_token_id: Mapped[UUID | None] = mapped_column(
+        GUID,
         ForeignKey("device_tokens.device_token_id", ondelete="SET NULL"),
         nullable=True,
     )

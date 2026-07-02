@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 
 import httpx
@@ -8,6 +9,7 @@ from lab_tracker_client import LabTracker
 from lab_tracker_client.hpc import (
     begin_event,
     event_from_manifest,
+    event_source_external_id,
     finish_event,
     init_config,
     load_config,
@@ -207,3 +209,132 @@ def test_sync_failure_marks_event_failed_and_retries(tmp_path, monkeypatch) -> N
     assert retried["errors"] == []
     assert read_event(path)["sync"]["status"] == "synced"
     assert read_event(path)["sync"]["note_id"] == "note-retry"
+
+
+def _matching_note_payload(path, *, note_id: str) -> dict:
+    """A GET /notes record whose evidence key matches the on-disk event."""
+
+    event = read_event(path)
+    evidence = render_event_note(event)
+    return {
+        "note_id": note_id,
+        "project_id": str(event["project_id"]),
+        "status": "staged",
+        "metadata": {
+            "evidence_source_provider": "hpc-outbox",
+            "evidence_source_external_id": event_source_external_id(event),
+            "evidence_content_hash": hashlib.sha256(evidence.encode("utf-8")).hexdigest(),
+        },
+    }
+
+
+def test_sync_skips_duplicate_when_server_already_holds_the_evidence(
+    tmp_path, monkeypatch
+) -> None:
+    _clear_hpc_env(monkeypatch)
+    monkeypatch.chdir(tmp_path)
+    config = init_config(project_id="project-1", cluster="bouchet")
+    _event, path = finish_event(config, run_id="run-dup", exit_code=0)
+    existing = _matching_note_payload(path, note_id="note-existing")
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if request.method == "GET" and request.url.path == "/notes":
+            return _json_response(
+                200,
+                {"data": [existing], "meta": {"limit": 200, "offset": 0, "total": 1}},
+            )
+        return _json_response(500, {"error": {"message": "unexpected request"}})
+
+    with LabTracker(
+        base_url="http://testserver", transport=httpx.MockTransport(handler)
+    ) as lt:
+        summary = sync_outbox(lt, config)
+
+    assert summary["errors"] == []
+    assert summary["results"][0]["action"] == "skipped"
+    assert summary["results"][0]["reason"] == "duplicate"
+    assert summary["results"][0]["note_id"] == "note-existing"
+    # The matching note was adopted without any upload.
+    assert [request.method for request in requests] == ["GET"]
+    synced = read_event(path)
+    assert synced["sync"]["status"] == "synced"
+    assert synced["sync"]["note_id"] == "note-existing"
+
+
+def test_second_sync_pass_is_idempotent_with_zero_requests(tmp_path, monkeypatch) -> None:
+    _clear_hpc_env(monkeypatch)
+    monkeypatch.chdir(tmp_path)
+    config = init_config(project_id="project-1", cluster="bouchet")
+    _event, path = finish_event(config, run_id="run-idem", exit_code=0)
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if request.method == "GET" and request.url.path == "/notes":
+            return _json_response(
+                200,
+                {"data": [], "meta": {"limit": 200, "offset": 0, "total": 0}},
+            )
+        if request.method == "POST" and request.url.path == "/notes/upload-file":
+            return _json_response(201, {"data": {"note_id": "note-once"}})
+        return _json_response(500, {"error": {"message": "unexpected request"}})
+
+    with LabTracker(
+        base_url="http://testserver", transport=httpx.MockTransport(handler)
+    ) as lt:
+        first = sync_outbox(lt, config)
+        requests_after_first = len(requests)
+        second = sync_outbox(lt, config)
+
+    assert first["results"][0]["action"] == "imported"
+    assert read_event(path)["sync"]["status"] == "synced"
+    assert second["results"][0]["action"] == "skipped"
+    assert second["results"][0]["reason"] == "already_synced"
+    assert second["results"][0]["note_id"] == "note-once"
+    # The terminal event short-circuits before any HTTP traffic.
+    assert len(requests) == requests_after_first
+
+
+def test_retry_after_persisted_upload_failure_dedupes_against_server(
+    tmp_path, monkeypatch
+) -> None:
+    _clear_hpc_env(monkeypatch)
+    monkeypatch.chdir(tmp_path)
+    config = init_config(project_id="project-1", cluster="bouchet")
+    _event, path = finish_event(config, run_id="run-crash", exit_code=0)
+    existing = _matching_note_payload(path, note_id="note-persisted")
+    state = {"uploaded": False}
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if request.method == "GET" and request.url.path == "/notes":
+            data = [existing] if state["uploaded"] else []
+            return _json_response(
+                200,
+                {"data": data, "meta": {"limit": 200, "offset": 0, "total": len(data)}},
+            )
+        if request.method == "POST" and request.url.path == "/notes/upload-file":
+            # The server persists the note but the client sees a failure.
+            state["uploaded"] = True
+            return _json_response(503, {"error": {"message": "gateway timeout"}})
+        return _json_response(500, {"error": {"message": "unexpected request"}})
+
+    with LabTracker(
+        base_url="http://testserver", transport=httpx.MockTransport(handler)
+    ) as lt:
+        failed = sync_outbox(lt, config)
+        retried = sync_outbox(lt, config)
+
+    assert failed["errors"] and read_event(path)["sync"]["attempts"] == 1
+    assert retried["errors"] == []
+    assert retried["results"][0]["action"] == "skipped"
+    assert retried["results"][0]["reason"] == "duplicate"
+    # Exactly one upload ever reached the server; the retry adopted the match.
+    uploads = [request for request in requests if request.method == "POST"]
+    assert len(uploads) == 1
+    synced = read_event(path)
+    assert synced["sync"]["status"] == "synced"
+    assert synced["sync"]["note_id"] == "note-persisted"

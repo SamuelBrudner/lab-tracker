@@ -87,7 +87,7 @@ function WorkspaceHome({
       />
 
       <QuestionPanel
-        canWrite={auth.canWrite}
+        canWrite={canContribute}
         busy={busy}
         selectedProjectId={workspaceData.selectedProjectId}
         questionText={workspaceForms.questionText}
@@ -113,7 +113,7 @@ function WorkspaceHome({
       />
 
       <SessionPanel
-        canWrite={auth.canWrite}
+        canWrite={canContribute}
         busy={busy}
         error={sessionData.error}
         loading={sessionData.loading}
@@ -159,7 +159,7 @@ function WorkspaceHome({
       />
 
       <DatasetPanel
-        canWrite={auth.canWrite}
+        canWrite={canContribute}
         busy={busy}
         selectedProjectId={workspaceData.selectedProjectId}
         datasetPrimaryQuestionId={dataset.datasetPrimaryQuestionId}
@@ -179,7 +179,7 @@ function WorkspaceHome({
       />
 
       <AnalysisPanel
-        canWrite={auth.canWrite}
+        canWrite={canContribute}
         busy={busy}
         error={analysis.analysisError}
         loading={analysis.analysisLoading}

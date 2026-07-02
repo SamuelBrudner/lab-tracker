@@ -18,6 +18,7 @@ from lab_tracker.db_models import (
     QuestionRefactorModel,
     UserModel,
 )
+from lab_tracker.db_types import ensure_uuid
 from lab_tracker.models import (
     GroupMembership,
     Project,
@@ -144,9 +145,9 @@ class SQLAlchemyProjectMembershipRepository(EntityRepository[ProjectMembership])
         user: UserModel | None = None,
     ) -> ProjectMembership:
         return ProjectMembership(
-            membership_id=UUID(row.membership_id),
-            project_id=UUID(row.project_id),
-            user_id=UUID(row.user_id),
+            membership_id=ensure_uuid(row.membership_id),
+            project_id=ensure_uuid(row.project_id),
+            user_id=ensure_uuid(row.user_id),
             role=ProjectMembershipRole(row.role),
             username=user.username if user is not None else None,
             user_global_role=user.role if user is not None else None,
@@ -403,7 +404,7 @@ class SQLAlchemyQuestionRepository(EntityRepository[Question]):
             select(QuestionParentModel).where(QuestionParentModel.question_id.in_(question_ids))
         )
         for row in rows:
-            parent_map[row.question_id].append(UUID(row.parent_question_id))
+            parent_map[str(row.question_id)].append(ensure_uuid(row.parent_question_id))
         return parent_map
 
     def get(self, entity_id: UUID) -> Question | None:
@@ -426,7 +427,7 @@ class SQLAlchemyQuestionRepository(EntityRepository[Question]):
         question_ids = [row.question_id for row in rows]
         parent_map = self.parent_map(question_ids)
         return [
-            question_from_model(row, parent_question_ids=parent_map.get(row.question_id, []))
+            question_from_model(row, parent_question_ids=parent_map.get(str(row.question_id), []))
             for row in rows
         ]
 

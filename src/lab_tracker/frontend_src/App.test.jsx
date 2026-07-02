@@ -567,6 +567,84 @@ describe("App", () => {
     await waitFor(() => expect(screen.getByLabelText("Active project")).toHaveValue("project-2"));
   });
 
+  it("lets a global viewer with a contributor membership use project write surfaces", async () => {
+    localStorage.setItem(TOKEN_STORAGE_KEY, "token-viewer-contributor");
+    installFetchMock([
+      {
+        match: "/auth/me",
+        response: apiResponse({ role: "viewer", user_id: "user-1", username: "josh" }),
+      },
+      {
+        match: projectsPath,
+        response: apiResponse([project("project-1", "Temporal odor")]),
+      },
+      {
+        match: questionListPath("project-1"),
+        response: paged([]),
+      },
+      {
+        match: questionCountPath("project-1"),
+        response: paged([], { limit: 1, offset: 0, total: 0 }),
+      },
+      {
+        match: datasetListPath("project-1"),
+        response: paged([]),
+      },
+      {
+        match: datasetCountPath("project-1"),
+        response: paged([], { limit: 1, offset: 0, total: 0 }),
+      },
+      {
+        match: noteCountPath("project-1"),
+        response: paged([], { limit: 1, offset: 0, total: 0 }),
+      },
+      {
+        match: recentNotesPath("project-1"),
+        response: paged([]),
+      },
+      {
+        match: activeSessionsPath("project-1"),
+        response: paged([]),
+      },
+      {
+        match: stagedAnalysesPath("project-1"),
+        response: paged([]),
+      },
+      {
+        match: committedAnalysesPath("project-1"),
+        response: paged([], { limit: 1, offset: 0, total: 0 }),
+      },
+      {
+        match: projectMembersPath("project-1"),
+        response: paged([
+          {
+            membership_id: "membership-1",
+            role: "contributor",
+            user_id: "user-1",
+            username: "josh",
+          },
+        ]),
+      },
+      {
+        match: buildApiPath("/batches", { limit: 5 }),
+        response: paged([], { limit: 5, offset: 0, total: 0 }),
+      },
+    ]);
+
+    render(<App />);
+
+    // Project-scoped write surfaces follow the project membership, not the
+    // global role: the contributor can stage questions in this project.
+    await waitFor(() => {
+      expect(screen.getByLabelText("Question text")).toBeEnabled();
+    });
+    expect(screen.getByRole("button", { name: "Stage question" })).toBeEnabled();
+
+    // Genuinely global actions stay gated on the global role.
+    expect(screen.getByRole("button", { name: "Create project" })).toBeDisabled();
+    expect(document.querySelector('[name="new-project-name"]')).toBeDisabled();
+  });
+
   it("restores a stored session and signs out", async () => {
     localStorage.setItem(TOKEN_STORAGE_KEY, "token-1");
     installFetchMock([

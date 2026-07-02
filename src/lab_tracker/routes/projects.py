@@ -18,6 +18,7 @@ from lab_tracker.db_models import (
     NoteModel,
     VisualizationModel,
 )
+from lab_tracker.db_types import ensure_uuid
 from lab_tracker.errors import NotFoundError
 from lab_tracker.models import (
     Project,
@@ -154,7 +155,7 @@ def build_projects_router(api: LabTrackerAPI) -> APIRouter:
         file_storage_backend = file_storage_from_request(request)
         raw_note_storage = request.app.state.raw_note_storage
         dataset_file_storage_ids = [
-            UUID(value)
+            ensure_uuid(value)
             for value in db_session.scalars(
                 select(DatasetFileModel.storage_id)
                 .join(DatasetModel, DatasetModel.dataset_id == DatasetFileModel.dataset_id)
@@ -162,7 +163,7 @@ def build_projects_router(api: LabTrackerAPI) -> APIRouter:
             )
         ]
         raw_note_storage_ids = [
-            UUID(value)
+            ensure_uuid(value)
             for value in db_session.scalars(
                 select(NoteModel.raw_storage_id).where(
                     NoteModel.project_id == str(project_id),
@@ -171,7 +172,7 @@ def build_projects_router(api: LabTrackerAPI) -> APIRouter:
             )
         ]
         visualization_storage_ids = [
-            UUID(value)
+            ensure_uuid(value)
             for value in db_session.scalars(
                 select(VisualizationModel.asset_storage_id)
                 .join(
