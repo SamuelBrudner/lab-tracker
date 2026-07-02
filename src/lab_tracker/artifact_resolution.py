@@ -30,6 +30,7 @@ import hashlib
 import json
 import mimetypes
 import os
+import tempfile
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Iterable, Iterator, Sequence
 from dataclasses import dataclass, replace
@@ -798,6 +799,178 @@ def _rclone_error_detail(completed: RcloneCompleted) -> str:
     return f"rclone exited with status {completed.returncode}."
 
 
+@dataclass(frozen=True)
+class GitCompleted:
+    """Result of one git invocation."""
+
+    returncode: int
+    stdout: bytes
+    stderr: bytes
+
+
+# A runner takes git argv (without the binary name) and returns its result.
+GitRunner = Callable[[list[str]], GitCompleted]
+
+
+def _subprocess_git_runner(binary: str) -> GitRunner:
+    def run(args: list[str]) -> GitCompleted:
+        import subprocess
+
+        completed = subprocess.run(  # noqa: S603 - args are built, not shell
+            [binary, *args],
+            capture_output=True,
+            check=False,
+        )
+        return GitCompleted(
+            returncode=completed.returncode,
+            stdout=completed.stdout,
+            stderr=completed.stderr,
+        )
+
+    return run
+
+
+class _GitReadError(Exception):
+    """A git command failed while reading a blob; carries a caller-facing detail."""
+
+    def __init__(self, detail: str) -> None:
+        super().__init__(detail)
+        self.detail = detail
+
+
+def _parse_git_locator(uri: str) -> tuple[str, str, str] | None:
+    """Split a ``git+<remote>#<commit>:<path>`` locator into its parts.
+
+    Returns ``(remote, commit, path)`` or ``None`` when the URI is not a
+    well-formed git locator. The remote may itself contain schemes, ``@``, and
+    ``:`` (e.g. ``git@host:org/repo.git``); the commit and path live in the
+    fragment after ``#`` so the remote is never ambiguous.
+    """
+
+    if not uri.startswith("git+"):
+        return None
+    remote, sep, fragment = uri[len("git+") :].partition("#")
+    if not sep:
+        return None
+    commit, sep2, path = fragment.partition(":")
+    if not sep2:
+        return None
+    remote, commit, path = remote.strip(), commit.strip(), path.strip()
+    if not remote or not commit or not path:
+        return None
+    return remote, commit, path
+
+
+class GitResolver(ArtifactResolver):
+    """Resolves artifacts pinned to a git commit.
+
+    References are addressed as ``git+<remote>#<commit>:<path>`` (source_system
+    ``git``). Credentials live host-side in git's own config/credential helper,
+    never in Lab Tracker. The blob for ``<commit>:<path>`` is fetched into a
+    per-remote cache and read with ``git cat-file``, then hashed to verify
+    against the reference's ``content_hash``. A ``runner`` may be injected for
+    tests; otherwise git is invoked as a subprocess and the resolver degrades to
+    UNRESOLVED when the binary is absent.
+
+    Remote allowlisting, blobless/quota-bounded fetch, and cache eviction are
+    layered on separately (see lt-81s6.7); this resolver is the fetch+verify
+    core.
+    """
+
+    def __init__(
+        self,
+        *,
+        runner: GitRunner | None = None,
+        binary: str = "git",
+        cache_root: str | Path | None = None,
+        max_fetch_bytes: int = DEFAULT_MAX_FETCH_BYTES,
+    ) -> None:
+        self._runner = runner or _subprocess_git_runner(binary)
+        self._cache_root = cache_root
+        self._max_fetch_bytes = max_fetch_bytes
+
+    def can_resolve(self, ref: ExternalArtifactReference) -> bool:
+        if ref.source_system.strip().lower() == "git":
+            return True
+        return ref.uri.startswith("git+")
+
+    def resolve(
+        self,
+        ref: ExternalArtifactReference,
+        *,
+        max_bytes: int = DEFAULT_MAX_BYTES,
+        byte_range: tuple[int, int] | None = None,
+    ) -> ResolvedArtifact:
+        try:
+            window = _normalize_byte_range(byte_range)
+        except ValueError as exc:
+            return _unresolved(ref, detail=str(exc))
+
+        if not is_verifiable_hash(ref.content_hash):
+            algorithm, _ = parse_content_hash(ref.content_hash)
+            return _unresolved(
+                ref,
+                detail=f"Cannot verify content hash with algorithm '{algorithm}'.",
+            )
+
+        locator = _parse_git_locator(ref.uri)
+        if locator is None:
+            return _unresolved(ref, detail="Reference URI is not a git locator.")
+        remote, commit, path = locator
+
+        algorithm, _ = parse_content_hash(ref.content_hash)
+        try:
+            blob = self._read_blob(remote, commit, path)
+        except _GitReadError as exc:
+            return _unresolved(ref, detail=exc.detail)
+        except OSError as exc:
+            return _unresolved(ref, detail=f"git is unavailable: {exc}")
+
+        content, total, truncated, observed = _hash_and_collect(
+            [blob],
+            algorithm=algorithm,
+            max_bytes=max_bytes,
+            window=window,
+        )
+        content_type, _ = mimetypes.guess_type(path)
+        return _build_resolved(
+            ref,
+            observed=observed,
+            content=content,
+            total=total,
+            truncated=truncated,
+            content_type=content_type or "application/octet-stream",
+        )
+
+    def _read_blob(self, remote: str, commit: str, path: str) -> bytes:
+        cache = self._repo_cache(remote)
+        # Idempotent: a fresh cache is initialised once, an existing one reused.
+        self._runner(["-C", cache, "init", "-q"])
+        fetch = self._runner(["-C", cache, "fetch", "--depth", "1", remote, commit])
+        if fetch.returncode != 0:
+            raise _GitReadError(_git_error_detail(fetch))
+        cat = self._runner(["-C", cache, "cat-file", "blob", f"{commit}:{path}"])
+        if cat.returncode != 0:
+            raise _GitReadError(_git_error_detail(cat))
+        return cat.stdout
+
+    def _repo_cache(self, remote: str) -> str:
+        base = self._cache_root or os.path.join(
+            tempfile.gettempdir(), "lab-tracker-git-cache"
+        )
+        digest = hashlib.sha256(remote.encode("utf-8")).hexdigest()[:16]
+        cache = os.path.join(os.fspath(base), digest)
+        os.makedirs(cache, exist_ok=True)
+        return cache
+
+
+def _git_error_detail(completed: GitCompleted) -> str:
+    stderr = completed.stderr.decode("utf-8", errors="replace").strip()
+    if stderr:
+        return f"git failed: {stderr.splitlines()[-1]}"
+    return f"git exited with status {completed.returncode}."
+
+
 class _FetchTooLarge(Exception):
     """Raised when a streamed artifact exceeds the verification fetch cap."""
 
@@ -894,11 +1067,11 @@ def default_registry(
 ) -> ResolverRegistry:
     """Build a registry with the adapters available in this slice.
 
-    Local-filesystem, HTTP(S), and rclone resolvers. The rclone adapter degrades
-    to UNRESOLVED when the binary is absent, so including it is safe by default.
-    Native store-backed adapters (s3, ssh, database) register here as they land.
-    ``recovery`` opts the local resolver into content-hash recovery of missing
-    files within ``allowed_roots``.
+    Local-filesystem, HTTP(S), rclone, and git resolvers. The rclone and git
+    adapters degrade to UNRESOLVED when their binary is absent, so including them
+    is safe by default. Native store-backed adapters (s3, ssh, database) register
+    here as they land. ``recovery`` opts the local resolver into content-hash
+    recovery of missing files within ``allowed_roots``.
     """
 
     return ResolverRegistry(
@@ -906,6 +1079,7 @@ def default_registry(
             LocalFilesystemResolver(allowed_roots=allowed_roots, recovery=recovery),
             HttpResolver(),
             RcloneResolver(),
+            GitResolver(),
         ]
     )
 

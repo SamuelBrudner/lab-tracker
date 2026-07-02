@@ -8,6 +8,8 @@ import pytest
 from lab_tracker.artifact_resolution import (
     DEFAULT_MAX_BYTES,
     ArtifactResolver,
+    GitCompleted,
+    GitResolver,
     HttpResolver,
     LocalFilesystemResolver,
     RcloneCompleted,
@@ -849,3 +851,193 @@ def test_registry_from_env_recovery_off_by_default(tmp_path, monkeypatch):
     result = registry_from_env().resolve(_local_ref(missing, _sha256(data)))
 
     assert result.status is ResolutionStatus.UNRESOLVED
+
+
+# --- GitResolver ----------------------------------------------------------
+
+
+_GIT_REMOTE = "https://example.com/org/repo.git"
+
+
+def _git_ref(
+    content_hash: str,
+    *,
+    commit: str = "a" * 40,
+    path: str = "analysis/run.py",
+    remote: str = _GIT_REMOTE,
+    source_system: str = "git",
+) -> ExternalArtifactReference:
+    return ExternalArtifactReference(
+        source_system=source_system,
+        uri=f"git+{remote}#{commit}:{path}",
+        content_hash=content_hash,
+    )
+
+
+def _fake_git_runner(*, blob: bytes | None, fetch_returncode: int = 0, cat_returncode: int = 0):
+    calls: list[list[str]] = []
+
+    def runner(args):
+        calls.append(args)
+        # args are like ["-C", <cache>, <command>, ...].
+        command = args[2] if len(args) >= 3 and args[0] == "-C" else args[0]
+        if command == "init":
+            return GitCompleted(0, b"", b"")
+        if command == "fetch":
+            return GitCompleted(
+                fetch_returncode,
+                b"",
+                b"" if fetch_returncode == 0 else b"remote error: not found",
+            )
+        if command == "cat-file":
+            if cat_returncode != 0:
+                return GitCompleted(cat_returncode, b"", b"fatal: bad object")
+            return GitCompleted(0, blob or b"", b"")
+        raise AssertionError(f"unexpected git args: {args}")
+
+    runner.calls = calls
+    return runner
+
+
+def test_git_resolver_verifies_blob(tmp_path):
+    data = b"import numpy as np  # the pinned analysis script"
+    resolver = GitResolver(runner=_fake_git_runner(blob=data), cache_root=tmp_path)
+
+    result = resolver.resolve(_git_ref(_sha256(data)))
+
+    assert result.status is ResolutionStatus.VERIFIED
+    assert result.content == data
+    assert result.size_bytes == len(data)
+    assert result.observed_hash == _sha256(data)
+    assert result.content_type == "text/x-python"
+
+
+def test_git_resolver_reports_drift_on_mismatch(tmp_path):
+    resolver = GitResolver(runner=_fake_git_runner(blob=b"actual"), cache_root=tmp_path)
+
+    result = resolver.resolve(_git_ref(_sha256(b"what the graph recorded")))
+
+    assert result.status is ResolutionStatus.DRIFTED
+    assert result.observed_hash == _sha256(b"actual")
+    assert result.detail is not None
+
+
+def test_git_resolver_missing_object_is_unresolved(tmp_path):
+    resolver = GitResolver(
+        runner=_fake_git_runner(blob=None, cat_returncode=128), cache_root=tmp_path
+    )
+
+    result = resolver.resolve(_git_ref(_sha256(b"x")))
+
+    assert result.status is ResolutionStatus.UNRESOLVED
+    assert "git failed" in (result.detail or "")
+
+
+def test_git_resolver_fetch_failure_is_unresolved(tmp_path):
+    resolver = GitResolver(
+        runner=_fake_git_runner(blob=None, fetch_returncode=128), cache_root=tmp_path
+    )
+
+    result = resolver.resolve(_git_ref(_sha256(b"x")))
+
+    assert result.status is ResolutionStatus.UNRESOLVED
+    assert "not found" in (result.detail or "")
+
+
+def test_git_resolver_unverifiable_hash_is_unresolved(tmp_path):
+    resolver = GitResolver(runner=_fake_git_runner(blob=b"data"), cache_root=tmp_path)
+
+    result = resolver.resolve(_git_ref("datalad-key:MD5E-s4--abc"))
+
+    assert result.status is ResolutionStatus.UNRESOLVED
+    assert "datalad-key" in (result.detail or "")
+
+
+def test_git_resolver_bad_locator_is_unresolved(tmp_path):
+    resolver = GitResolver(runner=_fake_git_runner(blob=b"data"), cache_root=tmp_path)
+    ref = ExternalArtifactReference(
+        source_system="git",
+        uri=f"git+{_GIT_REMOTE}",  # no #<commit>:<path>
+        content_hash=_sha256(b"data"),
+    )
+
+    result = resolver.resolve(ref)
+
+    assert result.status is ResolutionStatus.UNRESOLVED
+    assert "not a git locator" in (result.detail or "")
+
+
+def test_git_resolver_missing_binary_is_unresolved(tmp_path):
+    def runner(args):
+        raise OSError("git not found")
+
+    result = GitResolver(runner=runner, cache_root=tmp_path).resolve(
+        _git_ref(_sha256(b"x"))
+    )
+
+    assert result.status is ResolutionStatus.UNRESOLVED
+    assert "git is unavailable" in (result.detail or "")
+
+
+def test_git_resolver_truncates_payload_but_verifies(tmp_path):
+    data = b"y" * 100
+    resolver = GitResolver(runner=_fake_git_runner(blob=data), cache_root=tmp_path)
+
+    result = resolver.resolve(_git_ref(_sha256(data)), max_bytes=10)
+
+    assert result.status is ResolutionStatus.VERIFIED  # full blob hashed
+    assert result.truncated is True
+    assert result.content == data[:10]
+    assert result.size_bytes == len(data)
+
+
+def test_git_resolver_returns_byte_range_slice(tmp_path):
+    data = b"0123456789abcdef"
+    resolver = GitResolver(runner=_fake_git_runner(blob=data), cache_root=tmp_path)
+
+    result = resolver.resolve(_git_ref(_sha256(data)), byte_range=(4, 8))
+
+    assert result.status is ResolutionStatus.VERIFIED
+    assert result.content == data[4:8]
+
+
+def test_git_resolver_can_resolve_by_source_system_and_scheme():
+    resolver = GitResolver(runner=_fake_git_runner(blob=b""))
+
+    assert resolver.can_resolve(_git_ref(_sha256(b""))) is True
+    # A git+ URI is recognised even under a different source_system.
+    assert resolver.can_resolve(_git_ref(_sha256(b""), source_system="other")) is True
+    assert (
+        resolver.can_resolve(
+            ExternalArtifactReference(
+                source_system="local",
+                uri="file:///tmp/x",
+                content_hash=_sha256(b""),
+            )
+        )
+        is False
+    )
+
+
+def test_registry_dispatches_git(tmp_path):
+    data = b"pinned code"
+    registry = ResolverRegistry(
+        [
+            LocalFilesystemResolver(),
+            GitResolver(runner=_fake_git_runner(blob=data), cache_root=tmp_path),
+        ]
+    )
+
+    result = registry.resolve(_git_ref(_sha256(data)))
+
+    assert result.status is ResolutionStatus.VERIFIED
+
+
+def test_default_capabilities_for_git():
+    from lab_tracker.models import StoreCapability, default_store_capabilities
+
+    assert default_store_capabilities(StoreKind.GIT) == [
+        StoreCapability.BYTES_BY_PATH,
+        StoreCapability.BYTE_RANGE,
+        StoreCapability.VERSIONED_SNAPSHOT,
+    ]
