@@ -142,7 +142,13 @@ describe("BatchReviewPage", () => {
     );
 
     expect(await screen.findByRole("heading", { name: "Cadence" })).toBeInTheDocument();
-    fireEvent.click(screen.getByLabelText("Enabled"));
+    // Wait for the settings GET to populate the form before interacting. The
+    // "Enabled" checkbox defaults to checked but loads unchecked, so clicking
+    // before the async load resolves lets the load clobber the toggle (the
+    // request would then carry enabled: false and the save assertion flakes).
+    const enabledCheckbox = screen.getByLabelText("Enabled");
+    await waitFor(() => expect(enabledCheckbox).not.toBeChecked());
+    fireEvent.click(enabledCheckbox);
     fireEvent.change(screen.getByLabelText("Cadence"), { target: { value: "1440" } });
     fireEvent.change(screen.getByLabelText("Local run time"), { target: { value: "18:00" } });
     fireEvent.click(screen.getByRole("button", { name: "Save cadence" }));
