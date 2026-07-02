@@ -455,6 +455,107 @@ def sync_outbox(
     }
 
 
+HOOK_BEGIN_MARKER = "# --- BEGIN LAB TRACKER REPO HOOK ---"
+HOOK_END_MARKER = "# --- END LAB TRACKER REPO HOOK ---"
+_HOOK_SHEBANG = "#!/usr/bin/env sh"
+
+
+def install_post_commit_hook(
+    repo_root: str | Path | None = None,
+    *,
+    lt_command: str | None = None,
+    force: bool = False,
+) -> JsonObject:
+    """Install (or update) the managed ``lt repo`` post-commit hook.
+
+    Git runs hooks under ``sh`` on every platform (Git for Windows bundles one),
+    so a single sh hook body covers POSIX and Windows checkouts alike. The hook
+    lives between BEGIN/END markers so reinstalls update it in place, a foreign
+    hook is never clobbered without ``force``, and the block is fail-soft: it
+    never blocks the commit, even when ``lt`` is missing or errors.
+    """
+
+    root = Path(repo_root or Path.cwd()).expanduser()
+    toplevel = _git_output(root, "rev-parse", "--show-toplevel")
+    if not toplevel:
+        raise LTValidationError(f"Not a git repository: {root}")
+    hook_path = _hook_path(Path(toplevel))
+    resolved_lt = _hook_command_path(lt_command)
+    managed_block = _hook_managed_block(resolved_lt)
+
+    if hook_path.exists():
+        existing = hook_path.read_text(encoding="utf-8")
+        if HOOK_BEGIN_MARKER in existing and HOOK_END_MARKER in existing:
+            pattern = re.compile(
+                re.escape(HOOK_BEGIN_MARKER) + r".*?" + re.escape(HOOK_END_MARKER),
+                re.DOTALL,
+            )
+            updated = pattern.sub(lambda _match: managed_block, existing)
+            action = "updated"
+        elif existing.strip() and not force:
+            raise LTValidationError(
+                f"Existing post-commit hook is not Lab Tracker-managed: {hook_path}. "
+                "Re-run with --force to append the managed block."
+            )
+        elif existing.strip():
+            updated = existing.rstrip() + "\n\n" + managed_block + "\n"
+            action = "appended"
+        else:
+            updated = f"{_HOOK_SHEBANG}\n{managed_block}\n"
+            action = "installed"
+    else:
+        updated = f"{_HOOK_SHEBANG}\n{managed_block}\n"
+        action = "installed"
+
+    hook_path.parent.mkdir(parents=True, exist_ok=True)
+    hook_path.write_text(updated.replace("\r\n", "\n"), encoding="utf-8", newline="\n")
+    hook_path.chmod(hook_path.stat().st_mode | 0o755)
+    return {
+        "command": "repo-install-hook",
+        "action": action,
+        "repo": str(Path(toplevel)),
+        "hook": str(hook_path),
+        "lt_command": resolved_lt,
+    }
+
+
+def _hook_path(repo_root: Path) -> Path:
+    """Resolve the post-commit hook path, honouring ``core.hooksPath``."""
+
+    raw = _git_output(repo_root, "rev-parse", "--git-path", "hooks/post-commit")
+    candidate = Path(raw) if raw else Path(".git") / "hooks" / "post-commit"
+    if not candidate.is_absolute():
+        candidate = repo_root / candidate
+    return candidate
+
+
+def _hook_command_path(lt_command: str | None) -> str:
+    """Pick the ``lt`` the hook should call, as an sh-friendly path."""
+
+    import shutil
+
+    resolved = lt_command or shutil.which("lt") or "lt"
+    # Git hooks run under sh even on Windows; sh wants forward slashes.
+    return resolved.replace("\\", "/")
+
+
+def _hook_managed_block(lt_command: str) -> str:
+    return "\n".join(
+        [
+            HOOK_BEGIN_MARKER,
+            'LAB_TRACKER_REPO_HOOK_ENABLED="${LAB_TRACKER_REPO_HOOK_ENABLED:-1}"',
+            'if [ "$LAB_TRACKER_REPO_HOOK_ENABLED" != "0" ]; then',
+            f'  LT="${{LAB_TRACKER_LT:-{lt_command}}}"',
+            '  if command -v "$LT" >/dev/null 2>&1; then',
+            '    "$LT" repo report --fail-silent >/dev/null 2>&1 || '
+            'echo "lab-tracker: repo hook could not record the commit; commit kept." >&2',
+            "  fi",
+            "fi",
+            HOOK_END_MARKER,
+        ]
+    )
+
+
 def git_context(cwd: str | Path | None = None) -> JsonObject:
     root = Path(cwd or Path.cwd()).expanduser()
     commit = _git_output(root, "rev-parse", "HEAD")
