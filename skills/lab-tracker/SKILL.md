@@ -35,6 +35,15 @@ files. The generated `scripts/lt.py` is a thin shim over `lab_tracker_client`,
 and the generated `.mcp.json` uses the portable `lt-mcp` command instead of a
 workstation-specific Python path.
 
+After upgrading the installed package, run `lt update` inside a consumer repo to
+refresh everything to the new version in one step: managed prompt blocks are
+re-rendered in place (consent decisions preserved; add missing conventions
+blocks with `--yes`), and scaffolded files (`.claude/settings.json` hooks,
+`.mcp.json`, `.cursor/mcp.json`, `scripts/lt.py`, `AGENTS.lt.md`) are rewritten
+to the current canonical text with any customised previous file kept next to it
+as `*.bak-lt-update`. `lt_ids.json` is never touched. Use `--dry-run` to preview
+and `lt doctor` to confirm the repo is in sync afterwards.
+
 For substantive, rerunnable notes, prefer `lab_tracker_client.LabTracker` or
 the generated `scripts.lt.upsert_note(...)`. Notes are idempotent by the first
 non-blank line of `content`; treat that first line as a stable marker.
