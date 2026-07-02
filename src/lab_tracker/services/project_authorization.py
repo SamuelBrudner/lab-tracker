@@ -43,20 +43,20 @@ class ProjectAuthorizationPolicy(BaseService):
     def require_interactive(self, actor: AuthContext | None, *, action: str) -> None:
         """Reject non-interactive and unauthenticated principals at accept/commit gates.
 
-        An automation principal (e.g. the in-process daily-review scheduler)
-        may DRAFT graph proposals but must never accept or commit them: only a
-        human in the loop turns a proposal into a committed graph edge. Pairs
-        with :attr:`AuthContext.is_interactive`, and is fail-closed: only an
-        explicitly authenticated interactive principal (USER, DEVICE, SERVICE)
-        is admitted; a SYSTEM principal and a missing (None) actor are both
-        rejected.
+        A delegated service token or an automation principal (e.g. the
+        daily-review scheduler) may DRAFT graph proposals but must never accept
+        or commit them: only a person in the loop turns a proposal into a
+        committed graph edge. Pairs with :attr:`AuthContext.is_interactive`, and
+        is fail-closed: only an interactive human session (USER or DEVICE) is
+        admitted; SERVICE and SYSTEM principals and a missing (None) actor are
+        all rejected.
         """
 
         if actor is None or not actor.is_interactive:
             raise AuthError(
-                f"{action} requires an interactive principal; automation "
-                "principals may draft graph proposals but not accept or commit "
-                "them."
+                f"{action} requires an interactive human session; service "
+                "tokens and automation principals may draft graph proposals "
+                "but not accept or commit them."
             )
 
     def group_membership_role(

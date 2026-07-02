@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from contextlib import contextmanager
+from datetime import timedelta
 from typing import Any
 from uuid import UUID, uuid4
 
@@ -10,7 +11,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from lab_tracker.app_parts.middleware import system_auth_context
-from lab_tracker.auth import AuthContext, PrincipalType, Role
+from lab_tracker.auth import AuthContext, PrincipalType, Role, utc_now
 from lab_tracker.config import Settings
 from lab_tracker.db_models import GraphChangeSetModel
 from lab_tracker.errors import AuthError, ValidationError
@@ -2377,14 +2378,65 @@ def _note_graph_draft(
     return data["change_set_id"], data["operations"][0]
 
 
-def test_is_interactive_admits_human_principals_excludes_system() -> None:
+def test_is_interactive_admits_only_human_sessions() -> None:
     user = uuid4()
-    for principal in (PrincipalType.USER, PrincipalType.DEVICE, PrincipalType.SERVICE):
+    for principal in (PrincipalType.USER, PrincipalType.DEVICE):
         actor = AuthContext(user_id=user, role=Role.ADMIN, principal_type=principal)
         assert actor.is_interactive, principal
-    system = AuthContext(user_id=user, role=Role.ADMIN, principal_type=PrincipalType.SYSTEM)
-    assert system.is_system
-    assert not system.is_interactive
+    for principal in (PrincipalType.SERVICE, PrincipalType.SYSTEM):
+        actor = AuthContext(user_id=user, role=Role.ADMIN, principal_type=principal)
+        assert not actor.is_interactive, principal
+
+
+def _service_actor() -> AuthContext:
+    """A writable admin service-token principal (an lpat_ token maps to this)."""
+    return AuthContext(user_id=uuid4(), role=Role.ADMIN, principal_type=PrincipalType.SERVICE)
+
+
+def test_service_actor_cannot_commit_graph_change_set(
+    client: TestClient, admin_auth_headers: dict[str, str]
+) -> None:
+    """A delegated service token is not a person operating the review gate."""
+    change_set_id, _ = _note_graph_draft(client, admin_auth_headers)
+    with _autonomy_request_api(client) as api, pytest.raises(AuthError):
+        api.commit_graph_change_set(
+            UUID(change_set_id), message="token commit", actor=_service_actor()
+        )
+
+
+def test_writable_service_token_cannot_accept_or_commit_graph_draft(
+    client: TestClient, admin_auth_headers: dict[str, str]
+) -> None:
+    """Regression for the review finding: a writable admin lpat_ token may read and
+    draft, but must never operate the human review gate (accept/commit)."""
+    change_set_id, _ = _note_graph_draft(client, admin_auth_headers)
+    issued = client.post(
+        "/auth/tokens",
+        json={
+            "label": "automation",
+            "role": "admin",
+            "read_only": False,
+            "expires_at": (utc_now() + timedelta(days=7)).isoformat(),
+        },
+        headers=admin_auth_headers,
+    )
+    assert issued.status_code == 201, issued.text
+    token = {"Authorization": f"Bearer {issued.json()['data']['secret']}"}
+    # The token is valid and may read the graph...
+    assert client.get("/projects", headers=token).status_code == 200
+    # ...but the accept and commit gates reject it.
+    assert (
+        client.post(f"/graph-drafts/{change_set_id}/accept-all", headers=token).status_code
+        == 401
+    )
+    assert (
+        client.post(
+            f"/graph-drafts/{change_set_id}/commit",
+            json={"message": "token commit"},
+            headers=token,
+        ).status_code
+        == 401
+    )
 
 
 def test_system_actor_is_admin_but_not_interactive(client: TestClient) -> None:

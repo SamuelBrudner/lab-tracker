@@ -72,18 +72,20 @@ class AuthContext:
 
     @property
     def is_interactive(self) -> bool:
-        """Whether a human drove this request.
+        """Whether a person is directly operating this request.
 
-        Accept and commit gates require an interactive principal so an
-        unattended automation actor (``SYSTEM``) can DRAFT but never launder AI
-        proposals into the committed graph. Allow-list rather than deny-list so
-        a future non-interactive principal type is fail-closed (excluded) until
-        it is deliberately admitted here.
+        The graph-draft accept and commit gates require an interactive
+        principal, so that only a person -- not a delegated token or an
+        unattended automation -- turns an AI proposal into a committed graph
+        edge. A browser session (``USER``) and a paired phone (``DEVICE``)
+        count; a long-lived service token (``SERVICE``, which a script may
+        drive unattended) and the automation principal (``SYSTEM``) do not.
+        Allow-list rather than deny-list so a future principal type is
+        fail-closed (excluded) until it is deliberately admitted here.
         """
         return self.principal_type in {
             PrincipalType.USER,
             PrincipalType.DEVICE,
-            PrincipalType.SERVICE,
         }
 
 
