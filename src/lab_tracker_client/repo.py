@@ -907,6 +907,10 @@ def event_metadata(
     if source.get("git_branch"):
         metadata["repo_git_branch"] = str(source["git_branch"])
     metadata["repo_git_dirty"] = bool(source.get("git_dirty"))
+    if payload["artifacts"]:
+        # Structured (JSON-encoded scalar) so the curation bridge can lift the
+        # pointers into ExternalArtifactReferences without re-parsing markdown.
+        metadata["repo_artifacts"] = json.dumps(payload["artifacts"], sort_keys=True)
     host = payload.get("host") if isinstance(payload.get("host"), Mapping) else {}
     for key in CAPTURE_HOST_METADATA_KEYS:
         if host.get(key):

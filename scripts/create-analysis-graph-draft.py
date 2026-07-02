@@ -310,7 +310,10 @@ def _git_commit_evidence(
         "git_max_diff_lines": max_diff_lines,
         "evidence_source_provider": "git",
         "evidence_source_uri": remote_url or root,
-        "evidence_source_external_id": commit_sha,
+        # Shared git-evidence identity (see lab_tracker_client.repo
+        # event_source_external_id): both the post-commit hook path and this CI
+        # path must dedup to one identity per commit.
+        "evidence_source_external_id": f"{_normalize_remote(remote_url) or 'local'}@{commit_sha}",
         "evidence_source_observed_at": _utc_iso(),
         "evidence_capture_kind": "git_commit",
         "evidence_content_hash": _text_hash(evidence),
@@ -320,6 +323,31 @@ def _git_commit_evidence(
     if remote_url:
         metadata["git_remote_origin_url"] = remote_url
     return evidence, metadata
+
+
+def _normalize_remote(remote: str) -> str:
+    """Canonicalize a git remote URL for a stable, credential-free identity.
+
+    Inlined copy of the canonical ``lab_tracker_client.repo.normalize_remote``
+    (this script stays stdlib+httpx so CI can run it without the client
+    package). ``tests/test_repo_bridge.py`` pins the two implementations
+    together — change both or that contract test fails.
+    """
+
+    import re
+
+    cleaned = remote.strip()
+    if not cleaned:
+        return ""
+    cleaned = re.sub(r"^[a-zA-Z][a-zA-Z0-9+.-]*://", "", cleaned)
+    if "@" in cleaned and "://" not in remote:
+        cleaned = cleaned.split("@", 1)[1]
+    else:
+        cleaned = re.sub(r"^[^@/]+@", "", cleaned)
+    cleaned = cleaned.replace(":", "/")
+    if cleaned.endswith(".git"):
+        cleaned = cleaned[: -len(".git")]
+    return cleaned.strip("/").lower()
 
 
 def _utc_iso() -> str:
