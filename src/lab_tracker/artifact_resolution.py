@@ -253,8 +253,10 @@ def store_relative_reference(
 
     Returns a reference one of the registered adapters can resolve, or ``None``
     when the store kind is not resolvable yet (``object_table``/``database`` need
-    the deferred snapshot/query adapters). Credentials are never embedded — the
-    rclone remote name comes from the store's ``credential_ref``.
+    the deferred snapshot/query adapters) or the locator is malformed (a git
+    locator needs a ``@<commit>`` pin). Credentials are never embedded — the
+    rclone remote name comes from the store's ``credential_ref``, and git uses
+    its own host-side credential helper keyed by the remote URL (``store.root``).
     """
 
     joined = _join_store_path(store.root, path)
@@ -275,6 +277,17 @@ def store_relative_reference(
         return ExternalArtifactReference(
             source_system="rclone",
             uri=f"rclone://{remote}/{joined.lstrip('/')}",
+            content_hash=content_hash,
+        )
+    if store.kind is StoreKind.GIT:
+        # The locator carries the commit pin as a ``<path>@<commit>`` suffix; the
+        # remote is the store root. Without a commit there is no snapshot to pin.
+        file_path, sep, commit = path.rpartition("@")
+        if not sep or not file_path or not commit:
+            return None
+        return ExternalArtifactReference(
+            source_system="git",
+            uri=f"git+{store.root}#{commit}:{file_path.lstrip('/')}",
             content_hash=content_hash,
         )
     return None
@@ -305,14 +318,16 @@ def check_store_health(
     store: DataStore,
     *,
     rclone_runner: RcloneRunner | None = None,
+    git_runner: GitRunner | None = None,
     http_client: object | None = None,
     http_timeout: float = 10.0,
 ) -> StoreHealth:
     """Probe whether a registered store is reachable from this host.
 
     Lightweight and read-only: a directory stat for ``local_fs``, an HTTP ``HEAD``
-    for ``http``, and ``rclone lsf`` for the cloud/remote kinds. ``object_table``
-    and ``database`` are reported ``unsupported`` until their adapters land.
+    for ``http``, ``rclone lsf`` for the cloud/remote kinds, and ``git ls-remote``
+    for ``git``. ``object_table`` and ``database`` are reported ``unsupported``
+    until their adapters land.
     """
 
     kind = store.kind
@@ -338,6 +353,16 @@ def check_store_health(
         if completed.returncode == 0:
             return StoreHealth(StoreHealthStatus.HEALTHY)
         return StoreHealth(StoreHealthStatus.UNREACHABLE, _rclone_error_detail(completed))
+
+    if kind is StoreKind.GIT:
+        runner = git_runner or _subprocess_git_runner("git")
+        try:
+            completed = runner(["ls-remote", store.root, "HEAD"])
+        except OSError as exc:
+            return StoreHealth(StoreHealthStatus.UNREACHABLE, f"git is unavailable: {exc}")
+        if completed.returncode == 0:
+            return StoreHealth(StoreHealthStatus.HEALTHY)
+        return StoreHealth(StoreHealthStatus.UNREACHABLE, _git_error_detail(completed))
 
     return StoreHealth(
         StoreHealthStatus.UNSUPPORTED,

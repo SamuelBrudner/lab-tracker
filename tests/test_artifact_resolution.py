@@ -539,6 +539,50 @@ def test_store_relative_reference_unsupported_kind_returns_none():
     assert store_relative_reference(store, path="q", content_hash=_sha256(b"x")) is None
 
 
+def test_store_relative_reference_git_builds_commit_pin():
+    store = _data_store(
+        StoreKind.GIT, "https://example.com/org/repo.git", name="repo"
+    )
+    commit = "a" * 40
+    ref = store_relative_reference(
+        store, path=f"analysis/run.py@{commit}", content_hash=_sha256(b"x")
+    )
+    assert ref is not None
+    assert ref.source_system == "git"
+    assert ref.uri == f"git+https://example.com/org/repo.git#{commit}:analysis/run.py"
+
+
+def test_store_relative_reference_git_without_commit_returns_none():
+    store = _data_store(
+        StoreKind.GIT, "https://example.com/org/repo.git", name="repo"
+    )
+    assert (
+        store_relative_reference(store, path="analysis/run.py", content_hash=_sha256(b"x"))
+        is None
+    )
+
+
+def test_store_relative_reference_git_resolves_end_to_end(tmp_path):
+    # The locator produced from a git store must be consumable by GitResolver.
+    data = b"pinned analysis code"
+    store = _data_store(
+        StoreKind.GIT, "https://example.com/org/repo.git", name="repo"
+    )
+    commit = "b" * 40
+    ref = store_relative_reference(
+        store, path=f"src/model.py@{commit}", content_hash=_sha256(data)
+    )
+    assert ref is not None
+    registry = ResolverRegistry(
+        [GitResolver(runner=_fake_git_runner(blob=data), cache_root=tmp_path)]
+    )
+
+    result = registry.resolve(ref)
+
+    assert result.status is ResolutionStatus.VERIFIED
+    assert result.content == data
+
+
 # --- check_store_health ---------------------------------------------------
 
 
@@ -619,6 +663,39 @@ def test_check_store_health_database_is_unsupported():
     store = _data_store(StoreKind.DATABASE, "postgresql://lims", name="lims")
     health = check_store_health(store)
     assert health.status is StoreHealthStatus.UNSUPPORTED
+
+
+def test_check_store_health_git_healthy_via_runner():
+    store = _data_store(StoreKind.GIT, "https://example.com/org/repo.git", name="repo")
+
+    def runner(args):
+        assert args == ["ls-remote", store.root, "HEAD"]
+        return GitCompleted(0, b"a" * 40 + b"\tHEAD\n", b"")
+
+    health = check_store_health(store, git_runner=runner)
+    assert health.status is StoreHealthStatus.HEALTHY
+
+
+def test_check_store_health_git_unreachable_via_runner():
+    store = _data_store(StoreKind.GIT, "https://example.com/org/missing.git", name="repo")
+
+    def runner(args):
+        return GitCompleted(128, b"", b"fatal: repository not found")
+
+    health = check_store_health(store, git_runner=runner)
+    assert health.status is StoreHealthStatus.UNREACHABLE
+    assert "not found" in (health.detail or "")
+
+
+def test_check_store_health_git_missing_binary():
+    store = _data_store(StoreKind.GIT, "https://example.com/org/repo.git", name="repo")
+
+    def runner(args):
+        raise OSError("git not found")
+
+    health = check_store_health(store, git_runner=runner)
+    assert health.status is StoreHealthStatus.UNREACHABLE
+    assert "git is unavailable" in (health.detail or "")
 
 
 # --- ResolverRegistry -----------------------------------------------------
