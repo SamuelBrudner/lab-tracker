@@ -1,10 +1,10 @@
 # Guided Setup and Automatic Tracking — Design
 
-_Status: Phase 1 implemented (2026-07-01, epic `lab-tracker-stkn`, children
-.1–.5); Phases 2–4 designed, not built. Produced from a five-way code
-exploration plus a three-design / three-judge review; the Phase 1
-implementation then passed an 18-finding adversarial review (all findings
-fixed). The retained surface
+_Status: Phases 1–2 implemented (2026-07-01/02, epic `lab-tracker-stkn`,
+children .1–.7); Phases 3–4 designed, not built. Produced from a five-way
+code exploration plus a three-design / three-judge review; each phase's
+implementation then passed a multi-lens adversarial review (18 and 20
+confirmed findings respectively, all fixed). The retained surface
 ([`retained-v1-surface.md`](retained-v1-surface.md)) wins any scope
 disagreement._
 
@@ -149,20 +149,30 @@ Judged alternatives, for the record:
 6. **`lt git snapshot`** (M) — moves the transport of
    `scripts/create-analysis-graph-draft.py` into `lab_tracker_client` and
    makes commit capture **outbox-backed**: render the same git evidence
-   (metadata, `--stat`, capped diff), write a deterministic outbox event
-   (`capture_id.git.event_id.json`, same `(provider, external_id,
-   content_hash)` dedupe), then best-effort sync; `--request-draft` flows
-   through the existing draft endpoint on sync. Commits made while the server
-   is down **queue instead of vanish** — the largest fail-soft win of the
-   whole design, at zero new persistence machinery.
+   (byte-compatible with the legacy rendering so content hashes dedupe across
+   both paths), write a deterministic staged-note outbox event carrying the
+   evidence in the reserved `payload.body` key, then best-effort drain of the
+   repo's outbox. Commits made while the server is down **queue instead of
+   vanish** — the largest fail-soft win of the whole design, at zero new
+   persistence machinery. Review-hardened details: the draft request rides on
+   the event itself (reserved `payload.request_draft`), so a commit-triggered
+   drain never requests LLM drafts for unrelated queued captures; only the
+   repo-local watch config is honored (no parent-directory walk) and a broken
+   config falls back leniently (salvaging the configured outbox string) so a
+   commit is never lost or stranded; credentialed remote URLs are stripped
+   before entering evidence.
 7. **`lt hooks install | uninstall | status`** (M) — pure-Python,
    cross-platform port of the PS1 installer: hook path via
    `git rev-parse --git-path`, the **same BEGIN/END managed-block markers**
-   (existing enrolled repos upgrade in place), POSIX-sh body invoking
-   `lt git snapshot --fail-silent` and exiting 0 unconditionally, absolute
-   `lt` path recorded at install time (GUI git clients without PATH),
-   refuses pre-existing unmanaged hooks without `--force`. Reuses
-   `_upsert_managed_block`/`_strip_managed_block`. The PS1 script is
+   (existing enrolled repos upgrade in place, and the legacy block's baked
+   project/base-URL defaults are carried forward so an upgrade can never
+   silently unbind capture), POSIX-sh LF-only body invoking `lt git
+   snapshot`, absolute `lt` path recorded at install time (interpreter
+   sibling preferred over PATH), refuses pre-existing unmanaged hooks
+   without `--force` and unpaired-marker corruption always. The hook's
+   `|| echo` warning stays reachable because snapshot exits nonzero when not
+   fully synced; post-commit hooks are advisory, so the commit is never
+   blocked either way. `--yes`-gated like connect/bind. The PS1 script is
    deprecated-but-kept.
 8. **Doctor extension + sha-only drift** (S/M) — `version_in_sync` compares
    the content sha only, so package bumps stop crying wolf; `_doctor` also

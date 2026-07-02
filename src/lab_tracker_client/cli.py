@@ -9,6 +9,8 @@ import sys
 from pathlib import Path
 from typing import Any
 
+import lab_tracker_client.git_capture as git_capture
+import lab_tracker_client.hooks as hook_install
 import lab_tracker_client.setup as setup_helpers
 import lab_tracker_client.watch as watch_capture
 from lab_tracker.assistant_next_questions import is_research_facing_prompt
@@ -93,6 +95,8 @@ def _build_parser() -> argparse.ArgumentParser:
 
     _add_setup_parsers(subcommands)
     _add_project_parsers(subcommands)
+    _add_git_parsers(subcommands)
+    _add_hooks_parsers(subcommands)
 
     prime_parser = subcommands.add_parser(
         "prime",
@@ -351,6 +355,136 @@ def _add_project_parsers(subcommands: argparse._SubParsersAction) -> None:
         help="Consent to writing lt_ids.json.",
     )
     bind_parser.set_defaults(func=_cmd_project_bind)
+
+
+def _add_git_parsers(subcommands: argparse._SubParsersAction) -> None:
+    git_parser = subcommands.add_parser(
+        "git",
+        help="Capture git commits as queued Lab Tracker evidence.",
+    )
+    git_commands = git_parser.add_subparsers(dest="git_command", required=True)
+
+    snapshot_parser = git_commands.add_parser(
+        "snapshot",
+        help="Queue a commit as staged evidence (outbox-backed), then best-effort sync.",
+    )
+    snapshot_parser.add_argument("--commit", default="HEAD", help="Commit-ish. Defaults to HEAD.")
+    snapshot_parser.add_argument("--repo", default=".", help="Repository path. Defaults to cwd.")
+    snapshot_parser.add_argument(
+        "--project",
+        help="Project UUID. Defaults to LAB_TRACKER_PROJECT_ID, watch config, or lt_ids.json.",
+    )
+    snapshot_parser.add_argument("--question", help="Candidate question UUID.")
+    snapshot_parser.add_argument(
+        "--dataset",
+        action="append",
+        default=[],
+        help="Candidate dataset UUID. Repeatable.",
+    )
+    snapshot_parser.add_argument("--tag", action="append", default=[], help="Tag. Repeatable.")
+    snapshot_parser.add_argument("--config", help="Watch config path. Defaults to discovered.")
+    snapshot_parser.add_argument(
+        "--max-diff-lines",
+        type=int,
+        help="Maximum diff lines. Defaults to LAB_TRACKER_GIT_MAX_DIFF_LINES or 800.",
+    )
+    snapshot_parser.add_argument(
+        "--context-lines",
+        type=int,
+        help="Unified diff context lines. Defaults to LAB_TRACKER_GIT_CONTEXT_LINES or 3.",
+    )
+    snapshot_parser.add_argument(
+        "--request-draft",
+        action="store_true",
+        help="Request an analysis graph draft when the snapshot syncs.",
+    )
+    snapshot_parser.add_argument(
+        "--no-sync",
+        action="store_true",
+        help="Queue the event only; skip the best-effort sync.",
+    )
+    snapshot_parser.add_argument(
+        "--fail-silent",
+        action="store_true",
+        help="Swallow all errors so a post-commit hook can never block a commit.",
+    )
+    snapshot_parser.set_defaults(func=_cmd_git_snapshot, needs_client=False)
+
+
+def _add_hooks_parsers(subcommands: argparse._SubParsersAction) -> None:
+    hooks_parser = subcommands.add_parser(
+        "hooks",
+        help="Enroll repositories with the Lab Tracker post-commit snapshot hook.",
+    )
+    hooks_commands = hooks_parser.add_subparsers(dest="hooks_command", required=True)
+
+    install_parser = hooks_commands.add_parser(
+        "install",
+        help="Write the managed post-commit block (upgrades legacy installs in place).",
+    )
+    install_parser.add_argument("--repo", default=".", help="Repository path. Defaults to cwd.")
+    install_parser.add_argument(
+        "--project",
+        help="Project UUID baked into the hook as an overridable default.",
+    )
+    install_parser.add_argument(
+        "--base-url",
+        help="API base URL baked into the hook as an overridable default.",
+    )
+    install_parser.add_argument(
+        "--lt-path",
+        help="Absolute lt executable for the hook body. Defaults to the installed lt.",
+    )
+    install_parser.add_argument(
+        "--no-request-draft",
+        action="store_true",
+        help="Do not request an analysis graph draft when snapshots sync.",
+    )
+    install_parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Append the managed block to a pre-existing unmanaged hook.",
+    )
+    install_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Show the hook diff without writing.",
+    )
+    install_parser.add_argument(
+        "--yes",
+        action="store_true",
+        help="Consent to writing the repository's post-commit hook.",
+    )
+    install_parser.set_defaults(func=_cmd_hooks_install, needs_client=False)
+
+    uninstall_parser = hooks_commands.add_parser(
+        "uninstall",
+        help="Strip the managed block, preserving any surrounding hook content.",
+    )
+    uninstall_parser.add_argument("--repo", default=".", help="Repository path. Defaults to cwd.")
+    uninstall_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Show what would be removed without writing.",
+    )
+    uninstall_parser.add_argument(
+        "--yes",
+        action="store_true",
+        help="Consent to modifying the repository's post-commit hook.",
+    )
+    uninstall_parser.set_defaults(func=_cmd_hooks_uninstall, needs_client=False)
+
+    status_parser = hooks_commands.add_parser(
+        "status",
+        help="Report hook presence, managed block, and lt-path health for a repo.",
+    )
+    status_parser.add_argument("--repo", default=".", help="Repository path. Defaults to cwd.")
+    status_parser.add_argument(
+        "--fail-silent",
+        action="store_true",
+        help="Suppress errors for hook/scheduler invocations.",
+    )
+    status_parser.set_defaults(func=_cmd_hooks_status, needs_client=False)
 
 
 def _add_watch_parsers(subcommands: argparse._SubParsersAction) -> None:
@@ -771,6 +905,75 @@ def _cmd_project_bind(client: LabTracker, args: argparse.Namespace) -> Any:
     )
 
 
+def _cmd_git_snapshot(args: argparse.Namespace) -> Any:
+    payload = git_capture.snapshot_commit(
+        repo=args.repo,
+        commit=args.commit,
+        project_id=args.project,
+        question_id=args.question,
+        dataset_ids=args.dataset,
+        tags=args.tag,
+        config_path=args.config,
+        max_diff_lines=args.max_diff_lines,
+        context_lines=args.context_lines,
+        request_draft=args.request_draft,
+    )
+    if args.no_sync:
+        return payload
+    # Best-effort drain: the event above is durable, so a down server means
+    # "queued for a later sync", never a lost commit. Draining the whole
+    # outbox here is what empties the backlog on the next commit. The draft
+    # request rides on the git event itself (payload.request_draft), so
+    # request_draft stays False here — unrelated queued captures must never
+    # get LLM drafts as a side effect of a commit.
+    config, _config_error = git_capture.resolve_watch_config(
+        Path(payload["repo"]), args.config
+    )
+    try:
+        client = LabTracker.from_env()
+        try:
+            payload["sync"] = watch_capture.sync_outbox(
+                client,
+                config,
+                request_draft=False,
+            )
+        finally:
+            client.close()
+    except Exception as exc:  # noqa: BLE001 - queued events retry on later syncs.
+        payload["sync_error"] = str(exc)
+    return payload
+
+
+def _cmd_hooks_install(args: argparse.Namespace) -> Any:
+    if not (args.yes or args.dry_run):
+        raise SystemExit(
+            "lt hooks install writes the repository's post-commit hook; "
+            "pass --yes to consent or --dry-run to preview."
+        )
+    return hook_install.install_hook(
+        repo=args.repo,
+        project_id=args.project,
+        base_url=args.base_url,
+        request_draft=not args.no_request_draft,
+        lt_path=args.lt_path,
+        force=args.force,
+        dry_run=args.dry_run,
+    )
+
+
+def _cmd_hooks_uninstall(args: argparse.Namespace) -> Any:
+    if not (args.yes or args.dry_run):
+        raise SystemExit(
+            "lt hooks uninstall modifies the repository's post-commit hook; "
+            "pass --yes to consent or --dry-run to preview."
+        )
+    return hook_install.uninstall_hook(repo=args.repo, dry_run=args.dry_run)
+
+
+def _cmd_hooks_status(args: argparse.Namespace) -> Any:
+    return hook_install.hook_status(repo=args.repo)
+
+
 def _cmd_watch_status(args: argparse.Namespace) -> Any:
     config = watch_capture.load_config(config_path=args.config)
     summary = watch_capture.outbox_status(config.outbox_path())
@@ -1118,4 +1321,14 @@ def _payload_exit_code(payload: Any) -> int:
         and payload.get("errors")
     ):
         return 1
+    if isinstance(payload, dict) and payload.get("command") == "git-snapshot":
+        sync = payload.get("sync")
+        if (
+            payload.get("sync_error")
+            or payload.get("config_error")
+            or (isinstance(sync, dict) and sync.get("errors"))
+        ):
+            # The commit is safely queued; nonzero signals "not fully synced"
+            # so the hook's one-line warning stays reachable.
+            return 1
     return 0

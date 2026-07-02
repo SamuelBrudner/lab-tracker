@@ -88,9 +88,9 @@ def managed_claude_block() -> str:
             "If capture looks unconfigured or drifted here, `lt setup status` is a "
             "read-only inventory that is safe to consult. Setup writes happen "
             "through `lt` commands that all take a `--dry-run` preview "
-            "(`lt setup init`, `lt watch add`; `lt setup connect` and "
-            "`lt project bind` also require `--yes`); suggest them to the user "
-            "rather than applying them unprompted.",
+            "(`lt setup init`, `lt watch add`; `lt setup connect`, "
+            "`lt project bind`, and `lt hooks install` also require `--yes`); "
+            "suggest them to the user rather than applying them unprompted.",
             CLAUDE_BLOCK_END,
             "",
         ]
@@ -135,9 +135,9 @@ def code_facing_idioms(*, symbols: Iterable[str] | None = None) -> str:
         "Guided setup lives on the `lt` CLI: `lt setup status` is a read-only "
         "inventory of what is configured in a consumer repo. Setup write "
         "commands take `--dry-run` previews (`lt setup init`, `lt watch add`), "
-        "and `lt setup connect` and `lt project bind` also require `--yes`. "
-        "Status and previews are safe to consult; a person approves each "
-        "applying command.",
+        "and `lt setup connect`, `lt project bind`, and `lt hooks install` "
+        "also require `--yes`. Status and previews are safe to consult; a "
+        "person approves each applying command.",
     ]
     if {"savefig", "capture_figures"}.issubset(symbol_set):
         sections.extend(

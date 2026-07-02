@@ -869,9 +869,9 @@ def _agents_fragment() -> str:
         Guided setup lives on the `lt` CLI: `lt setup status` is a read-only
         inventory of server reachability and what is configured in this repo.
         Setup write commands take `--dry-run` previews (`lt setup init`,
-        `lt watch add`), and `lt setup connect` and `lt project bind` also
-        require `--yes`; suggest them to the user rather than applying them
-        unprompted.
+        `lt watch add`), and `lt setup connect`, `lt project bind`, and
+        `lt hooks install` also require `--yes`; suggest them to the user
+        rather than applying them unprompted.
 
         Configure the MCP server with the generated `.mcp.json`. It uses the portable
         `lt-mcp` command, so consumer repos should not hard-code local Lab Tracker

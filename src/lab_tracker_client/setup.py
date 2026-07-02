@@ -31,11 +31,11 @@ from lab_tracker_client.client import (
     connection_profile_path,
     load_connection_profile,
 )
+from lab_tracker_client.hooks import HOOK_BLOCK_BEGIN
 
 JsonObject = dict[str, Any]
 
 PROFILE_KEYS = ("base_url", "default_project_id", "access_token")
-HOOK_BLOCK_BEGIN = "# --- BEGIN LAB TRACKER GRAPH DRAFT HOOK ---"
 _HEALTH_PROBE_TIMEOUT_SECONDS = 2.0
 
 _SCAFFOLD_FILES = (
