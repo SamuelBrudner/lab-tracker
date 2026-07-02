@@ -74,7 +74,9 @@ research record:
 - Sessions and acquisition outputs, including closing sessions and promoting
   eligible sessions into datasets.
 - Dataset staging and direct commit with provenance/manifest capture, without
-  an approval gate.
+  an approval gate. The direct-commit path for people and the human-gated review
+  path for AI proposals are deliberately asymmetric; see
+  [review-and-commit-model.md](review-and-commit-model.md).
 - Analysis, claim, and visualization records as explicit user-driven flows,
   including managed file storage for visualization assets.
 - Exploration nodes for the divergent research trajectory — `decision`,
