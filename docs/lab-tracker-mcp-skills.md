@@ -135,6 +135,64 @@ when storing the note. Nested metadata objects and arrays are not supported. Pas
 `targets` as a list of `{entity_type, entity_id}` objects to attach a source note
 to the most specific relevant graph record.
 
+## Troubleshooting MCP Discovery
+
+First distinguish API authorization failures from MCP discovery failures. If an
+agent can call `lab_tracker_health` or `lab_tracker_readiness` but a later tool
+returns `403 service_forbidden`, the MCP server is loaded and the API rejected
+the configured token or account. Check token scope, project membership, and
+`LAB_TRACKER_AUTH_ENABLED`.
+
+If the agent cannot see any `lab_tracker_*` tools, debug MCP discovery instead.
+In Codex Desktop, closing the window with the `X` may leave the background
+`codex.exe app-server` process alive with stale MCP state. A stale app-server can
+keep reporting no cached tool snapshot even after Lab Tracker, Tailscale, or the
+MCP config has been fixed.
+
+On Windows, check whether Codex Desktop actually restarted and whether it spawned
+Lab Tracker MCP:
+
+```powershell
+Get-CimInstance Win32_Process |
+  Where-Object {
+    $_.Name -match '^(Codex|codex|python)\.exe$' -or
+    $_.CommandLine -match 'app-server|lab_tracker\.mcp_server'
+  } |
+  Select-Object ProcessId, ParentProcessId, Name, CreationDate, CommandLine |
+  Sort-Object CreationDate |
+  Format-List
+```
+
+A healthy Codex Desktop session has a recent `codex.exe app-server` process and
+one or more child processes running `python.exe -m lab_tracker.mcp_server`. If
+the app-server creation time is older than the config/API fix, fully quit Codex
+from the system tray or Task Manager, then relaunch it. From PowerShell, this
+forces a full quit:
+
+```powershell
+Get-CimInstance Win32_Process |
+  Where-Object {
+    ($_.Name -ieq "Codex.exe" -or $_.Name -ieq "codex.exe") -and
+    ($_.CommandLine -like "*OpenAI.Codex*")
+  } |
+  ForEach-Object {
+    Stop-Process -Id $_.ProcessId -Force
+  }
+```
+
+After relaunch, ask the agent to search for `lab_tracker_get_decision_context`
+or call the read-only MCP checks:
+
+```text
+lab_tracker_health
+lab_tracker_readiness
+```
+
+If those pass, MCP discovery is fixed. If discovery still fails while a direct
+stdio client can list tools, inspect Codex logs for repeated messages like
+`server_name=lab-tracker has_cached_tool_info_snapshot=false startup_complete=true`;
+that points to client-side MCP lifecycle state rather than the Lab Tracker API.
+
 ## Evidence Authoring
 
 Agents should read existing questions, datasets, analyses, claims,
