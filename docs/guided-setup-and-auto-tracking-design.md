@@ -1,7 +1,15 @@
 # Guided Setup and Automatic Tracking — Design
 
-_Status: Phases 1–3 implemented (2026-07-01/02, epic `lab-tracker-stkn`,
-children .1–.12); Phase 4 designed, not built. Phase 3 notes: the wizard is
+_Status: Phases 1–4 implemented (2026-07-01/02, epic `lab-tracker-stkn`,
+children .1–.14); only the declarative `.lab-tracker.toml` (`stkn.15`)
+remains deferred by design (drive-by-enrollment hazard; revisit on observed
+teammate friction). Phase 4 notes: `lt setup schedule` registers an
+OS-scheduler job (schtasks / managed crontab line) running the new
+single-process `lt watch run --fail-silent`; a fail-soft
+`~/.lab-tracker/applied-repos.json` registry records enrolled repos at
+init/update/watch-add/hooks-install/schedule time and `lt doctor --all`
+sweeps it after upgrades — suggestion metadata only, never an auto-apply
+trigger. Phase 3 notes: the wizard is
 the generated `skills/lab-tracker-setup` skill (single-sourced from
 `lab_tracker.setup_guide`, drift-tested, installable via
 `--install-skills`, also served as `lab-tracker://setup-guide`); doctor

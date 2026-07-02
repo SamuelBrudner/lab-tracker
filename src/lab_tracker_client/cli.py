@@ -11,6 +11,8 @@ from typing import Any
 
 import lab_tracker_client.git_capture as git_capture
 import lab_tracker_client.hooks as hook_install
+import lab_tracker_client.registry as repo_registry
+import lab_tracker_client.schedule as schedule_helpers
 import lab_tracker_client.setup as setup_helpers
 import lab_tracker_client.watch as watch_capture
 from lab_tracker.assistant_next_questions import is_research_facing_prompt
@@ -85,6 +87,16 @@ def _build_parser() -> argparse.ArgumentParser:
         "--target",
         default=".",
         help="Consumer repo path to inspect. Defaults to the current directory.",
+    )
+    doctor_parser.add_argument(
+        "--all",
+        action="store_true",
+        help="Sweep every repo recorded in ~/.lab-tracker/applied-repos.json.",
+    )
+    doctor_parser.add_argument(
+        "--prune-missing",
+        action="store_true",
+        help="With --all: drop registry entries whose directory no longer exists.",
     )
     doctor_parser.add_argument(
         "--fail-silent",
@@ -360,6 +372,41 @@ def _add_setup_parsers(subcommands: argparse._SubParsersAction) -> None:
         help="Consent to writing the machine-level connection profile.",
     )
     connect_parser.set_defaults(func=_cmd_setup_connect, needs_client=False)
+
+    schedule_parser = setup_commands.add_parser(
+        "schedule",
+        help="Register an OS-scheduler job running 'lt watch run' for this repo's config.",
+    )
+    schedule_parser.add_argument(
+        "--config",
+        help="Watch config path. Defaults to ./.lab-tracker/watch.json.",
+    )
+    schedule_parser.add_argument(
+        "--interval-minutes",
+        type=int,
+        default=schedule_helpers.DEFAULT_INTERVAL_MINUTES,
+        help=f"Recurrence interval. Defaults to {schedule_helpers.DEFAULT_INTERVAL_MINUTES}.",
+    )
+    schedule_parser.add_argument(
+        "--lt-path",
+        help="Absolute lt executable for the scheduled command. Defaults to the installed lt.",
+    )
+    schedule_parser.add_argument(
+        "--uninstall",
+        action="store_true",
+        help="Remove the scheduled job for this config.",
+    )
+    schedule_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Show the scheduler change without applying it.",
+    )
+    schedule_parser.add_argument(
+        "--yes",
+        action="store_true",
+        help="Consent to modifying the OS scheduler.",
+    )
+    schedule_parser.set_defaults(func=_cmd_setup_schedule, needs_client=False)
 
 
 def _add_project_parsers(subcommands: argparse._SubParsersAction) -> None:
@@ -684,6 +731,20 @@ def _add_watch_parsers(subcommands: argparse._SubParsersAction) -> None:
     )
     sync_parser.set_defaults(func=_cmd_watch_sync)
 
+    run_parser = watch_commands.add_parser(
+        "run",
+        help="Scan configured watches then sync the outbox in one process (for schedulers).",
+    )
+    run_parser.add_argument("--config", help="Config path. Defaults to discovered config.")
+    run_parser.add_argument("--request-draft", action="store_true")
+    run_parser.add_argument("--limit", type=int, help="Maximum items per stage.")
+    run_parser.add_argument(
+        "--fail-silent",
+        action="store_true",
+        help="Suppress errors and error exit codes for scheduler runs.",
+    )
+    run_parser.set_defaults(func=_cmd_watch_run)
+
 
 def _add_hpc_parsers(subcommands: argparse._SubParsersAction) -> None:
     hpc_parser = subcommands.add_parser(
@@ -849,7 +910,7 @@ def _cmd_watch_scan(args: argparse.Namespace) -> Any:
 
 
 def _cmd_watch_add(args: argparse.Namespace) -> Any:
-    return watch_capture.add_watch(
+    payload = watch_capture.add_watch(
         root=args.root,
         mode=args.mode,
         sink=args.sink,
@@ -863,6 +924,13 @@ def _cmd_watch_add(args: argparse.Namespace) -> Any:
         config_path=args.config,
         dry_run=args.dry_run,
     )
+    if not args.dry_run:
+        # Registry entries are sweep metadata for `lt doctor --all`, never an
+        # auto-apply trigger; recording is fail-soft.
+        repo_registry.record_repo(
+            repo_registry.repo_root_for_config(payload["config"]), "watch-add"
+        )
+    return payload
 
 
 def _cmd_watch_list(args: argparse.Namespace) -> Any:
@@ -1015,6 +1083,49 @@ def _cmd_hooks_uninstall(args: argparse.Namespace) -> Any:
 
 def _cmd_hooks_status(args: argparse.Namespace) -> Any:
     return hook_install.hook_status(repo=args.repo)
+
+
+def _cmd_watch_run(client: LabTracker, args: argparse.Namespace) -> Any:
+    config = watch_capture.load_config(config_path=args.config)
+    scan = watch_capture.scan_configured(config, limit=args.limit)
+    sync = watch_capture.sync_outbox(
+        client,
+        config,
+        request_draft=args.request_draft,
+        limit=args.limit,
+    )
+    return {
+        "command": "watch-run",
+        "config": str(config.config_path),
+        "scan": scan,
+        "sync": sync,
+        "errors": list(scan.get("errors") or []) + list(sync.get("errors") or []),
+    }
+
+
+def _cmd_setup_schedule(args: argparse.Namespace) -> Any:
+    if not (args.yes or args.dry_run):
+        raise SystemExit(
+            "lt setup schedule modifies the OS scheduler; "
+            "pass --yes to consent or --dry-run to preview."
+        )
+    config_path = args.config or Path(".") / ".lab-tracker" / "watch.json"
+    if args.uninstall:
+        return schedule_helpers.uninstall_schedule(
+            config_path=config_path,
+            dry_run=args.dry_run,
+        )
+    payload = schedule_helpers.install_schedule(
+        config_path=config_path,
+        interval_minutes=args.interval_minutes,
+        lt_path=args.lt_path,
+        dry_run=args.dry_run,
+    )
+    if not args.dry_run:
+        repo_registry.record_repo(
+            repo_registry.repo_root_for_config(payload["config"]), "setup-schedule"
+        )
+    return payload
 
 
 def _cmd_watch_status(args: argparse.Namespace) -> Any:
@@ -1290,7 +1401,45 @@ def _cmd_list_notes(client: LabTracker, args: argparse.Namespace) -> Any:
 def _cmd_doctor(args: argparse.Namespace) -> Any:
     from lab_tracker.cli import _doctor
 
-    return _doctor(args.target)
+    if not getattr(args, "all", False):
+        return _doctor(args.target)
+    repos = []
+    pruned = []
+    for entry in repo_registry.list_repos():
+        root = str(entry.get("root") or "")
+        if not root:
+            continue
+        summary: dict[str, Any] = {"root": root, "actions": entry.get("actions") or []}
+        if not Path(root).exists():
+            if getattr(args, "prune_missing", False):
+                repo_registry.remove_repo(root)
+                pruned.append(root)
+                continue
+            summary["missing"] = True
+        else:
+            try:
+                payload = _doctor(root)
+            except Exception as exc:  # noqa: BLE001 - one bad repo must not end the sweep.
+                summary["error"] = str(exc)
+                repos.append(summary)
+                continue
+            targets = payload.get("targets") or []
+            summary["drifted"] = [
+                target["name"]
+                for target in targets
+                if isinstance(target, dict) and target.get("drifted")
+            ]
+            if payload.get("suggestion"):
+                summary["suggestion"] = payload["suggestion"]
+        repos.append(summary)
+    result: dict[str, Any] = {
+        "command": "doctor-all",
+        "registry": str(repo_registry.registry_path()),
+        "repos": repos,
+    }
+    if pruned:
+        result["pruned"] = pruned
+    return result
 
 
 def _cmd_update(args: argparse.Namespace) -> Any:
@@ -1376,6 +1525,21 @@ def _payload_exit_code(payload: Any) -> int:
         and payload.get("errors")
     ):
         return 1
+    if (
+        isinstance(payload, dict)
+        and payload.get("command") == "watch-run"
+        and payload.get("errors")
+    ):
+        return 1
+    if isinstance(payload, dict) and payload.get("command") == "doctor-all":
+        repos = payload.get("repos")
+        if not isinstance(repos, list):
+            return 1
+        if any(
+            repo.get("missing") or repo.get("drifted") or repo.get("error")
+            for repo in repos
+        ):
+            return 1
     if isinstance(payload, dict) and payload.get("command") == "git-snapshot":
         sync = payload.get("sync")
         if (
