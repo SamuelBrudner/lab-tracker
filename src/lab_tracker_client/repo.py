@@ -1137,11 +1137,23 @@ def artifact_from_path(
 
     from lab_tracker_client.watch import observe_file
 
-    resolved_root = Path(root or Path.cwd()).expanduser().resolve()
-    resolved = Path(path).expanduser().resolve()
-    if not resolved.is_file():
-        raise LTValidationError(f"Artifact file not found: {resolved}")
-    observation = observe_file(resolved, root=resolved_root)
+    # Resolve the file before touching the working directory: resolving a
+    # relative path (or defaulting root to cwd) raises OSError when the process
+    # sits in a deleted directory, and callers are promised LTValidationError.
+    candidate = Path(path).expanduser()
+    try:
+        candidate = candidate.resolve()
+    except OSError as exc:
+        raise LTValidationError(f"Artifact file not found: {candidate}") from exc
+    if not candidate.is_file():
+        raise LTValidationError(f"Artifact file not found: {candidate}")
+    try:
+        resolved_root = Path(root or Path.cwd()).expanduser().resolve()
+    except OSError as exc:
+        raise LTValidationError(
+            "Cannot resolve the artifact root: the working directory is unavailable."
+        ) from exc
+    observation = observe_file(candidate, root=resolved_root)
     return {
         "uri": observation.source_uri,
         "kind": "file",
