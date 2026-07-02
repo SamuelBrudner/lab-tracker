@@ -390,6 +390,91 @@ def test_exploration_nodes_reject_invalid_invalidation_shapes():
         )
 
 
+def _create_pivot_node(api, project, question, actor, *, title: str, **invalidates):
+    return api.create_exploration_node(
+        project_id=project.project_id,
+        node_type=ExplorationNodeType.PIVOT,
+        title=title,
+        target=EntityRef(entity_type=EntityType.QUESTION, entity_id=question.question_id),
+        trigger="A later run changed the interpretation.",
+        rationale="Recording why the path changed.",
+        actor=actor,
+        **invalidates,
+    )
+
+
+def test_deleting_invalidated_target_does_not_strand_committed_pivot():
+    api, actor, project, question, _dataset, _claim = _create_exploration_context()
+    decision = _create_decision_node(api, project, question, actor, title="Old path")
+    pivot = _create_pivot_node(
+        api,
+        project,
+        question,
+        actor,
+        title="Pivot away from old path",
+        invalidates_node_id=decision.node_id,
+    )
+    api.update_exploration_node(
+        pivot.node_id, status=ExplorationNodeStatus.COMMITTED, actor=actor
+    )
+
+    # Deleting the invalidated target SET NULLs the committed pivot's ref.
+    api.delete_exploration_node(decision.node_id, actor=actor)
+    stranded = api.get_exploration_node(pivot.node_id)
+    assert stranded.invalidates_node_id is None
+
+    # The pivot can still be transitioned (status-only) despite the nulled ref.
+    archived = api.update_exploration_node(
+        pivot.node_id, status=ExplorationNodeStatus.ARCHIVED, actor=actor
+    )
+    assert archived.status == ExplorationNodeStatus.ARCHIVED
+
+
+def test_status_only_commit_tolerates_since_deleted_invalidation_target():
+    api, actor, project, question, _dataset, claim = _create_exploration_context()
+    pivot = _create_pivot_node(
+        api,
+        project,
+        question,
+        actor,
+        title="Pivot invalidating a claim",
+        invalidates_claim_id=claim.claim_id,
+    )
+
+    api.delete_claim(claim.claim_id, actor=actor)
+
+    committed = api.update_exploration_node(
+        pivot.node_id, status=ExplorationNodeStatus.COMMITTED, actor=actor
+    )
+    assert committed.status == ExplorationNodeStatus.COMMITTED
+    assert committed.invalidates_claim_id is None
+
+
+def test_staged_pivot_can_switch_invalidation_between_node_and_claim():
+    api, actor, project, question, _dataset, claim = _create_exploration_context()
+    decision = _create_decision_node(api, project, question, actor, title="Old path")
+    pivot = _create_pivot_node(
+        api,
+        project,
+        question,
+        actor,
+        title="Pivot that re-points",
+        invalidates_node_id=decision.node_id,
+    )
+
+    switched = api.update_exploration_node(
+        pivot.node_id, invalidates_claim_id=claim.claim_id, actor=actor
+    )
+    assert switched.invalidates_claim_id == claim.claim_id
+    assert switched.invalidates_node_id is None
+
+    switched_back = api.update_exploration_node(
+        pivot.node_id, invalidates_node_id=decision.node_id, actor=actor
+    )
+    assert switched_back.invalidates_node_id == decision.node_id
+    assert switched_back.invalidates_claim_id is None
+
+
 @pytest.mark.parametrize(
     ("node_type", "field_kwargs", "match"),
     [
