@@ -235,6 +235,7 @@ def make_event(
         "tags": resolved_tags,
         "cwd": resolved_cwd,
         "source": _json_mapping(resolved_source),
+        "environment": environment_fingerprint(resolved_cwd),
         "artifacts": [_artifact_payload(item) for item in artifacts or []],
         "summary": resolved_summary,
         "capture_id": resolved_run_id,
@@ -356,6 +357,7 @@ def _capture_content(event: Mapping[str, Any]) -> str:
     content["source"] = {
         key: payload["source"].get(key) for key in _CAPTURE_SOURCE_KEYS
     }
+    content["environment"] = payload["environment"]
     return json.dumps(content, sort_keys=True)
 
 
@@ -398,6 +400,7 @@ def validate_event(payload: Mapping[str, Any]) -> JsonObject:
     event["tags"] = _string_list(event.get("tags"))
     event["cwd"] = str(event.get("cwd") or "")
     event["source"] = _json_mapping(event.get("source") or {})
+    event["environment"] = _json_mapping(event.get("environment") or {})
     event["artifacts"] = [_artifact_payload(item) for item in event.get("artifacts") or []]
     event["summary"] = str(event.get("summary") or "")
     event["host"] = _json_mapping(event.get("host") or {})
@@ -711,6 +714,67 @@ def _hook_managed_block(lt_command: str, config_path: str) -> str:
     )
 
 
+# Lockfiles that pin an analysis environment, in the order they are hashed.
+ENVIRONMENT_LOCKFILES = (
+    "uv.lock",
+    "poetry.lock",
+    "Pipfile.lock",
+    "requirements.txt",
+    "pyproject.toml",
+    "environment.yml",
+    "environment.yaml",
+)
+LAB_TRACKER_CONTAINER_REF_ENV = "LAB_TRACKER_CONTAINER_REF"
+
+
+def environment_fingerprint(
+    cwd: str | Path | None = None,
+    *,
+    container_ref: str | None = None,
+) -> JsonObject:
+    """Fingerprint the analysis environment declared in the repo.
+
+    Hashes whichever :data:`ENVIRONMENT_LOCKFILES` exist at the repo root,
+    together with the capturing interpreter's version and an optional container
+    reference (``container_ref`` or ``LAB_TRACKER_CONTAINER_REF``), into one
+    ``sha256:`` digest. The digest lands in note metadata as
+    ``repo_environment_hash`` so curation can later populate
+    ``Analysis.environment_hash`` (see ``lab_tracker.repo_bridge``). Returns an
+    empty mapping when no lockfile is present — no fingerprint is better than a
+    meaningless one.
+    """
+
+    import platform
+
+    root = Path(cwd or Path.cwd()).expanduser()
+    hasher = hashlib.sha256()
+    hashed_files: list[str] = []
+    for name in ENVIRONMENT_LOCKFILES:
+        candidate = root / name
+        if not candidate.is_file():
+            continue
+        digest = hashlib.sha256(candidate.read_bytes()).hexdigest()
+        hasher.update(f"{name}:{digest}\n".encode())
+        hashed_files.append(name)
+    if not hashed_files:
+        return {}
+    python_version = platform.python_version()
+    hasher.update(f"python:{python_version}\n".encode())
+    resolved_container = _optional_str(
+        container_ref or os.getenv(LAB_TRACKER_CONTAINER_REF_ENV)
+    )
+    if resolved_container:
+        hasher.update(f"container:{resolved_container}\n".encode())
+    fingerprint: JsonObject = {
+        "repo_environment_hash": f"sha256:{hasher.hexdigest()}",
+        "repo_environment_files": ",".join(hashed_files),
+        "repo_environment_python": python_version,
+    }
+    if resolved_container:
+        fingerprint["repo_environment_container"] = resolved_container
+    return fingerprint
+
+
 def git_context(cwd: str | Path | None = None) -> JsonObject:
     root = Path(cwd or Path.cwd()).expanduser()
     commit = _git_output(root, "rev-parse", "HEAD")
@@ -907,6 +971,9 @@ def event_metadata(
     if source.get("git_branch"):
         metadata["repo_git_branch"] = str(source["git_branch"])
     metadata["repo_git_dirty"] = bool(source.get("git_dirty"))
+    for key, value in payload["environment"].items():
+        if isinstance(value, (str, bool, int, float)) and str(key).startswith("repo_environment"):
+            metadata[str(key)] = value
     if payload["artifacts"]:
         # Structured (JSON-encoded scalar) so the curation bridge can lift the
         # pointers into ExternalArtifactReferences without re-parsing markdown.

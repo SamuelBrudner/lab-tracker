@@ -19,6 +19,7 @@ def _clear_repo_env(monkeypatch) -> None:
     monkeypatch.delenv("LAB_TRACKER_REPO_CONFIG", raising=False)
     monkeypatch.delenv("LAB_TRACKER_REPO_OUTBOX", raising=False)
     monkeypatch.delenv("LAB_TRACKER_REPO_RUN_ID", raising=False)
+    monkeypatch.delenv("LAB_TRACKER_CONTAINER_REF", raising=False)
     monkeypatch.delenv("LAB_TRACKER_REPO_HOOK_ENABLED", raising=False)
     monkeypatch.delenv("LAB_TRACKER_LT", raising=False)
 

@@ -27,6 +27,7 @@ def _clear_repo_env(monkeypatch) -> None:
     monkeypatch.delenv("LAB_TRACKER_REPO_CONFIG", raising=False)
     monkeypatch.delenv("LAB_TRACKER_REPO_OUTBOX", raising=False)
     monkeypatch.delenv("LAB_TRACKER_REPO_RUN_ID", raising=False)
+    monkeypatch.delenv("LAB_TRACKER_CONTAINER_REF", raising=False)
 
 
 def _init_git_repo(path) -> str:
@@ -286,6 +287,91 @@ def test_capture_with_artifacts_renders_pointer_section(tmp_path, monkeypatch) -
     assert event["artifacts"][0]["content_hash"].startswith("sha256:")
     assert "## Artifact Pointers" in note
     assert "out.csv" in note
+
+
+# --- environment fingerprint -------------------------------------------------
+
+
+def test_environment_fingerprint_hashes_lockfiles(tmp_path, monkeypatch) -> None:
+    from lab_tracker_client.repo import environment_fingerprint
+
+    monkeypatch.delenv("LAB_TRACKER_CONTAINER_REF", raising=False)
+    (tmp_path / "uv.lock").write_text("locked deps v1\n", encoding="utf-8")
+    (tmp_path / "pyproject.toml").write_text("[project]\nname='x'\n", encoding="utf-8")
+
+    first = environment_fingerprint(tmp_path)
+    unchanged = environment_fingerprint(tmp_path)
+    (tmp_path / "uv.lock").write_text("locked deps v2\n", encoding="utf-8")
+    changed = environment_fingerprint(tmp_path)
+
+    assert first["repo_environment_hash"].startswith("sha256:")
+    assert first["repo_environment_files"] == "uv.lock,pyproject.toml"
+    assert first["repo_environment_python"]
+    assert unchanged["repo_environment_hash"] == first["repo_environment_hash"]
+    assert changed["repo_environment_hash"] != first["repo_environment_hash"]
+
+
+def test_environment_fingerprint_empty_without_lockfiles(tmp_path, monkeypatch) -> None:
+    from lab_tracker_client.repo import environment_fingerprint
+
+    monkeypatch.delenv("LAB_TRACKER_CONTAINER_REF", raising=False)
+
+    assert environment_fingerprint(tmp_path) == {}
+
+
+def test_environment_fingerprint_includes_container_ref(tmp_path, monkeypatch) -> None:
+    from lab_tracker_client.repo import environment_fingerprint
+
+    (tmp_path / "requirements.txt").write_text("numpy\n", encoding="utf-8")
+    monkeypatch.delenv("LAB_TRACKER_CONTAINER_REF", raising=False)
+    bare = environment_fingerprint(tmp_path)
+    monkeypatch.setenv("LAB_TRACKER_CONTAINER_REF", "docker.io/lab/analysis:1.2")
+    with_container = environment_fingerprint(tmp_path)
+
+    assert with_container["repo_environment_container"] == "docker.io/lab/analysis:1.2"
+    assert with_container["repo_environment_hash"] != bare["repo_environment_hash"]
+
+
+def test_capture_records_environment_in_event_and_metadata(tmp_path, monkeypatch) -> None:
+    from lab_tracker_client.repo import event_metadata
+
+    _clear_repo_env(monkeypatch)
+    monkeypatch.delenv("LAB_TRACKER_CONTAINER_REF", raising=False)
+    _init_git_repo(tmp_path)
+    (tmp_path / "uv.lock").write_text("locked deps\n", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    config = init_config(project_id="project-1")
+
+    event, _path, _action = capture_commit(config)
+    metadata = event_metadata(
+        event,
+        source_uri="file:///outbox/event.json",
+        source_external_id="example.com/org/repo@abc",
+        content_hash="deadbeef",
+    )
+
+    assert event["environment"]["repo_environment_hash"].startswith("sha256:")
+    assert metadata["repo_environment_hash"] == event["environment"]["repo_environment_hash"]
+    assert metadata["repo_environment_files"] == "uv.lock"
+
+
+def test_lockfile_change_updates_pending_capture(tmp_path, monkeypatch) -> None:
+    """An environment change at the same commit refreshes the pending event."""
+
+    _clear_repo_env(monkeypatch)
+    monkeypatch.delenv("LAB_TRACKER_CONTAINER_REF", raising=False)
+    _init_git_repo(tmp_path)
+    (tmp_path / "uv.lock").write_text("locked deps v1\n", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    config = init_config(project_id="project-1")
+    _e1, path, first_action = capture_commit(config)
+
+    (tmp_path / "uv.lock").write_text("locked deps v2\n", encoding="utf-8")
+    event, same_path, action = capture_commit(config)
+
+    assert (first_action, action) == ("captured", "updated")
+    assert same_path == path
+    assert read_event(path)["environment"] == event["environment"]
 
 
 # --- sync -----------------------------------------------------------------
