@@ -93,6 +93,30 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     doctor_parser.set_defaults(func=_cmd_doctor, needs_client=False)
 
+    update_parser = subcommands.add_parser(
+        "update",
+        help=(
+            "Refresh Lab Tracker integration files (hooks, agent prompts, managed "
+            "blocks) in this repo to the installed package version."
+        ),
+    )
+    update_parser.add_argument(
+        "--target",
+        default=".",
+        help="Consumer repo path to update. Defaults to the current directory.",
+    )
+    update_parser.add_argument(
+        "--yes",
+        action="store_true",
+        help="Also install managed code-conventions blocks that are not present yet.",
+    )
+    update_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Show what would change without writing files.",
+    )
+    update_parser.set_defaults(func=_cmd_update, needs_client=False)
+
     _add_setup_parsers(subcommands)
     _add_project_parsers(subcommands)
     _add_git_parsers(subcommands)
@@ -1248,6 +1272,13 @@ def _cmd_doctor(args: argparse.Namespace) -> Any:
     from lab_tracker.cli import _doctor
 
     return _doctor(args.target)
+
+
+def _cmd_update(args: argparse.Namespace) -> Any:
+    from lab_tracker.cli import update_consumer_repo
+
+    result = update_consumer_repo(args.target, yes=args.yes, dry_run=args.dry_run)
+    return result.as_dict()
 
 
 def _target(value: str) -> EntityRef:
