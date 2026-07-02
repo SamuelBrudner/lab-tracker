@@ -2532,3 +2532,116 @@ def test_repository_write_rejects_auto_accepted_operation() -> None:
     )
     with pytest.raises(ValidationError):
         operation_to_model(operation)
+
+
+# --- Origin honesty: user_revised only when a human actually edited the op ---
+
+
+def _link_note_update_draft(note_id: str, question_id: str) -> dict[str, Any]:
+    """A one-operation draft that UPDATES a note to target an existing question."""
+    return {
+        "summary": "link the note to the question",
+        "uncertain_fields": [],
+        "clarification_requests": [],
+        "operations": [
+            {
+                "client_ref": "link1",
+                "op": "update",
+                "entity_type": "note",
+                "semantic_type": "link_note_to_question",
+                "target_entity_id": note_id,
+                "payload_json": json.dumps(
+                    {"targets": [{"entity_type": "question", "entity_id": question_id}]}
+                ),
+                "rationale": "The note is about this question.",
+                "confidence": 0.9,
+                "source_refs": [],
+            }
+        ],
+    }
+
+
+def _project_note_question(
+    client: TestClient, headers: dict[str, str]
+) -> tuple[str, str, str]:
+    project_id = _project(client, headers)
+    note_id = _image_note(client, headers, project_id)
+    question = client.post(
+        "/questions",
+        json={
+            "project_id": project_id,
+            "text": "Does the protocol improve yield?",
+            "question_type": "descriptive",
+        },
+        headers=headers,
+    )
+    assert question.status_code == 201, question.text
+    return project_id, note_id, question.json()["data"]["question_id"]
+
+
+def test_unedited_update_commits_ai_suggested_origin(
+    client: TestClient, admin_auth_headers: dict[str, str]
+) -> None:
+    """A bulk-accepted (unedited) UPDATE is an AI suggestion, not a human revision.
+
+    Regression: the applier used to stamp every UPDATE user_revised regardless of
+    edits, which made PROV-O export fabricate a prov:wasRevisionOf edge for a
+    rubber-stamped operation.
+    """
+    _project_id, note_id, question_id = _project_note_question(client, admin_auth_headers)
+    client.app.state.graph_draft_client_factory = lambda settings: FakeDraftClient(
+        _link_note_update_draft(note_id, question_id)
+    )
+    change_set_id = client.post(
+        f"/notes/{note_id}/graph-drafts", headers=admin_auth_headers
+    ).json()["data"]["change_set_id"]
+    assert (
+        client.post(
+            f"/graph-drafts/{change_set_id}/accept-all", headers=admin_auth_headers
+        ).status_code
+        == 200
+    )
+    commit = client.post(
+        f"/graph-drafts/{change_set_id}/commit",
+        json={"message": "link note"},
+        headers=admin_auth_headers,
+    )
+    assert commit.status_code == 200, commit.text
+    note = client.get(f"/notes/{note_id}", headers=admin_auth_headers)
+    assert note.status_code == 200
+    assert note.json()["data"]["origin"] == "ai_suggested"
+
+
+def test_edited_update_commits_user_revised_origin(
+    client: TestClient, admin_auth_headers: dict[str, str]
+) -> None:
+    """An UPDATE whose payload a reviewer actually edited is a genuine revision."""
+    _project_id, note_id, question_id = _project_note_question(client, admin_auth_headers)
+    client.app.state.graph_draft_client_factory = lambda settings: FakeDraftClient(
+        _link_note_update_draft(note_id, question_id)
+    )
+    draft = client.post(
+        f"/notes/{note_id}/graph-drafts", headers=admin_auth_headers
+    ).json()["data"]
+    change_set_id = draft["change_set_id"]
+    operation = draft["operations"][0]
+    # Edit the payload so it differs from the AI's proposal (records edited_at).
+    edited_payload = {
+        "targets": [{"entity_type": "question", "entity_id": question_id}],
+        "metadata": {"reviewed": True},
+    }
+    patch = client.patch(
+        f"/graph-drafts/{change_set_id}/operations/{operation['operation_id']}",
+        json={"payload": edited_payload, "status": "accepted"},
+        headers=admin_auth_headers,
+    )
+    assert patch.status_code == 200, patch.text
+    commit = client.post(
+        f"/graph-drafts/{change_set_id}/commit",
+        json={"message": "link note"},
+        headers=admin_auth_headers,
+    )
+    assert commit.status_code == 200, commit.text
+    note = client.get(f"/notes/{note_id}", headers=admin_auth_headers)
+    assert note.status_code == 200
+    assert note.json()["data"]["origin"] == "user_revised"
