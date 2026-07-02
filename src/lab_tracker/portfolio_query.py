@@ -29,6 +29,7 @@ from lab_tracker.db_models import (
     UserModel,
     VisualizationModel,
 )
+from lab_tracker.db_types import ensure_uuid
 from lab_tracker.models import (
     AnalysisStatus,
     ClaimStatus,
@@ -254,7 +255,7 @@ def _summary_by_project(
         unreviewed_claim_count = unreviewed_claim_counts[project_id]
         activity_at = last_activity_at.get(project_id)
         summaries[project_id] = PortfolioProjectSummary(
-            project_id=UUID(project_id),
+            project_id=ensure_uuid(project_id),
             name=project.name,
             status=ProjectStatus(project.status),
             open_question_count=open_question_count,
@@ -318,7 +319,7 @@ def _owners_by_project(
     owners: dict[str, list[PortfolioProjectOwner]] = defaultdict(list)
     for project_id, user_id, username in rows:
         owners[project_id].append(
-            PortfolioProjectOwner(user_id=UUID(user_id), username=username)
+            PortfolioProjectOwner(user_id=ensure_uuid(user_id), username=username)
         )
     return owners
 

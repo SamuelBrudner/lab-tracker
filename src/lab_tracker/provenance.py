@@ -9,6 +9,7 @@ from typing import Any
 from urllib.parse import quote
 from uuid import UUID
 
+from lab_tracker.db_types import ensure_uuid
 from lab_tracker.models import (
     Analysis,
     Claim,
@@ -357,7 +358,7 @@ def _origin_provenance_nodes(base_url: str, entity: object) -> list[dict[str, ob
 
 def _uuid_or_none(value: str) -> UUID | None:
     try:
-        return UUID(value)
+        return ensure_uuid(value)
     except ValueError:
         return None
 

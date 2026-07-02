@@ -14,6 +14,7 @@ from lab_tracker.db_models import (
     GraphDraftBatchRunModel,
     GraphDraftBatchSettingsModel,
 )
+from lab_tracker.db_types import ensure_uuid
 from lab_tracker.models import (
     GraphDraftBatchRun,
     GraphDraftBatchRunStatus,
@@ -27,7 +28,7 @@ from .common import apply_pagination, count_from_statement
 
 
 def _uuid(value: str | None) -> UUID | None:
-    return UUID(value) if value else None
+    return ensure_uuid(value) if value else None
 
 
 def _uuid_str(value: UUID | None) -> str | None:
@@ -74,8 +75,8 @@ def apply_settings_to_model(
 
 def settings_from_model(row: GraphDraftBatchSettingsModel) -> GraphDraftBatchSettings:
     return GraphDraftBatchSettings(
-        settings_id=UUID(row.settings_id),
-        project_id=UUID(row.project_id),
+        settings_id=ensure_uuid(row.settings_id),
+        project_id=ensure_uuid(row.project_id),
         enabled=row.enabled,
         cadence_minutes=row.cadence_minutes,
         run_at_local_time=row.run_at_local_time,
@@ -130,15 +131,15 @@ def apply_run_to_model(row: GraphDraftBatchRunModel, run: GraphDraftBatchRun) ->
 
 def run_from_model(row: GraphDraftBatchRunModel) -> GraphDraftBatchRun:
     return GraphDraftBatchRun(
-        run_id=UUID(row.run_id),
-        project_id=UUID(row.project_id),
+        run_id=ensure_uuid(row.run_id),
+        project_id=ensure_uuid(row.project_id),
         trigger=GraphDraftBatchTrigger(row.trigger),
         status=GraphDraftBatchRunStatus(row.status),
         window_start=as_utc(row.window_start),
         window_end=as_utc(row.window_end),
         note_count=row.note_count,
         batch_key=row.batch_key,
-        change_set_id=UUID(row.change_set_id) if row.change_set_id else None,
+        change_set_id=ensure_uuid(row.change_set_id) if row.change_set_id else None,
         summary=row.summary or "",
         error_metadata=_dict(row.error_metadata),
         created_at=as_utc(row.created_at),
@@ -293,7 +294,7 @@ class SQLAlchemyGraphDraftBatchRunRepository(EntityRepository[GraphDraftBatchRun
         )
         note_ids: set[UUID] = set()
         for (source_note_ids,) in rows:
-            note_ids.update(UUID(str(note_id)) for note_id in (source_note_ids or []))
+            note_ids.update(ensure_uuid(str(note_id)) for note_id in (source_note_ids or []))
         return note_ids
 
     def list(self) -> list[GraphDraftBatchRun]:

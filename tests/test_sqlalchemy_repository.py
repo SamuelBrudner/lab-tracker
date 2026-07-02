@@ -154,8 +154,11 @@ def test_project_group_repository_crud_and_membership_queries(db_session):
     repo.project_groups.save(updated)
     repo.commit()
 
-    assert repo.project_groups.get(group.group_id) == updated
-    assert repo.project_groups.delete(group.group_id) == updated
+    # updated_at is managed DB-side via onupdate; adopt the persisted value.
+    reloaded = repo.project_groups.get(group.group_id)
+    expected = updated.model_copy(update={"updated_at": reloaded.updated_at})
+    assert reloaded == expected
+    assert repo.project_groups.delete(group.group_id) == expected
     repo.commit()
     assert repo.project_groups.get(group.group_id) is None
 

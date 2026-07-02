@@ -16,6 +16,7 @@ from starlette.responses import StreamingResponse
 
 from lab_tracker.api import LabTrackerAPI
 from lab_tracker.db_models import DatasetFileModel, DatasetModel
+from lab_tracker.db_types import ensure_uuid
 from lab_tracker.errors import ConflictError, NotFoundError, ValidationError
 from lab_tracker.models import DatasetFile, DatasetStatus
 from lab_tracker.schemas import Envelope, ListEnvelope
@@ -75,7 +76,7 @@ def build_dataset_files_router(api: LabTrackerAPI) -> APIRouter:
         dataset_row = db_session.get(DatasetModel, str(dataset_id))
         if dataset_row is None:
             raise NotFoundError("Dataset does not exist.")
-        ensure_project_contributor(request, UUID(dataset_row.project_id))
+        ensure_project_contributor(request, ensure_uuid(dataset_row.project_id))
         if dataset_row.status != DatasetStatus.STAGED.value:
             raise ValidationError("Files can only be attached while dataset status is staged.")
         enforce_request_content_length_limit(
@@ -136,7 +137,7 @@ def build_dataset_files_router(api: LabTrackerAPI) -> APIRouter:
 
         return Envelope(
             data=DatasetFile(
-                file_id=UUID(row.file_id),
+                file_id=ensure_uuid(row.file_id),
                 path=row.path,
                 checksum=row.checksum,
                 size_bytes=row.size_bytes,
@@ -156,7 +157,7 @@ def build_dataset_files_router(api: LabTrackerAPI) -> APIRouter:
         dataset_row = db_session.get(DatasetModel, str(dataset_id))
         if dataset_row is None:
             raise NotFoundError("Dataset does not exist.")
-        ensure_project_read(request, UUID(dataset_row.project_id))
+        ensure_project_read(request, ensure_uuid(dataset_row.project_id))
 
         files, total = repository_from_request(request).query_dataset_files(
             dataset_id=dataset_id,
@@ -179,10 +180,10 @@ def build_dataset_files_router(api: LabTrackerAPI) -> APIRouter:
         dataset_row = db_session.get(DatasetModel, str(dataset_id))
         if dataset_row is None:
             raise NotFoundError("Dataset does not exist.")
-        ensure_project_read(request, UUID(dataset_row.project_id))
+        ensure_project_read(request, ensure_uuid(dataset_row.project_id))
 
         row = db_session.get(DatasetFileModel, str(file_id))
-        if row is None or row.dataset_id != str(dataset_id):
+        if row is None or str(row.dataset_id) != str(dataset_id):
             raise NotFoundError("Dataset file does not exist.")
 
         headers = {
@@ -190,7 +191,7 @@ def build_dataset_files_router(api: LabTrackerAPI) -> APIRouter:
             "Content-Length": str(row.size_bytes),
         }
         return StreamingResponse(
-            storage_backend.iter_chunks(UUID(row.storage_id)),
+            storage_backend.iter_chunks(ensure_uuid(row.storage_id)),
             media_type=row.content_type,
             headers=headers,
         )
@@ -209,12 +210,12 @@ def build_dataset_files_router(api: LabTrackerAPI) -> APIRouter:
         dataset_row = db_session.get(DatasetModel, str(dataset_id))
         if dataset_row is None:
             raise NotFoundError("Dataset does not exist.")
-        ensure_project_contributor(request, UUID(dataset_row.project_id))
+        ensure_project_contributor(request, ensure_uuid(dataset_row.project_id))
         if dataset_row.status != DatasetStatus.STAGED.value:
             raise ValidationError("Files can only be attached while dataset status is staged.")
 
         row = db_session.get(DatasetFileModel, str(file_id))
-        if row is None or row.dataset_id != str(dataset_id):
+        if row is None or str(row.dataset_id) != str(dataset_id):
             raise NotFoundError("Dataset file does not exist.")
 
         payload = DatasetFile(
@@ -223,7 +224,7 @@ def build_dataset_files_router(api: LabTrackerAPI) -> APIRouter:
             checksum=row.checksum,
             size_bytes=row.size_bytes,
         )
-        storage_id = UUID(row.storage_id)
+        storage_id = ensure_uuid(row.storage_id)
         db_session.delete(row)
         db_session.flush()
         request_api.run_after_commit(

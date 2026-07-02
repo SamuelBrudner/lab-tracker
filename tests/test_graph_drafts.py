@@ -2148,6 +2148,49 @@ def test_revise_graph_draft_rejects_non_image_attachment(
     assert response.status_code == 422
 
 
+def test_revise_graph_draft_enforces_cumulative_cap_without_content_length(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+) -> None:
+    project_id = _project(client, admin_auth_headers)
+    note_id = _image_note(client, admin_auth_headers, project_id)
+    client.app.state.graph_draft_client_factory = lambda settings: FakeDraftClient(
+        _draft_patch(project_id)
+    )
+    change_set_id = client.post(
+        f"/notes/{note_id}/graph-drafts", headers=admin_auth_headers
+    ).json()["data"]["change_set_id"]
+
+    # Each file is under the cap; together they exceed it. Send the multipart
+    # body as a generator so the request is chunked (no Content-Length) and the
+    # pre-read header guard cannot fire — only the streaming cap can reject it.
+    client.app.state.settings.max_upload_bytes = 1024
+    boundary = "sizecapboundary"
+
+    def part(name: str, filename: str, content_type: str, payload: bytes) -> bytes:
+        head = (
+            f'--{boundary}\r\nContent-Disposition: form-data; name="{name}"; '
+            f'filename="{filename}"\r\nContent-Type: {content_type}\r\n\r\n'
+        )
+        return head.encode() + payload + b"\r\n"
+
+    body = (
+        part("audio", "feedback.webm", "audio/webm", b"a" * 700)
+        + part("attachments", "photo.png", "image/png", b"b" * 700)
+        + f"--{boundary}--\r\n".encode()
+    )
+
+    response = client.post(
+        f"/graph-drafts/{change_set_id}/revise",
+        content=iter([body]),
+        headers={
+            **admin_auth_headers,
+            "Content-Type": f"multipart/form-data; boundary={boundary}",
+        },
+    )
+    assert response.status_code == 413
+
+
 def test_revise_graph_draft_keeps_draft_on_model_failure(
     client: TestClient,
     admin_auth_headers: dict[str, str],

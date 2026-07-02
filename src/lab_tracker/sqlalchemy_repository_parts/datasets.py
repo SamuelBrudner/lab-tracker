@@ -15,6 +15,7 @@ from lab_tracker.db_models import (
     DatasetQuestionLinkModel,
     NoteTargetModel,
 )
+from lab_tracker.db_types import ensure_uuid
 from lab_tracker.models import Dataset, DatasetFile
 from lab_tracker.repository import EntityRepository
 from lab_tracker.sqlalchemy_mappers import (
@@ -42,7 +43,7 @@ class SQLAlchemyDatasetRepository(EntityRepository[Dataset]):
             )
         )
         for row in rows:
-            link_map[row.dataset_id].append(row)
+            link_map[str(row.dataset_id)].append(row)
         return link_map
 
     def datasets_from_rows(self, rows: list[DatasetModel]) -> list[Dataset]:
@@ -53,7 +54,7 @@ class SQLAlchemyDatasetRepository(EntityRepository[Dataset]):
                 row,
                 question_links=[
                     dataset_question_link_from_model(link)
-                    for link in link_map.get(row.dataset_id, [])
+                    for link in link_map.get(str(row.dataset_id), [])
                 ],
             )
             for row in rows
@@ -166,7 +167,7 @@ class SQLAlchemyDatasetRepository(EntityRepository[Dataset]):
         return (
             [
                 DatasetFile(
-                    file_id=UUID(row.file_id),
+                    file_id=ensure_uuid(row.file_id),
                     path=row.path,
                     checksum=row.checksum,
                     size_bytes=row.size_bytes,
@@ -190,4 +191,4 @@ class SQLAlchemyDatasetRepository(EntityRepository[Dataset]):
                 )
             )
         )
-        return [UUID(note_id) for note_id in rows]
+        return [ensure_uuid(note_id) for note_id in rows]

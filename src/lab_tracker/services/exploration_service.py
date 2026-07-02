@@ -250,10 +250,18 @@ class ExplorationService(BaseService):
             node.tooling_context = _normalize_optional_text(tooling_context)
         if trigger is not None:
             node.trigger = _normalize_optional_text(trigger)
+        # Providing exactly one invalidation target re-points the pivot and
+        # clears the other kind, so a staged pivot can switch between
+        # invalidating a node and a claim without tripping the exactly-one
+        # rule mid-update. Providing both still fails validation below.
         if invalidates_node_id is not None:
             node.invalidates_node_id = invalidates_node_id
+            if invalidates_claim_id is None:
+                node.invalidates_claim_id = None
         if invalidates_claim_id is not None:
             node.invalidates_claim_id = invalidates_claim_id
+            if invalidates_node_id is None:
+                node.invalidates_node_id = None
         if parent_node_ids is not None:
             node.parent_node_ids = unique_ids(parent_node_ids)
         if also_depends_on_node_ids is not None:
@@ -270,7 +278,14 @@ class ExplorationService(BaseService):
         if origin_prompt_version is not None:
             node.origin_prompt_version = origin_prompt_version
         node.updated_at = utc_now()
-        self._validate_node(node)
+        if content_edit:
+            self._validate_node(node)
+        # Status-only transitions skip re-validation: the content was validated
+        # on creation and on every staged edit, and the only drift since then is
+        # external — a referenced node/claim deleted out from under the pivot
+        # (invalidates_* are ondelete=SET NULL). Re-running the exactly-one
+        # check there would strand a committed/archived pivot that can no
+        # longer be re-pointed.
         with self.unit_of_work() as repository:
             repository.exploration_nodes.save(node)
         return node
