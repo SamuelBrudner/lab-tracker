@@ -187,6 +187,117 @@ def init_config(
     return config
 
 
+def add_watch(
+    *,
+    root: str,
+    mode: str = MODE_FILES,
+    sink: str = SINK_STAGED_NOTE,
+    include: Sequence[str] | None = None,
+    exclude: Sequence[str] | None = None,
+    name: str | None = None,
+    project_id: str | None = None,
+    question_id: str | None = None,
+    session_id: str | None = None,
+    tags: Sequence[str] | None = None,
+    config_path: str | Path | None = None,
+    dry_run: bool = False,
+) -> JsonObject:
+    """Append a validated watch entry to watch.json, creating the config if absent.
+
+    A malformed existing config raises rather than being silently recreated;
+    an exact-duplicate entry is a no-op reported as ``unchanged``.
+    """
+
+    path = Path(config_path).expanduser().resolve() if config_path else find_config_path()
+    created_config = False
+    if path is not None and path.exists():
+        config = load_config(config_path=path)
+    else:
+        path = path or default_config_path()
+        config = WatchConfig(config_path=path)
+        created_config = True
+    entry: JsonObject = {
+        "root": _non_empty(root, "root"),
+        "mode": mode,
+        "sink": sink,
+    }
+    if include:
+        entry["include"] = _string_list(include)
+    if exclude:
+        entry["exclude"] = _string_list(exclude)
+    if name:
+        entry["name"] = name
+    if project_id:
+        entry["project_id"] = project_id
+    if question_id:
+        entry["question_id"] = question_id
+    if session_id:
+        entry["session_id"] = session_id
+    if tags:
+        entry["tags"] = _string_list(tags)
+    entry = _watch_config_payload(entry)
+    if entry["sink"] == SINK_ACQUISITION_OUTPUT and not entry.get("session_id"):
+        raise LTValidationError("acquisition-output watches require --session.")
+    action = "unchanged" if entry in config.watches else "added"
+    if action == "added":
+        config.watches.append(entry)
+    if not dry_run and (action == "added" or created_config):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        _write_json_atomic(path, config.to_dict())
+        config.outbox_path().mkdir(parents=True, exist_ok=True)
+    return {
+        "command": "watch-add",
+        "config": str(path),
+        "created_config": created_config,
+        "action": action,
+        "watch": entry,
+        "watches": list(config.watches),
+        "dry_run": dry_run,
+    }
+
+
+def remove_watch(
+    *,
+    root: str,
+    config_path: str | Path | None = None,
+    dry_run: bool = False,
+) -> JsonObject:
+    """Remove watch entries whose root matches ``root`` (literally or resolved)."""
+
+    config = load_config(config_path=config_path)
+    target = _comparable_root(root)
+    kept: list[JsonObject] = []
+    removed: list[JsonObject] = []
+    for entry in config.watches:
+        entry_root = str(entry.get("root") or "")
+        if entry_root == root or _comparable_root(entry_root) == target:
+            removed.append(entry)
+        else:
+            kept.append(entry)
+    if not removed:
+        raise LTValidationError(f"No watch entry matches root: {root}")
+    config.watches = kept
+    if not dry_run:
+        _write_json_atomic(config.config_path, config.to_dict())
+    return {
+        "command": "watch-remove",
+        "config": str(config.config_path),
+        "removed": removed,
+        "watches": kept,
+        "dry_run": dry_run,
+    }
+
+
+def _comparable_root(value: str) -> str:
+    # normcase folds case and separators on Windows (resolve() preserves the
+    # typed case for paths that no longer exist on disk) and is a no-op on
+    # POSIX, so removing a watch for a deleted folder still matches.
+    try:
+        return os.path.normcase(str(Path(value).expanduser().resolve()))
+    except OSError:
+        return os.path.normcase(value)
+
+
 def load_config(
     *,
     config_path: str | Path | None = None,
