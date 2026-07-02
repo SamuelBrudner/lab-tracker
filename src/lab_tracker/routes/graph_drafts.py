@@ -26,6 +26,7 @@ from lab_tracker.schemas import (
 from lab_tracker.services.graph_draft_service import RevisionInputs, RevisionUpload
 from lab_tracker.upload_security import (
     enforce_request_content_length_limit,
+    enforce_stream_size_limit,
     validate_upload_content_type,
 )
 
@@ -215,18 +216,9 @@ def build_graph_drafts_router(api: LabTrackerAPI) -> APIRouter:
         attachments: Annotated[list[UploadFile] | None, File()] = None,
     ):
         actor = actor_from_request(request)
-        enforce_request_content_length_limit(
-            request,
-            max_bytes=request.app.state.settings.max_upload_bytes,
-        )
-        inputs = RevisionInputs(
-            audio=_read_revision_upload(audio),
-            attachments=[
-                upload
-                for item in attachments or []
-                if (upload := _read_revision_upload(item)) is not None
-            ],
-        )
+        max_upload_bytes = request.app.state.settings.max_upload_bytes
+        enforce_request_content_length_limit(request, max_bytes=max_upload_bytes)
+        inputs = _read_revision_inputs(audio, attachments, max_bytes=max_upload_bytes)
         draft_client = _draft_client_from_request(request)
         try:
             change_set = api_from_request(request, api).revise_graph_change_set(
@@ -262,22 +254,52 @@ def build_graph_drafts_router(api: LabTrackerAPI) -> APIRouter:
     return router
 
 
-def _read_revision_upload(upload: UploadFile | None) -> RevisionUpload | None:
-    """Read an uploaded revision file into memory, or ``None`` when absent."""
+_REVISION_UPLOAD_CHUNK_BYTES = 64 * 1024
 
-    if upload is None:
-        return None
-    filename = (upload.filename or "").strip()
-    if not filename:
-        return None
-    content = upload.file.read()
-    if not content:
-        return None
-    content_type = validate_upload_content_type(upload.content_type)
-    return RevisionUpload(
-        content=content,
-        filename=filename,
-        content_type=content_type,
+
+def _read_revision_inputs(
+    audio: UploadFile | None,
+    attachments: list[UploadFile] | None,
+    *,
+    max_bytes: int | None,
+) -> RevisionInputs:
+    """Read revision uploads with one cumulative size budget across all files.
+
+    The Content-Length pre-check does not fire for chunked transfer encoding,
+    so the cap must be enforced while reading: chunk-by-chunk, against the
+    running total of audio plus every attachment, keeping peak memory bounded
+    by the cap rather than by what the client chooses to send.
+    """
+
+    total_bytes = 0
+
+    def read(upload: UploadFile | None) -> RevisionUpload | None:
+        nonlocal total_bytes
+        if upload is None:
+            return None
+        filename = (upload.filename or "").strip()
+        if not filename:
+            return None
+        chunks: list[bytes] = []
+        while chunk := upload.file.read(_REVISION_UPLOAD_CHUNK_BYTES):
+            total_bytes += len(chunk)
+            enforce_stream_size_limit(total_bytes, max_bytes=max_bytes)
+            chunks.append(chunk)
+        content = b"".join(chunks)
+        if not content:
+            return None
+        content_type = validate_upload_content_type(upload.content_type)
+        return RevisionUpload(
+            content=content,
+            filename=filename,
+            content_type=content_type,
+        )
+
+    return RevisionInputs(
+        audio=read(audio),
+        attachments=[
+            upload for item in attachments or [] if (upload := read(item)) is not None
+        ],
     )
 
 
