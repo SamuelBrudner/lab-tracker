@@ -50,6 +50,8 @@ class InitResult:
     skipped: list[Path] = field(default_factory=list)
     overwritten: list[Path] = field(default_factory=list)
     stripped: list[Path] = field(default_factory=list)
+    up_to_date: list[Path] = field(default_factory=list)
+    backups: dict[Path, Path] = field(default_factory=dict)
     diffs: dict[Path, str] = field(default_factory=dict)
     offers: list[str] = field(default_factory=list)
     _preview_contents: dict[Path, str] = field(default_factory=dict, repr=False)
@@ -60,6 +62,8 @@ class InitResult:
             "skipped": [str(path) for path in self.skipped],
             "overwritten": [str(path) for path in self.overwritten],
             "stripped": [str(path) for path in self.stripped],
+            "up_to_date": [str(path) for path in self.up_to_date],
+            "backups": {str(path): str(backup) for path, backup in self.backups.items()},
             "diffs": {str(path): diff for path, diff in self.diffs.items()},
             "offers": list(self.offers),
         }
@@ -153,6 +157,109 @@ def init_consumer_repo(
             "`lab_tracker init --yes`."
         )
     return result
+
+
+_UPDATE_BACKUP_SUFFIX = ".bak-lt-update"
+
+_CONVENTIONS_TARGETS: tuple[tuple[str, str, str], ...] = (
+    ("CLAUDE.md", CODE_CONVENTIONS_BLOCK_BEGIN, CODE_CONVENTIONS_BLOCK_END),
+    ("AGENTS.md", AGENTS_CODE_CONVENTIONS_BLOCK_BEGIN, AGENTS_CODE_CONVENTIONS_BLOCK_END),
+    (".cursor/rules/lab-tracker.mdc", CODE_CONVENTIONS_BLOCK_BEGIN, CODE_CONVENTIONS_BLOCK_END),
+)
+
+
+def update_consumer_repo(
+    target: str | Path = ".",
+    *,
+    yes: bool = False,
+    dry_run: bool = False,
+) -> InitResult:
+    """Refresh a previously initialised consumer repo to the current package.
+
+    - Scaffold files are rewritten to the current canonical text; a customised
+      or stale file is first backed up next to itself (``*.bak-lt-update``) so
+      nothing is lost. ``lt_ids.json`` is user data and is only created when
+      missing, never rewritten.
+    - Managed blocks refresh in place wherever they are already present, which
+      preserves the original consent decision; missing code-conventions blocks
+      are only added with ``yes`` (the same gate as ``init --yes``).
+    """
+
+    root = Path(target).expanduser().resolve()
+    if not dry_run:
+        root.mkdir(parents=True, exist_ok=True)
+    result = InitResult()
+    files = {
+        root / ".mcp.json": _mcp_json(),
+        root / ".cursor" / "mcp.json": _cursor_mcp_json(),
+        root / ".claude" / "settings.json": _claude_settings_json(),
+        root / "scripts" / "lt.py": _lt_shim(),
+        root / "AGENTS.lt.md": _agents_fragment(),
+    }
+    for path, content in files.items():
+        _update_scaffold_file(path, content, result=result, dry_run=dry_run)
+    ids_path = root / "lt_ids.json"
+    if ids_path.exists():
+        result.skipped.append(ids_path)
+    else:
+        _write_scaffold_file(
+            ids_path, _ids_placeholder(None), force=False, result=result, dry_run=dry_run
+        )
+
+    _write_managed_claude_block(root / "CLAUDE.md", result=result, dry_run=dry_run)
+
+    conventions_offer_needed = False
+    for relative, begin_marker, end_marker in _CONVENTIONS_TARGETS:
+        path = root / Path(relative)
+        content = path.read_text(encoding="utf-8") if path.exists() else ""
+        present = (
+            _extract_managed_body(content, begin_marker=begin_marker, end_marker=end_marker)
+            is not None
+        )
+        if not present and not yes:
+            conventions_offer_needed = True
+            continue
+        _write_managed_block(
+            path,
+            managed_code_conventions_block(begin_marker=begin_marker, end_marker=end_marker)
+            if relative != ".cursor/rules/lab-tracker.mdc"
+            else cursor_rules_mdc(),
+            begin_marker=begin_marker,
+            end_marker=end_marker,
+            result=result,
+            dry_run=dry_run,
+        )
+    if conventions_offer_needed:
+        result.offers.append(
+            "Managed code-facing convention blocks are available with "
+            "`lab_tracker update --yes`."
+        )
+    return result
+
+
+def _update_scaffold_file(
+    path: Path,
+    content: str,
+    *,
+    result: InitResult,
+    dry_run: bool = False,
+) -> None:
+    if not path.exists():
+        _write_scaffold_file(path, content, force=False, result=result, dry_run=dry_run)
+        return
+    existing = path.read_text(encoding="utf-8")
+    if existing == content:
+        result.up_to_date.append(path)
+        return
+    backup = path.with_name(path.name + _UPDATE_BACKUP_SUFFIX)
+    result.backups[path] = backup
+    if dry_run:
+        _record_dry_run_change(path, existing, content, result)
+        result.overwritten.append(path)
+        return
+    backup.write_text(existing, encoding="utf-8")
+    path.write_text(content, encoding="utf-8")
+    result.overwritten.append(path)
 
 
 def serve_app(
@@ -330,6 +437,28 @@ def main(argv: list[str] | None = None) -> None:
         action="store_true",
         help="Strip Lab Tracker managed blocks while preserving surrounding content.",
     )
+    update_parser = subcommands.add_parser(
+        "update",
+        help=(
+            "Refresh scaffolded integration files and managed blocks in a "
+            "consumer repo to the current package text."
+        ),
+    )
+    update_parser.add_argument(
+        "--target",
+        default=".",
+        help="Consumer repo path to update. Defaults to the current directory.",
+    )
+    update_parser.add_argument(
+        "--yes",
+        action="store_true",
+        help="Also install managed code-conventions blocks that are not present yet.",
+    )
+    update_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Show what would change without writing files.",
+    )
     serve_parser = subcommands.add_parser(
         "serve",
         help="Run migrations, open the browser, and start the Lab Tracker web app.",
@@ -428,6 +557,13 @@ def main(argv: list[str] | None = None) -> None:
             yes=args.yes,
             dry_run=args.dry_run,
             uninstall=args.uninstall,
+        )
+        print(json.dumps(result.as_dict(), indent=2))
+    elif args.command == "update":
+        result = update_consumer_repo(
+            args.target,
+            yes=args.yes,
+            dry_run=args.dry_run,
         )
         print(json.dumps(result.as_dict(), indent=2))
     elif args.command == "serve":
