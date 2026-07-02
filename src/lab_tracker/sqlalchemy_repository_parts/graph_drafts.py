@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session as OrmSession
 
 from lab_tracker.db_models import GraphChangeOperationModel, GraphChangeSetModel, UserModel
 from lab_tracker.db_types import ensure_uuid
+from lab_tracker.errors import ValidationError
 from lab_tracker.models import (
     AcceptanceMode,
     EntityType,
@@ -52,6 +53,10 @@ def _as_utc_optional(value: Any) -> Any:
 
 
 def operation_to_model(operation: GraphChangeOperation) -> GraphChangeOperationModel:
+    if operation.acceptance_mode == AcceptanceMode.AUTO_ACCEPTED:
+        raise ValidationError(
+            "auto_accepted is a reserved acceptance mode and must not be persisted."
+        )
     return GraphChangeOperationModel(
         operation_id=str(operation.operation_id),
         change_set_id=str(operation.change_set_id),
