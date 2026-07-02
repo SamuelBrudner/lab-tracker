@@ -1,4 +1,5 @@
 import hashlib
+import os
 from pathlib import Path
 from uuid import uuid4
 
@@ -951,7 +952,14 @@ def _git_ref(
     )
 
 
-def _fake_git_runner(*, blob: bytes | None, fetch_returncode: int = 0, cat_returncode: int = 0):
+def _fake_git_runner(
+    *,
+    blob: bytes | None,
+    fetch_returncode: int = 0,
+    cat_returncode: int = 0,
+    size_returncode: int = 0,
+    reported_size: int | None = None,
+):
     calls: list[list[str]] = []
 
     def runner(args):
@@ -967,6 +975,12 @@ def _fake_git_runner(*, blob: bytes | None, fetch_returncode: int = 0, cat_retur
                 b"" if fetch_returncode == 0 else b"remote error: not found",
             )
         if command == "cat-file":
+            mode = args[3] if len(args) >= 4 else ""
+            if mode == "-s":
+                if size_returncode != 0:
+                    return GitCompleted(size_returncode, b"", b"fatal: bad object")
+                size = reported_size if reported_size is not None else len(blob or b"")
+                return GitCompleted(0, f"{size}\n".encode(), b"")
             if cat_returncode != 0:
                 return GitCompleted(cat_returncode, b"", b"fatal: bad object")
             return GitCompleted(0, blob or b"", b"")
@@ -1118,3 +1132,104 @@ def test_default_capabilities_for_git():
         StoreCapability.BYTE_RANGE,
         StoreCapability.VERSIONED_SNAPSHOT,
     ]
+
+
+# --- GitResolver security gate (lt-81s6.7) --------------------------------
+
+
+def test_git_resolver_refuses_remote_not_in_allowlist(tmp_path):
+    runner = _fake_git_runner(blob=b"data")
+    resolver = GitResolver(
+        runner=runner,
+        cache_root=tmp_path,
+        allowed_remotes=["https://allowed.example/"],
+    )
+
+    result = resolver.resolve(_git_ref(_sha256(b"data")))  # remote example.com
+
+    assert result.status is ResolutionStatus.UNRESOLVED
+    assert "allowlist" in (result.detail or "")
+    assert runner.calls == []  # refused before any git subprocess
+
+
+def test_git_resolver_allows_remote_in_allowlist_by_prefix(tmp_path):
+    data = b"allowed remote payload"
+    resolver = GitResolver(
+        runner=_fake_git_runner(blob=data),
+        cache_root=tmp_path,
+        allowed_remotes=["https://example.com/"],
+    )
+
+    result = resolver.resolve(_git_ref(_sha256(data)))
+
+    assert result.status is ResolutionStatus.VERIFIED
+    assert result.content == data
+
+
+def test_git_resolver_refuses_oversized_blob(tmp_path):
+    resolver = GitResolver(
+        runner=_fake_git_runner(blob=b"x", reported_size=10_000),
+        cache_root=tmp_path,
+        max_fetch_bytes=1024,
+    )
+
+    result = resolver.resolve(_git_ref(_sha256(b"x")))
+
+    assert result.status is ResolutionStatus.UNRESOLVED
+    assert "exceeds" in (result.detail or "")
+
+
+def test_git_resolver_evicts_cache_over_quota(tmp_path):
+    base = tmp_path / "gitcache"
+    base.mkdir()
+    old = base / "oldremotecache"
+    old.mkdir()
+    (old / "objects.pack").write_bytes(b"x" * 5000)
+    os.utime(old, (1, 1))  # mark as the least-recently-used cache
+
+    data = b"new pinned code"
+    resolver = GitResolver(
+        runner=_fake_git_runner(blob=data),
+        cache_root=base,
+        max_cache_bytes=1024,  # smaller than the 5000-byte old cache
+    )
+
+    result = resolver.resolve(_git_ref(_sha256(data)))
+
+    assert result.status is ResolutionStatus.VERIFIED
+    assert not old.exists()  # evicted before the new fetch
+
+
+def test_registry_from_env_git_denies_remotes_by_default(monkeypatch):
+    monkeypatch.delenv("LAB_TRACKER_GIT_ALLOWED_REMOTES", raising=False)
+
+    result = registry_from_env().resolve(_git_ref(_sha256(b"x")))
+
+    assert result.status is ResolutionStatus.UNRESOLVED
+    assert "allowlist" in (result.detail or "")
+
+
+def test_registry_from_env_git_allowlist_excludes_unlisted_remote(monkeypatch):
+    monkeypatch.setenv("LAB_TRACKER_GIT_ALLOWED_REMOTES", "https://other.example/")
+
+    result = registry_from_env().resolve(_git_ref(_sha256(b"x")))
+
+    assert result.status is ResolutionStatus.UNRESOLVED
+    assert "allowlist" in (result.detail or "")
+
+
+def test_git_resolver_rejects_option_like_components(tmp_path):
+    runner = _fake_git_runner(blob=b"data")
+    resolver = GitResolver(runner=runner, cache_root=tmp_path)
+    # A remote that would be read as a git option must not reach the subprocess.
+    ref = ExternalArtifactReference(
+        source_system="git",
+        uri=f"git+--upload-pack=evil#{'a' * 40}:run.py",
+        content_hash=_sha256(b"data"),
+    )
+
+    result = resolver.resolve(ref)
+
+    assert result.status is ResolutionStatus.UNRESOLVED
+    assert "not a git locator" in (result.detail or "")
+    assert runner.calls == []

@@ -30,9 +30,11 @@ import hashlib
 import json
 import mimetypes
 import os
+import shutil
 import tempfile
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Iterable, Iterator, Sequence
+from contextlib import suppress
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from enum import Enum
@@ -59,6 +61,11 @@ _HTTP_SCHEMES = frozenset({"http", "https"})
 # be hashed to certify it, so an artifact larger than this is refused
 # (UNRESOLVED) rather than returned uncertified.
 DEFAULT_MAX_FETCH_BYTES = 64 * 1024 * 1024
+
+# Protocols the git resolver's subprocess is allowed to use. Restricting this
+# blocks `file://` (local reads) and `ext::`/`fd::` (arbitrary command execution)
+# vectors that a malicious reference could otherwise trigger via git.
+DEFAULT_GIT_ALLOW_PROTOCOL = "https:ssh:git"
 
 _STREAM_CHUNK_SIZE = 1024 * 1024
 
@@ -355,7 +362,9 @@ def check_store_health(
         return StoreHealth(StoreHealthStatus.UNREACHABLE, _rclone_error_detail(completed))
 
     if kind is StoreKind.GIT:
-        runner = git_runner or _subprocess_git_runner("git")
+        runner = git_runner or _subprocess_git_runner(
+            "git", allow_protocol=DEFAULT_GIT_ALLOW_PROTOCOL
+        )
         try:
             completed = runner(["ls-remote", store.root, "HEAD"])
         except OSError as exc:
@@ -837,14 +846,22 @@ class GitCompleted:
 GitRunner = Callable[[list[str]], GitCompleted]
 
 
-def _subprocess_git_runner(binary: str) -> GitRunner:
+def _subprocess_git_runner(
+    binary: str, *, allow_protocol: str | None = None
+) -> GitRunner:
     def run(args: list[str]) -> GitCompleted:
         import subprocess
 
+        env = dict(os.environ)
+        # Never block on an interactive credential prompt (would hang the server).
+        env["GIT_TERMINAL_PROMPT"] = "0"
+        if allow_protocol:
+            env["GIT_ALLOW_PROTOCOL"] = allow_protocol
         completed = subprocess.run(  # noqa: S603 - args are built, not shell
             [binary, *args],
             capture_output=True,
             check=False,
+            env=env,
         )
         return GitCompleted(
             returncode=completed.returncode,
@@ -883,6 +900,10 @@ def _parse_git_locator(uri: str) -> tuple[str, str, str] | None:
     remote, commit, path = remote.strip(), commit.strip(), path.strip()
     if not remote or not commit or not path:
         return None
+    # Guard against argument injection: a leading '-' could be read by git as an
+    # option (e.g. remote='--upload-pack=<cmd>', which executes a command).
+    if any(part.startswith("-") for part in (remote, commit, path)):
+        return None
     return remote, commit, path
 
 
@@ -897,9 +918,20 @@ class GitResolver(ArtifactResolver):
     tests; otherwise git is invoked as a subprocess and the resolver degrades to
     UNRESOLVED when the binary is absent.
 
-    Remote allowlisting, blobless/quota-bounded fetch, and cache eviction are
-    layered on separately (see lt-81s6.7); this resolver is the fetch+verify
-    core.
+    Security controls (all opt-in via the injected config or the environment):
+
+    * ``allowed_remotes`` — ``None`` means unrestricted (library default); a list
+      restricts fetches to remotes matching one of its prefixes, and anything
+      else resolves UNRESOLVED *before* any git subprocess runs (SSRF guard).
+      ``registry_from_env`` denies all remotes unless
+      ``LAB_TRACKER_GIT_ALLOWED_REMOTES`` is set, mirroring the local resolver's
+      allowed-roots posture.
+    * ``allow_protocol`` — passed to git as ``GIT_ALLOW_PROTOCOL`` so ``file://``
+      and ``ext::`` command-execution vectors are refused.
+    * The blob's size is checked (``git cat-file -s``) before it is read, so an
+      object larger than ``max_fetch_bytes`` is refused rather than buffered.
+    * ``max_cache_bytes`` bounds the on-disk fetch cache; least-recently-used
+      per-remote caches are evicted before a new fetch.
     """
 
     def __init__(
@@ -908,16 +940,33 @@ class GitResolver(ArtifactResolver):
         runner: GitRunner | None = None,
         binary: str = "git",
         cache_root: str | Path | None = None,
+        allowed_remotes: Sequence[str] | None = None,
+        allow_protocol: str | None = DEFAULT_GIT_ALLOW_PROTOCOL,
         max_fetch_bytes: int = DEFAULT_MAX_FETCH_BYTES,
+        max_cache_bytes: int | None = None,
     ) -> None:
-        self._runner = runner or _subprocess_git_runner(binary)
+        self._runner = runner or _subprocess_git_runner(
+            binary, allow_protocol=allow_protocol
+        )
         self._cache_root = cache_root
+        self._allowed_remotes = (
+            None if allowed_remotes is None else list(allowed_remotes)
+        )
         self._max_fetch_bytes = max_fetch_bytes
+        self._max_cache_bytes = max_cache_bytes
 
     def can_resolve(self, ref: ExternalArtifactReference) -> bool:
         if ref.source_system.strip().lower() == "git":
             return True
         return ref.uri.startswith("git+")
+
+    def _remote_allowed(self, remote: str) -> bool:
+        if self._allowed_remotes is None:
+            return True
+        return any(
+            remote == allowed or remote.startswith(allowed)
+            for allowed in self._allowed_remotes
+        )
 
     def resolve(
         self,
@@ -942,6 +991,11 @@ class GitResolver(ArtifactResolver):
         if locator is None:
             return _unresolved(ref, detail="Reference URI is not a git locator.")
         remote, commit, path = locator
+
+        if not self._remote_allowed(remote):
+            return _unresolved(
+                ref, detail="Remote is not in the git resolver allowlist."
+            )
 
         algorithm, _ = parse_content_hash(ref.content_hash)
         try:
@@ -969,24 +1023,61 @@ class GitResolver(ArtifactResolver):
 
     def _read_blob(self, remote: str, commit: str, path: str) -> bytes:
         cache = self._repo_cache(remote)
+        rev = f"{commit}:{path}"
         # Idempotent: a fresh cache is initialised once, an existing one reused.
         self._runner(["-C", cache, "init", "-q"])
         fetch = self._runner(["-C", cache, "fetch", "--depth", "1", remote, commit])
         if fetch.returncode != 0:
             raise _GitReadError(_git_error_detail(fetch))
-        cat = self._runner(["-C", cache, "cat-file", "blob", f"{commit}:{path}"])
+        # Refuse an oversized object before reading it into memory.
+        size_out = self._runner(["-C", cache, "cat-file", "-s", rev])
+        if size_out.returncode != 0:
+            raise _GitReadError(_git_error_detail(size_out))
+        try:
+            size = int(size_out.stdout.decode("utf-8", errors="replace").strip())
+        except ValueError:
+            raise _GitReadError("git returned an unparseable object size.") from None
+        if size > self._max_fetch_bytes:
+            raise _GitReadError(
+                f"Artifact ({size} bytes) exceeds the "
+                f"{self._max_fetch_bytes}-byte fetch limit."
+            )
+        cat = self._runner(["-C", cache, "cat-file", "blob", rev])
         if cat.returncode != 0:
             raise _GitReadError(_git_error_detail(cat))
         return cat.stdout
 
     def _repo_cache(self, remote: str) -> str:
-        base = self._cache_root or os.path.join(
+        base = os.fspath(self._cache_root) if self._cache_root else os.path.join(
             tempfile.gettempdir(), "lab-tracker-git-cache"
         )
+        self._enforce_cache_quota(base)
         digest = hashlib.sha256(remote.encode("utf-8")).hexdigest()[:16]
-        cache = os.path.join(os.fspath(base), digest)
+        cache = os.path.join(base, digest)
         os.makedirs(cache, exist_ok=True)
         return cache
+
+    def _enforce_cache_quota(self, base: str) -> None:
+        """Evict least-recently-used per-remote caches until under the quota."""
+
+        if not self._max_cache_bytes or not os.path.isdir(base):
+            return
+        entries: list[tuple[float, str, int]] = []
+        total = 0
+        for name in os.listdir(base):
+            path = os.path.join(base, name)
+            if not os.path.isdir(path):
+                continue
+            size = _dir_size(path)
+            entries.append((os.path.getmtime(path), path, size))
+            total += size
+        if total <= self._max_cache_bytes:
+            return
+        for _mtime, path, size in sorted(entries):  # oldest first
+            if total <= self._max_cache_bytes:
+                break
+            shutil.rmtree(path, ignore_errors=True)
+            total -= size
 
 
 def _git_error_detail(completed: GitCompleted) -> str:
@@ -994,6 +1085,17 @@ def _git_error_detail(completed: GitCompleted) -> str:
     if stderr:
         return f"git failed: {stderr.splitlines()[-1]}"
     return f"git exited with status {completed.returncode}."
+
+
+def _dir_size(path: str) -> int:
+    """Best-effort total size of the files under ``path`` (for cache quota)."""
+
+    total = 0
+    for dirpath, _dirs, files in os.walk(path):
+        for name in files:
+            with suppress(OSError):
+                total += os.path.getsize(os.path.join(dirpath, name))
+    return total
 
 
 class _FetchTooLarge(Exception):
@@ -1089,6 +1191,9 @@ def default_registry(
     *,
     allowed_roots: Sequence[str | Path] | None = None,
     recovery: RecoveryPolicy | None = None,
+    git_allowed_remotes: Sequence[str] | None = None,
+    git_cache_root: str | Path | None = None,
+    git_max_cache_bytes: int | None = None,
 ) -> ResolverRegistry:
     """Build a registry with the adapters available in this slice.
 
@@ -1096,7 +1201,8 @@ def default_registry(
     adapters degrade to UNRESOLVED when their binary is absent, so including them
     is safe by default. Native store-backed adapters (s3, ssh, database) register
     here as they land. ``recovery`` opts the local resolver into content-hash
-    recovery of missing files within ``allowed_roots``.
+    recovery of missing files within ``allowed_roots``. ``git_allowed_remotes``
+    (``None`` = unrestricted) gates which remotes the git resolver may fetch.
     """
 
     return ResolverRegistry(
@@ -1104,7 +1210,11 @@ def default_registry(
             LocalFilesystemResolver(allowed_roots=allowed_roots, recovery=recovery),
             HttpResolver(),
             RcloneResolver(),
-            GitResolver(),
+            GitResolver(
+                allowed_remotes=git_allowed_remotes,
+                cache_root=git_cache_root,
+                max_cache_bytes=git_max_cache_bytes,
+            ),
         ]
     )
 
@@ -1121,6 +1231,13 @@ LAB_TRACKER_RESOLVER_ALLOWED_ROOTS_ENV = "LAB_TRACKER_RESOLVER_ALLOWED_ROOTS"
 LAB_TRACKER_RESOLVER_RECOVERY_ENV = "LAB_TRACKER_RESOLVER_RECOVERY"
 LAB_TRACKER_RESOLVER_RECOVERY_MAX_FILES_ENV = "LAB_TRACKER_RESOLVER_RECOVERY_MAX_FILES"
 LAB_TRACKER_RESOLVER_RECOVERY_MAX_BYTES_ENV = "LAB_TRACKER_RESOLVER_RECOVERY_MAX_BYTES"
+
+# Comma-separated allowlist of git remote prefixes the git resolver may fetch.
+# When unset, registry_from_env denies all remotes (git pins resolve UNRESOLVED)
+# until an operator opts specific remotes in — the same posture as allowed roots.
+LAB_TRACKER_GIT_ALLOWED_REMOTES_ENV = "LAB_TRACKER_GIT_ALLOWED_REMOTES"
+LAB_TRACKER_GIT_CACHE_ROOT_ENV = "LAB_TRACKER_GIT_CACHE_ROOT"
+LAB_TRACKER_GIT_CACHE_MAX_BYTES_ENV = "LAB_TRACKER_GIT_CACHE_MAX_BYTES"
 
 _TRUTHY = frozenset({"1", "true", "yes", "on"})
 
@@ -1156,12 +1273,27 @@ def recovery_from_env() -> RecoveryPolicy:
 
 
 def registry_from_env() -> ResolverRegistry:
-    """Build the default registry, reading allowed local roots from the env."""
+    """Build the default registry, reading resolver config from the env."""
 
     raw = os.environ.get(LAB_TRACKER_RESOLVER_ALLOWED_ROOTS_ENV)
     allowed_roots = (
         [part for part in raw.split(os.pathsep) if part.strip()] if raw else []
     )
+    raw_remotes = os.environ.get(LAB_TRACKER_GIT_ALLOWED_REMOTES_ENV)
+    # Unset -> [] -> deny all git remotes (opt-in, mirroring allowed roots).
+    git_allowed_remotes = (
+        [part.strip() for part in raw_remotes.split(",") if part.strip()]
+        if raw_remotes
+        else []
+    )
+    git_cache_root = os.environ.get(LAB_TRACKER_GIT_CACHE_ROOT_ENV) or None
+    git_max_cache_bytes = _env_positive_int(
+        os.environ.get(LAB_TRACKER_GIT_CACHE_MAX_BYTES_ENV), 0
+    )
     return default_registry(
-        allowed_roots=allowed_roots, recovery=recovery_from_env()
+        allowed_roots=allowed_roots,
+        recovery=recovery_from_env(),
+        git_allowed_remotes=git_allowed_remotes,
+        git_cache_root=git_cache_root,
+        git_max_cache_bytes=git_max_cache_bytes or None,
     )
