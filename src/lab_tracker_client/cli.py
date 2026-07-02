@@ -337,7 +337,7 @@ def _add_hpc_parsers(subcommands: argparse._SubParsersAction) -> None:
         "submit",
         help="Wrap an HPC submission command and write a submit event.",
     )
-    _add_hpc_context_args(submit_parser)
+    _add_capture_context_args(submit_parser)
     submit_parser.add_argument("--summary", help="Short run summary for review.")
     submit_parser.add_argument(
         "command",
@@ -347,7 +347,7 @@ def _add_hpc_parsers(subcommands: argparse._SubParsersAction) -> None:
     submit_parser.set_defaults(func=_cmd_hpc_submit, needs_client=False)
 
     begin_parser = hpc_commands.add_parser("begin", help="Write a begin event from inside a job.")
-    _add_hpc_context_args(begin_parser)
+    _add_capture_context_args(begin_parser)
     begin_parser.add_argument("--run", help="Run id. Defaults to LAB_TRACKER_HPC_RUN_ID.")
     begin_parser.add_argument("--summary", help="Short run summary for review.")
     begin_parser.set_defaults(func=_cmd_hpc_begin, needs_client=False)
@@ -356,7 +356,7 @@ def _add_hpc_parsers(subcommands: argparse._SubParsersAction) -> None:
         "finish",
         help="Write a finish event from inside a job.",
     )
-    _add_hpc_context_args(finish_parser)
+    _add_capture_context_args(finish_parser)
     finish_parser.add_argument("--run", help="Run id. Defaults to LAB_TRACKER_HPC_RUN_ID.")
     finish_parser.add_argument("--exit-code", type=int, help="Job or script exit code.")
     finish_parser.add_argument("--state", help="Scheduler/run state, e.g. completed or failed.")
@@ -381,7 +381,7 @@ def _add_hpc_parsers(subcommands: argparse._SubParsersAction) -> None:
         "watch",
         help="Import run manifests from designated output folders into the outbox.",
     )
-    _add_hpc_context_args(watch_parser)
+    _add_capture_context_args(watch_parser)
     watch_parser.add_argument("--root", required=True, help="Output folder to scan.")
     watch_parser.add_argument(
         "--pattern",
@@ -407,7 +407,7 @@ def _add_hpc_parsers(subcommands: argparse._SubParsersAction) -> None:
     sync_parser.set_defaults(func=_cmd_hpc_sync)
 
 
-def _add_hpc_context_args(parser: argparse.ArgumentParser) -> None:
+def _add_capture_context_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--config", help="Config path. Defaults to discovered config.")
     parser.add_argument("--project", help="Override project UUID from config.")
     parser.add_argument("--question", help="Candidate question UUID recorded in evidence metadata.")
@@ -443,8 +443,11 @@ def _add_repo_parsers(subcommands: argparse._SubParsersAction) -> None:
         "report",
         help="Record the current repo state (commit, dirty, remote) as an outbox event.",
     )
-    _add_repo_context_args(report_parser)
-    report_parser.add_argument("--run", help="Run id. Defaults to the commit SHA.")
+    _add_capture_context_args(report_parser)
+    report_parser.add_argument(
+        "--run",
+        help="Run id. Defaults to LAB_TRACKER_REPO_RUN_ID, then the commit SHA.",
+    )
     report_parser.add_argument("--summary", help="Short summary for review.")
     report_parser.add_argument(
         "--fail-silent",
@@ -474,6 +477,10 @@ def _add_repo_parsers(subcommands: argparse._SubParsersAction) -> None:
     )
     hook_parser.add_argument("--repo", default=".", help="Repository path. Defaults to cwd.")
     hook_parser.add_argument(
+        "--config",
+        help="Repo config to pin into the hook. Defaults to discovered config.",
+    )
+    hook_parser.add_argument(
         "--lt-command",
         help="Path to the lt executable the hook should call. Defaults to the lt on PATH.",
     )
@@ -483,19 +490,6 @@ def _add_repo_parsers(subcommands: argparse._SubParsersAction) -> None:
         help="Append to an existing non-managed post-commit hook.",
     )
     hook_parser.set_defaults(func=_cmd_repo_install_hook, needs_client=False)
-
-
-def _add_repo_context_args(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("--config", help="Config path. Defaults to discovered config.")
-    parser.add_argument("--project", help="Override project UUID from config.")
-    parser.add_argument("--question", help="Candidate question UUID recorded in evidence metadata.")
-    parser.add_argument(
-        "--dataset",
-        action="append",
-        default=[],
-        help="Candidate dataset UUID. Repeatable.",
-    )
-    parser.add_argument("--tag", action="append", default=[], help="Tag. Repeatable.")
 
 
 def _cmd_repo_init(args: argparse.Namespace) -> Any:
@@ -516,7 +510,7 @@ def _cmd_repo_init(args: argparse.Namespace) -> Any:
 
 def _cmd_repo_report(args: argparse.Namespace) -> Any:
     config = repo_capture.load_config(config_path=args.config)
-    event, path = repo_capture.capture_commit(
+    event, path, action = repo_capture.capture_commit(
         config,
         run_id=args.run,
         project_id=args.project,
@@ -527,6 +521,7 @@ def _cmd_repo_report(args: argparse.Namespace) -> Any:
     )
     return {
         "command": "repo-report",
+        "action": action,
         "run_id": event["run_id"],
         "event_type": event["event_type"],
         "git_commit": event["source"].get("git_commit", ""),
@@ -564,6 +559,7 @@ def _cmd_repo_install_hook(args: argparse.Namespace) -> Any:
     return repo_capture.install_post_commit_hook(
         args.repo,
         lt_command=args.lt_command,
+        config_path=args.config,
         force=args.force,
     )
 

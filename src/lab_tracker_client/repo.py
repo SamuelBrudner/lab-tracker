@@ -270,8 +270,21 @@ def capture_commit(
     cwd: str | Path | None = None,
     artifacts: Sequence[Mapping[str, Any]] | None = None,
     summary: str | None = None,
-) -> tuple[JsonObject, Path]:
-    """Capture the current repo state as an event and write it to the outbox."""
+) -> tuple[JsonObject, Path, str]:
+    """Capture the current repo state as an event and write it to the outbox.
+
+    Returns ``(event, path, action)``. Event ids are deterministic per commit so
+    a repeated post-commit hook stays idempotent — but annotations must never be
+    silently dropped, so an existing event is handled by content:
+
+    * ``captured`` — no event existed; a new one was written.
+    * ``unchanged`` — an identical event already exists (the hook re-fired).
+    * ``updated`` — a pending event existed and its content differed (e.g. the
+      user annotated the commit with ``--summary``/``--question``); it was
+      rewritten in place, preserving its sync state.
+    * ``recaptured`` — the existing event was already synced, so mutating it
+      would desync the staged note; the annotation was written as a new event.
+    """
 
     event = make_event(
         config,
@@ -285,8 +298,65 @@ def capture_commit(
         artifacts=artifacts,
         summary=summary,
     )
-    path = write_event(event, config.outbox_path())
-    return event, path
+    outbox = config.outbox_path()
+    path = event_path(event, outbox)
+    if not path.exists():
+        write_event(event, outbox)
+        return event, path, "captured"
+    existing = read_event(path)
+    # Merge argument-wise so neither direction drops data: explicit flags win,
+    # unspecified fields keep the existing event's values (a bare hook re-fire
+    # must not revert an earlier annotation to defaults), and the git source
+    # state is always refreshed.
+    merged = make_event(
+        config,
+        event_type=event_type,
+        run_id=run_id or str(existing["run_id"]),
+        event_id=str(existing["event_id"]),
+        observed_at=str(existing["observed_at"]),
+        project_id=project_id or str(existing["project_id"]),
+        question_id=question_id or existing.get("question_id"),
+        dataset_ids=dataset_ids or existing.get("dataset_ids"),
+        tags=tags or existing.get("tags"),
+        cwd=cwd,
+        artifacts=artifacts or existing.get("artifacts"),
+        summary=summary or _optional_str(existing.get("summary")),
+    )
+    if _capture_content(existing) == _capture_content(merged):
+        return existing, path, "unchanged"
+    merged["observed_at"] = utc_now()
+    if str(existing.get("sync", {}).get("status") or "") in TERMINAL_SYNC_STATES:
+        # The synced note reflects the old content; a new event (fresh id) keeps
+        # the annotation instead of desyncing the existing record.
+        merged["event_id"] = uuid.uuid4().hex
+        path = write_event(merged, outbox)
+        return merged, path, "recaptured"
+    merged = validate_event({**merged, "sync": existing.get("sync") or merged["sync"]})
+    _write_json_atomic(path, merged)
+    return merged, path, "updated"
+
+
+_CAPTURE_CONTENT_KEYS = (
+    "event_type",
+    "project_id",
+    "question_id",
+    "dataset_ids",
+    "tags",
+    "artifacts",
+    "summary",
+)
+_CAPTURE_SOURCE_KEYS = ("git_commit", "git_dirty", "repo_remote_url", "git_branch")
+
+
+def _capture_content(event: Mapping[str, Any]) -> str:
+    """Canonical form of an event's capture-relevant content (not sync/times)."""
+
+    payload = validate_event(dict(event))
+    content = {key: payload[key] for key in _CAPTURE_CONTENT_KEYS}
+    content["source"] = {
+        key: payload["source"].get(key) for key in _CAPTURE_SOURCE_KEYS
+    }
+    return json.dumps(content, sort_keys=True)
 
 
 def write_event(event: Mapping[str, Any], outbox: str | Path) -> Path:
@@ -464,42 +534,75 @@ def install_post_commit_hook(
     repo_root: str | Path | None = None,
     *,
     lt_command: str | None = None,
+    config_path: str | Path | None = None,
     force: bool = False,
 ) -> JsonObject:
     """Install (or update) the managed ``lt repo`` post-commit hook.
 
     Git runs hooks under ``sh`` on every platform (Git for Windows bundles one),
     so a single sh hook body covers POSIX and Windows checkouts alike. The hook
-    lives between BEGIN/END markers so reinstalls update it in place, a foreign
-    hook is never clobbered without ``force``, and the block is fail-soft: it
-    never blocks the commit, even when ``lt`` is missing or errors.
+    lives between BEGIN/END markers so reinstalls update it in place, and a
+    foreign hook is never clobbered: without ``force`` the install refuses, and
+    with ``force`` the managed block is inserted *before* the foreign body
+    (right after its shebang), so a trailing ``exit``/``exec`` in the foreign
+    hook cannot turn the block into dead code — and the block itself never
+    exits, so the foreign hook still runs. The repo config the hook needs is
+    resolved at install time and pinned into the block, so a missing or
+    mis-located config fails here, loudly, instead of silently on every commit.
     """
 
     root = Path(repo_root or Path.cwd()).expanduser()
     toplevel = _git_output(root, "rev-parse", "--show-toplevel")
     if not toplevel:
         raise LTValidationError(f"Not a git repository: {root}")
+    try:
+        config = load_config(config_path=config_path, start=toplevel)
+    except LTValidationError as exc:
+        raise LTValidationError(
+            f"No repo config found from {toplevel}. Run 'lt repo init' in the "
+            "repository first (or pass --config)."
+        ) from exc
     hook_path = _hook_path(Path(toplevel))
     resolved_lt = _hook_command_path(lt_command)
-    managed_block = _hook_managed_block(resolved_lt)
+    config_for_hook = str(config.config_path).replace("\\", "/")
+    managed_block = _hook_managed_block(resolved_lt, config_for_hook)
 
     if hook_path.exists():
-        existing = hook_path.read_text(encoding="utf-8")
-        if HOOK_BEGIN_MARKER in existing and HOOK_END_MARKER in existing:
+        try:
+            existing = hook_path.read_text(encoding="utf-8")
+        except UnicodeDecodeError as exc:
+            raise LTValidationError(
+                f"Existing post-commit hook is not UTF-8 text: {hook_path}. "
+                "Fix or remove it, then re-run."
+            ) from exc
+        has_begin = HOOK_BEGIN_MARKER in existing
+        has_end = HOOK_END_MARKER in existing
+        if has_begin and has_end:
             pattern = re.compile(
                 re.escape(HOOK_BEGIN_MARKER) + r".*?" + re.escape(HOOK_END_MARKER),
                 re.DOTALL,
             )
+            if not pattern.search(existing):
+                raise LTValidationError(
+                    f"Lab Tracker markers in {hook_path} are out of order "
+                    "(END before BEGIN?). Repair the hook manually, then re-run."
+                )
             updated = pattern.sub(lambda _match: managed_block, existing)
             action = "updated"
+        elif has_begin or has_end:
+            raise LTValidationError(
+                f"Post-commit hook has an unmatched Lab Tracker marker: {hook_path}. "
+                "Repair the hook manually, then re-run."
+            )
         elif existing.strip() and not force:
             raise LTValidationError(
                 f"Existing post-commit hook is not Lab Tracker-managed: {hook_path}. "
-                "Re-run with --force to append the managed block."
+                "Re-run with --force to add the managed block ahead of it."
             )
         elif existing.strip():
-            updated = existing.rstrip() + "\n\n" + managed_block + "\n"
-            action = "appended"
+            _require_sh_hook(existing, hook_path)
+            updated = _insert_block_after_shebang(existing, managed_block)
+            action = "prepended"
         else:
             updated = f"{_HOOK_SHEBANG}\n{managed_block}\n"
             action = "installed"
@@ -516,6 +619,7 @@ def install_post_commit_hook(
         "repo": str(Path(toplevel)),
         "hook": str(hook_path),
         "lt_command": resolved_lt,
+        "config": str(config.config_path),
     }
 
 
@@ -539,15 +643,66 @@ def _hook_command_path(lt_command: str | None) -> str:
     return resolved.replace("\\", "/")
 
 
-def _hook_managed_block(lt_command: str) -> str:
+def _sh_single_quote(value: str) -> str:
+    """Quote ``value`` for sh so no character in it can expand or execute."""
+
+    if any(ch in value for ch in ("\n", "\r", "\x00")):
+        raise LTValidationError("Hook paths must not contain newlines or NULs.")
+    return "'" + value.replace("'", "'\\''") + "'"
+
+
+_SH_SHELLS = ("sh", "bash", "dash", "ksh", "ash", "zsh")
+
+
+def _require_sh_hook(existing: str, hook_path: Path) -> None:
+    """Refuse to merge sh code into a hook written for another interpreter."""
+
+    first_line = existing.split("\n", 1)[0].strip()
+    if not first_line.startswith("#!"):
+        return  # git runs shebang-less hooks under sh
+    interpreter = first_line[2:].strip()
+    if any(re.search(rf"(^|/|\s){shell}$", interpreter) for shell in _SH_SHELLS):
+        return
+    raise LTValidationError(
+        f"Existing post-commit hook uses a non-sh interpreter ({first_line}): "
+        f"{hook_path}. Chain 'lt repo report' from it manually instead."
+    )
+
+
+def _insert_block_after_shebang(existing: str, block: str) -> str:
+    """Insert the managed block before the foreign hook body.
+
+    Running first means a trailing ``exit``/``exec`` in the foreign body cannot
+    make the block unreachable, and since the block never exits, the foreign
+    hook still runs exactly as before.
+    """
+
+    if existing.startswith("#!"):
+        newline = existing.find("\n")
+        if newline == -1:
+            return f"{existing}\n{block}\n"
+        return f"{existing[: newline + 1]}{block}\n{existing[newline + 1 :]}"
+    return f"{block}\n{existing}"
+
+
+def _hook_managed_block(lt_command: str, config_path: str) -> str:
+    lt_quoted = _sh_single_quote(lt_command)
+    config_quoted = _sh_single_quote(config_path)
     return "\n".join(
         [
             HOOK_BEGIN_MARKER,
             'LAB_TRACKER_REPO_HOOK_ENABLED="${LAB_TRACKER_REPO_HOOK_ENABLED:-1}"',
             'if [ "$LAB_TRACKER_REPO_HOOK_ENABLED" != "0" ]; then',
-            f'  LT="${{LAB_TRACKER_LT:-{lt_command}}}"',
+            '  LT="$LAB_TRACKER_LT"',
+            f"  [ -n \"$LT\" ] || LT={lt_quoted}",
+            '  if [ -z "$LAB_TRACKER_REPO_CONFIG" ]; then',
+            f"    LAB_TRACKER_REPO_CONFIG={config_quoted}",
+            "    export LAB_TRACKER_REPO_CONFIG",
+            "  fi",
             '  if command -v "$LT" >/dev/null 2>&1; then',
-            '    "$LT" repo report --fail-silent >/dev/null 2>&1 || '
+            # post-commit exit codes never block the commit; the redirect hides
+            # tracebacks and the || branch surfaces a one-line warning instead.
+            '    "$LT" repo report >/dev/null 2>&1 || '
             'echo "lab-tracker: repo hook could not record the commit; commit kept." >&2',
             "  fi",
             "fi",

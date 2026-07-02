@@ -33,6 +33,15 @@ def _git(path, *args: str) -> str:
     return result.stdout.strip()
 
 
+def _init_repo_config(path) -> None:
+    from lab_tracker_client.repo import init_config
+
+    init_config(
+        project_id="project-1",
+        config_path=path / ".lab-tracker" / "repo.json",
+    )
+
+
 def _init_git_repo(path) -> str:
     _git(path, "init", "-q")
     _git(path, "config", "user.email", "test@example.com")
@@ -60,6 +69,7 @@ def test_repo_cli_init_report_status(tmp_path, monkeypatch, capsys) -> None:
     status_payload = json.loads(capsys.readouterr().out)
 
     assert report_payload["command"] == "repo-report"
+    assert report_payload["action"] == "captured"
     assert report_payload["git_commit"] == commit
     assert report_payload["git_dirty"] is False
     assert status_payload["command"] == "repo-status"
@@ -91,6 +101,7 @@ def test_repo_cli_report_without_config_raises(tmp_path, monkeypatch) -> None:
 def test_install_hook_creates_managed_block(tmp_path, monkeypatch) -> None:
     _clear_repo_env(monkeypatch)
     _init_git_repo(tmp_path)
+    _init_repo_config(tmp_path)
 
     result = install_post_commit_hook(tmp_path, lt_command="/opt/venv/bin/lt")
 
@@ -100,14 +111,28 @@ def test_install_hook_creates_managed_block(tmp_path, monkeypatch) -> None:
     assert content.startswith("#!/usr/bin/env sh")
     assert HOOK_BEGIN_MARKER in content
     assert HOOK_END_MARKER in content
-    assert "/opt/venv/bin/lt" in content
-    assert "repo report --fail-silent" in content
+    assert "LT='/opt/venv/bin/lt'" in content  # sh-single-quoted, injection-proof
+    assert "repo report >" in content
+    # The config the hook needs is pinned at install time.
+    assert "repo.json" in content
+    assert "LAB_TRACKER_REPO_CONFIG" in content
     assert hook.stat().st_mode & 0o111  # executable
+
+
+def test_install_hook_requires_repo_config(tmp_path, monkeypatch) -> None:
+    """A hook installed without a config would no-op on every commit — refuse."""
+
+    _clear_repo_env(monkeypatch)
+    _init_git_repo(tmp_path)
+
+    with pytest.raises(LTValidationError, match="lt repo init"):
+        install_post_commit_hook(tmp_path, lt_command="lt")
 
 
 def test_install_hook_is_idempotent_and_updates_in_place(tmp_path, monkeypatch) -> None:
     _clear_repo_env(monkeypatch)
     _init_git_repo(tmp_path)
+    _init_repo_config(tmp_path)
 
     install_post_commit_hook(tmp_path, lt_command="/old/lt")
     result = install_post_commit_hook(tmp_path, lt_command="/new/lt")
@@ -122,18 +147,75 @@ def test_install_hook_is_idempotent_and_updates_in_place(tmp_path, monkeypatch) 
 def test_install_hook_refuses_foreign_hook_without_force(tmp_path, monkeypatch) -> None:
     _clear_repo_env(monkeypatch)
     _init_git_repo(tmp_path)
+    _init_repo_config(tmp_path)
     hook = tmp_path / ".git" / "hooks" / "post-commit"
     hook.parent.mkdir(parents=True, exist_ok=True)
-    hook.write_text("#!/bin/sh\necho custom hook\n", encoding="utf-8")
+    hook.write_text("#!/bin/sh\necho custom hook\nexit 0\n", encoding="utf-8")
 
     with pytest.raises(LTValidationError):
         install_post_commit_hook(tmp_path, lt_command="lt")
 
-    appended = install_post_commit_hook(tmp_path, lt_command="lt", force=True)
+    merged = install_post_commit_hook(tmp_path, lt_command="lt", force=True)
     content = hook.read_text(encoding="utf-8")
-    assert appended["action"] == "appended"
+    assert merged["action"] == "prepended"
     assert "echo custom hook" in content  # foreign hook preserved
-    assert HOOK_BEGIN_MARKER in content
+    # The managed block must run BEFORE the foreign body, so a trailing
+    # `exit 0`/`exec` there cannot turn provenance capture into dead code.
+    assert content.index(HOOK_END_MARKER) < content.index("echo custom hook")
+
+
+def test_install_hook_refuses_non_sh_foreign_hook(tmp_path, monkeypatch) -> None:
+    _clear_repo_env(monkeypatch)
+    _init_git_repo(tmp_path)
+    _init_repo_config(tmp_path)
+    hook = tmp_path / ".git" / "hooks" / "post-commit"
+    hook.parent.mkdir(parents=True, exist_ok=True)
+    hook.write_text("#!/usr/bin/env python3\nprint('custom')\n", encoding="utf-8")
+
+    # Merging sh code into a python hook would syntax-error every commit.
+    with pytest.raises(LTValidationError, match="non-sh interpreter"):
+        install_post_commit_hook(tmp_path, lt_command="lt", force=True)
+
+
+def test_install_hook_rejects_corrupted_markers(tmp_path, monkeypatch) -> None:
+    _clear_repo_env(monkeypatch)
+    _init_git_repo(tmp_path)
+    _init_repo_config(tmp_path)
+    hook = tmp_path / ".git" / "hooks" / "post-commit"
+    hook.parent.mkdir(parents=True, exist_ok=True)
+    # END before BEGIN (e.g. a botched merge) must not become a silent no-op.
+    hook.write_text(
+        f"#!/bin/sh\n{HOOK_END_MARKER}\necho x\n{HOOK_BEGIN_MARKER}\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(LTValidationError, match="out of order"):
+        install_post_commit_hook(tmp_path, lt_command="lt")
+
+
+def test_install_hook_rejects_non_utf8_foreign_hook(tmp_path, monkeypatch) -> None:
+    _clear_repo_env(monkeypatch)
+    _init_git_repo(tmp_path)
+    _init_repo_config(tmp_path)
+    hook = tmp_path / ".git" / "hooks" / "post-commit"
+    hook.parent.mkdir(parents=True, exist_ok=True)
+    hook.write_bytes(b"#!/bin/sh\n# ma\xeetre hook by Ren\xe9\n")
+
+    with pytest.raises(LTValidationError, match="not UTF-8"):
+        install_post_commit_hook(tmp_path, lt_command="lt")
+
+
+def test_install_hook_quotes_shell_metacharacters_in_lt_path(tmp_path, monkeypatch) -> None:
+    _clear_repo_env(monkeypatch)
+    _init_git_repo(tmp_path)
+    _init_repo_config(tmp_path)
+
+    install_post_commit_hook(tmp_path, lt_command="/opt/john$doe/`hostname`/lt")
+
+    content = (tmp_path / ".git" / "hooks" / "post-commit").read_text(encoding="utf-8")
+    # The raw path sits inside single quotes, so $doe cannot expand and the
+    # backticked command substitution cannot execute at commit time.
+    assert "LT='/opt/john$doe/`hostname`/lt'" in content
 
 
 def test_install_hook_outside_git_repo_raises(tmp_path, monkeypatch) -> None:
@@ -146,11 +228,12 @@ def test_install_hook_outside_git_repo_raises(tmp_path, monkeypatch) -> None:
 def test_install_hook_converts_windows_paths_for_sh(tmp_path, monkeypatch) -> None:
     _clear_repo_env(monkeypatch)
     _init_git_repo(tmp_path)
+    _init_repo_config(tmp_path)
 
     install_post_commit_hook(tmp_path, lt_command="C:\\venv\\Scripts\\lt.exe")
 
     content = (tmp_path / ".git" / "hooks" / "post-commit").read_text(encoding="utf-8")
-    assert "C:/venv/Scripts/lt.exe" in content
+    assert "LT='C:/venv/Scripts/lt.exe'" in content
     assert "\\" not in content.split(HOOK_BEGIN_MARKER, 1)[1]
 
 
@@ -183,11 +266,43 @@ def test_installed_hook_records_commit_end_to_end(tmp_path, monkeypatch) -> None
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="sh hook execution test is POSIX-only")
+def test_forced_hook_runs_before_foreign_exit_end_to_end(tmp_path, monkeypatch) -> None:
+    """With a foreign hook ending in `exit 0`, capture must still happen."""
+
+    _clear_repo_env(monkeypatch)
+    _init_git_repo(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    lt_cli.main(["repo", "init", "--project", "project-1"])
+    hook = tmp_path / ".git" / "hooks" / "post-commit"
+    hook.parent.mkdir(parents=True, exist_ok=True)
+    hook.write_text("#!/bin/sh\necho custom hook\nexit 0\n", encoding="utf-8")
+    hook.chmod(0o755)
+    lt_shim = tmp_path / "lt-shim"
+    lt_shim.write_text(
+        "#!/usr/bin/env sh\n"
+        f'exec "{sys.executable}" -m lab_tracker_client "$@"\n',
+        encoding="utf-8",
+    )
+    lt_shim.chmod(0o755)
+    install_post_commit_hook(tmp_path, lt_command=str(lt_shim), force=True)
+
+    (tmp_path / "analysis.py").write_text("print('v4')\n", encoding="utf-8")
+    _git(tmp_path, "add", "analysis.py")
+    _git(tmp_path, "commit", "-q", "-m", "capture survives foreign exit 0")
+    commit = _git(tmp_path, "rev-parse", "HEAD")
+
+    outbox = tmp_path / ".lab-tracker" / "outbox" / "repo"
+    events = [json.loads(p.read_text(encoding="utf-8")) for p in sorted(outbox.glob("*.json"))]
+    assert any(e["source"]["git_commit"] == commit for e in events)
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="sh hook execution test is POSIX-only")
 def test_hook_never_blocks_commit_when_lt_fails(tmp_path, monkeypatch) -> None:
     _clear_repo_env(monkeypatch)
     _init_git_repo(tmp_path)
     monkeypatch.chdir(tmp_path)
-    # No `lt repo init` -> report fails; the commit must still succeed.
+    _init_repo_config(tmp_path)
+    # lt itself is broken (exit 1) -> report fails; the commit must still succeed.
     broken_lt = tmp_path / "broken-lt"
     broken_lt.write_text("#!/usr/bin/env sh\nexit 1\n", encoding="utf-8")
     broken_lt.chmod(0o755)

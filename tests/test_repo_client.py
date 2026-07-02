@@ -65,7 +65,7 @@ def test_init_config_and_capture_commit(tmp_path, monkeypatch) -> None:
 
     config = init_config(project_id="project-1", default_question_id="question-1")
     loaded = load_config()
-    event, path = capture_commit(loaded, tags=["pilot"])
+    event, path, action = capture_commit(loaded, tags=["pilot"])
 
     assert config.config_path == tmp_path / ".lab-tracker" / "repo.json"
     assert loaded.outbox_path() == tmp_path / ".lab-tracker" / "outbox" / "repo"
@@ -86,12 +86,75 @@ def test_capture_commit_is_idempotent_per_commit(tmp_path, monkeypatch) -> None:
     monkeypatch.chdir(tmp_path)
     config = init_config(project_id="project-1")
 
-    _event_a, path_a = capture_commit(config)
-    _event_b, path_b = capture_commit(config)
+    _event_a, path_a, action_a = capture_commit(config)
+    _event_b, path_b, action_b = capture_commit(config)
 
     # A repeated post-commit hook for the same commit must not pile up events.
     assert path_a == path_b
+    assert (action_a, action_b) == ("captured", "unchanged")
     assert len(list(config.outbox_path().glob("*.json"))) == 1
+
+
+def test_capture_commit_annotation_updates_pending_event(tmp_path, monkeypatch) -> None:
+    """--summary/--question on an already-captured commit must not be dropped."""
+
+    _clear_repo_env(monkeypatch)
+    _init_git_repo(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    config = init_config(project_id="project-1")
+
+    _hook_event, path, _action = capture_commit(config)  # hook-style default capture
+    annotated, annotated_path, action = capture_commit(
+        config, summary="IMPORTANT user summary", question_id="q-42", tags=["t1"]
+    )
+
+    assert action == "updated"
+    assert annotated_path == path
+    on_disk = read_event(path)
+    assert on_disk["summary"] == "IMPORTANT user summary"
+    assert on_disk["question_id"] == "q-42"
+    assert on_disk["tags"] == ["t1"]
+    assert on_disk["sync"]["status"] == "pending"
+    assert annotated["summary"] == "IMPORTANT user summary"
+    assert len(list(config.outbox_path().glob("*.json"))) == 1
+
+
+def test_capture_commit_hook_refire_preserves_annotation(tmp_path, monkeypatch) -> None:
+    """A bare hook re-fire must not revert an earlier annotation to defaults."""
+
+    _clear_repo_env(monkeypatch)
+    _init_git_repo(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    config = init_config(project_id="project-1")
+    capture_commit(config, summary="IMPORTANT user summary", question_id="q-42")
+
+    _event, path, action = capture_commit(config)  # bare, hook-style
+
+    assert action == "unchanged"
+    on_disk = read_event(path)
+    assert on_disk["summary"] == "IMPORTANT user summary"
+    assert on_disk["question_id"] == "q-42"
+
+
+def test_capture_commit_after_sync_writes_new_event(tmp_path, monkeypatch) -> None:
+    """Annotating a synced commit must not desync the staged note."""
+
+    _clear_repo_env(monkeypatch)
+    _init_git_repo(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    config = init_config(project_id="project-1")
+    _event, path, _action = capture_commit(config)
+    synced = read_event(path)
+    synced["sync"] = {"status": "synced", "attempts": 1, "note_id": "note-1"}
+    path.write_text(__import__("json").dumps(synced), encoding="utf-8")
+
+    annotated, new_path, action = capture_commit(config, summary="Post-sync annotation")
+
+    assert action == "recaptured"
+    assert new_path != path
+    assert annotated["summary"] == "Post-sync annotation"
+    assert read_event(path)["sync"]["note_id"] == "note-1"  # original untouched
+    assert len(list(config.outbox_path().glob("*.json"))) == 2
 
 
 def test_capture_commit_records_dirty_tree(tmp_path, monkeypatch) -> None:
@@ -101,7 +164,7 @@ def test_capture_commit_records_dirty_tree(tmp_path, monkeypatch) -> None:
     monkeypatch.chdir(tmp_path)
     config = init_config(project_id="project-1")
 
-    event, _path = capture_commit(config)
+    event, _path, _action = capture_commit(config)
 
     assert event["source"]["git_dirty"] is True
 
@@ -111,7 +174,7 @@ def test_render_event_note_contains_commit_state(tmp_path, monkeypatch) -> None:
     commit = _init_git_repo(tmp_path)
     monkeypatch.chdir(tmp_path)
     config = init_config(project_id="project-1")
-    event, _path = capture_commit(config)
+    event, _path, _action = capture_commit(config)
 
     note = render_event_note(event)
 
@@ -137,7 +200,7 @@ def test_event_source_external_id_is_remote_at_commit(tmp_path, monkeypatch) -> 
     commit = _init_git_repo(tmp_path)
     monkeypatch.chdir(tmp_path)
     config = init_config(project_id="project-1")
-    event, _path = capture_commit(config)
+    event, _path, _action = capture_commit(config)
 
     assert event_source_external_id(event) == f"example.com/org/repo@{commit}"
 
@@ -163,7 +226,7 @@ def test_sync_outbox_uploads_staged_note_and_requests_draft(tmp_path, monkeypatc
     _init_git_repo(tmp_path)
     monkeypatch.chdir(tmp_path)
     config = init_config(project_id="project-1")
-    _event, path = capture_commit(config, summary="Pinned the analysis commit.")
+    _event, path, _action = capture_commit(config, summary="Pinned the analysis commit.")
     requests: list[httpx.Request] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -210,7 +273,7 @@ def test_sync_outbox_dedups_duplicate_commit_capture(tmp_path, monkeypatch) -> N
     _init_git_repo(tmp_path)
     monkeypatch.chdir(tmp_path)
     config = init_config(project_id="project-1")
-    _event, path = capture_commit(config)
+    _event, path, _action = capture_commit(config)
     uploads: list[httpx.Request] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -242,7 +305,7 @@ def test_sync_outbox_dry_run_makes_no_changes(tmp_path, monkeypatch) -> None:
     _init_git_repo(tmp_path)
     monkeypatch.chdir(tmp_path)
     config = init_config(project_id="project-1")
-    _event, path = capture_commit(config)
+    _event, path, _action = capture_commit(config)
 
     def handler(request: httpx.Request) -> httpx.Response:
         if request.method == "GET" and request.url.path == "/notes":
