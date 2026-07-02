@@ -1,12 +1,18 @@
 from __future__ import annotations
 
+import hashlib
 import subprocess
 
 import httpx
+import pytest
 
 from lab_tracker_client import LabTracker
+from lab_tracker_client.client import LTValidationError
 from lab_tracker_client.repo import (
+    artifact_from_path,
     capture_commit,
+    environment_fingerprint,
+    event_metadata,
     event_source_external_id,
     init_config,
     load_config,
@@ -223,15 +229,11 @@ def test_make_event_without_git_falls_back(tmp_path, monkeypatch) -> None:
 
 
 def test_artifact_from_path_fingerprints_file(tmp_path) -> None:
-    from lab_tracker_client.repo import artifact_from_path
-
     out = tmp_path / "results" / "summary.csv"
     out.parent.mkdir()
     out.write_bytes(b"a,b\n1,2\n")
 
     artifact = artifact_from_path(out, root=tmp_path, summary="Run output.")
-
-    import hashlib
 
     assert artifact["uri"] == out.as_uri()
     assert artifact["title"] == "results/summary.csv"
@@ -242,10 +244,6 @@ def test_artifact_from_path_fingerprints_file(tmp_path) -> None:
 
 
 def test_artifact_from_path_missing_file_raises(tmp_path) -> None:
-    import pytest
-
-    from lab_tracker_client.client import LTValidationError
-    from lab_tracker_client.repo import artifact_from_path
 
     with pytest.raises(LTValidationError, match="not found"):
         artifact_from_path(tmp_path / "gone.csv")
@@ -269,8 +267,6 @@ def test_finish_events_stay_distinct_per_run(tmp_path, monkeypatch) -> None:
 
 
 def test_capture_with_artifacts_renders_pointer_section(tmp_path, monkeypatch) -> None:
-    from lab_tracker_client.repo import artifact_from_path
-
     _clear_repo_env(monkeypatch)
     _init_git_repo(tmp_path)
     (tmp_path / "out.csv").write_bytes(b"x\n")
@@ -293,8 +289,6 @@ def test_capture_with_artifacts_renders_pointer_section(tmp_path, monkeypatch) -
 
 
 def test_environment_fingerprint_hashes_lockfiles(tmp_path, monkeypatch) -> None:
-    from lab_tracker_client.repo import environment_fingerprint
-
     monkeypatch.delenv("LAB_TRACKER_CONTAINER_REF", raising=False)
     (tmp_path / "uv.lock").write_text("locked deps v1\n", encoding="utf-8")
     (tmp_path / "pyproject.toml").write_text("[project]\nname='x'\n", encoding="utf-8")
@@ -312,16 +306,12 @@ def test_environment_fingerprint_hashes_lockfiles(tmp_path, monkeypatch) -> None
 
 
 def test_environment_fingerprint_empty_without_lockfiles(tmp_path, monkeypatch) -> None:
-    from lab_tracker_client.repo import environment_fingerprint
-
     monkeypatch.delenv("LAB_TRACKER_CONTAINER_REF", raising=False)
 
     assert environment_fingerprint(tmp_path) == {}
 
 
 def test_environment_fingerprint_includes_container_ref(tmp_path, monkeypatch) -> None:
-    from lab_tracker_client.repo import environment_fingerprint
-
     (tmp_path / "requirements.txt").write_text("numpy\n", encoding="utf-8")
     monkeypatch.delenv("LAB_TRACKER_CONTAINER_REF", raising=False)
     bare = environment_fingerprint(tmp_path)
@@ -333,8 +323,6 @@ def test_environment_fingerprint_includes_container_ref(tmp_path, monkeypatch) -
 
 
 def test_capture_records_environment_in_event_and_metadata(tmp_path, monkeypatch) -> None:
-    from lab_tracker_client.repo import event_metadata
-
     _clear_repo_env(monkeypatch)
     monkeypatch.delenv("LAB_TRACKER_CONTAINER_REF", raising=False)
     _init_git_repo(tmp_path)
