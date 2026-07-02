@@ -1,15 +1,19 @@
 from __future__ import annotations
 
 import json
+from contextlib import contextmanager
 from typing import Any
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import httpx
 import pytest
 from fastapi.testclient import TestClient
 
+from lab_tracker.app_parts.middleware import system_auth_context
+from lab_tracker.auth import AuthContext, PrincipalType, Role
 from lab_tracker.config import Settings
 from lab_tracker.db_models import GraphChangeSetModel
+from lab_tracker.errors import AuthError, ValidationError
 from lab_tracker.graph_drafting import (
     AnthropicGraphDraftClient,
     GoogleGraphDraftClient,
@@ -17,6 +21,15 @@ from lab_tracker.graph_drafting import (
     OpenAIGraphDraftClient,
     make_graph_draft_client,
 )
+from lab_tracker.models import (
+    AcceptanceMode,
+    EntityType,
+    GraphChangeOp,
+    GraphChangeOperation,
+    GraphChangeOperationStatus,
+)
+from lab_tracker.sqlalchemy_repository import SQLAlchemyLabTrackerRepository
+from lab_tracker.sqlalchemy_repository_parts.graph_drafts import operation_to_model
 
 
 class FakeDraftClient:
@@ -2319,3 +2332,151 @@ def test_reopening_operation_clears_acceptance_mark(
     )
     assert op["acceptance_mode"] is None
     assert op["accepted_at"] is None
+
+
+# --- Autonomy guardrails (lab-tracker-09ok.1 / .2): drafting only, never commit ---
+
+
+def _human_actor() -> AuthContext:
+    """An interactive admin principal (the default principal_type is USER)."""
+    return AuthContext(user_id=uuid4(), role=Role.ADMIN)
+
+
+@contextmanager
+def _autonomy_request_api(client: TestClient):
+    """Yield a request-scoped API bound to a fresh session.
+
+    Lets a test invoke service methods in-process with an arbitrary actor --
+    the only way to exercise a SYSTEM (automation) principal, since no bearer
+    token ever mints one.
+    """
+    session = client.app.state.db_session_factory()
+    try:
+        repository = SQLAlchemyLabTrackerRepository(session)
+        yield client.app.state.lab_tracker_api.for_request(repository)
+        session.commit()
+    except Exception:
+        session.rollback()
+        raise
+    finally:
+        session.close()
+
+
+def _note_graph_draft(
+    client: TestClient, headers: dict[str, str]
+) -> tuple[str, dict[str, Any]]:
+    """Create a real graph draft over a note; return (change_set_id, first_op)."""
+    project_id = _project(client, headers)
+    note_id = _image_note(client, headers, project_id)
+    client.app.state.graph_draft_client_factory = lambda settings: FakeDraftClient(
+        _draft_patch(project_id)
+    )
+    draft = client.post(f"/notes/{note_id}/graph-drafts", headers=headers)
+    assert draft.status_code == 201
+    data = draft.json()["data"]
+    return data["change_set_id"], data["operations"][0]
+
+
+def test_is_interactive_admits_human_principals_excludes_system() -> None:
+    user = uuid4()
+    for principal in (PrincipalType.USER, PrincipalType.DEVICE, PrincipalType.SERVICE):
+        actor = AuthContext(user_id=user, role=Role.ADMIN, principal_type=principal)
+        assert actor.is_interactive, principal
+    system = AuthContext(user_id=user, role=Role.ADMIN, principal_type=PrincipalType.SYSTEM)
+    assert system.is_system
+    assert not system.is_interactive
+
+
+def test_system_actor_is_admin_but_not_interactive(client: TestClient) -> None:
+    """Automation may DRAFT (admin-gated) yet never accept/commit (interactive-gated)."""
+    authz = client.app.state.lab_tracker_api.project_authorization
+    system = system_auth_context()
+    assert authz.has_global_admin(system) is True
+    authz.require_interactive(_human_actor(), action="Committing")
+    with pytest.raises(AuthError):
+        authz.require_interactive(system, action="Committing")
+
+
+def test_system_actor_cannot_commit_graph_change_set(
+    client: TestClient, admin_auth_headers: dict[str, str]
+) -> None:
+    change_set_id, _ = _note_graph_draft(client, admin_auth_headers)
+    with _autonomy_request_api(client) as api, pytest.raises(AuthError):
+        api.commit_graph_change_set(
+            UUID(change_set_id), message="auto-commit", actor=system_auth_context()
+        )
+
+
+def test_system_actor_cannot_bulk_accept_operations(
+    client: TestClient, admin_auth_headers: dict[str, str]
+) -> None:
+    change_set_id, _ = _note_graph_draft(client, admin_auth_headers)
+    with _autonomy_request_api(client) as api, pytest.raises(AuthError):
+        api.bulk_accept_graph_change_operations(
+            UUID(change_set_id), actor=system_auth_context()
+        )
+
+
+def test_system_actor_cannot_accept_single_operation(
+    client: TestClient, admin_auth_headers: dict[str, str]
+) -> None:
+    change_set_id, operation = _note_graph_draft(client, admin_auth_headers)
+    with _autonomy_request_api(client) as api, pytest.raises(AuthError):
+        api.update_graph_change_operation(
+            UUID(change_set_id),
+            UUID(operation["operation_id"]),
+            payload=operation["payload"],
+            status=GraphChangeOperationStatus.ACCEPTED,
+            actor=system_auth_context(),
+        )
+
+
+def test_human_owner_can_still_commit_after_automation_is_blocked(
+    client: TestClient, admin_auth_headers: dict[str, str]
+) -> None:
+    """The wall blocks automation without blocking the human review path."""
+    change_set_id, _ = _note_graph_draft(client, admin_auth_headers)
+    accept_all = client.post(
+        f"/graph-drafts/{change_set_id}/accept-all", headers=admin_auth_headers
+    )
+    assert accept_all.status_code == 200
+    with _autonomy_request_api(client) as api, pytest.raises(AuthError):
+        api.commit_graph_change_set(
+            UUID(change_set_id), message="auto", actor=system_auth_context()
+        )
+    commit = client.post(
+        f"/graph-drafts/{change_set_id}/commit",
+        json={"message": "human commit"},
+        headers=admin_auth_headers,
+    )
+    assert commit.status_code == 200
+
+
+def test_update_operation_rejects_auto_accepted_mode(
+    client: TestClient, admin_auth_headers: dict[str, str]
+) -> None:
+    change_set_id, operation = _note_graph_draft(client, admin_auth_headers)
+    with _autonomy_request_api(client) as api, pytest.raises(ValidationError):
+        api.update_graph_change_operation(
+            UUID(change_set_id),
+            UUID(operation["operation_id"]),
+            payload=operation["payload"],
+            status=GraphChangeOperationStatus.ACCEPTED,
+            acceptance_mode=AcceptanceMode.AUTO_ACCEPTED,
+            actor=_human_actor(),
+        )
+
+
+def test_repository_write_rejects_auto_accepted_operation() -> None:
+    """Defense in depth: the persistence layer refuses the reserved mode."""
+    operation = GraphChangeOperation(
+        operation_id=uuid4(),
+        change_set_id=uuid4(),
+        sequence=0,
+        op=GraphChangeOp.CREATE,
+        entity_type=EntityType.QUESTION,
+        status=GraphChangeOperationStatus.ACCEPTED,
+        acceptance_mode=AcceptanceMode.AUTO_ACCEPTED,
+    )
+    with pytest.raises(ValidationError):
+        operation_to_model(operation)
