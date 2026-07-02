@@ -806,7 +806,7 @@ def sync_outbox(
         sync = event.get("sync", {})
         already_synced = str(sync.get("status") or "") in TERMINAL_SYNC_STATES
         needs_draft = (
-            request_draft
+            (request_draft or _event_requests_draft(event))
             and event["sink"] == SINK_STAGED_NOTE
             and sync.get("note_id")
             and not sync.get("change_set_id")
@@ -1018,7 +1018,10 @@ def _sync_staged_note(
         reason = result.reason
         note_id = str(note.id) if note is not None else None
     elif not note_id:
-        evidence = render_event_note(event)
+        # Content-bearing events (e.g. git snapshots) carry their evidence
+        # text in the reserved payload.body key; other events render.
+        body = event["payload"].get("body")
+        evidence = body if isinstance(body, str) and body.strip() else render_event_note(event)
         evidence_bytes = evidence.encode("utf-8")
         content_hash = hashlib.sha256(evidence_bytes).hexdigest()
         metadata = build_evidence_metadata(
@@ -1055,7 +1058,13 @@ def _sync_staged_note(
                 metadata=metadata,
                 status=str(event["payload"].get("status") or "staged"),
                 content_type="text/markdown",
-                client_capture_id=_client_capture_id(_event_source_external_id(event)),
+                # Include the event id (which embeds the content hash) so the
+                # server-side first-wins capture-id dedupe agrees with the
+                # evidence-key dedupe: new content for the same source gets a
+                # new note instead of silently returning the stale one.
+                client_capture_id=_client_capture_id(
+                    f"{_event_source_external_id(event)}:{event['event_id']}"
+                ),
             )
             index[evidence_key] = note
             action = "imported"
@@ -1068,7 +1077,12 @@ def _sync_staged_note(
         action = "synced"
         reason = ""
     draft_error = ""
-    if request_draft and note_id and not change_set_id and not dry_run:
+    if (
+        (request_draft or _event_requests_draft(event))
+        and note_id
+        and not change_set_id
+        and not dry_run
+    ):
         try:
             draft = client.create_analysis_graph_draft(note_id)
             change_set_id = str(draft.id)
@@ -1244,11 +1258,25 @@ def _event_metadata(event: Mapping[str, Any]) -> dict[str, NoteMetadataScalar]:
     for key in ("relative_path", "content_hash", "size_bytes", "manifest_content_hash"):
         if source.get(key) is not None:
             metadata[f"watch_{key}"] = source[key]
+    for key, value in source.items():
+        if str(key).startswith("git_") and isinstance(value, (str, bool, int, float)):
+            metadata[str(key)] = value
     host = payload.get("host") if isinstance(payload.get("host"), Mapping) else {}
     for key in CAPTURE_HOST_METADATA_KEYS:
         if host.get(key):
             metadata[key] = str(host[key])
     return metadata
+
+
+def _event_requests_draft(event: Mapping[str, Any]) -> bool:
+    """Reserved payload.request_draft key: this event wants a graph draft.
+
+    Lets a queuing command (e.g. `lt git snapshot --request-draft`) scope the
+    draft request to its own event, so draining the shared outbox does not
+    request LLM drafts for unrelated captures.
+    """
+
+    return bool(_json_mapping(event.get("payload") or {}).get("request_draft"))
 
 
 def _event_source_external_id(event: Mapping[str, Any]) -> str:
