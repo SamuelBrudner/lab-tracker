@@ -1,7 +1,13 @@
 # Guided Setup and Automatic Tracking — Design
 
-_Status: Phases 1–2 implemented (2026-07-01/02, epic `lab-tracker-stkn`,
-children .1–.7); Phases 3–4 designed, not built. Produced from a five-way
+_Status: Phases 1–3 implemented (2026-07-01/02, epic `lab-tracker-stkn`,
+children .1–.12); Phase 4 designed, not built. Phase 3 notes: the wizard is
+the generated `skills/lab-tracker-setup` skill (single-sourced from
+`lab_tracker.setup_guide`, drift-tested, installable via
+`--install-skills`, also served as `lab-tracker://setup-guide`); doctor
+drift is content-only (version bumps no longer cry wolf) and repairs point
+at `lt update`; `lt setup status` gained suggestions[] and `--brief`, wired
+into a scaffolded SessionStart hook. Produced from a five-way
 code exploration plus a three-design / three-judge review; each phase's
 implementation then passed a multi-lens adversarial review (18 and 20
 confirmed findings respectively, all fixed). The retained surface

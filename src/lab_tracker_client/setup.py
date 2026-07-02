@@ -142,13 +142,19 @@ def _harden_profile_permissions(path: Path) -> bool:
     return False
 
 
-def setup_status(target: str | Path = ".") -> JsonObject:
-    """Read-only inventory of server, profile, repo scaffold, watch, hpc, hooks."""
+def setup_status(target: str | Path = ".", *, brief: bool = False) -> JsonObject:
+    """Read-only inventory of server, profile, repo scaffold, watch, hpc, hooks.
+
+    ``brief`` reduces the payload for session hooks: one line when healthy, a
+    short advisory plus the suggestions when anything is missing or drifted.
+    Suggestions are non-imperative — they name what a command does; a person
+    decides whether it runs.
+    """
 
     root = Path(target).expanduser().resolve()
     profile = load_connection_profile()
     base_url, base_url_source = _resolve_base_url(profile)
-    return {
+    payload: JsonObject = {
         "command": "setup-status",
         "target": str(root),
         "server": {
@@ -169,7 +175,100 @@ def setup_status(target: str | Path = ".") -> JsonObject:
         "watch": _watch_status(root),
         "hpc": _hpc_status(root),
         "hooks": _hooks_status(root),
+        "skills": _skills_status(),
     }
+    payload["suggestions"] = _suggestions(payload)
+    if not brief:
+        return payload
+    suggestions = payload["suggestions"]
+    if suggestions:
+        brief_line = (
+            f"lab-tracker: {len(suggestions)} setup suggestion(s) — {suggestions[0]}"
+        )
+    else:
+        brief_line = "lab-tracker: capture is configured; server reachable."
+        if not payload["server"]["reachable"]:
+            brief_line = "lab-tracker: capture is configured; server currently unreachable."
+    return {
+        "command": "setup-status",
+        "brief": brief_line,
+        "suggestions": suggestions,
+    }
+
+
+def _suggestions(status: JsonObject) -> list[str]:
+    suggestions: list[str] = []
+    repo = status["repo"]
+    hooks = status["hooks"]
+    watch = status["watch"]
+    skills = status["skills"]
+    # Only when nothing configured the URL at all: an env- or profile-pinned
+    # server that is temporarily down is an outage, not a setup gap.
+    if not status["server"]["reachable"] and status["server"]["source"] == "default":
+        suggestions.append(
+            f"No Lab Tracker API responded at {status['server']['base_url']}; "
+            "`lab-tracker serve` starts a local instance and `lt setup connect` "
+            "records a lab server URL (`--yes` applies)."
+        )
+    if not repo["scaffold"][".mcp.json"]:
+        suggestions.append(
+            "`lt setup init` scaffolds the integration files here "
+            "(`--dry-run` previews)."
+        )
+    elif any(item.get("drifted") for item in repo["conventions"]):
+        suggestions.append(
+            "Managed blocks differ from the installed package; `lt update` "
+            "refreshes them (`--dry-run` previews)."
+        )
+    if not repo["lt_ids"]["project_id_bound"]:
+        suggestions.append(
+            "`lt project bind` records the project id in lt_ids.json, "
+            "creating the file when missing (`--yes` applies)."
+        )
+    if not watch.get("config_present") or not watch.get("watch_count"):
+        suggestions.append(
+            "`lt watch add <folder>` registers a results folder for capture."
+        )
+    if hooks.get("git_repo") and not hooks.get("managed_block_present"):
+        suggestions.append(
+            "`lt hooks install` enrolls this repository's commits "
+            "(`--yes` applies)."
+        )
+    if hooks.get("managed_block_present") and hooks.get("lt_path_exists") is False:
+        suggestions.append(
+            "The commit hook points at a missing lt executable; "
+            "`lt hooks install --yes` re-records the current path."
+        )
+    if skills.get("installed") and skills.get("up_to_date") is False:
+        suggestions.append(
+            "The installed lab-tracker-setup skill is stale; "
+            "`lt update --install-skills` refreshes it."
+        )
+    return suggestions
+
+
+def _skills_status() -> JsonObject:
+    from lab_tracker.cli import _setup_skill_path
+    from lab_tracker.setup_guide import (
+        setup_skill_markdown,
+        skill_content_without_version_line,
+    )
+
+    path = _setup_skill_path()
+    summary: JsonObject = {"path": str(path), "installed": path.exists()}
+    if summary["installed"]:
+        with suppress(Exception):
+            installed = path.read_text(encoding="utf-8")
+            generated = setup_skill_markdown()
+            # Staleness is a CONTENT verdict, mirroring doctor: a package
+            # bump with unchanged skill text must not cry wolf in every
+            # session's SessionStart hook. The raw version line stays
+            # informational.
+            summary["up_to_date"] = skill_content_without_version_line(
+                installed
+            ) == skill_content_without_version_line(generated)
+            summary["version_in_sync"] = installed == generated
+    return summary
 
 
 def _resolve_base_url(profile: dict[str, str]) -> tuple[str, str]:
@@ -281,14 +380,27 @@ def _hooks_status(root: Path) -> JsonObject:
     if hook_path is None:
         return {"git_repo": False}
     managed_block_present = False
+    content = ""
     with suppress(OSError, UnicodeDecodeError):
-        managed_block_present = HOOK_BLOCK_BEGIN in hook_path.read_text(encoding="utf-8")
-    return {
+        content = hook_path.read_text(encoding="utf-8")
+        managed_block_present = HOOK_BLOCK_BEGIN in content
+    summary: JsonObject = {
         "git_repo": True,
         "post_commit_path": str(hook_path),
         "post_commit_present": hook_path.exists(),
         "managed_block_present": managed_block_present,
     }
+    if managed_block_present:
+        # The venv-moved failure mode: the block's baked lt path no longer
+        # exists, so the hook dies silently on every commit.
+        from lab_tracker_client.hooks import _LT_LINE_PATTERN
+
+        match = _LT_LINE_PATTERN.search(content)
+        if match:
+            summary["lt_path"] = match.group("path")
+            with suppress(OSError):
+                summary["lt_path_exists"] = Path(match.group("path")).exists()
+    return summary
 
 
 def bind_project(

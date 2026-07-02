@@ -115,6 +115,11 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Show what would change without writing files.",
     )
+    update_parser.add_argument(
+        "--install-skills",
+        action="store_true",
+        help="Also refresh the lab-tracker-setup skill in ~/.claude/skills.",
+    )
     update_parser.set_defaults(func=_cmd_update, needs_client=False)
 
     _add_setup_parsers(subcommands)
@@ -269,6 +274,11 @@ def _add_setup_parsers(subcommands: argparse._SubParsersAction) -> None:
         help="Consumer repo path to inspect. Defaults to the current directory.",
     )
     status_parser.add_argument(
+        "--brief",
+        action="store_true",
+        help="One-line summary plus suggestions; sized for session hooks.",
+    )
+    status_parser.add_argument(
         "--fail-silent",
         action="store_true",
         help="Suppress errors so agent/session hooks never block.",
@@ -308,6 +318,14 @@ def _add_setup_parsers(subcommands: argparse._SubParsersAction) -> None:
         "--uninstall",
         action="store_true",
         help="Strip Lab Tracker managed blocks while preserving surrounding content.",
+    )
+    init_parser.add_argument(
+        "--install-skills",
+        action="store_true",
+        help=(
+            "Also render the lab-tracker-setup skill into ~/.claude/skills "
+            "(with --uninstall: remove it)."
+        ),
     )
     init_parser.set_defaults(func=_cmd_setup_init, needs_client=False)
 
@@ -866,7 +884,7 @@ def _cmd_watch_remove(args: argparse.Namespace) -> Any:
 
 
 def _cmd_setup_status(args: argparse.Namespace) -> Any:
-    return setup_helpers.setup_status(args.target)
+    return setup_helpers.setup_status(args.target, brief=args.brief)
 
 
 def _cmd_setup_init(args: argparse.Namespace) -> Any:
@@ -879,6 +897,7 @@ def _cmd_setup_init(args: argparse.Namespace) -> Any:
         yes=args.yes,
         dry_run=args.dry_run,
         uninstall=args.uninstall,
+        install_skills=args.install_skills,
     )
     payload = result.as_dict()
     payload["command"] = "setup-init"
@@ -1277,7 +1296,12 @@ def _cmd_doctor(args: argparse.Namespace) -> Any:
 def _cmd_update(args: argparse.Namespace) -> Any:
     from lab_tracker.cli import update_consumer_repo
 
-    result = update_consumer_repo(args.target, yes=args.yes, dry_run=args.dry_run)
+    result = update_consumer_repo(
+        args.target,
+        yes=args.yes,
+        dry_run=args.dry_run,
+        install_skills=args.install_skills,
+    )
     return result.as_dict()
 
 
