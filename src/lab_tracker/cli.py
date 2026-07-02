@@ -156,6 +156,10 @@ def init_consumer_repo(
             "Managed code-facing convention blocks are available with "
             "`lab_tracker init --yes`."
         )
+    result.offers.append(
+        "Bind a project id into lt_ids.json with `lt project bind` "
+        "(--dry-run previews the write)."
+    )
     return result
 
 
@@ -997,6 +1001,13 @@ def _agents_fragment() -> str:
         Notes are idempotent by the first non-blank line of the note body when the
         existing body is identical. Treat that first line as a stable marker; change
         it intentionally when you mean to create a new Lab Tracker note.
+
+        Guided setup lives on the `lt` CLI: `lt setup status` is a read-only
+        inventory of server reachability and what is configured in this repo.
+        Setup write commands take `--dry-run` previews (`lt setup init`,
+        `lt watch add`), and `lt setup connect`, `lt project bind`, and
+        `lt hooks install` also require `--yes`; suggest them to the user
+        rather than applying them unprompted.
 
         Configure the MCP server with the generated `.mcp.json`. It uses the portable
         `lt-mcp` command, so consumer repos should not hard-code local Lab Tracker
