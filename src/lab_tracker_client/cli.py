@@ -448,6 +448,12 @@ def _add_repo_parsers(subcommands: argparse._SubParsersAction) -> None:
         "--run",
         help="Run id. Defaults to LAB_TRACKER_REPO_RUN_ID, then the commit SHA.",
     )
+    report_parser.add_argument(
+        "--artifact",
+        action="append",
+        default=[],
+        help="Produced file to fingerprint as an artifact pointer. Repeatable.",
+    )
     report_parser.add_argument("--summary", help="Short summary for review.")
     report_parser.add_argument(
         "--fail-silent",
@@ -456,6 +462,24 @@ def _add_repo_parsers(subcommands: argparse._SubParsersAction) -> None:
         help="Exit quietly on any error (for git hooks; never blocks a commit).",
     )
     report_parser.set_defaults(func=_cmd_repo_report, needs_client=False)
+
+    finish_parser = repo_commands.add_parser(
+        "finish",
+        help="Record a finished analysis run with its produced artifacts.",
+    )
+    _add_capture_context_args(finish_parser)
+    finish_parser.add_argument(
+        "--run",
+        help="Run id. Defaults to LAB_TRACKER_REPO_RUN_ID, then the commit SHA.",
+    )
+    finish_parser.add_argument(
+        "--artifact",
+        action="append",
+        default=[],
+        help="Produced file to fingerprint as an artifact pointer. Repeatable.",
+    )
+    finish_parser.add_argument("--summary", help="Short run summary for review.")
+    finish_parser.set_defaults(func=_cmd_repo_finish, needs_client=False)
 
     status_parser = repo_commands.add_parser("status", help="Summarize local repo outbox state.")
     status_parser.add_argument("--config", help="Config path. Defaults to discovered config.")
@@ -509,23 +533,35 @@ def _cmd_repo_init(args: argparse.Namespace) -> Any:
 
 
 def _cmd_repo_report(args: argparse.Namespace) -> Any:
+    return _repo_capture_payload("repo-report", args, event_type="commit")
+
+
+def _cmd_repo_finish(args: argparse.Namespace) -> Any:
+    return _repo_capture_payload("repo-finish", args, event_type="finish")
+
+
+def _repo_capture_payload(command: str, args: argparse.Namespace, *, event_type: str) -> Any:
     config = repo_capture.load_config(config_path=args.config)
+    artifacts = [repo_capture.artifact_from_path(item) for item in args.artifact]
     event, path, action = repo_capture.capture_commit(
         config,
+        event_type=event_type,
         run_id=args.run,
         project_id=args.project,
         question_id=args.question,
         dataset_ids=args.dataset,
         tags=args.tag,
+        artifacts=artifacts,
         summary=args.summary,
     )
     return {
-        "command": "repo-report",
+        "command": command,
         "action": action,
         "run_id": event["run_id"],
         "event_type": event["event_type"],
         "git_commit": event["source"].get("git_commit", ""),
         "git_dirty": event["source"].get("git_dirty", False),
+        "artifact_count": len(event["artifacts"]),
         "event_path": str(path),
         "outbox": str(config.outbox_path()),
     }

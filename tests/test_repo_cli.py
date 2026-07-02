@@ -95,6 +95,50 @@ def test_repo_cli_report_without_config_raises(tmp_path, monkeypatch) -> None:
         lt_cli.main(["repo", "report"])
 
 
+def test_repo_cli_finish_with_artifacts(tmp_path, monkeypatch, capsys) -> None:
+    _clear_repo_env(monkeypatch)
+    _init_git_repo(tmp_path)
+    (tmp_path / "results.csv").write_bytes(b"a,b\n1,2\n")
+    monkeypatch.chdir(tmp_path)
+    lt_cli.main(["repo", "init", "--project", "project-1"])
+    capsys.readouterr()
+
+    lt_cli.main(
+        [
+            "repo",
+            "finish",
+            "--artifact",
+            "results.csv",
+            "--summary",
+            "Decoded stimulus identity.",
+        ]
+    )
+    payload = json.loads(capsys.readouterr().out)
+
+    assert payload["command"] == "repo-finish"
+    assert payload["event_type"] == "finish"
+    assert payload["artifact_count"] == 1
+    event = json.loads(
+        (tmp_path / ".lab-tracker" / "outbox" / "repo")
+        .glob("*.finish.*.json")
+        .__next__()
+        .read_text(encoding="utf-8")
+    )
+    assert event["artifacts"][0]["title"] == "results.csv"
+    assert event["artifacts"][0]["content_hash"].startswith("sha256:")
+    assert event["summary"] == "Decoded stimulus identity."
+
+
+def test_repo_cli_report_artifact_missing_file_raises(tmp_path, monkeypatch) -> None:
+    _clear_repo_env(monkeypatch)
+    _init_git_repo(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    lt_cli.main(["repo", "init", "--project", "project-1"])
+
+    with pytest.raises(LTValidationError, match="not found"):
+        lt_cli.main(["repo", "report", "--artifact", "missing.csv"])
+
+
 # --- hook installer ---------------------------------------------------------
 
 

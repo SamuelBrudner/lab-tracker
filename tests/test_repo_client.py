@@ -218,6 +218,76 @@ def test_make_event_without_git_falls_back(tmp_path, monkeypatch) -> None:
     assert event["source"]["git_dirty"] is False
 
 
+# --- artifacts --------------------------------------------------------------
+
+
+def test_artifact_from_path_fingerprints_file(tmp_path) -> None:
+    from lab_tracker_client.repo import artifact_from_path
+
+    out = tmp_path / "results" / "summary.csv"
+    out.parent.mkdir()
+    out.write_bytes(b"a,b\n1,2\n")
+
+    artifact = artifact_from_path(out, root=tmp_path, summary="Run output.")
+
+    import hashlib
+
+    assert artifact["uri"] == out.as_uri()
+    assert artifact["title"] == "results/summary.csv"
+    assert artifact["kind"] == "file"
+    assert artifact["summary"] == "Run output."
+    assert artifact["content_hash"] == "sha256:" + hashlib.sha256(b"a,b\n1,2\n").hexdigest()
+    assert artifact["size_bytes"] == len(b"a,b\n1,2\n")
+
+
+def test_artifact_from_path_missing_file_raises(tmp_path) -> None:
+    import pytest
+
+    from lab_tracker_client.client import LTValidationError
+    from lab_tracker_client.repo import artifact_from_path
+
+    with pytest.raises(LTValidationError, match="not found"):
+        artifact_from_path(tmp_path / "gone.csv")
+
+
+def test_finish_events_stay_distinct_per_run(tmp_path, monkeypatch) -> None:
+    """Two runs at the same commit must not merge into one finish event."""
+
+    _clear_repo_env(monkeypatch)
+    _init_git_repo(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    config = init_config(project_id="project-1")
+
+    _e1, path_1, action_1 = capture_commit(config, event_type="finish", summary="Run one.")
+    _e2, path_2, action_2 = capture_commit(config, event_type="finish", summary="Run two.")
+
+    assert (action_1, action_2) == ("captured", "captured")
+    assert path_1 != path_2
+    assert read_event(path_1)["summary"] == "Run one."
+    assert read_event(path_2)["summary"] == "Run two."
+
+
+def test_capture_with_artifacts_renders_pointer_section(tmp_path, monkeypatch) -> None:
+    from lab_tracker_client.repo import artifact_from_path
+
+    _clear_repo_env(monkeypatch)
+    _init_git_repo(tmp_path)
+    (tmp_path / "out.csv").write_bytes(b"x\n")
+    monkeypatch.chdir(tmp_path)
+    config = init_config(project_id="project-1")
+
+    event, _path, _action = capture_commit(
+        config,
+        event_type="finish",
+        artifacts=[artifact_from_path(tmp_path / "out.csv", root=tmp_path)],
+    )
+    note = render_event_note(event)
+
+    assert event["artifacts"][0]["content_hash"].startswith("sha256:")
+    assert "## Artifact Pointers" in note
+    assert "out.csv" in note
+
+
 # --- sync -----------------------------------------------------------------
 
 

@@ -1023,7 +1023,10 @@ def _git_output(root: Path, *args: str) -> str:
 
 
 def _default_event_id(event_type: str, source: Mapping[str, Any], commit: str) -> str:
-    if not commit:
+    # Only hook-style "commit" events are idempotent per commit; report/finish
+    # events describe a particular run, so two runs at the same commit must stay
+    # distinct events rather than merging into one.
+    if event_type != "commit" or not commit:
         return uuid.uuid4().hex
     remote = normalize_remote(str(source.get("repo_remote_url") or ""))
     seed = f"{event_type}:{remote}:{commit}"
@@ -1045,6 +1048,37 @@ def _default_summary(event_type: str, source: Mapping[str, Any]) -> str:
     where = f" on {branch}" if branch else ""
     target = short or "the working tree"
     return f"Captured repo {event_type} for {target}{where}."
+
+
+def artifact_from_path(
+    path: str | Path,
+    *,
+    root: str | Path | None = None,
+    summary: str | None = None,
+) -> JsonObject:
+    """Fingerprint a produced file as an artifact pointer (path + hash, no bytes).
+
+    Reuses the watch adapter's stability-sandwiched fingerprint so a file still
+    being written is refused rather than captured with a wrong hash. The hash is
+    ``sha256:``-prefixed, matching the resolver convention, so the pointer can
+    later be lifted into a verifiable ExternalArtifactReference (lt-81s6.8).
+    """
+
+    from lab_tracker_client.watch import observe_file
+
+    resolved_root = Path(root or Path.cwd()).expanduser().resolve()
+    resolved = Path(path).expanduser().resolve()
+    if not resolved.is_file():
+        raise LTValidationError(f"Artifact file not found: {resolved}")
+    observation = observe_file(resolved, root=resolved_root)
+    return {
+        "uri": observation.source_uri,
+        "kind": "file",
+        "title": observation.relative_path,
+        "summary": _optional_str(summary) or "",
+        "content_hash": f"sha256:{observation.content_hash}",
+        "size_bytes": observation.size_bytes,
+    }
 
 
 def _artifact_payload(value: Mapping[str, Any]) -> JsonObject:
