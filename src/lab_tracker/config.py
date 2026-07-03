@@ -38,6 +38,10 @@ class Settings(BaseSettings):
     auth_enabled: bool | None = None
     max_upload_bytes: int = 100 * 1024 * 1024
     graph_draft_provider: str = "openai"
+    graph_draft_background_enabled: bool = False
+    graph_draft_scheduler_enabled: bool = False
+    graph_draft_worker_poll_seconds: float = 5.0
+    graph_draft_scheduler_interval_seconds: float = 60.0
     public_base_url: str = ""
     openai_api_key: str = ""
     openai_model: str = "gpt-4o-mini"
@@ -97,6 +101,14 @@ class Settings(BaseSettings):
         if self.auth_rate_limit_window_seconds < 1:
             raise ValueError(
                 "LAB_TRACKER_AUTH_RATE_LIMIT_WINDOW_SECONDS must be at least 1."
+            )
+        if self.graph_draft_worker_poll_seconds <= 0:
+            raise ValueError(
+                "LAB_TRACKER_GRAPH_DRAFT_WORKER_POLL_SECONDS must be greater than 0."
+            )
+        if self.graph_draft_scheduler_interval_seconds <= 0:
+            raise ValueError(
+                "LAB_TRACKER_GRAPH_DRAFT_SCHEDULER_INTERVAL_SECONDS must be greater than 0."
             )
         return self
 

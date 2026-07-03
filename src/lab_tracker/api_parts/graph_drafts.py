@@ -137,8 +137,29 @@ class GraphDraftsApiMixin:
             resource_id_attr="run_id",
         )
 
+    def enqueue_graph_draft_batch_for_project(self, *args: Any, **kwargs: Any) -> Any:
+        return self._with_usage_event(
+            lambda: self.graph_drafts.enqueue_graph_draft_batch_for_project(*args, **kwargs),
+            verb=UsageEventVerb.CREATE,
+            resource_type=UsageEventResourceType.GRAPH_DRAFT_BATCH_RUN,
+            actor=kwargs.get("actor"),
+            resource_id_attr="run_id",
+        )
+
+    def process_next_graph_draft_batch_run(self, *args: Any, **kwargs: Any) -> Any:
+        return self.graph_drafts.process_next_graph_draft_batch_run(*args, **kwargs)
+
+    def execute_graph_draft_batch_run(self, *args: Any, **kwargs: Any) -> Any:
+        return self.graph_drafts.execute_graph_draft_batch_run(*args, **kwargs)
+
+    def get_graph_draft_batch_run(self, *args: Any, **kwargs: Any) -> Any:
+        return self.graph_drafts.get_graph_draft_batch_run(*args, **kwargs)
+
     def run_due_graph_draft_batches(self, *args: Any, **kwargs: Any) -> Any:
         return self.graph_drafts.run_due_graph_draft_batches(*args, **kwargs)
+
+    def enqueue_due_graph_draft_batches(self, *args: Any, **kwargs: Any) -> Any:
+        return self.graph_drafts.enqueue_due_graph_draft_batches(*args, **kwargs)
 
     def list_graph_draft_batch_runs(self, *args: Any, **kwargs: Any) -> Any:
         return self.graph_drafts.list_graph_draft_batch_runs(*args, **kwargs)

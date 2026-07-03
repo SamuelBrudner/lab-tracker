@@ -123,14 +123,17 @@ See [curation-states.md](curation-states.md).
 
 ### The daily review — AI drafts, a human confirms
 
-An external scheduler POSTs `/batches/run-due`; a per-project cadence (default
-18:00 local, an end-of-day "confirm the day's captures" ritual) decides which
-projects fire. The batch sweeps the day's staged notes into a `GraphChangeSet`
-of typed proposals — link this capture to a question, draft a note, suggest a
-sub-question, flag uncertainty — each with a rationale, a confidence, and source
-references back to the evidence. A terse capture like "Rig 2 Fly 12" inside a
-session window becomes legible prose; the same label with no anchor becomes a
-_clarification request_ rather than a fabricated finding.
+An optional in-process scheduler POST-equivalent runs on the Lab Tracker server
+and enqueues due batch jobs; an external scheduler can still call
+`/batches/run-due` as a deployment fallback. A per-(project, user) cadence
+(default 18:00 local, an end-of-day "confirm the day's captures" ritual) decides
+which reviews fire. Each due window is partitioned by staged-note author and
+becomes one `GraphChangeSet` assigned to that reviewer, with typed proposals —
+link this capture to a question, draft a note, suggest a sub-question, flag
+uncertainty — each carrying rationale, confidence, and source references back to
+the evidence. A terse capture like "Rig 2 Fly 12" inside a session window
+becomes legible prose; the same label with no anchor becomes a _clarification
+request_ rather than a fabricated finding.
 
 The scientist works **one review queue**: accept, edit, reject, or defer each
 proposal, or "revise with AI" by feeding back typed, dictated, or image
@@ -282,17 +285,19 @@ access edges — deliberately not an org chart, HR system, or identity provider.
 
 ## Deployment philosophy
 
-Lab Tracker is a plain synchronous web app with zero background machinery. _All_
-automation — the daily review, git-commit drafting, CI drafting — enters through
-ordinary authenticated HTTP POSTs fired by whatever scheduler the operator already
-has (cron, launchd, Windows Task Scheduler, git hooks, GitHub Actions, a Claude
-routine). The server makes dumb, frequent polling safe via compare-and-set claims
-and unique batch keys; the real per-project schedule lives in the database. Safe
-defaults are coded in: auth cannot be disabled outside a `local` environment,
-placeholder secret keys are rejected, and serving beyond loopback refuses to start
-with auth off. The animating goal is that **bench scientists never touch a
-terminal** — someone technical hosts one shared instance; everyone else opens a
-link. See [deployment-options.md](deployment-options.md) and
+Lab Tracker stays a request/response web app by default, with optional
+server-resident machinery only for the daily graph-draft review: a lifespan
+ticker enqueues due batch jobs and a worker executes draft generation as the
+`SYSTEM` principal. Operators can leave that machinery off and keep using
+ordinary authenticated HTTP POSTs from cron, launchd, Windows Task Scheduler, git
+hooks, GitHub Actions, or an assistant routine. Either way, the server makes
+dumb, frequent polling safe via compare-and-set claims and unique batch keys;
+the real per-(project, user) schedule lives in the database. Safe defaults are
+coded in: auth cannot be disabled outside a `local` environment, placeholder
+secret keys are rejected, and serving beyond loopback refuses to start with auth
+off. The animating goal is that **bench scientists never touch a terminal** —
+someone technical hosts one shared instance; everyone else opens a link. See
+[deployment-options.md](deployment-options.md) and
 [self-hosted-operations.md](self-hosted-operations.md).
 
 ## Deliberately out of scope

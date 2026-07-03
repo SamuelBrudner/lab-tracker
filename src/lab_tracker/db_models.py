@@ -439,6 +439,11 @@ class GraphChangeSetModel(Base):
         GUID,
         ForeignKey("users.user_id", ondelete="SET NULL"),
     )
+    review_assignee: Mapped[str | None] = mapped_column(String(255))
+    review_assignee_user_id: Mapped[UUID | None] = mapped_column(
+        GUID,
+        ForeignKey("users.user_id", ondelete="SET NULL"),
+    )
     created_at: Mapped[datetime] = mapped_column(UtcDateTime, default=_utc_now)
     updated_at: Mapped[datetime] = mapped_column(
         UtcDateTime,
@@ -535,7 +540,13 @@ class EntityVersionModel(Base):
 
 class GraphDraftBatchSettingsModel(Base):
     __tablename__ = "graph_draft_batch_settings"
-    __table_args__ = (UniqueConstraint("project_id", name="uq_graph_draft_batch_settings_project"),)
+    __table_args__ = (
+        UniqueConstraint(
+            "project_id",
+            "user_id",
+            name="uq_graph_draft_batch_settings_project_user",
+        ),
+    )
 
     settings_id: Mapped[UUID] = mapped_column(
         GUID,
@@ -546,6 +557,10 @@ class GraphDraftBatchSettingsModel(Base):
         GUID,
         ForeignKey("projects.project_id", ondelete="CASCADE"),
         nullable=False,
+    )
+    user_id: Mapped[UUID | None] = mapped_column(
+        GUID,
+        ForeignKey("users.user_id", ondelete="CASCADE"),
     )
     enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     cadence_minutes: Mapped[int] = mapped_column(Integer, nullable=False, default=24 * 60)
@@ -584,7 +599,9 @@ class GraphDraftBatchRunModel(Base):
     window_start: Mapped[datetime] = mapped_column(UtcDateTime, nullable=False)
     window_end: Mapped[datetime] = mapped_column(UtcDateTime, nullable=False)
     note_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    source_note_ids: Mapped[list[str]] = mapped_column(JSON, default=list)
     batch_key: Mapped[str] = mapped_column(String(120), nullable=False)
+    user_hint: Mapped[str | None] = mapped_column(Text)
     change_set_id: Mapped[UUID | None] = mapped_column(
         GUID,
         ForeignKey("graph_change_sets.change_set_id", ondelete="SET NULL"),
@@ -593,6 +610,11 @@ class GraphDraftBatchRunModel(Base):
     error_metadata: Mapped[dict[str, object]] = mapped_column(JSON, default=dict)
     created_by: Mapped[str | None] = mapped_column(String(255))
     created_by_user_id: Mapped[UUID | None] = mapped_column(
+        GUID,
+        ForeignKey("users.user_id", ondelete="SET NULL"),
+    )
+    review_assignee: Mapped[str | None] = mapped_column(String(255))
+    review_assignee_user_id: Mapped[UUID | None] = mapped_column(
         GUID,
         ForeignKey("users.user_id", ondelete="SET NULL"),
     )
@@ -1540,7 +1562,24 @@ Index("ix_question_refactors_created_by_user_id", QuestionRefactorModel.created_
 Index("ix_datasets_created_by_user_id", DatasetModel.created_by_user_id)
 Index("ix_notes_created_by_user_id", NoteModel.created_by_user_id)
 Index("ix_graph_change_sets_created_by_user_id", GraphChangeSetModel.created_by_user_id)
+Index("ix_graph_change_sets_review_assignee_user_id", GraphChangeSetModel.review_assignee_user_id)
 Index("ix_graph_draft_batch_runs_created_by_user_id", GraphDraftBatchRunModel.created_by_user_id)
+Index(
+    "ix_graph_draft_batch_runs_review_assignee_user_id",
+    GraphDraftBatchRunModel.review_assignee_user_id,
+)
+Index(
+    "ix_graph_draft_batch_settings_project_user",
+    GraphDraftBatchSettingsModel.project_id,
+    GraphDraftBatchSettingsModel.user_id,
+)
+Index(
+    "uq_graph_draft_batch_settings_project_default",
+    GraphDraftBatchSettingsModel.project_id,
+    unique=True,
+    sqlite_where=GraphDraftBatchSettingsModel.user_id.is_(None),
+    postgresql_where=GraphDraftBatchSettingsModel.user_id.is_(None),
+)
 Index("ix_sessions_created_by_user_id", SessionModel.created_by_user_id)
 Index("ix_analyses_executed_by_user_id", AnalysisModel.executed_by_user_id)
 Index("ix_claims_created_by_user_id", ClaimModel.created_by_user_id)

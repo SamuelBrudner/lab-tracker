@@ -57,8 +57,9 @@ research record:
   staged notes. Drafting may be note-scoped or batch-scoped, but every proposed
   operation requires human edit/accept/reject before commit through normal API
   validation.
-- Per-project graph-draft batch settings and run history for configured
-  cadence, run-now, and run-due drafting over staged notes.
+- Per-(project, user) graph-draft batch settings and run history for configured
+  cadence, run-now, and run-due drafting over staged notes, with a project-level
+  default row and `review_assignee` attribution on scheduled user batches.
 - Durable curation provenance that keeps the committed graph honest about
   itself: each accepted graph-draft operation records how it was accepted
   (`human_selected`, `bulk_accepted`, or `auto_accepted`) plus the accepting

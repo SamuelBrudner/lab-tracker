@@ -381,6 +381,7 @@ class GraphDraftMode(str, Enum):
 
 
 class GraphDraftBatchRunStatus(str, Enum):
+    PENDING = "pending"
     RUNNING = "running"
     SKIPPED = "skipped"
     READY = "ready"
@@ -609,6 +610,9 @@ class GraphChangeSet(_DomainModel):
     created_by: str | None = None
     created_by_user_id: UUID | None = None
     created_by_username: str | None = None
+    review_assignee: str | None = None
+    review_assignee_user_id: UUID | None = None
+    review_assignee_username: str | None = None
     updated_at: datetime = Field(default_factory=utc_now)
     submitted_at: datetime | None = None
     submitted_by: str | None = None
@@ -646,6 +650,7 @@ class GraphChangeSet(_DomainModel):
 class GraphDraftBatchSettings(_DomainModel):
     settings_id: UUID
     project_id: UUID
+    user_id: UUID | None = None
     enabled: bool = True
     cadence_minutes: int = 24 * 60
     run_at_local_time: str = "18:00"
@@ -664,7 +669,9 @@ class GraphDraftBatchRun(_DomainModel):
     window_start: datetime
     window_end: datetime
     note_count: int = 0
+    source_note_ids: list[UUID] = Field(default_factory=list)
     batch_key: str
+    user_hint: str | None = None
     change_set_id: UUID | None = None
     summary: str = ""
     error_metadata: dict[str, Any] = Field(default_factory=dict)
@@ -674,6 +681,8 @@ class GraphDraftBatchRun(_DomainModel):
     finished_at: datetime | None = None
     created_by: str | None = None
     created_by_user_id: UUID | None = None
+    review_assignee: str | None = None
+    review_assignee_user_id: UUID | None = None
 
 
 class Project(_DomainModel):
