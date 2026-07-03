@@ -574,19 +574,32 @@ def test_from_env_uses_mcp_base_url_fallback(monkeypatch: pytest.MonkeyPatch) ->
 
 def test_module_default_client_is_lazy(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("LAB_TRACKER_HTTP_TIMEOUT", "not-a-float")
-    client_module = importlib.reload(importlib.import_module("lab_tracker_client.client"))
+    client_module = importlib.import_module("lab_tracker_client.client")
+    # reload() re-executes the module in place, replacing every class object.
+    # Restore the original namespace afterwards or the rest of the session sees
+    # two generations of LTValidationError/LabTracker/... whose isinstance and
+    # except semantics silently diverge (late imports get the new classes while
+    # lab_tracker_client.repo/hpc/watch keep raising the old ones).
+    saved_namespace = dict(client_module.__dict__)
+    try:
+        client_module = importlib.reload(client_module)
 
-    calls = 0
+        calls = 0
 
-    def fail_from_env() -> LabTracker:
-        nonlocal calls
-        calls += 1
-        raise LTAPIError("constructed")
+        def fail_from_env() -> LabTracker:
+            nonlocal calls
+            calls += 1
+            raise LTAPIError("constructed")
 
-    monkeypatch.setattr(client_module, "_default_client_instance", None)
-    monkeypatch.setattr(client_module, "client_from_env", fail_from_env)
+        # Set directly (not via monkeypatch): its teardown runs after the
+        # finally below and would re-pollute the restored namespace.
+        client_module._default_client_instance = None
+        client_module.client_from_env = fail_from_env
 
-    assert calls == 0
-    with pytest.raises(LTAPIError, match="constructed"):
-        client_module.health()
-    assert calls == 1
+        assert calls == 0
+        with pytest.raises(LTAPIError, match="constructed"):
+            client_module.health()
+        assert calls == 1
+    finally:
+        client_module.__dict__.clear()
+        client_module.__dict__.update(saved_namespace)

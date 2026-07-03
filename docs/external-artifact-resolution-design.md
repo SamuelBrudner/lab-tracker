@@ -158,6 +158,33 @@ than silently feeding the agent the wrong file. This is the resolver-side
 complement to the cross-machine consolidation described in
 [`lab-experiment-documentation.md`](lab-experiment-documentation.md).
 
+## Recovering moved/renamed local artifacts
+
+The `content_hash` is not only the integrity gate — it is a location-independent
+identity that survives a rename. So when a local reference's file is *missing at
+its `uri`* (the researcher moved or renamed it), the local resolver can recover
+it instead of dead-ending at `UNRESOLVED`: it scans the resolver's already
+configured `allowed_roots` for a file whose recomputed digest matches the
+reference, and returns that file `VERIFIED`. The recovery detail records the path
+it was found at; the stored `uri` is **not** rewritten (recovery is read-only —
+auto-repairing the pointer is deferred).
+
+This never widens the trust or security surface:
+
+- **Integrity is unchanged.** A recovered file is verified by the same
+  re-hash-and-compare as any other resolve, so it is exactly as trustworthy as
+  one found at the `uri`; a same-named decoy with different bytes does not match.
+- **Never reads outside the allowed roots.** The scan walks only `allowed_roots`
+  and re-checks path containment (after symlink resolution) per candidate, so it
+  cannot become an oracle for probing arbitrary host files by hash.
+- **Opt-in and bounded.** Recovery is off unless
+  `LAB_TRACKER_RESOLVER_RECOVERY` is truthy *and* roots are configured. A
+  `RecoveryPolicy` budget (`max_files`, `max_bytes`, overridable via
+  `LAB_TRACKER_RESOLVER_RECOVERY_MAX_FILES` / `_MAX_BYTES`) caps the scan;
+  candidates that share the original basename are tried first so the common case
+  (a rename that kept the filename, or a moved parent directory) is cheap. When
+  nothing matches within budget the result is `UNRESOLVED` — identical to today.
+
 ## Read-surface integration
 
 Resolution is an **explicit follow-up call**, not something that bloats every
@@ -222,6 +249,11 @@ Shipped (`src/lab_tracker/artifact_resolution.py`, tested in
   adapter and falls back to `UNRESOLVED`.
 - ✅ `LocalFilesystemResolver` — `file://` and `local`/`local_fs` sources, with
   `allowed_roots` path-containment so resolution cannot read arbitrary host files.
+- ✅ Content-hash recovery of moved/renamed local artifacts — opt-in
+  (`LAB_TRACKER_RESOLVER_RECOVERY`), bounded by a `RecoveryPolicy`, scans only
+  `allowed_roots`, basename-first; a missing file whose bytes still exist under a
+  root resolves `VERIFIED` instead of `UNRESOLVED` (read-only; the `uri` is not
+  rewritten).
 - ✅ `HttpResolver` — `http(s)`, full-body verify with a `max_fetch_bytes` cap
   (oversized → `UNRESOLVED`, never uncertified bytes).
 - ✅ `RcloneResolver` — `rclone://<remote>/<path>`, the locked-in unifier for
