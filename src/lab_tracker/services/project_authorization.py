@@ -40,6 +40,25 @@ class ProjectAuthorizationPolicy(BaseService):
     def has_global_admin(self, actor: AuthContext | None) -> bool:
         return actor is not None and actor.role == Role.ADMIN
 
+    def require_interactive(self, actor: AuthContext | None, *, action: str) -> None:
+        """Reject non-interactive and unauthenticated principals at accept/commit gates.
+
+        A delegated service token or an automation principal (e.g. the
+        daily-review scheduler) may DRAFT graph proposals but must never accept
+        or commit them: only a person in the loop turns a proposal into a
+        committed graph edge. Pairs with :attr:`AuthContext.is_interactive`, and
+        is fail-closed: only an interactive human session (USER or DEVICE) is
+        admitted; SERVICE and SYSTEM principals and a missing (None) actor are
+        all rejected.
+        """
+
+        if actor is None or not actor.is_interactive:
+            raise AuthError(
+                f"{action} requires an interactive human session; service "
+                "tokens and automation principals may draft graph proposals "
+                "but not accept or commit them."
+            )
+
     def group_membership_role(
         self,
         group_id: UUID,

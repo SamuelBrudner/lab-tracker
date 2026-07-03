@@ -106,6 +106,17 @@ configuration reference for the exact environment variables.
 
 Full install, configuration, and deployment instructions live in the docs below — start with the [setup guide](docs/setup.md).
 
+**Connecting an analysis repo?** In any repo, with the package installed, a
+coding agent (or you) can bootstrap capture from one read-only command:
+
+```bash
+lt setup status   # read-only inventory + suggestions for what to set up next
+```
+
+It reports what is configured and names the consent-gated commands
+(`lt setup init`, `lt project bind`, `lt watch add`, `lt hooks install`)
+that close each gap; every write takes a `--dry-run` preview.
+
 ## What ships today
 
 What ships today is the minimum that preserves the core research record:

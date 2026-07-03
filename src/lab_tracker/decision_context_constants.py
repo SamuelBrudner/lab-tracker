@@ -54,6 +54,9 @@ MCP_SERVER_INSTRUCTIONS = " ".join(
         "Read lab-tracker://quickstart for setup.",
         "Code-facing conventions are available at lab-tracker://code-conventions; "
         "package text remains canonical.",
+        "When capture looks unconfigured or drifted, lab-tracker://setup-guide "
+        "describes the consent-gated guided-setup flow; read-only `lt setup "
+        "status` is safe to consult.",
     )
 )
 
@@ -84,6 +87,13 @@ def managed_claude_block() -> str:
             "If Lab Tracker is unavailable or ambiguous, say that explicitly and "
             "proceed without graph context. Do not create or mutate Lab Tracker "
             "records unless the user explicitly asks.",
+            "",
+            "If capture looks unconfigured or drifted here, `lt setup status` is a "
+            "read-only inventory that is safe to consult. Setup writes happen "
+            "through `lt` commands that all take a `--dry-run` preview "
+            "(`lt setup init`, `lt watch add`; `lt setup connect`, "
+            "`lt project bind`, and `lt hooks install` also require `--yes`); "
+            "suggest them to the user rather than applying them unprompted.",
             CLAUDE_BLOCK_END,
             "",
         ]
@@ -124,6 +134,13 @@ def code_facing_idioms(*, symbols: Iterable[str] | None = None) -> str:
         "",
         "Strip UUID-bearing citation tokens before external sharing unless the "
         "recipient is meant to see Lab Tracker-local identifiers.",
+        "",
+        "Guided setup lives on the `lt` CLI: `lt setup status` is a read-only "
+        "inventory of what is configured in a consumer repo. Setup write "
+        "commands take `--dry-run` previews (`lt setup init`, `lt watch add`), "
+        "and `lt setup connect`, `lt project bind`, and `lt hooks install` "
+        "also require `--yes`. Status and previews are safe to consult; a "
+        "person approves each applying command.",
     ]
     if {"savefig", "capture_figures"}.issubset(symbol_set):
         sections.extend(
