@@ -3222,7 +3222,10 @@ describe("App", () => {
 
     expect(await screen.findByRole("heading", { name: "Question Detail" })).toBeInTheDocument();
     fireEvent.click(await screen.findByRole("button", { name: "Refactor question" }));
-    fireEvent.change(screen.getByLabelText("Replacement question text"), {
+    // The refactor form mounts after the click's state update; gate on its first
+    // field with a retrying query (findBy*) before the synchronous field edits,
+    // or the whole form-fill races the render under parallel CI load.
+    fireEvent.change(await screen.findByLabelText("Replacement question text"), {
       target: { value: "Which ATF4 arbitration comparison is testable first?" },
     });
     fireEvent.change(screen.getByLabelText("Replacement type"), {
