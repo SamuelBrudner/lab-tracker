@@ -341,6 +341,14 @@ def _add_setup_parsers(subcommands: argparse._SubParsersAction) -> None:
         help="Also persist an access token (separate, explicit consent).",
     )
     connect_parser.add_argument(
+        "--keep-token",
+        action="store_true",
+        help=(
+            "Keep an existing stored token even if --base-url points at a "
+            "different server. Use only when the new URL is the same trusted instance."
+        ),
+    )
+    connect_parser.add_argument(
         "--token",
         help="Access token for --save-token. Defaults to LAB_TRACKER_ACCESS_TOKEN.",
     )
@@ -360,6 +368,60 @@ def _add_setup_parsers(subcommands: argparse._SubParsersAction) -> None:
         help="Consent to writing the machine-level connection profile.",
     )
     connect_parser.set_defaults(func=_cmd_setup_connect, needs_client=False)
+
+    switch_parser = setup_commands.add_parser(
+        "switch-server",
+        help="Switch this machine/repo to a different Lab Tracker API server.",
+    )
+    switch_parser.add_argument(
+        "--base-url",
+        required=True,
+        help="New Lab Tracker API base URL, such as https://host.ts.net or http://host:8000.",
+    )
+    switch_parser.add_argument(
+        "--target",
+        default=".",
+        help="Consumer repo path whose MCP config and managed hook should be updated.",
+    )
+    switch_parser.add_argument("--project", help="Default project UUID to persist.")
+    switch_parser.add_argument(
+        "--save-token",
+        action="store_true",
+        help="Also persist an access token for the new server.",
+    )
+    switch_parser.add_argument(
+        "--token",
+        help="Access token for --save-token. Defaults to LAB_TRACKER_ACCESS_TOKEN.",
+    )
+    switch_parser.add_argument(
+        "--keep-token",
+        action="store_true",
+        help=(
+            "Keep an existing stored token for the new URL. Use only when the "
+            "new URL is the same trusted graph instance."
+        ),
+    )
+    switch_parser.add_argument(
+        "--no-repo",
+        action="store_true",
+        help="Only update the machine profile; leave repo MCP config files unchanged.",
+    )
+    switch_parser.add_argument(
+        "--no-hooks",
+        action="store_true",
+        help="Do not refresh an already-installed managed git hook.",
+    )
+    switch_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Show profile and repo diffs without writing.",
+    )
+    switch_parser.add_argument(
+        "--yes",
+        action="store_true",
+        help="Consent to writing the profile and selected repo files.",
+    )
+    switch_parser.set_defaults(func=_cmd_setup_switch_server, needs_client=False)
 
 
 def _add_project_parsers(subcommands: argparse._SubParsersAction) -> None:
@@ -910,6 +972,8 @@ def _cmd_setup_connect(args: argparse.Namespace) -> Any:
             "lt setup connect writes the machine-level connection profile; "
             "pass --yes to consent or --dry-run to preview."
         )
+    if args.keep_token and args.save_token:
+        raise SystemExit("--keep-token cannot be combined with --save-token.")
     if args.uninstall:
         return setup_helpers.delete_connection_profile(dry_run=args.dry_run)
     token = None
@@ -925,10 +989,42 @@ def _cmd_setup_connect(args: argparse.Namespace) -> Any:
         base_url=args.base_url,
         default_project_id=args.project,
         access_token=token,
+        keep_existing_token=args.keep_token,
         dry_run=args.dry_run,
     )
     if args.base_url:
         payload["server_reachable"] = setup_helpers.probe_health(args.base_url)
+    return payload
+
+
+def _cmd_setup_switch_server(args: argparse.Namespace) -> Any:
+    if not (args.yes or args.dry_run):
+        raise SystemExit(
+            "lt setup switch-server writes the connection profile and repo config; "
+            "pass --yes to consent or --dry-run to preview."
+        )
+    if args.keep_token and args.save_token:
+        raise SystemExit("--keep-token cannot be combined with --save-token.")
+    token = None
+    if args.save_token:
+        token = args.token or os.getenv("LAB_TRACKER_ACCESS_TOKEN")
+        if not token:
+            raise SystemExit(
+                "--save-token needs --token or LAB_TRACKER_ACCESS_TOKEN in the environment."
+            )
+    elif args.token:
+        raise SystemExit("--token persists only with explicit --save-token consent.")
+    payload = setup_helpers.switch_server(
+        base_url=args.base_url,
+        target=args.target,
+        default_project_id=args.project,
+        access_token=token,
+        keep_existing_token=args.keep_token,
+        update_repo=not args.no_repo,
+        update_hooks=not args.no_hooks,
+        dry_run=args.dry_run,
+    )
+    payload["server_reachable"] = setup_helpers.probe_health(args.base_url)
     return payload
 
 

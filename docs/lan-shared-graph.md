@@ -99,5 +99,20 @@ $env:LAB_TRACKER_MCP_BASE_URL = "http://<lan-ip>:8000"
 When authentication is enabled, also set `LAB_TRACKER_MCP_USERNAME` and
 `LAB_TRACKER_MCP_PASSWORD` in that client environment.
 
+## Switch a Client to Another Server
+
+When the same graph moves to a different workstation, LAN IP, or hosted URL, use
+the guided switch instead of hand-editing profile and MCP files:
+
+```bash
+lt setup switch-server --base-url "http://<new-host-or-ip>:8000" --target /path/to/repo --dry-run
+lt setup switch-server --base-url "http://<new-host-or-ip>:8000" --target /path/to/repo --yes
+```
+
+The command updates the machine connection profile, generated repo MCP config
+files, and an existing managed git hook. A token saved for the old URL is not
+carried to the new URL unless you explicitly provide a new one with
+`--save-token` or choose `--keep-token` for a trusted same-instance move.
+
 For phone pairing and capture details, see
 [`docs/phone-capture-quickstart.md`](phone-capture-quickstart.md).

@@ -37,6 +37,19 @@ JsonObject = dict[str, Any]
 
 PROFILE_KEYS = ("base_url", "default_project_id", "access_token")
 _HEALTH_PROBE_TIMEOUT_SECONDS = 2.0
+_MCP_CONFIG_TARGETS = (
+    (Path(".mcp.json"), "mcpServers"),
+    (Path(".cursor") / "mcp.json", "mcpServers"),
+    (Path(".vscode") / "mcp.json", "servers"),
+    (Path("mcp.visualstudio.json"), "servers"),
+)
+_MCP_SECRET_ENV_KEYS = (
+    "LAB_TRACKER_ACCESS_TOKEN",
+    "LAB_TRACKER_AUTH_SECRET_KEY",
+    "LAB_TRACKER_MCP_API_KEY",
+    "LAB_TRACKER_MCP_PASSWORD",
+    "LAB_TRACKER_PASSWORD",
+)
 
 _SCAFFOLD_FILES = (
     ".mcp.json",
@@ -53,6 +66,7 @@ def save_connection_profile(
     base_url: str | None = None,
     default_project_id: str | None = None,
     access_token: str | None = None,
+    keep_existing_token: bool = False,
     dry_run: bool = False,
 ) -> JsonObject:
     """Merge the provided values into the profile file and harden permissions.
@@ -64,11 +78,23 @@ def save_connection_profile(
     path = connection_profile_path()
     existing_text = path.read_text(encoding="utf-8") if path.exists() else ""
     profile = load_connection_profile()
+    existing_base_url = profile.get("base_url")
+    had_token = "access_token" in profile
+    token_removed = False
     updates = {
         "base_url": base_url,
         "default_project_id": default_project_id,
         "access_token": access_token,
     }
+    if (
+        base_url is not None
+        and access_token is None
+        and had_token
+        and not keep_existing_token
+        and _base_url_changed(existing_base_url, base_url)
+    ):
+        profile.pop("access_token", None)
+        token_removed = True
     for key, value in updates.items():
         if value is not None and value.strip():
             profile[key] = value.strip()
@@ -79,6 +105,7 @@ def save_connection_profile(
         "dry_run": dry_run,
         "stored_keys": sorted(profile),
         "has_token": "access_token" in profile,
+        "access_token_removed": token_removed,
         "diff": _text_diff(
             path,
             _redact_profile_text(existing_text),
@@ -102,6 +129,145 @@ def save_connection_profile(
     tmp_path.replace(path)
     payload["permissions_hardened"] = _harden_profile_permissions(path)
     return payload
+
+
+def switch_server(
+    *,
+    base_url: str,
+    target: str | Path = ".",
+    default_project_id: str | None = None,
+    access_token: str | None = None,
+    keep_existing_token: bool = False,
+    update_repo: bool = True,
+    update_hooks: bool = True,
+    dry_run: bool = False,
+) -> JsonObject:
+    """Switch this machine/repo to a new Lab Tracker API server URL."""
+
+    normalized_base_url = base_url.strip().rstrip("/")
+    if not normalized_base_url:
+        raise LTValidationError("Server base URL cannot be empty.")
+    root = Path(target).expanduser().resolve()
+    profile = save_connection_profile(
+        base_url=normalized_base_url,
+        default_project_id=default_project_id,
+        access_token=access_token,
+        keep_existing_token=keep_existing_token,
+        dry_run=dry_run,
+    )
+    payload: JsonObject = {
+        "command": "setup-switch-server",
+        "target": str(root),
+        "base_url": normalized_base_url,
+        "dry_run": dry_run,
+        "profile": profile,
+    }
+    if update_repo:
+        payload["repo_mcp_configs"] = update_repo_mcp_base_url(
+            root,
+            normalized_base_url,
+            dry_run=dry_run,
+        )
+    else:
+        payload["repo_mcp_configs"] = {"skipped": [{"reason": "disabled"}]}
+    if update_hooks:
+        payload["hooks"] = update_managed_hook_base_url(
+            root,
+            normalized_base_url,
+            dry_run=dry_run,
+        )
+    else:
+        payload["hooks"] = {"skipped": [{"reason": "disabled"}]}
+    return payload
+
+
+def update_repo_mcp_base_url(
+    target: str | Path,
+    base_url: str,
+    *,
+    dry_run: bool = False,
+) -> JsonObject:
+    root = Path(target).expanduser().resolve()
+    summary: JsonObject = {
+        "target": str(root),
+        "dry_run": dry_run,
+        "updated": [],
+        "up_to_date": [],
+        "skipped": [],
+        "diffs": {},
+    }
+    for relative_path, server_key in _MCP_CONFIG_TARGETS:
+        path = root / relative_path
+        path_label = str(path)
+        if not path.exists():
+            summary["skipped"].append({"path": path_label, "reason": "missing"})
+            continue
+        existing_text = path.read_text(encoding="utf-8")
+        try:
+            payload = json.loads(existing_text)
+        except json.JSONDecodeError:
+            summary["skipped"].append({"path": path_label, "reason": "invalid-json"})
+            continue
+        env = _lab_tracker_mcp_env(payload, server_key)
+        if env is None:
+            summary["skipped"].append({"path": path_label, "reason": "unsupported-shape"})
+            continue
+        old_base_url = str(env.get("LAB_TRACKER_MCP_BASE_URL") or "")
+        if old_base_url.rstrip("/") == base_url.rstrip("/"):
+            summary["up_to_date"].append(path_label)
+            continue
+        env["LAB_TRACKER_MCP_BASE_URL"] = base_url.rstrip("/")
+        proposed_text = json.dumps(payload, indent=2) + "\n"
+        summary["diffs"][path_label] = _text_diff(
+            path,
+            _redact_mcp_config_text(existing_text),
+            _redact_mcp_config_text(proposed_text),
+        )
+        summary["updated"].append(
+            {
+                "path": path_label,
+                "old_base_url": old_base_url,
+                "new_base_url": base_url.rstrip("/"),
+            }
+        )
+        if not dry_run:
+            path.write_text(proposed_text, encoding="utf-8")
+    return summary
+
+
+def update_managed_hook_base_url(
+    target: str | Path,
+    base_url: str,
+    *,
+    dry_run: bool = False,
+) -> JsonObject:
+    import lab_tracker_client.hooks as hook_install
+
+    try:
+        status = hook_install.hook_status(repo=target)
+    except Exception as exc:  # noqa: BLE001 - hook refresh is auxiliary to server switching.
+        return {"skipped": [{"reason": "unavailable", "detail": str(exc)}]}
+    if status.get("markers_unpaired"):
+        return {
+            "skipped": [
+                {
+                    "reason": "unpaired-managed-markers",
+                    "hook_path": status.get("hook_path"),
+                }
+            ]
+        }
+    if not status.get("managed_block_present"):
+        return {
+            "skipped": [
+                {
+                    "reason": "no-managed-hook",
+                    "hook_path": status.get("hook_path"),
+                }
+            ]
+        }
+    if str(status.get("baked_base_url") or "").rstrip("/") == base_url.rstrip("/"):
+        return {"up_to_date": [status.get("hook_path")]}
+    return hook_install.install_hook(repo=target, base_url=base_url.rstrip("/"), dry_run=dry_run)
 
 
 def delete_connection_profile(*, dry_run: bool = False) -> JsonObject:
@@ -517,3 +683,33 @@ def _redact_profile_text(text: str) -> str:
         r"\1***redacted***\2",
         text,
     )
+
+
+def _base_url_changed(existing_base_url: str | None, new_base_url: str) -> bool:
+    if not existing_base_url:
+        return True
+    return existing_base_url.rstrip("/") != new_base_url.rstrip("/")
+
+
+def _lab_tracker_mcp_env(payload: Any, server_key: str) -> dict[str, Any] | None:
+    if not isinstance(payload, dict):
+        return None
+    servers = payload.get(server_key)
+    if not isinstance(servers, dict):
+        return None
+    lab_tracker = servers.get("lab-tracker")
+    if not isinstance(lab_tracker, dict):
+        return None
+    env = lab_tracker.get("env")
+    return env if isinstance(env, dict) else None
+
+
+def _redact_mcp_config_text(text: str) -> str:
+    redacted = text
+    for key in _MCP_SECRET_ENV_KEYS:
+        redacted = re.sub(
+            rf'("{re.escape(key)}"\s*:\s*")[^"]*(")',
+            r"\1***redacted***\2",
+            redacted,
+        )
+    return redacted

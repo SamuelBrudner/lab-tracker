@@ -148,9 +148,11 @@ def code_facing_idioms(*, symbols: Iterable[str] | None = None) -> str:
         "Guided setup lives on the `lt` CLI: `lt setup status` is a read-only "
         "inventory of what is configured in a consumer repo. Setup write "
         "commands take `--dry-run` previews (`lt setup init`, `lt watch add`), "
-        "and `lt setup connect`, `lt project bind`, and `lt hooks install` "
-        "also require `--yes`. Status and previews are safe to consult; a "
-        "person approves each applying command.",
+        "and `lt setup connect`, `lt setup switch-server`, `lt project bind`, "
+        "and `lt hooks install` also require `--yes`. Status and previews are "
+        "safe to consult; a person approves each applying command. Use "
+        "`lt setup switch-server --base-url <url> --target <repo>` when a graph "
+        "instance moves to another workstation or hosted URL.",
     ]
     if {"savefig", "capture_figures"}.issubset(symbol_set):
         sections.extend(

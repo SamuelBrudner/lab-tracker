@@ -368,6 +368,58 @@ def test_hooks_install_upgrades_legacy_ps1_block_in_place(git_repo, capsys) -> N
     assert status["baked_project_id"] == "legacy-project"
 
 
+def test_setup_switch_server_updates_existing_managed_hook(git_repo, capsys) -> None:
+    lt_cli.main(
+        [
+            "hooks",
+            "install",
+            "--repo",
+            str(git_repo),
+            "--project",
+            "p-1",
+            "--base-url",
+            "http://old-lab:8000",
+            "--yes",
+        ]
+    )
+    payload = json.loads(capsys.readouterr().out)
+    hook_path = Path(payload["hook_path"])
+
+    lt_cli.main(
+        [
+            "setup",
+            "switch-server",
+            "--target",
+            str(git_repo),
+            "--base-url",
+            "http://new-lab:8000",
+            "--dry-run",
+            "--no-repo",
+        ]
+    )
+    dry_payload = json.loads(capsys.readouterr().out)
+    assert "http://new-lab:8000" in dry_payload["hooks"]["diff"]
+    assert "http://old-lab:8000" in hook_path.read_text(encoding="utf-8")
+
+    lt_cli.main(
+        [
+            "setup",
+            "switch-server",
+            "--target",
+            str(git_repo),
+            "--base-url",
+            "http://new-lab:8000",
+            "--yes",
+            "--no-repo",
+        ]
+    )
+    apply_payload = json.loads(capsys.readouterr().out)
+    assert apply_payload["hooks"]["action"] == "updated"
+    content = hook_path.read_text(encoding="utf-8")
+    assert 'LAB_TRACKER_BASE_URL="${LAB_TRACKER_BASE_URL:-http://new-lab:8000}"' in content
+    assert 'LAB_TRACKER_PROJECT_ID="${LAB_TRACKER_PROJECT_ID:-p-1}"' in content
+
+
 def test_hooks_refuse_unpaired_markers(git_repo) -> None:
     hook_path = git_repo / ".git" / "hooks" / "post-commit"
     hook_path.parent.mkdir(parents=True, exist_ok=True)

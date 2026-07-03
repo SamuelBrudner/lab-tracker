@@ -183,6 +183,37 @@ def test_setup_connect_persists_token_only_with_save_token(config_home, capsys) 
     assert not (config_home / "config.json").exists()
 
 
+def test_setup_connect_clears_token_when_base_url_changes(config_home, capsys) -> None:
+    lt_cli.main(
+        [
+            "setup",
+            "connect",
+            "--base-url",
+            "http://old-lab:8000",
+            "--save-token",
+            "--token",
+            "old-token",
+            "--yes",
+        ]
+    )
+    capsys.readouterr()
+
+    lt_cli.main(
+        [
+            "setup",
+            "connect",
+            "--base-url",
+            "http://new-lab:8000",
+            "--yes",
+        ]
+    )
+    payload = json.loads(capsys.readouterr().out)
+    profile = json.loads((config_home / "config.json").read_text(encoding="utf-8"))
+
+    assert payload["access_token_removed"] is True
+    assert profile == {"base_url": "http://new-lab:8000"}
+
+
 def test_setup_connect_never_leaks_a_previously_stored_token(config_home, capsys) -> None:
     lt_cli.main(["setup", "connect", "--save-token", "--token", "stored-secret", "--yes"])
     capsys.readouterr()
@@ -198,6 +229,97 @@ def test_setup_connect_never_leaks_a_previously_stored_token(config_home, capsys
     assert "stored-secret" not in json.dumps(apply_payload)
     profile = json.loads((config_home / "config.json").read_text(encoding="utf-8"))
     assert profile["access_token"] == "stored-secret"
+
+
+def test_setup_switch_server_updates_profile_and_repo_mcp_configs(
+    config_home, tmp_path, capsys
+) -> None:
+    repo = tmp_path / "consumer"
+    lt_cli.main(["setup", "init", "--target", str(repo)])
+    capsys.readouterr()
+
+    lt_cli.main(
+        [
+            "setup",
+            "switch-server",
+            "--target",
+            str(repo),
+            "--base-url",
+            "http://lab-host:8000",
+            "--project",
+            "project-1",
+            "--yes",
+        ]
+    )
+    payload = json.loads(capsys.readouterr().out)
+
+    assert payload["command"] == "setup-switch-server"
+    assert payload["profile"]["access_token_removed"] is False
+    assert sorted(item["path"] for item in payload["repo_mcp_configs"]["updated"]) == [
+        str(repo / ".cursor" / "mcp.json"),
+        str(repo / ".mcp.json"),
+    ]
+    profile = json.loads((config_home / "config.json").read_text(encoding="utf-8"))
+    assert profile == {
+        "base_url": "http://lab-host:8000",
+        "default_project_id": "project-1",
+    }
+    for path in (repo / ".mcp.json", repo / ".cursor" / "mcp.json"):
+        config = json.loads(path.read_text(encoding="utf-8"))
+        env = config["mcpServers"]["lab-tracker"]["env"]
+        assert env["LAB_TRACKER_MCP_BASE_URL"] == "http://lab-host:8000"
+
+
+def test_setup_switch_server_dry_run_redacts_repo_mcp_secrets(
+    config_home, tmp_path, capsys
+) -> None:
+    repo = tmp_path / "consumer"
+    repo.mkdir()
+    vscode = repo / ".vscode" / "mcp.json"
+    vscode.parent.mkdir()
+    vscode.write_text(
+        json.dumps(
+            {
+                "servers": {
+                    "lab-tracker": {
+                        "type": "stdio",
+                        "command": "lt-mcp",
+                        "env": {
+                            "LAB_TRACKER_MCP_BASE_URL": "http://old-lab:8000",
+                            "LAB_TRACKER_MCP_API_KEY": "secret-token",
+                            "LAB_TRACKER_MCP_PASSWORD": "secret-password",
+                        },
+                    }
+                }
+            },
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    lt_cli.main(
+        [
+            "setup",
+            "switch-server",
+            "--target",
+            str(repo),
+            "--base-url",
+            "http://new-lab:8000",
+            "--dry-run",
+            "--no-hooks",
+        ]
+    )
+    payload = json.loads(capsys.readouterr().out)
+    payload_text = json.dumps(payload)
+
+    assert "secret-token" not in payload_text
+    assert "secret-password" not in payload_text
+    assert "http://new-lab:8000" in payload_text
+    assert not (config_home / "config.json").exists()
+    config = json.loads(vscode.read_text(encoding="utf-8"))
+    env = config["servers"]["lab-tracker"]["env"]
+    assert env["LAB_TRACKER_MCP_BASE_URL"] == "http://old-lab:8000"
 
 
 def test_setup_status_is_read_only_and_reports_repo_state(

@@ -1,6 +1,6 @@
 ---
 name: lab-tracker-setup
-description: Guide a user through setting up Lab Tracker capture in a consumer repo or on a new machine. Use when the user asks to set up Lab Tracker, connect a repo, configure watch folders, enroll commit hooks, bind a project, or when `lt setup status` / a session hook reports unconfigured or drifted capture. Covers the consent-gated `lt` setup verbs and their choreography.
+description: Guide a user through setting up Lab Tracker capture in a consumer repo or on a new machine. Use when the user asks to set up Lab Tracker, connect a repo, switch the Lab Tracker server URL, configure watch folders, enroll commit hooks, bind a project, or when `lt setup status` / a session hook reports unconfigured or drifted capture. Covers the consent-gated `lt` setup verbs and their choreography.
 allowed-tools: "Read,Bash(lt setup status:*),Bash(lt doctor:*)"
 version: "0.1.0"
 compatible-with: claude-code,codex
@@ -32,8 +32,8 @@ short, consent-gated sequence on the `lt` CLI.
 - Every write command below takes a `--dry-run` preview; previews are
   safe to show.
 - A person approves each applying command. `lt setup connect`,
-  `lt project bind`, and `lt hooks install` additionally require an
-  explicit `--yes`.
+  `lt setup switch-server`, `lt project bind`, and `lt hooks install`
+  additionally require an explicit `--yes`.
 - One command per approval; the diff or preview is shown first.
 - Access tokens are minted by a person in the Lab Tracker web app and
   are never relayed through an agent.
@@ -52,16 +52,22 @@ short, consent-gated sequence on the `lt` CLI.
    `~/.lab-tracker/config.json` so hooks and schedulers work without
    per-shell environment variables. Token storage is a separate
    consent (`--save-token`).
-4. **Repo scaffolding** — `lt setup init` writes the integration files
+4. **Server moves** — when the graph moves to another workstation or
+   hosted URL, `lt setup switch-server --base-url <url> --target <repo>`
+   updates the profile, repo MCP config, and any existing managed git
+   hook in one previewable step. Stored tokens are not carried to the
+   new URL unless the user explicitly passes `--save-token` or
+   `--keep-token`.
+5. **Repo scaffolding** — `lt setup init` writes the integration files
    (MCP config, prompt hooks, `lt_ids.json`); `lt update` refreshes
    them after a package upgrade.
-5. **Project binding** — `lt project bind --name <project> --yes`
+6. **Project binding** — `lt project bind --name <project> --yes`
    resolves or creates the project and records its id in
    `lt_ids.json` (`--create` when it does not exist yet).
-6. **Watch folders** — `lt watch add <folder>` registers a results
+7. **Watch folders** — `lt watch add <folder>` registers a results
    folder; `lt watch scan` and `lt watch sync` capture and upload on
    demand or from a scheduler.
-7. **Commit hooks** — `lt hooks install --yes` enrolls the current
+8. **Commit hooks** — `lt hooks install --yes` enrolls the current
    repository: each commit queues durable evidence that syncs when
    the server is reachable. Repos are enrolled one consented command
    at a time.
@@ -89,4 +95,4 @@ after package upgrades, and `lt update` is the refresh path.
 If Lab Tracker is unreachable and the user does not operate a server, point
 them at whoever runs their lab's instance instead of standing one up ad hoc.
 
-<!-- lab-tracker-setup-guide version=0.1.0 sha256=0442c3f0d6df -->
+<!-- lab-tracker-setup-guide version=0.1.0 sha256=a78f2ebb6525 -->
