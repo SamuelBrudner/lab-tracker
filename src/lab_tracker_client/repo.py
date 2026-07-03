@@ -578,6 +578,23 @@ def install_post_commit_hook(
                 f"Existing post-commit hook is not UTF-8 text: {hook_path}. "
                 "Fix or remove it, then re-run."
             ) from exc
+        # hooks.py imports this module at top level, so import lazily here.
+        from lab_tracker_client.hooks import HOOK_BLOCK_BEGIN as DRAFT_HOOK_BLOCK_BEGIN
+
+        if (
+            DRAFT_HOOK_BLOCK_BEGIN in existing
+            and HOOK_BEGIN_MARKER not in existing  # updating our own block is fine
+            and not force
+        ):
+            # Both Lab Tracker capture hooks in one repo record two staged
+            # notes per commit (lt-81s6.17). One adapter per repo unless forced.
+            raise LTValidationError(
+                "This repo already has the 'lt git snapshot' capture hook "
+                "installed (GRAPH DRAFT block). Running both capture hooks "
+                "records every commit twice. Remove that block (lt hooks "
+                "uninstall) first, or pass --force only if you deliberately "
+                "want both."
+            )
         has_begin = HOOK_BEGIN_MARKER in existing
         has_end = HOOK_END_MARKER in existing
         if has_begin and has_end:
