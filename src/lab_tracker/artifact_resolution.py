@@ -733,6 +733,14 @@ class RcloneResolver(ArtifactResolver):
     The whole object is fetched (``rclone cat``) to certify its hash, so its size
     is checked first (``rclone size``) and an object larger than
     ``max_fetch_bytes`` is refused as UNRESOLVED rather than downloaded.
+
+    ``allowed_remotes`` — ``None`` means unrestricted (library default); a list
+    restricts resolution to those rclone remote *names*, and anything else
+    resolves UNRESOLVED before any rclone subprocess runs. Without it, a
+    reference can drive server-side ``rclone cat`` against ANY remote in the
+    host's rclone config. ``registry_from_env`` denies all remotes unless
+    ``LAB_TRACKER_RCLONE_ALLOWED_REMOTES`` is set — the same opt-in posture as
+    the local resolver's allowed roots and the git resolver's remote allowlist.
     """
 
     def __init__(
@@ -740,13 +748,22 @@ class RcloneResolver(ArtifactResolver):
         *,
         runner: RcloneRunner | None = None,
         binary: str = "rclone",
+        allowed_remotes: Sequence[str] | None = None,
         max_fetch_bytes: int = DEFAULT_MAX_FETCH_BYTES,
     ) -> None:
         self._runner = runner or _subprocess_rclone_runner(binary)
+        self._allowed_remotes = (
+            None if allowed_remotes is None else list(allowed_remotes)
+        )
         self._max_fetch_bytes = max_fetch_bytes
 
     def can_resolve(self, ref: ExternalArtifactReference) -> bool:
         return urlsplit(ref.uri).scheme.lower() == "rclone"
+
+    def _remote_allowed(self, remote: str) -> bool:
+        if self._allowed_remotes is None:
+            return True
+        return remote in self._allowed_remotes
 
     def resolve(
         self,
@@ -770,6 +787,11 @@ class RcloneResolver(ArtifactResolver):
         target = self._rclone_target(ref.uri)
         if target is None:
             return _unresolved(ref, detail="Reference URI is not an rclone locator.")
+        remote_name = target.partition(":")[0]
+        if not self._remote_allowed(remote_name):
+            return _unresolved(
+                ref, detail="Remote is not in the rclone resolver allowlist."
+            )
 
         try:
             size = self._object_size(target)
@@ -1191,6 +1213,7 @@ def default_registry(
     *,
     allowed_roots: Sequence[str | Path] | None = None,
     recovery: RecoveryPolicy | None = None,
+    rclone_allowed_remotes: Sequence[str] | None = None,
     git_allowed_remotes: Sequence[str] | None = None,
     git_cache_root: str | Path | None = None,
     git_max_cache_bytes: int | None = None,
@@ -1209,7 +1232,7 @@ def default_registry(
         [
             LocalFilesystemResolver(allowed_roots=allowed_roots, recovery=recovery),
             HttpResolver(),
-            RcloneResolver(),
+            RcloneResolver(allowed_remotes=rclone_allowed_remotes),
             GitResolver(
                 allowed_remotes=git_allowed_remotes,
                 cache_root=git_cache_root,
@@ -1231,6 +1254,13 @@ LAB_TRACKER_RESOLVER_ALLOWED_ROOTS_ENV = "LAB_TRACKER_RESOLVER_ALLOWED_ROOTS"
 LAB_TRACKER_RESOLVER_RECOVERY_ENV = "LAB_TRACKER_RESOLVER_RECOVERY"
 LAB_TRACKER_RESOLVER_RECOVERY_MAX_FILES_ENV = "LAB_TRACKER_RESOLVER_RECOVERY_MAX_FILES"
 LAB_TRACKER_RESOLVER_RECOVERY_MAX_BYTES_ENV = "LAB_TRACKER_RESOLVER_RECOVERY_MAX_BYTES"
+
+# Comma-separated allowlist of rclone remote NAMES the rclone resolver may read.
+# When unset, registry_from_env denies all rclone remotes (references resolve
+# UNRESOLVED) until an operator opts specific remotes in — without it, a
+# reference could drive server-side `rclone cat` against any remote in the
+# host's rclone config.
+LAB_TRACKER_RCLONE_ALLOWED_REMOTES_ENV = "LAB_TRACKER_RCLONE_ALLOWED_REMOTES"
 
 # Comma-separated allowlist of git remote prefixes the git resolver may fetch.
 # When unset, registry_from_env denies all remotes (git pins resolve UNRESOLVED)
@@ -1279,6 +1309,13 @@ def registry_from_env() -> ResolverRegistry:
     allowed_roots = (
         [part for part in raw.split(os.pathsep) if part.strip()] if raw else []
     )
+    raw_rclone = os.environ.get(LAB_TRACKER_RCLONE_ALLOWED_REMOTES_ENV)
+    # Unset -> [] -> deny all rclone remotes (opt-in, mirroring allowed roots).
+    rclone_allowed_remotes = (
+        [part.strip() for part in raw_rclone.split(",") if part.strip()]
+        if raw_rclone
+        else []
+    )
     raw_remotes = os.environ.get(LAB_TRACKER_GIT_ALLOWED_REMOTES_ENV)
     # Unset -> [] -> deny all git remotes (opt-in, mirroring allowed roots).
     git_allowed_remotes = (
@@ -1293,6 +1330,7 @@ def registry_from_env() -> ResolverRegistry:
     return default_registry(
         allowed_roots=allowed_roots,
         recovery=recovery_from_env(),
+        rclone_allowed_remotes=rclone_allowed_remotes,
         git_allowed_remotes=git_allowed_remotes,
         git_cache_root=git_cache_root,
         git_max_cache_bytes=git_max_cache_bytes or None,

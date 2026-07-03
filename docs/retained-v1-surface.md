@@ -135,7 +135,9 @@ research record:
   Registered `git` data stores resolve `path@commit` locators read-only and
   on demand, gated by an operator remote allowlist
   (`LAB_TRACKER_GIT_ALLOWED_REMOTES`, deny-by-default), a protocol allowlist,
-  a fetch size cap, and a bounded cache — never by cloning or polling. See
+  a fetch size cap, and a bounded cache — never by cloning or polling. Rclone
+  resolution is likewise gated by an operator remote-name allowlist
+  (`LAB_TRACKER_RCLONE_ALLOWED_REMOTES`, deny-by-default). See
   [external-artifact-resolution-design.md](external-artifact-resolution-design.md).
 - Read-only assistant and MCP decision-context endpoints over the retained
   graph. Assistants may inspect context through these surfaces, but retained v1
