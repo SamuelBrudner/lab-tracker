@@ -1597,10 +1597,14 @@ describe("App", () => {
 
     expect(await screen.findByText("1 daily review ready")).toBeInTheDocument();
     expect(await screen.findByRole("heading", { name: "Daily review" })).toBeInTheDocument();
-    expect(screen.getAllByText("Batch drafted one question").length).toBeGreaterThanOrEqual(1);
-    expect(screen.getAllByText("2 notes").length).toBeGreaterThanOrEqual(1);
-    expect(screen.getByText("1 ops")).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "Review batch" }));
+    // The queue list renders from its own fetch after the badge/heading land,
+    // so these lookups must retry (findBy*) rather than race it (getBy*).
+    expect((await screen.findAllByText("Batch drafted one question")).length).toBeGreaterThanOrEqual(
+      1,
+    );
+    expect((await screen.findAllByText("2 notes")).length).toBeGreaterThanOrEqual(1);
+    expect(await screen.findByText("1 ops")).toBeInTheDocument();
+    fireEvent.click(await screen.findByRole("button", { name: "Review batch" }));
     await waitFor(() => expect(window.location.pathname).toBe(`/app/batches/${batchId}`));
   });
 
