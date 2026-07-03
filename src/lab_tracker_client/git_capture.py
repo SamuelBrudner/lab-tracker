@@ -22,6 +22,7 @@ from urllib.parse import urlsplit, urlunsplit
 
 import lab_tracker_client.watch as watch_capture
 from lab_tracker_client.client import LTValidationError
+from lab_tracker_client.repo import normalize_remote
 
 JsonObject = dict[str, Any]
 
@@ -85,6 +86,11 @@ def snapshot_commit(
     content_hash = hashlib.sha256(evidence.encode("utf-8")).hexdigest()
     commit_sha = str(facts["git_commit"])
     repo_name = str(facts["git_repository_name"])
+    # Shared git-evidence identity (lt-81s6.8/.17): <normalized-remote>@<commit>,
+    # owned by lab_tracker_client.repo, so hook-, CLI-, and CI-captured evidence
+    # for one commit dedup to a single identity instead of parallel note streams.
+    remote_for_id = normalize_remote(str(facts.get("git_remote_origin_url") or ""))
+    source_external_id = f"{remote_for_id or 'local'}@{commit_sha}"
     event = watch_capture.make_event(
         capture_id=f"git-{repo_name}-{commit_sha[:12]}",
         event_id=f"commit-{content_hash[:16]}",
@@ -94,7 +100,7 @@ def snapshot_commit(
         source={
             "provider": "git",
             "uri": facts.get("git_remote_origin_url") or facts["git_repository_path"],
-            "external_id": commit_sha,
+            "external_id": source_external_id,
             "content_hash": content_hash,
             **facts,
         },

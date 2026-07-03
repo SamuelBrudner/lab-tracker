@@ -358,3 +358,57 @@ def test_hook_never_blocks_commit_when_lt_fails(tmp_path, monkeypatch) -> None:
     _git(tmp_path, "commit", "-q", "-m", "commit survives broken hook")
 
     assert _git(tmp_path, "log", "-1", "--pretty=%s") == "commit survives broken hook"
+
+
+# --- cross-adapter coexistence (lt-81s6.17) ----------------------------------
+
+
+def test_install_hook_refuses_graph_draft_hook_without_force(tmp_path, monkeypatch) -> None:
+    """Two Lab Tracker capture hooks would record every commit twice."""
+
+    from lab_tracker_client.hooks import HOOK_BLOCK_BEGIN, HOOK_BLOCK_END
+
+    _clear_repo_env(monkeypatch)
+    _init_git_repo(tmp_path)
+    _init_repo_config(tmp_path)
+    hook = tmp_path / ".git" / "hooks" / "post-commit"
+    hook.parent.mkdir(parents=True, exist_ok=True)
+    hook.write_text(
+        f"#!/usr/bin/env sh\n{HOOK_BLOCK_BEGIN}\n: draft capture\n{HOOK_BLOCK_END}\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(LTValidationError, match="lt git snapshot"):
+        install_post_commit_hook(tmp_path, lt_command="lt")
+
+    forced = install_post_commit_hook(tmp_path, lt_command="lt", force=True)
+    content = hook.read_text(encoding="utf-8")
+    assert forced["action"] == "prepended"
+    assert HOOK_BLOCK_BEGIN in content  # foreign draft block preserved
+    assert HOOK_BEGIN_MARKER in content
+
+
+def test_install_hook_updates_own_block_despite_draft_block(tmp_path, monkeypatch) -> None:
+    """A deliberately-forced dual setup must stay idempotently updatable."""
+
+    from lab_tracker_client.hooks import HOOK_BLOCK_BEGIN, HOOK_BLOCK_END
+
+    _clear_repo_env(monkeypatch)
+    _init_git_repo(tmp_path)
+    _init_repo_config(tmp_path)
+    hook = tmp_path / ".git" / "hooks" / "post-commit"
+    hook.parent.mkdir(parents=True, exist_ok=True)
+    hook.write_text(
+        f"#!/usr/bin/env sh\n{HOOK_BLOCK_BEGIN}\n: draft capture\n{HOOK_BLOCK_END}\n",
+        encoding="utf-8",
+    )
+    install_post_commit_hook(tmp_path, lt_command="/old/lt", force=True)
+
+    # Re-running WITHOUT force updates our own block in place.
+    result = install_post_commit_hook(tmp_path, lt_command="/new/lt")
+
+    content = hook.read_text(encoding="utf-8")
+    assert result["action"] == "updated"
+    assert "/new/lt" in content
+    assert "/old/lt" not in content
+    assert HOOK_BLOCK_BEGIN in content  # draft block untouched

@@ -1233,3 +1233,58 @@ def test_git_resolver_rejects_option_like_components(tmp_path):
     assert result.status is ResolutionStatus.UNRESOLVED
     assert "not a git locator" in (result.detail or "")
     assert runner.calls == []
+
+
+# --- RcloneResolver remote allowlist ---------------------------------------
+
+
+def test_rclone_resolver_refuses_remote_not_in_allowlist():
+    runner = _fake_rclone_runner(size_bytes=4, body=b"data")
+    resolver = RcloneResolver(runner=runner, allowed_remotes=["lab-onedrive"])
+
+    result = resolver.resolve(
+        _rclone_ref("rclone://other-remote/exp/x.bin", _sha256(b"data"))
+    )
+
+    assert result.status is ResolutionStatus.UNRESOLVED
+    assert "allowlist" in (result.detail or "")
+    assert runner.calls == []  # refused before any rclone subprocess
+
+
+def test_rclone_resolver_allows_listed_remote():
+    data = b"allowed remote payload"
+    runner = _fake_rclone_runner(size_bytes=len(data), body=data)
+    resolver = RcloneResolver(runner=runner, allowed_remotes=["lab-onedrive"])
+
+    result = resolver.resolve(
+        _rclone_ref("rclone://lab-onedrive/exp/x.bin", _sha256(data))
+    )
+
+    assert result.status is ResolutionStatus.VERIFIED
+    assert result.content == data
+
+
+def test_registry_from_env_rclone_denies_remotes_by_default(monkeypatch):
+    monkeypatch.delenv("LAB_TRACKER_RCLONE_ALLOWED_REMOTES", raising=False)
+
+    result = registry_from_env().resolve(
+        _rclone_ref("rclone://any-remote/x.bin", _sha256(b"x"))
+    )
+
+    assert result.status is ResolutionStatus.UNRESOLVED
+    assert "allowlist" in (result.detail or "")
+
+
+def test_registry_from_env_rclone_allowlist_admits_named_remote(monkeypatch):
+    monkeypatch.setenv("LAB_TRACKER_RCLONE_ALLOWED_REMOTES", "lab-onedrive, backup")
+
+    registry = registry_from_env()
+    denied = registry.resolve(_rclone_ref("rclone://other/x.bin", _sha256(b"x")))
+
+    assert denied.status is ResolutionStatus.UNRESOLVED
+    assert "allowlist" in (denied.detail or "")
+    # A listed remote passes the allowlist gate (and then fails on the real
+    # rclone binary being absent/unreachable in this environment, which is a
+    # different detail message).
+    allowed = registry.resolve(_rclone_ref("rclone://lab-onedrive/x.bin", _sha256(b"x")))
+    assert "allowlist" not in (allowed.detail or "")

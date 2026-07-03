@@ -258,7 +258,11 @@ Shipped (`src/lab_tracker/artifact_resolution.py`, tested in
   (oversized → `UNRESOLVED`, never uncertified bytes).
 - ✅ `RcloneResolver` — `rclone://<remote>/<path>`, the locked-in unifier for
   S3 / SFTP / Dropbox / Google Drive / Box / OneDrive; stats then fetches, and
-  degrades to `UNRESOLVED` when the binary is absent.
+  degrades to `UNRESOLVED` when the binary is absent. Gated by an operator
+  remote-name allowlist (`LAB_TRACKER_RCLONE_ALLOWED_REMOTES`, deny-by-default
+  when unset) so a reference cannot drive server-side `rclone cat` against
+  arbitrary remotes in the host's rclone config — the same opt-in posture as
+  local allowed roots and the git remote allowlist.
 - ✅ Content hash is the integrity gate across all adapters (the whole object is
   hashed; `max_bytes`/`byte_range` bound only the returned payload), via the
   shared `_hash_and_collect` helper.
