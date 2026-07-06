@@ -237,12 +237,14 @@ principal type may draft but is structurally forbidden from accepting or
 committing, and the reserved `auto_accepted` mode is rejected at the repository
 layer.
 
-**Status (2026-07-01):** on the mainline the gate is enforced by _convention and
-policy_, not structure — read-only tokens by default, admin-only batch triggering,
-`acceptance_mode` not exposed over the API, and the policy text propagated to every
-agent. The fail-closed structural version (a `SYSTEM` principal + an interactive
-allow-list + `auto_accepted` rejection) currently lives only on an unmerged branch.
-Landing it is the highest-priority hardening of the invariant.
+**Status (2026-07-02):** the fail-closed structural gate is on mainline
+(commits `6889069` and `57277e6`, 2026-07-02): `require_interactive` rejects
+non-interactive principals (`SERVICE`, `SYSTEM`) at accept, bulk-accept, and
+commit in the service layer, and the reserved `auto_accepted` mode is rejected
+at both the service and repository layers, with tests covering the `SYSTEM`
+principal and service tokens. The convention-and-policy layer (read-only tokens
+by default, admin-only batch triggering, policy text propagated to every agent)
+remains on top of the structural gate, not instead of it.
 
 ## The endgame: the research object as the artifact
 

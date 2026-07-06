@@ -25,3 +25,6 @@ lab_tracker.db.lock
 # Test/coverage artifacts
 .coverage
 .coverage.*
+
+# Beads / Dolt files (added by bd init)
+.beads/proxieddb/

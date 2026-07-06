@@ -12,6 +12,7 @@ from typing import Any
 import lab_tracker_client.git_capture as git_capture
 import lab_tracker_client.hooks as hook_install
 import lab_tracker_client.registry as repo_registry
+import lab_tracker_client.repo as repo_capture
 import lab_tracker_client.schedule as schedule_helpers
 import lab_tracker_client.setup as setup_helpers
 import lab_tracker_client.watch as watch_capture
@@ -230,6 +231,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
     _add_watch_parsers(subcommands)
     _add_hpc_parsers(subcommands)
+    _add_repo_parsers(subcommands)
 
     export_parser = subcommands.add_parser(
         "export",
@@ -775,7 +777,7 @@ def _add_hpc_parsers(subcommands: argparse._SubParsersAction) -> None:
         "submit",
         help="Wrap an HPC submission command and write a submit event.",
     )
-    _add_hpc_context_args(submit_parser)
+    _add_capture_context_args(submit_parser)
     submit_parser.add_argument("--summary", help="Short run summary for review.")
     submit_parser.add_argument(
         "command",
@@ -785,7 +787,7 @@ def _add_hpc_parsers(subcommands: argparse._SubParsersAction) -> None:
     submit_parser.set_defaults(func=_cmd_hpc_submit, needs_client=False)
 
     begin_parser = hpc_commands.add_parser("begin", help="Write a begin event from inside a job.")
-    _add_hpc_context_args(begin_parser)
+    _add_capture_context_args(begin_parser)
     begin_parser.add_argument("--run", help="Run id. Defaults to LAB_TRACKER_HPC_RUN_ID.")
     begin_parser.add_argument("--summary", help="Short run summary for review.")
     begin_parser.set_defaults(func=_cmd_hpc_begin, needs_client=False)
@@ -794,7 +796,7 @@ def _add_hpc_parsers(subcommands: argparse._SubParsersAction) -> None:
         "finish",
         help="Write a finish event from inside a job.",
     )
-    _add_hpc_context_args(finish_parser)
+    _add_capture_context_args(finish_parser)
     finish_parser.add_argument("--run", help="Run id. Defaults to LAB_TRACKER_HPC_RUN_ID.")
     finish_parser.add_argument("--exit-code", type=int, help="Job or script exit code.")
     finish_parser.add_argument("--state", help="Scheduler/run state, e.g. completed or failed.")
@@ -819,7 +821,7 @@ def _add_hpc_parsers(subcommands: argparse._SubParsersAction) -> None:
         "watch",
         help="Import run manifests from designated output folders into the outbox.",
     )
-    _add_hpc_context_args(watch_parser)
+    _add_capture_context_args(watch_parser)
     watch_parser.add_argument("--root", required=True, help="Output folder to scan.")
     watch_parser.add_argument(
         "--pattern",
@@ -845,7 +847,7 @@ def _add_hpc_parsers(subcommands: argparse._SubParsersAction) -> None:
     sync_parser.set_defaults(func=_cmd_hpc_sync)
 
 
-def _add_hpc_context_args(parser: argparse.ArgumentParser) -> None:
+def _add_capture_context_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--config", help="Config path. Defaults to discovered config.")
     parser.add_argument("--project", help="Override project UUID from config.")
     parser.add_argument("--question", help="Candidate question UUID recorded in evidence metadata.")
@@ -856,6 +858,186 @@ def _add_hpc_context_args(parser: argparse.ArgumentParser) -> None:
         help="Candidate dataset UUID. Repeatable.",
     )
     parser.add_argument("--tag", action="append", default=[], help="Tag. Repeatable.")
+
+
+def _add_repo_parsers(subcommands: argparse._SubParsersAction) -> None:
+    repo_parser = subcommands.add_parser(
+        "repo",
+        help="Capture analysis-repo commit provenance into a local outbox.",
+    )
+    repo_commands = repo_parser.add_subparsers(dest="repo_command", required=True)
+
+    init_parser = repo_commands.add_parser("init", help="Create .lab-tracker/repo.json.")
+    init_parser.add_argument("--project", required=True, help="Lab Tracker project UUID.")
+    init_parser.add_argument(
+        "--outbox",
+        default=repo_capture.DEFAULT_OUTBOX,
+        help=f"Outbox path. Defaults to {repo_capture.DEFAULT_OUTBOX}.",
+    )
+    init_parser.add_argument("--default-question", help="Optional candidate question UUID.")
+    init_parser.add_argument("--config", help="Config path. Defaults to .lab-tracker/repo.json.")
+    init_parser.add_argument("--force", action="store_true", help="Overwrite an existing config.")
+    init_parser.set_defaults(func=_cmd_repo_init, needs_client=False)
+
+    report_parser = repo_commands.add_parser(
+        "report",
+        help="Record the current repo state (commit, dirty, remote) as an outbox event.",
+    )
+    _add_capture_context_args(report_parser)
+    report_parser.add_argument(
+        "--run",
+        help="Run id. Defaults to LAB_TRACKER_REPO_RUN_ID, then the commit SHA.",
+    )
+    report_parser.add_argument(
+        "--artifact",
+        action="append",
+        default=[],
+        help="Produced file to fingerprint as an artifact pointer. Repeatable.",
+    )
+    report_parser.add_argument("--summary", help="Short summary for review.")
+    report_parser.add_argument(
+        "--fail-silent",
+        action="store_true",
+        dest="fail_silent",
+        help="Exit quietly on any error (for git hooks; never blocks a commit).",
+    )
+    report_parser.set_defaults(func=_cmd_repo_report, needs_client=False)
+
+    finish_parser = repo_commands.add_parser(
+        "finish",
+        help="Record a finished analysis run with its produced artifacts.",
+    )
+    _add_capture_context_args(finish_parser)
+    finish_parser.add_argument(
+        "--run",
+        help="Run id. Defaults to LAB_TRACKER_REPO_RUN_ID, then the commit SHA.",
+    )
+    finish_parser.add_argument(
+        "--artifact",
+        action="append",
+        default=[],
+        help="Produced file to fingerprint as an artifact pointer. Repeatable.",
+    )
+    finish_parser.add_argument("--summary", help="Short run summary for review.")
+    finish_parser.set_defaults(func=_cmd_repo_finish, needs_client=False)
+
+    status_parser = repo_commands.add_parser("status", help="Summarize local repo outbox state.")
+    status_parser.add_argument("--config", help="Config path. Defaults to discovered config.")
+    status_parser.set_defaults(func=_cmd_repo_status, needs_client=False)
+
+    sync_parser = repo_commands.add_parser(
+        "sync",
+        help="Sync outbox events into staged Lab Tracker evidence notes.",
+    )
+    sync_parser.add_argument("--config", help="Config path. Defaults to discovered config.")
+    sync_parser.add_argument("--dry-run", action="store_true")
+    sync_parser.add_argument("--request-draft", action="store_true")
+    sync_parser.add_argument("--limit", type=int, help="Maximum events to process.")
+    sync_parser.set_defaults(func=_cmd_repo_sync)
+
+    hook_parser = repo_commands.add_parser(
+        "install-hook",
+        help="Install the managed post-commit hook that runs 'lt repo report'.",
+    )
+    hook_parser.add_argument("--repo", default=".", help="Repository path. Defaults to cwd.")
+    hook_parser.add_argument(
+        "--config",
+        help="Repo config to pin into the hook. Defaults to discovered config.",
+    )
+    hook_parser.add_argument(
+        "--lt-command",
+        help="Path to the lt executable the hook should call. Defaults to the lt on PATH.",
+    )
+    hook_parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Append to an existing non-managed post-commit hook.",
+    )
+    hook_parser.set_defaults(func=_cmd_repo_install_hook, needs_client=False)
+
+
+def _cmd_repo_init(args: argparse.Namespace) -> Any:
+    config = repo_capture.init_config(
+        project_id=args.project,
+        outbox=args.outbox,
+        default_question_id=args.default_question,
+        config_path=args.config,
+        force=args.force,
+    )
+    return {
+        "command": "repo-init",
+        "config": str(config.config_path),
+        "outbox": str(config.outbox_path()),
+        "project_id": config.project_id,
+    }
+
+
+def _cmd_repo_report(args: argparse.Namespace) -> Any:
+    return _repo_capture_payload("repo-report", args, event_type="commit")
+
+
+def _cmd_repo_finish(args: argparse.Namespace) -> Any:
+    return _repo_capture_payload("repo-finish", args, event_type="finish")
+
+
+def _repo_capture_payload(command: str, args: argparse.Namespace, *, event_type: str) -> Any:
+    config = repo_capture.load_config(config_path=args.config)
+    artifacts = [repo_capture.artifact_from_path(item) for item in args.artifact]
+    event, path, action = repo_capture.capture_commit(
+        config,
+        event_type=event_type,
+        run_id=args.run,
+        project_id=args.project,
+        question_id=args.question,
+        dataset_ids=args.dataset,
+        tags=args.tag,
+        artifacts=artifacts,
+        summary=args.summary,
+    )
+    return {
+        "command": command,
+        "action": action,
+        "run_id": event["run_id"],
+        "event_type": event["event_type"],
+        "git_commit": event["source"].get("git_commit", ""),
+        "git_dirty": event["source"].get("git_dirty", False),
+        "artifact_count": len(event["artifacts"]),
+        "event_path": str(path),
+        "outbox": str(config.outbox_path()),
+    }
+
+
+def _cmd_repo_status(args: argparse.Namespace) -> Any:
+    config = repo_capture.load_config(config_path=args.config)
+    summary = repo_capture.outbox_status(config.outbox_path())
+    summary.update(
+        {
+            "command": "repo-status",
+            "config": str(config.config_path),
+            "project_id": config.project_id,
+        }
+    )
+    return summary
+
+
+def _cmd_repo_sync(client: LabTracker, args: argparse.Namespace) -> Any:
+    config = repo_capture.load_config(config_path=args.config)
+    return repo_capture.sync_outbox(
+        client,
+        config,
+        dry_run=args.dry_run,
+        request_draft=args.request_draft,
+        limit=args.limit,
+    )
+
+
+def _cmd_repo_install_hook(args: argparse.Namespace) -> Any:
+    return repo_capture.install_post_commit_hook(
+        args.repo,
+        lt_command=args.lt_command,
+        config_path=args.config,
+        force=args.force,
+    )
 
 
 def _cmd_watch_init(args: argparse.Namespace) -> Any:
@@ -1515,7 +1697,7 @@ def _payload_exit_code(payload: Any) -> int:
         return int(payload.get("exit_code") or 0)
     if (
         isinstance(payload, dict)
-        and payload.get("command") in {"hpc-sync", "hpc-watch"}
+        and payload.get("command") in {"hpc-sync", "hpc-watch", "repo-sync"}
         and payload.get("errors")
     ):
         return 1

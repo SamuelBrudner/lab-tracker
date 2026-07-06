@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Any
 
 from lab_tracker_client.client import LTValidationError
+from lab_tracker_client.repo import HOOK_BEGIN_MARKER as REPO_HOOK_BLOCK_BEGIN
 
 JsonObject = dict[str, Any]
 
@@ -138,6 +139,15 @@ def install_hook(
         base_url=base_url,
         request_draft=request_draft,
     )
+    if REPO_HOOK_BLOCK_BEGIN in existing and not has_block and not force:
+        # Both Lab Tracker capture hooks in one repo record two staged notes
+        # per commit (lt-81s6.17). One adapter per repo unless forced.
+        raise LTValidationError(
+            "This repo already has the 'lt repo' capture hook installed. "
+            "Running both capture hooks records every commit twice. Remove the "
+            "REPO HOOK block (or uninstall it) first, or pass --force only if "
+            "you deliberately want both."
+        )
     if existing.strip() and not has_block and not force:
         raise LTValidationError(
             "Existing post-commit hook is not Lab Tracker-managed. "
