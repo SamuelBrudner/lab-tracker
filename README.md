@@ -30,7 +30,7 @@ Either way, captures land *staged* — held for review, never written straight i
 
 ![The daily review — AI-proposed graph changes from the day's captures, each waiting for you to accept, edit, or reject](docs/screenshots/daily-review-queue.png)
 
-At the end of each day — on a cadence you set, or on demand — **the daily review** gathers your staged captures and proposes how they fit the graph: *link this photo to that question, draft a note from this voice memo, suggest a new sub-question, flag this one as unclear.* You get **one review queue**. Accept, edit, or reject each proposal; commit the ones you keep.
+At the end of each day — on a cadence you set, or on demand — **the daily review** gathers your staged captures and proposes how they fit the graph: *link this photo to that question, draft a note from this voice memo, suggest a new sub-question, flag this one as unclear.* You get **one review queue**. Accept, edit, or reject each proposal; commit the ones you keep. Each proposal arrives with the model's rationale, its confidence, and references back to the evidence it read — down to the region of the photo — and you can push back by typing, dictating, or attaching an image.
 
 The model only ever proposes. Nothing touches your record until a person says yes — **AI can suggest; only a person commits.**
 
@@ -99,12 +99,32 @@ This part is for the lab member or IT contact comfortable installing software. T
 
 Manual server runs should apply migrations first with
 `uv run alembic upgrade head` before starting
-`uv run uvicorn lab_tracker.asgi:app --reload`. Graph draft review defaults to
-OpenAI, but `LAB_TRACKER_GRAPH_DRAFT_PROVIDER` can select Anthropic or Google;
-voice transcription requires a provider that supports audio. See the
-configuration reference for the exact environment variables.
+`uv run uvicorn lab_tracker.asgi:app --reload`.
 
 Full install, configuration, and deployment instructions live in the docs below — start with the [setup guide](docs/setup.md).
+
+### Set up the AI — your model, your agent, one human gate
+
+The proposal workflow — captures in, AI-drafted graph proposals out, a person
+approving each one — needs two choices, and both are deliberately yours:
+
+- **Drafting model.** OpenAI, Anthropic (Claude), and Google (Gemini) are
+  equally supported: set `LAB_TRACKER_GRAPH_DRAFT_PROVIDER` and that
+  provider's API key. Drafting runs server-side with server-held keys, and
+  the same multimodal loop — photos, voice transcripts, figures — works on
+  any of them. (Voice-note transcription currently needs OpenAI or Google.)
+- **Coding agent.** Any MCP-capable agent connects the same way:
+  `lab_tracker init` scaffolds MCP config for Claude Code, Codex CLI, Gemini
+  CLI, and Cursor, with the same policy text in each agent's instruction file
+  (`CLAUDE.md`, `AGENTS.md`, `GEMINI.md`); GitHub Copilot has its own guide.
+  Use whichever your lab already uses.
+
+However drafting is triggered — the built-in scheduler, cron, or your agent
+platform's own automation — the shape of the work never changes: **agents and
+models propose; a person reviews and commits.**
+
+The explicit walkthrough (provider, scheduling, credentials, MCP, verification)
+is **[Set up AI agents for the proposal workflow](docs/agent-setup.md)**.
 
 **Connecting an analysis repo?** In any repo, with the package installed, a
 coding agent (or you) can bootstrap capture from one read-only command:
@@ -151,11 +171,17 @@ The authoritative list of what's supported is **[docs/retained-v1-surface.md](do
 - [HPC analysis capture](docs/hpc-analysis-capture.md) — capture Slurm/HPC run summaries, logs, metrics, and artifact pointers with `lt hpc`
 - [Curation states](docs/curation-states.md) — how the graph records the way each edge was reviewed, and why captures are archived with a reason
 - [Provenance export](docs/provenance-export.md) — write `lt export` sidecars that survive without a running instance
+
+**Agents and the proposal workflow**
+- [Set up AI agents for the proposal workflow](docs/agent-setup.md) — pick a drafting provider (OpenAI, Anthropic, or Google), schedule the daily review, mint credentials, and connect coding agents over MCP
+- [Make the daily review run on its own](docs/scheduled-daily-review.md) — built-in scheduler, cron/launchd/Task Scheduler, or your agent platform's automation
+- [Analysis graph drafts from CI and git hooks](docs/analysis-graph-drafts-ci.md) — stage commit evidence from analysis repos and draft it for review
 - [MCP server, skills, and Dolt mirror](docs/lab-tracker-mcp-skills.md) — wire up assistants and the export-only versioned mirror
 - [GitHub Copilot MCP setup](docs/lab-tracker-copilot.md) — connect Copilot IDEs to the local Lab Tracker MCP server
 - [Cursor MCP setup](docs/lab-tracker-cursor.md) — connect Cursor to the local Lab Tracker MCP server via `.cursor/mcp.json`
 
 **Scope and vision**
+- [Vision](docs/vision.md) — the north star: a question-rooted provenance graph that is human-readable, agent-readable, and AI-maintained but human-committed
 - [Supported v1 surface (authoritative)](docs/retained-v1-surface.md) — the definitive list of what ships
 - [Deferred long-term vision](idea.md) — OCR, vector search, and PI review gates, explicitly out of v1
 

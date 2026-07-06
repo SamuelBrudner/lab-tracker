@@ -41,6 +41,7 @@ _HEALTH_PROBE_TIMEOUT_SECONDS = 2.0
 _SCAFFOLD_FILES = (
     ".mcp.json",
     ".cursor/mcp.json",
+    ".gemini/settings.json",
     ".claude/settings.json",
     "scripts/lt.py",
     "AGENTS.lt.md",
