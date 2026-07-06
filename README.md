@@ -1,6 +1,8 @@
 # Lab Tracker
 
-A file named `2025_12_10_Rig2_session001.nwb` tells you *when*, *where*, and *what* — but not *why* you collected it, what you expected, or what you actually saw at the bench. That reasoning lives on paper towels, on whiteboards, and in people's heads — and it walks out the door when they do. Lab Tracker gives it a durable place to live, next to the data.
+**Lab Tracker builds a living model of your research projects — your questions, data, claims, and figures, all connected — while asking for as little input effort as possible.** You capture in seconds: type a note, snap a photo, record a voice memo, save a figure from your analysis code. AI proposes where each capture fits in the model; you accept or reject in one daily review. The filing happens for you — you only ever confirm.
+
+Why it matters: a file named `2025_12_10_Rig2_session001.nwb` tells you *when*, *where*, and *what* — but not *why* you collected it, what you expected, or what you actually saw at the bench. That reasoning lives on paper towels, on whiteboards, and in people's heads — and it walks out the door when they do. Lab Tracker gives it a durable place to live, next to the data.
 
 **[Open the read-only demo →](https://samuelbrudner.github.io/lab-tracker/app/)** — seeded fly-olfaction data, no install, no login. Click around for 60 seconds.
 
