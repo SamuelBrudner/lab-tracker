@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
@@ -14,6 +15,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session, sessionmaker
 
 from lab_tracker.api import LabTrackerAPI
+from lab_tracker.app_parts.middleware import system_auth_context
 from lab_tracker.auth import (
     AuthService,
     DeviceAuthService,
@@ -31,6 +33,7 @@ from lab_tracker.logging import configure_logging
 from lab_tracker.note_storage import LocalNoteStorage
 from lab_tracker.process_lock import ProcessLock
 from lab_tracker.rate_limit import InMemoryRateLimiter
+from lab_tracker.sqlalchemy_repository import SQLAlchemyLabTrackerRepository
 
 _logger = logging.getLogger(__name__)
 
@@ -123,14 +126,92 @@ def make_lifespan(engine: Engine):
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         lock = _acquire_database_lock(engine)
+        background_tasks = _start_graph_draft_background_tasks(app)
         try:
             yield
         finally:
+            await _stop_background_tasks(background_tasks)
             if lock is not None:
                 lock.release()
             engine.dispose()
 
     return lifespan
+
+
+def _start_graph_draft_background_tasks(app: FastAPI) -> list[asyncio.Task[None]]:
+    settings = getattr(app.state, "settings", None)
+    if settings is None or not _graph_draft_background_enabled(settings):
+        return []
+    tasks = [asyncio.create_task(_graph_draft_worker_loop(app))]
+    if settings.graph_draft_scheduler_enabled:
+        tasks.append(asyncio.create_task(_graph_draft_scheduler_loop(app)))
+    return tasks
+
+
+async def _stop_background_tasks(tasks: list[asyncio.Task[None]]) -> None:
+    for task in tasks:
+        task.cancel()
+    if tasks:
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+
+def _graph_draft_background_enabled(settings: Settings) -> bool:
+    return bool(settings.graph_draft_background_enabled or settings.graph_draft_scheduler_enabled)
+
+
+async def _graph_draft_worker_loop(app: FastAPI) -> None:
+    settings = app.state.settings
+    poll_seconds = settings.graph_draft_worker_poll_seconds
+    while True:
+        try:
+            processed = await asyncio.to_thread(_process_one_graph_draft_batch_run, app)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            _logger.exception("Graph draft background worker tick failed.")
+            processed = False
+        if not processed:
+            await asyncio.sleep(poll_seconds)
+
+
+async def _graph_draft_scheduler_loop(app: FastAPI) -> None:
+    settings = app.state.settings
+    interval_seconds = settings.graph_draft_scheduler_interval_seconds
+    while True:
+        try:
+            await asyncio.to_thread(_enqueue_due_graph_draft_batches, app)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            _logger.exception("Graph draft scheduler tick failed.")
+        await asyncio.sleep(interval_seconds)
+
+
+def _process_one_graph_draft_batch_run(app: FastAPI) -> bool:
+    with app.state.db_session_factory() as session:
+        api = LabTrackerAPI(
+            raw_storage=app.state.raw_note_storage,
+            repository=SQLAlchemyLabTrackerRepository(session),
+            settings=app.state.settings,
+            surface="background",
+        )
+        run = api.process_next_graph_draft_batch_run(
+            draft_client_factory=app.state.graph_draft_client_factory,
+            app_settings=app.state.settings,
+            actor=system_auth_context(),
+        )
+        return run is not None
+
+
+def _enqueue_due_graph_draft_batches(app: FastAPI) -> None:
+    with app.state.db_session_factory() as session:
+        api = LabTrackerAPI(
+            raw_storage=app.state.raw_note_storage,
+            repository=SQLAlchemyLabTrackerRepository(session),
+            settings=app.state.settings,
+            surface="background",
+        )
+        api.enqueue_due_graph_draft_batches(actor=system_auth_context())
 
 
 def _acquire_database_lock(engine: Engine) -> ProcessLock | None:

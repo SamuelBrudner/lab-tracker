@@ -80,7 +80,18 @@ that destination through your normal off-machine backup process.
 
 - `LAB_TRACKER_GRAPH_DRAFT_PROVIDER`: active drafting provider (default:
   `openai`; accepted values are `openai`, `anthropic`/`claude`, and
-  `google`/`gemini`)
+  `google`/`gemini`; `agentic`/`agentic-openai` enables the read-only agentic
+  batch drafter and must be run through the background worker)
+- `LAB_TRACKER_GRAPH_DRAFT_BACKGROUND_ENABLED`: when `true`, run-now and
+  run-due enqueue graph-draft batch jobs and the in-process worker executes
+  them (default: `false`)
+- `LAB_TRACKER_GRAPH_DRAFT_SCHEDULER_ENABLED`: when `true`, the app also starts
+  an in-process ticker that enqueues due daily-review batches as `SYSTEM`
+  (default: `false`)
+- `LAB_TRACKER_GRAPH_DRAFT_WORKER_POLL_SECONDS`: worker idle polling interval
+  for pending graph-draft batch jobs (default: `5`)
+- `LAB_TRACKER_GRAPH_DRAFT_SCHEDULER_INTERVAL_SECONDS`: scheduler tick interval
+  for checking due cadence rows (default: `60`)
 - `LAB_TRACKER_OPENAI_API_KEY`: required when the provider is `openai` and for
   OpenAI voice-note transcription
 - `LAB_TRACKER_OPENAI_MODEL`: OpenAI model for graph drafts (default:

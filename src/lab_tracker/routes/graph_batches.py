@@ -95,10 +95,15 @@ def build_graph_batches_router(api: LabTrackerAPI) -> APIRouter:
         "/projects/{project_id:uuid}/graph-draft-batch-settings",
         response_model=Envelope[GraphDraftBatchSettings],
     )
-    def get_batch_settings(project_id: UUID, request: Request):
+    def get_batch_settings(
+        project_id: UUID,
+        request: Request,
+        user_id: UUID | None = None,
+    ):
         actor = actor_from_request(request)
         settings = api_from_request(request, api).get_graph_draft_batch_settings(
             project_id,
+            user_id=user_id,
             actor=actor,
         )
         record_usage_view(
@@ -125,6 +130,7 @@ def build_graph_batches_router(api: LabTrackerAPI) -> APIRouter:
             cadence_minutes=payload.cadence_minutes,
             run_at_local_time=payload.run_at_local_time,
             timezone_name=payload.timezone_name,
+            user_id=payload.user_id,
             actor=actor,
         )
         return Envelope(data=settings)
@@ -156,6 +162,15 @@ def build_graph_batches_router(api: LabTrackerAPI) -> APIRouter:
     def run_batch_now(payload: GraphDraftBatchRunRequest, request: Request):
         actor = actor_from_request(request)
         ensure_project_owner(request, payload.project_id)
+        if _background_drafting_enabled(request):
+            run = api_from_request(request, api).enqueue_graph_draft_batch_for_project(
+                payload.project_id,
+                since=payload.since,
+                until=payload.until,
+                user_hint=payload.user_hint,
+                actor=actor,
+            )
+            return Envelope(data=run)
         draft_client = _draft_client_from_request(request)
         try:
             run = api_from_request(request, api).run_graph_draft_batch_for_project(
@@ -175,6 +190,16 @@ def build_graph_batches_router(api: LabTrackerAPI) -> APIRouter:
     @router.post("/batches/run-due", response_model=ListEnvelope[GraphDraftBatchRun])
     def run_due_batches(request: Request):
         actor = actor_from_request(request)
+        if _background_drafting_enabled(request):
+            runs = api_from_request(request, api).enqueue_due_graph_draft_batches(
+                actor=actor,
+            )
+            return list_response(
+                runs,
+                limit=max(1, len(runs) or 1),
+                offset=0,
+                total=len(runs),
+            )
         runs = api_from_request(request, api).run_due_graph_draft_batches(
             draft_client_factory=_draft_client_factory_from_request(request),
             app_settings=getattr(request.app.state, "settings", None) or get_settings(),
@@ -195,3 +220,11 @@ def _draft_client_factory_from_request(request: Request):
 def _draft_client_from_request(request: Request):
     settings = getattr(request.app.state, "settings", None) or get_settings()
     return _draft_client_factory_from_request(request)(settings)
+
+
+def _background_drafting_enabled(request: Request) -> bool:
+    settings = getattr(request.app.state, "settings", None) or get_settings()
+    return bool(
+        getattr(settings, "graph_draft_background_enabled", False)
+        or getattr(settings, "graph_draft_scheduler_enabled", False)
+    )

@@ -849,6 +849,84 @@ class GoogleGraphDraftClient:
         return _parse_graph_patch_text(_gemini_output_text(payload), "Google")
 
 
+READ_ONLY_AGENT_TOOLS = (
+    "inspect_graph_context",
+    "search_existing_graph_nodes",
+    "summarize_decision_context",
+)
+
+
+class AgenticGraphDraftClient:
+    """Read-only agentic wrapper for background batch drafting.
+
+    The wrapper deliberately exposes no write tools. Its internal tool pass can
+    only inspect the batch context already assembled by Lab Tracker, search
+    existing graph-node summaries inside that context, and attach a bounded
+    trace before delegating to the same structured graph-patch provider.
+    """
+
+    provider = "agentic"
+    requires_background_worker = True
+
+    def __init__(self, *, base_client: GraphDraftClient) -> None:
+        self._base_client = base_client
+        self.model = f"agentic:{getattr(base_client, 'model', 'unknown')}"
+
+    @classmethod
+    def from_settings(cls, settings: Settings) -> AgenticGraphDraftClient:
+        return cls(base_client=OpenAIGraphDraftClient.from_settings(settings))
+
+    def close(self) -> None:
+        close = getattr(self._base_client, "close", None)
+        if callable(close):
+            close()
+
+    def draft_from_note(self, **_kwargs: Any) -> dict[str, Any]:
+        raise GraphDraftingError(
+            "Agentic graph drafting is only supported for background batch drafts."
+        )
+
+    def draft_from_analysis_evidence(self, **_kwargs: Any) -> dict[str, Any]:
+        raise GraphDraftingError(
+            "Agentic graph drafting is only supported for background batch drafts."
+        )
+
+    def draft_from_batch(
+        self,
+        *,
+        batch_context: dict[str, Any],
+        user_hint: str | None = None,
+    ) -> dict[str, Any]:
+        augmented_context = dict(batch_context)
+        trace = _agentic_read_only_tool_trace(batch_context=batch_context)
+        augmented_context["agentic_tool_trace"] = trace
+        augmented_hint = _agentic_user_hint(user_hint=user_hint, trace=trace)
+        return self._base_client.draft_from_batch(
+            batch_context=augmented_context,
+            user_hint=augmented_hint,
+        )
+
+    def transcribe_audio(
+        self,
+        *,
+        audio_bytes: bytes,
+        filename: str,
+        content_type: str,
+        prompt: str | None = None,
+    ) -> dict[str, Any]:
+        transcribe = getattr(self._base_client, "transcribe_audio", None)
+        if not callable(transcribe):
+            raise GraphDraftingError(
+                "The configured agentic base client does not support audio transcription."
+            )
+        return transcribe(
+            audio_bytes=audio_bytes,
+            filename=filename,
+            content_type=content_type,
+            prompt=prompt,
+        )
+
+
 def make_graph_draft_client(settings: Settings) -> GraphDraftClient:
     """Return the active graph-draft client for ``settings.graph_draft_provider``.
 
@@ -862,9 +940,11 @@ def make_graph_draft_client(settings: Settings) -> GraphDraftClient:
         return AnthropicGraphDraftClient.from_settings(settings)
     if provider in {"google", "gemini"}:
         return GoogleGraphDraftClient.from_settings(settings)
+    if provider in {"agentic", "agentic-openai", "agentic_openai"}:
+        return AgenticGraphDraftClient.from_settings(settings)
     raise GraphDraftingError(
         "Unknown graph_draft_provider "
-        f"'{provider}'. Configured providers: openai, anthropic, google."
+        f"'{provider}'. Configured providers: openai, anthropic, google, agentic."
     )
 
 
@@ -1036,6 +1116,120 @@ def _batch_prompt_text(
         f"{json.dumps(batch_context, sort_keys=True)}\n"
         "</untrusted_batch_context>"
     )
+
+
+def _agentic_user_hint(
+    *,
+    user_hint: str | None,
+    trace: dict[str, Any],
+) -> str:
+    parts = []
+    if user_hint and user_hint.strip():
+        parts.append(user_hint.strip())
+    parts.append(
+        "Agentic read-only pre-pass completed. Prefer linking to existing graph "
+        "nodes surfaced in agentic_tool_trace before proposing new nodes."
+    )
+    if trace.get("matched_existing_nodes"):
+        parts.append(
+            "Matched existing node candidates: "
+            + json.dumps(trace["matched_existing_nodes"], sort_keys=True)
+        )
+    return "\n\n".join(parts)
+
+
+def _agentic_read_only_tool_trace(
+    *,
+    batch_context: dict[str, Any],
+) -> dict[str, Any]:
+    context_summary = batch_context.get("context_summary")
+    notes = [item for item in batch_context.get("batch_notes", []) if isinstance(item, dict)]
+    projects = [item for item in batch_context.get("projects", []) if isinstance(item, dict)]
+    terms = _agentic_search_terms(notes)
+    return {
+        "tool_policy": {
+            "allowed_tools": list(READ_ONLY_AGENT_TOOLS),
+            "write_tools_available": False,
+        },
+        "inspect_graph_context": {
+            "project_count": len(projects),
+            "batch_note_count": len(notes),
+            "context_summary": context_summary if isinstance(context_summary, dict) else {},
+        },
+        "search_terms": terms,
+        "matched_existing_nodes": _agentic_search_existing_nodes(projects, terms),
+        "decision_context": _agentic_decision_context_summary(projects),
+    }
+
+
+def _agentic_search_terms(notes: list[dict[str, Any]]) -> list[str]:
+    tokens: set[str] = set()
+    for note in notes:
+        text = " ".join(
+            str(note.get(key) or "")
+            for key in ("raw_content_preview", "transcribed_text", "summary", "label")
+        )
+        for raw_token in text.replace("_", " ").replace("-", " ").split():
+            token = "".join(char.lower() for char in raw_token if char.isalnum())
+            if len(token) >= 5:
+                tokens.add(token)
+    return sorted(tokens)[:20]
+
+
+def _agentic_search_existing_nodes(
+    projects: list[dict[str, Any]],
+    terms: list[str],
+) -> list[dict[str, Any]]:
+    if not terms:
+        return []
+    matches: list[dict[str, Any]] = []
+    for project in projects:
+        project_id = str(project.get("id") or "")
+        for field in (
+            "active_or_staged_questions",
+            "recent_sessions",
+            "recent_datasets",
+            "recent_notes",
+            "recent_analyses",
+            "recent_claims",
+            "recent_visualizations",
+            "recent_goals",
+        ):
+            for item in project.get(field, []) or []:
+                if not isinstance(item, dict):
+                    continue
+                haystack = json.dumps(item, sort_keys=True).lower()
+                hit_terms = [term for term in terms if term in haystack]
+                if not hit_terms:
+                    continue
+                matches.append(
+                    {
+                        "project_id": project_id,
+                        "context_field": field,
+                        "id": item.get("id"),
+                        "label": item.get("label") or item.get("text") or item.get("statement"),
+                        "matched_terms": hit_terms[:5],
+                    }
+                )
+                if len(matches) >= 20:
+                    return matches
+    return matches
+
+
+def _agentic_decision_context_summary(projects: list[dict[str, Any]]) -> dict[str, Any]:
+    summaries: list[dict[str, Any]] = []
+    for project in projects[:10]:
+        summaries.append(
+            {
+                "project_id": project.get("id"),
+                "project_label": project.get("label"),
+                "question_count": len(project.get("active_or_staged_questions") or []),
+                "recent_claim_count": len(project.get("recent_claims") or []),
+                "recent_analysis_count": len(project.get("recent_analyses") or []),
+                "known_alias_count": len(project.get("known_aliases") or []),
+            }
+        )
+    return {"projects": summaries}
 
 
 def _analysis_prompt_text(
