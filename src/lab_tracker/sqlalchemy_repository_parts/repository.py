@@ -1035,8 +1035,19 @@ class SQLAlchemyLabTrackerRepository(LabTrackerRepository):
     def get_graph_draft_batch_settings_by_project(
         self,
         project_id: UUID,
+        *,
+        user_id: UUID | None = None,
     ) -> GraphDraftBatchSettings | None:
-        return self.graph_draft_batch_settings.get_by_project(project_id)
+        return self.graph_draft_batch_settings.get_by_project(
+            project_id,
+            user_id=user_id,
+        )
+
+    def list_graph_draft_batch_settings_for_project(
+        self,
+        project_id: UUID,
+    ) -> list[GraphDraftBatchSettings]:
+        return self.graph_draft_batch_settings.list_for_project(project_id)
 
     def list_due_graph_draft_batch_settings(
         self,
@@ -1067,17 +1078,29 @@ class SQLAlchemyLabTrackerRepository(LabTrackerRepository):
     def latest_successful_graph_draft_batch_run(
         self,
         project_id: UUID,
+        *,
+        review_assignee_user_id: UUID | None = None,
+        review_assignee: str | None = None,
     ) -> GraphDraftBatchRun | None:
-        return self.graph_draft_batch_runs.latest_successful_for_project(project_id)
+        return self.graph_draft_batch_runs.latest_successful_for_project(
+            project_id,
+            review_assignee_user_id=review_assignee_user_id,
+            review_assignee=review_assignee,
+        )
 
     def successful_graph_draft_batch_source_note_ids_at_window_end(
         self,
         project_id: UUID,
         window_end: datetime,
+        *,
+        review_assignee_user_id: UUID | None = None,
+        review_assignee: str | None = None,
     ) -> set[UUID]:
         return self.graph_draft_batch_runs.successful_source_note_ids_at_window_end(
             project_id,
             window_end,
+            review_assignee_user_id=review_assignee_user_id,
+            review_assignee=review_assignee,
         )
 
     def query_graph_draft_batch_runs(
@@ -1094,3 +1117,10 @@ class SQLAlchemyLabTrackerRepository(LabTrackerRepository):
             limit=limit,
             offset=offset,
         )
+
+    def claim_next_pending_graph_draft_batch_run(
+        self,
+        *,
+        claimed_at: datetime,
+    ) -> GraphDraftBatchRun | None:
+        return self.graph_draft_batch_runs.claim_next_pending(claimed_at=claimed_at)

@@ -315,6 +315,7 @@ def _attach_graph_usernames(request: Request, change_set: GraphChangeSet) -> Gra
     auth_service = request.app.state.auth_service
     for id_field, username_field in (
         ("created_by", "created_by_username"),
+        ("review_assignee", "review_assignee_username"),
         ("submitted_by", "submitted_by_username"),
         ("reviewed_by", "reviewed_by_username"),
         ("committed_by", "committed_by_username"),
@@ -359,6 +360,9 @@ def _graph_change_set_summary(change_set: GraphChangeSet) -> GraphChangeSetSumma
         created_by=change_set.created_by,
         created_by_user_id=change_set.created_by_user_id,
         created_by_username=change_set.created_by_username,
+        review_assignee=change_set.review_assignee,
+        review_assignee_user_id=change_set.review_assignee_user_id,
+        review_assignee_username=change_set.review_assignee_username,
         updated_at=change_set.updated_at,
         submitted_at=change_set.submitted_at,
         submitted_by=change_set.submitted_by,

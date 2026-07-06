@@ -5,19 +5,36 @@ memos — including notes tagged as meetings) and proposes how they fit your gra
 in one review queue you accept or reject. It can run **on demand** (the **Run
 now** button on the Batches page) or **on a schedule**.
 
-Lab Tracker itself does not run a background scheduler — it's a plain web app. To
-fire the review automatically you point a small **external scheduler** at one
-endpoint, `POST /batches/run-due`. This page sets that up in one step.
+On a server deployment, prefer the built-in scheduler/worker: set
+`LAB_TRACKER_GRAPH_DRAFT_SCHEDULER_ENABLED=true` and the app will enqueue due
+reviews itself, then draft them in the background. The older external scheduler
+flow remains supported for hosts that want cron, launchd, Windows Task Scheduler,
+or cloud automation to call `POST /batches/run-due`.
 
 > **The model only ever proposes.** The scheduled job triggers *drafting* — a
 > human still accepts or rejects every proposal before anything is committed.
 
 ---
 
-## Quick start (one command)
+## Recommended server setup
 
-Suggested configuration: a local Lab Tracker (`http://127.0.0.1:8000`), polled
-every 15 minutes. Each project still fires only at the time *you* set for it.
+Enable the server-resident scheduler before starting Lab Tracker:
+
+```sh
+export LAB_TRACKER_GRAPH_DRAFT_SCHEDULER_ENABLED=true
+```
+
+With that flag on, the app ticks for due reviews, claims eligible cadence rows
+safely in the database, enqueues one batch job per reviewer, and runs draft
+generation in the worker instead of inside the HTTP request. The **Run now**
+button and `POST /batches/run-due` also enqueue work rather than blocking on
+model calls.
+
+## External scheduler fallback
+
+Suggested fallback configuration: a local Lab Tracker
+(`http://127.0.0.1:8000`), polled every 15 minutes. Each review still fires only
+at the time *you* set for it.
 
 **Windows** — double-click [`scripts/install-daily-review.cmd`](../scripts/install-daily-review.cmd),
 or run:
@@ -39,8 +56,8 @@ scripts/install-daily-review-launchd.sh
 scripts/install-daily-review.sh
 ```
 
-That registers a scheduled job (a Windows Scheduled Task, a launchd LaunchAgent,
-or a `cron` entry) that nudges the review every 15 minutes. Re-running it just
+That registers an external job (a Windows Scheduled Task, a launchd LaunchAgent,
+or a `cron` entry) that nudges the server every 15 minutes. Re-running it just
 updates the existing job. Both \*nix installers take the same optional arguments
 (`[interval_minutes] [base_url]`); when auth is enabled they read
 `LAB_TRACKER_ADMIN_USER` / `LAB_TRACKER_ADMIN_PASS` from the environment. The
@@ -51,11 +68,12 @@ rather than into the world-readable plist.
 ### One thing to turn on first
 
 The job does nothing until at least one project has the daily review **enabled**.
-Open the **Batches** page at `/app/batches`, pick a project, and set its cadence
-(default: daily at **18:00** — early evening — in your timezone, so you confirm
-the day's captures before you head out; switch it to `06:00` for a next-morning
-review instead). That per-project setting decides when each project actually
-runs; the scheduled job is just a frequent, cheap poll.
+Open the **Batches** page at `/app/batches`, pick a project, and set the cadence
+for the project default or for a specific user (default: daily at **18:00** —
+early evening — in your timezone, so each person confirms the day's captures
+before heading out; switch it to `06:00` for a next-morning review instead).
+That per-(project, user) setting decides when each review actually runs; the
+scheduler is just a frequent, cheap poll.
 
 ### Try it without waiting
 
@@ -63,7 +81,8 @@ runs; the scheduled job is just a frequent, cheap poll.
 - run the trigger once yourself:
   `scripts/daily-review-run-due.sh` (or `scripts/daily-review-run-due.ps1`).
 
-Then review the queue at `/app/batches`.
+With background drafting enabled, those triggers enqueue a pending run and the
+worker fills the queue shortly after. Then review the queue at `/app/batches`.
 
 ### Remove it
 
@@ -75,9 +94,9 @@ Then review the queue at `/app/batches`.
 
 ## Running against a server (with login)
 
-The Quick Start assumes a local instance with authentication disabled, so no
-credentials are needed. Two things change when Lab Tracker is **deployed** and
-**auth is enabled**:
+The external scheduler fallback assumes a local instance with authentication
+disabled, so no credentials are needed. Two things change when Lab Tracker is
+**deployed** and **auth is enabled**:
 
 - **Reachability.** A cloud scheduler (a Claude routine, a Codex automation, a
   hosted cron) can only reach a Lab Tracker that has a public URL. A localhost
@@ -111,7 +130,7 @@ The installers above wrap a one-line trigger you can drive from anything.
 ### Plain cron / curl
 
 ```cron
-# Poll every 15 min; per-project run_at_local_time decides the real time.
+# Poll every 15 min; per-(project, user) run_at_local_time decides the real time.
 */15 * * * * /path/to/lab-tracker/scripts/daily-review-run-due.sh >> ~/.lab-tracker-daily-review.log 2>&1
 ```
 
@@ -140,9 +159,15 @@ to the project. Same reachability and auth rules as above.
 
 ## How it behaves (why frequent polling is fine)
 
-`POST /batches/run-due` runs every project whose batch settings are enabled and
-due, then advances each project's `next_run_at`. It is idempotent: a
-compare-and-set (`claim_due`) plus a deterministic `batch_key` mean concurrent or
-redundant calls never double-fire a project, and an off-time poll simply finds
-nothing due and returns immediately. So the trigger can be dumb and frequent; the
-*per-project* cadence does the real scheduling.
+`POST /batches/run-due` and the built-in ticker both examine enabled cadence rows
+that are due, then advance each row's `next_run_at`. The default project row
+partitions staged notes by note author; a user-specific row runs only that user's
+new staged notes. Each generated change set keeps `created_by` as the triggering
+principal (`SYSTEM` for the built-in scheduler) and sets `review_assignee` to the
+person expected to review it.
+
+The operation is idempotent: a compare-and-set (`claim_due`) plus deterministic
+batch keys mean concurrent or redundant calls never double-fire the same review,
+and an off-time poll simply finds nothing due and returns immediately. So the
+trigger can be dumb and frequent; the per-(project, user) cadence does the real
+scheduling.

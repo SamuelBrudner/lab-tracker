@@ -143,6 +143,8 @@ def change_set_to_model(change_set: GraphChangeSet) -> GraphChangeSetModel:
         error_metadata=dict(change_set.error_metadata),
         created_by=change_set.created_by,
         created_by_user_id=_uuid_str(change_set.created_by_user_id),
+        review_assignee=change_set.review_assignee,
+        review_assignee_user_id=_uuid_str(change_set.review_assignee_user_id),
         created_at=change_set.created_at,
         updated_at=change_set.updated_at,
         submitted_at=change_set.submitted_at,
@@ -178,6 +180,8 @@ def apply_change_set_to_model(row: GraphChangeSetModel, change_set: GraphChangeS
     row.error_metadata = dict(change_set.error_metadata)
     row.created_by = change_set.created_by
     row.created_by_user_id = _uuid_str(change_set.created_by_user_id)
+    row.review_assignee = change_set.review_assignee
+    row.review_assignee_user_id = _uuid_str(change_set.review_assignee_user_id)
     row.created_at = change_set.created_at
     row.updated_at = change_set.updated_at
     row.submitted_at = change_set.submitted_at
@@ -227,6 +231,9 @@ def change_set_from_model(
         created_by=row.created_by,
         created_by_user_id=_uuid(row.created_by_user_id),
         created_by_username=resolved_usernames.get(row.created_by or ""),
+        review_assignee=row.review_assignee,
+        review_assignee_user_id=_uuid(row.review_assignee_user_id),
+        review_assignee_username=resolved_usernames.get(row.review_assignee or ""),
         created_at=as_utc(row.created_at),
         updated_at=as_utc(row.updated_at),
         submitted_at=_as_utc_optional(row.submitted_at),
@@ -298,6 +305,7 @@ class SQLAlchemyGraphChangeSetRepository(EntityRepository[GraphChangeSet]):
                 for row in rows
                 for user_id in (
                     row.created_by,
+                    row.review_assignee,
                     row.submitted_by,
                     row.reviewed_by,
                     row.committed_by,
