@@ -382,7 +382,10 @@ function App() {
                 role: selectedProjectRole,
               }}
             />
-          ) : (
+          ) : route.kind === "graph" ? null : (
+            // The graph explorer has its own project picker and fills the
+            // viewport; stacking the Dashboard card (second picker, New
+            // Project + member forms) next to it just buries the canvas.
             <Dashboard {...dashboardProps} />
           )}
 
@@ -426,7 +429,7 @@ function App() {
                 workspaceData.setSelectedProjectId(event.target.value)
               }
               navigate={navigate}
-              canManageGraph={canManageProjectMembers}
+              canManageGraph={canContributeToProject}
               setBusy={setBusy}
               setFlash={setFlash}
             />

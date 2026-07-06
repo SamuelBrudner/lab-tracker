@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vitest";
 
-import { buildFlowGraph, computeQuestionLayout } from "./project-graph.jsx";
+import {
+  buildFlowGraph,
+  computeQuestionLayout,
+  defaultHiddenTypes,
+  filterGraphByHiddenTypes,
+} from "./project-graph.jsx";
 
 const q = (id, label) => ({ id, entity_type: "question", label });
 const edge = (id, source, target, relationship, label) => ({
@@ -150,6 +155,39 @@ describe("buildFlowGraph edge dedupe", () => {
     expect(goalEdge.style.strokeDasharray).toBe("5 5");
   });
 
+  it("truncates long display labels but keeps the full text in data", () => {
+    const longLabel = "word ".repeat(60).trim(); // 299 chars
+    const graph = {
+      nodes: [{ id: "C", entity_type: "claim", label: longLabel }],
+      edges: [],
+    };
+    const [node] = buildFlowGraph(graph, "evidence").nodes;
+    expect(node.data.label.length).toBeLessThanOrEqual(110);
+    expect(node.data.label.endsWith("…")).toBe(true);
+    expect(node.data.fullLabel).toBe(longLabel);
+  });
+
+  it("does not split an astral-plane character at the truncation boundary", () => {
+    // The emoji straddles the 108/109 UTF-16 boundary; a code-unit slice would
+    // leave a lone high surrogate (rendered as the replacement character).
+    const label = `${"a".repeat(108)}😀${"b".repeat(50)}`;
+    const graph = { nodes: [{ id: "C", entity_type: "claim", label }], edges: [] };
+    const [node] = buildFlowGraph(graph, "evidence").nodes;
+    const beforeEllipsis = node.data.label.slice(0, -1);
+    // No unpaired surrogate anywhere in the displayed label.
+    expect(/[\uD800-\uDFFF]/.test(beforeEllipsis.replace(/[\uD800-\uDBFF][\uDC00-\uDFFF]/g, ""))).toBe(false);
+    expect(node.data.label.endsWith("…")).toBe(true);
+  });
+
+  it("leaves short labels untouched", () => {
+    const graph = {
+      nodes: [{ id: "C", entity_type: "claim", label: "short claim" }],
+      edges: [],
+    };
+    const [node] = buildFlowGraph(graph, "evidence").nodes;
+    expect(node.data.label).toBe("short claim");
+  });
+
   it("places exploration nodes between claims and visualizations", () => {
     const graph = {
       nodes: [
@@ -171,5 +209,113 @@ describe("buildFlowGraph edge dedupe", () => {
     expect(byId.E.data.entityType).toBe("exploration_node");
     expect(byId.E.position.x).toBeGreaterThan(byId.C.position.x);
     expect(byId.V.position.x).toBeGreaterThan(byId.E.position.x);
+  });
+});
+
+// A question with two downstream chains: Q -> D -> A and Q -> D2. Used to
+// exercise on-demand edge labels and neighborhood dimming.
+function evidenceChain() {
+  return {
+    nodes: [
+      q("Q", "question"),
+      { id: "D", entity_type: "dataset", label: "ds" },
+      { id: "D2", entity_type: "dataset", label: "ds2" },
+      { id: "A", entity_type: "analysis", label: "an" },
+    ],
+    edges: [
+      edge("e1", "Q", "D", "dataset_question_primary", "primary question"),
+      edge("e2", "Q", "D2", "dataset_question_primary", "primary question"),
+      edge("e3", "D", "A", "analysis_dataset", "used by"),
+    ],
+  };
+}
+
+describe("buildFlowGraph edge labels and selection", () => {
+  it("renders no edge labels by default", () => {
+    const { edges } = buildFlowGraph(evidenceChain(), "evidence");
+    expect(edges.every((item) => item.label === undefined)).toBe(true);
+    // ...but keeps the prose available for on-demand display.
+    expect(edges[0].data.label).toBe("primary question");
+  });
+
+  it("renders every edge label when showEdgeLabels is on", () => {
+    const { edges } = buildFlowGraph(evidenceChain(), "evidence", {
+      showEdgeLabels: true,
+    });
+    expect(edges.map((item) => item.label)).toEqual([
+      "primary question",
+      "primary question",
+      "used by",
+    ]);
+  });
+
+  it("labels only the hovered edge", () => {
+    const { edges } = buildFlowGraph(evidenceChain(), "evidence", {
+      hoveredEdgeId: "e3",
+    });
+    const byId = Object.fromEntries(edges.map((item) => [item.id, item]));
+    expect(byId.e3.label).toBe("used by");
+    expect(byId.e1.label).toBeUndefined();
+    expect(byId.e2.label).toBeUndefined();
+  });
+
+  it("dims everything outside the selected node's neighborhood and labels its edges", () => {
+    const { nodes, edges } = buildFlowGraph(evidenceChain(), "evidence", {
+      selectedNodeId: "D",
+    });
+    const nodesById = Object.fromEntries(nodes.map((item) => [item.id, item]));
+    const edgesById = Object.fromEntries(edges.map((item) => [item.id, item]));
+    // D's 1-hop neighborhood is Q and A; D2 dims.
+    expect(nodesById.D.style.opacity).toBeUndefined();
+    expect(nodesById.Q.style.opacity).toBeUndefined();
+    expect(nodesById.A.style.opacity).toBeUndefined();
+    expect(nodesById.D2.style.opacity).toBe(0.15);
+    expect(nodesById.D.style.borderWidth).toBe(2);
+    expect(nodesById.D2.style.borderWidth).toBe(1);
+    // Incident edges keep opacity and show labels; the rest dim, unlabeled.
+    expect(edgesById.e1.label).toBe("primary question");
+    expect(edgesById.e3.label).toBe("used by");
+    expect(edgesById.e1.style.opacity).toBeUndefined();
+    expect(edgesById.e2.label).toBeUndefined();
+    expect(edgesById.e2.style.opacity).toBe(0.15);
+  });
+
+  it("ignores a selected id that is not in the rendered graph", () => {
+    const { nodes } = buildFlowGraph(evidenceChain(), "evidence", {
+      selectedNodeId: "note:gone",
+    });
+    expect(nodes.every((item) => item.style.opacity === undefined)).toBe(true);
+  });
+});
+
+describe("type filtering", () => {
+  it("hides notes and sessions by default in the full view only", () => {
+    expect([...defaultHiddenTypes("full")].sort()).toEqual(["note", "session"]);
+    expect(defaultHiddenTypes("evidence").size).toBe(0);
+    expect(defaultHiddenTypes("questions").size).toBe(0);
+  });
+
+  it("drops hidden types and their incident edges, and re-stacks survivors from the top", () => {
+    const graph = {
+      nodes: [
+        { id: "N", entity_type: "note", label: "note" },
+        { id: "D", entity_type: "dataset", label: "ds" },
+        { id: "D2", entity_type: "dataset", label: "ds2" },
+      ],
+      edges: [edge("e1", "N", "D", "note_target", "about")],
+    };
+    const filtered = filterGraphByHiddenTypes(graph, new Set(["note"]));
+    expect(filtered.nodes.map((node) => node.id)).toEqual(["D", "D2"]);
+    expect(filtered.edges).toHaveLength(0);
+    // Layout of the filtered graph stacks the surviving column from y=0.
+    const { nodes } = buildFlowGraph(filtered, "evidence");
+    expect(nodes[0].position.y).toBe(0);
+    expect(nodes[1].position.y).toBe(118);
+  });
+
+  it("returns the graph unchanged when nothing is hidden", () => {
+    const graph = { nodes: [q("Q", "question")], edges: [] };
+    expect(filterGraphByHiddenTypes(graph, new Set())).toBe(graph);
+    expect(filterGraphByHiddenTypes(null, new Set(["note"]))).toBe(null);
   });
 });

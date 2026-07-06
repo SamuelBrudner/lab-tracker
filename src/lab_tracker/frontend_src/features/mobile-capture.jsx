@@ -599,12 +599,12 @@ function MobileCaptureCard({
     return metadata;
   }
 
-  function baseMetadata({ draft, kind, bundleId = "", file = null }) {
+  function baseMetadata({ kind, bundleId = "", file = null }) {
     const metadata = {
       capture_source: "mobile_capture",
       capture_mode: captureMode,
       capture_kind: kind,
-      capture_review_status: draft ? "draft_requested" : "pending_review",
+      capture_review_status: "pending_review",
       ...sourceFileMetadata(file),
     };
     if (bundleId) {
@@ -682,13 +682,13 @@ function MobileCaptureCard({
     }
   }
 
-  async function createTextCapture({ draft }) {
+  async function createTextCapture() {
     return apiRequest("/notes", {
       body: {
         project_id: selectedProjectId,
         raw_content: textNote.trim(),
         targets: selectedTargets(),
-        metadata: baseMetadata({ draft, kind: "text" }),
+        metadata: baseMetadata({ kind: "text" }),
       },
       method: "POST",
       token,
@@ -742,51 +742,7 @@ function MobileCaptureCard({
     }
   }
 
-  async function draftPendingNote(note) {
-    if (!note || !canWrite) {
-      return;
-    }
-    if (isAudioCapture(note) && !hasTranscript(note)) {
-      setPendingActionErrors((current) => ({
-        ...current,
-        [note.note_id]: "Transcribe this voice note before drafting.",
-      }));
-      return;
-    }
-    if (missingBundleTranscript(note, pendingNotes)) {
-      setPendingActionErrors((current) => ({
-        ...current,
-        [note.note_id]: "Transcribe the bundled voice note before drafting.",
-      }));
-      return;
-    }
-    setPendingAction(note.note_id, "drafting");
-    setFlash("", "");
-    try {
-      const graphDraft = await apiRequest(`/notes/${note.note_id}/graph-drafts`, {
-        body: {
-          mode: "graph_context",
-          user_hint: captureHint(note) || undefined,
-        },
-        method: "POST",
-        token,
-      });
-      if (graphDraft?.change_set_id) {
-        navigate(`/app/graph-drafts/${graphDraft.change_set_id}`);
-        setFlash("Graph-aware draft ready for review.");
-      }
-    } catch (err) {
-      setPendingActionErrors((current) => ({
-        ...current,
-        [note.note_id]: err.message || "Failed to draft graph update.",
-      }));
-      setFlash("", err.message || "Failed to draft graph update.");
-    } finally {
-      clearPendingAction(note.note_id);
-    }
-  }
-
-  async function uploadCapture({ draft = false, imageOnly = false } = {}) {
+  async function uploadCapture() {
     if (!canWrite) {
       return;
     }
@@ -814,7 +770,7 @@ function MobileCaptureCard({
       if (needsPhoto() && !noteId) {
         const result = await uploadOrQueueRawFile({
           fileToUpload: photoFile,
-          metadata: baseMetadata({ draft, kind: "image", bundleId, file: photoFile }),
+          metadata: baseMetadata({ kind: "image", bundleId, file: photoFile }),
         });
         if (result === OFFLINE_QUEUED) {
           queuedOffline = true;
@@ -828,7 +784,7 @@ function MobileCaptureCard({
       if (needsVoice() && !voiceNoteId && !queuedOffline) {
         const result = await uploadOrQueueRawFile({
           fileToUpload: audioFile,
-          metadata: baseMetadata({ draft, kind: "voice", bundleId, file: audioFile }),
+          metadata: baseMetadata({ kind: "voice", bundleId, file: audioFile }),
         });
         if (result === OFFLINE_QUEUED) {
           queuedOffline = true;
@@ -844,12 +800,12 @@ function MobileCaptureCard({
       } else if (needsVoice() && !voiceNoteId && queuedOffline) {
         await queueRawFileNoteOffline({
           fileToUpload: audioFile,
-          metadata: baseMetadata({ draft, kind: "voice", bundleId, file: audioFile }),
+          metadata: baseMetadata({ kind: "voice", bundleId, file: audioFile }),
         });
       }
 
       if (needsText() && !noteId && !queuedOffline) {
-        const textCapture = await createTextCapture({ draft });
+        const textCapture = await createTextCapture();
         noteId = textCapture.note_id;
         noteCreated = true;
         setUploadedNoteId(noteId);
@@ -868,30 +824,6 @@ function MobileCaptureCard({
           refreshProjectCounts(selectedProjectId),
           refreshRecentNotes(selectedProjectId),
         ]);
-      }
-      if (draft && voiceNoteId) {
-        await apiRequest(`/notes/${voiceNoteId}/transcript`, {
-          body: hint.trim() ? { prompt: hint.trim() } : {},
-          method: "POST",
-          token,
-        });
-      }
-      if (draft) {
-        const graphDraft = await apiRequest(`/notes/${noteId}/graph-drafts`, {
-          body: {
-            mode: imageOnly ? "image_only" : "graph_context",
-            user_hint: hint.trim() || undefined,
-          },
-          method: "POST",
-          token,
-        });
-        if (graphDraft?.change_set_id) {
-          navigate(`/app/graph-drafts/${graphDraft.change_set_id}`);
-          setFlash(
-            imageOnly ? "Image-only draft ready for review." : "Graph-aware draft ready for review."
-          );
-          return;
-        }
       }
       setFlash("Capture saved for review.");
       setPhotoFile(null);
@@ -920,7 +852,6 @@ function MobileCaptureCard({
             <input
               accept="image/*"
               aria-label="Photo file"
-              capture="environment"
               className="sr-only"
               disabled={!canWrite}
               id="capture-photo-input"
@@ -930,10 +861,19 @@ function MobileCaptureCard({
             <input
               accept="audio/*"
               aria-label="Voice recording"
-              capture
               className="sr-only"
               disabled={!canWrite}
               id="capture-audio-input"
+              onChange={handleAudioFileChange}
+              type="file"
+            />
+            <input
+              accept="audio/*"
+              aria-label="Record voice note"
+              capture
+              className="sr-only"
+              disabled={!canWrite}
+              id="capture-audio-record-input"
               onChange={handleAudioFileChange}
               type="file"
             />
@@ -966,16 +906,16 @@ function MobileCaptureCard({
                 className={`capture-composer-icon capture-composer-mic${
                   canWrite ? "" : " disabled"
                 }`}
-                htmlFor="capture-audio-input"
+                htmlFor="capture-audio-record-input"
               >
                 <CaptureIcon kind="voice" />
               </label>
               <button
-                aria-label="Upload and draft"
+                aria-label="Save capture"
                 className="capture-composer-send"
                 disabled={!canWrite || !readyToCapture()}
-                onClick={() => uploadCapture({ draft: true })}
-                title="Upload and draft"
+                onClick={() => uploadCapture()}
+                title="Save capture"
                 type="button"
               >
                 <svg aria-hidden="true" viewBox="0 0 24 24">
@@ -1093,16 +1033,6 @@ function MobileCaptureCard({
               >
                 Save for later
               </button>
-              {uploadedNoteId ? (
-                <button
-                  className="btn-secondary"
-                  disabled={!canWrite || captureMode !== "photo"}
-                  onClick={() => uploadCapture({ draft: true, imageOnly: true })}
-                  type="button"
-                >
-                  Draft image-only
-                </button>
-              ) : null}
             </div>
           </section>
 
@@ -1238,11 +1168,6 @@ function MobileCaptureCard({
               const audioCapture = isAudioCapture(note);
               const transcriptReady = hasTranscript(note);
               const bundleBlocked = missingBundleTranscript(note, pendingNotes);
-              const draftDisabled =
-                !canWrite ||
-                Boolean(action) ||
-                (audioCapture && !transcriptReady) ||
-                bundleBlocked;
               return (
                 <article className="review-queue-item" key={note.note_id}>
                   <div className="inline">
@@ -1292,14 +1217,6 @@ function MobileCaptureCard({
                         Review
                       </button>
                     )}
-                    <button
-                      className="btn-secondary"
-                      disabled={draftDisabled}
-                      onClick={() => draftPendingNote(note)}
-                      type="button"
-                    >
-                      {action === "drafting" ? "Drafting..." : "Draft"}
-                    </button>
                   </div>
                 </article>
               );
