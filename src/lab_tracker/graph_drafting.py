@@ -46,6 +46,16 @@ class GraphDraftingError(RuntimeError):
     """Raised when GPT graph drafting cannot produce a usable patch."""
 
 
+def _missing_api_key_error(env_var: str, action: str) -> GraphDraftingError:
+    # Point misconfigured operators at the provider switch, not just the key:
+    # OpenAI, Anthropic, and Google are equally supported and the choice is
+    # theirs (LAB_TRACKER_GRAPH_DRAFT_PROVIDER).
+    return GraphDraftingError(
+        f"{env_var} must be set before {action}. Set it, or select a different provider "
+        "with LAB_TRACKER_GRAPH_DRAFT_PROVIDER (openai, anthropic/claude, google/gemini)."
+    )
+
+
 def graph_patch_response_schema() -> dict[str, Any]:
     region_schema: dict[str, Any] = {
         "type": "object",
@@ -254,8 +264,8 @@ class OpenAIGraphDraftClient:
         extra_images: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         if not self._api_key:
-            raise GraphDraftingError(
-                "LAB_TRACKER_OPENAI_API_KEY must be set before drafting graph changes."
+            raise _missing_api_key_error(
+                "LAB_TRACKER_OPENAI_API_KEY", "drafting graph changes"
             )
         resolved_context = graph_context if graph_context is not None else project_context or {}
         artifacts = list(source_artifacts or [])
@@ -341,8 +351,8 @@ class OpenAIGraphDraftClient:
         user_hint: str | None = None,
     ) -> dict[str, Any]:
         if not self._api_key:
-            raise GraphDraftingError(
-                "LAB_TRACKER_OPENAI_API_KEY must be set before drafting batch graph changes."
+            raise _missing_api_key_error(
+                "LAB_TRACKER_OPENAI_API_KEY", "drafting batch graph changes"
             )
         batch_notes = batch_context.get("batch_notes") or []
         if not batch_notes:
@@ -397,8 +407,8 @@ class OpenAIGraphDraftClient:
         project_context: dict[str, Any],
     ) -> dict[str, Any]:
         if not self._api_key:
-            raise GraphDraftingError(
-                "LAB_TRACKER_OPENAI_API_KEY must be set before drafting graph changes."
+            raise _missing_api_key_error(
+                "LAB_TRACKER_OPENAI_API_KEY", "drafting graph changes"
             )
         cleaned_evidence = evidence_text.strip()
         if not cleaned_evidence:
@@ -452,8 +462,8 @@ class OpenAIGraphDraftClient:
         prompt: str | None = None,
     ) -> dict[str, Any]:
         if not self._api_key:
-            raise GraphDraftingError(
-                "LAB_TRACKER_OPENAI_API_KEY must be set before transcribing voice notes."
+            raise _missing_api_key_error(
+                "LAB_TRACKER_OPENAI_API_KEY", "transcribing voice notes"
             )
         if not audio_bytes:
             raise GraphDraftingError("Source audio is empty.")
@@ -525,8 +535,8 @@ class AnthropicGraphDraftClient:
         extra_images: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         if not self._api_key:
-            raise GraphDraftingError(
-                "LAB_TRACKER_ANTHROPIC_API_KEY must be set before drafting graph changes."
+            raise _missing_api_key_error(
+                "LAB_TRACKER_ANTHROPIC_API_KEY", "drafting graph changes"
             )
         resolved_context = graph_context if graph_context is not None else project_context or {}
         artifacts = list(source_artifacts or [])
@@ -577,8 +587,8 @@ class AnthropicGraphDraftClient:
         user_hint: str | None = None,
     ) -> dict[str, Any]:
         if not self._api_key:
-            raise GraphDraftingError(
-                "LAB_TRACKER_ANTHROPIC_API_KEY must be set before drafting batch graph changes."
+            raise _missing_api_key_error(
+                "LAB_TRACKER_ANTHROPIC_API_KEY", "drafting batch graph changes"
             )
         batch_notes = batch_context.get("batch_notes") or []
         if not batch_notes:
@@ -601,8 +611,8 @@ class AnthropicGraphDraftClient:
         project_context: dict[str, Any],
     ) -> dict[str, Any]:
         if not self._api_key:
-            raise GraphDraftingError(
-                "LAB_TRACKER_ANTHROPIC_API_KEY must be set before drafting graph changes."
+            raise _missing_api_key_error(
+                "LAB_TRACKER_ANTHROPIC_API_KEY", "drafting graph changes"
             )
         cleaned_evidence = evidence_text.strip()
         if not cleaned_evidence:
@@ -707,8 +717,8 @@ class GoogleGraphDraftClient:
         extra_images: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         if not self._api_key:
-            raise GraphDraftingError(
-                "LAB_TRACKER_GOOGLE_API_KEY must be set before drafting graph changes."
+            raise _missing_api_key_error(
+                "LAB_TRACKER_GOOGLE_API_KEY", "drafting graph changes"
             )
         resolved_context = graph_context if graph_context is not None else project_context or {}
         artifacts = list(source_artifacts or [])
@@ -740,8 +750,8 @@ class GoogleGraphDraftClient:
         user_hint: str | None = None,
     ) -> dict[str, Any]:
         if not self._api_key:
-            raise GraphDraftingError(
-                "LAB_TRACKER_GOOGLE_API_KEY must be set before drafting batch graph changes."
+            raise _missing_api_key_error(
+                "LAB_TRACKER_GOOGLE_API_KEY", "drafting batch graph changes"
             )
         batch_notes = batch_context.get("batch_notes") or []
         if not batch_notes:
@@ -758,8 +768,8 @@ class GoogleGraphDraftClient:
         project_context: dict[str, Any],
     ) -> dict[str, Any]:
         if not self._api_key:
-            raise GraphDraftingError(
-                "LAB_TRACKER_GOOGLE_API_KEY must be set before drafting graph changes."
+            raise _missing_api_key_error(
+                "LAB_TRACKER_GOOGLE_API_KEY", "drafting graph changes"
             )
         cleaned_evidence = evidence_text.strip()
         if not cleaned_evidence:
@@ -785,8 +795,8 @@ class GoogleGraphDraftClient:
         prompt: str | None = None,
     ) -> dict[str, Any]:
         if not self._api_key:
-            raise GraphDraftingError(
-                "LAB_TRACKER_GOOGLE_API_KEY must be set before transcribing voice notes."
+            raise _missing_api_key_error(
+                "LAB_TRACKER_GOOGLE_API_KEY", "transcribing voice notes"
             )
         if not audio_bytes:
             raise GraphDraftingError("Source audio is empty.")
@@ -944,7 +954,7 @@ def make_graph_draft_client(settings: Settings) -> GraphDraftClient:
         return AgenticGraphDraftClient.from_settings(settings)
     raise GraphDraftingError(
         "Unknown graph_draft_provider "
-        f"'{provider}'. Configured providers: openai, anthropic, google, agentic."
+        f"'{provider}'. Supported providers: openai, anthropic/claude, google/gemini, agentic."
     )
 
 

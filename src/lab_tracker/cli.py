@@ -38,7 +38,7 @@ from lab_tracker.decision_context_constants import (
     code_conventions_version_line,
     code_facing_idioms,
     cursor_rules_mdc,
-    managed_claude_block,
+    managed_agent_activation_block,
     managed_code_conventions_block,
     package_version,
 )
@@ -88,13 +88,14 @@ def init_consumer_repo(
     if uninstall:
         if install_skills:
             _uninstall_setup_skill(result=result, dry_run=dry_run)
-        _strip_managed_block(
-            root / "CLAUDE.md",
-            begin_marker=CLAUDE_BLOCK_BEGIN,
-            end_marker=CLAUDE_BLOCK_END,
-            result=result,
-            dry_run=dry_run,
-        )
+        for activation_target in _ACTIVATION_BLOCK_TARGETS:
+            _strip_managed_block(
+                root / activation_target,
+                begin_marker=CLAUDE_BLOCK_BEGIN,
+                end_marker=CLAUDE_BLOCK_END,
+                result=result,
+                dry_run=dry_run,
+            )
         _strip_managed_block(
             root / "CLAUDE.md",
             begin_marker=CODE_CONVENTIONS_BLOCK_BEGIN,
@@ -120,6 +121,7 @@ def init_consumer_repo(
     files = {
         root / ".mcp.json": _mcp_json(),
         root / ".cursor" / "mcp.json": _cursor_mcp_json(),
+        root / ".gemini" / "settings.json": _gemini_settings_json(),
         root / ".claude" / "settings.json": _claude_settings_json(),
         root / "scripts" / "lt.py": _lt_shim(),
         root / "AGENTS.lt.md": _agents_fragment(),
@@ -127,7 +129,8 @@ def init_consumer_repo(
     }
     for path, content in files.items():
         _write_scaffold_file(path, content, force=force, result=result, dry_run=dry_run)
-    _write_managed_claude_block(root / "CLAUDE.md", result=result, dry_run=dry_run)
+    for activation_target in _ACTIVATION_BLOCK_TARGETS:
+        _write_managed_activation_block(root / activation_target, result=result, dry_run=dry_run)
     if yes:
         _write_managed_block(
             root / "CLAUDE.md",
@@ -265,6 +268,11 @@ def _uninstall_setup_skill(*, result: InitResult, dry_run: bool = False) -> None
 
 _UPDATE_BACKUP_SUFFIX = ".bak-lt-update"
 
+# One activation block per agent instruction file, kept byte-identical so
+# Claude Code (CLAUDE.md), Codex CLI and other AGENTS.md readers, and
+# Gemini CLI (GEMINI.md) all receive the same consultation policy.
+_ACTIVATION_BLOCK_TARGETS: tuple[str, ...] = ("CLAUDE.md", "AGENTS.md", "GEMINI.md")
+
 _CONVENTIONS_TARGETS: tuple[tuple[str, str, str], ...] = (
     ("CLAUDE.md", CODE_CONVENTIONS_BLOCK_BEGIN, CODE_CONVENTIONS_BLOCK_END),
     ("AGENTS.md", AGENTS_CODE_CONVENTIONS_BLOCK_BEGIN, AGENTS_CODE_CONVENTIONS_BLOCK_END),
@@ -297,6 +305,7 @@ def update_consumer_repo(
     files = {
         root / ".mcp.json": _mcp_json(),
         root / ".cursor" / "mcp.json": _cursor_mcp_json(),
+        root / ".gemini" / "settings.json": _gemini_settings_json(),
         root / ".claude" / "settings.json": _claude_settings_json(),
         root / "scripts" / "lt.py": _lt_shim(),
         root / "AGENTS.lt.md": _agents_fragment(),
@@ -311,7 +320,8 @@ def update_consumer_repo(
             ids_path, _ids_placeholder(None), force=False, result=result, dry_run=dry_run
         )
 
-    _write_managed_claude_block(root / "CLAUDE.md", result=result, dry_run=dry_run)
+    for activation_target in _ACTIVATION_BLOCK_TARGETS:
+        _write_managed_activation_block(root / activation_target, result=result, dry_run=dry_run)
 
     conventions_offer_needed = False
     for relative, begin_marker, end_marker in _CONVENTIONS_TARGETS:
@@ -514,7 +524,13 @@ def main(argv: list[str] | None = None) -> None:
 
     init_parser = subcommands.add_parser(
         "init",
-        help="Scaffold Lab Tracker integration files into a consumer repo.",
+        help=(
+            "Scaffold Lab Tracker integration files into a consumer repo: MCP "
+            "config and instruction blocks for Claude Code, Codex CLI, Gemini "
+            "CLI, and Cursor (agent choice stays with the user), so connected "
+            "agents consult the graph and route writes through the human-gated "
+            "proposal workflow."
+        ),
     )
     init_parser.add_argument(
         "--target",
@@ -778,7 +794,7 @@ def _write_scaffold_file(
         result.created.append(path)
 
 
-def _write_managed_claude_block(
+def _write_managed_activation_block(
     path: Path,
     *,
     result: InitResult,
@@ -786,7 +802,7 @@ def _write_managed_claude_block(
 ) -> None:
     _write_managed_block(
         path,
-        managed_claude_block(),
+        managed_agent_activation_block(),
         begin_marker=CLAUDE_BLOCK_BEGIN,
         end_marker=CLAUDE_BLOCK_END,
         result=result,
@@ -1072,6 +1088,15 @@ def _cursor_mcp_json() -> str:
     return _mcp_json()
 
 
+def _gemini_settings_json() -> str:
+    # Gemini CLI reads project settings from .gemini/settings.json and accepts
+    # the same top-level `mcpServers` shape (it does not auto-read root
+    # .mcp.json). Only the MCP entry is written; Gemini CLI merges project
+    # settings over user-level ones. Kept byte-identical to .mcp.json so every
+    # vendor launches the same portable `lt-mcp` command.
+    return _mcp_json()
+
+
 def _claude_settings_json() -> str:
     payload = {
         "hooks": {
@@ -1152,9 +1177,25 @@ def _agents_fragment() -> str:
         `lt hooks install` also require `--yes`; suggest them to the user
         rather than applying them unprompted.
 
-        Configure the MCP server with the generated `.mcp.json`. It uses the portable
-        `lt-mcp` command, so consumer repos should not hard-code local Lab Tracker
-        virtualenv paths.
+        The proposal workflow is human-gated: evidence staged from this repo
+        (notes, figures, watch folders, commit hooks) can be swept into
+        AI-drafted graph change proposals — the daily review — that a person
+        accepts, edits, or rejects in the Lab Tracker app. Agents may stage
+        evidence and, when asked, trigger or request drafts; they never accept
+        or commit them. Drafting runs server-side on the provider the operator
+        configured (`LAB_TRACKER_GRAPH_DRAFT_PROVIDER`: OpenAI, Anthropic, or
+        Google — the lab's choice). See `docs/agent-setup.md` in the Lab
+        Tracker repository, or the `lab-tracker://setup-guide` MCP resource.
+
+        MCP config is scaffolded per agent and works with any MCP-capable
+        coding agent: `.mcp.json` (Claude Code and other root-config readers),
+        `.cursor/mcp.json` (Cursor), and `.gemini/settings.json` (Gemini CLI)
+        all launch the portable `lt-mcp` command, so consumer repos should not
+        hard-code local Lab Tracker virtualenv paths. Codex CLI reads this
+        repo's `AGENTS.md` and registers MCP servers in `~/.codex/config.toml`
+        — add `[mcp_servers.lab-tracker]` with `command = "lt-mcp"` (a
+        project-scoped `.codex/config.toml` works only in trusted repos, so it
+        is not scaffolded here).
         """
     )
 
