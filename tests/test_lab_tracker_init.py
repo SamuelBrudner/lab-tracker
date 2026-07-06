@@ -475,7 +475,21 @@ def test_lt_prime_non_research_prompt_emits_nothing(capsys) -> None:
     assert captured.err == ""
 
 
-def test_serve_app_runs_migrations_schedules_browser_and_starts_server(monkeypatch) -> None:
+def test_serve_app_runs_migrations_schedules_browser_and_starts_server(
+    monkeypatch, tmp_path: Path
+) -> None:
+    # Keep this hermetic: serve_app() resolves Settings from the current working
+    # directory's .env plus the process environment. Run from an empty temp dir
+    # (no .env) and drop any inherited overrides so the asserted defaults hold
+    # regardless of a developer's local .env contents.
+    monkeypatch.chdir(tmp_path)
+    for var in (
+        "LAB_TRACKER_DATABASE_URL",
+        "LAB_TRACKER_BACKUP_PATH",
+        "LAB_TRACKER_BACKUP_KEEP",
+    ):
+        monkeypatch.delenv(var, raising=False)
+
     calls: list[tuple[str, object]] = []
 
     def fake_backup(database_url: str, **kwargs):
