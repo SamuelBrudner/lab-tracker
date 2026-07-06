@@ -54,7 +54,10 @@ def test_git_commit_evidence_includes_commit_context(tmp_path: Path) -> None:
     assert len(metadata["git_commit"]) == 40
     assert metadata["git_diff_truncated"] is False
     assert metadata["evidence_source_provider"] == "git"
-    assert metadata["evidence_source_external_id"] == metadata["git_commit"]
+    # Shared git-evidence identity (<normalized-remote>@<commit>; "local" when
+    # no remote is configured) so hook and CI paths dedup to one identity per
+    # commit — see lab_tracker_client.repo.event_source_external_id.
+    assert metadata["evidence_source_external_id"] == f"local@{metadata['git_commit']}"
     assert metadata["evidence_capture_kind"] == "git_commit"
     assert metadata["evidence_content_hash"]
 

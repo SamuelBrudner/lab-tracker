@@ -6,6 +6,7 @@ from typing import Any
 
 from lab_tracker.decision_context import AGENT_CONSULTATION_POLICY
 from lab_tracker.decision_context_constants import code_facing_idioms
+from lab_tracker.setup_guide import setup_guide_markdown
 
 
 def lab_tracker_quickstart() -> str:
@@ -49,6 +50,10 @@ def lab_tracker_code_conventions() -> str:
     return code_facing_idioms()
 
 
+def lab_tracker_setup_guide() -> str:
+    return setup_guide_markdown()
+
+
 def register_resources(server: Any) -> None:
     server.resource(
         "lab-tracker://quickstart",
@@ -70,3 +75,8 @@ def register_resources(server: Any) -> None:
         name="Lab Tracker Code Conventions",
         mime_type="text/markdown",
     )(lab_tracker_code_conventions)
+    server.resource(
+        "lab-tracker://setup-guide",
+        name="Lab Tracker Guided Setup",
+        mime_type="text/markdown",
+    )(lab_tracker_setup_guide)

@@ -7,6 +7,7 @@ import difflib
 import ipaddress
 import json
 import math
+import os
 import sys
 import threading
 import time
@@ -14,6 +15,7 @@ import urllib.error
 import urllib.request
 import webbrowser
 from collections.abc import Callable
+from contextlib import suppress
 from dataclasses import dataclass, field
 from importlib import resources
 from pathlib import Path
@@ -50,6 +52,8 @@ class InitResult:
     skipped: list[Path] = field(default_factory=list)
     overwritten: list[Path] = field(default_factory=list)
     stripped: list[Path] = field(default_factory=list)
+    up_to_date: list[Path] = field(default_factory=list)
+    backups: dict[Path, Path] = field(default_factory=dict)
     diffs: dict[Path, str] = field(default_factory=dict)
     offers: list[str] = field(default_factory=list)
     _preview_contents: dict[Path, str] = field(default_factory=dict, repr=False)
@@ -60,6 +64,8 @@ class InitResult:
             "skipped": [str(path) for path in self.skipped],
             "overwritten": [str(path) for path in self.overwritten],
             "stripped": [str(path) for path in self.stripped],
+            "up_to_date": [str(path) for path in self.up_to_date],
+            "backups": {str(path): str(backup) for path, backup in self.backups.items()},
             "diffs": {str(path): diff for path, diff in self.diffs.items()},
             "offers": list(self.offers),
         }
@@ -73,12 +79,15 @@ def init_consumer_repo(
     yes: bool = False,
     dry_run: bool = False,
     uninstall: bool = False,
+    install_skills: bool = False,
 ) -> InitResult:
     root = Path(target).expanduser().resolve()
     if not dry_run:
         root.mkdir(parents=True, exist_ok=True)
     result = InitResult()
     if uninstall:
+        if install_skills:
+            _uninstall_setup_skill(result=result, dry_run=dry_run)
         _strip_managed_block(
             root / "CLAUDE.md",
             begin_marker=CLAUDE_BLOCK_BEGIN,
@@ -152,7 +161,201 @@ def init_consumer_repo(
             "Managed code-facing convention blocks are available with "
             "`lab_tracker init --yes`."
         )
+    result.offers.append(
+        "Bind a project id into lt_ids.json with `lt project bind` "
+        "(--dry-run previews the write)."
+    )
+    if install_skills:
+        _install_setup_skill(result=result, dry_run=dry_run)
+    else:
+        result.offers.append(
+            "The lab-tracker-setup skill can be installed for Claude/Codex "
+            "agents with `--install-skills`."
+        )
     return result
+
+
+def _skills_home() -> Path:
+    override = os.getenv("LAB_TRACKER_SKILLS_HOME")
+    return Path(override).expanduser() if override else Path.home() / ".claude" / "skills"
+
+
+def _setup_skill_path() -> Path:
+    return _skills_home() / "lab-tracker-setup" / "SKILL.md"
+
+
+def _install_setup_skill(*, result: InitResult, dry_run: bool = False) -> None:
+    """Render the packaged setup skill into the agent skills home.
+
+    A real file copy (no symlinks — Windows), LF-only because the trailing
+    sha line pins the exact bytes, fully generated from package text so
+    upgrades refresh it via the same call. A version-line-only difference is
+    rewritten without a backup (a package bump with unchanged text must not
+    churn — or clobber — the single ``.bak-lt-update`` slot); a genuinely
+    customised copy is backed up like any other refreshed scaffold file.
+    """
+
+    from lab_tracker.setup_guide import (
+        setup_skill_markdown,
+        skill_content_without_version_line,
+    )
+
+    path = _setup_skill_path()
+    content = setup_skill_markdown()
+    if not path.exists():
+        if dry_run:
+            _record_dry_run_change(path, "", content, result)
+            result.created.append(path)
+            return
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content, encoding="utf-8", newline="\n")
+        result.created.append(path)
+        return
+    existing = path.read_text(encoding="utf-8")
+    if existing == content:
+        result.up_to_date.append(path)
+        return
+    version_line_only = skill_content_without_version_line(
+        existing
+    ) == skill_content_without_version_line(content)
+    if not version_line_only:
+        backup = path.with_name(path.name + _UPDATE_BACKUP_SUFFIX)
+        result.backups[path] = backup
+        if not dry_run:
+            backup.write_text(existing, encoding="utf-8", newline="\n")
+    if dry_run:
+        _record_dry_run_change(path, existing, content, result)
+        result.overwritten.append(path)
+        return
+    path.write_text(content, encoding="utf-8", newline="\n")
+    result.overwritten.append(path)
+
+
+def _uninstall_setup_skill(*, result: InitResult, dry_run: bool = False) -> None:
+    path = _setup_skill_path()
+    backup = path.with_name(path.name + _UPDATE_BACKUP_SUFFIX)
+    if not path.exists() and not backup.exists():
+        result.skipped.append(path)
+        return
+    if path.exists():
+        result.stripped.append(path)
+    if backup.exists():
+        result.stripped.append(backup)
+    if dry_run:
+        if path.exists():
+            _record_dry_run_change(path, path.read_text(encoding="utf-8"), "", result)
+        return
+    for item in (path, backup):
+        if item.exists():
+            item.unlink()
+    with suppress(OSError):
+        path.parent.rmdir()
+
+
+_UPDATE_BACKUP_SUFFIX = ".bak-lt-update"
+
+_CONVENTIONS_TARGETS: tuple[tuple[str, str, str], ...] = (
+    ("CLAUDE.md", CODE_CONVENTIONS_BLOCK_BEGIN, CODE_CONVENTIONS_BLOCK_END),
+    ("AGENTS.md", AGENTS_CODE_CONVENTIONS_BLOCK_BEGIN, AGENTS_CODE_CONVENTIONS_BLOCK_END),
+    (".cursor/rules/lab-tracker.mdc", CODE_CONVENTIONS_BLOCK_BEGIN, CODE_CONVENTIONS_BLOCK_END),
+)
+
+
+def update_consumer_repo(
+    target: str | Path = ".",
+    *,
+    yes: bool = False,
+    dry_run: bool = False,
+    install_skills: bool = False,
+) -> InitResult:
+    """Refresh a previously initialised consumer repo to the current package.
+
+    - Scaffold files are rewritten to the current canonical text; a customised
+      or stale file is first backed up next to itself (``*.bak-lt-update``) so
+      nothing is lost. ``lt_ids.json`` is user data and is only created when
+      missing, never rewritten.
+    - Managed blocks refresh in place wherever they are already present, which
+      preserves the original consent decision; missing code-conventions blocks
+      are only added with ``yes`` (the same gate as ``init --yes``).
+    """
+
+    root = Path(target).expanduser().resolve()
+    if not dry_run:
+        root.mkdir(parents=True, exist_ok=True)
+    result = InitResult()
+    files = {
+        root / ".mcp.json": _mcp_json(),
+        root / ".cursor" / "mcp.json": _cursor_mcp_json(),
+        root / ".claude" / "settings.json": _claude_settings_json(),
+        root / "scripts" / "lt.py": _lt_shim(),
+        root / "AGENTS.lt.md": _agents_fragment(),
+    }
+    for path, content in files.items():
+        _update_scaffold_file(path, content, result=result, dry_run=dry_run)
+    ids_path = root / "lt_ids.json"
+    if ids_path.exists():
+        result.skipped.append(ids_path)
+    else:
+        _write_scaffold_file(
+            ids_path, _ids_placeholder(None), force=False, result=result, dry_run=dry_run
+        )
+
+    _write_managed_claude_block(root / "CLAUDE.md", result=result, dry_run=dry_run)
+
+    conventions_offer_needed = False
+    for relative, begin_marker, end_marker in _CONVENTIONS_TARGETS:
+        path = root / Path(relative)
+        content = path.read_text(encoding="utf-8") if path.exists() else ""
+        present = (
+            _extract_managed_body(content, begin_marker=begin_marker, end_marker=end_marker)
+            is not None
+        )
+        if not present and not yes:
+            conventions_offer_needed = True
+            continue
+        _write_managed_block(
+            path,
+            managed_code_conventions_block(begin_marker=begin_marker, end_marker=end_marker)
+            if relative != ".cursor/rules/lab-tracker.mdc"
+            else cursor_rules_mdc(),
+            begin_marker=begin_marker,
+            end_marker=end_marker,
+            result=result,
+            dry_run=dry_run,
+        )
+    if conventions_offer_needed:
+        result.offers.append(
+            "Managed code-facing convention blocks are available with "
+            "`lab_tracker update --yes`."
+        )
+    if install_skills:
+        _install_setup_skill(result=result, dry_run=dry_run)
+    return result
+
+
+def _update_scaffold_file(
+    path: Path,
+    content: str,
+    *,
+    result: InitResult,
+    dry_run: bool = False,
+) -> None:
+    if not path.exists():
+        _write_scaffold_file(path, content, force=False, result=result, dry_run=dry_run)
+        return
+    existing = path.read_text(encoding="utf-8")
+    if existing == content:
+        result.up_to_date.append(path)
+        return
+    backup = path.with_name(path.name + _UPDATE_BACKUP_SUFFIX)
+    result.backups[path] = backup
+    if dry_run:
+        _record_dry_run_change(path, existing, content, result)
+        result.overwritten.append(path)
+        return
+    backup.write_text(existing, encoding="utf-8")
+    path.write_text(content, encoding="utf-8")
+    result.overwritten.append(path)
 
 
 def serve_app(
@@ -330,6 +533,41 @@ def main(argv: list[str] | None = None) -> None:
         action="store_true",
         help="Strip Lab Tracker managed blocks while preserving surrounding content.",
     )
+    init_parser.add_argument(
+        "--install-skills",
+        action="store_true",
+        help=(
+            "Also render the lab-tracker-setup skill into ~/.claude/skills "
+            "(with --uninstall: remove it)."
+        ),
+    )
+    update_parser = subcommands.add_parser(
+        "update",
+        help=(
+            "Refresh scaffolded integration files and managed blocks in a "
+            "consumer repo to the current package text."
+        ),
+    )
+    update_parser.add_argument(
+        "--target",
+        default=".",
+        help="Consumer repo path to update. Defaults to the current directory.",
+    )
+    update_parser.add_argument(
+        "--yes",
+        action="store_true",
+        help="Also install managed code-conventions blocks that are not present yet.",
+    )
+    update_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Show what would change without writing files.",
+    )
+    update_parser.add_argument(
+        "--install-skills",
+        action="store_true",
+        help="Also refresh the lab-tracker-setup skill in ~/.claude/skills.",
+    )
     serve_parser = subcommands.add_parser(
         "serve",
         help="Run migrations, open the browser, and start the Lab Tracker web app.",
@@ -428,6 +666,15 @@ def main(argv: list[str] | None = None) -> None:
             yes=args.yes,
             dry_run=args.dry_run,
             uninstall=args.uninstall,
+            install_skills=args.install_skills,
+        )
+        print(json.dumps(result.as_dict(), indent=2))
+    elif args.command == "update":
+        result = update_consumer_repo(
+            args.target,
+            yes=args.yes,
+            dry_run=args.dry_run,
+            install_skills=args.install_skills,
         )
         print(json.dumps(result.as_dict(), indent=2))
     elif args.command == "serve":
@@ -747,26 +994,35 @@ def _doctor(target: str | Path = ".") -> dict[str, object]:
         present = found_body is not None
         body_in_sync = present and found_body == body
         version_in_sync = present and found_version == version_line
-        drifted = present and not (body_in_sync and version_in_sync)
+        # Drift is a CONTENT verdict: a package bump that leaves the idiom
+        # text unchanged must not cry wolf (a noisy doctor trains users to
+        # ignore it). The version line stays reported for information.
+        drifted = present and not body_in_sync
         targets.append(
             {
                 "name": name,
                 "path": str(path),
                 "present": present,
-                "in_sync": present and body_in_sync and version_in_sync,
+                "in_sync": present and body_in_sync,
                 "body_in_sync": body_in_sync,
                 "version_in_sync": version_in_sync,
                 "drifted": drifted,
                 "version_line": found_version,
             }
         )
-    return {
+    payload: dict[str, object] = {
         "command": "doctor",
         "package_version": package_version(),
         "expected_version_line": version_line,
         "code_facing_idioms": body,
         "targets": targets,
     }
+    if any(target["drifted"] for target in targets):
+        payload["suggestion"] = (
+            "Managed blocks differ from the installed package text; "
+            "`lt update` refreshes them (`--dry-run` previews the changes)."
+        )
+    return payload
 
 
 def _doctor_exit_code(payload: object) -> int:
@@ -806,6 +1062,20 @@ def _cursor_mcp_json() -> str:
 def _claude_settings_json() -> str:
     payload = {
         "hooks": {
+            "SessionStart": [
+                {
+                    "matcher": "",
+                    "hooks": [
+                        {
+                            "type": "command",
+                            # One line when healthy, short advisory when setup
+                            # is missing or drifted; --fail-silent guarantees
+                            # the hook can never block a session.
+                            "command": "lt setup status --brief --fail-silent",
+                        }
+                    ],
+                }
+            ],
             "UserPromptSubmit": [
                 {
                     "matcher": "",
@@ -818,7 +1088,7 @@ def _claude_settings_json() -> str:
                         }
                     ],
                 }
-            ]
+            ],
         }
     }
     return json.dumps(payload, indent=2) + "\n"
@@ -861,6 +1131,13 @@ def _agents_fragment() -> str:
         Notes are idempotent by the first non-blank line of the note body when the
         existing body is identical. Treat that first line as a stable marker; change
         it intentionally when you mean to create a new Lab Tracker note.
+
+        Guided setup lives on the `lt` CLI: `lt setup status` is a read-only
+        inventory of server reachability and what is configured in this repo.
+        Setup write commands take `--dry-run` previews (`lt setup init`,
+        `lt watch add`), and `lt setup connect`, `lt project bind`, and
+        `lt hooks install` also require `--yes`; suggest them to the user
+        rather than applying them unprompted.
 
         Configure the MCP server with the generated `.mcp.json`. It uses the portable
         `lt-mcp` command, so consumer repos should not hard-code local Lab Tracker

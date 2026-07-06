@@ -15,6 +15,7 @@ from starlette.responses import StreamingResponse
 
 from lab_tracker.api import LabTrackerAPI
 from lab_tracker.db_models import VisualizationModel
+from lab_tracker.db_types import ensure_uuid
 from lab_tracker.errors import NotFoundError, ValidationError
 from lab_tracker.models import UsageEventResourceType, Visualization, utc_now
 from lab_tracker.schemas import Envelope, ListEnvelope, VisualizationCreate, VisualizationUpdate
@@ -153,7 +154,7 @@ def build_visualizations_router(api: LabTrackerAPI) -> APIRouter:
             raise ValidationError("filename must not be empty.")
         content_type = validate_upload_content_type(file.content_type)
 
-        old_storage_id = UUID(row.asset_storage_id) if row.asset_storage_id else None
+        old_storage_id = ensure_uuid(row.asset_storage_id) if row.asset_storage_id else None
         metadata = storage_backend.store_stream(
             iter(lambda: file.file.read(1024 * 1024), b""),
             filename=filename,
@@ -219,7 +220,7 @@ def build_visualizations_router(api: LabTrackerAPI) -> APIRouter:
             "X-Content-Type-Options": "nosniff",
         }
         return StreamingResponse(
-            storage_backend.iter_chunks(UUID(row.asset_storage_id)),
+            storage_backend.iter_chunks(ensure_uuid(row.asset_storage_id)),
             media_type=row.asset_content_type or "application/octet-stream",
             headers=headers,
         )
@@ -251,7 +252,7 @@ def build_visualizations_router(api: LabTrackerAPI) -> APIRouter:
         storage_backend = file_storage_from_request(request)
         row = db_session.get(VisualizationModel, str(viz_id))
         storage_id = (
-            UUID(row.asset_storage_id) if row is not None and row.asset_storage_id else None
+            ensure_uuid(row.asset_storage_id) if row is not None and row.asset_storage_id else None
         )
         visualization = request_api.delete_visualization(viz_id, actor=actor)
         db_session.flush()

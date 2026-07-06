@@ -12,12 +12,14 @@ import tomllib
 
 from lab_tracker.cli import (
     _doctor,
+    _doctor_exit_code,
     _extract_managed_body,
     _extract_version_line,
     _open_browser_when_ready,
     _upsert_managed_block,
     init_consumer_repo,
     serve_app,
+    update_consumer_repo,
 )
 from lab_tracker.cli import (
     main as lab_tracker_main,
@@ -302,6 +304,99 @@ def test_lt_doctor_delegates_and_honors_fail_silent(
     captured = capsys.readouterr()
     assert captured.out == ""
     assert captured.err == ""
+
+
+def test_update_refreshes_stale_scaffold_and_managed_blocks(tmp_path: Path) -> None:
+    init_consumer_repo(tmp_path, yes=True)
+    settings = tmp_path / ".claude" / "settings.json"
+    settings.write_text('{"hooks": {"OldHookShape": []}}\n', encoding="utf-8")
+    agents = tmp_path / "AGENTS.md"
+    agents.write_text(
+        agents.read_text(encoding="utf-8").replace("EntityRef", "EntityRefDrift", 1),
+        encoding="utf-8",
+    )
+    assert _doctor_exit_code(_doctor(tmp_path)) == 1
+
+    result = update_consumer_repo(tmp_path)
+
+    # Stale hook config refreshed, with the old content preserved as a backup.
+    assert "lt prime" in settings.read_text(encoding="utf-8")
+    backup = settings.with_name(settings.name + ".bak-lt-update")
+    assert result.backups[settings] == backup
+    assert "OldHookShape" in backup.read_text(encoding="utf-8")
+    # Drifted conventions block re-rendered: doctor is clean again.
+    assert _doctor_exit_code(_doctor(tmp_path)) == 0
+
+
+def test_update_preserves_conventions_consent(tmp_path: Path) -> None:
+    init_consumer_repo(tmp_path)  # no --yes: no conventions blocks installed
+
+    without_consent = update_consumer_repo(tmp_path)
+    claude_text = (tmp_path / "CLAUDE.md").read_text(encoding="utf-8")
+
+    assert "BEGIN LAB TRACKER CODE CONVENTIONS" not in claude_text
+    assert not (tmp_path / ".cursor" / "rules" / "lab-tracker.mdc").exists()
+    assert any("--yes" in offer for offer in without_consent.offers)
+
+    update_consumer_repo(tmp_path, yes=True)
+
+    assert "BEGIN LAB TRACKER CODE CONVENTIONS" in (tmp_path / "CLAUDE.md").read_text(
+        encoding="utf-8"
+    )
+    assert (tmp_path / ".cursor" / "rules" / "lab-tracker.mdc").exists()
+
+
+def test_update_never_rewrites_lt_ids(tmp_path: Path) -> None:
+    init_consumer_repo(tmp_path)
+    ids = tmp_path / "lt_ids.json"
+    ids.write_text('{"project_id": "abc-123", "project_name": "Josh thesis"}\n', encoding="utf-8")
+
+    result = update_consumer_repo(tmp_path)
+
+    assert ids in result.skipped
+    assert json.loads(ids.read_text(encoding="utf-8"))["project_id"] == "abc-123"
+
+
+def test_update_scaffold_files_are_stable_between_runs(tmp_path: Path) -> None:
+    init_consumer_repo(tmp_path, yes=True)
+
+    update_consumer_repo(tmp_path)
+    second = update_consumer_repo(tmp_path)
+
+    scaffold = {
+        tmp_path / ".mcp.json",
+        tmp_path / ".cursor" / "mcp.json",
+        tmp_path / ".claude" / "settings.json",
+        tmp_path / "scripts" / "lt.py",
+        tmp_path / "AGENTS.lt.md",
+    }
+    assert scaffold <= set(second.up_to_date)
+    assert not second.backups
+
+
+def test_update_dry_run_writes_nothing(tmp_path: Path) -> None:
+    init_consumer_repo(tmp_path, yes=True)
+    settings = tmp_path / ".claude" / "settings.json"
+    settings.write_text('{"hooks": {}}\n', encoding="utf-8")
+
+    result = update_consumer_repo(tmp_path, dry_run=True)
+
+    assert settings.read_text(encoding="utf-8") == '{"hooks": {}}\n'
+    assert not settings.with_name(settings.name + ".bak-lt-update").exists()
+    assert settings in result.diffs and "lt prime" in result.diffs[settings]
+
+
+def test_lt_update_cli_delegates(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    init_consumer_repo(tmp_path, yes=True)
+    settings = tmp_path / ".claude" / "settings.json"
+    settings.write_text('{"hooks": {"OldHookShape": []}}\n', encoding="utf-8")
+
+    lt_main(["update", "--target", str(tmp_path)])
+
+    payload = json.loads(capsys.readouterr().out)
+    assert str(settings) in payload["overwritten"]
+    assert str(settings) in payload["backups"]
+    assert "lt prime" in settings.read_text(encoding="utf-8")
 
 
 def test_generated_scripts_lt_help_runs(tmp_path: Path) -> None:

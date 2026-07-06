@@ -20,6 +20,7 @@ from lab_tracker.auth import (
     Role,
     TokenService,
 )
+from lab_tracker.db_types import ensure_uuid
 from lab_tracker.errors import AuthError, ConflictError
 from lab_tracker.schemas import (
     AuthBootstrapStatus,
@@ -230,7 +231,7 @@ def build_auth_router(
         actor = actor_from_request(request)
         if not request.app.state.auth_enabled:
             user = AuthUserRead(
-                user_id=UUID(str(actor.user_id)),
+                user_id=ensure_uuid(str(actor.user_id)),
                 username=LOCAL_AUTH_USERNAME,
                 role=actor.role,
                 created_at=datetime.now(timezone.utc),

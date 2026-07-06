@@ -1060,8 +1060,8 @@ def test_fastapi_search_reads_database_changes_after_app_start(monkeypatch, tmp_
 
     assert search_response.status_code == 200
     payload = search_response.json()["data"]
-    assert {item["question_id"] for item in payload["questions"]} == {question_id}
-    assert {item["note_id"] for item in payload["notes"]} == {note_id}
+    assert {item["question_id"] for item in payload["questions"]} == {str(question_id)}
+    assert {item["note_id"] for item in payload["notes"]} == {str(note_id)}
 
 
 def test_note_transcribed_text_search_survives_app_restart(monkeypatch, tmp_path):

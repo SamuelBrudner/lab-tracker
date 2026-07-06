@@ -567,6 +567,84 @@ describe("App", () => {
     await waitFor(() => expect(screen.getByLabelText("Active project")).toHaveValue("project-2"));
   });
 
+  it("lets a global viewer with a contributor membership use project write surfaces", async () => {
+    localStorage.setItem(TOKEN_STORAGE_KEY, "token-viewer-contributor");
+    installFetchMock([
+      {
+        match: "/auth/me",
+        response: apiResponse({ role: "viewer", user_id: "user-1", username: "josh" }),
+      },
+      {
+        match: projectsPath,
+        response: apiResponse([project("project-1", "Temporal odor")]),
+      },
+      {
+        match: questionListPath("project-1"),
+        response: paged([]),
+      },
+      {
+        match: questionCountPath("project-1"),
+        response: paged([], { limit: 1, offset: 0, total: 0 }),
+      },
+      {
+        match: datasetListPath("project-1"),
+        response: paged([]),
+      },
+      {
+        match: datasetCountPath("project-1"),
+        response: paged([], { limit: 1, offset: 0, total: 0 }),
+      },
+      {
+        match: noteCountPath("project-1"),
+        response: paged([], { limit: 1, offset: 0, total: 0 }),
+      },
+      {
+        match: recentNotesPath("project-1"),
+        response: paged([]),
+      },
+      {
+        match: activeSessionsPath("project-1"),
+        response: paged([]),
+      },
+      {
+        match: stagedAnalysesPath("project-1"),
+        response: paged([]),
+      },
+      {
+        match: committedAnalysesPath("project-1"),
+        response: paged([], { limit: 1, offset: 0, total: 0 }),
+      },
+      {
+        match: projectMembersPath("project-1"),
+        response: paged([
+          {
+            membership_id: "membership-1",
+            role: "contributor",
+            user_id: "user-1",
+            username: "josh",
+          },
+        ]),
+      },
+      {
+        match: buildApiPath("/batches", { limit: 5 }),
+        response: paged([], { limit: 5, offset: 0, total: 0 }),
+      },
+    ]);
+
+    render(<App />);
+
+    // Project-scoped write surfaces follow the project membership, not the
+    // global role: the contributor can stage questions in this project.
+    await waitFor(() => {
+      expect(screen.getByLabelText("Question text")).toBeEnabled();
+    });
+    expect(screen.getByRole("button", { name: "Stage question" })).toBeEnabled();
+
+    // Genuinely global actions stay gated on the global role.
+    expect(screen.getByRole("button", { name: "Create project" })).toBeDisabled();
+    expect(document.querySelector('[name="new-project-name"]')).toBeDisabled();
+  });
+
   it("restores a stored session and signs out", async () => {
     localStorage.setItem(TOKEN_STORAGE_KEY, "token-1");
     installFetchMock([
@@ -1519,10 +1597,14 @@ describe("App", () => {
 
     expect(await screen.findByText("1 daily review ready")).toBeInTheDocument();
     expect(await screen.findByRole("heading", { name: "Daily review" })).toBeInTheDocument();
-    expect(screen.getAllByText("Batch drafted one question").length).toBeGreaterThanOrEqual(1);
-    expect(screen.getAllByText("2 notes").length).toBeGreaterThanOrEqual(1);
-    expect(screen.getByText("1 ops")).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "Review batch" }));
+    // The queue list renders from its own fetch after the badge/heading land,
+    // so these lookups must retry (findBy*) rather than race it (getBy*).
+    expect((await screen.findAllByText("Batch drafted one question")).length).toBeGreaterThanOrEqual(
+      1,
+    );
+    expect((await screen.findAllByText("2 notes")).length).toBeGreaterThanOrEqual(1);
+    expect(await screen.findByText("1 ops")).toBeInTheDocument();
+    fireEvent.click(await screen.findByRole("button", { name: "Review batch" }));
     await waitFor(() => expect(window.location.pathname).toBe(`/app/batches/${batchId}`));
   });
 
@@ -3122,7 +3204,10 @@ describe("App", () => {
 
     expect(await screen.findByRole("heading", { name: "Question Detail" })).toBeInTheDocument();
     fireEvent.click(await screen.findByRole("button", { name: "Refactor question" }));
-    fireEvent.change(screen.getByLabelText("Replacement question text"), {
+    // The refactor form mounts after the click's state update; gate on its first
+    // field with a retrying query (findBy*) before the synchronous field edits,
+    // or the whole form-fill races the render under parallel CI load.
+    fireEvent.change(await screen.findByLabelText("Replacement question text"), {
       target: { value: "Which ATF4 arbitration comparison is testable first?" },
     });
     fireEvent.change(screen.getByLabelText("Replacement type"), {

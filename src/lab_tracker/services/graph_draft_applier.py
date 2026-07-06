@@ -92,7 +92,7 @@ class GraphPatchApplier:
         payload = resolve_refs(operation.payload, ref_map)
         if not isinstance(payload, dict):
             raise ValidationError("Resolved operation payload must be a JSON object.")
-        origin_kwargs = _graph_draft_origin_kwargs(change_set, operation.op)
+        origin_kwargs = _graph_draft_origin_kwargs(change_set, operation)
         if operation.op == GraphChangeOp.CREATE:
             return self._create_graph_entity(
                 operation.entity_type,
@@ -387,19 +387,34 @@ class GraphPatchApplier:
 
 def _graph_draft_origin_kwargs(
     change_set: GraphChangeSet,
-    op: GraphChangeOp,
+    operation: GraphChangeOperation,
 ) -> dict[str, Any]:
     return {
         "origin": (
-            EntityOrigin.AI_SUGGESTED
-            if op == GraphChangeOp.CREATE
-            else EntityOrigin.USER_REVISED
+            EntityOrigin.USER_REVISED
+            if _operation_was_human_edited(operation)
+            else EntityOrigin.AI_SUGGESTED
         ),
         "change_set_id": change_set.change_set_id,
         "origin_provider": change_set.provider,
         "origin_model": change_set.model,
         "origin_prompt_version": change_set.prompt_version,
     }
+
+
+def _operation_was_human_edited(operation: GraphChangeOperation) -> bool:
+    """True iff a reviewer edited this operation's payload before accepting it.
+
+    Keyed on ``error_metadata['edited_at']``, which ``update_graph_change_operation``
+    sets unconditionally whenever the incoming payload differs from the stored
+    one. We deliberately do NOT key on ``edited_by``: it is ``None`` for an
+    anonymous actor and is dropped by the validation-cleanup whitelist, whereas
+    ``edited_at`` always survives to apply time. Stamping ``user_revised`` only on
+    a genuine human edit keeps the PROV-O export honest -- an operation that was
+    accepted (or bulk-accepted) unedited is an AI suggestion, not a human
+    revision, so it must not materialize a ``prov:wasRevisionOf`` edge.
+    """
+    return (operation.error_metadata or {}).get("edited_at") is not None
 
 
 def _applied_goal_link_status(

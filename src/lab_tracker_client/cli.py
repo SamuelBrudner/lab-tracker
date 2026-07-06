@@ -4,10 +4,15 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
 from typing import Any
 
+import lab_tracker_client.git_capture as git_capture
+import lab_tracker_client.hooks as hook_install
+import lab_tracker_client.repo as repo_capture
+import lab_tracker_client.setup as setup_helpers
 import lab_tracker_client.watch as watch_capture
 from lab_tracker.assistant_next_questions import is_research_facing_prompt
 from lab_tracker_client.client import (
@@ -88,6 +93,40 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Suppress drift exit codes and errors for prompt hooks.",
     )
     doctor_parser.set_defaults(func=_cmd_doctor, needs_client=False)
+
+    update_parser = subcommands.add_parser(
+        "update",
+        help=(
+            "Refresh Lab Tracker integration files (hooks, agent prompts, managed "
+            "blocks) in this repo to the installed package version."
+        ),
+    )
+    update_parser.add_argument(
+        "--target",
+        default=".",
+        help="Consumer repo path to update. Defaults to the current directory.",
+    )
+    update_parser.add_argument(
+        "--yes",
+        action="store_true",
+        help="Also install managed code-conventions blocks that are not present yet.",
+    )
+    update_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Show what would change without writing files.",
+    )
+    update_parser.add_argument(
+        "--install-skills",
+        action="store_true",
+        help="Also refresh the lab-tracker-setup skill in ~/.claude/skills.",
+    )
+    update_parser.set_defaults(func=_cmd_update, needs_client=False)
+
+    _add_setup_parsers(subcommands)
+    _add_project_parsers(subcommands)
+    _add_git_parsers(subcommands)
+    _add_hooks_parsers(subcommands)
 
     prime_parser = subcommands.add_parser(
         "prime",
@@ -180,6 +219,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
     _add_watch_parsers(subcommands)
     _add_hpc_parsers(subcommands)
+    _add_repo_parsers(subcommands)
 
     export_parser = subcommands.add_parser(
         "export",
@@ -219,6 +259,278 @@ def _build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _add_setup_parsers(subcommands: argparse._SubParsersAction) -> None:
+    setup_parser = subcommands.add_parser(
+        "setup",
+        help="Inspect and (with consent) configure Lab Tracker capture for this machine/repo.",
+    )
+    setup_commands = setup_parser.add_subparsers(dest="setup_command", required=True)
+
+    status_parser = setup_commands.add_parser(
+        "status",
+        help="Read-only inventory: server, profile, repo scaffold, watch, hpc, hooks.",
+    )
+    status_parser.add_argument(
+        "--target",
+        default=".",
+        help="Consumer repo path to inspect. Defaults to the current directory.",
+    )
+    status_parser.add_argument(
+        "--brief",
+        action="store_true",
+        help="One-line summary plus suggestions; sized for session hooks.",
+    )
+    status_parser.add_argument(
+        "--fail-silent",
+        action="store_true",
+        help="Suppress errors so agent/session hooks never block.",
+    )
+    status_parser.set_defaults(func=_cmd_setup_status, needs_client=False)
+
+    init_parser = setup_commands.add_parser(
+        "init",
+        help="Scaffold Lab Tracker integration files into a consumer repo.",
+    )
+    init_parser.add_argument(
+        "--target",
+        default=".",
+        help="Consumer repo path to scaffold. Defaults to the current directory.",
+    )
+    init_parser.add_argument(
+        "--project-name",
+        default=None,
+        help="Optional project name recorded in the lt_ids.json placeholder.",
+    )
+    init_parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Overwrite existing scaffolded files.",
+    )
+    init_parser.add_argument(
+        "--yes",
+        action="store_true",
+        help="Consent to recommended managed code-conventions blocks.",
+    )
+    init_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Show scaffold and managed-block diffs without writing files.",
+    )
+    init_parser.add_argument(
+        "--uninstall",
+        action="store_true",
+        help="Strip Lab Tracker managed blocks while preserving surrounding content.",
+    )
+    init_parser.add_argument(
+        "--install-skills",
+        action="store_true",
+        help=(
+            "Also render the lab-tracker-setup skill into ~/.claude/skills "
+            "(with --uninstall: remove it)."
+        ),
+    )
+    init_parser.set_defaults(func=_cmd_setup_init, needs_client=False)
+
+    connect_parser = setup_commands.add_parser(
+        "connect",
+        help="Persist server URL / default project (token only with --save-token).",
+    )
+    connect_parser.add_argument("--base-url", help="Lab Tracker API base URL to persist.")
+    connect_parser.add_argument("--project", help="Default project UUID to persist.")
+    connect_parser.add_argument(
+        "--save-token",
+        action="store_true",
+        help="Also persist an access token (separate, explicit consent).",
+    )
+    connect_parser.add_argument(
+        "--token",
+        help="Access token for --save-token. Defaults to LAB_TRACKER_ACCESS_TOKEN.",
+    )
+    connect_parser.add_argument(
+        "--uninstall",
+        action="store_true",
+        help="Remove the persisted connection profile.",
+    )
+    connect_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Show the profile diff without writing.",
+    )
+    connect_parser.add_argument(
+        "--yes",
+        action="store_true",
+        help="Consent to writing the machine-level connection profile.",
+    )
+    connect_parser.set_defaults(func=_cmd_setup_connect, needs_client=False)
+
+
+def _add_project_parsers(subcommands: argparse._SubParsersAction) -> None:
+    project_parser = subcommands.add_parser(
+        "project",
+        help="Project-level helpers for consumer repos.",
+    )
+    project_commands = project_parser.add_subparsers(dest="project_command", required=True)
+
+    bind_parser = project_commands.add_parser(
+        "bind",
+        help="Resolve or create a project and write its id into lt_ids.json.",
+    )
+    resolver = bind_parser.add_mutually_exclusive_group(required=True)
+    resolver.add_argument("--project-id", help="Existing project UUID to bind.")
+    resolver.add_argument("--name", help="Project name to resolve (exact match).")
+    bind_parser.add_argument(
+        "--create",
+        action="store_true",
+        help="Create the project when no exact --name match exists.",
+    )
+    bind_parser.add_argument(
+        "--ids",
+        default="lt_ids.json",
+        help="Path to lt_ids.json. Defaults to ./lt_ids.json.",
+    )
+    bind_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Show the lt_ids.json diff without writing.",
+    )
+    bind_parser.add_argument(
+        "--yes",
+        action="store_true",
+        help="Consent to writing lt_ids.json.",
+    )
+    bind_parser.set_defaults(func=_cmd_project_bind)
+
+
+def _add_git_parsers(subcommands: argparse._SubParsersAction) -> None:
+    git_parser = subcommands.add_parser(
+        "git",
+        help="Capture git commits as queued Lab Tracker evidence.",
+    )
+    git_commands = git_parser.add_subparsers(dest="git_command", required=True)
+
+    snapshot_parser = git_commands.add_parser(
+        "snapshot",
+        help="Queue a commit as staged evidence (outbox-backed), then best-effort sync.",
+    )
+    snapshot_parser.add_argument("--commit", default="HEAD", help="Commit-ish. Defaults to HEAD.")
+    snapshot_parser.add_argument("--repo", default=".", help="Repository path. Defaults to cwd.")
+    snapshot_parser.add_argument(
+        "--project",
+        help="Project UUID. Defaults to LAB_TRACKER_PROJECT_ID, watch config, or lt_ids.json.",
+    )
+    snapshot_parser.add_argument("--question", help="Candidate question UUID.")
+    snapshot_parser.add_argument(
+        "--dataset",
+        action="append",
+        default=[],
+        help="Candidate dataset UUID. Repeatable.",
+    )
+    snapshot_parser.add_argument("--tag", action="append", default=[], help="Tag. Repeatable.")
+    snapshot_parser.add_argument("--config", help="Watch config path. Defaults to discovered.")
+    snapshot_parser.add_argument(
+        "--max-diff-lines",
+        type=int,
+        help="Maximum diff lines. Defaults to LAB_TRACKER_GIT_MAX_DIFF_LINES or 800.",
+    )
+    snapshot_parser.add_argument(
+        "--context-lines",
+        type=int,
+        help="Unified diff context lines. Defaults to LAB_TRACKER_GIT_CONTEXT_LINES or 3.",
+    )
+    snapshot_parser.add_argument(
+        "--request-draft",
+        action="store_true",
+        help="Request an analysis graph draft when the snapshot syncs.",
+    )
+    snapshot_parser.add_argument(
+        "--no-sync",
+        action="store_true",
+        help="Queue the event only; skip the best-effort sync.",
+    )
+    snapshot_parser.add_argument(
+        "--fail-silent",
+        action="store_true",
+        help="Swallow all errors so a post-commit hook can never block a commit.",
+    )
+    snapshot_parser.set_defaults(func=_cmd_git_snapshot, needs_client=False)
+
+
+def _add_hooks_parsers(subcommands: argparse._SubParsersAction) -> None:
+    hooks_parser = subcommands.add_parser(
+        "hooks",
+        help="Enroll repositories with the Lab Tracker post-commit snapshot hook.",
+    )
+    hooks_commands = hooks_parser.add_subparsers(dest="hooks_command", required=True)
+
+    install_parser = hooks_commands.add_parser(
+        "install",
+        help="Write the managed post-commit block (upgrades legacy installs in place).",
+    )
+    install_parser.add_argument("--repo", default=".", help="Repository path. Defaults to cwd.")
+    install_parser.add_argument(
+        "--project",
+        help="Project UUID baked into the hook as an overridable default.",
+    )
+    install_parser.add_argument(
+        "--base-url",
+        help="API base URL baked into the hook as an overridable default.",
+    )
+    install_parser.add_argument(
+        "--lt-path",
+        help="Absolute lt executable for the hook body. Defaults to the installed lt.",
+    )
+    install_parser.add_argument(
+        "--no-request-draft",
+        action="store_true",
+        help="Do not request an analysis graph draft when snapshots sync.",
+    )
+    install_parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Append the managed block to a pre-existing unmanaged hook.",
+    )
+    install_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Show the hook diff without writing.",
+    )
+    install_parser.add_argument(
+        "--yes",
+        action="store_true",
+        help="Consent to writing the repository's post-commit hook.",
+    )
+    install_parser.set_defaults(func=_cmd_hooks_install, needs_client=False)
+
+    uninstall_parser = hooks_commands.add_parser(
+        "uninstall",
+        help="Strip the managed block, preserving any surrounding hook content.",
+    )
+    uninstall_parser.add_argument("--repo", default=".", help="Repository path. Defaults to cwd.")
+    uninstall_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Show what would be removed without writing.",
+    )
+    uninstall_parser.add_argument(
+        "--yes",
+        action="store_true",
+        help="Consent to modifying the repository's post-commit hook.",
+    )
+    uninstall_parser.set_defaults(func=_cmd_hooks_uninstall, needs_client=False)
+
+    status_parser = hooks_commands.add_parser(
+        "status",
+        help="Report hook presence, managed block, and lt-path health for a repo.",
+    )
+    status_parser.add_argument("--repo", default=".", help="Repository path. Defaults to cwd.")
+    status_parser.add_argument(
+        "--fail-silent",
+        action="store_true",
+        help="Suppress errors for hook/scheduler invocations.",
+    )
+    status_parser.set_defaults(func=_cmd_hooks_status, needs_client=False)
+
+
 def _add_watch_parsers(subcommands: argparse._SubParsersAction) -> None:
     watch_parser = subcommands.add_parser(
         "watch",
@@ -236,6 +548,65 @@ def _add_watch_parsers(subcommands: argparse._SubParsersAction) -> None:
     init_parser.add_argument("--config", help="Config path. Defaults to .lab-tracker/watch.json.")
     init_parser.add_argument("--force", action="store_true", help="Overwrite an existing config.")
     init_parser.set_defaults(func=_cmd_watch_init, needs_client=False)
+
+    add_parser = watch_commands.add_parser(
+        "add",
+        help="Register a folder in watch.json without hand-editing JSON.",
+    )
+    add_parser.add_argument("root", help="Folder to watch.")
+    add_parser.add_argument(
+        "--mode",
+        choices=sorted(watch_capture.ALLOWED_MODES),
+        default=watch_capture.MODE_FILES,
+        help="Capture mode. Defaults to files.",
+    )
+    add_parser.add_argument(
+        "--sink",
+        choices=sorted(watch_capture.ALLOWED_SINKS),
+        default=watch_capture.SINK_STAGED_NOTE,
+        help="Sync sink for captured events. Defaults to staged-note.",
+    )
+    add_parser.add_argument(
+        "--include",
+        action="append",
+        default=[],
+        help="Glob for relative paths to include. Repeatable.",
+    )
+    add_parser.add_argument(
+        "--exclude",
+        action="append",
+        default=[],
+        help="Glob for relative paths to exclude. Repeatable.",
+    )
+    add_parser.add_argument("--name", help="Optional label for this watch entry.")
+    add_parser.add_argument("--project", help="Project UUID override for this watch.")
+    add_parser.add_argument("--question", help="Candidate question UUID recorded in metadata.")
+    add_parser.add_argument("--session", help="Session UUID for the acquisition-output sink.")
+    add_parser.add_argument("--tag", action="append", default=[], help="Tag. Repeatable.")
+    add_parser.add_argument("--config", help="Config path. Defaults to discovered config.")
+    add_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Show the resulting entry without writing watch.json.",
+    )
+    add_parser.set_defaults(func=_cmd_watch_add, needs_client=False)
+
+    list_parser = watch_commands.add_parser("list", help="List registered watch entries.")
+    list_parser.add_argument("--config", help="Config path. Defaults to discovered config.")
+    list_parser.set_defaults(func=_cmd_watch_list, needs_client=False)
+
+    remove_parser = watch_commands.add_parser(
+        "remove",
+        help="Remove watch entries matching a root folder.",
+    )
+    remove_parser.add_argument("root", help="Watched folder to remove.")
+    remove_parser.add_argument("--config", help="Config path. Defaults to discovered config.")
+    remove_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Show what would be removed without writing watch.json.",
+    )
+    remove_parser.set_defaults(func=_cmd_watch_remove, needs_client=False)
 
     scan_parser = watch_commands.add_parser(
         "scan",
@@ -289,6 +660,11 @@ def _add_watch_parsers(subcommands: argparse._SubParsersAction) -> None:
     scan_parser.add_argument("--adapter", help="Adapter identifier recorded in metadata.")
     scan_parser.add_argument("--limit", type=int, help="Maximum items to process.")
     scan_parser.add_argument("--dry-run", action="store_true")
+    scan_parser.add_argument(
+        "--fail-silent",
+        action="store_true",
+        help="Suppress errors and error exit codes for hook/scheduler runs.",
+    )
     scan_parser.set_defaults(func=_cmd_watch_scan, needs_client=False)
 
     status_parser = watch_commands.add_parser("status", help="Summarize local watch outbox state.")
@@ -303,6 +679,11 @@ def _add_watch_parsers(subcommands: argparse._SubParsersAction) -> None:
     sync_parser.add_argument("--dry-run", action="store_true")
     sync_parser.add_argument("--request-draft", action="store_true")
     sync_parser.add_argument("--limit", type=int, help="Maximum events to process.")
+    sync_parser.add_argument(
+        "--fail-silent",
+        action="store_true",
+        help="Suppress errors and error exit codes for hook/scheduler runs.",
+    )
     sync_parser.set_defaults(func=_cmd_watch_sync)
 
 
@@ -335,7 +716,7 @@ def _add_hpc_parsers(subcommands: argparse._SubParsersAction) -> None:
         "submit",
         help="Wrap an HPC submission command and write a submit event.",
     )
-    _add_hpc_context_args(submit_parser)
+    _add_capture_context_args(submit_parser)
     submit_parser.add_argument("--summary", help="Short run summary for review.")
     submit_parser.add_argument(
         "command",
@@ -345,7 +726,7 @@ def _add_hpc_parsers(subcommands: argparse._SubParsersAction) -> None:
     submit_parser.set_defaults(func=_cmd_hpc_submit, needs_client=False)
 
     begin_parser = hpc_commands.add_parser("begin", help="Write a begin event from inside a job.")
-    _add_hpc_context_args(begin_parser)
+    _add_capture_context_args(begin_parser)
     begin_parser.add_argument("--run", help="Run id. Defaults to LAB_TRACKER_HPC_RUN_ID.")
     begin_parser.add_argument("--summary", help="Short run summary for review.")
     begin_parser.set_defaults(func=_cmd_hpc_begin, needs_client=False)
@@ -354,7 +735,7 @@ def _add_hpc_parsers(subcommands: argparse._SubParsersAction) -> None:
         "finish",
         help="Write a finish event from inside a job.",
     )
-    _add_hpc_context_args(finish_parser)
+    _add_capture_context_args(finish_parser)
     finish_parser.add_argument("--run", help="Run id. Defaults to LAB_TRACKER_HPC_RUN_ID.")
     finish_parser.add_argument("--exit-code", type=int, help="Job or script exit code.")
     finish_parser.add_argument("--state", help="Scheduler/run state, e.g. completed or failed.")
@@ -379,7 +760,7 @@ def _add_hpc_parsers(subcommands: argparse._SubParsersAction) -> None:
         "watch",
         help="Import run manifests from designated output folders into the outbox.",
     )
-    _add_hpc_context_args(watch_parser)
+    _add_capture_context_args(watch_parser)
     watch_parser.add_argument("--root", required=True, help="Output folder to scan.")
     watch_parser.add_argument(
         "--pattern",
@@ -405,7 +786,7 @@ def _add_hpc_parsers(subcommands: argparse._SubParsersAction) -> None:
     sync_parser.set_defaults(func=_cmd_hpc_sync)
 
 
-def _add_hpc_context_args(parser: argparse.ArgumentParser) -> None:
+def _add_capture_context_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--config", help="Config path. Defaults to discovered config.")
     parser.add_argument("--project", help="Override project UUID from config.")
     parser.add_argument("--question", help="Candidate question UUID recorded in evidence metadata.")
@@ -416,6 +797,186 @@ def _add_hpc_context_args(parser: argparse.ArgumentParser) -> None:
         help="Candidate dataset UUID. Repeatable.",
     )
     parser.add_argument("--tag", action="append", default=[], help="Tag. Repeatable.")
+
+
+def _add_repo_parsers(subcommands: argparse._SubParsersAction) -> None:
+    repo_parser = subcommands.add_parser(
+        "repo",
+        help="Capture analysis-repo commit provenance into a local outbox.",
+    )
+    repo_commands = repo_parser.add_subparsers(dest="repo_command", required=True)
+
+    init_parser = repo_commands.add_parser("init", help="Create .lab-tracker/repo.json.")
+    init_parser.add_argument("--project", required=True, help="Lab Tracker project UUID.")
+    init_parser.add_argument(
+        "--outbox",
+        default=repo_capture.DEFAULT_OUTBOX,
+        help=f"Outbox path. Defaults to {repo_capture.DEFAULT_OUTBOX}.",
+    )
+    init_parser.add_argument("--default-question", help="Optional candidate question UUID.")
+    init_parser.add_argument("--config", help="Config path. Defaults to .lab-tracker/repo.json.")
+    init_parser.add_argument("--force", action="store_true", help="Overwrite an existing config.")
+    init_parser.set_defaults(func=_cmd_repo_init, needs_client=False)
+
+    report_parser = repo_commands.add_parser(
+        "report",
+        help="Record the current repo state (commit, dirty, remote) as an outbox event.",
+    )
+    _add_capture_context_args(report_parser)
+    report_parser.add_argument(
+        "--run",
+        help="Run id. Defaults to LAB_TRACKER_REPO_RUN_ID, then the commit SHA.",
+    )
+    report_parser.add_argument(
+        "--artifact",
+        action="append",
+        default=[],
+        help="Produced file to fingerprint as an artifact pointer. Repeatable.",
+    )
+    report_parser.add_argument("--summary", help="Short summary for review.")
+    report_parser.add_argument(
+        "--fail-silent",
+        action="store_true",
+        dest="fail_silent",
+        help="Exit quietly on any error (for git hooks; never blocks a commit).",
+    )
+    report_parser.set_defaults(func=_cmd_repo_report, needs_client=False)
+
+    finish_parser = repo_commands.add_parser(
+        "finish",
+        help="Record a finished analysis run with its produced artifacts.",
+    )
+    _add_capture_context_args(finish_parser)
+    finish_parser.add_argument(
+        "--run",
+        help="Run id. Defaults to LAB_TRACKER_REPO_RUN_ID, then the commit SHA.",
+    )
+    finish_parser.add_argument(
+        "--artifact",
+        action="append",
+        default=[],
+        help="Produced file to fingerprint as an artifact pointer. Repeatable.",
+    )
+    finish_parser.add_argument("--summary", help="Short run summary for review.")
+    finish_parser.set_defaults(func=_cmd_repo_finish, needs_client=False)
+
+    status_parser = repo_commands.add_parser("status", help="Summarize local repo outbox state.")
+    status_parser.add_argument("--config", help="Config path. Defaults to discovered config.")
+    status_parser.set_defaults(func=_cmd_repo_status, needs_client=False)
+
+    sync_parser = repo_commands.add_parser(
+        "sync",
+        help="Sync outbox events into staged Lab Tracker evidence notes.",
+    )
+    sync_parser.add_argument("--config", help="Config path. Defaults to discovered config.")
+    sync_parser.add_argument("--dry-run", action="store_true")
+    sync_parser.add_argument("--request-draft", action="store_true")
+    sync_parser.add_argument("--limit", type=int, help="Maximum events to process.")
+    sync_parser.set_defaults(func=_cmd_repo_sync)
+
+    hook_parser = repo_commands.add_parser(
+        "install-hook",
+        help="Install the managed post-commit hook that runs 'lt repo report'.",
+    )
+    hook_parser.add_argument("--repo", default=".", help="Repository path. Defaults to cwd.")
+    hook_parser.add_argument(
+        "--config",
+        help="Repo config to pin into the hook. Defaults to discovered config.",
+    )
+    hook_parser.add_argument(
+        "--lt-command",
+        help="Path to the lt executable the hook should call. Defaults to the lt on PATH.",
+    )
+    hook_parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Append to an existing non-managed post-commit hook.",
+    )
+    hook_parser.set_defaults(func=_cmd_repo_install_hook, needs_client=False)
+
+
+def _cmd_repo_init(args: argparse.Namespace) -> Any:
+    config = repo_capture.init_config(
+        project_id=args.project,
+        outbox=args.outbox,
+        default_question_id=args.default_question,
+        config_path=args.config,
+        force=args.force,
+    )
+    return {
+        "command": "repo-init",
+        "config": str(config.config_path),
+        "outbox": str(config.outbox_path()),
+        "project_id": config.project_id,
+    }
+
+
+def _cmd_repo_report(args: argparse.Namespace) -> Any:
+    return _repo_capture_payload("repo-report", args, event_type="commit")
+
+
+def _cmd_repo_finish(args: argparse.Namespace) -> Any:
+    return _repo_capture_payload("repo-finish", args, event_type="finish")
+
+
+def _repo_capture_payload(command: str, args: argparse.Namespace, *, event_type: str) -> Any:
+    config = repo_capture.load_config(config_path=args.config)
+    artifacts = [repo_capture.artifact_from_path(item) for item in args.artifact]
+    event, path, action = repo_capture.capture_commit(
+        config,
+        event_type=event_type,
+        run_id=args.run,
+        project_id=args.project,
+        question_id=args.question,
+        dataset_ids=args.dataset,
+        tags=args.tag,
+        artifacts=artifacts,
+        summary=args.summary,
+    )
+    return {
+        "command": command,
+        "action": action,
+        "run_id": event["run_id"],
+        "event_type": event["event_type"],
+        "git_commit": event["source"].get("git_commit", ""),
+        "git_dirty": event["source"].get("git_dirty", False),
+        "artifact_count": len(event["artifacts"]),
+        "event_path": str(path),
+        "outbox": str(config.outbox_path()),
+    }
+
+
+def _cmd_repo_status(args: argparse.Namespace) -> Any:
+    config = repo_capture.load_config(config_path=args.config)
+    summary = repo_capture.outbox_status(config.outbox_path())
+    summary.update(
+        {
+            "command": "repo-status",
+            "config": str(config.config_path),
+            "project_id": config.project_id,
+        }
+    )
+    return summary
+
+
+def _cmd_repo_sync(client: LabTracker, args: argparse.Namespace) -> Any:
+    config = repo_capture.load_config(config_path=args.config)
+    return repo_capture.sync_outbox(
+        client,
+        config,
+        dry_run=args.dry_run,
+        request_draft=args.request_draft,
+        limit=args.limit,
+    )
+
+
+def _cmd_repo_install_hook(args: argparse.Namespace) -> Any:
+    return repo_capture.install_post_commit_hook(
+        args.repo,
+        lt_command=args.lt_command,
+        config_path=args.config,
+        force=args.force,
+    )
 
 
 def _cmd_watch_init(args: argparse.Namespace) -> Any:
@@ -467,6 +1028,175 @@ def _cmd_watch_scan(args: argparse.Namespace) -> Any:
         adapter=args.adapter,
         dry_run=args.dry_run,
     )
+
+
+def _cmd_watch_add(args: argparse.Namespace) -> Any:
+    return watch_capture.add_watch(
+        root=args.root,
+        mode=args.mode,
+        sink=args.sink,
+        include=args.include or None,
+        exclude=args.exclude or None,
+        name=args.name,
+        project_id=args.project,
+        question_id=args.question,
+        session_id=args.session,
+        tags=args.tag or None,
+        config_path=args.config,
+        dry_run=args.dry_run,
+    )
+
+
+def _cmd_watch_list(args: argparse.Namespace) -> Any:
+    config = watch_capture.load_config(config_path=args.config)
+    return {
+        "command": "watch-list",
+        "config": str(config.config_path),
+        "project_id": config.project_id,
+        "watches": config.watches,
+    }
+
+
+def _cmd_watch_remove(args: argparse.Namespace) -> Any:
+    return watch_capture.remove_watch(
+        root=args.root,
+        config_path=args.config,
+        dry_run=args.dry_run,
+    )
+
+
+def _cmd_setup_status(args: argparse.Namespace) -> Any:
+    return setup_helpers.setup_status(args.target, brief=args.brief)
+
+
+def _cmd_setup_init(args: argparse.Namespace) -> Any:
+    from lab_tracker.cli import init_consumer_repo
+
+    result = init_consumer_repo(
+        args.target,
+        project_name=args.project_name,
+        force=args.force,
+        yes=args.yes,
+        dry_run=args.dry_run,
+        uninstall=args.uninstall,
+        install_skills=args.install_skills,
+    )
+    payload = result.as_dict()
+    payload["command"] = "setup-init"
+    return payload
+
+
+def _cmd_setup_connect(args: argparse.Namespace) -> Any:
+    if not (args.yes or args.dry_run):
+        raise SystemExit(
+            "lt setup connect writes the machine-level connection profile; "
+            "pass --yes to consent or --dry-run to preview."
+        )
+    if args.uninstall:
+        return setup_helpers.delete_connection_profile(dry_run=args.dry_run)
+    token = None
+    if args.save_token:
+        token = args.token or os.getenv("LAB_TRACKER_ACCESS_TOKEN")
+        if not token:
+            raise SystemExit(
+                "--save-token needs --token or LAB_TRACKER_ACCESS_TOKEN in the environment."
+            )
+    elif args.token:
+        raise SystemExit("--token persists only with explicit --save-token consent.")
+    payload = setup_helpers.save_connection_profile(
+        base_url=args.base_url,
+        default_project_id=args.project,
+        access_token=token,
+        dry_run=args.dry_run,
+    )
+    if args.base_url:
+        payload["server_reachable"] = setup_helpers.probe_health(args.base_url)
+    return payload
+
+
+def _cmd_project_bind(client: LabTracker, args: argparse.Namespace) -> Any:
+    if not (args.yes or args.dry_run):
+        raise SystemExit(
+            "lt project bind writes lt_ids.json; pass --yes to consent or "
+            "--dry-run to preview."
+        )
+    return setup_helpers.bind_project(
+        client,
+        project_id=args.project_id,
+        name=args.name,
+        create=args.create,
+        ids_path=args.ids,
+        dry_run=args.dry_run,
+    )
+
+
+def _cmd_git_snapshot(args: argparse.Namespace) -> Any:
+    payload = git_capture.snapshot_commit(
+        repo=args.repo,
+        commit=args.commit,
+        project_id=args.project,
+        question_id=args.question,
+        dataset_ids=args.dataset,
+        tags=args.tag,
+        config_path=args.config,
+        max_diff_lines=args.max_diff_lines,
+        context_lines=args.context_lines,
+        request_draft=args.request_draft,
+    )
+    if args.no_sync:
+        return payload
+    # Best-effort drain: the event above is durable, so a down server means
+    # "queued for a later sync", never a lost commit. Draining the whole
+    # outbox here is what empties the backlog on the next commit. The draft
+    # request rides on the git event itself (payload.request_draft), so
+    # request_draft stays False here — unrelated queued captures must never
+    # get LLM drafts as a side effect of a commit.
+    config, _config_error = git_capture.resolve_watch_config(
+        Path(payload["repo"]), args.config
+    )
+    try:
+        client = LabTracker.from_env()
+        try:
+            payload["sync"] = watch_capture.sync_outbox(
+                client,
+                config,
+                request_draft=False,
+            )
+        finally:
+            client.close()
+    except Exception as exc:  # noqa: BLE001 - queued events retry on later syncs.
+        payload["sync_error"] = str(exc)
+    return payload
+
+
+def _cmd_hooks_install(args: argparse.Namespace) -> Any:
+    if not (args.yes or args.dry_run):
+        raise SystemExit(
+            "lt hooks install writes the repository's post-commit hook; "
+            "pass --yes to consent or --dry-run to preview."
+        )
+    return hook_install.install_hook(
+        repo=args.repo,
+        project_id=args.project,
+        base_url=args.base_url,
+        request_draft=not args.no_request_draft,
+        lt_path=args.lt_path,
+        force=args.force,
+        dry_run=args.dry_run,
+    )
+
+
+def _cmd_hooks_uninstall(args: argparse.Namespace) -> Any:
+    if not (args.yes or args.dry_run):
+        raise SystemExit(
+            "lt hooks uninstall modifies the repository's post-commit hook; "
+            "pass --yes to consent or --dry-run to preview."
+        )
+    return hook_install.uninstall_hook(repo=args.repo, dry_run=args.dry_run)
+
+
+def _cmd_hooks_status(args: argparse.Namespace) -> Any:
+    return hook_install.hook_status(repo=args.repo)
 
 
 def _cmd_watch_status(args: argparse.Namespace) -> Any:
@@ -745,6 +1475,18 @@ def _cmd_doctor(args: argparse.Namespace) -> Any:
     return _doctor(args.target)
 
 
+def _cmd_update(args: argparse.Namespace) -> Any:
+    from lab_tracker.cli import update_consumer_repo
+
+    result = update_consumer_repo(
+        args.target,
+        yes=args.yes,
+        dry_run=args.dry_run,
+        install_skills=args.install_skills,
+    )
+    return result.as_dict()
+
+
 def _target(value: str) -> EntityRef:
     entity_type, separator, entity_id = value.partition(":")
     if not separator:
@@ -806,7 +1548,7 @@ def _payload_exit_code(payload: Any) -> int:
         return int(payload.get("exit_code") or 0)
     if (
         isinstance(payload, dict)
-        and payload.get("command") in {"hpc-sync", "hpc-watch"}
+        and payload.get("command") in {"hpc-sync", "hpc-watch", "repo-sync"}
         and payload.get("errors")
     ):
         return 1
@@ -816,4 +1558,14 @@ def _payload_exit_code(payload: Any) -> int:
         and payload.get("errors")
     ):
         return 1
+    if isinstance(payload, dict) and payload.get("command") == "git-snapshot":
+        sync = payload.get("sync")
+        if (
+            payload.get("sync_error")
+            or payload.get("config_error")
+            or (isinstance(sync, dict) and sync.get("errors"))
+        ):
+            # The commit is safely queued; nonzero signals "not fully synced"
+            # so the hook's one-line warning stays reachable.
+            return 1
     return 0

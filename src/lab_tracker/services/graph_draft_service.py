@@ -894,7 +894,15 @@ class GraphDraftService(BaseService):
         stamp, so a re-opened operation never carries a stale acceptance record.
         """
 
+        if acceptance_mode == AcceptanceMode.AUTO_ACCEPTED:
+            raise ValidationError(
+                "auto_accepted is a reserved acceptance mode and cannot be "
+                "recorded; graph operations require an explicit human accept."
+            )
         if operation.status == GraphChangeOperationStatus.ACCEPTED:
+            self.authorization.require_interactive(
+                actor, action="Accepting graph operations"
+            )
             operation.acceptance_mode = acceptance_mode
             operation.accepted_by = actor_user_id(actor)
             operation.accepted_by_user_id = actor_user_fk(actor, self.repository)
@@ -1219,6 +1227,9 @@ class GraphDraftService(BaseService):
             raise ValidationError("message must not be empty.")
         change_set = self.get_graph_change_set(change_set_id)
         self.authorization.require_owner(change_set.project_id, actor=actor)
+        self.authorization.require_interactive(
+            actor, action="Committing graph changes"
+        )
         if change_set.status == GraphChangeSetStatus.COMMITTING:
             raise ValidationError("This graph draft is already being committed.")
         if change_set.status not in {

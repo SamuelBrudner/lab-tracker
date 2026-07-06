@@ -201,7 +201,9 @@ def test_project_mapper_pilot_keeps_schema_domain_and_orm_boundaries():
     response_payload = Envelope[Project](data=project).model_dump(mode="json")
 
     assert isinstance(row, ProjectModel)
-    assert row.project_id == str(project.project_id)
+    # ORM ids are now typed (GUID column) — the row carries the UUID; the JSON
+    # response envelope is the boundary that renders it as a string.
+    assert row.project_id == project.project_id
     assert project_from_model(row) == project
     assert response_payload["data"]["project_id"] == str(project.project_id)
     assert response_payload["data"]["status"] == "active"

@@ -12,8 +12,10 @@ def as_utc(value: datetime) -> datetime:
     return value.astimezone(timezone.utc)
 
 
-def uuid_from_db(raw: str) -> UUID:
-    return UUID(raw)
+def uuid_from_db(raw: str | UUID) -> UUID:
+    # Tolerant during the per-entity GUID migration (str for un-migrated columns,
+    # UUID for migrated ones).
+    return raw if isinstance(raw, UUID) else UUID(raw)
 
 
 def uuid_to_db(value: UUID) -> str:

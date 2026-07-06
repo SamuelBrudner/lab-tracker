@@ -44,6 +44,16 @@ research record:
   compact scheduler facts, git context, metrics, log excerpts, and external
   artifact pointers. Large outputs remain outside Lab Tracker, and any proposed
   analysis/question/claim meaning remains human-gated through graph drafts.
+- Consumer-side analysis-repo capture through the `lt repo` CLI as an
+  offline-first staged-note workflow: a fail-soft managed post-commit hook,
+  explicit reports, and run-finish events record commit state, declared
+  artifact pointers (hashes, never bytes), and an environment fingerprint into
+  durable local outbox records that sync as `provider=git` staged notes under
+  the shared `<normalized-remote>@<commit>` evidence identity. Capture is
+  event-based — Lab Tracker never clones or continuously monitors
+  repositories — and the staged-note sink works under today's device-token
+  allowlist while draft requests need a user or personal-access token. See
+  [repo-report-capture.md](repo-report-capture.md).
 - Package-pinned code-facing idiom teaching rendered from one generator into
   consent-gated managed agent surfaces, with the advisory
   `lab-tracker://code-conventions` MCP resource treating the package text as
@@ -74,7 +84,9 @@ research record:
 - Sessions and acquisition outputs, including closing sessions and promoting
   eligible sessions into datasets.
 - Dataset staging and direct commit with provenance/manifest capture, without
-  an approval gate.
+  an approval gate. The direct-commit path for people and the human-gated review
+  path for AI proposals are deliberately asymmetric; see
+  [review-and-commit-model.md](review-and-commit-model.md).
 - Analysis, claim, and visualization records as explicit user-driven flows,
   including managed file storage for visualization assets.
 - Exploration nodes for the divergent research trajectory — `decision`,
@@ -116,6 +128,17 @@ research record:
   these documents as self-contained sidecar files that survive without a running
   instance, optionally co-located next to the data files they describe. See
   [provenance-export.md](provenance-export.md).
+- On-demand resolution of external artifact references (content hash is the
+  integrity gate). Local resolution optionally recovers a moved/renamed file by
+  its content hash within operator-configured `allowed_roots`
+  (`LAB_TRACKER_RESOLVER_RECOVERY`, off by default, bounded, read-only).
+  Registered `git` data stores resolve `path@commit` locators read-only and
+  on demand, gated by an operator remote allowlist
+  (`LAB_TRACKER_GIT_ALLOWED_REMOTES`, deny-by-default), a protocol allowlist,
+  a fetch size cap, and a bounded cache — never by cloning or polling. Rclone
+  resolution is likewise gated by an operator remote-name allowlist
+  (`LAB_TRACKER_RCLONE_ALLOWED_REMOTES`, deny-by-default). See
+  [external-artifact-resolution-design.md](external-artifact-resolution-design.md).
 - Read-only assistant and MCP decision-context endpoints over the retained
   graph. Assistants may inspect context through these surfaces, but retained v1
   does not delegate graph commits to autonomous agents.

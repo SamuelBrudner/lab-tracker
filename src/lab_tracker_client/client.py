@@ -95,6 +95,32 @@ def _install_id_path() -> Path:
     return root / "install-id"
 
 
+def connection_profile_path() -> Path:
+    base = os.getenv("LAB_TRACKER_CONFIG_DIR")
+    root = Path(base).expanduser() if base else Path.home() / ".lab-tracker"
+    return root / "config.json"
+
+
+def load_connection_profile() -> dict[str, str]:
+    """Read the persisted connection profile; fail-soft to an empty mapping.
+
+    Environment variables always win in ``from_env``; the profile only fills
+    gaps so hook-, scheduler-, and GUI-launched commands work without
+    per-shell env exports. A missing or malformed file must never break a
+    consumer script, so every failure path returns ``{}``.
+    """
+
+    with suppress(Exception):
+        payload = json.loads(connection_profile_path().read_text(encoding="utf-8"))
+        if isinstance(payload, dict):
+            return {
+                str(key): value.strip()
+                for key, value in payload.items()
+                if isinstance(value, str) and value.strip()
+            }
+    return {}
+
+
 def _resolve_install_id() -> str:
     """Read or lazily create a stable per-install id; fail-soft to ""."""
     path = _install_id_path()
@@ -257,16 +283,32 @@ class LabTracker:
 
     @classmethod
     def from_env(cls) -> LabTracker:
-        """Build a client from environment variables used by consumer repos."""
+        """Build a client from environment variables used by consumer repos.
 
+        Values absent from the environment fall back to the persisted
+        connection profile (``~/.lab-tracker/config.json``, written only by
+        the consent-gated ``lt setup connect``); env vars always win. The
+        profile's access token is used only when the environment supplies no
+        credentials of its own (a token or a username) and does not point at
+        a different server than the one the token was saved for.
+        """
+
+        profile = load_connection_profile()
+        env_base_url = os.getenv("LAB_TRACKER_BASE_URL") or os.getenv("LAB_TRACKER_MCP_BASE_URL")
+        env_username = os.getenv("LAB_TRACKER_USERNAME") or os.getenv("LAB_TRACKER_MCP_USERNAME")
+        profile_base_url = profile.get("base_url") or DEFAULT_BASE_URL
+        profile_token = profile.get("access_token")
+        if env_username or (
+            env_base_url and env_base_url.rstrip("/") != profile_base_url.rstrip("/")
+        ):
+            profile_token = None
         return cls(
-            base_url=os.getenv("LAB_TRACKER_BASE_URL")
-            or os.getenv("LAB_TRACKER_MCP_BASE_URL")
-            or DEFAULT_BASE_URL,
-            username=os.getenv("LAB_TRACKER_USERNAME") or os.getenv("LAB_TRACKER_MCP_USERNAME"),
+            base_url=env_base_url or profile.get("base_url") or DEFAULT_BASE_URL,
+            username=env_username,
             password=os.getenv("LAB_TRACKER_PASSWORD") or os.getenv("LAB_TRACKER_MCP_PASSWORD"),
-            access_token=os.getenv("LAB_TRACKER_ACCESS_TOKEN"),
-            default_project_id=os.getenv("LAB_TRACKER_PROJECT_ID"),
+            access_token=os.getenv("LAB_TRACKER_ACCESS_TOKEN") or profile_token,
+            default_project_id=os.getenv("LAB_TRACKER_PROJECT_ID")
+            or profile.get("default_project_id"),
             timeout_seconds=float(
                 os.getenv("LAB_TRACKER_HTTP_TIMEOUT", str(DEFAULT_TIMEOUT_SECONDS))
             ),

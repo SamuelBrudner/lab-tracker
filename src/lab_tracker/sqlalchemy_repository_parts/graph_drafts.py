@@ -10,6 +10,8 @@ from sqlalchemy import func, select, update
 from sqlalchemy.orm import Session as OrmSession
 
 from lab_tracker.db_models import GraphChangeOperationModel, GraphChangeSetModel, UserModel
+from lab_tracker.db_types import ensure_uuid
+from lab_tracker.errors import ValidationError
 from lab_tracker.models import (
     AcceptanceMode,
     EntityType,
@@ -29,7 +31,7 @@ from .common import apply_pagination, count_from_statement, replace_child_rows, 
 
 
 def _uuid(value: str | None) -> UUID | None:
-    return UUID(value) if value else None
+    return ensure_uuid(value) if value else None
 
 
 def _uuid_str(value: UUID | None) -> str | None:
@@ -51,6 +53,10 @@ def _as_utc_optional(value: Any) -> Any:
 
 
 def operation_to_model(operation: GraphChangeOperation) -> GraphChangeOperationModel:
+    if operation.acceptance_mode == AcceptanceMode.AUTO_ACCEPTED:
+        raise ValidationError(
+            "auto_accepted is a reserved acceptance mode and must not be persisted."
+        )
     return GraphChangeOperationModel(
         operation_id=str(operation.operation_id),
         change_set_id=str(operation.change_set_id),
@@ -83,8 +89,8 @@ def operation_to_model(operation: GraphChangeOperation) -> GraphChangeOperationM
 
 def operation_from_model(row: GraphChangeOperationModel) -> GraphChangeOperation:
     return GraphChangeOperation(
-        operation_id=UUID(row.operation_id),
-        change_set_id=UUID(row.change_set_id),
+        operation_id=ensure_uuid(row.operation_id),
+        change_set_id=ensure_uuid(row.change_set_id),
         sequence=row.sequence,
         op=GraphChangeOp(row.op),
         entity_type=EntityType(row.entity_type),
@@ -193,11 +199,11 @@ def change_set_from_model(
     resolved_usernames = usernames or {}
     operation_list = list(operations)
     return GraphChangeSet(
-        change_set_id=UUID(row.change_set_id),
-        project_id=UUID(row.project_id),
-        source_note_id=UUID(row.source_note_id),
+        change_set_id=ensure_uuid(row.change_set_id),
+        project_id=ensure_uuid(row.project_id),
+        source_note_id=ensure_uuid(row.source_note_id),
         source_note_ids=[
-            UUID(str(note_id)) for note_id in (row.source_note_ids or [row.source_note_id])
+            ensure_uuid(str(note_id)) for note_id in (row.source_note_ids or [row.source_note_id])
         ],
         source_checksum=row.source_checksum,
         source_content_type=row.source_content_type,
@@ -255,7 +261,7 @@ class SQLAlchemyGraphChangeSetRepository(EntityRepository[GraphChangeSet]):
         )
         operation_map: dict[str, list[GraphChangeOperation]] = {}
         for row in rows:
-            operation_map.setdefault(row.change_set_id, []).append(operation_from_model(row))
+            operation_map.setdefault(str(row.change_set_id), []).append(operation_from_model(row))
         return operation_map
 
     def _operation_counts_for(self, change_set_ids: list[str]) -> dict[str, int]:
@@ -308,8 +314,8 @@ class SQLAlchemyGraphChangeSetRepository(EntityRepository[GraphChangeSet]):
         return [
             change_set_from_model(
                 row,
-                operations=operation_map.get(row.change_set_id, []),
-                operation_count=operation_counts.get(row.change_set_id, 0),
+                operations=operation_map.get(str(row.change_set_id), []),
+                operation_count=operation_counts.get(str(row.change_set_id), 0),
                 usernames=usernames,
             )
             for row in rows
