@@ -418,6 +418,17 @@ def test_project_graph_full_view_truncates_long_note_and_claim_labels(
         },
         headers=admin_auth_headers,
     ).json()["data"]["note_id"]
+    question_text = "Question " + ("long clause " * 30)
+    question_id = client.post(
+        "/questions",
+        json={
+            "project_id": project_id,
+            "text": question_text,
+            "question_type": "descriptive",
+            "status": "active",
+        },
+        headers=admin_auth_headers,
+    ).json()["data"]["question_id"]
     claim_statement = "Claim " + ("long statement " * 30)
     claim_id = client.post(
         "/claims",
@@ -440,6 +451,8 @@ def test_project_graph_full_view_truncates_long_note_and_claim_labels(
     assert len(nodes[f"note:{note_id}"]["label"]) == 180
     assert nodes[f"claim:{claim_id}"]["label"] == claim_statement[:180]
     assert len(nodes[f"claim:{claim_id}"]["label"]) == 180
+    assert nodes[f"question:{question_id}"]["label"] == question_text[:180]
+    assert len(nodes[f"question:{question_id}"]["label"]) == 180
 
 
 def test_project_graph_includes_claim_relations_and_external_citations(
