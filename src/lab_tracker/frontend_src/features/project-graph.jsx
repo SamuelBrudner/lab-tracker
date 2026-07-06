@@ -1,5 +1,5 @@
 import * as React from "react";
-import { Background, Controls, MiniMap, ReactFlow } from "@xyflow/react";
+import { Background, Controls, ReactFlow } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
 
 import { apiRequest, apiTextRequest, buildApiPath } from "../shared/api.js";
@@ -744,14 +744,6 @@ function ProjectGraphExplorer({
                 onEdgeMouseEnter={(_event, edge) => setHoveredEdgeId(edge.id)}
                 onEdgeMouseLeave={() => setHoveredEdgeId(null)}
               >
-                <MiniMap
-                  nodeColor={(node) =>
-                    TYPE_STYLES[node.data?.entityType]?.background || "#e5e7eb"
-                  }
-                  nodeStrokeColor={(node) =>
-                    TYPE_STYLES[node.data?.entityType]?.borderColor || "#9aa3ad"
-                  }
-                />
                 <Controls />
                 <Background />
               </ReactFlow>
