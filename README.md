@@ -57,7 +57,7 @@ The capture loop can stay light because the underlying record is opinionated.
 
 ![The question hierarchy for a project](docs/screenshots/project-graph-questions.png)
 
-The spine of every project is a graph of **questions** — your broad motivating question at the top, broken down into the atomic ones you can actually answer at the rig. Questions are first-class: you write them down *first*, before any data exists, and they persist whether the experiment works or not. A question can roll up to more than one parent, so the structure branches and converges as your thinking does.
+The spine of every project is a graph of **questions** — your broad motivating question at the top, broken down into the atomic ones you can actually answer with data. Questions are first-class: you write them down *first*, before any data exists, and they persist whether the experiment works or not. A question can roll up to more than one parent, so the structure branches and converges as your thinking does.
 
 ## Everything else hangs off a question
 
@@ -67,7 +67,7 @@ Once the questions exist, the rest of your record points back at them:
 
 - **A dataset must name the question it addresses** — you can't commit one without it. Tag secondary questions too, and mark whether the data supported, refuted, or was inconclusive for each.
 - **Notes** pin to the question (or session, or dataset) they describe.
-- **Sessions** at the rig point at the question you're collecting for.
+- **Sessions** point at the question you're collecting data for.
 - **Claims** answer questions — and only count as *supported* once a real dataset or analysis backs them.
 - **Analyses and visualizations** inherit their questions from the data and claims they're built on.
 
@@ -75,7 +75,7 @@ So from any figure you can walk backward — to the claim, the analysis, the dat
 
 ## Who it's for
 
-Wet labs — initially neuroscience — that generate high-bandwidth data on specialized rigs and want the reasoning preserved alongside it. If you've ever inherited a folder of `.nwb` files with no idea why they exist, this is for you.
+Wet labs — initially neuroscience — that generate high-bandwidth data on specialized instruments and want the reasoning preserved alongside it. If you've ever inherited a folder of `.nwb` files with no idea why they exist, this is for you.
 
 ## Scientists start here
 

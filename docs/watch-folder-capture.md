@@ -16,7 +16,7 @@ automatically, leave scientific meaning and graph commits to human review.
 
 ## Setup
 
-Create a config in the analysis checkout, rig workstation folder, or synced
+Create a config in the analysis checkout, instrument workstation folder, or synced
 folder you want to scan from:
 
 ```bash
@@ -70,7 +70,7 @@ relative path and filename.
 
 ## Acquisition Session Output Folder
 
-Use `acquisition-output` when a rig or instrument writes files that should be
+Use `acquisition-output` when an instrument writes files that should be
 registered against an existing session:
 
 ```bash

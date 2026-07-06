@@ -44,7 +44,7 @@ take photo on phone -> AI drafts structured graph update -> researcher reviews/e
 ```
 
 The phone is essential because the relevant context is often created at the
-bench, in front of a whiteboard, beside a rig, in a notebook, in a hallway
+bench, in front of a whiteboard, beside an instrument, in a notebook, in a hallway
 conversation, or during a meeting. A desktop-first workflow misses the moment
 when the metadata is easiest to capture.
 
@@ -177,7 +177,7 @@ JSON object string matching the API payload.
       "semantic_type": "create_note",
       "target_entity_id": null,
       "payload_json": "{\"project_id\":\"project_gradient\",\"raw_content\":\"Rig 2 gradient protocol. Fly 12 tracked well. Turning appeared stronger after pulse onset.\",\"status\":\"staged\",\"targets\":[{\"entity_type\":\"session\",\"entity_id\":\"session_2026_05_14_rig2\"}]}",
-      "rationale": "The capture records a staged note tied to the rig session.",
+      "rationale": "The capture records a staged note tied to the acquisition session.",
       "confidence": 0.86,
       "source_refs": [
         {
@@ -257,7 +257,7 @@ Acceptance criteria:
 - User can attach the image to a project/question/session/dataset with minimal
   taps.
 - User can capture without fully resolving context, then review later.
-- Capture can happen at the bench, rig, notebook, field site, hallway, or
+- Capture can happen at the bench, instrument, notebook, field site, hallway, or
   whiteboard.
 - The UI works in a mobile browser.
 - The flow does not require installing a native app for the first version.
