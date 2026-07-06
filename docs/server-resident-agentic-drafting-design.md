@@ -186,6 +186,89 @@ single-shot providers remain selectable as a config rollback.
   provision" failure mode. The job-queue abstraction still permits
   moving the worker to a sidecar later without changing the model.
 
+## Adjacent tool landscape (considered 2026-07-06)
+
+Six agentic-data-stack tools were evaluated against this design:
+PuppyGraph, Upriver, Compass (Dagster Labs), Malloy, fenic (typedef),
+and Ascend.io. Facts and URLs are recorded in
+`docs/build-vs-buy-boundaries.md` ("Agentic-Data Tool Landscape"). None
+changes decisions 1–4: the deployment topology (SQLite solo,
+zero-sidecar desktop launcher) excludes every external engine among
+them, and the read tools the agent needs are graph-shaped and small.
+Three notes worth keeping:
+
+**Convergence validation.** Upriver grounds its enterprise agents in a
+continuously maintained cross-stack context graph; Compass's
+differentiator over raw text-to-SQL is a human-approved context store
+in front of strictly read-only warehouse queries. Both are the
+industry-scale shape of components 3–4: a read-only agent grounded in a
+curated semantic context, with human-gated approval of what it
+produces. Lab Tracker's graph is the context engine and the draft
+review surface is the governance loop; this design is on the
+convergence path, not off it.
+
+**Malloy Publisher as a source-visible design reference for component
+4.** Publisher (MIT, github.com/malloydata/publisher) ships an
+agent-facing MCP server; because it is open source, its concrete
+choices were read directly (verified in source 2026-07-06) and compared
+against the shipped `AgenticGraphDraftClient`
+(`graph_drafting.py`, landed 2026-07-03, `lab-tracker-1325.4` closed).
+Note the shipped shape: not a live tool loop but a deterministic
+read-only *pre-pass* — tokenize staged notes, substring-match against
+node summaries already in the batch context, attach a bounded
+`agentic_tool_trace` plus a link-before-create hint, then delegate to
+the unchanged single-shot structured call.
+
+Where the shipped implementation already matches Publisher's choices:
+
+- *Read-only by construction.* Publisher enforces read-only-ness by
+  tool absence plus process isolation (its agent MCP server exposes
+  exactly two retrieval tools; query execution lives on a separate
+  port). The pre-pass is stronger still: the model gets no live tool
+  surface at all.
+- *Context budget as a first-class constraint.* Publisher caps results
+  (default 10, max 50), truncates doc excerpts to 280 chars, and caps
+  queries at 500 chars; the pre-pass caps search terms at 20, matches
+  at 20, and decision-context summaries at 10 projects.
+- *Lexical baseline first.* Publisher's `getContext` is BM25 (Lunr)
+  over flattened model entities — no LLM, no embeddings; the pre-pass
+  is likewise pure-lexical substring matching.
+
+Where Publisher is ahead — candidate follow-ups
+(`lab-tracker-1325.4` is closed; filed as `lab-tracker-su76`):
+
+- *A checked-in retrieval eval.* Publisher ships a recall@K harness
+  with labeled query→expected-entity cases next to the tool, candidly
+  documenting the lexical gap ("dep_delay" shares no token with
+  "departure delay") as measured future-work motivation. Nothing
+  measures whether the pre-pass surfaces the right existing nodes,
+  which is the duplicate-avoidance point of component 4.
+- *Ranked, field-boosted matching.* Publisher boosts entity names 4x
+  over body text; the pre-pass substring-matches unranked JSON
+  haystacks, so a label hit and an incidental metadata hit score the
+  same.
+- *Two-phase retrieval and description-as-prompt.* Broad search then a
+  scoped drill-down parameter, and tool descriptions that state the
+  grounding purpose ("…instead of guessing"), become relevant if the
+  pre-pass ever grows into the live tool loop this design originally
+  sketched.
+
+Not a dependency: TypeScript/Node runtime and sidecar server, no
+SQLite connector, and analytics-shaped (measures/dimensions) rather
+than graph-shaped reads. Revisit only if agents someday need
+analytical queries over the graph.
+
+**Revisit triggers for the rest.** fenic (Apache-2.0, embeds
+in-process) is the reference target if a batch semantic-extraction or
+duplicate-claim pre-pass (embedding/semantic join over staged notes)
+ever fronts the agent loop — pre-1.0 from a seed-stage vendor, so not
+now. PuppyGraph is the reference target only if graph analytics on
+shared-Postgres hosts outgrow recursive CTEs; note its MCP query
+surface would function as an external agent harness, adjacent to the
+rejected alternative above. Ascend.io is winding down as of mid-2026
+despite ~$54M raised — a cautionary citation for keeping external-tool
+adapters thin and optional, per `build-vs-buy-boundaries.md`.
+
 ## Decisions (resolved 2026-07-02)
 
 1. **Placement:** proposal-writing agents run on the server host, inside
