@@ -43,6 +43,17 @@ describe("static demo API", () => {
     expect(mermaid).toContain("graph LR");
   });
 
+  it("labels the dataset node with its manifest name, not the commit hash", async () => {
+    const graph = await apiRequest(
+      "/projects/2a32290d-5977-4e1a-9639-23210d3d4f1e/graph?view=evidence"
+    );
+    const dataset = graph.nodes.find((node) => node.entity_type === "dataset");
+    expect(dataset).toBeTruthy();
+    expect(dataset.label).toBe("2025_12_10_Rig2_session001.nwb");
+    // ...and the commit hash stays available on the node detail.
+    expect(dataset.detail).toContain("f2eabaa");
+  });
+
   it("rejects writes so the public demo is safe to click through", async () => {
     await expect(
       apiRequest("/projects", {

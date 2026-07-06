@@ -455,6 +455,75 @@ def test_project_graph_full_view_truncates_long_note_and_claim_labels(
     assert len(nodes[f"question:{question_id}"]["label"]) == 180
 
 
+def test_project_graph_dataset_label_prefers_manifest_name_over_hash(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+):
+    project_id = client.post(
+        "/projects",
+        json={"name": "Dataset labels"},
+        headers=admin_auth_headers,
+    ).json()["data"]["project_id"]
+    question_id = client.post(
+        "/questions",
+        json={
+            "project_id": project_id,
+            "text": "Does the rig record cleanly?",
+            "question_type": "descriptive",
+            "status": "active",
+        },
+        headers=admin_auth_headers,
+    ).json()["data"]["question_id"]
+
+    # commit_hash is content-addressed (computed from the manifest), so we let
+    # the service assign it rather than passing one.
+    def make_dataset(manifest: dict, status: str = "committed") -> str:
+        response = client.post(
+            "/datasets",
+            json={
+                "project_id": project_id,
+                "primary_question_id": question_id,
+                "status": status,
+                "commit_manifest": manifest,
+            },
+            headers=admin_auth_headers,
+        )
+        body = response.json()
+        assert "data" in body, response.text
+        return body["data"]["dataset_id"]
+
+    named_id = make_dataset(
+        {
+            "files": [{"path": "raw/ignored.nwb", "checksum": "c1"}],
+            "metadata": {"dataset_name": "2025_12_10_Rig2_session001.nwb"},
+        },
+    )
+    filed_id = make_dataset(
+        {"files": [{"path": "sessions/2025-12-10/scan_A.tif", "checksum": "c2"}]},
+    )
+    # Neither a name nor files: a staged dataset (committing requires a file),
+    # so the label falls back to the existing "Dataset <id>" form.
+    bare_id = make_dataset({}, status="staged")
+
+    response = client.get(
+        f"/projects/{project_id}/graph?view=evidence",
+        headers=admin_auth_headers,
+    )
+
+    assert response.status_code == 200
+    nodes = {item["id"]: item for item in response.json()["data"]["nodes"]}
+    # metadata dataset_name wins over the commit hash
+    assert nodes[f"dataset:{named_id}"]["label"] == "2025_12_10_Rig2_session001.nwb"
+    # else the first committed file's basename (POSIX or Windows separators)
+    assert nodes[f"dataset:{filed_id}"]["label"] == "scan_A.tif"
+    # else fall back to the existing hash/id-based label
+    bare_label = nodes[f"dataset:{bare_id}"]["label"]
+    assert bare_label.startswith("Dataset ")
+    assert bare_label not in {"2025_12_10_Rig2_session001.nwb", "scan_A.tif"}
+    # the commit hash stays available on the node detail for named datasets
+    assert nodes[f"dataset:{named_id}"]["detail"]
+
+
 def test_project_graph_includes_claim_relations_and_external_citations(
     client: TestClient,
     admin_auth_headers: dict[str, str],

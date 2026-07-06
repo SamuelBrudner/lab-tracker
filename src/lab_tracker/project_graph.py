@@ -246,6 +246,16 @@ def _question_label(question: Question) -> str:
 
 
 def _dataset_label(dataset: Dataset) -> str:
+    # Prefer a human-readable name from the commit manifest — the capture path
+    # records e.g. metadata["dataset_name"] or the committed file paths — over
+    # the opaque commit hash. The hash stays available via the node `detail`.
+    manifest = dataset.commit_manifest
+    name = (manifest.metadata.get("dataset_name") or "").strip()
+    if not name and manifest.files:
+        # File paths may use POSIX or Windows separators regardless of host.
+        name = manifest.files[0].path.replace("\\", "/").rsplit("/", 1)[-1].strip()
+    if name:
+        return _truncate_graph_label(name)
     return f"Dataset {dataset.commit_hash or _short_id(dataset.dataset_id)}"
 
 
