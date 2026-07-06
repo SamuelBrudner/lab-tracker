@@ -189,6 +189,9 @@ def install_hook(
     hook_path.write_text(updated, encoding="utf-8", newline="\n")
     if sys.platform != "win32":
         hook_path.chmod(0o755)
+    from lab_tracker_client.registry import record_repo
+
+    record_repo(repo_root, "hooks-install")
     return payload
 
 

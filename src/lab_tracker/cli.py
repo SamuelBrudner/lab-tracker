@@ -172,7 +172,18 @@ def init_consumer_repo(
             "The lab-tracker-setup skill can be installed for Claude/Codex "
             "agents with `--install-skills`."
         )
+    if not dry_run:
+        _record_enrolled_repo(root, "init")
     return result
+
+
+def _record_enrolled_repo(root: Path, action: str) -> None:
+    """Fail-soft: registry metadata must never break init/update."""
+
+    with suppress(Exception):
+        from lab_tracker_client.registry import record_repo
+
+        record_repo(root, action)
 
 
 def _skills_home() -> Path:
@@ -330,6 +341,8 @@ def update_consumer_repo(
         )
     if install_skills:
         _install_setup_skill(result=result, dry_run=dry_run)
+    if not dry_run:
+        _record_enrolled_repo(root, "update")
     return result
 
 
