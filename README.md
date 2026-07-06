@@ -1,6 +1,6 @@
 # Lab Tracker
 
-**Lab Tracker builds a living model of your research projects — your questions, data, claims, and figures, all connected — while asking for as little input effort as possible.** You capture in seconds: type a note, snap a photo, record a voice memo, save a figure from your analysis code. AI proposes where each capture fits in the model; you accept or reject in one daily review. The filing happens for you — you only ever confirm.
+**Lab Tracker builds a living model of your research projects — your questions, data, claims, and figures, all connected — while asking for as little input effort as possible.** You capture in seconds: type a note, snap a photo, record a voice memo, save a figure from your analysis code. AI proposes where each capture fits in the model, and you settle it in one daily review. The clerical work happens for you; what's left is the part worth having — a short, unhurried sitting with your own day's science, deciding what each result actually means.
 
 Why it matters: a file named `2025_12_10_Rig2_session001.nwb` tells you *when*, *where*, and *what* — but not *why* you collected it, what you expected, or what you actually saw at the bench. That reasoning lives on paper towels, on whiteboards, and in people's heads — and it walks out the door when they do. Lab Tracker gives it a durable place to live, next to the data.
 
@@ -36,13 +36,13 @@ At the end of each day — on a cadence you set, or on demand — **the daily re
 
 The model only ever proposes. Nothing touches your record until a person says yes — **AI can suggest; only a person commits.**
 
-The review is where the real thinking happens, so it's built to reward attention rather than rush it: accept the proposals you've actually scrutinized one at a time, or accept a batch in bulk when you've skimmed it — and the record remembers which you did, so a bulk rubber-stamp is never mistaken later for a considered call. Some people print the queue and sit with it on paper before replying; that's a feature, not a workaround. Captures you don't get to stay **staged and visible** — never silently dropped — and when you do set one aside, you say *why* (not relevant, superseded, or simply archived-unreviewed). A skipped evening costs you visible coverage, never silent trust.
+The review is where the real thinking happens — and it's the enjoyable kind: a quiet, end-of-day pass over your own results, the sort of reflection bench work rarely leaves room for. So it's built to reward attention rather than rush it: accept the proposals you've actually scrutinized one at a time, or accept a batch in bulk when you've skimmed it — and the record remembers which you did, so a bulk rubber-stamp is never mistaken later for a considered call. Some people print the queue and sit with it on paper before replying; that's a feature, not a workaround. Captures you don't get to stay **staged and visible** — never silently dropped — and when you do set one aside, you say *why* (not relevant, superseded, or simply archived-unreviewed). A skipped evening costs you visible coverage, never silent trust.
 
 Want it to run on its own? One command — or one double-click on Windows — sets up the schedule. See [Make the daily review run on its own](docs/scheduled-daily-review.md).
 
 ## The daily routine
 
-The whole thing is built to cost you almost nothing while you work, and a focused sitting before you head home.
+The whole thing is built to cost you almost nothing while you work, and one focused sitting before you head home — the good kind of effort, thinking about your science rather than filing it.
 
 - **At the bench — just capture.** As you work, you capture without stopping to file anything: snap the prep, record a thirty-second voice note on what looked off, type a one-line observation. Tap send and keep going. Nothing asks you which question it belongs to — that's for the evening review. If a result makes you ask something new, say it into a voice note; it becomes a candidate question.
 - **Running analysis — figures file themselves.** When you plot results, `lab_tracker_client.savefig(...)` (or a `with capture_figures():` block) in Python, and `labtracker.savefig(...)` in MATLAB, register each figure as staged evidence with its content hash; wrap Python runs in `with run_context():` and the exact git commit that produced them rides along. You upload nothing by hand.
