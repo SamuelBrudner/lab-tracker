@@ -516,6 +516,9 @@ class GraphChangeSetSummary(BaseModel):
     created_by: str | None = None
     created_by_user_id: UUID | None = None
     created_by_username: str | None = None
+    review_assignee: str | None = None
+    review_assignee_user_id: UUID | None = None
+    review_assignee_username: str | None = None
     updated_at: datetime
     submitted_at: datetime | None = None
     submitted_by: str | None = None
@@ -540,6 +543,7 @@ class GraphDraftBatchSettingsUpdate(RequestModel):
     cadence_minutes: int | None = Field(default=None, ge=60)
     run_at_local_time: str | None = None
     timezone_name: str | None = None
+    user_id: UUID | None = None
 
 
 class GraphDraftBatchRunRequest(RequestModel):

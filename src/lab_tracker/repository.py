@@ -480,8 +480,16 @@ class LabTrackerRepository(Protocol):
     def get_graph_draft_batch_settings_by_project(
         self,
         project_id: UUID,
+        *,
+        user_id: UUID | None = None,
     ) -> GraphDraftBatchSettings | None:
         """Return graph draft batch settings for a project."""
+
+    def list_graph_draft_batch_settings_for_project(
+        self,
+        project_id: UUID,
+    ) -> list[GraphDraftBatchSettings]:
+        """Return all graph draft batch settings rows for a project."""
 
     def list_due_graph_draft_batch_settings(
         self,
@@ -506,6 +514,9 @@ class LabTrackerRepository(Protocol):
     def latest_successful_graph_draft_batch_run(
         self,
         project_id: UUID,
+        *,
+        review_assignee_user_id: UUID | None = None,
+        review_assignee: str | None = None,
     ) -> GraphDraftBatchRun | None:
         """Return the latest successful/skipped batch run for a project."""
 
@@ -513,6 +524,9 @@ class LabTrackerRepository(Protocol):
         self,
         project_id: UUID,
         window_end: datetime,
+        *,
+        review_assignee_user_id: UUID | None = None,
+        review_assignee: str | None = None,
     ) -> set[UUID]:
         """Return source note IDs from successful batch runs ending at a window boundary."""
 
@@ -525,6 +539,13 @@ class LabTrackerRepository(Protocol):
         offset: int = 0,
     ) -> tuple[list[GraphDraftBatchRun], int]:
         """Query graph draft batch run history."""
+
+    def claim_next_pending_graph_draft_batch_run(
+        self,
+        *,
+        claimed_at: datetime,
+    ) -> GraphDraftBatchRun | None:
+        """Atomically claim the oldest pending graph draft batch run."""
 
     def list_dataset_files(self, dataset_id: UUID) -> list[DatasetFile]:
         """Return all files attached to a dataset."""

@@ -3,14 +3,21 @@ from __future__ import annotations
 import json
 from datetime import datetime, time, timedelta, timezone
 from typing import Any
-from uuid import uuid4
+from uuid import UUID, uuid4
 
+import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import select
 
+from lab_tracker.api import LabTrackerAPI
+from lab_tracker.app_parts.middleware import system_auth_context
 from lab_tracker.auth import Role
 from lab_tracker.db_models import GraphDraftBatchSettingsModel, NoteModel
-from lab_tracker.graph_drafting import GraphDraftingError
+from lab_tracker.graph_drafting import (
+    READ_ONLY_AGENT_TOOLS,
+    AgenticGraphDraftClient,
+    GraphDraftingError,
+)
 from lab_tracker.sqlalchemy_repository_parts.repository import SQLAlchemyLabTrackerRepository
 
 
@@ -71,6 +78,26 @@ def _user_auth_headers(client: TestClient, *, role: Role = Role.VIEWER) -> dict[
     return _auth_headers(login_response.json()["data"]["access_token"])
 
 
+def _registered_user(
+    client: TestClient,
+    *,
+    role: Role = Role.VIEWER,
+) -> tuple[dict[str, str], str]:
+    username = f"batch-{role.value}-{uuid4().hex[:8]}"
+    password = "secret"
+    user = client.app.state.auth_service.register_user(
+        username=username,
+        password=password,
+        role=role,
+    )
+    login_response = client.post(
+        "/auth/login",
+        json={"username": username, "password": password},
+    )
+    assert login_response.status_code == 200
+    return _auth_headers(login_response.json()["data"]["access_token"]), str(user.user_id)
+
+
 def _api_datetime(value: str) -> datetime:
     return datetime.fromisoformat(value.replace("Z", "+00:00")).astimezone(timezone.utc)
 
@@ -117,6 +144,21 @@ def _batch_patch(project_id: str) -> dict[str, Any]:
             }
         ],
     }
+
+
+def _process_next_background_run(client: TestClient):
+    with client.app.state.db_session_factory() as session:
+        api = LabTrackerAPI(
+            raw_storage=client.app.state.raw_note_storage,
+            repository=SQLAlchemyLabTrackerRepository(session),
+            settings=client.app.state.settings,
+            surface="background",
+        )
+        return api.process_next_graph_draft_batch_run(
+            draft_client_factory=client.app.state.graph_draft_client_factory,
+            app_settings=client.app.state.settings,
+            actor=system_auth_context(),
+        )
 
 
 def test_run_now_persists_pending_batch_with_source_traceability(
@@ -264,6 +306,39 @@ def test_viewer_cannot_schedule_or_run_project_batch(
         headers=viewer_headers,
     )
     assert run.status_code == 401
+
+
+def test_background_run_now_enqueues_and_worker_processes(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+) -> None:
+    project_id = _project(client, admin_auth_headers)
+    _note(client, admin_auth_headers, project_id, "Queued background note.")
+    fake_client = FakeBatchDraftClient(_batch_patch(project_id))
+    client.app.state.graph_draft_client_factory = lambda settings: fake_client
+    client.app.state.settings.graph_draft_background_enabled = True
+
+    response = client.post(
+        "/batches/run-now",
+        json={"project_id": project_id, "user_hint": "queue it"},
+        headers=admin_auth_headers,
+    )
+
+    assert response.status_code == 201
+    queued = response.json()["data"]
+    assert queued["status"] == "pending"
+    assert queued["change_set_id"] is None
+    assert queued["source_note_ids"]
+    assert fake_client.calls == []
+
+    processed = _process_next_background_run(client)
+
+    assert processed.status.value == "ready"
+    assert len(fake_client.calls) == 1
+    assert fake_client.calls[0]["user_hint"] == "queue it"
+    draft = client.get(f"/batches/{processed.change_set_id}", headers=admin_auth_headers)
+    assert draft.status_code == 200
+    assert draft.json()["data"]["status"] == "ready"
 
 
 def test_batch_run_is_idempotent_for_same_window(
@@ -622,6 +697,169 @@ def test_run_due_isolates_project_errors_and_continues(
         tzinfo=timezone.utc,
     )
     assert _api_datetime(settings.json()["data"]["next_run_at"]) == expected_next_run_at
+
+
+def test_background_run_due_partitions_by_note_author_and_assigns_reviewers(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+) -> None:
+    project_id = _project(client, admin_auth_headers)
+    first_headers, first_user_id = _registered_user(client, role=Role.VIEWER)
+    second_headers, second_user_id = _registered_user(client, role=Role.VIEWER)
+    for user_id in (first_user_id, second_user_id):
+        response = client.post(
+            f"/projects/{project_id}/members",
+            json={"user_id": user_id, "role": "contributor"},
+            headers=admin_auth_headers,
+        )
+        assert response.status_code == 201
+    first_note = _note(client, first_headers, project_id, "First user's staged note.")
+    second_note = _note(client, second_headers, project_id, "Second user's staged note.")
+    settings = client.patch(
+        f"/projects/{project_id}/graph-draft-batch-settings",
+        json={"enabled": True},
+        headers=admin_auth_headers,
+    )
+    assert settings.status_code == 200
+    with client.app.state.db_session_factory() as session:
+        row = session.scalar(
+            select(GraphDraftBatchSettingsModel).where(
+                GraphDraftBatchSettingsModel.project_id == project_id
+            )
+        )
+        row.next_run_at = datetime.now(timezone.utc) - timedelta(minutes=5)
+        session.commit()
+    fake_client = FakeBatchDraftClient(_batch_patch(project_id))
+    client.app.state.graph_draft_client_factory = lambda settings: fake_client
+    client.app.state.settings.graph_draft_background_enabled = True
+
+    response = client.post("/batches/run-due", headers=admin_auth_headers)
+
+    assert response.status_code == 200
+    queued_runs = response.json()["data"]
+    assert len(queued_runs) == 2
+    assert {run["status"] for run in queued_runs} == {"pending"}
+    assert {run["review_assignee_user_id"] for run in queued_runs} == {
+        first_user_id,
+        second_user_id,
+    }
+    assert {tuple(run["source_note_ids"]) for run in queued_runs} == {
+        (first_note,),
+        (second_note,),
+    }
+    assert fake_client.calls == []
+
+    processed = []
+    for _ in queued_runs:
+        run = _process_next_background_run(client)
+        assert run is not None
+        processed.append(run)
+
+    assert {run.review_assignee_user_id for run in processed} == {
+        UUID(first_user_id),
+        UUID(second_user_id),
+    }
+    first_run = next(run for run in processed if str(run.review_assignee_user_id) == first_user_id)
+    first_draft = client.get(
+        f"/batches/{first_run.change_set_id}",
+        headers=admin_auth_headers,
+    )
+    assert first_draft.status_code == 200
+    first_payload = first_draft.json()["data"]
+    assert first_payload["review_assignee_user_id"] == first_user_id
+    operation = first_payload["operations"][0]
+
+    wrong_user = client.patch(
+        f"/graph-drafts/{first_run.change_set_id}/operations/{operation['operation_id']}",
+        json={"payload": operation["payload"], "status": "accepted"},
+        headers=second_headers,
+    )
+    assert wrong_user.status_code == 422
+    assert "assigned reviewer" in wrong_user.json()["error"]["message"]
+
+    accepted = client.patch(
+        f"/graph-drafts/{first_run.change_set_id}/operations/{operation['operation_id']}",
+        json={"payload": operation["payload"], "status": "accepted"},
+        headers=first_headers,
+    )
+    assert accepted.status_code == 200
+    submitted = client.post(
+        f"/graph-drafts/{first_run.change_set_id}/submit",
+        headers=first_headers,
+    )
+    assert submitted.status_code == 200
+
+
+def test_agentic_graph_draft_client_uses_read_only_context_trace() -> None:
+    class CapturingBaseClient:
+        provider = "fake"
+        model = "fake-model"
+
+        def __init__(self) -> None:
+            self.batch_context: dict[str, Any] | None = None
+            self.user_hint: str | None = None
+            self.closed = False
+
+        def draft_from_batch(
+            self,
+            *,
+            batch_context: dict[str, Any],
+            user_hint: str | None = None,
+        ) -> dict[str, Any]:
+            self.batch_context = batch_context
+            self.user_hint = user_hint
+            return {
+                "summary": "agentic",
+                "uncertain_fields": [],
+                "clarification_requests": [],
+                "operations": [],
+            }
+
+        def close(self) -> None:
+            self.closed = True
+
+    base = CapturingBaseClient()
+    client = AgenticGraphDraftClient(base_client=base)
+
+    result = client.draft_from_batch(
+        batch_context={
+            "batch_notes": [
+                {
+                    "id": "note-1",
+                    "raw_content_preview": "PV inhibition broadened odor tuning.",
+                }
+            ],
+            "projects": [
+                {
+                    "id": "project-1",
+                    "label": "Olfaction",
+                    "active_or_staged_questions": [
+                        {
+                            "id": "question-1",
+                            "text": "Does PV inhibition broaden odor tuning?",
+                        }
+                    ],
+                    "recent_claims": [],
+                    "recent_analyses": [],
+                    "known_aliases": [],
+                }
+            ],
+            "context_summary": {"counts": {"batch_notes": 1}},
+        },
+        user_hint="prefer existing questions",
+    )
+
+    assert result["summary"] == "agentic"
+    assert base.batch_context is not None
+    trace = base.batch_context["agentic_tool_trace"]
+    assert trace["tool_policy"] == {
+        "allowed_tools": list(READ_ONLY_AGENT_TOOLS),
+        "write_tools_available": False,
+    }
+    assert trace["matched_existing_nodes"][0]["id"] == "question-1"
+    assert "prefer existing questions" in (base.user_hint or "")
+    with pytest.raises(GraphDraftingError, match="background batch drafts"):
+        client.draft_from_note()
 
 
 def test_batch_settings_claim_requires_observed_next_run_at(
