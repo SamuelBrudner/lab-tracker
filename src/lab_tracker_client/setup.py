@@ -31,7 +31,7 @@ from lab_tracker_client.client import (
     connection_profile_path,
     load_connection_profile,
 )
-from lab_tracker_client.hooks import HOOK_BLOCK_BEGIN
+from lab_tracker_client.hooks import HOOK_BLOCK_BEGIN, hook_path_for_repo
 
 JsonObject = dict[str, Any]
 
@@ -211,6 +211,12 @@ def _suggestions(status: JsonObject) -> list[str]:
             "`lab-tracker serve` starts a local instance and `lt setup connect` "
             "records a lab server URL (`--yes` applies)."
         )
+    if status["server"]["source"] == "default" and not status["profile"]["present"]:
+        suggestions.append(
+            "`lt setup connect --base-url <url>` records the intended Lab Tracker "
+            "URL before MCP configs bake the default localhost "
+            "(`--dry-run` previews, `--yes` applies)."
+        )
     if not repo["scaffold"][".mcp.json"]:
         suggestions.append(
             "`lt setup init` scaffolds the integration files here "
@@ -227,9 +233,7 @@ def _suggestions(status: JsonObject) -> list[str]:
             "creating the file when missing (`--yes` applies)."
         )
     if not watch.get("config_present") or not watch.get("watch_count"):
-        suggestions.append(
-            "`lt watch add <folder>` registers a results folder for capture."
-        )
+        suggestions.append(_watch_setup_suggestion(status))
     if hooks.get("git_repo") and not hooks.get("managed_block_present"):
         suggestions.append(
             "`lt hooks install` enrolls this repository's commits "
@@ -279,6 +283,12 @@ def _resolve_base_url(profile: dict[str, str]) -> tuple[str, str]:
     if profile.get("base_url"):
         return profile["base_url"], "profile"
     return DEFAULT_BASE_URL, "default"
+
+
+def resolved_base_url_for_setup() -> tuple[str, str]:
+    """Return the URL/source that setup scaffolding should bake into MCP files."""
+
+    return _resolve_base_url(load_connection_profile())
 
 
 def probe_health(base_url: str) -> bool:
@@ -336,7 +346,11 @@ def _watch_status(root: Path) -> JsonObject:
     try:
         config = watch_capture.load_config(start=root)
     except LTValidationError as exc:
-        return {"config_present": False, "detail": str(exc)}
+        return {
+            "config_present": False,
+            "detail": str(exc),
+            "candidate_roots": _watch_candidate_roots(root),
+        }
     except Exception as exc:  # noqa: BLE001 - status is a read-only inventory.
         return {"config_present": None, "detail": str(exc)}
     summary: JsonObject = {
@@ -348,6 +362,57 @@ def _watch_status(root: Path) -> JsonObject:
     with suppress(Exception):
         summary["outbox"] = watch_capture.outbox_status(config.outbox_path())
     return summary
+
+
+def _watch_candidate_roots(root: Path) -> list[JsonObject]:
+    candidates: list[JsonObject] = []
+    for name in ("results", "outputs", "figures", "plots", "reports", "artifacts"):
+        path = root / name
+        if not path.is_dir():
+            continue
+        broad = name in {"artifacts", "outputs"}
+        candidates.append(
+            {
+                "path": str(path),
+                "name": name,
+                "broad": broad,
+                "guidance": (
+                    "Prefer a run- or analysis-specific subfolder."
+                    if broad
+                    else "Reasonable candidate; add include globs for expected outputs."
+                ),
+            }
+        )
+    return candidates
+
+
+def _watch_setup_suggestion(status: JsonObject) -> str:
+    hooks = status["hooks"]
+    candidates = status["watch"].get("candidate_roots") or []
+    candidate_names = [
+        str(item.get("name") or item.get("path"))
+        for item in candidates
+        if isinstance(item, dict)
+    ]
+    candidate_hint = ""
+    if candidate_names:
+        candidate_hint = (
+            " Candidate roots found: "
+            + ", ".join(candidate_names[:3])
+            + "; prefer a narrow run-specific folder or include globs."
+        )
+    if hooks.get("managed_block_present") and hooks.get("lt_path_exists") is not False:
+        return (
+            "Commit snapshots are active; skip watch setup unless there is a "
+            "narrow results folder to capture. `lt watch add <folder> --include "
+            "<glob>` registers one (`--dry-run` previews)."
+            + candidate_hint
+        )
+    return (
+        "`lt watch add <folder> --include <glob>` registers a narrow results "
+        "folder for capture (`--dry-run` previews)."
+        + candidate_hint
+    )
 
 
 def _hpc_status(root: Path) -> JsonObject:
@@ -366,9 +431,10 @@ def _hpc_status(root: Path) -> JsonObject:
 
 def _hooks_status(root: Path) -> JsonObject:
     hook_path: Path | None = None
+    core_hooks_path: str | None = None
     with suppress(Exception):
         completed = subprocess.run(  # noqa: S603 - fixed executable, no shell.
-            ["git", "rev-parse", "--git-path", "hooks/post-commit"],
+            ["git", "config", "--get", "core.hooksPath"],
             cwd=root,
             capture_output=True,
             timeout=10,
@@ -376,8 +442,22 @@ def _hooks_status(root: Path) -> JsonObject:
             check=False,
         )
         if completed.returncode == 0 and completed.stdout.strip():
-            candidate = Path(completed.stdout.strip())
-            hook_path = candidate if candidate.is_absolute() else root / candidate
+            core_hooks_path = completed.stdout.strip()
+    with suppress(Exception):
+        _repo_root, hook_path = hook_path_for_repo(root)
+    if hook_path is None:
+        with suppress(Exception):
+            completed = subprocess.run(  # noqa: S603 - fixed executable, no shell.
+                ["git", "rev-parse", "--git-path", "hooks/post-commit"],
+                cwd=root,
+                capture_output=True,
+                timeout=10,
+                text=True,
+                check=False,
+            )
+            if completed.returncode == 0 and completed.stdout.strip():
+                candidate = Path(completed.stdout.strip())
+                hook_path = candidate if candidate.is_absolute() else root / candidate
     if hook_path is None:
         return {"git_repo": False}
     managed_block_present = False
@@ -388,6 +468,7 @@ def _hooks_status(root: Path) -> JsonObject:
     summary: JsonObject = {
         "git_repo": True,
         "post_commit_path": str(hook_path),
+        "core_hooks_path": core_hooks_path,
         "post_commit_present": hook_path.exists(),
         "managed_block_present": managed_block_present,
     }
@@ -418,9 +499,14 @@ def bind_project(
     if bool(project_id) == bool(name):
         raise LTValidationError("Pass exactly one of --project-id or --name.")
     created_project = False
+    verification_warning: str | None = None
     if project_id:
-        record = _find_project_by_id(client, project_id)
-        if record is None:
+        try:
+            record = _find_project_by_id(client, project_id)
+        except Exception as exc:  # noqa: BLE001 - explicit ids can be written offline.
+            record = None
+            verification_warning = _project_id_verification_warning(exc)
+        if record is None and verification_warning is None:
             raise LTValidationError(f"No project found with id {project_id}.")
     else:
         matches = [
@@ -446,6 +532,9 @@ def bind_project(
     if record is not None:
         resolved_id = str(record.get("project_id") or record.id)
         resolved_name = str(record.get("name") or "")
+    elif project_id:
+        resolved_id = project_id
+        resolved_name = ""
     else:
         resolved_id = "<created-on-apply>"
         resolved_name = str(name)
@@ -461,6 +550,8 @@ def bind_project(
             raise LTValidationError(f"{path} must contain a JSON object of string ids.")
         ids_payload = {str(key): str(value) for key, value in parsed.items()}
     ids_payload["project_id"] = resolved_id
+    if not resolved_name and project_id:
+        resolved_name = ids_payload.get("project_name", "")
     if resolved_name:
         ids_payload["project_name"] = resolved_name
     proposed_text = json.dumps(ids_payload, indent=2) + "\n"
@@ -473,9 +564,20 @@ def bind_project(
         "ids_path": str(path),
         "diff": _text_diff(path, existing_text, proposed_text),
     }
+    if verification_warning:
+        payload["warnings"] = [verification_warning]
     if not dry_run:
         path.write_text(proposed_text, encoding="utf-8")
     return payload
+
+
+def _project_id_verification_warning(exc: Exception) -> str:
+    return (
+        "Could not verify the project id through the Lab Tracker API "
+        f"({exc}). The explicit id was recorded anyway. To verify names and "
+        "permissions, set LAB_TRACKER_ACCESS_TOKEN or run "
+        "`lt setup connect --save-token --yes` with a token from the web app."
+    )
 
 
 def _find_project_by_id(client: LabTracker, project_id: str) -> Any:
