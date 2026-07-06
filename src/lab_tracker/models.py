@@ -270,6 +270,7 @@ class StoreKind(str, Enum):
     DATABASE = "database"
     HTTP = "http"
     RCLONE = "rclone"
+    GIT = "git"
 
 
 class StoreCapability(str, Enum):
@@ -301,6 +302,14 @@ def default_store_capabilities(kind: StoreKind) -> list[StoreCapability]:
         return [StoreCapability.QUERY]
     if kind is StoreKind.HTTP:
         return [StoreCapability.BYTES_BY_PATH, StoreCapability.BYTE_RANGE]
+    if kind is StoreKind.GIT:
+        # A commit is an immutable snapshot, so a git pin is versioned; bytes are
+        # addressed by path within a commit and support ranged reads.
+        return [
+            StoreCapability.BYTES_BY_PATH,
+            StoreCapability.BYTE_RANGE,
+            StoreCapability.VERSIONED_SNAPSHOT,
+        ]
     return list(_PATH_STORE_CAPABILITIES)
 
 

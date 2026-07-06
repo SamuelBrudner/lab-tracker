@@ -420,3 +420,58 @@ def test_hooks_uninstall_preserves_unmanaged_content(git_repo, capsys) -> None:
     content = hook_path.read_text(encoding="utf-8")
     assert "echo custom-hook" in content
     assert HOOK_BLOCK_BEGIN not in content
+
+
+# --- cross-adapter coexistence (lt-81s6.17) ----------------------------------
+
+
+def test_git_snapshot_external_id_uses_shared_git_identity(git_repo, capsys) -> None:
+    """Snapshot evidence must carry <normalized-remote>@<commit>, not a bare SHA,
+    so hook-, CLI-, and CI-captured evidence for one commit share one identity."""
+
+    from lab_tracker_client.repo import normalize_remote
+
+    _git(git_repo, "remote", "add", "origin", "https://example.com/org/repo.git")
+    lt_cli.main(
+        ["git", "snapshot", "--repo", str(git_repo), "--project", "p-1", "--no-sync"]
+    )
+    payload = json.loads(capsys.readouterr().out)
+    event = json.loads(Path(payload["event_path"]).read_text(encoding="utf-8"))
+
+    expected = f"{normalize_remote('https://example.com/org/repo.git')}@{payload['commit']}"
+    assert event["source"]["external_id"] == expected
+    assert expected == f"example.com/org/repo@{payload['commit']}"
+
+
+def test_git_snapshot_external_id_falls_back_to_local_without_remote(
+    git_repo, capsys
+) -> None:
+    lt_cli.main(
+        ["git", "snapshot", "--repo", str(git_repo), "--project", "p-1", "--no-sync"]
+    )
+    payload = json.loads(capsys.readouterr().out)
+    event = json.loads(Path(payload["event_path"]).read_text(encoding="utf-8"))
+
+    assert event["source"]["external_id"] == f"local@{payload['commit']}"
+
+
+def test_hooks_install_refuses_repo_capture_hook_without_force(git_repo) -> None:
+    """Two Lab Tracker capture hooks would record every commit twice."""
+
+    from lab_tracker_client.repo import HOOK_BEGIN_MARKER, HOOK_END_MARKER
+
+    hook_path = git_repo / ".git" / "hooks" / "post-commit"
+    hook_path.parent.mkdir(parents=True, exist_ok=True)
+    hook_path.write_text(
+        f"#!/usr/bin/env sh\n{HOOK_BEGIN_MARKER}\n: repo capture\n{HOOK_END_MARKER}\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(Exception, match="lt repo"):
+        lt_cli.main(["hooks", "install", "--repo", str(git_repo), "--yes"])
+
+    # Deliberate dual setup stays possible behind --force.
+    lt_cli.main(["hooks", "install", "--repo", str(git_repo), "--yes", "--force"])
+    content = hook_path.read_text(encoding="utf-8")
+    assert HOOK_BLOCK_BEGIN in content
+    assert HOOK_BEGIN_MARKER in content

@@ -1,4 +1,5 @@
 import hashlib
+import os
 from pathlib import Path
 from uuid import uuid4
 
@@ -8,10 +9,13 @@ import pytest
 from lab_tracker.artifact_resolution import (
     DEFAULT_MAX_BYTES,
     ArtifactResolver,
+    GitCompleted,
+    GitResolver,
     HttpResolver,
     LocalFilesystemResolver,
     RcloneCompleted,
     RcloneResolver,
+    RecoveryPolicy,
     ResolutionStatus,
     ResolvedArtifact,
     ResolverRegistry,
@@ -20,6 +24,7 @@ from lab_tracker.artifact_resolution import (
     default_registry,
     is_verifiable_hash,
     parse_content_hash,
+    registry_from_env,
     store_relative_reference,
 )
 from lab_tracker.models import DataStore, ExternalArtifactReference, StoreKind
@@ -535,6 +540,50 @@ def test_store_relative_reference_unsupported_kind_returns_none():
     assert store_relative_reference(store, path="q", content_hash=_sha256(b"x")) is None
 
 
+def test_store_relative_reference_git_builds_commit_pin():
+    store = _data_store(
+        StoreKind.GIT, "https://example.com/org/repo.git", name="repo"
+    )
+    commit = "a" * 40
+    ref = store_relative_reference(
+        store, path=f"analysis/run.py@{commit}", content_hash=_sha256(b"x")
+    )
+    assert ref is not None
+    assert ref.source_system == "git"
+    assert ref.uri == f"git+https://example.com/org/repo.git#{commit}:analysis/run.py"
+
+
+def test_store_relative_reference_git_without_commit_returns_none():
+    store = _data_store(
+        StoreKind.GIT, "https://example.com/org/repo.git", name="repo"
+    )
+    assert (
+        store_relative_reference(store, path="analysis/run.py", content_hash=_sha256(b"x"))
+        is None
+    )
+
+
+def test_store_relative_reference_git_resolves_end_to_end(tmp_path):
+    # The locator produced from a git store must be consumable by GitResolver.
+    data = b"pinned analysis code"
+    store = _data_store(
+        StoreKind.GIT, "https://example.com/org/repo.git", name="repo"
+    )
+    commit = "b" * 40
+    ref = store_relative_reference(
+        store, path=f"src/model.py@{commit}", content_hash=_sha256(data)
+    )
+    assert ref is not None
+    registry = ResolverRegistry(
+        [GitResolver(runner=_fake_git_runner(blob=data), cache_root=tmp_path)]
+    )
+
+    result = registry.resolve(ref)
+
+    assert result.status is ResolutionStatus.VERIFIED
+    assert result.content == data
+
+
 # --- check_store_health ---------------------------------------------------
 
 
@@ -617,6 +666,39 @@ def test_check_store_health_database_is_unsupported():
     assert health.status is StoreHealthStatus.UNSUPPORTED
 
 
+def test_check_store_health_git_healthy_via_runner():
+    store = _data_store(StoreKind.GIT, "https://example.com/org/repo.git", name="repo")
+
+    def runner(args):
+        assert args == ["ls-remote", store.root, "HEAD"]
+        return GitCompleted(0, b"a" * 40 + b"\tHEAD\n", b"")
+
+    health = check_store_health(store, git_runner=runner)
+    assert health.status is StoreHealthStatus.HEALTHY
+
+
+def test_check_store_health_git_unreachable_via_runner():
+    store = _data_store(StoreKind.GIT, "https://example.com/org/missing.git", name="repo")
+
+    def runner(args):
+        return GitCompleted(128, b"", b"fatal: repository not found")
+
+    health = check_store_health(store, git_runner=runner)
+    assert health.status is StoreHealthStatus.UNREACHABLE
+    assert "not found" in (health.detail or "")
+
+
+def test_check_store_health_git_missing_binary():
+    store = _data_store(StoreKind.GIT, "https://example.com/org/repo.git", name="repo")
+
+    def runner(args):
+        raise OSError("git not found")
+
+    health = check_store_health(store, git_runner=runner)
+    assert health.status is StoreHealthStatus.UNREACHABLE
+    assert "git is unavailable" in (health.detail or "")
+
+
 # --- ResolverRegistry -----------------------------------------------------
 
 
@@ -690,4 +772,519 @@ def test_resolved_artifact_to_json_dict_omits_raw_bytes(tmp_path):
     assert payload["returned_bytes"] == len(data)
     assert payload["size_bytes"] == len(data)
     assert "content" not in payload
-    assert payload["observed_hash"] == _sha256(data)
+
+
+# --- content-hash recovery of moved/renamed local artifacts ---------------
+
+
+def test_recovery_finds_moved_file_by_hash(tmp_path):
+    root = tmp_path / "store"
+    root.mkdir()
+    data = b"analysis output that was moved"
+    moved = root / "new" / "result.csv"
+    moved.parent.mkdir(parents=True)
+    moved.write_bytes(data)
+    missing = root / "old" / "result.csv"  # never existed here
+    resolver = LocalFilesystemResolver(
+        allowed_roots=[root], recovery=RecoveryPolicy(enabled=True)
+    )
+
+    result = resolver.resolve(_local_ref(missing, _sha256(data)))
+
+    assert result.status is ResolutionStatus.VERIFIED
+    assert result.content == data
+    assert result.observed_hash == _sha256(data)
+    assert "Recovered from" in (result.detail or "")
+
+
+def test_recovery_finds_renamed_file_by_hash(tmp_path):
+    root = tmp_path / "store"
+    root.mkdir()
+    data = b"same bytes, different name"
+    (root / "result_final.csv").write_bytes(data)
+    missing = root / "result.csv"
+    resolver = LocalFilesystemResolver(
+        allowed_roots=[root], recovery=RecoveryPolicy(enabled=True)
+    )
+
+    result = resolver.resolve(_local_ref(missing, _sha256(data)))
+
+    assert result.status is ResolutionStatus.VERIFIED
+    assert result.content == data
+
+
+def test_recovery_disabled_by_default_stays_unresolved(tmp_path):
+    root = tmp_path / "store"
+    root.mkdir()
+    data = b"present but recovery off"
+    (root / "moved.bin").write_bytes(data)
+    missing = root / "gone.bin"
+    resolver = LocalFilesystemResolver(allowed_roots=[root])  # recovery defaults off
+
+    result = resolver.resolve(_local_ref(missing, _sha256(data)))
+
+    assert result.status is ResolutionStatus.UNRESOLVED
+    assert "not found" in (result.detail or "").lower()
+
+
+def test_recovery_requires_allowed_roots(tmp_path):
+    # Enabled but unscoped: must not walk the whole filesystem.
+    data = b"unscoped recovery is refused"
+    (tmp_path / "present.bin").write_bytes(data)
+    missing = tmp_path / "gone.bin"
+    resolver = LocalFilesystemResolver(recovery=RecoveryPolicy(enabled=True))
+
+    result = resolver.resolve(_local_ref(missing, _sha256(data)))
+
+    assert result.status is ResolutionStatus.UNRESOLVED
+
+
+def test_recovery_never_reads_outside_allowed_roots(tmp_path):
+    root = tmp_path / "store"
+    root.mkdir()
+    data = b"secret bytes outside the store"
+    outside = tmp_path / "elsewhere" / "secret.bin"
+    outside.parent.mkdir()
+    outside.write_bytes(data)
+    missing = root / "gone.bin"
+    resolver = LocalFilesystemResolver(
+        allowed_roots=[root], recovery=RecoveryPolicy(enabled=True)
+    )
+
+    result = resolver.resolve(_local_ref(missing, _sha256(data)))
+
+    assert result.status is ResolutionStatus.UNRESOLVED
+
+
+def test_recovery_does_not_falsely_match_same_name_different_bytes(tmp_path):
+    root = tmp_path / "store"
+    root.mkdir()
+    (root / "result.csv").write_bytes(b"a decoy with the same name")
+    missing = root / "sub" / "result.csv"
+    resolver = LocalFilesystemResolver(
+        allowed_roots=[root], recovery=RecoveryPolicy(enabled=True)
+    )
+
+    result = resolver.resolve(_local_ref(missing, _sha256(b"the real content")))
+
+    assert result.status is ResolutionStatus.UNRESOLVED
+
+
+def test_recovery_respects_byte_budget(tmp_path):
+    root = tmp_path / "store"
+    root.mkdir()
+    data = b"z" * 1024
+    (root / "moved.bin").write_bytes(data)
+    missing = root / "gone.bin"
+    resolver = LocalFilesystemResolver(
+        allowed_roots=[root],
+        recovery=RecoveryPolicy(enabled=True, max_bytes=16),
+    )
+
+    result = resolver.resolve(_local_ref(missing, _sha256(data)))
+
+    assert result.status is ResolutionStatus.UNRESOLVED
+
+
+def test_recovery_respects_file_budget(tmp_path):
+    root = tmp_path / "store"
+    root.mkdir()
+    data = b"budget exhausted before hashing"
+    (root / "result.csv").write_bytes(data)
+    missing = root / "sub" / "result.csv"
+    resolver = LocalFilesystemResolver(
+        allowed_roots=[root],
+        recovery=RecoveryPolicy(enabled=True, max_files=0),
+    )
+
+    result = resolver.resolve(_local_ref(missing, _sha256(data)))
+
+    assert result.status is ResolutionStatus.UNRESOLVED
+
+
+def test_registry_from_env_enables_recovery(tmp_path, monkeypatch):
+    root = tmp_path / "store"
+    root.mkdir()
+    data = b"recovery wired through the environment"
+    (root / "moved.bin").write_bytes(data)
+    missing = root / "gone.bin"
+    monkeypatch.setenv("LAB_TRACKER_RESOLVER_ALLOWED_ROOTS", str(root))
+    monkeypatch.setenv("LAB_TRACKER_RESOLVER_RECOVERY", "1")
+
+    result = registry_from_env().resolve(_local_ref(missing, _sha256(data)))
+
+    assert result.status is ResolutionStatus.VERIFIED
+    assert result.content == data
+
+
+def test_registry_from_env_recovery_off_by_default(tmp_path, monkeypatch):
+    root = tmp_path / "store"
+    root.mkdir()
+    data = b"present but env flag unset"
+    (root / "moved.bin").write_bytes(data)
+    missing = root / "gone.bin"
+    monkeypatch.setenv("LAB_TRACKER_RESOLVER_ALLOWED_ROOTS", str(root))
+    monkeypatch.delenv("LAB_TRACKER_RESOLVER_RECOVERY", raising=False)
+
+    result = registry_from_env().resolve(_local_ref(missing, _sha256(data)))
+
+    assert result.status is ResolutionStatus.UNRESOLVED
+
+
+# --- GitResolver ----------------------------------------------------------
+
+
+_GIT_REMOTE = "https://example.com/org/repo.git"
+
+
+def _git_ref(
+    content_hash: str,
+    *,
+    commit: str = "a" * 40,
+    path: str = "analysis/run.py",
+    remote: str = _GIT_REMOTE,
+    source_system: str = "git",
+) -> ExternalArtifactReference:
+    return ExternalArtifactReference(
+        source_system=source_system,
+        uri=f"git+{remote}#{commit}:{path}",
+        content_hash=content_hash,
+    )
+
+
+def _fake_git_runner(
+    *,
+    blob: bytes | None,
+    fetch_returncode: int = 0,
+    cat_returncode: int = 0,
+    size_returncode: int = 0,
+    reported_size: int | None = None,
+):
+    calls: list[list[str]] = []
+
+    def runner(args):
+        calls.append(args)
+        # args are like ["-C", <cache>, <command>, ...].
+        command = args[2] if len(args) >= 3 and args[0] == "-C" else args[0]
+        if command == "init":
+            return GitCompleted(0, b"", b"")
+        if command == "fetch":
+            return GitCompleted(
+                fetch_returncode,
+                b"",
+                b"" if fetch_returncode == 0 else b"remote error: not found",
+            )
+        if command == "cat-file":
+            mode = args[3] if len(args) >= 4 else ""
+            if mode == "-s":
+                if size_returncode != 0:
+                    return GitCompleted(size_returncode, b"", b"fatal: bad object")
+                size = reported_size if reported_size is not None else len(blob or b"")
+                return GitCompleted(0, f"{size}\n".encode(), b"")
+            if cat_returncode != 0:
+                return GitCompleted(cat_returncode, b"", b"fatal: bad object")
+            return GitCompleted(0, blob or b"", b"")
+        raise AssertionError(f"unexpected git args: {args}")
+
+    runner.calls = calls
+    return runner
+
+
+def test_git_resolver_verifies_blob(tmp_path):
+    data = b"import numpy as np  # the pinned analysis script"
+    resolver = GitResolver(runner=_fake_git_runner(blob=data), cache_root=tmp_path)
+
+    result = resolver.resolve(_git_ref(_sha256(data)))
+
+    assert result.status is ResolutionStatus.VERIFIED
+    assert result.content == data
+    assert result.size_bytes == len(data)
+    assert result.observed_hash == _sha256(data)
+    assert result.content_type == "text/x-python"
+
+
+def test_git_resolver_reports_drift_on_mismatch(tmp_path):
+    resolver = GitResolver(runner=_fake_git_runner(blob=b"actual"), cache_root=tmp_path)
+
+    result = resolver.resolve(_git_ref(_sha256(b"what the graph recorded")))
+
+    assert result.status is ResolutionStatus.DRIFTED
+    assert result.observed_hash == _sha256(b"actual")
+    assert result.detail is not None
+
+
+def test_git_resolver_missing_object_is_unresolved(tmp_path):
+    resolver = GitResolver(
+        runner=_fake_git_runner(blob=None, cat_returncode=128), cache_root=tmp_path
+    )
+
+    result = resolver.resolve(_git_ref(_sha256(b"x")))
+
+    assert result.status is ResolutionStatus.UNRESOLVED
+    assert "git failed" in (result.detail or "")
+
+
+def test_git_resolver_fetch_failure_is_unresolved(tmp_path):
+    resolver = GitResolver(
+        runner=_fake_git_runner(blob=None, fetch_returncode=128), cache_root=tmp_path
+    )
+
+    result = resolver.resolve(_git_ref(_sha256(b"x")))
+
+    assert result.status is ResolutionStatus.UNRESOLVED
+    assert "not found" in (result.detail or "")
+
+
+def test_git_resolver_unverifiable_hash_is_unresolved(tmp_path):
+    resolver = GitResolver(runner=_fake_git_runner(blob=b"data"), cache_root=tmp_path)
+
+    result = resolver.resolve(_git_ref("datalad-key:MD5E-s4--abc"))
+
+    assert result.status is ResolutionStatus.UNRESOLVED
+    assert "datalad-key" in (result.detail or "")
+
+
+def test_git_resolver_bad_locator_is_unresolved(tmp_path):
+    resolver = GitResolver(runner=_fake_git_runner(blob=b"data"), cache_root=tmp_path)
+    ref = ExternalArtifactReference(
+        source_system="git",
+        uri=f"git+{_GIT_REMOTE}",  # no #<commit>:<path>
+        content_hash=_sha256(b"data"),
+    )
+
+    result = resolver.resolve(ref)
+
+    assert result.status is ResolutionStatus.UNRESOLVED
+    assert "not a git locator" in (result.detail or "")
+
+
+def test_git_resolver_missing_binary_is_unresolved(tmp_path):
+    def runner(args):
+        raise OSError("git not found")
+
+    result = GitResolver(runner=runner, cache_root=tmp_path).resolve(
+        _git_ref(_sha256(b"x"))
+    )
+
+    assert result.status is ResolutionStatus.UNRESOLVED
+    assert "git is unavailable" in (result.detail or "")
+
+
+def test_git_resolver_truncates_payload_but_verifies(tmp_path):
+    data = b"y" * 100
+    resolver = GitResolver(runner=_fake_git_runner(blob=data), cache_root=tmp_path)
+
+    result = resolver.resolve(_git_ref(_sha256(data)), max_bytes=10)
+
+    assert result.status is ResolutionStatus.VERIFIED  # full blob hashed
+    assert result.truncated is True
+    assert result.content == data[:10]
+    assert result.size_bytes == len(data)
+
+
+def test_git_resolver_returns_byte_range_slice(tmp_path):
+    data = b"0123456789abcdef"
+    resolver = GitResolver(runner=_fake_git_runner(blob=data), cache_root=tmp_path)
+
+    result = resolver.resolve(_git_ref(_sha256(data)), byte_range=(4, 8))
+
+    assert result.status is ResolutionStatus.VERIFIED
+    assert result.content == data[4:8]
+
+
+def test_git_resolver_can_resolve_by_source_system_and_scheme():
+    resolver = GitResolver(runner=_fake_git_runner(blob=b""))
+
+    assert resolver.can_resolve(_git_ref(_sha256(b""))) is True
+    # A git+ URI is recognised even under a different source_system.
+    assert resolver.can_resolve(_git_ref(_sha256(b""), source_system="other")) is True
+    assert (
+        resolver.can_resolve(
+            ExternalArtifactReference(
+                source_system="local",
+                uri="file:///tmp/x",
+                content_hash=_sha256(b""),
+            )
+        )
+        is False
+    )
+
+
+def test_registry_dispatches_git(tmp_path):
+    data = b"pinned code"
+    registry = ResolverRegistry(
+        [
+            LocalFilesystemResolver(),
+            GitResolver(runner=_fake_git_runner(blob=data), cache_root=tmp_path),
+        ]
+    )
+
+    result = registry.resolve(_git_ref(_sha256(data)))
+
+    assert result.status is ResolutionStatus.VERIFIED
+
+
+def test_default_capabilities_for_git():
+    from lab_tracker.models import StoreCapability, default_store_capabilities
+
+    assert default_store_capabilities(StoreKind.GIT) == [
+        StoreCapability.BYTES_BY_PATH,
+        StoreCapability.BYTE_RANGE,
+        StoreCapability.VERSIONED_SNAPSHOT,
+    ]
+
+
+# --- GitResolver security gate (lt-81s6.7) --------------------------------
+
+
+def test_git_resolver_refuses_remote_not_in_allowlist(tmp_path):
+    runner = _fake_git_runner(blob=b"data")
+    resolver = GitResolver(
+        runner=runner,
+        cache_root=tmp_path,
+        allowed_remotes=["https://allowed.example/"],
+    )
+
+    result = resolver.resolve(_git_ref(_sha256(b"data")))  # remote example.com
+
+    assert result.status is ResolutionStatus.UNRESOLVED
+    assert "allowlist" in (result.detail or "")
+    assert runner.calls == []  # refused before any git subprocess
+
+
+def test_git_resolver_allows_remote_in_allowlist_by_prefix(tmp_path):
+    data = b"allowed remote payload"
+    resolver = GitResolver(
+        runner=_fake_git_runner(blob=data),
+        cache_root=tmp_path,
+        allowed_remotes=["https://example.com/"],
+    )
+
+    result = resolver.resolve(_git_ref(_sha256(data)))
+
+    assert result.status is ResolutionStatus.VERIFIED
+    assert result.content == data
+
+
+def test_git_resolver_refuses_oversized_blob(tmp_path):
+    resolver = GitResolver(
+        runner=_fake_git_runner(blob=b"x", reported_size=10_000),
+        cache_root=tmp_path,
+        max_fetch_bytes=1024,
+    )
+
+    result = resolver.resolve(_git_ref(_sha256(b"x")))
+
+    assert result.status is ResolutionStatus.UNRESOLVED
+    assert "exceeds" in (result.detail or "")
+
+
+def test_git_resolver_evicts_cache_over_quota(tmp_path):
+    base = tmp_path / "gitcache"
+    base.mkdir()
+    old = base / "oldremotecache"
+    old.mkdir()
+    (old / "objects.pack").write_bytes(b"x" * 5000)
+    os.utime(old, (1, 1))  # mark as the least-recently-used cache
+
+    data = b"new pinned code"
+    resolver = GitResolver(
+        runner=_fake_git_runner(blob=data),
+        cache_root=base,
+        max_cache_bytes=1024,  # smaller than the 5000-byte old cache
+    )
+
+    result = resolver.resolve(_git_ref(_sha256(data)))
+
+    assert result.status is ResolutionStatus.VERIFIED
+    assert not old.exists()  # evicted before the new fetch
+
+
+def test_registry_from_env_git_denies_remotes_by_default(monkeypatch):
+    monkeypatch.delenv("LAB_TRACKER_GIT_ALLOWED_REMOTES", raising=False)
+
+    result = registry_from_env().resolve(_git_ref(_sha256(b"x")))
+
+    assert result.status is ResolutionStatus.UNRESOLVED
+    assert "allowlist" in (result.detail or "")
+
+
+def test_registry_from_env_git_allowlist_excludes_unlisted_remote(monkeypatch):
+    monkeypatch.setenv("LAB_TRACKER_GIT_ALLOWED_REMOTES", "https://other.example/")
+
+    result = registry_from_env().resolve(_git_ref(_sha256(b"x")))
+
+    assert result.status is ResolutionStatus.UNRESOLVED
+    assert "allowlist" in (result.detail or "")
+
+
+def test_git_resolver_rejects_option_like_components(tmp_path):
+    runner = _fake_git_runner(blob=b"data")
+    resolver = GitResolver(runner=runner, cache_root=tmp_path)
+    # A remote that would be read as a git option must not reach the subprocess.
+    ref = ExternalArtifactReference(
+        source_system="git",
+        uri=f"git+--upload-pack=evil#{'a' * 40}:run.py",
+        content_hash=_sha256(b"data"),
+    )
+
+    result = resolver.resolve(ref)
+
+    assert result.status is ResolutionStatus.UNRESOLVED
+    assert "not a git locator" in (result.detail or "")
+    assert runner.calls == []
+
+
+# --- RcloneResolver remote allowlist ---------------------------------------
+
+
+def test_rclone_resolver_refuses_remote_not_in_allowlist():
+    runner = _fake_rclone_runner(size_bytes=4, body=b"data")
+    resolver = RcloneResolver(runner=runner, allowed_remotes=["lab-onedrive"])
+
+    result = resolver.resolve(
+        _rclone_ref("rclone://other-remote/exp/x.bin", _sha256(b"data"))
+    )
+
+    assert result.status is ResolutionStatus.UNRESOLVED
+    assert "allowlist" in (result.detail or "")
+    assert runner.calls == []  # refused before any rclone subprocess
+
+
+def test_rclone_resolver_allows_listed_remote():
+    data = b"allowed remote payload"
+    runner = _fake_rclone_runner(size_bytes=len(data), body=data)
+    resolver = RcloneResolver(runner=runner, allowed_remotes=["lab-onedrive"])
+
+    result = resolver.resolve(
+        _rclone_ref("rclone://lab-onedrive/exp/x.bin", _sha256(data))
+    )
+
+    assert result.status is ResolutionStatus.VERIFIED
+    assert result.content == data
+
+
+def test_registry_from_env_rclone_denies_remotes_by_default(monkeypatch):
+    monkeypatch.delenv("LAB_TRACKER_RCLONE_ALLOWED_REMOTES", raising=False)
+
+    result = registry_from_env().resolve(
+        _rclone_ref("rclone://any-remote/x.bin", _sha256(b"x"))
+    )
+
+    assert result.status is ResolutionStatus.UNRESOLVED
+    assert "allowlist" in (result.detail or "")
+
+
+def test_registry_from_env_rclone_allowlist_admits_named_remote(monkeypatch):
+    monkeypatch.setenv("LAB_TRACKER_RCLONE_ALLOWED_REMOTES", "lab-onedrive, backup")
+
+    registry = registry_from_env()
+    denied = registry.resolve(_rclone_ref("rclone://other/x.bin", _sha256(b"x")))
+
+    assert denied.status is ResolutionStatus.UNRESOLVED
+    assert "allowlist" in (denied.detail or "")
+    # A listed remote passes the allowlist gate (and then fails on the real
+    # rclone binary being absent/unreachable in this environment, which is a
+    # different detail message).
+    allowed = registry.resolve(_rclone_ref("rclone://lab-onedrive/x.bin", _sha256(b"x")))
+    assert "allowlist" not in (allowed.detail or "")

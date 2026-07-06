@@ -326,3 +326,84 @@ def test_get_data_store_denied_for_unauthorized_project(
         f"/data-stores/{store_id}", headers=scoped_project_member.member_headers
     )
     assert response.status_code == 401
+
+
+def _register_group_member(client, admin_auth_headers, group_id: str) -> dict[str, str]:
+    """Register a fresh viewer-role user and add them to the group."""
+
+    from uuid import uuid4
+
+    from lab_tracker.auth import Role
+
+    username = f"group-member-{uuid4().hex[:8]}"
+    user = client.app.state.auth_service.register_user(
+        username=username, password="secret", role=Role.VIEWER
+    )
+    membership = client.post(
+        f"/groups/{group_id}/members",
+        json={"user_id": str(user.user_id), "role": "viewer"},
+        headers=admin_auth_headers,
+    )
+    assert membership.status_code == 201
+    login = client.post(
+        "/auth/login", json={"username": username, "password": "secret"}
+    )
+    token = login.json()["data"]["access_token"]
+    return {"Authorization": f"Bearer {token}"}
+
+
+def test_group_member_can_read_group_scoped_store(
+    client, admin_auth_headers, tmp_path
+):
+    """A group-scoped store has project_id=None; authorization must check the
+    group scope, not deny every non-admin via ensure_project_read(None)."""
+
+    group_id = _create_group(client, admin_auth_headers, "Readable lab")
+    store_id = client.post(
+        "/data-stores",
+        json={
+            "group_id": group_id,
+            "name": "lab-fs",
+            "kind": "local_fs",
+            "root": str(tmp_path),
+        },
+        headers=admin_auth_headers,
+    ).json()["data"]["store_id"]
+    member_headers = _register_group_member(client, admin_auth_headers, group_id)
+
+    get_response = client.get(f"/data-stores/{store_id}", headers=member_headers)
+    health_response = client.get(
+        f"/data-stores/{store_id}/health", headers=member_headers
+    )
+
+    assert get_response.status_code == 200
+    assert get_response.json()["data"]["group_id"] == group_id
+    assert health_response.status_code == 200
+    assert health_response.json()["data"]["status"] == "healthy"
+
+
+def test_group_scoped_store_still_denied_for_non_member(
+    client, admin_auth_headers, scoped_project_member, tmp_path
+):
+    group_id = _create_group(client, admin_auth_headers, "Private lab")
+    store_id = client.post(
+        "/data-stores",
+        json={
+            "group_id": group_id,
+            "name": "lab-fs",
+            "kind": "local_fs",
+            "root": str(tmp_path),
+        },
+        headers=admin_auth_headers,
+    ).json()["data"]["store_id"]
+
+    response = client.get(
+        f"/data-stores/{store_id}", headers=scoped_project_member.member_headers
+    )
+    health = client.get(
+        f"/data-stores/{store_id}/health",
+        headers=scoped_project_member.member_headers,
+    )
+
+    assert response.status_code == 401
+    assert health.status_code == 401
