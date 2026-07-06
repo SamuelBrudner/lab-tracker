@@ -1585,10 +1585,6 @@ button.project-graph-legend-item:hover {
   background: radial-gradient(circle at 20% 0, #181b21 0%, #141619 45%, #121316 100%);
 }
 
-:root[data-theme="dark"] .react-flow__minimap {
-  background: #14161a;
-}
-
 :root[data-theme="dark"] .hero {
   background: rgba(30, 33, 40, 0.82);
 }
@@ -1718,10 +1714,6 @@ button.project-graph-legend-item:hover {
   :root,
   body {
     background: radial-gradient(circle at 20% 0, #181b21 0%, #141619 45%, #121316 100%);
-  }
-
-  .react-flow__minimap {
-    background: #14161a;
   }
 
   .hero {
