@@ -426,7 +426,7 @@ function App() {
                 workspaceData.setSelectedProjectId(event.target.value)
               }
               navigate={navigate}
-              canManageGraph={canManageProjectMembers}
+              canManageGraph={canContributeToProject}
               setBusy={setBusy}
               setFlash={setFlash}
             />

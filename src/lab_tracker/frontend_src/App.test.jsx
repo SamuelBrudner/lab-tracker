@@ -1392,7 +1392,7 @@ describe("App", () => {
 
     const installPrompt = await screen.findByRole("status");
     const captureHeading = await screen.findByRole("heading", { name: "Capture" });
-    const uploadButton = screen.getByRole("button", { name: "Upload and draft" });
+    const uploadButton = screen.getByRole("button", { name: "Save capture" });
     const detailsHeading = screen.getByRole("heading", { name: "Upload details" });
     const dashboardHeading = screen.getByRole("heading", { name: "Dashboard" });
     const projectSelect = screen.getByLabelText("Project");
@@ -1663,7 +1663,7 @@ describe("App", () => {
     );
   });
 
-  it("captures a mobile image with context and starts a graph-aware draft", async () => {
+  it("captures a mobile image with context as a capture-only note", async () => {
     const noteId = "11111111-1111-4111-8111-111111111111";
     const draftId = "22222222-2222-4222-8222-222222222222";
     localStorage.setItem(TOKEN_STORAGE_KEY, "token-mobile-capture");
@@ -1736,7 +1736,7 @@ describe("App", () => {
             capture_hint: "Rig 2 Fly 12",
             capture_kind: "image",
             capture_mode: "photo",
-            capture_review_status: "draft_requested",
+            capture_review_status: "pending_review",
             capture_source: "mobile_capture",
             source_file_last_modified_at: "2026-02-01T00:00:00.000Z",
             source_file_last_modified_ms: 1769904000000,
@@ -1868,15 +1868,12 @@ describe("App", () => {
     fireEvent.change(screen.getByLabelText("Short hint (optional)"), {
       target: { value: "Rig 2 Fly 12" },
     });
-    fireEvent.click(screen.getByRole("button", { name: "Upload and draft" }));
+    fireEvent.click(screen.getByRole("button", { name: "Save capture" }));
 
-    expect(
-      await screen.findByRole("heading", { name: "Review" }, { timeout: 3000 })
-    ).toBeInTheDocument();
-    expect(await screen.findByText("Mobile capture draft")).toBeInTheDocument();
+    expect(await screen.findByText("Capture saved for review.")).toBeInTheDocument();
   });
 
-  it("captures a photo plus voice bundle, transcribes voice, and drafts from the bundle", async () => {
+  it("captures a photo plus voice bundle as capture-only notes", async () => {
     const imageNoteId = "11111111-1111-4111-8111-111111111111";
     const voiceNoteId = "33333333-3333-4333-8333-333333333333";
     const draftId = "22222222-2222-4222-8222-222222222222";
@@ -1938,7 +1935,7 @@ describe("App", () => {
           const metadata = JSON.parse(body.get("metadata"));
           expect(body.get("project_id")).toBe("project-1");
           expect(metadata.capture_mode).toBe("bundle");
-          expect(metadata.capture_review_status).toBe("draft_requested");
+          expect(metadata.capture_review_status).toBe("pending_review");
           if (uploadCount === 1) {
             bundleId = metadata.capture_bundle_id;
             expect(body.get("file").name).toBe("notebook.jpg");
@@ -2123,15 +2120,13 @@ describe("App", () => {
     fireEvent.change(screen.getByLabelText("Short hint (optional)"), {
       target: { value: "Rig 2 Fly 12" },
     });
-    fireEvent.click(screen.getByRole("button", { name: "Upload and draft" }));
+    fireEvent.click(screen.getByRole("button", { name: "Save capture" }));
 
-    expect(await screen.findByRole("heading", { name: "Review" })).toBeInTheDocument();
-    expect(await screen.findByText("Bundle draft")).toBeInTheDocument();
-    expect(screen.getByText("Fly 12 tracked better after pulse onset.")).toBeInTheDocument();
+    expect(await screen.findByText("Capture saved for review.")).toBeInTheDocument();
     expect(uploadCount).toBe(2);
   });
 
-  it("retries a bundle draft without duplicating uploaded notes after transcript failure", async () => {
+  it("captures a bundle without transcribing or drafting on the phone", async () => {
     const imageNoteId = "11111111-1111-4111-8111-111111111111";
     const voiceNoteId = "33333333-3333-4333-8333-333333333333";
     const draftId = "22222222-2222-4222-8222-222222222222";
@@ -2193,7 +2188,7 @@ describe("App", () => {
           const body = request.init.body;
           const metadata = JSON.parse(body.get("metadata"));
           expect(metadata.capture_mode).toBe("bundle");
-          expect(metadata.capture_review_status).toBe("draft_requested");
+          expect(metadata.capture_review_status).toBe("pending_review");
           if (uploadCount === 1) {
             bundleId = metadata.capture_bundle_id;
             expect(body.get("file").name).toBe("notebook.jpg");
@@ -2321,21 +2316,16 @@ describe("App", () => {
     fireEvent.change(screen.getByLabelText("Short hint (optional)"), {
       target: { value: "Rig 2 Fly 12" },
     });
-    fireEvent.click(screen.getByRole("button", { name: "Upload and draft" }));
+    fireEvent.click(screen.getByRole("button", { name: "Save capture" }));
 
-    expect(await screen.findByText("Transcript service unavailable.")).toBeInTheDocument();
+    // Phone is capture-only: both notes upload as pending_review, and no
+    // transcript or graph-draft request is made from the capture path.
+    expect(await screen.findByText("Capture saved for review.")).toBeInTheDocument();
     expect(uploadCount).toBe(2);
-    expect(transcriptCount).toBe(1);
-
-    fireEvent.click(screen.getByRole("button", { name: "Upload and draft" }));
-
-    expect(await screen.findByRole("heading", { name: "Review" })).toBeInTheDocument();
-    expect(await screen.findByText("Bundle draft after retry")).toBeInTheDocument();
-    expect(uploadCount).toBe(2);
-    expect(transcriptCount).toBe(2);
+    expect(transcriptCount).toBe(0);
   });
 
-  it("transcribes a deferred voice capture from pending review before drafting its bundle", async () => {
+  it("transcribes a deferred voice capture from pending review", async () => {
     const imageNoteId = "11111111-1111-4111-8111-111111111111";
     const voiceNoteId = "33333333-3333-4333-8333-333333333333";
     const draftId = "22222222-2222-4222-8222-222222222222";
@@ -2544,19 +2534,11 @@ describe("App", () => {
     const imageRow = (await screen.findByText("notebook.jpg")).closest(".review-queue-item");
     const voiceRow = (await screen.findByText("voice.webm")).closest(".review-queue-item");
     expect(within(imageRow).getByText("voice transcript needed")).toBeInTheDocument();
-    expect(within(imageRow).getByRole("button", { name: "Draft" })).toBeDisabled();
 
     fireEvent.click(within(voiceRow).getByRole("button", { name: "Transcribe" }));
 
     expect(await screen.findByText("Voice transcript ready.")).toBeInTheDocument();
     expect(await screen.findByText("Fly 12 tracked better after pulse onset.")).toBeInTheDocument();
-    const readyImageRow = screen.getByText("notebook.jpg").closest(".review-queue-item");
-    expect(within(readyImageRow).getByRole("button", { name: "Draft" })).not.toBeDisabled();
-
-    fireEvent.click(within(readyImageRow).getByRole("button", { name: "Draft" }));
-
-    expect(await screen.findByRole("heading", { name: "Review" })).toBeInTheDocument();
-    expect(await screen.findByText("Pending bundle draft")).toBeInTheDocument();
   });
 
   it("shows a visible restore error when session bootstrap fails", async () => {
