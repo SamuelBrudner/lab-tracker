@@ -1,5 +1,5 @@
 import * as React from "react";
-import { Background, Controls, MiniMap, ReactFlow } from "@xyflow/react";
+import { Background, Controls, ReactFlow } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
 
 import { apiRequest, apiTextRequest, buildApiPath } from "../shared/api.js";
@@ -93,6 +93,50 @@ const VIEW_AXIS_TYPES = {
 // Column width per entity-type layer, and row height per stacked node.
 const COL_WIDTH = 265;
 const ROW_HEIGHT = 118;
+// Display cap for on-canvas node text. Roughly three wrapped lines at the
+// fixed 220px node width, so no node grows taller than ROW_HEIGHT and
+// overlaps the row below. Full text lives in data.fullLabel and the
+// selection detail panel.
+const NODE_LABEL_DISPLAY_LIMIT = 110;
+// Edges read as background structure: light stroke and small arrowheads by
+// default, darker when hovered so the revealed label has a visible anchor.
+const EDGE_STROKE = "#c6ccd2";
+const EDGE_STROKE_ACTIVE = "#6b7280";
+const DIMMED_OPACITY = 0.15;
+
+function truncateNodeLabel(label) {
+  const text = String(label ?? "");
+  // Slice by code point, not UTF-16 unit, so an emoji or other astral-plane
+  // character straddling the cut boundary is never split into a lone surrogate.
+  const points = Array.from(text);
+  if (points.length <= NODE_LABEL_DISPLAY_LIMIT) {
+    return text;
+  }
+  return `${points.slice(0, NODE_LABEL_DISPLAY_LIMIT - 1).join("").trimEnd()}…`;
+}
+
+// Per-view starting visibility. The full view opens with the two
+// highest-volume, lowest-signal types hidden; their legend chips keep
+// showing counts so the information is one click away.
+export function defaultHiddenTypes(view) {
+  return view === "full" ? new Set(["note", "session"]) : new Set();
+}
+
+// Drop hidden entity types and any edge touching them. Runs BEFORE layout so
+// the surviving columns re-stack compactly instead of leaving holes.
+export function filterGraphByHiddenTypes(graph, hiddenTypes) {
+  if (!graph || !hiddenTypes || hiddenTypes.size === 0) {
+    return graph;
+  }
+  const nodes = (graph.nodes || []).filter(
+    (node) => !hiddenTypes.has(node.entity_type),
+  );
+  const visibleIds = new Set(nodes.map((node) => node.id));
+  const edges = (graph.edges || []).filter(
+    (edge) => visibleIds.has(edge.source) && visibleIds.has(edge.target),
+  );
+  return { ...graph, nodes, edges };
+}
 // Questions form a hierarchy (parent / supersede), so they are laid out as a
 // tree from their edges instead of a single insertion-ordered column. We key
 // off the stable machine `relationship` field (NOT the human display `label`,
@@ -266,49 +310,73 @@ function computeNodePositions(nodes, edges, view, layerByType, qLayout) {
   return positions;
 }
 
-function graphNodeToFlowNode(node, positions) {
+function graphNodeToFlowNode(node, positions, selection) {
   const style = TYPE_STYLES[node.entity_type] || {};
   const goalShape =
     node.entity_type === "goal"
       ? { clipPath: "polygon(8% 0, 92% 0, 100% 50%, 92% 100%, 8% 100%, 0 50%)" }
       : {};
+  const isSelected = selection.selectedNodeId === node.id;
+  const isDimmed = selection.active && !selection.neighborIds.has(node.id);
   return {
     id: node.id,
     data: {
       detail: node.detail,
       entityType: node.entity_type,
-      label: node.label,
+      fullLabel: node.label,
+      label: truncateNodeLabel(node.label),
       route: node.route,
       status: node.status,
     },
     position: positions.get(node.id) || { x: 0, y: 0 },
     style: {
       ...style,
-      borderWidth: 1,
+      borderWidth: isSelected ? 2 : 1,
       color: "#1f2933",
       ...goalShape,
       maxWidth: 220,
       width: 220,
+      ...(isSelected
+        ? { boxShadow: `0 0 0 2px ${style.borderColor || "#6b7280"}` }
+        : {}),
+      ...(isDimmed ? { opacity: DIMMED_OPACITY } : {}),
     },
   };
 }
 
-function graphEdgeToFlowEdge(edge) {
+function graphEdgeToFlowEdge(edge, selection, { hoveredEdgeId, showEdgeLabels }) {
   const isCandidate = String(edge.relationship || "").endsWith("_candidate");
+  const isHovered = edge.id === hoveredEdgeId;
+  const isIncident = selection.active && selection.incidentEdgeIds.has(edge.id);
+  const isDimmed = selection.active && !isIncident;
+  // Prose labels are on-demand: hover an edge, select a node to label its
+  // incident edges, or opt back into always-on via the toolbar checkbox.
+  const showLabel = showEdgeLabels || isHovered || isIncident;
   // Graph edges are directed (parent -> child, dataset -> analysis, ...), so
   // render an arrowhead at the target end.
+  const stroke = isHovered || isIncident ? EDGE_STROKE_ACTIVE : EDGE_STROKE;
   return {
     id: edge.id,
-    label: edge.label,
+    ...(showLabel ? { label: edge.label } : {}),
+    data: { label: edge.label, relationship: edge.relationship },
     source: edge.source,
     target: edge.target,
     type: "smoothstep",
-    markerEnd: { type: "arrowclosed", width: 22, height: 22, color: "#6b7280" },
-    style: { stroke: "#9aa3ad", strokeDasharray: isCandidate ? "5 5" : undefined },
+    markerEnd: { type: "arrowclosed", width: 14, height: 14, color: stroke },
+    style: {
+      stroke,
+      strokeDasharray: isCandidate ? "5 5" : undefined,
+      ...(isDimmed ? { opacity: DIMMED_OPACITY } : {}),
+    },
   };
 }
 
-export function buildFlowGraph(graph, view) {
+export function buildFlowGraph(graph, view, options = {}) {
+  const {
+    hoveredEdgeId = null,
+    selectedNodeId = null,
+    showEdgeLabels = false,
+  } = options;
   const layerByType = TYPE_LAYER_BY_VIEW[view] || TYPE_LAYER_BY_VIEW.evidence;
   const qLayout = computeQuestionLayout(graph?.nodes || [], graph?.edges || []);
   const positions = computeNodePositions(
@@ -333,9 +401,32 @@ export function buildFlowGraph(graph, view) {
     keptPairs.add(`${edge.source}->${edge.target}`);
     return true;
   });
+  // Focus-on-selection: the selected node's 1-hop neighborhood keeps full
+  // opacity (and its incident edges show their labels); everything else dims.
+  // Selection only activates when the id is actually in the rendered graph,
+  // so a stale id (e.g. its type was just hidden) never dims the whole canvas.
+  const active =
+    Boolean(selectedNodeId) &&
+    (graph?.nodes || []).some((node) => node.id === selectedNodeId);
+  const neighborIds = new Set(active ? [selectedNodeId] : []);
+  const incidentEdgeIds = new Set();
+  if (active) {
+    dedupedEdges.forEach((edge) => {
+      if (edge.source === selectedNodeId || edge.target === selectedNodeId) {
+        incidentEdgeIds.add(edge.id);
+        neighborIds.add(edge.source);
+        neighborIds.add(edge.target);
+      }
+    });
+  }
+  const selection = { active, incidentEdgeIds, neighborIds, selectedNodeId };
   return {
-    edges: dedupedEdges.map(graphEdgeToFlowEdge),
-    nodes: (graph?.nodes || []).map((node) => graphNodeToFlowNode(node, positions)),
+    edges: dedupedEdges.map((edge) =>
+      graphEdgeToFlowEdge(edge, selection, { hoveredEdgeId, showEdgeLabels }),
+    ),
+    nodes: (graph?.nodes || []).map((node) =>
+      graphNodeToFlowNode(node, positions, selection),
+    ),
   };
 }
 
@@ -375,11 +466,27 @@ function ProjectGraphExplorer({
     const requested = new URLSearchParams(window.location.search).get("view");
     return GRAPH_VIEWS.some((option) => option.id === requested) ? requested : "evidence";
   });
+  const [hiddenTypes, setHiddenTypes] = React.useState(() => defaultHiddenTypes(view));
+  const [selectedNodeId, setSelectedNodeId] = React.useState(null);
+  const [hoveredEdgeId, setHoveredEdgeId] = React.useState(null);
+  const [showEdgeLabels, setShowEdgeLabels] = React.useState(false);
   const selectView = React.useCallback((nextView) => {
     setView(nextView);
+    setHiddenTypes(defaultHiddenTypes(nextView));
     const url = new URL(window.location.href);
     url.searchParams.set("view", nextView);
     window.history.replaceState(window.history.state, "", url);
+  }, []);
+  const toggleType = React.useCallback((entityType) => {
+    setHiddenTypes((current) => {
+      const next = new Set(current);
+      if (next.has(entityType)) {
+        next.delete(entityType);
+      } else {
+        next.add(entityType);
+      }
+      return next;
+    });
   }, []);
   const [graph, setGraph] = React.useState(null);
   const [loading, setLoading] = React.useState(false);
@@ -390,6 +497,8 @@ function ProjectGraphExplorer({
     let canceled = false;
     setGraph(null);
     setError("");
+    setSelectedNodeId(null);
+    setHoveredEdgeId(null);
     if (!selectedProjectId) {
       return () => {
         canceled = true;
@@ -417,7 +526,27 @@ function ProjectGraphExplorer({
     };
   }, [selectedProjectId, token, view]);
 
-  const flowGraph = React.useMemo(() => buildFlowGraph(graph, view), [graph, view]);
+  const filteredGraph = React.useMemo(
+    () => filterGraphByHiddenTypes(graph, hiddenTypes),
+    [graph, hiddenTypes],
+  );
+  const selectedNode = React.useMemo(
+    () =>
+      (filteredGraph?.nodes || []).find((node) => node.id === selectedNodeId) ||
+      null,
+    [filteredGraph, selectedNodeId],
+  );
+  const flowGraph = React.useMemo(
+    () =>
+      buildFlowGraph(filteredGraph, view, {
+        hoveredEdgeId,
+        selectedNodeId,
+        showEdgeLabels,
+      }),
+    [filteredGraph, hoveredEdgeId, selectedNodeId, showEdgeLabels, view],
+  );
+  // Counts come from the unfiltered graph so a hidden type's chip still
+  // reports how much it is hiding.
   const nodeGroups = React.useMemo(() => groupByType(graph?.nodes || []), [graph]);
   const legendTypes = React.useMemo(
     () => legendTypesForView(view, nodeGroups),
@@ -540,59 +669,126 @@ function ProjectGraphExplorer({
       {selectedProjectId && !loading && !error && graph?.nodes?.length > 0 ? (
         <>
           <div className="project-graph-guide">
-            <div className="project-graph-axis" aria-label="Graph layout axis">
+            <div
+              className="project-graph-axis"
+              role="group"
+              aria-label="Graph layout order and node type filters"
+            >
               <span className="project-graph-axis-label">{VIEW_AXIS_LABELS[view]}</span>
-              <div className="project-graph-axis-steps">
-                {legendTypes.map((entityType, index) => (
+              {legendTypes.map((entityType, index) => {
+                const style = TYPE_STYLES[entityType] || {};
+                const typeLabel = TYPE_LABELS[entityType] || entityType;
+                const hidden = hiddenTypes.has(entityType);
+                return (
                   <React.Fragment key={entityType}>
-                    <span className="project-graph-axis-step">
-                      {TYPE_LABELS[entityType] || entityType}
-                    </span>
+                    <button
+                      type="button"
+                      className={
+                        hidden
+                          ? "project-graph-legend-item is-hidden"
+                          : "project-graph-legend-item"
+                      }
+                      aria-pressed={!hidden}
+                      title={
+                        hidden
+                          ? `Show ${typeLabel} nodes`
+                          : `Hide ${typeLabel} nodes`
+                      }
+                      onClick={() => toggleType(entityType)}
+                    >
+                      <span
+                        className="project-graph-legend-swatch"
+                        style={{
+                          background: style.background,
+                          borderColor: style.borderColor,
+                        }}
+                      />
+                      {typeLabel}: {nodeGroups[entityType]?.length || 0}
+                    </button>
                     {index < legendTypes.length - 1 ? (
                       <span className="project-graph-axis-arrow" aria-hidden="true">
                         →
                       </span>
                     ) : null}
                   </React.Fragment>
-                ))}
-              </div>
-            </div>
-            <div className="project-graph-legend" aria-label="Node color legend">
-              {legendTypes.map((entityType) => {
-                const style = TYPE_STYLES[entityType] || {};
-                return (
-                  <span className="project-graph-legend-item" key={entityType}>
-                    <span
-                      className="project-graph-legend-swatch"
-                      style={{
-                        background: style.background,
-                        borderColor: style.borderColor,
-                      }}
-                    />
-                    {TYPE_LABELS[entityType] || entityType}: {nodeGroups[entityType]?.length || 0}
-                  </span>
                 );
               })}
+              <span className="project-graph-legend-item project-graph-legend-key">
+                <span
+                  className="project-graph-legend-swatch project-graph-legend-swatch-dashed"
+                  aria-hidden="true"
+                />
+                dashed = candidate
+              </span>
+              <label className="project-graph-legend-item project-graph-edge-label-toggle">
+                <input
+                  type="checkbox"
+                  checked={showEdgeLabels}
+                  onChange={(event) => setShowEdgeLabels(event.target.checked)}
+                />
+                Edge labels
+              </label>
             </div>
           </div>
-          <div className="project-graph-canvas">
-            <ReactFlow
-              nodes={flowGraph.nodes}
-              edges={flowGraph.edges}
-              fitView
-              nodesDraggable={false}
-              nodesConnectable={false}
-              elementsSelectable={false}
-              onNodeClick={(_event, node) => {
-                if (node.data?.route) {
-                  navigate(node.data.route);
-                }
-              }}
-            >
-              <MiniMap />
-              <Controls />
-              <Background />
-            </ReactFlow>
+          <div className="project-graph-body">
+            <div className="project-graph-canvas">
+              <ReactFlow
+                nodes={flowGraph.nodes}
+                edges={flowGraph.edges}
+                fitView
+                nodesDraggable={false}
+                nodesConnectable={false}
+                elementsSelectable
+                onNodeClick={(_event, node) => setSelectedNodeId(node.id)}
+                onPaneClick={() => setSelectedNodeId(null)}
+                onEdgeMouseEnter={(_event, edge) => setHoveredEdgeId(edge.id)}
+                onEdgeMouseLeave={() => setHoveredEdgeId(null)}
+              >
+                <Controls />
+                <Background />
+              </ReactFlow>
+            </div>
+            {selectedNode ? (
+              <aside
+                className="project-graph-detail"
+                aria-label="Selected node details"
+              >
+                <div className="project-graph-detail-head">
+                  <span
+                    className="project-graph-detail-type"
+                    style={{
+                      background: TYPE_STYLES[selectedNode.entity_type]?.background,
+                      borderColor: TYPE_STYLES[selectedNode.entity_type]?.borderColor,
+                    }}
+                  >
+                    {TYPE_LABELS[selectedNode.entity_type] || selectedNode.entity_type}
+                  </span>
+                  <button
+                    type="button"
+                    className="btn-secondary"
+                    onClick={() => setSelectedNodeId(null)}
+                  >
+                    Close
+                  </button>
+                </div>
+                <p className="project-graph-detail-label">{selectedNode.label}</p>
+                {selectedNode.status ? (
+                  <p className="subtle">Status: {selectedNode.status}</p>
+                ) : null}
+                {selectedNode.detail ? (
+                  <p className="subtle">{selectedNode.detail}</p>
+                ) : null}
+                {selectedNode.route ? (
+                  <button
+                    type="button"
+                    className="btn-secondary"
+                    onClick={() => navigate(selectedNode.route)}
+                  >
+                    Open {TYPE_LABELS[selectedNode.entity_type] || selectedNode.entity_type}
+                  </button>
+                ) : null}
+              </aside>
+            ) : null}
           </div>
         </>
       ) : null}

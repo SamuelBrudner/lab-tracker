@@ -242,7 +242,7 @@ def _truncate_graph_label(value: str) -> str:
 
 
 def _question_label(question: Question) -> str:
-    return question.text
+    return _truncate_graph_label(question.text)
 
 
 def _dataset_label(dataset: Dataset) -> str:
@@ -288,7 +288,7 @@ def _question_node(question: Question) -> ProjectGraphNode:
         id=_entity_node_id("question", question.question_id),
         entity_type="question",
         entity_id=str(question.question_id),
-        label=question.text,
+        label=_question_label(question),
         detail=_enum_value(question.question_type),
         status=_enum_value(question.status),
         route=f"/app/questions/{question.question_id}",
