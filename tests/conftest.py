@@ -23,6 +23,21 @@ def _repo_root() -> Path:
     return Path(__file__).resolve().parent.parent
 
 
+@pytest.fixture(autouse=True)
+def _isolate_lab_tracker_home(tmp_path_factory, monkeypatch):
+    """Keep every test away from the developer's real machine-level state.
+
+    init/update/hooks record into ~/.lab-tracker/applied-repos.json,
+    from_env reads ~/.lab-tracker/config.json, and --install-skills writes
+    into ~/.claude/skills — none of which a test run may touch or observe.
+    Tests that care about these paths override the env vars themselves.
+    """
+
+    home = tmp_path_factory.mktemp("lt-isolated-home")
+    monkeypatch.setenv("LAB_TRACKER_CONFIG_DIR", str(home / "lab-tracker"))
+    monkeypatch.setenv("LAB_TRACKER_SKILLS_HOME", str(home / "skills"))
+
+
 def _auth_headers(token: str) -> dict[str, str]:
     return {"Authorization": f"Bearer {token}"}
 
