@@ -1,5 +1,6 @@
 import * as React from "react";
 
+import { AgentAccessPage } from "./features/agent-access.jsx";
 import { Dashboard } from "./features/dashboard-projects.jsx";
 import { BatchReviewPage, PendingBatchBanner } from "./features/batches.jsx";
 import { DevicesPage } from "./features/devices.jsx";
@@ -394,6 +395,17 @@ function App() {
               token={auth.token}
               canWrite={Boolean(auth.user)}
               navigate={navigate}
+              setFlash={setFlash}
+            />
+          ) : null}
+
+          {route.kind === "agents" ? (
+            <AgentAccessPage
+              token={auth.token}
+              user={auth.user}
+              authEnabled={auth.authEnabled}
+              navigate={navigate}
+              setBusy={setBusy}
               setFlash={setFlash}
             />
           ) : null}

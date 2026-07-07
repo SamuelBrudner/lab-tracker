@@ -5,6 +5,11 @@ import { appBasePath, parseAppRoute, resolveAppPath } from "./routing.jsx";
 const QUESTION_ID = "fb3454e0-6319-40bb-864c-9de91d0b04f1";
 
 describe("app routing", () => {
+  it("parses the agent-access page route", () => {
+    expect(parseAppRoute("/app/agents")).toEqual({ kind: "agents" });
+    expect(parseAppRoute("/lab-tracker/app/agents")).toEqual({ kind: "agents" });
+  });
+
   it("parses app routes under a GitHub Pages project prefix", () => {
     expect(parseAppRoute("/lab-tracker/app/graph")).toEqual({ kind: "graph" });
     expect(parseAppRoute(`/lab-tracker/app/questions/${QUESTION_ID}`)).toEqual({

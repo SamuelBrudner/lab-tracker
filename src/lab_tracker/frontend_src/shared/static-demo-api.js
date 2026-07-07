@@ -710,6 +710,9 @@ function demoPayload(url) {
   if (pathname === "/batches" || pathname === "/batches/runs" || pathname === "/graph-drafts") {
     return listResponse([], searchParams);
   }
+  if (pathname === "/auth/tokens" || pathname === "/auth/devices") {
+    return listResponse([], searchParams);
+  }
   if (pathname === `/questions/${QUESTION_LATERAL_ID}/refactors`) {
     return listResponse([], searchParams);
   }
