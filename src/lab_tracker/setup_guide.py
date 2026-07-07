@@ -25,9 +25,9 @@ def setup_guide_markdown() -> str:
     return (
         "# Lab Tracker Guided Setup\n"
         "\n"
-        "Lab Tracker captures research artifacts (figures, watched folders, git\n"
-        "commits) as staged evidence that a person later reviews. Setup is a\n"
-        "short, consent-gated sequence on the `lt` CLI.\n"
+        "Lab Tracker captures research artifacts (figures, watched folders,\n"
+        "HPC runs, git commits) as staged evidence that a person later reviews.\n"
+        "Setup is a short, consent-gated sequence on the `lt` CLI.\n"
         "\n"
         "## Consent rules (hard requirements)\n"
         "\n"
@@ -45,8 +45,8 @@ def setup_guide_markdown() -> str:
         "\n"
         "1. **Inventory** — `lt setup status` reports server reachability, the\n"
         "   connection profile, repo scaffolding, project binding, watch\n"
-        "   folders, and commit-hook enrollment in one JSON payload, with\n"
-        "   suggestions for whatever is missing.\n"
+        "   folders, HPC capture, and commit-hook enrollment in one JSON\n"
+        "   payload, with suggestions for whatever is missing.\n"
         "2. **Connectivity** — when no server is reachable, `lab-tracker serve`\n"
         "   starts a local instance; a lab usually shares one instance and its\n"
         "   URL comes from whoever operates it.\n"
@@ -67,7 +67,14 @@ def setup_guide_markdown() -> str:
         "   are usually skipped or narrowed to a run-specific subfolder. `lt\n"
         "   watch scan` and `lt watch sync` capture and upload on demand or\n"
         "   from a scheduler.\n"
-        "7. **Commit hooks** — `lt hooks install --yes` enrolls the current\n"
+        "7. **HPC runs** — `lt hpc init --project <id> --cluster <name>`\n"
+        "   configures scheduler-aware capture for Slurm/HPC work. `lt hpc\n"
+        "   submit -- sbatch ...`, lightweight `lt hpc begin` / `lt hpc\n"
+        "   finish` hooks, or `lt hpc watch` manifests fit jobs where run\n"
+        "   ids, logs, metrics, and artifact pointers matter. `lt hpc sync\n"
+        "   --request-draft` stages compact run evidence and optional graph\n"
+        "   draft proposals; large outputs stay external.\n"
+        "8. **Commit hooks** — `lt hooks install --yes` enrolls the current\n"
         "   repository: each commit queues durable evidence that syncs when\n"
         "   the server is reachable. Repos are enrolled one consented command\n"
         "   at a time.\n"
@@ -103,8 +110,8 @@ def skill_content_without_version_line(text: str) -> str:
 _SKILL_DESCRIPTION = (
     "Guide a user through setting up Lab Tracker capture in a consumer repo "
     "or on a new machine. Use when the user asks to set up Lab Tracker, "
-    "connect a repo, configure watch folders, enroll commit hooks, bind a "
-    "project, or when `lt setup status` / a session hook reports "
+    "connect a repo, configure watch folders or HPC runs, enroll commit hooks, "
+    "bind a project, or when `lt setup status` / a session hook reports "
     "unconfigured or drifted capture. Covers the consent-gated `lt` setup "
     "verbs and their choreography."
 )
@@ -145,9 +152,12 @@ _SKILL_CONVERSATION = """\
    the user run (or approve) the applying command. Do not batch approvals.
 3. Watch folders deserve a real elicitation: ask which folders actually
    accumulate results worth capturing rather than guessing.
-4. Commit hooks are per-repo consent: name the repo, show the preview, and
+4. HPC capture deserves a scheduler check: use `lt hpc` for Slurm/HPC jobs
+   when run ids, logs, metrics, and artifact pointers matter; otherwise keep
+   generic folders on `lt watch`.
+5. Commit hooks are per-repo consent: name the repo, show the preview, and
    let the user apply `lt hooks install --yes` themselves when in doubt.
-5. Close by re-running `lt setup status` and reflecting the healthy state
+6. Close by re-running `lt setup status` and reflecting the healthy state
    back; mention that `lt update` refreshes everything after upgrades.
 
 If Lab Tracker is unreachable and the user does not operate a server, point

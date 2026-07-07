@@ -1,6 +1,6 @@
 ---
 name: lab-tracker
-description: Use when working with the Lab Tracker application, API-backed MCP server, Postgres live runtime, Dolt mirror, consumer Python client, or consumer repo scaffolding. Covers project/question/note/session/dataset/analysis/claim/visualization workflows, retained-v1 product boundaries, local startup, validation, and MCP tool usage.
+description: Use when working with the Lab Tracker application, API-backed MCP server, Postgres live runtime, Dolt mirror, consumer Python client, consumer repo scaffolding, watch-folder capture, HPC/Slurm capture, or repo/commit capture. Covers project/question/note/session/dataset/analysis/claim/visualization workflows, retained-v1 product boundaries, local startup, validation, and MCP tool usage.
 allowed-tools: "Read,Bash(uv:*),Bash(python:*),Bash(pytest:*),Bash(npm:*),Bash(bd:*),Bash(docker:*)"
 version: "0.1.0"
 compatible-with: claude-code,codex
@@ -43,6 +43,14 @@ blocks with `--yes`), and scaffolded files (`.claude/settings.json` hooks,
 to the current canonical text with any customised previous file kept next to it
 as `*.bak-lt-update`. `lt_ids.json` is never touched. Use `--dry-run` to preview
 and `lt doctor` to confirm the repo is in sync afterwards.
+
+Choose the narrowest consumer-side capture adapter that matches the source:
+`lt watch` for non-HPC folders or workflow-written manifests, `lt hpc` for
+Slurm/HPC jobs where scheduler ids, logs, metrics, and artifact pointers matter,
+and `lt repo` / managed hooks for commit or run-finish evidence from analysis
+repos. Large outputs should stay external as pointers, hashes, summaries, or log
+excerpts; proposed graph meaning still flows through staged notes and
+human-gated review.
 
 For substantive, rerunnable notes, prefer `lab_tracker_client.LabTracker` or
 the generated `scripts.lt.upsert_note(...)`. Notes are idempotent by the first

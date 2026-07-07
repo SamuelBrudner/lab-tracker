@@ -1,6 +1,6 @@
 ---
 name: lab-tracker-setup
-description: Guide a user through setting up Lab Tracker capture in a consumer repo or on a new machine. Use when the user asks to set up Lab Tracker, connect a repo, configure watch folders, enroll commit hooks, bind a project, or when `lt setup status` / a session hook reports unconfigured or drifted capture. Covers the consent-gated `lt` setup verbs and their choreography.
+description: Guide a user through setting up Lab Tracker capture in a consumer repo or on a new machine. Use when the user asks to set up Lab Tracker, connect a repo, configure watch folders or HPC runs, enroll commit hooks, bind a project, or when `lt setup status` / a session hook reports unconfigured or drifted capture. Covers the consent-gated `lt` setup verbs and their choreography.
 allowed-tools: "Read,Bash(lt setup status:*),Bash(lt doctor:*)"
 version: "0.1.0"
 compatible-with: claude-code,codex
@@ -22,9 +22,9 @@ resource.
 <!-- BEGIN GENERATED SETUP GUIDE -->
 # Lab Tracker Guided Setup
 
-Lab Tracker captures research artifacts (figures, watched folders, git
-commits) as staged evidence that a person later reviews. Setup is a
-short, consent-gated sequence on the `lt` CLI.
+Lab Tracker captures research artifacts (figures, watched folders,
+HPC runs, git commits) as staged evidence that a person later reviews.
+Setup is a short, consent-gated sequence on the `lt` CLI.
 
 ## Consent rules (hard requirements)
 
@@ -42,8 +42,8 @@ short, consent-gated sequence on the `lt` CLI.
 
 1. **Inventory** — `lt setup status` reports server reachability, the
    connection profile, repo scaffolding, project binding, watch
-   folders, and commit-hook enrollment in one JSON payload, with
-   suggestions for whatever is missing.
+   folders, HPC capture, and commit-hook enrollment in one JSON
+   payload, with suggestions for whatever is missing.
 2. **Connectivity** — when no server is reachable, `lab-tracker serve`
    starts a local instance; a lab usually shares one instance and its
    URL comes from whoever operates it.
@@ -64,7 +64,14 @@ short, consent-gated sequence on the `lt` CLI.
    are usually skipped or narrowed to a run-specific subfolder. `lt
    watch scan` and `lt watch sync` capture and upload on demand or
    from a scheduler.
-7. **Commit hooks** — `lt hooks install --yes` enrolls the current
+7. **HPC runs** — `lt hpc init --project <id> --cluster <name>`
+   configures scheduler-aware capture for Slurm/HPC work. `lt hpc
+   submit -- sbatch ...`, lightweight `lt hpc begin` / `lt hpc
+   finish` hooks, or `lt hpc watch` manifests fit jobs where run
+   ids, logs, metrics, and artifact pointers matter. `lt hpc sync
+   --request-draft` stages compact run evidence and optional graph
+   draft proposals; large outputs stay external.
+8. **Commit hooks** — `lt hooks install --yes` enrolls the current
    repository: each commit queues durable evidence that syncs when
    the server is reachable. Repos are enrolled one consented command
    at a time.
@@ -84,12 +91,15 @@ after package upgrades, and `lt update` is the refresh path.
    the user run (or approve) the applying command. Do not batch approvals.
 3. Watch folders deserve a real elicitation: ask which folders actually
    accumulate results worth capturing rather than guessing.
-4. Commit hooks are per-repo consent: name the repo, show the preview, and
+4. HPC capture deserves a scheduler check: use `lt hpc` for Slurm/HPC jobs
+   when run ids, logs, metrics, and artifact pointers matter; otherwise keep
+   generic folders on `lt watch`.
+5. Commit hooks are per-repo consent: name the repo, show the preview, and
    let the user apply `lt hooks install --yes` themselves when in doubt.
-5. Close by re-running `lt setup status` and reflecting the healthy state
+6. Close by re-running `lt setup status` and reflecting the healthy state
    back; mention that `lt update` refreshes everything after upgrades.
 
 If Lab Tracker is unreachable and the user does not operate a server, point
 them at whoever runs their lab's instance instead of standing one up ad hoc.
 
-<!-- lab-tracker-setup-guide version=0.1.0 sha256=06f89c82ad9c -->
+<!-- lab-tracker-setup-guide version=0.1.0 sha256=0fa7e28a7491 -->
