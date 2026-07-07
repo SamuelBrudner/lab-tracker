@@ -83,15 +83,25 @@ daily at 18:00 in the cadence row's timezone — which starts as
 
 ## 3. Mint credentials for automations
 
-`POST /batches/run-due` is admin-only. On an auth-enabled instance, give the
-scheduled job an admin **personal access token**: create one with
-`POST /auth/tokens` (it returns an `lpat_…` secret) and export it as
-`LAB_TRACKER_API_KEY` next to `LAB_TRACKER_BASE_URL`. Username/password
+Mint **personal access tokens** on the **Agents** page in the web app
+(`/app/agents`): pick a label, an access level, and an expiry (90-day
+maximum), and the page returns the one-time `lpat_…` secret together with
+copy-paste setup commands for the machine where the agent runs — an
+`lt setup connect --save-token` block for the `lt` client plus the
+`LAB_TRACKER_MCP_API_KEY` export MCP agents read. Minting stays
+human-in-browser by design: tokens themselves cannot call `/auth/*`, so an
+agent can never mint or relay its own credential. (The raw API remains
+`POST /auth/tokens` if you script it.)
+
+For `POST /batches/run-due` — which is admin-only — pick the page's
+**Scheduler trigger (admin)** level; it stays read-only except for the
+run-due trigger. Export the secret as `LAB_TRACKER_API_KEY` next to
+`LAB_TRACKER_BASE_URL` for the trigger scripts. Username/password
 credentials also work; the trigger script logs in each run.
 
-For agents that should only *read* the graph, mint a token for a viewer
-account instead — decision-context lookups work read-only, and a read-only
-principal cannot stage or draft anything.
+For agents that should only *read* the graph, pick **Read-only** —
+decision-context lookups work read-only, and a read-only principal cannot
+stage or draft anything.
 
 ## 4. Connect coding agents over MCP
 

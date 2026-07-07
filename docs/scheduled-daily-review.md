@@ -108,7 +108,9 @@ disabled, so no credentials are needed. Two things change when Lab Tracker is
   public URL. A localhost instance must be driven by a scheduler on the
   **same machine**.
 - **Auth.** `run-due` is admin-only. Prefer an admin personal access token for
-  scheduled automations:
+  scheduled automations — mint one on the **Agents** page in the web app
+  (`/app/agents`) with the **Scheduler trigger (admin)** level, which stays
+  read-only except for the run-due trigger:
 
   ```sh
   export LAB_TRACKER_BASE_URL="https://lab.example.org"

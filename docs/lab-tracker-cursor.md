@@ -48,8 +48,10 @@ Cursor users get the server out of the box there too.
 If local auth is disabled, the committed config works as-is — no credentials
 needed.
 
-If auth is enabled, prefer a personal access token: create one with
-`POST /auth/tokens`, then provide the returned `lpat_...` secret as
+If auth is enabled, prefer a personal access token: mint one on the **Agents**
+page in the web app (`/app/agents`, which also prints ready-made setup
+commands), or with `POST /auth/tokens`, then provide the returned
+`lpat_...` secret as
 `LAB_TRACKER_MCP_API_KEY`. The token secret is returned once; Lab Tracker stores
 only its SHA-256 hash, and the MCP client sends it as `Authorization: Bearer ...`
 without calling `/auth/login`. Username/password

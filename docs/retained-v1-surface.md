@@ -80,6 +80,13 @@ research record:
   than silent trust. See [curation-states.md](curation-states.md).
 - Paired-device enrollment for phone capture, including one-time enrollment
   URLs, device-token capture, and revocation.
+- Human-in-browser personal-access-token minting on the Agents page
+  (`/app/agents`), including role/read-only level selection capped at the
+  issuer's role, one-time secret display with copy-paste `lt setup connect`
+  and MCP setup commands, and token listing/revocation. Service principals
+  stay blocked from `/auth/*`, and device principals from everything under
+  `/auth/*` except read-only `/auth/me` session introspection; see
+  [agent-setup.md](agent-setup.md).
 - Project graph views and exports for inspecting the retained question,
   evidence, goal, analysis, claim, dataset, session, and visualization graph.
 - Sessions and acquisition outputs, including closing sessions and promoting
