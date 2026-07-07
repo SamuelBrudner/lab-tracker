@@ -1,6 +1,14 @@
 import "@testing-library/jest-dom/vitest";
-import { cleanup } from "@testing-library/react";
+import { cleanup, configure } from "@testing-library/react";
 import { afterEach, beforeEach, vi } from "vitest";
+
+// findBy*/waitFor default to a 1000ms timeout, which is ample locally but too
+// tight on a loaded CI runner: an async chain like POST /questions -> refresh
+// -> re-render can occasionally exceed it, intermittently failing assertions
+// such as findByText("Question staged."). Give async queries real headroom so
+// CI load spikes don't cause spurious timeouts; genuinely missing UI still
+// fails, just after a longer wait.
+configure({ asyncUtilTimeout: 5000 });
 
 vi.mock("@xyflow/react", async () => {
   const React = await import("react");
