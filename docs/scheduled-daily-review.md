@@ -14,6 +14,10 @@ or cloud automation to call `POST /batches/run-due`.
 > **The model only ever proposes.** The scheduled job triggers *drafting* — a
 > human still accepts or rejects every proposal before anything is committed.
 
+This page covers the trigger. For the full agent picture — choosing the
+drafting provider (OpenAI, Anthropic, or Google), credentials, and MCP — see
+[Set up AI agents for the proposal workflow](agent-setup.md).
+
 ---
 
 ## Recommended server setup
@@ -70,8 +74,9 @@ rather than into the world-readable plist.
 The job does nothing until at least one project has the daily review **enabled**.
 Open the **Batches** page at `/app/batches`, pick a project, and set the cadence
 for the project default or for a specific user (default: daily at **18:00** —
-early evening — in your timezone, so each person confirms the day's captures
-before heading out; switch it to `06:00` for a next-morning review instead).
+early evening — so each person confirms the day's captures before heading out;
+switch it to `06:00` for a next-morning review instead). The cadence row's
+timezone starts as `America/New_York` — set yours when you enable it.
 That per-(project, user) setting decides when each review actually runs; the
 scheduler is just a frequent, cheap poll.
 
@@ -99,10 +104,13 @@ disabled, so no credentials are needed. Two things change when Lab Tracker is
 **deployed** and **auth is enabled**:
 
 - **Reachability.** A cloud scheduler (a Claude routine, a Codex automation, a
-  hosted cron) can only reach a Lab Tracker that has a public URL. A localhost
-  instance must be driven by a scheduler on the **same machine**.
+  Gemini-driven job, a hosted cron) can only reach a Lab Tracker that has a
+  public URL. A localhost instance must be driven by a scheduler on the
+  **same machine**.
 - **Auth.** `run-due` is admin-only. Prefer an admin personal access token for
-  scheduled automations:
+  scheduled automations — mint one on the **Agents** page in the web app
+  (`/app/agents`) with the **Scheduler trigger (admin)** level, which stays
+  read-only except for the run-due trigger:
 
   ```sh
   export LAB_TRACKER_BASE_URL="https://lab.example.org"
@@ -151,9 +159,19 @@ Configure a Codex scheduled automation whose task runs the trigger script
 (`scripts/daily-review-run-due.sh`). The repo's `AGENTS.md` already orients Codex
 to the project. Same reachability and auth rules as above.
 
-> Whichever you pick, keep the job to **triggering drafts only**. Lab Tracker
-> deliberately does not delegate graph commits to autonomous agents — a person
-> reviews the queue and commits what they keep.
+### Gemini CLI
+
+Gemini CLI does not ship its own scheduler, so register the same one-line
+trigger with your OS scheduler (the installers above), or run it from any
+Gemini-driven automation that can execute `scripts/daily-review-run-due.sh`.
+In scaffolded repos, the generated `GEMINI.md` orients Gemini CLI to the
+project the same way `AGENTS.md` orients Codex. Same reachability and auth
+rules as above.
+
+> Whichever you pick — and whichever agent vendor you prefer — keep the job to
+> **triggering drafts only**. Lab Tracker deliberately does not delegate graph
+> commits to autonomous agents — a person reviews the queue and commits what
+> they keep.
 
 ---
 

@@ -1140,9 +1140,11 @@ def _cmd_setup_status(args: argparse.Namespace) -> Any:
 def _cmd_setup_init(args: argparse.Namespace) -> Any:
     from lab_tracker.cli import init_consumer_repo
 
+    mcp_base_url, mcp_base_url_source = setup_helpers.resolved_base_url_for_setup()
     result = init_consumer_repo(
         args.target,
         project_name=args.project_name,
+        mcp_base_url=mcp_base_url,
         force=args.force,
         yes=args.yes,
         dry_run=args.dry_run,
@@ -1151,6 +1153,8 @@ def _cmd_setup_init(args: argparse.Namespace) -> Any:
     )
     payload = result.as_dict()
     payload["command"] = "setup-init"
+    payload["mcp_base_url"] = mcp_base_url
+    payload["mcp_base_url_source"] = mcp_base_url_source
     return payload
 
 

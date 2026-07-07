@@ -53,14 +53,17 @@ short, consent-gated sequence on the `lt` CLI.
    per-shell environment variables. Token storage is a separate
    consent (`--save-token`).
 4. **Repo scaffolding** — `lt setup init` writes the integration files
-   (MCP config, prompt hooks, `lt_ids.json`); `lt update` refreshes
-   them after a package upgrade.
+   (MCP config, prompt hooks, `lt_ids.json`). The MCP files use the
+   saved/env Lab Tracker URL when one exists, otherwise localhost;
+   `lt update` refreshes them after a package upgrade.
 5. **Project binding** — `lt project bind --name <project> --yes`
    resolves or creates the project and records its id in
    `lt_ids.json` (`--create` when it does not exist yet).
-6. **Watch folders** — `lt watch add <folder>` registers a results
-   folder; `lt watch scan` and `lt watch sync` capture and upload on
-   demand or from a scheduler.
+6. **Watch folders** — `lt watch add <folder> --include <glob>`
+   registers a narrow results folder; broad roots such as `artifacts/`
+   are usually skipped or narrowed to a run-specific subfolder. `lt
+   watch scan` and `lt watch sync` capture and upload on demand or
+   from a scheduler.
 7. **Commit hooks** — `lt hooks install --yes` enrolls the current
    repository: each commit queues durable evidence that syncs when
    the server is reachable. Repos are enrolled one consented command
@@ -89,4 +92,4 @@ after package upgrades, and `lt update` is the refresh path.
 If Lab Tracker is unreachable and the user does not operate a server, point
 them at whoever runs their lab's instance instead of standing one up ad hoc.
 
-<!-- lab-tracker-setup-guide version=0.1.0 sha256=0442c3f0d6df -->
+<!-- lab-tracker-setup-guide version=0.1.0 sha256=06f89c82ad9c -->

@@ -1,6 +1,8 @@
 # Lab Tracker
 
-A file named `2025_12_10_Rig2_session001.nwb` tells you *when*, *where*, and *what* — but not *why* you collected it, what you expected, or what you actually saw at the bench. That reasoning lives on paper towels, on whiteboards, and in people's heads — and it walks out the door when they do. Lab Tracker gives it a durable place to live, next to the data.
+**Lab Tracker builds a living model of your research projects — your questions, data, claims, and figures, all connected — while asking for as little input effort as possible.** You capture in seconds: type a note, snap a photo, record a voice memo, save a figure from your analysis code. AI proposes where each capture fits in the model, and you settle it in one daily review. The clerical work happens for you; what's left is the part worth having — a short, unhurried sitting with your own day's science, deciding what each result actually means.
+
+Why it matters: a file named `2025_12_10_Rig2_session001.nwb` tells you *when*, *where*, and *what* — but not *why* you collected it, what you expected, or what you actually saw at the bench. That reasoning lives on paper towels, on whiteboards, and in people's heads — and it walks out the door when they do. Lab Tracker gives it a durable place to live, next to the data.
 
 **[Open the read-only demo →](https://samuelbrudner.github.io/lab-tracker/app/)** — seeded fly-olfaction data, no install, no login. Click around for 60 seconds.
 
@@ -30,17 +32,17 @@ Either way, captures land *staged* — held for review, never written straight i
 
 ![The daily review — AI-proposed graph changes from the day's captures, each waiting for you to accept, edit, or reject](docs/screenshots/daily-review-queue.png)
 
-At the end of each day — on a cadence you set, or on demand — **the daily review** gathers your staged captures and proposes how they fit the graph: *link this photo to that question, draft a note from this voice memo, suggest a new sub-question, flag this one as unclear.* You get **one review queue**. Accept, edit, or reject each proposal; commit the ones you keep.
+At the end of each day — on a cadence you set, or on demand — **the daily review** gathers your staged captures and proposes how they fit the graph: *link this photo to that question, draft a note from this voice memo, suggest a new sub-question, flag this one as unclear.* You get **one review queue**. Accept, edit, or reject each proposal; commit the ones you keep. Each proposal arrives with the model's rationale, its confidence, and references back to the evidence it read — down to the region of the photo — and you can push back by typing, dictating, or attaching an image.
 
 The model only ever proposes. Nothing touches your record until a person says yes — **AI can suggest; only a person commits.**
 
-The review is where the real thinking happens, so it's built to reward attention rather than rush it: accept the proposals you've actually scrutinized one at a time, or accept a batch in bulk when you've skimmed it — and the record remembers which you did, so a bulk rubber-stamp is never mistaken later for a considered call. Some people print the queue and sit with it on paper before replying; that's a feature, not a workaround. Captures you don't get to stay **staged and visible** — never silently dropped — and when you do set one aside, you say *why* (not relevant, superseded, or simply archived-unreviewed). A skipped evening costs you visible coverage, never silent trust.
+The review is where the real thinking happens — and it's the enjoyable kind: a quiet, end-of-day pass over your own results, the sort of reflection bench work rarely leaves room for. So it's built to reward attention rather than rush it: accept the proposals you've actually scrutinized one at a time, or accept a batch in bulk when you've skimmed it — and the record remembers which you did, so a bulk rubber-stamp is never mistaken later for a considered call. Some people print the queue and sit with it on paper before replying; that's a feature, not a workaround. Captures you don't get to stay **staged and visible** — never silently dropped — and when you do set one aside, you say *why* (not relevant, superseded, or simply archived-unreviewed). A skipped evening costs you visible coverage, never silent trust.
 
 Want it to run on its own? One command — or one double-click on Windows — sets up the schedule. See [Make the daily review run on its own](docs/scheduled-daily-review.md).
 
 ## The daily routine
 
-The whole thing is built to cost you almost nothing while you work, and a focused sitting before you head home.
+The whole thing is built to cost you almost nothing while you work, and one focused sitting before you head home — the good kind of effort, thinking about your science rather than filing it.
 
 - **At the bench — just capture.** As you work, you capture without stopping to file anything: snap the prep, record a thirty-second voice note on what looked off, type a one-line observation. Tap send and keep going. Nothing asks you which question it belongs to — that's for the evening review. If a result makes you ask something new, say it into a voice note; it becomes a candidate question.
 - **Running analysis — figures file themselves.** When you plot results, `lab_tracker_client.savefig(...)` (or a `with capture_figures():` block) in Python, and `labtracker.savefig(...)` in MATLAB, register each figure as staged evidence with its content hash; wrap Python runs in `with run_context():` and the exact git commit that produced them rides along. You upload nothing by hand.
@@ -57,7 +59,7 @@ The capture loop can stay light because the underlying record is opinionated.
 
 ![The question hierarchy for a project](docs/screenshots/project-graph-questions.png)
 
-The spine of every project is a graph of **questions** — your broad motivating question at the top, broken down into the atomic ones you can actually answer at the rig. Questions are first-class: you write them down *first*, before any data exists, and they persist whether the experiment works or not. A question can roll up to more than one parent, so the structure branches and converges as your thinking does.
+The spine of every project is a graph of **questions** — your broad motivating question at the top, broken down into the atomic ones you can actually answer with data. Questions are first-class: you write them down *first*, before any data exists, and they persist whether the experiment works or not. A question can roll up to more than one parent, so the structure branches and converges as your thinking does.
 
 ## Everything else hangs off a question
 
@@ -67,7 +69,7 @@ Once the questions exist, the rest of your record points back at them:
 
 - **A dataset must name the question it addresses** — you can't commit one without it. Tag secondary questions too, and mark whether the data supported, refuted, or was inconclusive for each.
 - **Notes** pin to the question (or session, or dataset) they describe.
-- **Sessions** at the rig point at the question you're collecting for.
+- **Sessions** point at the question you're collecting data for.
 - **Claims** answer questions — and only count as *supported* once a real dataset or analysis backs them.
 - **Analyses and visualizations** inherit their questions from the data and claims they're built on.
 
@@ -75,7 +77,7 @@ So from any figure you can walk backward — to the claim, the analysis, the dat
 
 ## Who it's for
 
-Wet labs — initially neuroscience — that generate high-bandwidth data on specialized rigs and want the reasoning preserved alongside it. If you've ever inherited a folder of `.nwb` files with no idea why they exist, this is for you.
+Wet labs — initially neuroscience — that generate high-bandwidth data on specialized instruments and want the reasoning preserved alongside it. If you've ever inherited a folder of `.nwb` files with no idea why they exist, this is for you.
 
 ## Scientists start here
 
@@ -99,12 +101,32 @@ This part is for the lab member or IT contact comfortable installing software. T
 
 Manual server runs should apply migrations first with
 `uv run alembic upgrade head` before starting
-`uv run uvicorn lab_tracker.asgi:app --reload`. Graph draft review defaults to
-OpenAI, but `LAB_TRACKER_GRAPH_DRAFT_PROVIDER` can select Anthropic or Google;
-voice transcription requires a provider that supports audio. See the
-configuration reference for the exact environment variables.
+`uv run uvicorn lab_tracker.asgi:app --reload`.
 
 Full install, configuration, and deployment instructions live in the docs below — start with the [setup guide](docs/setup.md).
+
+### Set up the AI — your model, your agent, one human gate
+
+The proposal workflow — captures in, AI-drafted graph proposals out, a person
+approving each one — needs two choices, and both are deliberately yours:
+
+- **Drafting model.** OpenAI, Anthropic (Claude), and Google (Gemini) are
+  equally supported: set `LAB_TRACKER_GRAPH_DRAFT_PROVIDER` and that
+  provider's API key. Drafting runs server-side with server-held keys, and
+  the same multimodal loop — photos, voice transcripts, figures — works on
+  any of them. (Voice-note transcription currently needs OpenAI or Google.)
+- **Coding agent.** Any MCP-capable agent connects the same way:
+  `lab_tracker init` scaffolds MCP config for Claude Code, Codex CLI, Gemini
+  CLI, and Cursor, with the same policy text in each agent's instruction file
+  (`CLAUDE.md`, `AGENTS.md`, `GEMINI.md`); GitHub Copilot has its own guide.
+  Use whichever your lab already uses.
+
+However drafting is triggered — the built-in scheduler, cron, or your agent
+platform's own automation — the shape of the work never changes: **agents and
+models propose; a person reviews and commits.**
+
+The explicit walkthrough (provider, scheduling, credentials, MCP, verification)
+is **[Set up AI agents for the proposal workflow](docs/agent-setup.md)**.
 
 **Connecting an analysis repo?** In any repo, with the package installed, a
 coding agent (or you) can bootstrap capture from one read-only command:
@@ -151,11 +173,17 @@ The authoritative list of what's supported is **[docs/retained-v1-surface.md](do
 - [HPC analysis capture](docs/hpc-analysis-capture.md) — capture Slurm/HPC run summaries, logs, metrics, and artifact pointers with `lt hpc`
 - [Curation states](docs/curation-states.md) — how the graph records the way each edge was reviewed, and why captures are archived with a reason
 - [Provenance export](docs/provenance-export.md) — write `lt export` sidecars that survive without a running instance
+
+**Agents and the proposal workflow**
+- [Set up AI agents for the proposal workflow](docs/agent-setup.md) — pick a drafting provider (OpenAI, Anthropic, or Google), schedule the daily review, mint credentials, and connect coding agents over MCP
+- [Make the daily review run on its own](docs/scheduled-daily-review.md) — built-in scheduler, cron/launchd/Task Scheduler, or your agent platform's automation
+- [Analysis graph drafts from CI and git hooks](docs/analysis-graph-drafts-ci.md) — stage commit evidence from analysis repos and draft it for review
 - [MCP server, skills, and Dolt mirror](docs/lab-tracker-mcp-skills.md) — wire up assistants and the export-only versioned mirror
 - [GitHub Copilot MCP setup](docs/lab-tracker-copilot.md) — connect Copilot IDEs to the local Lab Tracker MCP server
 - [Cursor MCP setup](docs/lab-tracker-cursor.md) — connect Cursor to the local Lab Tracker MCP server via `.cursor/mcp.json`
 
 **Scope and vision**
+- [Vision](docs/vision.md) — the north star: a question-rooted provenance graph that is human-readable, agent-readable, and AI-maintained but human-committed
 - [Supported v1 surface (authoritative)](docs/retained-v1-surface.md) — the definitive list of what ships
 - [Deferred long-term vision](idea.md) — OCR, vector search, and PI review gates, explicitly out of v1
 

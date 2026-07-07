@@ -1489,6 +1489,21 @@ button.project-graph-legend-item:hover {
   border-radius: 7px;
 }
 
+.command-snippet {
+  margin-top: 0.7rem;
+}
+
+.command-block {
+  font-family: "IBM Plex Mono", "Menlo", monospace;
+  font-size: 0.82rem;
+  white-space: pre-wrap;
+  word-break: break-all;
+  background: #f4f3f0;
+  padding: 0.5rem 0.6rem;
+  border-radius: 7px;
+  margin: 0.35rem 0 0;
+}
+
 .list-clean {
   list-style: none;
   padding: 0;
@@ -1585,10 +1600,6 @@ button.project-graph-legend-item:hover {
   background: radial-gradient(circle at 20% 0, #181b21 0%, #141619 45%, #121316 100%);
 }
 
-:root[data-theme="dark"] .react-flow__minimap {
-  background: #14161a;
-}
-
 :root[data-theme="dark"] .hero {
   background: rgba(30, 33, 40, 0.82);
 }
@@ -1609,6 +1620,7 @@ button.project-graph-legend-item:hover {
 :root[data-theme="dark"] .source-snippet,
 :root[data-theme="dark"] .manifest-preview,
 :root[data-theme="dark"] .enrollment-url code,
+:root[data-theme="dark"] .command-block,
 :root[data-theme="dark"] .capture-pending,
 :root[data-theme="dark"] .project-graph-canvas {
   background: #181b21;
@@ -1720,10 +1732,6 @@ button.project-graph-legend-item:hover {
     background: radial-gradient(circle at 20% 0, #181b21 0%, #141619 45%, #121316 100%);
   }
 
-  .react-flow__minimap {
-    background: #14161a;
-  }
-
   .hero {
     background: rgba(30, 33, 40, 0.82);
   }
@@ -1744,6 +1752,7 @@ button.project-graph-legend-item:hover {
   .source-snippet,
   .manifest-preview,
   .enrollment-url code,
+  .command-block,
   .capture-pending,
   .project-graph-canvas {
     background: #181b21;

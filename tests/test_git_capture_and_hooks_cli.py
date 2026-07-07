@@ -315,6 +315,21 @@ def test_hooks_install_dry_run_writes_nothing(git_repo, capsys) -> None:
     assert not (git_repo / ".git" / "hooks" / "post-commit").exists()
 
 
+def test_hooks_install_normalizes_absolute_beads_hooks_path(git_repo, capsys) -> None:
+    hooks_dir = git_repo / ".beads" / "hooks"
+    hooks_dir.mkdir(parents=True)
+    _git(git_repo, "config", "core.hooksPath", str(hooks_dir))
+
+    lt_cli.main(["hooks", "install", "--repo", str(git_repo), "--yes"])
+    payload = json.loads(capsys.readouterr().out)
+
+    assert Path(payload["hook_path"]).resolve() == (hooks_dir / "post-commit").resolve()
+    assert payload["core_hooks_path"]["action"] == "normalized"
+    assert payload["core_hooks_path"]["desired"] == ".beads/hooks"
+    assert _git(git_repo, "config", "--get", "core.hooksPath").strip() == ".beads/hooks"
+    assert (hooks_dir / "post-commit").exists()
+
+
 def test_hooks_install_refuses_unmanaged_hook_without_force(git_repo, capsys) -> None:
     hook_path = git_repo / ".git" / "hooks" / "post-commit"
     hook_path.parent.mkdir(parents=True, exist_ok=True)

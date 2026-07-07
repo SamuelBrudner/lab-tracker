@@ -44,9 +44,12 @@ def test_init_creates_portable_consumer_files(tmp_path: Path) -> None:
     assert sorted(path.relative_to(tmp_path).as_posix() for path in result.created) == [
         ".claude/settings.json",
         ".cursor/mcp.json",
+        ".gemini/settings.json",
         ".mcp.json",
         "AGENTS.lt.md",
+        "AGENTS.md",
         "CLAUDE.md",
+        "GEMINI.md",
         "lt_ids.json",
         "scripts/lt.py",
     ]
@@ -68,17 +71,32 @@ def test_init_creates_portable_consumer_files(tmp_path: Path) -> None:
     assert "C:\\" not in json.dumps(cursor_config)
     assert cursor_config == mcp_config
 
+    # Gemini CLI reads .gemini/settings.json with the same mcpServers shape;
+    # it stays in lockstep with .mcp.json so every vendor launches lt-mcp.
+    gemini_config = json.loads(
+        (tmp_path / ".gemini" / "settings.json").read_text(encoding="utf-8")
+    )
+    assert gemini_config == mcp_config
+
     shim = (tmp_path / "scripts" / "lt.py").read_text(encoding="utf-8")
     assert "from lab_tracker_client import *" in shim
     assert "from lab_tracker_client.cli import main" in shim
 
     ids = json.loads((tmp_path / "lt_ids.json").read_text(encoding="utf-8"))
     assert ids == {"project_id": "", "project_name": "Consumer Project"}
-    assert "first non-blank line" in (tmp_path / "AGENTS.lt.md").read_text(encoding="utf-8")
-    assert "Managed code-facing conventions" in (
-        tmp_path / "AGENTS.lt.md"
-    ).read_text(encoding="utf-8")
-    assert not (tmp_path / "AGENTS.md").exists()
+    agents_fragment = (tmp_path / "AGENTS.lt.md").read_text(encoding="utf-8")
+    assert "first non-blank line" in agents_fragment
+    assert "Managed code-facing conventions" in agents_fragment
+    assert "never accept" in agents_fragment  # proposal workflow is human-gated
+    assert ".gemini/settings.json" in agents_fragment
+    assert "~/.codex/config.toml" in agents_fragment
+    # Every agent instruction file gets the same activation block; the
+    # code-conventions blocks stay behind --yes consent.
+    agents_md = (tmp_path / "AGENTS.md").read_text(encoding="utf-8")
+    gemini_md = (tmp_path / "GEMINI.md").read_text(encoding="utf-8")
+    assert "BEGIN LAB TRACKER MCP ACTIVATION" in agents_md
+    assert "BEGIN LAB TRACKER MCP ACTIVATION" in gemini_md
+    assert AGENTS_CODE_CONVENTIONS_BLOCK_BEGIN not in agents_md
     assert not (tmp_path / ".cursor" / "rules" / "lab-tracker.mdc").exists()
     claude_settings = json.loads(
         (tmp_path / ".claude" / "settings.json").read_text(encoding="utf-8")
@@ -210,8 +228,11 @@ def test_init_uninstall_strips_managed_blocks_preserving_surroundings(tmp_path: 
     assert tmp_path / "CLAUDE.md" in result.stripped
     assert CLAUDE_BLOCK_BEGIN not in claude_content
     assert CODE_CONVENTIONS_BLOCK_BEGIN not in claude_content
+    assert CLAUDE_BLOCK_BEGIN not in agents_content
     assert AGENTS_CODE_CONVENTIONS_BLOCK_BEGIN not in agents_content
     assert "# Existing Agents" in agents_content
+    gemini_content = (tmp_path / "GEMINI.md").read_text(encoding="utf-8")
+    assert CLAUDE_BLOCK_BEGIN not in gemini_content
     assert CODE_CONVENTIONS_BLOCK_BEGIN not in cursor_content
 
 
@@ -366,6 +387,7 @@ def test_update_scaffold_files_are_stable_between_runs(tmp_path: Path) -> None:
     scaffold = {
         tmp_path / ".mcp.json",
         tmp_path / ".cursor" / "mcp.json",
+        tmp_path / ".gemini" / "settings.json",
         tmp_path / ".claude" / "settings.json",
         tmp_path / "scripts" / "lt.py",
         tmp_path / "AGENTS.lt.md",

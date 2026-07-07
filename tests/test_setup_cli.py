@@ -7,6 +7,7 @@ import sys
 
 import pytest
 
+import lab_tracker_client.setup as setup_helpers
 from lab_tracker_client import LTRecord
 from lab_tracker_client import cli as lt_cli
 from lab_tracker_client.client import LabTracker, load_connection_profile
@@ -227,6 +228,46 @@ def test_setup_status_is_read_only_and_reports_repo_state(
     assert sorted(path.name for path in repo.iterdir()) == before
 
 
+def test_setup_status_suggests_persisting_default_base_url(
+    config_home, tmp_path, monkeypatch, capsys
+) -> None:
+    monkeypatch.setattr(setup_helpers, "probe_health", lambda _url: True)
+
+    lt_cli.main(["setup", "status", "--target", str(tmp_path)])
+    payload = json.loads(capsys.readouterr().out)
+
+    assert payload["server"]["source"] == "default"
+    assert any("setup connect --base-url" in item for item in payload["suggestions"])
+
+
+def test_setup_status_watch_guidance_is_optional_when_commit_hook_active(
+    config_home, tmp_path, monkeypatch, capsys
+) -> None:
+    (tmp_path / "artifacts").mkdir()
+    monkeypatch.setattr(
+        setup_helpers,
+        "_hooks_status",
+        lambda _root: {
+            "git_repo": True,
+            "post_commit_present": True,
+            "managed_block_present": True,
+            "lt_path_exists": True,
+        },
+    )
+
+    lt_cli.main(["setup", "status", "--target", str(tmp_path)])
+    payload = json.loads(capsys.readouterr().out)
+
+    assert payload["watch"]["candidate_roots"][0]["name"] == "artifacts"
+    watch_suggestions = [
+        item for item in payload["suggestions"] if "watch add" in item
+    ]
+    assert watch_suggestions
+    assert "Commit snapshots are active" in watch_suggestions[0]
+    assert "skip watch setup" in watch_suggestions[0]
+    assert "artifacts" in watch_suggestions[0]
+
+
 def test_setup_status_fail_silent_never_raises(config_home, tmp_path, capsys) -> None:
     lt_cli.main(["setup", "status", "--target", str(tmp_path / "missing"), "--fail-silent"])
     payload = json.loads(capsys.readouterr().out)
@@ -247,6 +288,23 @@ def test_setup_init_delegates_to_consumer_scaffold(config_home, tmp_path, capsys
     assert "lt setup status" in claude
     agents = (repo / "AGENTS.lt.md").read_text(encoding="utf-8")
     assert "lt setup status" in agents
+
+
+def test_setup_init_uses_saved_profile_base_url(config_home, tmp_path, capsys) -> None:
+    config_home.mkdir(parents=True)
+    (config_home / "config.json").write_text(
+        json.dumps({"base_url": "https://lt.example.test"}), encoding="utf-8"
+    )
+    repo = tmp_path / "consumer-profile"
+
+    lt_cli.main(["setup", "init", "--target", str(repo)])
+    payload = json.loads(capsys.readouterr().out)
+
+    mcp_config = json.loads((repo / ".mcp.json").read_text(encoding="utf-8"))
+    server_env = mcp_config["mcpServers"]["lab-tracker"]["env"]
+    assert server_env["LAB_TRACKER_MCP_BASE_URL"] == "https://lt.example.test"
+    assert payload["mcp_base_url"] == "https://lt.example.test"
+    assert payload["mcp_base_url_source"] == "profile"
 
 
 def test_setup_init_dry_run_writes_nothing(config_home, tmp_path, capsys) -> None:
@@ -285,6 +343,11 @@ def _fake_bind_client(monkeypatch, projects: list[dict[str, str]]) -> _FakeBindC
         classmethod(lambda cls: fake),  # noqa: ARG005
     )
     return fake
+
+
+class _AuthFailBindClient(_FakeBindClient):
+    def list_projects(self) -> list[LTRecord]:
+        raise RuntimeError("401: set LAB_TRACKER_USERNAME/PASSWORD")
 
 
 def test_project_bind_requires_consent(config_home, tmp_path, monkeypatch) -> None:
@@ -329,6 +392,32 @@ def test_project_bind_preserves_existing_ids_keys(
     ids_payload = json.loads((tmp_path / "lt_ids.json").read_text(encoding="utf-8"))
     assert ids_payload["project_id"] == "p-1"
     assert ids_payload["question_id"] == "q-9"
+
+
+def test_project_bind_by_id_writes_with_auth_warning_when_lookup_fails(
+    config_home, tmp_path, monkeypatch, capsys
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    fake = _AuthFailBindClient([])
+    monkeypatch.setattr(
+        lt_cli.LabTracker,
+        "from_env",
+        classmethod(lambda cls: fake),  # noqa: ARG005
+    )
+
+    lt_cli.main(["project", "bind", "--project-id", "p-raw", "--dry-run"])
+    dry_payload = json.loads(capsys.readouterr().out)
+    assert dry_payload["action"] == "would-bind"
+    assert dry_payload["project_id"] == "p-raw"
+    assert "LAB_TRACKER_ACCESS_TOKEN" in dry_payload["warnings"][0]
+    assert "setup connect --save-token" in dry_payload["warnings"][0]
+    assert not (tmp_path / "lt_ids.json").exists()
+
+    lt_cli.main(["project", "bind", "--project-id", "p-raw", "--yes"])
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["action"] == "bound"
+    ids_payload = json.loads((tmp_path / "lt_ids.json").read_text(encoding="utf-8"))
+    assert ids_payload == {"project_id": "p-raw"}
 
 
 def test_project_bind_fails_loudly_on_ambiguous_name(
