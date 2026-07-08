@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import json
+import os
+import pathlib
+import subprocess
 import sys
 import time
 from contextlib import contextmanager
@@ -31,6 +34,9 @@ from lab_tracker.graph_drafting import (
     HarnessVendorLaunch,
     OpenAIGraphDraftClient,
     SubprocessHarnessDraftRunner,
+    _HarnessStdoutOverflowError,
+    _run_bounded_harness_subprocess,
+    _sanitized_harness_env,
     make_graph_draft_client,
 )
 from lab_tracker.models import (
@@ -955,51 +961,18 @@ def test_external_harness_client_fails_closed_when_disabled() -> None:
         )
 
 
-def test_external_harness_subprocess_runner_scrubs_lab_tracker_env(
+def test_sanitized_harness_env_excludes_lab_tracker_secrets(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    patch = {
-        "summary": "subprocess ok",
-        "uncertain_fields": [],
-        "clarification_requests": [],
-        "operations": [],
-    }
-    script = (
-        "import json, os; "
-        "assert not any(k.startswith('LAB_TRACKER_') for k in os.environ); "
-        f"print({json.dumps(json.dumps(patch))})"
-    )
     monkeypatch.setenv("LAB_TRACKER_DATABASE_URL", "sqlite:///secret.db")
+    monkeypatch.setenv("LAB_TRACKER_AUTH_SECRET_KEY", "shh")
+    monkeypatch.setenv("DATABASE_URL", "postgres://secret")
     monkeypatch.setenv("OPENAI_API_KEY", "vendor-only")
-    mcp = _FakeHarnessMCP()
-    request = _harness_subprocess_request(
-        command=(sys.executable, "-c", script),
-        max_stdout_bytes=4096,
-    )
-
-    result = SubprocessHarnessDraftRunner().run(request=request, mcp_server=mcp)
-
-    assert result.graph_patch == patch
-    assert mcp.submitted_patch == patch
-    assert result.tool_trace is not None
-    assert result.tool_trace["subprocess"]["stdout_bytes"] > 0
-    assert result.tool_trace["subprocess"]["env_policy"][
-        "lab_tracker_env_forwarded"
-    ] is False
-
-
-def test_external_harness_subprocess_runner_fails_closed_on_malformed_output() -> None:
-    request = _harness_subprocess_request(
-        command=(sys.executable, "-c", "print('not json')"),
-        max_stdout_bytes=4096,
-    )
-
-    with pytest.raises(GraphDraftingError, match="malformed graph patch JSON") as exc_info:
-        SubprocessHarnessDraftRunner().run(request=request, mcp_server=_FakeHarnessMCP())
-
-    trace = getattr(exc_info.value, "tool_trace", None)
-    assert trace["provider"] == "external_harness"
-    assert trace["subprocess"]["stdout_bytes"] > 0
+    env = _sanitized_harness_env(EXTERNAL_HARNESS_LAUNCH_TABLE["codex"])
+    assert not any(key.startswith("LAB_TRACKER_") for key in env)
+    assert "DATABASE_URL" not in env
+    # the vendor's own API key IS forwarded so the child can reach the model
+    assert env.get("OPENAI_API_KEY") == "vendor-only"
 
 
 def test_external_harness_fails_closed_without_operator_wrapper() -> None:
@@ -1025,31 +998,99 @@ def test_external_harness_fails_closed_when_profiles_default() -> None:
         SubprocessHarnessDraftRunner().run(request=request, mcp_server=_FakeHarnessMCP())
 
 
-def test_external_harness_subprocess_runner_bounds_stdout() -> None:
-    # A harness that floods stdout must be aborted at the cap, not buffered.
-    request = _harness_subprocess_request(
-        command=(sys.executable, "-c", "print('x' * 100000)"),
-        max_stdout_bytes=1024,
-    )
-    with pytest.raises(GraphDraftingError, match="exceeded the configured capture limit"):
-        SubprocessHarnessDraftRunner().run(request=request, mcp_server=_FakeHarnessMCP())
+def test_run_bounded_harness_subprocess_bounds_stdout() -> None:
+    # A harness that floods stdout must be aborted at the cap, not buffered in RAM.
+    with pytest.raises(_HarnessStdoutOverflowError):
+        _run_bounded_harness_subprocess(
+            command=[sys.executable, "-c", "print('x' * 100000)"],
+            input_text="",
+            cwd=os.getcwd(),
+            env=dict(os.environ),
+            timeout_seconds=30,
+            max_stdout_bytes=1024,
+            creationflags=0,
+        )
 
 
-def test_external_harness_subprocess_runner_kills_on_timeout() -> None:
-    # A harness that hangs past the wall-clock budget must be killed and surfaced
-    # as a timeout, not left running.
-    request = replace(
-        _harness_subprocess_request(
-            command=(sys.executable, "-c", "import time; time.sleep(30)"),
-            max_stdout_bytes=4096,
-        ),
-        timeout_seconds=1.0,
-    )
+def test_run_bounded_harness_subprocess_kills_on_timeout() -> None:
+    # A hung harness must be killed near the deadline, not run for the full sleep.
     started = time.monotonic()
-    with pytest.raises(GraphDraftingError, match="wall-clock timeout"):
-        SubprocessHarnessDraftRunner().run(request=request, mcp_server=_FakeHarnessMCP())
-    # It must abort near the deadline, not run for the full sleep.
+    with pytest.raises(subprocess.TimeoutExpired):
+        _run_bounded_harness_subprocess(
+            command=[sys.executable, "-c", "import time; time.sleep(30)"],
+            input_text="",
+            cwd=os.getcwd(),
+            env=dict(os.environ),
+            timeout_seconds=1.0,
+            max_stdout_bytes=4096,
+            creationflags=0,
+        )
     assert time.monotonic() - started < 15
+
+
+class _FakeScopedHarnessExecutor:
+    """Scoped-executor stand-in for the end-to-end harness runner test."""
+
+    def __init__(self) -> None:
+        self.sensitivity_policy = "redact"
+        self.calls: list[str] = []
+
+    def mcp_tool_specs(self) -> list[dict[str, Any]]:
+        return [
+            {
+                "name": "search",
+                "description": "Search scoped context.",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {"query": {"type": "string"}},
+                    "required": ["query"],
+                    "additionalProperties": False,
+                },
+            }
+        ]
+
+    def execute(self, name: str, arguments: dict[str, Any] | None = None) -> dict[str, Any]:
+        self.calls.append(name)
+        return {"results": [{"note_id": "note-scoped-1"}]}
+
+
+def _harness_client_with_command(command: tuple[str, ...]) -> HarnessGraphDraftClient:
+    client = HarnessGraphDraftClient(
+        launch=replace(EXTERNAL_HARNESS_LAUNCH_TABLE["claude_code"], command=command),
+        enabled=True,
+        sandbox_profile="operator_managed",
+        egress_profile="vendor_api_only",
+        timeout_seconds=60,
+        max_tool_calls=4,
+        max_stdout_bytes=65536,
+        operator_command_provided=True,
+    )
+    client.configure_live_read_tools(_FakeScopedHarnessExecutor())
+    return client
+
+
+def test_external_harness_end_to_end_via_loopback_mcp() -> None:
+    # Full runtime path: serve the scoped MCP on loopback, launch a stand-in CLI
+    # that performs a live scoped read and submits a patch through the propose-only
+    # tool, and capture that patch server-side (never trusted from stdout).
+    fake_cli = str(pathlib.Path(__file__).parent / "_fake_harness_cli.py")
+    client = _harness_client_with_command((sys.executable, fake_cli))
+    result = client.draft_from_batch(
+        batch_context={"mode": "graph_batch", "batch_notes": [{"id": "note-1"}]},
+    )
+    assert result.graph_patch["summary"] == "fake harness proposal"
+    assert result.tool_trace["submit_graph_patch_calls"] == 1
+    assert result.tool_trace["tool_call_count"] == 1  # one live scoped read
+
+
+def test_external_harness_fails_closed_when_child_does_not_submit() -> None:
+    # A child that exits cleanly without calling submit_graph_patch must not look
+    # like a successful (empty) draft.
+    client = _harness_client_with_command((sys.executable, "-c", "raise SystemExit(0)"))
+    with pytest.raises(GraphDraftingError, match="did not submit a graph patch"):
+        client.draft_from_batch(
+            batch_context={"mode": "graph_batch", "batch_notes": [{"id": "note-1"}]},
+        )
 
 
 def test_anthropic_graph_draft_client_runs_bounded_tool_loop() -> None:

@@ -2,8 +2,12 @@
 
 from __future__ import annotations
 
+import hmac
 import inspect
-from collections.abc import Callable
+import secrets
+import threading
+import time
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -14,6 +18,9 @@ from lab_tracker.graph_drafting import GraphDraftingError, graph_patch_response_
 from lab_tracker.services.graph_draft_read_tools import AGENTIC_READ_TOOL_ALLOWLIST
 
 JsonObject = dict[str, Any]
+
+# Where the streamable-HTTP MCP endpoint is mounted on the loopback server.
+HARNESS_MCP_HTTP_PATH = "/mcp"
 
 SUBMIT_GRAPH_PATCH_TOOL = "submit_graph_patch"
 HARNESS_MCP_SERVER_NAME = "lab-tracker-graph-draft-harness"
@@ -286,3 +293,113 @@ def _collect_trace_result_ids(value: Any, found: list[dict[str, str]]) -> None:
 
 def _tool_title(name: str) -> str:
     return "Lab Tracker " + name.replace("_", " ").title()
+
+
+class _BearerTokenASGI:
+    """ASGI guard that rejects any request without the per-run bearer token.
+
+    Wraps the FastMCP streamable-HTTP app so nothing else on the loopback
+    interface can reach the scoped read tools during a run.
+    """
+
+    def __init__(self, app: Any, *, token: str) -> None:
+        self._app = app
+        self._expected = f"Bearer {token}".encode()
+
+    async def __call__(
+        self,
+        scope: dict[str, Any],
+        receive: Callable[[], Awaitable[dict[str, Any]]],
+        send: Callable[[dict[str, Any]], Awaitable[None]],
+    ) -> None:
+        if scope.get("type") == "http":
+            headers = dict(scope.get("headers") or [])
+            provided = headers.get(b"authorization", b"")
+            if not hmac.compare_digest(provided, self._expected):
+                await send(
+                    {
+                        "type": "http.response.start",
+                        "status": 401,
+                        "headers": [(b"content-type", b"text/plain")],
+                    }
+                )
+                await send({"type": "http.response.body", "body": b"unauthorized"})
+                return
+        await self._app(scope, receive, send)
+
+
+class HarnessMCPLoopbackServer:
+    """Serve a per-run scoped harness MCP over loopback streamable-HTTP.
+
+    The ``ScopedGraphDraftReadToolExecutor`` and its database access stay in THIS
+    (worker) process; the external harness subprocess receives only the
+    ``127.0.0.1`` URL and a single-use bearer token — never a database DSN or a
+    Lab Tracker credential. This is what lets the harness's live reads flow
+    through the scoped chokepoint (single-project scope + omit sensitivity + no
+    write/resolve tools) by construction, without handing DB creds to the child.
+
+    Use as a context manager; the server starts on an ephemeral port in a daemon
+    thread and is shut down on exit.
+    """
+
+    def __init__(self, mcp_server: HarnessGraphDraftMCPServer) -> None:
+        self._mcp_server = mcp_server
+        self._token = secrets.token_urlsafe(32)
+        self._server: Any = None
+        self._thread: threading.Thread | None = None
+        self._port: int | None = None
+
+    @property
+    def token(self) -> str:
+        return self._token
+
+    @property
+    def port(self) -> int:
+        if self._port is None:
+            raise GraphDraftingError("Harness MCP loopback server is not running.")
+        return self._port
+
+    @property
+    def url(self) -> str:
+        return f"http://127.0.0.1:{self.port}{HARNESS_MCP_HTTP_PATH}"
+
+    def __enter__(self) -> HarnessMCPLoopbackServer:
+        import uvicorn
+
+        fastmcp = self._mcp_server.build_fastmcp_server()
+        if hasattr(fastmcp.settings, "streamable_http_path"):
+            fastmcp.settings.streamable_http_path = HARNESS_MCP_HTTP_PATH
+        guarded = _BearerTokenASGI(fastmcp.streamable_http_app(), token=self._token)
+        config = uvicorn.Config(
+            guarded,
+            host="127.0.0.1",
+            port=0,
+            log_level="warning",
+            lifespan="on",
+            access_log=False,
+        )
+        self._server = uvicorn.Server(config)
+        # run() skips signal handlers off the main thread, so this is thread-safe.
+        self._thread = threading.Thread(target=self._server.run, daemon=True)
+        self._thread.start()
+        deadline = time.monotonic() + 20
+        while time.monotonic() < deadline:
+            if getattr(self._server, "started", False) and self._server.servers:
+                sockets = self._server.servers[0].sockets
+                if sockets:
+                    self._port = sockets[0].getsockname()[1]
+                    break
+            time.sleep(0.02)
+        if self._port is None:
+            self.__exit__(None, None, None)
+            raise GraphDraftingError("Harness MCP loopback server failed to start.")
+        return self
+
+    def __exit__(self, *_exc: Any) -> None:
+        if self._server is not None:
+            self._server.should_exit = True
+        if self._thread is not None:
+            self._thread.join(timeout=15)
+        self._thread = None
+        self._server = None
+        self._port = None

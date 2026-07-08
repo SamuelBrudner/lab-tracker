@@ -1125,38 +1125,57 @@ class SubprocessHarnessDraftRunner:
             },
         )
         env = _sanitized_harness_env(request.launch)
-        prompt_payload = _external_harness_prompt_payload(request, mcp_server)
         creationflags = (
             subprocess.CREATE_NO_WINDOW
             if os.name == "nt" and hasattr(subprocess, "CREATE_NO_WINDOW")
             else 0
         )
-        try:
-            with tempfile.TemporaryDirectory(prefix="lt-graph-harness-") as cwd:
-                returncode, stdout, stderr = _run_bounded_harness_subprocess(
-                    command=list(request.launch.command),
-                    input_text=json.dumps(prompt_payload, sort_keys=True),
-                    cwd=cwd,
-                    env=env,
-                    timeout_seconds=request.timeout_seconds,
-                    max_stdout_bytes=request.max_stdout_bytes,
-                    creationflags=creationflags,
-                )
-        except FileNotFoundError as exc:
-            raise _external_harness_error(
-                f"External harness executable not found: {request.launch.command[0]}",
-                trace,
-            ) from exc
-        except subprocess.TimeoutExpired as exc:
-            raise _external_harness_error(
-                "External harness exceeded wall-clock timeout.",
-                trace,
-            ) from exc
-        except _HarnessStdoutOverflowError as exc:
-            raise _external_harness_error(
-                "External harness stdout exceeded the configured capture limit.",
-                trace,
-            ) from exc
+        # Import lazily: the loopback server module imports from this one.
+        from lab_tracker.services.graph_draft_harness_mcp import HarnessMCPLoopbackServer
+
+        # Host the scoped read tools on loopback so the child performs LIVE reads
+        # through the executor (single-project scope + omit sensitivity + no
+        # write/resolve tools) and returns its patch via the propose-only submit
+        # tool captured HERE. The child gets only a 127.0.0.1 URL + a per-run
+        # token — never a DB DSN — and the patch is never trusted from stdout.
+        with HarnessMCPLoopbackServer(mcp_server) as loopback:
+            argv = _build_harness_launch_argv(
+                request.launch,
+                mcp_url=loopback.url,
+                mcp_token=loopback.token,
+                prompt=_external_harness_prompt(request),
+                trace=trace,
+            )
+            trace["subprocess"]["mcp_transport"] = "loopback_streamable_http"
+            try:
+                with tempfile.TemporaryDirectory(prefix="lt-graph-harness-") as cwd:
+                    returncode, stdout, stderr = _run_bounded_harness_subprocess(
+                        command=argv,
+                        input_text="",
+                        cwd=cwd,
+                        env=env,
+                        timeout_seconds=request.timeout_seconds,
+                        max_stdout_bytes=request.max_stdout_bytes,
+                        creationflags=creationflags,
+                    )
+            except FileNotFoundError as exc:
+                raise _external_harness_error(
+                    f"External harness executable not found: {request.launch.command[0]}",
+                    trace,
+                ) from exc
+            except subprocess.TimeoutExpired as exc:
+                raise _external_harness_error(
+                    "External harness exceeded wall-clock timeout.",
+                    trace,
+                ) from exc
+            except _HarnessStdoutOverflowError as exc:
+                raise _external_harness_error(
+                    "External harness stdout exceeded the configured capture limit.",
+                    trace,
+                ) from exc
+            # The patch is whatever the child submitted through the scoped MCP
+            # submit_graph_patch tool, captured in-process.
+            patch = getattr(mcp_server, "graph_patch", None)
         trace["subprocess"].update(
             {
                 "returncode": returncode,
@@ -1169,13 +1188,12 @@ class SubprocessHarnessDraftRunner:
                 f"External harness exited with code {returncode}.",
                 trace,
             )
-        try:
-            patch = _parse_graph_patch_text(stdout, request.launch.display_name)
-            mcp_server.execute_tool("submit_graph_patch", {"graph_patch": patch})
-        except GraphDraftingError as exc:
-            if not hasattr(exc, "tool_trace"):
-                exc.tool_trace = trace  # type: ignore[attr-defined]
-            raise
+        if patch is None:
+            raise _external_harness_error(
+                "External harness did not submit a graph patch via the scoped MCP "
+                "submit_graph_patch tool.",
+                trace,
+            )
         return HarnessDraftRunResult(
             graph_patch=patch,
             tool_trace=_external_harness_trace(
@@ -1564,6 +1582,64 @@ def _external_harness_error(
     error = GraphDraftingError(message)
     error.tool_trace = trace  # type: ignore[attr-defined]
     return error
+
+
+def _external_harness_prompt(request: HarnessDraftRequest) -> str:
+    """The instruction the headless harness receives on the command line."""
+    return (
+        f"{request.instructions}\n\n{request.prompt_text}\n\n"
+        "Ground your proposal using the lab-tracker MCP read tools, then call "
+        "submit_graph_patch exactly once with the final graph patch. Use no other "
+        "tools and write nothing to disk or the network."
+    )
+
+
+def _build_harness_launch_argv(
+    launch: HarnessVendorLaunch,
+    *,
+    mcp_url: str,
+    mcp_token: str,
+    prompt: str,
+    trace: dict[str, Any],
+) -> list[str]:
+    """Build the headless vendor invocation that attaches to the loopback MCP.
+
+    Only Claude Code is wired for the live-MCP path today; other vendors fail
+    closed rather than run without the scoped read chokepoint (their MCP config
+    is file-based and is a follow-up on lab-tracker-bhkq).
+    """
+    base = list(launch.command)
+    if launch.selector == "claude_code":
+        mcp_config = json.dumps(
+            {
+                "mcpServers": {
+                    "lt": {
+                        "type": "http",
+                        "url": mcp_url,
+                        "headers": {"Authorization": f"Bearer {mcp_token}"},
+                    }
+                }
+            }
+        )
+        return [
+            *base,
+            "-p",
+            prompt,
+            "--output-format",
+            "json",
+            "--mcp-config",
+            mcp_config,
+            "--allowedTools",
+            "mcp__lt",
+            "--disallowedTools",
+            ",".join(launch.native_tool_denies),
+        ]
+    raise _external_harness_error(
+        f"Live-MCP harness launch is not yet wired for '{launch.selector}'. Only "
+        "claude_code is supported; refusing to run without the scoped read "
+        "chokepoint.",
+        trace,
+    )
 
 
 class AgenticGraphDraftClient:
