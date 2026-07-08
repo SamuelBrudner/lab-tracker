@@ -28,8 +28,10 @@ export LAB_TRACKER_ACCESS_TOKEN=<TOKEN>
 ```
 
 If your local server has authentication disabled, `LAB_TRACKER_ACCESS_TOKEN` is
-not required. When auth is enabled and no access token is set, the MATLAB client
-can log in with `LAB_TRACKER_USERNAME` and `LAB_TRACKER_PASSWORD`.
+not required. Prefer setting `LAB_TRACKER_ACCESS_TOKEN` to a personal access
+token when auth is enabled. As a deprecated fallback, when no access token is set
+the MATLAB client can log in with `LAB_TRACKER_USERNAME` and
+`LAB_TRACKER_PASSWORD`.
 
 You can also configure a client explicitly:
 

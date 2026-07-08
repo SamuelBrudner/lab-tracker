@@ -144,6 +144,49 @@ def test_init_force_overwrites_existing_files(tmp_path: Path) -> None:
     ] == "lt-mcp"
 
 
+def test_init_warns_when_hook_interpreter_cannot_resolve_lt(
+    tmp_path: Path, monkeypatch
+) -> None:
+    # Simulate the GH #76 environment: the client lives in a venv that is not on
+    # the ambient PATH/interpreter, so the generated hooks are dead-on-arrival.
+    monkeypatch.setattr("lab_tracker.cli.shutil.which", lambda _name: None)
+    monkeypatch.setattr("lab_tracker.cli.importlib.util.find_spec", lambda _name: None)
+
+    result = init_consumer_repo(tmp_path)
+
+    joined = "\n".join(result.warnings)
+    assert "no `lt` executable is on the current PATH" in joined
+    assert "not importable" in joined
+    # Warnings ride in the machine-readable payload too.
+    assert result.as_dict()["warnings"] == result.warnings
+
+
+def test_init_has_no_env_warnings_when_lt_and_client_resolve(
+    tmp_path: Path, monkeypatch
+) -> None:
+    monkeypatch.setattr("lab_tracker.cli.shutil.which", lambda _name: "/venv/bin/lt")
+    monkeypatch.setattr("lab_tracker.cli.importlib.util.find_spec", lambda _name: object())
+
+    result = init_consumer_repo(tmp_path)
+
+    assert result.warnings == []
+
+
+def test_init_cli_prints_hook_env_warning_to_stderr(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    monkeypatch.setattr("lab_tracker.cli.shutil.which", lambda _name: None)
+    monkeypatch.setattr("lab_tracker.cli.importlib.util.find_spec", lambda _name: object())
+
+    lab_tracker_main(["init", "--target", str(tmp_path)])
+
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)  # stdout stays clean JSON
+    assert payload["warnings"]
+    assert "warning: " in captured.err
+    assert "no `lt` executable" in captured.err
+
+
 def test_init_yes_writes_managed_code_conventions_blocks(tmp_path: Path) -> None:
     agents = tmp_path / "AGENTS.md"
     agents.write_text(

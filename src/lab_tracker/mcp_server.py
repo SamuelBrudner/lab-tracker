@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ipaddress
 import os
+import sys
 from dataclasses import dataclass
 from typing import Literal
 from urllib.parse import urlparse
@@ -149,7 +150,12 @@ def _ensure_mcp_target_safe(settings: MCPSettings | None = None) -> None:
     client = LabTrackerAPIClient(settings)
     try:
         payload = client.readiness()
-    except LabTrackerAPIAuthError:
+    except LabTrackerAPIAuthError as exc:
+        # The startup probe is fail-soft (the server still boots), but a swallowed
+        # auth failure makes the resulting 401 undiagnosable: health stays green
+        # while every authenticated tool fails. Emit a loud stderr warning so it
+        # lands in the MCP server log (GH #79).
+        _warn_startup_auth_probe_failed(settings, exc)
         return
     except LabTrackerAPIError:
         return
@@ -161,6 +167,27 @@ def _ensure_mcp_target_safe(settings: MCPSettings | None = None) -> None:
             "Refusing to start Lab Tracker MCP against a non-loopback auth-disabled "
             f"API target: {settings.base_url}"
         )
+
+
+def _warn_startup_auth_probe_failed(
+    settings: MCPSettings, exc: LabTrackerAPIAuthError
+) -> None:
+    status = exc.status_code or 401
+    auth_mode = (
+        "static LAB_TRACKER_MCP_API_KEY (LPAT)"
+        if (settings.api_key or "").strip()
+        else "LAB_TRACKER_MCP_USERNAME/PASSWORD login"
+        if (settings.username or "").strip()
+        else "no credentials"
+    )
+    print(
+        f"WARNING: Lab Tracker MCP startup auth probe failed (HTTP {status}) against "
+        f"{settings.base_url} using {auth_mode}. The server is starting anyway, but "
+        "every authenticated tool will fail until this is fixed — check "
+        "LAB_TRACKER_MCP_API_KEY / credentials, then relaunch the MCP server.",
+        file=sys.stderr,
+        flush=True,
+    )
 
 
 def _is_loopback_url(value: str) -> bool:

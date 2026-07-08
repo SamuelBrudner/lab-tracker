@@ -96,8 +96,10 @@ For MCP clients on other computers, set:
 $env:LAB_TRACKER_MCP_BASE_URL = "http://<lan-ip>:8000"
 ```
 
-When authentication is enabled, also set `LAB_TRACKER_MCP_USERNAME` and
-`LAB_TRACKER_MCP_PASSWORD` in that client environment.
+When authentication is enabled, set `LAB_TRACKER_MCP_API_KEY` to a Lab Tracker
+personal access token (LPAT) in that client environment — this is the sanctioned
+auth method. The older `LAB_TRACKER_MCP_USERNAME` / `LAB_TRACKER_MCP_PASSWORD`
+login is deprecated; run `lt auth doctor` to find any client still using it.
 
 For phone pairing and capture details, see
 [`docs/phone-capture-quickstart.md`](phone-capture-quickstart.md).

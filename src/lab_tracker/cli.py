@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import argparse
 import difflib
+import importlib.util
 import ipaddress
 import json
 import math
 import os
+import shutil
 import sys
 import threading
 import time
@@ -56,6 +58,7 @@ class InitResult:
     backups: dict[Path, Path] = field(default_factory=dict)
     diffs: dict[Path, str] = field(default_factory=dict)
     offers: list[str] = field(default_factory=list)
+    warnings: list[str] = field(default_factory=list)
     _preview_contents: dict[Path, str] = field(default_factory=dict, repr=False)
 
     def as_dict(self) -> dict[str, object]:
@@ -68,6 +71,7 @@ class InitResult:
             "backups": {str(path): str(backup) for path, backup in self.backups.items()},
             "diffs": {str(path): diff for path, diff in self.diffs.items()},
             "offers": list(self.offers),
+            "warnings": list(self.warnings),
         }
 
 
@@ -179,7 +183,41 @@ def init_consumer_repo(
         )
     if not dry_run:
         _record_enrolled_repo(root, "init")
+    result.warnings.extend(_hook_environment_warnings())
     return result
+
+
+def _print_init_warnings(result: InitResult) -> None:
+    for warning in result.warnings:
+        print(f"warning: {warning}", file=sys.stderr)
+
+
+def _hook_environment_warnings() -> list[str]:
+    """Warn when the interpreter/PATH that will run generated hooks can't resolve them.
+
+    init scaffolds agent hooks that call bare ``lt`` and a ``scripts/lt.py`` shim
+    that imports ``lab_tracker_client``. When the client lives in a different venv
+    than the ambient interpreter, that config is dead-on-arrival and fails
+    silently, so surface it explicitly at init time (GH #76).
+    """
+
+    warnings: list[str] = []
+    if shutil.which("lt") is None:
+        warnings.append(
+            "Generated agent hooks call `lt`, but no `lt` executable is on the "
+            "current PATH. SessionStart/UserPromptSubmit hooks (`lt setup status`, "
+            "`lt prime`) will silently no-op until the Lab Tracker client is "
+            "installed and its bin directory is on the PATH your agent uses "
+            "(e.g. activate the venv that provides `lt`)."
+        )
+    if importlib.util.find_spec("lab_tracker_client") is None:
+        warnings.append(
+            "scripts/lt.py imports lab_tracker_client, but it is not importable "
+            f"under {sys.executable}. Install the client into the interpreter that "
+            "runs the shim (`pip install lab-tracker-client` or the repo), or invoke "
+            "it with that interpreter."
+        )
+    return warnings
 
 
 def _record_enrolled_repo(root: Path, action: str) -> None:
@@ -355,6 +393,7 @@ def update_consumer_repo(
         _install_setup_skill(result=result, dry_run=dry_run)
     if not dry_run:
         _record_enrolled_repo(root, "update")
+    result.warnings.extend(_hook_environment_warnings())
     return result
 
 
@@ -700,6 +739,7 @@ def main(argv: list[str] | None = None) -> None:
             install_skills=args.install_skills,
         )
         print(json.dumps(result.as_dict(), indent=2))
+        _print_init_warnings(result)
     elif args.command == "update":
         result = update_consumer_repo(
             args.target,
@@ -708,6 +748,7 @@ def main(argv: list[str] | None = None) -> None:
             install_skills=args.install_skills,
         )
         print(json.dumps(result.as_dict(), indent=2))
+        _print_init_warnings(result)
     elif args.command == "serve":
         try:
             serve_app(

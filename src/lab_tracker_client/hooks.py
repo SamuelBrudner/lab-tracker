@@ -90,13 +90,17 @@ def managed_hook_block(
     # not yet synced) must reach the || so the one-line warning stays
     # reachable. post-commit hooks are advisory — git never blocks the commit
     # on them — and the || echo keeps the block's own status 0 regardless.
+    # Suppress only stdout (the JSON payload), NOT stderr: lt prints a
+    # cause-and-remediation diagnostic there on a sync failure (GH #77), so the
+    # user sees *why* and *how to drain* rather than an unactionable one-liner.
     warning = (
-        "lab-tracker: commit snapshot did not fully sync; "
-        "queued events retry on the next sync. Commit kept."
+        "lab-tracker: commit capture did not fully sync (see the note above if "
+        "shown). Queued events are kept — inspect with 'lt outbox status' and "
+        "drain with 'lt outbox sync'. Commit kept."
     )
     lines.extend(
         [
-            f'  "$LAB_TRACKER_LT" git snapshot{draft_flag} >/dev/null 2>&1 || \\',
+            f'  "$LAB_TRACKER_LT" git snapshot{draft_flag} >/dev/null || \\',
             f'    echo "{warning}" >&2',
             "fi",
             HOOK_BLOCK_END,
