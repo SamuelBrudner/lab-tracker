@@ -175,6 +175,49 @@ rules as above.
 
 ---
 
+## Email a cue when a review is ready
+
+Triggering drafts fills the in-app queue. To also **nudge a reviewer where they
+already look**, the same routine that calls `run-due` can send a *cue* — a short,
+contentless email that says a review is ready and links straight to it. Lab
+Tracker never sends the mail itself (it holds no SMTP credentials and owns no
+transport); your own routine sends it through your own mailbox.
+
+The cue is deliberately content-free — a count and a signed link, never any
+science. The read model and its egress guarantees are documented in
+[daily-review-egress-defaults.md](daily-review-egress-defaults.md).
+
+Two endpoints back this:
+
+- `GET /batches/editions-ready` — admin/scheduler read model. Returns the ready
+  editions (optionally `?user_id=<reviewer>` and `?since=<ISO-8601 watermark>`),
+  each with a `decidable_count` and a signed `deep_link`. Project name is omitted
+  unless you pass `?include_project_name=true`; the count is suppressed for any
+  edition whose notes are sensitivity-tagged.
+- `GET /r/<token>` — the public landing route the `deep_link` points at. It
+  verifies the signed, short-TTL token and 302-redirects into the in-app
+  accept/reject queue (`LAB_TRACKER_REVIEW_LINK_TTL_HOURS`, default 72h). An
+  expired or tampered link bounces to “open your Read”.
+
+The routine gains one step after triggering drafts: poll `editions-ready` for the
+reviewer, and for each fresh edition (newer than a stored watermark) send one
+email carrying the fixed cue phrase, the count, and the `deep_link`.
+
+[`scripts/daily-review-notify.ps1`](../scripts/daily-review-notify.ps1) is a
+ready-to-fill reference implementation (Windows/PowerShell). It needs an admin
+token (`LAB_TRACKER_API_KEY`, minted at `/app/agents` with the **Scheduler
+trigger (admin)** level), the reviewer’s email, and your own SMTP settings.
+
+> **Watermark gotcha.** An ISO-8601 timestamp ends in `+00:00`; the `+` must be
+> percent-encoded (`%2B`) when placed in the `since` query string, or the server
+> reads it as a space and rejects the request. The reference script and any HTTP
+> client’s params helper handle this for you.
+
+> **Reachability, again.** The emailed link only works if the reviewer can open
+> your Lab Tracker URL. A localhost instance produces dead links; set
+> `LAB_TRACKER_PUBLIC_BASE_URL` to a reachable URL (e.g. a Tailscale Funnel
+> endpoint) so the composed `deep_link` is absolute and openable off-machine.
+
 ## How it behaves (why frequent polling is fine)
 
 `POST /batches/run-due` and the built-in ticker both examine enabled cadence rows

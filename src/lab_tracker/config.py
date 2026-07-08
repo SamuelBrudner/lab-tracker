@@ -42,6 +42,19 @@ class Settings(BaseSettings):
     graph_draft_scheduler_enabled: bool = False
     graph_draft_worker_poll_seconds: float = 5.0
     graph_draft_scheduler_interval_seconds: float = 60.0
+    graph_draft_agentic_tool_loop_enabled: bool = False
+    graph_draft_agentic_max_tool_calls: int = 8
+    graph_draft_agentic_base_provider: str = "openai"
+    graph_draft_agentic_sensitivity_policy: Literal["redact", "omit", "allow"] = "redact"
+    graph_draft_external_harness_enabled: bool = False
+    graph_draft_external_harness: str = "codex"
+    graph_draft_external_harness_command: str = ""
+    graph_draft_external_harness_sandbox_profile: str = "disabled"
+    graph_draft_external_harness_egress_profile: str = "disabled"
+    graph_draft_external_harness_timeout_seconds: float = 120.0
+    graph_draft_external_harness_max_stdout_bytes: int = 64 * 1024
+    graph_draft_external_harness_max_spawns_per_tick: int = 1
+    review_link_ttl_hours: int = 72
     public_base_url: str = ""
     openai_api_key: str = ""
     openai_model: str = "gpt-4o-mini"
@@ -110,6 +123,62 @@ class Settings(BaseSettings):
             raise ValueError(
                 "LAB_TRACKER_GRAPH_DRAFT_SCHEDULER_INTERVAL_SECONDS must be greater than 0."
             )
+        if self.graph_draft_agentic_max_tool_calls < 1:
+            raise ValueError(
+                "LAB_TRACKER_GRAPH_DRAFT_AGENTIC_MAX_TOOL_CALLS must be at least 1."
+            )
+        self.graph_draft_agentic_base_provider = (
+            self.graph_draft_agentic_base_provider.strip().lower()
+        )
+        self.graph_draft_external_harness = (
+            self.graph_draft_external_harness.strip().lower() or "codex"
+        )
+        if self.graph_draft_external_harness not in {"claude_code", "codex", "gemini"}:
+            raise ValueError(
+                "LAB_TRACKER_GRAPH_DRAFT_EXTERNAL_HARNESS must be one of "
+                "claude_code, codex, or gemini."
+            )
+        self.graph_draft_external_harness_sandbox_profile = (
+            self.graph_draft_external_harness_sandbox_profile.strip().lower()
+            or "disabled"
+        )
+        if self.graph_draft_external_harness_sandbox_profile not in {
+            "disabled",
+            "operator_managed",
+        }:
+            raise ValueError(
+                "LAB_TRACKER_GRAPH_DRAFT_EXTERNAL_HARNESS_SANDBOX_PROFILE must be "
+                "disabled or operator_managed."
+            )
+        self.graph_draft_external_harness_egress_profile = (
+            self.graph_draft_external_harness_egress_profile.strip().lower()
+            or "disabled"
+        )
+        if self.graph_draft_external_harness_egress_profile not in {
+            "disabled",
+            "vendor_api_only",
+        }:
+            raise ValueError(
+                "LAB_TRACKER_GRAPH_DRAFT_EXTERNAL_HARNESS_EGRESS_PROFILE must be "
+                "disabled or vendor_api_only."
+            )
+        if self.graph_draft_external_harness_timeout_seconds <= 0:
+            raise ValueError(
+                "LAB_TRACKER_GRAPH_DRAFT_EXTERNAL_HARNESS_TIMEOUT_SECONDS must be "
+                "greater than 0."
+            )
+        if self.graph_draft_external_harness_max_stdout_bytes < 1:
+            raise ValueError(
+                "LAB_TRACKER_GRAPH_DRAFT_EXTERNAL_HARNESS_MAX_STDOUT_BYTES must be "
+                "at least 1."
+            )
+        if self.graph_draft_external_harness_max_spawns_per_tick < 1:
+            raise ValueError(
+                "LAB_TRACKER_GRAPH_DRAFT_EXTERNAL_HARNESS_MAX_SPAWNS_PER_TICK must be "
+                "at least 1."
+            )
+        if self.review_link_ttl_hours < 1:
+            raise ValueError("LAB_TRACKER_REVIEW_LINK_TTL_HOURS must be at least 1.")
         return self
 
     model_config = SettingsConfigDict(

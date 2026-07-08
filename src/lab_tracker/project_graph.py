@@ -339,7 +339,9 @@ def _claim_node(claim: Claim) -> ProjectGraphNode:
         entity_type="claim",
         entity_id=str(claim.claim_id),
         label=_claim_label(claim),
-        detail=f"confidence {claim.confidence:g}",
+        detail=(
+            f"confidence {claim.confidence:g}" if claim.confidence is not None else None
+        ),
         status=_enum_value(claim.status),
     )
 

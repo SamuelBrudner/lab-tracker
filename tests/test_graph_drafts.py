@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import json
+import sys
+import time
 from contextlib import contextmanager
+from dataclasses import replace
 from datetime import timedelta
 from typing import Any
 from uuid import UUID, uuid4
@@ -16,10 +19,18 @@ from lab_tracker.config import Settings
 from lab_tracker.db_models import GraphChangeSetModel
 from lab_tracker.errors import AuthError, ValidationError
 from lab_tracker.graph_drafting import (
+    EXTERNAL_HARNESS_LAUNCH_TABLE,
+    AgenticGraphDraftClient,
     AnthropicGraphDraftClient,
     GoogleGraphDraftClient,
+    GraphDraftBatchResult,
     GraphDraftingError,
+    HarnessDraftRequest,
+    HarnessDraftRunResult,
+    HarnessGraphDraftClient,
+    HarnessVendorLaunch,
     OpenAIGraphDraftClient,
+    SubprocessHarnessDraftRunner,
     make_graph_draft_client,
 )
 from lab_tracker.models import (
@@ -135,6 +146,72 @@ class FakeDraftClient:
 
     def close(self) -> None:
         self.closed = True
+
+
+class _FakeHarnessMCP:
+    def __init__(self) -> None:
+        self.submitted_patch: dict[str, Any] | None = None
+
+    @property
+    def tool_trace(self) -> dict[str, Any]:
+        return {
+            "provider": "external_harness",
+            "tool_call_count": 0,
+            "max_tool_calls": 4,
+            "tool_calls": [],
+            "submit_graph_patch_calls": 1 if self.submitted_patch is not None else 0,
+        }
+
+    def tool_specs(self) -> list[dict[str, Any]]:
+        return [
+            {
+                "name": "submit_graph_patch",
+                "description": "Submit final patch.",
+                "input_schema": {"type": "object"},
+            }
+        ]
+
+    def execute_tool(
+        self,
+        tool_name: str,
+        arguments: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        assert tool_name == "submit_graph_patch"
+        assert arguments is not None
+        self.submitted_patch = arguments["graph_patch"]
+        return {"accepted": True}
+
+
+def _harness_subprocess_request(
+    *,
+    command: tuple[str, ...],
+    max_stdout_bytes: int,
+    sandbox_profile: str = "operator_managed",
+    egress_profile: str = "vendor_api_only",
+    operator_command_provided: bool = True,
+) -> HarnessDraftRequest:
+    return HarnessDraftRequest(
+        batch_context={"mode": "graph_batch", "batch_notes": [{"id": "note-1"}]},
+        user_hint=None,
+        prompt_text="Draft from one note.",
+        instructions="Return a graph patch.",
+        graph_patch_schema={"type": "object"},
+        launch=HarnessVendorLaunch(
+            selector="codex",
+            display_name="Codex CLI",
+            command=command,
+            allowed_env_vars=("OPENAI_API_KEY",),
+            egress_hosts=("api.openai.com",),
+            native_tool_denies=("shell",),
+        ),
+        timeout_seconds=30,
+        max_tool_calls=4,
+        max_stdout_bytes=max_stdout_bytes,
+        sandbox_profile=sandbox_profile,
+        egress_profile=egress_profile,
+        # A caller-supplied command stands in for an operator sandbox wrapper.
+        operator_command_provided=operator_command_provided,
+    )
 
 
 def _project(client: TestClient, headers: dict[str, str]) -> str:
@@ -756,6 +833,319 @@ def test_provider_factory_returns_anthropic_and_google_clients() -> None:
     finally:
         anthropic.close()
         google.close()
+
+
+def test_make_graph_draft_client_returns_agentic_with_configured_base_provider() -> None:
+    client = make_graph_draft_client(
+        Settings(
+            environment="local",
+            auth_enabled=False,
+            graph_draft_provider="agentic",
+            graph_draft_agentic_base_provider="anthropic",
+            anthropic_api_key="anthropic-key",
+            anthropic_model="claude-test",
+        )
+    )
+    try:
+        assert isinstance(client, AgenticGraphDraftClient)
+        assert client.model == "agentic:claude-test"
+    finally:
+        client.close()
+
+
+def test_make_graph_draft_client_returns_external_harness_default_off() -> None:
+    client = make_graph_draft_client(
+        Settings(
+            environment="local",
+            auth_enabled=False,
+            graph_draft_provider="external_harness",
+            graph_draft_external_harness="codex",
+        )
+    )
+    assert isinstance(client, HarnessGraphDraftClient)
+    assert client.launch.selector == "codex"
+    assert client.model == "external-harness:codex"
+
+
+def test_external_harness_client_runs_injected_runner_through_submit_tool() -> None:
+    patch = {
+        "summary": "harness ok",
+        "uncertain_fields": [],
+        "clarification_requests": [],
+        "operations": [],
+    }
+
+    class FakeExecutor:
+        sensitivity_policy = "redact"
+
+        def mcp_tool_specs(self) -> list[dict[str, Any]]:
+            return [
+                {
+                    "name": "search",
+                    "description": "Search scoped context.",
+                    "input_schema": {
+                        "type": "object",
+                        "properties": {"query": {"type": "string"}},
+                        "required": ["query"],
+                        "additionalProperties": False,
+                    },
+                }
+            ]
+
+        def anthropic_tool_specs(self) -> list[dict[str, Any]]:
+            return self.mcp_tool_specs()
+
+        def execute(self, tool_name: str, arguments: dict[str, Any] | None = None):
+            assert tool_name == "search"
+            assert arguments == {"query": "odor"}
+            return {"data": [{"note_id": "note-1"}]}
+
+    class FakeRunner:
+        def __init__(self) -> None:
+            self.request = None
+
+        def run(self, *, request, mcp_server):  # noqa: ANN001
+            self.request = request
+            assert request.sandbox_profile == "operator_managed"
+            assert request.egress_profile == "vendor_api_only"
+            assert mcp_server.executor.sensitivity_policy == "omit"
+            mcp_server.execute_tool("search", {"query": "odor"})
+            mcp_server.execute_tool("submit_graph_patch", {"graph_patch": patch})
+            return HarnessDraftRunResult(tool_trace=mcp_server.tool_trace)
+
+    runner = FakeRunner()
+    client = HarnessGraphDraftClient(
+        launch=EXTERNAL_HARNESS_LAUNCH_TABLE["codex"],
+        enabled=True,
+        sandbox_profile="operator_managed",
+        egress_profile="vendor_api_only",
+        timeout_seconds=30,
+        max_tool_calls=4,
+        max_stdout_bytes=4096,
+        runner=runner,
+    )
+    client.configure_live_read_tools(FakeExecutor())
+
+    result = client.draft_from_batch(
+        batch_context={"mode": "graph_batch", "batch_notes": [{"id": "note-1"}]},
+    )
+
+    assert result.graph_patch == patch
+    assert result.tool_trace is not None
+    assert result.tool_trace["provider"] == "external_harness"
+    assert result.tool_trace["tool_call_count"] == 1
+    assert result.tool_trace["submit_graph_patch_calls"] == 1
+    assert runner.request is not None
+
+
+def test_external_harness_client_fails_closed_when_disabled() -> None:
+    client = HarnessGraphDraftClient(
+        launch=EXTERNAL_HARNESS_LAUNCH_TABLE["codex"],
+        enabled=False,
+        sandbox_profile="operator_managed",
+        egress_profile="vendor_api_only",
+        timeout_seconds=30,
+        max_tool_calls=4,
+        max_stdout_bytes=4096,
+    )
+
+    with pytest.raises(GraphDraftingError, match="disabled"):
+        client.draft_from_batch(
+            batch_context={"mode": "graph_batch", "batch_notes": [{"id": "note-1"}]},
+        )
+
+
+def test_external_harness_subprocess_runner_scrubs_lab_tracker_env(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    patch = {
+        "summary": "subprocess ok",
+        "uncertain_fields": [],
+        "clarification_requests": [],
+        "operations": [],
+    }
+    script = (
+        "import json, os; "
+        "assert not any(k.startswith('LAB_TRACKER_') for k in os.environ); "
+        f"print({json.dumps(json.dumps(patch))})"
+    )
+    monkeypatch.setenv("LAB_TRACKER_DATABASE_URL", "sqlite:///secret.db")
+    monkeypatch.setenv("OPENAI_API_KEY", "vendor-only")
+    mcp = _FakeHarnessMCP()
+    request = _harness_subprocess_request(
+        command=(sys.executable, "-c", script),
+        max_stdout_bytes=4096,
+    )
+
+    result = SubprocessHarnessDraftRunner().run(request=request, mcp_server=mcp)
+
+    assert result.graph_patch == patch
+    assert mcp.submitted_patch == patch
+    assert result.tool_trace is not None
+    assert result.tool_trace["subprocess"]["stdout_bytes"] > 0
+    assert result.tool_trace["subprocess"]["env_policy"][
+        "lab_tracker_env_forwarded"
+    ] is False
+
+
+def test_external_harness_subprocess_runner_fails_closed_on_malformed_output() -> None:
+    request = _harness_subprocess_request(
+        command=(sys.executable, "-c", "print('not json')"),
+        max_stdout_bytes=4096,
+    )
+
+    with pytest.raises(GraphDraftingError, match="malformed graph patch JSON") as exc_info:
+        SubprocessHarnessDraftRunner().run(request=request, mcp_server=_FakeHarnessMCP())
+
+    trace = getattr(exc_info.value, "tool_trace", None)
+    assert trace["provider"] == "external_harness"
+    assert trace["subprocess"]["stdout_bytes"] > 0
+
+
+def test_external_harness_fails_closed_without_operator_wrapper() -> None:
+    # operator_managed isolation is attested but no wrapper command was supplied:
+    # refuse rather than spawn the bare vendor binary unisolated.
+    request = _harness_subprocess_request(
+        command=(sys.executable, "-c", "print('{}')"),
+        max_stdout_bytes=4096,
+        operator_command_provided=False,
+    )
+    with pytest.raises(GraphDraftingError, match="no wrapper command is configured"):
+        SubprocessHarnessDraftRunner().run(request=request, mcp_server=_FakeHarnessMCP())
+
+
+def test_external_harness_fails_closed_when_profiles_default() -> None:
+    request = _harness_subprocess_request(
+        command=(sys.executable, "-c", "print('{}')"),
+        max_stdout_bytes=4096,
+        sandbox_profile="disabled",
+        egress_profile="disabled",
+    )
+    with pytest.raises(GraphDraftingError, match="sandbox profile is not established"):
+        SubprocessHarnessDraftRunner().run(request=request, mcp_server=_FakeHarnessMCP())
+
+
+def test_external_harness_subprocess_runner_bounds_stdout() -> None:
+    # A harness that floods stdout must be aborted at the cap, not buffered.
+    request = _harness_subprocess_request(
+        command=(sys.executable, "-c", "print('x' * 100000)"),
+        max_stdout_bytes=1024,
+    )
+    with pytest.raises(GraphDraftingError, match="exceeded the configured capture limit"):
+        SubprocessHarnessDraftRunner().run(request=request, mcp_server=_FakeHarnessMCP())
+
+
+def test_external_harness_subprocess_runner_kills_on_timeout() -> None:
+    # A harness that hangs past the wall-clock budget must be killed and surfaced
+    # as a timeout, not left running.
+    request = replace(
+        _harness_subprocess_request(
+            command=(sys.executable, "-c", "import time; time.sleep(30)"),
+            max_stdout_bytes=4096,
+        ),
+        timeout_seconds=1.0,
+    )
+    started = time.monotonic()
+    with pytest.raises(GraphDraftingError, match="wall-clock timeout"):
+        SubprocessHarnessDraftRunner().run(request=request, mcp_server=_FakeHarnessMCP())
+    # It must abort near the deadline, not run for the full sleep.
+    assert time.monotonic() - started < 15
+
+
+def test_anthropic_graph_draft_client_runs_bounded_tool_loop() -> None:
+    requests: list[dict[str, Any]] = []
+
+    class FakeToolExecutor:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, dict[str, Any]]] = []
+
+        def anthropic_tool_specs(self) -> list[dict[str, Any]]:
+            return [
+                {
+                    "name": "search",
+                    "description": "Search scoped graph context.",
+                    "input_schema": {
+                        "type": "object",
+                        "properties": {"query": {"type": "string"}},
+                        "required": ["query"],
+                        "additionalProperties": True,
+                    },
+                }
+            ]
+
+        def execute(self, tool_name: str, arguments: dict[str, Any] | None = None):
+            args = dict(arguments or {})
+            self.calls.append((tool_name, args))
+            return {"data": {"notes": [{"note_id": "note-1"}]}}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/v1/messages"
+        payload = json.loads(request.content.decode("utf-8"))
+        requests.append(payload)
+        if len(requests) == 1:
+            return httpx.Response(
+                200,
+                json={
+                    "stop_reason": "tool_use",
+                    "content": [
+                        {
+                            "type": "tool_use",
+                            "id": "toolu_1",
+                            "name": "search",
+                            "input": {"query": "odor", "project_id": "p1"},
+                        }
+                    ],
+                },
+            )
+        return httpx.Response(
+            200,
+            json={
+                "stop_reason": "end_turn",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": json.dumps(
+                            {
+                                "summary": "tool loop ok",
+                                "uncertain_fields": [],
+                                "clarification_requests": [],
+                                "operations": [],
+                            }
+                        ),
+                    }
+                ],
+            },
+        )
+
+    executor = FakeToolExecutor()
+    client = AnthropicGraphDraftClient(
+        api_key="anthropic-key",
+        model="claude-test",
+        transport=httpx.MockTransport(handler),
+    )
+
+    result = client.draft_from_batch_with_tools(
+        batch_context={"mode": "graph_batch", "batch_notes": [{"id": "note-1"}]},
+        tool_executor=executor,
+        max_tool_calls=4,
+    )
+
+    assert isinstance(result, GraphDraftBatchResult)
+    assert result.graph_patch["summary"] == "tool loop ok"
+    assert result.tool_trace is not None
+    assert result.tool_trace["tool_call_count"] == 1
+    assert result.tool_trace["tool_calls"][0]["tool"] == "search"
+    assert result.tool_trace["tool_calls"][0]["result_ids"] == [
+        {"field": "note_id", "value": "note-1"}
+    ]
+    assert executor.calls == [("search", {"query": "odor", "project_id": "p1"})]
+    assert len(requests) == 2
+    tool_result_turn = requests[1]["messages"][-1]
+    assert tool_result_turn["role"] == "user"
+    assert "<untrusted_tool_result tool=\"search\">" in tool_result_turn["content"][0][
+        "content"
+    ][0]["text"]
+    client.close()
 
 
 def test_anthropic_and_google_clients_report_api_errors() -> None:

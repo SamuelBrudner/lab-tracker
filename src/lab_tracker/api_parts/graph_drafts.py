@@ -57,6 +57,9 @@ class GraphDraftsApiMixin:
     def list_batch_graph_drafts(self, *args: Any, **kwargs: Any) -> Any:
         return self.graph_drafts.list_batch_graph_drafts(*args, **kwargs)
 
+    def list_ready_editions(self, *args: Any, **kwargs: Any) -> Any:
+        return self.graph_drafts.list_ready_editions(*args, **kwargs)
+
     def update_graph_change_operation(self, *args: Any, **kwargs: Any) -> Any:
         return self._with_usage_event(
             lambda: self.graph_drafts.update_graph_change_operation(*args, **kwargs),

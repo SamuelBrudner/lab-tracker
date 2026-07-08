@@ -162,6 +162,7 @@ def build_graph_batches_router(api: LabTrackerAPI) -> APIRouter:
     def run_batch_now(payload: GraphDraftBatchRunRequest, request: Request):
         actor = actor_from_request(request)
         ensure_project_contributor(request, payload.project_id)
+        reviewer_kwargs = _agentic_live_reviewer_kwargs(request, actor)
         if _background_drafting_enabled(request):
             run = api_from_request(request, api).enqueue_graph_draft_batch_for_project(
                 payload.project_id,
@@ -169,6 +170,7 @@ def build_graph_batches_router(api: LabTrackerAPI) -> APIRouter:
                 until=payload.until,
                 user_hint=payload.user_hint,
                 actor=actor,
+                **reviewer_kwargs,
             )
             return Envelope(data=run)
         draft_client = _draft_client_from_request(request)
@@ -180,6 +182,7 @@ def build_graph_batches_router(api: LabTrackerAPI) -> APIRouter:
                 until=payload.until,
                 user_hint=payload.user_hint,
                 actor=actor,
+                **reviewer_kwargs,
             )
         finally:
             close = getattr(draft_client, "close", None)
@@ -228,3 +231,21 @@ def _background_drafting_enabled(request: Request) -> bool:
         getattr(settings, "graph_draft_background_enabled", False)
         or getattr(settings, "graph_draft_scheduler_enabled", False)
     )
+
+
+def _agentic_live_reviewer_kwargs(request: Request, actor) -> dict[str, UUID | str]:
+    settings = getattr(request.app.state, "settings", None) or get_settings()
+    provider = str(getattr(settings, "graph_draft_provider", "") or "").strip().lower()
+    requires_reviewer = provider in {"external_harness", "external-harness", "harness"}
+    requires_reviewer = requires_reviewer or (
+        provider in {"agentic", "agentic-openai", "agentic_openai"}
+        and bool(getattr(settings, "graph_draft_agentic_tool_loop_enabled", False))
+    )
+    if not requires_reviewer:
+        return {}
+    if actor is None or actor.is_system:
+        return {}
+    return {
+        "review_assignee": str(actor.user_id),
+        "review_assignee_user_id": actor.user_id,
+    }

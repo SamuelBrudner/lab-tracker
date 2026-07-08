@@ -211,6 +211,7 @@ class LabTrackerAPI(
             versions=self.entity_versions,
             authorization=self.project_authorization,
             provenance_links=self.provenance_links,
+            publication_readiness=self.publication_readiness,
         )
 
     def for_request(self, repository: LabTrackerRepository) -> LabTrackerAPI:

@@ -38,6 +38,7 @@ from .provenance import build_provenance_router
 from .provenance_links import build_provenance_links_router
 from .questions import build_questions_router
 from .record_exports import build_record_exports_router
+from .review_delivery import build_review_delivery_router
 from .schema import build_schema_router
 from .search import build_search_router
 from .sessions import build_sessions_router
@@ -88,6 +89,7 @@ def register_routes(
     app.include_router(build_notes_router(api))
     app.include_router(build_graph_drafts_router(api))
     app.include_router(build_graph_batches_router(api))
+    app.include_router(build_review_delivery_router(api))
     app.include_router(build_provenance_router(api))
     app.include_router(build_search_router(api))
     app.include_router(build_usage_events_router(api))

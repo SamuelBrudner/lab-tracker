@@ -69,7 +69,7 @@ class ClaimService(BaseService):
         self,
         project_id: UUID,
         statement: str,
-        confidence: float,
+        confidence: float | None = None,
         *,
         status: ClaimStatus = ClaimStatus.PROPOSED,
         terminal_reason: str | None = None,
@@ -90,7 +90,8 @@ class ClaimService(BaseService):
         self.authorization.require_contributor(project_id, actor=actor)
         self.projects.get_project(project_id)
         ensure_non_empty(statement, "statement")
-        _ensure_claim_confidence(confidence)
+        if confidence is not None:
+            _ensure_claim_confidence(confidence)
         dataset_ids, analysis_ids = self._resolve_claim_support_links(
             project_id,
             supported_by_dataset_ids,

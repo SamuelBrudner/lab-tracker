@@ -144,3 +144,46 @@ def test_non_local_environment_rejects_disabled_auth(monkeypatch):
     monkeypatch.setenv("LAB_TRACKER_AUTH_SECRET_KEY", "custom-secret")
     with pytest.raises(ValidationError, match="LAB_TRACKER_AUTH_ENABLED=false"):
         _settings_from_environment()
+
+
+def test_agentic_max_tool_calls_must_be_positive(monkeypatch):
+    _clear_auth_env(monkeypatch)
+    monkeypatch.setenv("LAB_TRACKER_ENVIRONMENT", "local")
+    monkeypatch.setenv("LAB_TRACKER_GRAPH_DRAFT_AGENTIC_MAX_TOOL_CALLS", "0")
+    with pytest.raises(ValidationError, match="GRAPH_DRAFT_AGENTIC_MAX_TOOL_CALLS"):
+        _settings_from_environment()
+
+
+def test_external_harness_config_validates_selector_profiles_and_bounds(monkeypatch):
+    _clear_auth_env(monkeypatch)
+    monkeypatch.setenv("LAB_TRACKER_ENVIRONMENT", "local")
+    monkeypatch.setenv("LAB_TRACKER_GRAPH_DRAFT_EXTERNAL_HARNESS", "claude_code")
+    monkeypatch.setenv(
+        "LAB_TRACKER_GRAPH_DRAFT_EXTERNAL_HARNESS_SANDBOX_PROFILE",
+        "operator_managed",
+    )
+    monkeypatch.setenv(
+        "LAB_TRACKER_GRAPH_DRAFT_EXTERNAL_HARNESS_EGRESS_PROFILE",
+        "vendor_api_only",
+    )
+    settings = _settings_from_environment()
+    assert settings.graph_draft_external_harness == "claude_code"
+    assert settings.graph_draft_external_harness_sandbox_profile == "operator_managed"
+    assert settings.graph_draft_external_harness_egress_profile == "vendor_api_only"
+
+    monkeypatch.setenv("LAB_TRACKER_GRAPH_DRAFT_EXTERNAL_HARNESS", "robot")
+    with pytest.raises(ValidationError, match="GRAPH_DRAFT_EXTERNAL_HARNESS"):
+        _settings_from_environment()
+
+    monkeypatch.setenv("LAB_TRACKER_GRAPH_DRAFT_EXTERNAL_HARNESS", "codex")
+    monkeypatch.setenv("LAB_TRACKER_GRAPH_DRAFT_EXTERNAL_HARNESS_TIMEOUT_SECONDS", "0")
+    with pytest.raises(ValidationError, match="EXTERNAL_HARNESS_TIMEOUT_SECONDS"):
+        _settings_from_environment()
+
+    monkeypatch.setenv("LAB_TRACKER_GRAPH_DRAFT_EXTERNAL_HARNESS_TIMEOUT_SECONDS", "120")
+    monkeypatch.setenv(
+        "LAB_TRACKER_GRAPH_DRAFT_EXTERNAL_HARNESS_MAX_SPAWNS_PER_TICK",
+        "0",
+    )
+    with pytest.raises(ValidationError, match="EXTERNAL_HARNESS_MAX_SPAWNS_PER_TICK"):
+        _settings_from_environment()

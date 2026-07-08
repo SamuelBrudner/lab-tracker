@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from datetime import datetime, time, timedelta, timezone
 from typing import Any
@@ -14,10 +15,24 @@ from lab_tracker.app_parts.middleware import system_auth_context
 from lab_tracker.auth import Role
 from lab_tracker.db_models import GraphDraftBatchSettingsModel, NoteModel
 from lab_tracker.graph_drafting import (
+    EXTERNAL_HARNESS_LAUNCH_TABLE,
     READ_ONLY_AGENT_TOOLS,
     AgenticGraphDraftClient,
+    GraphDraftBatchResult,
     GraphDraftingError,
+    HarnessDraftRunResult,
+    HarnessGraphDraftClient,
 )
+from lab_tracker.services.graph_draft_context import SENSITIVE_NOTE_REDACTION
+from lab_tracker.services.graph_draft_harness_mcp import (
+    SUBMIT_GRAPH_PATCH_TOOL,
+    HarnessGraphDraftMCPServer,
+)
+from lab_tracker.services.graph_draft_read_tools import (
+    AGENTIC_READ_TOOL_ALLOWLIST,
+    ScopedGraphDraftReadToolExecutor,
+)
+from lab_tracker.services.shared import SENSITIVE_NOTE_VALUE, SENSITIVITY_METADATA_KEY
 from lab_tracker.sqlalchemy_repository_parts.repository import SQLAlchemyLabTrackerRepository
 
 
@@ -27,7 +42,7 @@ class FakeBatchDraftClient:
 
     def __init__(
         self,
-        patch: dict[str, Any] | None = None,
+        patch: dict[str, Any] | GraphDraftBatchResult | None = None,
         *,
         fail_attempts: int = 0,
         error: str = "temporary model outage",
@@ -48,7 +63,7 @@ class FakeBatchDraftClient:
         *,
         batch_context: dict[str, Any],
         user_hint: str | None = None,
-    ) -> dict[str, Any]:
+    ) -> dict[str, Any] | GraphDraftBatchResult:
         self.calls.append({"batch_context": batch_context, "user_hint": user_hint})
         if len(self.calls) <= self.fail_attempts:
             raise GraphDraftingError(self.error)
@@ -218,6 +233,42 @@ def test_run_now_persists_pending_batch_with_source_traceability(
     assert listed.json()["data"][0]["change_set_id"] == run["change_set_id"]
 
 
+def test_run_now_persists_agentic_tool_trace(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+) -> None:
+    project_id = _project(client, admin_auth_headers)
+    note_id = _note(client, admin_auth_headers, project_id, "Odor tracking looked stable.")
+    trace = {
+        "provider": "anthropic",
+        "tool_call_count": 1,
+        "max_tool_calls": 4,
+        "tool_calls": [
+            {
+                "tool": "search",
+                "arguments": {"query": "odor"},
+                "result_ids": [{"field": "note_id", "value": note_id}],
+            }
+        ],
+    }
+    fake_client = FakeBatchDraftClient(
+        GraphDraftBatchResult(graph_patch=_batch_patch(project_id), tool_trace=trace)
+    )
+    client.app.state.graph_draft_client_factory = lambda settings: fake_client
+
+    response = client.post(
+        "/batches/run-now",
+        json={"project_id": project_id},
+        headers=admin_auth_headers,
+    )
+
+    assert response.status_code == 201, response.text
+    run = response.json()["data"]
+    draft = client.get(f"/batches/{run['change_set_id']}", headers=admin_auth_headers)
+    assert draft.status_code == 200, draft.text
+    assert draft.json()["data"]["context_packet"]["agentic_tool_trace"] == trace
+
+
 def _register_project_member(
     client: TestClient,
     *,
@@ -339,6 +390,28 @@ def test_background_run_now_enqueues_and_worker_processes(
     draft = client.get(f"/batches/{processed.change_set_id}", headers=admin_auth_headers)
     assert draft.status_code == 200
     assert draft.json()["data"]["status"] == "ready"
+
+
+def test_external_harness_background_run_now_stamps_actor_as_reviewer(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+) -> None:
+    project_id = _project(client, admin_auth_headers)
+    _note(client, admin_auth_headers, project_id, "Queued harness note.")
+    client.app.state.settings.graph_draft_provider = "external_harness"
+    client.app.state.settings.graph_draft_background_enabled = True
+
+    response = client.post(
+        "/batches/run-now",
+        json={"project_id": project_id},
+        headers=admin_auth_headers,
+    )
+
+    assert response.status_code == 201, response.text
+    queued = response.json()["data"]
+    assert queued["status"] == "pending"
+    assert queued["review_assignee_user_id"]
+    assert queued["review_assignee"] == queued["review_assignee_user_id"]
 
 
 def test_batch_run_is_idempotent_for_same_window(
@@ -788,6 +861,279 @@ def test_background_run_due_partitions_by_note_author_and_assigns_reviewers(
         headers=first_headers,
     )
     assert submitted.status_code == 200
+
+
+def test_scoped_graph_draft_read_tools_enforce_scope_sensitivity_and_allowlist(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+) -> None:
+    project_a = _project(client, admin_auth_headers)
+    project_b = _project(client, admin_auth_headers)
+    _viewer_headers, viewer_user_id = _registered_user(client, role=Role.VIEWER)
+    added = client.post(
+        f"/projects/{project_a}/members",
+        json={"user_id": viewer_user_id, "role": "viewer"},
+        headers=admin_auth_headers,
+    )
+    assert added.status_code == 201, added.text
+    note = client.post(
+        "/notes",
+        json={
+            "project_id": project_a,
+            "raw_content": "Embargoed odor observation",
+            "transcribed_text": "Sensitive transcript",
+            "metadata": {SENSITIVITY_METADATA_KEY: SENSITIVE_NOTE_VALUE},
+            "status": "staged",
+        },
+        headers=admin_auth_headers,
+    )
+    assert note.status_code == 201, note.text
+
+    with client.app.state.db_session_factory() as session:
+        repository = SQLAlchemyLabTrackerRepository(session)
+        api = client.app.state.lab_tracker_api.for_request(repository)
+        executor = ScopedGraphDraftReadToolExecutor(
+            repository=repository,
+            authorization=api.project_authorization,
+            project_id=UUID(project_a),
+            target_user_id=UUID(viewer_user_id),
+            sensitivity_policy="redact",
+            goals=api.goals,
+            publication_readiness=api.publication_readiness,
+        )
+
+        result = executor.execute("list_notes", {"project_id": project_a}).payload
+        redacted_note = result["data"][0]
+        assert redacted_note["raw_content"] == SENSITIVE_NOTE_REDACTION
+        assert redacted_note["transcribed_text"] == SENSITIVE_NOTE_REDACTION
+        assert redacted_note["sensitive_content_redacted"] is True
+
+        with pytest.raises(GraphDraftingError, match="outside the graph draft read scope"):
+            executor.execute("list_notes", {"project_id": project_b})
+        with pytest.raises(GraphDraftingError, match="not allowlisted"):
+            executor.execute("resolve_artifact", {})
+
+
+def test_external_harness_mcp_surface_is_scoped_omit_only_and_propose_only(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+) -> None:
+    project_a = _project(client, admin_auth_headers)
+    project_b = _project(client, admin_auth_headers)
+    _viewer_headers, viewer_user_id = _registered_user(client, role=Role.VIEWER)
+    added = client.post(
+        f"/projects/{project_a}/members",
+        json={"user_id": viewer_user_id, "role": "viewer"},
+        headers=admin_auth_headers,
+    )
+    assert added.status_code == 201, added.text
+    note = client.post(
+        "/notes",
+        json={
+            "project_id": project_a,
+            "raw_content": "Embargoed odor observation",
+            "transcribed_text": "Sensitive transcript",
+            "metadata": {SENSITIVITY_METADATA_KEY: SENSITIVE_NOTE_VALUE},
+            "status": "staged",
+        },
+        headers=admin_auth_headers,
+    )
+    assert note.status_code == 201, note.text
+
+    with client.app.state.db_session_factory() as session:
+        repository = SQLAlchemyLabTrackerRepository(session)
+        api = client.app.state.lab_tracker_api.for_request(repository)
+        executor = ScopedGraphDraftReadToolExecutor(
+            repository=repository,
+            authorization=api.project_authorization,
+            project_id=UUID(project_a),
+            target_user_id=UUID(viewer_user_id),
+            sensitivity_policy="redact",
+            goals=api.goals,
+            publication_readiness=api.publication_readiness,
+        )
+        harness_mcp = HarnessGraphDraftMCPServer(executor=executor, max_tool_calls=4)
+
+        tool_names = {item["name"] for item in harness_mcp.tool_specs()}
+        assert tool_names == set(AGENTIC_READ_TOOL_ALLOWLIST) | {SUBMIT_GRAPH_PATCH_TOOL}
+        assert "resolve_artifact" not in tool_names
+        assert not any(name.startswith("create_") for name in tool_names)
+
+        fastmcp_names = {
+            tool.name
+            for tool in asyncio.run(harness_mcp.build_fastmcp_server().list_tools())
+        }
+        assert fastmcp_names == tool_names
+
+        result = harness_mcp.execute_tool("list_notes", {"project_id": project_a})
+        omitted_note = result["data"][0]
+        assert omitted_note["sensitive_content_omitted"] is True
+        assert "raw_content" not in omitted_note
+        assert executor.sensitivity_policy == "omit"
+
+        with pytest.raises(GraphDraftingError, match="outside the graph draft read scope"):
+            harness_mcp.execute_tool("list_notes", {"project_id": project_b})
+        with pytest.raises(GraphDraftingError, match="not registered"):
+            harness_mcp.execute_tool("resolve_artifact", {})
+
+        submitted = harness_mcp.execute_tool(
+            SUBMIT_GRAPH_PATCH_TOOL,
+            {
+                "graph_patch": {
+                    "summary": "no-op",
+                    "uncertain_fields": [],
+                    "clarification_requests": [],
+                    "operations": [],
+                }
+            },
+        )
+        assert submitted == {"accepted": True, "propose_only": True, "operation_count": 0}
+
+
+def test_agentic_live_read_tools_fail_closed_without_review_assignee(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+) -> None:
+    project_id = _project(client, admin_auth_headers)
+    _note(client, admin_auth_headers, project_id, "Scheduled note without reviewer.")
+
+    class LiveToolClient(FakeBatchDraftClient):
+        provider = "agentic"
+        requires_background_worker = True
+        _tool_loop_enabled = True
+
+        def configure_live_read_tools(self, executor) -> None:  # noqa: ANN001
+            raise AssertionError("unassigned live runs must fail before executor injection")
+
+    fake_client = LiveToolClient(_batch_patch(project_id))
+    with client.app.state.db_session_factory() as session:
+        api = client.app.state.lab_tracker_api.for_request(
+            SQLAlchemyLabTrackerRepository(session)
+        )
+        run = api.run_graph_draft_batch_for_project(
+            UUID(project_id),
+            draft_client=fake_client,
+            actor=system_auth_context(),
+        )
+
+    assert run.status.value == "failed"
+    assert run.change_set_id is None
+    assert fake_client.calls == []
+    assert "review_assignee_user_id" in run.error_metadata["message"]
+
+
+def test_external_harness_background_run_lands_proposals_through_existing_pipeline(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+) -> None:
+    project_id = _project(client, admin_auth_headers)
+    reviewer_headers, reviewer_user_id = _registered_user(client, role=Role.VIEWER)
+    added = client.post(
+        f"/projects/{project_id}/members",
+        json={"user_id": reviewer_user_id, "role": "contributor"},
+        headers=admin_auth_headers,
+    )
+    assert added.status_code == 201, added.text
+    _note(client, reviewer_headers, project_id, "Daily note about odor panel.")
+    patch = _batch_patch(project_id)
+
+    class FakeHarnessRunner:
+        def run(self, *, request, mcp_server):  # noqa: ANN001
+            assert request.launch.selector == "codex"
+            assert request.sandbox_profile == "operator_managed"
+            assert request.egress_profile == "vendor_api_only"
+            read_result = mcp_server.execute_tool(
+                "list_notes",
+                {"project_id": project_id, "limit": 1},
+            )
+            assert read_result["data"]
+            mcp_server.execute_tool(SUBMIT_GRAPH_PATCH_TOOL, {"graph_patch": patch})
+            return HarnessDraftRunResult(tool_trace=mcp_server.tool_trace)
+
+    draft_client = HarnessGraphDraftClient(
+        launch=EXTERNAL_HARNESS_LAUNCH_TABLE["codex"],
+        enabled=True,
+        sandbox_profile="operator_managed",
+        egress_profile="vendor_api_only",
+        timeout_seconds=30,
+        max_tool_calls=4,
+        max_stdout_bytes=4096,
+        runner=FakeHarnessRunner(),
+    )
+
+    with client.app.state.db_session_factory() as session:
+        api = client.app.state.lab_tracker_api.for_request(
+            SQLAlchemyLabTrackerRepository(session)
+        )
+        run = api.run_graph_draft_batch_for_project(
+            UUID(project_id),
+            draft_client=draft_client,
+            actor=system_auth_context(),
+            review_assignee=reviewer_user_id,
+            review_assignee_user_id=UUID(reviewer_user_id),
+        )
+        change_set = api.get_graph_change_set(run.change_set_id)
+
+    assert run.status.value == "ready"
+    assert run.change_set_id is not None
+    assert change_set.provider == "external_harness"
+    assert change_set.status.value == "ready"
+    assert change_set.context_packet["agentic_tool_trace"]["provider"] == "external_harness"
+    assert change_set.context_packet["agentic_tool_trace"]["tool_call_count"] == 1
+    assert change_set.operations[0].status.value == "proposed"
+    assert change_set.operations[0].acceptance_mode is None
+
+
+def test_external_harness_failure_does_not_retry_full_subprocess_spawn(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+) -> None:
+    project_id = _project(client, admin_auth_headers)
+    reviewer_headers, reviewer_user_id = _registered_user(client, role=Role.VIEWER)
+    added = client.post(
+        f"/projects/{project_id}/members",
+        json={"user_id": reviewer_user_id, "role": "contributor"},
+        headers=admin_auth_headers,
+    )
+    assert added.status_code == 201, added.text
+    _note(client, reviewer_headers, project_id, "Daily note for failing harness.")
+
+    class FailingHarnessRunner:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def run(self, *, request, mcp_server):  # noqa: ANN001
+            self.calls += 1
+            raise GraphDraftingError("harness failed once")
+
+    runner = FailingHarnessRunner()
+    draft_client = HarnessGraphDraftClient(
+        launch=EXTERNAL_HARNESS_LAUNCH_TABLE["codex"],
+        enabled=True,
+        sandbox_profile="operator_managed",
+        egress_profile="vendor_api_only",
+        timeout_seconds=30,
+        max_tool_calls=4,
+        max_stdout_bytes=4096,
+        runner=runner,
+    )
+
+    with client.app.state.db_session_factory() as session:
+        api = client.app.state.lab_tracker_api.for_request(
+            SQLAlchemyLabTrackerRepository(session)
+        )
+        run = api.run_graph_draft_batch_for_project(
+            UUID(project_id),
+            draft_client=draft_client,
+            actor=system_auth_context(),
+            review_assignee=reviewer_user_id,
+            review_assignee_user_id=UUID(reviewer_user_id),
+        )
+
+    assert run.status.value == "failed"
+    assert runner.calls == 1
+    assert run.error_metadata["attempts"] == 1
+    assert run.error_metadata["message"] == "harness failed once"
 
 
 def test_agentic_graph_draft_client_uses_read_only_context_trace() -> None:

@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+from uuid import uuid4
+
 import pytest
 from fastapi.testclient import TestClient
 
 from lab_tracker.app import create_app
+from lab_tracker.auth import Role
 from lab_tracker.routes.device_auth import (
     _ENROLLMENT_QR_BORDER,
     _ENROLLMENT_QR_DARK,
@@ -18,6 +21,25 @@ from lab_tracker.routes.device_auth import (
 
 def _device_headers(secret: str) -> dict[str, str]:
     return {"Authorization": f"Bearer {secret}"}
+
+
+def _register_user(
+    client: TestClient,
+    *,
+    role: Role = Role.ADMIN,
+    username_prefix: str = "user",
+) -> tuple[str, dict[str, str]]:
+    username = f"{username_prefix}-{uuid4().hex[:8]}"
+    password = "secret"
+    user = client.app.state.auth_service.register_user(
+        username=username,
+        password=password,
+        role=role,
+    )
+    login = client.post("/auth/login", json={"username": username, "password": password})
+    assert login.status_code == 200, login.text
+    token = login.json()["data"]["access_token"]
+    return str(user.user_id), {"Authorization": f"Bearer {token}"}
 
 
 def _create_project(client: TestClient, headers: dict[str, str]) -> str:
@@ -128,6 +150,58 @@ def test_consume_enrollment_is_public_and_single_use(
         json={"offer_token": enrollment["offer_token"], "label": "Other"},
     )
     assert consume_again.status_code == 401
+
+
+def test_qr_paired_device_inherits_enrollment_creator_user_id(client: TestClient):
+    owner_user_id, owner_headers = _register_user(client, username_prefix="device-owner")
+    other_user_id, other_headers = _register_user(client, username_prefix="other-user")
+    assert owner_user_id != other_user_id
+    project_id = _create_project(client, owner_headers)
+
+    enrollment = client.post(
+        "/auth/devices/enrollment",
+        json={},
+        headers=owner_headers,
+    )
+    assert enrollment.status_code == 201, enrollment.text
+    offer_token = enrollment.json()["data"]["offer_token"]
+
+    consume = client.post(
+        "/auth/devices/consume",
+        json={"offer_token": offer_token, "label": "Owner phone"},
+        headers=other_headers,
+    )
+    assert consume.status_code == 201, consume.text
+    issued = consume.json()["data"]
+    device_token_id = issued["device_token_id"]
+    device_secret = issued["secret"]
+
+    me = client.get("/auth/me", headers=_device_headers(device_secret))
+    assert me.status_code == 200, me.text
+    assert me.json()["data"]["user_id"] == owner_user_id
+
+    owner_devices = client.get("/auth/devices", headers=owner_headers)
+    assert owner_devices.status_code == 200, owner_devices.text
+    assert any(
+        device["device_token_id"] == device_token_id
+        for device in owner_devices.json()["data"]
+    )
+
+    other_devices = client.get("/auth/devices", headers=other_headers)
+    assert other_devices.status_code == 200, other_devices.text
+    assert all(
+        device["device_token_id"] != device_token_id
+        for device in other_devices.json()["data"]
+    )
+
+    upload = client.post(
+        "/notes/upload-file",
+        data={"project_id": project_id},
+        files={"file": ("owner-snap.jpg", b"image-bytes", "image/jpeg")},
+        headers=_device_headers(device_secret),
+    )
+    assert upload.status_code == 201, upload.text
+    assert upload.json()["data"]["created_by_user_id"] == owner_user_id
 
 
 def test_list_and_revoke_device_round_trip(

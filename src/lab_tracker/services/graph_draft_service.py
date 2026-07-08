@@ -19,6 +19,7 @@ from lab_tracker.graph_drafting import (
     BATCH_PROMPT_VERSION,
     PROMPT_VERSION,
     PROVIDER,
+    GraphDraftBatchResult,
     GraphDraftingError,
 )
 from lab_tracker.models import (
@@ -34,6 +35,7 @@ from lab_tracker.models import (
     GraphDraftMode,
     Note,
     NoteStatus,
+    ReadyEdition,
     utc_now,
 )
 from lab_tracker.services.analysis_service import AnalysisService
@@ -49,14 +51,16 @@ from lab_tracker.services.graph_draft_context import (
 from lab_tracker.services.graph_draft_context import (
     entity_id as graph_entity_id,
 )
+from lab_tracker.services.graph_draft_read_tools import ScopedGraphDraftReadToolExecutor
 from lab_tracker.services.graph_draft_validation import GraphPatchValidator, string_list
 from lab_tracker.services.note_service import NoteService
 from lab_tracker.services.project_authorization import ProjectAuthorizationPolicy
 from lab_tracker.services.project_service import ProjectService
 from lab_tracker.services.provenance_link_service import ProvenanceLinkService
+from lab_tracker.services.publication_readiness_service import PublicationReadinessService
 from lab_tracker.services.question_service import QuestionService
 from lab_tracker.services.session_service import SessionService
-from lab_tracker.services.shared import actor_user_fk, actor_user_id
+from lab_tracker.services.shared import actor_user_fk, actor_user_id, is_sensitive_note
 from lab_tracker.services.visualization_service import VisualizationService
 
 logger = logging.getLogger(__name__)
@@ -128,6 +132,7 @@ class GraphDraftService(BaseService):
         versions: EntityVersionService,
         authorization: ProjectAuthorizationPolicy,
         provenance_links: ProvenanceLinkService | None = None,
+        publication_readiness: PublicationReadinessService | None = None,
     ) -> None:
         super().__init__(context)
         self.projects = projects
@@ -142,6 +147,7 @@ class GraphDraftService(BaseService):
         self.versions = versions
         self.authorization = authorization
         self.provenance_links = provenance_links
+        self.publication_readiness = publication_readiness
         self.context_builder = GraphContextBuilder(
             projects=projects,
             questions=questions,
@@ -355,11 +361,18 @@ class GraphDraftService(BaseService):
         if active_existing:
             return active_existing[0]
         self._ensure_draft_client_allowed_here(draft_client, actor=actor)
+        self._configure_agentic_live_read_tools(
+            draft_client,
+            project_id=project_id,
+            review_assignee_user_id=review_assignee_user_id,
+        )
+        app_settings = self._context.active_settings()
         context_packet = self.context_builder.build_batch_graph_context(
             batch_notes,
             window=window,
             actor=actor,
             batch_note_limit=_BATCH_NOTE_LIMIT,
+            sensitivity_policy=_batch_sensitivity_policy(draft_client, app_settings),
         )
         if cleaned_hint:
             context_packet["user_hint"] = cleaned_hint
@@ -388,25 +401,39 @@ class GraphDraftService(BaseService):
         )
         self._save_graph_change_set(change_set)
 
-        attempts = max(1, max_attempts)
+        attempts = (
+            1
+            if getattr(draft_client, "_disable_batch_retries", False)
+            else max(1, max_attempts)
+        )
         last_error: GraphDraftingError | None = None
+        graph_patch: dict[str, Any] | None = None
+        tool_trace: dict[str, Any] | None = None
         for attempt in range(1, attempts + 1):
             try:
-                graph_patch = draft_client.draft_from_batch(
+                draft_result = draft_client.draft_from_batch(
                     batch_context=context_packet,
                     user_hint=cleaned_hint,
                 )
+                graph_patch, tool_trace = _batch_draft_result_parts(draft_result)
+                if tool_trace:
+                    context_packet["agentic_tool_trace"] = tool_trace
+                    change_set.context_packet = context_packet
                 break
             except GraphDraftingError as exc:
                 last_error = exc
                 if attempt >= attempts:
-                    change_set.status = GraphChangeSetStatus.FAILED
-                    change_set.error_metadata = {
+                    error_metadata = {
                         "category": "model_error",
                         "message": str(exc),
                         "attempts": attempt,
                         "input_snapshot": _batch_input_snapshot(context_packet),
                     }
+                    error_tool_trace = _tool_trace_from_error(exc)
+                    if error_tool_trace:
+                        error_metadata["agentic_tool_trace"] = error_tool_trace
+                    change_set.status = GraphChangeSetStatus.FAILED
+                    change_set.error_metadata = error_metadata
                     change_set.updated_at = utc_now()
                     self._save_graph_change_set(change_set)
                     return change_set
@@ -414,29 +441,39 @@ class GraphDraftService(BaseService):
                     time.sleep(retry_backoff_seconds * attempt)
         else:
             message = str(last_error) if last_error is not None else "Model did not return a patch."
-            change_set.status = GraphChangeSetStatus.FAILED
-            change_set.error_metadata = {
+            error_metadata = {
                 "category": "model_error",
                 "message": message,
                 "attempts": attempts,
                 "input_snapshot": _batch_input_snapshot(context_packet),
             }
+            if last_error is not None:
+                error_tool_trace = _tool_trace_from_error(last_error)
+                if error_tool_trace:
+                    error_metadata["agentic_tool_trace"] = error_tool_trace
+            change_set.status = GraphChangeSetStatus.FAILED
+            change_set.error_metadata = error_metadata
             change_set.updated_at = utc_now()
             self._save_graph_change_set(change_set)
             return change_set
 
         try:
+            if graph_patch is None:
+                raise GraphDraftingError("Model did not return a patch.")
             self.patch_validator.validate_top_level(graph_patch)
             operations = self.patch_validator.operations_from_graph_patch(change_set, graph_patch)
             _attach_batch_source_traceability(operations, note_ids)
         except GraphDraftingError as exc:
-            change_set.status = GraphChangeSetStatus.FAILED
-            change_set.error_metadata = {
+            error_metadata = {
                 "category": "validation_error",
                 "message": str(exc),
                 "attempts": attempts if last_error is not None else 1,
                 "input_snapshot": _batch_input_snapshot(context_packet),
             }
+            if tool_trace:
+                error_metadata["agentic_tool_trace"] = tool_trace
+            change_set.status = GraphChangeSetStatus.FAILED
+            change_set.error_metadata = error_metadata
             change_set.updated_at = utc_now()
             self._save_graph_change_set(change_set)
             return change_set
@@ -464,6 +501,32 @@ class GraphDraftService(BaseService):
         raise GraphDraftingError(
             "The configured graph draft client only runs inside the background worker."
         )
+
+    def _configure_agentic_live_read_tools(
+        self,
+        draft_client: Any,
+        *,
+        project_id: UUID,
+        review_assignee_user_id: UUID | None,
+    ) -> None:
+        configure = getattr(draft_client, "configure_live_read_tools", None)
+        if not callable(configure) or not getattr(draft_client, "_tool_loop_enabled", False):
+            return
+        if review_assignee_user_id is None:
+            raise GraphDraftingError(
+                "Agentic live read tools require a concrete review_assignee_user_id."
+            )
+        app_settings = self._context.active_settings()
+        executor = ScopedGraphDraftReadToolExecutor(
+            repository=self.repository,
+            authorization=self.authorization,
+            project_id=project_id,
+            target_user_id=review_assignee_user_id,
+            sensitivity_policy=_batch_sensitivity_policy(draft_client, app_settings),
+            goals=self.goals,
+            publication_readiness=self.publication_readiness,
+        )
+        configure(executor)
 
     def get_graph_draft_batch_settings(
         self,
@@ -938,6 +1001,11 @@ class GraphDraftService(BaseService):
             raise AuthError("Only admins can run scheduled batch drafts.")
         current_time = _as_utc(now or utc_now())
         due_settings = self.repository.list_due_graph_draft_batch_settings(current_time)
+        external_harness_provider = (
+            not enqueue and _is_external_harness_provider(app_settings)
+        )
+        external_harness_spawn_limit = _external_harness_spawn_limit(app_settings)
+        external_harness_spawns = 0
         runs: list[GraphDraftBatchRun] = []
         for batch_settings in due_settings:
             if batch_settings.next_run_at is None:
@@ -986,6 +1054,15 @@ class GraphDraftService(BaseService):
                             review_assignee_user_id=reviewer.reviewer_user_id,
                         )
                     else:
+                        if (
+                            external_harness_provider
+                            and external_harness_spawns >= external_harness_spawn_limit
+                        ):
+                            raise GraphDraftingError(
+                                "External harness per-tick spawn ceiling reached."
+                            )
+                        if external_harness_provider:
+                            external_harness_spawns += 1
                         draft_client = draft_client_factory(app_settings)
                         run = self.run_graph_draft_batch_for_project(
                             batch_settings.project_id,
@@ -1226,6 +1303,73 @@ class GraphDraftService(BaseService):
             status=status,
             draft_mode=GraphDraftMode.GRAPH_BATCH,
         )
+
+    def list_ready_editions(
+        self,
+        *,
+        since: datetime | None = None,
+        review_assignee_user_id: UUID | None = None,
+        actor: AuthContext | None = None,
+    ) -> list[ReadyEdition]:
+        """Return contentless summaries of ready daily-review editions.
+
+        Admin-only, mirroring ``run_due`` -- this is the read model the external
+        run-due routine polls to decide whether to send a contentless cue. Only
+        READY batch editions with at least one still-decidable (PROPOSED)
+        operation qualify; a submitted/committed/empty edition is not a fresh
+        cue. ``since`` filters on creation time (strictly after) so the routine
+        can advance a watermark and never re-cue the same edition;
+        ``review_assignee_user_id`` narrows to one reviewer. The item count is
+        suppressed (``None``, ``sensitivity_suppressed=True``) when any source
+        note in the edition is sensitivity-tagged. Sorted oldest-first.
+        """
+        if not self.authorization.has_global_admin(actor):
+            raise AuthError("Only admins can list ready daily-review editions.")
+        editions: list[ReadyEdition] = []
+        for change_set in self.list_batch_graph_drafts(status=GraphChangeSetStatus.READY):
+            decidable_count = sum(
+                1
+                for operation in change_set.operations
+                if operation.status == GraphChangeOperationStatus.PROPOSED
+            )
+            if decidable_count <= 0:
+                continue
+            if (
+                since is not None
+                and change_set.created_at is not None
+                and _as_utc(change_set.created_at) <= _as_utc(since)
+            ):
+                continue
+            if (
+                review_assignee_user_id is not None
+                and change_set.review_assignee_user_id != review_assignee_user_id
+            ):
+                continue
+            sensitive = self._edition_has_sensitive_note(change_set)
+            editions.append(
+                ReadyEdition(
+                    change_set_id=change_set.change_set_id,
+                    project_id=change_set.project_id,
+                    review_assignee=change_set.review_assignee,
+                    review_assignee_user_id=change_set.review_assignee_user_id,
+                    review_assignee_username=change_set.review_assignee_username,
+                    decidable_count=None if sensitive else decidable_count,
+                    sensitivity_suppressed=sensitive,
+                    created_at=change_set.created_at,
+                )
+            )
+        editions.sort(key=lambda edition: _as_utc(edition.created_at))
+        return editions
+
+    def _edition_has_sensitive_note(self, change_set: GraphChangeSet) -> bool:
+        note_ids = change_set.source_note_ids or (
+            [change_set.source_note_id] if change_set.source_note_id else []
+        )
+        for note_id in note_ids:
+            note = self.repository.notes.get(note_id)
+            if note is not None and is_sensitive_note(note):
+                return True
+        return False
 
     def update_graph_change_operation(
         self,
@@ -1919,6 +2063,39 @@ def _batch_input_snapshot(context_packet: dict[str, Any]) -> dict[str, Any]:
             if isinstance(item, dict)
         ],
     }
+
+
+def _batch_draft_result_parts(
+    draft_result: dict[str, Any] | GraphDraftBatchResult,
+) -> tuple[dict[str, Any], dict[str, Any] | None]:
+    if isinstance(draft_result, GraphDraftBatchResult):
+        return draft_result.graph_patch, draft_result.tool_trace
+    return draft_result, None
+
+
+def _batch_sensitivity_policy(draft_client: Any, app_settings: Any) -> str:
+    if getattr(draft_client, "_force_omit_sensitivity", False):
+        return "omit"
+    return str(getattr(app_settings, "graph_draft_agentic_sensitivity_policy", "redact"))
+
+
+def _is_external_harness_provider(app_settings: Any) -> bool:
+    provider = str(getattr(app_settings, "graph_draft_provider", "") or "").strip().lower()
+    return provider in {"external_harness", "external-harness", "harness"}
+
+
+def _external_harness_spawn_limit(app_settings: Any) -> int:
+    raw = getattr(app_settings, "graph_draft_external_harness_max_spawns_per_tick", 1)
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return 1
+    return max(1, value)
+
+
+def _tool_trace_from_error(error: GraphDraftingError) -> dict[str, Any] | None:
+    trace = getattr(error, "tool_trace", None)
+    return trace if isinstance(trace, dict) else None
 
 
 def _attach_batch_source_traceability(

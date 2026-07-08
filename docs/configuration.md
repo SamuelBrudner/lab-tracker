@@ -55,6 +55,8 @@ that destination through your normal off-machine backup process.
 - `LAB_TRACKER_AUTH_ENABLED`: enable login and role enforcement (default: `false`
   in `local`, `true` otherwise; non-local environments cannot disable auth)
 - `LAB_TRACKER_PUBLIC_BASE_URL`: public URL used in email invitation links
+- `LAB_TRACKER_REVIEW_LINK_TTL_HOURS`: signed review-link lifetime in hours
+  (default: `72`)
 - `LAB_TRACKER_USAGE_EVENTS`: enable local usage telemetry writes (default:
   `false` in `local`, `true` otherwise)
 
@@ -100,6 +102,38 @@ credentials, MCP) is [`agent-setup.md`](agent-setup.md).
   for pending graph-draft batch jobs (default: `5`)
 - `LAB_TRACKER_GRAPH_DRAFT_SCHEDULER_INTERVAL_SECONDS`: scheduler tick interval
   for checking due cadence rows (default: `60`)
+- `LAB_TRACKER_GRAPH_DRAFT_AGENTIC_TOOL_LOOP_ENABLED`: when `true`, the
+  `agentic` batch drafter may let the model call scoped live read tools from the
+  background worker; default `false`
+- `LAB_TRACKER_GRAPH_DRAFT_AGENTIC_MAX_TOOL_CALLS`: maximum live read-tool calls
+  per agentic drafting attempt (default: `8`)
+- `LAB_TRACKER_GRAPH_DRAFT_AGENTIC_BASE_PROVIDER`: provider underneath the
+  `agentic` wrapper (default: `openai`; live tool loops currently require
+  `anthropic`)
+- `LAB_TRACKER_GRAPH_DRAFT_AGENTIC_SENSITIVITY_POLICY`: model-facing behavior for
+  sensitivity-tagged note bodies (`redact`, `omit`, or `allow`; default:
+  `redact`)
+- `LAB_TRACKER_GRAPH_DRAFT_EXTERNAL_HARNESS_ENABLED`: default-off security gate
+  for the external daily-review harness provider; set `true` only after the
+  sandbox and egress profile have been reviewed
+- `LAB_TRACKER_GRAPH_DRAFT_EXTERNAL_HARNESS`: external harness selector
+  (`claude_code`, `codex`, or `gemini`; default: `codex`)
+- `LAB_TRACKER_GRAPH_DRAFT_EXTERNAL_HARNESS_COMMAND`: optional operator-approved
+  command override for launching the selected harness; leave empty to use the
+  built-in launch table
+- `LAB_TRACKER_GRAPH_DRAFT_EXTERNAL_HARNESS_SANDBOX_PROFILE`: sandbox profile for
+  the external harness (`disabled` or `operator_managed`; default: `disabled`)
+- `LAB_TRACKER_GRAPH_DRAFT_EXTERNAL_HARNESS_EGRESS_PROFILE`: network egress
+  profile for the external harness (`disabled` or `vendor_api_only`; default:
+  `disabled`)
+- `LAB_TRACKER_GRAPH_DRAFT_EXTERNAL_HARNESS_TIMEOUT_SECONDS`: external harness
+  wall-clock timeout in seconds (default: `120`)
+- `LAB_TRACKER_GRAPH_DRAFT_EXTERNAL_HARNESS_MAX_STDOUT_BYTES`: maximum stdout
+  bytes captured from the harness before failing closed (default: `65536`);
+  raw stdout is never persisted
+- `LAB_TRACKER_GRAPH_DRAFT_EXTERNAL_HARNESS_MAX_SPAWNS_PER_TICK`: maximum
+  external harness subprocess launches allowed during one scheduled due-run
+  dispatch tick (default: `1`)
 - `LAB_TRACKER_OPENAI_API_KEY`: required when the provider is `openai` and for
   OpenAI voice-note transcription
 - `LAB_TRACKER_OPENAI_MODEL`: OpenAI model for graph drafts (default:

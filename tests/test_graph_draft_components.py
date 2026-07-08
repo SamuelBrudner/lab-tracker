@@ -19,13 +19,20 @@ from lab_tracker.models import (
 )
 from lab_tracker.services.graph_draft_applier import GraphPatchApplier
 from lab_tracker.services.graph_draft_context import (
+    SENSITIVE_NOTE_REDACTION,
     GraphContextBuilder,
     _compact_note,
     _graph_batch_context_summary,
     _source_artifact_packet,
 )
 from lab_tracker.services.graph_draft_validation import GraphPatchValidator
-from lab_tracker.services.shared import MEETING_NOTE_TYPE, NOTE_TYPE_METADATA_KEY, is_meeting_note
+from lab_tracker.services.shared import (
+    MEETING_NOTE_TYPE,
+    NOTE_TYPE_METADATA_KEY,
+    SENSITIVE_NOTE_VALUE,
+    SENSITIVITY_METADATA_KEY,
+    is_meeting_note,
+)
 
 
 def _change_set(project_id: UUID) -> GraphChangeSet:
@@ -274,6 +281,60 @@ def test_compact_note_and_source_artifact_expose_is_meeting() -> None:
     assert _compact_note(plain)["is_meeting"] is False
     assert _source_artifact_packet(meeting)["is_meeting"] is True
     assert _source_artifact_packet(plain)["is_meeting"] is False
+
+
+def test_sensitive_note_content_redacts_in_batch_context_packets() -> None:
+    note = Note(
+        note_id=uuid4(),
+        project_id=uuid4(),
+        raw_content="Embargoed observation",
+        transcribed_text="Sensitive transcript",
+        metadata={SENSITIVITY_METADATA_KEY: SENSITIVE_NOTE_VALUE},
+    )
+
+    compact = _compact_note(note)
+    artifact = _source_artifact_packet(note)
+
+    assert compact["preview"] == SENSITIVE_NOTE_REDACTION
+    assert compact["sensitive_content_redacted"] is True
+    assert artifact["transcript_text"] == SENSITIVE_NOTE_REDACTION
+    assert artifact["raw_content_preview"] == SENSITIVE_NOTE_REDACTION
+    assert artifact["sensitive_content_redacted"] is True
+
+    allowed = _source_artifact_packet(note, sensitivity_policy="allow")
+    assert allowed["transcript_text"] == "Sensitive transcript"
+
+
+def test_omit_policy_strips_mirrored_artifact_identifiers_from_metadata() -> None:
+    # The file-upload path mirrors a raw asset's identifiers into free-form
+    # metadata (source_file_*). Under `omit` those must not reach the
+    # model-facing payload, even though dropping raw_asset alone would leave
+    # them behind. Non-identifier classification metadata is retained.
+    note = Note(
+        note_id=uuid4(),
+        project_id=uuid4(),
+        raw_content="Embargoed observation",
+        metadata={
+            SENSITIVITY_METADATA_KEY: SENSITIVE_NOTE_VALUE,
+            "source_file_name": "EMBARGOED-grant.pdf",
+            "source_file_checksum": "deadbeefcafe",
+            "source_file_size_bytes": "918273",
+            "note_type": "meeting",
+        },
+    )
+    for packet in (
+        _compact_note(note, sensitivity_policy="omit"),
+        _source_artifact_packet(note, sensitivity_policy="omit"),
+    ):
+        blob = str(packet)
+        assert "EMBARGOED-grant.pdf" not in blob
+        assert "deadbeefcafe" not in blob
+        assert "918273" not in blob
+        assert packet["sensitive_content_omitted"] is True
+        assert "source_file_name" not in packet["metadata"]
+        # classification metadata is intentionally retained
+        assert packet["metadata"]["note_type"] == "meeting"
+        assert packet["metadata"][SENSITIVITY_METADATA_KEY] == SENSITIVE_NOTE_VALUE
 
 
 def test_graph_batch_context_summary_counts_meeting_notes() -> None:

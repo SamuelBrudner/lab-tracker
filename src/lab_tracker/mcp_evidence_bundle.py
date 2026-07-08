@@ -211,12 +211,12 @@ def _plan_claim(context: _BundleContext, payload: JsonObject) -> None:
         return
     statement = _clean(payload.get("statement"))
     confidence = payload.get("confidence")
-    if statement is None or confidence is None:
+    if statement is None:
         _create_planned(
             context,
             "claim",
             {},
-            warning="Claim create requires statement and confidence.",
+            warning="Claim create requires a statement.",
         )
         return
     dataset_ids = _string_list(payload.get("supported_by_dataset_ids"))

@@ -208,6 +208,28 @@ def test_claim_status_transitions_and_edits():
         api.update_claim(claim.claim_id, statement="Updated statement", actor=actor)
 
 
+def test_create_claim_without_confidence_is_allowed():
+    api = repository_backed_api()
+    actor = _actor()
+    project, question = _setup_project_with_question(api, actor)
+    claim = api.create_claim(
+        project_id=project.project_id,
+        statement="Confidence is optional and may be omitted",
+        answers_question_ids=[question.question_id],
+        actor=actor,
+    )
+    assert claim.confidence is None
+    assert api.get_claim(claim.claim_id).confidence is None
+    # A provided value is still range-validated.
+    with pytest.raises(ValidationError):
+        api.create_claim(
+            project_id=project.project_id,
+            statement="Out-of-range confidence is still rejected",
+            confidence=150.0,
+            actor=actor,
+        )
+
+
 def test_update_claim_can_clear_support_links_with_empty_lists():
     api = repository_backed_api()
     actor = _actor()

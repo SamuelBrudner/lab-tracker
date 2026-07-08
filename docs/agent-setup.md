@@ -51,6 +51,18 @@ gateway. An `agentic` provider (a read-only tool-using drafting loop) also
 exists and requires the background worker — see
 [`server-resident-agentic-drafting-design.md`](server-resident-agentic-drafting-design.md).
 
+An `external_harness` provider is also available for daily-review batch drafting
+when a deployment wants Claude Code, Codex CLI, or Gemini CLI to act as the
+drafting brain. It is background-worker-only, disabled by default, and should
+stay disabled until an operator has established both
+`LAB_TRACKER_GRAPH_DRAFT_EXTERNAL_HARNESS_SANDBOX_PROFILE=operator_managed` and
+`LAB_TRACKER_GRAPH_DRAFT_EXTERNAL_HARNESS_EGRESS_PROFILE=vendor_api_only`.
+The harness gets no Lab Tracker token or database setting: it can read only
+through the per-run scoped executor MCP surface, with sensitivity forced to
+`omit`, and its patch still lands in the same human review queue. The enablement
+checklist lives in
+[`external-harness-security-review.md`](external-harness-security-review.md).
+
 Two setup facts worth knowing up front:
 
 - A missing key is **not** detected at startup. It surfaces at the first draft

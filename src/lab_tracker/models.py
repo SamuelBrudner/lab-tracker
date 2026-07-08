@@ -656,6 +656,30 @@ class GraphChangeSet(_DomainModel):
         return int(value)
 
 
+class ReadyEdition(_DomainModel):
+    """A contentless summary of one ready daily-review edition for a reviewer.
+
+    This is the payload of the daily-review *cue* (the email/push knock). It
+    deliberately carries no science: no summary, no proposed operations, no
+    excerpts. ``project_name`` is ``None`` unless the caller explicitly opts in,
+    and ``decidable_count`` is ``None`` (with ``sensitivity_suppressed`` true)
+    when any source note in the edition is sensitivity-tagged, so even activity
+    volume for a sensitive program cannot be inferred off-app. ``deep_link`` is a
+    signed, short-TTL, capability-free link into the in-app accept/reject queue.
+    """
+
+    change_set_id: UUID
+    project_id: UUID
+    project_name: str | None = None
+    review_assignee: str | None = None
+    review_assignee_user_id: UUID | None = None
+    review_assignee_username: str | None = None
+    decidable_count: int | None = None
+    sensitivity_suppressed: bool = False
+    created_at: datetime
+    deep_link: str | None = None
+
+
 class GraphDraftBatchSettings(_DomainModel):
     settings_id: UUID
     project_id: UUID
@@ -910,7 +934,7 @@ class ClaimInput(_DomainModel):
     model_config = ConfigDict(from_attributes=True, frozen=True)
 
     statement: str
-    confidence: float
+    confidence: float | None = None
     status: ClaimStatus = ClaimStatus.PROPOSED
     terminal_reason: str | None = None
     falsification_criteria: str | None = None
@@ -926,7 +950,7 @@ class Claim(_DomainModel):
     claim_id: UUID
     project_id: UUID
     statement: str
-    confidence: float
+    confidence: float | None = None
     status: ClaimStatus = ClaimStatus.PROPOSED
     terminal_reason: str | None = None
     falsification_criteria: str | None = None

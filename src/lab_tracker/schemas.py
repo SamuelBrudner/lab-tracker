@@ -635,7 +635,7 @@ class AnalysisUpdate(RequestModel):
 class ClaimCreate(RequestModel):
     project_id: UUID
     statement: NonBlankStr
-    confidence: float = Field(..., ge=0.0, le=100.0)
+    confidence: float | None = Field(None, ge=0.0, le=100.0)
     status: ClaimStatus | None = None
     terminal_reason: NonBlankStr | None = None
     falsification_criteria: NonBlankStr | None = None

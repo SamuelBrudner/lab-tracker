@@ -776,7 +776,7 @@ class ClaimModel(Base):
         nullable=False,
     )
     statement: Mapped[str] = mapped_column(Text, nullable=False)
-    confidence: Mapped[float] = mapped_column(Float, nullable=False)
+    confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
     status: Mapped[ClaimStatus] = mapped_column(
         EnumType(ClaimStatus, length=20), default="proposed"
     )

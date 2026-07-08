@@ -32,7 +32,7 @@ from lab_tracker.services.note_service import NoteService
 from lab_tracker.services.project_service import ProjectService
 from lab_tracker.services.question_service import QuestionService
 from lab_tracker.services.session_service import SessionService
-from lab_tracker.services.shared import is_meeting_note
+from lab_tracker.services.shared import is_meeting_note, is_sensitive_note, omit_safe_metadata
 from lab_tracker.services.visualization_service import VisualizationService
 
 EntityResult = (
@@ -41,6 +41,7 @@ EntityResult = (
 _RECENT_CONTEXT_LIMIT = 10
 _QUESTION_CONTEXT_LIMIT = 50
 _CAPTURE_BUNDLE_LIMIT = 6
+SENSITIVE_NOTE_REDACTION = "[sensitive note content redacted]"
 
 
 class GraphContextBuilder:
@@ -74,6 +75,7 @@ class GraphContextBuilder:
         window: tuple[Any, Any] | None = None,
         actor: AuthContext | None = None,
         batch_note_limit: int = 100,
+        sensitivity_policy: str = "redact",
     ) -> dict[str, Any]:
         """Assemble a context packet covering a batch of staged notes.
 
@@ -126,7 +128,10 @@ class GraphContextBuilder:
                     ],
                     "recent_sessions": [_compact_session(item) for item in recent_sessions],
                     "recent_datasets": [_compact_dataset(item) for item in recent_datasets],
-                    "recent_notes": [_compact_note(item) for item in recent_notes],
+                    "recent_notes": [
+                        _compact_note(item, sensitivity_policy=sensitivity_policy)
+                        for item in recent_notes
+                    ],
                     "recent_analyses": [_compact_analysis(item) for item in recent_analyses],
                     "recent_claims": [_compact_claim(item) for item in recent_claims],
                     "recent_visualizations": [
@@ -151,12 +156,22 @@ class GraphContextBuilder:
             "mode": "graph_batch",
             "batch_window": _batch_window(window, batch_notes),
             "current_user": _compact_actor(actor),
-            "batch_notes": [_compact_note(item, include_raw_asset=True) for item in batch_notes],
+            "batch_notes": [
+                _compact_note(
+                    item,
+                    include_raw_asset=True,
+                    sensitivity_policy=sensitivity_policy,
+                )
+                for item in batch_notes
+            ],
             "capture_placement": [
                 _capture_placement(note, sessions_by_project.get(note.project_id, []))
                 for note in batch_notes
             ],
-            "source_artifacts": [_source_artifact_packet(item) for item in batch_notes],
+            "source_artifacts": [
+                _source_artifact_packet(item, sensitivity_policy=sensitivity_policy)
+                for item in batch_notes
+            ],
             "projects": project_blocks,
             "truncated_note_count": truncated_note_count,
         }
@@ -652,8 +667,33 @@ def _capture_placement(note: Note, sessions: list[Session]) -> dict[str, Any]:
     }
 
 
-def _compact_note(note: Note, *, include_raw_asset: bool = False) -> dict[str, Any]:
+def _compact_note(
+    note: Note,
+    *,
+    include_raw_asset: bool = False,
+    sensitivity_policy: str = "redact",
+) -> dict[str, Any]:
+    if _should_omit_sensitive_note(note, sensitivity_policy):
+        omitted: dict[str, Any] = {
+            "id": str(note.note_id),
+            "project_id": str(note.project_id),
+            "status": note.status.value,
+            "created_at": note.created_at.isoformat(),
+            "updated_at": note.updated_at.isoformat(),
+            "targets": [
+                {"entity_type": target.entity_type.value, "entity_id": str(target.entity_id)}
+                for target in note.targets
+            ],
+            "metadata": omit_safe_metadata(note.metadata),
+            "is_meeting": is_meeting_note(note),
+            "sensitive_content_omitted": True,
+        }
+        _add_origin_context(omitted, note)
+        return omitted
     preview = note.transcribed_text or note.raw_content or ""
+    sensitive_redacted = _should_redact_sensitive_note(note, sensitivity_policy)
+    if sensitive_redacted:
+        preview = SENSITIVE_NOTE_REDACTION
     payload: dict[str, Any] = {
         "id": str(note.note_id),
         "project_id": str(note.project_id),
@@ -668,6 +708,8 @@ def _compact_note(note: Note, *, include_raw_asset: bool = False) -> dict[str, A
         "metadata": dict(note.metadata),
         "is_meeting": is_meeting_note(note),
     }
+    if sensitive_redacted:
+        payload["sensitive_content_redacted"] = True
     if include_raw_asset and note.raw_asset is not None:
         payload["raw_asset"] = {
             "filename": note.raw_asset.filename,
@@ -704,8 +746,26 @@ def _source_artifact_type(note: Note) -> str:
     return "text"
 
 
-def _source_artifact_packet(note: Note) -> dict[str, Any]:
+def _source_artifact_packet(
+    note: Note,
+    *,
+    sensitivity_policy: str = "redact",
+) -> dict[str, Any]:
     artifact_type = _source_artifact_type(note)
+    if _should_omit_sensitive_note(note, sensitivity_policy):
+        # Drop the sensitive note's content AND its raw-asset identifiers
+        # (filename/checksum/storage-id/size) that the redact path would leak.
+        return {
+            "type": artifact_type,
+            "note_id": str(note.note_id),
+            "project_id": str(note.project_id),
+            "created_at": note.created_at.isoformat(),
+            "status": note.status.value,
+            "metadata": omit_safe_metadata(note.metadata),
+            "is_meeting": is_meeting_note(note),
+            "sensitive_content_omitted": True,
+        }
+    sensitive_redacted = _should_redact_sensitive_note(note, sensitivity_policy)
     payload: dict[str, Any] = {
         "type": artifact_type,
         "note_id": str(note.note_id),
@@ -719,6 +779,8 @@ def _source_artifact_packet(note: Note) -> dict[str, Any]:
             for target in note.targets
         ],
     }
+    if sensitive_redacted:
+        payload["sensitive_content_redacted"] = True
     if note.raw_asset is not None:
         payload["artifact_id"] = str(note.raw_asset.storage_id)
         payload["filename"] = note.raw_asset.filename
@@ -727,11 +789,31 @@ def _source_artifact_packet(note: Note) -> dict[str, Any]:
         payload["checksum"] = note.raw_asset.checksum
     if note.transcribed_text:
         payload["transcript_id"] = f"transcript:{note.note_id}"
-        payload["transcript_text"] = note.transcribed_text
+        payload["transcript_text"] = (
+            SENSITIVE_NOTE_REDACTION if sensitive_redacted else note.transcribed_text
+        )
         payload["transcript_is_derived"] = True
     if note.raw_content:
-        payload["raw_content_preview"] = note.raw_content[:1000]
+        payload["raw_content_preview"] = (
+            SENSITIVE_NOTE_REDACTION if sensitive_redacted else note.raw_content[:1000]
+        )
     return payload
+
+
+def _should_redact_sensitive_note(note: Note, sensitivity_policy: str) -> bool:
+    return sensitivity_policy != "allow" and is_sensitive_note(note)
+
+
+def _should_omit_sensitive_note(note: Note, sensitivity_policy: str) -> bool:
+    """Whether a sensitive note's content AND artifact identifiers must be dropped.
+
+    Under the ``omit`` policy a sensitive note is reduced to its structural
+    identity plus a coverage-gap marker: no raw content, no transcript, and no
+    raw-asset filename/checksum/storage-id/size. ``redact`` (the weaker default)
+    only masks the free-text bodies and still exposes those artifact
+    identifiers, so the ``omit`` path must short-circuit before the redact path.
+    """
+    return sensitivity_policy == "omit" and is_sensitive_note(note)
 
 
 def _compact_question(question: Question) -> dict[str, Any]:

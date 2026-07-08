@@ -796,9 +796,10 @@ def _claim_node(
         "@id": _resource_iri(base_url, "claims", claim.claim_id),
         "@type": "prov:Entity",
         "statement": claim.statement,
-        "confidence": claim.confidence,
         "status": claim.status.value,
     }
+    if claim.confidence is not None:
+        node["confidence"] = claim.confidence
     if claim.terminal_reason:
         node["terminalReason"] = claim.terminal_reason
     if claim.falsification_criteria:

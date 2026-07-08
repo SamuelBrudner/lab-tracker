@@ -46,6 +46,16 @@ StatusT = TypeVar("StatusT", bound=Enum)
 NOTE_TYPE_METADATA_KEY = "note_type"
 MEETING_NOTE_TYPE = "meeting"
 
+# Free-form note metadata convention for marking a captured note as sensitive
+# (unpublished/embargoed program, PHI/IACUC-relevant, etc.). Stored under the
+# same notes.metadata JSON column as the meeting marker, so this needs no schema
+# change. Centralized here so the daily-review delivery read model and any future
+# capture-time control agree on the exact key/value. When any note in a ready
+# edition carries this tag, the contentless cue suppresses even the item count so
+# activity volume for a sensitive program cannot be inferred off-app.
+SENSITIVITY_METADATA_KEY = "sensitivity"
+SENSITIVE_NOTE_VALUE = "sensitive"
+
 
 def actor_user_id(actor: AuthContext | None) -> str | None:
     if actor is None:
@@ -121,6 +131,34 @@ def is_meeting_note(note: Note) -> bool:
     so the comparison is against the canonical string.
     """
     return note.metadata.get(NOTE_TYPE_METADATA_KEY) == MEETING_NOTE_TYPE
+
+
+def is_sensitive_note(note: Note) -> bool:
+    """Return True when a note is tagged sensitive via free-form metadata.
+
+    The marker is ``metadata[SENSITIVITY_METADATA_KEY] == SENSITIVE_NOTE_VALUE``.
+    Note metadata values are stringified on write (see normalize_note_metadata),
+    so the comparison is against the canonical string.
+    """
+    return note.metadata.get(SENSITIVITY_METADATA_KEY) == SENSITIVE_NOTE_VALUE
+
+
+# The file-upload capture path mirrors a note's raw-asset identifiers into
+# free-form metadata (``source_file_name``/``_checksum``/``_size_bytes``/… — see
+# ``source_file_metadata`` in routes/notes.py). Dropping ``raw_asset`` under the
+# ``omit`` sensitivity policy is not enough on its own: those same identifiers
+# survive in ``metadata`` and re-expose a sensitive note's filename/checksum/size
+# to the model. Strip them so ``omit`` actually withholds what it claims.
+_OMIT_STRIPPED_METADATA_PREFIXES = ("source_file_",)
+
+
+def omit_safe_metadata(metadata: Mapping[str, str]) -> dict[str, str]:
+    """Return note metadata with raw-asset-identifier keys removed for ``omit``."""
+    return {
+        str(key): value
+        for key, value in metadata.items()
+        if not str(key).startswith(_OMIT_STRIPPED_METADATA_PREFIXES)
+    }
 
 
 def _normalized_query(query: str) -> str:

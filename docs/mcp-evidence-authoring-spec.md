@@ -153,7 +153,7 @@ Required shape should mirror `POST /claims`:
 
 - `project_id`
 - `statement`
-- `confidence`
+- optional `confidence`
 - optional `status`
 - optional `supported_by_dataset_ids`
 - optional `supported_by_analysis_ids`

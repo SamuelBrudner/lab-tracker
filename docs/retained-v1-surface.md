@@ -67,6 +67,13 @@ research record:
   staged notes. Drafting may be note-scoped or batch-scoped, but every proposed
   operation requires human edit/accept/reject before commit through normal API
   validation.
+- Default-off external harness drafting for SYSTEM background daily-review
+  batches, where Claude Code, Codex CLI, or Gemini CLI may be selected as the
+  drafting brain only behind an operator-reviewed sandbox and vendor-only egress
+  profile. The harness receives no Lab Tracker credential, reads through the
+  per-run scoped executor surface (18 read tools plus `submit_graph_patch`,
+  sensitivity forced to omit, no artifact resolution or write tools), and still
+  lands proposals only through the normal human-gated graph-draft pipeline.
 - Per-(project, user) graph-draft batch settings and run history for configured
   cadence, run-now, and run-due drafting over staged notes, with a project-level
   default row and `review_assignee` attribution on scheduled user batches.

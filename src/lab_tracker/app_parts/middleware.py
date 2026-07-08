@@ -108,11 +108,15 @@ def system_auth_context() -> AuthContext:
 def _is_public_path(path: str) -> bool:
     if path in _PUBLIC_PATHS:
         return True
-    # Keep docs and app assets reachable without credentials.
+    # Keep docs and app assets reachable without credentials. ``/r/`` is the
+    # daily-review deep-link landing route: it verifies its own signed token and
+    # only ever 302-redirects into the (still authenticated) in-app queue, so it
+    # must be reachable before the recipient has signed in.
     return (
         path.startswith("/docs/")
         or path.startswith("/redoc/")
         or path.startswith("/app/")
+        or path.startswith("/r/")
     )
 
 

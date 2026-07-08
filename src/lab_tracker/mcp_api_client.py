@@ -656,7 +656,7 @@ class LabTrackerAPIClient:
         *,
         project_id: str,
         statement: str,
-        confidence: float,
+        confidence: float | None = None,
         status: str | None = "proposed",
         falsification_criteria: str | None = None,
         verification_plan: str | None = None,
