@@ -946,7 +946,10 @@ def _add_repo_parsers(subcommands: argparse._SubParsersAction) -> None:
     )
     hook_parser.add_argument(
         "--lt-command",
-        help="Path to the lt executable the hook should call. Defaults to the lt on PATH.",
+        help=(
+            "Path to the lt executable the hook should call. Defaults to the lt "
+            "that runs this command, else the lt on PATH."
+        ),
     )
     hook_parser.add_argument(
         "--force",
@@ -1588,7 +1591,7 @@ def _cmd_doctor(args: argparse.Namespace) -> Any:
     from lab_tracker.cli import _doctor
 
     if not getattr(args, "all", False):
-        return _doctor(args.target)
+        return _doctor(args.target, include_installation=True)
     repos = []
     pruned = []
     for entry in repo_registry.list_repos():

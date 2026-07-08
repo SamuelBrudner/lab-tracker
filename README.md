@@ -84,7 +84,7 @@ Wet labs — initially neuroscience — that generate high-bandwidth data on spe
 No install. No terminal.
 
 - **Just looking?** [Open the demo](https://samuelbrudner.github.io/lab-tracker/app/) — read-only, seeded data, no login.
-- **Your lab already runs it?** Open the link your admin gave you. Local instances start with sign-in off, so you can jump straight into `/app`. Where sign-in is on, public sign-up creates a viewer account — ask your admin for editor access to write.
+- **Your lab already runs it?** Open the link or invitation your admin gave you. Local instances start with sign-in off, so you can jump straight into `/app`. Where sign-in is on, users are invite/admin-provisioned by default; ask your admin for project access or editor permissions.
 - **Capturing from your phone?** Pair it from the **Devices** page, then use the capture link. See the [phone capture quickstart](docs/phone-capture-quickstart.md).
 
 That's it. The rest of this page is for whoever sets it up.
@@ -128,8 +128,17 @@ models propose; a person reviews and commits.**
 The explicit walkthrough (provider, scheduling, credentials, MCP, verification)
 is **[Set up AI agents for the proposal workflow](docs/agent-setup.md)**.
 
-**Connecting an analysis repo?** In any repo, with the package installed, a
-coding agent (or you) can bootstrap capture from one read-only command:
+**Connecting an analysis repo?** First put the `lt` capture client on PATH once,
+so it works from any repo and any shell (`uv tool` keeps it in a stable
+`~/.local/bin` that the commit hook and MCP configs can rely on):
+
+```bash
+uv tool install "git+https://github.com/SamuelBrudner/lab-tracker"
+# then `uv tool update-shell` once if ~/.local/bin isn't on PATH yet
+```
+
+Then, in any repo, a coding agent (or you) can bootstrap capture from one
+read-only command:
 
 ```bash
 lt setup status   # read-only inventory + suggestions for what to set up next

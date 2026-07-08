@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pytest
 
+import lab_tracker_client.setup as setup_helpers
 from lab_tracker.cli import _doctor, init_consumer_repo, update_consumer_repo
 from lab_tracker.decision_context_constants import (
     MCP_SERVER_INSTRUCTIONS,
@@ -211,6 +212,24 @@ def test_doctor_content_only_drift(tmp_path) -> None:
     assert block  # silence unused warning paths
 
 
+def test_doctor_surfaces_installation_only_when_requested(tmp_path) -> None:
+    repo = tmp_path / "repo"
+    init_consumer_repo(repo)
+
+    # Default _doctor stays a pure idiom-drift report (used by setup_status and
+    # the --all sweep); the installation report is opt-in per call.
+    assert "installation" not in _doctor(repo)
+
+    payload = _doctor(repo, include_installation=True)
+    installation = payload["installation"]
+    assert set(installation) >= {"lt", "lt_mcp", "problems"}
+    assert isinstance(installation["problems"], list)
+    # Informational only: a fragile/missing install must never fail doctor.
+    from lab_tracker.cli import _doctor_exit_code
+
+    assert _doctor_exit_code(payload) == 0
+
+
 def test_scaffolded_settings_include_session_start_status_hook(tmp_path) -> None:
     repo = tmp_path / "repo"
     init_consumer_repo(repo)
@@ -252,6 +271,11 @@ def test_status_brief_healthy_is_one_line(isolated_homes, monkeypatch, capsys) -
     lt_cli.main(["watch", "add", "results", "--config", str(config_path)])
     capsys.readouterr()
     monkeypatch.setenv("LAB_TRACKER_BASE_URL", "http://127.0.0.1:9")
+    # Installation health (lt/lt-mcp on PATH, install stability) is a
+    # machine-global axis, orthogonal to whether this repo is configured. Under
+    # the test's dev .venv it would legitimately flag a fragile install, so stub
+    # it out to keep this a pure repo-config-completeness assertion.
+    monkeypatch.setattr(setup_helpers, "_installation_status", lambda: {"problems": []})
 
     lt_cli.main(["setup", "status", "--target", str(repo), "--brief"])
     brief = json.loads(capsys.readouterr().out)

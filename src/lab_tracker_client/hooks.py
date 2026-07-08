@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import difflib
 import re
-import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -368,14 +367,13 @@ def _require_paired_markers(existing: str, hook_path: Path) -> bool:
 
 
 def _default_lt_path() -> str:
-    # Prefer the sibling of this interpreter: it is guaranteed to be the same
-    # environment that provides git_capture; PATH may find a different install.
-    sibling = Path(sys.executable).parent / ("lt.exe" if sys.platform == "win32" else "lt")
-    if sibling.exists():
-        return str(sibling)
-    found = shutil.which("lt")
-    if found:
-        return found
+    # Prefer the sibling of this interpreter (the env that provides git_capture)
+    # over PATH; resolve_executable encodes that same order.
+    from lab_tracker_client.executables import resolve_executable
+
+    path = resolve_executable("lt").path
+    if path:
+        return path
     raise LTValidationError(
         "Could not locate the lt executable for the hook body; pass --lt-path."
     )

@@ -274,6 +274,46 @@ def test_setup_status_fail_silent_never_raises(config_home, tmp_path, capsys) ->
     assert payload["command"] == "setup-status"
 
 
+def test_setup_status_reports_installation_and_surfaces_problems(
+    config_home, tmp_path, monkeypatch, capsys
+) -> None:
+    monkeypatch.setattr(
+        setup_helpers,
+        "_installation_status",
+        lambda: {
+            "lt": {"on_path": None, "install_kind": "not-found"},
+            "lt_mcp": {"on_path": None, "install_kind": "not-found"},
+            "ok": False,
+            "problems": [
+                "`lt-mcp` is not on PATH; MCP clients cannot launch the Lab Tracker "
+                "server. `uv tool install` provides it."
+            ],
+        },
+    )
+
+    lt_cli.main(["setup", "status", "--target", str(tmp_path)])
+    payload = json.loads(capsys.readouterr().out)
+
+    assert payload["installation"]["ok"] is False
+    assert any("lt-mcp" in item for item in payload["suggestions"])
+
+
+def test_setup_status_omits_install_suggestion_when_healthy(
+    config_home, tmp_path, monkeypatch, capsys
+) -> None:
+    monkeypatch.setattr(
+        setup_helpers,
+        "_installation_status",
+        lambda: {"lt": {}, "lt_mcp": {}, "ok": True, "problems": []},
+    )
+
+    lt_cli.main(["setup", "status", "--target", str(tmp_path)])
+    payload = json.loads(capsys.readouterr().out)
+
+    assert payload["installation"]["ok"] is True
+    assert not any("not on PATH" in item for item in payload["suggestions"])
+
+
 def test_setup_init_delegates_to_consumer_scaffold(config_home, tmp_path, capsys) -> None:
     repo = tmp_path / "consumer"
     lt_cli.main(["setup", "init", "--target", str(repo)])

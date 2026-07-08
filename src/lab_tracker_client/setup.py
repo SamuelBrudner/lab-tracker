@@ -177,6 +177,7 @@ def setup_status(target: str | Path = ".", *, brief: bool = False) -> JsonObject
         "hpc": _hpc_status(root),
         "hooks": _hooks_status(root),
         "skills": _skills_status(),
+        "installation": _installation_status(),
     }
     payload["suggestions"] = _suggestions(payload)
     if not brief:
@@ -203,6 +204,7 @@ def _suggestions(status: JsonObject) -> list[str]:
     hooks = status["hooks"]
     watch = status["watch"]
     skills = status["skills"]
+    installation = status.get("installation") or {}
     # Only when nothing configured the URL at all: an env- or profile-pinned
     # server that is temporarily down is an outage, not a setup gap.
     if not status["server"]["reachable"] and status["server"]["source"] == "default":
@@ -249,6 +251,10 @@ def _suggestions(status: JsonObject) -> list[str]:
             "The installed lab-tracker-setup skill is stale; "
             "`lt update --install-skills` refreshes it."
         )
+    # Installation problems (lt/lt-mcp not on PATH, a fragile venv install) are
+    # already phrased as non-imperative suggestions; append them so they reach
+    # `--brief` and the SessionStart hook, which surface only `suggestions`.
+    suggestions.extend(installation.get("problems") or [])
     return suggestions
 
 
@@ -274,6 +280,17 @@ def _skills_status() -> JsonObject:
             ) == skill_content_without_version_line(generated)
             summary["version_in_sync"] = installed == generated
     return summary
+
+
+def _installation_status() -> JsonObject:
+    """Read-only report on whether lt/lt-mcp resolve and from a stable location."""
+
+    from lab_tracker_client.executables import installation_report
+
+    try:
+        return installation_report()
+    except Exception:  # noqa: BLE001 - status is a read-only inventory; never raise.
+        return {"problems": []}
 
 
 def _resolve_base_url(profile: dict[str, str]) -> tuple[str, str]:

@@ -11,6 +11,7 @@ from lab_tracker_client.client import LTValidationError
 from lab_tracker_client.repo import (
     HOOK_BEGIN_MARKER,
     HOOK_END_MARKER,
+    _hook_command_path,
     install_post_commit_hook,
 )
 
@@ -280,6 +281,39 @@ def test_install_hook_converts_windows_paths_for_sh(tmp_path, monkeypatch) -> No
     content = (tmp_path / ".git" / "hooks" / "post-commit").read_text(encoding="utf-8")
     assert "LT='C:/venv/Scripts/lt.exe'" in content
     assert "\\" not in content.split(HOOK_BEGIN_MARKER, 1)[1]
+
+
+def test_hook_command_path_defaults_to_resolver_sibling(tmp_path, monkeypatch) -> None:
+    # With --lt-command omitted, the baked path matches the shared resolver: the
+    # lt beside the running interpreter wins over a different PATH lt, so the
+    # repo hook agrees with the graph-draft and schedule hooks.
+    import shutil
+
+    bindir = "Scripts" if sys.platform == "win32" else "bin"
+    py = "python.exe" if sys.platform == "win32" else "python"
+    exe = "lt.exe" if sys.platform == "win32" else "lt"
+    env_bin = tmp_path / "env" / bindir
+    env_bin.mkdir(parents=True)
+    (env_bin / py).write_text("", encoding="utf-8")
+    sibling = env_bin / exe
+    sibling.write_text("", encoding="utf-8")
+    monkeypatch.setattr(sys, "executable", str(env_bin / py))
+    monkeypatch.setattr(shutil, "which", lambda _n: "/some/other/lt")
+
+    assert _hook_command_path(None) == str(sibling).replace("\\", "/")
+
+
+def test_hook_command_path_falls_back_to_literal_lt(tmp_path, monkeypatch) -> None:
+    # Last resort when neither a sibling nor a PATH lt resolves: defer to the
+    # commit-time shell's PATH via the bare name (preserves the old behavior).
+    import shutil
+
+    empty_bin = tmp_path / "empty" / ("Scripts" if sys.platform == "win32" else "bin")
+    empty_bin.mkdir(parents=True)
+    monkeypatch.setattr(sys, "executable", str(empty_bin / "python"))
+    monkeypatch.setattr(shutil, "which", lambda _n: None)
+
+    assert _hook_command_path(None) == "lt"
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="sh hook execution test is POSIX-only")

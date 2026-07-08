@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import hashlib
 import os
-import shutil
 import subprocess
 import sys
 from collections.abc import Callable
@@ -233,12 +232,11 @@ def _write_crontab(runner: Runner, content: str) -> None:
 
 
 def _default_lt_path() -> str:
-    sibling = Path(sys.executable).parent / ("lt.exe" if sys.platform == "win32" else "lt")
-    if sibling.exists():
-        return str(sibling)
-    found = shutil.which("lt")
-    if found:
-        return found
+    from lab_tracker_client.executables import resolve_executable
+
+    path = resolve_executable("lt").path
+    if path:
+        return path
     raise LTValidationError(
         "Could not locate the lt executable for the scheduled command; pass --lt-path."
     )

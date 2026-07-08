@@ -71,9 +71,18 @@ reliable place for both credentials and any `PATH` adjustments.
 ## `lt-mcp` on PATH
 
 Cursor must be able to find `lt-mcp`. The installed console script is the
-preferred portable command. If Cursor cannot find it on `PATH`, either point
-`command` at the absolute path of the script in your environment
-(e.g. `<venv>/bin/lt-mcp`), or run it through `uvx` against the repository:
+preferred portable command. The most reliable way to get it (and `lt`) onto
+`PATH` for a GUI editor is a global uv tool install, which puts them in a stable
+`~/.local/bin` (`%USERPROFILE%\.local\bin` on Windows):
+
+```bash
+uv tool install "git+https://github.com/SamuelBrudner/lab-tracker"
+uv tool update-shell   # first time only, if ~/.local/bin isn't on PATH yet
+```
+
+If you would rather not install it, either point `command` at the absolute path
+of the script in your environment (e.g. `<venv>/bin/lt-mcp`), or run it through
+`uvx` against the repository:
 
 ```json
 {

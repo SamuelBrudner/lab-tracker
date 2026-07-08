@@ -732,7 +732,7 @@ def main(argv: list[str] | None = None) -> None:
             raise SystemExit(1) from exc
         print(json.dumps(result.as_dict(), indent=2))
     elif args.command in {"doctor", "check-idioms"}:
-        payload = _doctor(args.target)
+        payload = _doctor(args.target, include_installation=True)
         print(json.dumps(payload, indent=2))
         if _doctor_exit_code(payload):
             raise SystemExit(1)
@@ -989,7 +989,9 @@ def _extract_version_line(
     return stripped.splitlines()[0]
 
 
-def _doctor(target: str | Path = ".") -> dict[str, object]:
+def _doctor(
+    target: str | Path = ".", *, include_installation: bool = False
+) -> dict[str, object]:
     root = Path(target).expanduser().resolve()
     body = code_facing_idioms()
     version_line = code_conventions_version_line(body)
@@ -1053,6 +1055,16 @@ def _doctor(target: str | Path = ".") -> dict[str, object]:
             "Managed blocks differ from the installed package text; "
             "`lt update` refreshes them (`--dry-run` previews the changes)."
         )
+    if include_installation:
+        # Informational only: the installation report never feeds the exit code
+        # (both _doctor_exit_code and the client _payload_exit_code key solely
+        # off targets[*]["drifted"]), so a fragile install never fails `doctor`.
+        try:
+            from lab_tracker_client.executables import installation_report
+
+            payload["installation"] = installation_report()
+        except Exception:  # noqa: BLE001 - doctor stays useful even if this fails.
+            pass
     return payload
 
 

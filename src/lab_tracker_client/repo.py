@@ -654,11 +654,18 @@ def _hook_path(repo_root: Path) -> Path:
 
 
 def _hook_command_path(lt_command: str | None) -> str:
-    """Pick the ``lt`` the hook should call, as an sh-friendly path."""
+    """Pick the ``lt`` the hook should call, as an sh-friendly path.
 
-    import shutil
+    With no explicit ``--lt-command``, resolve the same way the graph-draft and
+    schedule hooks do — via the shared resolver: the ``lt`` beside the running
+    interpreter, then ``PATH`` — so every baked hook path agrees. The literal
+    ``lt`` stays the last resort (deferring to the commit-time shell's ``PATH``)
+    when nothing resolves.
+    """
 
-    resolved = lt_command or shutil.which("lt") or "lt"
+    from lab_tracker_client.executables import resolve_executable
+
+    resolved = lt_command or resolve_executable("lt").path or "lt"
     # Git hooks run under sh even on Windows; sh wants forward slashes.
     return resolved.replace("\\", "/")
 

@@ -53,6 +53,34 @@ and `pillow`:
 uv pip install -e ".[test,lint,figure]"
 ```
 
+### Put `lt` and `lt-mcp` on PATH
+
+The editable install above only exposes the console scripts inside the
+activated `.venv`. But `lt` (the capture client) and `lt-mcp` (the MCP stdio
+server) are most useful as bare commands: watch-folder capture, the git
+commit-snapshot hook, and MCP client configs (Claude Code, Cursor, Copilot) all
+look for `lt`/`lt-mcp` on `PATH`, and a GUI-launched editor does not inherit an
+activated venv.
+
+Install them once as a global
+[uv tool](https://docs.astral.sh/uv/guides/tools/) so they resolve from any
+directory and any shell:
+
+```bash
+uv tool install -e .      # from a lab-tracker checkout; tracks your working tree
+# or straight from git, with no checkout:
+uv tool install "git+https://github.com/SamuelBrudner/lab-tracker"
+```
+
+This installs `lt`, `lt-mcp`, and `lab-tracker` into `uv tool dir --bin`
+(`~/.local/bin`; `%USERPROFILE%\.local\bin` on Windows) in an isolated
+environment. If that directory is not already on `PATH`, run `uv tool
+update-shell` once and open a new shell, then verify with `lt --help`. Because
+that location is stable, the commit hook's baked `lt` path keeps working even
+after you rebuild a project's `.venv` — unlike an `lt` that lives only inside a
+per-project venv. The `pipx` equivalent is `pipx install -e .` followed by
+`pipx ensurepath`.
+
 Windows fresh-clone notes, including Beads/Dolt setup, are in
 [`windows-fresh-clone.md`](windows-fresh-clone.md).
 

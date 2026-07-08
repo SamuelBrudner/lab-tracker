@@ -34,6 +34,24 @@ python -m venv .venv
 .\.venv\Scripts\python.exe -m alembic upgrade head
 ```
 
+### Put `lt` on PATH
+
+That venv keeps the console scripts under `.\.venv\Scripts\`, so you have to
+call them by full path (`.\.venv\Scripts\lt.exe`) and only from this repo. To
+get `lt`, `lt-mcp`, and `lab-tracker` as bare commands everywhere — so
+watch-folder capture, the commit hook, and MCP client configs find them — install
+the package once as a global uv tool:
+
+```powershell
+uv tool install -e .
+uv tool update-shell   # first time only; adds %USERPROFILE%\.local\bin to PATH
+```
+
+Open a new PowerShell window and verify with `lt --help`. After this, the run
+commands below work as bare `lab-tracker serve` instead of the full
+`.\.venv\Scripts\` path. (No `uv`? Install it with
+`irm https://astral.sh/uv/install.ps1 | iex`.)
+
 PowerShell execution policy may block `npm.ps1`. Use `npm.cmd` from PowerShell:
 
 ```powershell
@@ -43,7 +61,14 @@ npm.cmd run lint:frontend
 npm.cmd run build
 ```
 
-Start the local app with the preferred launcher:
+Start the local app with the preferred launcher. If you ran `uv tool install`
+above, `lab-tracker` is on PATH:
+
+```powershell
+lab-tracker serve
+```
+
+Otherwise call the venv copy by full path:
 
 ```powershell
 .\.venv\Scripts\lab-tracker.exe serve
