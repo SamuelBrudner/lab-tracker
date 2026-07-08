@@ -161,6 +161,7 @@ class AuthBootstrapStatus(BaseModel):
     has_users: bool
     bootstrap_admin_configured: bool
     first_admin_available: bool
+    public_viewer_registration_enabled: bool
     bootstrap_token: str | None = None
     bootstrap_token_warning: str | None = None
 

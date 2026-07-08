@@ -37,6 +37,11 @@ $env:LAB_TRACKER_AUTH_ENABLED = "true"
 $env:LAB_TRACKER_AUTH_SECRET_KEY = "<long-random-secret>"
 ```
 
+Public viewer self-registration is off by default. Invite users from the
+`Users` screen, or set
+`LAB_TRACKER_AUTH_PUBLIC_VIEWER_REGISTRATION_ENABLED=true` only for an
+intentional open viewer-signup deployment.
+
 ## Start the LAN Server
 
 On macOS or Linux, use the helper:

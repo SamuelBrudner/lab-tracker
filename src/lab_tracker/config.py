@@ -31,7 +31,7 @@ class Settings(BaseSettings):
     auth_invite_ttl_hours: int = 7 * 24
     auth_rate_limit_attempts: int = 10
     auth_rate_limit_window_seconds: int = 60
-    auth_public_viewer_registration_enabled: bool = True
+    auth_public_viewer_registration_enabled: bool = False
     usage_events: bool | None = None
     bootstrap_admin_token: str = ""
     bootstrap_admin_token_disclosure: Literal["local", "first_run", "never"] = "local"

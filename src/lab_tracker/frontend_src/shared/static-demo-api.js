@@ -672,6 +672,7 @@ function demoPayload(url) {
       bootstrap_token_warning: null,
       first_admin_available: false,
       has_users: true,
+      public_viewer_registration_enabled: false,
     });
   }
   if (pathname === "/auth/me") {

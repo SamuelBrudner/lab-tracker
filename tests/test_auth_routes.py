@@ -53,6 +53,7 @@ def _login(client: TestClient, username: str, password: str) -> str:
 
 def test_register_login_and_me_round_trip(monkeypatch, tmp_path):
     _bootstrap_database(monkeypatch, tmp_path)
+    monkeypatch.setenv("LAB_TRACKER_AUTH_PUBLIC_VIEWER_REGISTRATION_ENABLED", "true")
     with TestClient(create_app()) as client:
         register_response = client.post(
             "/auth/register",
@@ -80,6 +81,7 @@ def test_register_login_and_me_round_trip(monkeypatch, tmp_path):
 
 def test_login_rejects_invalid_credentials(monkeypatch, tmp_path):
     _bootstrap_database(monkeypatch, tmp_path)
+    monkeypatch.setenv("LAB_TRACKER_AUTH_PUBLIC_VIEWER_REGISTRATION_ENABLED", "true")
     with TestClient(create_app()) as client:
         register_response = client.post(
             "/auth/register",
@@ -98,6 +100,7 @@ def test_login_rejects_invalid_credentials(monkeypatch, tmp_path):
 
 def test_register_and_password_reset_reject_short_passwords(monkeypatch, tmp_path):
     _bootstrap_database(monkeypatch, tmp_path)
+    monkeypatch.setenv("LAB_TRACKER_AUTH_PUBLIC_VIEWER_REGISTRATION_ENABLED", "true")
     with TestClient(create_app()) as client:
         register_response = client.post(
             "/auth/register",
@@ -166,6 +169,7 @@ def test_protected_routes_accept_valid_authorization(monkeypatch, tmp_path):
 
 def test_register_non_viewer_requires_admin_token(monkeypatch, tmp_path):
     _bootstrap_database(monkeypatch, tmp_path)
+    monkeypatch.setenv("LAB_TRACKER_AUTH_PUBLIC_VIEWER_REGISTRATION_ENABLED", "true")
     with TestClient(create_app()) as client:
         no_auth_response = client.post(
             "/auth/register",
@@ -219,6 +223,7 @@ def test_bootstrap_admin_allows_first_admin_registration(monkeypatch, tmp_path):
             "bootstrap_token_warning": None,
             "first_admin_available": True,
             "has_users": False,
+            "public_viewer_registration_enabled": False,
         }
 
         bootstrap_response = client.post(
@@ -342,6 +347,7 @@ def test_admin_can_manage_users(monkeypatch, tmp_path):
         viewer_response = client.post(
             "/auth/register",
             json={"username": "viewer-1", "password": "old-secret"},
+            headers=_auth_headers(admin_token),
         )
         assert viewer_response.status_code == 201
         viewer = viewer_response.json()["data"]["user"]
@@ -546,6 +552,7 @@ def test_invitation_token_must_match_registration_email(monkeypatch, tmp_path):
 
 def test_refresh_issues_fresh_token_ttl(monkeypatch, tmp_path):
     _bootstrap_database(monkeypatch, tmp_path)
+    monkeypatch.setenv("LAB_TRACKER_AUTH_PUBLIC_VIEWER_REGISTRATION_ENABLED", "true")
 
     import lab_tracker.auth as auth_module
 
@@ -580,6 +587,7 @@ def test_refresh_issues_fresh_token_ttl(monkeypatch, tmp_path):
 def test_refresh_rejects_expired_token(monkeypatch, tmp_path):
     _bootstrap_database(monkeypatch, tmp_path)
     monkeypatch.setenv("LAB_TRACKER_AUTH_TOKEN_TTL_MINUTES", "1")
+    monkeypatch.setenv("LAB_TRACKER_AUTH_PUBLIC_VIEWER_REGISTRATION_ENABLED", "true")
 
     import lab_tracker.auth as auth_module
 
@@ -629,11 +637,17 @@ def test_login_rate_limits_repeated_invalid_credentials(monkeypatch, tmp_path):
     assert limited.json()["error"]["code"] == "rate_limited"
 
 
-def test_public_viewer_registration_can_be_disabled(monkeypatch, tmp_path):
+def test_public_viewer_registration_is_disabled_by_default(monkeypatch, tmp_path):
     _bootstrap_database(monkeypatch, tmp_path)
-    monkeypatch.setenv("LAB_TRACKER_AUTH_PUBLIC_VIEWER_REGISTRATION_ENABLED", "false")
 
     with TestClient(create_app()) as client:
+        status_response = client.get("/auth/bootstrap-status")
+        assert status_response.status_code == 200
+        assert (
+            status_response.json()["data"]["public_viewer_registration_enabled"]
+            is False
+        )
+
         denied = client.post(
             "/auth/register",
             json={"username": "viewer-1", "password": "secret"},

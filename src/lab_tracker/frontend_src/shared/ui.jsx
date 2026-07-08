@@ -190,6 +190,8 @@ function AuthForm({
 }) {
   const isSetup = authMode === "setup";
   const isInvite = authMode === "register" && Boolean(authInviteToken);
+  const publicViewerRegistrationEnabled =
+    authBootstrapStatus?.public_viewer_registration_enabled === true;
   const bootstrapTokenLoaded = Boolean(authBootstrapStatus?.bootstrap_token);
   const title = isSetup
     ? "Create First Admin"
@@ -204,7 +206,9 @@ function AuthForm({
       : "Enter the first-admin token for this deployment."
     : isInvite
     ? "Set a password for the invited account."
-    : "Viewer registration is public. Admin/editor accounts must be provisioned by an admin.";
+    : publicViewerRegistrationEnabled
+    ? "Viewer registration is public. Admin/editor accounts must be provisioned by an admin."
+    : "Use the account or invitation link your Lab Tracker admin gave you.";
   return (
     <article className="card span-6">
       <h2>{title}</h2>
@@ -258,7 +262,7 @@ function AuthForm({
               ? "Sign in"
               : "Register"}
           </button>
-          {!isInvite ? (
+          {!isInvite && publicViewerRegistrationEnabled ? (
             <button type="button" className="btn-secondary" onClick={onToggleMode}>
               {authMode === "login" ? "Need an account?" : "Have an account?"}
             </button>

@@ -393,6 +393,53 @@ describe("App", () => {
     expect(await screen.findByText("Welcome to Lab Tracker")).toBeInTheDocument();
   });
 
+  it("hides public account creation when viewer signup is disabled", async () => {
+    installFetchMock([
+      {
+        match: "/auth/me",
+        response: errorResponse("Authentication required.", 401),
+      },
+    ]);
+
+    render(<App />);
+
+    expect(await screen.findByRole("heading", { name: "Sign In" })).toBeInTheDocument();
+    expect(
+      screen.getByText("Use the account or invitation link your Lab Tracker admin gave you.")
+    ).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Need an account?" })).not.toBeInTheDocument();
+  });
+
+  it("offers viewer registration when public signup is explicitly enabled", async () => {
+    installFetchMock([
+      {
+        match: "/auth/bootstrap-status",
+        response: apiResponse({
+          bootstrap_admin_configured: false,
+          bootstrap_token: null,
+          bootstrap_token_warning: null,
+          first_admin_available: false,
+          has_users: true,
+          public_viewer_registration_enabled: true,
+        }),
+      },
+      {
+        match: "/auth/me",
+        response: errorResponse("Authentication required.", 401),
+      },
+    ]);
+
+    render(<App />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Need an account?" }));
+    expect(screen.getByRole("heading", { name: "Create Viewer Account" })).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        "Viewer registration is public. Admin/editor accounts must be provisioned by an admin."
+      )
+    ).toBeInTheDocument();
+  });
+
   it("loads projects without a token when local auth is disabled", async () => {
     const fetchMock = installFetchMock([
       {

@@ -282,6 +282,7 @@ describe("useAuthSession", () => {
           bootstrap_token_warning: null,
           first_admin_available: true,
           has_users: false,
+          public_viewer_registration_enabled: false,
         }),
       },
       {

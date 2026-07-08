@@ -69,6 +69,9 @@ def build_auth_router(
                 has_users=has_users,
                 bootstrap_admin_configured=bool(expected),
                 first_admin_available=not has_users and bool(expected),
+                public_viewer_registration_enabled=(
+                    request.app.state.settings.auth_public_viewer_registration_enabled
+                ),
                 bootstrap_token=bootstrap_token,
                 bootstrap_token_warning=bootstrap_token_warning,
             )
