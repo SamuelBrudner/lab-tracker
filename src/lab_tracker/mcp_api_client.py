@@ -5,6 +5,7 @@ from __future__ import annotations
 import mimetypes
 import os
 import re
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -53,6 +54,22 @@ GOAL_LINK_STATUS_VALUES = tuple(status.value for status in GoalLinkStatus)
 GOAL_LINK_STATUS_TEXT = ", ".join(GOAL_LINK_STATUS_VALUES)
 _BEARER_SECRET_RE = re.compile(r"Bearer\s+[^\s\"'\\,}\]]+", re.IGNORECASE)
 _LPAT_SECRET_RE = re.compile(r"lpat_[A-Za-z0-9_-]+")
+
+# Remediation guidance appended to auth failures so a rejected credential is
+# self-describing at the tool boundary rather than an opaque "Invalid
+# credentials" (GH #74, #79). Desktop MCP hosts only re-read env on a full
+# relaunch, so a corrected config is inert until the server is restarted.
+_LPAT_REMEDIATION = (
+    "Re-mint an LPAT via POST /auth/tokens, verify it with `lt setup status`, then "
+    "relaunch the Lab Tracker MCP server/host so it re-reads the credential (desktop "
+    "apps only re-read env on a full quit-and-reopen, not a window reload)."
+)
+_NO_CREDENTIALS_MESSAGE = (
+    "No Lab Tracker MCP credentials are configured, but the API requires "
+    "authentication. Set LAB_TRACKER_MCP_API_KEY to an LPAT (mint via POST "
+    "/auth/tokens) — the sanctioned auth method. LAB_TRACKER_MCP_USERNAME / "
+    "LAB_TRACKER_MCP_PASSWORD login is deprecated."
+)
 
 
 class LabTrackerAPIError(RuntimeError):
@@ -873,12 +890,13 @@ class LabTrackerAPIClient:
         )
         if response.status_code == 401 and authenticated and retry_on_unauthorized:
             if self._static_api_key():
-                raise _api_error_from_response(response)
+                raise _static_key_rejected_error(
+                    response, base_url=self._settings.base_url
+                )
             self._access_token = None
             if not self._has_credentials():
                 raise LabTrackerAPIAuthError(
-                    "LAB_TRACKER_MCP_USERNAME and LAB_TRACKER_MCP_PASSWORD are required "
-                    "when the Lab Tracker API has authentication enabled.",
+                    _NO_CREDENTIALS_MESSAGE,
                     status_code=response.status_code,
                     code="auth_error",
                 )
@@ -917,16 +935,30 @@ class LabTrackerAPIClient:
         password = self._settings.password or ""
         if not username or not password:
             raise LabTrackerAPIAuthError(
-                "LAB_TRACKER_MCP_USERNAME and LAB_TRACKER_MCP_PASSWORD are required "
-                "for authenticated Lab Tracker MCP tools.",
+                _NO_CREDENTIALS_MESSAGE,
                 code="auth_error",
             )
+        # Proactively flag the deprecated auth path even on a successful login, so
+        # the drift is visible before a stale credential turns it into a 401 outage
+        # (GH #81). Emitted at login time, i.e. ~once per client.
+        print(
+            "WARNING: Lab Tracker MCP is authenticating with the deprecated "
+            "LAB_TRACKER_MCP_USERNAME/PASSWORD login. Migrate to an LPAT: set "
+            "LAB_TRACKER_MCP_API_KEY and remove the username/password env. Run "
+            "`lt auth doctor` to audit every MCP config.",
+            file=sys.stderr,
+            flush=True,
+        )
         response = self._send(
             "POST",
             "/auth/login",
             json={"username": username, "password": password},
         )
         if response.status_code >= 400:
+            if response.status_code in {401, 403}:
+                raise _login_rejected_error(
+                    response, base_url=self._settings.base_url, username=username
+                )
             raise _api_error_from_response(response)
         payload = _response_json(response)
         try:
@@ -1147,6 +1179,55 @@ def _response_json(response: httpx.Response) -> JsonObject:
     if not isinstance(payload, dict):
         raise LabTrackerAPIError("Lab Tracker API returned a non-object JSON payload.")
     return payload
+
+
+def _static_key_rejected_error(
+    response: httpx.Response, *, base_url: str
+) -> LabTrackerAPIAuthError:
+    """Actionable error when the static LPAT (LAB_TRACKER_MCP_API_KEY) is rejected.
+
+    Distinguishes a static-key rejection from a username/password login failure and
+    names the two likely causes (revoked/expired token vs a stale token in a
+    still-running server), with remediation (GH #74).
+    """
+    server_message, code, issues = _response_error_parts(response)
+    message = (
+        f"Lab Tracker rejected the static LAB_TRACKER_MCP_API_KEY (LPAT) with HTTP "
+        f"{response.status_code} at {base_url}: {server_message}. This is the static "
+        "API key, not a username/password login. Likely causes: the token is expired "
+        "or revoked, or the running MCP server is still holding a stale token from a "
+        f"previous config and needs a relaunch. {_LPAT_REMEDIATION}"
+    )
+    return LabTrackerAPIAuthError(
+        message,
+        status_code=response.status_code,
+        code=code or "auth_error",
+        issues=issues,
+    )
+
+
+def _login_rejected_error(
+    response: httpx.Response, *, base_url: str, username: str | None
+) -> LabTrackerAPIAuthError:
+    """Actionable error when a username/password ``POST /auth/login`` is rejected.
+
+    Names the failing user and steers toward LPAT, which is the sanctioned auth
+    method (GH #79, #81).
+    """
+    server_message, code, issues = _response_error_parts(response)
+    who = f" for user '{username}'" if username else ""
+    message = (
+        f"Lab Tracker rejected the LAB_TRACKER_MCP_USERNAME/PASSWORD login{who} with "
+        f"HTTP {response.status_code} at {base_url}: {server_message}. Username/password "
+        "auth is deprecated — migrate to an LPAT: set LAB_TRACKER_MCP_API_KEY and remove "
+        f"LAB_TRACKER_MCP_USERNAME / LAB_TRACKER_MCP_PASSWORD. {_LPAT_REMEDIATION}"
+    )
+    return LabTrackerAPIAuthError(
+        message,
+        status_code=response.status_code,
+        code=code or "auth_error",
+        issues=issues,
+    )
 
 
 def _api_error_from_response(response: httpx.Response) -> LabTrackerAPIError:

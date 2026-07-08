@@ -74,8 +74,8 @@ Required environment:
 
 - `LAB_TRACKER_BASE_URL` or `LAB_TRACKER_MCP_BASE_URL`
 - one of:
-  - `LAB_TRACKER_TOKEN`
-  - `LAB_TRACKER_USERNAME` and `LAB_TRACKER_PASSWORD`
+  - `LAB_TRACKER_TOKEN` (preferred — a personal access token)
+  - `LAB_TRACKER_USERNAME` and `LAB_TRACKER_PASSWORD` (deprecated login; prefer a token)
   - no auth variables when the target API has local auth disabled
 
 The script prints the created note id and the stored change set as JSON. Run it from
