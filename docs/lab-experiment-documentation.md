@@ -68,6 +68,39 @@ So the rule for this workflow is:
   [`ExternalArtifactReference`](../src/lab_tracker/models.py) (a
   `source_system` + `uri` + `content_hash` + free `metadata`) so the external
   files are addressable from inside the graph without copying them.
+- **Declare your store once, then address files relative to it.** The preferred
+  form of that reference is now **store-relative**. Register your lab OneDrive
+  (or Drive/S3/SFTP) a single time as a `DataStore` named e.g. `lab-onedrive`,
+  and every artifact becomes `store://lab-onedrive/experiments/001/flow/sample.fcs`
+  + `content_hash` — an `ExternalArtifactReference` with paired `store_name` +
+  `locator` fields. This is portable across your laptop, the core-facility PC,
+  and an HPC node (the host-specific mount root lives on the *store*, not the
+  artifact), and an assistant can pull bounded, hash-verified bytes on demand via
+  `lab_tracker_resolve_artifact` (returns `verified` / `drifted` / `unresolved`).
+  A synced OneDrive folder registers as `kind=local_fs` with **zero credentials**;
+  an unsynced/headless store uses the rclone adapter. See
+  [`data-store-registry-design.md`](data-store-registry-design.md).
+- **Setup is per-host, and stores are meant to span a fleet.** Real work happens
+  on more than one machine — her laptop, an instrument/experiment PC, the shared
+  core-facility computer. The store *definition* lives once in Lab Tracker and is
+  shared; *reaching* it is per-host, and the health check is always "from **this**
+  host." Two practical rules:
+  - For a **single machine**, `kind=local_fs` on the synced OneDrive folder is
+    easiest (zero credentials).
+  - For a **multi-machine lab**, prefer the **rclone form** (`kind=onedrive`,
+    `credential_ref` = an rclone remote name each host maps in its own
+    `rclone.conf`): the store record is then host-independent and
+    `store://lab-onedrive/...` resolves identically on every machine — including
+    hosts where OneDrive isn't file-synced. A `local_fs` store's `root` is an
+    absolute path, so it only resolves on the machine that registered it.
+  - **A host you can't set up (the shared core PC) needs no Lab Tracker setup at
+    all:** upload the `.fcs` to OneDrive from it as usual, and your laptop (where
+    the store is configured) resolves and hashes the file. The store abstraction
+    is exactly what lets a no-agent machine participate.
+  *Setup note:* registering a store is currently a `POST /data-stores` call — an
+  `lt store` verb (run **on each host**), a web pane, per-host binding, and setup
+  auto-detection are in progress (epic `lab-tracker-y5j8`, incl. `lab-tracker-iquh`
+  for the per-host binding), so for a first trial have the store pre-registered.
 
 That gives the human a navigable record and gives an AI a typed, linked
 structure to reason over — without forcing the scientist to abandon the tools
@@ -165,9 +198,10 @@ with the strongest response in macrophages.
 - RNA, supernatant: freezer <unit> / box <id> / position <…>
 
 ## Artifacts index                  # the links the old paper notebook lacked
-- Raw data:   <paths / URIs + content hashes>
-- Analysis:   <software outputs>
-- Figures:    <links>
+- Raw data:   store://lab-onedrive/experiments/001/flow/*.fcs   (+ content hashes)
+- Analysis:   store://lab-onedrive/experiments/001/analysis/... (software outputs)
+- Figures:    store://lab-onedrive/experiments/001/figures/...
+  # store-relative locators resolve + hash-verify from any host; a bare URI still works
 
 ## Findings                         # → Claim (statement + evidence + question)
 - <claim>, confidence <…>, supported by dataset <…> / analysis <…>,
@@ -199,6 +233,11 @@ to reconstruct the experiment without the operator present:
 
 ## Suggested order of operations
 
+0. **Once per lab (setup):** register your data store — the lab OneDrive as a
+   `DataStore` named `lab-onedrive` (synced folder → `kind=local_fs`), and mark it
+   default. From then on every artifact below is addressed as
+   `store://lab-onedrive/...` + `content_hash`, so nothing depends on a per-machine
+   path. (Trial shortcut: ask whoever is onboarding you to pre-register this.)
 1. **Before the bench:** create the **Question** (with hypothesis) and open a
    **Session** for Experiment 001. Put both IDs at the top of the Word doc.
 2. **At the bench:** keep working on paper as usual. Photograph handwritten
@@ -216,9 +255,19 @@ to reconstruct the experiment without the operator present:
    dataset/analysis and answers the question — and record any **ExplorationNode**
    for arms you dropped.
 
-The Word document stays the human-facing front page. Lab Tracker holds the typed
-spine and the durable links, so months later either the scientist or an assistant
-can start from the question and walk to every artifact the experiment produced.
+The Word document stays the human-facing front page — but you increasingly
+**don't have to author it by hand.** Because the spine (question → session →
+dataset → analysis → claim, plus the linked artifacts) is populated as you work,
+an assistant can *compile* the per-experiment write-up from the graph on demand:
+`lab_tracker_export_goal_artifact` and `lab_tracker_export_question_subtree`
+render a linked subtree, and `get_decision_context` adds a windowed briefing.
+Server-resident agentic drafting is the in-progress direction that turns this into
+a first-class "generate my experiment doc" flow. Treat the template above as the
+*shape* the graph should fill, not a document you keep in sync manually. Either
+way — hand-written or generated — Lab Tracker holds the typed spine and the
+durable, store-relative links, so months later either the scientist or an
+assistant can start from the question and walk to every artifact the experiment
+produced, and verify each one still matches what the claim was built on.
 
 ## See also
 
