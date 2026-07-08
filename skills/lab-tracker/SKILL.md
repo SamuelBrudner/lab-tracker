@@ -1,7 +1,7 @@
 ---
 name: lab-tracker
 description: Use when working with the Lab Tracker application, API-backed MCP server, Postgres live runtime, Dolt mirror, consumer Python client, or consumer repo scaffolding. Covers project/question/note/session/dataset/analysis/claim/visualization workflows, retained-v1 product boundaries, local startup, validation, and MCP tool usage.
-allowed-tools: "Read,Bash(uv:*),Bash(python:*),Bash(pytest:*),Bash(npm:*),Bash(bd:*),Bash(docker:*)"
+allowed-tools: "Read,Bash(uv:*),Bash(python:*),Bash(pytest:*),Bash(npm:*),Bash(bd:*),Bash(docker:*),Bash(gh:*)"
 version: "0.1.0"
 compatible-with: claude-code,codex
 tags: [lab-tracker, research-data, mcp, fastapi, sqlalchemy]
@@ -27,6 +27,38 @@ Treat the app as a research-context system, not a generic file manager.
    `.\scripts\serve-lan.ps1 -UsePostgres` and see `docs/lan-shared-graph.md`.
 7. On Sam's current workstation, Lab Tracker is served durably through Tailscale
    Funnel at `https://mwcppc01ysbc155.tail79f9d8.ts.net/app`.
+
+## Reporting Friction and Failures
+
+When using Lab Tracker surfaces a real problem — a command or MCP tool that
+errors, a documented workflow that does not behave as described, setup/startup
+that fails, a missing or wrong doc, or friction that blocks or noticeably slows
+the user — recommend filing an issue on the GitHub repo so the maintainer sees
+it. This is the end-user feedback channel and is deliberately separate from
+`bd`/beads, which tracks in-repo development work; do not route user-facing
+usage problems into beads.
+
+Offer to file it; do not open the issue silently. Filing is outward-facing, so
+confirm with the user first, and check for an existing report before opening a
+new one:
+
+```bash
+gh issue list --repo SamuelBrudner/lab-tracker --search "<keywords>"
+gh issue create --repo SamuelBrudner/lab-tracker \
+  --title "<concise summary>" \
+  --body "<what you tried, exact command or tool call, full error, environment>"
+```
+
+If `gh` is unavailable, share the web link
+`https://github.com/SamuelBrudner/lab-tracker/issues/new` together with a
+ready-to-paste title and body.
+
+Include in every report:
+- What the user was trying to do and the exact command or MCP tool call.
+- The full error text, or the observed vs. expected behavior.
+- Environment: OS, how the app is served (local, LAN, or Tailscale Funnel),
+  whether auth is enabled, and the Lab Tracker version if known.
+- Which doc or skill step was being followed, if any.
 
 ## Consumer Repos
 
