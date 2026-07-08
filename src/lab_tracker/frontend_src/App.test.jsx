@@ -838,7 +838,14 @@ describe("App", () => {
 
     fireEvent.click(screen.getByRole("tab", { name: "Evidence" }));
     await screen.findByRole("button", { name: "Dataset commit-1" });
+    // Clicking a node opens the in-place detail panel; navigation happens
+    // through the panel's explicit Open button.
     fireEvent.click(screen.getByRole("button", { name: "Dataset commit-1" }));
+    const detailPanel = await screen.findByRole("complementary", {
+      name: "Selected node details",
+    });
+    expect(detailPanel).toHaveTextContent("Status: committed");
+    fireEvent.click(screen.getByRole("button", { name: "Open Dataset" }));
     await waitFor(() => expect(window.location.pathname).toBe(`/app/datasets/${datasetId}`));
     expect(await screen.findByRole("heading", { name: "Dataset Detail" })).toBeInTheDocument();
   });
