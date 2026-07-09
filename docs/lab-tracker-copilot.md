@@ -29,9 +29,10 @@ Start Lab Tracker locally, open this repository in VS Code, and enable the
 `http://127.0.0.1:8000`.
 
 If local auth is disabled, leave the prompted token, username, and password
-blank. If auth is enabled, prefer a personal access token: create one with
-`POST /auth/tokens`, paste the returned `lpat_...` secret into the token prompt,
-and leave username/password blank. Username/password still works as a fallback.
+blank. If auth is enabled, prefer a personal access token: mint one on the
+**Agents** page in the web app (`/app/agents`), or with `POST /auth/tokens`,
+paste the returned `lpat_...` secret into the token prompt, and leave
+username/password blank. Username/password still works as a fallback.
 
 The token secret is returned once. Lab Tracker stores only its SHA-256 hash, and
 the MCP client sends it as `Authorization: Bearer ...` without calling

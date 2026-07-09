@@ -498,10 +498,18 @@ class GraphDraftService(BaseService):
         user_id: UUID | None = None,
         actor: AuthContext | None = None,
     ) -> GraphDraftBatchSettings:
-        if user_id is not None and actor is not None and user_id == actor.user_id:
-            self.authorization.require_contributor(project_id, actor=actor)
-        else:
+        # Contributors may schedule their own project's daily batch -- the
+        # project-level default (user_id is None) and their own per-user
+        # settings (user_id == actor). Editing *another* user's per-user
+        # settings still requires owner.
+        editing_other_user = (
+            user_id is not None
+            and (actor is None or user_id != actor.user_id)
+        )
+        if editing_other_user:
             self.authorization.require_owner(project_id, actor=actor)
+        else:
+            self.authorization.require_contributor(project_id, actor=actor)
         settings = self.repository.get_graph_draft_batch_settings_by_project(
             project_id,
             user_id=user_id,

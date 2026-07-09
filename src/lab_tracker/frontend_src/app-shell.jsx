@@ -1,5 +1,6 @@
 import * as React from "react";
 
+import { AgentAccessPage } from "./features/agent-access.jsx";
 import { Dashboard } from "./features/dashboard-projects.jsx";
 import { BatchReviewPage, PendingBatchBanner } from "./features/batches.jsx";
 import { DevicesPage } from "./features/devices.jsx";
@@ -398,6 +399,17 @@ function App() {
             />
           ) : null}
 
+          {route.kind === "agents" ? (
+            <AgentAccessPage
+              token={auth.token}
+              user={auth.user}
+              authEnabled={auth.authEnabled}
+              navigate={navigate}
+              setBusy={setBusy}
+              setFlash={setFlash}
+            />
+          ) : null}
+
           {route.kind === "users" ? (
             <UsersPage
               token={auth.token}
@@ -429,7 +441,7 @@ function App() {
                 workspaceData.setSelectedProjectId(event.target.value)
               }
               navigate={navigate}
-              canManageGraph={canManageProjectMembers}
+              canManageGraph={canContributeToProject}
               setBusy={setBusy}
               setFlash={setFlash}
             />

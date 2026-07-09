@@ -727,6 +727,11 @@ button.project-graph-legend-item:hover {
   outline: none;
 }
 
+.capture-composer-input::placeholder {
+  color: var(--ink-soft);
+  opacity: 1;
+}
+
 .capture-attachment-menu {
   display: grid;
   gap: 0.5rem;
@@ -1484,6 +1489,21 @@ button.project-graph-legend-item:hover {
   border-radius: 7px;
 }
 
+.command-snippet {
+  margin-top: 0.7rem;
+}
+
+.command-block {
+  font-family: "IBM Plex Mono", "Menlo", monospace;
+  font-size: 0.82rem;
+  white-space: pre-wrap;
+  word-break: break-all;
+  background: #f4f3f0;
+  padding: 0.5rem 0.6rem;
+  border-radius: 7px;
+  margin: 0.35rem 0 0;
+}
+
 .list-clean {
   list-style: none;
   padding: 0;
@@ -1580,10 +1600,6 @@ button.project-graph-legend-item:hover {
   background: radial-gradient(circle at 20% 0, #181b21 0%, #141619 45%, #121316 100%);
 }
 
-:root[data-theme="dark"] .react-flow__minimap {
-  background: #14161a;
-}
-
 :root[data-theme="dark"] .hero {
   background: rgba(30, 33, 40, 0.82);
 }
@@ -1604,6 +1620,7 @@ button.project-graph-legend-item:hover {
 :root[data-theme="dark"] .source-snippet,
 :root[data-theme="dark"] .manifest-preview,
 :root[data-theme="dark"] .enrollment-url code,
+:root[data-theme="dark"] .command-block,
 :root[data-theme="dark"] .capture-pending,
 :root[data-theme="dark"] .project-graph-canvas {
   background: #181b21;
@@ -1666,6 +1683,34 @@ button.project-graph-legend-item:hover {
   color: #e6c878;
 }
 
+:root[data-theme="dark"] .capture-composer {
+  background: #23272f;
+  border-color: var(--line);
+}
+
+:root[data-theme="dark"] .capture-composer-input {
+  background: #181b21;
+  border-color: var(--line);
+  color: var(--ink);
+}
+
+:root[data-theme="dark"] .capture-composer-icon {
+  background: #262a32;
+  color: var(--ink);
+}
+
+:root[data-theme="dark"] .capture-attachment-option,
+:root[data-theme="dark"] .capture-attachment-chip {
+  background: #181b21;
+  border-color: var(--line);
+  color: var(--ink);
+}
+
+:root[data-theme="dark"] .capture-attachment-chip button {
+  background: #262a32;
+  color: var(--ink-soft);
+}
+
 @media (prefers-color-scheme: dark) {
   :root {
     --bg: #14161a;
@@ -1685,10 +1730,6 @@ button.project-graph-legend-item:hover {
   :root,
   body {
     background: radial-gradient(circle at 20% 0, #181b21 0%, #141619 45%, #121316 100%);
-  }
-
-  .react-flow__minimap {
-    background: #14161a;
   }
 
   .hero {
@@ -1711,6 +1752,7 @@ button.project-graph-legend-item:hover {
   .source-snippet,
   .manifest-preview,
   .enrollment-url code,
+  .command-block,
   .capture-pending,
   .project-graph-canvas {
     background: #181b21;
@@ -1771,6 +1813,34 @@ button.project-graph-legend-item:hover {
     background: #2e2616;
     border-color: #5c4a1f;
     color: #e6c878;
+  }
+
+  .capture-composer {
+    background: #23272f;
+    border-color: var(--line);
+  }
+
+  .capture-composer-input {
+    background: #181b21;
+    border-color: var(--line);
+    color: var(--ink);
+  }
+
+  .capture-composer-icon {
+    background: #262a32;
+    color: var(--ink);
+  }
+
+  .capture-attachment-option,
+  .capture-attachment-chip {
+    background: #181b21;
+    border-color: var(--line);
+    color: var(--ink);
+  }
+
+  .capture-attachment-chip button {
+    background: #262a32;
+    color: var(--ink-soft);
   }
 }
 

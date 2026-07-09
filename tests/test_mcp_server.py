@@ -347,6 +347,131 @@ def test_client_static_api_key_does_not_retry_revoked_token() -> None:
     assert seen == [("GET", "/projects", "Bearer lpat_secret")]
 
 
+def test_static_api_key_401_error_is_self_describing_and_actionable() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return _json_response(401, {"error": {"message": "Invalid credentials"}})
+
+    client = mcp_server.LabTrackerAPIClient(
+        mcp_server.MCPSettings(base_url="http://lab.example.test", api_key="lpat_secret"),
+        transport=httpx.MockTransport(handler),
+    )
+
+    try:
+        with pytest.raises(mcp_server.LabTrackerAPIAuthError) as excinfo:
+            client.list_projects()
+    finally:
+        client.close()
+
+    message = str(excinfo.value)
+    # Names the rejected credential (not a generic 401), the two likely causes,
+    # and the remediation — and never leaks the secret (GH #74).
+    assert "LAB_TRACKER_MCP_API_KEY" in message
+    assert "lpat_secret" not in message
+    assert "relaunch" in message.lower()
+    assert "lt setup status" in message
+    assert excinfo.value.status_code == 401
+
+
+def test_username_password_login_401_steers_to_lpat_and_names_user() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/auth/login":
+            return _json_response(401, {"error": {"message": "Invalid credentials"}})
+        return _json_response(200, {"data": [], "meta": {"total": 0}})
+
+    client = mcp_server.LabTrackerAPIClient(
+        mcp_server.MCPSettings(
+            base_url="http://lab.example.test",
+            username="home-test-admin",
+            password="stale-pass",
+        ),
+        transport=httpx.MockTransport(handler),
+    )
+
+    try:
+        with pytest.raises(mcp_server.LabTrackerAPIAuthError) as excinfo:
+            client.list_projects()
+    finally:
+        client.close()
+
+    message = str(excinfo.value)
+    assert "home-test-admin" in message  # names the failing user (GH #79)
+    assert "deprecated" in message.lower()
+    assert "LAB_TRACKER_MCP_API_KEY" in message  # migrate to LPAT (GH #81)
+    assert "stale-pass" not in message
+
+
+def test_no_credentials_error_recommends_lpat_first() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return _json_response(401, {"error": {"message": "Invalid credentials"}})
+
+    client = mcp_server.LabTrackerAPIClient(
+        mcp_server.MCPSettings(base_url="http://lab.example.test"),
+        transport=httpx.MockTransport(handler),
+    )
+
+    try:
+        with pytest.raises(mcp_server.LabTrackerAPIAuthError) as excinfo:
+            client.list_projects()
+    finally:
+        client.close()
+
+    message = str(excinfo.value)
+    assert "LAB_TRACKER_MCP_API_KEY" in message
+    assert "deprecated" in message.lower()
+
+
+def test_username_password_login_emits_deprecation_warning(capsys) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/auth/login":
+            return _json_response(200, {"data": {"access_token": "token-1"}})
+        return _json_response(200, {"data": [], "meta": {"total": 0}})
+
+    client = mcp_server.LabTrackerAPIClient(
+        mcp_server.MCPSettings(
+            base_url="http://lab.example.test", username="svc", password="pw"
+        ),
+        transport=httpx.MockTransport(handler),
+    )
+    try:
+        client.list_projects()  # succeeds, but the deprecated path still warns
+    finally:
+        client.close()
+
+    err = capsys.readouterr().err
+    assert "deprecated" in err.lower()
+    assert "LAB_TRACKER_MCP_API_KEY" in err
+    assert "lt auth doctor" in err
+
+
+def test_ensure_mcp_target_safe_warns_and_boots_on_startup_auth_failure(
+    monkeypatch, capsys
+) -> None:
+    class FailingClient:
+        def __init__(self, _settings):
+            pass
+
+        def readiness(self):
+            raise mcp_server.LabTrackerAPIAuthError(
+                "Invalid credentials", status_code=401, code="auth_error"
+            )
+
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setattr(mcp_server, "LabTrackerAPIClient", FailingClient)
+
+    # Fail-soft: must NOT raise (server still boots), but must warn loudly to stderr.
+    mcp_server._ensure_mcp_target_safe(
+        mcp_server.MCPSettings(base_url="http://lab.example.test", api_key="lpat_secret")
+    )
+
+    err = capsys.readouterr().err
+    assert "startup auth probe failed" in err
+    assert "http://lab.example.test" in err
+    assert "LAB_TRACKER_MCP_API_KEY" in err
+    assert "lpat_secret" not in err
+
+
 def test_mcp_settings_from_env_accepts_api_key_aliases(monkeypatch) -> None:
     monkeypatch.setenv("LAB_TRACKER_MCP_API_KEY", "lpat_primary")
     monkeypatch.setenv("LAB_TRACKER_MCP_TOKEN", "lpat_alias")

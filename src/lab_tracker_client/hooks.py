@@ -90,13 +90,17 @@ def managed_hook_block(
     # not yet synced) must reach the || so the one-line warning stays
     # reachable. post-commit hooks are advisory — git never blocks the commit
     # on them — and the || echo keeps the block's own status 0 regardless.
+    # Suppress only stdout (the JSON payload), NOT stderr: lt prints a
+    # cause-and-remediation diagnostic there on a sync failure (GH #77), so the
+    # user sees *why* and *how to drain* rather than an unactionable one-liner.
     warning = (
-        "lab-tracker: commit snapshot did not fully sync; "
-        "queued events retry on the next sync. Commit kept."
+        "lab-tracker: commit capture did not fully sync (see the note above if "
+        "shown). Queued events are kept — inspect with 'lt outbox status' and "
+        "drain with 'lt outbox sync'. Commit kept."
     )
     lines.extend(
         [
-            f'  "$LAB_TRACKER_LT" git snapshot{draft_flag} >/dev/null 2>&1 || \\',
+            f'  "$LAB_TRACKER_LT" git snapshot{draft_flag} >/dev/null || \\',
             f'    echo "{warning}" >&2',
             "fi",
             HOOK_BLOCK_END,
@@ -179,6 +183,13 @@ def install_hook(
         "dry_run": dry_run,
         "diff": _text_diff(hook_path, existing, updated),
     }
+    hooks_path_change = _normalize_core_hooks_path(
+        repo_root=repo_root,
+        hook_path=hook_path,
+        dry_run=dry_run,
+    )
+    if hooks_path_change:
+        payload["core_hooks_path"] = hooks_path_change
     if carried_project:
         payload["carried_project_id"] = carried_project
     if carried_base_url:
@@ -268,6 +279,56 @@ def _toplevel(repo: str | Path) -> Path:
             f"Not a git repository: {Path(repo).expanduser().resolve()}"
         )
     return Path(_normalize_git_path(completed.stdout.strip())).resolve()
+
+
+def _normalize_core_hooks_path(
+    *,
+    repo_root: Path,
+    hook_path: Path,
+    dry_run: bool,
+) -> JsonObject | None:
+    """Keep Beads-style hook enrollment executable from Windows and POSIX Git.
+
+    Older setup paths sometimes left ``core.hooksPath`` as an absolute MSYS/WSL
+    spelling of this repo's ``.beads/hooks`` directory. Git for Windows can
+    resolve and print those paths differently than the shell that later runs
+    the hook, so once the hook path is known to be the repo's Beads hook
+    directory, store the portable repo-relative form.
+    """
+
+    desired_dir = (repo_root / ".beads" / "hooks").resolve()
+    if hook_path.parent.resolve() != desired_dir:
+        return None
+    completed = subprocess.run(  # noqa: S603 - fixed executable, no shell.
+        ["git", "config", "--get", "core.hooksPath"],
+        cwd=repo_root,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+    previous = completed.stdout.strip() if completed.returncode == 0 else ""
+    desired = ".beads/hooks"
+    if previous == desired:
+        return {
+            "action": "unchanged",
+            "previous": previous,
+            "desired": desired,
+        }
+    if not dry_run:
+        subprocess.run(  # noqa: S603 - fixed executable, no shell.
+            ["git", "config", "core.hooksPath", desired],
+            cwd=repo_root,
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=True,
+        )
+    return {
+        "action": "would-normalize" if dry_run else "normalized",
+        "previous": previous,
+        "desired": desired,
+    }
 
 
 def _normalize_git_path(raw: str) -> str:

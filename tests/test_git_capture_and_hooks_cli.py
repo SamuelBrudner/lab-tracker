@@ -219,6 +219,72 @@ def test_git_snapshot_offline_queues_then_later_sync_drains(
     assert event["sync"]["note_id"] == "note-1"
 
 
+def test_git_snapshot_sync_failure_prints_actionable_stderr(
+    git_repo, monkeypatch, capsys
+) -> None:
+    # Unreachable server: the commit is queued but not synced. The user must get
+    # an actionable diagnostic on stderr (cause + queue location + drain command),
+    # not the old opaque "did not fully sync; retries later" one-liner (GH #77).
+    monkeypatch.setenv("LAB_TRACKER_BASE_URL", "http://127.0.0.1:9")
+    with pytest.raises(SystemExit):
+        lt_cli.main(["git", "snapshot", "--repo", str(git_repo), "--project", "p-1"])
+
+    err = capsys.readouterr().err
+    assert "did not fully sync" in err
+    assert "failed to sync" in err  # names the cause
+    assert "lt outbox sync" in err  # names the exact recovery command
+    assert "1 event" in err  # names the backlog size
+    assert ".lab-tracker/outbox/watch" in err.replace("\\", "/")  # names where
+
+
+def test_outbox_status_reports_queued_events_without_watch_json(git_repo, capsys) -> None:
+    from lab_tracker_client import watch as watch_capture
+
+    # Commit-snapshot capture queues an event but writes no watch.json.
+    lt_cli.main(["git", "snapshot", "--repo", str(git_repo), "--project", "p-1", "--no-sync"])
+    capsys.readouterr()
+
+    # Precondition (GH #78): the watch loader hard-fails without watch.json, so
+    # `lt watch status`/`sync` cannot drain commit-snapshot events...
+    with pytest.raises(Exception, match="Watch config not found"):
+        watch_capture.load_config(config_path=git_repo / ".lab-tracker" / "watch.json")
+
+    # ...but `lt outbox status` reads the queue straight from the outbox layout.
+    lt_cli.main(["outbox", "status", "--repo", str(git_repo)])
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["command"] == "outbox-status"
+    assert payload["total"] == 1
+    assert payload["events"][0]["capture_kind"] == "git_commit"
+    assert payload["events"][0]["sync_status"] == "pending"
+
+
+def test_outbox_sync_drains_queue_without_watch_json(git_repo, monkeypatch, capsys) -> None:
+    # Queue an event offline (no watch.json), leaving a backlog to replay.
+    lt_cli.main(["git", "snapshot", "--repo", str(git_repo), "--project", "p-1", "--no-sync"])
+    capsys.readouterr()
+
+    fake = _FakeSyncClient()
+    monkeypatch.setattr(
+        lt_cli.LabTracker,
+        "from_env",
+        classmethod(lambda cls: fake),  # noqa: ARG005
+    )
+
+    lt_cli.main(["outbox", "sync", "--repo", str(git_repo)])
+    payload = json.loads(capsys.readouterr().out)
+
+    assert payload["command"] == "outbox-sync"
+    assert payload["processed"] == 1
+    assert not payload["errors"]
+    assert payload["results"][0]["action"] == "imported"
+    assert payload["results"][0]["note_id"] == "note-1"
+
+    # The queue is now drained: a follow-up status shows the event synced.
+    lt_cli.main(["outbox", "status", "--repo", str(git_repo)])
+    status = json.loads(capsys.readouterr().out)
+    assert status["events"][0]["sync_status"] == "synced"
+
+
 def test_git_snapshot_reports_ignored_context_on_requeue(git_repo, capsys) -> None:
     lt_cli.main(["git", "snapshot", "--repo", str(git_repo), "--project", "p-1", "--no-sync"])
     capsys.readouterr()
@@ -295,6 +361,10 @@ def test_hooks_install_writes_posix_hook(git_repo, capsys) -> None:
     assert HOOK_BLOCK_BEGIN in content
     assert HOOK_BLOCK_END in content
     assert "git snapshot --request-draft >/dev/null" in content
+    # Suppress stdout only, not stderr, so lt's cause+remediation line survives
+    # (GH #77); and the fallback warning points at the drain commands.
+    assert ">/dev/null 2>&1" not in content
+    assert "lt outbox sync" in content
     assert "--fail-silent" not in content
     assert 'LAB_TRACKER_PROJECT_ID="${LAB_TRACKER_PROJECT_ID:-p-9}"' in content
     assert "\\" not in content.split('LAB_TRACKER_LT:-', 1)[1].split("}", 1)[0]
@@ -313,6 +383,21 @@ def test_hooks_install_dry_run_writes_nothing(git_repo, capsys) -> None:
     assert payload["dry_run"] is True
     assert payload["diff"]
     assert not (git_repo / ".git" / "hooks" / "post-commit").exists()
+
+
+def test_hooks_install_normalizes_absolute_beads_hooks_path(git_repo, capsys) -> None:
+    hooks_dir = git_repo / ".beads" / "hooks"
+    hooks_dir.mkdir(parents=True)
+    _git(git_repo, "config", "core.hooksPath", str(hooks_dir))
+
+    lt_cli.main(["hooks", "install", "--repo", str(git_repo), "--yes"])
+    payload = json.loads(capsys.readouterr().out)
+
+    assert Path(payload["hook_path"]).resolve() == (hooks_dir / "post-commit").resolve()
+    assert payload["core_hooks_path"]["action"] == "normalized"
+    assert payload["core_hooks_path"]["desired"] == ".beads/hooks"
+    assert _git(git_repo, "config", "--get", "core.hooksPath").strip() == ".beads/hooks"
+    assert (hooks_dir / "post-commit").exists()
 
 
 def test_hooks_install_refuses_unmanaged_hook_without_force(git_repo, capsys) -> None:

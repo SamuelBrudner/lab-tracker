@@ -10,24 +10,31 @@
     "build:pages-demo": "node scripts/build-pages-demo.mjs",
     "dev:frontend": "node scripts/build-frontend.mjs --watch",
     "lint:frontend": "eslint \"src/lab_tracker/frontend_src/**/*.{js,jsx}\"",
+    "shoot:screenshots": "node scripts/shoot-screenshots.mjs",
     "test:frontend": "vitest run"
   },
   "devDependencies": {
-    "@eslint/js": "^9.25.1",
+    "@eslint/js": "^10.0.1",
     "@testing-library/jest-dom": "^6.6.3",
     "@testing-library/react": "^16.3.0",
-    "esbuild": "^0.28.0",
-    "eslint": "^9.25.1",
+    "esbuild": "^0.28.1",
+    "eslint": "^10.6.0",
     "eslint-plugin-react": "^7.37.5",
     "eslint-plugin-react-hooks": "^7.1.1",
     "fake-indexeddb": "^6.2.5",
     "globals": "^17.7.0",
-    "jsdom": "^26.1.0",
+    "jsdom": "^29.1.1",
+    "playwright": "^1.61.1",
     "react": "^19.2.7",
     "react-dom": "^19.2.7",
     "vitest": "^4.1.9"
   },
   "dependencies": {
-    "@xyflow/react": "^12.11.0"
+    "@xyflow/react": "^12.11.1"
+  },
+  "overrides": {
+    "eslint-plugin-react": {
+      "eslint": "$eslint"
+    }
   }
 }

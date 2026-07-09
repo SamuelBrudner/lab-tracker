@@ -78,6 +78,13 @@ that destination through your normal off-machine backup process.
 
 ### Graph draft providers and transcription
 
+Pick **one** provider and set both halves: `LAB_TRACKER_GRAPH_DRAFT_PROVIDER`
+*and* that provider's API key. OpenAI, Anthropic, and Google are equally
+supported — the default is only a default. A missing key is not caught at
+startup; it surfaces at the first draft as a `failed` change set whose error
+names the variable to set. The step-by-step walkthrough (scheduling, agent
+credentials, MCP) is [`agent-setup.md`](agent-setup.md).
+
 - `LAB_TRACKER_GRAPH_DRAFT_PROVIDER`: active drafting provider (default:
   `openai`; accepted values are `openai`, `anthropic`/`claude`, and
   `google`/`gemini`; `agentic`/`agentic-openai` enables the read-only agentic
@@ -190,9 +197,9 @@ pseudonym or external sink should happen only behind the existing
 
 ## Multimodal graph draft review
 
-Multimodal draft generation defaults to OpenAI and requires
-`LAB_TRACKER_OPENAI_API_KEY` unless `LAB_TRACKER_GRAPH_DRAFT_PROVIDER` selects
-another provider. To try the local image review loop with the default provider:
+Multimodal draft generation runs on whichever provider you configured —
+OpenAI (the default), Anthropic, or Google — and requires that provider's API
+key. To try the local image review loop with the default provider:
 
 ```powershell
 $env:LAB_TRACKER_OPENAI_API_KEY = "<your OpenAI API key>"

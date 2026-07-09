@@ -9,6 +9,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
+import lab_tracker_client.auth as auth_helpers
 import lab_tracker_client.git_capture as git_capture
 import lab_tracker_client.hooks as hook_install
 import lab_tracker_client.registry as repo_registry
@@ -136,6 +137,7 @@ def _build_parser() -> argparse.ArgumentParser:
     update_parser.set_defaults(func=_cmd_update, needs_client=False)
 
     _add_setup_parsers(subcommands)
+    _add_auth_parsers(subcommands)
     _add_project_parsers(subcommands)
     _add_git_parsers(subcommands)
     _add_hooks_parsers(subcommands)
@@ -230,6 +232,7 @@ def _build_parser() -> argparse.ArgumentParser:
     import_folder_parser.set_defaults(func=_cmd_import_folder)
 
     _add_watch_parsers(subcommands)
+    _add_outbox_parsers(subcommands)
     _add_hpc_parsers(subcommands)
     _add_repo_parsers(subcommands)
 
@@ -748,6 +751,76 @@ def _add_watch_parsers(subcommands: argparse._SubParsersAction) -> None:
     run_parser.set_defaults(func=_cmd_watch_run)
 
 
+def _add_outbox_parsers(subcommands: argparse._SubParsersAction) -> None:
+    outbox_parser = subcommands.add_parser(
+        "outbox",
+        help=(
+            "Inspect and drain the local capture outbox directly, without a "
+            "watch.json (works for commit-snapshot events)."
+        ),
+    )
+    outbox_commands = outbox_parser.add_subparsers(dest="outbox_command", required=True)
+
+    status_parser = outbox_commands.add_parser(
+        "status",
+        help="Summarize queued outbox events (count, oldest, last error).",
+    )
+    status_parser.add_argument(
+        "--repo",
+        default=".",
+        help="Repository whose .lab-tracker/outbox to inspect. Defaults to cwd.",
+    )
+    status_parser.add_argument("--config", help="Watch config path. Optional; not required.")
+    status_parser.set_defaults(func=_cmd_outbox_status, needs_client=False)
+
+    sync_parser = outbox_commands.add_parser(
+        "sync",
+        help="Drain queued outbox events into Lab Tracker (no watch.json required).",
+    )
+    sync_parser.add_argument(
+        "--repo",
+        default=".",
+        help="Repository whose .lab-tracker/outbox to drain. Defaults to cwd.",
+    )
+    sync_parser.add_argument("--config", help="Watch config path. Optional; not required.")
+    sync_parser.add_argument("--dry-run", action="store_true")
+    sync_parser.add_argument("--request-draft", action="store_true")
+    sync_parser.add_argument("--limit", type=int, help="Maximum events to process.")
+    sync_parser.add_argument(
+        "--fail-silent",
+        action="store_true",
+        help="Suppress errors and error exit codes for hook/scheduler runs.",
+    )
+    sync_parser.set_defaults(func=_cmd_outbox_sync)
+
+
+def _add_auth_parsers(subcommands: argparse._SubParsersAction) -> None:
+    auth_parser = subcommands.add_parser(
+        "auth",
+        help="Audit lab-tracker MCP auth across CLI, Desktop, and repo surfaces.",
+    )
+    auth_commands = auth_parser.add_subparsers(dest="auth_command", required=True)
+
+    doctor_parser = auth_commands.add_parser(
+        "doctor",
+        help=(
+            "Enumerate every lab-tracker MCP registration and flag deprecated "
+            "username/password auth (drift that causes silent 401s)."
+        ),
+    )
+    doctor_parser.add_argument(
+        "--target",
+        default=".",
+        help="Repo whose local MCP configs to inspect. Defaults to the cwd.",
+    )
+    doctor_parser.add_argument(
+        "--fail-silent",
+        action="store_true",
+        help="Suppress the nonzero exit for deprecated configs (for hooks).",
+    )
+    doctor_parser.set_defaults(func=_cmd_auth_doctor, needs_client=False)
+
+
 def _add_hpc_parsers(subcommands: argparse._SubParsersAction) -> None:
     hpc_parser = subcommands.add_parser(
         "hpc",
@@ -1140,9 +1213,11 @@ def _cmd_setup_status(args: argparse.Namespace) -> Any:
 def _cmd_setup_init(args: argparse.Namespace) -> Any:
     from lab_tracker.cli import init_consumer_repo
 
+    mcp_base_url, mcp_base_url_source = setup_helpers.resolved_base_url_for_setup()
     result = init_consumer_repo(
         args.target,
         project_name=args.project_name,
+        mcp_base_url=mcp_base_url,
         force=args.force,
         yes=args.yes,
         dry_run=args.dry_run,
@@ -1151,6 +1226,8 @@ def _cmd_setup_init(args: argparse.Namespace) -> Any:
     )
     payload = result.as_dict()
     payload["command"] = "setup-init"
+    payload["mcp_base_url"] = mcp_base_url
+    payload["mcp_base_url_source"] = mcp_base_url_source
     return payload
 
 
@@ -1234,7 +1311,49 @@ def _cmd_git_snapshot(args: argparse.Namespace) -> Any:
             client.close()
     except Exception as exc:  # noqa: BLE001 - queued events retry on later syncs.
         payload["sync_error"] = str(exc)
+    diagnostic = _git_snapshot_sync_diagnostic(payload)
+    if diagnostic:
+        print(diagnostic, file=sys.stderr, flush=True)
     return payload
+
+
+def _git_snapshot_sync_diagnostic(payload: Any) -> str | None:
+    """Human-readable cause+remediation for a failed commit-snapshot sync (GH #77).
+
+    Returns ``None`` when the sync succeeded. The post-commit hook suppresses
+    stdout but not stderr, so this line is what the user actually sees instead of
+    the old unactionable "did not fully sync" one-liner.
+    """
+    if not isinstance(payload, dict):
+        return None
+    sync = payload.get("sync")
+    sync_errors = sync.get("errors") if isinstance(sync, dict) else None
+    if not (payload.get("sync_error") or payload.get("config_error") or sync_errors):
+        return None
+    outbox = payload.get("outbox") or "<outbox>"
+    try:
+        queued = watch_capture.outbox_status(outbox).get("total", "?")
+    except Exception:  # noqa: BLE001 - a diagnostic must never raise.
+        queued = "?"
+    if payload.get("sync_error"):
+        cause = (
+            "could not reach Lab Tracker or start the client "
+            f"({payload['sync_error']}). If 'lt' or lab_tracker_client is not "
+            "resolvable here, run 'lt setup status' to diagnose"
+        )
+    elif sync_errors:
+        first = sync_errors[0].get("error") if isinstance(sync_errors[0], dict) else None
+        cause = (
+            f"{len(sync_errors)} event(s) failed to sync "
+            f"({first or 'see the queued event files'})"
+        )
+    else:
+        cause = f"the watch config could not be used ({payload['config_error']})"
+    return (
+        f"lab-tracker: commit capture did not fully sync — {cause}. "
+        f"{queued} event(s) are queued at {outbox}; the commit was kept. "
+        "Drain later with 'lt outbox sync' (inspect with 'lt outbox status')."
+    )
 
 
 def _cmd_hooks_install(args: argparse.Namespace) -> Any:
@@ -1332,6 +1451,55 @@ def _cmd_watch_sync(client: LabTracker, args: argparse.Namespace) -> Any:
         request_draft=args.request_draft,
         limit=args.limit,
     )
+
+
+def _cmd_auth_doctor(args: argparse.Namespace) -> Any:
+    payload = auth_helpers.auth_doctor(args.target)
+    if not getattr(args, "fail_silent", False):
+        print(auth_helpers.render_report(payload), file=sys.stderr)
+    return payload
+
+
+def _resolve_outbox_config(
+    args: argparse.Namespace,
+) -> tuple[watch_capture.WatchConfig, str | None]:
+    # Commit-snapshot capture has no watch.json, so resolve the outbox from the
+    # repo layout directly (git toplevel, else the given path). This is what lets
+    # `lt outbox` drain events that `lt watch sync` refuses without watch.json.
+    try:
+        repo_root = git_capture.repo_toplevel(args.repo)
+    except Exception:  # noqa: BLE001 - not a git repo: treat --repo as the root.
+        repo_root = Path(args.repo).expanduser().resolve()
+    return git_capture.resolve_watch_config(repo_root, args.config)
+
+
+def _cmd_outbox_status(args: argparse.Namespace) -> Any:
+    config, config_error = _resolve_outbox_config(args)
+    summary = watch_capture.outbox_status(config.outbox_path())
+    summary.update(
+        {
+            "command": "outbox-status",
+            "config": str(config.config_path),
+        }
+    )
+    if config_error:
+        summary["config_error"] = config_error
+    return summary
+
+
+def _cmd_outbox_sync(client: LabTracker, args: argparse.Namespace) -> Any:
+    config, config_error = _resolve_outbox_config(args)
+    result = watch_capture.sync_outbox(
+        client,
+        config,
+        dry_run=args.dry_run,
+        request_draft=args.request_draft,
+        limit=args.limit,
+    )
+    result["command"] = "outbox-sync"
+    if config_error:
+        result["config_error"] = config_error
+    return result
 
 
 def _cmd_note(client: LabTracker, args: argparse.Namespace) -> Any:
@@ -1703,7 +1871,7 @@ def _payload_exit_code(payload: Any) -> int:
         return 1
     if (
         isinstance(payload, dict)
-        and payload.get("command") in {"watch-scan", "watch-sync"}
+        and payload.get("command") in {"watch-scan", "watch-sync", "outbox-sync"}
         and payload.get("errors")
     ):
         return 1
@@ -1711,6 +1879,12 @@ def _payload_exit_code(payload: Any) -> int:
         isinstance(payload, dict)
         and payload.get("command") == "watch-run"
         and payload.get("errors")
+    ):
+        return 1
+    if (
+        isinstance(payload, dict)
+        and payload.get("command") == "auth-doctor"
+        and payload.get("deprecated_count")
     ):
         return 1
     if isinstance(payload, dict) and payload.get("command") == "doctor-all":

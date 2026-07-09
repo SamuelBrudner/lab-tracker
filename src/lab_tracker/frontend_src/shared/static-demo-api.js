@@ -404,6 +404,20 @@ function filterCollection(name, searchParams) {
   return items;
 }
 
+// Mirror the backend _dataset_label precedence (see project_graph.py): prefer
+// the manifest's human-readable name over the opaque commit hash.
+function datasetLabel(dataset) {
+  const manifest = dataset.commit_manifest || {};
+  const name = ((manifest.metadata || {}).dataset_name || "").trim();
+  if (name) return name;
+  const files = manifest.files || [];
+  if (files.length) {
+    const base = String(files[0].path || "").replace(/\\/g, "/").split("/").pop().trim();
+    if (base) return base;
+  }
+  return `Dataset ${dataset.commit_hash}`;
+}
+
 function graphNode(entityType, entity, label, detail, status, route, metadata = {}) {
   const entityId = entity[`${entityType}_id`] || entity.viz_id || entity.id;
   return {
@@ -496,7 +510,7 @@ function baseGraph() {
     graphNode(
       "dataset",
       DATASETS[0],
-      "Dataset f2eabaa157282d2a3613b495d117528457a303da5de6429bf48faf776f724ce1",
+      datasetLabel(DATASETS[0]),
       DATASETS[0].commit_hash,
       "committed",
       `/app/datasets/${DATASET_ID}`
@@ -694,6 +708,9 @@ function demoPayload(url) {
     });
   }
   if (pathname === "/batches" || pathname === "/batches/runs" || pathname === "/graph-drafts") {
+    return listResponse([], searchParams);
+  }
+  if (pathname === "/auth/tokens" || pathname === "/auth/devices") {
     return listResponse([], searchParams);
   }
   if (pathname === `/questions/${QUESTION_LATERAL_ID}/refactors`) {
