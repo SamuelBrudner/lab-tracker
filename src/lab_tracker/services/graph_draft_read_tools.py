@@ -13,10 +13,11 @@ from lab_tracker.decision_context_query import RepositoryDecisionContextReader
 from lab_tracker.decision_context_use_case import build_decision_context
 from lab_tracker.errors import AuthError
 from lab_tracker.graph_drafting import GraphDraftingError
-from lab_tracker.models import EntityRef, EntityType
+from lab_tracker.models import DataStore, EntityRef, EntityType
 from lab_tracker.repository import LabTrackerRepository
 from lab_tracker.schema_metadata import build_schema_description
 from lab_tracker.services.goal_service import GoalService
+from lab_tracker.services.graph_draft_github_reads import GitHubRepositoryReader
 from lab_tracker.services.project_authorization import ProjectAuthorizationPolicy
 from lab_tracker.services.publication_readiness_service import PublicationReadinessService
 from lab_tracker.services.shared import (
@@ -50,6 +51,12 @@ AGENTIC_READ_TOOL_ALLOWLIST = (
     "next_questions",
 )
 
+GITHUB_REPOSITORY_READ_TOOL_ALLOWLIST = (
+    "list_relevant_repositories",
+    "list_repository_files",
+    "read_repository_file",
+)
+
 
 @dataclass(frozen=True)
 class ScopedToolResult:
@@ -71,6 +78,7 @@ class ScopedGraphDraftReadToolExecutor:
         sensitivity_policy: str = "redact",
         goals: GoalService,
         publication_readiness: PublicationReadinessService | None = None,
+        github_reader: GitHubRepositoryReader | None = None,
     ) -> None:
         self._repository = repository
         self._authorization = authorization
@@ -79,6 +87,7 @@ class ScopedGraphDraftReadToolExecutor:
         self.sensitivity_policy = sensitivity_policy
         self._goals = goals
         self._publication_readiness = publication_readiness
+        self._github_reader = github_reader
         self._actor = AuthContext(
             user_id=target_user_id,
             role=Role.VIEWER,
@@ -93,7 +102,7 @@ class ScopedGraphDraftReadToolExecutor:
         )
 
     def mcp_tool_specs(self) -> list[JsonObject]:
-        return [
+        specs = [
             _tool_spec(
                 "describe_schema",
                 "Describe Lab Tracker entity fields and enums.",
@@ -232,13 +241,58 @@ class ScopedGraphDraftReadToolExecutor:
                 {"project_id": _string_schema(), "limit": _integer_schema()},
             ),
         ]
+        if self._github_reader is not None:
+            specs.extend(
+                [
+                    _tool_spec(
+                        "list_relevant_repositories",
+                        (
+                            "List GitHub repositories explicitly registered for the "
+                            "scoped Lab Tracker project."
+                        ),
+                        {},
+                    ),
+                    _tool_spec(
+                        "list_repository_files",
+                        (
+                            "List bounded files in one relevant GitHub repository at "
+                            "an immutable full commit hash."
+                        ),
+                        {
+                            "store_id": _string_schema(),
+                            "commit": _string_schema(),
+                            "path": _string_schema(),
+                            "limit": _integer_schema(),
+                        },
+                        required=("store_id", "commit"),
+                    ),
+                    _tool_spec(
+                        "read_repository_file",
+                        (
+                            "Read bounded UTF-8 text from one relevant GitHub repository "
+                            "at an immutable full commit hash."
+                        ),
+                        {
+                            "store_id": _string_schema(),
+                            "commit": _string_schema(),
+                            "path": _string_schema(),
+                            "max_bytes": _integer_schema(),
+                        },
+                        required=("store_id", "commit", "path"),
+                    ),
+                ]
+            )
+        return specs
 
     def anthropic_tool_specs(self) -> list[JsonObject]:
         return self.mcp_tool_specs()
 
     def execute(self, tool_name: str, arguments: JsonObject | None = None) -> ScopedToolResult:
         name = str(tool_name or "").strip()
-        if name not in AGENTIC_READ_TOOL_ALLOWLIST:
+        allowed_tools = set(AGENTIC_READ_TOOL_ALLOWLIST)
+        if self._github_reader is not None:
+            allowed_tools.update(GITHUB_REPOSITORY_READ_TOOL_ALLOWLIST)
+        if name not in allowed_tools:
             raise GraphDraftingError(f"Graph draft read tool {name!r} is not allowlisted.")
         method = getattr(self, f"_execute_{name}", None)
         if not callable(method):
@@ -467,6 +521,72 @@ class ScopedGraphDraftReadToolExecutor:
             [_dump(item) for item in questions],
             [_dump(item) for item in claims],
             limit=_int_arg(arguments, "limit", 5),
+        )
+
+    def _execute_list_relevant_repositories(self, _arguments: JsonObject) -> JsonObject:
+        reader = self._require_github_reader()
+        items = []
+        for store in self._effective_github_stores():
+            repository = reader.repository_for_store(store)
+            if repository is None:
+                continue
+            items.append(
+                {
+                    "store_id": str(store.store_id),
+                    "name": store.name,
+                    "repository": repository.slug,
+                    "url": repository.web_url,
+                    "scope": "project" if store.project_id is not None else "group",
+                }
+            )
+        return {"data": items, "total": len(items)}
+
+    def _execute_list_repository_files(self, arguments: JsonObject) -> JsonObject:
+        reader = self._require_github_reader()
+        store = self._github_store_in_scope(_uuid_arg(arguments, "store_id"))
+        return {
+            "data": reader.list_files(
+                store,
+                commit=_required_str(arguments, "commit"),
+                path=_optional_str(arguments, "path") or "",
+                limit=_int_arg(arguments, "limit", 200),
+            )
+        }
+
+    def _execute_read_repository_file(self, arguments: JsonObject) -> JsonObject:
+        reader = self._require_github_reader()
+        store = self._github_store_in_scope(_uuid_arg(arguments, "store_id"))
+        max_bytes = arguments.get("max_bytes")
+        return {
+            "data": reader.read_file(
+                store,
+                commit=_required_str(arguments, "commit"),
+                path=_required_str(arguments, "path"),
+                max_bytes=None if max_bytes in {None, ""} else _int_arg(arguments, "max_bytes", 0),
+            )
+        }
+
+    def _require_github_reader(self) -> GitHubRepositoryReader:
+        if self._github_reader is None:
+            raise GraphDraftingError("GitHub repository reads are disabled.")
+        return self._github_reader
+
+    def _effective_github_stores(self) -> list[DataStore]:
+        reader = self._require_github_reader()
+        list_effective = getattr(
+            self._repository.data_stores, "list_effective_for_project", None
+        )
+        if not callable(list_effective):
+            raise GraphDraftingError("Effective project data stores are unavailable.")
+        stores = list_effective(self.project_id)
+        return [store for store in stores if reader.repository_for_store(store) is not None]
+
+    def _github_store_in_scope(self, store_id: UUID) -> DataStore:
+        for store in self._effective_github_stores():
+            if store.store_id == store_id:
+                return store
+        raise GraphDraftingError(
+            "store_id is not a GitHub repository in the graph draft read scope."
         )
 
     def _scoped_project_id(self, arguments: JsonObject) -> UUID:

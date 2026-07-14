@@ -51,6 +51,7 @@ from lab_tracker.services.graph_draft_context import (
 from lab_tracker.services.graph_draft_context import (
     entity_id as graph_entity_id,
 )
+from lab_tracker.services.graph_draft_github_reads import GitHubRepositoryReader
 from lab_tracker.services.graph_draft_read_tools import ScopedGraphDraftReadToolExecutor
 from lab_tracker.services.graph_draft_validation import GraphPatchValidator, string_list
 from lab_tracker.services.note_service import NoteService
@@ -517,6 +518,13 @@ class GraphDraftService(BaseService):
                 "Agentic live read tools require a concrete review_assignee_user_id."
             )
         app_settings = self._context.active_settings()
+        github_reader = None
+        if app_settings.graph_draft_github_read_enabled:
+            github_reader = GitHubRepositoryReader(
+                token=app_settings.graph_draft_github_token,
+                max_file_bytes=app_settings.graph_draft_github_max_file_bytes,
+                timeout_seconds=app_settings.graph_draft_github_timeout_seconds,
+            )
         executor = ScopedGraphDraftReadToolExecutor(
             repository=self.repository,
             authorization=self.authorization,
@@ -525,6 +533,7 @@ class GraphDraftService(BaseService):
             sensitivity_policy=_batch_sensitivity_policy(draft_client, app_settings),
             goals=self.goals,
             publication_readiness=self.publication_readiness,
+            github_reader=github_reader,
         )
         configure(executor)
 

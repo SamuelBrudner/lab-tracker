@@ -134,6 +134,21 @@ credentials, MCP) is [`agent-setup.md`](agent-setup.md).
 - `LAB_TRACKER_GRAPH_DRAFT_EXTERNAL_HARNESS_MAX_SPAWNS_PER_TICK`: maximum
   external harness subprocess launches allowed during one scheduled due-run
   dispatch tick (default: `1`)
+- `LAB_TRACKER_GRAPH_DRAFT_GITHUB_READ_ENABLED`: when `true`, agentic and
+  external-harness batch drafters gain three read-only MCP tools for GitHub
+  repositories registered as effective `StoreKind.GIT` data stores for the
+  batch project (default: `false`); arbitrary repositories remain inaccessible
+- `LAB_TRACKER_GRAPH_DRAFT_GITHUB_TOKEN`: optional server-held GitHub token for
+  private repositories; use a fine-grained token restricted to the selected
+  repositories with **Contents: read-only**, and never place this token in the
+  harness command or environment. A GitHub data store with
+  `credential_ref=gh-cli:github.com` may instead use an existing server-user
+  GitHub CLI keyring login; this is intended for single-user workstations.
+- `LAB_TRACKER_GRAPH_DRAFT_GITHUB_MAX_FILE_BYTES`: hard cap for one repository
+  file read (default: `262144`); only UTF-8 text at a full immutable commit hash
+  is returned
+- `LAB_TRACKER_GRAPH_DRAFT_GITHUB_TIMEOUT_SECONDS`: timeout for each server-side
+  GitHub Contents API read (default: `20`)
 - `LAB_TRACKER_OPENAI_API_KEY`: required when the provider is `openai` and for
   OpenAI voice-note transcription
 - `LAB_TRACKER_OPENAI_MODEL`: OpenAI model for graph drafts (default:

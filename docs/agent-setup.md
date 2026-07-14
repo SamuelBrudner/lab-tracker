@@ -63,6 +63,21 @@ through the per-run scoped executor MCP surface, with sensitivity forced to
 checklist lives in
 [`external-harness-security-review.md`](external-harness-security-review.md).
 
+To let that proposal agent inspect analysis code, register each relevant
+GitHub repository as a project- or lab/group-scoped `git` data store, then set
+`LAB_TRACKER_GRAPH_DRAFT_GITHUB_READ_ENABLED=true`. Public repositories need no
+additional credential. For private repositories, set
+`LAB_TRACKER_GRAPH_DRAFT_GITHUB_TOKEN` to a fine-grained token limited to the
+registered repositories with **Contents: read-only**. The harness never receives
+that token: Lab Tracker performs the GitHub request and exposes only repository
+listing, commit-pinned directory listing, and bounded UTF-8 file reads through
+the existing project/user-scoped MCP executor. Full commit hashes are required;
+branches and arbitrary remotes are rejected. On a single-user workstation that
+already uses GitHub CLI's OS-keyring login, a store may instead name
+`credential_ref=gh-cli:github.com`; Lab Tracker resolves that reference
+server-side with `gh auth token` and never persists or returns the token. The
+feature is off by default.
+
 Two setup facts worth knowing up front:
 
 - A missing key is **not** detected at startup. It surfaces at the first draft

@@ -71,9 +71,14 @@ research record:
   batches, where Claude Code, Codex CLI, or Gemini CLI may be selected as the
   drafting brain only behind an operator-reviewed sandbox and vendor-only egress
   profile. The harness receives no Lab Tracker credential, reads through the
-  per-run scoped executor surface (18 read tools plus `submit_graph_patch`,
-  sensitivity forced to omit, no artifact resolution or write tools), and still
-  lands proposals only through the normal human-gated graph-draft pipeline.
+  per-run scoped executor surface (18 graph read tools plus
+  `submit_graph_patch`, sensitivity forced to omit, and no write tools), and
+  still lands proposals only through the normal human-gated graph-draft
+  pipeline. An explicit default-off option may add three server-side,
+  read-only GitHub tools. Those tools can see only GitHub `git` data stores
+  effective for the batch project and can list/read bounded UTF-8 content only
+  at a full immutable commit hash; credentials remain server-held and arbitrary
+  repository or general artifact resolution stays unavailable.
 - Per-(project, user) graph-draft batch settings and run history for configured
   cadence, run-now, and run-due drafting over staged notes, with a project-level
   default row and `review_assignee` attribution on scheduled user batches.

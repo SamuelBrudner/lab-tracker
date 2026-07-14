@@ -15,7 +15,10 @@ from mcp.server.fastmcp import FastMCP
 from mcp.types import ToolAnnotations
 
 from lab_tracker.graph_drafting import GraphDraftingError, graph_patch_response_schema
-from lab_tracker.services.graph_draft_read_tools import AGENTIC_READ_TOOL_ALLOWLIST
+from lab_tracker.services.graph_draft_read_tools import (
+    AGENTIC_READ_TOOL_ALLOWLIST,
+    GITHUB_REPOSITORY_READ_TOOL_ALLOWLIST,
+)
 
 JsonObject = dict[str, Any]
 
@@ -24,6 +27,9 @@ HARNESS_MCP_HTTP_PATH = "/mcp"
 
 SUBMIT_GRAPH_PATCH_TOOL = "submit_graph_patch"
 HARNESS_MCP_SERVER_NAME = "lab-tracker-graph-draft-harness"
+HARNESS_READ_TOOL_ALLOWLIST = frozenset(
+    (*AGENTIC_READ_TOOL_ALLOWLIST, *GITHUB_REPOSITORY_READ_TOOL_ALLOWLIST)
+)
 
 
 @dataclass
@@ -69,7 +75,7 @@ class HarnessGraphDraftMCPServer:
         specs = [
             _mcp_tool_spec(spec)
             for spec in self.executor.mcp_tool_specs()
-            if spec.get("name") in AGENTIC_READ_TOOL_ALLOWLIST
+            if spec.get("name") in HARNESS_READ_TOOL_ALLOWLIST
         ]
         specs.append(_submit_graph_patch_spec())
         return specs
@@ -82,7 +88,12 @@ class HarnessGraphDraftMCPServer:
         name = str(tool_name or "").strip()
         if name == SUBMIT_GRAPH_PATCH_TOOL:
             return self.submit_graph_patch(arguments or {})
-        if name not in AGENTIC_READ_TOOL_ALLOWLIST:
+        registered_reads = {
+            str(spec.get("name") or "")
+            for spec in self.executor.mcp_tool_specs()
+            if spec.get("name") in HARNESS_READ_TOOL_ALLOWLIST
+        }
+        if name not in registered_reads:
             raise GraphDraftingError(f"External harness tool {name!r} is not registered.")
         if len(self._read_trace) >= self.max_tool_calls:
             raise GraphDraftingError("External harness exceeded max read tool calls.")

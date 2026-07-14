@@ -54,6 +54,10 @@ class Settings(BaseSettings):
     graph_draft_external_harness_timeout_seconds: float = 120.0
     graph_draft_external_harness_max_stdout_bytes: int = 64 * 1024
     graph_draft_external_harness_max_spawns_per_tick: int = 1
+    graph_draft_github_read_enabled: bool = False
+    graph_draft_github_token: str = ""
+    graph_draft_github_max_file_bytes: int = 256 * 1024
+    graph_draft_github_timeout_seconds: float = 20.0
     review_link_ttl_hours: int = 72
     public_base_url: str = ""
     openai_api_key: str = ""
@@ -176,6 +180,15 @@ class Settings(BaseSettings):
             raise ValueError(
                 "LAB_TRACKER_GRAPH_DRAFT_EXTERNAL_HARNESS_MAX_SPAWNS_PER_TICK must be "
                 "at least 1."
+            )
+        self.graph_draft_github_token = self.graph_draft_github_token.strip()
+        if self.graph_draft_github_max_file_bytes < 1:
+            raise ValueError(
+                "LAB_TRACKER_GRAPH_DRAFT_GITHUB_MAX_FILE_BYTES must be at least 1."
+            )
+        if self.graph_draft_github_timeout_seconds <= 0:
+            raise ValueError(
+                "LAB_TRACKER_GRAPH_DRAFT_GITHUB_TIMEOUT_SECONDS must be greater than 0."
             )
         if self.review_link_ttl_hours < 1:
             raise ValueError("LAB_TRACKER_REVIEW_LINK_TTL_HOURS must be at least 1.")

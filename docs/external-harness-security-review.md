@@ -28,9 +28,13 @@ command is configured (see the corrected fail-closed row):
   scrubbed environment (OS basics + the vendor API-key allowlist only) and raises
   if any `LAB_TRACKER_*`/`DATABASE_URL` leaks in. Pinned by
   `tests/test_graph_drafts.py::test_external_harness_subprocess_runner_scrubs_lab_tracker_env`.
-- **No artifact-deref / write tools on the MCP surface.** The MCP tool set is
-  exactly the 18 allowlisted reads plus `submit_graph_patch`; `resolve_artifact`
-  and all `create_*` tools are structurally absent.
+- **No general artifact-deref / write tools on the MCP surface.** The MCP tool
+  set is the 18 allowlisted graph reads plus `submit_graph_patch` by default;
+  `resolve_artifact` and all `create_*` tools are structurally absent. If
+  `LAB_TRACKER_GRAPH_DRAFT_GITHUB_READ_ENABLED=true`, three additional reads
+  list project-effective GitHub data stores and list/read bounded UTF-8 files at
+  a full commit hash. Store scope is enforced server-side and the GitHub token
+  never reaches the child.
 - **Fail-closed at the default and without a wrapper.** The runner refuses to
   launch unless both profiles are set to their "on" values **and** an operator
   wrapper command is supplied; it will not spawn a bare vendor binary while
@@ -60,6 +64,16 @@ must supply `..._COMMAND` as a launcher that, outside the app, actually:
   server keys, in a throwaway working directory;
 - restricts outbound network to the vendor API host(s) only; and
 - disables the harness's own native Bash/Read/Write/WebFetch tools.
+
+Optional GitHub repository access does not change the child egress policy:
+Lab Tracker's server performs the API call through the scoped executor. The
+operator must use a fine-grained GitHub token limited to the registered
+repositories with Contents read-only access, keep the option disabled when it
+is unnecessary, and treat the registered project/group `git` data stores as
+the repository allowlist. A single-user workstation may use the explicit
+`credential_ref=gh-cli:github.com` keyring reference instead of storing a token
+in Lab Tracker configuration; no other credential-reference schemes are
+resolved by this feature.
 
 Without that wrapper, enabling the feature spawns an **unisolated** vendor CLI with
 full host network and same-user filesystem access. Do not enable until these
