@@ -225,3 +225,40 @@ def test_submit_gate_rejects_client_refs_without_matching_operation() -> None:
         "note_dispositions": [entry],
     }
     assert mcp.submit_graph_patch({"graph_patch": linked})["accepted"] is True
+
+
+def test_submit_gate_enforces_evidence_grounding_when_corpus_given() -> None:
+    mcp = HarnessGraphDraftMCPServer(
+        executor=_FakeScopedExecutor(),
+        max_tool_calls=4,
+        expected_note_ids=("note-a",),
+        evidence_corpus={"note-a": ("gel lane 2 looked clean.",)},
+    )
+    fabricated = {
+        **_valid_patch(),
+        "note_dispositions": [
+            {
+                "note_id": "note-a",
+                "disposition": "no_change",
+                "reason": "checked",
+                "evidence_quote": "completely invented text",
+                "client_refs": [],
+            }
+        ],
+    }
+    with pytest.raises(GraphDraftingError, match="not a verbatim snippet"):
+        mcp.submit_graph_patch({"graph_patch": fabricated})
+
+    grounded = {
+        **_valid_patch(),
+        "note_dispositions": [
+            {
+                "note_id": "note-a",
+                "disposition": "no_change",
+                "reason": "checked",
+                "evidence_quote": "Lane 2 looked clean",
+                "client_refs": [],
+            }
+        ],
+    }
+    assert mcp.submit_graph_patch({"graph_patch": grounded})["accepted"] is True

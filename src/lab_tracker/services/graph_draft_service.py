@@ -56,7 +56,9 @@ from lab_tracker.services.graph_draft_read_tools import ScopedGraphDraftReadTool
 from lab_tracker.services.graph_draft_validation import (
     GraphPatchCoverageError,
     GraphPatchValidator,
+    evidence_quote_is_grounded,
     note_disposition_expectations,
+    note_evidence_corpus_from_notes,
     string_list,
     validate_note_disposition_coverage,
 )
@@ -107,6 +109,9 @@ class BatchReviewer:
     reviewer: str | None
     reviewer_user_id: UUID | None
     skip_reason: str | None = None
+    # True when this reviewer is the project's fallback and their batch must
+    # also pick up notes that route to nobody available (lab-tracker-ul0n.1).
+    include_unrouted: bool = False
 
 
 _BATCH_NOTE_LIMIT = 100
@@ -417,6 +422,17 @@ class GraphDraftService(BaseService):
         expected_note_ids, content_unavailable_note_ids = note_disposition_expectations(
             context_packet
         )
+        # Built from the FULL domain notes, not the truncated packet previews:
+        # agentic/harness runs read complete note bodies via the scoped read
+        # tools, so packet-only grounding would brand honest quotes from
+        # beyond the truncation windows as unverified.
+        evidence_corpus = note_evidence_corpus_from_notes(
+            batch_notes,
+            content_unavailable_note_ids=content_unavailable_note_ids,
+        )
+        enforce_grounding = (
+            getattr(app_settings, "graph_draft_evidence_grounding", "warn") == "enforce"
+        )
         last_error: GraphDraftingError | None = None
         graph_patch: dict[str, Any] | None = None
         tool_trace: dict[str, Any] | None = None
@@ -435,6 +451,7 @@ class GraphDraftService(BaseService):
                     graph_patch,
                     expected_note_ids=expected_note_ids,
                     content_unavailable_note_ids=content_unavailable_note_ids,
+                    evidence_corpus=evidence_corpus if enforce_grounding else None,
                 )
                 if tool_trace:
                     context_packet["agentic_tool_trace"] = tool_trace
@@ -529,6 +546,21 @@ class GraphDraftService(BaseService):
         change_set.summary = str(graph_patch.get("summary") or "")
         change_set.uncertain_fields = string_list(graph_patch.get("uncertain_fields"))
         change_set.clarification_requests = string_list(graph_patch.get("clarification_requests"))
+        # Soft evidence grounding (lab-tracker-hymd.4): stamp whether each
+        # non-empty quote is a verbatim snippet of the note's text. Never
+        # rejects — an unverified quote becomes a reviewer-visible badge.
+        # Content-unavailable notes are marked so the UI can tell a forced
+        # insufficient_info from a voluntary one.
+        unavailable_ids = set(content_unavailable_note_ids)
+        for entry in agent_dispositions:
+            quote = entry.get("evidence_quote")
+            note_id = str(entry.get("note_id") or "")
+            if note_id in unavailable_ids:
+                entry["content_unavailable"] = True
+            if isinstance(quote, str) and quote.strip():
+                entry["attestation_verified"] = evidence_quote_is_grounded(
+                    quote, evidence_corpus.get(note_id)
+                )
         # The persisted ledger: agent-attested entries for presented notes plus
         # server-generated rows for notes dropped before drafting. Notes the
         # system never showed the model are a system-attributed gap, distinct
@@ -630,6 +662,8 @@ class GraphDraftService(BaseService):
         run_at_local_time: str | None = None,
         timezone_name: str | None = None,
         user_id: UUID | None = None,
+        default_reviewer_user_id: UUID | None = None,
+        clear_default_reviewer: bool = False,
         actor: AuthContext | None = None,
     ) -> GraphDraftBatchSettings:
         # Contributors may schedule their own project's daily batch -- the
@@ -640,12 +674,25 @@ class GraphDraftService(BaseService):
             user_id is not None
             and (actor is None or user_id != actor.user_id)
         )
-        if editing_other_user:
+        changing_default_reviewer = (
+            default_reviewer_user_id is not None or clear_default_reviewer
+        )
+        if changing_default_reviewer and user_id is not None:
+            raise ValidationError(
+                "The default reviewer lives on the project-default settings row."
+            )
+        # Routing a draft transfers review authority (edit/submit/accept), so
+        # changing the fallback reviewer is gated like acceptance: owner only.
+        if editing_other_user or changing_default_reviewer:
             self.authorization.require_owner(project_id, actor=actor)
         else:
             self.authorization.require_contributor(project_id, actor=actor)
         if user_id is not None:
             self._ensure_review_assignee_can_read_project(project_id, user_id)
+        if default_reviewer_user_id is not None:
+            self._ensure_review_assignee_can_read_project(
+                project_id, default_reviewer_user_id
+            )
         settings = self.repository.get_graph_draft_batch_settings_by_project(
             project_id,
             user_id=user_id,
@@ -670,6 +717,10 @@ class GraphDraftService(BaseService):
         if timezone_name is not None:
             _zoneinfo(timezone_name)
             settings.timezone_name = timezone_name
+        if clear_default_reviewer:
+            settings.default_reviewer_user_id = None
+        elif default_reviewer_user_id is not None:
+            settings.default_reviewer_user_id = default_reviewer_user_id
         settings.next_run_at = (
             _next_run_at(
                 cadence_minutes=settings.cadence_minutes,
@@ -2297,9 +2348,9 @@ def _tool_trace_from_error(error: GraphDraftingError) -> dict[str, Any] | None:
 def _coverage_repair_hint(base_hint: str | None, error: GraphPatchCoverageError) -> str:
     repair = (
         "Your previous attempt violated the note_dispositions coverage contract: "
-        f"{error} Emit exactly one note_dispositions entry for every id in the "
-        "packet's note_ids_requiring_disposition array -- no omissions, extras, "
-        "or duplicates."
+        f"{error} Fix every violation listed: emit exactly one note_dispositions "
+        "entry per id in the packet's note_ids_requiring_disposition array, and "
+        "copy each non-empty evidence_quote verbatim from that note's text."
     )
     return f"{base_hint}\n\n{repair}" if base_hint else repair
 

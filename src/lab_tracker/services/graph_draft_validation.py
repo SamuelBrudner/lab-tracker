@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import json
+import unicodedata
 from collections import Counter
-from collections.abc import Callable, Collection, Sequence
+from collections.abc import Callable, Collection, Iterable, Sequence
 from typing import Any
 from uuid import UUID, uuid4
 
@@ -40,7 +41,7 @@ from lab_tracker.schemas import (
     VisualizationCreate,
     VisualizationUpdate,
 )
-from lab_tracker.services.graph_draft_context import EntityResult
+from lab_tracker.services.graph_draft_context import SENSITIVE_NOTE_REDACTION, EntityResult
 
 _REF_VALIDATION_PLACEHOLDER = "00000000-0000-0000-0000-000000000001"
 _CREATE_SCHEMAS = {
@@ -327,6 +328,106 @@ class GraphPatchCoverageError(GraphDraftingError):
         self.details: dict[str, Any] = details or {}
 
 
+# Models copying text routinely swap typographic punctuation for ASCII.
+_EVIDENCE_PUNCTUATION_FOLD = str.maketrans(
+    {
+        "‘": "'",
+        "’": "'",
+        "“": '"',
+        "”": '"',
+        "–": "-",
+        "—": "-",
+    }
+)
+# A quote shorter than this cannot meaningfully attest attention to the note:
+# single characters and stop words ground against virtually any text.
+MIN_EVIDENCE_QUOTE_CHARS = 8
+
+
+def _normalize_evidence_text(value: str) -> str:
+    normalized = unicodedata.normalize("NFKC", str(value)).translate(
+        _EVIDENCE_PUNCTUATION_FOLD
+    )
+    return " ".join(normalized.split()).casefold()
+
+
+def note_evidence_corpus(context_packet: dict[str, Any]) -> dict[str, tuple[str, ...]]:
+    """Per-note normalized text the model was actually shown.
+
+    A disposition's evidence_quote is grounded iff its normalized form is a
+    substring of one of these parts. The redaction marker is deliberately
+    excluded so quoting it never counts as evidence.
+    """
+    parts_by_note: dict[str, list[str]] = {}
+
+    def _add(note_id: str, value: Any) -> None:
+        if not note_id or not isinstance(value, str) or not value.strip():
+            return
+        normalized = _normalize_evidence_text(value)
+        if normalized == _normalize_evidence_text(SENSITIVE_NOTE_REDACTION):
+            return
+        parts_by_note.setdefault(note_id, []).append(normalized)
+
+    for note in context_packet.get("batch_notes") or []:
+        if isinstance(note, dict):
+            _add(str(note.get("id") or ""), note.get("preview"))
+    for artifact in context_packet.get("source_artifacts") or []:
+        if isinstance(artifact, dict):
+            note_id = str(artifact.get("note_id") or "")
+            _add(note_id, artifact.get("transcript_text"))
+            _add(note_id, artifact.get("raw_content_preview"))
+            _add(note_id, artifact.get("filename"))
+    return {note_id: tuple(parts) for note_id, parts in parts_by_note.items()}
+
+
+def evidence_quote_is_grounded(
+    quote: str,
+    corpus_parts: tuple[str, ...] | None,
+) -> bool:
+    normalized = _normalize_evidence_text(quote)
+    if len(normalized) < MIN_EVIDENCE_QUOTE_CHARS or not corpus_parts:
+        return False
+    return any(normalized in part for part in corpus_parts)
+
+
+def note_evidence_corpus_from_notes(
+    notes: Iterable[Any],
+    *,
+    content_unavailable_note_ids: Collection[str] = frozenset(),
+) -> dict[str, tuple[str, ...]]:
+    """Per-note normalized text built from the FULL domain notes.
+
+    Preferred over the packet-based corpus wherever the domain notes are in
+    hand: agentic and harness runs can read complete note bodies through the
+    scoped read tools, so grounding against the truncated packet previews
+    would brand honest quotes from beyond the truncation as unverified.
+    Content-omitted/redacted notes are excluded — their quotes must be empty.
+    """
+    unavailable = {str(item) for item in content_unavailable_note_ids}
+    parts_by_note: dict[str, list[str]] = {}
+    for note in notes:
+        note_id = str(getattr(note, "note_id", "") or "")
+        if not note_id or note_id in unavailable:
+            continue
+        parts: list[str] = []
+        for value in (
+            getattr(note, "raw_content", None),
+            getattr(note, "transcribed_text", None),
+        ):
+            if isinstance(value, str) and value.strip():
+                parts.append(_normalize_evidence_text(value))
+        raw_asset = getattr(note, "raw_asset", None)
+        filename = getattr(raw_asset, "filename", None)
+        if isinstance(filename, str) and filename.strip():
+            parts.append(_normalize_evidence_text(filename))
+        for value in (getattr(note, "metadata", None) or {}).values():
+            if isinstance(value, str) and value.strip():
+                parts.append(_normalize_evidence_text(value))
+        if parts:
+            parts_by_note[note_id] = parts
+    return {note_id: tuple(parts) for note_id, parts in parts_by_note.items()}
+
+
 def note_disposition_expectations(
     context_packet: dict[str, Any],
 ) -> tuple[list[str], frozenset[str]]:
@@ -359,6 +460,7 @@ def validate_note_disposition_coverage(
     *,
     expected_note_ids: Sequence[str],
     content_unavailable_note_ids: Collection[str] = frozenset(),
+    evidence_corpus: dict[str, tuple[str, ...]] | None = None,
 ) -> None:
     """Enforce the per-note disposition contract on a batch graph patch.
 
@@ -367,7 +469,11 @@ def validate_note_disposition_coverage(
     disposition enum; cited client_refs must name existing operations and only
     proposed_change entries may cite any; notes delivered with content omitted
     or redacted must attest insufficient_info with an empty evidence_quote.
-    Evidence-quote grounding stays a soft signal (lab-tracker-hymd.4).
+
+    Passing ``evidence_corpus`` (graph_draft_evidence_grounding="enforce",
+    lab-tracker-hymd.4) additionally rejects non-empty evidence quotes that are
+    not verbatim snippets of the note's delivered text; the default "warn" mode
+    instead stamps attestation_verified on the persisted ledger.
     """
     expected = [str(item) for item in expected_note_ids]
     entries = graph_patch.get("note_dispositions")
@@ -441,6 +547,19 @@ def validate_note_disposition_coverage(
                     f"note {note_id} was delivered with content omitted or redacted; "
                     "its evidence_quote must be empty"
                 )
+        elif evidence_corpus is not None:
+            quote = entry.get("evidence_quote")
+            if isinstance(quote, str) and quote.strip():
+                if len(_normalize_evidence_text(quote)) < MIN_EVIDENCE_QUOTE_CHARS:
+                    problems.append(
+                        f"note {note_id} evidence_quote is too short to verify; "
+                        "quote at least a few words of the note's text"
+                    )
+                elif not evidence_quote_is_grounded(quote, evidence_corpus.get(note_id)):
+                    problems.append(
+                        f"note {note_id} evidence_quote is not a verbatim snippet of "
+                        "the note's delivered text"
+                    )
     counts = Counter(seen_ids)
     missing = [note_id for note_id in expected if note_id not in counts]
     extra = sorted(set(seen_ids) - set(expected))

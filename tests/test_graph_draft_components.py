@@ -603,3 +603,117 @@ def test_note_disposition_expectations_reads_packet_checklist_and_flags() -> Non
     expected, unavailable = note_disposition_expectations(legacy)
     assert expected == ["a", "b"]
     assert unavailable == frozenset({"b"})
+
+
+def test_note_evidence_corpus_collects_delivered_text_and_skips_redaction() -> None:
+    from lab_tracker.services.graph_draft_validation import (
+        evidence_quote_is_grounded,
+        note_evidence_corpus,
+    )
+
+    packet = {
+        "batch_notes": [
+            {"id": "a", "preview": "Rig 2  Fly 12 responded to the ODOR pulse."},
+            {"id": "b", "preview": SENSITIVE_NOTE_REDACTION},
+        ],
+        "source_artifacts": [
+            {"note_id": "a", "transcript_text": "Full transcript about plume tracking."},
+            {"note_id": "b", "filename": "secret.jpg"},
+        ],
+    }
+    corpus = note_evidence_corpus(packet)
+
+    # Case- and whitespace-insensitive verbatim matching.
+    assert evidence_quote_is_grounded("rig 2 fly 12", corpus.get("a"))
+    assert evidence_quote_is_grounded("PLUME tracking", corpus.get("a"))
+    assert not evidence_quote_is_grounded("fabricated finding", corpus.get("a"))
+    assert not evidence_quote_is_grounded("", corpus.get("a"))
+    # The redaction marker never grounds a quote; the filename still does.
+    assert not evidence_quote_is_grounded(SENSITIVE_NOTE_REDACTION, corpus.get("b"))
+    assert evidence_quote_is_grounded("secret.jpg", corpus.get("b"))
+
+
+def test_note_disposition_coverage_enforces_evidence_grounding_when_corpus_given() -> None:
+    from lab_tracker.services.graph_draft_validation import (
+        GraphPatchCoverageError,
+        note_evidence_corpus,
+        validate_note_disposition_coverage,
+    )
+
+    packet = {"batch_notes": [{"id": "a", "preview": "Gel lane 2 looked clean."}]}
+    corpus = note_evidence_corpus(packet)
+    fabricated = [_coverage_entry("a", evidence_quote="the moon is made of cheese")]
+    with pytest.raises(GraphPatchCoverageError, match="not a verbatim snippet"):
+        validate_note_disposition_coverage(
+            _coverage_patch(fabricated),
+            expected_note_ids=["a"],
+            evidence_corpus=corpus,
+        )
+
+    grounded = [_coverage_entry("a", evidence_quote="lane 2 looked CLEAN")]
+    validate_note_disposition_coverage(
+        _coverage_patch(grounded),
+        expected_note_ids=["a"],
+        evidence_corpus=corpus,
+    )
+    # Empty quotes stay legal even under enforcement.
+    validate_note_disposition_coverage(
+        _coverage_patch([_coverage_entry("a")]),
+        expected_note_ids=["a"],
+        evidence_corpus=corpus,
+    )
+
+
+def test_evidence_grounding_min_length_and_unicode_folding() -> None:
+    from lab_tracker.services.graph_draft_validation import (
+        GraphPatchCoverageError,
+        evidence_quote_is_grounded,
+        validate_note_disposition_coverage,
+    )
+
+    corpus = ("the fly didn't track the plume - odd result.",)
+    # Trivial quotes never ground: they'd match nearly any note.
+    assert not evidence_quote_is_grounded("a", corpus)
+    assert not evidence_quote_is_grounded("the", corpus)
+    # Typographic punctuation from the model folds to ASCII before matching.
+    assert evidence_quote_is_grounded("didn’t track the plume – odd", corpus)
+
+    too_short = [_coverage_entry("a", evidence_quote="odd")]
+    with pytest.raises(GraphPatchCoverageError, match="too short to verify"):
+        validate_note_disposition_coverage(
+            _coverage_patch(too_short),
+            expected_note_ids=["a"],
+            evidence_corpus={"a": corpus},
+        )
+
+
+def test_note_evidence_corpus_from_notes_uses_full_bodies() -> None:
+    from lab_tracker.services.graph_draft_validation import (
+        evidence_quote_is_grounded,
+        note_evidence_corpus_from_notes,
+    )
+
+    long_body = "Preview part. " * 40 + "The tail says calibration drifted overnight."
+    note = Note(
+        note_id=uuid4(),
+        project_id=uuid4(),
+        raw_content=long_body,
+        metadata={"instrument": "Rig 4 photometer"},
+    )
+    hidden = Note(note_id=uuid4(), project_id=uuid4(), raw_content="secret body")
+    corpus = note_evidence_corpus_from_notes(
+        [note, hidden],
+        content_unavailable_note_ids={str(hidden.note_id)},
+    )
+
+    # Quotes far beyond the 400-char packet preview still ground: the model
+    # can read full bodies through the scoped read tools.
+    assert evidence_quote_is_grounded(
+        "calibration drifted overnight", corpus.get(str(note.note_id))
+    )
+    # Metadata values the model sees are part of the note's text.
+    assert evidence_quote_is_grounded(
+        "rig 4 photometer", corpus.get(str(note.note_id))
+    )
+    # Content-unavailable notes have no corpus: nothing can ground against them.
+    assert str(hidden.note_id) not in corpus

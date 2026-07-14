@@ -1867,3 +1867,109 @@ def test_batch_ledger_links_ops_to_citing_notes(
     assert operation.client_ref == "batch_question"
     assert operation.source_refs[0]["source_note_ids"] == [note_a]
     assert note_b not in operation.source_refs[0]["source_note_ids"]
+
+
+class _QuotingClient:
+    """Emits one grounded and one fabricated evidence quote per batch."""
+
+    provider = "fake"
+    model = "fake-batch-model"
+
+    def __init__(self) -> None:
+        self.calls: list[dict[str, Any]] = []
+
+    def draft_from_batch(
+        self,
+        *,
+        batch_context: dict[str, Any],
+        user_hint: str | None = None,
+    ) -> dict[str, Any]:
+        self.calls.append({"batch_context": batch_context, "user_hint": user_hint})
+        previews = {
+            str(note.get("id")): str(note.get("preview") or "")
+            for note in batch_context.get("batch_notes") or []
+            if isinstance(note, dict)
+        }
+        entries = []
+        for index, note_id in enumerate(_checklist_note_ids(batch_context)):
+            grounded = index == 0
+            preview = previews.get(note_id, "")
+            entries.append(
+                {
+                    "note_id": note_id,
+                    "disposition": "no_change",
+                    "reason": f"considered capture {index}",
+                    "evidence_quote": (
+                        preview[:20] if grounded else "fabricated claim never delivered"
+                    ),
+                    "client_refs": [],
+                }
+            )
+        return {
+            "summary": "empty",
+            "uncertain_fields": [],
+            "clarification_requests": [],
+            "operations": [],
+            "note_dispositions": entries,
+        }
+
+    def close(self) -> None:
+        return None
+
+
+def test_batch_evidence_grounding_warn_mode_stamps_attestation(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+) -> None:
+    project_id = _project(client, admin_auth_headers)
+    note_a = _note(client, admin_auth_headers, project_id, "Gel lane 2 looked clean today.")
+    note_b = _note(client, admin_auth_headers, project_id, "Rig 4 hums at startup.")
+    client.app.state.graph_draft_client_factory = lambda settings: _QuotingClient()
+
+    response = client.post(
+        "/batches/run-now",
+        json={"project_id": project_id},
+        headers=admin_auth_headers,
+    )
+
+    assert response.status_code == 201
+    run = response.json()["data"]
+    assert run["status"] == "ready"
+    draft = client.get(f"/batches/{run['change_set_id']}", headers=admin_auth_headers)
+    ledger = {entry["note_id"]: entry for entry in draft.json()["data"]["note_dispositions"]}
+    verified_flags = {
+        note_id: entry["attestation_verified"] for note_id, entry in ledger.items()
+    }
+    # Exactly one quote is verbatim from its note's delivered preview.
+    assert sorted(verified_flags.values()) == [False, True]
+    assert set(verified_flags) == {note_a, note_b}
+
+
+def test_batch_evidence_grounding_enforce_mode_rejects_fabricated_quotes(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+    monkeypatch,
+) -> None:
+    project_id = _project(client, admin_auth_headers)
+    _note(client, admin_auth_headers, project_id, "Only note in this window.")
+    _note(client, admin_auth_headers, project_id, "Second note in this window.")
+    monkeypatch.setattr(
+        client.app.state.settings, "graph_draft_evidence_grounding", "enforce"
+    )
+    quoting = _QuotingClient()
+    client.app.state.graph_draft_client_factory = lambda settings: quoting
+
+    response = client.post(
+        "/batches/run-now",
+        json={"project_id": project_id},
+        headers=admin_auth_headers,
+    )
+
+    assert response.status_code == 201
+    failed_run = response.json()["data"]
+    assert failed_run["status"] == "failed"
+    assert failed_run["error_metadata"]["category"] == "coverage_error"
+    assert "not a verbatim snippet" in failed_run["error_metadata"]["message"]
+    # The violation was retried with a repair hint before failing.
+    assert len(quoting.calls) > 1
+    assert "not a verbatim snippet" in (quoting.calls[1]["user_hint"] or "")

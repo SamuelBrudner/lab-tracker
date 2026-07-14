@@ -1395,6 +1395,10 @@ class HarnessGraphDraftClient:
         expected_note_ids, content_unavailable_note_ids = note_disposition_expectations(
             batch_context
         )
+        # No evidence_corpus here: the packet only carries truncated previews
+        # while the harness can read full note bodies through the scoped read
+        # tools, so in-run grounding would reject honest quotes. Evidence
+        # enforcement runs in the service gate against the full-note corpus.
         mcp_server = HarnessGraphDraftMCPServer(
             executor=self._tool_executor,
             max_tool_calls=self._max_tool_calls,
@@ -1934,10 +1938,10 @@ def _batch_instructions() -> str:
         "warrants no graph change; or 'insufficient_info' when its content was "
         "unavailable or you could not place it. Notes whose content was "
         "omitted or redacted (a '[sensitive note content redacted]' preview) "
-        "must use 'insufficient_info'. Copy a short verbatim snippet from the "
-        "note's delivered text into evidence_quote; leave it empty only for "
-        "content-omitted, redacted, or non-text notes -- never quote the "
-        "redaction marker."
+        "must use 'insufficient_info'. Copy a short verbatim snippet -- at "
+        "least a few words, never a single word -- from the note's text into "
+        "evidence_quote; leave it empty only for content-omitted, redacted, "
+        "or non-text notes -- never quote the redaction marker."
     )
 
 

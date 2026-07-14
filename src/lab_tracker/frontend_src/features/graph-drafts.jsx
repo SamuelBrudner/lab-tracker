@@ -53,6 +53,40 @@ function dispositionLabel(value) {
   return DISPOSITION_LABELS[value] || String(value || "unknown");
 }
 
+function ledgerWarnings(entries, clarificationRequests) {
+  // Honesty telemetry, never blocking: a wall of identical rationales or
+  // unexplained insufficient-info entries deserves reviewer attention.
+  // Server-written not_presented rows share one reason by construction and
+  // are not agent attestations, so they never count toward either signal.
+  const warnings = [];
+  const list = (entries || []).filter((entry) => entry?.disposition !== "not_presented");
+  const reasonCounts = {};
+  for (const entry of list) {
+    const reason = (entry?.reason || "").trim();
+    if (reason) {
+      reasonCounts[reason] = (reasonCounts[reason] || 0) + 1;
+    }
+  }
+  const topCount = Math.max(0, ...Object.values(reasonCounts));
+  if (topCount >= 3) {
+    warnings.push(
+      `${topCount} captures share an identical rationale — spot-check their quotes against the notes.`,
+    );
+  }
+  // Content-unavailable notes are FORCED to insufficient_info by the coverage
+  // contract; only voluntary insufficient-info entries warrant a clarification.
+  const needsInfo = list.filter(
+    (entry) =>
+      entry?.disposition === "insufficient_info" && entry?.content_unavailable !== true,
+  ).length;
+  if (needsInfo > 0 && (clarificationRequests || []).length === 0) {
+    warnings.push(
+      `${needsInfo === 1 ? "1 capture" : `${needsInfo} captures`} lacked enough information, but the draft requested no clarification.`,
+    );
+  }
+  return warnings;
+}
+
 function operationTitle(operation) {
   return operation.semantic_type
     ? operation.semantic_type.replaceAll("_", " ")
@@ -1097,12 +1131,28 @@ function GraphDraftDetailCard({
               {(changeSet.note_dispositions || []).length > 0 ? (
                 <div>
                   <div className="subtle">What happened to each capture</div>
+                  {ledgerWarnings(
+                    changeSet.note_dispositions,
+                    changeSet.clarification_requests,
+                  ).length > 0 ? (
+                    <ul className="compact-list">
+                      {ledgerWarnings(
+                        changeSet.note_dispositions,
+                        changeSet.clarification_requests,
+                      ).map((warning) => (
+                        <li key={warning}>⚠ {warning}</li>
+                      ))}
+                    </ul>
+                  ) : null}
                   <div className="stack">
                     {(changeSet.note_dispositions || []).map((entry, index) => (
                       <article className="item" key={`${entry.note_id || "note"}-${index}`}>
                         <div className="inline">
                           <span className="pill">{dispositionLabel(entry.disposition)}</span>
                           <span className="pill mono">{entry.note_id}</span>
+                          {entry.attestation_verified === false ? (
+                            <span className="pill review-rejected">quote not found in note</span>
+                          ) : null}
                           {[...new Set(entry.client_refs || [])].map((ref) => (
                             <span className="pill mono" key={ref}>
                               op: {ref}

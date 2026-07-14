@@ -46,6 +46,12 @@ class Settings(BaseSettings):
     graph_draft_agentic_max_tool_calls: int = 8
     graph_draft_agentic_base_provider: str = "openai"
     graph_draft_agentic_sensitivity_policy: Literal["redact", "omit", "allow"] = "redact"
+    # Evidence-quote grounding for batch note dispositions (lab-tracker-hymd.4):
+    # "warn" stamps attestation_verified on persisted ledger entries; "enforce"
+    # additionally rejects drafts whose quotes are not grounded in the note's
+    # delivered text. Flip to enforce only after observing real-traffic
+    # false-negative (paraphrase/whitespace) rates.
+    graph_draft_evidence_grounding: Literal["warn", "enforce"] = "warn"
     graph_draft_external_harness_enabled: bool = False
     graph_draft_external_harness: str = "codex"
     graph_draft_external_harness_command: str = ""

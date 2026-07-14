@@ -54,6 +54,10 @@ class HarnessGraphDraftMCPServer:
     # or redacted. None disables the coverage gate (bare-server test contexts).
     expected_note_ids: tuple[str, ...] | None = None
     content_unavailable_note_ids: frozenset[str] = frozenset()
+    # Non-None only under graph_draft_evidence_grounding="enforce"
+    # (lab-tracker-hymd.4): quotes must then be grounded in the note's
+    # delivered text or the submission is rejected for in-run repair.
+    evidence_corpus: dict[str, tuple[str, ...]] | None = None
     submission: HarnessGraphPatchSubmission = field(
         default_factory=HarnessGraphPatchSubmission
     )
@@ -143,6 +147,7 @@ class HarnessGraphDraftMCPServer:
                     graph_patch,
                     expected_note_ids=self.expected_note_ids,
                     content_unavailable_note_ids=self.content_unavailable_note_ids,
+                    evidence_corpus=self.evidence_corpus,
                 )
             except GraphDraftingError as exc:
                 self.submission.rejected_count += 1

@@ -1063,11 +1063,33 @@ describe("App", () => {
       model: "gpt-5.4-mini",
       note_dispositions: [
         {
+          attestation_verified: false,
           client_refs: ["q1"],
           disposition: "proposed_change",
           evidence_quote: "yield?",
           note_id: noteId,
           reason: "The whiteboard states the follow-up question.",
+        },
+        {
+          client_refs: [],
+          disposition: "no_change",
+          evidence_quote: "",
+          note_id: "55555555-5555-4555-8555-555555555551",
+          reason: "Considered; nothing new.",
+        },
+        {
+          client_refs: [],
+          disposition: "no_change",
+          evidence_quote: "",
+          note_id: "55555555-5555-4555-8555-555555555552",
+          reason: "Considered; nothing new.",
+        },
+        {
+          client_refs: [],
+          disposition: "no_change",
+          evidence_quote: "",
+          note_id: "55555555-5555-4555-8555-555555555553",
+          reason: "Considered; nothing new.",
         },
       ],
       operations: [baseOperation],
@@ -1166,6 +1188,13 @@ describe("App", () => {
     expect(screen.getByText("proposed a change")).toBeInTheDocument();
     expect(screen.getByText("op: q1")).toBeInTheDocument();
     expect(screen.getByText("The whiteboard states the follow-up question.")).toBeInTheDocument();
+    // Honesty telemetry: unverified quote badge + rationale-uniformity warning.
+    expect(screen.getByText("quote not found in note")).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        "⚠ 3 captures share an identical rationale — spot-check their quotes against the notes.",
+      ),
+    ).toBeInTheDocument();
     expect(screen.getByText("Proposed new question")).toBeInTheDocument();
     expect(screen.getByText("Model inference")).toBeInTheDocument();
     expect(screen.getByText("Source evidence")).toBeInTheDocument();

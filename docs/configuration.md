@@ -113,6 +113,10 @@ credentials, MCP) is [`agent-setup.md`](agent-setup.md).
 - `LAB_TRACKER_GRAPH_DRAFT_AGENTIC_SENSITIVITY_POLICY`: model-facing behavior for
   sensitivity-tagged note bodies (`redact`, `omit`, or `allow`; default:
   `redact`)
+- `LAB_TRACKER_GRAPH_DRAFT_EVIDENCE_GROUNDING`: evidence-quote grounding for
+  batch note dispositions (`warn` stamps `attestation_verified` on persisted
+  ledger entries; `enforce` additionally rejects drafts whose quotes are not
+  verbatim snippets of the note's delivered text; default: `warn`)
 - `LAB_TRACKER_GRAPH_DRAFT_EXTERNAL_HARNESS_ENABLED`: default-off security gate
   for the external daily-review harness provider; set `true` only after the
   sandbox and egress profile have been reviewed
