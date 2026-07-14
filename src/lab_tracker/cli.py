@@ -26,6 +26,7 @@ from textwrap import dedent
 from alembic import command
 from alembic.config import Config
 
+from lab_tracker._version import __version__
 from lab_tracker.api import LabTrackerAPI
 from lab_tracker.backup import BackupError, create_sqlite_backup, restore_sqlite_backup
 from lab_tracker.config import get_settings
@@ -561,6 +562,7 @@ def _is_non_loopback_host(host: str) -> bool:
 
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(prog="lab_tracker")
+    parser.add_argument("--version", action="version", version=f"lab-tracker {__version__}")
     subcommands = parser.add_subparsers(dest="command", required=True)
 
     init_parser = subcommands.add_parser(

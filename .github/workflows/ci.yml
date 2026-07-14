@@ -19,6 +19,8 @@ jobs:
       - uses: astral-sh/setup-uv@v7
       - name: Install Python dependencies
         run: uv sync --frozen --extra test --extra lint
+      - name: Verify package version
+        run: uv run python scripts/verify_release.py
       - name: Install frontend dependencies
         run: npm ci
       - name: Lint

@@ -183,6 +183,7 @@ The authoritative list of what's supported is **[docs/retained-v1-surface.md](do
 - [Cursor MCP setup](docs/lab-tracker-cursor.md) — connect Cursor to the local Lab Tracker MCP server via `.cursor/mcp.json`
 
 **Scope and vision**
+- [Versioning and releases](docs/versioning.md) — SemVer policy, version bumping, tags, and automated GitHub Releases
 - [Vision](docs/vision.md) — the north star: a question-rooted provenance graph that is human-readable, agent-readable, and AI-maintained but human-committed
 - [Supported v1 surface (authoritative)](docs/retained-v1-surface.md) — the definitive list of what ships
 - [Deferred long-term vision](idea.md) — OCR, vector search, and PI review gates, explicitly out of v1
