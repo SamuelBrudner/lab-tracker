@@ -89,12 +89,12 @@ describe("AgentAccessPage", () => {
     const commandText = Array.from(commandBlocks)
       .map((node) => node.textContent)
       .join("\n");
-    expect(commandText).toContain(`lt setup connect --base-url ${origin} --save-token --yes`);
-    expect(commandText).toContain("LAB_TRACKER_ACCESS_TOKEN = 'lpat_test-secret'");
     expect(commandText).toContain(
-      "$env:LAB_TRACKER_MCP_API_KEY = $env:LAB_TRACKER_ACCESS_TOKEN"
+      `lt setup connect --base-url ${origin} --save-token --prompt-token --yes`
     );
-    expect(commandText).toContain('export LAB_TRACKER_MCP_API_KEY="$LAB_TRACKER_ACCESS_TOKEN"');
+    expect(commandText).not.toContain("lpat_test-secret");
+    expect(commandText).not.toContain("LAB_TRACKER_ACCESS_TOKEN");
+    expect(commandText).not.toContain("LAB_TRACKER_MCP_API_KEY");
     expect(commandText).toContain("lt setup init --yes");
     // Read-only tokens cannot create projects, so the repo block must not
     // suggest --create.

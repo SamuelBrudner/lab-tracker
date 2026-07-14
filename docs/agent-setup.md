@@ -143,6 +143,22 @@ agent at once:
 lab_tracker init        # or, from the client: lt setup init (--dry-run previews first)
 ```
 
+After upgrading Lab Tracker, refresh every enrolled analysis repository and the
+global Claude/Codex skills from one command:
+
+```bash
+lt update --all --yes --install-skills --dry-run
+lt update --all --yes --install-skills
+lt doctor --all
+```
+
+The registry is `~/.lab-tracker/applied-repos.json`; `--all` continues across
+individual repo errors and reports missing paths. The managed conventions are
+written to `AGENTS.md`, `CLAUDE.md`, `GEMINI.md`, and Cursor's always-applied
+rule. The skills are copied into both `~/.codex/skills` and
+`~/.claude/skills`. Start a fresh agent task after the update because agents
+load instruction and skill text at task startup.
+
 | File | Who reads it |
 | --- | --- |
 | `.mcp.json` | Claude Code and other root-config MCP readers |

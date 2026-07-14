@@ -186,7 +186,10 @@ Judged alternatives, for the record:
    without `--force` and unpaired-marker corruption always. The hook's
    `|| echo` warning stays reachable because snapshot exits nonzero when not
    fully synced; post-commit hooks are advisory, so the commit is never
-   blocked either way. `--yes`-gated like connect/bind. The PS1 script is
+   blocked either way. New managed hooks stage commit evidence only by default;
+   `lt hooks install --request-draft` opts into immediate graph draft requests,
+   and reinstalling without a draft flag preserves the existing managed block's
+   draft behavior. `--yes`-gated like connect/bind. The PS1 script is
    deprecated-but-kept.
 8. **Doctor extension + sha-only drift** (S/M) — `version_in_sync` compares
    the content sha only, so package bumps stop crying wolf; `_doctor` also

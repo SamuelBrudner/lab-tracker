@@ -1471,6 +1471,17 @@ button.project-graph-legend-item:hover {
   margin-top: 0.7rem;
 }
 
+.form-grid,
+.grid-mini {
+  display: grid;
+  gap: 0.75rem;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+}
+
+.grid-mini {
+  align-items: start;
+}
+
 .enrollment-url {
   display: flex;
   flex-wrap: wrap;

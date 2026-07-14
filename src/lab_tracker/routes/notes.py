@@ -75,6 +75,7 @@ def build_notes_router(api: LabTrackerAPI) -> APIRouter:
             targets=payload.targets,
             metadata=payload.metadata,
             client_capture_id=payload.client_capture_id,
+            capture_context_id=payload.capture_context_id,
             status=payload.status or note_default_status(),
             actor=actor,
         )
@@ -94,6 +95,7 @@ def build_notes_router(api: LabTrackerAPI) -> APIRouter:
         targets: Annotated[str | None, Form()] = None,
         metadata: Annotated[str | None, Form()] = None,
         client_capture_id: Annotated[str | None, Form()] = None,
+        capture_context_id: Annotated[UUID | None, Form()] = None,
         status: Annotated[NoteStatus | None, Form()] = None,
     ):
         actor = actor_from_request(request)
@@ -131,6 +133,7 @@ def build_notes_router(api: LabTrackerAPI) -> APIRouter:
             targets=parsed_targets,
             metadata=enriched_metadata,
             client_capture_id=client_capture_id,
+            capture_context_id=capture_context_id,
             status=status or note_default_status(),
             actor=actor,
         )
@@ -148,6 +151,7 @@ def build_notes_router(api: LabTrackerAPI) -> APIRouter:
         project_id: Annotated[UUID, Form()],
         metadata: Annotated[str | None, Form()] = None,
         client_capture_id: Annotated[str | None, Form()] = None,
+        capture_context_id: Annotated[UUID | None, Form()] = None,
     ):
         actor = actor_from_request(request)
         request_api = api_from_request(request, api)
@@ -180,6 +184,7 @@ def build_notes_router(api: LabTrackerAPI) -> APIRouter:
             owns_raw_asset=True,
             metadata=enriched_metadata,
             client_capture_id=client_capture_id,
+            capture_context_id=capture_context_id,
             status=NoteStatus.STAGED,
             actor=actor,
         )

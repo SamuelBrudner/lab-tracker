@@ -157,6 +157,7 @@ def test_init_yes_writes_managed_code_conventions_blocks(tmp_path: Path) -> None
     expected_version = code_conventions_version_line(expected_body)
     claude_content = (tmp_path / "CLAUDE.md").read_text(encoding="utf-8")
     agents_content = agents.read_text(encoding="utf-8")
+    gemini_content = (tmp_path / "GEMINI.md").read_text(encoding="utf-8")
     cursor_content = (tmp_path / ".cursor" / "rules" / "lab-tracker.mdc").read_text(
         encoding="utf-8"
     )
@@ -164,6 +165,7 @@ def test_init_yes_writes_managed_code_conventions_blocks(tmp_path: Path) -> None
     assert CLAUDE_BLOCK_BEGIN in claude_content
     assert claude_content.count(CODE_CONVENTIONS_BLOCK_BEGIN) == 1
     assert agents_content.count(AGENTS_CODE_CONVENTIONS_BLOCK_BEGIN) == 1
+    assert gemini_content.count(CODE_CONVENTIONS_BLOCK_BEGIN) == 1
     assert "<!-- BEGIN BEADS -->" in agents_content
     assert cursor_content.startswith("---\ndescription: Lab Tracker code-facing conventions")
     assert (
@@ -179,6 +181,14 @@ def test_init_yes_writes_managed_code_conventions_blocks(tmp_path: Path) -> None
             agents_content,
             begin_marker=AGENTS_CODE_CONVENTIONS_BLOCK_BEGIN,
             end_marker=AGENTS_CODE_CONVENTIONS_BLOCK_END,
+        )
+        == expected_body
+    )
+    assert (
+        _extract_managed_body(
+            gemini_content,
+            begin_marker=CODE_CONVENTIONS_BLOCK_BEGIN,
+            end_marker=CODE_CONVENTIONS_BLOCK_END,
         )
         == expected_body
     )
@@ -233,6 +243,7 @@ def test_init_uninstall_strips_managed_blocks_preserving_surroundings(tmp_path: 
     assert "# Existing Agents" in agents_content
     gemini_content = (tmp_path / "GEMINI.md").read_text(encoding="utf-8")
     assert CLAUDE_BLOCK_BEGIN not in gemini_content
+    assert CODE_CONVENTIONS_BLOCK_BEGIN not in gemini_content
     assert CODE_CONVENTIONS_BLOCK_BEGIN not in cursor_content
 
 
@@ -299,6 +310,10 @@ def test_doctor_treats_safe_default_absent_blocks_as_not_installed(
     assert any(not target["present"] for target in payload["targets"])
     assert not any(target["drifted"] for target in payload["targets"])
 
+    fleet_payload = _doctor(tmp_path, require_conventions=True)
+    assert all(target["drifted"] for target in fleet_payload["targets"])
+    assert "lt update --yes" in fleet_payload["suggestion"]
+
     lab_tracker_main(["check-idioms", "--target", str(tmp_path)])
     assert json.loads(capsys.readouterr().out)["command"] == "doctor"
 
@@ -362,6 +377,9 @@ def test_update_preserves_conventions_consent(tmp_path: Path) -> None:
     update_consumer_repo(tmp_path, yes=True)
 
     assert "BEGIN LAB TRACKER CODE CONVENTIONS" in (tmp_path / "CLAUDE.md").read_text(
+        encoding="utf-8"
+    )
+    assert "BEGIN LAB TRACKER CODE CONVENTIONS" in (tmp_path / "GEMINI.md").read_text(
         encoding="utf-8"
     )
     assert (tmp_path / ".cursor" / "rules" / "lab-tracker.mdc").exists()
@@ -445,6 +463,9 @@ def test_lab_tracker_init_console_entrypoints_are_packaged() -> None:
     assert scripts["lab_tracker"] == "lab_tracker.cli:main"
     assert scripts["lab-tracker"] == "lab_tracker.cli:main"
     assert scripts["lt"] == "lab_tracker_client.cli:main"
+    assert pyproject["tool"]["setuptools"]["data-files"][
+        "share/lab-tracker/skills/lab-tracker"
+    ] == ["skills/lab-tracker/SKILL.md"]
 
 
 def test_seed_demo_cli_prints_json_summary(monkeypatch, capsys) -> None:
@@ -498,6 +519,7 @@ def test_lt_prime_non_research_prompt_emits_nothing(capsys) -> None:
 
 
 def test_serve_app_runs_migrations_schedules_browser_and_starts_server(monkeypatch) -> None:
+    monkeypatch.setenv("LAB_TRACKER_DATABASE_URL", "sqlite+pysqlite:///./lab_tracker.db")
     calls: list[tuple[str, object]] = []
 
     def fake_backup(database_url: str, **kwargs):

@@ -21,6 +21,16 @@ class FakeBatchDraftClient:
             "uncertain_fields": [],
             "clarification_requests": [],
             "operations": [],
+            "note_dispositions": [
+                {
+                    "note_id": str(note_id),
+                    "disposition": "no_change",
+                    "reason": "considered by fake drafter",
+                    "evidence_quote": "",
+                    "client_refs": [],
+                }
+                for note_id in batch_context.get("note_ids_requiring_disposition") or []
+            ],
         }
 
     def close(self) -> None:

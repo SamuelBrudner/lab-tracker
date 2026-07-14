@@ -514,7 +514,16 @@ def test_store_relative_reference_local_builds_file_uri():
     ref = store_relative_reference(store, path="exp/001/x.txt", content_hash=_sha256(b"x"))
     assert ref is not None
     assert ref.source_system == "local"
-    assert ref.uri == Path("/data/store/exp/001/x.txt").as_uri()
+    assert ref.uri == "file:///data/store/exp/001/x.txt"
+
+
+def test_store_relative_reference_local_preserves_native_path_uri(tmp_path):
+    store = _data_store(StoreKind.LOCAL_FS, str(tmp_path))
+
+    ref = store_relative_reference(store, path="exp/001/x.txt", content_hash=_sha256(b"x"))
+
+    assert ref is not None
+    assert ref.uri == (tmp_path / "exp" / "001" / "x.txt").as_uri()
 
 
 def test_store_relative_reference_rclone_uses_credential_ref_as_remote():

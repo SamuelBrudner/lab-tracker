@@ -60,7 +60,7 @@ def test_create_list_and_revoke_personal_access_token(
     assert revoked.json()["data"]["revoked_at"] is not None
 
 
-def test_read_only_personal_access_token_can_read_but_not_write_or_auth(
+def test_read_only_personal_access_token_can_read_and_introspect_but_not_write(
     client: TestClient,
     admin_auth_headers: dict[str, str],
 ):
@@ -70,11 +70,11 @@ def test_read_only_personal_access_token_can_read_but_not_write_or_auth(
         headers=admin_auth_headers,
     )
     assert project_response.status_code == 201, project_response.text
-    issued = _create_token(client, admin_auth_headers, role="admin", read_only=True)
+    issued = _create_token(client, admin_auth_headers, role="viewer", read_only=True)
     pat_headers = _bearer(issued["secret"])
 
     listing = client.get("/projects", headers=pat_headers)
-    forbidden_auth = client.get("/auth/me", headers=pat_headers)
+    introspection = client.get("/auth/me", headers=pat_headers)
     write_attempts = [
         client.post("/projects", json={"name": "Blocked"}, headers=pat_headers),
         client.post(
@@ -122,7 +122,15 @@ def test_read_only_personal_access_token_can_read_but_not_write_or_auth(
     assert {response.json()["error"]["code"] for response in write_attempts} == {
         "service_forbidden"
     }
-    assert forbidden_auth.status_code == 403
+    assert introspection.status_code == 200, introspection.text
+    introspection_payload = introspection.json()
+    assert introspection_payload["meta"]["principal_type"] == "service"
+    assert introspection_payload["meta"]["is_interactive"] is False
+    assert introspection_payload["meta"]["service_token"]["token_id"] == issued["token_id"]
+    assert introspection_payload["meta"]["service_token"]["label"] == issued["label"]
+    assert introspection_payload["data"]["role"] == "viewer"
+    assert introspection_payload["meta"]["service_token"]["role"] == "viewer"
+    assert introspection_payload["meta"]["service_token"]["read_only"] is True
 
 
 def test_write_enabled_token_uses_capped_role_not_live_user_role(

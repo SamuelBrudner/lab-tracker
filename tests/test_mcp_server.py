@@ -356,6 +356,39 @@ def test_mcp_settings_from_env_accepts_api_key_aliases(monkeypatch) -> None:
     assert mcp_server.MCPSettings.from_env().api_key == "lpat_alias"
 
 
+def test_mcp_settings_fall_back_to_saved_connection_profile(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    (config_dir / "config.json").write_text(
+        json.dumps(
+            {
+                "access_token": "profile-token",
+                "base_url": "https://lab.example.test",
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("LAB_TRACKER_CONFIG_DIR", str(config_dir))
+    for name in (
+        "LAB_TRACKER_ACCESS_TOKEN",
+        "LAB_TRACKER_BASE_URL",
+        "LAB_TRACKER_MCP_API_KEY",
+        "LAB_TRACKER_MCP_BASE_URL",
+        "LAB_TRACKER_MCP_TOKEN",
+        "LAB_TRACKER_MCP_USERNAME",
+        "LAB_TRACKER_USERNAME",
+    ):
+        monkeypatch.delenv(name, raising=False)
+
+    settings = mcp_server.MCPSettings.from_env()
+
+    assert settings.base_url == "https://lab.example.test"
+    assert settings.api_key == "profile-token"
+
+
 def test_mcp_api_error_redacts_bearer_and_lpat_secrets() -> None:
     exc = mcp_server.LabTrackerAPIUnavailableError(
         "GET failed with Authorization: Bearer lpat_supersecret",

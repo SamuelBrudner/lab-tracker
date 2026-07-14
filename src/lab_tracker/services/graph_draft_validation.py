@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Callable
+from collections import Counter
+from collections.abc import Callable, Collection, Sequence
 from typing import Any
 from uuid import UUID, uuid4
 
@@ -118,8 +119,16 @@ class GraphPatchValidator:
     ) -> None:
         self._get_graph_entity = get_graph_entity
 
-    def validate_top_level(self, graph_patch: dict[str, Any]) -> None:
-        _validate_graph_patch_top_level(graph_patch)
+    def validate_top_level(
+        self,
+        graph_patch: dict[str, Any],
+        *,
+        require_note_dispositions: bool = False,
+    ) -> None:
+        _validate_graph_patch_top_level(
+            graph_patch,
+            require_note_dispositions=require_note_dispositions,
+        )
 
     def validate_operation(
         self,
@@ -152,7 +161,7 @@ class GraphPatchValidator:
                     operation_id=uuid4(),
                     change_set_id=change_set.change_set_id,
                     sequence=index,
-                    op=GraphChangeOp(item.get("op")),
+                    op=_normalized_graph_change_op(item),
                     entity_type=EntityType(item.get("entity_type")),
                     semantic_type=GraphDraftSemanticType(item.get("semantic_type")),
                     target_entity_id=item.get("target_entity_id"),
@@ -160,7 +169,7 @@ class GraphPatchValidator:
                     payload=payload,
                     rationale=str(item.get("rationale") or ""),
                     confidence=item.get("confidence"),
-                    source_refs=item.get("source_refs") or [],
+                    source_refs=_normalized_source_refs(item.get("source_refs") or []),
                 )
             except Exception as exc:
                 raise GraphDraftingError("GPT graph patch operation was invalid.") from exc
@@ -232,6 +241,31 @@ def _payload_from_json(raw_payload: Any) -> dict[str, Any]:
     return parsed
 
 
+def _normalized_graph_change_op(item: dict[str, Any]) -> GraphChangeOp:
+    raw_op = item.get("op")
+    alias = {"create_entity": "create", "update_entity": "update"}.get(raw_op)
+    if alias is not None and raw_op == item.get("semantic_type"):
+        raw_op = alias
+    return GraphChangeOp(raw_op)
+
+
+def _normalized_source_refs(raw_refs: list[Any]) -> list[Any]:
+    normalized: list[Any] = []
+    for ref in raw_refs:
+        if not isinstance(ref, str):
+            normalized.append(ref)
+            continue
+        try:
+            note_id = UUID(ref)
+        except ValueError:
+            normalized.append(ref)
+            continue
+        normalized.append(
+            {"label": f"note:{note_id}", "quote": "", "region": None}
+        )
+    return normalized
+
+
 def _validate_graph_patch_operation_shape(item: dict[str, Any]) -> None:
     required = {
         "client_ref",
@@ -263,13 +297,173 @@ def _validate_graph_patch_operation_shape(item: dict[str, Any]) -> None:
         raise GraphDraftingError("GPT graph patch source_refs must be a list.")
 
 
-def _validate_graph_patch_top_level(graph_patch: dict[str, Any]) -> None:
+def _validate_graph_patch_top_level(
+    graph_patch: dict[str, Any],
+    *,
+    require_note_dispositions: bool = False,
+) -> None:
     if not isinstance(graph_patch.get("summary"), str):
         raise GraphDraftingError("GPT graph patch summary must be a string.")
     if not isinstance(graph_patch.get("uncertain_fields"), list):
         raise GraphDraftingError("GPT graph patch uncertain_fields must be a list.")
     if not isinstance(graph_patch.get("clarification_requests"), list):
         raise GraphDraftingError("GPT graph patch clarification_requests must be a list.")
+    if require_note_dispositions and not isinstance(graph_patch.get("note_dispositions"), list):
+        raise GraphDraftingError("GPT graph patch note_dispositions must be a list.")
+
+
+_NOTE_DISPOSITION_VALUES = frozenset({"proposed_change", "no_change", "insufficient_info"})
+
+
+class GraphPatchCoverageError(GraphDraftingError):
+    """A batch graph patch failed the per-note disposition coverage contract.
+
+    ``details`` carries the machine-readable violation sets (missing, extra,
+    and duplicate note ids) for run error metadata and repair hints.
+    """
+
+    def __init__(self, message: str, *, details: dict[str, Any] | None = None) -> None:
+        super().__init__(message)
+        self.details: dict[str, Any] = details or {}
+
+
+def note_disposition_expectations(
+    context_packet: dict[str, Any],
+) -> tuple[list[str], frozenset[str]]:
+    """Derive the coverage contract from a batch context packet.
+
+    Returns the note ids requiring a disposition and the subset whose content
+    was delivered omitted or redacted (which therefore cannot honestly claim
+    anything but ``insufficient_info``). Packets predating the explicit
+    checklist fall back to the presented ``batch_notes`` ids.
+    """
+    batch_notes = [
+        note for note in context_packet.get("batch_notes") or [] if isinstance(note, dict)
+    ]
+    raw_expected = context_packet.get("note_ids_requiring_disposition")
+    if raw_expected is None:
+        expected = [str(note.get("id")) for note in batch_notes if note.get("id")]
+    else:
+        expected = [str(item) for item in raw_expected if item]
+    content_unavailable = frozenset(
+        str(note.get("id"))
+        for note in batch_notes
+        if note.get("id")
+        and (note.get("sensitive_content_omitted") or note.get("sensitive_content_redacted"))
+    )
+    return expected, content_unavailable
+
+
+def validate_note_disposition_coverage(
+    graph_patch: dict[str, Any],
+    *,
+    expected_note_ids: Sequence[str],
+    content_unavailable_note_ids: Collection[str] = frozenset(),
+) -> None:
+    """Enforce the per-note disposition contract on a batch graph patch.
+
+    Hard rules (lab-tracker-hymd.2): exactly one well-formed entry per
+    presented note id — no omissions, extras, or duplicates; a valid
+    disposition enum; cited client_refs must name existing operations and only
+    proposed_change entries may cite any; notes delivered with content omitted
+    or redacted must attest insufficient_info with an empty evidence_quote.
+    Evidence-quote grounding stays a soft signal (lab-tracker-hymd.4).
+    """
+    expected = [str(item) for item in expected_note_ids]
+    entries = graph_patch.get("note_dispositions")
+    if not isinstance(entries, list):
+        raise GraphPatchCoverageError(
+            "Graph patch is missing the note_dispositions checklist; emit exactly "
+            f"one entry per note id: {', '.join(expected) or '(none)'}.",
+            details={"missing_note_ids": expected},
+        )
+    problems: list[str] = []
+    seen_ids: list[str] = []
+    operation_refs = {
+        operation.get("client_ref")
+        for operation in graph_patch.get("operations") or []
+        if isinstance(operation, dict) and isinstance(operation.get("client_ref"), str)
+    }
+    unavailable = {str(item) for item in content_unavailable_note_ids}
+    for index, entry in enumerate(entries):
+        if not isinstance(entry, dict):
+            problems.append(f"note_dispositions[{index}] must be an object")
+            continue
+        note_id = entry.get("note_id")
+        if not isinstance(note_id, str) or not note_id:
+            problems.append(f"note_dispositions[{index}] must carry a note_id string")
+            continue
+        seen_ids.append(note_id)
+        disposition = entry.get("disposition")
+        if disposition not in _NOTE_DISPOSITION_VALUES:
+            problems.append(
+                f"note {note_id} has invalid disposition {disposition!r} "
+                "(allowed: proposed_change, no_change, insufficient_info)"
+            )
+        if not isinstance(entry.get("reason"), str) or not entry.get("reason"):
+            problems.append(f"note {note_id} must carry a non-empty reason string")
+        if not isinstance(entry.get("evidence_quote"), str):
+            problems.append(f"note {note_id} must carry an evidence_quote string")
+        client_refs = entry.get("client_refs")
+        if not isinstance(client_refs, list) or any(
+            not isinstance(ref, str) for ref in client_refs
+        ):
+            problems.append(f"note {note_id} client_refs must be a list of strings")
+            client_refs = []
+        unknown_refs = sorted(set(client_refs) - operation_refs)
+        if unknown_refs:
+            problems.append(
+                f"note {note_id} cites client_refs with no matching operation: "
+                + ", ".join(repr(ref) for ref in unknown_refs)
+            )
+        if disposition == "proposed_change" and not client_refs:
+            problems.append(
+                f"note {note_id} is proposed_change but cites no operations; "
+                "at least one client_ref is required"
+            )
+        if (
+            disposition in _NOTE_DISPOSITION_VALUES
+            and disposition != "proposed_change"
+            and client_refs
+        ):
+            problems.append(
+                f"note {note_id} is {disposition} but cites operations; only "
+                "proposed_change entries may carry client_refs"
+            )
+        if note_id in unavailable:
+            if disposition != "insufficient_info":
+                problems.append(
+                    f"note {note_id} was delivered with content omitted or redacted "
+                    "and must use disposition insufficient_info"
+                )
+            if entry.get("evidence_quote"):
+                problems.append(
+                    f"note {note_id} was delivered with content omitted or redacted; "
+                    "its evidence_quote must be empty"
+                )
+    counts = Counter(seen_ids)
+    missing = [note_id for note_id in expected if note_id not in counts]
+    extra = sorted(set(seen_ids) - set(expected))
+    duplicates = sorted(note_id for note_id, count in counts.items() if count > 1)
+    details: dict[str, Any] = {}
+    set_problems: list[str] = []
+    if missing:
+        details["missing_note_ids"] = missing
+        set_problems.append("missing dispositions for note ids: " + ", ".join(missing))
+    if extra:
+        details["extra_note_ids"] = extra
+        set_problems.append("dispositions for note ids not in this batch: " + ", ".join(extra))
+    if duplicates:
+        details["duplicate_note_ids"] = duplicates
+        set_problems.append("duplicate dispositions for note ids: " + ", ".join(duplicates))
+    problems = set_problems + problems
+    if problems:
+        raise GraphPatchCoverageError(
+            "Graph patch note_dispositions failed the coverage contract: "
+            + "; ".join(problems)
+            + ".",
+            details=details,
+        )
 
 
 def _resolve_refs(value: Any, ref_map: dict[str, UUID]) -> Any:

@@ -183,7 +183,7 @@ models, with an Alembic migration (single-head rule). The change-set-level
 trace reference from component 2 is the interim; this is the durable
 per-operation `prov:used`.
 
-## Product decisions (open)
+## Product decisions
 
 1. **Sensitivity policy for model-facing reads (`lab-tracker-2k8j.1`).**
    For a note tagged sensitive, does the drafting model get: the note
@@ -191,11 +191,11 @@ per-operation `prov:used`.
    coverage gap (recommended — mirrors the `context_summary` gap-warning
    philosophy), or the content allowed behind a flag? Sets the default of
    `graph_draft_agentic_sensitivity_policy`.
-2. **Reviewer-ambiguity fallback identity (`lab-tracker-2k8j.2`).** A
-   scheduled batch with `review_assignee` unset has no single user to
-   read as. Fall back to the batch-settings owner, the project owner, or
-   refuse to draft (fail-closed)? Sets target-user resolution in
-   `execute_graph_draft_batch_run`.
+2. **Reviewer-ambiguity fallback identity (`lab-tracker-2k8j.2`) - resolved.**
+   Scheduled agentic/live-read and external-harness drafts fail closed without a
+   concrete `review_assignee_user_id`. The service refuses to inject scoped read
+   tools rather than falling back to the batch-settings owner, project owner, or
+   scheduler/admin actor.
 
 ## Rejected alternatives
 

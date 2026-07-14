@@ -110,6 +110,14 @@ function readShareTargetStatus() {
   }
 }
 
+function readCaptureContextId() {
+  try {
+    return new URLSearchParams(window.location.search || "").get("context") || "";
+  } catch {
+    return "";
+  }
+}
+
 function clearShareTargetStatus() {
   try {
     const url = new URL(window.location.href);
@@ -306,10 +314,62 @@ function MobileCaptureCard({
   const [analyses, setAnalyses] = useState([]);
   const [claims, setClaims] = useState([]);
   const [pendingError, setPendingError] = useState("");
+  const [captureContext, setCaptureContext] = useState(null);
+  const [captureContextError, setCaptureContextError] = useState("");
+  const captureContextId = useMemo(() => readCaptureContextId(), []);
   const activeQuestions = useMemo(
     () => questions.filter((question) => question.status === "active"),
     [questions]
   );
+
+  useEffect(() => {
+    let canceled = false;
+    setCaptureContext(null);
+    setCaptureContextError("");
+    if (!captureContextId) {
+      return () => {
+        canceled = true;
+      };
+    }
+    apiRequest(`/capture-contexts/${captureContextId}`, { token })
+      .then((context) => {
+        if (canceled) {
+          return;
+        }
+        if (context?.revoked_at) {
+          setCaptureContextError("This capture QR has been revoked.");
+          return;
+        }
+        setCaptureContext(context);
+        if (context?.project_id) {
+          onSelectedProjectChange(context.project_id);
+        }
+      })
+      .catch((err) => {
+        if (!canceled) {
+          setCaptureContextError(err.message || "Unable to load capture context.");
+        }
+      });
+    return () => {
+      canceled = true;
+    };
+  }, [captureContextId, onSelectedProjectChange, token]);
+
+  useEffect(() => {
+    if (!captureContext) {
+      return;
+    }
+    if (captureContext.default_hint) {
+      setHint((current) => (current.trim() ? current : captureContext.default_hint));
+    }
+    const defaults = captureContext.default_targets || [];
+    const targetByType = new Map(defaults.map((target) => [target.entity_type, target.entity_id]));
+    setQuestionId(targetByType.get("question") || "");
+    setSessionId(targetByType.get("session") || "");
+    setDatasetId(targetByType.get("dataset") || "");
+    setAnalysisId(targetByType.get("analysis") || "");
+    setClaimId(targetByType.get("claim") || "");
+  }, [captureContext]);
 
   useEffect(() => {
     let canceled = false;
@@ -387,10 +447,15 @@ function MobileCaptureCard({
       createTextNote: ({ metadata, rawContent }) =>
         apiRequest("/notes", {
           body: {
-            metadata,
+            metadata: {
+              ...metadata,
+              capture_observed_at:
+                metadata?.capture_observed_at || new Date().toISOString(),
+            },
             project_id: selectedProjectId,
             raw_content: rawContent,
             targets: [],
+            ...(captureContextId ? { capture_context_id: captureContextId } : {}),
           },
           method: "POST",
           token,
@@ -425,7 +490,7 @@ function MobileCaptureCard({
     return () => {
       canceled = true;
     };
-  }, [selectedProjectId, token, setFlash]);
+  }, [captureContextId, selectedProjectId, token, setFlash]);
 
   function selectedTargets() {
     const targets = [];
@@ -599,12 +664,13 @@ function MobileCaptureCard({
     return metadata;
   }
 
-  function baseMetadata({ kind, bundleId = "", file = null }) {
+  function baseMetadata({ kind, bundleId = "", file = null, observedAt }) {
     const metadata = {
       capture_source: "mobile_capture",
       capture_mode: captureMode,
       capture_kind: kind,
       capture_review_status: "pending_review",
+      capture_observed_at: observedAt || new Date().toISOString(),
       ...sourceFileMetadata(file),
     };
     if (bundleId) {
@@ -626,6 +692,9 @@ function MobileCaptureCard({
     payload.append("project_id", selectedProjectId);
     payload.append("metadata", JSON.stringify(metadata));
     payload.append("client_capture_id", clientCaptureId);
+    if (captureContextId) {
+      payload.append("capture_context_id", captureContextId);
+    }
     const targets = selectedTargets();
     if (targets.length > 0) {
       payload.append("targets", JSON.stringify(targets));
@@ -647,6 +716,9 @@ function MobileCaptureCard({
       metadata: JSON.stringify(metadata),
       client_capture_id: clientCaptureId,
     };
+    if (captureContextId) {
+      fields.capture_context_id = captureContextId;
+    }
     const targets = selectedTargets();
     if (targets.length > 0) {
       fields.targets = JSON.stringify(targets);
@@ -682,13 +754,14 @@ function MobileCaptureCard({
     }
   }
 
-  async function createTextCapture() {
+  async function createTextCapture({ observedAt }) {
     return apiRequest("/notes", {
       body: {
         project_id: selectedProjectId,
         raw_content: textNote.trim(),
         targets: selectedTargets(),
-        metadata: baseMetadata({ kind: "text" }),
+        metadata: baseMetadata({ kind: "text", observedAt }),
+        ...(captureContextId ? { capture_context_id: captureContextId } : {}),
       },
       method: "POST",
       token,
@@ -761,6 +834,7 @@ function MobileCaptureCard({
       let voiceNoteId = uploadedVoiceNoteId;
       let queuedOffline = false;
       let noteCreated = false;
+      const observedAt = new Date().toISOString();
       const bundleId =
         captureMode === "bundle" ? uploadedBundleId || newBundleId() : "";
       if (bundleId && !uploadedBundleId) {
@@ -770,7 +844,12 @@ function MobileCaptureCard({
       if (needsPhoto() && !noteId) {
         const result = await uploadOrQueueRawFile({
           fileToUpload: photoFile,
-          metadata: baseMetadata({ kind: "image", bundleId, file: photoFile }),
+          metadata: baseMetadata({
+            kind: "image",
+            bundleId,
+            file: photoFile,
+            observedAt,
+          }),
         });
         if (result === OFFLINE_QUEUED) {
           queuedOffline = true;
@@ -784,7 +863,12 @@ function MobileCaptureCard({
       if (needsVoice() && !voiceNoteId && !queuedOffline) {
         const result = await uploadOrQueueRawFile({
           fileToUpload: audioFile,
-          metadata: baseMetadata({ kind: "voice", bundleId, file: audioFile }),
+          metadata: baseMetadata({
+            kind: "voice",
+            bundleId,
+            file: audioFile,
+            observedAt,
+          }),
         });
         if (result === OFFLINE_QUEUED) {
           queuedOffline = true;
@@ -800,12 +884,17 @@ function MobileCaptureCard({
       } else if (needsVoice() && !voiceNoteId && queuedOffline) {
         await queueRawFileNoteOffline({
           fileToUpload: audioFile,
-          metadata: baseMetadata({ kind: "voice", bundleId, file: audioFile }),
+          metadata: baseMetadata({
+            kind: "voice",
+            bundleId,
+            file: audioFile,
+            observedAt,
+          }),
         });
       }
 
       if (needsText() && !noteId && !queuedOffline) {
-        const textCapture = await createTextCapture();
+        const textCapture = await createTextCapture({ observedAt });
         noteId = textCapture.note_id;
         noteCreated = true;
         setUploadedNoteId(noteId);
@@ -849,6 +938,18 @@ function MobileCaptureCard({
                 Workspace
               </button>
             </div>
+            {captureContext ? (
+              <div className="inline" aria-label="Capture context">
+                <span className="pill">{captureContext.label}</span>
+                {captureContext.site_label ? (
+                  <span className="subtle">{captureContext.site_label}</span>
+                ) : null}
+                {captureContext.place_label ? (
+                  <span className="subtle">{captureContext.place_label}</span>
+                ) : null}
+              </div>
+            ) : null}
+            {captureContextError ? <p className="flash error">{captureContextError}</p> : null}
             <input
               accept="image/*"
               aria-label="Photo file"

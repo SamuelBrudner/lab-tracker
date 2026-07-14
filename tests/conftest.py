@@ -25,17 +25,34 @@ def _repo_root() -> Path:
 
 @pytest.fixture(autouse=True)
 def _isolate_lab_tracker_home(tmp_path_factory, monkeypatch):
-    """Keep every test away from the developer's real machine-level state.
+    """Keep every test away from developer machine-level state and settings.
 
     init/update/hooks record into ~/.lab-tracker/applied-repos.json,
     from_env reads ~/.lab-tracker/config.json, and --install-skills writes
-    into ~/.claude/skills — none of which a test run may touch or observe.
-    Tests that care about these paths override the env vars themselves.
+    into ~/.claude/skills. Direct app tests also construct Settings() and would
+    otherwise inherit a developer's .env, including its auth and SQLite paths.
+    Tests that exercise a different runtime configuration override these values
+    explicitly.
     """
 
     home = tmp_path_factory.mktemp("lt-isolated-home")
     monkeypatch.setenv("LAB_TRACKER_CONFIG_DIR", str(home / "lab-tracker"))
     monkeypatch.setenv("LAB_TRACKER_SKILLS_HOME", str(home / "skills"))
+    monkeypatch.setenv("LAB_TRACKER_ENVIRONMENT", "local")
+    monkeypatch.setenv(
+        "LAB_TRACKER_DATABASE_URL", f"sqlite+pysqlite:///{home / 'test.db'}"
+    )
+    monkeypatch.setenv("LAB_TRACKER_FILE_STORAGE_PATH", str(home / "file-storage"))
+    monkeypatch.setenv("LAB_TRACKER_NOTE_STORAGE_PATH", str(home / "note-storage"))
+    monkeypatch.setenv("LAB_TRACKER_AUTH_ENABLED", "false")
+    monkeypatch.setenv("LAB_TRACKER_AUTH_SECRET_KEY", "test-secret")
+    monkeypatch.setenv("LAB_TRACKER_AUTH_PUBLIC_VIEWER_REGISTRATION_ENABLED", "false")
+    monkeypatch.setenv("LAB_TRACKER_BOOTSTRAP_ADMIN_TOKEN", "")
+    monkeypatch.setenv("LAB_TRACKER_PUBLIC_BASE_URL", "")
+    monkeypatch.setenv("LAB_TRACKER_GRAPH_DRAFT_BACKGROUND_ENABLED", "false")
+    monkeypatch.setenv("LAB_TRACKER_GRAPH_DRAFT_SCHEDULER_ENABLED", "false")
+    monkeypatch.setenv("LAB_TRACKER_GRAPH_DRAFT_EXTERNAL_HARNESS_ENABLED", "false")
+    monkeypatch.setenv("LAB_TRACKER_GRAPH_DRAFT_PROVIDER", "openai")
 
 
 def _auth_headers(token: str) -> dict[str, str]:
@@ -132,6 +149,7 @@ def migrated_sqlite_database_url(
     monkeypatch.setenv("LAB_TRACKER_NOTE_STORAGE_PATH", str(tmp_path / "note-storage"))
     monkeypatch.setenv("LAB_TRACKER_AUTH_SECRET_KEY", "test-secret")
     monkeypatch.setenv("LAB_TRACKER_AUTH_ENABLED", "true")
+    monkeypatch.setenv("LAB_TRACKER_AUTH_PUBLIC_VIEWER_REGISTRATION_ENABLED", "true")
 
     config = Config(str(_repo_root() / "alembic.ini"))
     command.upgrade(config, "head")
@@ -165,6 +183,7 @@ def migrated_postgres_database_url(monkeypatch, tmp_path) -> Iterator[str]:
     monkeypatch.setenv("LAB_TRACKER_NOTE_STORAGE_PATH", str(tmp_path / "note-storage"))
     monkeypatch.setenv("LAB_TRACKER_AUTH_SECRET_KEY", "test-secret")
     monkeypatch.setenv("LAB_TRACKER_AUTH_ENABLED", "true")
+    monkeypatch.setenv("LAB_TRACKER_AUTH_PUBLIC_VIEWER_REGISTRATION_ENABLED", "true")
 
     config = Config(str(_repo_root() / "alembic.ini"))
     command.upgrade(config, "head")

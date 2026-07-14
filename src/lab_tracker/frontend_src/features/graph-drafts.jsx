@@ -42,6 +42,17 @@ function statusClass(status) {
   return "pill review-pending";
 }
 
+const DISPOSITION_LABELS = {
+  proposed_change: "proposed a change",
+  no_change: "no change",
+  insufficient_info: "insufficient info",
+  not_presented: "not shown to the agent",
+};
+
+function dispositionLabel(value) {
+  return DISPOSITION_LABELS[value] || String(value || "unknown");
+}
+
 function operationTitle(operation) {
   return operation.semantic_type
     ? operation.semantic_type.replaceAll("_", " ")
@@ -1083,7 +1094,30 @@ function GraphDraftDetailCard({
                 <div className="subtle">Source note</div>
                 <div className="mono">{changeSet.source_note_id}</div>
               </div>
-              {(changeSet.source_note_ids || []).length > 1 ? (
+              {(changeSet.note_dispositions || []).length > 0 ? (
+                <div>
+                  <div className="subtle">What happened to each capture</div>
+                  <div className="stack">
+                    {(changeSet.note_dispositions || []).map((entry, index) => (
+                      <article className="item" key={`${entry.note_id || "note"}-${index}`}>
+                        <div className="inline">
+                          <span className="pill">{dispositionLabel(entry.disposition)}</span>
+                          <span className="pill mono">{entry.note_id}</span>
+                          {[...new Set(entry.client_refs || [])].map((ref) => (
+                            <span className="pill mono" key={ref}>
+                              op: {ref}
+                            </span>
+                          ))}
+                        </div>
+                        {entry.reason ? <p className="subtle">{entry.reason}</p> : null}
+                        {entry.evidence_quote ? (
+                          <p className="mono">&ldquo;{entry.evidence_quote}&rdquo;</p>
+                        ) : null}
+                      </article>
+                    ))}
+                  </div>
+                </div>
+              ) : (changeSet.source_note_ids || []).length > 1 ? (
                 <div>
                   <div className="subtle">Notes in this review</div>
                   <div className="inline">

@@ -17,6 +17,7 @@ from lab_tracker.auth import (
     ENROLLMENT_OFFER_PREFIX,
     AuthError,
     DeviceAuthService,
+    DeviceTokenKind,
     Role,
     _as_utc,
     utc_now,
@@ -86,6 +87,7 @@ def test_consume_enrollment_issues_device_token_and_marks_offer_consumed(session
 
     assert issued.secret.startswith(DEVICE_TOKEN_PREFIX)
     assert issued.device_token.label == "iPhone 14"
+    assert issued.device_token.kind == DeviceTokenKind.MOBILE
     assert issued.device_token.user_id == uuid_from(user_id)
     assert issued.device_token.revoked is False
 
@@ -207,6 +209,25 @@ def test_list_devices_returns_all_including_revoked(session_factory):
     assert by_label["A"].revoked is True
     assert by_label["B"].revoked is False
     assert issued_b.device_token.device_token_id == by_label["B"].device_token_id
+
+
+def test_issue_device_token_mints_computer_token_for_user(session_factory):
+    service = DeviceAuthService(session_factory=session_factory)
+    user_id = _create_user(session_factory)
+
+    issued = service.issue_device_token(
+        uuid_from(user_id),
+        label="Rig desktop",
+        kind=DeviceTokenKind.COMPUTER,
+    )
+
+    assert issued.secret.startswith(DEVICE_TOKEN_PREFIX)
+    assert issued.device_token.kind == DeviceTokenKind.COMPUTER
+    assert issued.device_token.label == "Rig desktop"
+    principal = service.verify_device_token(issued.secret)
+    assert principal is not None
+    assert principal.user_id == uuid_from(user_id)
+    assert principal.kind == DeviceTokenKind.COMPUTER
 
 
 def test_revoke_device_rejects_other_users_tokens(session_factory):

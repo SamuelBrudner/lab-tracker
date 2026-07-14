@@ -332,6 +332,18 @@ def _attach_graph_usernames(request: Request, change_set: GraphChangeSet) -> Gra
     return change_set
 
 
+def _coverage_summary(note_dispositions: list[dict[str, object]]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for entry in note_dispositions:
+        if not isinstance(entry, dict):
+            continue
+        disposition = str(entry.get("disposition") or "unknown")
+        counts[disposition] = counts.get(disposition, 0) + 1
+    if counts:
+        counts["total"] = sum(counts.values())
+    return counts
+
+
 def _graph_change_set_summary(change_set: GraphChangeSet) -> GraphChangeSetSummary:
     return GraphChangeSetSummary(
         change_set_id=change_set.change_set_id,
@@ -352,6 +364,7 @@ def _graph_change_set_summary(change_set: GraphChangeSet) -> GraphChangeSetSumma
         summary=change_set.summary,
         uncertain_fields=list(change_set.uncertain_fields),
         clarification_requests=list(change_set.clarification_requests),
+        coverage_summary=_coverage_summary(change_set.note_dispositions),
         status=change_set.status,
         commit_message=change_set.commit_message,
         error_metadata=dict(change_set.error_metadata),

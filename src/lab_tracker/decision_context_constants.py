@@ -173,6 +173,36 @@ def code_facing_idioms(*, symbols: Iterable[str] | None = None) -> str:
                 "scalar git/run metadata without creating Analysis records.",
             ]
         )
+    if {"save_artifact", "capture"}.issubset(symbol_set):
+        sections.extend(
+            [
+                "",
+                "Format-agnostic staged capture is available through "
+                "`save_artifact()` and `capture()`: `save_artifact()` wraps one "
+                "regular-file writer and records exact `producer_*` metadata for "
+                "the external call site, including its source file, line, symbol, "
+                "region hash, repository HEAD as the base commit, and dirty state. "
+                "`savefig()` is the figure specialization of this eager path. The "
+                "output file stays identified separately by its evidence URI and "
+                "content hash.",
+                "When editing research code that already writes a regular-file "
+                "result, prefer `save_artifact()` at that write boundary so the "
+                "result reaches the staged review queue with exact provenance. "
+                "Do not invent new analyses, plots, or output files solely to "
+                "capture them.",
+                "",
+                "`capture()` and `capture_figures()` discover bounded file-pattern "
+                "changes after a context body, so scan-only outputs carry honest "
+                "`capture_scope_*` metadata for the enclosing `with` statement, not "
+                "a fabricated producer line. Exact attribution inside a context is "
+                "available through `CaptureContext.save_artifact()`. Directory "
+                "stores and multi-file output trees belong on `lt watch`.",
+                "",
+                "These helpers create staged evidence notes only. They do not "
+                "create canonical Dataset, Analysis, Claim, or Visualization "
+                "records; a person supplies that graph meaning during review.",
+            ]
+        )
     return "\n".join(sections) + "\n"
 
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from lab_tracker.api_parts.analyses import AnalysesApiMixin
+from lab_tracker.api_parts.capture_contexts import CaptureContextsApiMixin
 from lab_tracker.api_parts.datasets import DatasetsApiMixin
 from lab_tracker.api_parts.exploration import ExplorationApiMixin
 from lab_tracker.api_parts.goals import GoalsApiMixin
@@ -21,6 +22,7 @@ __all__ = [
     "DatasetsApiMixin",
     "SessionsApiMixin",
     "AnalysesApiMixin",
+    "CaptureContextsApiMixin",
     "GoalsApiMixin",
     "GraphDraftsApiMixin",
     "ExplorationApiMixin",

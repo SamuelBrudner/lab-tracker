@@ -5,13 +5,12 @@ from __future__ import annotations
 import hashlib
 import io
 import mimetypes
-import os
 import stat
 import subprocess
 import sys
 import time
 import uuid
-from collections.abc import Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from contextlib import contextmanager, suppress
 from contextvars import ContextVar
 from dataclasses import dataclass, field
@@ -41,6 +40,9 @@ _DEFAULT_IMAGE_PATTERNS = ("*.png", "*.jpg", "*.jpeg", "*.svg", "*.pdf", "*.tif"
 _RUN_CONTEXT: ContextVar[RunContext | None] = ContextVar("lab_tracker_run_context", default=None)
 _CIRCUIT_OPEN = False
 _WARNED: set[str] = set()
+_CLIENT_PACKAGE_ROOT = Path(__file__).resolve().parent
+
+
 def _first_capture_review_keys(kind: str) -> frozenset[str]:
     return frozenset({f"{kind}_no_preview", f"{kind}_preview_size_bytes"})
 
@@ -93,7 +95,7 @@ class RunContext:
     expires_at: float
     run_id: str = ""
     git_commit: str = ""
-    git_dirty: bool = False
+    git_dirty: bool | None = None
     repo_remote_url: str = ""
     code_file: str = ""
     code_symbol: str = ""
@@ -107,8 +109,9 @@ class RunContext:
     def to_metadata(self) -> dict[str, NoteMetadataScalar]:
         metadata: dict[str, NoteMetadataScalar] = {
             "run_captured_at": self.captured_at,
-            "run_git_dirty": self.git_dirty,
         }
+        if self.git_dirty is not None:
+            metadata["run_git_dirty"] = self.git_dirty
         if self.run_id:
             metadata["run_id"] = self.run_id
         if self.git_commit:
@@ -190,8 +193,11 @@ class CaptureContext:
         self.results: list[FigureCaptureResult] = []
         self.errors: list[str] = []
         self._snapshot: dict[Path, int] = {}
+        self._scope_metadata: dict[str, NoteMetadataScalar] = {}
+        self._eager_paths: set[Path] = set()
 
     def __enter__(self) -> CaptureContext:
+        self._scope_metadata = _code_provenance("capture_scope")
         self._snapshot = _snapshot_file_mtimes(self.root, self.patterns, recursive=self.recursive)
         return self
 
@@ -199,6 +205,8 @@ class CaptureContext:
         try:
             after = _snapshot_file_mtimes(self.root, self.patterns, recursive=self.recursive)
             for path, mtime in sorted(after.items(), key=lambda item: item[0].as_posix()):
+                if path.resolve() in self._eager_paths:
+                    continue
                 if self._snapshot.get(path) == mtime:
                     continue
                 logical_id = _capture_context_logical_id(
@@ -213,7 +221,7 @@ class CaptureContext:
                         client=self.client,
                         project_id=self.project_id,
                         logical_id=logical_id,
-                        metadata=self.metadata,
+                        metadata=_merge_metadata(self.metadata, self._scope_metadata),
                         preview_max_bytes=self.preview_max_bytes,
                         version_every_change=self.version_every_change,
                         kind=self.kind,
@@ -226,6 +234,47 @@ class CaptureContext:
                 f"Lab Tracker figure capture could not scan saved figures: {exc}",
             )
         return False
+
+    def save_artifact(
+        self,
+        path: str | Path,
+        *,
+        writer: Callable[[Path], Any],
+        kind: str | None = None,
+        logical_id: str | None = None,
+        metadata: Mapping[str, NoteMetadataScalar] | None = None,
+        preview_max_bytes: int | None = None,
+        version_every_change: bool | None = None,
+    ) -> FigureCaptureResult:
+        """Write and capture one artifact with exact producer provenance.
+
+        Scan-only context capture can identify only the enclosing ``with``
+        scope. Routing a write through this method records the external caller
+        that performed this specific write and suppresses a duplicate scan-time
+        capture when the context exits.
+        """
+
+        resolved_path = Path(path).expanduser().resolve()
+        result = save_artifact(
+            resolved_path,
+            kind=kind or self.kind,
+            writer=writer,
+            client=self.client,
+            project_id=self.project_id,
+            logical_id=logical_id,
+            metadata=_merge_metadata(self.metadata, self._scope_metadata, metadata),
+            preview_max_bytes=(
+                self.preview_max_bytes if preview_max_bytes is None else preview_max_bytes
+            ),
+            version_every_change=(
+                self.version_every_change
+                if version_every_change is None
+                else version_every_change
+            ),
+        )
+        self._eager_paths.add(resolved_path)
+        self.results.append(result)
+        return result
 
 
 # Back-compat alias: figure capture is now one kind of the generic CaptureContext.
@@ -241,12 +290,13 @@ def run_context(
 
     resolved_extra = dict(_validate_metadata(extra) or {})
     pointer = _run_code_pointer()
+    git_status = _git_output_checked("status", "--porcelain")
     context = RunContext(
         captured_at=datetime.now(timezone.utc).isoformat(),
         expires_at=time.monotonic() + max(0.0, float(ttl_seconds)),
         run_id=uuid.uuid4().hex,
         git_commit=_git_output("rev-parse", "HEAD"),
-        git_dirty=bool(_git_output("status", "--porcelain")),
+        git_dirty=bool(git_status) if git_status is not None else None,
         repo_remote_url=_git_output("config", "--get", "remote.origin.url"),
         code_file=str(pointer.get("code_file", "")),
         code_symbol=str(pointer.get("code_symbol", "")),
@@ -313,6 +363,138 @@ def _code_region_hash(filename: str, lineno: int, *, context_lines: int = 3) -> 
     return ""
 
 
+def _code_provenance(prefix: str) -> dict[str, NoteMetadataScalar]:
+    """Return an exact external call-site pointer plus source-repository state."""
+
+    frame = _external_caller_frame()
+    if frame is None:
+        return {}
+    metadata: dict[str, NoteMetadataScalar] = {
+        f"{prefix}_observed_at": datetime.now(timezone.utc).isoformat(),
+    }
+    with suppress(Exception):
+        filename = str(frame.f_code.co_filename)
+        lineno = int(frame.f_lineno)
+        symbol = getattr(frame.f_code, "co_qualname", None) or frame.f_code.co_name
+        source_path = Path(filename).resolve()
+        repo_root_text = _git_output(
+            "rev-parse",
+            "--show-toplevel",
+            cwd=source_path.parent,
+        )
+        repo_root = Path(repo_root_text).resolve() if repo_root_text else None
+        code_file = source_path.name
+        if repo_root is not None:
+            with suppress(ValueError):
+                code_file = source_path.relative_to(repo_root).as_posix()
+        metadata[f"{prefix}_code_file"] = code_file
+        metadata[f"{prefix}_code_line"] = lineno
+        if symbol:
+            metadata[f"{prefix}_code_symbol"] = str(symbol)
+        region_hash = _code_region_hash(filename, lineno)
+        if region_hash:
+            metadata[f"{prefix}_code_region_hash"] = region_hash
+        if repo_root is not None:
+            commit = _git_output("rev-parse", "HEAD", cwd=repo_root)
+            if commit:
+                metadata[f"{prefix}_git_commit"] = commit
+            git_status = _git_output_checked("status", "--porcelain", cwd=repo_root)
+            if git_status is not None:
+                metadata[f"{prefix}_git_dirty"] = bool(git_status)
+            remote = _strip_remote_credentials(
+                _git_output("config", "--get", "remote.origin.url", cwd=repo_root)
+            )
+            if remote:
+                metadata[f"{prefix}_repo_remote_url"] = remote
+    return metadata
+
+
+def _external_caller_frame() -> Any:
+    frame: Any = None
+    with suppress(Exception):
+        frame = sys._getframe(1)
+        while frame is not None:
+            filename = Path(str(frame.f_code.co_filename)).resolve()
+            if not _path_is_within(filename, _CLIENT_PACKAGE_ROOT):
+                return frame
+            frame = frame.f_back
+    return None
+
+
+def _path_is_within(path: Path, root: Path) -> bool:
+    with suppress(ValueError, OSError):
+        path.relative_to(root)
+        return True
+    return False
+
+
+def _strip_remote_credentials(remote: str) -> str:
+    """Remove HTTP(S) userinfo while preserving SSH-style ``git@`` remotes."""
+
+    cleaned = remote.strip()
+    if not cleaned or "://" not in cleaned or "@" not in cleaned:
+        return cleaned
+    with suppress(ValueError):
+        scheme, remainder = cleaned.split("://", 1)
+        authority, separator, suffix = remainder.partition("/")
+        if "@" not in authority:
+            return cleaned
+        host = authority.rsplit("@", 1)[1]
+        return f"{scheme}://{host}{separator}{suffix}"
+    return ""
+
+
+def _merge_metadata(
+    *sources: Mapping[str, NoteMetadataScalar] | None,
+) -> dict[str, NoteMetadataScalar]:
+    merged: dict[str, NoteMetadataScalar] = {}
+    for source in sources:
+        merged.update(dict(_validate_metadata(source) or {}))
+    return merged
+
+
+def save_artifact(
+    path: str | Path,
+    *,
+    kind: str,
+    writer: Callable[[Path], Any],
+    client: LabTracker | None = None,
+    project_id: str | None = None,
+    logical_id: str | None = None,
+    metadata: Mapping[str, NoteMetadataScalar] | None = None,
+    preview_max_bytes: int = FIGURE_PREVIEW_MAX_BYTES,
+    version_every_change: bool = False,
+    _preview_figure: Any = None,
+) -> FigureCaptureResult:
+    """Write one regular file, then fail-soft capture it as staged evidence.
+
+    The writer is authoritative and runs before any capture work. Its errors
+    propagate unchanged. Once the write succeeds, Lab Tracker capture retains
+    the existing never-harm-the-save guarantee and records the exact external
+    call site as ``producer_*`` metadata.
+    """
+
+    resolved_kind = str(kind).strip()
+    if not resolved_kind:
+        raise LTValidationError("save_artifact() requires a non-empty kind.")
+    if not callable(writer):
+        raise LTValidationError("save_artifact() requires a callable writer.")
+    resolved_path = Path(path).expanduser().resolve()
+    producer_metadata = _code_provenance("producer")
+    writer(resolved_path)
+    return _capture_saved_figure(
+        fig=_preview_figure,
+        path=resolved_path,
+        client=client,
+        project_id=project_id,
+        logical_id=logical_id,
+        metadata=_merge_metadata(metadata, producer_metadata),
+        preview_max_bytes=preview_max_bytes,
+        version_every_change=version_every_change,
+        kind=resolved_kind,
+    )
+
+
 def savefig(
     fig: Any,
     path: str | Path,
@@ -328,17 +510,28 @@ def savefig(
     """Save a figure, then fail-soft capture the saved artifact in Lab Tracker."""
 
     resolved_path = Path(path).expanduser()
-    if fig is not None:
-        fig.savefig(resolved_path, **savefig_kwargs)
-    return _capture_saved_figure(
-        fig=fig,
-        path=resolved_path,
+    if fig is None:
+        return _capture_saved_figure(
+            fig=None,
+            path=resolved_path,
+            client=client,
+            project_id=project_id,
+            logical_id=logical_id,
+            metadata=_merge_metadata(metadata, _code_provenance("capture_scope")),
+            preview_max_bytes=preview_max_bytes,
+            version_every_change=version_every_change,
+        )
+    return save_artifact(
+        resolved_path,
+        kind="figure",
+        writer=lambda output_path: fig.savefig(output_path, **savefig_kwargs),
         client=client,
         project_id=project_id,
         logical_id=logical_id,
         metadata=metadata,
         preview_max_bytes=preview_max_bytes,
         version_every_change=version_every_change,
+        _preview_figure=fig,
     )
 
 
@@ -822,25 +1015,12 @@ def _resolve_capture_client(
     if client is not None:
         resolved_project_id = project_id or client.default_project_id
         return client, str(resolved_project_id) if resolved_project_id else None, False
-    resolved_project_id = project_id or os.getenv("LAB_TRACKER_PROJECT_ID")
-    base_url = os.getenv("LAB_TRACKER_BASE_URL") or os.getenv("LAB_TRACKER_MCP_BASE_URL")
-    username = os.getenv("LAB_TRACKER_USERNAME") or os.getenv("LAB_TRACKER_MCP_USERNAME")
-    password = os.getenv("LAB_TRACKER_PASSWORD") or os.getenv("LAB_TRACKER_MCP_PASSWORD")
-    access_token = os.getenv("LAB_TRACKER_ACCESS_TOKEN")
-    if not resolved_project_id or not base_url or not (access_token or (username and password)):
+    resolved_client = LabTracker.from_env()
+    resolved_project_id = project_id or resolved_client.default_project_id
+    if not resolved_project_id:
+        resolved_client.close()
         return None, None, False
-    return (
-        LabTracker(
-            base_url=base_url,
-            username=username,
-            password=password,
-            access_token=access_token,
-            default_project_id=resolved_project_id,
-            timeout_seconds=FIGURE_CAPTURE_TIMEOUT_SECONDS,
-        ),
-        str(resolved_project_id),
-        True,
-    )
+    return resolved_client, str(resolved_project_id), True
 
 
 def _client_capture_id(
@@ -922,7 +1102,13 @@ def _active_run_context() -> RunContext | None:
     return context
 
 
-def _git_output(*args: str) -> str:
+def _git_output(*args: str, cwd: str | Path | None = None) -> str:
+    return _git_output_checked(*args, cwd=cwd) or ""
+
+
+def _git_output_checked(*args: str, cwd: str | Path | None = None) -> str | None:
+    """Return Git stdout, preserving failure as unknown rather than clean/empty."""
+
     try:
         result = subprocess.run(
             ["git", *args],
@@ -930,11 +1116,12 @@ def _git_output(*args: str) -> str:
             capture_output=True,
             text=True,
             timeout=1,
+            cwd=str(cwd) if cwd is not None else None,
         )
     except Exception:
-        return ""
+        return None
     if result.returncode != 0:
-        return ""
+        return None
     return result.stdout.strip()
 
 

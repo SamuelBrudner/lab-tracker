@@ -336,7 +336,7 @@ describe("App", () => {
     window.history.replaceState(
       {},
       "",
-      "/app?invite=signed-token&email=member%40example.org"
+      "/app/?invite=signed-token&email=member%40example.org"
     );
     installFetchMock([
       {
@@ -1061,6 +1061,15 @@ describe("App", () => {
       created_at: "2026-04-20T00:00:00Z",
       draft_mode: "graph_context",
       model: "gpt-5.4-mini",
+      note_dispositions: [
+        {
+          client_refs: ["q1"],
+          disposition: "proposed_change",
+          evidence_quote: "yield?",
+          note_id: noteId,
+          reason: "The whiteboard states the follow-up question.",
+        },
+      ],
       operations: [baseOperation],
       project_id: "project-1",
       prompt_version: "image-graph-draft-v2",
@@ -1152,6 +1161,11 @@ describe("App", () => {
     expect(screen.getByText("no audio source artifact was included")).toBeInTheDocument();
     expect(screen.getByText("Exact protocol name")).toBeInTheDocument();
     expect(screen.getByText("Confirm whether Fly 12 should be formalized.")).toBeInTheDocument();
+    // The per-note disposition ledger renders under Details & provenance.
+    expect(screen.getByText("What happened to each capture")).toBeInTheDocument();
+    expect(screen.getByText("proposed a change")).toBeInTheDocument();
+    expect(screen.getByText("op: q1")).toBeInTheDocument();
+    expect(screen.getByText("The whiteboard states the follow-up question.")).toBeInTheDocument();
     expect(screen.getByText("Proposed new question")).toBeInTheDocument();
     expect(screen.getByText("Model inference")).toBeInTheDocument();
     expect(screen.getByText("Source evidence")).toBeInTheDocument();
@@ -1479,6 +1493,154 @@ describe("App", () => {
     expect(await screen.findByRole("heading", { name: "Project Graph" })).toBeInTheDocument();
   });
 
+  it("loads a printable capture context and submits it with observed time", async () => {
+    const noteId = "11111111-1111-4111-8111-111111111111";
+    localStorage.setItem(TOKEN_STORAGE_KEY, "token-mobile-context");
+    window.history.replaceState({}, "", "/app/capture?context=context-1");
+
+    installFetchMock([
+      {
+        match: "/auth/me",
+        response: apiResponse({ role: "admin", username: "sam" }),
+      },
+      {
+        match: "/capture-contexts/context-1",
+        response: apiResponse({
+          capture_context_id: "context-1",
+          capture_qr_svg: "<svg />",
+          capture_url: "http://localhost/app/capture?context=context-1",
+          default_hint: "Rig 2 default hint",
+          default_targets: [
+            { entity_id: "question-2", entity_type: "question" },
+            { entity_id: "session-2", entity_type: "session" },
+            { entity_id: "dataset-2", entity_type: "dataset" },
+          ],
+          label: "Rig 2 QR",
+          place_label: "Rig 2",
+          project_id: "project-2",
+          revoked_at: null,
+          site_label: "West campus",
+        }),
+      },
+      {
+        match: projectsPath,
+        response: apiResponse([project("project-2", "Project Two")]),
+      },
+      {
+        match: questionListPath("project-2"),
+        response: paged([
+          question({
+            projectId: "project-2",
+            questionId: "question-2",
+            text: "What happened at rig 2?",
+          }),
+        ]),
+      },
+      {
+        match: datasetListPath("project-2"),
+        response: paged([
+          dataset({
+            datasetId: "dataset-2",
+            commitHash: "rig-2-dataset",
+            projectId: "project-2",
+          }),
+        ]),
+      },
+      {
+        match: noteCountPath("project-2"),
+        response: [
+          paged([], { limit: 1, offset: 0, total: 0 }),
+          paged([], { limit: 1, offset: 0, total: 1 }),
+        ],
+      },
+      {
+        match: activeSessionsPath("project-2"),
+        response: paged([
+          session({
+            projectId: "project-2",
+            primaryQuestionId: "question-2",
+            sessionId: "session-2",
+          }),
+        ]),
+      },
+      {
+        match: buildApiPath("/graph-drafts", { project_id: "project-2", limit: 10 }),
+        response: paged([]),
+      },
+      {
+        match: buildApiPath("/notes", { project_id: "project-2", limit: 10 }),
+        response: paged([]),
+      },
+      {
+        match: captureAnalysesPath("project-2"),
+        response: paged([]),
+      },
+      {
+        match: captureClaimsPath("project-2"),
+        response: paged([]),
+      },
+      {
+        match: "/notes",
+        method: "POST",
+        response: (request) => {
+          const body = JSON.parse(request.init.body);
+          expect(body.project_id).toBe("project-2");
+          expect(body.capture_context_id).toBe("context-1");
+          expect(body.raw_content).toBe("Mouse paused at the reward port.");
+          expect(body.metadata.capture_hint).toBe("Rig 2 default hint");
+          expect(body.metadata.capture_kind).toBe("text");
+          expect(body.metadata.capture_observed_at).toEqual(expect.any(String));
+          expect(Number.isNaN(Date.parse(body.metadata.capture_observed_at))).toBe(false);
+          expect(body.targets).toEqual([
+            { entity_id: "question-2", entity_type: "question" },
+            { entity_id: "session-2", entity_type: "session" },
+            { entity_id: "dataset-2", entity_type: "dataset" },
+          ]);
+          return apiResponse(
+            note({
+              metadata: body.metadata,
+              noteId,
+              projectId: "project-2",
+              targets: body.targets,
+            }),
+            201
+          );
+        },
+      },
+      {
+        match: questionCountPath("project-2"),
+        response: paged([], { limit: 1, offset: 0, total: 1 }),
+      },
+      {
+        match: datasetCountPath("project-2"),
+        response: paged([], { limit: 1, offset: 0, total: 1 }),
+      },
+      {
+        match: recentNotesPath("project-2"),
+        response: paged([note({ noteId, projectId: "project-2" })]),
+      },
+    ]);
+
+    render(<App />);
+
+    expect(await screen.findByRole("heading", { name: "Capture" })).toBeInTheDocument();
+    expect(await screen.findByLabelText("Capture context")).toHaveTextContent("Rig 2 QR");
+    await waitFor(() => expect(screen.getByLabelText("Project")).toHaveValue("project-2"));
+    await waitFor(() =>
+      expect(screen.getByLabelText("Active question (optional)")).toHaveValue("question-2")
+    );
+    expect(screen.getByLabelText("Session (optional)")).toHaveValue("session-2");
+    expect(screen.getByLabelText("Dataset (optional)")).toHaveValue("dataset-2");
+    expect(screen.getByLabelText("Short hint (optional)")).toHaveValue("Rig 2 default hint");
+
+    fireEvent.change(screen.getByLabelText("Message or hint"), {
+      target: { value: "Mouse paused at the reward port." },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Save capture" }));
+
+    expect(await screen.findByText("Capture saved for review.")).toBeInTheDocument();
+  });
+
   it("surfaces share-target inbox write failures on the capture route", async () => {
     localStorage.setItem(TOKEN_STORAGE_KEY, "token-share-target-error");
     window.history.replaceState({}, "", "/app/capture?from-share=error");
@@ -1555,6 +1717,22 @@ describe("App", () => {
         {
           operation_id: "44444444-4444-4444-8444-444444444444",
           status: "proposed",
+        },
+      ],
+      note_dispositions: [
+        {
+          client_refs: [],
+          disposition: "no_change",
+          evidence_quote: "",
+          note_id: noteA,
+          reason: "Considered; already captured in the session log.",
+        },
+        {
+          client_refs: [],
+          disposition: "insufficient_info",
+          evidence_quote: "",
+          note_id: noteB,
+          reason: "Content was redacted.",
         },
       ],
       project_id: "project-1",
@@ -1658,6 +1836,9 @@ describe("App", () => {
     );
     expect((await screen.findAllByText("2 notes")).length).toBeGreaterThanOrEqual(1);
     expect(await screen.findByText("1 ops")).toBeInTheDocument();
+    // Per-note coverage chips from the disposition ledger.
+    expect(await screen.findByText("1 no-change")).toBeInTheDocument();
+    expect(await screen.findByText("1 needs info")).toBeInTheDocument();
     fireEvent.click(await screen.findByRole("button", { name: "Review batch" }));
     await waitFor(() => expect(window.location.pathname).toBe(`/app/batches/${batchId}`));
   });
@@ -1786,7 +1967,11 @@ describe("App", () => {
           const body = request.init.body;
           expect(body.get("project_id")).toBe("project-1");
           expect(body.get("file").name).toBe("phone-capture.jpg");
-          expect(JSON.parse(body.get("metadata"))).toEqual({
+          const metadata = JSON.parse(body.get("metadata"));
+          expect(metadata.capture_observed_at).toEqual(expect.any(String));
+          expect(Number.isNaN(Date.parse(metadata.capture_observed_at))).toBe(false);
+          delete metadata.capture_observed_at;
+          expect(metadata).toEqual({
             capture_hint: "Rig 2 Fly 12",
             capture_kind: "image",
             capture_mode: "photo",

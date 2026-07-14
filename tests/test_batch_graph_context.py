@@ -226,6 +226,10 @@ def test_batch_context_groups_per_project_with_questions_and_recent_neighborhood
     assert {entry["note_id"] for entry in placement} == {str(note_a_id), str(note_b_id)}
     assert all(entry["in_session"] is None for entry in placement)
     assert {note["id"] for note in packet["batch_notes"]} == {note_a_id, note_b_id}
+    # The disposition checklist names exactly the presented notes, in packet order.
+    assert packet["note_ids_requiring_disposition"] == [
+        note["id"] for note in packet["batch_notes"]
+    ]
     assert {artifact["note_id"] for artifact in packet["source_artifacts"]} == {
         note_a_id,
         note_b_id,
@@ -543,6 +547,11 @@ def test_batch_context_truncates_overflow_and_reports_count(
 
     assert packet["truncated_note_count"] == 2
     assert len(packet["batch_notes"]) == 3
+    # Truncated notes are never on the checklist: the drafter is only asked to
+    # account for notes it was actually shown.
+    assert packet["note_ids_requiring_disposition"] == [
+        note["id"] for note in packet["batch_notes"]
+    ]
     assert packet["context_summary"]["counts"]["batch_notes"] == 3
     assert any(
         "batch truncated" in warning
@@ -559,6 +568,7 @@ def test_batch_context_handles_empty_batch(
 
     assert packet["mode"] == "graph_batch"
     assert packet["batch_notes"] == []
+    assert packet["note_ids_requiring_disposition"] == []
     assert packet["projects"] == []
     assert packet["truncated_note_count"] == 0
     summary = packet["context_summary"]

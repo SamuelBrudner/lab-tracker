@@ -16,6 +16,7 @@ from lab_tracker.auth import (
 from .analyses import build_analyses_router
 from .assistant import build_assistant_router
 from .auth import build_auth_router
+from .capture_contexts import build_capture_contexts_router
 from .claims import build_claims_router
 from .data_stores import build_data_stores_router
 from .dataset_files import build_dataset_files_router
@@ -61,6 +62,7 @@ def register_routes(
     register_error_handlers(app)
     app.include_router(
         build_auth_router(
+            api=api,
             auth_service=auth_service,
             token_service=token_service,
             invitation_token_service=invitation_token_service,
@@ -86,6 +88,7 @@ def register_routes(
     app.include_router(build_questions_router(api))
     app.include_router(build_datasets_router(api))
     app.include_router(build_dataset_files_router(api))
+    app.include_router(build_capture_contexts_router(api))
     app.include_router(build_notes_router(api))
     app.include_router(build_graph_drafts_router(api))
     app.include_router(build_graph_batches_router(api))

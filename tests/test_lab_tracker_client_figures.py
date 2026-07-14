@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 import json
 from hashlib import sha256
 from pathlib import Path
@@ -14,6 +15,7 @@ from lab_tracker_client import (
     capture,
     capture_figures,
     run_context,
+    save_artifact,
     savefig,
 )
 from lab_tracker_client.figure import (
@@ -45,13 +47,19 @@ def _multipart_field(body: bytes, name: str) -> str:
 
 
 @pytest.fixture(autouse=True)
-def reset_figure_capture_state(monkeypatch: pytest.MonkeyPatch) -> None:
+def reset_figure_capture_state(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
     _reset_figure_capture_state_for_tests()
+    monkeypatch.setenv("LAB_TRACKER_CONFIG_DIR", str(tmp_path / "lab-tracker-config"))
     for key in (
         "LAB_TRACKER_PROJECT_ID",
         "LAB_TRACKER_BASE_URL",
         "LAB_TRACKER_MCP_BASE_URL",
         "LAB_TRACKER_ACCESS_TOKEN",
+        "LAB_TRACKER_MCP_API_KEY",
+        "LAB_TRACKER_MCP_TOKEN",
         "LAB_TRACKER_USERNAME",
         "LAB_TRACKER_PASSWORD",
         "LAB_TRACKER_MCP_USERNAME",
@@ -239,6 +247,35 @@ def test_unconfigured_savefig_warns_once_without_network(
 
     stderr = capsys.readouterr().err
     assert stderr.count("Lab Tracker figure capture is unconfigured") == 1
+
+
+def test_capture_client_resolves_profile_only_connection(tmp_path: Path) -> None:
+    config_dir = tmp_path / "lab-tracker-config"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    (config_dir / "config.json").write_text(
+        json.dumps(
+            {
+                "base_url": "http://profile-server:8123",
+                "default_project_id": "profile-project",
+                "access_token": "profile-token",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    client, project_id, owned = figure_module._resolve_capture_client(
+        client=None,
+        project_id=None,
+    )
+    try:
+        assert client is not None
+        assert client.base_url == "http://profile-server:8123"
+        assert client.access_token == "profile-token"
+        assert project_id == "profile-project"
+        assert owned is True
+    finally:
+        if client is not None:
+            client.close()
 
 
 def test_changed_coalesced_capture_patches_metadata_preserving_first_evidence_keys(
@@ -637,3 +674,367 @@ def test_capture_requires_patterns_and_kind(tmp_path: Path) -> None:
         capture(tmp_path, patterns=[], kind="dataset")
     with pytest.raises(LTValidationError):
         capture(tmp_path, patterns=["*.csv"], kind="   ")
+
+
+def test_save_artifact_writes_before_capture_and_records_exact_producer(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    metadata_seen: dict[str, object] = {}
+    writer_paths: list[Path] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        metadata_seen.update(json.loads(_multipart_field(request.content, "metadata")))
+        return _json_response(
+            201,
+            {
+                "data": {
+                    "note_id": "note-artifact",
+                    "project_id": "project-1",
+                    "status": "staged",
+                    "metadata": metadata_seen,
+                }
+            },
+        )
+
+    def write_csv(path: Path) -> None:
+        writer_paths.append(path)
+        path.write_text("a,b\n1,2\n", encoding="utf-8")
+
+    monkeypatch.chdir(tmp_path)
+    with LabTracker(
+        base_url="http://testserver",
+        default_project_id="project-1",
+        transport=httpx.MockTransport(handler),
+    ) as lt:
+        expected_line = inspect.currentframe().f_lineno + 1
+        result = save_artifact("summary.csv", kind="table", writer=write_csv, client=lt)
+
+    expected_commit = figure_module._git_output(
+        "rev-parse", "HEAD", cwd=Path(__file__).resolve().parent
+    )
+    expected_dirty = bool(
+        figure_module._git_output(
+            "status", "--porcelain", cwd=Path(__file__).resolve().parent
+        )
+    )
+    assert result.action == "imported"
+    assert writer_paths == [(tmp_path / "summary.csv").resolve()]
+    assert (tmp_path / "summary.csv").read_text(encoding="utf-8") == "a,b\n1,2\n"
+    assert metadata_seen["producer_code_line"] == expected_line
+    assert str(metadata_seen["producer_code_file"]).endswith(
+        "tests/test_lab_tracker_client_figures.py"
+    )
+    assert "test_save_artifact_writes_before_capture" in str(
+        metadata_seen["producer_code_symbol"]
+    )
+    assert len(str(metadata_seen["producer_code_region_hash"])) == 64
+    assert metadata_seen["producer_git_commit"] == expected_commit
+    assert metadata_seen["producer_git_dirty"] is expected_dirty
+    assert metadata_seen["evidence_capture_kind"] == "table"
+    assert metadata_seen["evidence_source_uri"] == (tmp_path / "summary.csv").as_uri()
+
+
+def test_save_artifact_omits_dirty_flag_when_git_status_is_unknown(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    metadata_seen: dict[str, object] = {}
+    original = figure_module._git_output_checked
+
+    def git_output(*args: str, cwd: str | Path | None = None) -> str | None:
+        if args == ("status", "--porcelain"):
+            return None
+        return original(*args, cwd=cwd)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        metadata_seen.update(json.loads(_multipart_field(request.content, "metadata")))
+        return _json_response(
+            201,
+            {
+                "data": {
+                    "note_id": "note-unknown-git-state",
+                    "project_id": "project-1",
+                    "status": "staged",
+                    "metadata": metadata_seen,
+                }
+            },
+        )
+
+    monkeypatch.setattr(figure_module, "_git_output_checked", git_output)
+    with LabTracker(
+        base_url="http://testserver",
+        default_project_id="project-1",
+        transport=httpx.MockTransport(handler),
+    ) as lt:
+        result = save_artifact(
+            tmp_path / "unknown.csv",
+            kind="table",
+            writer=lambda path: path.write_text("value\n1\n", encoding="utf-8"),
+            client=lt,
+        )
+
+    assert result.action == "imported"
+    assert "producer_git_dirty" not in metadata_seen
+
+
+def test_save_artifact_reuses_the_logical_capture_id_for_idempotent_writes(
+    tmp_path: Path,
+) -> None:
+    post_ids: list[str] = []
+    first_metadata: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        client_capture_id = _multipart_field(request.content, "client_capture_id")
+        post_ids.append(client_capture_id)
+        metadata = json.loads(_multipart_field(request.content, "metadata"))
+        if not first_metadata:
+            first_metadata.update(metadata)
+        return _json_response(
+            201 if len(post_ids) == 1 else 200,
+            {
+                "data": {
+                    "note_id": "note-idempotent",
+                    "project_id": "project-1",
+                    "status": "staged",
+                    "metadata": first_metadata,
+                }
+            },
+        )
+
+    output = tmp_path / "stable.csv"
+    with LabTracker(
+        base_url="http://testserver",
+        default_project_id="project-1",
+        transport=httpx.MockTransport(handler),
+    ) as lt:
+        first = save_artifact(
+            output,
+            kind="table",
+            writer=lambda path: path.write_text("value\n1\n", encoding="utf-8"),
+            client=lt,
+        )
+        second = save_artifact(
+            output,
+            kind="table",
+            writer=lambda path: path.write_text("value\n1\n", encoding="utf-8"),
+            client=lt,
+        )
+
+    assert first.action == "imported"
+    assert second.action == "coalesced"
+    assert post_ids == ["table:stable.csv", "table:stable.csv"]
+    assert first.client_capture_id == second.client_capture_id
+
+
+def test_savefig_records_the_external_save_call_not_wrapper_internals(tmp_path: Path) -> None:
+    metadata_seen: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        metadata_seen.update(json.loads(_multipart_field(request.content, "metadata")))
+        return _json_response(
+            201,
+            {
+                "data": {
+                    "note_id": "note-figure-producer",
+                    "project_id": "project-1",
+                    "status": "staged",
+                    "metadata": metadata_seen,
+                }
+            },
+        )
+
+    with LabTracker(
+        base_url="http://testserver",
+        default_project_id="project-1",
+        transport=httpx.MockTransport(handler),
+    ) as lt:
+        expected_line = inspect.currentframe().f_lineno + 1
+        savefig(FakeFigure(), tmp_path / "producer.png", client=lt)
+
+    assert metadata_seen["producer_code_line"] == expected_line
+    assert str(metadata_seen["producer_code_file"]).endswith(
+        "tests/test_lab_tracker_client_figures.py"
+    )
+    assert "test_savefig_records_the_external_save_call" in str(
+        metadata_seen["producer_code_symbol"]
+    )
+    assert metadata_seen["evidence_capture_kind"] == "figure"
+    assert not any(key.startswith("capture_scope_") for key in metadata_seen)
+
+
+def test_save_artifact_supports_binary_and_pointer_only_outputs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(figure_module, "FIGURE_UPLOAD_MAX_BYTES", 4)
+    payload = b"binary-model-payload"
+    metadata_seen: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert payload not in request.content
+        metadata_seen.update(json.loads(_multipart_field(request.content, "metadata")))
+        return _json_response(
+            201,
+            {
+                "data": {
+                    "note_id": "note-model",
+                    "project_id": "project-1",
+                    "status": "staged",
+                    "metadata": metadata_seen,
+                }
+            },
+        )
+
+    with LabTracker(
+        base_url="http://testserver",
+        default_project_id="project-1",
+        transport=httpx.MockTransport(handler),
+    ) as lt:
+        result = save_artifact(
+            tmp_path / "model.bin",
+            kind="model",
+            writer=lambda path: path.write_bytes(payload),
+            client=lt,
+        )
+
+    assert result.action == "imported"
+    assert result.no_preview is True
+    assert result.content_hash == sha256(payload).hexdigest()
+    assert metadata_seen["model_full_size_bytes"] == len(payload)
+    assert metadata_seen["model_no_preview"] is True
+
+
+def test_save_artifact_writer_failure_propagates_without_capture(tmp_path: Path) -> None:
+    api_calls = 0
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        nonlocal api_calls
+        api_calls += 1
+        raise AssertionError("the API must not run after a failed writer")
+
+    def failed_writer(_path: Path) -> None:
+        raise RuntimeError("writer failed")
+
+    with LabTracker(
+        base_url="http://testserver",
+        default_project_id="project-1",
+        transport=httpx.MockTransport(handler),
+    ) as lt, pytest.raises(RuntimeError, match="writer failed"):
+        save_artifact(
+            tmp_path / "missing.csv",
+            kind="table",
+            writer=failed_writer,
+            client=lt,
+        )
+
+    assert api_calls == 0
+    assert not (tmp_path / "missing.csv").exists()
+
+
+def test_save_artifact_capture_failure_never_removes_successful_output(tmp_path: Path) -> None:
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return _json_response(500, {"error": {"message": "capture unavailable"}})
+
+    output = tmp_path / "kept.txt"
+    with LabTracker(
+        base_url="http://testserver",
+        default_project_id="project-1",
+        transport=httpx.MockTransport(handler),
+    ) as lt:
+        result = save_artifact(
+            output,
+            kind="text-output",
+            writer=lambda path: path.write_text("keep me", encoding="utf-8"),
+            client=lt,
+        )
+
+    assert result.action == "failed"
+    assert output.read_text(encoding="utf-8") == "keep me"
+
+
+def test_capture_scan_records_scope_not_fabricated_producer(tmp_path: Path) -> None:
+    metadata_seen: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        metadata_seen.update(json.loads(_multipart_field(request.content, "metadata")))
+        return _json_response(
+            201,
+            {
+                "data": {
+                    "note_id": "note-scanned",
+                    "project_id": "project-1",
+                    "status": "staged",
+                    "metadata": metadata_seen,
+                }
+            },
+        )
+
+    with LabTracker(
+        base_url="http://testserver",
+        default_project_id="project-1",
+        transport=httpx.MockTransport(handler),
+    ) as lt:
+        context = capture(tmp_path, patterns=["*.csv"], kind="table", client=lt)
+        expected_line = inspect.currentframe().f_lineno + 1
+        with context:
+            (tmp_path / "scanned.csv").write_text("value\n1\n", encoding="utf-8")
+
+    assert metadata_seen["capture_scope_code_line"] == expected_line
+    assert str(metadata_seen["capture_scope_code_file"]).endswith(
+        "tests/test_lab_tracker_client_figures.py"
+    )
+    assert "capture_scope_git_commit" in metadata_seen
+    assert not any(key.startswith("producer_") for key in metadata_seen)
+
+
+def test_capture_context_eager_writes_keep_distinct_producer_lines_and_no_duplicates(
+    tmp_path: Path,
+) -> None:
+    uploaded: list[dict[str, object]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        metadata = json.loads(_multipart_field(request.content, "metadata"))
+        uploaded.append(metadata)
+        return _json_response(
+            201,
+            {
+                "data": {
+                    "note_id": f"note-{len(uploaded)}",
+                    "project_id": "project-1",
+                    "status": "staged",
+                    "metadata": metadata,
+                }
+            },
+        )
+
+    with LabTracker(
+        base_url="http://testserver",
+        default_project_id="project-1",
+        transport=httpx.MockTransport(handler),
+    ) as lt, capture(tmp_path, patterns=["*.csv"], kind="table", client=lt) as context:
+        first_line = inspect.currentframe().f_lineno + 1
+        context.save_artifact(tmp_path / "first.csv", writer=lambda p: p.write_text("1"))
+        second_line = inspect.currentframe().f_lineno + 1
+        context.save_artifact(tmp_path / "second.csv", writer=lambda p: p.write_text("2"))
+
+    assert len(context.results) == 2
+    assert len(uploaded) == 2
+    assert [metadata["producer_code_line"] for metadata in uploaded] == [
+        first_line,
+        second_line,
+    ]
+    assert all("capture_scope_code_line" in metadata for metadata in uploaded)
+
+
+def test_save_artifact_validates_kind_and_writer_before_writing(tmp_path: Path) -> None:
+    wrote = False
+
+    def writer(_path: Path) -> None:
+        nonlocal wrote
+        wrote = True
+
+    with pytest.raises(LTValidationError, match="non-empty kind"):
+        save_artifact(tmp_path / "bad", kind=" ", writer=writer)
+    with pytest.raises(LTValidationError, match="callable writer"):
+        save_artifact(tmp_path / "bad", kind="table", writer=None)  # type: ignore[arg-type]
+
+    assert wrote is False

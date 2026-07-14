@@ -94,12 +94,30 @@ class MCPSettings:
 
     @classmethod
     def from_env(cls) -> MCPSettings:
+        from lab_tracker_client.client import (
+            access_token_from_env,
+            load_connection_profile,
+        )
+
+        profile = load_connection_profile()
+        env_base_url = os.getenv("LAB_TRACKER_MCP_BASE_URL") or os.getenv(
+            "LAB_TRACKER_BASE_URL"
+        )
+        env_username = os.getenv("LAB_TRACKER_MCP_USERNAME") or os.getenv(
+            "LAB_TRACKER_USERNAME"
+        )
+        profile_base_url = profile.get("base_url") or DEFAULT_BASE_URL
+        profile_token = profile.get("access_token")
+        if env_username or (
+            env_base_url and env_base_url.rstrip("/") != profile_base_url.rstrip("/")
+        ):
+            profile_token = None
         return cls(
-            base_url=os.getenv("LAB_TRACKER_MCP_BASE_URL", DEFAULT_BASE_URL).rstrip("/"),
-            username=os.getenv("LAB_TRACKER_MCP_USERNAME"),
-            password=os.getenv("LAB_TRACKER_MCP_PASSWORD"),
-            api_key=os.getenv("LAB_TRACKER_MCP_API_KEY")
-            or os.getenv("LAB_TRACKER_MCP_TOKEN"),
+            base_url=(env_base_url or profile_base_url).rstrip("/"),
+            username=env_username,
+            password=os.getenv("LAB_TRACKER_MCP_PASSWORD")
+            or os.getenv("LAB_TRACKER_PASSWORD"),
+            api_key=access_token_from_env() or profile_token,
             timeout_seconds=float(
                 os.getenv("LAB_TRACKER_MCP_TIMEOUT_SECONDS", str(DEFAULT_TIMEOUT_SECONDS))
             ),

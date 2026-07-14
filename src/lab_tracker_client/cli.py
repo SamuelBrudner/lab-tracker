@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import getpass
 import json
 import os
 import sys
@@ -119,6 +120,11 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Consumer repo path to update. Defaults to the current directory.",
     )
     update_parser.add_argument(
+        "--all",
+        action="store_true",
+        help="Update every repo recorded in ~/.lab-tracker/applied-repos.json.",
+    )
+    update_parser.add_argument(
         "--yes",
         action="store_true",
         help="Also install managed code-conventions blocks that are not present yet.",
@@ -131,7 +137,7 @@ def _build_parser() -> argparse.ArgumentParser:
     update_parser.add_argument(
         "--install-skills",
         action="store_true",
-        help="Also refresh the lab-tracker-setup skill in ~/.claude/skills.",
+        help="Also refresh Lab Tracker skills for local Claude and Codex agents.",
     )
     update_parser.set_defaults(func=_cmd_update, needs_client=False)
 
@@ -337,8 +343,8 @@ def _add_setup_parsers(subcommands: argparse._SubParsersAction) -> None:
         "--install-skills",
         action="store_true",
         help=(
-            "Also render the lab-tracker-setup skill into ~/.claude/skills "
-            "(with --uninstall: remove it)."
+            "Also install Lab Tracker skills for local Claude and Codex agents "
+            "(with --uninstall: remove them)."
         ),
     )
     init_parser.set_defaults(func=_cmd_setup_init, needs_client=False)
@@ -350,6 +356,14 @@ def _add_setup_parsers(subcommands: argparse._SubParsersAction) -> None:
     connect_parser.add_argument("--base-url", help="Lab Tracker API base URL to persist.")
     connect_parser.add_argument("--project", help="Default project UUID to persist.")
     connect_parser.add_argument(
+        "--capture-host",
+        help="Human label for this computer in capture metadata.",
+    )
+    connect_parser.add_argument(
+        "--capture-context",
+        help="Default capture context UUID for CLI captures from this computer.",
+    )
+    connect_parser.add_argument(
         "--save-token",
         action="store_true",
         help="Also persist an access token (separate, explicit consent).",
@@ -357,6 +371,11 @@ def _add_setup_parsers(subcommands: argparse._SubParsersAction) -> None:
     connect_parser.add_argument(
         "--token",
         help="Access token for --save-token. Defaults to LAB_TRACKER_ACCESS_TOKEN.",
+    )
+    connect_parser.add_argument(
+        "--prompt-token",
+        action="store_true",
+        help="Prompt without echo for the token persisted by --save-token.",
     )
     connect_parser.add_argument(
         "--uninstall",
@@ -526,11 +545,20 @@ def _add_hooks_parsers(subcommands: argparse._SubParsersAction) -> None:
         "--lt-path",
         help="Absolute lt executable for the hook body. Defaults to the installed lt.",
     )
-    install_parser.add_argument(
-        "--no-request-draft",
+    draft_group = install_parser.add_mutually_exclusive_group()
+    draft_group.add_argument(
+        "--request-draft",
+        dest="request_draft",
         action="store_true",
+        help="Request an analysis graph draft when snapshots sync.",
+    )
+    draft_group.add_argument(
+        "--no-request-draft",
+        dest="request_draft",
+        action="store_false",
         help="Do not request an analysis graph draft when snapshots sync.",
     )
+    install_parser.set_defaults(request_draft=None)
     install_parser.add_argument(
         "--force",
         action="store_true",
@@ -1020,7 +1048,7 @@ def _cmd_repo_status(args: argparse.Namespace) -> Any:
             "project_id": config.project_id,
         }
     )
-    return summary
+    return setup_helpers.with_identity_status(summary)
 
 
 def _cmd_repo_sync(client: LabTracker, args: argparse.Namespace) -> Any:
@@ -1169,19 +1197,30 @@ def _cmd_setup_connect(args: argparse.Namespace) -> Any:
         )
     if args.uninstall:
         return setup_helpers.delete_connection_profile(dry_run=args.dry_run)
+    if args.prompt_token and args.token:
+        raise SystemExit("--prompt-token and --token are mutually exclusive.")
     token = None
     if args.save_token:
-        token = args.token or os.getenv("LAB_TRACKER_ACCESS_TOKEN")
+        token = (
+            getpass.getpass("Lab Tracker access token: ").strip()
+            if args.prompt_token
+            else args.token or os.getenv("LAB_TRACKER_ACCESS_TOKEN")
+        )
         if not token:
             raise SystemExit(
-                "--save-token needs --token or LAB_TRACKER_ACCESS_TOKEN in the environment."
+                "--save-token needs --prompt-token, --token, or "
+                "LAB_TRACKER_ACCESS_TOKEN in the environment."
             )
-    elif args.token:
-        raise SystemExit("--token persists only with explicit --save-token consent.")
+    elif args.token or args.prompt_token:
+        raise SystemExit(
+            "--token and --prompt-token persist only with explicit --save-token consent."
+        )
     payload = setup_helpers.save_connection_profile(
         base_url=args.base_url,
         default_project_id=args.project,
         access_token=token,
+        capture_host_label=args.capture_host,
+        default_capture_context_id=args.capture_context,
         dry_run=args.dry_run,
     )
     if args.base_url:
@@ -1254,7 +1293,7 @@ def _cmd_hooks_install(args: argparse.Namespace) -> Any:
         repo=args.repo,
         project_id=args.project,
         base_url=args.base_url,
-        request_draft=not args.no_request_draft,
+        request_draft=args.request_draft,
         lt_path=args.lt_path,
         force=args.force,
         dry_run=args.dry_run,
@@ -1271,7 +1310,7 @@ def _cmd_hooks_uninstall(args: argparse.Namespace) -> Any:
 
 
 def _cmd_hooks_status(args: argparse.Namespace) -> Any:
-    return hook_install.hook_status(repo=args.repo)
+    return setup_helpers.with_identity_status(hook_install.hook_status(repo=args.repo))
 
 
 def _cmd_watch_run(client: LabTracker, args: argparse.Namespace) -> Any:
@@ -1327,7 +1366,7 @@ def _cmd_watch_status(args: argparse.Namespace) -> Any:
             "project_id": config.project_id,
         }
     )
-    return summary
+    return setup_helpers.with_identity_status(summary)
 
 
 def _cmd_watch_sync(client: LabTracker, args: argparse.Namespace) -> Any:
@@ -1561,7 +1600,7 @@ def _cmd_hpc_status(args: argparse.Namespace) -> Any:
             "scheduler": config.scheduler,
         }
     )
-    return summary
+    return setup_helpers.with_identity_status(summary)
 
 
 def _cmd_hpc_sync(client: LabTracker, args: argparse.Namespace) -> Any:
@@ -1607,7 +1646,7 @@ def _cmd_doctor(args: argparse.Namespace) -> Any:
             summary["missing"] = True
         else:
             try:
-                payload = _doctor(root)
+                payload = _doctor(root, require_conventions=True)
             except Exception as exc:  # noqa: BLE001 - one bad repo must not end the sweep.
                 summary["error"] = str(exc)
                 repos.append(summary)
@@ -1632,15 +1671,51 @@ def _cmd_doctor(args: argparse.Namespace) -> Any:
 
 
 def _cmd_update(args: argparse.Namespace) -> Any:
-    from lab_tracker.cli import update_consumer_repo
+    from lab_tracker.cli import InitResult, install_agent_skills, update_consumer_repo
 
-    result = update_consumer_repo(
-        args.target,
-        yes=args.yes,
-        dry_run=args.dry_run,
-        install_skills=args.install_skills,
-    )
-    return result.as_dict()
+    if not getattr(args, "all", False):
+        result = update_consumer_repo(
+            args.target,
+            yes=args.yes,
+            dry_run=args.dry_run,
+            install_skills=args.install_skills,
+        )
+        return result.as_dict()
+    if args.target != ".":
+        raise SystemExit("--all cannot be combined with a non-default --target")
+
+    repos: list[dict[str, Any]] = []
+    for entry in repo_registry.list_repos():
+        root = str(entry.get("root") or "")
+        if not root:
+            continue
+        summary: dict[str, Any] = {"root": root, "actions": entry.get("actions") or []}
+        if not Path(root).exists():
+            summary["missing"] = True
+        else:
+            try:
+                result = update_consumer_repo(
+                    root,
+                    yes=args.yes,
+                    dry_run=args.dry_run,
+                    install_skills=False,
+                )
+                summary["result"] = result.as_dict()
+            except Exception as exc:  # noqa: BLE001 - continue the fleet update.
+                summary["error"] = str(exc)
+        repos.append(summary)
+
+    payload: dict[str, Any] = {
+        "command": "update-all",
+        "registry": str(repo_registry.registry_path()),
+        "dry_run": args.dry_run,
+        "repos": repos,
+    }
+    if args.install_skills:
+        skills_result = InitResult()
+        install_agent_skills(result=skills_result, dry_run=args.dry_run)
+        payload["skills"] = skills_result.as_dict()
+    return payload
 
 
 def _target(value: str) -> EntityRef:
@@ -1728,6 +1803,12 @@ def _payload_exit_code(payload: Any) -> int:
             repo.get("missing") or repo.get("drifted") or repo.get("error")
             for repo in repos
         ):
+            return 1
+    if isinstance(payload, dict) and payload.get("command") == "update-all":
+        repos = payload.get("repos")
+        if not isinstance(repos, list):
+            return 1
+        if any(repo.get("missing") or repo.get("error") for repo in repos):
             return 1
     if isinstance(payload, dict) and payload.get("command") == "git-snapshot":
         sync = payload.get("sync")

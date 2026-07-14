@@ -10,7 +10,7 @@ import pytest
 import lab_tracker_client.setup as setup_helpers
 from lab_tracker_client import LTRecord
 from lab_tracker_client import cli as lt_cli
-from lab_tracker_client.client import LabTracker, load_connection_profile
+from lab_tracker_client.client import LabTracker, capture_host_metadata, load_connection_profile
 
 
 def _clear_connection_env(monkeypatch) -> None:
@@ -18,11 +18,15 @@ def _clear_connection_env(monkeypatch) -> None:
         "LAB_TRACKER_BASE_URL",
         "LAB_TRACKER_MCP_BASE_URL",
         "LAB_TRACKER_ACCESS_TOKEN",
+        "LAB_TRACKER_MCP_API_KEY",
+        "LAB_TRACKER_MCP_TOKEN",
         "LAB_TRACKER_USERNAME",
         "LAB_TRACKER_PASSWORD",
         "LAB_TRACKER_MCP_USERNAME",
         "LAB_TRACKER_MCP_PASSWORD",
         "LAB_TRACKER_PROJECT_ID",
+        "LAB_TRACKER_CAPTURE_CONTEXT_ID",
+        "LAB_TRACKER_CAPTURE_HOST",
         "LAB_TRACKER_WATCH_CONFIG",
         "LAB_TRACKER_WATCH_OUTBOX",
         "LAB_TRACKER_HPC_CONFIG",
@@ -46,6 +50,7 @@ def test_from_env_prefers_env_over_profile(config_home, monkeypatch) -> None:
                 "base_url": "http://profile:9000",
                 "access_token": "profile-token",
                 "default_project_id": "profile-project",
+                "default_capture_context_id": "profile-context",
             }
         ),
         encoding="utf-8",
@@ -56,17 +61,28 @@ def test_from_env_prefers_env_over_profile(config_home, monkeypatch) -> None:
         assert client.base_url == "http://profile:9000"
         assert client.access_token == "profile-token"
         assert client.default_project_id == "profile-project"
+        assert client.default_capture_context_id == "profile-context"
+    finally:
+        client.close()
+
+    monkeypatch.delenv("LAB_TRACKER_ACCESS_TOKEN", raising=False)
+    monkeypatch.setenv("LAB_TRACKER_MCP_API_KEY", "mcp-token")
+    client = LabTracker.from_env()
+    try:
+        assert client.access_token == "mcp-token"
     finally:
         client.close()
 
     monkeypatch.setenv("LAB_TRACKER_BASE_URL", "http://env:8000")
     monkeypatch.setenv("LAB_TRACKER_ACCESS_TOKEN", "env-token")
     monkeypatch.setenv("LAB_TRACKER_PROJECT_ID", "env-project")
+    monkeypatch.setenv("LAB_TRACKER_CAPTURE_CONTEXT_ID", "env-context")
     client = LabTracker.from_env()
     try:
         assert client.base_url == "http://env:8000"
         assert client.access_token == "env-token"
         assert client.default_project_id == "env-project"
+        assert client.default_capture_context_id == "env-context"
     finally:
         client.close()
 
@@ -163,12 +179,21 @@ def test_setup_connect_persists_token_only_with_save_token(config_home, capsys) 
             "http://lab:8000",
             "--project",
             "project-1",
+            "--capture-host",
+            "Rig desktop",
+            "--capture-context",
+            "context-1",
             "--yes",
         ]
     )
     capsys.readouterr()
     profile = json.loads((config_home / "config.json").read_text(encoding="utf-8"))
-    assert profile == {"base_url": "http://lab:8000", "default_project_id": "project-1"}
+    assert profile == {
+        "base_url": "http://lab:8000",
+        "capture_host_label": "Rig desktop",
+        "default_capture_context_id": "context-1",
+        "default_project_id": "project-1",
+    }
 
     with pytest.raises(SystemExit):
         lt_cli.main(["setup", "connect", "--token", "tok", "--yes"])
@@ -178,10 +203,43 @@ def test_setup_connect_persists_token_only_with_save_token(config_home, capsys) 
     profile = json.loads((config_home / "config.json").read_text(encoding="utf-8"))
     assert profile["access_token"] == "tok"
     assert profile["base_url"] == "http://lab:8000"
+    assert profile["capture_host_label"] == "Rig desktop"
+    assert profile["default_capture_context_id"] == "context-1"
 
     lt_cli.main(["setup", "connect", "--uninstall", "--yes"])
     capsys.readouterr()
     assert not (config_home / "config.json").exists()
+
+
+def test_setup_connect_can_prompt_without_echoing_token(
+    config_home,
+    monkeypatch,
+    capsys,
+) -> None:
+    monkeypatch.setattr(lt_cli.getpass, "getpass", lambda _prompt: "prompt-secret")
+
+    lt_cli.main(
+        ["setup", "connect", "--save-token", "--prompt-token", "--yes"]
+    )
+    payload = json.loads(capsys.readouterr().out)
+    profile = json.loads((config_home / "config.json").read_text(encoding="utf-8"))
+
+    assert payload["has_token"] is True
+    assert "prompt-secret" not in json.dumps(payload)
+    assert profile["access_token"] == "prompt-secret"
+
+    with pytest.raises(SystemExit, match="mutually exclusive"):
+        lt_cli.main(
+            [
+                "setup",
+                "connect",
+                "--save-token",
+                "--prompt-token",
+                "--token",
+                "inline",
+                "--yes",
+            ]
+        )
 
 
 def test_setup_connect_never_leaks_a_previously_stored_token(config_home, capsys) -> None:
@@ -199,6 +257,29 @@ def test_setup_connect_never_leaks_a_previously_stored_token(config_home, capsys
     assert "stored-secret" not in json.dumps(apply_payload)
     profile = json.loads((config_home / "config.json").read_text(encoding="utf-8"))
     assert profile["access_token"] == "stored-secret"
+
+
+def test_capture_host_metadata_prefers_env_then_profile(
+    config_home,
+    monkeypatch,
+) -> None:
+    config_home.mkdir(parents=True)
+    (config_home / "config.json").write_text(
+        json.dumps({"capture_host_label": "profile-host"}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("platform.node", lambda: "platform-host")
+
+    metadata = capture_host_metadata()
+
+    assert metadata["capture_host_label"] == "profile-host"
+    assert metadata["capture_install_id"]
+    assert metadata["capture_platform"]
+
+    monkeypatch.setenv("LAB_TRACKER_CAPTURE_HOST", "env-host")
+    metadata = capture_host_metadata()
+
+    assert metadata["capture_host_label"] == "env-host"
 
 
 def test_setup_status_is_read_only_and_reports_repo_state(
@@ -238,6 +319,40 @@ def test_setup_status_suggests_persisting_default_base_url(
 
     assert payload["server"]["source"] == "default"
     assert any("setup connect --base-url" in item for item in payload["suggestions"])
+
+
+def test_identity_status_warns_when_auth_is_disabled(config_home, monkeypatch) -> None:
+    class FakeClient:
+        def whoami(self) -> dict:
+            return {
+                "data": {
+                    "user_id": "local-user",
+                    "username": "local-tester",
+                    "role": "admin",
+                },
+                "meta": {
+                    "auth_enabled": False,
+                    "principal_type": "user",
+                    "is_interactive": True,
+                },
+            }
+
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setattr(
+        setup_helpers.LabTracker,
+        "from_env",
+        classmethod(lambda cls: FakeClient()),  # noqa: ARG005
+    )
+
+    payload = setup_helpers.identity_status("http://lab.example.test", reachable=True)
+
+    assert payload["available"] is True
+    assert payload["resolved_user"]["username"] == "local-tester"
+    assert payload["auth_enabled"] is False
+    assert payload["warnings"]
+    assert "Authentication is disabled" in payload["warnings"][0]
 
 
 def test_setup_status_watch_guidance_is_optional_when_commit_hook_active(

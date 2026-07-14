@@ -98,6 +98,24 @@ _EXECUTED_BY_TARGETS: tuple[
     ("analyses", AnalysisModel, AnalysisModel.executed_by, AnalysisModel.executed_by_user_id),
 )
 
+_REVIEW_ASSIGNEE_TARGETS: tuple[
+    tuple[str, type[object], InstrumentedAttribute[str | None], InstrumentedAttribute[str | None]],
+    ...,
+] = (
+    (
+        "graph_change_sets_review_assignee",
+        GraphChangeSetModel,
+        GraphChangeSetModel.review_assignee,
+        GraphChangeSetModel.review_assignee_user_id,
+    ),
+    (
+        "graph_draft_batch_runs_review_assignee",
+        GraphDraftBatchRunModel,
+        GraphDraftBatchRunModel.review_assignee,
+        GraphDraftBatchRunModel.review_assignee_user_id,
+    ),
+)
+
 
 def ownership_reassignment_from_model(
     row: OwnershipReassignmentModel,
@@ -333,6 +351,7 @@ class SQLAlchemyOwnershipReassignmentRepository(EntityRepository[OwnershipReassi
         for label, model, text_column, user_id_column in (
             *_CREATED_BY_TARGETS,
             *_EXECUTED_BY_TARGETS,
+            *_REVIEW_ASSIGNEE_TARGETS,
         ):
             result = self._session.execute(
                 update(model)

@@ -96,7 +96,7 @@ Open it: $($edition.deep_link)
 "@
 
     if ($WhatIf) {
-        Write-Host "[WhatIf] would email $To: $subject / $($edition.deep_link)"
+        Write-Host "[WhatIf] would email ${To}: $subject / $($edition.deep_link)"
     } else {
         $sendParams = @{
             To         = $To

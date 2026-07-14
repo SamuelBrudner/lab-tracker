@@ -5,6 +5,8 @@ from types import SimpleNamespace
 from typing import Any
 from uuid import UUID, uuid4
 
+import pytest
+
 from lab_tracker.graph_drafting import BATCH_PROMPT_VERSION, _batch_instructions
 from lab_tracker.models import (
     EntityRef,
@@ -393,5 +395,211 @@ def test_batch_instructions_are_narrative_first_with_terse_capture_guardrail() -
     assert "never fabricate content for an identifier-only capture" in lowered
     # Stays subordinate to the supported-changes guardrail.
     assert "supported by the source artifacts" in instructions
-    # The summary contract changed (now a narrative), so the version bumps.
-    assert BATCH_PROMPT_VERSION == "daily-batch-graph-draft-v2"
+    # Per-note coverage checklist (lab-tracker-hymd): every staged note id must
+    # get exactly one disposition entry.
+    assert "note_dispositions" in instructions
+    assert "note_ids_requiring_disposition" in instructions
+    assert "exactly one note_dispositions entry per id" in instructions
+    # The batch contract changed (per-note dispositions), so the version bumps.
+    assert BATCH_PROMPT_VERSION == "daily-batch-graph-draft-v3"
+
+
+def test_graph_patch_schema_adds_note_dispositions_only_for_batch() -> None:
+    from lab_tracker.graph_drafting import graph_patch_response_schema
+
+    base = graph_patch_response_schema()
+    assert "note_dispositions" not in base["properties"]
+    assert "note_dispositions" not in base["required"]
+
+    batch = graph_patch_response_schema(include_note_dispositions=True)
+    assert "note_dispositions" in batch["required"]
+    entry = batch["properties"]["note_dispositions"]["items"]
+    assert entry["properties"]["disposition"]["enum"] == [
+        "proposed_change",
+        "no_change",
+        "insufficient_info",
+    ]
+    # OpenAI strict structured output requires every object to enumerate its
+    # properties and mark them all required.
+    assert entry["additionalProperties"] is False
+    assert set(entry["required"]) == set(entry["properties"])
+    # The base contract is unchanged for single-note/analysis flows.
+    assert base["required"] == [
+        "summary",
+        "uncertain_fields",
+        "clarification_requests",
+        "operations",
+    ]
+
+
+def _coverage_patch(
+    entries: list[dict[str, object]] | None,
+    operations: list[dict[str, object]] | None = None,
+) -> dict[str, object]:
+    patch: dict[str, object] = {
+        "summary": "s",
+        "uncertain_fields": [],
+        "clarification_requests": [],
+        "operations": operations or [],
+    }
+    if entries is not None:
+        patch["note_dispositions"] = entries
+    return patch
+
+
+def _coverage_entry(note_id: str, **overrides: object) -> dict[str, object]:
+    entry: dict[str, object] = {
+        "note_id": note_id,
+        "disposition": "no_change",
+        "reason": "considered",
+        "evidence_quote": "",
+        "client_refs": [],
+    }
+    entry.update(overrides)
+    return entry
+
+
+def test_note_disposition_coverage_accepts_exact_cover() -> None:
+    from lab_tracker.services.graph_draft_validation import (
+        validate_note_disposition_coverage,
+    )
+
+    validate_note_disposition_coverage(
+        _coverage_patch([_coverage_entry("a"), _coverage_entry("b")]),
+        expected_note_ids=["a", "b"],
+    )
+
+
+def test_note_disposition_coverage_names_missing_extra_and_duplicates() -> None:
+    from lab_tracker.services.graph_draft_validation import (
+        GraphPatchCoverageError,
+        validate_note_disposition_coverage,
+    )
+
+    entries = [_coverage_entry("a"), _coverage_entry("a"), _coverage_entry("x")]
+    with pytest.raises(GraphPatchCoverageError) as excinfo:
+        validate_note_disposition_coverage(
+            _coverage_patch(entries),
+            expected_note_ids=["a", "b"],
+        )
+    message = str(excinfo.value)
+    assert "b" in message and "x" in message
+    assert excinfo.value.details == {
+        "missing_note_ids": ["b"],
+        "extra_note_ids": ["x"],
+        "duplicate_note_ids": ["a"],
+    }
+
+
+def test_note_disposition_coverage_missing_checklist_reports_all_ids() -> None:
+    from lab_tracker.services.graph_draft_validation import (
+        GraphPatchCoverageError,
+        validate_note_disposition_coverage,
+    )
+
+    with pytest.raises(GraphPatchCoverageError) as excinfo:
+        validate_note_disposition_coverage(
+            _coverage_patch(None),
+            expected_note_ids=["a", "b"],
+        )
+    assert excinfo.value.details == {"missing_note_ids": ["a", "b"]}
+
+
+def test_note_disposition_coverage_rejects_invalid_enum_and_hollow_reason() -> None:
+    from lab_tracker.services.graph_draft_validation import (
+        GraphPatchCoverageError,
+        validate_note_disposition_coverage,
+    )
+
+    entries = [_coverage_entry("a", disposition="ignored", reason="")]
+    with pytest.raises(GraphPatchCoverageError) as excinfo:
+        validate_note_disposition_coverage(
+            _coverage_patch(entries),
+            expected_note_ids=["a"],
+        )
+    message = str(excinfo.value)
+    assert "invalid disposition" in message
+    assert "reason" in message
+
+
+def test_note_disposition_coverage_checks_client_ref_linkage() -> None:
+    from lab_tracker.services.graph_draft_validation import (
+        GraphPatchCoverageError,
+        validate_note_disposition_coverage,
+    )
+
+    operations = [{"client_ref": "q1"}]
+    cited = [_coverage_entry("a", disposition="proposed_change", client_refs=["q1"])]
+    validate_note_disposition_coverage(
+        _coverage_patch(cited, operations),
+        expected_note_ids=["a"],
+    )
+
+    uncited = [_coverage_entry("a", disposition="proposed_change")]
+    with pytest.raises(GraphPatchCoverageError, match="at least one client_ref"):
+        validate_note_disposition_coverage(
+            _coverage_patch(uncited, operations),
+            expected_note_ids=["a"],
+        )
+
+    dangling = [_coverage_entry("a", disposition="proposed_change", client_refs=["q2"])]
+    with pytest.raises(GraphPatchCoverageError, match="no matching operation"):
+        validate_note_disposition_coverage(
+            _coverage_patch(dangling, operations),
+            expected_note_ids=["a"],
+        )
+
+    no_change_citing = [_coverage_entry("a", client_refs=["q1"])]
+    with pytest.raises(GraphPatchCoverageError, match="only\s+proposed_change"):
+        validate_note_disposition_coverage(
+            _coverage_patch(no_change_citing, operations),
+            expected_note_ids=["a"],
+        )
+
+
+def test_note_disposition_coverage_content_unavailable_honeypot() -> None:
+    from lab_tracker.services.graph_draft_validation import (
+        GraphPatchCoverageError,
+        validate_note_disposition_coverage,
+    )
+
+    box_ticker = [_coverage_entry("a", evidence_quote="[sensitive note content redacted]")]
+    with pytest.raises(GraphPatchCoverageError) as excinfo:
+        validate_note_disposition_coverage(
+            _coverage_patch(box_ticker),
+            expected_note_ids=["a"],
+            content_unavailable_note_ids={"a"},
+        )
+    message = str(excinfo.value)
+    assert "insufficient_info" in message
+    assert "evidence_quote must be empty" in message
+
+    honest = [_coverage_entry("a", disposition="insufficient_info")]
+    validate_note_disposition_coverage(
+        _coverage_patch(honest),
+        expected_note_ids=["a"],
+        content_unavailable_note_ids={"a"},
+    )
+
+
+def test_note_disposition_expectations_reads_packet_checklist_and_flags() -> None:
+    from lab_tracker.services.graph_draft_validation import (
+        note_disposition_expectations,
+    )
+
+    packet = {
+        "note_ids_requiring_disposition": ["a", "b"],
+        "batch_notes": [
+            {"id": "a", "sensitive_content_omitted": True},
+            {"id": "b"},
+        ],
+    }
+    expected, unavailable = note_disposition_expectations(packet)
+    assert expected == ["a", "b"]
+    assert unavailable == frozenset({"a"})
+
+    # Packets predating the checklist fall back to presented batch_notes ids.
+    legacy = {"batch_notes": [{"id": "a"}, {"id": "b", "sensitive_content_redacted": True}]}
+    expected, unavailable = note_disposition_expectations(legacy)
+    assert expected == ["a", "b"]
+    assert unavailable == frozenset({"b"})

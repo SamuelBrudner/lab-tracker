@@ -6,9 +6,11 @@ from datetime import datetime
 from typing import Generic, Protocol, TypeVar
 from uuid import UUID
 
+from lab_tracker.auth import Role
 from lab_tracker.models import (
     AcquisitionOutput,
     Analysis,
+    CaptureContext,
     Claim,
     ClaimEdge,
     Dataset,
@@ -73,6 +75,7 @@ class LabTrackerRepository(Protocol):
     questions: EntityRepository[Question]
     question_refactors: EntityRepository[QuestionRefactor]
     datasets: EntityRepository[Dataset]
+    capture_contexts: EntityRepository[CaptureContext]
     notes: EntityRepository[Note]
     sessions: EntityRepository[Session]
     acquisition_outputs: EntityRepository[AcquisitionOutput]
@@ -91,6 +94,9 @@ class LabTrackerRepository(Protocol):
 
     def user_exists(self, user_id: UUID) -> bool:
         """Return whether a user exists for FK-backed attribution."""
+
+    def user_role(self, user_id: UUID) -> Role | None:
+        """Return a user's global role, or None when the user does not exist."""
 
     def fetch_questions(self, question_ids: list[UUID]) -> list[Question]:
         """Fetch questions in the provided order."""
@@ -293,6 +299,17 @@ class LabTrackerRepository(Protocol):
         recent_first: bool = False,
     ) -> tuple[list[Note], int]:
         """Query notes with filters and pagination."""
+
+    def query_capture_contexts(
+        self,
+        *,
+        project_id: UUID | None = None,
+        project_ids: set[UUID] | None = None,
+        include_revoked: bool = False,
+        limit: int | None = None,
+        offset: int = 0,
+    ) -> tuple[list[CaptureContext], int]:
+        """Query capture context presets with project filters."""
 
     def project_ids_with_search_matches(
         self,

@@ -383,6 +383,38 @@ class NoteModel(Base):
     )
 
 
+class CaptureContextModel(Base):
+    __tablename__ = "capture_contexts"
+
+    capture_context_id: Mapped[UUID] = mapped_column(
+        GUID,
+        primary_key=True,
+        default=uuid4,
+    )
+    project_id: Mapped[UUID] = mapped_column(
+        GUID,
+        ForeignKey("projects.project_id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    label: Mapped[str] = mapped_column(String(150), nullable=False)
+    site_label: Mapped[str | None] = mapped_column(String(150))
+    place_label: Mapped[str | None] = mapped_column(String(150))
+    default_hint: Mapped[str | None] = mapped_column(String(500))
+    default_targets: Mapped[list[object]] = mapped_column(JSON, default=list)
+    created_by: Mapped[str | None] = mapped_column(String(255))
+    created_by_user_id: Mapped[UUID | None] = mapped_column(
+        GUID,
+        ForeignKey("users.user_id", ondelete="SET NULL"),
+    )
+    created_at: Mapped[datetime] = mapped_column(UtcDateTime, default=_utc_now)
+    updated_at: Mapped[datetime] = mapped_column(
+        UtcDateTime,
+        default=_utc_now,
+        onupdate=_utc_now,
+    )
+    revoked_at: Mapped[datetime | None] = mapped_column(UtcDateTime)
+
+
 class NoteTargetModel(Base):
     __tablename__ = "note_targets"
 
@@ -431,6 +463,7 @@ class GraphChangeSetModel(Base):
     summary: Mapped[str] = mapped_column(Text, default="")
     uncertain_fields: Mapped[list[str]] = mapped_column(JSON, default=list)
     clarification_requests: Mapped[list[str]] = mapped_column(JSON, default=list)
+    note_dispositions: Mapped[list[dict[str, object]]] = mapped_column(JSON, default=list)
     status: Mapped[str] = mapped_column(String(20), nullable=False, default="drafting")
     commit_message: Mapped[str | None] = mapped_column(Text)
     error_metadata: Mapped[dict[str, object]] = mapped_column(JSON, default=dict)
@@ -1248,6 +1281,15 @@ class InvitationModel(Base):
     )
     email: Mapped[str] = mapped_column(String(255), nullable=False)
     role: Mapped[str] = mapped_column(String(20), nullable=False)
+    project_id: Mapped[UUID | None] = mapped_column(
+        GUID,
+        ForeignKey("projects.project_id", ondelete="CASCADE"),
+    )
+    project_role: Mapped[str | None] = mapped_column(String(30))
+    review_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    review_cadence_minutes: Mapped[int | None] = mapped_column(Integer)
+    review_run_at_local_time: Mapped[str | None] = mapped_column(String(5))
+    review_timezone_name: Mapped[str | None] = mapped_column(String(100))
     token_hash: Mapped[str] = mapped_column(String(64), nullable=False)
     expires_at: Mapped[datetime] = mapped_column(UtcDateTime, nullable=False)
     created_at: Mapped[datetime] = mapped_column(UtcDateTime, default=_utc_now)
@@ -1520,6 +1562,7 @@ class DeviceTokenModel(Base):
         nullable=False,
     )
     label: Mapped[str] = mapped_column(String(150), nullable=False)
+    kind: Mapped[str] = mapped_column(String(20), nullable=False, default="mobile")
     token_hash: Mapped[str] = mapped_column(String(255), nullable=False)
     created_at: Mapped[datetime] = mapped_column(UtcDateTime, default=_utc_now)
     last_used_at: Mapped[datetime | None] = mapped_column(UtcDateTime, nullable=True)
@@ -1561,6 +1604,18 @@ Index("ix_questions_created_by_user_id", QuestionModel.created_by_user_id)
 Index("ix_question_refactors_created_by_user_id", QuestionRefactorModel.created_by_user_id)
 Index("ix_datasets_created_by_user_id", DatasetModel.created_by_user_id)
 Index("ix_notes_created_by_user_id", NoteModel.created_by_user_id)
+Index(
+    "ix_capture_contexts_project_created_at",
+    CaptureContextModel.project_id,
+    CaptureContextModel.created_at,
+)
+Index(
+    "ix_capture_contexts_project_revoked",
+    CaptureContextModel.project_id,
+    CaptureContextModel.revoked_at,
+)
+Index("ix_capture_contexts_created_by_user_id", CaptureContextModel.created_by_user_id)
+Index("ix_device_tokens_user_kind", DeviceTokenModel.user_id, DeviceTokenModel.kind)
 Index("ix_graph_change_sets_created_by_user_id", GraphChangeSetModel.created_by_user_id)
 Index("ix_graph_change_sets_review_assignee_user_id", GraphChangeSetModel.review_assignee_user_id)
 Index("ix_graph_draft_batch_runs_created_by_user_id", GraphDraftBatchRunModel.created_by_user_id)

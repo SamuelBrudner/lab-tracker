@@ -165,6 +165,7 @@ class UsageEventResourceType(str, Enum):
     GRAPH_DRAFT_BATCH_RUN = "graph_draft_batch_run"
     RECORD_EXPORT = "record_export"
     SEARCH = "search"
+    CAPTURE_CONTEXT = "capture_context"
     SUPERVISION_EDGE = "supervision_edge"
     ACQUISITION_OUTPUT = "acquisition_output"
     USAGE_EVENT = "usage_event"
@@ -610,6 +611,10 @@ class GraphChangeSet(_DomainModel):
     summary: str = ""
     uncertain_fields: list[str] = Field(default_factory=list)
     clarification_requests: list[str] = Field(default_factory=list)
+    # Per-note disposition ledger for batch drafts (lab-tracker-hymd): one
+    # agent-attested entry per presented note plus server-generated
+    # not_presented rows for notes dropped before drafting.
+    note_dispositions: list[dict[str, Any]] = Field(default_factory=list)
     status: GraphChangeSetStatus = GraphChangeSetStatus.DRAFTING
     commit_message: str | None = None
     error_metadata: dict[str, Any] = Field(default_factory=dict)
@@ -873,6 +878,26 @@ class Note(_DomainModel):
     origin_model: str | None = None
     origin_prompt_version: str | None = None
     updated_at: datetime = Field(default_factory=utc_now)
+
+
+class CaptureContext(_DomainModel):
+    capture_context_id: UUID
+    project_id: UUID
+    label: str
+    site_label: str | None = None
+    place_label: str | None = None
+    default_hint: str | None = None
+    default_targets: list[EntityRef] = Field(default_factory=list)
+    created_at: datetime = Field(default_factory=utc_now)
+    created_by: str | None = None
+    created_by_user_id: UUID | None = None
+    updated_at: datetime = Field(default_factory=utc_now)
+    revoked_at: datetime | None = None
+
+    @computed_field(return_type=bool)
+    @property
+    def revoked(self) -> bool:
+        return self.revoked_at is not None
 
 
 class Session(_DomainModel):

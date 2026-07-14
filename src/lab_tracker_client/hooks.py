@@ -32,6 +32,7 @@ _PROJECT_LINE_PATTERN = re.compile(
 _BASE_URL_LINE_PATTERN = re.compile(
     r'LAB_TRACKER_BASE_URL="\$\{LAB_TRACKER_BASE_URL:-(?P<value>[^}]*)\}"'
 )
+_REQUEST_DRAFT_PATTERN = re.compile(r"\bgit snapshot\b[^\n]*\s--request-draft\b")
 
 
 def hook_path_for_repo(repo: str | Path = ".") -> tuple[Path, Path]:
@@ -60,7 +61,7 @@ def managed_hook_block(
     lt_path: str,
     project_id: str | None = None,
     base_url: str | None = None,
-    request_draft: bool = True,
+    request_draft: bool = False,
 ) -> str:
     """Render the POSIX-sh managed block (LF only; runs under Git-for-Windows sh)."""
 
@@ -109,7 +110,7 @@ def install_hook(
     repo: str | Path = ".",
     project_id: str | None = None,
     base_url: str | None = None,
-    request_draft: bool = True,
+    request_draft: bool | None = None,
     lt_path: str | None = None,
     force: bool = False,
     dry_run: bool = False,
@@ -123,7 +124,8 @@ def install_hook(
     if has_block:
         # A legacy PS1-installed block may be the repo's ONLY project/URL
         # binding; replacing it wholesale would silently kill capture. Carry
-        # the baked defaults forward unless the caller overrides them.
+        # the baked defaults and draft-request behavior forward unless the
+        # caller overrides them.
         if project_id is None:
             match = _PROJECT_LINE_PATTERN.search(existing)
             carried_project = (match.group("value").strip() or None) if match else None
@@ -132,6 +134,10 @@ def install_hook(
             match = _BASE_URL_LINE_PATTERN.search(existing)
             carried_base_url = (match.group("value").strip() or None) if match else None
             base_url = carried_base_url
+        if request_draft is None:
+            request_draft = _hook_requests_draft(existing)
+    if request_draft is None:
+        request_draft = False
     block = managed_hook_block(
         lt_path=resolved_lt,
         project_id=project_id,
@@ -258,7 +264,12 @@ def hook_status(*, repo: str | Path = ".") -> JsonObject:
         "lt_path_exists": lt_path_exists,
         "baked_project_id": project_match.group("value") if project_match else None,
         "baked_base_url": base_url_match.group("value") if base_url_match else None,
+        "request_draft": _hook_requests_draft(existing) if has_begin and has_end else None,
     }
+
+
+def _hook_requests_draft(existing: str) -> bool:
+    return _REQUEST_DRAFT_PATTERN.search(existing) is not None
 
 
 def _toplevel(repo: str | Path) -> Path:

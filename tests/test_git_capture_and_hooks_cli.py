@@ -294,7 +294,8 @@ def test_hooks_install_writes_posix_hook(git_repo, capsys) -> None:
     assert content.startswith("#!/usr/bin/env sh\n")
     assert HOOK_BLOCK_BEGIN in content
     assert HOOK_BLOCK_END in content
-    assert "git snapshot --request-draft >/dev/null" in content
+    assert "git snapshot >/dev/null" in content
+    assert "--request-draft" not in content
     assert "--fail-silent" not in content
     assert 'LAB_TRACKER_PROJECT_ID="${LAB_TRACKER_PROJECT_ID:-p-9}"' in content
     assert "\\" not in content.split('LAB_TRACKER_LT:-', 1)[1].split("}", 1)[0]
@@ -305,6 +306,30 @@ def test_hooks_install_writes_posix_hook(git_repo, capsys) -> None:
     repeat = json.loads(capsys.readouterr().out)
     assert repeat["action"] == "updated"
     assert hook_path.read_bytes() == raw
+
+    lt_cli.main(
+        [
+            "hooks",
+            "install",
+            "--repo",
+            str(git_repo),
+            "--project",
+            "p-9",
+            "--request-draft",
+            "--yes",
+        ]
+    )
+    requested = json.loads(capsys.readouterr().out)
+    assert requested["action"] == "updated"
+    assert requested["request_draft"] is True
+    draft_raw = hook_path.read_bytes()
+    assert b"git snapshot --request-draft >/dev/null" in draft_raw
+
+    lt_cli.main(["hooks", "install", "--repo", str(git_repo), "--project", "p-9", "--yes"])
+    preserved = json.loads(capsys.readouterr().out)
+    assert preserved["action"] == "updated"
+    assert preserved["request_draft"] is True
+    assert hook_path.read_bytes() == draft_raw
 
 
 def test_hooks_install_dry_run_writes_nothing(git_repo, capsys) -> None:

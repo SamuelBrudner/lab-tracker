@@ -15,6 +15,23 @@ function batchNoteCount(batch) {
   return batch?.source_note_count || batch?.source_note_ids?.length || 1;
 }
 
+const DISPOSITION_CHIP_LABELS = [
+  ["no_change", "no-change"],
+  ["insufficient_info", "needs info"],
+  ["not_presented", "not shown"],
+];
+
+function dispositionChipLabels(batch) {
+  const counts = {};
+  for (const entry of batch?.note_dispositions || []) {
+    const key = entry?.disposition || "unknown";
+    counts[key] = (counts[key] || 0) + 1;
+  }
+  return DISPOSITION_CHIP_LABELS.filter(([key]) => counts[key]).map(
+    ([key, label]) => `${counts[key]} ${label}`,
+  );
+}
+
 function pendingBatchStatus(status) {
   if (status === "ready" || status === "submitted" || status === "changes_requested") {
     return "pill review-pending";
@@ -247,6 +264,11 @@ function BatchReviewPage({
                     <span className="pill">{formatDate(batch.created_at)}</span>
                     <span className="pill">{batchNoteCount(batch)} notes</span>
                     <span className="pill">{(batch.operations || []).length} ops</span>
+                    {dispositionChipLabels(batch).map((label) => (
+                      <span className="pill" key={label}>
+                        {label}
+                      </span>
+                    ))}
                     {batch.model ? <span className="pill">{batch.model}</span> : null}
                   </div>
                   <button

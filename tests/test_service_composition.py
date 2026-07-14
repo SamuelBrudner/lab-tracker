@@ -12,6 +12,7 @@ from lab_tracker.auth import AuthContext, Role
 from lab_tracker.db import Base
 from lab_tracker.services import (
     AnalysisService,
+    CaptureContextService,
     ClaimService,
     DatasetService,
     GraphDraftService,
@@ -32,6 +33,7 @@ SERVICE_TYPES = (
     SessionService,
     NoteService,
     AnalysisService,
+    CaptureContextService,
     ClaimService,
     VisualizationService,
     GraphDraftService,
@@ -75,6 +77,7 @@ def test_api_composes_named_service_instances() -> None:
     assert isinstance(api.datasets, DatasetService)
     assert isinstance(api.sessions, SessionService)
     assert isinstance(api.notes, NoteService)
+    assert isinstance(api.capture_contexts, CaptureContextService)
     assert isinstance(api.analyses, AnalysisService)
     assert isinstance(api.claims, ClaimService)
     assert isinstance(api.visualizations, VisualizationService)
@@ -87,6 +90,7 @@ def test_api_composes_named_service_instances() -> None:
     assert api.datasets.authorization is api.project_authorization
     assert api.sessions.authorization is api.project_authorization
     assert api.notes.authorization is api.project_authorization
+    assert api.capture_contexts.authorization is api.project_authorization
     assert api.analyses.authorization is api.project_authorization
     assert api.claims.authorization is api.project_authorization
     assert api.visualizations.authorization is api.project_authorization

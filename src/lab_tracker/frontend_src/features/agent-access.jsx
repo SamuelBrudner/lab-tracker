@@ -63,22 +63,13 @@ function isPrivateHost(hostname) {
   );
 }
 
-/* No persistence lines beyond `lt setup connect --save-token` here: the saved
-   profile is the one consented, permission-hardened token store. The MCP
-   export is process-scoped; agents launched from other shells need it set
-   where they run. */
-function connectCommands(secret, baseUrl) {
+/* The one-time secret is pasted only into a hidden prompt. The consented,
+   permission-hardened connection profile is shared by the CLI capture client
+   and the local MCP launcher, so copied commands never contain credentials. */
+function connectCommands(baseUrl) {
   return {
-    posix: [
-      `export LAB_TRACKER_ACCESS_TOKEN='${secret}'`,
-      `export LAB_TRACKER_MCP_API_KEY="$LAB_TRACKER_ACCESS_TOKEN"`,
-      `lt setup connect --base-url ${baseUrl} --save-token --yes`,
-    ].join("\n"),
-    powershell: [
-      `$env:LAB_TRACKER_ACCESS_TOKEN = '${secret}'`,
-      `$env:LAB_TRACKER_MCP_API_KEY = $env:LAB_TRACKER_ACCESS_TOKEN`,
-      `lt setup connect --base-url ${baseUrl} --save-token --yes`,
-    ].join("\n"),
+    posix: `lt setup connect --base-url ${baseUrl} --save-token --prompt-token --yes`,
+    powershell: `lt setup connect --base-url ${baseUrl} --save-token --prompt-token --yes`,
   };
 }
 
@@ -223,7 +214,7 @@ function AgentAccessPage({ token, user, authEnabled, navigate, setBusy, setFlash
     }
   }
 
-  const commands = issued ? connectCommands(issued.secret, baseUrl) : null;
+  const commands = issued ? connectCommands(baseUrl) : null;
   const issuedRepoCommands = issued ? repoCommands(issued.read_only === false) : "";
   const openRepoCommands = repoCommands(true);
   const openConnectCommand = `lt setup connect --base-url ${baseUrl} --yes`;
@@ -324,13 +315,11 @@ function AgentAccessPage({ token, user, authEnabled, navigate, setBusy, setFlash
             <div className="card-inset agent-token-issued">
               <h3>Token created — shown only once</h3>
               <p className="subtle">
-                Paste the block for the agent machine&#39;s shell. It saves the token
-                for the <code>lt</code> client (<code>~/.lab-tracker/config.json</code>,
-                readable in any later shell) and sets{" "}
-                <code>LAB_TRACKER_MCP_API_KEY</code> for MCP agents{" "}
-                <strong>launched from that same shell</strong> — agents started
-                elsewhere (IDEs, new terminals) need that variable set where they
-                run, for example in your MCP client&#39;s <code>env</code> block.
+                Copy the token, run the command for the agent machine, then paste the
+                token at the hidden prompt. It saves the token in{" "}
+                <code>~/.lab-tracker/config.json</code> for both the <code>lt</code>{" "}
+                capture client and locally launched Lab Tracker MCP agents. The token
+                is not included in the command or shell history.
               </p>
               <div className="enrollment-url">
                 <code>{issued.secret}</code>

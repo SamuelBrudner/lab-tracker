@@ -7,21 +7,27 @@ import ipaddress
 from datetime import datetime, timezone
 from urllib.parse import quote, urlencode, urlparse
 from uuid import UUID
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from fastapi import APIRouter
 from starlette import status as http_status
 from starlette.requests import Request
 
+from lab_tracker.api import LabTrackerAPI
 from lab_tracker.auth import (
     LOCAL_AUTH_USERNAME,
+    AuthContext,
     AuthService,
     Invitation,
+    InvitationClaims,
     InvitationTokenService,
     Role,
     TokenService,
+    User,
 )
 from lab_tracker.db_types import ensure_uuid
-from lab_tracker.errors import AuthError, ConflictError
+from lab_tracker.errors import AuthError, ConflictError, ValidationError
+from lab_tracker.models import ProjectMembershipRole
 from lab_tracker.schemas import (
     AuthBootstrapStatus,
     AuthInvitationCreate,
@@ -38,6 +44,7 @@ from lab_tracker.schemas import (
 from .shared import (
     actor_from_authorization_header,
     actor_from_request,
+    api_from_request,
     auth_token_read,
     auth_user_read,
     list_response,
@@ -48,6 +55,7 @@ from .shared import (
 
 def build_auth_router(
     *,
+    api: LabTrackerAPI,
     auth_service: AuthService,
     token_service: TokenService,
     invitation_token_service: InvitationTokenService,
@@ -86,6 +94,7 @@ def build_auth_router(
         _record_auth_attempt(request, _auth_rate_key(request, "register"))
         registration_role = payload.role
         username = payload.username
+        invitation: InvitationClaims | None = None
         if payload.invite_token:
             invitation = invitation_token_service.verify_invitation_token(payload.invite_token)
             invited_email = invitation_token_service.normalize_email(invitation.email)
@@ -128,11 +137,18 @@ def build_auth_router(
             username=username,
             password=payload.password,
             role=registration_role,
+            session=request.state.db_session if invitation is not None else None,
         )
-        if payload.invite_token:
+        if payload.invite_token and invitation is not None:
+            _provision_invited_user(
+                api_from_request(request, api),
+                user=user,
+                invitation=invitation,
+            )
             invitation_token_service.consume_invitation_token(
                 payload.invite_token,
                 consumed_by_user_id=user.user_id,
+                session=request.state.db_session,
             )
         token = token_service.issue_access_token(user)
         return Envelope(data=auth_token_read(user, token.token, token.expires_at))
@@ -143,20 +159,44 @@ def build_auth_router(
         status_code=http_status.HTTP_201_CREATED,
     )
     def create_auth_invitation(payload: AuthInvitationCreate, request: Request):
-        _ensure_admin(request)
+        actor = _ensure_admin(request)
         email = invitation_token_service.normalize_email(payload.email)
+        project_role: ProjectMembershipRole | None = None
+        review_cadence_minutes: int | None = None
+        review_run_at_local_time: str | None = None
+        review_timezone_name: str | None = None
+        if payload.project_id is not None:
+            request_api = api_from_request(request, api)
+            request_api.require_project_owner(payload.project_id, actor=actor)
+            request_api.get_project(payload.project_id)
+            project_role = payload.project_role or ProjectMembershipRole.CONTRIBUTOR
+            if payload.review_enabled:
+                review_cadence_minutes = payload.review_cadence_minutes or 24 * 60
+                review_run_at_local_time = payload.review_run_at_local_time or "18:00"
+                review_timezone_name = payload.review_timezone_name or "America/New_York"
+                _validate_invitation_timezone(review_timezone_name)
         issued = invitation_token_service.issue_invitation(
             email=email,
             role=payload.role,
+            project_id=payload.project_id,
+            project_role=project_role,
+            review_enabled=payload.review_enabled,
+            review_cadence_minutes=review_cadence_minutes,
+            review_run_at_local_time=review_run_at_local_time,
+            review_timezone_name=review_timezone_name,
         )
         base_url, warning = _public_base_url_with_warning(request)
         invite_token = issued.token
-        invite_url = f"{base_url}/app?{urlencode({'invite': invite_token, 'email': email})}"
+        invite_url = f"{base_url}/app/?{urlencode({'invite': invite_token, 'email': email})}"
         mailto_url = _mailto_invitation_url(
             email=email,
             invite_url=invite_url,
             role=payload.role,
             expires_at=issued.invitation.expires_at,
+            project_role=issued.invitation.project_role,
+            review_enabled=issued.invitation.review_enabled,
+            review_run_at_local_time=issued.invitation.review_run_at_local_time,
+            review_timezone_name=issued.invitation.review_timezone_name,
         )
         return Envelope(
             data=_auth_invitation_read(
@@ -239,19 +279,51 @@ def build_auth_router(
                 role=actor.role,
                 created_at=datetime.now(timezone.utc),
             )
-            return Envelope(data=user, meta={"auth_enabled": False})
+            return Envelope(data=user, meta=_auth_me_meta(actor, auth_enabled=False))
         user = auth_service.get_user_by_id(actor.user_id)
         if user is None:
             raise AuthError("Authentication required.")
-        return Envelope(data=auth_user_read(user), meta={"auth_enabled": True})
+        response_user = auth_user_read(user)
+        if actor.is_service:
+            response_user = response_user.model_copy(update={"role": actor.role})
+        return Envelope(data=response_user, meta=_auth_me_meta(actor, auth_enabled=True))
 
     return router
 
 
-def _ensure_admin(request: Request) -> None:
+def _ensure_admin(request: Request) -> AuthContext:
     actor = actor_from_request(request)
     if actor.role != Role.ADMIN:
         raise AuthError("Admin privileges required.")
+    return actor
+
+
+def _auth_me_meta(actor: AuthContext, *, auth_enabled: bool) -> dict[str, object]:
+    meta: dict[str, object] = {
+        "auth_enabled": auth_enabled,
+        "principal_type": actor.principal_type.value,
+        "is_interactive": actor.is_interactive,
+    }
+    if actor.device_token_id is not None:
+        meta["device_token_id"] = str(actor.device_token_id)
+        meta["device_token"] = {
+            "device_token_id": str(actor.device_token_id),
+            "label": actor.device_token_label,
+            "kind": actor.device_token_kind.value if actor.device_token_kind is not None else None,
+        }
+    if actor.service_token_id is not None:
+        meta["service_token"] = {
+            "token_id": str(actor.service_token_id),
+            "label": actor.service_token_label,
+            "role": actor.role.value,
+            "read_only": actor.service_token_read_only,
+            "expires_at": (
+                actor.service_token_expires_at.isoformat()
+                if actor.service_token_expires_at is not None
+                else None
+            ),
+        }
+    return meta
 
 
 def _auth_rate_key(request: Request, purpose: str, username: str | None = None) -> str:
@@ -293,6 +365,12 @@ def _auth_invitation_read(
         invitation_id=invitation.invitation_id,
         email=invitation.email,
         role=invitation.role,
+        project_id=invitation.project_id,
+        project_role=invitation.project_role,
+        review_enabled=invitation.review_enabled,
+        review_cadence_minutes=invitation.review_cadence_minutes,
+        review_run_at_local_time=invitation.review_run_at_local_time,
+        review_timezone_name=invitation.review_timezone_name,
         status=invitation.status,
         invite_url=invite_url,
         mailto_url=mailto_url,
@@ -398,12 +476,66 @@ def _mailto_invitation_url(
     invite_url: str,
     role: Role,
     expires_at: datetime,
+    project_role: ProjectMembershipRole | None = None,
+    review_enabled: bool = False,
+    review_run_at_local_time: str | None = None,
+    review_timezone_name: str | None = None,
 ) -> str:
     subject = "Lab Tracker invitation"
+    project_line = (
+        f"This invite includes {project_role.value} access to a shared project.\n\n"
+        if project_role is not None
+        else ""
+    )
+    review_line = (
+        "Your daily review will run at "
+        f"{review_run_at_local_time} ({review_timezone_name}).\n\n"
+        if review_enabled
+        else ""
+    )
     body = (
         "You have been invited to Lab Tracker.\n\n"
+        f"{project_line}"
+        f"{review_line}"
         f"Open this link to create your password and sign in as {role.value}:\n"
         f"{invite_url}\n\n"
         f"This invitation expires at {expires_at.isoformat()}."
     )
     return f"mailto:{quote(email)}?{urlencode({'subject': subject, 'body': body})}"
+
+
+def _validate_invitation_timezone(timezone_name: str) -> None:
+    try:
+        ZoneInfo(timezone_name)
+    except (ZoneInfoNotFoundError, ValueError) as exc:
+        raise ValidationError("review_timezone_name must be a valid IANA timezone.") from exc
+
+
+def _provision_invited_user(
+    api: LabTrackerAPI,
+    *,
+    user: User,
+    invitation: InvitationClaims,
+) -> None:
+    if invitation.project_id is None:
+        return
+    project_role = invitation.project_role or ProjectMembershipRole.CONTRIBUTOR
+    invitation_actor = AuthContext(user_id=user.user_id, role=Role.ADMIN)
+    api.upsert_project_membership(
+        invitation.project_id,
+        user.user_id,
+        project_role,
+        actor=invitation_actor,
+    )
+    if not invitation.review_enabled:
+        return
+    member_actor = AuthContext(user_id=user.user_id, role=user.role)
+    api.update_graph_draft_batch_settings(
+        invitation.project_id,
+        enabled=True,
+        cadence_minutes=invitation.review_cadence_minutes or 24 * 60,
+        run_at_local_time=invitation.review_run_at_local_time or "18:00",
+        timezone_name=invitation.review_timezone_name or "America/New_York",
+        user_id=user.user_id,
+        actor=member_actor,
+    )

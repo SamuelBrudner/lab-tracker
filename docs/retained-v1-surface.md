@@ -26,12 +26,18 @@ research record:
 - Manual note capture, including text notes, multipart raw file upload, raw file
   download, raw voice notes with editable transcripts, and attaching notes to
   retained entities.
-- Consumer-side figure capture through the Python client (`savefig`,
-  `capture_figures`, and `run_context`) and MATLAB package
-  (`labtracker.savefig` and `labtracker.uploadFigure`) as fail-soft
-  staged-note workflows: Lab Tracker stores a bounded review image or pointer
-  plus source URI and content-hash metadata, while full figure files remain in
-  the consumer repo.
+- Consumer-side artifact capture through the Python client: eager
+  `save_artifact` writes work for regular-file outputs of any format, `savefig`
+  preserves the figure convenience path, and `capture`/`capture_figures` scan
+  bounded patterns after a context body. Eager writes attach an exact producer
+  source file, line, symbol, source-region hash, repository commit, and dirty
+  state to the staged note; scan-only capture attaches the enclosing capture
+  scope and does not claim a false per-write line. The MATLAB package
+  (`labtracker.savefig` and `labtracker.uploadFigure`) remains figure-specific.
+  All of these are fail-soft staged-note workflows: Lab Tracker stores a
+  bounded review payload or external pointer plus source URI and content hash,
+  while full output files remain in the consumer repo. They do not create
+  canonical Dataset, Analysis, Claim, or Visualization records.
 - Consumer-side watch-folder capture through the `lt watch` CLI as an
   offline-first adapter workflow: watched files and workflow-written manifests
   write durable local outbox records that later sync into staged evidence notes

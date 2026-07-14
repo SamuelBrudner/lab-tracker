@@ -23,6 +23,8 @@ REQUEST_SCHEMAS = (
     ("Visualizations", "VisualizationCreate"),
     ("Graph Drafts", "GraphDraftCreateRequest"),
     ("Decision Context", "AssistantDecisionContextRequest"),
+    ("Capture Contexts", "CaptureContextCreate"),
+    ("Capture Context Updates", "CaptureContextUpdate"),
 )
 
 LIST_ENDPOINTS = (
@@ -36,6 +38,7 @@ LIST_ENDPOINTS = (
     "/projects/{project_id}/goals",
     "/visualizations",
     "/graph-drafts",
+    "/capture-contexts",
     "/search",
 )
 

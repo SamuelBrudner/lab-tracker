@@ -55,6 +55,9 @@ lab_tracker = [
   "frontend/**/*",
 ]
 
+[tool.setuptools.data-files]
+"share/lab-tracker/skills/lab-tracker" = ["skills/lab-tracker/SKILL.md"]
+
 [tool.codex_orchestrator]
 env = "lab_tracker"
 allow_env_creation = true

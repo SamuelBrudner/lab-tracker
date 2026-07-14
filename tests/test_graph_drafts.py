@@ -34,6 +34,7 @@ from lab_tracker.graph_drafting import (
     HarnessVendorLaunch,
     OpenAIGraphDraftClient,
     SubprocessHarnessDraftRunner,
+    _build_harness_launch_argv,
     _HarnessStdoutOverflowError,
     _run_bounded_harness_subprocess,
     _sanitized_harness_env,
@@ -46,6 +47,7 @@ from lab_tracker.models import (
     GraphChangeOperation,
     GraphChangeOperationStatus,
 )
+from lab_tracker.services.graph_draft_harness_mcp import SUBMIT_GRAPH_PATCH_TOOL
 from lab_tracker.sqlalchemy_repository import SQLAlchemyLabTrackerRepository
 from lab_tracker.sqlalchemy_repository_parts.graph_drafts import operation_to_model
 
@@ -593,7 +595,12 @@ def test_openai_graph_draft_client_drafts_from_batch_sends_packet() -> None:
     assert "Batch size: 2 notes" in user_text
     assert "prefer linking over creating" in user_text
     assert "graph_batch" in user_text
-    assert request["text"]["format"]["schema"]["additionalProperties"] is False
+    schema = request["text"]["format"]["schema"]
+    assert schema["additionalProperties"] is False
+    # Batch drafts carry the per-note coverage contract (lab-tracker-hymd):
+    # note_dispositions is generation-time enforced on the strict OpenAI path.
+    assert "note_dispositions" in schema["required"]
+    assert "exactly one note_dispositions entry per id" in request["instructions"]
     client.close()
 
 
@@ -879,6 +886,16 @@ def test_external_harness_client_runs_injected_runner_through_submit_tool() -> N
         "uncertain_fields": [],
         "clarification_requests": [],
         "operations": [],
+        # The submit gate enforces one disposition per presented note id.
+        "note_dispositions": [
+            {
+                "note_id": "note-1",
+                "disposition": "no_change",
+                "reason": "considered by fake harness",
+                "evidence_quote": "",
+                "client_refs": [],
+            }
+        ],
     }
 
     class FakeExecutor:
@@ -1076,11 +1093,30 @@ def test_external_harness_end_to_end_via_loopback_mcp() -> None:
     fake_cli = str(pathlib.Path(__file__).parent / "_fake_harness_cli.py")
     client = _harness_client_with_command((sys.executable, fake_cli))
     result = client.draft_from_batch(
-        batch_context={"mode": "graph_batch", "batch_notes": [{"id": "note-1"}]},
+        batch_context={
+            "mode": "graph_batch",
+            "batch_notes": [{"id": "note-1"}],
+            "note_ids_requiring_disposition": ["note-1"],
+        },
     )
     assert result.graph_patch["summary"] == "fake harness proposal"
+    # The child read the checklist out of the prompt packet and accounted for
+    # every listed note in its submitted patch.
+    assert [entry["note_id"] for entry in result.graph_patch["note_dispositions"]] == ["note-1"]
     assert result.tool_trace["submit_graph_patch_calls"] == 1
     assert result.tool_trace["tool_call_count"] == 1  # one live scoped read
+
+
+def test_external_harness_launch_keeps_large_prompt_out_of_argv() -> None:
+    argv = _build_harness_launch_argv(
+        EXTERNAL_HARNESS_LAUNCH_TABLE["claude_code"],
+        mcp_url="http://127.0.0.1:1234/mcp",
+        mcp_token="token",
+        trace={},
+    )
+
+    assert argv[argv.index("-p") + 1] == "--output-format"
+    assert max(map(len, argv)) < 1024
 
 
 def test_external_harness_fails_closed_when_child_does_not_submit() -> None:
@@ -1479,6 +1515,11 @@ def test_graph_context_packet_includes_selected_targets_and_recent_neighborhood(
                 {
                     "capture_source": "mobile_capture",
                     "capture_hint": "Rig 2 Fly 12",
+                    "capture_host_label": "rig-workstation",
+                    "capture_install_id": "install-123",
+                    "evidence_source_uri": "file:///Users/lab/private/rig-note.jpg",
+                    "repo_path": "/Users/lab/private/repo",
+                    "service_token_label": "daily scheduler",
                     "source_file_last_modified_ms": 1769904000000,
                 }
             ),
@@ -1504,12 +1545,20 @@ def test_graph_context_packet_includes_selected_targets_and_recent_neighborhood(
     assert context["current_user"]["role"] == "admin"
     assert context["project"]["id"] == project_id
     assert context["source_note"]["metadata"]["capture_source"] == "mobile_capture"
+    assert context["source_note"]["metadata"]["capture_hint"] == "Rig 2 Fly 12"
     assert context["source_note"]["metadata"]["source_file_name"] == "rig-note.jpg"
     assert (
         context["source_note"]["metadata"]["source_file_last_modified_at"]
         == "2026-02-01T00:00:00+00:00"
     )
+    assert "capture_host_label" not in context["source_note"]["metadata"]
+    assert "capture_install_id" not in context["source_note"]["metadata"]
+    assert "evidence_source_uri" not in context["source_note"]["metadata"]
+    assert "repo_path" not in context["source_note"]["metadata"]
+    assert "service_token_label" not in context["source_note"]["metadata"]
     assert context["source_artifacts"][0]["metadata"]["source_file_name"] == "rig-note.jpg"
+    assert "capture_host_label" not in context["source_artifacts"][0]["metadata"]
+    assert "evidence_source_uri" not in context["source_artifacts"][0]["metadata"]
     assert {
         (target["entity_type"], target["entity_id"]) for target in context["selected_targets"]
     } == {
@@ -2085,6 +2134,45 @@ def test_malformed_or_unsupported_gpt_patch_returns_stored_failed_draft(
     payload = response.json()["data"]
     assert payload["status"] == "failed"
     assert "invalid" in payload["error_metadata"]["message"]
+
+
+def test_graph_patch_normalizes_semantic_op_alias_and_note_source_ref(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+) -> None:
+    project_id = _project(client, admin_auth_headers)
+    note_id = _image_note(client, admin_auth_headers, project_id)
+    client.app.state.graph_draft_client_factory = lambda settings: FakeDraftClient(
+        {
+            "summary": "normalized model output",
+            "uncertain_fields": [],
+            "clarification_requests": [],
+            "operations": [
+                {
+                    "client_ref": None,
+                    "op": "update_entity",
+                    "entity_type": "note",
+                    "semantic_type": "update_entity",
+                    "target_entity_id": note_id,
+                    "payload_json": json.dumps({"metadata": {"reviewed": True}}),
+                    "rationale": "The source note supports this proposed update.",
+                    "confidence": 0.8,
+                    "source_refs": [note_id],
+                }
+            ],
+        }
+    )
+
+    response = client.post(f"/notes/{note_id}/graph-drafts", headers=admin_auth_headers)
+
+    assert response.status_code == 201
+    payload = response.json()["data"]
+    assert payload["status"] == "ready"
+    operation = payload["operations"][0]
+    assert operation["op"] == "update"
+    assert operation["source_refs"] == [
+        {"label": f"note:{note_id}", "quote": "", "region": None}
+    ]
 
 
 def test_generic_semantic_entity_operations_validate_operation_direction(
@@ -3076,3 +3164,49 @@ def test_edited_update_commits_user_revised_origin(
     note = client.get(f"/notes/{note_id}", headers=admin_auth_headers)
     assert note.status_code == 200
     assert note.json()["data"]["origin"] == "user_revised"
+
+
+def test_external_harness_unrepaired_coverage_rejection_names_the_gap() -> None:
+    """A child that gives up after a gate rejection fails with the violation named."""
+
+    class GivingUpRunner:
+        def run(self, *, request, mcp_server):  # noqa: ANN001
+            bad_patch = {
+                "summary": "missing dispositions",
+                "uncertain_fields": [],
+                "clarification_requests": [],
+                "operations": [],
+            }
+            with pytest.raises(GraphDraftingError):
+                mcp_server.execute_tool(
+                    SUBMIT_GRAPH_PATCH_TOOL, {"graph_patch": bad_patch}
+                )
+            # Like a real vendor CLI receiving a tool error it never repairs,
+            # the child exits without a recorded submission.
+            return HarnessDraftRunResult(tool_trace=mcp_server.tool_trace)
+
+    client = HarnessGraphDraftClient(
+        launch=EXTERNAL_HARNESS_LAUNCH_TABLE["codex"],
+        enabled=True,
+        sandbox_profile="operator_managed",
+        egress_profile="vendor_api_only",
+        timeout_seconds=30,
+        max_tool_calls=4,
+        max_stdout_bytes=4096,
+        runner=GivingUpRunner(),
+    )
+    client.configure_live_read_tools(_FakeScopedHarnessExecutor())
+
+    with pytest.raises(GraphDraftingError) as excinfo:
+        client.draft_from_batch(
+            batch_context={
+                "mode": "graph_batch",
+                "batch_notes": [{"id": "note-1"}],
+                "note_ids_requiring_disposition": ["note-1"],
+            },
+        )
+
+    message = str(excinfo.value)
+    assert "did not submit a graph patch" in message
+    assert "rejected by the coverage gate" in message
+    assert "note-1" in message

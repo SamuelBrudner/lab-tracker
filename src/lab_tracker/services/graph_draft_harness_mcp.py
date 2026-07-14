@@ -19,6 +19,7 @@ from lab_tracker.services.graph_draft_read_tools import (
     AGENTIC_READ_TOOL_ALLOWLIST,
     GITHUB_REPOSITORY_READ_TOOL_ALLOWLIST,
 )
+from lab_tracker.services.graph_draft_validation import validate_note_disposition_coverage
 
 JsonObject = dict[str, Any]
 
@@ -38,6 +39,8 @@ class HarnessGraphPatchSubmission:
 
     graph_patch: JsonObject | None = None
     submit_count: int = 0
+    rejected_count: int = 0
+    last_rejection: str | None = None
 
 
 @dataclass
@@ -46,6 +49,11 @@ class HarnessGraphDraftMCPServer:
 
     executor: Any
     max_tool_calls: int
+    # Coverage contract for this run (lab-tracker-hymd.2): the note ids the
+    # submitted patch must disposition, and the subset delivered content-omitted
+    # or redacted. None disables the coverage gate (bare-server test contexts).
+    expected_note_ids: tuple[str, ...] | None = None
+    content_unavailable_note_ids: frozenset[str] = frozenset()
     submission: HarnessGraphPatchSubmission = field(
         default_factory=HarnessGraphPatchSubmission
     )
@@ -59,13 +67,17 @@ class HarnessGraphDraftMCPServer:
 
     @property
     def tool_trace(self) -> JsonObject:
-        return {
+        trace: JsonObject = {
             "provider": "external_harness",
             "tool_call_count": len(self._read_trace),
             "max_tool_calls": self.max_tool_calls,
             "tool_calls": list(self._read_trace),
             "submit_graph_patch_calls": self.submission.submit_count,
+            "submit_graph_patch_rejections": self.submission.rejected_count,
         }
+        if self.submission.last_rejection:
+            trace["last_rejected_submission_error"] = self.submission.last_rejection
+        return trace
 
     @property
     def graph_patch(self) -> JsonObject | None:
@@ -116,8 +128,26 @@ class HarnessGraphDraftMCPServer:
         if not isinstance(graph_patch, dict):
             raise GraphDraftingError("submit_graph_patch requires a graph_patch object.")
         _validate_graph_patch_shape(graph_patch)
+        # Once-only comes before coverage: after an accepted patch, a repeat
+        # submission gets the terminal "only once" error instead of a coverage
+        # message that would invite pointless in-run repair.
         if self.submission.graph_patch is not None:
             raise GraphDraftingError("submit_graph_patch may be called only once.")
+        # Coverage runs BEFORE the submission is recorded: a rejected patch
+        # can be repaired and resubmitted in the same run (the harness path
+        # has no service-level retries), and the rejection stays observable
+        # in the tool trace and the run's failure message.
+        if self.expected_note_ids is not None:
+            try:
+                validate_note_disposition_coverage(
+                    graph_patch,
+                    expected_note_ids=self.expected_note_ids,
+                    content_unavailable_note_ids=self.content_unavailable_note_ids,
+                )
+            except GraphDraftingError as exc:
+                self.submission.rejected_count += 1
+                self.submission.last_rejection = str(exc)
+                raise
         self.submission.graph_patch = graph_patch
         self.submission.submit_count += 1
         return {
@@ -202,7 +232,11 @@ def _submit_graph_patch_spec() -> JsonObject:
         ),
         "input_schema": {
             "type": "object",
-            "properties": {"graph_patch": graph_patch_response_schema()},
+            # The harness serves batch drafting only, so the advertised patch
+            # shape always carries the per-note disposition contract.
+            "properties": {
+                "graph_patch": graph_patch_response_schema(include_note_dispositions=True)
+            },
             "required": ["graph_patch"],
             "additionalProperties": False,
         },

@@ -8,6 +8,8 @@ node_modules/
 .env.*
 !.env.example
 note_storage/
+file_storage/
+.codex-runtime/
 lab_tracker.db
 lab_tracker.db.backup-*
 lab_tracker.db.lock

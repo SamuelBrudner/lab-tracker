@@ -151,6 +151,37 @@ def is_sensitive_note(note: Note) -> bool:
 # to the model. Strip them so ``omit`` actually withholds what it claims.
 _OMIT_STRIPPED_METADATA_PREFIXES = ("source_file_",)
 
+_MODEL_STRIPPED_METADATA_KEYS = {
+    "capture_host_label",
+    "capture_install_id",
+    "capture_platform",
+    "credential_ref",
+    "evidence_source_external_id",
+    "evidence_source_uri",
+    "host_label",
+    "hostname",
+    "outbox_path",
+    "principal_type",
+    "repo_path",
+    "repository_path",
+    "service_token_id",
+    "service_token_label",
+    "source_path",
+    "source_uri",
+    "token_id",
+    "token_label",
+    "working_tree",
+}
+_MODEL_STRIPPED_METADATA_PREFIXES = (
+    "automation_principal_",
+    "capture_host_",
+    "capture_install_",
+    "credential_",
+    "outbox_",
+    "service_token_",
+    "token_",
+)
+
 
 def omit_safe_metadata(metadata: Mapping[str, str]) -> dict[str, str]:
     """Return note metadata with raw-asset-identifier keys removed for ``omit``."""
@@ -159,6 +190,24 @@ def omit_safe_metadata(metadata: Mapping[str, str]) -> dict[str, str]:
         for key, value in metadata.items()
         if not str(key).startswith(_OMIT_STRIPPED_METADATA_PREFIXES)
     }
+
+
+def model_safe_metadata(metadata: Mapping[str, str]) -> dict[str, str]:
+    """Drop operational audit breadcrumbs from model-bound context packets."""
+
+    return {
+        str(key): value
+        for key, value in metadata.items()
+        if not _is_model_private_metadata_key(str(key))
+    }
+
+
+def _is_model_private_metadata_key(key: str) -> bool:
+    normalized = key.strip().casefold()
+    return normalized in _MODEL_STRIPPED_METADATA_KEYS or any(
+        normalized.startswith(prefix)
+        for prefix in _MODEL_STRIPPED_METADATA_PREFIXES
+    )
 
 
 def _normalized_query(query: str) -> str:

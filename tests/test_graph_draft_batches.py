@@ -13,7 +13,11 @@ from sqlalchemy import select
 from lab_tracker.api import LabTrackerAPI
 from lab_tracker.app_parts.middleware import system_auth_context
 from lab_tracker.auth import Role
-from lab_tracker.db_models import GraphDraftBatchSettingsModel, NoteModel
+from lab_tracker.db_models import (
+    GraphDraftBatchSettingsModel,
+    NoteModel,
+    ProjectMembershipModel,
+)
 from lab_tracker.graph_drafting import (
     EXTERNAL_HARNESS_LAUNCH_TABLE,
     READ_ONLY_AGENT_TOOLS,
@@ -46,7 +50,12 @@ class FakeBatchDraftClient:
         *,
         fail_attempts: int = 0,
         error: str = "temporary model outage",
+        augment_dispositions: bool = True,
     ) -> None:
+        # Like a well-behaved drafter, the fake fills the per-note disposition
+        # checklist for any patch that lacks one. Coverage-gate tests pass
+        # augment_dispositions=False to submit contract-violating patches.
+        self._augment_dispositions = augment_dispositions
         self.patch = patch or {
             "summary": "empty",
             "uncertain_fields": [],
@@ -67,6 +76,18 @@ class FakeBatchDraftClient:
         self.calls.append({"batch_context": batch_context, "user_hint": user_hint})
         if len(self.calls) <= self.fail_attempts:
             raise GraphDraftingError(self.error)
+        if not self._augment_dispositions:
+            return self.patch
+        if isinstance(self.patch, GraphDraftBatchResult):
+            graph_patch = self.patch.graph_patch
+            if isinstance(graph_patch, dict) and "note_dispositions" not in graph_patch:
+                return GraphDraftBatchResult(
+                    graph_patch=_with_fake_dispositions(graph_patch, batch_context),
+                    tool_trace=self.patch.tool_trace,
+                )
+            return self.patch
+        if isinstance(self.patch, dict) and "note_dispositions" not in self.patch:
+            return _with_fake_dispositions(self.patch, batch_context)
         return self.patch
 
     def close(self) -> None:
@@ -157,6 +178,46 @@ def _batch_patch(project_id: str) -> dict[str, Any]:
                 "confidence": 0.82,
                 "source_refs": [],
             }
+        ],
+    }
+
+
+def _checklist_note_ids(batch_context: dict[str, Any]) -> list[str]:
+    checklist = batch_context.get("note_ids_requiring_disposition")
+    if checklist is None:
+        checklist = [
+            note.get("id")
+            for note in batch_context.get("batch_notes") or []
+            if isinstance(note, dict) and note.get("id")
+        ]
+    return [str(note_id) for note_id in checklist]
+
+
+def _with_fake_dispositions(
+    graph_patch: dict[str, Any],
+    batch_context: dict[str, Any],
+) -> dict[str, Any]:
+    # Content-omitted/redacted notes must attest insufficient_info (the
+    # coverage gate's honeypot rule); everything else gets no_change.
+    unavailable = {
+        str(note.get("id"))
+        for note in batch_context.get("batch_notes") or []
+        if isinstance(note, dict)
+        and (note.get("sensitive_content_omitted") or note.get("sensitive_content_redacted"))
+    }
+    return {
+        **graph_patch,
+        "note_dispositions": [
+            {
+                "note_id": note_id,
+                "disposition": (
+                    "insufficient_info" if note_id in unavailable else "no_change"
+                ),
+                "reason": "considered by fake drafter",
+                "evidence_quote": "",
+                "client_refs": [],
+            }
+            for note_id in _checklist_note_ids(batch_context)
         ],
     }
 
@@ -568,6 +629,23 @@ def test_batch_cadence_settings_are_user_visible_and_rescheduled(
     assert payload["next_run_at"]
 
 
+def test_per_user_batch_settings_validate_reviewer_project_access(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+) -> None:
+    project_id = _project(client, admin_auth_headers)
+    _outsider_headers, outsider_id = _registered_user(client, role=Role.VIEWER)
+
+    updated = client.patch(
+        f"/projects/{project_id}/graph-draft-batch-settings",
+        json={"enabled": True, "user_id": outsider_id},
+        headers=admin_auth_headers,
+    )
+
+    assert updated.status_code == 422
+    assert "cannot read the batch project" in updated.json()["error"]["message"]
+
+
 def test_batch_run_validates_and_clamps_manual_windows(
     client: TestClient,
     admin_auth_headers: dict[str, str],
@@ -863,6 +941,65 @@ def test_background_run_due_partitions_by_note_author_and_assigns_reviewers(
     assert submitted.status_code == 200
 
 
+def test_run_due_skips_reviewer_who_lost_project_access(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+) -> None:
+    project_id = _project(client, admin_auth_headers)
+    reviewer_headers, reviewer_user_id = _registered_user(client, role=Role.VIEWER)
+    added = client.post(
+        f"/projects/{project_id}/members",
+        json={"user_id": reviewer_user_id, "role": "contributor"},
+        headers=admin_auth_headers,
+    )
+    assert added.status_code == 201, added.text
+    note_id = _note(client, reviewer_headers, project_id, "Departing reviewer note.")
+    settings = client.patch(
+        f"/projects/{project_id}/graph-draft-batch-settings",
+        json={"enabled": True},
+        headers=admin_auth_headers,
+    )
+    assert settings.status_code == 200
+    with client.app.state.db_session_factory() as session:
+        membership = session.scalar(
+            select(ProjectMembershipModel).where(
+                ProjectMembershipModel.project_id == str(project_id),
+                ProjectMembershipModel.user_id == reviewer_user_id,
+            )
+        )
+        assert membership is not None
+        session.delete(membership)
+        row = session.scalar(
+            select(GraphDraftBatchSettingsModel).where(
+                GraphDraftBatchSettingsModel.project_id == project_id
+            )
+        )
+        row.next_run_at = datetime.now(timezone.utc) - timedelta(minutes=5)
+        session.commit()
+
+    fake_client = FakeBatchDraftClient(_batch_patch(project_id))
+    client.app.state.graph_draft_client_factory = lambda settings: fake_client
+    client.app.state.settings.graph_draft_background_enabled = True
+
+    response = client.post("/batches/run-due", headers=admin_auth_headers)
+
+    assert response.status_code == 200, response.text
+    runs = response.json()["data"]
+    assert len(runs) == 1
+    run = runs[0]
+    assert run["status"] == "skipped"
+    assert run["change_set_id"] is None
+    assert run["source_note_ids"] == []
+    assert run["review_assignee_user_id"] == reviewer_user_id
+    assert run["error_metadata"]["category"] == "reviewer_unavailable"
+    assert "cannot read" in run["error_metadata"]["message"]
+    assert fake_client.calls == []
+
+    with client.app.state.db_session_factory() as session:
+        row = session.get(NoteModel, note_id)
+        assert row is not None
+
+
 def test_scoped_graph_draft_read_tools_enforce_scope_sensitivity_and_allowlist(
     client: TestClient,
     admin_auth_headers: dict[str, str],
@@ -1047,7 +1184,10 @@ def test_external_harness_background_run_lands_proposals_through_existing_pipeli
                 {"project_id": project_id, "limit": 1},
             )
             assert read_result["data"]
-            mcp_server.execute_tool(SUBMIT_GRAPH_PATCH_TOOL, {"graph_patch": patch})
+            mcp_server.execute_tool(
+                SUBMIT_GRAPH_PATCH_TOOL,
+                {"graph_patch": _with_fake_dispositions(patch, request.batch_context)},
+            )
             return HarnessDraftRunResult(tool_trace=mcp_server.tool_trace)
 
     draft_client = HarnessGraphDraftClient(
@@ -1159,6 +1299,16 @@ def test_agentic_graph_draft_client_uses_read_only_context_trace() -> None:
                 "uncertain_fields": [],
                 "clarification_requests": [],
                 "operations": [],
+                "note_dispositions": [
+                    {
+                        "note_id": str(note_id),
+                        "disposition": "no_change",
+                        "reason": "considered by fake drafter",
+                        "evidence_quote": "",
+                        "client_refs": [],
+                    }
+                    for note_id in batch_context.get("note_ids_requiring_disposition") or []
+                ],
             }
 
         def close(self) -> None:
@@ -1391,3 +1541,329 @@ def test_run_due_rejects_non_admin_user(
         "message": "Only admins can run scheduled batch drafts.",
         "issues": None,
     }
+
+
+def test_batch_coverage_violation_gets_targeted_repair_hint(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+) -> None:
+    """Gate 2: a coverage violation is retried with a hint naming the gap."""
+    project_id = _project(client, admin_auth_headers)
+    _note(client, admin_auth_headers, project_id, "Coverage repair note.")
+
+    class RepairingClient:
+        provider = "fake"
+        model = "fake-batch-model"
+
+        def __init__(self) -> None:
+            self.calls: list[dict[str, Any]] = []
+
+        def draft_from_batch(
+            self,
+            *,
+            batch_context: dict[str, Any],
+            user_hint: str | None = None,
+        ) -> dict[str, Any]:
+            self.calls.append({"batch_context": batch_context, "user_hint": user_hint})
+            base = {
+                "summary": "empty",
+                "uncertain_fields": [],
+                "clarification_requests": [],
+                "operations": [],
+            }
+            if len(self.calls) == 1:
+                return base  # violates coverage: no note_dispositions
+            return _with_fake_dispositions(base, batch_context)
+
+        def close(self) -> None:
+            return None
+
+    repairing = RepairingClient()
+    client.app.state.graph_draft_client_factory = lambda settings: repairing
+
+    response = client.post(
+        "/batches/run-now",
+        json={"project_id": project_id, "user_hint": "merge my notes"},
+        headers=admin_auth_headers,
+    )
+
+    assert response.status_code == 201
+    assert response.json()["data"]["status"] == "ready"
+    assert len(repairing.calls) == 2
+    assert repairing.calls[0]["user_hint"] == "merge my notes"
+    repair_hint = repairing.calls[1]["user_hint"]
+    assert "merge my notes" in repair_hint
+    assert "note_dispositions coverage contract" in repair_hint
+    checklist = repairing.calls[0]["batch_context"]["note_ids_requiring_disposition"]
+    assert checklist and checklist[0] in repair_hint
+
+
+def test_batch_coverage_violation_exhausts_retries_with_coverage_error(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+) -> None:
+    """Gate 2: persistent violations fail the run with machine-readable gaps."""
+    project_id = _project(client, admin_auth_headers)
+    note_id = _note(client, admin_auth_headers, project_id, "Silently skipped note.")
+    silent_client = FakeBatchDraftClient(augment_dispositions=False)
+    client.app.state.graph_draft_client_factory = lambda settings: silent_client
+
+    response = client.post(
+        "/batches/run-now",
+        json={"project_id": project_id},
+        headers=admin_auth_headers,
+    )
+
+    assert response.status_code == 201
+    failed_run = response.json()["data"]
+    assert failed_run["status"] == "failed"
+    assert failed_run["error_metadata"]["category"] == "coverage_error"
+    assert failed_run["error_metadata"]["missing_note_ids"] == [note_id]
+    # Every retry attempt saw the same violation before the run failed.
+    assert len(silent_client.calls) > 1
+
+
+def test_batch_coverage_exhaustion_preserves_agentic_tool_trace(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+) -> None:
+    """A coverage_error failure keeps the failing attempt's read audit trail."""
+    project_id = _project(client, admin_auth_headers)
+    _note(client, admin_auth_headers, project_id, "Uncovered note with a tool trace.")
+    trace = {"provider": "agentic", "tool_call_count": 2, "tool_calls": []}
+    silent_client = FakeBatchDraftClient(
+        GraphDraftBatchResult(
+            graph_patch={
+                "summary": "empty",
+                "uncertain_fields": [],
+                "clarification_requests": [],
+                "operations": [],
+            },
+            tool_trace=trace,
+        ),
+        augment_dispositions=False,
+    )
+    client.app.state.graph_draft_client_factory = lambda settings: silent_client
+
+    response = client.post(
+        "/batches/run-now",
+        json={"project_id": project_id},
+        headers=admin_auth_headers,
+    )
+
+    assert response.status_code == 201
+    failed_run = response.json()["data"]
+    assert failed_run["status"] == "failed"
+    assert failed_run["error_metadata"]["category"] == "coverage_error"
+    assert failed_run["error_metadata"]["agentic_tool_trace"] == trace
+
+
+def test_batch_repair_hint_resets_after_non_coverage_error(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+) -> None:
+    """A stale coverage repair hint must not survive an unrelated model error."""
+    project_id = _project(client, admin_auth_headers)
+    _note(client, admin_auth_headers, project_id, "Hint hygiene note.")
+
+    class FlakyClient:
+        provider = "fake"
+        model = "fake-batch-model"
+
+        def __init__(self) -> None:
+            self.calls: list[dict[str, Any]] = []
+
+        def draft_from_batch(
+            self,
+            *,
+            batch_context: dict[str, Any],
+            user_hint: str | None = None,
+        ) -> dict[str, Any]:
+            self.calls.append({"batch_context": batch_context, "user_hint": user_hint})
+            base = {
+                "summary": "empty",
+                "uncertain_fields": [],
+                "clarification_requests": [],
+                "operations": [],
+            }
+            if len(self.calls) == 1:
+                return base  # coverage violation
+            if len(self.calls) == 2:
+                raise GraphDraftingError("temporary model outage")
+            return _with_fake_dispositions(base, batch_context)
+
+        def close(self) -> None:
+            return None
+
+    flaky = FlakyClient()
+    client.app.state.graph_draft_client_factory = lambda settings: flaky
+
+    response = client.post(
+        "/batches/run-now",
+        json={"project_id": project_id, "user_hint": "base hint"},
+        headers=admin_auth_headers,
+    )
+
+    assert response.status_code == 201
+    assert response.json()["data"]["status"] == "ready"
+    assert len(flaky.calls) == 3
+    assert flaky.calls[0]["user_hint"] == "base hint"
+    assert "coverage contract" in flaky.calls[1]["user_hint"]
+    # The model error on attempt 2 invalidates the repair claim for attempt 3.
+    assert flaky.calls[2]["user_hint"] == "base hint"
+
+
+def test_batch_ledger_persists_dispositions_and_coverage_summary(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+) -> None:
+    project_id = _project(client, admin_auth_headers)
+    note_a = _note(client, admin_auth_headers, project_id, "Ledger note A.")
+    note_b = _note(client, admin_auth_headers, project_id, "Ledger note B.")
+    fake_client = FakeBatchDraftClient(_batch_patch(project_id))
+    client.app.state.graph_draft_client_factory = lambda settings: fake_client
+
+    response = client.post(
+        "/batches/run-now",
+        json={"project_id": project_id},
+        headers=admin_auth_headers,
+    )
+
+    assert response.status_code == 201
+    run = response.json()["data"]
+    assert run["status"] == "ready"
+    draft = client.get(f"/batches/{run['change_set_id']}", headers=admin_auth_headers)
+    data = draft.json()["data"]
+    ledger = data["note_dispositions"]
+    assert {entry["note_id"] for entry in ledger} == {note_a, note_b}
+    assert all(entry["disposition"] == "no_change" for entry in ledger)
+    # The list surface carries the aggregated coverage counts for its chip.
+    listing = client.get(
+        "/graph-drafts",
+        params={"project_id": project_id},
+        headers=admin_auth_headers,
+    )
+    summaries = [
+        item
+        for item in listing.json()["data"]
+        if item["change_set_id"] == run["change_set_id"]
+    ]
+    assert summaries, listing.json()
+    assert summaries[0]["coverage_summary"] == {"no_change": 2, "total": 2}
+    # The lean list surface carries only the aggregate; the ledger itself
+    # rides the detail endpoints.
+    assert "note_dispositions" not in summaries[0]
+
+
+def test_batch_ledger_marks_unpresented_notes_and_scopes_provenance(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+    monkeypatch,
+) -> None:
+    """Notes dropped before drafting get server-written not_presented rows and
+    are never stamped into operation provenance."""
+    from lab_tracker.services import graph_draft_service
+
+    monkeypatch.setattr(graph_draft_service, "_BATCH_NOTE_LIMIT", 2)
+    project_id = _project(client, admin_auth_headers)
+    note_ids = [
+        _note(client, admin_auth_headers, project_id, f"Overflow note {index}.")
+        for index in range(4)
+    ]
+    fake_client = FakeBatchDraftClient(_batch_patch(project_id))
+
+    with client.app.state.db_session_factory() as session:
+        api = client.app.state.lab_tracker_api.for_request(
+            SQLAlchemyLabTrackerRepository(session)
+        )
+        notes = [api.get_note(UUID(note_id)) for note_id in note_ids]
+        change_set = api.create_batch_graph_draft(
+            notes,
+            draft_client=fake_client,
+            actor=system_auth_context(),
+        )
+        session.commit()
+
+    assert change_set.status.value == "ready"
+    presented = fake_client.calls[0]["batch_context"]["note_ids_requiring_disposition"]
+    assert len(presented) == 2
+    ledger = change_set.note_dispositions
+    not_presented = [e for e in ledger if e["disposition"] == "not_presented"]
+    assert {e["note_id"] for e in not_presented} == set(note_ids) - set(presented)
+    assert all(
+        e["reason"] == "truncated from context packet before drafting" for e in not_presented
+    )
+    agent_entries = [e for e in ledger if e["disposition"] != "not_presented"]
+    assert {e["note_id"] for e in agent_entries} == set(presented)
+    # Operation provenance falls back to the PRESENTED notes only — unseen
+    # overflow notes are never stamped as sources.
+    assert change_set.operations[0].source_refs[0]["source_note_ids"] == presented
+
+
+def test_batch_ledger_links_ops_to_citing_notes(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+) -> None:
+    """proposed_change client_refs give per-op source attribution."""
+    project_id = _project(client, admin_auth_headers)
+    note_a = _note(client, admin_auth_headers, project_id, "Note that produced the op.")
+    note_b = _note(client, admin_auth_headers, project_id, "Unrelated note.")
+    patch = _batch_patch(project_id)
+
+    class CitingClient:
+        provider = "fake"
+        model = "fake-batch-model"
+
+        def draft_from_batch(
+            self,
+            *,
+            batch_context: dict[str, Any],
+            user_hint: str | None = None,
+        ) -> dict[str, Any]:
+            entries = []
+            for note_id in _checklist_note_ids(batch_context):
+                if note_id == note_a:
+                    entries.append(
+                        {
+                            "note_id": note_id,
+                            "disposition": "proposed_change",
+                            "reason": "this capture states the follow-up question",
+                            "evidence_quote": "",
+                            "client_refs": ["batch_question"],
+                        }
+                    )
+                else:
+                    entries.append(
+                        {
+                            "note_id": note_id,
+                            "disposition": "no_change",
+                            "reason": "considered; nothing to add",
+                            "evidence_quote": "",
+                            "client_refs": [],
+                        }
+                    )
+            return {**patch, "note_dispositions": entries}
+
+        def close(self) -> None:
+            return None
+
+    client.app.state.graph_draft_client_factory = lambda settings: CitingClient()
+
+    response = client.post(
+        "/batches/run-now",
+        json={"project_id": project_id},
+        headers=admin_auth_headers,
+    )
+
+    assert response.status_code == 201
+    run = response.json()["data"]
+    assert run["status"] == "ready"
+    with client.app.state.db_session_factory() as session:
+        api = client.app.state.lab_tracker_api.for_request(
+            SQLAlchemyLabTrackerRepository(session)
+        )
+        change_set = api.get_graph_change_set(UUID(run["change_set_id"]))
+    operation = change_set.operations[0]
+    assert operation.client_ref == "batch_question"
+    assert operation.source_refs[0]["source_note_ids"] == [note_a]
+    assert note_b not in operation.source_refs[0]["source_note_ids"]

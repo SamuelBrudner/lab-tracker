@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 
+import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
 from starlette.requests import Request
@@ -9,6 +10,7 @@ from starlette.requests import Request
 from lab_tracker.app import create_app
 from lab_tracker.auth import Role
 from lab_tracker.db import Base
+from lab_tracker.routes import auth as auth_routes
 from lab_tracker.routes.auth import _bootstrap_token_for_status
 
 
@@ -145,6 +147,40 @@ def test_local_auth_disabled_allows_write_without_authorization(monkeypatch, tmp
         create_response = client.post("/projects", json={"name": "No Login"})
         assert create_response.status_code == 201
         assert create_response.json()["data"]["created_by"] == me_payload["data"]["user_id"]
+
+
+def test_service_token_can_introspect_its_own_session(monkeypatch, tmp_path):
+    _bootstrap_database(monkeypatch, tmp_path)
+    with TestClient(create_app()) as client:
+        _seed_admin(client, username="root", password="secret")
+        token = _login(client, "root", "secret")
+        expires_at = datetime.now(timezone.utc) + timedelta(days=1)
+        issued = client.post(
+            "/auth/tokens",
+            json={
+                "label": "daily scheduler",
+                "role": "admin",
+                "read_only": True,
+                "expires_at": expires_at.isoformat(),
+            },
+            headers=_auth_headers(token),
+        )
+        assert issued.status_code == 201, issued.text
+
+        me_response = client.get(
+            "/auth/me",
+            headers=_auth_headers(issued.json()["data"]["secret"]),
+        )
+
+        assert me_response.status_code == 200, me_response.text
+        payload = me_response.json()
+        assert payload["data"]["username"] == "root"
+        assert payload["meta"]["auth_enabled"] is True
+        assert payload["meta"]["principal_type"] == "service"
+        assert payload["meta"]["is_interactive"] is False
+        assert payload["meta"]["service_token"]["label"] == "daily scheduler"
+        assert payload["meta"]["service_token"]["read_only"] is True
+        assert payload["meta"]["service_token"]["expires_at"]
 
 
 def test_protected_routes_accept_valid_authorization(monkeypatch, tmp_path):
@@ -421,7 +457,7 @@ def test_admin_can_invite_user_by_email(monkeypatch, tmp_path):
         assert invitation["role"] == "editor"
         assert invitation["status"] == "pending"
         assert invitation["warning"] is None
-        assert invitation["invite_url"].startswith("https://lab.example.org/app?invite=")
+        assert invitation["invite_url"].startswith("https://lab.example.org/app/?invite=")
         assert "mailto:member%40example.org" in invitation["mailto_url"]
 
         invitations_response = client.get(
@@ -471,6 +507,135 @@ def test_admin_can_invite_user_by_email(monkeypatch, tmp_path):
         assert consumed_response.json()["data"][0]["status"] == "consumed"
 
 
+def test_project_invitation_provisions_membership_and_daily_review(monkeypatch, tmp_path):
+    _bootstrap_database(monkeypatch, tmp_path)
+    monkeypatch.setenv("LAB_TRACKER_PUBLIC_BASE_URL", "https://lab.example.org")
+    with TestClient(create_app()) as client:
+        _seed_admin(client)
+        admin_token = _login(client, "root", "secret")
+        admin_headers = _auth_headers(admin_token)
+        project_response = client.post(
+            "/projects",
+            json={"name": "Shared Project"},
+            headers=admin_headers,
+        )
+        assert project_response.status_code == 201
+        project_id = project_response.json()["data"]["project_id"]
+
+        invite_response = client.post(
+            "/auth/invitations",
+            json={
+                "email": "member@example.org",
+                "role": "editor",
+                "project_id": project_id,
+                "project_role": "contributor",
+                "review_enabled": True,
+                "review_cadence_minutes": 1440,
+                "review_run_at_local_time": "17:00",
+                "review_timezone_name": "America/New_York",
+            },
+            headers=admin_headers,
+        )
+        assert invite_response.status_code == 201
+        invitation = invite_response.json()["data"]
+        assert invitation["project_id"] == project_id
+        assert invitation["project_role"] == "contributor"
+        assert invitation["review_enabled"] is True
+        assert invitation["review_run_at_local_time"] == "17:00"
+        assert invitation["review_timezone_name"] == "America/New_York"
+        assert "daily+review+will+run+at+17%3A00" in invitation["mailto_url"]
+
+        invite_token = invitation["invite_url"].split("invite=", 1)[1].split("&", 1)[0]
+        register_response = client.post(
+            "/auth/register",
+            json={
+                "invite_token": invite_token,
+                "password": "invite-secret",
+                "username": "member@example.org",
+            },
+        )
+        assert register_response.status_code == 201
+        registered = register_response.json()["data"]
+        user_id = registered["user"]["user_id"]
+        assert registered["user"]["role"] == "editor"
+
+        members_response = client.get(
+            f"/projects/{project_id}/members",
+            headers=_auth_headers(registered["access_token"]),
+        )
+        assert members_response.status_code == 200
+        membership = next(
+            item for item in members_response.json()["data"] if item["user_id"] == user_id
+        )
+        assert membership["role"] == "contributor"
+
+        settings_response = client.get(
+            f"/projects/{project_id}/graph-draft-batch-settings",
+            params={"user_id": user_id},
+            headers=_auth_headers(registered["access_token"]),
+        )
+        assert settings_response.status_code == 200
+        settings = settings_response.json()["data"]
+        assert settings["user_id"] == user_id
+        assert settings["enabled"] is True
+        assert settings["cadence_minutes"] == 1440
+        assert settings["run_at_local_time"] == "17:00"
+        assert settings["timezone_name"] == "America/New_York"
+
+
+def test_invited_registration_rolls_back_user_when_provisioning_fails(
+    monkeypatch,
+    tmp_path,
+):
+    _bootstrap_database(monkeypatch, tmp_path)
+    monkeypatch.setenv("LAB_TRACKER_PUBLIC_BASE_URL", "https://lab.example.org")
+    original = auth_routes._provision_invited_user
+    attempts = 0
+
+    def fail_once(*args, **kwargs):
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise RuntimeError("simulated provisioning failure")
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(auth_routes, "_provision_invited_user", fail_once)
+    with TestClient(create_app()) as client:
+        _seed_admin(client)
+        admin_token = _login(client, "root", "secret")
+        project = client.post(
+            "/projects",
+            json={"name": "Atomic invitation"},
+            headers=_auth_headers(admin_token),
+        ).json()["data"]
+        invitation = client.post(
+            "/auth/invitations",
+            json={
+                "email": "atomic@example.org",
+                "project_id": project["project_id"],
+            },
+            headers=_auth_headers(admin_token),
+        ).json()["data"]
+        invite_token = invitation["invite_url"].split("invite=", 1)[1].split("&", 1)[0]
+        registration = {
+            "invite_token": invite_token,
+            "password": "invite-secret",
+            "username": "atomic@example.org",
+        }
+
+        with pytest.raises(RuntimeError, match="simulated provisioning failure"):
+            client.post("/auth/register", json=registration)
+
+        failed_login = client.post(
+            "/auth/login",
+            json={"username": "atomic@example.org", "password": "invite-secret"},
+        )
+        assert failed_login.status_code == 401
+
+        retry = client.post("/auth/register", json=registration)
+        assert retry.status_code == 201, retry.text
+
+
 def test_invitation_defaults_to_editor_and_warns_for_local_base_url(monkeypatch, tmp_path):
     _bootstrap_database(monkeypatch, tmp_path)
     with TestClient(create_app(), base_url="http://127.0.0.1:8000") as client:
@@ -486,7 +651,7 @@ def test_invitation_defaults_to_editor_and_warns_for_local_base_url(monkeypatch,
         assert invite_response.status_code == 201
         invitation = invite_response.json()["data"]
         assert invitation["role"] == "editor"
-        assert invitation["invite_url"].startswith("http://127.0.0.1:8000/app?invite=")
+        assert invitation["invite_url"].startswith("http://127.0.0.1:8000/app/?invite=")
         assert "LAB_TRACKER_PUBLIC_BASE_URL" in invitation["warning"]
 
 

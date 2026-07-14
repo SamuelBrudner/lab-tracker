@@ -266,6 +266,53 @@ def test_upload_note_file_posts_staged_evidence_multipart(tmp_path) -> None:
     assert len(seen) == 1
 
 
+def test_capture_context_id_propagates_to_note_capture_methods(tmp_path) -> None:
+    evidence_path = tmp_path / "capture.txt"
+    evidence_path.write_text("bench observation", encoding="utf-8")
+    seen_paths: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen_paths.append(request.url.path)
+        if request.method == "GET" and request.url.path == "/notes":
+            return _json_response(
+                200,
+                {"data": [], "meta": {"limit": 200, "offset": 0, "total": 0}},
+            )
+        if request.method == "POST" and request.url.path == "/notes":
+            body = json.loads(request.content.decode("utf-8"))
+            assert body["capture_context_id"] == "context-profile"
+            return _json_response(201, {"data": {"note_id": "note-json", **body}})
+        if request.method == "POST" and request.url.path == "/notes/quick-capture":
+            assert b"context-profile" in request.content
+            return _json_response(202, {"data": {"note_id": "note-quick"}})
+        if request.method == "POST" and request.url.path == "/notes/upload-file":
+            assert b"context-explicit" in request.content
+            assert b"context-profile" not in request.content
+            return _json_response(201, {"data": {"note_id": "note-file"}})
+        return _json_response(404, {"error": {"message": "not found"}})
+
+    with LabTracker(
+        base_url="http://testserver",
+        default_project_id="project-1",
+        default_capture_context_id="context-profile",
+        transport=httpx.MockTransport(handler),
+    ) as lt:
+        lt.upsert_note(project_id="project-1", content="# context note")
+        lt.quick_capture("agent observation")
+        lt.upload_note_file(
+            project_id="project-1",
+            file_path=evidence_path,
+            capture_context_id="context-explicit",
+        )
+
+    assert seen_paths == [
+        "/notes",
+        "/notes",
+        "/notes/quick-capture",
+        "/notes/upload-file",
+    ]
+
+
 def test_import_evidence_file_skips_duplicate_and_imports_changed_content(tmp_path) -> None:
     evidence_path = tmp_path / "bench.md"
     evidence_path.write_text("bench observation", encoding="utf-8")

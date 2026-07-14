@@ -27,6 +27,7 @@ from lab_tracker.db_models import (
 )
 from lab_tracker.db_types import ensure_uuid
 from lab_tracker.errors import AuthError, ConflictError, NotFoundError, ValidationError
+from lab_tracker.models import ProjectMembershipRole
 
 LOCAL_AUTH_USER_ID = ensure_uuid("00000000-0000-4000-8000-000000000001")
 LOCAL_AUTH_USERNAME = "local-tester"
@@ -51,12 +52,23 @@ class PrincipalType(str, Enum):
     SYSTEM = "system"
 
 
+class DeviceTokenKind(str, Enum):
+    MOBILE = "mobile"
+    COMPUTER = "computer"
+
+
 @dataclass(frozen=True)
 class AuthContext:
     user_id: UUID
     role: Role
     principal_type: PrincipalType = PrincipalType.USER
     device_token_id: UUID | None = None
+    device_token_label: str | None = None
+    device_token_kind: DeviceTokenKind | None = None
+    service_token_id: UUID | None = None
+    service_token_label: str | None = None
+    service_token_read_only: bool | None = None
+    service_token_expires_at: datetime | None = None
 
     @property
     def is_device(self) -> bool:
@@ -148,7 +160,14 @@ class AuthService:
         self._session_factory = session_factory
         self._users_by_username: dict[str, User] = {}
 
-    def register_user(self, username: str, password: str, role: Role) -> User:
+    def register_user(
+        self,
+        username: str,
+        password: str,
+        role: Role,
+        *,
+        session: Session | None = None,
+    ) -> User:
         normalized = self._normalize_username(username)
         password_hash = PasswordHasher.hash_password(password)
         if self._session_factory is None:
@@ -163,20 +182,49 @@ class AuthService:
             self._users_by_username[normalized] = user
             return user
 
-        with self._session_factory() as session:
-            existing = session.scalar(select(UserModel).where(UserModel.username == normalized))
-            if existing is not None:
-                raise ConflictError("Username already exists.")
-            user_row = UserModel(
-                user_id=str(uuid4()),
-                username=normalized,
+        if session is not None:
+            return self._register_user_in_session(
+                session,
+                normalized=normalized,
                 password_hash=password_hash,
-                role=role.value,
-                created_at=utc_now(),
+                role=role,
+                commit=False,
             )
-            session.add(user_row)
+
+        with self._session_factory() as owned_session:
+            return self._register_user_in_session(
+                owned_session,
+                normalized=normalized,
+                password_hash=password_hash,
+                role=role,
+                commit=True,
+            )
+
+    @staticmethod
+    def _register_user_in_session(
+        session: Session,
+        *,
+        normalized: str,
+        password_hash: str,
+        role: Role,
+        commit: bool,
+    ) -> User:
+        existing = session.scalar(select(UserModel).where(UserModel.username == normalized))
+        if existing is not None:
+            raise ConflictError("Username already exists.")
+        user_row = UserModel(
+            user_id=str(uuid4()),
+            username=normalized,
+            password_hash=password_hash,
+            role=role.value,
+            created_at=utc_now(),
+        )
+        session.add(user_row)
+        if commit:
             session.commit()
-            return _user_from_model(user_row)
+        else:
+            session.flush()
+        return _user_from_model(user_row)
 
     def authenticate(self, username: str, password: str) -> User:
         normalized = self._normalize_username(username)
@@ -326,6 +374,12 @@ class InvitationClaims:
     role: Role
     expires_at: datetime
     issued_at: datetime
+    project_id: UUID | None = None
+    project_role: ProjectMembershipRole | None = None
+    review_enabled: bool = False
+    review_cadence_minutes: int | None = None
+    review_run_at_local_time: str | None = None
+    review_timezone_name: str | None = None
 
 
 @dataclass(frozen=True)
@@ -338,6 +392,12 @@ class Invitation:
     consumed_at: datetime | None = None
     consumed_by_user_id: UUID | None = None
     revoked_at: datetime | None = None
+    project_id: UUID | None = None
+    project_role: ProjectMembershipRole | None = None
+    review_enabled: bool = False
+    review_cadence_minutes: int | None = None
+    review_run_at_local_time: str | None = None
+    review_timezone_name: str | None = None
 
     @property
     def status(self) -> str:
@@ -434,7 +494,18 @@ class InvitationTokenService:
         self._session_factory = session_factory
         self._memory_invitations_by_hash: dict[str, InvitationModel] = {}
 
-    def issue_invitation(self, *, email: str, role: Role) -> IssuedInvitation:
+    def issue_invitation(
+        self,
+        *,
+        email: str,
+        role: Role,
+        project_id: UUID | None = None,
+        project_role: ProjectMembershipRole | None = None,
+        review_enabled: bool = False,
+        review_cadence_minutes: int | None = None,
+        review_run_at_local_time: str | None = None,
+        review_timezone_name: str | None = None,
+    ) -> IssuedInvitation:
         issued_at = utc_now()
         expires_at = issued_at + timedelta(hours=self._ttl_hours)
         token = _generate_secret(INVITATION_TOKEN_PREFIX)
@@ -444,6 +515,12 @@ class InvitationTokenService:
             invitation_id=str(invitation_id),
             email=self.normalize_email(email),
             role=role.value,
+            project_id=project_id,
+            project_role=project_role.value if project_role is not None else None,
+            review_enabled=review_enabled,
+            review_cadence_minutes=review_cadence_minutes,
+            review_run_at_local_time=review_run_at_local_time,
+            review_timezone_name=review_timezone_name,
             token_hash=token_hash,
             expires_at=expires_at,
             created_at=issued_at,
@@ -472,9 +549,21 @@ class InvitationTokenService:
             role=invitation.role,
             expires_at=invitation.expires_at,
             issued_at=invitation.created_at,
+            project_id=invitation.project_id,
+            project_role=invitation.project_role,
+            review_enabled=invitation.review_enabled,
+            review_cadence_minutes=invitation.review_cadence_minutes,
+            review_run_at_local_time=invitation.review_run_at_local_time,
+            review_timezone_name=invitation.review_timezone_name,
         )
 
-    def consume_invitation_token(self, token: str, *, consumed_by_user_id: UUID) -> Invitation:
+    def consume_invitation_token(
+        self,
+        token: str,
+        *,
+        consumed_by_user_id: UUID,
+        session: Session | None = None,
+    ) -> Invitation:
         _ensure_non_empty(token, "invite_token")
         token_hash = _hash_token(token)
         if self._session_factory is None:
@@ -485,6 +574,19 @@ class InvitationTokenService:
             self._ensure_invitation_pending(invitation)
             row.consumed_at = utc_now()
             row.consumed_by_user_id = str(consumed_by_user_id)
+            return _invitation_from_model(row)
+
+        if session is not None:
+            row = session.scalar(
+                select(InvitationModel).where(InvitationModel.token_hash == token_hash)
+            )
+            if row is None:
+                raise AuthError("Invitation token is invalid.")
+            invitation = _invitation_from_model(row)
+            self._ensure_invitation_pending(invitation)
+            row.consumed_at = utc_now()
+            row.consumed_by_user_id = consumed_by_user_id
+            session.flush()
             return _invitation_from_model(row)
 
         with self._session_factory() as session:
@@ -629,6 +731,8 @@ def service_principal_can_access(
 ) -> bool:
     """Coarse-grained policy for lpat_ service principals."""
     method = method.upper()
+    if path == "/auth/me":
+        return method in {"GET", "HEAD", "OPTIONS"}
     if path.startswith("/auth"):
         return False
     if method in {"GET", "HEAD", "OPTIONS"}:
@@ -645,6 +749,7 @@ class DeviceToken:
     device_token_id: UUID
     user_id: UUID
     label: str
+    kind: DeviceTokenKind
     created_at: datetime
     last_used_at: datetime | None
     revoked_at: datetime | None
@@ -673,6 +778,7 @@ class DevicePrincipal:
     user_id: UUID
     device_token_id: UUID
     label: str
+    kind: DeviceTokenKind
 
 
 @dataclass(frozen=True)
@@ -709,6 +815,7 @@ class PersonalAccessTokenPrincipal:
     label: str
     role: Role
     read_only: bool
+    expires_at: datetime
 
 
 def _hash_token(token: str) -> str:
@@ -724,6 +831,7 @@ def _device_token_from_model(model: DeviceTokenModel) -> DeviceToken:
         device_token_id=ensure_uuid(model.device_token_id),
         user_id=ensure_uuid(model.user_id),
         label=model.label,
+        kind=DeviceTokenKind(getattr(model, "kind", None) or DeviceTokenKind.MOBILE.value),
         created_at=model.created_at,
         last_used_at=model.last_used_at,
         revoked_at=model.revoked_at,
@@ -791,6 +899,37 @@ class DeviceAuthService:
             expires_at=expires_at,
         )
 
+    def issue_device_token(
+        self,
+        user_id: UUID,
+        *,
+        label: str,
+        kind: DeviceTokenKind = DeviceTokenKind.MOBILE,
+    ) -> IssuedDeviceToken:
+        if not label or not label.strip():
+            raise ValidationError("Device label must not be empty.")
+        now = utc_now()
+        secret = _generate_secret(DEVICE_TOKEN_PREFIX)
+        row = DeviceTokenModel(
+            device_token_id=str(uuid4()),
+            user_id=str(user_id),
+            label=label.strip(),
+            kind=kind.value,
+            token_hash=_hash_token(secret),
+            created_at=now,
+        )
+        with self._session_factory() as session:
+            user = session.get(UserModel, str(user_id))
+            if user is None:
+                raise NotFoundError("User does not exist.")
+            session.add(row)
+            session.commit()
+            session.refresh(row)
+            return IssuedDeviceToken(
+                device_token=_device_token_from_model(row),
+                secret=secret,
+            )
+
     def consume_enrollment(self, offer_token: str, *, label: str) -> IssuedDeviceToken:
         if not offer_token or not offer_token.strip():
             raise AuthError("Enrollment offer token must not be empty.")
@@ -837,6 +976,7 @@ class DeviceAuthService:
                 device_token_id=str(uuid4()),
                 user_id=enrollment.user_id,
                 label=label,
+                kind=DeviceTokenKind.MOBILE.value,
                 token_hash=_hash_token(secret),
                 created_at=utc_now(),
             )
@@ -899,6 +1039,7 @@ class DeviceAuthService:
                 user_id=ensure_uuid(row.user_id),
                 device_token_id=ensure_uuid(row.device_token_id),
                 label=row.label,
+                kind=DeviceTokenKind(getattr(row, "kind", None) or DeviceTokenKind.MOBILE.value),
             )
 
 
@@ -998,6 +1139,7 @@ class PersonalAccessTokenService:
                 label=row.label,
                 role=Role(row.role),
                 read_only=bool(row.read_only),
+                expires_at=_as_utc(row.expires_at),
             )
 
 
@@ -1078,6 +1220,14 @@ def _invitation_from_model(row: InvitationModel) -> Invitation:
             ensure_uuid(row.consumed_by_user_id) if row.consumed_by_user_id else None
         ),
         revoked_at=_optional_as_utc(row.revoked_at),
+        project_id=ensure_uuid(row.project_id) if row.project_id else None,
+        project_role=(
+            ProjectMembershipRole(row.project_role) if row.project_role else None
+        ),
+        review_enabled=row.review_enabled,
+        review_cadence_minutes=row.review_cadence_minutes,
+        review_run_at_local_time=row.review_run_at_local_time,
+        review_timezone_name=row.review_timezone_name,
     )
 
 

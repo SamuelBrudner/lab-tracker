@@ -331,6 +331,47 @@ def test_doctor_all_sweeps_registry(home, monkeypatch, capsys) -> None:
     assert str(missing.resolve()) not in roots
 
 
+def test_update_all_refreshes_enrolled_repos_and_agent_skills(home, capsys) -> None:
+    first = home / "first-repo"
+    second = home / "second-repo"
+    init_consumer_repo(first)
+    init_consumer_repo(second)
+
+    lt_cli.main(["update", "--all", "--yes", "--install-skills", "--dry-run"])
+    preview = json.loads(capsys.readouterr().out)
+    assert preview["command"] == "update-all"
+    assert preview["dry_run"] is True
+    assert len(preview["repos"]) == 2
+    assert "BEGIN LAB TRACKER CODE CONVENTIONS" not in (first / "GEMINI.md").read_text(
+        encoding="utf-8"
+    )
+
+    lt_cli.main(["update", "--all", "--yes", "--install-skills"])
+    applied = json.loads(capsys.readouterr().out)
+    assert applied["command"] == "update-all"
+    for repo in (first, second):
+        assert "BEGIN LAB TRACKER CODE CONVENTIONS" in (repo / "CLAUDE.md").read_text(
+            encoding="utf-8"
+        )
+        assert "BEGIN LAB TRACKER AGENTS CODE CONVENTIONS" in (
+            repo / "AGENTS.md"
+        ).read_text(encoding="utf-8")
+        assert "BEGIN LAB TRACKER CODE CONVENTIONS" in (repo / "GEMINI.md").read_text(
+            encoding="utf-8"
+        )
+        assert (repo / ".cursor" / "rules" / "lab-tracker.mdc").exists()
+
+    skills_home = home / "skills-home"
+    assert "save_artifact" in (
+        skills_home / "lab-tracker" / "SKILL.md"
+    ).read_text(encoding="utf-8")
+    assert (skills_home / "lab-tracker-setup" / "SKILL.md").exists()
+
+    lt_cli.main(["doctor", "--all"])
+    doctor = json.loads(capsys.readouterr().out)
+    assert all(not repo["drifted"] for repo in doctor["repos"])
+
+
 def test_watch_run_composes_scan_and_sync(home, monkeypatch, capsys) -> None:
     repo = home / "run-repo"
     inbox = repo / "inbox"

@@ -7,6 +7,7 @@ from pathlib import Path
 
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
+from starlette.requests import Request
 from starlette.responses import FileResponse, RedirectResponse
 
 _FRONTEND_DIR = Path(__file__).resolve().parent.parent / "frontend"
@@ -41,8 +42,10 @@ def configure_frontend_routes(
         return RedirectResponse(url="/app/")
 
     @app.get("/app", include_in_schema=False)
-    def app_redirect():
-        return RedirectResponse(url="/app/")
+    def app_redirect(request: Request):
+        query = request.url.query
+        target = f"/app/?{query}" if query else "/app/"
+        return RedirectResponse(url=target)
 
     sw_file = frontend_dir / "sw.js"
 

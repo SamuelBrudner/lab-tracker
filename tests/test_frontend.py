@@ -16,6 +16,16 @@ def test_frontend_routes_and_assets_are_served():
     assert bare_app_response.status_code in (302, 307)
     assert bare_app_response.headers["location"] == "/app/"
 
+    invite_redirect = client.get(
+        "/app?invite=signed-token&email=member%40example.org",
+        follow_redirects=False,
+    )
+    assert invite_redirect.status_code in (302, 307)
+    assert (
+        invite_redirect.headers["location"]
+        == "/app/?invite=signed-token&email=member%40example.org"
+    )
+
     app_response = client.get("/app/")
     assert app_response.status_code == 200
     assert "text/html" in app_response.headers.get("content-type", "")

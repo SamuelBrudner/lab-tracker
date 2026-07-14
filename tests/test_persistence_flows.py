@@ -58,8 +58,21 @@ class _AttributionDraftClient:
             "operations": [],
         }
 
-    def draft_from_batch(self, **_kwargs):
-        return self.draft_from_note()
+    def draft_from_batch(self, **kwargs):
+        batch_context = kwargs.get("batch_context") or {}
+        return {
+            **self.draft_from_note(),
+            "note_dispositions": [
+                {
+                    "note_id": str(note_id),
+                    "disposition": "no_change",
+                    "reason": "considered by fake drafter",
+                    "evidence_quote": "",
+                    "client_refs": [],
+                }
+                for note_id in batch_context.get("note_ids_requiring_disposition") or []
+            ],
+        }
 
 
 _ATTRIBUTION_COLUMN_PAIRS = (

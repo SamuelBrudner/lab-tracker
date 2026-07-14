@@ -11,6 +11,7 @@ from uuid import UUID
 
 from lab_tracker.api_parts import (
     AnalysesApiMixin,
+    CaptureContextsApiMixin,
     DatasetsApiMixin,
     ExplorationApiMixin,
     GoalsApiMixin,
@@ -34,6 +35,7 @@ from lab_tracker.repository import LabTrackerRepository
 from lab_tracker.request_context import LabTrackerRequestContext
 from lab_tracker.services import (
     AnalysisService,
+    CaptureContextService,
     ClaimService,
     DatasetService,
     DataStoreService,
@@ -62,6 +64,7 @@ ResponseT = TypeVar("ResponseT")
 class LabTrackerAPI(
     ProjectsApiMixin,
     QuestionsApiMixin,
+    CaptureContextsApiMixin,
     NotesApiMixin,
     DatasetsApiMixin,
     SessionsApiMixin,
@@ -185,9 +188,19 @@ class LabTrackerAPI(
             projects=self.projects,
             authorization=self.project_authorization,
         )
+        self.capture_contexts: CaptureContextService = CaptureContextService(
+            context,
+            projects=self.projects,
+            authorization=self.project_authorization,
+            target_validator=lambda target, project_id: self.notes.validate_target(
+                target,
+                project_id,
+            ),
+        )
         self.notes: NoteService = NoteService(
             context,
             projects=self.projects,
+            capture_contexts=self.capture_contexts,
             questions=self.questions,
             datasets=self.datasets,
             sessions=self.sessions,

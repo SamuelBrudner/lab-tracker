@@ -12,11 +12,12 @@ from uuid import UUID
 
 from pydantic import AfterValidator, BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from lab_tracker.auth import Role
+from lab_tracker.auth import DeviceTokenKind, Role
 from lab_tracker.goals_attributes import validate_goal_attributes
 from lab_tracker.models import (
     Analysis,
     AnalysisStatus,
+    CaptureContext,
     Claim,
     ClaimInput,
     ClaimRelation,
@@ -147,6 +148,12 @@ class AuthInvitationRead(BaseModel):
     invitation_id: UUID
     email: str
     role: Role
+    project_id: UUID | None = None
+    project_role: ProjectMembershipRole | None = None
+    review_enabled: bool = False
+    review_cadence_minutes: int | None = None
+    review_run_at_local_time: str | None = None
+    review_timezone_name: str | None = None
     status: str
     invite_url: str | None = None
     mailto_url: str | None = None
@@ -211,6 +218,30 @@ class AuthUserUpdate(RequestModel):
 class AuthInvitationCreate(RequestModel):
     email: NonBlankStr
     role: Role = Role.EDITOR
+    project_id: UUID | None = None
+    project_role: ProjectMembershipRole | None = None
+    review_enabled: bool = False
+    review_cadence_minutes: int | None = Field(default=None, ge=60)
+    review_run_at_local_time: str | None = Field(
+        default=None,
+        pattern=r"^(?:[01]\d|2[0-3]):[0-5]\d$",
+    )
+    review_timezone_name: NonBlankStr | None = None
+
+    @model_validator(mode="after")
+    def _project_required_for_provisioning(self) -> AuthInvitationCreate:
+        has_project_settings = any(
+            value is not None
+            for value in (
+                self.project_role,
+                self.review_cadence_minutes,
+                self.review_run_at_local_time,
+                self.review_timezone_name,
+            )
+        ) or self.review_enabled
+        if self.project_id is None and has_project_settings:
+            raise ValueError("project_id is required for project or review provisioning")
+        return self
 
 
 class AuthLoginRequest(RequestModel):
@@ -238,6 +269,7 @@ class DeviceConsumeRequest(RequestModel):
 class DeviceTokenRead(BaseModel):
     device_token_id: UUID
     label: str
+    kind: DeviceTokenKind = DeviceTokenKind.MOBILE
     created_at: datetime
     last_used_at: datetime | None = None
     revoked_at: datetime | None = None
@@ -247,7 +279,20 @@ class DeviceConsumeRead(BaseModel):
     device_token_id: UUID
     secret: str
     label: str
+    kind: DeviceTokenKind = DeviceTokenKind.MOBILE
     created_at: datetime
+
+
+class DeviceTokenCreate(RequestModel):
+    label: Annotated[str, Field(min_length=1, max_length=150), AfterValidator(_non_blank_string)]
+    kind: DeviceTokenKind = DeviceTokenKind.COMPUTER
+
+    @field_validator("kind")
+    @classmethod
+    def _computer_only(cls, value: DeviceTokenKind) -> DeviceTokenKind:
+        if value != DeviceTokenKind.COMPUTER:
+            raise ValueError("POST /auth/devices only creates computer tokens.")
+        return value
 
 
 class NoteRawDownloadRead(BaseModel):
@@ -436,6 +481,7 @@ class NoteCreate(RequestModel):
     targets: list[EntityRef] | None = None
     metadata: dict[str, NoteMetadataScalar] | None = None
     client_capture_id: str | None = None
+    capture_context_id: UUID | None = None
     status: NoteStatus | None = None
 
     @field_validator("metadata")
@@ -509,6 +555,10 @@ class GraphChangeSetSummary(BaseModel):
     summary: str = ""
     uncertain_fields: list[str] = Field(default_factory=list)
     clarification_requests: list[str] = Field(default_factory=list)
+    # The lean list surface carries only the aggregated coverage counts; the
+    # full note_dispositions ledger rides the detail endpoints, mirroring the
+    # operation_count-vs-operations split.
+    coverage_summary: dict[str, int] = Field(default_factory=dict)
     status: GraphChangeSetStatus
     commit_message: str | None = None
     error_metadata: dict[str, Any] = Field(default_factory=dict)
@@ -820,6 +870,31 @@ class DataStoreCreate(RequestModel):
 
 
 DataStoreRead = DataStore
+
+
+class CaptureContextCreate(RequestModel):
+    project_id: UUID
+    label: Annotated[str, Field(min_length=1, max_length=150), AfterValidator(_non_blank_string)]
+    site_label: str | None = Field(default=None, max_length=150)
+    place_label: str | None = Field(default=None, max_length=150)
+    default_hint: str | None = Field(default=None, max_length=500)
+    default_targets: list[EntityRef] | None = None
+
+
+class CaptureContextUpdate(RequestModel):
+    label: (
+        Annotated[str, Field(min_length=1, max_length=150), AfterValidator(_non_blank_string)]
+        | None
+    ) = None
+    site_label: str | None = Field(default=None, max_length=150)
+    place_label: str | None = Field(default=None, max_length=150)
+    default_hint: str | None = Field(default=None, max_length=500)
+    default_targets: list[EntityRef] | None = None
+
+
+class CaptureContextRead(CaptureContext):
+    capture_url: str
+    capture_qr_svg: str
 
 
 class VisualizationCreate(RequestModel):

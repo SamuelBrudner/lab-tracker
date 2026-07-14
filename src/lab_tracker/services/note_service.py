@@ -38,6 +38,7 @@ from lab_tracker.services.shared import (
 from lab_tracker.services.visualization_service import VisualizationService
 
 if TYPE_CHECKING:
+    from lab_tracker.services.capture_context_service import CaptureContextService
     from lab_tracker.services.goal_service import GoalService
 
 _logger = logging.getLogger(__name__)
@@ -49,6 +50,7 @@ class NoteService(BaseService):
         context: ServiceContext,
         *,
         projects: ProjectService,
+        capture_contexts: CaptureContextService | None = None,
         questions: QuestionService,
         datasets: DatasetService,
         sessions: SessionService,
@@ -60,6 +62,7 @@ class NoteService(BaseService):
     ) -> None:
         super().__init__(context)
         self.projects = projects
+        self.capture_contexts = capture_contexts
         self.questions = questions
         self.datasets = datasets
         self.sessions = sessions
@@ -107,6 +110,7 @@ class NoteService(BaseService):
         targets: Iterable[EntityRef] | None = None,
         metadata: dict[str, NoteMetadataScalar] | None = None,
         client_capture_id: str | None = None,
+        capture_context_id: UUID | None = None,
         status: NoteStatus = NoteStatus.STAGED,
         actor: AuthContext | None = None,
         origin: EntityOrigin = EntityOrigin.USER,
@@ -129,9 +133,17 @@ class NoteService(BaseService):
         if not raw_text and raw_asset is None:
             raise ValidationError("raw_content or raw_asset must be provided.")
         resolved_targets = list(targets or [])
-        for target in resolved_targets:
-            self._ensure_target_exists(target, project_id)
         resolved_metadata = normalize_note_metadata(metadata)
+        if capture_context_id is not None:
+            resolved_targets, resolved_metadata = self._apply_capture_context(
+                project_id=project_id,
+                targets=resolved_targets,
+                metadata=resolved_metadata,
+                capture_context_id=capture_context_id,
+                actor=actor,
+            )
+        for target in resolved_targets:
+            self.validate_target(target, project_id)
         note = Note(
             note_id=uuid4(),
             project_id=project_id,
@@ -189,6 +201,7 @@ class NoteService(BaseService):
         targets: Iterable[EntityRef] | None = None,
         metadata: dict[str, NoteMetadataScalar] | None = None,
         client_capture_id: str | None = None,
+        capture_context_id: UUID | None = None,
         status: NoteStatus = NoteStatus.STAGED,
         actor: AuthContext | None = None,
     ) -> Note:
@@ -227,6 +240,7 @@ class NoteService(BaseService):
                 targets=targets,
                 metadata=metadata,
                 client_capture_id=resolved_client_capture_id,
+                capture_context_id=capture_context_id,
                 status=status,
                 actor=actor,
             )
@@ -377,7 +391,7 @@ class NoteService(BaseService):
         if targets is not None:
             resolved_targets = list(targets)
             for target in resolved_targets:
-                self._ensure_target_exists(target, note.project_id)
+                self.validate_target(target, note.project_id)
             note.targets = resolved_targets
         if metadata is not None:
             note.metadata = normalize_note_metadata(metadata)
@@ -465,7 +479,9 @@ class NoteService(BaseService):
         ):
             raise ValidationError("Note cannot be deleted while graph drafts reference it.")
 
-    def _ensure_target_exists(self, target: EntityRef, project_id: UUID) -> None:
+    def validate_target(self, target: EntityRef, project_id: UUID) -> None:
+        """Require a supported target that exists in the selected project."""
+
         entity_getters = {
             EntityType.PROJECT: self.projects.get_project,
             EntityType.QUESTION: self.questions.get_question,
@@ -489,6 +505,41 @@ class NoteService(BaseService):
             return
         if hasattr(entity, "project_id") and entity.project_id != project_id:
             raise ValidationError("Target must belong to the same project.")
+
+    def _apply_capture_context(
+        self,
+        *,
+        project_id: UUID,
+        targets: list[EntityRef],
+        metadata: dict[str, str],
+        capture_context_id: UUID,
+        actor: AuthContext | None,
+    ) -> tuple[list[EntityRef], dict[str, str]]:
+        if self.capture_contexts is None:
+            raise ValidationError("Capture context service is not configured.")
+        context = self.capture_contexts.get_capture_context(capture_context_id, actor=actor)
+        if context.project_id != project_id:
+            raise ValidationError("Capture context must belong to the note project.")
+        if context.revoked_at is not None:
+            raise ValidationError("Capture context has been revoked.")
+        merged_targets: list[EntityRef] = []
+        seen: set[tuple[EntityType, UUID]] = set()
+        for target in [*context.default_targets, *targets]:
+            key = (target.entity_type, target.entity_id)
+            if key in seen:
+                continue
+            seen.add(key)
+            merged_targets.append(target)
+        merged_metadata = dict(metadata)
+        merged_metadata["capture_context_id"] = str(context.capture_context_id)
+        merged_metadata["capture_context_label"] = context.label
+        if context.site_label:
+            merged_metadata["capture_site_label"] = context.site_label
+        if context.place_label:
+            merged_metadata["capture_place_label"] = context.place_label
+        if context.default_hint:
+            merged_metadata["capture_context_hint"] = context.default_hint
+        return merged_targets, merged_metadata
 
 
 def _transcript_text(transcript: Any) -> str:

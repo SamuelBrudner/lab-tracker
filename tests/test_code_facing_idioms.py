@@ -43,6 +43,27 @@ def test_code_facing_idioms_figure_section_is_symbol_gated() -> None:
     assert "capture_figures()" in default_body
 
 
+def test_code_facing_idioms_generic_capture_section_is_symbol_gated() -> None:
+    assert "save_artifact()" not in code_facing_idioms(symbols=["capture"])
+
+    gated = code_facing_idioms(symbols=["save_artifact", "capture", "savefig"])
+    assert "save_artifact()" in gated
+    assert "capture()" in gated
+    assert "producer_*" in gated
+    assert "capture_scope_*" in gated
+    assert "repository HEAD as the base commit" in gated
+    assert "figure specialization" in gated
+    assert "CaptureContext.save_artifact()" in gated
+    assert "already writes a regular-file result" in gated
+    assert "Do not invent new analyses, plots, or output files" in gated
+    assert "staged evidence notes only" in gated
+    assert "canonical Dataset, Analysis, Claim, or Visualization" in gated
+
+    default_body = code_facing_idioms()
+    assert "save_artifact()" in default_body
+    assert "capture()" in default_body
+
+
 def test_code_facing_idioms_named_client_symbols_are_exported() -> None:
     body = code_facing_idioms(symbols=client_symbols)
     names = set(re.findall(r"`([A-Za-z_][A-Za-z0-9_]*)\(", body))
@@ -58,12 +79,30 @@ def test_code_facing_idioms_avoid_shell_or_install_directives() -> None:
 
 
 def test_retained_surface_records_code_idiom_and_citation_decisions() -> None:
-    doc = Path("docs/retained-v1-surface.md").read_text(encoding="utf-8")
+    doc = " ".join(
+        Path("docs/retained-v1-surface.md").read_text(encoding="utf-8").split()
+    )
 
     assert "code-facing idiom teaching" in doc
     assert "lab-tracker://code-conventions" in doc
     assert "citation annotation tokens" in doc
     assert "UUID-bearing tokens should be stripped" in doc
+    assert "regular-file outputs of any format" in doc
+    assert "exact producer" in doc
+    assert "enclosing capture scope" in doc
+    assert "do not create canonical Dataset, Analysis, Claim, or Visualization" in doc
+
+
+def test_artifact_capture_doc_covers_supported_examples_and_boundaries() -> None:
+    doc = " ".join(Path("docs/artifact-capture.md").read_text(encoding="utf-8").split())
+
+    assert "dataframe.to_parquet" in doc
+    assert "joblib.dump" in doc
+    assert "savefig(fig" in doc
+    assert "with capture(" in doc
+    assert "cannot know which line" in doc
+    assert "`capture_scope_*`" in doc
+    assert "do not decide that a file is a canonical Dataset" in doc
 
 
 def test_managed_code_conventions_block_has_stable_markers_and_version_line() -> None:
@@ -85,11 +124,14 @@ def test_managed_code_conventions_block_has_stable_markers_and_version_line() ->
     assert body.strip() in cursor
 
 
-def test_package_docstring_names_first_wave_idioms() -> None:
+def test_package_docstring_names_code_facing_idioms() -> None:
     doc = " ".join((lab_tracker_client.__doc__ or "").split())
 
     assert "first-line note markers" in doc
     assert "EntityRef note targets" in doc
     assert "lt_ids.json" in doc
     assert "content-hash evidence imports" in doc
-    assert "fail-soft figure capture" in doc
+    assert "fail-soft staged artifact capture" in doc
+    assert "save_artifact/capture" in doc
+    assert "exact producer source, line, and git provenance" in doc
+    assert "scan-only contexts record the enclosing capture scope" in doc

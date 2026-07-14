@@ -11,6 +11,7 @@ from lab_tracker.db_models import (
     AcquisitionOutputModel,
     AnalysisDatasetModel,
     AnalysisModel,
+    CaptureContextModel,
     ClaimAnalysisModel,
     ClaimDatasetModel,
     ClaimEdgeModel,
@@ -38,6 +39,7 @@ from lab_tracker.db_models import (
 from lab_tracker.models import (
     AcquisitionOutput,
     Analysis,
+    CaptureContext,
     Claim,
     ClaimEdge,
     Dataset,
@@ -626,6 +628,61 @@ def apply_note_to_model(row: NoteModel, note: Note) -> None:
     _apply_origin_to_model(row, note)
     row.created_at = note.created_at
     row.updated_at = note.updated_at
+
+
+def capture_context_to_model(context: CaptureContext) -> CaptureContextModel:
+    return CaptureContextModel(
+        capture_context_id=context.capture_context_id,
+        project_id=context.project_id,
+        label=context.label,
+        site_label=context.site_label,
+        place_label=context.place_label,
+        default_hint=context.default_hint,
+        default_targets=_entity_refs_to_json(context.default_targets),
+        created_by=context.created_by,
+        created_by_user_id=(
+            context.created_by_user_id if context.created_by_user_id is not None else None
+        ),
+        created_at=context.created_at,
+        updated_at=context.updated_at,
+        revoked_at=context.revoked_at,
+    )
+
+
+def capture_context_from_model(row: CaptureContextModel) -> CaptureContext:
+    return CaptureContext(
+        capture_context_id=row.capture_context_id,
+        project_id=row.project_id,
+        label=row.label,
+        site_label=row.site_label,
+        place_label=row.place_label,
+        default_hint=row.default_hint,
+        default_targets=_entity_refs_from_json(row.default_targets),
+        created_by=row.created_by,
+        created_by_user_id=(row.created_by_user_id if row.created_by_user_id else None),
+        created_at=row.created_at,
+        updated_at=row.updated_at,
+        revoked_at=row.revoked_at if row.revoked_at else None,
+    )
+
+
+def apply_capture_context_to_model(
+    row: CaptureContextModel,
+    context: CaptureContext,
+) -> None:
+    row.project_id = context.project_id
+    row.label = context.label
+    row.site_label = context.site_label
+    row.place_label = context.place_label
+    row.default_hint = context.default_hint
+    row.default_targets = _entity_refs_to_json(context.default_targets)
+    row.created_by = context.created_by
+    row.created_by_user_id = (
+        context.created_by_user_id if context.created_by_user_id is not None else None
+    )
+    row.created_at = context.created_at
+    row.updated_at = context.updated_at
+    row.revoked_at = context.revoked_at
 
 
 def session_to_model(session: Session) -> SessionModel:

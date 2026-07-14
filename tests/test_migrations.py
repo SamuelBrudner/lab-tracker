@@ -188,7 +188,10 @@ def test_alembic_upgrade_head_creates_expected_tables(monkeypatch, tmp_path):
         "usage_events",
         "usage_event_rollups",
         "invitations",
+        "device_tokens",
+        "device_enrollments",
         "personal_access_tokens",
+        "capture_contexts",
     }
     assert expected.issubset(table_names)
     assert "dataset_reviews" not in table_names
@@ -232,6 +235,10 @@ def test_alembic_upgrade_head_creates_expected_tables(monkeypatch, tmp_path):
     personal_access_token_columns = {
         column["name"] for column in inspector.get_columns("personal_access_tokens")
     }
+    device_token_columns = {column["name"] for column in inspector.get_columns("device_tokens")}
+    capture_context_columns = {
+        column["name"] for column in inspector.get_columns("capture_contexts")
+    }
     entity_version_columns = {
         column["name"] for column in inspector.get_columns("entity_versions")
     }
@@ -253,6 +260,7 @@ def test_alembic_upgrade_head_creates_expected_tables(monkeypatch, tmp_path):
     _assert_created_by_user_fk(inspector, "question_refactors")
     _assert_created_by_user_fk(inspector, "datasets")
     _assert_created_by_user_fk(inspector, "notes")
+    _assert_created_by_user_fk(inspector, "capture_contexts")
     _assert_created_by_user_fk(inspector, "graph_change_sets")
     _assert_created_by_user_fk(inspector, "graph_draft_batch_runs")
     _assert_created_by_user_fk(inspector, "sessions")
@@ -671,6 +679,47 @@ def test_alembic_upgrade_head_creates_expected_tables(monkeypatch, tmp_path):
         "personal_access_tokens",
         "ix_personal_access_tokens_expires_at",
     )
+    assert {
+        "device_token_id",
+        "user_id",
+        "label",
+        "kind",
+        "token_hash",
+        "created_at",
+        "last_used_at",
+        "revoked_at",
+    }.issubset(device_token_columns)
+    _assert_index(inspector, "device_tokens", "ix_device_tokens_user_kind")
+    _assert_fk(inspector, "device_tokens", column="user_id", referred_table="users")
+    assert {
+        "capture_context_id",
+        "project_id",
+        "label",
+        "site_label",
+        "place_label",
+        "default_hint",
+        "default_targets",
+        "created_by",
+        "created_by_user_id",
+        "created_at",
+        "updated_at",
+        "revoked_at",
+    }.issubset(capture_context_columns)
+    _assert_fk(
+        inspector,
+        "capture_contexts",
+        column="project_id",
+        referred_table="projects",
+    )
+    _assert_fk(
+        inspector,
+        "capture_contexts",
+        column="created_by_user_id",
+        referred_table="users",
+    )
+    _assert_index(inspector, "capture_contexts", "ix_capture_contexts_project_created_at")
+    _assert_index(inspector, "capture_contexts", "ix_capture_contexts_project_revoked")
+    _assert_index(inspector, "capture_contexts", "ix_capture_contexts_created_by_user_id")
     assert {
         "asset_storage_id",
         "asset_filename",
@@ -1196,6 +1245,7 @@ def test_database_at_daily_review_branch_upgrades_to_current_head(monkeypatch, t
         "record_export_events",
         "usage_events",
         "usage_event_rollups",
+        "capture_contexts",
     }.issubset(table_names)
     assert "daily_graph_reviews" not in table_names
     assert "daily_graph_review_change_sets" not in table_names

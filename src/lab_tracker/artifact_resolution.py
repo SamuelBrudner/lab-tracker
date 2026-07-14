@@ -39,7 +39,8 @@ from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
-from urllib.parse import unquote, urlsplit
+from urllib.parse import quote, unquote, urlsplit
+from urllib.request import url2pathname
 
 from lab_tracker.models import DataStore, ExternalArtifactReference, StoreKind
 
@@ -253,6 +254,20 @@ def _join_store_path(root: str, path: str) -> str:
     return f"{root.rstrip('/')}/{path.lstrip('/')}" if path else root
 
 
+def _local_file_uri(path: str) -> str:
+    """Serialize a local-store path without imposing the current OS's path rules.
+
+    A registered local store can retain a POSIX absolute root even when this
+    process runs on Windows. ``WindowsPath('/data/store')`` treats that form as
+    relative, so ``Path.as_uri()`` cannot serialize it. Native host paths still
+    use ``Path.as_uri()``, which also preserves Windows UNC handling.
+    """
+
+    if path.startswith("/") and not path.startswith("//"):
+        return f"file://{quote(path, safe='/:')}"
+    return Path(path).expanduser().as_uri()
+
+
 def store_relative_reference(
     store: DataStore, *, path: str, content_hash: str
 ) -> ExternalArtifactReference | None:
@@ -270,7 +285,7 @@ def store_relative_reference(
     if store.kind is StoreKind.LOCAL_FS:
         return ExternalArtifactReference(
             source_system="local",
-            uri=Path(joined).as_uri(),
+            uri=_local_file_uri(joined),
             content_hash=content_hash,
         )
     if store.kind is StoreKind.HTTP:
@@ -507,8 +522,11 @@ class LocalFilesystemResolver(ArtifactResolver):
         parsed = urlsplit(uri)
         scheme = parsed.scheme.lower()
         if scheme == "file":
-            # file:///abs/path -> /abs/path ; tolerate a localhost netloc.
-            return unquote(parsed.path) or None
+            # urlsplit exposes a Windows drive URI as /C:/..., while
+            # url2pathname restores the actual host path on each platform.
+            if parsed.netloc and parsed.netloc.lower() != "localhost":
+                return None
+            return url2pathname(parsed.path) or None
         if scheme == "":
             return uri or None
         return None

@@ -88,7 +88,7 @@ def init_consumer_repo(
     result = InitResult()
     if uninstall:
         if install_skills:
-            _uninstall_setup_skill(result=result, dry_run=dry_run)
+            _uninstall_agent_skills(result=result, dry_run=dry_run)
         for activation_target in _ACTIVATION_BLOCK_TARGETS:
             _strip_managed_block(
                 root / activation_target,
@@ -108,6 +108,13 @@ def init_consumer_repo(
             root / "AGENTS.md",
             begin_marker=AGENTS_CODE_CONVENTIONS_BLOCK_BEGIN,
             end_marker=AGENTS_CODE_CONVENTIONS_BLOCK_END,
+            result=result,
+            dry_run=dry_run,
+        )
+        _strip_managed_block(
+            root / "GEMINI.md",
+            begin_marker=CODE_CONVENTIONS_BLOCK_BEGIN,
+            end_marker=CODE_CONVENTIONS_BLOCK_END,
             result=result,
             dry_run=dry_run,
         )
@@ -154,6 +161,14 @@ def init_consumer_repo(
             dry_run=dry_run,
         )
         _write_managed_block(
+            root / "GEMINI.md",
+            managed_code_conventions_block(),
+            begin_marker=CODE_CONVENTIONS_BLOCK_BEGIN,
+            end_marker=CODE_CONVENTIONS_BLOCK_END,
+            result=result,
+            dry_run=dry_run,
+        )
+        _write_managed_block(
             root / ".cursor" / "rules" / "lab-tracker.mdc",
             cursor_rules_mdc(),
             begin_marker=CODE_CONVENTIONS_BLOCK_BEGIN,
@@ -171,11 +186,11 @@ def init_consumer_repo(
         "(--dry-run previews the write)."
     )
     if install_skills:
-        _install_setup_skill(result=result, dry_run=dry_run)
+        install_agent_skills(result=result, dry_run=dry_run)
     else:
         result.offers.append(
-            "The lab-tracker-setup skill can be installed for Claude/Codex "
-            "agents with `--install-skills`."
+            "The full and setup Lab Tracker skills can be installed for "
+            "Claude/Codex agents with `--install-skills`."
         )
     if not dry_run:
         _record_enrolled_repo(root, "init")
@@ -191,16 +206,54 @@ def _record_enrolled_repo(root: Path, action: str) -> None:
         record_repo(root, action)
 
 
-def _skills_home() -> Path:
+def _skills_homes() -> tuple[Path, ...]:
+    """Return every agent skill home managed by Lab Tracker."""
+
     override = os.getenv("LAB_TRACKER_SKILLS_HOME")
-    return Path(override).expanduser() if override else Path.home() / ".claude" / "skills"
+    if override:
+        return (Path(override).expanduser(),)
+    return (Path.home() / ".claude" / "skills", Path.home() / ".codex" / "skills")
+
+
+def _skills_home() -> Path:
+    """Return the primary home used by setup-status compatibility checks."""
+
+    return _skills_homes()[0]
 
 
 def _setup_skill_path() -> Path:
     return _skills_home() / "lab-tracker-setup" / "SKILL.md"
 
 
-def _install_setup_skill(*, result: InitResult, dry_run: bool = False) -> None:
+def _setup_skill_paths() -> tuple[Path, ...]:
+    return tuple(home / "lab-tracker-setup" / "SKILL.md" for home in _skills_homes())
+
+
+def _full_skill_paths() -> tuple[Path, ...]:
+    return tuple(home / "lab-tracker" / "SKILL.md" for home in _skills_homes())
+
+
+def _full_skill_markdown() -> str:
+    """Load the canonical full Lab Tracker skill from source or wheel data."""
+
+    candidates = (
+        Path(__file__).resolve().parents[2] / "skills" / "lab-tracker" / "SKILL.md",
+        Path(sys.prefix) / "share" / "lab-tracker" / "skills" / "lab-tracker" / "SKILL.md",
+    )
+    for candidate in candidates:
+        if candidate.is_file():
+            return candidate.read_text(encoding="utf-8")
+    searched = ", ".join(str(path) for path in candidates)
+    raise FileNotFoundError(f"Packaged lab-tracker skill not found; searched: {searched}")
+
+
+def _install_skill_file(
+    path: Path,
+    content: str,
+    *,
+    result: InitResult,
+    dry_run: bool = False,
+) -> None:
     """Render the packaged setup skill into the agent skills home.
 
     A real file copy (no symlinks — Windows), LF-only because the trailing
@@ -211,13 +264,8 @@ def _install_setup_skill(*, result: InitResult, dry_run: bool = False) -> None:
     customised copy is backed up like any other refreshed scaffold file.
     """
 
-    from lab_tracker.setup_guide import (
-        setup_skill_markdown,
-        skill_content_without_version_line,
-    )
+    from lab_tracker.setup_guide import skill_content_without_version_line
 
-    path = _setup_skill_path()
-    content = setup_skill_markdown()
     if not path.exists():
         if dry_run:
             _record_dry_run_change(path, "", content, result)
@@ -247,8 +295,20 @@ def _install_setup_skill(*, result: InitResult, dry_run: bool = False) -> None:
     result.overwritten.append(path)
 
 
-def _uninstall_setup_skill(*, result: InitResult, dry_run: bool = False) -> None:
-    path = _setup_skill_path()
+def install_agent_skills(*, result: InitResult, dry_run: bool = False) -> None:
+    """Install both Lab Tracker skills for Claude and Codex agents."""
+
+    from lab_tracker.setup_guide import setup_skill_markdown
+
+    for path in _full_skill_paths():
+        _install_skill_file(path, _full_skill_markdown(), result=result, dry_run=dry_run)
+    for path in _setup_skill_paths():
+        _install_skill_file(path, setup_skill_markdown(), result=result, dry_run=dry_run)
+
+
+def _uninstall_skill_file(
+    path: Path, *, result: InitResult, dry_run: bool = False
+) -> None:
     backup = path.with_name(path.name + _UPDATE_BACKUP_SUFFIX)
     if not path.exists() and not backup.exists():
         result.skipped.append(path)
@@ -268,6 +328,11 @@ def _uninstall_setup_skill(*, result: InitResult, dry_run: bool = False) -> None
         path.parent.rmdir()
 
 
+def _uninstall_agent_skills(*, result: InitResult, dry_run: bool = False) -> None:
+    for path in (*_full_skill_paths(), *_setup_skill_paths()):
+        _uninstall_skill_file(path, result=result, dry_run=dry_run)
+
+
 _UPDATE_BACKUP_SUFFIX = ".bak-lt-update"
 
 # One activation block per agent instruction file, kept byte-identical so
@@ -278,6 +343,7 @@ _ACTIVATION_BLOCK_TARGETS: tuple[str, ...] = ("CLAUDE.md", "AGENTS.md", "GEMINI.
 _CONVENTIONS_TARGETS: tuple[tuple[str, str, str], ...] = (
     ("CLAUDE.md", CODE_CONVENTIONS_BLOCK_BEGIN, CODE_CONVENTIONS_BLOCK_END),
     ("AGENTS.md", AGENTS_CODE_CONVENTIONS_BLOCK_BEGIN, AGENTS_CODE_CONVENTIONS_BLOCK_END),
+    ("GEMINI.md", CODE_CONVENTIONS_BLOCK_BEGIN, CODE_CONVENTIONS_BLOCK_END),
     (".cursor/rules/lab-tracker.mdc", CODE_CONVENTIONS_BLOCK_BEGIN, CODE_CONVENTIONS_BLOCK_END),
 )
 
@@ -352,7 +418,7 @@ def update_consumer_repo(
             "`lab_tracker update --yes`."
         )
     if install_skills:
-        _install_setup_skill(result=result, dry_run=dry_run)
+        install_agent_skills(result=result, dry_run=dry_run)
     if not dry_run:
         _record_enrolled_repo(root, "update")
     return result
@@ -568,8 +634,8 @@ def main(argv: list[str] | None = None) -> None:
         "--install-skills",
         action="store_true",
         help=(
-            "Also render the lab-tracker-setup skill into ~/.claude/skills "
-            "(with --uninstall: remove it)."
+            "Also install Lab Tracker skills for local Claude and Codex agents "
+            "(with --uninstall: remove them)."
         ),
     )
     update_parser = subcommands.add_parser(
@@ -597,7 +663,7 @@ def main(argv: list[str] | None = None) -> None:
     update_parser.add_argument(
         "--install-skills",
         action="store_true",
-        help="Also refresh the lab-tracker-setup skill in ~/.claude/skills.",
+        help="Also refresh Lab Tracker skills for local Claude and Codex agents.",
     )
     serve_parser = subcommands.add_parser(
         "serve",
@@ -990,7 +1056,10 @@ def _extract_version_line(
 
 
 def _doctor(
-    target: str | Path = ".", *, include_installation: bool = False
+    target: str | Path = ".",
+    *,
+    include_installation: bool = False,
+    require_conventions: bool = False,
 ) -> dict[str, object]:
     root = Path(target).expanduser().resolve()
     body = code_facing_idioms()
@@ -1007,6 +1076,12 @@ def _doctor(
             root / "AGENTS.md",
             AGENTS_CODE_CONVENTIONS_BLOCK_BEGIN,
             AGENTS_CODE_CONVENTIONS_BLOCK_END,
+        ),
+        (
+            "GEMINI.md",
+            root / "GEMINI.md",
+            CODE_CONVENTIONS_BLOCK_BEGIN,
+            CODE_CONVENTIONS_BLOCK_END,
         ),
         (
             ".cursor/rules/lab-tracker.mdc",
@@ -1030,7 +1105,7 @@ def _doctor(
         # Drift is a CONTENT verdict: a package bump that leaves the idiom
         # text unchanged must not cry wolf (a noisy doctor trains users to
         # ignore it). The version line stays reported for information.
-        drifted = present and not body_in_sync
+        drifted = (present and not body_in_sync) or (require_conventions and not present)
         targets.append(
             {
                 "name": name,
@@ -1051,10 +1126,19 @@ def _doctor(
         "targets": targets,
     }
     if any(target["drifted"] for target in targets):
-        payload["suggestion"] = (
-            "Managed blocks differ from the installed package text; "
-            "`lt update` refreshes them (`--dry-run` previews the changes)."
+        missing_required = any(
+            target["drifted"] and not target["present"] for target in targets
         )
+        if missing_required:
+            payload["suggestion"] = (
+                "Managed convention blocks are missing or stale; `lt update --yes` "
+                "installs and refreshes them (`--dry-run` previews the changes)."
+            )
+        else:
+            payload["suggestion"] = (
+                "Managed blocks differ from the installed package text; "
+                "`lt update` refreshes them (`--dry-run` previews the changes)."
+            )
     if include_installation:
         # Informational only: the installation report never feeds the exit code
         # (both _doctor_exit_code and the client _payload_exit_code key solely

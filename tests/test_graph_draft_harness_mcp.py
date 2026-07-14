@@ -15,6 +15,7 @@ import pytest
 from mcp import ClientSession
 from mcp.client.streamable_http import streamablehttp_client
 
+from lab_tracker.graph_drafting import GraphDraftingError
 from lab_tracker.services.graph_draft_harness_mcp import (
     HarnessGraphDraftMCPServer,
     HarnessMCPLoopbackServer,
@@ -105,3 +106,122 @@ def test_harness_mcp_loopback_rejects_wrong_token() -> None:
         asyncio.run(_expect_unauthorized(loopback.url))
     # No read tool ever executed for the unauthorized client.
     assert executor.calls == []
+
+
+def _dispositions(*note_ids: str, disposition: str = "no_change") -> list[dict[str, Any]]:
+    return [
+        {
+            "note_id": note_id,
+            "disposition": disposition,
+            "reason": "checked against the note",
+            "evidence_quote": "",
+            "client_refs": [],
+        }
+        for note_id in note_ids
+    ]
+
+
+def test_submit_gate_rejects_incomplete_coverage_and_allows_in_run_repair() -> None:
+    mcp = HarnessGraphDraftMCPServer(
+        executor=_FakeScopedExecutor(),
+        max_tool_calls=4,
+        expected_note_ids=("note-a", "note-b"),
+    )
+    incomplete = {**_valid_patch(), "note_dispositions": _dispositions("note-a")}
+
+    with pytest.raises(GraphDraftingError) as excinfo:
+        mcp.submit_graph_patch({"graph_patch": incomplete})
+
+    # The rejection names the gap and the submission is NOT recorded, so the
+    # agent can repair and resubmit within the same run. The rejection itself
+    # stays observable in the tool trace.
+    assert "note-b" in str(excinfo.value)
+    assert mcp.graph_patch is None
+    assert mcp.tool_trace["submit_graph_patch_calls"] == 0
+    assert mcp.tool_trace["submit_graph_patch_rejections"] == 1
+    assert "note-b" in mcp.tool_trace["last_rejected_submission_error"]
+
+    complete = {**_valid_patch(), "note_dispositions": _dispositions("note-a", "note-b")}
+    result = mcp.submit_graph_patch({"graph_patch": complete})
+    assert result["accepted"] is True
+    assert mcp.graph_patch == complete
+    assert mcp.tool_trace["submit_graph_patch_calls"] == 1
+    assert mcp.tool_trace["submit_graph_patch_rejections"] == 1
+
+    # After acceptance, a repeat submission gets the terminal once-only error,
+    # not a coverage message inviting pointless repair.
+    with pytest.raises(GraphDraftingError, match="only once"):
+        mcp.submit_graph_patch({"graph_patch": incomplete})
+
+
+def test_submit_gate_rejects_missing_checklist_and_duplicates() -> None:
+    mcp = HarnessGraphDraftMCPServer(
+        executor=_FakeScopedExecutor(),
+        max_tool_calls=4,
+        expected_note_ids=("note-a",),
+    )
+    with pytest.raises(GraphDraftingError, match="missing the note_dispositions"):
+        mcp.submit_graph_patch({"graph_patch": _valid_patch()})
+
+    duplicated = {
+        **_valid_patch(),
+        "note_dispositions": _dispositions("note-a", "note-a"),
+    }
+    with pytest.raises(GraphDraftingError, match="duplicate"):
+        mcp.submit_graph_patch({"graph_patch": duplicated})
+
+
+def test_submit_gate_enforces_content_unavailable_honeypot() -> None:
+    # The server KNOWS the model could not have read an omitted note, so any
+    # disposition but insufficient_info on it is a machine-detectable lie.
+    mcp = HarnessGraphDraftMCPServer(
+        executor=_FakeScopedExecutor(),
+        max_tool_calls=4,
+        expected_note_ids=("note-a",),
+        content_unavailable_note_ids=frozenset({"note-a"}),
+    )
+    liar = {**_valid_patch(), "note_dispositions": _dispositions("note-a")}
+    with pytest.raises(GraphDraftingError, match="insufficient_info"):
+        mcp.submit_graph_patch({"graph_patch": liar})
+
+    honest = {
+        **_valid_patch(),
+        "note_dispositions": _dispositions("note-a", disposition="insufficient_info"),
+    }
+    assert mcp.submit_graph_patch({"graph_patch": honest})["accepted"] is True
+
+
+def test_submit_gate_rejects_client_refs_without_matching_operation() -> None:
+    mcp = HarnessGraphDraftMCPServer(
+        executor=_FakeScopedExecutor(),
+        max_tool_calls=4,
+        expected_note_ids=("note-a",),
+    )
+    entry = {
+        "note_id": "note-a",
+        "disposition": "proposed_change",
+        "reason": "produced the question below",
+        "evidence_quote": "",
+        "client_refs": ["q1"],
+    }
+    dangling = {**_valid_patch(), "note_dispositions": [entry]}
+    with pytest.raises(GraphDraftingError, match="no matching operation"):
+        mcp.submit_graph_patch({"graph_patch": dangling})
+
+    operation = {
+        "client_ref": "q1",
+        "op": "create",
+        "entity_type": "question",
+        "semantic_type": "suggest_new_question",
+        "target_entity_id": None,
+        "payload_json": "{}",
+        "rationale": "From note-a.",
+        "confidence": 0.7,
+        "source_refs": [],
+    }
+    linked = {
+        **_valid_patch(),
+        "operations": [operation],
+        "note_dispositions": [entry],
+    }
+    assert mcp.submit_graph_patch({"graph_patch": linked})["accepted"] is True

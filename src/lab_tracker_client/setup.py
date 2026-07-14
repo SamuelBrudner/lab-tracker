@@ -28,6 +28,7 @@ from lab_tracker_client.client import (
     DEFAULT_BASE_URL,
     LabTracker,
     LTValidationError,
+    access_token_from_env,
     connection_profile_path,
     load_connection_profile,
 )
@@ -35,7 +36,13 @@ from lab_tracker_client.hooks import HOOK_BLOCK_BEGIN, hook_path_for_repo
 
 JsonObject = dict[str, Any]
 
-PROFILE_KEYS = ("base_url", "default_project_id", "access_token")
+PROFILE_KEYS = (
+    "base_url",
+    "default_project_id",
+    "access_token",
+    "capture_host_label",
+    "default_capture_context_id",
+)
 _HEALTH_PROBE_TIMEOUT_SECONDS = 2.0
 
 _SCAFFOLD_FILES = (
@@ -54,6 +61,8 @@ def save_connection_profile(
     base_url: str | None = None,
     default_project_id: str | None = None,
     access_token: str | None = None,
+    capture_host_label: str | None = None,
+    default_capture_context_id: str | None = None,
     dry_run: bool = False,
 ) -> JsonObject:
     """Merge the provided values into the profile file and harden permissions.
@@ -69,6 +78,8 @@ def save_connection_profile(
         "base_url": base_url,
         "default_project_id": default_project_id,
         "access_token": access_token,
+        "capture_host_label": capture_host_label,
+        "default_capture_context_id": default_capture_context_id,
     }
     for key, value in updates.items():
         if value is not None and value.strip():
@@ -168,9 +179,9 @@ def setup_status(target: str | Path = ".", *, brief: bool = False) -> JsonObject
             "path": str(connection_profile_path()),
             "base_url": profile.get("base_url"),
             "default_project_id": profile.get("default_project_id"),
-            "has_token": bool(
-                os.getenv("LAB_TRACKER_ACCESS_TOKEN") or profile.get("access_token")
-            ),
+            "capture_host_label": profile.get("capture_host_label"),
+            "default_capture_context_id": profile.get("default_capture_context_id"),
+            "has_token": bool(access_token_from_env() or profile.get("access_token")),
         },
         "repo": _repo_status(root),
         "watch": _watch_status(root),
@@ -179,11 +190,19 @@ def setup_status(target: str | Path = ".", *, brief: bool = False) -> JsonObject
         "skills": _skills_status(),
         "installation": _installation_status(),
     }
+    payload["identity"] = identity_status(
+        base_url,
+        reachable=bool(payload["server"]["reachable"]),
+    )
+    _add_identity_warnings(payload)
     payload["suggestions"] = _suggestions(payload)
     if not brief:
         return payload
     suggestions = payload["suggestions"]
-    if suggestions:
+    warnings = payload.get("warnings") or []
+    if warnings:
+        brief_line = f"lab-tracker: warning -- {warnings[0]}"
+    elif suggestions:
         brief_line = (
             f"lab-tracker: {len(suggestions)} setup suggestion(s) — {suggestions[0]}"
         )
@@ -195,7 +214,88 @@ def setup_status(target: str | Path = ".", *, brief: bool = False) -> JsonObject
         "command": "setup-status",
         "brief": brief_line,
         "suggestions": suggestions,
+        "warnings": warnings,
     }
+
+
+def identity_status(base_url: str, *, reachable: bool | None = None) -> JsonObject:
+    """Resolve the current Lab Tracker user without making status commands fragile."""
+
+    if reachable is False:
+        return {
+            "available": False,
+            "base_url": base_url,
+            "reason": "server_unreachable",
+            "warnings": [],
+        }
+    client = LabTracker.from_env()
+    try:
+        response = client.whoami()
+    except Exception as exc:  # noqa: BLE001 - status must fail soft.
+        return {
+            "available": False,
+            "base_url": base_url,
+            "error": str(exc),
+            "warnings": [],
+        }
+    finally:
+        client.close()
+    data = response.get("data") if isinstance(response, dict) else None
+    meta = response.get("meta") if isinstance(response, dict) else None
+    data = data if isinstance(data, dict) else {}
+    meta = meta if isinstance(meta, dict) else {}
+    payload: JsonObject = {
+        "available": True,
+        "base_url": base_url,
+        "resolved_user": {
+            "user_id": data.get("user_id"),
+            "username": data.get("username"),
+            "role": data.get("role"),
+        },
+        "auth_enabled": meta.get("auth_enabled"),
+        "principal_type": meta.get("principal_type"),
+        "is_interactive": meta.get("is_interactive"),
+        "warnings": [],
+    }
+    service_token = meta.get("service_token")
+    if isinstance(service_token, dict):
+        payload["service_token"] = service_token
+    if meta.get("auth_enabled") is False:
+        payload["warnings"] = [
+            "Authentication is disabled on this Lab Tracker server; status can "
+            "resolve only the local tester identity, and scripted accept/commit "
+            "calls are not structurally distinguishable from a person."
+        ]
+    return payload
+
+
+def with_identity_status(payload: JsonObject) -> JsonObject:
+    """Attach the same fail-soft identity block used by setup status."""
+
+    profile = load_connection_profile()
+    base_url, _source = _resolve_base_url(profile)
+    payload["identity"] = identity_status(base_url, reachable=probe_health(base_url))
+    _add_identity_warnings(payload)
+    return payload
+
+
+def _add_identity_warnings(payload: JsonObject) -> None:
+    identity = payload.get("identity")
+    if not isinstance(identity, dict):
+        return
+    warnings = [
+        str(item)
+        for item in identity.get("warnings", [])
+        if str(item or "").strip()
+    ]
+    if not warnings:
+        return
+    existing = [
+        str(item)
+        for item in payload.get("warnings", [])
+        if str(item or "").strip()
+    ]
+    payload["warnings"] = existing + warnings
 
 
 def _suggestions(status: JsonObject) -> list[str]:
@@ -246,9 +346,14 @@ def _suggestions(status: JsonObject) -> list[str]:
             "The commit hook points at a missing lt executable; "
             "`lt hooks install --yes` re-records the current path."
         )
-    if skills.get("installed") and skills.get("up_to_date") is False:
+    if not skills.get("installed"):
         suggestions.append(
-            "The installed lab-tracker-setup skill is stale; "
+            "One or more Lab Tracker agent skills are missing; "
+            "`lt update --install-skills` installs them for Claude and Codex."
+        )
+    elif skills.get("up_to_date") is False:
+        suggestions.append(
+            "One or more installed Lab Tracker agent skills are stale; "
             "`lt update --install-skills` refreshes it."
         )
     # Installation problems (lt/lt-mcp not on PATH, a fragile venv install) are
@@ -259,26 +364,41 @@ def _suggestions(status: JsonObject) -> list[str]:
 
 
 def _skills_status() -> JsonObject:
-    from lab_tracker.cli import _setup_skill_path
+    from lab_tracker.cli import _full_skill_markdown, _full_skill_paths, _setup_skill_paths
     from lab_tracker.setup_guide import (
         setup_skill_markdown,
         skill_content_without_version_line,
     )
 
-    path = _setup_skill_path()
-    summary: JsonObject = {"path": str(path), "installed": path.exists()}
-    if summary["installed"]:
-        with suppress(Exception):
-            installed = path.read_text(encoding="utf-8")
-            generated = setup_skill_markdown()
-            # Staleness is a CONTENT verdict, mirroring doctor: a package
-            # bump with unchanged skill text must not cry wolf in every
-            # session's SessionStart hook. The raw version line stays
-            # informational.
-            summary["up_to_date"] = skill_content_without_version_line(
-                installed
-            ) == skill_content_without_version_line(generated)
-            summary["version_in_sync"] = installed == generated
+    expected = [
+        *((path, "lab-tracker", _full_skill_markdown()) for path in _full_skill_paths()),
+        *((path, "lab-tracker-setup", setup_skill_markdown()) for path in _setup_skill_paths()),
+    ]
+    targets: list[JsonObject] = []
+    for path, kind, generated in expected:
+        target: JsonObject = {
+            "kind": kind,
+            "path": str(path),
+            "installed": path.exists(),
+            "up_to_date": False,
+            "version_in_sync": False,
+        }
+        if path.exists():
+            with suppress(Exception):
+                installed = path.read_text(encoding="utf-8")
+                target["up_to_date"] = skill_content_without_version_line(
+                    installed
+                ) == skill_content_without_version_line(generated)
+                target["version_in_sync"] = installed == generated
+        targets.append(target)
+    primary_path = _setup_skill_paths()[0]
+    summary: JsonObject = {
+        "path": str(primary_path),
+        "targets": targets,
+        "installed": all(bool(target["installed"]) for target in targets),
+        "up_to_date": all(bool(target["up_to_date"]) for target in targets),
+        "version_in_sync": all(bool(target["version_in_sync"]) for target in targets),
+    }
     return summary
 
 

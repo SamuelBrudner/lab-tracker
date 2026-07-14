@@ -152,6 +152,8 @@ def configure_auth_middleware(app: FastAPI) -> None:
                     role=user.role,
                     principal_type=PrincipalType.DEVICE,
                     device_token_id=principal.device_token_id,
+                    device_token_label=principal.label,
+                    device_token_kind=principal.kind,
                 )
             elif token.startswith(LPAT_TOKEN_PREFIX):
                 pat_rate_key = _pat_rate_key(request, token)
@@ -183,6 +185,10 @@ def configure_auth_middleware(app: FastAPI) -> None:
                     user_id=principal.user_id,
                     role=principal.role,
                     principal_type=PrincipalType.SERVICE,
+                    service_token_id=principal.token_id,
+                    service_token_label=principal.label,
+                    service_token_read_only=principal.read_only,
+                    service_token_expires_at=principal.expires_at,
                 )
             else:
                 claims = await run_in_threadpool(

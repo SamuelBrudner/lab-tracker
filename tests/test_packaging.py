@@ -97,6 +97,28 @@ def test_docker_entrypoint_has_short_migration_retry_budget():
     assert "fix the migration or database before restarting the container" in entrypoint
 
 
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows PowerShell parser check")
+def test_daily_review_notifier_parses_in_windows_powershell():
+    repo_root = Path(__file__).resolve().parent.parent
+    script_path = repo_root / "scripts" / "daily-review-notify.ps1"
+    powershell = shutil.which("powershell.exe")
+    assert powershell is not None
+    escaped_path = str(script_path).replace("'", "''")
+    parser_command = (
+        "$tokens=$null; $errors=$null; "
+        "[System.Management.Automation.Language.Parser]::ParseFile("
+        f"'{escaped_path}', [ref]$tokens, [ref]$errors) | Out-Null; "
+        "if ($errors.Count) { $errors | ForEach-Object { $_.Message }; exit 1 }"
+    )
+
+    subprocess.run(
+        [powershell, "-NoProfile", "-Command", parser_command],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+
 def test_frontend_package_data_covers_all_bundle_files():
     repo_root = Path(__file__).resolve().parent.parent
     package_root = repo_root / "src" / "lab_tracker"

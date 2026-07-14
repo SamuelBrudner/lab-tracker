@@ -144,6 +144,7 @@ def test_consume_enrollment_is_public_and_single_use(
     issued = consume_first.json()["data"]
     assert issued["secret"].startswith("ldev_")
     assert issued["label"] == "iPhone"
+    assert issued["kind"] == "mobile"
 
     consume_again = client.post(
         "/auth/devices/consume",
@@ -179,11 +180,13 @@ def test_qr_paired_device_inherits_enrollment_creator_user_id(client: TestClient
     me = client.get("/auth/me", headers=_device_headers(device_secret))
     assert me.status_code == 200, me.text
     assert me.json()["data"]["user_id"] == owner_user_id
+    assert me.json()["meta"]["device_token"]["kind"] == "mobile"
 
     owner_devices = client.get("/auth/devices", headers=owner_headers)
     assert owner_devices.status_code == 200, owner_devices.text
     assert any(
         device["device_token_id"] == device_token_id
+        and device["kind"] == "mobile"
         for device in owner_devices.json()["data"]
     )
 
@@ -280,6 +283,85 @@ def test_device_token_can_post_captures(
         headers=_device_headers(secret),
     )
     assert quick.status_code == 202, quick.text
+
+
+def test_registered_computer_token_is_shown_once_and_captures_as_owner(
+    client: TestClient,
+):
+    owner_user_id, owner_headers = _register_user(client, username_prefix="computer-owner")
+    project_id = _create_project(client, owner_headers)
+
+    issued = client.post(
+        "/auth/devices",
+        json={"label": "Rig desktop", "kind": "computer"},
+        headers=owner_headers,
+    )
+    assert issued.status_code == 201, issued.text
+    payload = issued.json()["data"]
+    assert payload["secret"].startswith("ldev_")
+    assert payload["kind"] == "computer"
+    assert payload["label"] == "Rig desktop"
+
+    listed = client.get("/auth/devices", headers=owner_headers)
+    assert listed.status_code == 200, listed.text
+    listed_device = next(
+        item
+        for item in listed.json()["data"]
+        if item["device_token_id"] == payload["device_token_id"]
+    )
+    assert listed_device["kind"] == "computer"
+    assert "secret" not in listed_device
+
+    me = client.get("/auth/me", headers=_device_headers(payload["secret"]))
+    assert me.status_code == 200, me.text
+    assert me.json()["data"]["user_id"] == owner_user_id
+    assert me.json()["meta"]["device_token"] == {
+        "device_token_id": payload["device_token_id"],
+        "label": "Rig desktop",
+        "kind": "computer",
+    }
+
+    upload = client.post(
+        "/notes/upload-file",
+        data={"project_id": project_id},
+        files={"file": ("rig-log.txt", b"rig observation", "text/plain")},
+        headers=_device_headers(payload["secret"]),
+    )
+    assert upload.status_code == 201, upload.text
+    assert upload.json()["data"]["created_by_user_id"] == owner_user_id
+
+    forbidden_project = client.post(
+        "/projects",
+        json={"name": "Not from registered computer"},
+        headers=_device_headers(payload["secret"]),
+    )
+    assert forbidden_project.status_code == 403
+
+    forbidden_graph = client.post(
+        f"/notes/{upload.json()['data']['note_id']}/analysis-graph-drafts",
+        headers=_device_headers(payload["secret"]),
+    )
+    assert forbidden_graph.status_code == 403
+
+
+def test_register_computer_rejects_mobile_kind_and_device_callers(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+):
+    invalid_kind = client.post(
+        "/auth/devices",
+        json={"label": "Phone through wrong route", "kind": "mobile"},
+        headers=admin_auth_headers,
+    )
+    assert invalid_kind.status_code == 422
+
+    _, secret = _pair_device(client, admin_auth_headers)
+    from_device = client.post(
+        "/auth/devices",
+        json={"label": "Nested desktop", "kind": "computer"},
+        headers=_device_headers(secret),
+    )
+    assert from_device.status_code == 403
 
 
 def test_device_token_can_read_but_not_mutate_other_entities(

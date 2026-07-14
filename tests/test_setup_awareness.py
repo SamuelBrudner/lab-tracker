@@ -82,6 +82,7 @@ def test_mcp_surface_points_at_setup_guide() -> None:
 def test_install_skills_renders_refreshes_and_uninstalls(isolated_homes) -> None:
     repo = isolated_homes / "repo"
     skill_path = isolated_homes / "skills-home" / "lab-tracker-setup" / "SKILL.md"
+    full_skill_path = isolated_homes / "skills-home" / "lab-tracker" / "SKILL.md"
 
     result = init_consumer_repo(repo)
     assert not skill_path.exists()
@@ -89,6 +90,9 @@ def test_install_skills_renders_refreshes_and_uninstalls(isolated_homes) -> None
 
     init_consumer_repo(repo, install_skills=True)
     assert skill_path.read_text(encoding="utf-8") == setup_skill_markdown()
+    assert full_skill_path.read_text(encoding="utf-8") == Path(
+        "skills/lab-tracker/SKILL.md"
+    ).read_text(encoding="utf-8")
 
     # Refresh path: a stale copy is rewritten with the original backed up.
     skill_path.write_text("stale text", encoding="utf-8")
@@ -100,6 +104,35 @@ def test_install_skills_renders_refreshes_and_uninstalls(isolated_homes) -> None
     result = init_consumer_repo(repo, uninstall=True, install_skills=True)
     assert not skill_path.exists()
     assert any("SKILL.md" in str(path) for path in result.stripped)
+
+
+def test_install_skills_fans_out_to_claude_and_codex(isolated_homes, monkeypatch) -> None:
+    monkeypatch.delenv("LAB_TRACKER_SKILLS_HOME")
+    user_home = isolated_homes / "user-home"
+    monkeypatch.setattr(Path, "home", lambda: user_home)
+
+    init_consumer_repo(isolated_homes / "repo-fanout", install_skills=True)
+
+    for agent_home in (".claude", ".codex"):
+        skills = user_home / agent_home / "skills"
+        assert (skills / "lab-tracker" / "SKILL.md").exists()
+        assert (skills / "lab-tracker-setup" / "SKILL.md").exists()
+
+    status = setup_helpers._skills_status()
+    assert status["installed"] is True
+    assert status["up_to_date"] is True
+    assert len(status["targets"]) == 4
+
+    (user_home / ".codex" / "skills" / "lab-tracker" / "SKILL.md").unlink()
+    incomplete = setup_helpers._skills_status()
+    assert incomplete["installed"] is False
+    assert incomplete["up_to_date"] is False
+    assert any(
+        target["kind"] == "lab-tracker"
+        and ".codex" in target["path"]
+        and target["installed"] is False
+        for target in incomplete["targets"]
+    )
 
 
 def test_version_only_skill_difference_is_not_stale_and_never_churns_backups(
@@ -255,9 +288,10 @@ def test_status_suggestions_and_brief(isolated_homes, monkeypatch, capsys) -> No
 
     lt_cli.main(["setup", "status", "--target", str(repo), "--brief"])
     brief = json.loads(capsys.readouterr().out)
-    assert set(brief) == {"command", "brief", "suggestions"}
+    assert set(brief) == {"command", "brief", "suggestions", "warnings"}
     assert brief["brief"].startswith("lab-tracker:")
     assert "suggestion(s)" in brief["brief"]
+    assert isinstance(brief["warnings"], list)
 
 
 def test_status_brief_healthy_is_one_line(isolated_homes, monkeypatch, capsys) -> None:

@@ -8,6 +8,7 @@ from uuid import UUID
 from sqlalchemy import or_, select
 from sqlalchemy.orm import Session as OrmSession
 
+from lab_tracker.auth import Role
 from lab_tracker.db_models import (
     AnalysisModel,
     ClaimAnalysisModel,
@@ -26,6 +27,7 @@ from lab_tracker.db_types import ensure_uuid
 from lab_tracker.models import (
     AcquisitionOutput,
     Analysis,
+    CaptureContext,
     Claim,
     ClaimEdge,
     Dataset,
@@ -60,6 +62,7 @@ from .analyses import (
     SQLAlchemyClaimRepository,
     SQLAlchemyVisualizationRepository,
 )
+from .capture_contexts import SQLAlchemyCaptureContextRepository
 from .common import apply_pagination, substring_pattern, uuid_values
 from .core import (
     SQLAlchemyGroupMembershipRepository,
@@ -112,6 +115,7 @@ class SQLAlchemyLabTrackerRepository(LabTrackerRepository):
         self.questions = SQLAlchemyQuestionRepository(session)
         self.question_refactors = SQLAlchemyQuestionRefactorRepository(session)
         self.datasets = SQLAlchemyDatasetRepository(session)
+        self.capture_contexts = SQLAlchemyCaptureContextRepository(session)
         self.notes = SQLAlchemyNoteRepository(session)
         self.sessions = SQLAlchemySessionRepository(session)
         self.acquisition_outputs = SQLAlchemyAcquisitionOutputRepository(session)
@@ -136,6 +140,10 @@ class SQLAlchemyLabTrackerRepository(LabTrackerRepository):
 
     def user_exists(self, user_id: UUID) -> bool:
         return self._session.get(UserModel, str(user_id)) is not None
+
+    def user_role(self, user_id: UUID) -> Role | None:
+        row = self._session.get(UserModel, str(user_id))
+        return Role(row.role) if row is not None else None
 
     def fetch_questions(self, question_ids: list[UUID]) -> list[Question]:
         self._session.flush()
@@ -701,6 +709,23 @@ class SQLAlchemyLabTrackerRepository(LabTrackerRepository):
             limit=limit,
             offset=offset,
             recent_first=recent_first,
+        )
+
+    def query_capture_contexts(
+        self,
+        *,
+        project_id: UUID | None = None,
+        project_ids: set[UUID] | None = None,
+        include_revoked: bool = False,
+        limit: int | None = None,
+        offset: int = 0,
+    ) -> tuple[list[CaptureContext], int]:
+        return self.capture_contexts.query(
+            project_id=project_id,
+            project_ids=project_ids,
+            include_revoked=include_revoked,
+            limit=limit,
+            offset=offset,
         )
 
     def project_ids_with_search_matches(

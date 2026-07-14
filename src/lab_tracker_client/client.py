@@ -43,6 +43,11 @@ EvidenceNoteKey = tuple[str, str, str]
 DEFAULT_BASE_URL = "http://127.0.0.1:8000"
 DEFAULT_TIMEOUT_SECONDS = 15.0
 MAX_PAGE_SIZE = 200
+ACCESS_TOKEN_ENV_VARS = (
+    "LAB_TRACKER_ACCESS_TOKEN",
+    "LAB_TRACKER_MCP_API_KEY",
+    "LAB_TRACKER_MCP_TOKEN",
+)
 
 PROJECT_STATUS_VALUES = tuple(status.value for status in ProjectStatus)
 QUESTION_TYPE_VALUES = tuple(question_type.value for question_type in QuestionType)
@@ -88,6 +93,8 @@ CAPTURE_HOST_METADATA_KEYS = (
     "capture_platform",
 )
 
+CAPTURE_CONTEXT_ENV_VAR = "LAB_TRACKER_CAPTURE_CONTEXT_ID"
+
 
 def _install_id_path() -> Path:
     base = os.getenv("LAB_TRACKER_CONFIG_DIR")
@@ -121,6 +128,14 @@ def load_connection_profile() -> dict[str, str]:
     return {}
 
 
+def access_token_from_env() -> str | None:
+    for name in ACCESS_TOKEN_ENV_VARS:
+        value = os.getenv(name)
+        if value and value.strip():
+            return value.strip()
+    return None
+
+
 def _resolve_install_id() -> str:
     """Read or lazily create a stable per-install id; fail-soft to ""."""
     path = _install_id_path()
@@ -145,7 +160,10 @@ def capture_host_metadata() -> dict[str, NoteMetadataScalar]:
     """
 
     metadata: dict[str, NoteMetadataScalar] = {}
+    profile = load_connection_profile()
     label = os.getenv("LAB_TRACKER_CAPTURE_HOST", "").strip()
+    if not label:
+        label = profile.get("capture_host_label", "")
     if not label:
         with suppress(Exception):
             label = platform.node().strip()
@@ -266,6 +284,7 @@ class LabTracker:
         password: str | None = None,
         access_token: str | None = None,
         default_project_id: str | None = None,
+        default_capture_context_id: str | None = None,
         timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS,
         transport: httpx.BaseTransport | None = None,
     ) -> None:
@@ -273,6 +292,7 @@ class LabTracker:
         self.username = username
         self.password = password
         self.default_project_id = default_project_id
+        self.default_capture_context_id = default_capture_context_id
         self._access_token = access_token
         self._supplied_access_token = bool(access_token)
         self._client = httpx.Client(
@@ -306,9 +326,11 @@ class LabTracker:
             base_url=env_base_url or profile.get("base_url") or DEFAULT_BASE_URL,
             username=env_username,
             password=os.getenv("LAB_TRACKER_PASSWORD") or os.getenv("LAB_TRACKER_MCP_PASSWORD"),
-            access_token=os.getenv("LAB_TRACKER_ACCESS_TOKEN") or profile_token,
+            access_token=access_token_from_env() or profile_token,
             default_project_id=os.getenv("LAB_TRACKER_PROJECT_ID")
             or profile.get("default_project_id"),
+            default_capture_context_id=os.getenv(CAPTURE_CONTEXT_ENV_VAR)
+            or profile.get("default_capture_context_id"),
             timeout_seconds=float(
                 os.getenv("LAB_TRACKER_HTTP_TIMEOUT", str(DEFAULT_TIMEOUT_SECONDS))
             ),
@@ -329,6 +351,15 @@ class LabTracker:
 
     def health(self) -> JsonObject:
         return self._request("GET", "/health", authenticated=False)
+
+    def whoami(self) -> JsonObject:
+        return self._request("GET", "/auth/me")
+
+    def _capture_context_id(self, value: str | None = None) -> str | None:
+        resolved = value or self.default_capture_context_id
+        if resolved is None:
+            return None
+        return _require_non_empty(str(resolved), "capture_context_id")
 
     def readiness(self) -> JsonObject:
         return self._request("GET", "/readiness")
@@ -775,6 +806,7 @@ class LabTracker:
         metadata: Mapping[str, NoteMetadataScalar] | None = None,
         status: str = NoteStatus.COMMITTED.value,
         transcribed_text: str | None = None,
+        capture_context_id: str | None = None,
     ) -> LTRecord:
         marker = first_line_marker(content)
         if not marker:
@@ -798,18 +830,22 @@ class LabTracker:
                     f"explicitly. Marker: {marker!r}."
                 )
             return existing
+        payload: JsonObject = {
+            "project_id": str(project_id),
+            "raw_content": content,
+            "transcribed_text": transcribed_text,
+            "targets": resolved_targets,
+            "metadata": resolved_metadata,
+            "status": resolved_status,
+        }
+        resolved_capture_context_id = self._capture_context_id(capture_context_id)
+        if resolved_capture_context_id:
+            payload["capture_context_id"] = resolved_capture_context_id
         return self._data_record(
             self._request(
                 "POST",
                 "/notes",
-                json_payload={
-                    "project_id": str(project_id),
-                    "raw_content": content,
-                    "transcribed_text": transcribed_text,
-                    "targets": resolved_targets,
-                    "metadata": resolved_metadata,
-                    "status": resolved_status,
-                },
+                json_payload=payload,
             )
         )
 
@@ -823,6 +859,7 @@ class LabTracker:
         metadata: Mapping[str, NoteMetadataScalar] | None = None,
         source: str | None = None,
         client_capture_id: str | None = None,
+        capture_context_id: str | None = None,
     ) -> LTRecord:
         resolved_project_id = project_id or self.default_project_id
         if not resolved_project_id:
@@ -841,6 +878,9 @@ class LabTracker:
                 client_capture_id,
                 "client_capture_id",
             )
+        resolved_capture_context_id = self._capture_context_id(capture_context_id)
+        if resolved_capture_context_id:
+            data["capture_context_id"] = resolved_capture_context_id
         if resolved_metadata:
             data["metadata"] = json.dumps(resolved_metadata)
         return self._data_record(
@@ -862,6 +902,7 @@ class LabTracker:
         content_type: str | None = None,
         transcribed_text: str | None = None,
         client_capture_id: str | None = None,
+        capture_context_id: str | None = None,
     ) -> LTRecord:
         path = Path(file_path).expanduser()
         payload = _read_non_empty_file(
@@ -877,6 +918,7 @@ class LabTracker:
             content_type=content_type,
             transcribed_text=transcribed_text,
             client_capture_id=client_capture_id,
+            capture_context_id=capture_context_id,
         )
 
     def _upload_note_file_payload(
@@ -890,6 +932,7 @@ class LabTracker:
         content_type: str | None = None,
         transcribed_text: str | None = None,
         client_capture_id: str | None = None,
+        capture_context_id: str | None = None,
     ) -> LTRecord:
         note, _status_code = self._upload_note_file_payload_with_status(
             project_id=project_id,
@@ -900,6 +943,7 @@ class LabTracker:
             content_type=content_type,
             transcribed_text=transcribed_text,
             client_capture_id=client_capture_id,
+            capture_context_id=capture_context_id,
         )
         return note
 
@@ -914,6 +958,7 @@ class LabTracker:
         content_type: str | None = None,
         transcribed_text: str | None = None,
         client_capture_id: str | None = None,
+        capture_context_id: str | None = None,
     ) -> tuple[LTRecord, int]:
         if not payload:
             raise LTValidationError("file_path must point to a non-empty file.")
@@ -935,6 +980,9 @@ class LabTracker:
                 client_capture_id,
                 "client_capture_id",
             )
+        resolved_capture_context_id = self._capture_context_id(capture_context_id)
+        if resolved_capture_context_id:
+            data["capture_context_id"] = resolved_capture_context_id
         if resolved_metadata:
             data["metadata"] = json.dumps(resolved_metadata, sort_keys=True)
         if transcribed_text:
@@ -1414,6 +1462,10 @@ client = _LazyLabTrackerClient()
 
 def health() -> JsonObject:
     return client.health()
+
+
+def whoami() -> JsonObject:
+    return client.whoami()
 
 
 def readiness() -> JsonObject:

@@ -2,9 +2,16 @@ import * as React from "react";
 
 import { apiListRequest, apiRequest, buildApiPath } from "../shared/api.js";
 
-function UsersPage({ token, canManageUsers, setBusy, setFlash }) {
+function UsersPage({ token, canManageUsers, projects = [], setBusy, setFlash }) {
   const [inviteEmail, setInviteEmail] = React.useState("");
   const [inviteRole, setInviteRole] = React.useState("editor");
+  const [inviteProjectId, setInviteProjectId] = React.useState("");
+  const [inviteProjectRole, setInviteProjectRole] = React.useState("contributor");
+  const [inviteReviewEnabled, setInviteReviewEnabled] = React.useState(false);
+  const [inviteReviewTime, setInviteReviewTime] = React.useState("17:00");
+  const [inviteReviewTimezone, setInviteReviewTimezone] = React.useState(
+    "America/New_York"
+  );
   const [invitations, setInvitations] = React.useState([]);
   const [latestInvitation, setLatestInvitation] = React.useState(null);
   const [users, setUsers] = React.useState([]);
@@ -81,6 +88,20 @@ function UsersPage({ token, canManageUsers, setBusy, setFlash }) {
         body: {
           email: inviteEmail.trim(),
           role: inviteRole,
+          ...(inviteProjectId
+            ? {
+                project_id: inviteProjectId,
+                project_role: inviteProjectRole,
+                review_enabled: inviteReviewEnabled,
+                ...(inviteReviewEnabled
+                  ? {
+                      review_cadence_minutes: 1440,
+                      review_run_at_local_time: inviteReviewTime,
+                      review_timezone_name: inviteReviewTimezone,
+                    }
+                  : {}),
+              }
+            : {}),
         },
         method: "POST",
         token,
@@ -166,6 +187,67 @@ function UsersPage({ token, canManageUsers, setBusy, setFlash }) {
               <option value="admin">admin</option>
             </select>
           </label>
+          <label>
+            Project
+            <select
+              value={inviteProjectId}
+              onChange={(event) => {
+                setInviteProjectId(event.target.value);
+                if (!event.target.value) {
+                  setInviteReviewEnabled(false);
+                }
+              }}
+            >
+              <option value="">No project yet</option>
+              {projects.map((project) => (
+                <option key={project.project_id} value={project.project_id}>
+                  {project.name}
+                </option>
+              ))}
+            </select>
+          </label>
+          {inviteProjectId ? (
+            <>
+              <label>
+                Project role
+                <select
+                  value={inviteProjectRole}
+                  onChange={(event) => setInviteProjectRole(event.target.value)}
+                >
+                  <option value="contributor">contributor</option>
+                  <option value="viewer">viewer</option>
+                  <option value="owner">owner</option>
+                </select>
+              </label>
+              <label className="check-row">
+                <input
+                  type="checkbox"
+                  checked={inviteReviewEnabled}
+                  onChange={(event) => setInviteReviewEnabled(event.target.checked)}
+                />
+                Daily review
+              </label>
+              {inviteReviewEnabled ? (
+                <>
+                  <label>
+                    Review time
+                    <input
+                      type="time"
+                      value={inviteReviewTime}
+                      onChange={(event) => setInviteReviewTime(event.target.value)}
+                    />
+                  </label>
+                  <label>
+                    Timezone
+                    <input
+                      value={inviteReviewTimezone}
+                      onChange={(event) => setInviteReviewTimezone(event.target.value)}
+                    />
+                  </label>
+                </>
+              ) : null}
+            </>
+          ) : null}
           <button className="btn-primary">Create invite</button>
         </form>
         {latestInvitation ? (
@@ -173,6 +255,14 @@ function UsersPage({ token, canManageUsers, setBusy, setFlash }) {
             <div>
               <strong>{latestInvitation.email}</strong>
               <p className="subtle">Role: {latestInvitation.role}</p>
+              {latestInvitation.project_role ? (
+                <p className="subtle">
+                  Project: {latestInvitation.project_role}
+                  {latestInvitation.review_enabled
+                    ? ` · daily at ${latestInvitation.review_run_at_local_time} (${latestInvitation.review_timezone_name})`
+                    : ""}
+                </p>
+              ) : null}
             </div>
             {latestInvitation.warning ? (
               <p className="warn">{latestInvitation.warning}</p>

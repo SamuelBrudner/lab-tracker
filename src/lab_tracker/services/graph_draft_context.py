@@ -32,7 +32,12 @@ from lab_tracker.services.note_service import NoteService
 from lab_tracker.services.project_service import ProjectService
 from lab_tracker.services.question_service import QuestionService
 from lab_tracker.services.session_service import SessionService
-from lab_tracker.services.shared import is_meeting_note, is_sensitive_note, omit_safe_metadata
+from lab_tracker.services.shared import (
+    is_meeting_note,
+    is_sensitive_note,
+    model_safe_metadata,
+    omit_safe_metadata,
+)
 from lab_tracker.services.visualization_service import VisualizationService
 
 EntityResult = (
@@ -156,6 +161,9 @@ class GraphContextBuilder:
             "mode": "graph_batch",
             "batch_window": _batch_window(window, batch_notes),
             "current_user": _compact_actor(actor),
+            # The explicit per-note checklist: the drafter must emit exactly one
+            # note_dispositions entry for each of these ids (lab-tracker-hymd).
+            "note_ids_requiring_disposition": [str(n.note_id) for n in batch_notes],
             "batch_notes": [
                 _compact_note(
                     item,
@@ -684,7 +692,7 @@ def _compact_note(
                 {"entity_type": target.entity_type.value, "entity_id": str(target.entity_id)}
                 for target in note.targets
             ],
-            "metadata": omit_safe_metadata(note.metadata),
+            "metadata": model_safe_metadata(omit_safe_metadata(note.metadata)),
             "is_meeting": is_meeting_note(note),
             "sensitive_content_omitted": True,
         }
@@ -705,7 +713,7 @@ def _compact_note(
             {"entity_type": target.entity_type.value, "entity_id": str(target.entity_id)}
             for target in note.targets
         ],
-        "metadata": dict(note.metadata),
+        "metadata": model_safe_metadata(note.metadata),
         "is_meeting": is_meeting_note(note),
     }
     if sensitive_redacted:
@@ -761,7 +769,7 @@ def _source_artifact_packet(
             "project_id": str(note.project_id),
             "created_at": note.created_at.isoformat(),
             "status": note.status.value,
-            "metadata": omit_safe_metadata(note.metadata),
+            "metadata": model_safe_metadata(omit_safe_metadata(note.metadata)),
             "is_meeting": is_meeting_note(note),
             "sensitive_content_omitted": True,
         }
@@ -772,7 +780,7 @@ def _source_artifact_packet(
         "project_id": str(note.project_id),
         "created_at": note.created_at.isoformat(),
         "status": note.status.value,
-        "metadata": dict(note.metadata),
+        "metadata": model_safe_metadata(note.metadata),
         "is_meeting": is_meeting_note(note),
         "targets": [
             {"entity_type": target.entity_type.value, "entity_id": str(target.entity_id)}

@@ -42,7 +42,8 @@ import { apiListRequest, apiRequest, buildApiPath } from "./shared/api.js";
 function App() {
   const { navigate, replace, route } = useAppRoute();
   const isHomeRoute = route.kind === "home";
-  const needsProjectData = isHomeRoute || route.kind === "capture" || route.kind === "batches";
+  const needsProjectData =
+    isHomeRoute || route.kind === "capture" || route.kind === "batches" || route.kind === "devices";
   const [busy, setBusy] = React.useState(false);
   const [message, setMessage] = React.useState("");
   const [error, setError] = React.useState("");
@@ -394,6 +395,11 @@ function App() {
             <DevicesPage
               token={auth.token}
               canWrite={Boolean(auth.user)}
+              projects={workspaceData.projects}
+              selectedProjectId={workspaceData.selectedProjectId}
+              questions={workspaceData.questions}
+              datasets={workspaceData.datasets}
+              sessions={sessionData.sessions}
               navigate={navigate}
               setFlash={setFlash}
             />
@@ -414,6 +420,7 @@ function App() {
             <UsersPage
               token={auth.token}
               canManageUsers={auth.user?.role === "admin"}
+              projects={workspaceData.projects}
               setBusy={setBusy}
               setFlash={setFlash}
             />

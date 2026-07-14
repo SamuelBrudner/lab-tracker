@@ -12,7 +12,7 @@ from typing import Any
 from uuid import UUID, uuid4
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from lab_tracker.auth import AuthContext
+from lab_tracker.auth import AuthContext, PrincipalType
 from lab_tracker.errors import AuthError, NotFoundError, ValidationError
 from lab_tracker.graph_drafting import (
     ANALYSIS_PROMPT_VERSION,
@@ -53,7 +53,13 @@ from lab_tracker.services.graph_draft_context import (
 )
 from lab_tracker.services.graph_draft_github_reads import GitHubRepositoryReader
 from lab_tracker.services.graph_draft_read_tools import ScopedGraphDraftReadToolExecutor
-from lab_tracker.services.graph_draft_validation import GraphPatchValidator, string_list
+from lab_tracker.services.graph_draft_validation import (
+    GraphPatchCoverageError,
+    GraphPatchValidator,
+    note_disposition_expectations,
+    string_list,
+    validate_note_disposition_coverage,
+)
 from lab_tracker.services.note_service import NoteService
 from lab_tracker.services.project_authorization import ProjectAuthorizationPolicy
 from lab_tracker.services.project_service import ProjectService
@@ -100,6 +106,7 @@ class RevisionInputs:
 class BatchReviewer:
     reviewer: str | None
     reviewer_user_id: UUID | None
+    skip_reason: str | None = None
 
 
 _BATCH_NOTE_LIMIT = 100
@@ -407,16 +414,28 @@ class GraphDraftService(BaseService):
             if getattr(draft_client, "_disable_batch_retries", False)
             else max(1, max_attempts)
         )
+        expected_note_ids, content_unavailable_note_ids = note_disposition_expectations(
+            context_packet
+        )
         last_error: GraphDraftingError | None = None
         graph_patch: dict[str, Any] | None = None
         tool_trace: dict[str, Any] | None = None
+        attempt_hint = cleaned_hint
         for attempt in range(1, attempts + 1):
             try:
                 draft_result = draft_client.draft_from_batch(
                     batch_context=context_packet,
-                    user_hint=cleaned_hint,
+                    user_hint=attempt_hint,
                 )
                 graph_patch, tool_trace = _batch_draft_result_parts(draft_result)
+                # Coverage gate (lab-tracker-hymd.2): raised here, inside the
+                # retry loop, so a violation gets a targeted repair attempt
+                # rather than the terminal stage-2 validation failure.
+                validate_note_disposition_coverage(
+                    graph_patch,
+                    expected_note_ids=expected_note_ids,
+                    content_unavailable_note_ids=content_unavailable_note_ids,
+                )
                 if tool_trace:
                     context_packet["agentic_tool_trace"] = tool_trace
                     change_set.context_packet = context_packet
@@ -425,12 +444,23 @@ class GraphDraftService(BaseService):
                 last_error = exc
                 if attempt >= attempts:
                     error_metadata = {
-                        "category": "model_error",
+                        "category": (
+                            "coverage_error"
+                            if isinstance(exc, GraphPatchCoverageError)
+                            else "model_error"
+                        ),
                         "message": str(exc),
                         "attempts": attempt,
                         "input_snapshot": _batch_input_snapshot(context_packet),
                     }
+                    if isinstance(exc, GraphPatchCoverageError):
+                        error_metadata.update(exc.details)
                     error_tool_trace = _tool_trace_from_error(exc)
+                    if error_tool_trace is None and isinstance(exc, GraphPatchCoverageError):
+                        # A coverage error is raised right after the attempt's
+                        # parts were extracted, so the local trace belongs to
+                        # the failing attempt — keep the read audit trail.
+                        error_tool_trace = tool_trace
                     if error_tool_trace:
                         error_metadata["agentic_tool_trace"] = error_tool_trace
                     change_set.status = GraphChangeSetStatus.FAILED
@@ -438,6 +468,13 @@ class GraphDraftService(BaseService):
                     change_set.updated_at = utc_now()
                     self._save_graph_change_set(change_set)
                     return change_set
+                if isinstance(exc, GraphPatchCoverageError):
+                    attempt_hint = _coverage_repair_hint(cleaned_hint, exc)
+                else:
+                    # A non-coverage failure invalidates any earlier repair
+                    # hint: the claim "your previous attempt violated the
+                    # contract" would be stale.
+                    attempt_hint = cleaned_hint
                 if retry_backoff_seconds > 0:
                     time.sleep(retry_backoff_seconds * attempt)
         else:
@@ -461,9 +498,18 @@ class GraphDraftService(BaseService):
         try:
             if graph_patch is None:
                 raise GraphDraftingError("Model did not return a patch.")
-            self.patch_validator.validate_top_level(graph_patch)
+            self.patch_validator.validate_top_level(graph_patch, require_note_dispositions=True)
             operations = self.patch_validator.operations_from_graph_patch(change_set, graph_patch)
-            _attach_batch_source_traceability(operations, note_ids)
+            agent_dispositions = [
+                dict(entry)
+                for entry in graph_patch.get("note_dispositions") or []
+                if isinstance(entry, dict)
+            ]
+            _attach_batch_source_traceability(
+                operations,
+                presented_note_ids=expected_note_ids,
+                note_dispositions=agent_dispositions,
+            )
         except GraphDraftingError as exc:
             error_metadata = {
                 "category": "validation_error",
@@ -483,6 +529,22 @@ class GraphDraftService(BaseService):
         change_set.summary = str(graph_patch.get("summary") or "")
         change_set.uncertain_fields = string_list(graph_patch.get("uncertain_fields"))
         change_set.clarification_requests = string_list(graph_patch.get("clarification_requests"))
+        # The persisted ledger: agent-attested entries for presented notes plus
+        # server-generated rows for notes dropped before drafting. Notes the
+        # system never showed the model are a system-attributed gap, distinct
+        # from a coverage violation, and are never blamed on the agent.
+        presented = set(expected_note_ids)
+        change_set.note_dispositions = agent_dispositions + [
+            {
+                "note_id": str(note_id),
+                "disposition": "not_presented",
+                "reason": "truncated from context packet before drafting",
+                "evidence_quote": "",
+                "client_refs": [],
+            }
+            for note_id in note_ids
+            if str(note_id) not in presented
+        ]
         change_set.status = GraphChangeSetStatus.READY
         change_set.error_metadata = {}
         change_set.updated_at = utc_now()
@@ -582,6 +644,8 @@ class GraphDraftService(BaseService):
             self.authorization.require_owner(project_id, actor=actor)
         else:
             self.authorization.require_contributor(project_id, actor=actor)
+        if user_id is not None:
+            self._ensure_review_assignee_can_read_project(project_id, user_id)
         settings = self.repository.get_graph_draft_batch_settings_by_project(
             project_id,
             user_id=user_id,
@@ -620,6 +684,40 @@ class GraphDraftService(BaseService):
         with self.unit_of_work() as repository:
             repository.graph_draft_batch_settings.save(settings)
         return settings
+
+    def _ensure_review_assignee_can_read_project(
+        self,
+        project_id: UUID,
+        user_id: UUID,
+    ) -> None:
+        skip_reason = self._reviewer_access_skip_reason(project_id, user_id)
+        if skip_reason is not None:
+            raise ValidationError(skip_reason)
+
+    def _reviewer_access_skip_reason(
+        self,
+        project_id: UUID,
+        user_id: UUID | None,
+    ) -> str | None:
+        if user_id is None:
+            return None
+        role = self.repository.user_role(user_id)
+        if role is None:
+            return "Graph draft reviewer user does not exist."
+        reviewer_actor = AuthContext(
+            user_id=user_id,
+            role=role,
+            principal_type=PrincipalType.USER,
+        )
+        try:
+            accessible_project_ids = self.authorization.accessible_project_ids(
+                reviewer_actor
+            )
+        except AuthError as exc:
+            return str(exc)
+        if accessible_project_ids is not None and project_id not in accessible_project_ids:
+            return "Graph draft reviewer cannot read the batch project."
+        return None
 
     def run_graph_draft_batch_for_project(
         self,
@@ -1053,7 +1151,16 @@ class GraphDraftService(BaseService):
             for reviewer in reviewers:
                 draft_client = None
                 try:
-                    if enqueue:
+                    if reviewer.skip_reason:
+                        run = self._record_skipped_scheduled_batch_run(
+                            batch_settings.project_id,
+                            window_end=current_time,
+                            reason=reviewer.skip_reason,
+                            actor=actor,
+                            review_assignee=reviewer.reviewer,
+                            review_assignee_user_id=reviewer.reviewer_user_id,
+                        )
+                    elif enqueue:
                         run = self.enqueue_graph_draft_batch_for_project(
                             batch_settings.project_id,
                             until=current_time,
@@ -1153,11 +1260,23 @@ class GraphDraftService(BaseService):
                 reviewer=str(settings.user_id),
                 reviewer_user_id=settings.user_id,
             )
+            skip_reason = self._reviewer_access_skip_reason(
+                settings.project_id,
+                settings.user_id,
+            )
             if any(
                 _note_matches_reviewer(note, reviewer)
                 and note_is_new_for_reviewer(note, reviewer)
                 for note in staged_notes
             ):
+                if skip_reason:
+                    return [
+                        BatchReviewer(
+                            reviewer=reviewer.reviewer,
+                            reviewer_user_id=reviewer.reviewer_user_id,
+                            skip_reason=skip_reason,
+                        )
+                    ]
                 return [reviewer]
             return []
         explicit_user_ids = {
@@ -1168,6 +1287,7 @@ class GraphDraftService(BaseService):
             if row.user_id is not None
         }
         reviewers: dict[tuple[str | None, UUID | None], BatchReviewer] = {}
+        skip_reason_by_user: dict[UUID | None, str | None] = {}
         for note in staged_notes:
             if note.created_by_user_id is not None and note.created_by_user_id in explicit_user_ids:
                 continue
@@ -1176,6 +1296,20 @@ class GraphDraftService(BaseService):
                 continue
             if not note_is_new_for_reviewer(note, reviewer):
                 continue
+            if reviewer.reviewer_user_id not in skip_reason_by_user:
+                skip_reason_by_user[reviewer.reviewer_user_id] = (
+                    self._reviewer_access_skip_reason(
+                        settings.project_id,
+                        reviewer.reviewer_user_id,
+                    )
+                )
+            skip_reason = skip_reason_by_user[reviewer.reviewer_user_id]
+            if skip_reason:
+                reviewer = BatchReviewer(
+                    reviewer=reviewer.reviewer,
+                    reviewer_user_id=reviewer.reviewer_user_id,
+                    skip_reason=skip_reason,
+                )
             reviewers[(reviewer.reviewer, reviewer.reviewer_user_id)] = reviewer
         return [
             reviewers[key]
@@ -1184,6 +1318,59 @@ class GraphDraftService(BaseService):
                 key=lambda item: (str(item[1] or ""), str(item[0] or "")),
             )
         ]
+
+    def _record_skipped_scheduled_batch_run(
+        self,
+        project_id: UUID,
+        *,
+        window_end: datetime,
+        reason: str,
+        actor: AuthContext | None,
+        review_assignee: str | None = None,
+        review_assignee_user_id: UUID | None = None,
+    ) -> GraphDraftBatchRun:
+        latest_success = self.repository.latest_successful_graph_draft_batch_run(
+            project_id,
+            review_assignee_user_id=review_assignee_user_id,
+            review_assignee=review_assignee,
+        )
+        window_start = _as_utc(
+            latest_success.window_end if latest_success is not None else datetime(1970, 1, 1)
+        )
+        finished_at = utc_now()
+        run = GraphDraftBatchRun(
+            run_id=uuid4(),
+            project_id=project_id,
+            trigger=GraphDraftBatchTrigger.SCHEDULED,
+            status=GraphDraftBatchRunStatus.SKIPPED,
+            window_start=window_start,
+            window_end=window_end,
+            note_count=0,
+            batch_key=_batch_key(
+                project_id=project_id,
+                since=window_start,
+                until=window_end,
+                note_ids=[],
+                review_assignee=review_assignee,
+                review_assignee_user_id=review_assignee_user_id,
+            ),
+            summary="Scheduled batch draft skipped because the reviewer is unavailable.",
+            error_metadata={
+                "category": "reviewer_unavailable",
+                "message": reason,
+            },
+            created_by=actor_user_id(actor),
+            created_by_user_id=actor_user_fk(actor, self.repository),
+            created_at=finished_at,
+            updated_at=finished_at,
+            started_at=finished_at,
+            finished_at=finished_at,
+            review_assignee=review_assignee,
+            review_assignee_user_id=review_assignee_user_id,
+        )
+        with self.unit_of_work() as repository:
+            repository.graph_draft_batch_runs.save(run)
+        return run
 
     def _record_failed_scheduled_batch_run(
         self,
@@ -2107,18 +2294,48 @@ def _tool_trace_from_error(error: GraphDraftingError) -> dict[str, Any] | None:
     return trace if isinstance(trace, dict) else None
 
 
+def _coverage_repair_hint(base_hint: str | None, error: GraphPatchCoverageError) -> str:
+    repair = (
+        "Your previous attempt violated the note_dispositions coverage contract: "
+        f"{error} Emit exactly one note_dispositions entry for every id in the "
+        "packet's note_ids_requiring_disposition array -- no omissions, extras, "
+        "or duplicates."
+    )
+    return f"{base_hint}\n\n{repair}" if base_hint else repair
+
+
 def _attach_batch_source_traceability(
     operations: list[GraphChangeOperation],
-    note_ids: list[UUID],
+    *,
+    presented_note_ids: list[str],
+    note_dispositions: list[dict[str, Any]],
 ) -> None:
-    note_id_strings = [str(note_id) for note_id in note_ids]
-    fallback_ref = {
-        "label": "batch source notes",
-        "quote": "",
-        "region": None,
-        "source_note_ids": note_id_strings,
-    }
+    """Attach per-operation source-note provenance.
+
+    Operations cited by a disposition's client_refs get exactly the note ids
+    that produced them; everything else falls back to the notes actually
+    presented to the model — never to notes dropped before drafting.
+    """
+    ref_to_note_ids: dict[str, list[str]] = {}
+    for entry in note_dispositions:
+        note_id = str(entry.get("note_id") or "")
+        if not note_id:
+            continue
+        for ref in entry.get("client_refs") or []:
+            if isinstance(ref, str) and ref:
+                citing_notes = ref_to_note_ids.setdefault(ref, [])
+                if note_id not in citing_notes:
+                    citing_notes.append(note_id)
+    fallback_note_ids = [str(note_id) for note_id in presented_note_ids]
     for operation in operations:
+        cited = ref_to_note_ids.get(operation.client_ref or "")
+        source_note_ids = cited or fallback_note_ids
+        fallback_ref = {
+            "label": "batch source notes",
+            "quote": "",
+            "region": None,
+            "source_note_ids": source_note_ids,
+        }
         if not operation.source_refs:
             operation.source_refs = [dict(fallback_ref)]
             continue
@@ -2128,7 +2345,7 @@ def _attach_batch_source_traceability(
             if not any(
                 key in next_ref for key in ("note_id", "source_note_id", "source_note_ids")
             ):
-                next_ref["source_note_ids"] = note_id_strings
+                next_ref["source_note_ids"] = source_note_ids
             next_refs.append(next_ref)
         operation.source_refs = next_refs
 

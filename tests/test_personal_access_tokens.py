@@ -187,7 +187,7 @@ def test_service_principal_policy_is_read_only_by_default():
     assert service_principal_can_access(
         "GET", "/projects", read_only=True, role=Role.VIEWER
     )
-    assert not service_principal_can_access(
+    assert service_principal_can_access(
         "GET", "/auth/me", read_only=True, role=Role.ADMIN
     )
     assert not service_principal_can_access(

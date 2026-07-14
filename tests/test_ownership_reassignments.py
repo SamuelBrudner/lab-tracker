@@ -205,6 +205,8 @@ def test_ownership_reassignment_moves_all_attribution_surfaces():
                 created_at=now,
                 updated_at=now,
                 started_at=now,
+                review_assignee=from_user,
+                review_assignee_user_id=from_user,
             ),
         ]
     )
@@ -262,6 +264,8 @@ def test_ownership_reassignment_moves_all_attribution_surfaces():
                 created_by_user_id=from_user,
                 created_at=now,
                 updated_at=now,
+                review_assignee=from_user,
+                review_assignee_user_id=from_user,
             ),
             SessionModel(
                 session_id=str(session_id),
@@ -362,7 +366,9 @@ def test_ownership_reassignment_moves_all_attribution_surfaces():
         "claims": 1,
         "visualizations": 1,
         "graph_change_sets": 1,
+        "graph_change_sets_review_assignee": 1,
         "graph_draft_batch_runs": 1,
+        "graph_draft_batch_runs_review_assignee": 1,
         "sessions": 1,
         "goals": 1,
         "goal_links": 1,
@@ -374,7 +380,7 @@ def test_ownership_reassignment_moves_all_attribution_surfaces():
     assert reassignment.to_user_id == to_user_id
     assert reassignment.reason == "trainee graduated"
     assert reassignment.record_counts == expected_counts
-    assert reassignment.total_records == 16
+    assert reassignment.total_records == 18
     assert reassignment.created_by == str(admin_user_id)
     assert reassignment.created_by_user_id == admin_user_id
 
@@ -406,6 +412,15 @@ def test_ownership_reassignment_moves_all_attribution_surfaces():
     assert analysis is not None
     assert analysis.executed_by == to_user
     assert str(analysis.executed_by_user_id) == to_user
+
+    change_set = session.get(GraphChangeSetModel, str(change_set_id))
+    assert change_set is not None
+    assert change_set.review_assignee == to_user
+    assert str(change_set.review_assignee_user_id) == to_user
+    batch_run = session.get(GraphDraftBatchRunModel, str(batch_run_id))
+    assert batch_run is not None
+    assert batch_run.review_assignee == to_user
+    assert str(batch_run.review_assignee_user_id) == to_user
 
 
 def test_ownership_reassignment_route_records_audit_and_requires_admin(

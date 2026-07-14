@@ -68,13 +68,18 @@ and the generated `.mcp.json` uses the portable `lt-mcp` command instead of a
 workstation-specific Python path.
 
 After upgrading the installed package, run `lt update` inside a consumer repo to
-refresh everything to the new version in one step: managed prompt blocks are
+refresh everything to the new version in one step. On a workstation with several
+enrolled repos, use `lt update --all --yes --install-skills` to refresh every
+registered repo plus the Claude and Codex global skills. Managed prompt blocks are
 re-rendered in place (consent decisions preserved; add missing conventions
 blocks with `--yes`), and scaffolded files (`.claude/settings.json` hooks,
 `.mcp.json`, `.cursor/mcp.json`, `scripts/lt.py`, `AGENTS.lt.md`) are rewritten
 to the current canonical text with any customised previous file kept next to it
 as `*.bak-lt-update`. `lt_ids.json` is never touched. Use `--dry-run` to preview
 and `lt doctor` to confirm the repo is in sync afterwards.
+
+Restart or open a fresh agent task after updating: instruction files and skills
+are loaded at task startup, so an already-running agent may retain older text.
 
 Choose the narrowest consumer-side capture adapter that matches the source:
 `lt watch` for non-HPC folders or workflow-written manifests, `lt hpc` for
@@ -83,6 +88,27 @@ and `lt repo` / managed hooks for commit or run-finish evidence from analysis
 repos. Large outputs should stay external as pointers, hashes, summaries, or log
 excerpts; proposed graph meaning still flows through staged notes and
 human-gated review.
+
+## Consumer Artifact Capture
+
+When editing research code that already writes a regular-file result, prefer
+`lab_tracker_client.save_artifact(...)` at the existing write boundary. It
+leaves the file where the code intended, stages a bounded evidence note, and
+records exact producer metadata for the external call site: source file, line,
+symbol, source-region hash, repository HEAD as the base commit, and dirty state.
+`savefig(...)` is the figure-specialized form. Do not invent a new analysis,
+plot, or output solely to create something for Lab Tracker.
+
+Use `capture(...)` or `capture_figures(...)` when a bounded context may write
+several matching files. Scan-discovered files carry honest `capture_scope_*`
+metadata for the enclosing `with` statement; use
+`CaptureContext.save_artifact(...)` inside the context when an individual write
+needs exact producer attribution. Directory stores and unbounded output trees
+belong on `lt watch`.
+
+These paths create staged evidence notes only. They do not create canonical
+Dataset, Analysis, Claim, or Visualization records; a person assigns graph
+meaning during review.
 
 For substantive, rerunnable notes, prefer `lab_tracker_client.LabTracker` or
 the generated `scripts.lt.upsert_note(...)`. Notes are idempotent by the first
@@ -289,6 +315,7 @@ List/search endpoints use `limit` between 1 and 200 and `offset` of 0 or greater
 
 #### Notes: `NoteCreate`
 - Required: `project_id`, `raw_content`
+- `capture_context_id` (optional): string(uuid) | null
 - `client_capture_id` (optional): string | null
 - `metadata` (optional): object | null
 - `project_id` (required): string(uuid)
@@ -376,6 +403,23 @@ List/search endpoints use `limit` between 1 and 200 and `offset` of 0 or greater
 - `task_kind` (required): string; min length 1
 - `until` (optional): string(date-time) | null
 - `visualization_id` (optional): string(uuid) | null
+
+#### Capture Contexts: `CaptureContextCreate`
+- Required: `project_id`, `label`
+- `default_hint` (optional): string; max length 500 | null
+- `default_targets` (optional): list[object] | null
+- `label` (required): string; min length 1, max length 150
+- `place_label` (optional): string; max length 150 | null
+- `project_id` (required): string(uuid)
+- `site_label` (optional): string; max length 150 | null
+
+#### Capture Context Updates: `CaptureContextUpdate`
+- Required: none
+- `default_hint` (optional): string; max length 500 | null
+- `default_targets` (optional): list[object] | null
+- `label` (optional): string; min length 1, max length 150 | null
+- `place_label` (optional): string; max length 150 | null
+- `site_label` (optional): string; max length 150 | null
 
 ### List/Search Query Parameters
 
@@ -468,6 +512,12 @@ List/search endpoints use `limit` between 1 and 200 and `offset` of 0 or greater
 - `project_id` (optional): string(uuid) | null
 - `status` (optional): GraphChangeSetStatus enum: drafting, ready, submitted, changes_requested, committing, rejected, failed, committed | null
 - `source_note_id` (optional): string(uuid) | null
+- `limit` (optional): integer; default 50; maximum 200 from shared route validation
+- `offset` (optional): integer; default 0; minimum 0 from shared route validation
+
+#### `GET /capture-contexts`
+- `project_id` (optional): string(uuid) | null
+- `include_revoked` (optional): boolean; default False
 - `limit` (optional): integer; default 50; maximum 200 from shared route validation
 - `offset` (optional): integer; default 0; minimum 0 from shared route validation
 

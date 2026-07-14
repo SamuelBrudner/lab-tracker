@@ -23,6 +23,7 @@ from lab_tracker.services.publication_readiness_service import PublicationReadin
 from lab_tracker.services.shared import (
     SENSITIVE_NOTE_VALUE,
     SENSITIVITY_METADATA_KEY,
+    model_safe_metadata,
     omit_safe_metadata,
 )
 
@@ -620,6 +621,9 @@ def _scrub_sensitive_notes(value: Any, *, policy: str) -> Any:
         return value
     scrubbed = {key: _scrub_sensitive_notes(item, policy=policy) for key, item in value.items()}
     metadata = scrubbed.get("metadata")
+    if isinstance(metadata, dict) and _looks_like_note_payload(scrubbed):
+        metadata = model_safe_metadata(metadata)
+        scrubbed["metadata"] = metadata
     is_sensitive = (
         isinstance(metadata, dict)
         and metadata.get(SENSITIVITY_METADATA_KEY) == SENSITIVE_NOTE_VALUE
@@ -631,7 +635,11 @@ def _scrub_sensitive_notes(value: Any, *, policy: str) -> Any:
         return {
             "note_id": scrubbed.get("note_id") or scrubbed.get("id"),
             "project_id": scrubbed.get("project_id"),
-            "metadata": omit_safe_metadata(metadata) if isinstance(metadata, dict) else metadata,
+            "metadata": (
+                model_safe_metadata(omit_safe_metadata(metadata))
+                if isinstance(metadata, dict)
+                else metadata
+            ),
             "sensitive_content_omitted": True,
         }
     for field in (

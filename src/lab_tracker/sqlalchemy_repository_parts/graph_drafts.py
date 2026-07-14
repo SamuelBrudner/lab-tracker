@@ -138,6 +138,7 @@ def change_set_to_model(change_set: GraphChangeSet) -> GraphChangeSetModel:
         summary=change_set.summary,
         uncertain_fields=list(change_set.uncertain_fields),
         clarification_requests=list(change_set.clarification_requests),
+        note_dispositions=list(change_set.note_dispositions),
         status=change_set.status.value,
         commit_message=change_set.commit_message,
         error_metadata=dict(change_set.error_metadata),
@@ -175,6 +176,7 @@ def apply_change_set_to_model(row: GraphChangeSetModel, change_set: GraphChangeS
     row.summary = change_set.summary
     row.uncertain_fields = list(change_set.uncertain_fields)
     row.clarification_requests = list(change_set.clarification_requests)
+    row.note_dispositions = list(change_set.note_dispositions)
     row.status = change_set.status.value
     row.commit_message = change_set.commit_message
     row.error_metadata = dict(change_set.error_metadata)
@@ -223,6 +225,7 @@ def change_set_from_model(
         summary=row.summary or "",
         uncertain_fields=list(row.uncertain_fields or []),
         clarification_requests=list(row.clarification_requests or []),
+        note_dispositions=list(row.note_dispositions or []),
         status=GraphChangeSetStatus(row.status),
         commit_message=row.commit_message,
         error_metadata=_dict(row.error_metadata),

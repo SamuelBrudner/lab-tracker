@@ -2,7 +2,9 @@
 
 Key Lab Tracker idioms include first-line note markers for idempotent notes,
 EntityRef note targets, project ids loaded from lt_ids.json, content-hash
-evidence imports, and fail-soft figure capture with savefig/capture_figures.
+evidence imports, and fail-soft staged artifact capture with save_artifact/capture.
+Eager writes record exact producer source, line, and git provenance; scan-only
+contexts record the enclosing capture scope honestly instead.
 """
 
 from lab_tracker_client.client import (
@@ -20,6 +22,7 @@ from lab_tracker_client.client import (
     LTRecord,
     LTValidationError,
     build_evidence_metadata,
+    capture_host_metadata,
     client,
     client_from_env,
     create_analysis_graph_draft,
@@ -50,6 +53,7 @@ from lab_tracker_client.client import (
     upsert_note,
     upsert_project,
     upsert_question,
+    whoami,
 )
 from lab_tracker_client.figure import (
     CaptureContext,
@@ -58,6 +62,7 @@ from lab_tracker_client.figure import (
     capture,
     capture_figures,
     run_context,
+    save_artifact,
     savefig,
 )
 from lab_tracker_client.hpc import (
@@ -95,6 +100,7 @@ __all__ = [
     "CaptureContext",
     "RunContext",
     "build_evidence_metadata",
+    "capture_host_metadata",
     "capture",
     "capture_figures",
     "client",
@@ -133,6 +139,7 @@ __all__ = [
     "register_acquisition_output",
     "run_context",
     "run_submit_command",
+    "save_artifact",
     "savefig",
     "sync_outbox",
     "upload_note_file",
@@ -143,4 +150,5 @@ __all__ = [
     "begin_event",
     "event_from_manifest",
     "finish_event",
+    "whoami",
 ]

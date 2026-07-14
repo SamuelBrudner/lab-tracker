@@ -162,7 +162,8 @@ def test_install_hook_creates_managed_block(tmp_path, monkeypatch) -> None:
     # The config the hook needs is pinned at install time.
     assert "repo.json" in content
     assert "LAB_TRACKER_REPO_CONFIG" in content
-    assert hook.stat().st_mode & 0o111  # executable
+    if sys.platform != "win32":
+        assert hook.stat().st_mode & 0o111  # executable
 
 
 def test_install_hook_requires_repo_config(tmp_path, monkeypatch) -> None:
