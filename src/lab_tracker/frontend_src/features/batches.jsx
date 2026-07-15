@@ -115,6 +115,12 @@ function BatchReviewPage({
   const [cadenceMinutes, setCadenceMinutes] = useState("1440");
   const [runAtLocalTime, setRunAtLocalTime] = useState("18:00");
   const [timezoneName, setTimezoneName] = useState("America/New_York");
+  const [defaultReviewerUserId, setDefaultReviewerUserId] = useState("");
+  // Dirty flag (not value comparison): the settings snapshot and the field can
+  // go stale independently across project switches, and PATCHing a stale
+  // owner-gated value would silently transfer review authority.
+  const [defaultReviewerDirty, setDefaultReviewerDirty] = useState(false);
+  const [members, setMembers] = useState([]);
 
   const activeProject = useMemo(
     () => projects.find((project) => project.project_id === selectedProjectId) || null,
@@ -160,11 +166,29 @@ function BatchReviewPage({
       setCadenceMinutes(String(nextSettings.cadence_minutes || 1440));
       setRunAtLocalTime(nextSettings.run_at_local_time || "18:00");
       setTimezoneName(nextSettings.timezone_name || "America/New_York");
+      setDefaultReviewerUserId(nextSettings.default_reviewer_user_id || "");
+      setDefaultReviewerDirty(false);
     } catch (err) {
       setSettings(null);
       setFlash("", err.message || "Failed to load batch cadence settings.");
     }
   }, [selectedProjectId, setFlash, token]);
+
+  const loadMembers = useCallback(async () => {
+    if (!selectedProjectId) {
+      setMembers([]);
+      return;
+    }
+    try {
+      const { data } = await apiListRequest(
+        buildApiPath(`/projects/${selectedProjectId}/members`, { limit: 100 }),
+        { token }
+      );
+      setMembers(data || []);
+    } catch {
+      setMembers([]);
+    }
+  }, [selectedProjectId, token]);
 
   useEffect(() => {
     loadBatches();
@@ -174,6 +198,10 @@ function BatchReviewPage({
     loadSettings();
   }, [loadSettings]);
 
+  useEffect(() => {
+    loadMembers();
+  }, [loadMembers]);
+
   async function saveSettings(event) {
     event.preventDefault();
     if (!selectedProjectId || !canManageGraph) {
@@ -182,15 +210,25 @@ function BatchReviewPage({
     setBusy(true);
     setFlash("", "");
     try {
+      const body = {
+        cadence_minutes: Number(cadenceMinutes),
+        enabled,
+        run_at_local_time: runAtLocalTime,
+        timezone_name: timezoneName,
+      };
+      // Owner-gated field: only send it when the user actually touched it, so
+      // contributors can still save cadence without tripping the owner gate.
+      if (defaultReviewerDirty) {
+        if (defaultReviewerUserId) {
+          body.default_reviewer_user_id = defaultReviewerUserId;
+        } else {
+          body.clear_default_reviewer = true;
+        }
+      }
       const nextSettings = await apiRequest(
         `/projects/${selectedProjectId}/graph-draft-batch-settings`,
         {
-          body: {
-            cadence_minutes: Number(cadenceMinutes),
-            enabled,
-            run_at_local_time: runAtLocalTime,
-            timezone_name: timezoneName,
-          },
+          body,
           method: "PATCH",
           token,
         }
@@ -355,6 +393,29 @@ function BatchReviewPage({
                 onChange={(event) => setTimezoneName(event.target.value)}
               />
             </label>
+            <label>
+              Fallback reviewer
+              <select
+                value={defaultReviewerUserId}
+                disabled={!canManageGraph || !selectedProjectId}
+                onChange={(event) => {
+                  setDefaultReviewerUserId(event.target.value);
+                  setDefaultReviewerDirty(true);
+                }}
+              >
+                <option value="">Earliest project owner (automatic)</option>
+                {members.map((member) => (
+                  <option key={member.user_id} value={member.user_id}>
+                    {member.username || member.user_id}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <p className="subtle">
+              Captures that route to nobody — unattributed, or from someone who left the
+              project — land in this reviewer&apos;s daily review instead of being dropped.
+              Changing it is owner-only.
+            </p>
             {settings?.next_run_at ? (
               <p className="subtle">Next run: {formatDate(settings.next_run_at)}</p>
             ) : null}

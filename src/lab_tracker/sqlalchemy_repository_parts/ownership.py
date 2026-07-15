@@ -17,6 +17,7 @@ from lab_tracker.db_models import (
     GoalModel,
     GraphChangeSetModel,
     GraphDraftBatchRunModel,
+    GraphDraftBatchSettingsModel,
     GroupMembershipModel,
     NoteModel,
     OwnershipReassignmentModel,
@@ -369,6 +370,18 @@ class SQLAlchemyOwnershipReassignmentRepository(EntityRepository[OwnershipReassi
                 )
             )
             counts[label] = int(result.rowcount or 0)
+
+        # The project default reviewer is a single-column authority pointer
+        # (lab-tracker-ul0n.1); a departing user must not keep receiving
+        # fallback-routed review batches.
+        default_reviewer_result = self._session.execute(
+            update(GraphDraftBatchSettingsModel)
+            .where(GraphDraftBatchSettingsModel.default_reviewer_user_id == from_user)
+            .values({GraphDraftBatchSettingsModel.default_reviewer_user_id.key: to_user})
+        )
+        counts["graph_draft_batch_settings_default_reviewer"] = int(
+            default_reviewer_result.rowcount or 0
+        )
 
         row = OwnershipReassignmentModel(
             reassignment_id=uuid_to_db(reassignment_id),

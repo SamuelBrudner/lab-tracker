@@ -35,6 +35,7 @@ from lab_tracker.models import (
     GraphDraftMode,
     Note,
     NoteStatus,
+    ProjectMembershipRole,
     ReadyEdition,
     utc_now,
 )
@@ -782,6 +783,7 @@ class GraphDraftService(BaseService):
         actor: AuthContext | None = None,
         review_assignee: str | None = None,
         review_assignee_user_id: UUID | None = None,
+        include_unrouted_notes: bool = False,
     ) -> GraphDraftBatchRun:
         self.authorization.require_contributor(project_id, actor=actor)
         run, notes = self._prepare_graph_draft_batch_run(
@@ -794,6 +796,7 @@ class GraphDraftService(BaseService):
             review_assignee=review_assignee,
             review_assignee_user_id=review_assignee_user_id,
             initial_status=GraphDraftBatchRunStatus.RUNNING,
+            include_unrouted_notes=include_unrouted_notes,
         )
         existing = self.repository.get_graph_draft_batch_run_by_key(run.batch_key)
         if existing is not None:
@@ -866,6 +869,7 @@ class GraphDraftService(BaseService):
         actor: AuthContext | None = None,
         review_assignee: str | None = None,
         review_assignee_user_id: UUID | None = None,
+        include_unrouted_notes: bool = False,
     ) -> GraphDraftBatchRun:
         self.authorization.require_contributor(project_id, actor=actor)
         run, _notes = self._prepare_graph_draft_batch_run(
@@ -878,6 +882,7 @@ class GraphDraftService(BaseService):
             review_assignee=review_assignee,
             review_assignee_user_id=review_assignee_user_id,
             initial_status=GraphDraftBatchRunStatus.PENDING,
+            include_unrouted_notes=include_unrouted_notes,
         )
         existing = self.repository.get_graph_draft_batch_run_by_key(run.batch_key)
         if existing is not None:
@@ -898,6 +903,7 @@ class GraphDraftService(BaseService):
         review_assignee: str | None,
         review_assignee_user_id: UUID | None,
         initial_status: GraphDraftBatchRunStatus,
+        include_unrouted_notes: bool = False,
     ) -> tuple[GraphDraftBatchRun, list[Note]]:
         self.projects.get_project(project_id)
         self._ensure_graph_draft_batch_settings_row(project_id, actor=actor)
@@ -937,14 +943,76 @@ class GraphDraftService(BaseService):
             if continuing_auto_window
             else set()
         )
+        project_notes = self.notes.list_notes(project_id=project_id)
+        project_drafted_note_ids: set[UUID] = set()
+        if trigger == GraphDraftBatchTrigger.SCHEDULED:
+            # Scheduled runs never re-draft a note any reviewer's batch has
+            # already claimed — e.g. a returning reviewer whose backlog a
+            # fallback run drafted while they were away.
+            project_drafted_note_ids = (
+                self.repository.graph_draft_batch_active_source_note_ids(project_id)
+            )
         notes = _staged_notes_in_window(
-            self.notes.list_notes(project_id=project_id),
+            project_notes,
             since=window_start,
             until=window_end,
             include_start=continuing_auto_window,
-            exclude_note_ids=already_drafted_note_ids,
+            exclude_note_ids=already_drafted_note_ids | project_drafted_note_ids,
             reviewer=reviewer_filter,
         )
+        if include_unrouted_notes:
+            # This reviewer is the project's fallback: their batch also picks
+            # up staged notes that route to nobody available — unattributed
+            # captures plus captures whose derived reviewer lost access.
+            # Notes of users with their own per-user settings row stay out:
+            # that row owns their routing.
+            explicit_settings_user_ids = {
+                row.user_id
+                for row in self.repository.list_graph_draft_batch_settings_for_project(
+                    project_id
+                )
+                if row.user_id is not None
+            }
+            if review_assignee_user_id in explicit_settings_user_ids:
+                # The fallback reviewer's own notes are governed by their
+                # per-user settings row; this run carries only unrouted notes.
+                notes = []
+            unavailable_checked: dict[UUID, bool] = {}
+            fallback_notes: list[Note] = []
+            for note in project_notes:
+                if note.status != NoteStatus.STAGED:
+                    continue
+                if (
+                    note.note_id in project_drafted_note_ids
+                    or note.note_id in already_drafted_note_ids
+                ):
+                    continue
+                if (
+                    note.created_by_user_id is not None
+                    and note.created_by_user_id in explicit_settings_user_ids
+                ):
+                    continue
+                derived = _reviewer_for_note(note)
+                unrouted = derived.reviewer is None and derived.reviewer_user_id is None
+                if not unrouted and derived.reviewer_user_id is not None:
+                    if derived.reviewer_user_id not in unavailable_checked:
+                        unavailable_checked[derived.reviewer_user_id] = (
+                            self._reviewer_access_skip_reason(
+                                project_id, derived.reviewer_user_id
+                            )
+                            is not None
+                        )
+                    unrouted = unavailable_checked[derived.reviewer_user_id]
+                if not unrouted:
+                    continue
+                # Unrouted notes bypass the reviewer's window START — nobody's
+                # watermark vouches for them — but never the window end.
+                if _as_utc(note.created_at) <= window_end:
+                    fallback_notes.append(note)
+            merged = {note.note_id: note for note in [*notes, *fallback_notes]}
+            notes = sorted(
+                merged.values(), key=lambda item: (item.created_at, str(item.note_id))
+            )
         notes, window_end = _limit_notes_to_draft(notes, window_end=window_end)
         note_ids = [note.note_id for note in notes]
         run = GraphDraftBatchRun(
@@ -1219,6 +1287,7 @@ class GraphDraftService(BaseService):
                             actor=actor,
                             review_assignee=reviewer.reviewer,
                             review_assignee_user_id=reviewer.reviewer_user_id,
+                            include_unrouted_notes=reviewer.include_unrouted,
                         )
                     else:
                         if (
@@ -1239,6 +1308,7 @@ class GraphDraftService(BaseService):
                             actor=actor,
                             review_assignee=reviewer.reviewer,
                             review_assignee_user_id=reviewer.reviewer_user_id,
+                            include_unrouted_notes=reviewer.include_unrouted,
                         )
                 except Exception as exc:
                     run = self._record_failed_scheduled_batch_run(
@@ -1337,13 +1407,38 @@ class GraphDraftService(BaseService):
             )
             if row.user_id is not None
         }
+        default_reviewer = self._default_reviewer_for_project(settings)
+        # Note-level cross-reviewer dedupe: per-identity watermarks cannot
+        # answer "was this NOTE ever drafted", and fallback routing must never
+        # re-draft a note another reviewer's batch already claimed — nor drop
+        # an unrouted note merely because the fallback reviewer ran recently.
+        project_drafted_note_ids = self.repository.graph_draft_batch_active_source_note_ids(
+            settings.project_id
+        )
+
+        def note_needs_fallback(note: Note) -> bool:
+            return (
+                default_reviewer is not None
+                and note.note_id not in project_drafted_note_ids
+                and _as_utc(note.created_at) <= _as_utc(until)
+            )
+
         reviewers: dict[tuple[str | None, UUID | None], BatchReviewer] = {}
         skip_reason_by_user: dict[UUID | None, str | None] = {}
+        needs_fallback = False
         for note in staged_notes:
             if note.created_by_user_id is not None and note.created_by_user_id in explicit_user_ids:
                 continue
             reviewer = _reviewer_for_note(note)
             if reviewer.reviewer is None and reviewer.reviewer_user_id is None:
+                # Unattributed capture: route to the fallback reviewer instead
+                # of silently dropping it (lab-tracker-ul0n.1).
+                if note_needs_fallback(note):
+                    needs_fallback = True
+                continue
+            if note.note_id in project_drafted_note_ids:
+                # Already claimed by some reviewer's batch (e.g. a fallback
+                # run while this note's reviewer was away) — never re-draft.
                 continue
             if not note_is_new_for_reviewer(note, reviewer):
                 continue
@@ -1356,12 +1451,25 @@ class GraphDraftService(BaseService):
                 )
             skip_reason = skip_reason_by_user[reviewer.reviewer_user_id]
             if skip_reason:
+                # Derived reviewer unavailable: reroute their notes to the
+                # fallback reviewer; keep the SKIPPED record only when no
+                # fallback exists.
+                if note_needs_fallback(note):
+                    needs_fallback = True
+                    continue
                 reviewer = BatchReviewer(
                     reviewer=reviewer.reviewer,
                     reviewer_user_id=reviewer.reviewer_user_id,
                     skip_reason=skip_reason,
                 )
             reviewers[(reviewer.reviewer, reviewer.reviewer_user_id)] = reviewer
+        if needs_fallback and default_reviewer is not None:
+            key = (default_reviewer.reviewer, default_reviewer.reviewer_user_id)
+            reviewers[key] = BatchReviewer(
+                reviewer=default_reviewer.reviewer,
+                reviewer_user_id=default_reviewer.reviewer_user_id,
+                include_unrouted=True,
+            )
         return [
             reviewers[key]
             for key in sorted(
@@ -1369,6 +1477,37 @@ class GraphDraftService(BaseService):
                 key=lambda item: (str(item[1] or ""), str(item[0] or "")),
             )
         ]
+
+    def _default_reviewer_for_project(
+        self,
+        settings: GraphDraftBatchSettings,
+    ) -> BatchReviewer | None:
+        """Resolve the fallback reviewer for otherwise-unroutable staged notes.
+
+        The explicitly configured default wins when it is still valid;
+        otherwise the earliest project OWNER membership (deterministic order).
+        Every candidate is re-validated at dispatch time — an owner who left
+        the project never silently receives review authority.
+        """
+        candidates: list[UUID] = []
+        if settings.default_reviewer_user_id is not None:
+            candidates.append(settings.default_reviewer_user_id)
+        memberships, _total = self.repository.query_project_memberships(
+            project_id=settings.project_id
+        )
+        owners = sorted(
+            (
+                membership
+                for membership in memberships
+                if membership.role == ProjectMembershipRole.OWNER
+            ),
+            key=lambda membership: (_as_utc(membership.created_at), str(membership.user_id)),
+        )
+        candidates.extend(membership.user_id for membership in owners)
+        for user_id in candidates:
+            if self._reviewer_access_skip_reason(settings.project_id, user_id) is None:
+                return BatchReviewer(reviewer=str(user_id), reviewer_user_id=user_id)
+        return None
 
     def _record_skipped_scheduled_batch_run(
         self,
@@ -1492,6 +1631,39 @@ class GraphDraftService(BaseService):
         change_set = self.repository.graph_change_sets.get(change_set_id)
         if change_set is None:
             raise NotFoundError("Graph draft does not exist.")
+        return change_set
+
+    def reassign_graph_change_set_reviewer(
+        self,
+        change_set_id: UUID,
+        *,
+        review_assignee_user_id: UUID,
+        actor: AuthContext | None = None,
+    ) -> GraphChangeSet:
+        """Route a draft's review to another user.
+
+        Assignment transfers review authority (edit/submit/accept), so setting
+        it is gated like acceptance: project owners and admins, plus the
+        current assignee handing the draft off. The target is validated the
+        same way as any reviewer (exists, can read the project).
+        """
+        change_set = self.get_graph_change_set(change_set_id)
+        actor_is_current_assignee = (
+            actor is not None
+            and actor.user_id is not None
+            and change_set.review_assignee_user_id == actor.user_id
+        )
+        if not actor_is_current_assignee:
+            self.authorization.require_owner(change_set.project_id, actor=actor)
+        if change_set.status == GraphChangeSetStatus.COMMITTED:
+            raise ValidationError("Committed graph drafts cannot be reassigned.")
+        self._ensure_review_assignee_can_read_project(
+            change_set.project_id, review_assignee_user_id
+        )
+        change_set.review_assignee = str(review_assignee_user_id)
+        change_set.review_assignee_user_id = review_assignee_user_id
+        change_set.updated_at = utc_now()
+        self._save_graph_change_set(change_set)
         return change_set
 
     def list_graph_change_sets(

@@ -1128,6 +1128,9 @@ class SQLAlchemyLabTrackerRepository(LabTrackerRepository):
             review_assignee=review_assignee,
         )
 
+    def graph_draft_batch_active_source_note_ids(self, project_id: UUID) -> set[UUID]:
+        return self.graph_draft_batch_runs.active_or_ready_source_note_ids(project_id)
+
     def query_graph_draft_batch_runs(
         self,
         *,

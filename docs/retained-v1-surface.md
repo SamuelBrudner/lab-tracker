@@ -88,6 +88,14 @@ research record:
 - Per-(project, user) graph-draft batch settings and run history for configured
   cadence, run-now, and run-due drafting over staged notes, with a project-level
   default row and `review_assignee` attribution on scheduled user batches.
+- Owner-configured fallback review routing so no staged note is silently
+  unroutable: the project-default settings row carries an owner-gated
+  `default_reviewer_user_id` (falling back to the earliest project owner) whose
+  scheduled batches also pick up unattributed captures and captures whose
+  derived reviewer lost access, and
+  `POST /graph-drafts/{change_set_id}/review-assignee` lets project owners,
+  admins, or the current assignee hand a draft's review authority to another
+  validated project reader.
 - Durable curation provenance that keeps the committed graph honest about
   itself: each accepted graph-draft operation records how it was accepted
   (`human_selected`, `bulk_accepted`, or `auto_accepted`) plus the accepting

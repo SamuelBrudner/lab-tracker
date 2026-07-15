@@ -941,11 +941,26 @@ def test_background_run_due_partitions_by_note_author_and_assigns_reviewers(
     assert submitted.status_code == 200
 
 
-def test_run_due_skips_reviewer_who_lost_project_access(
+def _me_user_id(client: TestClient, headers: dict[str, str]) -> str:
+    response = client.get("/auth/me", headers=headers)
+    assert response.status_code == 200, response.text
+    return str(response.json()["data"]["user_id"])
+
+
+def test_run_due_reroutes_departed_reviewer_notes_to_project_owner(
     client: TestClient,
     admin_auth_headers: dict[str, str],
 ) -> None:
+    """Formerly a SKIPPED run: the project owner is now the fallback reviewer
+    for notes whose derived reviewer lost access (lab-tracker-ul0n.1)."""
     project_id = _project(client, admin_auth_headers)
+    _owner_headers, owner_user_id = _registered_user(client, role=Role.VIEWER)
+    owner_added = client.post(
+        f"/projects/{project_id}/members",
+        json={"user_id": owner_user_id, "role": "owner"},
+        headers=admin_auth_headers,
+    )
+    assert owner_added.status_code == 201, owner_added.text
     reviewer_headers, reviewer_user_id = _registered_user(client, role=Role.VIEWER)
     added = client.post(
         f"/projects/{project_id}/members",
@@ -987,12 +1002,110 @@ def test_run_due_skips_reviewer_who_lost_project_access(
     runs = response.json()["data"]
     assert len(runs) == 1
     run = runs[0]
+    assert run["status"] == "pending"
+    assert run["review_assignee_user_id"] == owner_user_id
+    assert run["source_note_ids"] == [note_id]
+
+
+def test_run_due_routes_unattributed_notes_to_project_owner(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+) -> None:
+    """Unattributed staged notes were silently dropped from scheduled batches;
+    they now route to the project owner (lab-tracker-ul0n.1)."""
+    project_id = _project(client, admin_auth_headers)
+    _owner_headers, owner_user_id = _registered_user(client, role=Role.VIEWER)
+    owner_added = client.post(
+        f"/projects/{project_id}/members",
+        json={"user_id": owner_user_id, "role": "owner"},
+        headers=admin_auth_headers,
+    )
+    assert owner_added.status_code == 201, owner_added.text
+    note_id = _note(client, admin_auth_headers, project_id, "Orphaned capture.")
+    settings = client.patch(
+        f"/projects/{project_id}/graph-draft-batch-settings",
+        json={"enabled": True},
+        headers=admin_auth_headers,
+    )
+    assert settings.status_code == 200
+    with client.app.state.db_session_factory() as session:
+        note_row = session.get(NoteModel, note_id)
+        note_row.created_by = None
+        note_row.created_by_user_id = None
+        row = session.scalar(
+            select(GraphDraftBatchSettingsModel).where(
+                GraphDraftBatchSettingsModel.project_id == project_id
+            )
+        )
+        row.next_run_at = datetime.now(timezone.utc) - timedelta(minutes=5)
+        session.commit()
+
+    fake_client = FakeBatchDraftClient(_batch_patch(project_id))
+    client.app.state.graph_draft_client_factory = lambda settings: fake_client
+    client.app.state.settings.graph_draft_background_enabled = True
+
+    response = client.post("/batches/run-due", headers=admin_auth_headers)
+
+    assert response.status_code == 200, response.text
+    runs = response.json()["data"]
+    assert len(runs) == 1
+    run = runs[0]
+    assert run["status"] == "pending"
+    assert run["review_assignee_user_id"] == owner_user_id
+    assert run["source_note_ids"] == [note_id]
+
+
+def test_run_due_keeps_skip_when_no_fallback_owner_exists(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+) -> None:
+    """With no valid owner to fall back to, the departed reviewer's run stays
+    SKIPPED with reviewer_unavailable — the staleness audit is the backstop."""
+    project_id = _project(client, admin_auth_headers)
+    reviewer_headers, reviewer_user_id = _registered_user(client, role=Role.VIEWER)
+    added = client.post(
+        f"/projects/{project_id}/members",
+        json={"user_id": reviewer_user_id, "role": "contributor"},
+        headers=admin_auth_headers,
+    )
+    assert added.status_code == 201, added.text
+    note_id = _note(client, reviewer_headers, project_id, "Departing reviewer note.")
+    settings = client.patch(
+        f"/projects/{project_id}/graph-draft-batch-settings",
+        json={"enabled": True},
+        headers=admin_auth_headers,
+    )
+    assert settings.status_code == 200
+    with client.app.state.db_session_factory() as session:
+        memberships = session.scalars(
+            select(ProjectMembershipModel).where(
+                ProjectMembershipModel.project_id == str(project_id),
+            )
+        ).all()
+        # Remove every membership: the departed reviewer AND all owners.
+        for membership in memberships:
+            session.delete(membership)
+        row = session.scalar(
+            select(GraphDraftBatchSettingsModel).where(
+                GraphDraftBatchSettingsModel.project_id == project_id
+            )
+        )
+        row.next_run_at = datetime.now(timezone.utc) - timedelta(minutes=5)
+        session.commit()
+
+    fake_client = FakeBatchDraftClient(_batch_patch(project_id))
+    client.app.state.graph_draft_client_factory = lambda settings: fake_client
+    client.app.state.settings.graph_draft_background_enabled = True
+
+    response = client.post("/batches/run-due", headers=admin_auth_headers)
+
+    assert response.status_code == 200, response.text
+    runs = response.json()["data"]
+    assert len(runs) == 1
+    run = runs[0]
     assert run["status"] == "skipped"
-    assert run["change_set_id"] is None
-    assert run["source_note_ids"] == []
     assert run["review_assignee_user_id"] == reviewer_user_id
     assert run["error_metadata"]["category"] == "reviewer_unavailable"
-    assert "cannot read" in run["error_metadata"]["message"]
     assert fake_client.calls == []
 
     with client.app.state.db_session_factory() as session:
@@ -1973,3 +2086,326 @@ def test_batch_evidence_grounding_enforce_mode_rejects_fabricated_quotes(
     # The violation was retried with a repair hint before failing.
     assert len(quoting.calls) > 1
     assert "not a verbatim snippet" in (quoting.calls[1]["user_hint"] or "")
+
+
+def test_default_reviewer_setting_is_owner_gated_and_validated(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+) -> None:
+    project_id = _project(client, admin_auth_headers)
+    contributor_headers, contributor_user_id = _registered_user(client, role=Role.VIEWER)
+    added = client.post(
+        f"/projects/{project_id}/members",
+        json={"user_id": contributor_user_id, "role": "contributor"},
+        headers=admin_auth_headers,
+    )
+    assert added.status_code == 201, added.text
+    _outsider_headers, outsider_user_id = _registered_user(client, role=Role.VIEWER)
+
+    # Routing the fallback transfers review authority: contributor is refused.
+    refused = client.patch(
+        f"/projects/{project_id}/graph-draft-batch-settings",
+        json={"default_reviewer_user_id": contributor_user_id},
+        headers=contributor_headers,
+    )
+    assert refused.status_code == 401
+
+    # The target must be able to read the project.
+    invalid = client.patch(
+        f"/projects/{project_id}/graph-draft-batch-settings",
+        json={"default_reviewer_user_id": outsider_user_id},
+        headers=admin_auth_headers,
+    )
+    assert invalid.status_code == 422
+
+    updated = client.patch(
+        f"/projects/{project_id}/graph-draft-batch-settings",
+        json={"default_reviewer_user_id": contributor_user_id},
+        headers=admin_auth_headers,
+    )
+    assert updated.status_code == 200, updated.text
+    assert updated.json()["data"]["default_reviewer_user_id"] == contributor_user_id
+
+    cleared = client.patch(
+        f"/projects/{project_id}/graph-draft-batch-settings",
+        json={"clear_default_reviewer": True},
+        headers=admin_auth_headers,
+    )
+    assert cleared.status_code == 200
+    assert cleared.json()["data"]["default_reviewer_user_id"] is None
+
+
+def test_explicit_default_reviewer_wins_over_owner_fallback(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+) -> None:
+    project_id = _project(client, admin_auth_headers)
+    contributor_headers, contributor_user_id = _registered_user(client, role=Role.VIEWER)
+    added = client.post(
+        f"/projects/{project_id}/members",
+        json={"user_id": contributor_user_id, "role": "contributor"},
+        headers=admin_auth_headers,
+    )
+    assert added.status_code == 201, added.text
+    note_id = _note(client, admin_auth_headers, project_id, "Orphaned capture.")
+    settings = client.patch(
+        f"/projects/{project_id}/graph-draft-batch-settings",
+        json={"enabled": True, "default_reviewer_user_id": contributor_user_id},
+        headers=admin_auth_headers,
+    )
+    assert settings.status_code == 200, settings.text
+    with client.app.state.db_session_factory() as session:
+        note_row = session.get(NoteModel, note_id)
+        note_row.created_by = None
+        note_row.created_by_user_id = None
+        row = session.scalar(
+            select(GraphDraftBatchSettingsModel).where(
+                GraphDraftBatchSettingsModel.project_id == project_id
+            )
+        )
+        row.next_run_at = datetime.now(timezone.utc) - timedelta(minutes=5)
+        session.commit()
+
+    fake_client = FakeBatchDraftClient(_batch_patch(project_id))
+    client.app.state.graph_draft_client_factory = lambda settings: fake_client
+    client.app.state.settings.graph_draft_background_enabled = True
+
+    response = client.post("/batches/run-due", headers=admin_auth_headers)
+
+    assert response.status_code == 200, response.text
+    runs = response.json()["data"]
+    assert len(runs) == 1
+    assert runs[0]["review_assignee_user_id"] == contributor_user_id
+    assert runs[0]["source_note_ids"] == [note_id]
+
+
+def test_reassign_graph_draft_reviewer_authority(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+) -> None:
+    project_id = _project(client, admin_auth_headers)
+    admin_user_id = _me_user_id(client, admin_auth_headers)
+    contributor_headers, contributor_user_id = _registered_user(client, role=Role.VIEWER)
+    added = client.post(
+        f"/projects/{project_id}/members",
+        json={"user_id": contributor_user_id, "role": "contributor"},
+        headers=admin_auth_headers,
+    )
+    assert added.status_code == 201, added.text
+    _note(client, admin_auth_headers, project_id, "Note for the reassign test.")
+    fake_client = FakeBatchDraftClient(_batch_patch(project_id))
+    client.app.state.graph_draft_client_factory = lambda settings: fake_client
+    run = client.post(
+        "/batches/run-now",
+        json={"project_id": project_id},
+        headers=admin_auth_headers,
+    )
+    assert run.status_code == 201
+    change_set_id = run.json()["data"]["change_set_id"]
+
+    # A contributor who is not the assignee cannot route review authority.
+    refused = client.post(
+        f"/graph-drafts/{change_set_id}/review-assignee",
+        json={"review_assignee_user_id": contributor_user_id},
+        headers=contributor_headers,
+    )
+    assert refused.status_code == 401
+
+    # Owners (and admins) can.
+    assigned = client.post(
+        f"/graph-drafts/{change_set_id}/review-assignee",
+        json={"review_assignee_user_id": contributor_user_id},
+        headers=admin_auth_headers,
+    )
+    assert assigned.status_code == 200, assigned.text
+    assert assigned.json()["data"]["review_assignee_user_id"] == contributor_user_id
+
+    # The current assignee can hand the draft off.
+    handed_off = client.post(
+        f"/graph-drafts/{change_set_id}/review-assignee",
+        json={"review_assignee_user_id": admin_user_id},
+        headers=contributor_headers,
+    )
+    assert handed_off.status_code == 200, handed_off.text
+    assert handed_off.json()["data"]["review_assignee_user_id"] == admin_user_id
+
+
+def test_ownership_reassignment_rewrites_default_reviewer(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+) -> None:
+    project_id = _project(client, admin_auth_headers)
+    departing_headers, departing_user_id = _registered_user(client, role=Role.VIEWER)
+    successor_headers, successor_user_id = _registered_user(client, role=Role.VIEWER)
+    for user_id in (departing_user_id, successor_user_id):
+        added = client.post(
+            f"/projects/{project_id}/members",
+            json={"user_id": user_id, "role": "contributor"},
+            headers=admin_auth_headers,
+        )
+        assert added.status_code == 201, added.text
+    updated = client.patch(
+        f"/projects/{project_id}/graph-draft-batch-settings",
+        json={"default_reviewer_user_id": departing_user_id},
+        headers=admin_auth_headers,
+    )
+    assert updated.status_code == 200, updated.text
+
+    reassigned = client.post(
+        "/ownership-reassignments",
+        json={
+            "from_user_id": departing_user_id,
+            "to_user_id": successor_user_id,
+            "reason": "Departing the lab.",
+        },
+        headers=admin_auth_headers,
+    )
+    assert reassigned.status_code == 201, reassigned.text
+    counts = reassigned.json()["data"]["record_counts"]
+    assert counts["graph_draft_batch_settings_default_reviewer"] == 1
+
+    settings = client.get(
+        f"/projects/{project_id}/graph-draft-batch-settings",
+        headers=admin_auth_headers,
+    )
+    assert settings.json()["data"]["default_reviewer_user_id"] == successor_user_id
+
+
+def test_fallback_rescues_unrouted_notes_older_than_fallback_watermark(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+) -> None:
+    """An unrouted note predating the fallback reviewer's last run must still
+    be rerouted: nobody's watermark vouches for notes no batch ever selected."""
+    project_id = _project(client, admin_auth_headers)
+    _owner_headers, owner_user_id = _registered_user(client, role=Role.VIEWER)
+    owner_added = client.post(
+        f"/projects/{project_id}/members",
+        json={"user_id": owner_user_id, "role": "owner"},
+        headers=admin_auth_headers,
+    )
+    assert owner_added.status_code == 201, owner_added.text
+    owned_note = _note(client, _owner_headers, project_id, "Owner's own capture.")
+    settings = client.patch(
+        f"/projects/{project_id}/graph-draft-batch-settings",
+        json={"enabled": True},
+        headers=admin_auth_headers,
+    )
+    assert settings.status_code == 200
+    fake_client = FakeBatchDraftClient(_batch_patch(project_id))
+    client.app.state.graph_draft_client_factory = lambda settings: fake_client
+    client.app.state.settings.graph_draft_background_enabled = True
+
+    def _make_due() -> None:
+        with client.app.state.db_session_factory() as session:
+            row = session.scalar(
+                select(GraphDraftBatchSettingsModel).where(
+                    GraphDraftBatchSettingsModel.project_id == project_id
+                )
+            )
+            row.next_run_at = datetime.now(timezone.utc) - timedelta(minutes=5)
+            session.commit()
+
+    # Tick 1: the owner's own batch runs and advances their watermark.
+    _make_due()
+    first = client.post("/batches/run-due", headers=admin_auth_headers)
+    assert first.status_code == 200, first.text
+    first_runs = first.json()["data"]
+    assert len(first_runs) == 1
+    assert first_runs[0]["source_note_ids"] == [owned_note]
+    while _process_next_background_run(client) is not None:
+        pass
+
+    # An unattributed capture BACKDATED behind the owner's watermark.
+    orphan_note = _note(client, admin_auth_headers, project_id, "Old orphan capture.")
+    with client.app.state.db_session_factory() as session:
+        note_row = session.get(NoteModel, orphan_note)
+        note_row.created_by = None
+        note_row.created_by_user_id = None
+        note_row.created_at = datetime.now(timezone.utc) - timedelta(days=3)
+        session.commit()
+
+    # Tick 2: the fallback run still picks it up.
+    _make_due()
+    second = client.post("/batches/run-due", headers=admin_auth_headers)
+    assert second.status_code == 200, second.text
+    second_runs = second.json()["data"]
+    assert len(second_runs) == 1
+    assert second_runs[0]["review_assignee_user_id"] == owner_user_id
+    assert second_runs[0]["source_note_ids"] == [orphan_note]
+
+
+def test_returning_reviewer_does_not_redraft_fallback_drafted_notes(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+) -> None:
+    """A note rerouted to and drafted by the fallback must not produce a second
+    change set for its original reviewer when they regain access."""
+    project_id = _project(client, admin_auth_headers)
+    _owner_headers, owner_user_id = _registered_user(client, role=Role.VIEWER)
+    owner_added = client.post(
+        f"/projects/{project_id}/members",
+        json={"user_id": owner_user_id, "role": "owner"},
+        headers=admin_auth_headers,
+    )
+    assert owner_added.status_code == 201, owner_added.text
+    reviewer_headers, reviewer_user_id = _registered_user(client, role=Role.VIEWER)
+    added = client.post(
+        f"/projects/{project_id}/members",
+        json={"user_id": reviewer_user_id, "role": "contributor"},
+        headers=admin_auth_headers,
+    )
+    assert added.status_code == 201, added.text
+    note_id = _note(client, reviewer_headers, project_id, "Reviewer's capture.")
+    settings = client.patch(
+        f"/projects/{project_id}/graph-draft-batch-settings",
+        json={"enabled": True},
+        headers=admin_auth_headers,
+    )
+    assert settings.status_code == 200
+    fake_client = FakeBatchDraftClient(_batch_patch(project_id))
+    client.app.state.graph_draft_client_factory = lambda settings: fake_client
+    client.app.state.settings.graph_draft_background_enabled = True
+
+    def _make_due() -> None:
+        with client.app.state.db_session_factory() as session:
+            row = session.scalar(
+                select(GraphDraftBatchSettingsModel).where(
+                    GraphDraftBatchSettingsModel.project_id == project_id
+                )
+            )
+            row.next_run_at = datetime.now(timezone.utc) - timedelta(minutes=5)
+            session.commit()
+
+    # The reviewer departs; tick 1 reroutes their note to the fallback owner.
+    with client.app.state.db_session_factory() as session:
+        membership = session.scalar(
+            select(ProjectMembershipModel).where(
+                ProjectMembershipModel.project_id == str(project_id),
+                ProjectMembershipModel.user_id == reviewer_user_id,
+            )
+        )
+        session.delete(membership)
+        session.commit()
+    _make_due()
+    first = client.post("/batches/run-due", headers=admin_auth_headers)
+    assert first.status_code == 200, first.text
+    first_runs = first.json()["data"]
+    assert len(first_runs) == 1
+    assert first_runs[0]["review_assignee_user_id"] == owner_user_id
+    assert first_runs[0]["source_note_ids"] == [note_id]
+    while _process_next_background_run(client) is not None:
+        pass
+
+    # The reviewer returns; tick 2 must NOT draft the same note again.
+    readded = client.post(
+        f"/projects/{project_id}/members",
+        json={"user_id": reviewer_user_id, "role": "contributor"},
+        headers=admin_auth_headers,
+    )
+    assert readded.status_code == 201, readded.text
+    _make_due()
+    second = client.post("/batches/run-due", headers=admin_auth_headers)
+    assert second.status_code == 200, second.text
+    for run in second.json()["data"]:
+        assert note_id not in run["source_note_ids"]

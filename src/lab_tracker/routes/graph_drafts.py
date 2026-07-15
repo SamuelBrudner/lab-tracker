@@ -20,6 +20,7 @@ from lab_tracker.schemas import (
     GraphDraftCommitRequest,
     GraphDraftCreateRequest,
     GraphDraftOperationUpdate,
+    GraphDraftReviewerReassign,
     GraphDraftReviewRequest,
     ListEnvelope,
 )
@@ -156,6 +157,25 @@ def build_graph_drafts_router(api: LabTrackerAPI) -> APIRouter:
             payload=payload.payload,
             status=payload.status,
             review_note=payload.review_note,
+            actor=actor,
+        )
+        return Envelope(data=_attach_graph_usernames(request, change_set))
+
+    @router.post(
+        "/graph-drafts/{change_set_id:uuid}/review-assignee",
+        response_model=Envelope[GraphChangeSet],
+    )
+    def reassign_graph_draft_reviewer(
+        change_set_id: UUID,
+        payload: GraphDraftReviewerReassign,
+        request: Request,
+    ):
+        actor = actor_from_request(request)
+        change_set = api_from_request(request, api).get_graph_change_set(change_set_id)
+        ensure_project_read(request, change_set.project_id)
+        change_set = api_from_request(request, api).reassign_graph_change_set_reviewer(
+            change_set_id,
+            review_assignee_user_id=payload.review_assignee_user_id,
             actor=actor,
         )
         return Envelope(data=_attach_graph_usernames(request, change_set))

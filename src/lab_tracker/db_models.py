@@ -603,6 +603,13 @@ class GraphDraftBatchSettingsModel(Base):
         nullable=False,
         default="America/New_York",
     )
+    # Fallback reviewer for staged notes that route to nobody (unattributed
+    # captures or captures whose derived reviewer lost access). Only
+    # meaningful on the project-default row (user_id IS NULL).
+    default_reviewer_user_id: Mapped[UUID | None] = mapped_column(
+        GUID,
+        ForeignKey("users.user_id", ondelete="SET NULL"),
+    )
     next_run_at: Mapped[datetime | None] = mapped_column(UtcDateTime)
     created_at: Mapped[datetime] = mapped_column(UtcDateTime, default=_utc_now)
     updated_at: Mapped[datetime] = mapped_column(

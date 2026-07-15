@@ -693,6 +693,9 @@ class GraphDraftBatchSettings(_DomainModel):
     cadence_minutes: int = 24 * 60
     run_at_local_time: str = "18:00"
     timezone_name: str = "America/New_York"
+    # Fallback reviewer for otherwise-unroutable staged notes; project-default
+    # rows only (lab-tracker-ul0n.1).
+    default_reviewer_user_id: UUID | None = None
     next_run_at: datetime | None = None
     created_at: datetime = Field(default_factory=utc_now)
     updated_at: datetime = Field(default_factory=utc_now)

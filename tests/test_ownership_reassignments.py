@@ -369,6 +369,9 @@ def test_ownership_reassignment_moves_all_attribution_surfaces():
         "graph_change_sets_review_assignee": 1,
         "graph_draft_batch_runs": 1,
         "graph_draft_batch_runs_review_assignee": 1,
+        # No settings row names the departing user as default reviewer in this
+        # fixture; the surface is still swept (lab-tracker-ul0n.1).
+        "graph_draft_batch_settings_default_reviewer": 0,
         "sessions": 1,
         "goals": 1,
         "goal_links": 1,

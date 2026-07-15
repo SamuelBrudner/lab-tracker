@@ -52,6 +52,7 @@ def settings_to_model(settings: GraphDraftBatchSettings) -> GraphDraftBatchSetti
         cadence_minutes=settings.cadence_minutes,
         run_at_local_time=settings.run_at_local_time,
         timezone_name=settings.timezone_name,
+        default_reviewer_user_id=_uuid_str(settings.default_reviewer_user_id),
         next_run_at=settings.next_run_at,
         created_at=settings.created_at,
         updated_at=settings.updated_at,
@@ -69,6 +70,7 @@ def apply_settings_to_model(
     row.cadence_minutes = settings.cadence_minutes
     row.run_at_local_time = settings.run_at_local_time
     row.timezone_name = settings.timezone_name
+    row.default_reviewer_user_id = _uuid_str(settings.default_reviewer_user_id)
     row.next_run_at = settings.next_run_at
     row.created_at = settings.created_at
     row.updated_at = settings.updated_at
@@ -84,6 +86,7 @@ def settings_from_model(row: GraphDraftBatchSettingsModel) -> GraphDraftBatchSet
         cadence_minutes=row.cadence_minutes,
         run_at_local_time=row.run_at_local_time,
         timezone_name=row.timezone_name,
+        default_reviewer_user_id=_uuid(row.default_reviewer_user_id),
         next_run_at=_as_utc_optional(row.next_run_at),
         created_at=as_utc(row.created_at),
         updated_at=as_utc(row.updated_at),
@@ -355,6 +358,34 @@ class SQLAlchemyGraphDraftBatchRunRepository(EntityRepository[GraphDraftBatchRun
             )
         elif review_assignee is not None:
             stmt = stmt.where(GraphDraftBatchRunModel.review_assignee == review_assignee)
+        rows = self._session.execute(stmt)
+        note_ids: set[UUID] = set()
+        for (source_note_ids,) in rows:
+            note_ids.update(ensure_uuid(str(note_id)) for note_id in (source_note_ids or []))
+        return note_ids
+
+    def active_or_ready_source_note_ids(self, project_id: UUID) -> set[UUID]:
+        """Note ids claimed by any pending, running, or ready batch run.
+
+        The per-note answer to "was this note already drafted (or is it about
+        to be) by ANY reviewer's batch" — the cross-reviewer dedupe the
+        fallback routing needs (lab-tracker-ul0n.1). FAILED runs are excluded
+        so their notes retry; SKIPPED runs carry no source notes.
+        """
+        self._session.flush()
+        stmt = (
+            select(GraphDraftBatchRunModel.source_note_ids)
+            .where(GraphDraftBatchRunModel.project_id == str(project_id))
+            .where(
+                GraphDraftBatchRunModel.status.in_(
+                    (
+                        GraphDraftBatchRunStatus.PENDING.value,
+                        GraphDraftBatchRunStatus.RUNNING.value,
+                        GraphDraftBatchRunStatus.READY.value,
+                    )
+                )
+            )
+        )
         rows = self._session.execute(stmt)
         note_ids: set[UUID] = set()
         for (source_note_ids,) in rows:

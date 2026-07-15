@@ -583,6 +583,10 @@ class GraphChangeSetSummary(BaseModel):
     committed_by_username: str | None = None
 
 
+class GraphDraftReviewerReassign(RequestModel):
+    review_assignee_user_id: UUID
+
+
 class GraphDraftListFilters(BaseModel):
     project_id: UUID | None = None
     status: GraphChangeSetStatus | None = None
@@ -595,6 +599,10 @@ class GraphDraftBatchSettingsUpdate(RequestModel):
     run_at_local_time: str | None = None
     timezone_name: str | None = None
     user_id: UUID | None = None
+    # Fallback reviewer for otherwise-unroutable staged notes; owner-gated,
+    # project-default row only. Set clear_default_reviewer to remove it.
+    default_reviewer_user_id: UUID | None = None
+    clear_default_reviewer: bool = False
 
 
 class GraphDraftBatchRunRequest(RequestModel):

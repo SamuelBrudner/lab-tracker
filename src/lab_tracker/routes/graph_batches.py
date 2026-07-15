@@ -131,6 +131,8 @@ def build_graph_batches_router(api: LabTrackerAPI) -> APIRouter:
             run_at_local_time=payload.run_at_local_time,
             timezone_name=payload.timezone_name,
             user_id=payload.user_id,
+            default_reviewer_user_id=payload.default_reviewer_user_id,
+            clear_default_reviewer=payload.clear_default_reviewer,
             actor=actor,
         )
         return Envelope(data=settings)

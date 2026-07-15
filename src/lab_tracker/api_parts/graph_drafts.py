@@ -103,6 +103,16 @@ class GraphDraftsApiMixin:
     def revise_graph_change_set(self, *args: Any, **kwargs: Any) -> Any:
         return self.graph_drafts.revise_graph_change_set(*args, **kwargs)
 
+    def reassign_graph_change_set_reviewer(self, *args: Any, **kwargs: Any) -> Any:
+        return self._with_usage_event(
+            lambda: self.graph_drafts.reassign_graph_change_set_reviewer(*args, **kwargs),
+            verb=UsageEventVerb.UPDATE,
+            resource_type=UsageEventResourceType.GRAPH_CHANGE_SET,
+            actor=kwargs.get("actor"),
+            resource_id=_first_uuid(args),
+            resource_id_attr="change_set_id",
+        )
+
     def commit_graph_change_set(self, *args: Any, **kwargs: Any) -> Any:
         return self._with_usage_event(
             lambda: self.graph_drafts.commit_graph_change_set(*args, **kwargs),
