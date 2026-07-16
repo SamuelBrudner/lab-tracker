@@ -286,9 +286,14 @@ function App() {
   };
 
   const isCaptureRoute = route.kind === "capture";
+  const isFocusedReviewRoute = route.kind === "batch";
 
   return (
-    <div className={`app-shell${isCaptureRoute ? " capture-app-shell" : ""}`}>
+    <div
+      className={`app-shell${isCaptureRoute ? " capture-app-shell" : ""}${
+        isFocusedReviewRoute ? " review-app-shell" : ""
+      }`}
+    >
       <AppHeader
         activeKind={route.kind}
         authEnabled={auth.authEnabled}
@@ -383,7 +388,7 @@ function App() {
                 role: selectedProjectRole,
               }}
             />
-          ) : route.kind === "graph" ? null : (
+          ) : route.kind === "graph" || isFocusedReviewRoute ? null : (
             // The graph explorer has its own project picker and fills the
             // viewport; stacking the Dashboard card (second picker, New
             // Project + member forms) next to it just buries the canvas.
