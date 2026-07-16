@@ -68,6 +68,90 @@ function operationIntent(operation) {
   return `Proposed ${operation.entity_type} update`;
 }
 
+function normalizeSpeechText(value) {
+  return String(value || "")
+    .replace(/[`*_#>]/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function operationProposalText(operation, payloadTextById = {}) {
+  let payload = operation?.payload || {};
+  const editedPayload = payloadTextById[operation?.operation_id];
+  if (typeof editedPayload === "string") {
+    try {
+      const parsed = JSON.parse(editedPayload);
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+        payload = parsed;
+      }
+    } catch {
+      // Narrate the last valid server payload while an edit is incomplete.
+    }
+  }
+  return normalizeSpeechText(
+    payload.text ||
+      payload.raw_content ||
+      payload.label ||
+      payload.prompt ||
+      payload.statement ||
+      operationTitle(operation)
+  );
+}
+
+function spokenReviewScript(changeSet, payloadTextById = {}) {
+  if (!changeSet) {
+    return "";
+  }
+  const operations = changeSet.operations || [];
+  const sections = [];
+  const summary = normalizeSpeechText(changeSet.summary);
+  if (summary) {
+    sections.push(`Review summary. ${summary}`);
+  }
+  sections.push(
+    operations.length === 1
+      ? "There is 1 proposal."
+      : `There are ${operations.length} proposals.`
+  );
+  operations.forEach((operation, index) => {
+    const proposal = [
+      `Proposal ${index + 1}.`,
+      `${normalizeSpeechText(operationIntent(operation))}.`,
+      operationProposalText(operation, payloadTextById),
+    ];
+    const rationale = normalizeSpeechText(operation.rationale);
+    if (rationale) {
+      proposal.push(`Model inference. ${rationale}`);
+    }
+    if (operation.confidence !== null && operation.confidence !== undefined) {
+      proposal.push(`${Math.round(operation.confidence * 100)} percent confidence.`);
+    }
+    sections.push(proposal.join(" "));
+  });
+  const uncertainties = [
+    ...(changeSet.clarification_requests || []),
+    ...(changeSet.uncertain_fields || []),
+  ]
+    .map(normalizeSpeechText)
+    .filter(Boolean);
+  if (uncertainties.length) {
+    sections.push(`Questions for you. ${uncertainties.join(". ")}.`);
+  }
+  sections.push("You can dictate feedback now, or review each proposal below.");
+  return sections.join(" ");
+}
+
+function canSpeakReview() {
+  const speech = typeof window !== "undefined" ? window.speechSynthesis : null;
+  return (
+    Boolean(speech) &&
+    typeof SpeechSynthesisUtterance !== "undefined" &&
+    ["cancel", "pause", "resume", "speak"].every(
+      (method) => typeof speech[method] === "function"
+    )
+  );
+}
+
 function payloadText(changeSet) {
   const entries = {};
   for (const operation of changeSet?.operations || []) {
@@ -236,10 +320,13 @@ function GraphDraftDetailCard({
   const [reviseAttachments, setReviseAttachments] = useState([]);
   const [reviseAudio, setReviseAudio] = useState(null);
   const [isRecording, setIsRecording] = useState(false);
+  const [speechStatus, setSpeechStatus] = useState("idle");
   const mediaRecorderRef = useRef(null);
   const audioChunksRef = useRef([]);
   const audioStreamRef = useRef(null);
   const startingRef = useRef(false);
+  const speechUtteranceRef = useRef(null);
+  const mountedRef = useRef(true);
 
   const acceptedCount = useMemo(
     () =>
@@ -248,6 +335,10 @@ function GraphDraftDetailCard({
     [changeSet]
   );
   const visibleSourceRegions = useMemo(() => sourceRegions(changeSet), [changeSet]);
+  const spokenReview = useMemo(
+    () => spokenReviewScript(changeSet, payloads),
+    [changeSet, payloads]
+  );
   const isAdmin = user?.role === "admin";
   const usesDraftProjectAccess = Boolean(changeSet?.project_id);
   const hasDraftProjectAccess = usesDraftProjectAccess && draftProjectId === changeSet.project_id;
@@ -265,6 +356,7 @@ function GraphDraftDetailCard({
   const canReviewDraft = effectiveCanManageGraph && changeSet?.status === "submitted";
   const canCommitDraft =
     effectiveCanManageGraph && ["ready", "submitted"].includes(changeSet?.status || "");
+  const speechSupported = canSpeakReview();
 
   const loadDraft = useCallback(async () => {
     if (!changeSetId) {
@@ -289,6 +381,23 @@ function GraphDraftDetailCard({
   useEffect(() => {
     loadDraft();
   }, [loadDraft]);
+
+  const stopSpeech = useCallback((updateStatus = true) => {
+    const utterance = speechUtteranceRef.current;
+    if (utterance) {
+      utterance.onend = null;
+      utterance.onerror = null;
+    }
+    if (canSpeakReview()) {
+      window.speechSynthesis.cancel();
+    }
+    speechUtteranceRef.current = null;
+    if (updateStatus) {
+      setSpeechStatus("idle");
+    }
+  }, []);
+
+  useEffect(() => () => stopSpeech(false), [stopSpeech]);
 
   useEffect(() => {
     let canceled = false;
@@ -360,6 +469,42 @@ function GraphDraftDetailCard({
 
   function updatePayloadText(operationId, value) {
     setPayloads((current) => ({ ...current, [operationId]: value }));
+  }
+
+  function toggleSpeech() {
+    if (!speechSupported || !spokenReview) {
+      return;
+    }
+    if (speechStatus === "speaking") {
+      window.speechSynthesis.pause();
+      setSpeechStatus("paused");
+      return;
+    }
+    if (speechStatus === "paused") {
+      window.speechSynthesis.resume();
+      setSpeechStatus("speaking");
+      return;
+    }
+
+    window.speechSynthesis.cancel();
+    const utterance = new SpeechSynthesisUtterance(spokenReview);
+    utterance.lang = "en-US";
+    utterance.rate = 0.95;
+    utterance.onend = () => {
+      if (speechUtteranceRef.current === utterance) {
+        speechUtteranceRef.current = null;
+        setSpeechStatus("idle");
+      }
+    };
+    utterance.onerror = () => {
+      if (speechUtteranceRef.current === utterance) {
+        speechUtteranceRef.current = null;
+        setSpeechStatus("idle");
+      }
+    };
+    speechUtteranceRef.current = utterance;
+    window.speechSynthesis.speak(utterance);
+    setSpeechStatus("speaking");
   }
 
   function updateOperationReviewNote(operationId, value) {
@@ -505,12 +650,24 @@ function GraphDraftDetailCard({
 
   useEffect(
     () => () => {
-      stopAudioStream();
       if (reviseAudio?.url) {
         URL.revokeObjectURL(reviseAudio.url);
       }
     },
-    [reviseAudio, stopAudioStream]
+    [reviseAudio]
+  );
+
+  useEffect(
+    () => () => {
+      mountedRef.current = false;
+      const recorder = mediaRecorderRef.current;
+      if (recorder && recorder.state !== "inactive") {
+        recorder.stop();
+      }
+      mediaRecorderRef.current = null;
+      stopAudioStream();
+    },
+    [stopAudioStream]
   );
 
   function handleAttachmentChange(event) {
@@ -548,9 +705,14 @@ function GraphDraftDetailCard({
       return;
     }
     startingRef.current = true;
+    stopSpeech();
     setFlash("", "");
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      if (!mountedRef.current) {
+        stream.getTracks().forEach((track) => track.stop());
+        return;
+      }
       audioStreamRef.current = stream;
       const mimeType = pickAudioMimeType();
       const recorder = new MediaRecorder(stream, mimeType ? { mimeType } : undefined);
@@ -562,6 +724,10 @@ function GraphDraftDetailCard({
       });
       recorder.addEventListener("stop", () => {
         stopAudioStream();
+        if (!mountedRef.current) {
+          audioChunksRef.current = [];
+          return;
+        }
         const type = recorder.mimeType || mimeType || "audio/webm";
         const blob = new Blob(audioChunksRef.current, { type });
         audioChunksRef.current = [];
@@ -583,8 +749,10 @@ function GraphDraftDetailCard({
       setIsRecording(true);
     } catch {
       stopAudioStream();
-      setIsRecording(false);
-      setFlash("", "Could not access the microphone. Check browser permissions.");
+      if (mountedRef.current) {
+        setIsRecording(false);
+        setFlash("", "Could not access the microphone. Check browser permissions.");
+      }
     } finally {
       startingRef.current = false;
     }
@@ -660,10 +828,158 @@ function GraphDraftDetailCard({
     }
   }
 
+  function renderAudioReviewConsole() {
+    const speechButtonLabel =
+      speechStatus === "speaking"
+        ? "Pause audio review"
+        : speechStatus === "paused"
+          ? "Resume audio review"
+          : "Listen to review";
+    return (
+      <section className="ai-revise audio-review-console" aria-labelledby="audio-review-title">
+        <div className="audio-review-heading">
+          <div>
+            <h3 id="audio-review-title">Listen &amp; respond</h3>
+            <p className="subtle">
+              Hear the summary and proposals, then speak or type corrections for the AI.
+            </p>
+          </div>
+          {speechStatus !== "idle" ? (
+            <span className="pill audio-review-status" role="status">
+              {speechStatus === "paused" ? "Audio paused" : "Reading review"}
+            </span>
+          ) : null}
+        </div>
+
+        <div className="audio-review-primary-actions">
+          {speechSupported ? (
+            <button
+              type="button"
+              className="btn-primary"
+              disabled={!spokenReview}
+              onClick={toggleSpeech}
+              aria-pressed={speechStatus === "speaking"}
+            >
+              {speechButtonLabel}
+            </button>
+          ) : (
+            <p className="subtle audio-review-unavailable">
+              Spoken playback is unavailable in this browser; the review remains below.
+            </p>
+          )}
+          {speechStatus !== "idle" ? (
+            <button type="button" className="btn-secondary" onClick={() => stopSpeech()}>
+              Stop audio
+            </button>
+          ) : null}
+          <button
+            type="button"
+            className={`btn-secondary${isRecording ? " recording" : ""}`}
+            disabled={isRecording ? false : !canEditDraft || !recordingSupported}
+            title={
+              recordingSupported
+                ? undefined
+                : "Microphone recording isn't supported in this browser."
+            }
+            onClick={toggleRecording}
+            aria-pressed={isRecording}
+          >
+            {isRecording ? "Stop recording" : "Dictate feedback"}
+          </button>
+        </div>
+
+        {isRecording ? (
+          <p className="audio-recording-status" role="status">
+            Recording feedback… tap Stop recording when you&apos;re finished.
+          </p>
+        ) : null}
+        {reviseAudio ? (
+          <div className="ai-revise-attachment audio-review-recording">
+            <audio
+              aria-label="Recorded feedback preview"
+              controls
+              src={reviseAudio.url}
+              className="ai-revise-audio"
+            />
+            <button
+              type="button"
+              className="btn-link"
+              onClick={clearReviseAudio}
+              disabled={!canEditDraft}
+            >
+              Remove voice note
+            </button>
+          </div>
+        ) : null}
+
+        <details className="context-details audio-review-more">
+          <summary>Type feedback or attach an image</summary>
+          <div className="audio-review-more-body">
+            <textarea
+              className="ai-revise-input"
+              rows={2}
+              placeholder="Tell the AI how to revise these proposals — e.g. 'drop the dataset link; the claim isn't supported yet, make it a clarification instead'. You can also dictate feedback or attach an image."
+              value={reviseFeedback}
+              disabled={!canEditDraft || isRecording}
+              onChange={(event) => setReviseFeedback(event.target.value)}
+            />
+            <label
+              className={`btn-secondary ai-revise-attach${canEditDraft ? "" : " disabled"}`}
+            >
+              Attach image
+              <input
+                type="file"
+                accept="image/*"
+                multiple
+                className="sr-only"
+                disabled={!canEditDraft}
+                onChange={handleAttachmentChange}
+              />
+            </label>
+            {reviseAttachments.length ? (
+              <ul className="ai-revise-files">
+                {reviseAttachments.map((file, index) => (
+                  <li key={`${file.name}-${index}`} className="ai-revise-attachment">
+                    <span className="ai-revise-file-name">{file.name}</span>
+                    <button
+                      type="button"
+                      className="btn-link"
+                      onClick={() => removeAttachment(index)}
+                      disabled={!canEditDraft}
+                    >
+                      Remove
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            ) : null}
+          </div>
+        </details>
+        <button
+          type="button"
+          className="btn-primary audio-review-submit"
+          disabled={
+            !canEditDraft ||
+            isRecording ||
+            (!reviseFeedback.trim() && !reviseAudio && reviseAttachments.length === 0)
+          }
+          onClick={reviseDraft}
+        >
+          Revise with AI
+        </button>
+      </section>
+    );
+  }
+
   return (
     <article className="card span-12">
       <div className="item-head">
-        <h2>Review</h2>
+        <div className="review-title-row">
+          <button type="button" className="btn-link" onClick={() => navigate(backPath)}>
+            Back
+          </button>
+          <h2>Review</h2>
+        </div>
         {loading ? <span className="pill">Loading...</span> : null}
       </div>
       {error ? <p className="flash error">{error}</p> : null}
@@ -692,6 +1008,7 @@ function GraphDraftDetailCard({
               : `${(changeSet.operations || []).length} proposals`}{" "}
             for your graph. Keep what&apos;s right, then commit — nothing changes until you do.
           </p>
+          {renderAudioReviewConsole()}
           {changeSet.error_metadata?.message ? (
             <p className="flash error">{changeSet.error_metadata.message}</p>
           ) : null}
@@ -932,91 +1249,6 @@ function GraphDraftDetailCard({
               </button>
             </div>
 
-            <div className="ai-revise">
-              <div className="subtle">Revise with AI</div>
-              <textarea
-                className="ai-revise-input"
-                rows={2}
-                placeholder="Tell the AI how to revise these proposals — e.g. 'drop the dataset link; the claim isn't supported yet, make it a clarification instead'. You can also dictate feedback or attach an image."
-                value={reviseFeedback}
-                disabled={!canEditDraft || isRecording}
-                onChange={(event) => setReviseFeedback(event.target.value)}
-              />
-              <div className="ai-revise-tools">
-                <button
-                  type="button"
-                  className={`btn-secondary${isRecording ? " recording" : ""}`}
-                  disabled={isRecording ? false : !canEditDraft || !recordingSupported}
-                  title={
-                    recordingSupported
-                      ? undefined
-                      : "Microphone recording isn't supported in this browser."
-                  }
-                  onClick={toggleRecording}
-                  aria-pressed={isRecording}
-                >
-                  {isRecording ? "Stop recording" : "Dictate feedback"}
-                </button>
-                <label
-                  className={`btn-secondary ai-revise-attach${
-                    canEditDraft ? "" : " disabled"
-                  }`}
-                >
-                  Attach image
-                  <input
-                    type="file"
-                    accept="image/*"
-                    multiple
-                    className="sr-only"
-                    disabled={!canEditDraft}
-                    onChange={handleAttachmentChange}
-                  />
-                </label>
-              </div>
-              {reviseAudio ? (
-                <div className="ai-revise-attachment">
-                  <audio controls src={reviseAudio.url} className="ai-revise-audio" />
-                  <button
-                    type="button"
-                    className="btn-link"
-                    onClick={clearReviseAudio}
-                    disabled={!canEditDraft}
-                  >
-                    Remove voice note
-                  </button>
-                </div>
-              ) : null}
-              {reviseAttachments.length ? (
-                <ul className="ai-revise-files">
-                  {reviseAttachments.map((file, index) => (
-                    <li key={`${file.name}-${index}`} className="ai-revise-attachment">
-                      <span className="ai-revise-file-name">{file.name}</span>
-                      <button
-                        type="button"
-                        className="btn-link"
-                        onClick={() => removeAttachment(index)}
-                        disabled={!canEditDraft}
-                      >
-                        Remove
-                      </button>
-                    </li>
-                  ))}
-                </ul>
-              ) : null}
-              <button
-                type="button"
-                className="btn-secondary"
-                disabled={
-                  !canEditDraft ||
-                  isRecording ||
-                  (!reviseFeedback.trim() && !reviseAudio && reviseAttachments.length === 0)
-                }
-                onClick={reviseDraft}
-              >
-                Revise with AI
-              </button>
-            </div>
-
             <div className="inline">
               <button
                 type="button"
@@ -1215,4 +1447,4 @@ function GraphDraftDetailCard({
   );
 }
 
-export { GraphDraftDetailCard };
+export { GraphDraftDetailCard, spokenReviewScript };

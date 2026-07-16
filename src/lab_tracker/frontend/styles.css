@@ -1050,6 +1050,86 @@ button.project-graph-legend-item:hover {
   background: var(--paper-2, #faf8f3);
 }
 
+.audio-review-console {
+  display: grid;
+  gap: 0.65rem;
+  margin: 0.25rem 0 0.75rem;
+  padding: 0.85rem;
+  border-left: 4px solid var(--accent);
+  border-radius: 14px;
+  background: linear-gradient(135deg, var(--accent-soft), #fbfffd 62%);
+}
+
+.audio-review-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+
+.audio-review-heading h3 {
+  margin: 0 0 0.2rem;
+}
+
+.audio-review-primary-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: stretch;
+  gap: 0.5rem;
+}
+
+.audio-review-primary-actions button {
+  min-height: 44px;
+}
+
+.audio-review-primary-actions .recording {
+  border-color: var(--danger, #c0392b);
+  color: var(--danger, #c0392b);
+  background: var(--danger-soft);
+}
+
+.audio-review-unavailable {
+  flex: 1 1 16rem;
+  align-self: center;
+}
+
+.audio-recording-status {
+  margin: 0;
+  color: var(--danger);
+  font-size: 0.88rem;
+  font-weight: 700;
+}
+
+.audio-review-recording {
+  flex-wrap: wrap;
+  margin: 0;
+}
+
+.audio-review-more {
+  border-top: 1px solid color-mix(in srgb, var(--accent) 22%, transparent);
+  padding-top: 0.55rem;
+}
+
+.audio-review-more > summary {
+  color: var(--ink-soft);
+  font-size: 0.88rem;
+}
+
+.audio-review-more-body {
+  display: grid;
+  justify-items: start;
+  gap: 0.5rem;
+  padding-top: 0.25rem;
+}
+
+.audio-review-more-body .ai-revise-input {
+  margin-bottom: 0;
+}
+
+.audio-review-submit {
+  justify-self: start;
+}
+
 .ai-revise-input {
   width: 100%;
   margin: 0.4rem 0 0.5rem;
@@ -1250,6 +1330,16 @@ button.project-graph-legend-item:hover {
   display: grid;
   gap: 0.6rem;
   margin-top: 0.9rem;
+}
+
+.review-title-row {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+}
+
+.review-title-row h2 {
+  margin: 0;
 }
 
 .review-lead {
@@ -1882,5 +1972,88 @@ button.project-graph-legend-item:hover {
   .project-graph-detail {
     flex-basis: auto;
     max-height: none;
+  }
+}
+
+@media (max-width: 640px) {
+  .review-app-shell {
+    max-width: 34rem;
+    padding: 0.4rem;
+  }
+
+  .review-app-shell .hero {
+    border-radius: 14px;
+    padding: 0.7rem 0.75rem;
+  }
+
+  .review-app-shell .hero-row > div > .subtle {
+    display: none;
+  }
+
+  .review-app-shell .app-nav {
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    padding-bottom: 0.15rem;
+  }
+
+  .review-app-shell .grid {
+    gap: 0.5rem;
+    margin-top: 0.5rem;
+  }
+
+  .review-app-shell .card {
+    border-radius: 14px;
+    padding: 0.75rem;
+  }
+
+  .audio-review-console {
+    margin: 0.1rem -0.15rem 0.65rem;
+    padding: 0.75rem;
+  }
+
+  .audio-review-heading {
+    align-items: stretch;
+    flex-direction: column;
+    gap: 0.4rem;
+  }
+
+  .audio-review-status {
+    align-self: flex-start;
+  }
+
+  .audio-review-primary-actions {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .audio-review-primary-actions button,
+  .audio-review-submit {
+    min-height: 48px;
+  }
+
+  .audio-review-unavailable {
+    grid-column: 1 / -1;
+  }
+
+  .audio-review-submit,
+  .ai-revise-audio {
+    justify-self: stretch;
+    width: 100%;
+    max-width: none;
+  }
+
+  .review-proposal-actions {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
+  .review-proposal-actions .pill {
+    grid-column: 1 / -1;
+    justify-self: start;
+  }
+
+  .review-proposal-actions button {
+    min-height: 46px;
+    padding-inline: 0.45rem;
   }
 }
