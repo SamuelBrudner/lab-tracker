@@ -36,6 +36,12 @@ from lab_tracker.models import (
     SessionStatus,
     SessionType,
 )
+from lab_tracker_client.transport import (
+    MAX_UPLOAD_BYTES,
+    HttpTransport,
+    UploadTooLargeError,
+    preflight_upload_size,
+)
 
 JsonObject = dict[str, Any]
 EvidenceNoteKey = tuple[str, str, str]
@@ -310,11 +316,41 @@ class LabTracker:
         self.default_project_id = default_project_id
         self._access_token = access_token
         self._supplied_access_token = bool(access_token)
-        self._client = httpx.Client(
+        self._transport = HttpTransport(
             base_url=self.base_url,
-            timeout=timeout_seconds,
+            timeout_seconds=timeout_seconds,
+            auth=self,
             transport=transport,
         )
+
+    @property
+    def _client(self) -> httpx.Client:
+        # Retained for callers that read the underlying client (e.g. figure
+        # capture reads its configured timeout to compute a clamped value).
+        return self._transport.client
+
+    # --- TransportAuth policy (injected into the shared HttpTransport) --------
+    @property
+    def surface(self) -> str:
+        return "cli"
+
+    def initial_bearer(self) -> str | None:
+        return self._bearer_token(required=False)
+
+    def refresh_bearer(self, response: httpx.Response) -> str:
+        supplied_token_used = bool(self._access_token and self._supplied_access_token)
+        if supplied_token_used and not self._has_login_credentials():
+            raise LTAPIError(
+                "LAB_TRACKER_ACCESS_TOKEN was rejected by the Lab Tracker API. "
+                "Refresh the token or set LAB_TRACKER_USERNAME and "
+                "LAB_TRACKER_PASSWORD so the client can log in."
+            )
+        self._access_token = None
+        self._supplied_access_token = False
+        return self._bearer_token(required=True)
+
+    def wrap_transport_error(self, method: str, path: str, exc: Exception) -> Exception:
+        return LTAPIError(f"Lab Tracker request {method} {path} failed: {exc}")
 
     @classmethod
     def from_env(cls) -> LabTracker:
@@ -354,7 +390,7 @@ class LabTracker:
         return self._access_token
 
     def close(self) -> None:
-        self._client.close()
+        self._transport.close()
 
     def __enter__(self) -> LabTracker:
         return self
@@ -1080,6 +1116,14 @@ class LabTracker:
             )
         )
 
+    def _preflight_upload(self, path: Path) -> int:
+        """Reject an empty or oversize file before any bytes are transferred."""
+
+        try:
+            return preflight_upload_size(path, max_bytes=MAX_UPLOAD_BYTES)
+        except UploadTooLargeError as exc:
+            raise LTValidationError(str(exc)) from exc
+
     def upload_note_file(
         self,
         *,
@@ -1092,20 +1136,42 @@ class LabTracker:
         client_capture_id: str | None = None,
     ) -> LTRecord:
         path = Path(file_path).expanduser()
-        payload = _read_non_empty_file(
-            path,
-            empty_message="file_path must point to a non-empty file.",
+        self._preflight_upload(path)
+        resolved_status = _validate_enum(
+            status,
+            field_name="note status",
+            allowed_values=NOTE_STATUS_VALUES,
         )
-        return self._upload_note_file_payload(
-            project_id=project_id,
-            path=path,
-            payload=payload,
-            metadata=metadata,
-            status=status,
-            content_type=content_type,
-            transcribed_text=transcribed_text,
-            client_capture_id=client_capture_id,
+        resolved_metadata = _validate_metadata(metadata)
+        resolved_content_type = (
+            content_type or mimetypes.guess_type(path.name)[0] or "application/octet-stream"
         )
+        data: dict[str, str] = {
+            "project_id": _require_non_empty(str(project_id), "project_id"),
+            "status": resolved_status,
+        }
+        if client_capture_id:
+            data["client_capture_id"] = _require_non_empty(client_capture_id, "client_capture_id")
+        if resolved_metadata:
+            data["metadata"] = json.dumps(resolved_metadata, sort_keys=True)
+        if transcribed_text:
+            data["transcribed_text"] = transcribed_text
+        # Stream the file handle so a large upload never materializes in memory;
+        # open_file re-opens per attempt so a 401 retry replays cleanly.
+        response = self._transport.upload(
+            "POST",
+            "/notes/upload-file",
+            field_name="file",
+            open_file=lambda: path.open("rb"),
+            filename=path.name,
+            content_type=resolved_content_type,
+            data=data,
+        )
+        if response.status_code == 422:
+            raise LTValidationError(_response_error(response))
+        if response.status_code >= 400:
+            raise LTAPIError(_response_error(response))
+        return self._data_record(_response_json(response))
 
     def _upload_note_file_payload(
         self,
@@ -1246,6 +1312,11 @@ class LabTracker:
         path = Path(file_path).expanduser().resolve()
         if not path.is_file():
             raise LTValidationError(f"Evidence path is not a file: {path}")
+        # Reject an oversize file before reading it into memory. The bytes are
+        # then read exactly once: the same snapshot is hashed and uploaded, so a
+        # concurrent write between the read and the upload cannot desync the
+        # content hash from the transferred bytes.
+        self._preflight_upload(path)
         payload = _read_non_empty_file(
             path,
             empty_message="Evidence file must not be empty.",
@@ -1430,60 +1501,22 @@ class LabTracker:
         retry_on_unauthorized: bool = True,
         timeout: Any = None,
     ) -> tuple[JsonObject, int]:
-        headers: dict[str, str] = {"X-LabTracker-Surface": "cli"}
-        supplied_token_used = bool(self._access_token and self._supplied_access_token)
-        if authenticated:
-            token = self._bearer_token(required=False)
-            if token is not None:
-                headers["Authorization"] = f"Bearer {token}"
-        response = self._send(
+        response = self._transport.request(
             method,
             path,
-            params=_drop_empty(params),
-            json=_drop_empty(json_payload),
+            authenticated=authenticated,
+            params=params,
+            json=json_payload,
             data=data,
             files=files,
-            headers=headers,
+            retry_on_unauthorized=retry_on_unauthorized,
             timeout=timeout,
         )
-        if response.status_code == 401 and authenticated and retry_on_unauthorized:
-            if supplied_token_used and not self._has_login_credentials():
-                raise LTAPIError(
-                    "LAB_TRACKER_ACCESS_TOKEN was rejected by the Lab Tracker API. "
-                    "Refresh the token or set LAB_TRACKER_USERNAME and "
-                    "LAB_TRACKER_PASSWORD so the client can log in."
-                )
-            self._access_token = None
-            self._supplied_access_token = False
-            token = self._bearer_token(required=True)
-            headers["Authorization"] = f"Bearer {token}"
-            response = self._send(
-                method,
-                path,
-                params=_drop_empty(params),
-                json=_drop_empty(json_payload),
-                data=data,
-                files=files,
-                headers=headers,
-                timeout=timeout,
-            )
         if response.status_code == 422:
             raise LTValidationError(_response_error(response))
         if response.status_code >= 400:
             raise LTAPIError(_response_error(response))
         return _response_json(response), response.status_code
-
-    def _send(
-        self, method: str, path: str, *, timeout: Any = None, **kwargs: Any
-    ) -> httpx.Response:
-        # Only forward an explicit per-request timeout; passing timeout=None to
-        # httpx would disable the timeout rather than use the client default.
-        if timeout is not None:
-            kwargs["timeout"] = timeout
-        try:
-            return self._client.request(method, path, **kwargs)
-        except httpx.HTTPError as exc:
-            raise LTAPIError(f"Lab Tracker request {method} {path} failed: {exc}") from exc
 
     def _has_login_credentials(self) -> bool:
         return bool((self.username or "").strip() and self.password)
@@ -1500,7 +1533,7 @@ class LabTracker:
                     "when the Lab Tracker API has authentication enabled."
                 )
             return None
-        response = self._send(
+        response = self._transport.send(
             "POST",
             "/auth/login",
             json={"username": username, "password": password},
@@ -1812,12 +1845,6 @@ def _record(payload: Any) -> LTRecord:
     if not isinstance(payload, dict):
         raise LTAPIError("Lab Tracker API returned a non-object record.")
     return LTRecord(payload)
-
-
-def _drop_empty(payload: JsonObject | None) -> JsonObject | None:
-    if payload is None:
-        return None
-    return {key: value for key, value in payload.items() if value is not None}
 
 
 def _format_conflicts(conflicts: dict[str, tuple[Any, Any]]) -> str:
