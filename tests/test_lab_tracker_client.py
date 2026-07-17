@@ -166,6 +166,63 @@ def test_bad_enum_values_fail_before_request() -> None:
     assert requests == []
 
 
+def test_upsert_question_and_note_omit_status_to_inherit_server_staged_default() -> None:
+    """Consumers must not cross the human gate implicitly: omitting status must
+
+    drop the key from the POST body so the server applies its canonical staged
+    default, rather than the client re-declaring active/committed.
+    """
+
+    bodies: dict[str, dict] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if request.method == "GET" and path in {"/questions", "/notes"}:
+            return _json_response(
+                200, {"data": [], "meta": {"limit": 200, "offset": 0, "total": 0}}
+            )
+        if request.method == "POST" and path == "/questions":
+            bodies["question"] = json.loads(request.content.decode("utf-8"))
+            return _json_response(201, {"data": {"question_id": "question-1"}})
+        if request.method == "POST" and path == "/notes":
+            bodies["note"] = json.loads(request.content.decode("utf-8"))
+            return _json_response(201, {"data": {"note_id": "note-1"}})
+        return _json_response(404, {"error": {"message": "not found"}})
+
+    with LabTracker(
+        base_url="http://testserver", transport=httpx.MockTransport(handler)
+    ) as lt:
+        lt.upsert_question(project_id="project-1", text="How does it stage?")
+        lt.upsert_note(project_id="project-1", content="# marker\n\nBody")
+
+    assert "status" not in bodies["question"]
+    assert "status" not in bodies["note"]
+
+
+def test_activate_question_and_commit_note_are_explicit_patches() -> None:
+    """Crossing the human gate is a named, explicit PATCH, not a create default."""
+
+    patched: list[tuple[str, dict]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "PATCH":
+            patched.append((request.url.path, json.loads(request.content.decode("utf-8"))))
+            key = "question_id" if "questions" in request.url.path else "note_id"
+            return _json_response(200, {"data": {key: "id-1", "status": "changed"}})
+        return _json_response(404, {"error": {"message": "not found"}})
+
+    with LabTracker(
+        base_url="http://testserver", transport=httpx.MockTransport(handler)
+    ) as lt:
+        lt.activate_question("question-1")
+        lt.commit_note("note-1")
+
+    assert patched == [
+        ("/questions/question-1", {"status": "active"}),
+        ("/notes/note-1", {"status": "committed"}),
+    ]
+
+
 def test_entity_ref_and_first_line_marker_helpers() -> None:
     assert first_line_marker("\n\n  # Marker  \nbody") == "# Marker"
     assert EntityRef("question", "question-1").to_payload() == {

@@ -698,17 +698,24 @@ class LabTracker:
         project_id: str,
         text: str,
         question_type: str = QuestionType.OTHER.value,
-        status: str = QuestionStatus.ACTIVE.value,
+        status: str | None = None,
         hypothesis: str | None = None,
         parent_question_ids: Sequence[str] | None = None,
     ) -> LTRecord:
+        """Find or create a question by text.
+
+        When ``status`` is omitted the record inherits the server's canonical
+        staged default (``QuestionStatus.STAGED``); consumers and agents must not
+        cross the human gate implicitly. Promote deliberately with
+        :meth:`activate_question`.
+        """
         cleaned_text = _require_non_empty(text, "text")
         resolved_type = _validate_enum(
             question_type,
             field_name="question_type",
             allowed_values=QUESTION_TYPE_VALUES,
         )
-        resolved_status = _validate_enum(
+        resolved_status = _validate_optional_enum(
             status,
             field_name="question status",
             allowed_values=QUESTION_STATUS_VALUES,
@@ -728,6 +735,21 @@ class LabTracker:
                     "status": resolved_status,
                     "parent_question_ids": list(parent_question_ids or []),
                 },
+            )
+        )
+
+    def activate_question(self, question_id: str) -> LTRecord:
+        """Promote a staged question to active.
+
+        This crosses the human review gate deliberately; it is a named,
+        one-way promotion (the server rejects active -> staged). Consumers and
+        agents must call it explicitly rather than relying on a create default.
+        """
+        return self._data_record(
+            self._request(
+                "PATCH",
+                f"/questions/{_require_non_empty(str(question_id), 'question_id')}",
+                json_payload={"status": QuestionStatus.ACTIVE.value},
             )
         )
 
@@ -773,15 +795,21 @@ class LabTracker:
         content: str,
         targets: Sequence[EntityRef | Mapping[str, Any] | tuple[str, str] | str] = (),
         metadata: Mapping[str, NoteMetadataScalar] | None = None,
-        status: str = NoteStatus.COMMITTED.value,
+        status: str | None = None,
         transcribed_text: str | None = None,
     ) -> LTRecord:
+        """Find or create a note by its first-line marker.
+
+        When ``status`` is omitted the record inherits the server's canonical
+        staged default (``NoteStatus.STAGED``); consumers and agents must not
+        commit implicitly. Commit deliberately with :meth:`commit_note`.
+        """
         marker = first_line_marker(content)
         if not marker:
             raise LTValidationError(
                 "Note content has no first non-blank line; cannot derive idempotency marker."
             )
-        resolved_status = _validate_enum(
+        resolved_status = _validate_optional_enum(
             status,
             field_name="note status",
             allowed_values=NOTE_STATUS_VALUES,
@@ -966,6 +994,20 @@ class LabTracker:
                 "PATCH",
                 f"/notes/{_require_non_empty(str(note_id), 'note_id')}",
                 json_payload=payload,
+            )
+        )
+
+    def commit_note(self, note_id: str) -> LTRecord:
+        """Commit a staged note.
+
+        This crosses the human review gate deliberately. Consumers and agents
+        must call it explicitly rather than relying on a create default.
+        """
+        return self._data_record(
+            self._request(
+                "PATCH",
+                f"/notes/{_require_non_empty(str(note_id), 'note_id')}",
+                json_payload={"status": NoteStatus.COMMITTED.value},
             )
         )
 
@@ -1486,6 +1528,14 @@ def upsert_question(**kwargs: Any) -> LTRecord:
 
 def upsert_note(**kwargs: Any) -> LTRecord:
     return client.upsert_note(**kwargs)
+
+
+def activate_question(question_id: str) -> LTRecord:
+    return client.activate_question(question_id)
+
+
+def commit_note(note_id: str) -> LTRecord:
+    return client.commit_note(note_id)
 
 
 def quick_capture(text: str | bytes, **kwargs: Any) -> LTRecord:
