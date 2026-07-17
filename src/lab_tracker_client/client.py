@@ -918,6 +918,7 @@ class LabTracker:
         content_type: str | None = None,
         transcribed_text: str | None = None,
         client_capture_id: str | None = None,
+        timeout: Any = None,
     ) -> LTRecord:
         note, _status_code = self._upload_note_file_payload_with_status(
             project_id=project_id,
@@ -928,6 +929,7 @@ class LabTracker:
             content_type=content_type,
             transcribed_text=transcribed_text,
             client_capture_id=client_capture_id,
+            timeout=timeout,
         )
         return note
 
@@ -942,6 +944,7 @@ class LabTracker:
         content_type: str | None = None,
         transcribed_text: str | None = None,
         client_capture_id: str | None = None,
+        timeout: Any = None,
     ) -> tuple[LTRecord, int]:
         if not payload:
             raise LTValidationError("file_path must point to a non-empty file.")
@@ -972,6 +975,7 @@ class LabTracker:
             "/notes/upload-file",
             data=data,
             files={"file": (path.name, payload, resolved_content_type)},
+            timeout=timeout,
         )
         return self._data_record(response_payload), status_code
 
@@ -981,6 +985,7 @@ class LabTracker:
         metadata: Mapping[str, NoteMetadataScalar],
         *,
         status: str | None = None,
+        timeout: Any = None,
     ) -> LTRecord:
         payload: JsonObject = {"metadata": _validate_metadata(metadata) or {}}
         if status is not None:
@@ -994,6 +999,7 @@ class LabTracker:
                 "PATCH",
                 f"/notes/{_require_non_empty(str(note_id), 'note_id')}",
                 json_payload=payload,
+                timeout=timeout,
             )
         )
 
@@ -1196,6 +1202,7 @@ class LabTracker:
         data: Mapping[str, str] | None = None,
         files: dict[str, Any] | None = None,
         retry_on_unauthorized: bool = True,
+        timeout: Any = None,
     ) -> JsonObject:
         payload, _status_code = self._request_with_status(
             method,
@@ -1206,6 +1213,7 @@ class LabTracker:
             data=data,
             files=files,
             retry_on_unauthorized=retry_on_unauthorized,
+            timeout=timeout,
         )
         return payload
 
@@ -1220,6 +1228,7 @@ class LabTracker:
         data: Mapping[str, str] | None = None,
         files: dict[str, Any] | None = None,
         retry_on_unauthorized: bool = True,
+        timeout: Any = None,
     ) -> tuple[JsonObject, int]:
         headers: dict[str, str] = {"X-LabTracker-Surface": "cli"}
         supplied_token_used = bool(self._access_token and self._supplied_access_token)
@@ -1235,6 +1244,7 @@ class LabTracker:
             data=data,
             files=files,
             headers=headers,
+            timeout=timeout,
         )
         if response.status_code == 401 and authenticated and retry_on_unauthorized:
             if supplied_token_used and not self._has_login_credentials():
@@ -1255,6 +1265,7 @@ class LabTracker:
                 data=data,
                 files=files,
                 headers=headers,
+                timeout=timeout,
             )
         if response.status_code == 422:
             raise LTValidationError(_response_error(response))
@@ -1262,7 +1273,13 @@ class LabTracker:
             raise LTAPIError(_response_error(response))
         return _response_json(response), response.status_code
 
-    def _send(self, method: str, path: str, **kwargs: Any) -> httpx.Response:
+    def _send(
+        self, method: str, path: str, *, timeout: Any = None, **kwargs: Any
+    ) -> httpx.Response:
+        # Only forward an explicit per-request timeout; passing timeout=None to
+        # httpx would disable the timeout rather than use the client default.
+        if timeout is not None:
+            kwargs["timeout"] = timeout
         try:
             return self._client.request(method, path, **kwargs)
         except httpx.HTTPError as exc:
@@ -1441,14 +1458,39 @@ def _default_client() -> LabTracker:
 
 
 class _LazyLabTrackerClient:
+    """Module-level proxy over a lazily built, cached default client.
+
+    Attribute access delegates to a cached singleton so the module-level helper
+    functions share one client. Using the proxy as a context manager builds a
+    *fresh* client that owns its own lifetime, so ``with client as lt:`` closes
+    only that fresh client and never the shared singleton — later helper calls
+    can never end up attached to a closed httpx client.
+    """
+
     def __getattr__(self, name: str) -> Any:
         return getattr(_default_client(), name)
 
     def __enter__(self) -> LabTracker:
-        return _default_client().__enter__()
+        context_client = client_from_env()
+        self.__dict__.setdefault("_context_clients", []).append(context_client)
+        return context_client
 
     def __exit__(self, *exc_info: object) -> None:
-        return _default_client().__exit__(*exc_info)
+        context_clients = self.__dict__.get("_context_clients")
+        if context_clients:
+            context_clients.pop().close()
+
+    def close(self) -> None:
+        """Close and clear the cached singleton.
+
+        The next attribute access rebuilds it from the environment, so callers
+        can deterministically recycle the client (e.g. after changing env or
+        profile settings).
+        """
+        global _default_client_instance
+        if _default_client_instance is not None:
+            _default_client_instance.close()
+            _default_client_instance = None
 
 
 client = _LazyLabTrackerClient()

@@ -629,6 +629,47 @@ def test_from_env_uses_mcp_base_url_fallback(monkeypatch: pytest.MonkeyPatch) ->
         lt.close()
 
 
+def test_lazy_client_context_manager_does_not_close_shared_singleton() -> None:
+    """`with client as lt:` must build a fresh client and never close the shared
+
+    cached singleton, so later module-level helper calls can't reuse a closed
+    httpx client. `client.close()` deterministically clears the cache.
+    """
+
+    import sys
+
+    client_module = sys.modules["lab_tracker_client.client"]
+    saved_from_env = client_module.client_from_env
+    saved_instance = client_module._default_client_instance
+
+    class _Fake:
+        def __init__(self) -> None:
+            self.closed = False
+
+        def close(self) -> None:
+            self.closed = True
+
+    try:
+        client_module._default_client_instance = None
+        client_module.client_from_env = _Fake
+        proxy = client_module.client
+
+        with proxy as fresh:
+            assert isinstance(fresh, _Fake)
+            # The shared cache is untouched by context-manager use.
+            assert client_module._default_client_instance is None
+        assert fresh.closed is True
+
+        cached = _Fake()
+        client_module._default_client_instance = cached
+        proxy.close()
+        assert cached.closed is True
+        assert client_module._default_client_instance is None
+    finally:
+        client_module.client_from_env = saved_from_env
+        client_module._default_client_instance = saved_instance
+
+
 def test_module_default_client_is_lazy(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("LAB_TRACKER_HTTP_TIMEOUT", "not-a-float")
     client_module = importlib.import_module("lab_tracker_client.client")
