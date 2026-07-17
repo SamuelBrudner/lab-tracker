@@ -263,6 +263,7 @@ class ProjectCreate(RequestModel):
     description: str | None = None
     status: ProjectStatus | None = None
     group_id: UUID | None = None
+    client_capture_id: str | None = None
 
 
 class ProjectUpdate(RequestModel):
@@ -351,6 +352,7 @@ class QuestionCreate(RequestModel):
     question_type: QuestionType
     hypothesis: str | None = None
     status: QuestionStatus | None = None
+    client_capture_id: str | None = None
     terminal_reason: NonBlankStr | None = None
     parent_question_ids: list[UUID] | None = None
 

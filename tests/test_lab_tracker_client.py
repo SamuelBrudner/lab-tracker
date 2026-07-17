@@ -79,10 +79,9 @@ def test_upsert_project_question_and_note_are_idempotent() -> None:
         transport=httpx.MockTransport(handler),
     ) as lt:
         project = lt.upsert_project(name="Literature geometry", description="consumer sync")
-        same_project = lt.upsert_project(
-            name="Literature geometry",
-            description="ignored after first create",
-        )
+        # Re-issuing without a description reuses the existing project (a bare
+        # upsert stays lenient); a *conflicting* description would now raise.
+        same_project = lt.upsert_project(name="Literature geometry")
         question = lt.upsert_question(
             project_id=project.id,
             text="How does the manifold organize claims?",
@@ -221,6 +220,101 @@ def test_activate_question_and_commit_note_are_explicit_patches() -> None:
         ("/questions/question-1", {"status": "active"}),
         ("/notes/note-1", {"status": "committed"}),
     ]
+
+
+def test_get_or_create_project_distinguishes_created_reused_conflict_and_update() -> None:
+    projects: list[dict] = []
+    post_bodies: list[dict] = []
+    patched: list[tuple[str, dict]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if request.method == "GET" and path == "/projects":
+            return _json_response(
+                200,
+                {"data": projects, "meta": {"limit": 200, "offset": 0, "total": len(projects)}},
+            )
+        if request.method == "POST" and path == "/projects":
+            body = json.loads(request.content.decode("utf-8"))
+            post_bodies.append(body)
+            project = {
+                "project_id": "project-1",
+                "name": body["name"],
+                "description": body.get("description", ""),
+                "status": body.get("status") or "active",
+            }
+            projects.append(project)
+            return _json_response(201, {"data": project})
+        if request.method == "PATCH" and path == "/projects/project-1":
+            body = json.loads(request.content.decode("utf-8"))
+            patched.append((path, body))
+            projects[0].update(body)
+            return _json_response(200, {"data": projects[0]})
+        return _json_response(404, {"error": {"message": "not found"}})
+
+    with LabTracker(
+        base_url="http://testserver", transport=httpx.MockTransport(handler)
+    ) as lt:
+        created = lt.get_or_create_project(name="Geometry", description="first")
+        assert created.action == "created"
+        assert created.id == "project-1"
+        # A deterministic idempotency key is sent so concurrent creates dedupe.
+        assert post_bodies[0]["client_capture_id"].startswith("gc:")
+
+        reused = lt.get_or_create_project(name="Geometry")
+        assert reused.action == "reused"
+        assert reused.id == "project-1"
+
+        # A conflicting supplied field is never silently discarded.
+        with pytest.raises(LTValidationError, match="differs"):
+            lt.get_or_create_project(name="Geometry", description="conflicting")
+
+        updated = lt.get_or_create_project(
+            name="Geometry", description="conflicting", on_conflict="update"
+        )
+        assert updated.action == "updated"
+        assert patched == [("/projects/project-1", {"description": "conflicting"})]
+
+    assert len(post_bodies) == 1  # one POST despite four get_or_create calls
+
+
+def test_get_or_create_question_distinguishes_created_reused_and_conflict() -> None:
+    questions: list[dict] = []
+    post_bodies: list[dict] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if request.method == "GET" and path == "/questions":
+            return _json_response(
+                200,
+                {"data": questions, "meta": {"limit": 200, "offset": 0, "total": len(questions)}},
+            )
+        if request.method == "POST" and path == "/questions":
+            body = json.loads(request.content.decode("utf-8"))
+            post_bodies.append(body)
+            question = {"question_id": "question-1", **body}
+            questions.append(question)
+            return _json_response(201, {"data": question})
+        return _json_response(404, {"error": {"message": "not found"}})
+
+    with LabTracker(
+        base_url="http://testserver", transport=httpx.MockTransport(handler)
+    ) as lt:
+        created = lt.get_or_create_question(
+            project_id="project-1", text="How?", question_type="descriptive"
+        )
+        assert created.action == "created"
+        assert post_bodies[0]["client_capture_id"].startswith("gc:")
+
+        reused = lt.get_or_create_question(project_id="project-1", text="How?")
+        assert reused.action == "reused"
+
+        with pytest.raises(LTValidationError, match="differs"):
+            lt.get_or_create_question(
+                project_id="project-1", text="How?", question_type="hypothesis_driven"
+            )
+
+    assert len(post_bodies) == 1
 
 
 def test_entity_ref_and_first_line_marker_helpers() -> None:

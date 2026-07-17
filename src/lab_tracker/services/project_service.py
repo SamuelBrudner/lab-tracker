@@ -24,6 +24,7 @@ from lab_tracker.services.shared import (
     actor_user_fk,
     actor_user_id,
     ensure_non_empty,
+    normalize_client_capture_id,
 )
 
 _GROUP_ID_UNSET = object()
@@ -46,6 +47,7 @@ class ProjectService(BaseService):
         status: ProjectStatus = ProjectStatus.ACTIVE,
         group_id: UUID | None = None,
         *,
+        client_capture_id: str | None = None,
         actor: AuthContext | None = None,
     ) -> Project:
         require_role(actor, WRITE_ROLES)
@@ -53,12 +55,18 @@ class ProjectService(BaseService):
             self.authorization.require_group_owner(group_id, actor=actor)
             self.get_project_group(group_id)
         ensure_non_empty(name, "name")
+        resolved_client_capture_id = normalize_client_capture_id(client_capture_id)
+        if resolved_client_capture_id is not None:
+            existing = self._find_client_capture_project(resolved_client_capture_id)
+            if existing is not None:
+                return existing
         project = Project(
             project_id=uuid4(),
             group_id=group_id,
             name=name.strip(),
             description=description.strip(),
             status=status,
+            client_capture_id=resolved_client_capture_id,
             created_by=actor_user_id(actor),
             created_by_user_id=actor_user_fk(actor, self.repository),
         )
@@ -78,6 +86,16 @@ class ProjectService(BaseService):
             with self.unit_of_work() as repository:
                 repository.project_memberships.save(membership)
         return project
+
+    def _find_client_capture_project(self, client_capture_id: str) -> Project | None:
+        projects = self.query_from_repository(
+            loader=lambda repository: repository.query_projects(
+                client_capture_id=client_capture_id,
+                limit=1,
+                offset=0,
+            ),
+        )
+        return projects[0] if projects else None
 
     def get_project(self, project_id: UUID) -> Project:
         return self.get_from_repository(

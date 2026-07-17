@@ -195,6 +195,41 @@ class LTRecord(dict[str, Any]):
 
 EvidenceNoteIndex = dict[EvidenceNoteKey, LTRecord]
 
+# Sentinel distinguishing "caller did not supply this field" from an explicit
+# empty/None value, so get_or_create only compares fields the caller actually
+# provided (and never silently discards conflicting intent).
+_UNSET: Any = object()
+
+
+@dataclass(frozen=True)
+class GetOrCreateResult:
+    """Outcome of a get_or_create_* call.
+
+    ``action`` is ``"created"``, ``"reused"``, or ``"updated"``. The result also
+    proxies the record's ``id`` / ``get`` so existing record-shaped call sites
+    keep working.
+    """
+
+    action: str
+    record: LTRecord
+
+    @property
+    def id(self) -> Any:
+        return self.record.id
+
+    def get(self, key: str, default: Any = None) -> Any:
+        return self.record.get(key, default)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"action": self.action, "record": self.record.to_dict()}
+
+
+def _derive_capture_id(*parts: str) -> str:
+    """Deterministic idempotency key for a natural key, bounded to <=120 chars."""
+
+    digest = hashlib.sha256("\x1f".join(parts).encode("utf-8")).hexdigest()
+    return f"gc:{digest[:64]}"
+
 
 @dataclass(frozen=True)
 class EvidenceImportResult:
@@ -658,6 +693,86 @@ class LabTracker:
                 return project
         return None
 
+    def get_or_create_project(
+        self,
+        *,
+        name: str,
+        description: str | Any = _UNSET,
+        status: str | None | Any = _UNSET,
+        on_conflict: str = "error",
+    ) -> GetOrCreateResult:
+        """Find or create a project by name, honestly and atomically.
+
+        Returns a :class:`GetOrCreateResult` whose ``action`` distinguishes
+        ``created`` / ``reused`` / ``updated``. Only caller-supplied fields are
+        compared against an existing project; a divergence raises
+        ``LTValidationError`` (never a silent discard) unless
+        ``on_conflict="update"`` is passed, which PATCHes the record instead.
+
+        On create a deterministic ``client_capture_id`` derived from the name is
+        sent, so concurrent identical calls resolve to one canonical project
+        server-side rather than duplicating a graph node.
+        """
+
+        cleaned_name = _require_non_empty(name, "name")
+        resolved_status = (
+            _validate_optional_enum(
+                status,
+                field_name="project status",
+                allowed_values=PROJECT_STATUS_VALUES,
+            )
+            if status is not _UNSET
+            else _UNSET
+        )
+        existing = self.find_project_by_name(cleaned_name)
+        if existing is not None:
+            conflicts = _project_field_conflicts(
+                existing, description=description, status=resolved_status
+            )
+            if conflicts:
+                if on_conflict == "update":
+                    return GetOrCreateResult(
+                        "updated",
+                        self._patch_project(
+                            existing.id, description=description, status=resolved_status
+                        ),
+                    )
+                raise LTValidationError(
+                    f"Existing project {cleaned_name!r} differs from the supplied "
+                    f"fields ({_format_conflicts(conflicts)}). Pass on_conflict="
+                    "'update' to apply the change, or reconcile the inputs."
+                )
+            return GetOrCreateResult("reused", existing)
+        record = self._data_record(
+            self._request(
+                "POST",
+                "/projects",
+                json_payload={
+                    "name": cleaned_name,
+                    "description": "" if description is _UNSET else description,
+                    "status": None if resolved_status is _UNSET else resolved_status,
+                    "client_capture_id": _derive_capture_id("project", cleaned_name),
+                },
+            )
+        )
+        return GetOrCreateResult("created", record)
+
+    def _patch_project(
+        self, project_id: Any, *, description: str | Any, status: str | None | Any
+    ) -> LTRecord:
+        payload: JsonObject = {}
+        if description is not _UNSET:
+            payload["description"] = description
+        if status is not _UNSET and status is not None:
+            payload["status"] = status
+        return self._data_record(
+            self._request(
+                "PATCH",
+                f"/projects/{_require_non_empty(str(project_id), 'project_id')}",
+                json_payload=payload,
+            )
+        )
+
     def upsert_project(
         self,
         *,
@@ -665,25 +780,19 @@ class LabTracker:
         description: str = "",
         status: str | None = None,
     ) -> LTRecord:
-        resolved_status = _validate_optional_enum(
-            status,
-            field_name="project status",
-            allowed_values=PROJECT_STATUS_VALUES,
-        )
-        existing = self.find_project_by_name(name)
-        if existing is not None:
-            return existing
-        return self._data_record(
-            self._request(
-                "POST",
-                "/projects",
-                json_payload={
-                    "name": _require_non_empty(name, "name"),
-                    "description": description,
-                    "status": resolved_status,
-                },
-            )
-        )
+        """Deprecated: use :meth:`get_or_create_project`.
+
+        Preserves the record-returning contract. Fields are compared only when
+        supplied (a non-empty description or an explicit status), so an existing
+        project is reused when they match and a conflict is raised when they do
+        not — the honesty fix. A bare ``upsert_project(name=...)`` still reuses.
+        """
+
+        return self.get_or_create_project(
+            name=name,
+            description=description if description != "" else _UNSET,
+            status=status if status is not None else _UNSET,
+        ).record
 
     def find_question_by_text(self, project_id: str, text: str) -> LTRecord | None:
         cleaned = _require_non_empty(text, "text")
@@ -691,6 +800,112 @@ class LabTracker:
             if question.get("text") == cleaned:
                 return question
         return None
+
+    def get_or_create_question(
+        self,
+        *,
+        project_id: str,
+        text: str,
+        question_type: str | Any = _UNSET,
+        status: str | None | Any = _UNSET,
+        hypothesis: str | None | Any = _UNSET,
+        parent_question_ids: Sequence[str] | None | Any = _UNSET,
+        on_conflict: str = "error",
+    ) -> GetOrCreateResult:
+        """Find or create a question by text, honestly and atomically.
+
+        Returns a :class:`GetOrCreateResult` (``created`` / ``reused`` /
+        ``updated``). Only caller-supplied fields are compared against an
+        existing question; a divergence raises ``LTValidationError`` unless
+        ``on_conflict="update"``. When ``status`` is omitted the record inherits
+        the server's canonical staged default (``QuestionStatus.STAGED``);
+        promote deliberately with :meth:`activate_question`. On create a
+        deterministic ``client_capture_id`` derived from (project, text) is sent
+        so concurrent identical calls resolve to one canonical question.
+        """
+
+        cleaned_text = _require_non_empty(text, "text")
+        resolved_type = (
+            _validate_enum(
+                question_type,
+                field_name="question_type",
+                allowed_values=QUESTION_TYPE_VALUES,
+            )
+            if question_type is not _UNSET
+            else _UNSET
+        )
+        resolved_status = (
+            _validate_optional_enum(
+                status,
+                field_name="question status",
+                allowed_values=QUESTION_STATUS_VALUES,
+            )
+            if status is not _UNSET
+            else _UNSET
+        )
+        existing = self.find_question_by_text(project_id, cleaned_text)
+        if existing is not None:
+            conflicts = _question_field_conflicts(
+                existing,
+                question_type=resolved_type,
+                status=resolved_status,
+                hypothesis=hypothesis,
+                parent_question_ids=parent_question_ids,
+            )
+            if conflicts:
+                if on_conflict == "update":
+                    return GetOrCreateResult(
+                        "updated",
+                        self._patch_question(
+                            existing.id,
+                            status=resolved_status,
+                            hypothesis=hypothesis,
+                        ),
+                    )
+                raise LTValidationError(
+                    f"Existing question {cleaned_text!r} differs from the supplied "
+                    f"fields ({_format_conflicts(conflicts)}). Pass on_conflict="
+                    "'update' to apply the change, or reconcile the inputs."
+                )
+            return GetOrCreateResult("reused", existing)
+        record = self._data_record(
+            self._request(
+                "POST",
+                "/questions",
+                json_payload={
+                    "project_id": str(project_id),
+                    "text": cleaned_text,
+                    "question_type": (
+                        QuestionType.OTHER.value if resolved_type is _UNSET else resolved_type
+                    ),
+                    "hypothesis": None if hypothesis is _UNSET else hypothesis,
+                    "status": None if resolved_status is _UNSET else resolved_status,
+                    "parent_question_ids": (
+                        [] if parent_question_ids is _UNSET else list(parent_question_ids or [])
+                    ),
+                    "client_capture_id": _derive_capture_id(
+                        "question", str(project_id), cleaned_text
+                    ),
+                },
+            )
+        )
+        return GetOrCreateResult("created", record)
+
+    def _patch_question(
+        self, question_id: Any, *, status: str | None | Any, hypothesis: str | None | Any
+    ) -> LTRecord:
+        payload: JsonObject = {}
+        if status is not _UNSET and status is not None:
+            payload["status"] = status
+        if hypothesis is not _UNSET:
+            payload["hypothesis"] = hypothesis
+        return self._data_record(
+            self._request(
+                "PATCH",
+                f"/questions/{_require_non_empty(str(question_id), 'question_id')}",
+                json_payload=payload,
+            )
+        )
 
     def upsert_question(
         self,
@@ -702,41 +917,26 @@ class LabTracker:
         hypothesis: str | None = None,
         parent_question_ids: Sequence[str] | None = None,
     ) -> LTRecord:
-        """Find or create a question by text.
+        """Deprecated: use :meth:`get_or_create_question`.
 
-        When ``status`` is omitted the record inherits the server's canonical
-        staged default (``QuestionStatus.STAGED``); consumers and agents must not
-        cross the human gate implicitly. Promote deliberately with
-        :meth:`activate_question`.
+        Preserves the record-returning contract. Fields are compared only when
+        supplied (an explicit non-default question_type/status/hypothesis/
+        parents), so a matching existing question is reused and a conflicting one
+        raises — the honesty fix. When ``status`` is omitted the record stages.
         """
-        cleaned_text = _require_non_empty(text, "text")
-        resolved_type = _validate_enum(
-            question_type,
-            field_name="question_type",
-            allowed_values=QUESTION_TYPE_VALUES,
-        )
-        resolved_status = _validate_optional_enum(
-            status,
-            field_name="question status",
-            allowed_values=QUESTION_STATUS_VALUES,
-        )
-        existing = self.find_question_by_text(project_id, cleaned_text)
-        if existing is not None:
-            return existing
-        return self._data_record(
-            self._request(
-                "POST",
-                "/questions",
-                json_payload={
-                    "project_id": str(project_id),
-                    "text": cleaned_text,
-                    "question_type": resolved_type,
-                    "hypothesis": hypothesis,
-                    "status": resolved_status,
-                    "parent_question_ids": list(parent_question_ids or []),
-                },
-            )
-        )
+
+        return self.get_or_create_question(
+            project_id=project_id,
+            text=text,
+            question_type=(
+                question_type if question_type != QuestionType.OTHER.value else _UNSET
+            ),
+            status=status if status is not None else _UNSET,
+            hypothesis=hypothesis if hypothesis is not None else _UNSET,
+            parent_question_ids=(
+                parent_question_ids if parent_question_ids is not None else _UNSET
+            ),
+        ).record
 
     def activate_question(self, question_id: str) -> LTRecord:
         """Promote a staged question to active.
@@ -1560,6 +1760,14 @@ def find_note_by_marker(project_id: str, marker: str) -> LTRecord | None:
     return client.find_note_by_marker(project_id, marker)
 
 
+def get_or_create_project(**kwargs: Any) -> GetOrCreateResult:
+    return client.get_or_create_project(**kwargs)
+
+
+def get_or_create_question(**kwargs: Any) -> GetOrCreateResult:
+    return client.get_or_create_question(**kwargs)
+
+
 def upsert_project(**kwargs: Any) -> LTRecord:
     return client.upsert_project(**kwargs)
 
@@ -1610,6 +1818,62 @@ def _drop_empty(payload: JsonObject | None) -> JsonObject | None:
     if payload is None:
         return None
     return {key: value for key, value in payload.items() if value is not None}
+
+
+def _format_conflicts(conflicts: dict[str, tuple[Any, Any]]) -> str:
+    return "; ".join(
+        f"{field}: existing={existing!r} supplied={supplied!r}"
+        for field, (existing, supplied) in conflicts.items()
+    )
+
+
+def _project_field_conflicts(
+    existing: LTRecord, *, description: str | Any, status: str | None | Any
+) -> dict[str, tuple[Any, Any]]:
+    conflicts: dict[str, tuple[Any, Any]] = {}
+    if description is not _UNSET:
+        existing_desc = str(existing.get("description") or "")
+        supplied_desc = str(description or "")
+        if existing_desc != supplied_desc:
+            conflicts["description"] = (existing_desc, supplied_desc)
+    if status is not _UNSET and status is not None:
+        existing_status = str(existing.get("status") or "")
+        if existing_status != status:
+            conflicts["status"] = (existing_status, status)
+    return conflicts
+
+
+def _question_field_conflicts(
+    existing: LTRecord,
+    *,
+    question_type: str | Any,
+    status: str | None | Any,
+    hypothesis: str | None | Any,
+    parent_question_ids: Sequence[str] | None | Any,
+) -> dict[str, tuple[Any, Any]]:
+    conflicts: dict[str, tuple[Any, Any]] = {}
+    if question_type is not _UNSET:
+        existing_type = str(existing.get("question_type") or "")
+        if existing_type != question_type:
+            conflicts["question_type"] = (existing_type, question_type)
+    if status is not _UNSET and status is not None:
+        existing_status = str(existing.get("status") or "")
+        if existing_status != status:
+            conflicts["status"] = (existing_status, status)
+    if hypothesis is not _UNSET:
+        existing_hyp = str(existing.get("hypothesis") or "").strip()
+        supplied_hyp = str(hypothesis or "").strip()
+        if existing_hyp != supplied_hyp:
+            conflicts["hypothesis"] = (existing_hyp, supplied_hyp)
+    if parent_question_ids is not _UNSET:
+        existing_parents = {str(item) for item in (existing.get("parent_question_ids") or [])}
+        supplied_parents = {str(item) for item in (parent_question_ids or [])}
+        if existing_parents != supplied_parents:
+            conflicts["parent_question_ids"] = (
+                sorted(existing_parents),
+                sorted(supplied_parents),
+            )
+    return conflicts
 
 
 def _validate_limit(limit: int) -> int:

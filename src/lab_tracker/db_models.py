@@ -85,6 +85,12 @@ class ProjectGroupModel(Base):
 
 class ProjectModel(Base):
     __tablename__ = "projects"
+    __table_args__ = (
+        UniqueConstraint(
+            "client_capture_id",
+            name="uq_projects_client_capture",
+        ),
+    )
 
     project_id: Mapped[UUID] = mapped_column(
         GUID,
@@ -100,6 +106,7 @@ class ProjectModel(Base):
     status: Mapped[ProjectStatus] = mapped_column(
         EnumType(ProjectStatus, length=20), default="active"
     )
+    client_capture_id: Mapped[str | None] = mapped_column(String(120))
     created_by: Mapped[str | None] = mapped_column(String(255))
     created_by_user_id: Mapped[UUID | None] = mapped_column(
         GUID,
@@ -115,6 +122,13 @@ class ProjectModel(Base):
 
 class QuestionModel(Base):
     __tablename__ = "questions"
+    __table_args__ = (
+        UniqueConstraint(
+            "project_id",
+            "client_capture_id",
+            name="uq_questions_project_client_capture",
+        ),
+    )
 
     question_id: Mapped[UUID] = mapped_column(
         GUID,
@@ -134,6 +148,7 @@ class QuestionModel(Base):
     status: Mapped[QuestionStatus] = mapped_column(
         EnumType(QuestionStatus, length=20), default="staged"
     )
+    client_capture_id: Mapped[str | None] = mapped_column(String(120))
     terminal_reason: Mapped[str | None] = mapped_column(Text)
     superseded_by_question_id: Mapped[UUID | None] = mapped_column(
         GUID,

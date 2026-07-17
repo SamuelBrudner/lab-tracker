@@ -104,6 +104,7 @@ class LabTrackerRepository(Protocol):
         group_id: UUID | None = None,
         project_ids: set[UUID] | None = None,
         status: str | None = None,
+        client_capture_id: str | None = None,
         limit: int | None = None,
         offset: int = 0,
     ) -> tuple[list[Project], int]:
@@ -245,6 +246,7 @@ class LabTrackerRepository(Protocol):
         question_type: str | None = None,
         search: str | None = None,
         created_by: str | None = None,
+        client_capture_id: str | None = None,
         parent_question_id: UUID | None = None,
         ancestor_question_id: UUID | None = None,
         superseded_by_question_ids: set[UUID] | None = None,

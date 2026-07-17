@@ -181,6 +181,7 @@ class SQLAlchemyLabTrackerRepository(LabTrackerRepository):
         group_id: UUID | None = None,
         project_ids: set[UUID] | None = None,
         status: str | None = None,
+        client_capture_id: str | None = None,
         limit: int | None = None,
         offset: int = 0,
     ) -> tuple[list[Project], int]:
@@ -188,6 +189,7 @@ class SQLAlchemyLabTrackerRepository(LabTrackerRepository):
             group_id=group_id,
             project_ids=project_ids,
             status=status,
+            client_capture_id=client_capture_id,
             limit=limit,
             offset=offset,
         )
@@ -608,6 +610,7 @@ class SQLAlchemyLabTrackerRepository(LabTrackerRepository):
         question_type: str | None = None,
         search: str | None = None,
         created_by: str | None = None,
+        client_capture_id: str | None = None,
         parent_question_id: UUID | None = None,
         ancestor_question_id: UUID | None = None,
         superseded_by_question_ids: set[UUID] | None = None,
@@ -623,6 +626,7 @@ class SQLAlchemyLabTrackerRepository(LabTrackerRepository):
             question_type=question_type,
             search=search,
             created_by=created_by,
+            client_capture_id=client_capture_id,
             parent_question_id=parent_question_id,
             ancestor_question_id=ancestor_question_id,
             superseded_by_question_ids=superseded_by_question_ids,
