@@ -240,6 +240,7 @@ def question_to_model(question: Question) -> QuestionModel:
         question_type=question.question_type.value,
         hypothesis=question.hypothesis,
         status=question.status.value,
+        client_capture_id=question.client_capture_id,
         terminal_reason=question.terminal_reason,
         superseded_by_question_id=(
             question.superseded_by_question_id
@@ -275,6 +276,7 @@ def question_from_model(
         question_type=row.question_type,
         hypothesis=row.hypothesis,
         status=row.status,
+        client_capture_id=getattr(row, "client_capture_id", None),
         terminal_reason=getattr(row, "terminal_reason", None),
         parent_question_ids=list(parent_question_ids),
         superseded_by_question_id=(
@@ -307,6 +309,7 @@ def apply_question_to_model(row: QuestionModel, question: Question) -> None:
     row.question_type = question.question_type.value
     row.hypothesis = question.hypothesis
     row.status = question.status.value
+    row.client_capture_id = question.client_capture_id
     row.terminal_reason = question.terminal_reason
     row.superseded_by_question_id = (
         question.superseded_by_question_id

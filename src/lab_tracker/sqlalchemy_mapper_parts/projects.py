@@ -13,6 +13,7 @@ def project_to_model(project: Project) -> ProjectModel:
         name=project.name,
         description=project.description,
         status=project.status.value,
+        client_capture_id=project.client_capture_id,
         created_by=project.created_by,
         created_by_user_id=(
             project.created_by_user_id
@@ -31,6 +32,7 @@ def project_from_model(row: ProjectModel) -> Project:
         name=row.name,
         description=row.description,
         status=row.status,
+        client_capture_id=getattr(row, "client_capture_id", None),
         created_by=row.created_by,
         created_by_user_id=(
             row.created_by_user_id
@@ -47,6 +49,7 @@ def apply_project_to_model(row: ProjectModel, project: Project) -> None:
     row.name = project.name
     row.description = project.description
     row.status = project.status.value
+    row.client_capture_id = project.client_capture_id
     row.created_by = project.created_by
     row.created_by_user_id = (
         project.created_by_user_id

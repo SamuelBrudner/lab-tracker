@@ -144,6 +144,10 @@ def code_facing_idioms(*, symbols: Iterable[str] | None = None) -> str:
         "- `import_evidence_file()` records external files as staged evidence notes "
         "with `evidence_source_uri` and `evidence_content_hash` metadata, so byte "
         "duplicates are recognized by content hash.",
+        "- `upsert_note()` and `upsert_question()` stage records by default (the "
+        "human review gate); crossing it is a deliberate, separately named act via "
+        "`commit_note()` and `activate_question()`. Agents may stage but must not "
+        "commit or activate.",
         "",
         "Citation annotation tokens are an authoring convention (inert text, with no "
         "client emitter, parser, or stripper) — inert provenance hints that can travel "

@@ -700,6 +700,7 @@ class Project(_DomainModel):
     name: str
     description: str = ""
     status: ProjectStatus = ProjectStatus.ACTIVE
+    client_capture_id: str | None = None
     created_at: datetime = Field(default_factory=utc_now)
     created_by: str | None = None
     created_by_user_id: UUID | None = None
@@ -777,6 +778,7 @@ class Question(_DomainModel):
     question_type: QuestionType
     hypothesis: str | None = None
     status: QuestionStatus = QuestionStatus.STAGED
+    client_capture_id: str | None = None
     terminal_reason: str | None = None
     parent_question_ids: list[UUID] = Field(default_factory=list)
     superseded_by_question_id: UUID | None = None

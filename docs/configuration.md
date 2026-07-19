@@ -54,6 +54,13 @@ that destination through your normal off-machine backup process.
 - `LAB_TRACKER_AUTH_ENABLED`: enable login and role enforcement (default: `false`
   in `local`, `true` otherwise; non-local environments cannot disable auth)
 - `LAB_TRACKER_PUBLIC_BASE_URL`: public URL used in email invitation links
+- `LAB_TRACKER_CANONICAL_BASE_URL`: permanent base URL used to mint `@id`
+  identifiers in PROV-O/JSON-LD provenance documents and `lt export` sidecars
+  (default: empty — identifiers are rooted at whatever host served the
+  request). Set this once, before the first archived export, to the URL your
+  lab commits to long-term; identifiers then stay byte-identical no matter
+  which host or port serves the request. See
+  [provenance-export.md](provenance-export.md) for the identifier policy.
 - `LAB_TRACKER_USAGE_EVENTS`: enable local usage telemetry writes (default:
   `false` in `local`, `true` otherwise)
 
