@@ -89,3 +89,50 @@ def test_export_co_locates_dataset_sidecar_next_to_data(tmp_path) -> None:
     co_located = data_root / "raw" / "dataset-ds-1.prov.jsonld"
     assert co_located.is_file()
     assert json.loads(co_located.read_text(encoding="utf-8"))["@id"] == "ds-1"
+
+
+def _graph_prov_doc(base: str, route: str, entity_id: str) -> dict:
+    return {
+        "@context": {"prov": "http://www.w3.org/ns/prov#"},
+        "@graph": [{"@id": f"{base}/{route}/{entity_id}", "@type": "prov:Entity"}],
+    }
+
+
+def _graph_handler(identifier_base: str):
+    def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if path == "/datasets":
+            return _json_response(_list_payload([{"dataset_id": "ds-1"}]))
+        if path in ("/analyses", "/claims"):
+            return _json_response(_list_payload([]))
+        if path.endswith("/provenance"):
+            route, entity_id = path.split("/")[1:3]
+            return _json_response(_graph_prov_doc(identifier_base, route, entity_id))
+        return httpx.Response(500, json={"error": {"message": f"unexpected {path}"}})
+
+    return handler
+
+
+def test_export_notes_host_relative_identifiers(tmp_path) -> None:
+    from lab_tracker_client.export import export_project_provenance
+
+    handler = _graph_handler("http://testserver")
+    with LabTracker(base_url="http://testserver", transport=httpx.MockTransport(handler)) as lt:
+        result = export_project_provenance(lt, project_id="p1", out_dir=str(tmp_path))
+
+    assert result.identifier_root == "http://testserver"
+    assert result.identifier_note is not None
+    assert "LAB_TRACKER_CANONICAL_BASE_URL" in result.identifier_note
+    assert result.to_dict()["identifier_note"] == result.identifier_note
+
+
+def test_export_stays_quiet_for_canonical_identifiers(tmp_path) -> None:
+    from lab_tracker_client.export import export_project_provenance
+
+    handler = _graph_handler("https://lab.example.org")
+    with LabTracker(base_url="http://testserver", transport=httpx.MockTransport(handler)) as lt:
+        result = export_project_provenance(lt, project_id="p1", out_dir=str(tmp_path))
+
+    assert result.identifier_root == "https://lab.example.org"
+    assert result.identifier_note is None
+    assert "identifier_note" not in result.to_dict()

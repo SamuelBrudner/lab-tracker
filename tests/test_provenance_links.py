@@ -324,12 +324,12 @@ def test_accepted_link_renders_was_derived_from_in_ara_export() -> None:
 
     derived_node = _find_node_with_id_suffix(document, f"/notes/{derived.note_id}")
     assert derived_node is not None
-    refs = derived_node.get("prov:wasDerivedFrom")
+    refs = derived_node.get("wasDerivedFrom")
     assert refs == [{"@id": f"http://testserver/notes/{antecedent.note_id}"}]
     # The antecedent note has no derivation edge.
     antecedent_node = _find_node_with_id_suffix(document, f"/notes/{antecedent.note_id}")
     assert antecedent_node is not None
-    assert "prov:wasDerivedFrom" not in antecedent_node
+    assert "wasDerivedFrom" not in antecedent_node
 
 
 def test_proposed_link_does_not_render_in_ara_export() -> None:
@@ -351,4 +351,4 @@ def test_proposed_link_does_not_render_in_ara_export() -> None:
 
     derived_node = _find_node_with_id_suffix(document, f"/notes/{derived.note_id}")
     assert derived_node is not None
-    assert "prov:wasDerivedFrom" not in derived_node
+    assert "wasDerivedFrom" not in derived_node

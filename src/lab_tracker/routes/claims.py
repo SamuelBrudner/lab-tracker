@@ -21,6 +21,7 @@ from lab_tracker.models import (
 )
 from lab_tracker.schemas import ClaimCreate, ClaimEdgeCreate, ClaimUpdate, Envelope, ListEnvelope
 
+from .provenance import claim_provenance_payload, jsonld_response
 from .shared import (
     CreatedByFilter,
     accessible_project_ids_from_request,
@@ -29,9 +30,11 @@ from .shared import (
     ensure_project_read,
     list_response,
     paginate,
+    provenance_base_url,
     record_usage_view,
     repository_from_request,
     validate_pagination,
+    wants_jsonld,
 )
 
 
@@ -105,7 +108,13 @@ def build_claims_router(api: LabTrackerAPI) -> APIRouter:
             resource_id=claim.claim_id,
             project_id=claim.project_id,
         )
-        return Envelope(data=claim)
+        if wants_jsonld(request):
+            return jsonld_response(claim_provenance_payload(request, api, claim_id))
+        base_url = provenance_base_url(request)
+        return Envelope(
+            data=claim,
+            meta={"iri": f"{base_url}/claims/{claim.claim_id}"},
+        )
 
     @router.get("/claims/{claim_id}/versions", response_model=ListEnvelope[EntityVersion])
     def list_claim_versions(

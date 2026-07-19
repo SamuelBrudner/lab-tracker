@@ -144,8 +144,8 @@ def test_datalad_manifest_import_exports_provenance_and_question_edge():
     assert artifact.content_hash.startswith("sha256:")
     assert artifact.metadata["commit"] == "abc123"
     assert artifact.metadata["paths"] == ["sub-001/behavior.nwb"]
-    assert {"@id": file_id} in commit_node["prov:used"]
-    assert {"@id": artifact.uri} in commit_node["prov:used"]
+    assert {"@id": file_id} in commit_node["used"]
+    assert {"@id": artifact.uri} in commit_node["used"]
     assert commit_node["questionLink"] == [{"@id": question_link_node["@id"]}]
     assert artifact_node["@type"] == "prov:Entity"
     assert artifact_node["externalSourceSystem"] == "datalad"
