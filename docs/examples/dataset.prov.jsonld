@@ -1,0 +1,354 @@
+{
+  "@context": {
+    "actedOnBehalfOf": {
+      "@id": "prov:actedOnBehalfOf",
+      "@type": "@id"
+    },
+    "aiModel": "lab:aiModel",
+    "aiPromptVersion": "lab:aiPromptVersion",
+    "aiProvider": "lab:aiProvider",
+    "alsoDependsOn": {
+      "@id": "lab:alsoDependsOn",
+      "@type": "@id"
+    },
+    "alternativesConsidered": {
+      "@id": "lab:alternativesConsidered",
+      "@type": "@json"
+    },
+    "analysis": {
+      "@id": "lab:analysis",
+      "@type": "@id"
+    },
+    "answersQuestion": {
+      "@id": "lab:answersQuestion",
+      "@type": "@id"
+    },
+    "bidsMetadata": {
+      "@id": "lab:bidsMetadata",
+      "@type": "@json"
+    },
+    "caption": "schema:caption",
+    "changeSet": {
+      "@id": "lab:changeSet",
+      "@type": "@id"
+    },
+    "checksum": "lab:checksum",
+    "choice": "lab:choice",
+    "cites": {
+      "@id": "lab:cites",
+      "@type": "@id"
+    },
+    "claimRelation": {
+      "@id": "lab:claimRelation",
+      "@type": "@id"
+    },
+    "claimRelationSource": {
+      "@id": "lab:claimRelationSource",
+      "@type": "@id"
+    },
+    "claimRelationTarget": {
+      "@id": "lab:claimRelationTarget",
+      "@type": "@id"
+    },
+    "claimRelationType": "lab:claimRelationType",
+    "codeVersion": "lab:codeVersion",
+    "commitHash": "lab:commitHash",
+    "confidence": "lab:confidence",
+    "contentSize": "schema:contentSize",
+    "contentUrl": {
+      "@id": "schema:contentUrl",
+      "@type": "@id"
+    },
+    "createdAt": "dcterms:created",
+    "crossLayerBinding": {
+      "@id": "lab:crossLayerBinding",
+      "@type": "@id"
+    },
+    "dcterms": "http://purl.org/dc/terms/",
+    "encodingFormat": "schema:encodingFormat",
+    "endedAt": "prov:endedAtTime",
+    "entityId": "lab:entityId",
+    "entityType": "lab:entityType",
+    "environmentHash": "lab:environmentHash",
+    "evidence": {
+      "@id": "lab:evidence",
+      "@type": "@id"
+    },
+    "executedAt": "lab:executedAt",
+    "explorationNode": {
+      "@id": "lab:explorationNode",
+      "@type": "@id"
+    },
+    "explorationNodeType": "lab:explorationNodeType",
+    "externalArtifact": {
+      "@id": "lab:externalArtifact",
+      "@type": "@id"
+    },
+    "externalContentHash": "lab:externalContentHash",
+    "externalMetadata": {
+      "@id": "lab:externalMetadata",
+      "@type": "@json"
+    },
+    "externalSourceSystem": "lab:externalSourceSystem",
+    "externalUri": {
+      "@id": "lab:externalUri",
+      "@type": "@id"
+    },
+    "failureMode": "lab:failureMode",
+    "falsificationCriteria": "lab:falsificationCriteria",
+    "fileName": "lab:fileName",
+    "filePath": "lab:filePath",
+    "generatedAt": "prov:generatedAtTime",
+    "goalLink": {
+      "@id": "lab:goalLink",
+      "@type": "@id"
+    },
+    "groundingDataset": {
+      "@id": "lab:groundingDataset",
+      "@type": "@id"
+    },
+    "hypothesis": "lab:hypothesis",
+    "invalidates": {
+      "@id": "lab:invalidates",
+      "@type": "@id"
+    },
+    "lab": "https://lab.example.org/terms#",
+    "layer": "lab:layer",
+    "layers": {
+      "@id": "lab:layers",
+      "@type": "@json"
+    },
+    "lesson": "lab:lesson",
+    "metadata": {
+      "@id": "lab:metadata",
+      "@type": "@json"
+    },
+    "methodHash": "lab:methodHash",
+    "note": {
+      "@id": "lab:note",
+      "@type": "@id"
+    },
+    "nwbMetadata": {
+      "@id": "lab:nwbMetadata",
+      "@type": "@json"
+    },
+    "origin": "lab:origin",
+    "outcomeStatus": "lab:outcomeStatus",
+    "primaryQuestion": {
+      "@id": "lab:primaryQuestion",
+      "@type": "@id"
+    },
+    "prov": "http://www.w3.org/ns/prov#",
+    "question": {
+      "@id": "lab:question",
+      "@type": "@id"
+    },
+    "questionLink": {
+      "@id": "lab:questionLink",
+      "@type": "@id"
+    },
+    "questionType": "lab:questionType",
+    "rationale": "lab:rationale",
+    "rawContent": "lab:rawContent",
+    "refutingOutcome": "lab:refutingOutcome",
+    "relatedClaim": {
+      "@id": "lab:relatedClaim",
+      "@type": "@id"
+    },
+    "role": "lab:role",
+    "schema": "https://schema.org/",
+    "scope": {
+      "@id": "lab:scope",
+      "@type": "@id"
+    },
+    "sessionType": "lab:sessionType",
+    "sha256": "lab:checksum",
+    "sizeBytes": "schema:contentSize",
+    "sourceSession": {
+      "@id": "lab:sourceSession",
+      "@type": "@id"
+    },
+    "startedAt": "prov:startedAtTime",
+    "statement": "lab:statement",
+    "status": "lab:status",
+    "supervisionEndedAt": "lab:supervisionEndedAt",
+    "supervisionStartedAt": "lab:supervisionStartedAt",
+    "supportsAnalysis": {
+      "@id": "lab:supportsAnalysis",
+      "@type": "@id"
+    },
+    "supportsDataset": {
+      "@id": "lab:supportsDataset",
+      "@type": "@id"
+    },
+    "target": {
+      "@id": "lab:target",
+      "@type": "@id"
+    },
+    "terminalReason": "lab:terminalReason",
+    "text": "lab:text",
+    "toolingContext": "lab:toolingContext",
+    "transcribedText": "lab:transcribedText",
+    "trigger": "lab:trigger",
+    "updatedAt": "dcterms:modified",
+    "used": {
+      "@id": "prov:used",
+      "@type": "@id"
+    },
+    "userId": "lab:userId",
+    "verificationPlan": "lab:verificationPlan",
+    "versionNumber": "lab:versionNumber",
+    "vizType": "lab:vizType",
+    "wasAssociatedWith": {
+      "@id": "prov:wasAssociatedWith",
+      "@type": "@id"
+    },
+    "wasAttributedTo": {
+      "@id": "prov:wasAttributedTo",
+      "@type": "@id"
+    },
+    "wasDerivedFrom": {
+      "@id": "prov:wasDerivedFrom",
+      "@type": "@id"
+    },
+    "wasGeneratedBy": {
+      "@id": "prov:wasGeneratedBy",
+      "@type": "@id"
+    },
+    "wasInformedBy": {
+      "@id": "prov:wasInformedBy",
+      "@type": "@id"
+    },
+    "wasRevisionOf": {
+      "@id": "prov:wasRevisionOf",
+      "@type": "@id"
+    }
+  },
+  "@graph": [
+    {
+      "@id": "https://lab.example.org/datasets/6fce1866-5432-4b70-b582-3f342a9f4f13",
+      "@type": "prov:Entity",
+      "changeSet": {
+        "@id": "https://lab.example.org/graph-drafts/2f3e4d5c-6b7a-4980-9102-a3b4c5d6e7f8"
+      },
+      "commitHash": "sha256:1f8ac10f23c5b5bc1167bda84b833e5c057a77d2",
+      "origin": "ai_suggested",
+      "status": "committed",
+      "wasAttributedTo": {
+        "@id": "https://lab.example.org/agents/57a1c8b2-8d3e-4f50-a617-b8c9d0e1f2a3"
+      },
+      "wasGeneratedBy": [
+        {
+          "@id": "https://lab.example.org/datasets/6fce1866-5432-4b70-b582-3f342a9f4f13/provenance/commit"
+        },
+        {
+          "@id": "https://lab.example.org/graph-drafts/2f3e4d5c-6b7a-4980-9102-a3b4c5d6e7f8"
+        }
+      ]
+    },
+    {
+      "@id": "https://lab.example.org/datasets/6fce1866-5432-4b70-b582-3f342a9f4f13/provenance/commit",
+      "@type": "prov:Activity",
+      "metadata": {
+        "condition": "baseline",
+        "rig": "rig2"
+      },
+      "note": [
+        {
+          "@id": "https://lab.example.org/notes/4a3b2c1d-0e9f-4d8c-b7a6-5f4e3d2c1b0a"
+        }
+      ],
+      "nwbMetadata": {
+        "Session Description": "PV-cre baseline odor panel"
+      },
+      "questionLink": [
+        {
+          "@id": "https://lab.example.org/datasets/6fce1866-5432-4b70-b582-3f342a9f4f13/provenance/question-links/9c1f6c33-9d1e-4b2e-9d55-73f4dbb0f2c1"
+        },
+        {
+          "@id": "https://lab.example.org/datasets/6fce1866-5432-4b70-b582-3f342a9f4f13/provenance/question-links/d0e2b7c8-4d0f-4a3b-8f61-0f4f3f81c9d2"
+        }
+      ],
+      "sourceSession": {
+        "@id": "https://lab.example.org/sessions/7e8f9a0b-1c2d-4e3f-a5b6-c7d8e9f0a1b2"
+      },
+      "used": [
+        {
+          "@id": "https://lab.example.org/datasets/6fce1866-5432-4b70-b582-3f342a9f4f13/provenance/files/raw%2F2026_06_19_rig2_session001.nwb"
+        },
+        {
+          "@id": "https://lab.example.org/datasets/6fce1866-5432-4b70-b582-3f342a9f4f13/provenance/files/raw%2F2026_06_19_rig2_session001_stim.csv"
+        }
+      ]
+    },
+    {
+      "@id": "https://lab.example.org/graph-drafts/2f3e4d5c-6b7a-4980-9102-a3b4c5d6e7f8",
+      "@type": "prov:Activity",
+      "entityId": "2f3e4d5c-6b7a-4980-9102-a3b4c5d6e7f8",
+      "entityType": "graph_change_set",
+      "wasAssociatedWith": {
+        "@id": "https://lab.example.org/graph-drafts/2f3e4d5c-6b7a-4980-9102-a3b4c5d6e7f8/software-agent"
+      }
+    },
+    {
+      "@id": "https://lab.example.org/graph-drafts/2f3e4d5c-6b7a-4980-9102-a3b4c5d6e7f8/software-agent",
+      "@type": [
+        "prov:Agent",
+        "prov:SoftwareAgent"
+      ],
+      "aiModel": "claude-sonnet-5",
+      "aiPromptVersion": "drafting-v3",
+      "aiProvider": "anthropic"
+    },
+    {
+      "@id": "https://lab.example.org/datasets/6fce1866-5432-4b70-b582-3f342a9f4f13/provenance/files/raw%2F2026_06_19_rig2_session001.nwb",
+      "@type": "prov:Entity",
+      "checksum": "9b74c9897bac770ffc029102a200c5de",
+      "contentSize": 734003200,
+      "filePath": "raw/2026_06_19_rig2_session001.nwb"
+    },
+    {
+      "@id": "https://lab.example.org/datasets/6fce1866-5432-4b70-b582-3f342a9f4f13/provenance/files/raw%2F2026_06_19_rig2_session001_stim.csv",
+      "@type": "prov:Entity",
+      "checksum": "4e07408562bedb8b60ce05c1decfe3ad",
+      "contentSize": 52341,
+      "filePath": "raw/2026_06_19_rig2_session001_stim.csv"
+    },
+    {
+      "@id": "https://lab.example.org/datasets/6fce1866-5432-4b70-b582-3f342a9f4f13/provenance/question-links/9c1f6c33-9d1e-4b2e-9d55-73f4dbb0f2c1",
+      "outcomeStatus": "supports",
+      "question": {
+        "@id": "https://lab.example.org/questions/9c1f6c33-9d1e-4b2e-9d55-73f4dbb0f2c1"
+      },
+      "role": "primary"
+    },
+    {
+      "@id": "https://lab.example.org/datasets/6fce1866-5432-4b70-b582-3f342a9f4f13/provenance/question-links/d0e2b7c8-4d0f-4a3b-8f61-0f4f3f81c9d2",
+      "outcomeStatus": "inconclusive",
+      "question": {
+        "@id": "https://lab.example.org/questions/d0e2b7c8-4d0f-4a3b-8f61-0f4f3f81c9d2"
+      },
+      "role": "secondary"
+    },
+    {
+      "@id": "https://lab.example.org/agents/57a1c8b2-8d3e-4f50-a617-b8c9d0e1f2a3",
+      "@type": [
+        "prov:Agent",
+        "prov:Person"
+      ],
+      "actedOnBehalfOf": {
+        "@id": "https://lab.example.org/agents/c4d5e6f7-a8b9-4a0b-8c1d-2e3f4a5b6c7d",
+        "supervisionStartedAt": "2024-09-01T00:00:00+00:00"
+      },
+      "userId": "57a1c8b2-8d3e-4f50-a617-b8c9d0e1f2a3"
+    },
+    {
+      "@id": "https://lab.example.org/agents/c4d5e6f7-a8b9-4a0b-8c1d-2e3f4a5b6c7d",
+      "@type": [
+        "prov:Agent",
+        "prov:Person"
+      ],
+      "userId": "c4d5e6f7-a8b9-4a0b-8c1d-2e3f4a5b6c7d"
+    }
+  ]
+}

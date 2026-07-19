@@ -77,6 +77,35 @@ consumer can follow any `@id` in a sidecar straight to the live record. The
 plain-JSON envelope for those records carries the canonical URI as
 `meta.iri`, bridging the two representations from the other side.
 
+## A worked example
+
+A complete dataset sidecar is committed at
+[`examples/dataset.prov.jsonld`](examples/dataset.prov.jsonld) — paste it into
+the [JSON-LD Playground](https://json-ld.org/playground/) as-is. It is
+generated from a fixed fixture through the same builder as the live endpoints,
+and a test regenerates it on every run, so it can never drift from what the
+code produces. Reading its `@graph` top to bottom:
+
+- **The dataset** (`…/datasets/6fce1866-…`) is a `prov:Entity`: its
+  `commitHash` fixes the manifest, `wasGeneratedBy` points at the commit
+  activity, and `wasAttributedTo` names the person who committed it. Because
+  this record was AI-proposed and human-accepted, `origin` is
+  `ai_suggested` and `wasGeneratedBy` *also* lists the drafting change set.
+- **The commit activity** (`…/provenance/commit`) `used` the two raw files,
+  carries the manifest metadata (including the NWB block), links the
+  research `note` and the acquisition `sourceSession`, and holds a
+  `questionLink` per question the data addressed.
+- **The drafting activity and its software agent** record which provider,
+  model, and prompt version proposed the record — `wasAssociatedWith`
+  connects them. The proposal is provenance; the person is the one who
+  committed.
+- **The question links** say what the data *meant*: the primary question was
+  `supports`, the secondary `inconclusive`.
+- **The file entities** each carry `filePath`, `checksum`, and
+  `contentSize` — enough to re-identify the bytes they describe.
+- **The people** are `prov:Person` agents; `actedOnBehalfOf` states the
+  supervision active when the work happened, with its start date.
+
 Every key in a document reads as plain JSON (no prefixes) and is declared in
 one vocabulary registry (`src/lab_tracker/vocabulary.py`): keys map to
 standard PROV-O, schema.org, and Dublin Core IRIs where those exist, and to
