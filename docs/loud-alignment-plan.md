@@ -29,6 +29,11 @@ right:
 The gaps below are polish on that foundation, not a rewrite. They are ordered
 by leverage; each phase is independently shippable.
 
+> **Status: implemented.** All six phases shipped (epic `lab-tracker-oh60`).
+> The sections below are kept as the design rationale; the resulting surface
+> is summarized in [retained-v1-surface.md](retained-v1-surface.md) and
+> documented in [provenance-export.md](provenance-export.md).
+
 ## Phase 1 — Stable canonical identifiers
 
 **Gap.** IRIs are minted from the incoming request's base URL
