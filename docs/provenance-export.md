@@ -70,3 +70,11 @@ The documents are produced by the same builders that back the
 `GET /claims/{id}/provenance` endpoints — PROV-O entities and activities in
 JSON-LD, including content hashes, commit hashes, and the semantic edges back to
 the questions each record answers.
+
+Every key in a document reads as plain JSON (no prefixes) and is declared in
+one vocabulary registry (`src/lab_tracker/vocabulary.py`): keys map to
+standard PROV-O, schema.org, and Dublin Core IRIs where those exist, and to
+the `lab:` namespace for research-record concepts of our own (falsification
+criteria, question links, curation origin). Every `lab:` IRI dereferences:
+`GET /terms` on the instance serves the vocabulary as a human-readable page,
+or as JSON-LD with `Accept: application/ld+json`.
