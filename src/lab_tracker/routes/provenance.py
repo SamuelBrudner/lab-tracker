@@ -16,11 +16,12 @@ from lab_tracker.provenance import (
     build_dataset_provenance_document,
 )
 
-from .shared import api_from_request, ensure_project_read, repository_from_request
-
-
-def _request_base_url(request: Request) -> str:
-    return str(request.base_url).rstrip("/")
+from .shared import (
+    api_from_request,
+    ensure_project_read,
+    provenance_base_url,
+    repository_from_request,
+)
 
 
 def build_provenance_router(api: LabTrackerAPI) -> APIRouter:
@@ -33,7 +34,7 @@ def build_provenance_router(api: LabTrackerAPI) -> APIRouter:
         repository = repository_from_request(request)
         supervision_edges, _ = repository.query_supervision_edges(limit=None, offset=0)
         payload = build_dataset_provenance_document(
-            _request_base_url(request),
+            provenance_base_url(request),
             dataset,
             supervision_edges=supervision_edges,
         )
@@ -61,7 +62,7 @@ def build_provenance_router(api: LabTrackerAPI) -> APIRouter:
         )
         supervision_edges, _ = repository.query_supervision_edges(limit=None, offset=0)
         payload = build_analysis_provenance_document(
-            _request_base_url(request),
+            provenance_base_url(request),
             analysis,
             datasets=datasets,
             claims=claims,
@@ -109,7 +110,7 @@ def build_provenance_router(api: LabTrackerAPI) -> APIRouter:
         ]
         supervision_edges, _ = repository.query_supervision_edges(limit=None, offset=0)
         payload = build_claim_provenance_document(
-            _request_base_url(request),
+            provenance_base_url(request),
             claim,
             analyses=analyses,
             datasets=datasets,

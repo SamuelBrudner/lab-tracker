@@ -157,6 +157,20 @@ def actor_from_authorization_header(
     return AuthContext(user_id=user.user_id, role=user.role)
 
 
+def provenance_base_url(request: Request) -> str:
+    """Base URL that roots ``@id`` identifiers in provenance documents.
+
+    Prefers the configured ``LAB_TRACKER_CANONICAL_BASE_URL`` so identifiers
+    are stable names independent of the serving host; falls back to the
+    request's own base URL when unset.
+    """
+    settings = getattr(request.app.state, "settings", None)
+    configured = str(getattr(settings, "canonical_base_url", "") or "").strip()
+    if configured:
+        return configured.rstrip("/")
+    return str(request.base_url).rstrip("/")
+
+
 def safe_attachment_filename(filename: str) -> str:
     cleaned = _clean_attachment_filename(filename)
     return _ascii_attachment_fallback(cleaned)

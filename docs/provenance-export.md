@@ -44,6 +44,25 @@ lt export --project <PROJECT_ID> --since 2025-07-01T00:00:00+00:00
 `--since` is inclusive and `--until` is exclusive. Datasets and claims are
 exported in full; the window applies to analyses.
 
+## Identifier policy
+
+Every node in a sidecar carries an `@id` — an HTTP URI that names the dataset,
+analysis, claim, person, or activity it describes. A linked-data identifier is
+a *name* your lab commits to, not the address a request happened to arrive on,
+so it must not change when the serving host does.
+
+By default, identifiers are rooted at whatever base URL served the request:
+`http://127.0.0.1:8000/datasets/…` locally, your LAN IP over the LAN, and so
+on. Two exports of the same project through different hosts would then name
+the same records differently.
+
+**Before your first archived export, set `LAB_TRACKER_CANONICAL_BASE_URL`**
+(see [configuration.md](configuration.md)) to the URL your lab commits to
+long-term. From then on every provenance `@id` uses that root, byte-identical
+regardless of which host, port, or proxy served the request. `lt export`
+prints a note when the identifiers it writes are rooted at the URL it happened
+to connect to, as a reminder to configure the canonical base before archiving.
+
 ## What's inside a sidecar
 
 The documents are produced by the same builders that back the
