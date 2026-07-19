@@ -35,6 +35,9 @@ from lab_tracker.services.shared import (
     actor_user_id,
     normalize_note_metadata,
 )
+from lab_tracker.services.shared import (
+    normalize_client_capture_id as _normalize_client_capture_id,
+)
 from lab_tracker.services.visualization_service import VisualizationService
 
 if TYPE_CHECKING:
@@ -501,12 +504,3 @@ def _transcript_text(transcript: Any) -> str:
     return ""
 
 
-def _normalize_client_capture_id(client_capture_id: str | None) -> str | None:
-    if client_capture_id is None:
-        return None
-    value = client_capture_id.strip()
-    if not value:
-        return None
-    if len(value) > 120:
-        raise ValidationError("client_capture_id must be 120 characters or fewer.")
-    return value

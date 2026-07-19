@@ -281,7 +281,7 @@ def test_record_export_provenance_includes_exploration_edges_and_invalidation_li
         document,
         f"http://example.test/exploration-nodes/{pivot_node_id}",
     )
-    assert pivot_jsonld["prov:wasDerivedFrom"] == [
+    assert pivot_jsonld["wasDerivedFrom"] == [
         {"@id": f"http://example.test/exploration-nodes/{parent_node_id}"}
     ]
     assert pivot_jsonld["alsoDependsOn"] == [
@@ -443,20 +443,20 @@ def test_analysis_provenance_distinguishes_ai_suggested_and_user_revised_nodes()
 
     assert claim_node["origin"] == "ai_suggested"
     assert claim_node["changeSet"] == {"@id": draft_iri}
-    assert claim_node["prov:wasGeneratedBy"] == {"@id": draft_iri}
-    assert claim_node["prov:wasAttributedTo"] == {
+    assert claim_node["wasGeneratedBy"] == {"@id": draft_iri}
+    assert claim_node["wasAttributedTo"] == {
         "@id": f"http://example.test/agents/{creator_user_id}"
     }
     assert viz_node["origin"] == "user_revised"
     assert viz_node["changeSet"] == {"@id": draft_iri}
-    assert viz_node["prov:wasInformedBy"] == {"@id": draft_iri}
+    assert viz_node["wasInformedBy"] == {"@id": draft_iri}
     before_iri = f"http://example.test/visualizations/{viz_id}/versions/before/{change_set_id}"
-    assert viz_node["prov:wasRevisionOf"] == {"@id": before_iri}
+    assert viz_node["wasRevisionOf"] == {"@id": before_iri}
     # The wasRevisionOf target must resolve to a node present in @graph (raises if absent).
     before_node = _node_by_id(document, before_iri)
     assert before_node["origin"] == "ai_suggested"
     assert before_node["changeSet"] == {"@id": draft_iri}
-    assert draft_node["prov:wasAssociatedWith"] == {"@id": agent_iri}
+    assert draft_node["wasAssociatedWith"] == {"@id": agent_iri}
     assert _node_type_includes(agent_node, "prov:SoftwareAgent")
     assert agent_node["aiProvider"] == "openai"
     assert agent_node["aiModel"] == "fake-gpt"
@@ -508,11 +508,11 @@ def test_goal_ara_logic_layer_materializes_origin_nodes():
     before_node = _node_by_id(document, before_iri)
 
     assert goal_node["origin"] == "user_revised"
-    assert goal_node["prov:wasRevisionOf"] == {"@id": before_iri}
+    assert goal_node["wasRevisionOf"] == {"@id": before_iri}
     assert goal_node["changeSet"] == {"@id": draft_iri}
     assert before_node["origin"] == "ai_suggested"
     assert before_node["changeSet"] == {"@id": draft_iri}
-    assert draft_node["prov:wasAssociatedWith"] == {"@id": agent_iri}
+    assert draft_node["wasAssociatedWith"] == {"@id": agent_iri}
     assert _node_type_includes(agent_node, "prov:SoftwareAgent")
     assert agent_node["aiProvider"] == "openai"
     assert agent_node["aiModel"] == "fake-gpt"
@@ -574,7 +574,7 @@ def test_dataset_provenance_uses_inline_context_and_json_metadata():
     )
     commit_node = _node_by_id(document, commit_id)
 
-    assert dataset_node["prov:wasGeneratedBy"] == {"@id": commit_id}
+    assert dataset_node["wasGeneratedBy"] == {"@id": commit_id}
     assert dataset_node["commitHash"] == "commit-123"
     assert commit_node["metadata"] == {"run": "7"}
     assert commit_node["nwbMetadata"] == {"Session Description": "baseline"}
@@ -641,11 +641,11 @@ def test_dataset_provenance_attributes_creator_and_active_supervisor():
     creator_node = _node_by_id(document, creator_iri)
     supervisor_node = _node_by_id(document, supervisor_iri)
 
-    assert dataset_node["prov:wasAttributedTo"] == {"@id": creator_iri}
+    assert dataset_node["wasAttributedTo"] == {"@id": creator_iri}
     assert _node_type_includes(creator_node, "prov:Agent")
     assert _node_type_includes(creator_node, "prov:Person")
     assert creator_node["userId"] == str(creator_user_id)
-    assert creator_node["prov:actedOnBehalfOf"] == {
+    assert creator_node["actedOnBehalfOf"] == {
         "@id": supervisor_iri,
         "supervisionStartedAt": "2026-01-01T00:00:00+00:00",
     }
@@ -688,7 +688,7 @@ def test_dataset_provenance_uses_stable_synthetic_ids():
     )
 
     assert commit_node["@type"] == "prov:Activity"
-    assert commit_node["prov:used"] == [{"@id": file_node["@id"]}]
+    assert commit_node["used"] == [{"@id": file_node["@id"]}]
     assert commit_node["questionLink"] == [{"@id": question_link_node["@id"]}]
 
 
@@ -764,8 +764,8 @@ def test_external_dataset_artifact_round_trips_through_dataset_provenance():
         "http://example.test/datasets/aaaaaaaa-1111-1111-1111-aaaaaaaaaaaa/provenance/question-links/bbbbbbbb-2222-2222-2222-bbbbbbbbbbbb",
     )
 
-    assert {"@id": artifact.uri} in commit_node["prov:used"]
-    assert commit_node["prov:wasInformedBy"] == [{"@id": activity.uri}]
+    assert {"@id": artifact.uri} in commit_node["used"]
+    assert commit_node["wasInformedBy"] == [{"@id": activity.uri}]
     assert commit_node["questionLink"] == [{"@id": question_link_node["@id"]}]
     assert artifact_node["@type"] == "prov:Entity"
     assert artifact_node["externalSourceSystem"] == "datalad"
@@ -809,7 +809,7 @@ def test_legacy_external_artifact_metadata_still_exports_dataset_provenance():
     )
     artifact_node = _node_by_id(document, artifact.uri)
 
-    assert {"@id": artifact.uri} in commit_node["prov:used"]
+    assert {"@id": artifact.uri} in commit_node["used"]
     assert artifact_node["externalContentHash"] == "sha256:legacy-manifest"
 
 
@@ -835,7 +835,7 @@ def test_malformed_legacy_external_artifact_metadata_is_ignored_in_provenance():
         "http://example.test/datasets/aaaaaaaa-5555-5555-5555-aaaaaaaaaaaa/provenance/commit",
     )
 
-    assert "prov:used" not in commit_node
+    assert "used" not in commit_node
 
 
 def test_analysis_provenance_exports_external_run_reference():
@@ -879,8 +879,8 @@ def test_analysis_provenance_exports_external_run_reference():
     analysis_node = _node_by_id(document, f"http://example.test/analyses/{analysis_id}")
     run_node = _node_by_id(document, run.uri)
 
-    assert analysis_node["prov:used"] == [{"@id": f"http://example.test/datasets/{dataset_id}"}]
-    assert analysis_node["prov:wasInformedBy"] == [{"@id": run.uri}]
+    assert analysis_node["used"] == [{"@id": f"http://example.test/datasets/{dataset_id}"}]
+    assert analysis_node["wasInformedBy"] == [{"@id": run.uri}]
     assert run_node["@type"] == "prov:Activity"
     assert run_node["externalSourceSystem"] == "mlflow"
     assert run_node["externalContentHash"] == "sha256:run001"
@@ -948,11 +948,11 @@ def test_analysis_provenance_omits_optional_fields_and_preserves_support_links()
 
     context = document["@context"]
     assert isinstance(context, dict)
-    assert context["contentUrl"] == {"@id": "lab:contentUrl", "@type": "@id"}
+    assert context["contentUrl"] == {"@id": "schema:contentUrl", "@type": "@id"}
     assert context["fileName"] == "lab:fileName"
-    assert context["encodingFormat"] == "lab:encodingFormat"
-    assert context["contentSize"] == "lab:contentSize"
-    assert context["sha256"] == "lab:sha256"
+    assert context["encodingFormat"] == "schema:encodingFormat"
+    assert context["contentSize"] == "schema:contentSize"
+    assert context["sha256"] == "lab:checksum"
 
     analysis_node = _node_by_id(
         document,
@@ -969,18 +969,18 @@ def test_analysis_provenance_omits_optional_fields_and_preserves_support_links()
 
     assert analysis_node["@type"] == "prov:Activity"
     assert analysis_node["executedAt"] == "2026-04-23T00:00:00+00:00"
-    assert analysis_node["prov:used"] == [
+    assert analysis_node["used"] == [
         {"@id": "http://example.test/datasets/66666666-6666-6666-6666-666666666666"}
     ]
     assert "environmentHash" not in analysis_node
-    assert "prov:wasAssociatedWith" not in analysis_node
+    assert "wasAssociatedWith" not in analysis_node
     assert claim_node["supportsDataset"] == [
         {"@id": "http://example.test/datasets/66666666-6666-6666-6666-666666666666"}
     ]
     assert claim_node["supportsAnalysis"] == [
         {"@id": "http://example.test/analyses/55555555-5555-5555-5555-555555555555"}
     ]
-    assert viz_node["prov:wasGeneratedBy"] == {
+    assert viz_node["wasGeneratedBy"] == {
         "@id": "http://example.test/analyses/55555555-5555-5555-5555-555555555555"
     }
     assert viz_node["relatedClaim"] == [
@@ -989,7 +989,7 @@ def test_analysis_provenance_omits_optional_fields_and_preserves_support_links()
     assert viz_node["groundingDataset"] == [
         {"@id": "http://example.test/datasets/66666666-6666-6666-6666-666666666666"}
     ]
-    assert viz_node["prov:wasDerivedFrom"] == [
+    assert viz_node["wasDerivedFrom"] == [
         {"@id": "http://example.test/datasets/66666666-6666-6666-6666-666666666666"}
     ]
     assert viz_node["contentUrl"] == (
@@ -998,7 +998,7 @@ def test_analysis_provenance_omits_optional_fields_and_preserves_support_links()
     assert viz_node["fileName"] == "signal.png"
     assert viz_node["encodingFormat"] == "image/png"
     assert viz_node["contentSize"] == 128
-    assert viz_node["sha256"] == "abc123"
+    assert viz_node["checksum"] == "abc123"
     assert "caption" not in viz_node
 
 
@@ -1073,12 +1073,12 @@ def test_analysis_provenance_attributes_supported_entities_to_people():
     viz_node = _node_by_id(document, f"http://example.test/visualizations/{viz_id}")
     actor_node = _node_by_id(document, actor_iri)
 
-    assert analysis_node["prov:wasAssociatedWith"] == {"@id": actor_iri}
-    assert dataset_node["prov:wasAttributedTo"] == {"@id": actor_iri}
-    assert claim_node["prov:wasAttributedTo"] == {"@id": actor_iri}
-    assert viz_node["prov:wasAttributedTo"] == {"@id": actor_iri}
+    assert analysis_node["wasAssociatedWith"] == {"@id": actor_iri}
+    assert dataset_node["wasAttributedTo"] == {"@id": actor_iri}
+    assert claim_node["wasAttributedTo"] == {"@id": actor_iri}
+    assert viz_node["wasAttributedTo"] == {"@id": actor_iri}
     assert _node_type_includes(actor_node, "prov:Person")
-    assert actor_node["prov:actedOnBehalfOf"] == {
+    assert actor_node["actedOnBehalfOf"] == {
         "@id": supervisor_iri,
         "supervisionStartedAt": "2026-01-01T00:00:00+00:00",
     }

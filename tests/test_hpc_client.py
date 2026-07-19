@@ -171,6 +171,52 @@ def test_sync_outbox_uploads_note_and_requests_analysis_graph_draft(
     ]
 
 
+def test_sync_quarantines_malformed_event_and_drains_valid_sibling(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    _clear_hpc_env(monkeypatch)
+    monkeypatch.chdir(tmp_path)
+    config = init_config(project_id="project-1", cluster="bouchet")
+    _event, path = finish_event(
+        config,
+        run_id="run-1",
+        exit_code=0,
+        artifacts=["file:///scratch/run-1/results.csv"],
+        summary="Finished decoding analysis.",
+    )
+    # A malformed event that sorts before the valid one must be quarantined
+    # without aborting the batch (the decode-before-recovery bug).
+    outbox = config.outbox_path()
+    bad_path = outbox / "0-malformed.json"
+    bad_path.write_text("{not valid json", encoding="utf-8")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET" and request.url.path == "/notes":
+            return _json_response(
+                200, {"data": [], "meta": {"limit": 200, "offset": 0, "total": 0}}
+            )
+        if request.method == "POST" and request.url.path == "/notes/upload-file":
+            return _json_response(
+                201,
+                {"data": {"note_id": "note-hpc", "project_id": "project-1", "status": "staged"}},
+            )
+        return _json_response(500, {"error": {"message": "unexpected request"}})
+
+    with LabTracker(base_url="http://testserver", transport=httpx.MockTransport(handler)) as lt:
+        summary = sync_outbox(lt, config)
+
+    # The valid sibling still synced despite the poison record.
+    assert read_event(path)["sync"]["status"] == "synced"
+    assert any(result.get("note_id") == "note-hpc" for result in summary["results"])
+    # The malformed record was quarantined out of the drain, observably.
+    assert summary["quarantined"] == 1
+    assert not bad_path.exists()
+    assert (outbox / "0-malformed.json.quarantine").exists()
+    assert "quarantined" in {result["action"] for result in summary["results"]}
+    assert outbox_status(outbox)["quarantined"] == 1
+
+
 def test_sync_failure_marks_event_failed_and_retries(tmp_path, monkeypatch) -> None:
     _clear_hpc_env(monkeypatch)
     monkeypatch.chdir(tmp_path)

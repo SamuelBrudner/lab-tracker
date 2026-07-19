@@ -29,6 +29,7 @@ from lab_tracker.services.shared import (
     actor_user_fk,
     actor_user_id,
     ensure_non_empty,
+    normalize_client_capture_id,
     question_matches_substring,
     terminal_reason_for_status,
     unique_ids,
@@ -90,6 +91,7 @@ class QuestionService(BaseService):
         *,
         hypothesis: str | None = None,
         status: QuestionStatus = QuestionStatus.STAGED,
+        client_capture_id: str | None = None,
         terminal_reason: str | None = None,
         parent_question_ids: Iterable[UUID] | None = None,
         actor: AuthContext | None = None,
@@ -102,6 +104,14 @@ class QuestionService(BaseService):
         self.authorization.require_contributor(project_id, actor=actor)
         self.projects.get_project(project_id)
         ensure_non_empty(text, "text")
+        resolved_client_capture_id = normalize_client_capture_id(client_capture_id)
+        if resolved_client_capture_id is not None:
+            existing = self._find_client_capture_question(
+                project_id,
+                resolved_client_capture_id,
+            )
+            if existing is not None:
+                return existing
         question_id = uuid4()
         parent_ids = unique_ids(parent_question_ids)
         for parent_id in parent_ids:
@@ -127,6 +137,7 @@ class QuestionService(BaseService):
             question_type=question_type,
             hypothesis=hypothesis.strip() if hypothesis else None,
             status=status,
+            client_capture_id=resolved_client_capture_id,
             terminal_reason=resolved_terminal_reason,
             parent_question_ids=parent_ids,
             created_by=actor_user_id(actor),
@@ -147,6 +158,21 @@ class QuestionService(BaseService):
                 actor=actor,
             )
         return question
+
+    def _find_client_capture_question(
+        self,
+        project_id: UUID,
+        client_capture_id: str,
+    ) -> Question | None:
+        questions = self.query_from_repository(
+            loader=lambda repository: repository.query_questions(
+                project_id=project_id,
+                client_capture_id=client_capture_id,
+                limit=1,
+                offset=0,
+            ),
+        )
+        return questions[0] if questions else None
 
     def get_question(self, question_id: UUID) -> Question:
         return self.get_from_repository(

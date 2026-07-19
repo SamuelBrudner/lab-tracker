@@ -12,7 +12,7 @@ import sys
 import time
 import uuid
 from collections.abc import Iterable, Mapping
-from contextlib import contextmanager, suppress
+from contextlib import suppress
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -35,11 +35,27 @@ from lab_tracker_client.client import (
 )
 
 FIGURE_CAPTURE_TIMEOUT_SECONDS = 2.5
+FIGURE_CIRCUIT_COOLDOWN_SECONDS = 30.0
 FIGURE_PREVIEW_MAX_BYTES = 2_000_000
 FIGURE_UPLOAD_MAX_BYTES = 100 * 1024 * 1024
 _DEFAULT_IMAGE_PATTERNS = ("*.png", "*.jpg", "*.jpeg", "*.svg", "*.pdf", "*.tif", "*.tiff")
 _RUN_CONTEXT: ContextVar[RunContext | None] = ContextVar("lab_tracker_run_context", default=None)
-_CIRCUIT_OPEN = False
+
+
+@dataclass
+class _BreakerState:
+    """Open-circuit state for one capture endpoint."""
+
+    open_until: float
+    last_error: str = ""
+
+
+# Circuit breakers are keyed by endpoint identity (normalized base URL) so a
+# transient outage of endpoint A never skips a healthy capture against a
+# different explicit client/endpoint B. Each entry opens for a cooldown, then
+# allows a single half-open probe that either closes it (success) or re-opens
+# it with a fresh cooldown (failure).
+_BREAKERS: dict[str, _BreakerState] = {}
 _WARNED: set[str] = set()
 def _first_capture_review_keys(kind: str) -> frozenset[str]:
     return frozenset({f"{kind}_no_preview", f"{kind}_preview_size_bytes"})
@@ -432,6 +448,7 @@ def _capture_saved_figure(
         "metadata": {},
         "client_capture_id": "",
     }
+    endpoint_key = _capture_endpoint_key(client)
     try:
         file_size = resolved_path.stat().st_size
         if file_size <= 0:
@@ -473,10 +490,12 @@ def _capture_saved_figure(
                 "client_capture_id": client_capture_id,
             }
         )
-        if _CIRCUIT_OPEN:
+        if _breaker_blocks(endpoint_key):
+            remaining = _figure_circuit_state().get(endpoint_key or "", 0.0)
             _warn_once(
-                "circuit-open",
-                "Lab Tracker figure capture is paused after a connection or timeout failure.",
+                f"circuit-open:{endpoint_key}",
+                f"Lab Tracker figure capture is paused for {endpoint_key} after a "
+                f"connection or timeout failure (retrying in ~{remaining:.0f}s).",
             )
             return FigureCaptureResult(
                 **{**result_defaults, "action": "skipped", "reason": "circuit_open"}
@@ -495,60 +514,69 @@ def _capture_saved_figure(
                 **{**result_defaults, "action": "skipped", "reason": "unconfigured"}
             )
         try:
-            with _capture_timeout(resolved_client):
-                preview = _preview_payload(
-                    fig=fig,
-                    path=resolved_path,
-                    full_payload=full_payload,
-                    full_size_bytes=file_size,
-                    max_bytes=preview_max_bytes,
-                    source_uri=source_uri,
+            # Clamp the capture request without mutating the shared client's
+            # timeout: pass a per-request timeout so concurrent captures cannot
+            # race on client._client.timeout.
+            capture_timeout = _clamped_timeout(
+                getattr(getattr(resolved_client, "_client", None), "timeout", None)
+            )
+            preview = _preview_payload(
+                fig=fig,
+                path=resolved_path,
+                full_payload=full_payload,
+                full_size_bytes=file_size,
+                max_bytes=preview_max_bytes,
+                source_uri=source_uri,
+                content_hash=content_hash,
+            )
+            upload_metadata = dict(base_metadata)
+            upload_metadata.update(
+                {
+                    f"{kind}_no_preview": preview.no_preview,
+                    f"{kind}_preview_size_bytes": preview.size_bytes,
+                    f"{kind}_review_bytes_stale": False,
+                }
+            )
+            note, status_code = resolved_client._upload_note_file_payload_with_status(
+                project_id=resolved_project_id,
+                path=preview.path,
+                payload=preview.payload,
+                metadata=upload_metadata,
+                status="staged",
+                content_type=preview.content_type,
+                client_capture_id=client_capture_id,
+                timeout=capture_timeout,
+            )
+            # The endpoint answered: close any open breaker for it.
+            _close_circuit(endpoint_key)
+            if status_code == 200:
+                return _coalesced_result(
+                    client=resolved_client,
+                    note=note,
+                    result_defaults=result_defaults,
+                    current_metadata=upload_metadata,
                     content_hash=content_hash,
+                    source_uri=source_uri,
+                    source_external_id=client_capture_id,
+                    no_preview=preview.no_preview,
+                    kind=kind,
+                    timeout=capture_timeout,
                 )
-                upload_metadata = dict(base_metadata)
-                upload_metadata.update(
-                    {
-                        f"{kind}_no_preview": preview.no_preview,
-                        f"{kind}_preview_size_bytes": preview.size_bytes,
-                        f"{kind}_review_bytes_stale": False,
-                    }
-                )
-                note, status_code = resolved_client._upload_note_file_payload_with_status(
-                    project_id=resolved_project_id,
-                    path=preview.path,
-                    payload=preview.payload,
-                    metadata=upload_metadata,
-                    status="staged",
-                    content_type=preview.content_type,
-                    client_capture_id=client_capture_id,
-                )
-                if status_code == 200:
-                    return _coalesced_result(
-                        client=resolved_client,
-                        note=note,
-                        result_defaults=result_defaults,
-                        current_metadata=upload_metadata,
-                        content_hash=content_hash,
-                        source_uri=source_uri,
-                        source_external_id=client_capture_id,
-                        no_preview=preview.no_preview,
-                        kind=kind,
-                    )
-                return FigureCaptureResult(
-                    **{
-                        **result_defaults,
-                        "action": "imported",
-                        "metadata": upload_metadata,
-                        "note": note,
-                        "no_preview": preview.no_preview,
-                    }
-                )
+            return FigureCaptureResult(
+                **{
+                    **result_defaults,
+                    "action": "imported",
+                    "metadata": upload_metadata,
+                    "note": note,
+                    "no_preview": preview.no_preview,
+                }
+            )
         finally:
             if close_client:
                 resolved_client.close()
     except Exception as exc:
         if _is_transport_failure(exc):
-            _trip_circuit()
+            _trip_circuit(endpoint_key, str(exc))
         _warn_once("capture-failed", f"Lab Tracker figure capture failed: {exc}")
         return FigureCaptureResult(
             **{
@@ -571,6 +599,7 @@ def _coalesced_result(
     source_external_id: str,
     no_preview: bool,
     kind: str = "figure",
+    timeout: Any = None,
 ) -> FigureCaptureResult:
     note_metadata = note.get("metadata")
     existing_metadata = dict(note_metadata) if isinstance(note_metadata, Mapping) else {}
@@ -596,10 +625,12 @@ def _coalesced_result(
         kind=kind,
     )
     try:
-        note = client._patch_note_metadata(str(note.id), merged_metadata, status="staged")
+        note = client._patch_note_metadata(
+            str(note.id), merged_metadata, status="staged", timeout=timeout
+        )
     except Exception as exc:
         if _is_transport_failure(exc):
-            _trip_circuit()
+            _trip_circuit(_capture_endpoint_key(client), str(exc))
         return FigureCaptureResult(
             **{
                 **result_defaults,
@@ -781,20 +812,6 @@ def _render_downscaled_png(fig: Any, *, max_bytes: int) -> bytes | None:
     return None
 
 
-@contextmanager
-def _capture_timeout(client: LabTracker) -> Iterable[None]:
-    http_client = getattr(client, "_client", None)
-    if http_client is None or not hasattr(http_client, "timeout"):
-        yield
-        return
-    original_timeout = http_client.timeout
-    http_client.timeout = _clamped_timeout(original_timeout)
-    try:
-        yield
-    finally:
-        http_client.timeout = original_timeout
-
-
 def _clamped_timeout(timeout: Any) -> httpx.Timeout:
     with suppress(AttributeError):
         return httpx.Timeout(
@@ -950,9 +967,52 @@ def _is_transport_failure(exc: BaseException) -> bool:
     return False
 
 
-def _trip_circuit() -> None:
-    global _CIRCUIT_OPEN
-    _CIRCUIT_OPEN = True
+def _capture_endpoint_key(client: LabTracker | None) -> str | None:
+    """Identify the endpoint a capture would target, before building a client.
+
+    Uses the explicit client's base URL when one is passed, else the env base
+    URL the auto-client would use. Returning it lets the breaker short-circuit a
+    known-bad endpoint without constructing an env client.
+    """
+    if client is not None:
+        base_url = getattr(client, "base_url", None)
+    else:
+        base_url = os.getenv("LAB_TRACKER_BASE_URL") or os.getenv("LAB_TRACKER_MCP_BASE_URL")
+    if not base_url:
+        return None
+    return str(base_url).rstrip("/")
+
+
+def _breaker_blocks(key: str | None) -> bool:
+    """Return True if the endpoint's breaker is open and not yet ready to probe."""
+    if key is None:
+        return False
+    entry = _BREAKERS.get(key)
+    if entry is None:
+        return False
+    # Cooldown elapsed -> allow a single half-open probe (the caller closes the
+    # breaker on success or re-trips it on failure).
+    return time.monotonic() < entry.open_until
+
+
+def _trip_circuit(key: str | None, error: str = "") -> None:
+    if key is None:
+        return
+    _BREAKERS[key] = _BreakerState(
+        open_until=time.monotonic() + FIGURE_CIRCUIT_COOLDOWN_SECONDS,
+        last_error=error,
+    )
+
+
+def _close_circuit(key: str | None) -> None:
+    if key is not None:
+        _BREAKERS.pop(key, None)
+
+
+def _figure_circuit_state() -> dict[str, float]:
+    """Inspectable breaker state: endpoint -> seconds until the half-open probe."""
+    now = time.monotonic()
+    return {key: max(0.0, state.open_until - now) for key, state in _BREAKERS.items()}
 
 
 def _warn_once(key: str, message: str) -> None:
@@ -963,7 +1023,6 @@ def _warn_once(key: str, message: str) -> None:
 
 
 def _reset_figure_capture_state_for_tests() -> None:
-    global _CIRCUIT_OPEN
-    _CIRCUIT_OPEN = False
+    _BREAKERS.clear()
     _WARNED.clear()
     _RUN_CONTEXT.set(None)

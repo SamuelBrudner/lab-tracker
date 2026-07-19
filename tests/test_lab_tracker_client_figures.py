@@ -228,6 +228,89 @@ def test_circuit_open_skips_env_client_construction(
     assert skipped.reason == "circuit_open"
 
 
+def _ok_upload_handler(request: httpx.Request) -> httpx.Response:
+    return _json_response(
+        201,
+        {
+            "data": {
+                "note_id": "note-ok",
+                "project_id": "project-1",
+                "status": "staged",
+                "metadata": {},
+            }
+        },
+    )
+
+
+def test_breaker_is_per_endpoint_and_does_not_skip_a_healthy_endpoint(
+    tmp_path: Path,
+) -> None:
+    """A transient outage of endpoint A must not skip a healthy explicit client
+
+    on endpoint B: the breaker is keyed by endpoint identity, not process-global.
+    """
+
+    def connect_handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("offline", request=request)
+
+    with LabTracker(
+        base_url="http://endpoint-a",
+        default_project_id="project-1",
+        transport=httpx.MockTransport(connect_handler),
+    ) as lt_a:
+        failed = savefig(FakeFigure(b"a"), tmp_path / "a.png", client=lt_a)
+    assert failed.action == "failed"
+
+    healthy_hits = 0
+
+    def ok_handler(request: httpx.Request) -> httpx.Response:
+        nonlocal healthy_hits
+        healthy_hits += 1
+        return _ok_upload_handler(request)
+
+    with LabTracker(
+        base_url="http://endpoint-b",
+        default_project_id="project-1",
+        transport=httpx.MockTransport(ok_handler),
+    ) as lt_b:
+        healthy = savefig(FakeFigure(b"b"), tmp_path / "b.png", client=lt_b)
+
+    assert healthy.action in {"imported", "coalesced"}
+    assert healthy_hits == 1
+    assert set(figure_module._figure_circuit_state()) == {"http://endpoint-a"}
+
+
+def test_breaker_recovers_after_cooldown_with_half_open_probe(tmp_path: Path) -> None:
+    """After the cooldown elapses a half-open probe is allowed; success closes it."""
+
+    def connect_handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("offline", request=request)
+
+    with LabTracker(
+        base_url="http://testserver",
+        default_project_id="project-1",
+        transport=httpx.MockTransport(connect_handler),
+    ) as lt:
+        first = savefig(FakeFigure(b"one"), tmp_path / "one.png", client=lt)
+        second = savefig(FakeFigure(b"two"), tmp_path / "two.png", client=lt)
+    assert first.action == "failed"
+    assert second.action == "skipped" and second.reason == "circuit_open"
+
+    # Simulate the cooldown elapsing without touching the global clock.
+    for state in figure_module._BREAKERS.values():
+        state.open_until = figure_module.time.monotonic() - 1.0
+
+    with LabTracker(
+        base_url="http://testserver",
+        default_project_id="project-1",
+        transport=httpx.MockTransport(_ok_upload_handler),
+    ) as lt:
+        recovered = savefig(FakeFigure(b"three"), tmp_path / "three.png", client=lt)
+
+    assert recovered.action in {"imported", "coalesced"}
+    assert figure_module._figure_circuit_state() == {}
+
+
 def test_unconfigured_savefig_warns_once_without_network(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],

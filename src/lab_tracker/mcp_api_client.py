@@ -28,6 +28,12 @@ from lab_tracker.models import (
     NoteStatus,
     QuestionStatus,
 )
+from lab_tracker_client.transport import (
+    MAX_UPLOAD_BYTES,
+    HttpTransport,
+    UploadTooLargeError,
+    preflight_upload_size,
+)
 
 JsonObject = dict[str, Any]
 
@@ -134,18 +140,54 @@ class LabTrackerAPIClient:
     ) -> None:
         self._settings = settings
         self._access_token: str | None = None
-        self._client = httpx.Client(
+        self._transport = HttpTransport(
             base_url=settings.base_url,
-            timeout=settings.timeout_seconds,
+            timeout_seconds=settings.timeout_seconds,
+            auth=self,
             transport=transport,
         )
+
+    @property
+    def _client(self) -> httpx.Client:
+        return self._transport.client
 
     @property
     def access_token(self) -> str | None:
         return self._access_token
 
     def close(self) -> None:
-        self._client.close()
+        self._transport.close()
+
+    # --- TransportAuth policy (injected into the shared HttpTransport) --------
+    @property
+    def surface(self) -> str:
+        return "mcp"
+
+    def initial_bearer(self) -> str | None:
+        static_key = self._static_api_key()
+        if static_key:
+            return static_key
+        if self._has_credentials():
+            return self._token()
+        return None
+
+    def refresh_bearer(self, response: httpx.Response) -> str:
+        if self._static_api_key():
+            raise _static_key_rejected_error(response, base_url=self._settings.base_url)
+        self._access_token = None
+        if not self._has_credentials():
+            raise LabTrackerAPIAuthError(
+                _NO_CREDENTIALS_MESSAGE,
+                status_code=response.status_code,
+                code="auth_error",
+            )
+        return self._token()
+
+    def wrap_transport_error(self, method: str, path: str, exc: Exception) -> Exception:
+        return LabTrackerAPIUnavailableError(
+            f"Lab Tracker request {method} {path} failed: {exc}",
+            code=UNAVAILABLE_CODE,
+        )
 
     def health(self) -> JsonObject:
         return self._request("GET", "/health", authenticated=False)
@@ -851,16 +893,28 @@ class LabTrackerAPIClient:
         path = Path(file_path).expanduser()
         if not path.is_file():
             raise LabTrackerAPIError(f"Visualization file does not exist: {file_path}")
+        try:
+            preflight_upload_size(path, max_bytes=MAX_UPLOAD_BYTES)
+        except UploadTooLargeError as exc:
+            raise LabTrackerAPIValidationError(str(exc), code="validation_error") from exc
         resolved_content_type = (
             content_type
             or mimetypes.guess_type(path.name)[0]
             or "application/octet-stream"
         )
-        return self._request(
+        # Stream the file handle instead of reading it all into memory; open_file
+        # re-opens per attempt so a 401 retry replays cleanly.
+        response = self._transport.upload(
             "POST",
             f"/visualizations/{viz_id}/file",
-            files={"file": (path.name, path.read_bytes(), resolved_content_type)},
+            field_name="file",
+            open_file=lambda: path.open("rb"),
+            filename=path.name,
+            content_type=resolved_content_type,
         )
+        if response.status_code >= 400:
+            raise _api_error_from_response(response)
+        return _response_json(response)
 
     def _request(
         self,
@@ -873,54 +927,18 @@ class LabTrackerAPIClient:
         files: dict[str, Any] | None = None,
         retry_on_unauthorized: bool = True,
     ) -> JsonObject:
-        headers: dict[str, str] = {"X-LabTracker-Surface": "mcp"}
-        if authenticated:
-            static_key = self._static_api_key()
-            if static_key:
-                headers["Authorization"] = f"Bearer {static_key}"
-            elif self._has_credentials():
-                headers["Authorization"] = f"Bearer {self._token()}"
-        response = self._send(
+        response = self._transport.request(
             method,
             path,
-            params=_drop_empty(params),
-            json=_drop_empty(json_payload),
+            authenticated=authenticated,
+            params=params,
+            json=json_payload,
             files=files,
-            headers=headers,
+            retry_on_unauthorized=retry_on_unauthorized,
         )
-        if response.status_code == 401 and authenticated and retry_on_unauthorized:
-            if self._static_api_key():
-                raise _static_key_rejected_error(
-                    response, base_url=self._settings.base_url
-                )
-            self._access_token = None
-            if not self._has_credentials():
-                raise LabTrackerAPIAuthError(
-                    _NO_CREDENTIALS_MESSAGE,
-                    status_code=response.status_code,
-                    code="auth_error",
-                )
-            headers["Authorization"] = f"Bearer {self._token()}"
-            response = self._send(
-                method,
-                path,
-                params=_drop_empty(params),
-                json=_drop_empty(json_payload),
-                files=files,
-                headers=headers,
-            )
         if response.status_code >= 400:
             raise _api_error_from_response(response)
         return _response_json(response)
-
-    def _send(self, method: str, path: str, **kwargs: Any) -> httpx.Response:
-        try:
-            return self._client.request(method, path, **kwargs)
-        except httpx.HTTPError as exc:
-            raise LabTrackerAPIUnavailableError(
-                f"Lab Tracker request {method} {path} failed: {exc}",
-                code=UNAVAILABLE_CODE,
-            ) from exc
 
     def _has_credentials(self) -> bool:
         return bool((self._settings.username or "").strip() and self._settings.password)
@@ -949,7 +967,7 @@ class LabTrackerAPIClient:
             file=sys.stderr,
             flush=True,
         )
-        response = self._send(
+        response = self._transport.send(
             "POST",
             "/auth/login",
             json={"username": username, "password": password},
@@ -969,10 +987,6 @@ class LabTrackerAPIClient:
         return token
 
 
-def _drop_empty(payload: JsonObject | None) -> JsonObject | None:
-    if payload is None:
-        return None
-    return {key: value for key, value in payload.items() if value is not None}
 
 
 def _is_note_metadata_scalar(value: object) -> bool:

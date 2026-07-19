@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any
 
 from lab_tracker.models import NoteMetadataScalar
+from lab_tracker_client import outbox as _outbox
 from lab_tracker_client.client import (
     CAPTURE_HOST_METADATA_KEYS,
     EvidenceNoteIndex,
@@ -341,17 +342,22 @@ def event_path(event: Mapping[str, Any], outbox: str | Path) -> Path:
 
 
 def list_event_files(outbox: str | Path) -> list[Path]:
-    path = Path(outbox).expanduser()
-    if not path.exists():
-        return []
-    return sorted(item for item in path.glob("*.json") if item.is_file())
+    return _outbox.list_event_files(outbox)
 
 
 def outbox_status(outbox: str | Path) -> JsonObject:
     events: list[JsonObject] = []
     counts: dict[str, int] = {}
+    unreadable = 0
     for path in list_event_files(outbox):
-        event = read_event(path)
+        try:
+            event = read_event(path)
+        except Exception as exc:  # noqa: BLE001 - surface, don't abort status.
+            unreadable += 1
+            events.append(
+                {"path": str(path), "sync_status": "unreadable", "last_error": str(exc)}
+            )
+            continue
         status = str(event.get("sync", {}).get("status") or "pending")
         counts[status] = counts.get(status, 0) + 1
         events.append(
@@ -373,6 +379,8 @@ def outbox_status(outbox: str | Path) -> JsonObject:
         "pending": counts.get("pending", 0),
         "failed": counts.get("failed", 0),
         "synced": counts.get("synced", 0),
+        "quarantined": _outbox.count_quarantined(outbox),
+        "unreadable": unreadable,
         "events": events,
     }
 
@@ -578,62 +586,58 @@ def sync_outbox(
     limit: int | None = None,
 ) -> JsonObject:
     outbox = config.outbox_path()
-    files = list_event_files(outbox)
-    if limit is not None:
-        files = files[: max(0, limit)]
-    results: list[JsonObject] = []
-    errors: list[JsonObject] = []
     note_indexes: dict[str, EvidenceNoteIndex] = {}
-    for path in files:
-        event = read_event(path)
+
+    def _is_actionable(event: JsonObject) -> bool:
         sync = event.get("sync", {})
         already_synced = str(sync.get("status") or "") in TERMINAL_SYNC_STATES
         needs_draft = request_draft and sync.get("note_id") and not sync.get("change_set_id")
-        if already_synced and not needs_draft:
-            results.append(
-                HpcSyncResult(
-                    action="skipped",
-                    path=str(path),
-                    run_id=str(event["run_id"]),
-                    event_type=str(event["event_type"]),
-                    note_id=_optional_str(sync.get("note_id")),
-                    change_set_id=_optional_str(sync.get("change_set_id")),
-                    reason="already_synced",
-                ).to_dict()
-            )
-            continue
-        try:
-            result = _sync_event(
-                client,
-                path=path,
-                event=event,
-                note_indexes=note_indexes,
-                dry_run=dry_run,
-                request_draft=request_draft,
-            )
-            results.append(result.to_dict())
-            if result.error:
-                errors.append(result.to_dict())
-        except Exception as exc:  # noqa: BLE001 - keep draining the outbox.
-            event = _record_sync_failure(path, event, str(exc), dry_run=dry_run)
-            result = HpcSyncResult(
-                action="failed",
-                path=str(path),
-                run_id=str(event["run_id"]),
-                event_type=str(event["event_type"]),
-                error=str(exc),
-            ).to_dict()
-            results.append(result)
-            errors.append(result)
-    return {
-        "command": "hpc-sync",
-        "outbox": str(outbox),
-        "dry_run": dry_run,
-        "request_draft": request_draft,
-        "processed": len(results),
-        "results": results,
-        "errors": errors,
-    }
+        return (not already_synced) or bool(needs_draft)
+
+    def _process(path: Path, event: JsonObject) -> JsonObject:
+        return _sync_event(
+            client,
+            path=path,
+            event=event,
+            note_indexes=note_indexes,
+            dry_run=dry_run,
+            request_draft=request_draft,
+        ).to_dict()
+
+    def _skipped(path: Path, event: JsonObject) -> JsonObject:
+        sync = event.get("sync", {})
+        return HpcSyncResult(
+            action="skipped",
+            path=str(path),
+            run_id=str(event["run_id"]),
+            event_type=str(event["event_type"]),
+            note_id=_optional_str(sync.get("note_id")),
+            change_set_id=_optional_str(sync.get("change_set_id")),
+            reason="already_synced",
+        ).to_dict()
+
+    def _failed(path: Path, event: JsonObject, exc: Exception) -> JsonObject:
+        event = _record_sync_failure(path, event, str(exc), dry_run=dry_run)
+        return HpcSyncResult(
+            action="failed",
+            path=str(path),
+            run_id=str(event["run_id"]),
+            event_type=str(event["event_type"]),
+            error=str(exc),
+        ).to_dict()
+
+    return _outbox.drain_outbox(
+        outbox=outbox,
+        command="hpc-sync",
+        dry_run=dry_run,
+        request_draft=request_draft,
+        limit=limit,
+        read_event=read_event,
+        is_actionable=_is_actionable,
+        process=_process,
+        on_skipped=_skipped,
+        on_failure=_failed,
+    )
 
 
 def begin_event(
@@ -985,9 +989,7 @@ def _record_sync_failure(path: Path, event: JsonObject, error: str, *, dry_run: 
 
 
 def _write_json_atomic(path: Path, payload: Mapping[str, Any]) -> None:
-    tmp_path = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
-    tmp_path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    tmp_path.replace(path)
+    _outbox.write_json_atomic(path, payload)
 
 
 def _job_from_token(token: str, *, fallback_cluster: str | None) -> SbatchJob:

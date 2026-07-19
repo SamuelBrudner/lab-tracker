@@ -184,6 +184,7 @@ The authoritative list of what's supported is **[docs/retained-v1-surface.md](do
 
 **Scope and vision**
 - [Vision](docs/vision.md) — the north star: a question-rooted provenance graph that is human-readable, agent-readable, and AI-maintained but human-committed
+- [LOUD alignment plan](docs/loud-alignment-plan.md) — phased plan to make the provenance surface stable, dereferenceable, and self-describing linked data
 - [Supported v1 surface (authoritative)](docs/retained-v1-surface.md) — the definitive list of what ships
 - [Deferred long-term vision](idea.md) — OCR, vector search, and PI review gates, explicitly out of v1
 

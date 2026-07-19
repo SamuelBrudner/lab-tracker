@@ -23,6 +23,7 @@ from lab_tracker.schemas import (
     ListEnvelope,
 )
 
+from .provenance import analysis_provenance_payload, jsonld_response
 from .shared import (
     CreatedByFilter,
     accessible_project_ids_from_request,
@@ -33,9 +34,11 @@ from .shared import (
     ensure_project_read,
     file_storage_from_request,
     list_response,
+    provenance_base_url,
     record_usage_view,
     repository_from_request,
     validate_pagination,
+    wants_jsonld,
 )
 from .visualizations import _delete_stored_visualization_file
 
@@ -108,7 +111,13 @@ def build_analyses_router(api: LabTrackerAPI) -> APIRouter:
             resource_id=analysis.analysis_id,
             project_id=analysis.project_id,
         )
-        return Envelope(data=analysis)
+        if wants_jsonld(request):
+            return jsonld_response(analysis_provenance_payload(request, api, analysis_id))
+        base_url = provenance_base_url(request)
+        return Envelope(
+            data=analysis,
+            meta={"iri": f"{base_url}/analyses/{analysis.analysis_id}"},
+        )
 
     @router.patch("/analyses/{analysis_id}", response_model=Envelope[Analysis])
     def update_analysis(analysis_id: UUID, payload: AnalysisUpdate, request: Request):

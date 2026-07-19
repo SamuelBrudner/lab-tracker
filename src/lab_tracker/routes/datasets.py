@@ -17,6 +17,7 @@ from lab_tracker.models import Dataset, DatasetStatus, UsageEventResourceType
 from lab_tracker.schemas import DatasetCreate, DatasetUpdate, Envelope, ListEnvelope
 
 from .dataset_files import _delete_stored_dataset_file
+from .provenance import dataset_provenance_payload, jsonld_response
 from .shared import (
     CreatedByFilter,
     accessible_project_ids_from_request,
@@ -27,9 +28,11 @@ from .shared import (
     ensure_project_read,
     file_storage_from_request,
     list_response,
+    provenance_base_url,
     record_usage_view,
     repository_from_request,
     validate_pagination,
+    wants_jsonld,
 )
 
 
@@ -94,7 +97,13 @@ def build_datasets_router(api: LabTrackerAPI) -> APIRouter:
             resource_id=dataset.dataset_id,
             project_id=dataset.project_id,
         )
-        return Envelope(data=dataset)
+        if wants_jsonld(request):
+            return jsonld_response(dataset_provenance_payload(request, api, dataset_id))
+        base_url = provenance_base_url(request)
+        return Envelope(
+            data=dataset,
+            meta={"iri": f"{base_url}/datasets/{dataset.dataset_id}"},
+        )
 
     @router.patch("/datasets/{dataset_id}", response_model=Envelope[Dataset])
     def update_dataset(dataset_id: UUID, payload: DatasetUpdate, request: Request):
