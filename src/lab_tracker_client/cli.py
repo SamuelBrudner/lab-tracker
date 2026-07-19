@@ -175,7 +175,15 @@ def _build_parser() -> argparse.ArgumentParser:
     source = note_parser.add_mutually_exclusive_group(required=True)
     source.add_argument("--file", help="Path to note content.")
     source.add_argument("--text", help="Inline note content.")
-    note_parser.add_argument("--status", choices=NOTE_STATUS_VALUES, default="committed")
+    note_parser.add_argument(
+        "--status",
+        choices=NOTE_STATUS_VALUES,
+        default=None,
+        help=(
+            "Note status. Defaults to the server's staged state (the human "
+            "review gate); pass --status committed to commit explicitly."
+        ),
+    )
     note_parser.add_argument("--metadata", help="JSON object of scalar metadata.")
     note_parser.set_defaults(func=_cmd_note)
 

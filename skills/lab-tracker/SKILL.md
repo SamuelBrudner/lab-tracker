@@ -264,6 +264,7 @@ List/search endpoints use `limit` between 1 and 200 and `offset` of 0 or greater
 
 #### Projects: `ProjectCreate`
 - Required: `name`
+- `client_capture_id` (optional): string | null
 - `description` (optional): string | null
 - `group_id` (optional): string(uuid) | null
 - `name` (required): string; min length 1
@@ -271,6 +272,7 @@ List/search endpoints use `limit` between 1 and 200 and `offset` of 0 or greater
 
 #### Questions: `QuestionCreate`
 - Required: `project_id`, `text`, `question_type`
+- `client_capture_id` (optional): string | null
 - `hypothesis` (optional): string | null
 - `parent_question_ids` (optional): list[string(uuid)] | null
 - `project_id` (required): string(uuid)

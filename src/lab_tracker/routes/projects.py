@@ -84,6 +84,7 @@ def build_projects_router(api: LabTrackerAPI) -> APIRouter:
             description=payload.description or "",
             status=payload.status or project_default_status(),
             group_id=payload.group_id,
+            client_capture_id=payload.client_capture_id,
             actor=actor,
         )
         return Envelope(data=project)

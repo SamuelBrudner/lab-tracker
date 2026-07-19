@@ -78,6 +78,7 @@ class SQLAlchemyProjectRepository(SQLAlchemyModelRepository[Project, ProjectMode
         group_id: UUID | None = None,
         project_ids: set[UUID] | None = None,
         status: str | None = None,
+        client_capture_id: str | None = None,
         limit: int | None = None,
         offset: int = 0,
     ) -> tuple[list[Project], int]:
@@ -96,6 +97,9 @@ class SQLAlchemyProjectRepository(SQLAlchemyModelRepository[Project, ProjectMode
         if status is not None:
             stmt = stmt.where(ProjectModel.status == status)
             count_stmt = count_stmt.where(ProjectModel.status == status)
+        if client_capture_id is not None:
+            stmt = stmt.where(ProjectModel.client_capture_id == client_capture_id)
+            count_stmt = count_stmt.where(ProjectModel.client_capture_id == client_capture_id)
         stmt = stmt.order_by(ProjectModel.created_at, ProjectModel.project_id)
         total = count_from_statement(self._session, count_stmt)
         rows = list(self._session.scalars(apply_pagination(stmt, limit=limit, offset=offset)))
@@ -454,6 +458,7 @@ class SQLAlchemyQuestionRepository(EntityRepository[Question]):
         question_type: str | None = None,
         search: str | None = None,
         created_by: str | None = None,
+        client_capture_id: str | None = None,
         parent_question_id: UUID | None = None,
         ancestor_question_id: UUID | None = None,
         superseded_by_question_ids: set[UUID] | None = None,
@@ -485,6 +490,9 @@ class SQLAlchemyQuestionRepository(EntityRepository[Question]):
         if created_by is not None:
             stmt = stmt.where(QuestionModel.created_by_user_id == created_by)
             count_stmt = count_stmt.where(QuestionModel.created_by_user_id == created_by)
+        if client_capture_id is not None:
+            stmt = stmt.where(QuestionModel.client_capture_id == client_capture_id)
+            count_stmt = count_stmt.where(QuestionModel.client_capture_id == client_capture_id)
         pattern = substring_pattern(search)
         if pattern is not None:
             search_clause = or_(

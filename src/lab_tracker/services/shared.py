@@ -70,6 +70,19 @@ def ensure_non_empty(value: str, field_name: str) -> None:
         raise ValidationError(f"{field_name} must not be empty.")
 
 
+def normalize_client_capture_id(client_capture_id: str | None) -> str | None:
+    """Normalize a caller-supplied idempotency key: trim, empty -> None, bound length."""
+
+    if client_capture_id is None:
+        return None
+    value = client_capture_id.strip()
+    if not value:
+        return None
+    if len(value) > 120:
+        raise ValidationError("client_capture_id must be 120 characters or fewer.")
+    return value
+
+
 def terminal_reason_for_status(
     current_status: StatusT | None,
     next_status: StatusT,
