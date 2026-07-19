@@ -71,6 +71,12 @@ The documents are produced by the same builders that back the
 JSON-LD, including content hashes, commit hashes, and the semantic edges back to
 the questions each record answers.
 
+The identifiers dereference: `GET` on a dataset, analysis, or claim URI with
+`Accept: application/ld+json` returns this same document, so a JSON-LD
+consumer can follow any `@id` in a sidecar straight to the live record. The
+plain-JSON envelope for those records carries the canonical URI as
+`meta.iri`, bridging the two representations from the other side.
+
 Every key in a document reads as plain JSON (no prefixes) and is declared in
 one vocabulary registry (`src/lab_tracker/vocabulary.py`): keys map to
 standard PROV-O, schema.org, and Dublin Core IRIs where those exist, and to

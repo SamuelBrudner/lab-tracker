@@ -484,3 +484,41 @@ def test_documents_emit_only_bare_registry_keys(
 
     deprecated = {term.name for term in TERMS if term.deprecated_alias_of is not None}
     assert not emitted & deprecated
+
+
+def test_resource_uri_content_negotiates_to_the_provenance_document(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+):
+    """The @id of a dataset dereferences to the same JSON-LD document."""
+    headers = admin_auth_headers
+    _, dataset_id, _, _, _ = _create_committed_dataset_with_provenance(client, headers)
+
+    negotiated = client.get(
+        f"/datasets/{dataset_id}",
+        headers={**headers, "Accept": "application/ld+json"},
+    )
+    assert negotiated.status_code == 200
+    assert negotiated.headers["content-type"].startswith("application/ld+json")
+    provenance = client.get(f"/datasets/{dataset_id}/provenance", headers=headers)
+    assert negotiated.json() == provenance.json()
+
+
+def test_single_resource_envelopes_carry_the_canonical_iri(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+):
+    headers = admin_auth_headers
+    _, dataset_id, _, _, _ = _create_committed_dataset_with_provenance(client, headers)
+    canonical = "https://lab.example.org"
+
+    settings = client.app.state.settings
+    original = settings.canonical_base_url
+    settings.canonical_base_url = canonical
+    try:
+        envelope = client.get(f"/datasets/{dataset_id}", headers=headers).json()
+    finally:
+        settings.canonical_base_url = original
+
+    assert envelope["meta"]["iri"] == f"{canonical}/datasets/{dataset_id}"
+    assert envelope["data"]["dataset_id"] == dataset_id

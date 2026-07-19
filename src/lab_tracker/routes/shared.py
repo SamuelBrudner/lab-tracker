@@ -157,6 +157,11 @@ def actor_from_authorization_header(
     return AuthContext(user_id=user.user_id, role=user.role)
 
 
+def wants_jsonld(request: Request) -> bool:
+    """True when the client asked for JSON-LD via the Accept header."""
+    return "application/ld+json" in request.headers.get("accept", "")
+
+
 def provenance_base_url(request: Request) -> str:
     """Base URL that roots ``@id`` identifiers in provenance documents.
 
