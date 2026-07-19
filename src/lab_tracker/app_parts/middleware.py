@@ -52,6 +52,7 @@ _PUBLIC_PATHS = frozenset(
         "/auth/register",
         "/auth/bootstrap-status",
         "/auth/devices/consume",
+        "/terms",
         "/openapi.json",
         "/docs",
         "/redoc",

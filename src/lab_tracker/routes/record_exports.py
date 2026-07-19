@@ -13,11 +13,7 @@ from lab_tracker.api import LabTrackerAPI
 from lab_tracker.models import RecordExport
 from lab_tracker.schemas import Envelope
 
-from .shared import actor_from_request, api_from_request
-
-
-def _request_base_url(request: Request) -> str:
-    return str(request.base_url).rstrip("/")
+from .shared import actor_from_request, api_from_request, provenance_base_url
 
 
 def build_record_exports_router(api: LabTrackerAPI) -> APIRouter:
@@ -31,7 +27,7 @@ def build_record_exports_router(api: LabTrackerAPI) -> APIRouter:
         actor = actor_from_request(request)
         export = api_from_request(request, api).export_user_records(
             user_id=user_id,
-            base_url=_request_base_url(request),
+            base_url=provenance_base_url(request),
             actor=actor,
         )
         return Envelope(data=export)
@@ -45,7 +41,7 @@ def build_record_exports_router(api: LabTrackerAPI) -> APIRouter:
         export = api_from_request(request, api).export_user_records(
             user_id=user_id,
             group_id=group_id,
-            base_url=_request_base_url(request),
+            base_url=provenance_base_url(request),
             actor=actor,
         )
         return Envelope(data=export)
@@ -55,7 +51,7 @@ def build_record_exports_router(api: LabTrackerAPI) -> APIRouter:
         actor = actor_from_request(request)
         payload = api_from_request(request, api).export_goal_artifact(
             goal_id=goal_id,
-            base_url=_request_base_url(request),
+            base_url=provenance_base_url(request),
             actor=actor,
         )
         return JSONResponse(
@@ -68,7 +64,7 @@ def build_record_exports_router(api: LabTrackerAPI) -> APIRouter:
         actor = actor_from_request(request)
         payload = api_from_request(request, api).export_goal_artifact(
             goal_id=goal_id,
-            base_url=_request_base_url(request),
+            base_url=provenance_base_url(request),
             layer_name=layer_name,
             actor=actor,
         )
@@ -82,7 +78,7 @@ def build_record_exports_router(api: LabTrackerAPI) -> APIRouter:
         actor = actor_from_request(request)
         payload = api_from_request(request, api).export_question_subtree(
             root_id=question_id,
-            base_url=_request_base_url(request),
+            base_url=provenance_base_url(request),
             actor=actor,
         )
         return JSONResponse(
@@ -95,7 +91,7 @@ def build_record_exports_router(api: LabTrackerAPI) -> APIRouter:
         actor = actor_from_request(request)
         payload = api_from_request(request, api).export_question_subtree(
             root_id=question_id,
-            base_url=_request_base_url(request),
+            base_url=provenance_base_url(request),
             layer_name=layer_name,
             actor=actor,
         )

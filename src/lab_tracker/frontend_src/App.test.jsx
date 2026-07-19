@@ -1598,6 +1598,10 @@ describe("App", () => {
           timezone_name: "America/New_York",
         }),
       },
+      {
+        match: `/graph-drafts/${batchId}`,
+        response: apiResponse(pendingBatch),
+      },
     ]);
 
     render(<App />);
@@ -1613,6 +1617,9 @@ describe("App", () => {
     expect(await screen.findByText("1 ops")).toBeInTheDocument();
     fireEvent.click(await screen.findByRole("button", { name: "Review batch" }));
     await waitFor(() => expect(window.location.pathname).toBe(`/app/batches/${batchId}`));
+    expect(await screen.findByRole("heading", { name: "Listen & respond" })).toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "Dashboard" })).not.toBeInTheDocument();
+    expect(document.querySelector(".review-app-shell")).toBeInTheDocument();
   });
 
   it("does not expose the lab-wide graph-draft review queue route", async () => {

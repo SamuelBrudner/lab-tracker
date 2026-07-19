@@ -1538,6 +1538,8 @@ def _cmd_export(client: LabTracker, args: argparse.Namespace) -> Any:
         until=args.until,
         data_root=args.data_root,
     )
+    if result.identifier_note:
+        print(f"note: {result.identifier_note}", file=sys.stderr)
     return result.to_dict()
 
 

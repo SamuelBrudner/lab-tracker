@@ -136,6 +136,12 @@ research record:
   these documents as self-contained sidecar files that survive without a running
   instance, optionally co-located next to the data files they describe. See
   [provenance-export.md](provenance-export.md).
+- The linked-data surface around those documents: `@id` identifiers minted
+  from `LAB_TRACKER_CANONICAL_BASE_URL` when configured, a public `GET /terms`
+  vocabulary page (HTML and JSON-LD) generated from the same registry as the
+  embedded `@context`, JSON-LD content negotiation on dataset/analysis/claim
+  URIs with the canonical URI echoed as `meta.iri` in plain envelopes, and a
+  committed worked example under `docs/examples/` guarded by a drift test.
 - On-demand resolution of external artifact references (content hash is the
   integrity gate). Local resolution optionally recovers a moved/renamed file by
   its content hash within operator-configured `allowed_roots`
