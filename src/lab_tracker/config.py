@@ -43,6 +43,7 @@ class Settings(BaseSettings):
     graph_draft_worker_poll_seconds: float = 5.0
     graph_draft_scheduler_interval_seconds: float = 60.0
     public_base_url: str = ""
+    canonical_base_url: str = ""
     openai_api_key: str = ""
     openai_model: str = "gpt-4o-mini"
     openai_transcription_model: str = "gpt-4o-mini-transcribe"

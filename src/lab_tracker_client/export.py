@@ -36,9 +36,20 @@ class ExportResult:
     out_dir: str
     files: list[str] = field(default_factory=list)
     counts: dict[str, int] = field(default_factory=dict)
+    identifier_root: str | None = None
+    identifier_note: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
-        return {"out_dir": self.out_dir, "counts": self.counts, "files": self.files}
+        result: dict[str, Any] = {
+            "out_dir": self.out_dir,
+            "counts": self.counts,
+            "files": self.files,
+        }
+        if self.identifier_root is not None:
+            result["identifier_root"] = self.identifier_root
+        if self.identifier_note is not None:
+            result["identifier_note"] = self.identifier_note
+        return result
 
 
 def _sidecar_name(kind: str, entity_id: str) -> str:
@@ -47,6 +58,20 @@ def _sidecar_name(kind: str, entity_id: str) -> str:
 
 def _write_jsonld(path: Path, document: Any) -> None:
     path.write_text(json.dumps(document, indent=2, sort_keys=True), encoding="utf-8")
+
+
+def _identifier_root(document: Any, route: str, entity_id: str) -> str | None:
+    """Base URL the document's ``@id`` identifiers are rooted at, if findable."""
+    graph = document.get("@graph") if isinstance(document, dict) else None
+    if not isinstance(graph, list):
+        return None
+    suffix = f"/{route}/{entity_id}"
+    for node in graph:
+        if isinstance(node, dict):
+            node_id = node.get("@id")
+            if isinstance(node_id, str) and node_id.endswith(suffix):
+                return node_id.removesuffix(suffix)
+    return None
 
 
 def _dataset_file_paths(dataset: LTRecord) -> list[str]:
@@ -99,6 +124,8 @@ def export_project_provenance(
         for record in items:
             entity_id = str(record.id)
             document = client.provenance(route, entity_id)
+            if result.identifier_root is None:
+                result.identifier_root = _identifier_root(document, route, entity_id)
             sidecar = out / _sidecar_name(kind, entity_id)
             _write_jsonld(sidecar, document)
             result.files.append(str(sidecar))
@@ -109,4 +136,11 @@ def export_project_provenance(
                     if data_file.parent.is_dir():
                         _write_jsonld(co_located, document)
                         result.files.append(str(co_located))
+    if result.identifier_root is not None and result.identifier_root == client.base_url:
+        result.identifier_note = (
+            f"Provenance @id identifiers are rooted at {result.identifier_root}, the URL "
+            "this export connected to. If that is not your lab's permanent URL, set "
+            "LAB_TRACKER_CANONICAL_BASE_URL on the server before archiving sidecars so "
+            "identifiers stay stable across hosts."
+        )
     return result

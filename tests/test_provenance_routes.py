@@ -146,11 +146,11 @@ def test_dataset_provenance_route_exports_json_ld_graph(
     supervisor_node = _node_by_id(payload, supervisor_iri)
 
     assert dataset_node["@type"] == "prov:Entity"
-    assert dataset_node["prov:wasGeneratedBy"] == {"@id": commit_iri}
-    assert dataset_node["prov:wasAttributedTo"] == {"@id": creator_iri}
+    assert dataset_node["wasGeneratedBy"] == {"@id": commit_iri}
+    assert dataset_node["wasAttributedTo"] == {"@id": creator_iri}
     assert dataset_node["commitHash"]
     assert dataset_node["status"] == "committed"
-    assert commit_node["prov:used"] == [{"@id": f"{dataset_iri}/provenance/files/raw%2Fdata.csv"}]
+    assert commit_node["used"] == [{"@id": f"{dataset_iri}/provenance/files/raw%2Fdata.csv"}]
     assert commit_node["metadata"] == {"run": "7"}
     assert commit_node["nwbMetadata"] == {"Session Description": "baseline"}
     assert commit_node["bidsMetadata"] == {"Name": "Example Dataset"}
@@ -170,7 +170,7 @@ def test_dataset_provenance_route_exports_json_ld_graph(
     assert secondary_question_link["role"] == "secondary"
     assert _node_type_includes(creator_node, "prov:Person")
     assert creator_node["userId"] == admin_user_id
-    assert creator_node["prov:actedOnBehalfOf"] == {
+    assert creator_node["actedOnBehalfOf"] == {
         "@id": supervisor_iri,
         "supervisionStartedAt": "2020-01-01T00:00:00+00:00",
     }
@@ -301,11 +301,11 @@ def test_analysis_provenance_route_exports_related_entities(
     claim_node = _node_by_id(payload, claim_iri)
     viz_node = _node_by_id(payload, viz_iri)
     run_node = _node_by_id(payload, run["uri"])
-    agent_node = _node_by_id(payload, analysis_node["prov:wasAssociatedWith"]["@id"])
+    agent_node = _node_by_id(payload, analysis_node["wasAssociatedWith"]["@id"])
 
     assert analysis_node["@type"] == "prov:Activity"
-    assert analysis_node["prov:used"] == [{"@id": dataset_iri}]
-    assert analysis_node["prov:wasInformedBy"] == [{"@id": run["uri"]}]
+    assert analysis_node["used"] == [{"@id": dataset_iri}]
+    assert analysis_node["wasInformedBy"] == [{"@id": run["uri"]}]
     assert analysis_node["methodHash"] == "method-1"
     assert analysis_node["codeVersion"] == "v1"
     assert analysis_node["environmentHash"] == "env-1"
@@ -317,12 +317,12 @@ def test_analysis_provenance_route_exports_related_entities(
     assert run_node["@type"] == "prov:Activity"
     assert run_node["externalSourceSystem"] == "mlflow"
     assert run_node["externalContentHash"] == "sha256:run001"
-    assert dataset_node["prov:wasAttributedTo"] == {"@id": agent_node["@id"]}
+    assert dataset_node["wasAttributedTo"] == {"@id": agent_node["@id"]}
     assert claim_node["supportsDataset"] == [{"@id": dataset_iri}]
     assert claim_node["supportsAnalysis"] == [{"@id": analysis_iri}]
-    assert claim_node["prov:wasAttributedTo"] == {"@id": agent_node["@id"]}
-    assert viz_node["prov:wasGeneratedBy"] == {"@id": analysis_iri}
-    assert viz_node["prov:wasAttributedTo"] == {"@id": agent_node["@id"]}
+    assert claim_node["wasAttributedTo"] == {"@id": agent_node["@id"]}
+    assert viz_node["wasGeneratedBy"] == {"@id": analysis_iri}
+    assert viz_node["wasAttributedTo"] == {"@id": agent_node["@id"]}
     assert viz_node["relatedClaim"] == [{"@id": claim_iri}]
 
 
@@ -376,7 +376,7 @@ def test_claim_provenance_route_exports_full_ancestry(
 
     assert claim_node["supportsAnalysis"] == [{"@id": analysis_iri}]
     assert claim_node["answersQuestion"] == [{"@id": question_iri}]
-    assert analysis_node["prov:used"] == [{"@id": dataset_iri}]
+    assert analysis_node["used"] == [{"@id": dataset_iri}]
     assert analysis_node["codeVersion"] == "git:claim"
     assert analysis_node["environmentHash"] == "env-claim"
     assert dataset_node["commitHash"]
@@ -413,3 +413,112 @@ def test_provenance_routes_return_not_found_for_missing_resources(
     assert dataset_response.status_code == 404
     assert analysis_response.status_code == 404
     assert claim_response.status_code == 404
+
+
+def test_canonical_base_url_roots_provenance_identifiers(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+):
+    headers = admin_auth_headers
+    _, dataset_id, _, _, _ = _create_committed_dataset_with_provenance(client, headers)
+    canonical = "https://lab.example.org/tracker"
+
+    settings = client.app.state.settings
+    original = settings.canonical_base_url
+    settings.canonical_base_url = canonical
+    try:
+        document = client.get(f"/datasets/{dataset_id}/provenance", headers=headers).json()
+    finally:
+        settings.canonical_base_url = original
+
+    assert document["@context"]["lab"] == f"{canonical}/terms#"
+    dataset_node = _node_by_id(document, f"{canonical}/datasets/{dataset_id}")
+    assert _node_type_includes(dataset_node, "prov:Entity")
+    for node in document["@graph"]:
+        node_id = node["@id"]
+        assert not node_id.startswith("http://testserver"), node_id
+
+
+def test_unset_canonical_base_url_falls_back_to_request_host(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+):
+    headers = admin_auth_headers
+    _, dataset_id, _, _, _ = _create_committed_dataset_with_provenance(client, headers)
+
+    document = client.get(f"/datasets/{dataset_id}/provenance", headers=headers).json()
+
+    _node_by_id(document, f"http://testserver/datasets/{dataset_id}")
+
+
+def _walk_keys(value: object, keys: set[str], json_terms: set[str]) -> None:
+    if isinstance(value, dict):
+        for key, child in value.items():
+            keys.add(key)
+            if key not in json_terms:  # @json values hold user data, not vocabulary
+                _walk_keys(child, keys, json_terms)
+    elif isinstance(value, list):
+        for child in value:
+            _walk_keys(child, keys, json_terms)
+
+
+def test_documents_emit_only_bare_registry_keys(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+):
+    """Every emitted key is colon-free and declared in the vocabulary registry."""
+    from lab_tracker.vocabulary import TERMS
+
+    headers = admin_auth_headers
+    _, dataset_id, _, _, _ = _create_committed_dataset_with_provenance(client, headers)
+    document = client.get(f"/datasets/{dataset_id}/provenance", headers=headers).json()
+
+    known = {term.name for term in TERMS}
+    json_terms = {term.name for term in TERMS if term.is_json}
+    jsonld_keywords = {"@context", "@graph", "@id", "@type"}
+    emitted: set[str] = set()
+    _walk_keys(document["@graph"], emitted, json_terms)
+    for key in emitted - jsonld_keywords:
+        assert ":" not in key, key
+        assert key in known, key
+
+    deprecated = {term.name for term in TERMS if term.deprecated_alias_of is not None}
+    assert not emitted & deprecated
+
+
+def test_resource_uri_content_negotiates_to_the_provenance_document(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+):
+    """The @id of a dataset dereferences to the same JSON-LD document."""
+    headers = admin_auth_headers
+    _, dataset_id, _, _, _ = _create_committed_dataset_with_provenance(client, headers)
+
+    negotiated = client.get(
+        f"/datasets/{dataset_id}",
+        headers={**headers, "Accept": "application/ld+json"},
+    )
+    assert negotiated.status_code == 200
+    assert negotiated.headers["content-type"].startswith("application/ld+json")
+    provenance = client.get(f"/datasets/{dataset_id}/provenance", headers=headers)
+    assert negotiated.json() == provenance.json()
+
+
+def test_single_resource_envelopes_carry_the_canonical_iri(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+):
+    headers = admin_auth_headers
+    _, dataset_id, _, _, _ = _create_committed_dataset_with_provenance(client, headers)
+    canonical = "https://lab.example.org"
+
+    settings = client.app.state.settings
+    original = settings.canonical_base_url
+    settings.canonical_base_url = canonical
+    try:
+        envelope = client.get(f"/datasets/{dataset_id}", headers=headers).json()
+    finally:
+        settings.canonical_base_url = original
+
+    assert envelope["meta"]["iri"] == f"{canonical}/datasets/{dataset_id}"
+    assert envelope["data"]["dataset_id"] == dataset_id
