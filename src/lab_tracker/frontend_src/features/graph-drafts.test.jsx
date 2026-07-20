@@ -104,6 +104,76 @@ describe("spokenReviewScript", () => {
   });
 });
 
+describe("GraphDraftDetailCard route identity", () => {
+  const ID_A = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+  const ID_B = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+
+  function baseProps(changeSetId) {
+    return {
+      token: "token-1",
+      changeSetId,
+      navigate: vi.fn(),
+      canWrite: true,
+      canManageGraph: true,
+      user: { role: "admin", user_id: "user-1", username: "sam" },
+      setBusy: vi.fn(),
+      setFlash: vi.fn(),
+    };
+  }
+
+  it("ignores a stale draft response after navigating to a different draft", async () => {
+    const draftA = draftFixture({ change_set_id: ID_A, summary: "Draft A summary." });
+    const draftB = draftFixture({ change_set_id: ID_B, summary: "Draft B summary." });
+
+    let resolveA;
+    const deferredA = new Promise((resolve) => {
+      resolveA = resolve;
+    });
+    installFetchMock([
+      { match: `/graph-drafts/${ID_A}`, response: () => deferredA },
+      { match: `/graph-drafts/${ID_B}`, response: apiResponse(draftB) },
+    ]);
+
+    const { rerender } = render(<GraphDraftDetailCard {...baseProps(ID_A)} />);
+    // Navigate to B while A's load is still in flight.
+    rerender(<GraphDraftDetailCard {...baseProps(ID_B)} />);
+
+    // B loads and renders; A was never shown.
+    expect(await screen.findByText("Draft B summary.")).toBeInTheDocument();
+    expect(screen.queryByText("Draft A summary.")).not.toBeInTheDocument();
+
+    // A's response arrives late and must be ignored (last-started load wins).
+    resolveA(apiResponse(draftA));
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(screen.queryByText("Draft A summary.")).not.toBeInTheDocument();
+    expect(screen.getByText("Draft B summary.")).toBeInTheDocument();
+  });
+
+  it("targets a mutation at the route id, not the stale loaded draft", async () => {
+    const draftA = draftFixture({ change_set_id: ID_A, summary: "Draft A summary." });
+    const patchedUrls = [];
+    installFetchMock([
+      { match: `/graph-drafts/${ID_A}`, response: apiResponse(draftA) },
+      {
+        match: new RegExp(`/graph-drafts/${ID_A}/operations/`),
+        method: "PATCH",
+        response: (request) => {
+          patchedUrls.push(request.url);
+          return apiResponse({ ...draftA, status: "ready" });
+        },
+      },
+    ]);
+
+    render(<GraphDraftDetailCard {...baseProps(ID_A)} />);
+    // Accept the single proposal; the mutation must hit the ROUTE id's URL.
+    fireEvent.click(await screen.findByRole("button", { name: "Accept" }));
+    await waitFor(() => expect(patchedUrls.length).toBe(1));
+    expect(patchedUrls[0]).toContain(`/graph-drafts/${ID_A}/operations/`);
+  });
+});
+
 describe("GraphDraftDetailCard audio review", () => {
   it("plays, pauses, resumes, stops, and cancels narration on navigation", async () => {
     const speechSynthesis = installSpeechSynthesis();

@@ -327,6 +327,10 @@ function GraphDraftDetailCard({
   const startingRef = useRef(false);
   const speechUtteranceRef = useRef(null);
   const mountedRef = useRef(true);
+  // Last-started load wins: a superseded load's response is ignored.
+  const loadGenerationRef = useRef(0);
+  // Track the route id so we reset route-scoped state only on a genuine switch.
+  const previousChangeSetIdRef = useRef(changeSetId);
 
   const acceptedCount = useMemo(
     () =>
@@ -340,6 +344,11 @@ function GraphDraftDetailCard({
     [changeSet, payloads]
   );
   const isAdmin = user?.role === "admin";
+  // The loaded draft is only actionable when it is the one the route points at;
+  // during a route change (or a superseded load) the previous draft must not be
+  // editable or targetable by a mutation.
+  const loadedId = changeSet?.change_set_id ?? null;
+  const isCurrent = loadedId !== null && loadedId === changeSetId;
   const usesDraftProjectAccess = Boolean(changeSet?.project_id);
   const hasDraftProjectAccess = usesDraftProjectAccess && draftProjectId === changeSet.project_id;
   const effectiveCanWrite = usesDraftProjectAccess
@@ -349,34 +358,78 @@ function GraphDraftDetailCard({
     ? isAdmin || (hasDraftProjectAccess && canManageWithRole(user, draftProjectRole))
     : Boolean(canManageGraph);
   const canEditDraft =
-    effectiveCanWrite && ["ready", "changes_requested"].includes(changeSet?.status || "");
+    isCurrent &&
+    effectiveCanWrite &&
+    ["ready", "changes_requested"].includes(changeSet?.status || "");
   const recordingSupported = canRecordAudio();
   const canSubmitDraft =
-    effectiveCanWrite && ["ready", "changes_requested"].includes(changeSet?.status || "");
-  const canReviewDraft = effectiveCanManageGraph && changeSet?.status === "submitted";
+    isCurrent &&
+    effectiveCanWrite &&
+    ["ready", "changes_requested"].includes(changeSet?.status || "");
+  const canReviewDraft =
+    isCurrent && effectiveCanManageGraph && changeSet?.status === "submitted";
   const canCommitDraft =
-    effectiveCanManageGraph && ["ready", "submitted"].includes(changeSet?.status || "");
+    isCurrent &&
+    effectiveCanManageGraph &&
+    ["ready", "submitted"].includes(changeSet?.status || "");
   const speechSupported = canSpeakReview();
 
   const loadDraft = useCallback(async () => {
     if (!changeSetId) {
       return;
     }
+    const requestedId = changeSetId;
+    const generation = (loadGenerationRef.current += 1);
     setLoading(true);
     setError("");
     try {
-      const nextChangeSet = await apiRequest(`/graph-drafts/${changeSetId}`, { token });
+      const nextChangeSet = await apiRequest(`/graph-drafts/${requestedId}`, { token });
+      // Ignore a stale response if a newer load (or route change) superseded it.
+      if (generation !== loadGenerationRef.current) {
+        return;
+      }
       setChangeSet(nextChangeSet);
       setPayloads(payloadText(nextChangeSet));
       setOperationReviewNotes(operationReviewNoteText(nextChangeSet));
       setCommitMessage(nextChangeSet?.commit_message || "");
       setReviewNote(nextChangeSet?.review_note || "");
     } catch (err) {
+      if (generation !== loadGenerationRef.current) {
+        return;
+      }
       setError(err.message || "Failed to load graph draft.");
     } finally {
-      setLoading(false);
+      if (generation === loadGenerationRef.current) {
+        setLoading(false);
+      }
     }
   }, [changeSetId, token]);
+
+  useEffect(() => {
+    // On a genuine route change to a different draft, drop all route-scoped
+    // state immediately so the previous draft is neither shown nor actionable
+    // while the next one loads. Same-id reloads (after a mutation) are left
+    // untouched so in-progress edits on the current draft are preserved.
+    if (previousChangeSetIdRef.current !== changeSetId) {
+      previousChangeSetIdRef.current = changeSetId;
+      loadGenerationRef.current += 1; // abandon any in-flight load for the old id
+      setChangeSet(null);
+      setPayloads({});
+      setOperationReviewNotes({});
+      setCommitMessage("");
+      setReviewNote("");
+      setSourceImage("");
+      setError("");
+      setReviseFeedback("");
+      setReviseAttachments([]);
+      setReviseAudio((current) => {
+        if (current?.url) {
+          URL.revokeObjectURL(current.url);
+        }
+        return null;
+      });
+    }
+  }, [changeSetId]);
 
   useEffect(() => {
     loadDraft();
@@ -533,11 +586,15 @@ function GraphDraftDetailCard({
       setFlash("", "Operation payload must be a JSON object.");
       return;
     }
+    // Never mutate an operation on a draft that is no longer the active route.
+    if (!isCurrent) {
+      return;
+    }
     setBusy(true);
     setFlash("", "");
     try {
       const nextChangeSet = await apiRequest(
-        `/graph-drafts/${changeSet.change_set_id}/operations/${operation.operation_id}`,
+        `/graph-drafts/${changeSetId}/operations/${operation.operation_id}`,
         {
           body: {
             payload: parsedPayload,
@@ -583,7 +640,7 @@ function GraphDraftDetailCard({
     setBusy(true);
     setFlash("", "");
     try {
-      const nextChangeSet = await apiRequest(`/graph-drafts/${changeSet.change_set_id}/commit`, {
+      const nextChangeSet = await apiRequest(`/graph-drafts/${changeSetId}/commit`, {
         body: { message: commitMessage.trim() },
         method: "POST",
         token,
@@ -606,7 +663,7 @@ function GraphDraftDetailCard({
     setBusy(true);
     setFlash("", "");
     try {
-      const nextChangeSet = await apiRequest(`/graph-drafts/${changeSet.change_set_id}/submit`, {
+      const nextChangeSet = await apiRequest(`/graph-drafts/${changeSetId}/submit`, {
         method: "POST",
         token,
       });
@@ -626,7 +683,7 @@ function GraphDraftDetailCard({
     setBusy(true);
     setFlash("", "");
     try {
-      const nextChangeSet = await apiRequest(`/graph-drafts/${changeSet.change_set_id}/review`, {
+      const nextChangeSet = await apiRequest(`/graph-drafts/${changeSetId}/review`, {
         body: { status, note: reviewNote.trim() || null },
         method: "POST",
         token,
@@ -809,7 +866,7 @@ function GraphDraftDetailCard({
       reviseAttachments.forEach((file) => {
         formData.append("attachments", file, file.name);
       });
-      const nextChangeSet = await apiRequest(`/graph-drafts/${changeSet.change_set_id}/revise`, {
+      const nextChangeSet = await apiRequest(`/graph-drafts/${changeSetId}/revise`, {
         body: formData,
         method: "POST",
         token,
