@@ -332,6 +332,24 @@ function GraphDraftDetailCard({
   // Track the route id so we reset route-scoped state only on a genuine switch.
   const previousChangeSetIdRef = useRef(changeSetId);
 
+  // Per-command in-flight state. The ref guards synchronously against a double
+  // click before React re-renders; the state drives per-button disabling. Keyed
+  // by command so one command settling never clears another's pending flag.
+  const [pendingCommands, setPendingCommands] = useState({});
+  const pendingCommandsRef = useRef({});
+  const beginCommand = useCallback((name) => {
+    if (pendingCommandsRef.current[name]) {
+      return false;
+    }
+    pendingCommandsRef.current = { ...pendingCommandsRef.current, [name]: true };
+    setPendingCommands((prev) => ({ ...prev, [name]: true }));
+    return true;
+  }, []);
+  const endCommand = useCallback((name) => {
+    pendingCommandsRef.current = { ...pendingCommandsRef.current, [name]: false };
+    setPendingCommands((prev) => ({ ...prev, [name]: false }));
+  }, []);
+
   const acceptedCount = useMemo(
     () =>
       (changeSet?.operations || []).filter((operation) => operation.status === "accepted")
@@ -590,6 +608,11 @@ function GraphDraftDetailCard({
     if (!isCurrent) {
       return;
     }
+    // Per-operation in-flight guard so each row is independently non-duplicable.
+    const commandKey = `op:${operation.operation_id}`;
+    if (!beginCommand(commandKey)) {
+      return;
+    }
     setBusy(true);
     setFlash("", "");
     try {
@@ -612,19 +635,44 @@ function GraphDraftDetailCard({
     } catch (err) {
       setFlash("", err.message || "Failed to update graph draft operation.");
     } finally {
+      endCommand(commandKey);
       setBusy(false);
     }
   }
 
   async function acceptAll() {
-    if (!changeSet) {
+    if (!changeSet || !isCurrent) {
       return;
     }
-    for (const operation of changeSet.operations || []) {
-      if (operation.status === "applied") {
-        continue;
-      }
-      await saveOperation(operation, "accepted");
+    // One atomic server request replaces the old per-operation client loop: no
+    // partial-failure window and no per-iteration flash clobbering. Invalid
+    // proposals are left "proposed" and reported so the user can fix them.
+    if (!beginCommand("acceptAll")) {
+      return;
+    }
+    setBusy(true);
+    setFlash("", "");
+    try {
+      const nextChangeSet = await apiRequest(`/graph-drafts/${changeSetId}/accept-all`, {
+        method: "POST",
+        token,
+      });
+      setChangeSet(nextChangeSet);
+      setPayloads(payloadText(nextChangeSet));
+      setOperationReviewNotes(operationReviewNoteText(nextChangeSet));
+      const remaining = (nextChangeSet.operations || []).filter(
+        (operation) => operation.status === "proposed"
+      ).length;
+      setFlash(
+        remaining > 0
+          ? `Accepted the valid proposals; ${remaining} could not be accepted and remain for editing.`
+          : "All proposals accepted."
+      );
+    } catch (err) {
+      setFlash("", err.message || "Failed to accept all proposals.");
+    } finally {
+      endCommand("acceptAll");
+      setBusy(false);
     }
   }
 
@@ -635,6 +683,9 @@ function GraphDraftDetailCard({
     }
     if (!commitMessage.trim()) {
       setFlash("", "Commit message is required.");
+      return;
+    }
+    if (!beginCommand("commit")) {
       return;
     }
     setBusy(true);
@@ -652,12 +703,16 @@ function GraphDraftDetailCard({
     } catch (err) {
       setFlash("", err.message || "Failed to commit graph draft.");
     } finally {
+      endCommand("commit");
       setBusy(false);
     }
   }
 
   async function submitDraft() {
     if (!changeSet || !canSubmitDraft) {
+      return;
+    }
+    if (!beginCommand("submit")) {
       return;
     }
     setBusy(true);
@@ -672,12 +727,16 @@ function GraphDraftDetailCard({
     } catch (err) {
       setFlash("", err.message || "Failed to submit graph draft.");
     } finally {
+      endCommand("submit");
       setBusy(false);
     }
   }
 
   async function reviewDraft(status) {
     if (!changeSet || !canReviewDraft) {
+      return;
+    }
+    if (!beginCommand("review")) {
       return;
     }
     setBusy(true);
@@ -693,6 +752,7 @@ function GraphDraftDetailCard({
     } catch (err) {
       setFlash("", err.message || "Failed to review graph draft.");
     } finally {
+      endCommand("review");
       setBusy(false);
     }
   }
@@ -853,6 +913,9 @@ function GraphDraftDetailCard({
       setFlash("", "Add feedback, a voice note, or a file for the AI to revise the draft.");
       return;
     }
+    if (!beginCommand("revise")) {
+      return;
+    }
     setBusy(true);
     setFlash("", "");
     try {
@@ -881,6 +944,7 @@ function GraphDraftDetailCard({
     } catch (err) {
       setFlash("", err.message || "Failed to revise graph draft.");
     } finally {
+      endCommand("revise");
       setBusy(false);
     }
   }
@@ -1018,6 +1082,7 @@ function GraphDraftDetailCard({
           disabled={
             !canEditDraft ||
             isRecording ||
+            Boolean(pendingCommands.revise) ||
             (!reviseFeedback.trim() && !reviseAudio && reviseAttachments.length === 0)
           }
           onClick={reviseDraft}
@@ -1234,7 +1299,7 @@ function GraphDraftDetailCard({
                           <button
                             type="button"
                             className="btn-secondary"
-                            disabled={!canEditDraft}
+                            disabled={!canEditDraft || Boolean(pendingCommands[`op:${operation.operation_id}`])}
                             onClick={() => saveOperation(operation)}
                             title="Save your edits to this proposal without changing its decision"
                           >
@@ -1249,7 +1314,7 @@ function GraphDraftDetailCard({
                     <button
                       type="button"
                       className="btn-primary"
-                      disabled={!canEditDraft}
+                      disabled={!canEditDraft || Boolean(pendingCommands[`op:${operation.operation_id}`])}
                       onClick={() => saveOperation(operation, "accepted")}
                     >
                       Accept
@@ -1257,7 +1322,7 @@ function GraphDraftDetailCard({
                     <button
                       type="button"
                       className="btn-secondary"
-                      disabled={!canEditDraft}
+                      disabled={!canEditDraft || Boolean(pendingCommands[`op:${operation.operation_id}`])}
                       onClick={() => saveOperation(operation, "proposed")}
                     >
                       Defer
@@ -1265,7 +1330,7 @@ function GraphDraftDetailCard({
                     <button
                       type="button"
                       className="btn-danger"
-                      disabled={!canEditDraft}
+                      disabled={!canEditDraft || Boolean(pendingCommands[`op:${operation.operation_id}`])}
                       onClick={() => saveOperation(operation, "rejected")}
                     >
                       Reject
@@ -1299,7 +1364,7 @@ function GraphDraftDetailCard({
               <button
                 type="button"
                 className="btn-secondary"
-                disabled={!canEditDraft}
+                disabled={!canEditDraft || Boolean(pendingCommands.acceptAll)}
                 onClick={acceptAll}
               >
                 Accept all
@@ -1310,7 +1375,7 @@ function GraphDraftDetailCard({
               <button
                 type="button"
                 className="btn-secondary"
-                disabled={!canSubmitDraft}
+                disabled={!canSubmitDraft || Boolean(pendingCommands.submit)}
                 onClick={submitDraft}
               >
                 Submit for review
@@ -1332,6 +1397,7 @@ function GraphDraftDetailCard({
                   <button
                     type="button"
                     className="btn-secondary"
+                    disabled={Boolean(pendingCommands.review)}
                     onClick={() => reviewDraft("changes_requested")}
                   >
                     Request changes
@@ -1339,6 +1405,7 @@ function GraphDraftDetailCard({
                   <button
                     type="button"
                     className="btn-danger"
+                    disabled={Boolean(pendingCommands.review)}
                     onClick={() => reviewDraft("rejected")}
                   >
                     Reject draft
@@ -1353,7 +1420,10 @@ function GraphDraftDetailCard({
                   disabled={!canCommitDraft}
                 />
               </label>
-              <button className="btn-primary" disabled={!canCommitDraft || acceptedCount === 0}>
+              <button
+                className="btn-primary"
+                disabled={!canCommitDraft || acceptedCount === 0 || Boolean(pendingCommands.commit)}
+              >
                 Commit accepted changes
               </button>
             </form>

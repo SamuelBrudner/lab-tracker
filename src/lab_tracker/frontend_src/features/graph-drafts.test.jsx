@@ -174,6 +174,78 @@ describe("GraphDraftDetailCard route identity", () => {
   });
 });
 
+describe("GraphDraftDetailCard accept all", () => {
+  it("accepts all proposals via the atomic server endpoint and reports what remained", async () => {
+    const draft = draftFixture();
+    const partial = {
+      ...draft,
+      operations: [
+        { ...draft.operations[0], status: "accepted" },
+        {
+          ...draft.operations[0],
+          operation_id: "44444444-4444-4444-8444-444444444444",
+          status: "proposed",
+        },
+      ],
+    };
+    const acceptAllUrls = [];
+    const setFlash = vi.fn();
+    renderDraft(draft, {
+      setFlash,
+      routes: [
+        {
+          match: `/graph-drafts/${draft.change_set_id}/accept-all`,
+          method: "POST",
+          response: (request) => {
+            acceptAllUrls.push(request.url);
+            return apiResponse(partial);
+          },
+        },
+      ],
+    });
+
+    fireEvent.click(await screen.findByRole("button", { name: "Accept all" }));
+
+    // One atomic request to the bulk endpoint — not a per-operation client loop.
+    await waitFor(() => expect(acceptAllUrls).toHaveLength(1));
+    expect(acceptAllUrls[0]).toContain("/accept-all");
+    // Honest partial-failure report rather than blanket success.
+    await waitFor(() =>
+      expect(setFlash).toHaveBeenCalledWith(expect.stringContaining("could not be accepted"))
+    );
+  });
+
+  it("guards against a duplicate accept-all while one is in flight", async () => {
+    const draft = draftFixture();
+    let resolveAccept;
+    const deferred = new Promise((resolve) => {
+      resolveAccept = resolve;
+    });
+    let calls = 0;
+    renderDraft(draft, {
+      routes: [
+        {
+          match: `/graph-drafts/${draft.change_set_id}/accept-all`,
+          method: "POST",
+          response: () => {
+            calls += 1;
+            return deferred;
+          },
+        },
+      ],
+    });
+
+    const button = await screen.findByRole("button", { name: "Accept all" });
+    fireEvent.click(button);
+    fireEvent.click(button); // second click while the first is in flight
+    await Promise.resolve();
+
+    expect(calls).toBe(1);
+    resolveAccept(apiResponse(draft));
+    await waitFor(() => expect(button).not.toBeDisabled());
+  });
+});
+
 describe("GraphDraftDetailCard audio review", () => {
   it("plays, pauses, resumes, stops, and cancels narration on navigation", async () => {
     const speechSynthesis = installSpeechSynthesis();
