@@ -1,6 +1,7 @@
 import * as React from "react";
 
 import { fetchAllPages } from "../../shared/api.js";
+import { datasetShape } from "../../shared/gateways/datasets.js";
 import { formatBytes, formatDate } from "../../shared/formatters.js";
 import { AppLink } from "../../shared/routing.jsx";
 import { useApiResource } from "../../hooks/useApiResource.js";
@@ -11,7 +12,8 @@ function DatasetDetailCard({ token, datasetId, projects, navigate, onSetActivePr
   const { data: dataset, error, loading } = useApiResource(
     token && datasetId ? `/datasets/${datasetId}` : "",
     token,
-    "Failed to load dataset."
+    "Failed to load dataset.",
+    { validate: datasetShape }
   );
   const [fileState, setFileState] = useState({ loading: false, error: "", items: [] });
 

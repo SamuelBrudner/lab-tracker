@@ -1,6 +1,7 @@
 import * as React from "react";
 
 import { apiRequest } from "../shared/api.js";
+import { noteShape } from "../shared/gateways/notes.js";
 import { formatDate } from "../shared/formatters.js";
 import { useApiResource } from "../hooks/useApiResource.js";
 import { useProjectAccess } from "../hooks/useProjectAccess.js";
@@ -136,7 +137,8 @@ function NoteDetailCard({
   const { data: note, error, loading } = useApiResource(
     noteId ? `/notes/${noteId}` : "",
     token,
-    "Failed to load note."
+    "Failed to load note.",
+    { validate: noteShape }
   );
   // Key write access to the loaded note's OWN project (a direct-linked note may
   // belong to a different project than the dashboard selection); fall back to

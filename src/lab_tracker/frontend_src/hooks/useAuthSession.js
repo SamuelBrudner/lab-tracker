@@ -1,6 +1,7 @@
 import * as React from "react";
 
 import { AUTH_REJECTED_EVENT, apiFetch, apiRequest } from "../shared/api.js";
+import { auth as authGateway } from "../shared/gateways/index.js";
 import { createAuthStorage } from "../shared/auth-storage.js";
 import {
   TOKEN_EXPIRES_AT_STORAGE_KEY,
@@ -265,8 +266,12 @@ function useAuthSession({ replace, setBusy, setFlash, storage }) {
     setFlash("", "");
     try {
       const isRegistration = authMode === "register" || authMode === "setup";
-      const payload = await apiRequest(isRegistration ? "/auth/register" : "/auth/login", {
-        body: {
+      // The session-issuing response is validated at the gateway: a malformed
+      // token payload throws one ContractError instead of silently applying an
+      // empty token / null user.
+      const payload = await authGateway.authenticate(
+        isRegistration ? "/auth/register" : "/auth/login",
+        {
           ...(authMode === "setup"
             ? {
                 bootstrap_token: authBootstrapToken.trim(),
@@ -280,9 +285,8 @@ function useAuthSession({ replace, setBusy, setFlash, storage }) {
             : {}),
           password: authPassword,
           username: authUsername.trim(),
-        },
-        method: "POST",
-      });
+        }
+      );
       applyAuthPayload(payload);
       setAuthBootstrapToken("");
       setAuthInviteToken("");

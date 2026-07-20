@@ -1,6 +1,7 @@
 import * as React from "react";
 
 import { apiListRequest, apiRequest, buildApiPath } from "../shared/api.js";
+import { graphDrafts } from "../shared/gateways/index.js";
 import { formatDate } from "../shared/formatters.js";
 
 const { useCallback, useEffect, useMemo, useRef, useState } = React;
@@ -401,7 +402,7 @@ function GraphDraftDetailCard({
     setLoading(true);
     setError("");
     try {
-      const nextChangeSet = await apiRequest(`/graph-drafts/${requestedId}`, { token });
+      const nextChangeSet = await graphDrafts.getChangeSet(requestedId, { token });
       // Ignore a stale response if a newer load (or route change) superseded it.
       if (generation !== loadGenerationRef.current) {
         return;

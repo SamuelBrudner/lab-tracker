@@ -1,6 +1,6 @@
 import * as React from "react";
 
-import { apiListRequest, buildApiPath } from "../shared/api.js";
+import { projects } from "../shared/gateways/index.js";
 
 const { useCallback, useEffect, useRef, useState } = React;
 
@@ -46,7 +46,8 @@ function useProjectAccess(projectId, { token, user, enabled = true } = {}) {
     // it survives into the new project's loading window.
     setState({ projectId, status: "loading", role: "", members: [] });
     let canceled = false;
-    apiListRequest(buildApiPath(`/projects/${projectId}/members`, { limit: 200 }), { token })
+    projects
+      .listMembers(projectId, { token })
       .then(({ data }) => {
         if (canceled || requestId !== requestIdRef.current) {
           return; // a newer request (different project) superseded this one
