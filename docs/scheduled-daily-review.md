@@ -107,24 +107,33 @@ disabled, so no credentials are needed. Two things change when Lab Tracker is
   Gemini-driven job, a hosted cron) can only reach a Lab Tracker that has a
   public URL. A localhost instance must be driven by a scheduler on the
   **same machine**.
-- **Auth.** `run-due` is admin-only. Prefer an admin personal access token for
-  scheduled automations — mint one on the **Agents** page in the web app
-  (`/app/agents`) with the **Scheduler trigger (admin)** level, which stays
-  read-only except for the run-due trigger:
+- **Auth.** `run-due` is admin-only. Prefer a **run-due-scoped** personal access
+  token for scheduled automations — issue one with
+  `POST /auth/tokens` and `"scope": "batch_run_due"` (or the **Scheduler
+  trigger** level on the **Agents** page, `/app/agents`). A scoped token can
+  trigger **only** `POST /batches/run-due` — it cannot read or write anything
+  else — so if the scheduler host is compromised the token leaks nothing beyond
+  the ability to kick off a (human-reviewed) draft run:
 
   ```sh
   export LAB_TRACKER_BASE_URL="https://lab.example.org"
-  export LAB_TRACKER_API_KEY="lpat_…"
+  export LAB_TRACKER_API_KEY="lpat_…"   # a scope=batch_run_due token
   ```
 
-  Username/password credentials also work; the trigger logs in and mints a
-  fresh short-lived token each run:
+  Username/password credentials still work as a fallback; the trigger builds the
+  login body with `json.dumps` (never shell interpolation) and mints a fresh
+  short-lived token each run:
 
   ```sh
   export LAB_TRACKER_BASE_URL="https://lab.example.org"
   export LAB_TRACKER_ADMIN_USER="…"
   export LAB_TRACKER_ADMIN_PASS="…"
   ```
+
+  On macOS/Linux the launchd installer writes whatever secret you export to a
+  `0600` JSON file that the agent reads structurally at run time — it is never
+  sourced or shell-evaluated, so a credential containing shell metacharacters
+  cannot execute.
 
   Pass a non-local URL to the installer with `-BaseUrl` (Windows) or as the
   second argument (`install-daily-review.sh 15 https://lab.example.org`).
