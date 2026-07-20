@@ -50,11 +50,19 @@ export function droppedUploadsMessage(dropped) {
     : `${count} queued captures could not be uploaded. Please capture them again.`;
 }
 
-function readToken(getToken) {
+function defaultSession() {
+  // Boot-time default: a stored token but no proven owner identity. Because the
+  // queue only drains under a session with a matching ownerId, a boot drain with
+  // no owner is a safe no-op until the app supplies { token, ownerId }.
+  return { token: storedToken(), ownerId: "" };
+}
+
+function readSession(getSession) {
   try {
-    return getToken?.() || "";
+    const session = getSession?.() || {};
+    return { token: session.token || "", ownerId: session.ownerId || "" };
   } catch {
-    return "";
+    return { token: "", ownerId: "" };
   }
 }
 
@@ -100,7 +108,7 @@ export function registerServiceWorker(
 
 export function installOfflineRetry({
   queue = getUploadQueue(),
-  getToken = storedToken,
+  getSession = defaultSession,
   onDropped = () => {},
 } = {}) {
   if (!queue || typeof window === "undefined") {
@@ -108,14 +116,14 @@ export function installOfflineRetry({
   }
   const handleOnline = () => {
     queue
-      .drain({ token: readToken(getToken) })
+      .drain(readSession(getSession))
       .then((result) => surfaceDroppedUploads(result, onDropped))
       .catch(() => {});
   };
   window.addEventListener("online", handleOnline);
   // Drain at boot too, in case the app was relaunched after going offline.
   queue
-    .drain({ token: readToken(getToken) })
+    .drain(readSession(getSession))
     .then((result) => surfaceDroppedUploads(result, onDropped))
     .catch(() => {});
   return () => window.removeEventListener("online", handleOnline);

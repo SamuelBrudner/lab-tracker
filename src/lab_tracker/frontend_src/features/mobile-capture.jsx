@@ -271,6 +271,7 @@ function MobileInstallPrompt() {
 
 function MobileCaptureCard({
   token,
+  ownerId = "",
   canWrite,
   projects,
   selectedProjectId,
@@ -396,7 +397,7 @@ function MobileCaptureCard({
           token,
         }),
       projectId: selectedProjectId,
-      token,
+      ownerId,
       uploadQueue: queue,
     })
       .then((result) => {
@@ -409,7 +410,7 @@ function MobileCaptureCard({
             : `${result.migrated} shared captures imported.`
         );
         return queue
-          .drain({ token })
+          .drain({ token, ownerId })
           .then((drainResult) => {
             if (drainResult.dropped.length > 0) {
               setFlash("", droppedUploadsMessage(drainResult.dropped));
@@ -425,7 +426,7 @@ function MobileCaptureCard({
     return () => {
       canceled = true;
     };
-  }, [selectedProjectId, token, setFlash]);
+  }, [selectedProjectId, token, ownerId, setFlash]);
 
   function selectedTargets() {
     const targets = [];
@@ -655,7 +656,7 @@ function MobileCaptureCard({
       endpoint: UPLOAD_FILE_PATH,
       file: fileToUpload,
       fields,
-      token,
+      ownerId,
     });
     return true;
   }

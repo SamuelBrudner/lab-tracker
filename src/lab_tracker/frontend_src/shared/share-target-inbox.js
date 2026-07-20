@@ -111,7 +111,7 @@ function shareTextContent(share) {
 async function migrateIncomingShares({
   createTextNote = null,
   projectId,
-  token,
+  ownerId = "",
   uploadQueue,
   storage = createIndexedDbShareStorage(),
 }) {
@@ -141,7 +141,6 @@ async function migrateIncomingShares({
         projectId,
         rawContent,
         share,
-        token,
       });
       await storage.remove(share.id);
       migrated += 1;
@@ -157,7 +156,7 @@ async function migrateIncomingShares({
       fields,
       filename: share.filename,
       contentType: share.contentType,
-      token,
+      ownerId,
     });
     await storage.remove(share.id);
     migrated += 1;

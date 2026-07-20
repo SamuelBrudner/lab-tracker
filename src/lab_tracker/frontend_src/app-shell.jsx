@@ -54,17 +54,20 @@ function App() {
 
   const auth = useAuthSession({ replace, setBusy, setFlash });
   const apiEnabled = auth.authChecked && (!auth.authEnabled || Boolean(auth.token));
+  const ownerId = auth.user?.user_id || "";
   React.useEffect(() => {
     if (!auth.authChecked) {
       return undefined;
     }
     return installOfflineRetry({
-      getToken: () => auth.token,
+      // Drain only under the active session's identity; queued jobs owned by a
+      // different (or no) user are held/skipped, never submitted under this token.
+      getSession: () => ({ token: auth.token, ownerId }),
       onDropped: (dropped) => {
         setFlash("", droppedUploadsMessage(dropped));
       },
     });
-  }, [auth.authChecked, auth.token, setFlash]);
+  }, [auth.authChecked, auth.token, ownerId, setFlash]);
   const [projectMembers, setProjectMembers] = React.useState([]);
   const [memberUsername, setMemberUsername] = React.useState("");
   const [memberRole, setMemberRole] = React.useState("contributor");
@@ -350,6 +353,7 @@ function App() {
           {isCaptureRoute ? (
             <MobileCaptureCard
               token={auth.token}
+              ownerId={ownerId}
               canWrite={canContributeToProject}
               projects={workspaceData.projects}
               selectedProjectId={workspaceData.selectedProjectId}
