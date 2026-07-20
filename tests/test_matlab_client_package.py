@@ -83,3 +83,25 @@ def test_matlab_docs_are_linked_from_public_docs() -> None:
     assert "without installing\nor calling Python" in matlab_doc
     assert "LAB_TRACKER_ACCESS_TOKEN" in matlab_doc
     assert "capture_figure_smoke.m" in matlab_doc
+
+
+def test_matlab_runtime_smoke_runner_and_runbook_exist() -> None:
+    """The MATLAB runtime path is either executable or a documented deferral.
+
+    Guards the tqyw contract: a guarded runner that no-ops without a MATLAB
+    license, and a manual runbook, both asserting a real success action so a
+    fail-soft (skipped/failed) capture cannot pass as green.
+    """
+    runner = ROOT / "scripts" / "matlab-smoke.sh"
+    assert runner.exists(), "scripts/matlab-smoke.sh (the guarded MATLAB runner) is missing"
+    runner_source = _read(runner)
+    # Skips green without MATLAB, runs the example, and checks the success action.
+    assert "command -v matlab" in runner_source
+    assert "capture_figure_smoke.m" in runner_source
+    assert "imported" in runner_source and "coalesced" in runner_source
+
+    matlab_doc = _read(ROOT / "docs" / "lab-tracker-matlab.md")
+    assert "Runtime smoke validation" in matlab_doc
+    assert "scripts/matlab-smoke.sh" in matlab_doc
+    # The runbook must warn that a green exit alone does not prove a capture.
+    assert "result.action" in matlab_doc

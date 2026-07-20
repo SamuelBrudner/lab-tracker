@@ -92,6 +92,48 @@ run("/path/to/lab-tracker/matlab/examples/capture_figure_smoke.m")
 The script generates a small plot, saves it to your temp directory, and stages a
 Lab Tracker evidence note. It uses only MATLAB APIs.
 
+## Runtime smoke validation
+
+The MATLAB package has source-contract tests in CI, but an actual end-to-end
+capture can only be validated with a **licensed MATLAB runtime**, which the CI
+runners do not have. There are two ways to run the real thing:
+
+**Automated runner** — `scripts/matlab-smoke.sh` boots a disposable
+auth-disabled Lab Tracker server on a temp SQLite database, creates a project,
+runs `capture_figure_smoke.m` against it, and asserts the capture actually
+imported (`result.action` is `imported` or `coalesced`). It **skips green** when
+`matlab` is not on `PATH`, so it is safe to invoke anywhere:
+
+```sh
+scripts/matlab-smoke.sh    # no-op exit 0 without MATLAB; full smoke with it
+```
+
+**Manual runbook (token-authenticated, against any server)** — on a machine with
+MATLAB, point at a running Lab Tracker and confirm a success action:
+
+1. Start (or reach) a Lab Tracker server and note its base URL.
+2. Create a user + project, then issue an access token (login, or a personal
+   access token via `POST /auth/tokens`).
+3. Export the client configuration:
+
+   ```sh
+   export LAB_TRACKER_BASE_URL="https://lab.example.org"
+   export LAB_TRACKER_ACCESS_TOKEN="lpat_…"      # or username/password vars
+   export LAB_TRACKER_PROJECT_ID="…"
+   ```
+
+4. Run the example and confirm the printed `result` has
+   `action: "imported"` (first capture) or `action: "coalesced"` (a repeat of an
+   identical figure):
+
+   ```sh
+   matlab -batch "run('matlab/examples/capture_figure_smoke.m')"
+   ```
+
+Because the MATLAB client is fail-soft — a misconfigured capture returns
+`action: "skipped"` or `"failed"` rather than erroring — always check
+`result.action`; a green exit alone does not prove a figure was captured.
+
 ## Scope
 
 The MATLAB package currently covers figure capture and raw figure-file upload.
