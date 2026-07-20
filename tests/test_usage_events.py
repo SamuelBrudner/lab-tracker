@@ -5,6 +5,7 @@ from datetime import datetime, timedelta, timezone
 from uuid import uuid4
 
 import httpx
+from api_helpers import register_test_resources
 from fastapi.testclient import TestClient
 from sqlalchemy import JSON, String, Text, create_engine, select
 from sqlalchemy.orm import sessionmaker
@@ -305,4 +306,5 @@ def _usage_api(*, usage_events: bool) -> LabTrackerAPI:
         settings=settings,
     )
     api._test_resources = (engine, session)  # type: ignore[attr-defined]
+    register_test_resources(engine, session)
     return api

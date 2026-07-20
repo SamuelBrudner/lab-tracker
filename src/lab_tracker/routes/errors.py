@@ -44,12 +44,12 @@ def register_error_handlers(app: FastAPI) -> None:
     def _handle_payload_too_large_error(request: Request, exc: PayloadTooLargeError):
         _log_handled_error(
             request,
-            status_code=http_status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            status_code=http_status.HTTP_413_CONTENT_TOO_LARGE,
             code="payload_too_large",
             exc=exc,
         )
         return error_response(
-            http_status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            http_status.HTTP_413_CONTENT_TOO_LARGE,
             "payload_too_large",
             str(exc),
         )

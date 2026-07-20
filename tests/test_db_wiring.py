@@ -173,36 +173,39 @@ def test_sqlite_engine_enforces_foreign_keys_and_busy_wal_pragmas(tmp_path):
         _env_file=None,
     )
     engine = get_engine(settings)
-    Base.metadata.create_all(bind=engine)
+    try:
+        Base.metadata.create_all(bind=engine)
 
-    with engine.connect() as connection:
-        assert connection.exec_driver_sql("PRAGMA foreign_keys").scalar_one() == 1
-        assert connection.exec_driver_sql("PRAGMA busy_timeout").scalar_one() == 5000
-        assert connection.exec_driver_sql("PRAGMA journal_mode").scalar_one() == "wal"
+        with engine.connect() as connection:
+            assert connection.exec_driver_sql("PRAGMA foreign_keys").scalar_one() == 1
+            assert connection.exec_driver_sql("PRAGMA busy_timeout").scalar_one() == 5000
+            assert connection.exec_driver_sql("PRAGMA journal_mode").scalar_one() == "wal"
 
-    project_id = str(uuid4())
-    question_id = str(uuid4())
-    with Session(engine) as session:
-        session.add(ProjectModel(project_id=project_id, name="Cascade project"))
-        session.add(
-            QuestionModel(
-                question_id=question_id,
-                project_id=project_id,
-                text="Does SQLite enforce cascades?",
-                question_type="descriptive",
+        project_id = str(uuid4())
+        question_id = str(uuid4())
+        with Session(engine) as session:
+            session.add(ProjectModel(project_id=project_id, name="Cascade project"))
+            session.add(
+                QuestionModel(
+                    question_id=question_id,
+                    project_id=project_id,
+                    text="Does SQLite enforce cascades?",
+                    question_type="descriptive",
+                )
             )
-        )
-        session.commit()
+            session.commit()
 
-        session.execute(delete(ProjectModel).where(ProjectModel.project_id == project_id))
-        session.commit()
+            session.execute(delete(ProjectModel).where(ProjectModel.project_id == project_id))
+            session.commit()
 
-        assert (
-            session.scalar(
-                select(QuestionModel).where(QuestionModel.question_id == question_id)
+            assert (
+                session.scalar(
+                    select(QuestionModel).where(QuestionModel.question_id == question_id)
+                )
+                is None
             )
-            is None
-        )
+    finally:
+        engine.dispose()
 
 
 def test_startup_config_summary_logs_environment_db_backend_and_auth(
