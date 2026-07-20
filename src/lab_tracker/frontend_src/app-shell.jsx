@@ -303,6 +303,12 @@ function App() {
       />
 
       <FlashMessages message={message} error={error} />
+      {auth.persistenceDegraded ? (
+        <p className="flash warning" role="status">
+          Your session is active but couldn’t be saved on this device — you may
+          need to sign in again after closing this tab.
+        </p>
+      ) : null}
       <PendingUploadsBadge />
       <PendingBatchBanner enabled={apiEnabled} token={auth.token} navigate={navigate} />
 

@@ -1,6 +1,7 @@
 import * as React from "react";
 
 import { AUTH_REJECTED_EVENT, apiFetch, apiRequest } from "../shared/api.js";
+import { createAuthStorage } from "../shared/auth-storage.js";
 import {
   TOKEN_EXPIRES_AT_STORAGE_KEY,
   TOKEN_STORAGE_KEY,
@@ -21,20 +22,12 @@ function readInitialInvitation() {
   };
 }
 
-function readInitialToken() {
-  try {
-    return localStorage.getItem(TOKEN_STORAGE_KEY) || (isStaticDemoEnabled() ? "demo-token" : "");
-  } catch {
-    return isStaticDemoEnabled() ? "demo-token" : "";
-  }
+function readInitialToken(storage) {
+  return storage.getItem(TOKEN_STORAGE_KEY) || (isStaticDemoEnabled() ? "demo-token" : "");
 }
 
-function readInitialTokenExpiresAt() {
-  try {
-    return localStorage.getItem(TOKEN_EXPIRES_AT_STORAGE_KEY) || "";
-  } catch {
-    return "";
-  }
+function readInitialTokenExpiresAt(storage) {
+  return storage.getItem(TOKEN_EXPIRES_AT_STORAGE_KEY) || "";
 }
 
 function parseExpiryMs(expiresAt) {
@@ -54,13 +47,19 @@ function sessionExpiredMessage(message) {
   return text;
 }
 
-function useAuthSession({ replace, setBusy, setFlash }) {
+function useAuthSession({ replace, setBusy, setFlash, storage }) {
+  // One injected storage adapter for the tab; guards every read/write/remove and
+  // falls back to memory so a persistence failure can never crash the session.
+  const authStorage = useMemo(() => storage ?? createAuthStorage(), [storage]);
   const initialInvitation = readInitialInvitation();
-  const [token, setToken] = useState(() => readInitialToken());
-  const [tokenExpiresAt, setTokenExpiresAt] = useState(() => readInitialTokenExpiresAt());
+  const [token, setToken] = useState(() => readInitialToken(authStorage));
+  const [tokenExpiresAt, setTokenExpiresAt] = useState(() =>
+    readInitialTokenExpiresAt(authStorage)
+  );
   const [user, setUser] = useState(null);
   const [authChecked, setAuthChecked] = useState(false);
   const [authEnabled, setAuthEnabled] = useState(true);
+  const [persistenceDegraded, setPersistenceDegraded] = useState(false);
 
   const [authMode, setAuthMode] = useState(initialInvitation.token ? "register" : "login");
   const [authUsername, setAuthUsername] = useState(initialInvitation.email);
@@ -89,18 +88,24 @@ function useAuthSession({ replace, setBusy, setFlash }) {
   }, []);
 
   useEffect(() => {
+    // Route persistence through the adapter: these writes/removes can no longer
+    // throw into the error boundary. The in-memory state above stays the source
+    // of truth, so a degraded write never signs the user out.
     if (token) {
-      localStorage.setItem(TOKEN_STORAGE_KEY, token);
+      authStorage.setItem(TOKEN_STORAGE_KEY, token);
       if (tokenExpiresAt) {
-        localStorage.setItem(TOKEN_EXPIRES_AT_STORAGE_KEY, tokenExpiresAt);
+        authStorage.setItem(TOKEN_EXPIRES_AT_STORAGE_KEY, tokenExpiresAt);
       } else {
-        localStorage.removeItem(TOKEN_EXPIRES_AT_STORAGE_KEY);
+        authStorage.removeItem(TOKEN_EXPIRES_AT_STORAGE_KEY);
       }
-      return;
+    } else {
+      authStorage.removeItem(TOKEN_STORAGE_KEY);
+      authStorage.removeItem(TOKEN_EXPIRES_AT_STORAGE_KEY);
     }
-    localStorage.removeItem(TOKEN_STORAGE_KEY);
-    localStorage.removeItem(TOKEN_EXPIRES_AT_STORAGE_KEY);
-  }, [token, tokenExpiresAt]);
+    if (authStorage.isDegraded()) {
+      setPersistenceDegraded(true);
+    }
+  }, [authStorage, token, tokenExpiresAt]);
 
   useEffect(() => {
     function handleAuthRejected(event) {
@@ -327,6 +332,7 @@ function useAuthSession({ replace, setBusy, setFlash }) {
     canWrite,
     handleAuthSubmit,
     handleLogout,
+    persistenceDegraded,
     setAuthMode,
     setAuthBootstrapToken,
     setAuthPassword,
