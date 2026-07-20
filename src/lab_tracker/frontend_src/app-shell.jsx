@@ -23,6 +23,7 @@ import { useNoteActions } from "./hooks/useNoteActions.js";
 import { useProjectActions } from "./hooks/useProjectActions.js";
 import { useProjectNoteData } from "./hooks/useProjectNoteData.js";
 import { useProjectSessionData } from "./hooks/useProjectSessionData.js";
+import { useProjectAccess } from "./hooks/useProjectAccess.js";
 import { useProjectWorkspaceData } from "./hooks/useProjectWorkspaceData.js";
 import { useProjectWorkspaceForms } from "./hooks/useProjectWorkspaceForms.js";
 import { useQuestionActions } from "./hooks/useQuestionActions.js";
@@ -37,7 +38,7 @@ import {
 import { useAppRoute } from "./shared/routing.jsx";
 import { droppedUploadsMessage, installOfflineRetry } from "./shared/register-sw.js";
 import { PendingUploadsBadge } from "./shared/upload-status.jsx";
-import { apiListRequest, apiRequest, buildApiPath } from "./shared/api.js";
+import { apiRequest } from "./shared/api.js";
 
 function App() {
   const { navigate, replace, route } = useAppRoute();
@@ -68,7 +69,6 @@ function App() {
       },
     });
   }, [auth.authChecked, auth.token, ownerId, setFlash]);
-  const [projectMembers, setProjectMembers] = React.useState([]);
   const [memberUsername, setMemberUsername] = React.useState("");
   const [memberRole, setMemberRole] = React.useState("contributor");
   const workspaceData = useProjectWorkspaceData({
@@ -93,36 +93,19 @@ function App() {
   const workspaceForms = useProjectWorkspaceForms({
     questions: workspaceData.questions,
   });
-  const refreshProjectMembers = React.useCallback(async () => {
-    if (!apiEnabled || !workspaceData.selectedProjectId) {
-      setProjectMembers([]);
-      return;
-    }
-    try {
-      const { data } = await apiListRequest(
-        buildApiPath(`/projects/${workspaceData.selectedProjectId}/members`, { limit: 200 }),
-        { token: auth.token }
-      );
-      setProjectMembers(data);
-    } catch {
-      setProjectMembers([]);
-    }
-  }, [apiEnabled, auth.token, workspaceData.selectedProjectId]);
-
-  React.useEffect(() => {
-    refreshProjectMembers();
-  }, [refreshProjectMembers]);
-
-  const selectedProjectMembership = React.useMemo(
-    () => projectMembers.find((member) => member.user_id === auth.user?.user_id) || null,
-    [auth.user, projectMembers]
-  );
-  const selectedProjectRole = selectedProjectMembership?.role || "";
-  const canContributeToProject =
-    auth.user?.role === "admin" ||
-    selectedProjectRole === "contributor" ||
-    selectedProjectRole === "owner";
-  const canManageProjectMembers = auth.user?.role === "admin" || selectedProjectRole === "owner";
+  // One sequenced access boundary for the dashboard-selected project. Late
+  // members responses for a previously-selected project can no longer overwrite
+  // the current project's role, and controls deny while access is unknown.
+  const projectAccess = useProjectAccess(workspaceData.selectedProjectId, {
+    token: auth.token,
+    user: auth.user,
+    enabled: apiEnabled,
+  });
+  const projectMembers = projectAccess.members;
+  const selectedProjectRole = projectAccess.role;
+  const canContributeToProject = projectAccess.canContribute;
+  const canManageProjectMembers = projectAccess.canManage;
+  const refreshProjectMembers = projectAccess.refresh;
 
   async function handleAddProjectMember(event) {
     event.preventDefault();
@@ -466,6 +449,7 @@ function App() {
             <QuestionDetailCard
               token={auth.token}
               questionId={route.questionId}
+              user={auth.user}
               projects={workspaceData.projects}
               questions={workspaceData.questions}
               navigate={navigate}
@@ -480,6 +464,7 @@ function App() {
             <NoteDetailCard
               token={auth.token}
               noteId={route.noteId}
+              user={auth.user}
               projects={workspaceData.projects}
               navigate={navigate}
               onSetActiveProject={workspaceData.setSelectedProjectId}
@@ -520,6 +505,7 @@ function App() {
             <SessionDetailCard
               token={auth.token}
               sessionId={route.sessionId}
+              user={auth.user}
               projects={workspaceData.projects}
               navigate={navigate}
               onSetActiveProject={workspaceData.setSelectedProjectId}
