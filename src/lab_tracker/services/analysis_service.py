@@ -287,42 +287,43 @@ class AnalysisService(BaseService):
         if external_artifacts is not None:
             analysis.external_artifacts = _normalize_external_artifacts(external_artifacts)
         analysis.updated_at = utc_now()
-        with self.unit_of_work() as repository:
-            repository.analyses.save(analysis)
         created_claims: list[Claim] = []
-        for claim_input in claims or []:
-            supported_by_analysis_ids = list(claim_input.supported_by_analysis_ids)
-            if analysis.analysis_id not in supported_by_analysis_ids:
-                supported_by_analysis_ids.append(analysis.analysis_id)
-            created_claims.append(
-                self.claims.create_claim(
-                    project_id=analysis.project_id,
-                    statement=claim_input.statement,
-                    confidence=claim_input.confidence,
-                    status=claim_input.status,
-                    terminal_reason=claim_input.terminal_reason,
-                    falsification_criteria=claim_input.falsification_criteria,
-                    verification_plan=claim_input.verification_plan,
-                    refuting_outcome=claim_input.refuting_outcome,
-                    supported_by_dataset_ids=claim_input.supported_by_dataset_ids,
-                    supported_by_analysis_ids=supported_by_analysis_ids,
-                    answers_question_ids=claim_input.answers_question_ids,
-                    external_citations=claim_input.external_citations,
-                    actor=actor,
-                )
-            )
         created_visualizations: list[Visualization] = []
-        for viz_input in visualizations or []:
-            created_visualizations.append(
-                self.visualizations.create_visualization(
-                    analysis_id=analysis.analysis_id,
-                    viz_type=viz_input.viz_type,
-                    file_path=viz_input.file_path,
-                    caption=viz_input.caption,
-                    related_claim_ids=viz_input.related_claim_ids,
-                    actor=actor,
+        with self.application_transaction():
+            with self.unit_of_work() as repository:
+                repository.analyses.save(analysis)
+            for claim_input in claims or []:
+                supported_by_analysis_ids = list(claim_input.supported_by_analysis_ids)
+                if analysis.analysis_id not in supported_by_analysis_ids:
+                    supported_by_analysis_ids.append(analysis.analysis_id)
+                created_claims.append(
+                    self.claims.create_claim(
+                        project_id=analysis.project_id,
+                        statement=claim_input.statement,
+                        confidence=claim_input.confidence,
+                        status=claim_input.status,
+                        terminal_reason=claim_input.terminal_reason,
+                        falsification_criteria=claim_input.falsification_criteria,
+                        verification_plan=claim_input.verification_plan,
+                        refuting_outcome=claim_input.refuting_outcome,
+                        supported_by_dataset_ids=claim_input.supported_by_dataset_ids,
+                        supported_by_analysis_ids=supported_by_analysis_ids,
+                        answers_question_ids=claim_input.answers_question_ids,
+                        external_citations=claim_input.external_citations,
+                        actor=actor,
+                    )
                 )
-            )
+            for viz_input in visualizations or []:
+                created_visualizations.append(
+                    self.visualizations.create_visualization(
+                        analysis_id=analysis.analysis_id,
+                        viz_type=viz_input.viz_type,
+                        file_path=viz_input.file_path,
+                        caption=viz_input.caption,
+                        related_claim_ids=viz_input.related_claim_ids,
+                        actor=actor,
+                    )
+                )
         return analysis, created_claims, created_visualizations
 
     def _ensure_analysis_datasets_committed(self, analysis: Analysis) -> None:

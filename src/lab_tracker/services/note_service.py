@@ -234,7 +234,12 @@ class NoteService(BaseService):
             origin_prompt_version=origin_prompt_version,
         )
         try:
-            with self.unit_of_work() as repository:
+            unit_of_work = (
+                self.recoverable_unit_of_work
+                if resolved_client_capture_id is not None
+                else self.unit_of_work
+            )
+            with unit_of_work() as repository:
                 repository.notes.save(note)
         except IntegrityError as exc:
             if resolved_client_capture_id is None:

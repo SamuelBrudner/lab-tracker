@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
-from dataclasses import dataclass
+import logging
+from collections.abc import Callable, Iterator
+from contextlib import AbstractContextManager, contextmanager
+from dataclasses import dataclass, field
 from typing import Generic, Literal, TypeVar
 from uuid import UUID, uuid4
 
@@ -22,6 +24,8 @@ from lab_tracker.repository import LabTrackerRepository
 from lab_tracker.request_context import LabTrackerRequestContext
 
 EntityT = TypeVar("EntityT")
+
+_logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -50,6 +54,55 @@ class IdempotentCreateResult(Generic[EntityT]):
         return getattr(self.entity, name)
 
 
+class ApplicationTransaction:
+    """Mutable transaction boundary shared by all services in one context.
+
+    Direct and background APIs do not have request middleware to own a wider
+    transaction. A top-level composite command opens this boundary so nested
+    units of work share one commit/rollback decision and deferred actions run
+    only after that decision. Request-scoped APIs continue to be owned by
+    ``LabTrackerRequestScope`` instead.
+    """
+
+    def __init__(self) -> None:
+        self.depth = 0
+        self.after_commit_actions: list[Callable[[], None]] = []
+        self.after_rollback_actions: list[Callable[[], None]] = []
+
+    @property
+    def active(self) -> bool:
+        return self.depth > 0
+
+    def reset(self) -> None:
+        self.depth = 0
+        self.after_commit_actions.clear()
+        self.after_rollback_actions.clear()
+
+
+def _run_boundary_actions(actions: list[Callable[[], None]], label: str) -> None:
+    """Run deferred actions without changing an already-decided outcome."""
+
+    for action in actions:
+        try:
+            action()
+        except Exception as exc:
+            _logger.warning(
+                "Deferred %s action failed: %s",
+                label,
+                exc,
+                exc_info=True,
+            )
+
+
+def _safe_rollback(repository: LabTrackerRepository) -> None:
+    """Best-effort rollback after a failed application transaction."""
+
+    try:
+        repository.rollback()
+    except Exception:
+        _logger.exception("Application transaction rollback failed")
+
+
 @dataclass(frozen=True)
 class ServiceContext:
     raw_storage: LocalNoteStorage | None = None
@@ -57,6 +110,7 @@ class ServiceContext:
     request_context: LabTrackerRequestContext | None = None
     settings: Settings | None = None
     surface: str | None = None
+    transaction: ApplicationTransaction = field(default_factory=ApplicationTransaction)
 
     def active_repository(self) -> LabTrackerRepository:
         if self.request_context is not None:
@@ -67,6 +121,62 @@ class ServiceContext:
 
     def is_request_managed(self) -> bool:
         return self.request_context is not None
+
+    def owns_active_boundary(self) -> bool:
+        """Whether request middleware or a direct command owns the transaction."""
+
+        return self.is_request_managed() or self.transaction.active
+
+    @contextmanager
+    def application_transaction(self) -> Iterator[None]:
+        """Open or join one atomic boundary for a top-level application command.
+
+        Request middleware already owns request-scoped transactions, so this is
+        deliberately a no-op there. For direct/background contexts the outer
+        boundary commits once on success, rolls back on body or commit failure,
+        and always resets its mutable state so the same API remains reusable.
+        """
+
+        if self.is_request_managed():
+            yield
+            return
+
+        transaction = self.transaction
+        if transaction.active:
+            transaction.depth += 1
+            try:
+                yield
+            finally:
+                transaction.depth -= 1
+            return
+
+        repository = self.active_repository()
+        transaction.depth = 1
+        try:
+            yield
+        except BaseException:
+            self._abort_transaction(transaction, repository)
+            raise
+
+        try:
+            repository.commit()
+        except BaseException:
+            self._abort_transaction(transaction, repository)
+            raise
+
+        commit_actions = list(transaction.after_commit_actions)
+        transaction.reset()
+        _run_boundary_actions(commit_actions, "after_commit")
+
+    @staticmethod
+    def _abort_transaction(
+        transaction: ApplicationTransaction,
+        repository: LabTrackerRepository,
+    ) -> None:
+        rollback_actions = list(transaction.after_rollback_actions)
+        transaction.reset()
+        _safe_rollback(repository)
+        _run_boundary_actions(rollback_actions, "after_rollback")
 
     def active_settings(self) -> Settings:
         return self.settings or get_settings()
@@ -102,7 +212,7 @@ class RepositoryUnitOfWork:
             self._repository.rollback()
             return
         try:
-            if not self._context.is_request_managed():
+            if not self._context.owns_active_boundary():
                 self._repository.commit()
         except Exception:
             self._repository.rollback()
@@ -123,6 +233,30 @@ class BaseService:
 
     def unit_of_work(self) -> RepositoryUnitOfWork:
         return RepositoryUnitOfWork(self._context)
+
+    @contextmanager
+    def recoverable_unit_of_work(self) -> Iterator[LabTrackerRepository]:
+        """Isolate a write whose exception may be handled by its caller.
+
+        A caught uniqueness error must not roll back unrelated writes already
+        staged by an outer request/application transaction. Use a repository
+        savepoint when such a boundary exists; standalone calls retain the
+        ordinary unit-of-work commit/rollback behavior.
+        """
+
+        if not self._context.owns_active_boundary():
+            with self.unit_of_work() as repository:
+                yield repository
+            return
+
+        repository = self._context.active_repository()
+        with repository.savepoint():
+            yield repository
+
+    def application_transaction(self) -> AbstractContextManager[None]:
+        """Open or join this service context's application transaction."""
+
+        return self._context.application_transaction()
 
     def get_from_repository(
         self,
@@ -155,12 +289,17 @@ class BaseService:
         if self._context.request_context is not None:
             self._context.request_context.after_commit_actions.append(action)
             return
+        if self._context.transaction.active:
+            self._context.transaction.after_commit_actions.append(action)
+            return
         action()
 
     def run_after_rollback(self, action: Callable[[], None]) -> None:
-        if self._context.request_context is None:
+        if self._context.request_context is not None:
+            self._context.request_context.after_rollback_actions.append(action)
             return
-        self._context.request_context.after_rollback_actions.append(action)
+        if self._context.transaction.active:
+            self._context.transaction.after_rollback_actions.append(action)
 
     def record_usage_event(
         self,
@@ -195,8 +334,12 @@ class BaseService:
 
         def persist_event() -> None:
             repository = self._context.active_repository()
-            repository.usage_events.save(event)
-            repository.commit()
+            try:
+                repository.usage_events.save(event)
+                repository.commit()
+            except Exception:
+                _safe_rollback(repository)
+                raise
 
         if event.outcome == UsageEventOutcome.ERROR:
             self.run_after_rollback(persist_event)

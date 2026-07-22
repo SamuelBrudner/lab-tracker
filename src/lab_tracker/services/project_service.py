@@ -105,43 +105,49 @@ class ProjectService(BaseService):
             created_by=creator_id,
             created_by_user_id=actor_user_fk(actor, self.repository),
         )
-        try:
-            with self.unit_of_work() as repository:
-                repository.projects.save(project)
-                # The generic project repository defers its flush until a read;
-                # force it inside this try block so a uniqueness race can be
-                # recovered before request finalization.
-                repository.projects.get(project.project_id)
-        except IntegrityError as exc:
-            if resolved_client_capture_id is None:
-                raise
-            existing = self._find_client_capture_project(
-                resolved_client_capture_id,
-                created_by=creator_id,
-            )
-            if existing is None:
-                raise
-            self._ensure_matching_capture_project(
-                existing,
-                name=resolved_name,
-                description=resolved_description,
-                status=status,
-                group_id=group_id,
-                client_capture_id=resolved_client_capture_id,
-                cause=exc,
-            )
-            return IdempotentCreateResult("reused", existing)
-        if actor is not None and not self.authorization.has_global_admin(actor):
-            membership = ProjectMembership(
-                membership_id=uuid4(),
-                project_id=project.project_id,
-                user_id=actor.user_id,
-                role=ProjectMembershipRole.OWNER,
-                created_by=actor_user_id(actor),
-                created_by_user_id=actor_user_fk(actor, self.repository),
-            )
-            with self.unit_of_work() as repository:
-                repository.project_memberships.save(membership)
+        with self.application_transaction():
+            try:
+                unit_of_work = (
+                    self.recoverable_unit_of_work
+                    if resolved_client_capture_id is not None
+                    else self.unit_of_work
+                )
+                with unit_of_work() as repository:
+                    repository.projects.save(project)
+                    # The generic project repository defers its flush until a read;
+                    # force it inside this try block so a uniqueness race can be
+                    # recovered before request finalization.
+                    repository.projects.get(project.project_id)
+            except IntegrityError as exc:
+                if resolved_client_capture_id is None:
+                    raise
+                existing = self._find_client_capture_project(
+                    resolved_client_capture_id,
+                    created_by=creator_id,
+                )
+                if existing is None:
+                    raise
+                self._ensure_matching_capture_project(
+                    existing,
+                    name=resolved_name,
+                    description=resolved_description,
+                    status=status,
+                    group_id=group_id,
+                    client_capture_id=resolved_client_capture_id,
+                    cause=exc,
+                )
+                return IdempotentCreateResult("reused", existing)
+            if actor is not None and not self.authorization.has_global_admin(actor):
+                membership = ProjectMembership(
+                    membership_id=uuid4(),
+                    project_id=project.project_id,
+                    user_id=actor.user_id,
+                    role=ProjectMembershipRole.OWNER,
+                    created_by=actor_user_id(actor),
+                    created_by_user_id=actor_user_fk(actor, self.repository),
+                )
+                with self.unit_of_work() as repository:
+                    repository.project_memberships.save(membership)
         return IdempotentCreateResult("created", project)
 
     def _find_client_capture_project(
@@ -263,20 +269,21 @@ class ProjectService(BaseService):
             created_by=actor_user_id(actor),
             created_by_user_id=actor_user_fk(actor, self.repository),
         )
-        with self.unit_of_work() as repository:
-            repository.project_groups.save(group)
-            repository.project_groups.get(group.group_id)
-        if actor is not None and not self.authorization.has_global_admin(actor):
-            membership = GroupMembership(
-                membership_id=uuid4(),
-                group_id=group.group_id,
-                user_id=actor.user_id,
-                role=ProjectMembershipRole.OWNER,
-                created_by=actor_user_id(actor),
-                created_by_user_id=actor_user_fk(actor, self.repository),
-            )
+        with self.application_transaction():
             with self.unit_of_work() as repository:
-                repository.group_memberships.save(membership)
+                repository.project_groups.save(group)
+                repository.project_groups.get(group.group_id)
+            if actor is not None and not self.authorization.has_global_admin(actor):
+                membership = GroupMembership(
+                    membership_id=uuid4(),
+                    group_id=group.group_id,
+                    user_id=actor.user_id,
+                    role=ProjectMembershipRole.OWNER,
+                    created_by=actor_user_id(actor),
+                    created_by_user_id=actor_user_fk(actor, self.repository),
+                )
+                with self.unit_of_work() as repository:
+                    repository.group_memberships.save(membership)
         return group
 
     def get_project_group(self, group_id: UUID) -> ProjectGroup:

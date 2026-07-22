@@ -282,27 +282,28 @@ class LabTrackerAPI(
         project_id_attr: str | None = "project_id",
     ) -> Any:
         start = time.perf_counter()
-        try:
-            result = action()
-        except Exception:
+        with self._service_context.application_transaction():
+            try:
+                result = action()
+            except Exception:
+                self.record_usage_event(
+                    verb=verb,
+                    resource_type=resource_type,
+                    resource_id=resource_id,
+                    project_id=project_id,
+                    actor=actor,
+                    outcome=UsageEventOutcome.ERROR,
+                    duration_ms=_elapsed_ms(start),
+                )
+                raise
             self.record_usage_event(
                 verb=verb,
                 resource_type=resource_type,
-                resource_id=resource_id,
-                project_id=project_id,
+                resource_id=resource_id or _uuid_attr(result, resource_id_attr),
+                project_id=project_id or _uuid_attr(result, project_id_attr),
                 actor=actor,
-                outcome=UsageEventOutcome.ERROR,
                 duration_ms=_elapsed_ms(start),
             )
-            raise
-        self.record_usage_event(
-            verb=verb,
-            resource_type=resource_type,
-            resource_id=resource_id or _uuid_attr(result, resource_id_attr),
-            project_id=project_id or _uuid_attr(result, project_id_attr),
-            actor=actor,
-            duration_ms=_elapsed_ms(start),
-        )
         return result
 
 
