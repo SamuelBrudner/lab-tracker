@@ -12,10 +12,12 @@
     "dev:frontend": "node scripts/build-frontend.mjs --watch",
     "lint:frontend": "eslint \"src/lab_tracker/frontend_src/**/*.{js,jsx}\"",
     "shoot:screenshots": "node scripts/shoot-screenshots.mjs",
+    "test:e2e": "playwright test",
     "test:frontend": "vitest run"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
+    "@playwright/test": "^1.61.1",
     "@testing-library/jest-dom": "^6.6.3",
     "@testing-library/react": "^16.3.0",
     "esbuild": "^0.28.1",
