@@ -158,20 +158,67 @@ describe("createAuthStorage", () => {
     }
   });
 
-  it("reports reload persistence failure without resurrecting a stale token", () => {
+  it("removes a stale durable token when its replacement write fails", () => {
     const backing = new Map([[TOKEN_STORAGE_KEY, "stale-token"]]);
-    const storage = createAuthStorage({
+    const backingStore = {
       getItem: (key) => backing.get(key) ?? null,
       setItem: () => {
         throw new Error("QuotaExceededError");
       },
       removeItem: (key) => backing.delete(key),
+    };
+    const storage = createAuthStorage(backingStore);
+
+    expect(storage.getItem(TOKEN_STORAGE_KEY)).toBe("stale-token");
+    expect(persistAuthSession(storage, "new-device-token")).toBe(false);
+    expect(backing.has(TOKEN_STORAGE_KEY)).toBe(false);
+    expect(backing.has(TOKEN_EXPIRES_AT_STORAGE_KEY)).toBe(false);
+    expect(storage.getItem(TOKEN_STORAGE_KEY)).toBe("");
+    expect(createAuthStorage(backingStore).getItem(TOKEN_STORAGE_KEY)).toBe("");
+  });
+
+  it("removes both durable keys when expiry persistence fails", () => {
+    const backing = new Map([[TOKEN_EXPIRES_AT_STORAGE_KEY, "stale-expiry"]]);
+    const backingStore = {
+      getItem: (key) => backing.get(key) ?? null,
+      setItem: (key, value) => {
+        if (key === TOKEN_EXPIRES_AT_STORAGE_KEY) {
+          throw new Error("QuotaExceededError");
+        }
+        backing.set(key, value);
+      },
+      removeItem: (key) => backing.delete(key),
+    };
+    const storage = createAuthStorage(backingStore);
+
+    expect(
+      persistAuthSession(storage, "new-device-token", "2026-07-23T00:00:00Z")
+    ).toBe(false);
+    expect(backing.has(TOKEN_STORAGE_KEY)).toBe(false);
+    expect(backing.has(TOKEN_EXPIRES_AT_STORAGE_KEY)).toBe(false);
+    const freshStorage = createAuthStorage(backingStore);
+    expect(freshStorage.getItem(TOKEN_STORAGE_KEY)).toBe("");
+    expect(freshStorage.getItem(TOKEN_EXPIRES_AT_STORAGE_KEY)).toBe("");
+  });
+
+  it("keeps rollback tombstones authoritative when durable cleanup also fails", () => {
+    const backing = new Map([
+      [TOKEN_STORAGE_KEY, "stale-token"],
+      [TOKEN_EXPIRES_AT_STORAGE_KEY, "stale-expiry"],
+    ]);
+    const storage = createAuthStorage({
+      getItem: (key) => backing.get(key) ?? null,
+      setItem: () => {
+        throw new Error("QuotaExceededError");
+      },
+      removeItem: () => {
+        throw new Error("SecurityError");
+      },
     });
 
     expect(storage.getItem(TOKEN_STORAGE_KEY)).toBe("stale-token");
     expect(persistAuthSession(storage, "new-device-token")).toBe(false);
-    expect(backing.get(TOKEN_STORAGE_KEY)).toBe("stale-token");
-    expect(backing.has(TOKEN_EXPIRES_AT_STORAGE_KEY)).toBe(false);
-    expect(storage.getItem(TOKEN_STORAGE_KEY)).toBe("new-device-token");
+    expect(storage.getItem(TOKEN_STORAGE_KEY)).toBe("");
+    expect(storage.getItem(TOKEN_EXPIRES_AT_STORAGE_KEY)).toBe("");
   });
 });

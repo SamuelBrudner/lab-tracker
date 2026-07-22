@@ -150,7 +150,18 @@ function persistAuthSession(storage, token, expiresAt = "") {
   const expiryPersisted = expiresAt
     ? storage.setItem(TOKEN_EXPIRES_AT_STORAGE_KEY, expiresAt)
     : storage.removeItem(TOKEN_EXPIRES_AT_STORAGE_KEY);
-  return tokenPersisted && expiryPersisted;
+  if (tokenPersisted && expiryPersisted) {
+    return true;
+  }
+
+  // A partially persisted session is unsafe: a reload could otherwise revive
+  // an older token or pair a new token with stale expiry metadata. Tombstone
+  // both keys in this adapter and independently attempt to remove both durable
+  // values before reporting failure. removeItem retains an authoritative
+  // in-memory tombstone even when the backing store rejects cleanup.
+  storage.removeItem(TOKEN_STORAGE_KEY);
+  storage.removeItem(TOKEN_EXPIRES_AT_STORAGE_KEY);
+  return false;
 }
 
 export { createAuthStorage, persistAuthSession };

@@ -27,13 +27,14 @@ describe("EnrollPage credential persistence", () => {
       secret: "new-device-token",
     });
     const backing = new Map([[TOKEN_STORAGE_KEY, "stale-token"]]);
-    const storage = createAuthStorage({
+    const backingStore = {
       getItem: (key) => backing.get(key) ?? null,
       setItem: () => {
         throw new Error("QuotaExceededError");
       },
       removeItem: (key) => backing.delete(key),
-    });
+    };
+    const storage = createAuthStorage(backingStore);
     expect(storage.getItem(TOKEN_STORAGE_KEY)).toBe("stale-token");
 
     const reload = vi.fn();
@@ -52,8 +53,9 @@ describe("EnrollPage credential persistence", () => {
       await screen.findByText(/this browser couldn’t save the new credential/i)
     ).toBeInTheDocument();
     await waitFor(() => expect(authGateway.consumeDeviceEnrollment).toHaveBeenCalledOnce());
-    expect(backing.get(TOKEN_STORAGE_KEY)).toBe("stale-token");
-    expect(storage.getItem(TOKEN_STORAGE_KEY)).toBe("new-device-token");
+    expect(backing.has(TOKEN_STORAGE_KEY)).toBe(false);
+    expect(storage.getItem(TOKEN_STORAGE_KEY)).toBe("");
+    expect(createAuthStorage(backingStore).getItem(TOKEN_STORAGE_KEY)).toBe("");
     expect(setFlash).not.toHaveBeenCalled();
     expect(replace).not.toHaveBeenCalled();
     expect(reload).not.toHaveBeenCalled();
