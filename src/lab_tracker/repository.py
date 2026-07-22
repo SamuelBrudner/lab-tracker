@@ -99,6 +99,9 @@ class LabTrackerRepository(Protocol):
     def fetch_notes(self, note_ids: list[UUID]) -> list[Note]:
         """Fetch notes in the provided order."""
 
+    def lock_project_question_dag(self, project_id: UUID) -> None:
+        """Serialize question-DAG validation and mutation for one project."""
+
     def query_projects(
         self,
         *,
