@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from contextlib import AbstractContextManager
 from datetime import datetime
 from typing import Generic, Protocol, TypeVar
 from uuid import UUID
@@ -561,3 +562,6 @@ class LabTrackerRepository(Protocol):
 
     def rollback(self) -> None:
         """Rollback the current unit of work."""
+
+    def savepoint(self) -> AbstractContextManager[None]:
+        """Isolate a recoverable write inside the current transaction."""

@@ -5,6 +5,7 @@ from datetime import datetime, timedelta, timezone
 from uuid import uuid4
 
 import httpx
+import pytest
 from api_helpers import register_test_resources
 from fastapi.testclient import TestClient
 from sqlalchemy import JSON, String, Text, create_engine, select
@@ -17,6 +18,7 @@ from lab_tracker.config import Settings
 from lab_tracker.db import Base
 from lab_tracker.db_models import UsageEventModel, UsageEventRollupModel
 from lab_tracker.mcp_api_client import LabTrackerAPIClient, MCPSettings
+from lab_tracker.services import base as service_base
 from lab_tracker.sqlalchemy_repository import SQLAlchemyLabTrackerRepository
 from lab_tracker_client.client import LabTracker
 
@@ -63,6 +65,40 @@ def test_usage_event_seam_records_after_success_and_respects_flag():
     assert event.project_id == project.project_id
     assert event.actor_user_id == actor.user_id
     assert event.outcome == "ok"
+
+
+def test_direct_usage_event_failure_is_fail_soft_and_session_remains_reusable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    api = _usage_api(usage_events=True)
+    actor = AuthContext(user_id=uuid4(), role=Role.ADMIN)
+    usage_events = api.projects.repository.usage_events
+    original_save = usage_events.save
+    warnings: list[tuple[str, tuple[object, ...]]] = []
+
+    def fail_save(_event) -> None:  # noqa: ANN001
+        raise RuntimeError("telemetry storage unavailable")
+
+    def record_warning(message: str, *args: object, **_kwargs: object) -> None:
+        warnings.append((message, args))
+
+    monkeypatch.setattr(usage_events, "save", fail_save)
+    monkeypatch.setattr(service_base._logger, "warning", record_warning)  # noqa: SLF001
+
+    first = api.create_project("Business write survives telemetry failure", actor=actor)
+
+    assert api.get_project(first.project_id) == first
+    assert warnings
+    assert warnings[0][0] == "Deferred %s action failed: %s"
+    assert warnings[0][1][0] == "after_commit"
+    monkeypatch.setattr(usage_events, "save", original_save)
+
+    second = api.create_project("Session remains reusable", actor=actor)
+    events, total = api.query_usage_events()
+
+    assert api.get_project(second.project_id) == second
+    assert total == 1
+    assert events[0].resource_id == second.project_id
 
 
 def test_usage_event_routes_export_search_without_query_terms(

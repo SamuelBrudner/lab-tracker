@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import datetime
 from uuid import UUID
 
@@ -133,6 +135,23 @@ class SQLAlchemyLabTrackerRepository(LabTrackerRepository):
 
     def rollback(self) -> None:
         self._session.rollback()
+
+    @contextmanager
+    def savepoint(self) -> Iterator[None]:
+        """Use a nested SQL transaction for an expected recoverable failure."""
+
+        bind = self._session.get_bind()
+        if bind.dialect.name == "sqlite":
+            connection = self._session.connection()
+            driver_connection = connection.connection.driver_connection
+            # Python's sqlite3 driver uses legacy transaction control: a
+            # SAVEPOINT issued before a real BEGIN becomes its own transaction,
+            # so RELEASE would make the isolated insert durable too early.
+            # Establish the outer DBAPI transaction explicitly when needed.
+            if not bool(getattr(driver_connection, "in_transaction", True)):
+                connection.exec_driver_sql("BEGIN")
+        with self._session.begin_nested():
+            yield
 
     def user_exists(self, user_id: UUID) -> bool:
         return self._session.get(UserModel, str(user_id)) is not None
