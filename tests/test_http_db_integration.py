@@ -1580,7 +1580,7 @@ def test_quick_capture_stages_note_with_minimal_payload(
             files={"file": (filename, content, content_type)},
             headers=headers,
         )
-        assert response.status_code == 202, response.text
+        assert response.status_code == 201, response.text
         payload = response.json()["data"]
         assert payload["status"] == "staged"
         assert payload["project_id"] == project_id
@@ -1615,7 +1615,7 @@ def test_capture_upload_reuses_client_capture_id_on_retry(
     ).json()["data"]["project_id"]
 
     for endpoint, first_status in (
-        ("/notes/quick-capture", 202),
+        ("/notes/quick-capture", 201),
         ("/notes/upload-file", 201),
     ):
         client_capture_id = f"capture-{endpoint.rsplit('/', 1)[-1]}"
@@ -1717,7 +1717,7 @@ def test_quick_capture_preserves_metadata_but_ignores_workflow_fields(
         files={"file": ("snap.jpg", b"jpeg-bytes", "image/jpeg")},
         headers=headers,
     )
-    assert response.status_code == 202, response.text
+    assert response.status_code == 201, response.text
     payload = response.json()["data"]
     assert payload["status"] == "staged"
     assert payload["transcribed_text"] is None

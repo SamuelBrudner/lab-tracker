@@ -7,7 +7,6 @@ Revises: 0053_personal_access_token_scope
 from __future__ import annotations
 
 import sqlalchemy as sa
-
 from alembic import op
 
 revision = "0054_project_capture_key_principal_scope"
@@ -26,6 +25,11 @@ def upgrade() -> None:
                 "uq_projects_creator_client_capture",
                 ["created_by", "client_capture_id"],
             )
+            batch_op.create_check_constraint(
+                "ck_projects_client_capture_creator",
+                "client_capture_id IS NULL OR "
+                "(created_by IS NOT NULL AND TRIM(created_by) <> '')",
+            )
     finally:
         _set_sqlite_foreign_keys(enabled=True)
 
@@ -35,6 +39,10 @@ def downgrade() -> None:
     _set_sqlite_foreign_keys(enabled=False)
     try:
         with op.batch_alter_table("projects") as batch_op:
+            batch_op.drop_constraint(
+                "ck_projects_client_capture_creator",
+                type_="check",
+            )
             batch_op.drop_constraint(
                 "uq_projects_creator_client_capture",
                 type_="unique",

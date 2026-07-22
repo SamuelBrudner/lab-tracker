@@ -135,7 +135,7 @@ def build_notes_router(api: LabTrackerAPI) -> APIRouter:
     @router.post(
         "/notes/quick-capture",
         response_model=Envelope[Note],
-        status_code=http_status.HTTP_202_ACCEPTED,
+        status_code=http_status.HTTP_201_CREATED,
     )
     def quick_capture_note(
         request: Request,

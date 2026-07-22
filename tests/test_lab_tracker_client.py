@@ -427,7 +427,7 @@ def test_quick_capture_posts_text_as_multipart_file() -> None:
         assert b'"source": "cli"' in request.content
         assert b"client-capture-quick" in request.content
         return _json_response(
-            202,
+            201,
             {
                 "data": {
                     "note_id": "note-quick",
