@@ -1,4 +1,5 @@
 import { demoFetch, isStaticDemoEnabled } from "./static-demo-api.js";
+import { ContractError, parseCollection, parseResource, unknown } from "./contract.js";
 
 const AUTH_REJECTED_EVENT = "lab-tracker:auth-rejected";
 const AUTH_REJECTION_MESSAGE_PATTERN =
@@ -128,10 +129,7 @@ async function apiFetch(path, options = {}) {
 
 async function apiRequest(path, options = {}) {
   const payload = await apiFetch(path, options);
-  if (!payload || !Object.prototype.hasOwnProperty.call(payload, "data")) {
-    return null;
-  }
-  return payload.data;
+  return parseResource(payload, unknown);
 }
 
 async function apiTextRequest(path, options = {}) {
@@ -161,23 +159,13 @@ async function apiTextRequest(path, options = {}) {
 
 async function apiListRequest(path, options = {}) {
   const payload = await apiFetch(path, options);
-  const data = Array.isArray(payload?.data) ? payload.data : [];
-  const meta =
-    payload && typeof payload.meta === "object" && payload.meta !== null
-      ? payload.meta
-      : {
-          limit: data.length,
-          offset: 0,
-          total: data.length,
-        };
-  return { data, meta };
+  return parseCollection(payload, unknown);
 }
 
 async function fetchAllPages(path, options = {}) {
   const { limit = 200, ...requestOptions } = options;
   const items = [];
   let offset = 0;
-  let total = null;
 
   while (true) {
     const { data, meta } = await apiListRequest(
@@ -186,17 +174,22 @@ async function fetchAllPages(path, options = {}) {
     );
     items.push(...data);
 
-    const resolvedLimit =
-      typeof meta?.limit === "number" && meta.limit > 0 ? meta.limit : limit;
-    const resolvedOffset = typeof meta?.offset === "number" ? meta.offset : offset;
-    if (typeof meta?.total === "number") {
-      total = meta.total;
+    if (meta.offset !== offset) {
+      throw new ContractError(
+        `Contract violation at meta.offset: expected requested offset ${offset}, received ${meta.offset}`,
+        {
+          expected: `requested offset ${offset}`,
+          path: "meta.offset",
+          received: meta.offset,
+        }
+      );
     }
-
+    const resolvedLimit = meta.limit;
+    const resolvedOffset = meta.offset;
     if (data.length === 0) {
       break;
     }
-    if (total !== null && items.length >= total) {
+    if (items.length >= meta.total) {
       break;
     }
     if (data.length < resolvedLimit) {

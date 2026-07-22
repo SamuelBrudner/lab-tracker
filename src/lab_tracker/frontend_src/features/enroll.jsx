@@ -1,10 +1,10 @@
 import * as React from "react";
 
-import { apiRequest } from "../shared/api.js";
 import {
   TOKEN_EXPIRES_AT_STORAGE_KEY,
   TOKEN_STORAGE_KEY,
 } from "../shared/constants.js";
+import { auth as authGateway } from "../shared/gateways/index.js";
 
 const { useEffect, useRef, useState } = React;
 
@@ -53,10 +53,8 @@ function EnrollPage({ replace, setFlash }) {
       return;
     }
     const label = (labelOverride && labelOverride.trim()) || suggestedLabel();
-    apiRequest("/auth/devices/consume", {
-      body: { offer_token: offer, label },
-      method: "POST",
-    })
+    authGateway
+      .consumeDeviceEnrollment({ offer_token: offer, label })
       .then((payload) => {
         try {
           localStorage.setItem(TOKEN_STORAGE_KEY, payload.secret);

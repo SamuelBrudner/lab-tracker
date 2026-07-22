@@ -12,6 +12,7 @@ import {
   optional,
   parseCollection,
   parseResource,
+  parseResourceWithMeta,
   string,
   unknown,
 } from "./contract.js";
@@ -107,11 +108,14 @@ describe("envelope parsers", () => {
 
   it("parseCollection validates items and carries meta", () => {
     const result = parseCollection(
-      { data: [{ id: "a" }, { id: "b" }], meta: { total: 2 } },
+      {
+        data: [{ id: "a" }, { id: "b" }],
+        meta: { limit: 2, offset: 0, total: 2 },
+      },
       itemShape
     );
     expect(result.data).toEqual([{ id: "a" }, { id: "b" }]);
-    expect(result.meta).toEqual({ total: 2 });
+    expect(result.meta).toEqual({ limit: 2, offset: 0, total: 2 });
   });
 
   it("parseCollection throws when data is not an array (contract drift)", () => {
@@ -125,7 +129,57 @@ describe("envelope parsers", () => {
     expect(caught.path).toBe("data");
   });
 
-  it("parseCollection defaults meta to null when absent", () => {
-    expect(parseCollection({ data: [] }, itemShape).meta).toBeNull();
+  it("parseCollection rejects absent, partial, or invalid pagination metadata", () => {
+    expect(() => parseCollection({ data: [] }, itemShape)).toThrow(ContractError);
+    expect(() =>
+      parseCollection({ data: [], meta: { limit: 1, offset: 0 } }, itemShape)
+    ).toThrow(ContractError);
+    expect(() =>
+      parseCollection(
+        { data: [], meta: { limit: 0, offset: 0, total: 0 } },
+        itemShape
+      )
+    ).toThrow(ContractError);
+    expect(() =>
+      parseCollection(
+        { data: [], meta: { limit: 1, offset: 0.5, total: 0 } },
+        itemShape
+      )
+    ).toThrow(ContractError);
+  });
+
+  it("parseCollection rejects pages that contradict limit or total", () => {
+    expect(() =>
+      parseCollection(
+        {
+          data: [{ id: "a" }, { id: "b" }],
+          meta: { limit: 1, offset: 0, total: 2 },
+        },
+        itemShape
+      )
+    ).toThrow(ContractError);
+    expect(() =>
+      parseCollection(
+        {
+          data: [{ id: "a" }],
+          meta: { limit: 1, offset: 0, total: 0 },
+        },
+        itemShape
+      )
+    ).toThrow(ContractError);
+  });
+
+  it("parseResourceWithMeta validates both halves of the envelope", () => {
+    const metaShape = object({ enabled: boolean });
+    expect(
+      parseResourceWithMeta(
+        { data: { id: "x" }, meta: { enabled: true } },
+        itemShape,
+        metaShape
+      )
+    ).toEqual({ data: { id: "x" }, meta: { enabled: true } });
+    expect(() =>
+      parseResourceWithMeta({ data: { id: "x" } }, itemShape, metaShape)
+    ).toThrow(ContractError);
   });
 });

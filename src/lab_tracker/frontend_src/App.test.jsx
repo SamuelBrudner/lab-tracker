@@ -5,7 +5,12 @@ import { fireEvent, render, screen, waitFor, within } from "@testing-library/rea
 import { App } from "./app-shell.jsx";
 import { buildApiPath } from "./shared/api.js";
 import { TOKEN_STORAGE_KEY } from "./shared/constants.js";
-import { apiResponse, errorResponse, installFetchMock, textResponse } from "./test/utils.js";
+import {
+  apiResponse as rawApiResponse,
+  errorResponse,
+  installFetchMock,
+  textResponse,
+} from "./test/utils.js";
 
 import {
   activeSessionsPath,
@@ -41,6 +46,52 @@ import {
   visualization,
   visualizationsPath,
 } from "./test/fixtures.js";
+
+const AUTH_USER_CREATED_AT = "2026-04-20T00:00:00Z";
+
+// App journeys use compact auth fixtures. Complete the fields FastAPI always
+// serializes, and attach /auth/me's auth_enabled metadata, while the gateway
+// tests exercise malformed auth payloads through the raw response helper.
+function apiResponse(data, status = 200, meta = undefined) {
+  if (
+    data &&
+    typeof data === "object" &&
+    !Array.isArray(data) &&
+    "role" in data &&
+    "username" in data
+  ) {
+    return rawApiResponse(
+      {
+        created_at: AUTH_USER_CREATED_AT,
+        user_id: "user-1",
+        ...data,
+      },
+      status,
+      meta ?? { auth_enabled: true }
+    );
+  }
+  if (
+    data &&
+    typeof data === "object" &&
+    !Array.isArray(data) &&
+    "access_token" in data &&
+    data.user
+  ) {
+    return rawApiResponse(
+      {
+        ...data,
+        user: {
+          created_at: AUTH_USER_CREATED_AT,
+          user_id: "user-1",
+          ...data.user,
+        },
+      },
+      status,
+      meta
+    );
+  }
+  return rawApiResponse(data, status, meta);
+}
 
 describe("App", () => {
   it("accepts an emailed invitation link", async () => {

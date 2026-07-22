@@ -1,6 +1,6 @@
 import * as React from "react";
 
-import { AUTH_REJECTED_EVENT, apiFetch, apiRequest } from "../shared/api.js";
+import { AUTH_REJECTED_EVENT } from "../shared/api.js";
 import { auth as authGateway } from "../shared/gateways/index.js";
 import { createAuthStorage } from "../shared/auth-storage.js";
 import {
@@ -127,10 +127,10 @@ function useAuthSession({ replace, setBusy, setFlash, storage }) {
   useEffect(() => {
     let canceled = false;
 
-    apiFetch("/auth/bootstrap-status")
-      .then((payload) => {
+    authGateway
+      .getBootstrapStatus()
+      .then((status) => {
         if (!canceled) {
-          const status = payload?.data || null;
           setAuthBootstrapStatus(status);
           if (status?.bootstrap_token) {
             setAuthBootstrapToken((current) => current || status.bootstrap_token);
@@ -147,12 +147,12 @@ function useAuthSession({ replace, setBusy, setFlash, storage }) {
     if (token) {
       setFlash("", "");
     }
-    apiFetch("/auth/me", token ? { notifyAuthRejected: false, token } : {})
-      .then((payload) => {
+    authGateway
+      .getCurrentUser(token ? { notifyAuthRejected: false, token } : {})
+      .then(({ authEnabled: nextAuthEnabled, user: nextUser }) => {
         if (!canceled) {
-          const nextAuthEnabled = payload?.meta?.auth_enabled !== false;
           setAuthEnabled(nextAuthEnabled);
-          setUser(payload?.data || null);
+          setUser(nextUser);
           if (!nextAuthEnabled && token) {
             setToken("");
             setTokenExpiresAt("");
@@ -201,8 +201,7 @@ function useAuthSession({ replace, setBusy, setFlash, storage }) {
 
     async function refreshSession() {
       try {
-        const payload = await apiRequest("/auth/refresh", {
-          method: "POST",
+        const payload = await authGateway.refreshSession({
           notifyAuthRejected: false,
           token,
         });

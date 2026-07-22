@@ -25,6 +25,10 @@ jobs:
         run: uv run ruff check .
       - name: Lint frontend
         run: npm run lint:frontend -- --quiet
+      - name: Check frontend OpenAPI declarations
+        run: npm run check:frontend-contracts
+      - name: Typecheck frontend API contracts
+        run: npm run typecheck:frontend
       - name: Test frontend
         run: npm run test:frontend
       - name: Build frontend

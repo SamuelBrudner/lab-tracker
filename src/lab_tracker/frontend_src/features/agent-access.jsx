@@ -1,6 +1,6 @@
 import * as React from "react";
 
-import { apiListRequest, apiRequest } from "../shared/api.js";
+import { auth as authGateway } from "../shared/gateways/index.js";
 import { formatDate } from "../shared/formatters.js";
 
 const { useCallback, useEffect, useState } = React;
@@ -140,8 +140,8 @@ function AgentAccessPage({ token, user, authEnabled, navigate, setBusy, setFlash
     }
     setLoading(true);
     try {
-      const page = await apiListRequest("/auth/tokens", { token });
-      setTokens(page.data || []);
+      const page = await authGateway.listPersonalAccessTokens({ token });
+      setTokens(page.data);
       setTokensFetchedAt(Date.now());
     } catch (err) {
       setFlash("", err.message || "Failed to load agent tokens.");
@@ -183,8 +183,8 @@ function AgentAccessPage({ token, user, authEnabled, navigate, setBusy, setFlash
     setBusy(true);
     setFlash("", "");
     try {
-      const issuedToken = await apiRequest("/auth/tokens", {
-        body: {
+      const issuedToken = await authGateway.createPersonalAccessToken(
+        {
           expires_at: new Date(
             Date.now() + Number(expiresDays) * DAY_MS - EXPIRY_SKEW_MARGIN_MS
           ).toISOString(),
@@ -193,9 +193,8 @@ function AgentAccessPage({ token, user, authEnabled, navigate, setBusy, setFlash
           role: level.role,
           scope: level.scope || "all",
         },
-        method: "POST",
-        token,
-      });
+        { token }
+      );
       setIssued(issuedToken);
       await refresh();
       setFlash(`Token "${issuedToken.label}" created. It is shown only once — copy it now.`);
@@ -211,10 +210,7 @@ function AgentAccessPage({ token, user, authEnabled, navigate, setBusy, setFlash
     setRevokingId(tokenId);
     setFlash("", "");
     try {
-      await apiRequest(`/auth/tokens/${tokenId}`, {
-        method: "DELETE",
-        token,
-      });
+      await authGateway.revokePersonalAccessToken(tokenId, { token });
       setIssued((current) => (current?.token_id === tokenId ? null : current));
       setFlash("Token revoked.");
       await refresh();
