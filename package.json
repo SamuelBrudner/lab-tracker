@@ -9,11 +9,13 @@
     "build:frontend": "node scripts/build-frontend.mjs",
     "build:frontend:dev": "node scripts/build-frontend.mjs --dev",
     "build:pages-demo": "node scripts/build-pages-demo.mjs",
+    "check:frontend-contracts": "uv run python scripts/generate_frontend_openapi_types.py --check",
     "dev:frontend": "node scripts/build-frontend.mjs --watch",
     "lint:frontend": "eslint \"src/lab_tracker/frontend_src/**/*.{js,jsx}\"",
     "shoot:screenshots": "node scripts/shoot-screenshots.mjs",
     "test:e2e": "playwright test",
-    "test:frontend": "vitest run"
+    "test:frontend": "vitest run",
+    "typecheck:frontend": "tsc --project tsconfig.frontend-contracts.json"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
@@ -30,6 +32,7 @@
     "playwright": "^1.61.1",
     "react": "^19.2.7",
     "react-dom": "^19.2.7",
+    "typescript": "^5.9.3",
     "vitest": "^4.1.9"
   },
   "dependencies": {

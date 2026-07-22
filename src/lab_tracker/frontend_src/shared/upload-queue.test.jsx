@@ -11,9 +11,27 @@ import {
 } from "./upload-queue.js";
 
 const UPLOAD_QUEUE_DB_NAME = "lab-tracker-upload-queue";
+const OWNER = "owner-1";
+const LIVE_TOKEN = "live-token";
 
 function makeFile(name = "snap.jpg", content = "image-bytes", type = "image/jpeg") {
   return new File([content], name, { type });
+}
+
+// Enqueue an owned job (jobs never carry a token; identity is the owner id).
+function enqueueOwned(queue, { fields = { project_id: "proj-a" }, ...rest } = {}) {
+  return queue.enqueue({
+    endpoint: UPLOAD_FILE_PATH,
+    file: makeFile(),
+    fields,
+    ownerId: OWNER,
+    ...rest,
+  });
+}
+
+// Drain under the matching active session (live token + owner).
+function drainAsOwner(queue, token = LIVE_TOKEN) {
+  return queue.drain({ token, ownerId: OWNER });
 }
 
 function deleteDatabase(name) {
@@ -45,16 +63,8 @@ describe("createUploadQueue", () => {
       createClientCaptureId: () => `capture-${nextCaptureId++}`,
     });
 
-    await queue.enqueue({
-      endpoint: UPLOAD_FILE_PATH,
-      file: makeFile(),
-      fields: { project_id: "proj-a" },
-    });
-    await queue.enqueue({
-      endpoint: UPLOAD_FILE_PATH,
-      file: makeFile("two.jpg"),
-      fields: { project_id: "proj-a" },
-    });
+    await enqueueOwned(queue, { file: makeFile() });
+    await enqueueOwned(queue, { file: makeFile("two.jpg") });
 
     expect(await queue.pendingCount()).toBe(2);
     const pending = await queue.listPending();
@@ -63,6 +73,16 @@ describe("createUploadQueue", () => {
       "capture-1",
       "capture-2",
     ]);
+  });
+
+  it("stores an owner identity but never a bearer token", async () => {
+    const storage = createMemoryStorage();
+    const queue = createUploadQueue({ storage, fetch: vi.fn() });
+
+    await enqueueOwned(queue);
+    const [record] = await queue.listPending();
+    expect(record.ownerId).toBe(OWNER);
+    expect(record.token).toBeUndefined();
   });
 
   it("requires endpoint, file, and project_id field", async () => {
@@ -87,18 +107,15 @@ describe("createUploadQueue", () => {
       createClientCaptureId: () => "capture-forward",
     });
 
-    await queue.enqueue({
-      endpoint: UPLOAD_FILE_PATH,
-      file: makeFile(),
+    await enqueueOwned(queue, {
       fields: {
         project_id: "proj-a",
         metadata: JSON.stringify({ source: "camera" }),
         targets: JSON.stringify([{ entity_type: "question", entity_id: "q-1" }]),
       },
-      token: "tok-1",
     });
 
-    const result = await queue.drain();
+    const result = await drainAsOwner(queue, "tok-1");
     expect(result.uploaded).toHaveLength(1);
     expect(result.stillQueued).toHaveLength(0);
     expect(await queue.pendingCount()).toBe(0);
@@ -115,7 +132,18 @@ describe("createUploadQueue", () => {
     expect(body.get("file")).toBeInstanceOf(File);
   });
 
-  it("persists a generated client capture id for legacy queued records before retry", async () => {
+  it("uses only the live drain token, never a value stored with the job", async () => {
+    const storage = createMemoryStorage();
+    const fetchImpl = vi.fn(async () => ({ ok: true, status: 201 }));
+    const queue = createUploadQueue({ storage, fetch: fetchImpl });
+
+    await enqueueOwned(queue);
+    await drainAsOwner(queue, "fresh-token");
+
+    expect(fetchImpl.mock.calls[0][1].headers.Authorization).toBe("Bearer fresh-token");
+  });
+
+  it("backfills a missing client capture id for an owned record before retry", async () => {
     const storage = createMemoryStorage();
     const fetchImpl = vi
       .fn()
@@ -124,7 +152,7 @@ describe("createUploadQueue", () => {
     const queue = createUploadQueue({
       storage,
       fetch: fetchImpl,
-      createClientCaptureId: () => "legacy-capture-id",
+      createClientCaptureId: () => "backfilled-capture-id",
     });
     await storage.add({
       endpoint: UPLOAD_FILE_PATH,
@@ -132,20 +160,20 @@ describe("createUploadQueue", () => {
       fields: { project_id: "proj-a" },
       filename: "snap.jpg",
       contentType: "image/jpeg",
-      token: "tok-1",
+      ownerId: OWNER,
       enqueuedAt: 123,
     });
 
-    const failed = await queue.drain();
+    const failed = await drainAsOwner(queue);
     expect(failed.stillQueued).toHaveLength(1);
-    expect(failed.stillQueued[0].fields.client_capture_id).toBe("legacy-capture-id");
+    expect(failed.stillQueued[0].fields.client_capture_id).toBe("backfilled-capture-id");
     expect((await queue.listPending())[0].fields.client_capture_id).toBe(
-      "legacy-capture-id"
+      "backfilled-capture-id"
     );
 
-    await queue.drain();
+    await drainAsOwner(queue);
     const secondBody = fetchImpl.mock.calls[1][1].body;
-    expect(secondBody.get("client_capture_id")).toBe("legacy-capture-id");
+    expect(secondBody.get("client_capture_id")).toBe("backfilled-capture-id");
     expect(await queue.pendingCount()).toBe(0);
   });
 
@@ -154,18 +182,14 @@ describe("createUploadQueue", () => {
     const fetchImpl = vi.fn(async () => ({ ok: true, status: 202 }));
     const queue = createUploadQueue({ storage, fetch: fetchImpl });
 
-    await queue.enqueue({
-      endpoint: UPLOAD_FILE_PATH,
-      file: makeFile("full.jpg"),
-      fields: { project_id: "proj-a" },
-    });
-    await queue.enqueue({
+    await enqueueOwned(queue, { endpoint: UPLOAD_FILE_PATH, file: makeFile("full.jpg") });
+    await enqueueOwned(queue, {
       endpoint: QUICK_CAPTURE_PATH,
       file: makeFile("share.jpg"),
       fields: { project_id: "proj-b" },
     });
 
-    await queue.drain();
+    await drainAsOwner(queue);
     const paths = fetchImpl.mock.calls.map(([url]) => url);
     expect(paths).toEqual([UPLOAD_FILE_PATH, QUICK_CAPTURE_PATH]);
   });
@@ -177,12 +201,8 @@ describe("createUploadQueue", () => {
     });
     const queue = createUploadQueue({ storage, fetch: fetchImpl });
 
-    await queue.enqueue({
-      endpoint: UPLOAD_FILE_PATH,
-      file: makeFile(),
-      fields: { project_id: "proj-a" },
-    });
-    const result = await queue.drain();
+    await enqueueOwned(queue);
+    const result = await drainAsOwner(queue);
     expect(result.uploaded).toHaveLength(0);
     expect(result.stillQueued).toHaveLength(1);
     expect(await queue.pendingCount()).toBe(1);
@@ -193,12 +213,8 @@ describe("createUploadQueue", () => {
     const fetchImpl = vi.fn(async () => ({ ok: false, status: 422 }));
     const queue = createUploadQueue({ storage, fetch: fetchImpl });
 
-    await queue.enqueue({
-      endpoint: UPLOAD_FILE_PATH,
-      file: makeFile(),
-      fields: { project_id: "proj-a" },
-    });
-    const result = await queue.drain();
+    await enqueueOwned(queue);
+    const result = await drainAsOwner(queue);
     expect(result.dropped).toHaveLength(1);
     expect(result.dropped[0].rejectedStatus).toBe(422);
     expect(await queue.pendingCount()).toBe(0);
@@ -209,12 +225,8 @@ describe("createUploadQueue", () => {
     const fetchImpl = vi.fn(async () => ({ ok: false, status }));
     const queue = createUploadQueue({ storage, fetch: fetchImpl, now: () => 1234 });
 
-    await queue.enqueue({
-      endpoint: UPLOAD_FILE_PATH,
-      file: makeFile(),
-      fields: { project_id: "proj-a" },
-    });
-    const result = await queue.drain();
+    await enqueueOwned(queue);
+    const result = await drainAsOwner(queue);
     expect(result.dropped).toHaveLength(0);
     expect(result.stillQueued).toHaveLength(1);
     expect(result.stillQueued[0].lastStatus).toBe(status);
@@ -227,12 +239,8 @@ describe("createUploadQueue", () => {
     const fetchImpl = vi.fn(async () => ({ ok: false, status }));
     const queue = createUploadQueue({ storage, fetch: fetchImpl, now: () => 1234 });
 
-    await queue.enqueue({
-      endpoint: UPLOAD_FILE_PATH,
-      file: makeFile(),
-      fields: { project_id: "proj-a" },
-    });
-    const result = await queue.drain();
+    await enqueueOwned(queue);
+    const result = await drainAsOwner(queue);
     expect(result.dropped).toHaveLength(0);
     expect(result.stillQueued).toHaveLength(1);
     expect(result.stillQueued[0].lastStatus).toBe(status);
@@ -240,37 +248,16 @@ describe("createUploadQueue", () => {
     expect(await queue.pendingCount()).toBe(1);
   });
 
-  it("uses the live drain token instead of the enqueue-time token", async () => {
-    const storage = createMemoryStorage();
-    const fetchImpl = vi.fn(async () => ({ ok: true, status: 201 }));
-    const queue = createUploadQueue({ storage, fetch: fetchImpl });
-
-    await queue.enqueue({
-      endpoint: UPLOAD_FILE_PATH,
-      file: makeFile(),
-      fields: { project_id: "proj-a" },
-      token: "expired-token",
-    });
-
-    await queue.drain({ token: "fresh-token" });
-
-    expect(fetchImpl.mock.calls[0][1].headers.Authorization).toBe("Bearer fresh-token");
-  });
-
   it("does not drop auth failures after repeated drains", async () => {
     const storage = createMemoryStorage();
     const fetchImpl = vi.fn(async () => ({ ok: false, status: 401 }));
     const queue = createUploadQueue({ storage, fetch: fetchImpl });
 
-    await queue.enqueue({
-      endpoint: UPLOAD_FILE_PATH,
-      file: makeFile(),
-      fields: { project_id: "proj-a" },
-    });
+    await enqueueOwned(queue);
 
     let result = null;
     for (let attempt = 0; attempt < MAX_RETRY_ATTEMPTS + 2; attempt += 1) {
-      result = await queue.drain();
+      result = await drainAsOwner(queue);
     }
 
     expect(result.dropped).toHaveLength(0);
@@ -283,15 +270,11 @@ describe("createUploadQueue", () => {
     const fetchImpl = vi.fn(async () => ({ ok: false, status: 429 }));
     const queue = createUploadQueue({ storage, fetch: fetchImpl });
 
-    await queue.enqueue({
-      endpoint: UPLOAD_FILE_PATH,
-      file: makeFile(),
-      fields: { project_id: "proj-a" },
-    });
+    await enqueueOwned(queue);
 
     let result = null;
     for (let attempt = 0; attempt < MAX_RETRY_ATTEMPTS; attempt += 1) {
-      result = await queue.drain();
+      result = await drainAsOwner(queue);
     }
 
     expect(result.dropped).toHaveLength(1);
@@ -305,14 +288,74 @@ describe("createUploadQueue", () => {
     const fetchImpl = vi.fn(async () => ({ ok: false, status: 503 }));
     const queue = createUploadQueue({ storage, fetch: fetchImpl });
 
-    await queue.enqueue({
-      endpoint: UPLOAD_FILE_PATH,
-      file: makeFile(),
-      fields: { project_id: "proj-a" },
-    });
-    const result = await queue.drain();
+    await enqueueOwned(queue);
+    const result = await drainAsOwner(queue);
     expect(result.stillQueued).toHaveLength(1);
     expect(await queue.pendingCount()).toBe(1);
+  });
+
+  // --- Identity gating (lab-tracker-4w2x.1) ---------------------------------
+
+  it("does not drain any job without an active session (post-logout path)", async () => {
+    const storage = createMemoryStorage();
+    const fetchImpl = vi.fn(async () => ({ ok: true, status: 201 }));
+    const queue = createUploadQueue({ storage, fetch: fetchImpl });
+
+    await enqueueOwned(queue);
+    // No live token/owner: logout blanked the session.
+    const result = await queue.drain({ token: "", ownerId: "" });
+
+    expect(fetchImpl).not.toHaveBeenCalled();
+    expect(result.uploaded).toHaveLength(0);
+    expect(result.stillQueued).toHaveLength(1);
+    expect(await queue.pendingCount()).toBe(1);
+  });
+
+  it("skips a job whose owner does not match the active session (account switch)", async () => {
+    const storage = createMemoryStorage();
+    const fetchImpl = vi.fn(async () => ({ ok: true, status: 201 }));
+    const queue = createUploadQueue({ storage, fetch: fetchImpl });
+
+    await enqueueOwned(queue); // owned by OWNER
+    // A different user (B) is signed in with a live token.
+    const result = await queue.drain({ token: "user-b-token", ownerId: "owner-2" });
+
+    expect(fetchImpl).not.toHaveBeenCalled();
+    expect(result.skipped).toHaveLength(1);
+    expect(result.uploaded).toHaveLength(0);
+    expect(await queue.pendingCount()).toBe(1);
+
+    // The original owner returning resumes their own job.
+    const resumed = await drainAsOwner(queue);
+    expect(resumed.uploaded).toHaveLength(1);
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+    expect(await queue.pendingCount()).toBe(0);
+  });
+
+  it("quarantines a legacy token-bearing job and strips its token, never sending it", async () => {
+    const storage = createMemoryStorage();
+    const fetchImpl = vi.fn(async () => ({ ok: true, status: 201 }));
+    const queue = createUploadQueue({ storage, fetch: fetchImpl });
+    // A record from before owner binding: has a token, no ownerId.
+    await storage.add({
+      endpoint: UPLOAD_FILE_PATH,
+      file: makeFile(),
+      fields: { project_id: "proj-a", client_capture_id: "legacy" },
+      filename: "snap.jpg",
+      contentType: "image/jpeg",
+      token: "legacy-token",
+      enqueuedAt: 1,
+    });
+
+    const result = await drainAsOwner(queue);
+
+    expect(fetchImpl).not.toHaveBeenCalled();
+    expect(result.quarantined).toHaveLength(1);
+    expect(result.uploaded).toHaveLength(0);
+    // The persisted token is stripped and the record is marked quarantined.
+    const [record] = await queue.listPending();
+    expect(record.token).toBe("");
+    expect(record.quarantined).toBe(true);
   });
 
   it("notifies subscribers on enqueue and drain", async () => {
@@ -323,22 +366,14 @@ describe("createUploadQueue", () => {
     const listener = vi.fn();
     const unsubscribe = queue.subscribe(listener);
 
-    await queue.enqueue({
-      endpoint: UPLOAD_FILE_PATH,
-      file: makeFile(),
-      fields: { project_id: "proj-a" },
-    });
+    await enqueueOwned(queue);
     expect(listener).toHaveBeenCalledTimes(1);
 
-    await queue.drain();
+    await drainAsOwner(queue);
     expect(listener).toHaveBeenCalledTimes(2);
 
     unsubscribe();
-    await queue.enqueue({
-      endpoint: UPLOAD_FILE_PATH,
-      file: makeFile(),
-      fields: { project_id: "proj-a" },
-    });
+    await enqueueOwned(queue);
     expect(listener).toHaveBeenCalledTimes(2);
   });
 
@@ -353,14 +388,10 @@ describe("createUploadQueue", () => {
     );
     const queue = createUploadQueue({ storage, fetch: fetchImpl });
 
-    await queue.enqueue({
-      endpoint: UPLOAD_FILE_PATH,
-      file: makeFile(),
-      fields: { project_id: "proj-a" },
-    });
+    await enqueueOwned(queue);
 
-    const firstDrain = queue.drain();
-    const secondDrain = queue.drain();
+    const firstDrain = drainAsOwner(queue);
+    const secondDrain = drainAsOwner(queue);
     for (let tick = 0; tick < 5 && fetchImpl.mock.calls.length === 0; tick += 1) {
       await Promise.resolve();
     }
@@ -439,7 +470,7 @@ describe("createUploadQueue", () => {
       file,
       filename: file.name,
       contentType: file.type,
-      token: "tok-1",
+      ownerId: OWNER,
     });
 
     expect(id).toBe(1);
@@ -450,7 +481,7 @@ describe("createUploadQueue", () => {
         fields: { project_id: "proj-a", note: "from-real-idb" },
         filename: "real-idb.jpg",
         contentType: "image/jpeg",
-        token: "tok-1",
+        ownerId: OWNER,
       },
     ]);
 

@@ -23,6 +23,7 @@ import { useNoteActions } from "./hooks/useNoteActions.js";
 import { useProjectActions } from "./hooks/useProjectActions.js";
 import { useProjectNoteData } from "./hooks/useProjectNoteData.js";
 import { useProjectSessionData } from "./hooks/useProjectSessionData.js";
+import { useProjectAccess } from "./hooks/useProjectAccess.js";
 import { useProjectWorkspaceData } from "./hooks/useProjectWorkspaceData.js";
 import { useProjectWorkspaceForms } from "./hooks/useProjectWorkspaceForms.js";
 import { useQuestionActions } from "./hooks/useQuestionActions.js";
@@ -37,7 +38,7 @@ import {
 import { useAppRoute } from "./shared/routing.jsx";
 import { droppedUploadsMessage, installOfflineRetry } from "./shared/register-sw.js";
 import { PendingUploadsBadge } from "./shared/upload-status.jsx";
-import { apiListRequest, apiRequest, buildApiPath } from "./shared/api.js";
+import { apiRequest } from "./shared/api.js";
 
 function App() {
   const { navigate, replace, route } = useAppRoute();
@@ -54,18 +55,20 @@ function App() {
 
   const auth = useAuthSession({ replace, setBusy, setFlash });
   const apiEnabled = auth.authChecked && (!auth.authEnabled || Boolean(auth.token));
+  const ownerId = auth.user?.user_id || "";
   React.useEffect(() => {
     if (!auth.authChecked) {
       return undefined;
     }
     return installOfflineRetry({
-      getToken: () => auth.token,
+      // Drain only under the active session's identity; queued jobs owned by a
+      // different (or no) user are held/skipped, never submitted under this token.
+      getSession: () => ({ token: auth.token, ownerId }),
       onDropped: (dropped) => {
         setFlash("", droppedUploadsMessage(dropped));
       },
     });
-  }, [auth.authChecked, auth.token, setFlash]);
-  const [projectMembers, setProjectMembers] = React.useState([]);
+  }, [auth.authChecked, auth.token, ownerId, setFlash]);
   const [memberUsername, setMemberUsername] = React.useState("");
   const [memberRole, setMemberRole] = React.useState("contributor");
   const workspaceData = useProjectWorkspaceData({
@@ -90,36 +93,19 @@ function App() {
   const workspaceForms = useProjectWorkspaceForms({
     questions: workspaceData.questions,
   });
-  const refreshProjectMembers = React.useCallback(async () => {
-    if (!apiEnabled || !workspaceData.selectedProjectId) {
-      setProjectMembers([]);
-      return;
-    }
-    try {
-      const { data } = await apiListRequest(
-        buildApiPath(`/projects/${workspaceData.selectedProjectId}/members`, { limit: 200 }),
-        { token: auth.token }
-      );
-      setProjectMembers(data);
-    } catch {
-      setProjectMembers([]);
-    }
-  }, [apiEnabled, auth.token, workspaceData.selectedProjectId]);
-
-  React.useEffect(() => {
-    refreshProjectMembers();
-  }, [refreshProjectMembers]);
-
-  const selectedProjectMembership = React.useMemo(
-    () => projectMembers.find((member) => member.user_id === auth.user?.user_id) || null,
-    [auth.user, projectMembers]
-  );
-  const selectedProjectRole = selectedProjectMembership?.role || "";
-  const canContributeToProject =
-    auth.user?.role === "admin" ||
-    selectedProjectRole === "contributor" ||
-    selectedProjectRole === "owner";
-  const canManageProjectMembers = auth.user?.role === "admin" || selectedProjectRole === "owner";
+  // One sequenced access boundary for the dashboard-selected project. Late
+  // members responses for a previously-selected project can no longer overwrite
+  // the current project's role, and controls deny while access is unknown.
+  const projectAccess = useProjectAccess(workspaceData.selectedProjectId, {
+    token: auth.token,
+    user: auth.user,
+    enabled: apiEnabled,
+  });
+  const projectMembers = projectAccess.members;
+  const selectedProjectRole = projectAccess.role;
+  const canContributeToProject = projectAccess.canContribute;
+  const canManageProjectMembers = projectAccess.canManage;
+  const refreshProjectMembers = projectAccess.refresh;
 
   async function handleAddProjectMember(event) {
     event.preventDefault();
@@ -303,6 +289,12 @@ function App() {
       />
 
       <FlashMessages message={message} error={error} />
+      {auth.persistenceDegraded ? (
+        <p className="flash warning" role="status">
+          Your session is active but couldn’t be saved on this device — you may
+          need to sign in again after closing this tab.
+        </p>
+      ) : null}
       <PendingUploadsBadge />
       <PendingBatchBanner enabled={apiEnabled} token={auth.token} navigate={navigate} />
 
@@ -314,7 +306,11 @@ function App() {
         // Pairing happens before the phone has a token; bypass the login form
         // and the workspace shell, render the enroll page directly.
         <section className="grid">
-          <EnrollPage replace={replace} setFlash={setFlash} />
+          <EnrollPage
+            persistTokenForReload={auth.persistTokenForReload}
+            replace={replace}
+            setFlash={setFlash}
+          />
         </section>
       ) : auth.authEnabled && !auth.token ? (
         <section className="grid">
@@ -344,6 +340,7 @@ function App() {
           {isCaptureRoute ? (
             <MobileCaptureCard
               token={auth.token}
+              ownerId={ownerId}
               canWrite={canContributeToProject}
               projects={workspaceData.projects}
               selectedProjectId={workspaceData.selectedProjectId}
@@ -456,6 +453,7 @@ function App() {
             <QuestionDetailCard
               token={auth.token}
               questionId={route.questionId}
+              user={auth.user}
               projects={workspaceData.projects}
               questions={workspaceData.questions}
               navigate={navigate}
@@ -470,6 +468,7 @@ function App() {
             <NoteDetailCard
               token={auth.token}
               noteId={route.noteId}
+              user={auth.user}
               projects={workspaceData.projects}
               navigate={navigate}
               onSetActiveProject={workspaceData.setSelectedProjectId}
@@ -510,6 +509,7 @@ function App() {
             <SessionDetailCard
               token={auth.token}
               sessionId={route.sessionId}
+              user={auth.user}
               projects={workspaceData.projects}
               navigate={navigate}
               onSetActiveProject={workspaceData.setSelectedProjectId}

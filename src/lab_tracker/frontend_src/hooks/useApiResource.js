@@ -4,7 +4,7 @@ import { apiRequest } from "../shared/api.js";
 
 const { useCallback, useEffect, useState } = React;
 
-function useApiResource(path, token, errorMessage) {
+function useApiResource(path, token, errorMessage, { validate = null } = {}) {
   const [state, setState] = useState({
     data: null,
     error: "",
@@ -31,8 +31,13 @@ function useApiResource(path, token, errorMessage) {
     setState({ data: null, error: "", loading: true });
     apiRequest(path, { token })
       .then((payload) => {
+        // When a validator is supplied, enforce the shape at the boundary: a
+        // malformed 2xx envelope (already collapsed to null by apiRequest, or
+        // present with the wrong shape) throws one ContractError instead of
+        // flowing null/mis-shaped data into the component.
+        const data = validate ? validate(payload) : payload;
         if (!canceled) {
-          setState({ data: payload, error: "", loading: false });
+          setState({ data, error: "", loading: false });
         }
       })
       .catch((err) => {
@@ -48,7 +53,7 @@ function useApiResource(path, token, errorMessage) {
     return () => {
       canceled = true;
     };
-  }, [errorMessage, path, token]);
+  }, [errorMessage, path, token, validate]);
 
   return { ...state, setData };
 }

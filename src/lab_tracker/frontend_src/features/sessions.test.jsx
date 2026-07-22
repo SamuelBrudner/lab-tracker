@@ -10,6 +10,10 @@ describe("SessionDetailCard", () => {
   it("loads paginated outputs and scoped linked notes", async () => {
     installFetchMock([
       {
+        match: /\/projects\/project-1\/members/,
+        response: apiResponse([{ role: "contributor", user_id: "user-1" }]),
+      },
+      {
         match: "/sessions/session-1",
         response: apiResponse({
           created_at: "2026-04-20T00:00:00Z",
@@ -74,6 +78,7 @@ describe("SessionDetailCard", () => {
         projects={[{ name: "Project One", project_id: "project-1" }]}
         navigate={vi.fn()}
         onSetActiveProject={vi.fn()}
+        user={{ role: "editor", user_id: "user-1" }}
         canWrite={true}
         onCloseSession={vi.fn(async () => null)}
         onPromoteSession={vi.fn(async () => null)}
@@ -99,6 +104,10 @@ describe("SessionDetailCard", () => {
     }));
 
     installFetchMock([
+      {
+        match: /\/projects\/project-1\/members/,
+        response: apiResponse([{ role: "contributor", user_id: "user-1" }]),
+      },
       {
         match: "/sessions/session-1",
         response: apiResponse({
@@ -151,13 +160,18 @@ describe("SessionDetailCard", () => {
         projects={[{ name: "Project One", project_id: "project-1" }]}
         navigate={vi.fn()}
         onSetActiveProject={vi.fn()}
+        user={{ role: "editor", user_id: "user-1" }}
         canWrite={true}
         onCloseSession={onCloseSession}
         onPromoteSession={vi.fn(async () => null)}
       />
     );
 
-    fireEvent.click(await screen.findByRole("button", { name: "Close session" }));
+    const closeButton = await screen.findByRole("button", { name: "Close session" });
+    // Write access now resolves from the session's project membership fetch, so
+    // the button starts disabled; wait for it to enable before clicking.
+    await waitFor(() => expect(closeButton).toBeEnabled());
+    fireEvent.click(closeButton);
 
     await waitFor(() => {
       expect(onCloseSession).toHaveBeenCalledWith("session-1", "project-1");
@@ -180,6 +194,10 @@ describe("SessionDetailCard", () => {
     }));
 
     installFetchMock([
+      {
+        match: /\/projects\/project-1\/members/,
+        response: apiResponse([{ role: "contributor", user_id: "user-1" }]),
+      },
       {
         match: "/sessions/session-1",
         response: apiResponse({
@@ -224,6 +242,7 @@ describe("SessionDetailCard", () => {
         projects={[{ name: "Project One", project_id: "project-1" }]}
         navigate={vi.fn()}
         onSetActiveProject={vi.fn()}
+        user={{ role: "editor", user_id: "user-1" }}
         canWrite={true}
         onCloseSession={vi.fn(async () => null)}
         onPromoteSession={onPromoteSession}

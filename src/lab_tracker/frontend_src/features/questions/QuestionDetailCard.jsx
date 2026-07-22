@@ -4,6 +4,7 @@ import { QUESTION_TYPES } from "../../shared/constants.js";
 import { apiRequest, buildApiPath } from "../../shared/api.js";
 import { formatDate } from "../../shared/formatters.js";
 import { useApiResource } from "../../hooks/useApiResource.js";
+import { useProjectAccess } from "../../hooks/useProjectAccess.js";
 
 const { useEffect, useMemo, useState } = React;
 
@@ -23,7 +24,8 @@ function QuestionDetailCard({
   questions = [],
   navigate,
   onSetActiveProject,
-  canWrite = false,
+  canWrite: dashboardCanWrite = false,
+  user = null,
   setBusy = () => {},
   setFlash = () => {},
 }) {
@@ -32,6 +34,14 @@ function QuestionDetailCard({
     token,
     "Failed to load question."
   );
+  // Key write access to the loaded question's own project, not the dashboard
+  // selection; fall back to the passed permission until the project is known.
+  const questionAccess = useProjectAccess(question?.project_id, {
+    token,
+    user,
+    enabled: Boolean(question?.project_id),
+  });
+  const canWrite = question?.project_id ? questionAccess.canContribute : dashboardCanWrite;
   const { data: projectQuestions } = useApiResource(
     token && question?.project_id
       ? buildApiPath("/questions", {

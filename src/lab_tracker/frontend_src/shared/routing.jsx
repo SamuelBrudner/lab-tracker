@@ -134,12 +134,20 @@ function useAppRoute() {
 }
 
 function AppLink({ to, navigate, className = "", children }) {
+  // Resolve the deployed-prefix-aware URL ONCE and use the same value for both
+  // the rendered href and the intercepted navigation, so copy-link, middle- and
+  // modifier-clicks, and open-in-new-tab follow the identical prefixed path.
+  const href = resolveAppPath(to);
+  // Only internal app paths (which resolveAppPath returns as an absolute "/..."
+  // path) are intercepted; an external/absolute URL is left to the browser.
+  const isInternal = href.startsWith("/");
   return (
     <a
-      href={to}
+      href={href}
       className={className}
       onClick={(event) => {
         if (
+          !isInternal ||
           event.defaultPrevented ||
           event.button !== 0 ||
           event.metaKey ||
@@ -150,7 +158,7 @@ function AppLink({ to, navigate, className = "", children }) {
           return;
         }
         event.preventDefault();
-        navigate(to);
+        navigate(href);
       }}
     >
       {children}
