@@ -129,6 +129,7 @@ const personalAccessTokenShape = object({
   read_only: boolean,
   revoked_at: nullish(string),
   role: roleShape,
+  scope: string,
   token_id: string,
 });
 
@@ -141,6 +142,7 @@ const personalAccessTokenIssuedShape = object({
   read_only: boolean,
   revoked_at: nullish(string),
   role: roleShape,
+  scope: string,
   secret: string,
   token_id: string,
 });

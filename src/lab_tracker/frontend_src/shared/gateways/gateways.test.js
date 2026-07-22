@@ -321,6 +321,7 @@ describe("auth gateway", () => {
       read_only: true,
       revoked_at: null,
       role: "viewer",
+      scope: "api",
       token_id: "t-1",
     };
     installFetchMock([

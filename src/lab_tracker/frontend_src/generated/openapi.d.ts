@@ -599,6 +599,7 @@ export interface components {
       "read_only": boolean;
       "revoked_at"?: (string | null);
       "role": components["schemas"]["Role"];
+      "scope": string;
       "secret": string;
       "token_id": string;
     };
@@ -610,6 +611,7 @@ export interface components {
       "read_only": boolean;
       "revoked_at"?: (string | null);
       "role": components["schemas"]["Role"];
+      "scope": string;
       "token_id": string;
     };
     "Project": {
