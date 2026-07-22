@@ -6,8 +6,10 @@ from collections.abc import Callable, Iterable
 from typing import TYPE_CHECKING
 from uuid import UUID, uuid4
 
+from sqlalchemy.exc import IntegrityError
+
 from lab_tracker.auth import AuthContext
-from lab_tracker.errors import ValidationError
+from lab_tracker.errors import ConflictError, ValidationError
 from lab_tracker.models import (
     EntityOrigin,
     EntityRef,
@@ -19,7 +21,7 @@ from lab_tracker.models import (
     QuestionType,
     utc_now,
 )
-from lab_tracker.services.base import BaseService, ServiceContext
+from lab_tracker.services.base import BaseService, IdempotentCreateResult, ServiceContext
 from lab_tracker.services.goal_link_cleanup import remove_goal_links_to_entity
 from lab_tracker.services.project_authorization import ProjectAuthorizationPolicy
 from lab_tracker.services.project_service import ProjectService
@@ -101,17 +103,47 @@ class QuestionService(BaseService):
         origin_model: str | None = None,
         origin_prompt_version: str | None = None,
     ) -> Question:
+        return self.create_question_result(
+            project_id,
+            text,
+            question_type,
+            hypothesis=hypothesis,
+            status=status,
+            client_capture_id=client_capture_id,
+            terminal_reason=terminal_reason,
+            parent_question_ids=parent_question_ids,
+            actor=actor,
+            origin=origin,
+            change_set_id=change_set_id,
+            origin_provider=origin_provider,
+            origin_model=origin_model,
+            origin_prompt_version=origin_prompt_version,
+        ).entity
+
+    def create_question_result(
+        self,
+        project_id: UUID,
+        text: str,
+        question_type: QuestionType,
+        *,
+        hypothesis: str | None = None,
+        status: QuestionStatus = QuestionStatus.STAGED,
+        client_capture_id: str | None = None,
+        terminal_reason: str | None = None,
+        parent_question_ids: Iterable[UUID] | None = None,
+        actor: AuthContext | None = None,
+        origin: EntityOrigin = EntityOrigin.USER,
+        change_set_id: UUID | None = None,
+        origin_provider: str | None = None,
+        origin_model: str | None = None,
+        origin_prompt_version: str | None = None,
+    ) -> IdempotentCreateResult[Question]:
         self.authorization.require_contributor(project_id, actor=actor)
         self.projects.get_project(project_id)
         ensure_non_empty(text, "text")
+        resolved_text = text.strip()
+        resolved_hypothesis = hypothesis.strip() if hypothesis else None
         resolved_client_capture_id = normalize_client_capture_id(client_capture_id)
-        if resolved_client_capture_id is not None:
-            existing = self._find_client_capture_question(
-                project_id,
-                resolved_client_capture_id,
-            )
-            if existing is not None:
-                return existing
         question_id = uuid4()
         parent_ids = unique_ids(parent_question_ids)
         for parent_id in parent_ids:
@@ -130,12 +162,34 @@ class QuestionService(BaseService):
             terminal_reason,
             entity_name="Question",
         )
+        if resolved_client_capture_id is not None:
+            existing = self._find_client_capture_question(
+                project_id,
+                resolved_client_capture_id,
+            )
+            if existing is not None:
+                self._ensure_matching_capture_question(
+                    existing,
+                    text=resolved_text,
+                    question_type=question_type,
+                    hypothesis=resolved_hypothesis,
+                    status=status,
+                    terminal_reason=resolved_terminal_reason,
+                    parent_question_ids=parent_ids,
+                    origin=origin,
+                    change_set_id=change_set_id,
+                    origin_provider=origin_provider,
+                    origin_model=origin_model,
+                    origin_prompt_version=origin_prompt_version,
+                    client_capture_id=resolved_client_capture_id,
+                )
+                return IdempotentCreateResult("reused", existing)
         question = Question(
             question_id=question_id,
             project_id=project_id,
-            text=text.strip(),
+            text=resolved_text,
             question_type=question_type,
-            hypothesis=hypothesis.strip() if hypothesis else None,
+            hypothesis=resolved_hypothesis,
             status=status,
             client_capture_id=resolved_client_capture_id,
             terminal_reason=resolved_terminal_reason,
@@ -148,16 +202,43 @@ class QuestionService(BaseService):
             origin_model=origin_model,
             origin_prompt_version=origin_prompt_version,
         )
-        with self.unit_of_work() as repository:
-            repository.questions.save(question)
-            self.versions.record_entity_version(
-                repository,
-                entity_type=EntityType.QUESTION,
-                entity_id=question.question_id,
-                entity=question,
-                actor=actor,
+        try:
+            with self.unit_of_work() as repository:
+                repository.questions.save(question)
+                self.versions.record_entity_version(
+                    repository,
+                    entity_type=EntityType.QUESTION,
+                    entity_id=question.question_id,
+                    entity=question,
+                    actor=actor,
+                )
+        except IntegrityError as exc:
+            if resolved_client_capture_id is None:
+                raise
+            existing = self._find_client_capture_question(
+                project_id,
+                resolved_client_capture_id,
             )
-        return question
+            if existing is None:
+                raise
+            self._ensure_matching_capture_question(
+                existing,
+                text=resolved_text,
+                question_type=question_type,
+                hypothesis=resolved_hypothesis,
+                status=status,
+                terminal_reason=resolved_terminal_reason,
+                parent_question_ids=parent_ids,
+                origin=origin,
+                change_set_id=change_set_id,
+                origin_provider=origin_provider,
+                origin_model=origin_model,
+                origin_prompt_version=origin_prompt_version,
+                client_capture_id=resolved_client_capture_id,
+                cause=exc,
+            )
+            return IdempotentCreateResult("reused", existing)
+        return IdempotentCreateResult("created", question)
 
     def _find_client_capture_question(
         self,
@@ -173,6 +254,61 @@ class QuestionService(BaseService):
             ),
         )
         return questions[0] if questions else None
+
+    @staticmethod
+    def _ensure_matching_capture_question(
+        existing: Question,
+        *,
+        text: str,
+        question_type: QuestionType,
+        hypothesis: str | None,
+        status: QuestionStatus,
+        terminal_reason: str | None,
+        parent_question_ids: Iterable[UUID],
+        origin: EntityOrigin,
+        change_set_id: UUID | None,
+        origin_provider: str | None,
+        origin_model: str | None,
+        origin_prompt_version: str | None,
+        client_capture_id: str,
+        cause: Exception | None = None,
+    ) -> None:
+        supplied = {
+            "text": text,
+            "question_type": question_type,
+            "hypothesis": hypothesis,
+            "status": status,
+            "terminal_reason": terminal_reason,
+            "parent_question_ids": sorted(str(value) for value in parent_question_ids),
+            "origin": origin,
+            "change_set_id": change_set_id,
+            "origin_provider": origin_provider,
+            "origin_model": origin_model,
+            "origin_prompt_version": origin_prompt_version,
+        }
+        stored = {
+            "text": existing.text,
+            "question_type": existing.question_type,
+            "hypothesis": existing.hypothesis,
+            "status": existing.status,
+            "terminal_reason": existing.terminal_reason,
+            "parent_question_ids": sorted(str(value) for value in existing.parent_question_ids),
+            "origin": existing.origin,
+            "change_set_id": existing.change_set_id,
+            "origin_provider": existing.origin_provider,
+            "origin_model": existing.origin_model,
+            "origin_prompt_version": existing.origin_prompt_version,
+        }
+        conflicts = [field for field, value in supplied.items() if stored[field] != value]
+        if conflicts:
+            error = ConflictError(
+                "Question client_capture_id "
+                f"{client_capture_id!r} was already used with different "
+                f"field(s): {', '.join(conflicts)}."
+            )
+            if cause is not None:
+                raise error from cause
+            raise error
 
     def get_question(self, question_id: UUID) -> Question:
         return self.get_from_repository(

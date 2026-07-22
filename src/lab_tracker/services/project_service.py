@@ -4,8 +4,10 @@ from __future__ import annotations
 
 from uuid import UUID, uuid4
 
+from sqlalchemy.exc import IntegrityError
+
 from lab_tracker.auth import AuthContext, require_role
-from lab_tracker.errors import AuthError, NotFoundError, ValidationError
+from lab_tracker.errors import AuthError, ConflictError, NotFoundError, ValidationError
 from lab_tracker.models import (
     GroupMembership,
     Project,
@@ -16,7 +18,7 @@ from lab_tracker.models import (
     ProjectStatus,
     utc_now,
 )
-from lab_tracker.services.base import BaseService, ServiceContext
+from lab_tracker.services.base import BaseService, IdempotentCreateResult, ServiceContext
 from lab_tracker.services.goal_link_cleanup import remove_goal_links_to_project_contents
 from lab_tracker.services.project_authorization import ProjectAuthorizationPolicy
 from lab_tracker.services.shared import (
@@ -50,30 +52,85 @@ class ProjectService(BaseService):
         client_capture_id: str | None = None,
         actor: AuthContext | None = None,
     ) -> Project:
+        return self.create_project_result(
+            name,
+            description,
+            status,
+            group_id,
+            client_capture_id=client_capture_id,
+            actor=actor,
+        ).entity
+
+    def create_project_result(
+        self,
+        name: str,
+        description: str = "",
+        status: ProjectStatus = ProjectStatus.ACTIVE,
+        group_id: UUID | None = None,
+        *,
+        client_capture_id: str | None = None,
+        actor: AuthContext | None = None,
+    ) -> IdempotentCreateResult[Project]:
         require_role(actor, WRITE_ROLES)
         if group_id is not None:
             self.authorization.require_group_owner(group_id, actor=actor)
             self.get_project_group(group_id)
         ensure_non_empty(name, "name")
+        resolved_name = name.strip()
+        resolved_description = description.strip()
+        creator_id = actor_user_id(actor)
         resolved_client_capture_id = normalize_client_capture_id(client_capture_id)
         if resolved_client_capture_id is not None:
-            existing = self._find_client_capture_project(resolved_client_capture_id)
+            existing = self._find_client_capture_project(
+                resolved_client_capture_id,
+                created_by=creator_id,
+            )
             if existing is not None:
-                return existing
+                self._ensure_matching_capture_project(
+                    existing,
+                    name=resolved_name,
+                    description=resolved_description,
+                    status=status,
+                    group_id=group_id,
+                    client_capture_id=resolved_client_capture_id,
+                )
+                return IdempotentCreateResult("reused", existing)
         project = Project(
             project_id=uuid4(),
             group_id=group_id,
-            name=name.strip(),
-            description=description.strip(),
+            name=resolved_name,
+            description=resolved_description,
             status=status,
             client_capture_id=resolved_client_capture_id,
-            created_by=actor_user_id(actor),
+            created_by=creator_id,
             created_by_user_id=actor_user_fk(actor, self.repository),
         )
-        with self.unit_of_work() as repository:
-            repository.projects.save(project)
-            # Flush the project before the request-managed owner membership insert.
-            repository.projects.get(project.project_id)
+        try:
+            with self.unit_of_work() as repository:
+                repository.projects.save(project)
+                # The generic project repository defers its flush until a read;
+                # force it inside this try block so a uniqueness race can be
+                # recovered before request finalization.
+                repository.projects.get(project.project_id)
+        except IntegrityError as exc:
+            if resolved_client_capture_id is None:
+                raise
+            existing = self._find_client_capture_project(
+                resolved_client_capture_id,
+                created_by=creator_id,
+            )
+            if existing is None:
+                raise
+            self._ensure_matching_capture_project(
+                existing,
+                name=resolved_name,
+                description=resolved_description,
+                status=status,
+                group_id=group_id,
+                client_capture_id=resolved_client_capture_id,
+                cause=exc,
+            )
+            return IdempotentCreateResult("reused", existing)
         if actor is not None and not self.authorization.has_global_admin(actor):
             membership = ProjectMembership(
                 membership_id=uuid4(),
@@ -85,17 +142,57 @@ class ProjectService(BaseService):
             )
             with self.unit_of_work() as repository:
                 repository.project_memberships.save(membership)
-        return project
+        return IdempotentCreateResult("created", project)
 
-    def _find_client_capture_project(self, client_capture_id: str) -> Project | None:
+    def _find_client_capture_project(
+        self,
+        client_capture_id: str,
+        *,
+        created_by: str | None,
+    ) -> Project | None:
         projects = self.query_from_repository(
             loader=lambda repository: repository.query_projects(
                 client_capture_id=client_capture_id,
+                created_by=created_by,
                 limit=1,
                 offset=0,
             ),
         )
         return projects[0] if projects else None
+
+    @staticmethod
+    def _ensure_matching_capture_project(
+        existing: Project,
+        *,
+        name: str,
+        description: str,
+        status: ProjectStatus,
+        group_id: UUID | None,
+        client_capture_id: str,
+        cause: Exception | None = None,
+    ) -> None:
+        supplied = {
+            "name": name,
+            "description": description,
+            "status": status,
+            "group_id": group_id,
+        }
+        stored = {
+            "name": existing.name,
+            "description": existing.description,
+            "status": existing.status,
+            "group_id": existing.group_id,
+        }
+        conflicts = [field for field, value in supplied.items() if stored[field] != value]
+        if conflicts:
+            error = ConflictError(
+                "Project client_capture_id "
+                f"{client_capture_id!r} was already used with different "
+                f"field(s): {', '.join(conflicts)}."
+            )
+            if cause is not None:
+                raise error from cause
+            raise error
 
     def get_project(self, project_id: UUID) -> Project:
         return self.get_from_repository(

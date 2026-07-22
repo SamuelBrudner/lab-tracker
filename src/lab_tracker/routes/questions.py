@@ -7,6 +7,7 @@ from uuid import UUID
 from fastapi import APIRouter
 from starlette import status as http_status
 from starlette.requests import Request
+from starlette.responses import Response
 
 from lab_tracker.api import LabTrackerAPI
 from lab_tracker.models import (
@@ -51,9 +52,9 @@ def build_questions_router(api: LabTrackerAPI) -> APIRouter:
         response_model=Envelope[Question],
         status_code=http_status.HTTP_201_CREATED,
     )
-    def create_question(payload: QuestionCreate, request: Request):
+    def create_question(payload: QuestionCreate, request: Request, response: Response):
         actor = actor_from_request(request)
-        question = api_from_request(request, api).create_question(
+        result = api_from_request(request, api).create_question_result(
             project_id=payload.project_id,
             text=payload.text,
             question_type=payload.question_type,
@@ -64,7 +65,9 @@ def build_questions_router(api: LabTrackerAPI) -> APIRouter:
             parent_question_ids=payload.parent_question_ids,
             actor=actor,
         )
-        return Envelope(data=question)
+        if result.reused:
+            response.status_code = http_status.HTTP_200_OK
+        return Envelope(data=result.entity)
 
     @router.get("/questions", response_model=ListEnvelope[Question])
     def list_questions(

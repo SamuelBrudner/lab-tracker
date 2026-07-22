@@ -9,6 +9,7 @@ from fastapi import APIRouter
 from sqlalchemy import select
 from starlette import status as http_status
 from starlette.requests import Request
+from starlette.responses import Response
 
 from lab_tracker.api import LabTrackerAPI
 from lab_tracker.db_models import (
@@ -77,9 +78,9 @@ def build_projects_router(api: LabTrackerAPI) -> APIRouter:
         response_model=Envelope[Project],
         status_code=http_status.HTTP_201_CREATED,
     )
-    def create_project(payload: ProjectCreate, request: Request):
+    def create_project(payload: ProjectCreate, request: Request, response: Response):
         actor = actor_from_request(request)
-        project = api_from_request(request, api).create_project(
+        result = api_from_request(request, api).create_project_result(
             name=payload.name,
             description=payload.description or "",
             status=payload.status or project_default_status(),
@@ -87,7 +88,9 @@ def build_projects_router(api: LabTrackerAPI) -> APIRouter:
             client_capture_id=payload.client_capture_id,
             actor=actor,
         )
-        return Envelope(data=project)
+        if result.reused:
+            response.status_code = http_status.HTTP_200_OK
+        return Envelope(data=result.entity)
 
     @router.get("/projects", response_model=ListEnvelope[Project])
     def list_projects(

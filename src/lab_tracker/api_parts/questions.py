@@ -29,6 +29,15 @@ class QuestionsApiMixin:
             resource_id_attr="question_id",
         )
 
+    def create_question_result(self, *args: Any, **kwargs: Any) -> Any:
+        return self._with_usage_event(
+            lambda: self.questions.create_question_result(*args, **kwargs),
+            verb=UsageEventVerb.CREATE,
+            resource_type=UsageEventResourceType.QUESTION,
+            actor=kwargs.get("actor"),
+            resource_id_attr="question_id",
+        )
+
     def get_question(self, *args: Any, **kwargs: Any) -> Any:
         return self.questions.get_question(*args, **kwargs)
 

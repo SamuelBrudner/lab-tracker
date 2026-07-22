@@ -104,6 +104,7 @@ class LabTrackerRepository(Protocol):
         group_id: UUID | None = None,
         project_ids: set[UUID] | None = None,
         status: str | None = None,
+        created_by: str | None = None,
         client_capture_id: str | None = None,
         limit: int | None = None,
         offset: int = 0,

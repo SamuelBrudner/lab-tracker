@@ -8,6 +8,7 @@ from uuid import UUID, uuid4
 from sqlalchemy import (
     JSON,
     Boolean,
+    CheckConstraint,
     Date,
     Float,
     ForeignKey,
@@ -87,8 +88,14 @@ class ProjectModel(Base):
     __tablename__ = "projects"
     __table_args__ = (
         UniqueConstraint(
+            "created_by",
             "client_capture_id",
-            name="uq_projects_client_capture",
+            name="uq_projects_creator_client_capture",
+        ),
+        CheckConstraint(
+            "client_capture_id IS NULL OR "
+            "(created_by IS NOT NULL AND TRIM(created_by) <> '')",
+            name="ck_projects_client_capture_creator",
         ),
     )
 

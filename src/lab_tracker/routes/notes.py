@@ -65,10 +65,10 @@ def build_notes_router(api: LabTrackerAPI) -> APIRouter:
         response_model=Envelope[Note],
         status_code=http_status.HTTP_201_CREATED,
     )
-    def create_note(payload: NoteCreate, request: Request):
+    def create_note(payload: NoteCreate, request: Request, response: Response):
         actor = actor_from_request(request)
         ensure_project_contributor(request, payload.project_id)
-        note = api_from_request(request, api).create_note(
+        result = api_from_request(request, api).create_note_result(
             project_id=payload.project_id,
             raw_content=payload.raw_content,
             transcribed_text=payload.transcribed_text,
@@ -78,7 +78,9 @@ def build_notes_router(api: LabTrackerAPI) -> APIRouter:
             status=payload.status or note_default_status(),
             actor=actor,
         )
-        return Envelope(data=note)
+        if result.reused:
+            response.status_code = http_status.HTTP_200_OK
+        return Envelope(data=result.entity)
 
     @router.post(
         "/notes/upload-file",
@@ -99,14 +101,6 @@ def build_notes_router(api: LabTrackerAPI) -> APIRouter:
         actor = actor_from_request(request)
         ensure_project_contributor(request, project_id)
         request_api = api_from_request(request, api)
-        existing = request_api.find_note_by_client_capture_id(
-            project_id,
-            client_capture_id,
-            actor=actor,
-        )
-        if existing is not None:
-            response.status_code = http_status.HTTP_200_OK
-            return Envelope(data=existing)
         filename = (file.filename or "").strip()
         if not filename:
             raise ValidationError("filename must not be empty.")
@@ -123,7 +117,7 @@ def build_notes_router(api: LabTrackerAPI) -> APIRouter:
             content_type=content_type,
         )
         enriched_metadata = source_file_metadata(asset, parsed_metadata)
-        note = request_api.upload_note_raw(
+        result = request_api.upload_note_raw_result(
             project_id=project_id,
             raw_asset=asset,
             owns_raw_asset=True,
@@ -134,12 +128,14 @@ def build_notes_router(api: LabTrackerAPI) -> APIRouter:
             status=status or note_default_status(),
             actor=actor,
         )
-        return Envelope(data=note)
+        if result.reused:
+            response.status_code = http_status.HTTP_200_OK
+        return Envelope(data=result.entity)
 
     @router.post(
         "/notes/quick-capture",
         response_model=Envelope[Note],
-        status_code=http_status.HTTP_202_ACCEPTED,
+        status_code=http_status.HTTP_201_CREATED,
     )
     def quick_capture_note(
         request: Request,
@@ -151,14 +147,6 @@ def build_notes_router(api: LabTrackerAPI) -> APIRouter:
     ):
         actor = actor_from_request(request)
         request_api = api_from_request(request, api)
-        existing = request_api.find_note_by_client_capture_id(
-            project_id,
-            client_capture_id,
-            actor=actor,
-        )
-        if existing is not None:
-            response.status_code = http_status.HTTP_200_OK
-            return Envelope(data=existing)
         filename = (file.filename or "").strip()
         if not filename:
             raise ValidationError("filename must not be empty.")
@@ -174,7 +162,7 @@ def build_notes_router(api: LabTrackerAPI) -> APIRouter:
             content_type=content_type,
         )
         enriched_metadata = source_file_metadata(asset, parsed_metadata)
-        note = request_api.upload_note_raw(
+        result = request_api.upload_note_raw_result(
             project_id=project_id,
             raw_asset=asset,
             owns_raw_asset=True,
@@ -183,7 +171,9 @@ def build_notes_router(api: LabTrackerAPI) -> APIRouter:
             status=NoteStatus.STAGED,
             actor=actor,
         )
-        return Envelope(data=note)
+        if result.reused:
+            response.status_code = http_status.HTTP_200_OK
+        return Envelope(data=result.entity)
 
     @router.get("/notes", response_model=ListEnvelope[Note])
     def list_notes(

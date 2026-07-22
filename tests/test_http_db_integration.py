@@ -1580,7 +1580,7 @@ def test_quick_capture_stages_note_with_minimal_payload(
             files={"file": (filename, content, content_type)},
             headers=headers,
         )
-        assert response.status_code == 202, response.text
+        assert response.status_code == 201, response.text
         payload = response.json()["data"]
         assert payload["status"] == "staged"
         assert payload["project_id"] == project_id
@@ -1615,7 +1615,7 @@ def test_capture_upload_reuses_client_capture_id_on_retry(
     ).json()["data"]["project_id"]
 
     for endpoint, first_status in (
-        ("/notes/quick-capture", 202),
+        ("/notes/quick-capture", 201),
         ("/notes/upload-file", 201),
     ):
         client_capture_id = f"capture-{endpoint.rsplit('/', 1)[-1]}"
@@ -1634,6 +1634,15 @@ def test_capture_upload_reuses_client_capture_id_on_retry(
                 "project_id": project_id,
                 "client_capture_id": client_capture_id,
             },
+            files={"file": ("first.txt", b"first-capture", "text/plain")},
+            headers=headers,
+        )
+        conflicting_retry = client.post(
+            endpoint,
+            data={
+                "project_id": project_id,
+                "client_capture_id": client_capture_id,
+            },
             files={"file": ("retry.txt", b"retry-capture", "text/plain")},
             headers=headers,
         )
@@ -1645,6 +1654,8 @@ def test_capture_upload_reuses_client_capture_id_on_retry(
         assert retry_payload["note_id"] == first_payload["note_id"]
         assert retry_payload["raw_asset"]["filename"] == "first.txt"
         assert retry_payload["client_capture_id"] == client_capture_id
+        assert conflicting_retry.status_code == 409, conflicting_retry.text
+        assert conflicting_retry.json()["error"]["code"] == "conflict"
 
         with client.app.state.db_session_factory() as session:
             rows = list(
@@ -1706,7 +1717,7 @@ def test_quick_capture_preserves_metadata_but_ignores_workflow_fields(
         files={"file": ("snap.jpg", b"jpeg-bytes", "image/jpeg")},
         headers=headers,
     )
-    assert response.status_code == 202, response.text
+    assert response.status_code == 201, response.text
     payload = response.json()["data"]
     assert payload["status"] == "staged"
     assert payload["transcribed_text"] is None

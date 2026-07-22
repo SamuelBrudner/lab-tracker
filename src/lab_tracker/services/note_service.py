@@ -7,8 +7,10 @@ from collections.abc import Callable, Iterable
 from typing import TYPE_CHECKING, Any, BinaryIO
 from uuid import UUID, uuid4
 
+from sqlalchemy.exc import IntegrityError
+
 from lab_tracker.auth import AuthContext
-from lab_tracker.errors import NotFoundError, ValidationError
+from lab_tracker.errors import ConflictError, NotFoundError, ValidationError
 from lab_tracker.graph_drafting import PROVIDER, GraphDraftingError
 from lab_tracker.models import (
     EntityOrigin,
@@ -22,7 +24,7 @@ from lab_tracker.models import (
     utc_now,
 )
 from lab_tracker.services.analysis_service import AnalysisService
-from lab_tracker.services.base import BaseService, ServiceContext
+from lab_tracker.services.base import BaseService, IdempotentCreateResult, ServiceContext
 from lab_tracker.services.claim_service import ClaimService
 from lab_tracker.services.dataset_service import DatasetService
 from lab_tracker.services.goal_link_cleanup import remove_goal_links_to_entity
@@ -44,6 +46,33 @@ if TYPE_CHECKING:
     from lab_tracker.services.goal_service import GoalService
 
 _logger = logging.getLogger(__name__)
+
+
+def _canonical_raw_asset(asset: NoteRawAsset | None) -> tuple[str, str, int, str] | None:
+    if asset is None:
+        return None
+    # storage_id identifies this particular stored copy, not the uploaded
+    # content. A replay writes a temporary second copy before the uniqueness
+    # race is resolved, so compare the stable file identity instead.
+    return (asset.filename, asset.content_type, asset.size_bytes, asset.checksum)
+
+
+def _canonical_targets(targets: Iterable[EntityRef]) -> list[tuple[str, str]]:
+    return sorted(
+        (target.entity_type.value, str(target.entity_id))
+        for target in targets
+    )
+
+
+def _canonical_capture_metadata(metadata: dict[str, str]) -> dict[str, str]:
+    # The upload route stamps ingestion time after storing each physical copy.
+    # It is intentionally excluded; all caller-controlled and content-derived
+    # metadata remains part of conflict detection.
+    return {
+        key: value
+        for key, value in metadata.items()
+        if key != "source_file_ingested_at"
+    }
 
 
 class NoteService(BaseService):
@@ -118,8 +147,51 @@ class NoteService(BaseService):
         origin_model: str | None = None,
         origin_prompt_version: str | None = None,
     ) -> Note:
+        return self.create_note_result(
+            project_id,
+            raw_content,
+            raw_asset=raw_asset,
+            transcribed_text=transcribed_text,
+            targets=targets,
+            metadata=metadata,
+            client_capture_id=client_capture_id,
+            status=status,
+            actor=actor,
+            origin=origin,
+            change_set_id=change_set_id,
+            origin_provider=origin_provider,
+            origin_model=origin_model,
+            origin_prompt_version=origin_prompt_version,
+        ).entity
+
+    def create_note_result(
+        self,
+        project_id: UUID,
+        raw_content: str | None = None,
+        *,
+        raw_asset: NoteRawAsset | None = None,
+        transcribed_text: str | None = None,
+        targets: Iterable[EntityRef] | None = None,
+        metadata: dict[str, NoteMetadataScalar] | None = None,
+        client_capture_id: str | None = None,
+        status: NoteStatus = NoteStatus.STAGED,
+        actor: AuthContext | None = None,
+        origin: EntityOrigin = EntityOrigin.USER,
+        change_set_id: UUID | None = None,
+        origin_provider: str | None = None,
+        origin_model: str | None = None,
+        origin_prompt_version: str | None = None,
+    ) -> IdempotentCreateResult[Note]:
         self.authorization.require_contributor(project_id, actor=actor)
         self.projects.get_project(project_id)
+        raw_text = raw_content.strip() if raw_content else ""
+        if not raw_text and raw_asset is None:
+            raise ValidationError("raw_content or raw_asset must be provided.")
+        resolved_transcribed_text = transcribed_text.strip() if transcribed_text else None
+        resolved_targets = list(targets or [])
+        for target in resolved_targets:
+            self._ensure_target_exists(target, project_id)
+        resolved_metadata = normalize_note_metadata(metadata)
         resolved_client_capture_id = _normalize_client_capture_id(client_capture_id)
         if resolved_client_capture_id is not None:
             existing = self._find_client_capture_note(
@@ -127,20 +199,28 @@ class NoteService(BaseService):
                 resolved_client_capture_id,
             )
             if existing is not None:
-                return existing
-        raw_text = raw_content.strip() if raw_content else ""
-        if not raw_text and raw_asset is None:
-            raise ValidationError("raw_content or raw_asset must be provided.")
-        resolved_targets = list(targets or [])
-        for target in resolved_targets:
-            self._ensure_target_exists(target, project_id)
-        resolved_metadata = normalize_note_metadata(metadata)
+                self._ensure_matching_capture_note(
+                    existing,
+                    raw_content=raw_text,
+                    raw_asset=raw_asset,
+                    transcribed_text=resolved_transcribed_text,
+                    targets=resolved_targets,
+                    metadata=resolved_metadata,
+                    status=status,
+                    origin=origin,
+                    change_set_id=change_set_id,
+                    origin_provider=origin_provider,
+                    origin_model=origin_model,
+                    origin_prompt_version=origin_prompt_version,
+                    client_capture_id=resolved_client_capture_id,
+                )
+                return IdempotentCreateResult("reused", existing)
         note = Note(
             note_id=uuid4(),
             project_id=project_id,
             raw_content=raw_text,
             raw_asset=raw_asset,
-            transcribed_text=transcribed_text.strip() if transcribed_text else None,
+            transcribed_text=resolved_transcribed_text,
             targets=resolved_targets,
             metadata=resolved_metadata,
             client_capture_id=resolved_client_capture_id,
@@ -153,9 +233,36 @@ class NoteService(BaseService):
             origin_model=origin_model,
             origin_prompt_version=origin_prompt_version,
         )
-        with self.unit_of_work() as repository:
-            repository.notes.save(note)
-        return note
+        try:
+            with self.unit_of_work() as repository:
+                repository.notes.save(note)
+        except IntegrityError as exc:
+            if resolved_client_capture_id is None:
+                raise
+            existing = self._find_client_capture_note(
+                project_id,
+                resolved_client_capture_id,
+            )
+            if existing is None:
+                raise
+            self._ensure_matching_capture_note(
+                existing,
+                raw_content=raw_text,
+                raw_asset=raw_asset,
+                transcribed_text=resolved_transcribed_text,
+                targets=resolved_targets,
+                metadata=resolved_metadata,
+                status=status,
+                origin=origin,
+                change_set_id=change_set_id,
+                origin_provider=origin_provider,
+                origin_model=origin_model,
+                origin_prompt_version=origin_prompt_version,
+                client_capture_id=resolved_client_capture_id,
+                cause=exc,
+            )
+            return IdempotentCreateResult("reused", existing)
+        return IdempotentCreateResult("created", note)
 
     def store_note_raw_asset(
         self,
@@ -195,34 +302,56 @@ class NoteService(BaseService):
         status: NoteStatus = NoteStatus.STAGED,
         actor: AuthContext | None = None,
     ) -> Note:
-        if self.raw_storage is None:
-            raise ValidationError("Raw storage backend is not configured.")
-        self.authorization.require_contributor(project_id, actor=actor)
-        self.projects.get_project(project_id)
-        resolved_client_capture_id = _normalize_client_capture_id(client_capture_id)
-        if resolved_client_capture_id is not None:
-            existing = self._find_client_capture_note(
-                project_id,
-                resolved_client_capture_id,
-            )
-            if existing is not None:
-                if raw_asset is not None and owns_raw_asset:
-                    self._delete_raw_asset(raw_asset)
-                return existing
+        return self.upload_note_raw_result(
+            project_id,
+            content,
+            filename=filename,
+            content_type=content_type,
+            raw_asset=raw_asset,
+            owns_raw_asset=owns_raw_asset,
+            transcribed_text=transcribed_text,
+            targets=targets,
+            metadata=metadata,
+            client_capture_id=client_capture_id,
+            status=status,
+            actor=actor,
+        ).entity
+
+    def upload_note_raw_result(
+        self,
+        project_id: UUID,
+        content: bytes | None = None,
+        *,
+        filename: str | None = None,
+        content_type: str | None = None,
+        raw_asset: NoteRawAsset | None = None,
+        owns_raw_asset: bool = False,
+        transcribed_text: str | None = None,
+        targets: Iterable[EntityRef] | None = None,
+        metadata: dict[str, NoteMetadataScalar] | None = None,
+        client_capture_id: str | None = None,
+        status: NoteStatus = NoteStatus.STAGED,
+        actor: AuthContext | None = None,
+    ) -> IdempotentCreateResult[Note]:
         asset = raw_asset
         created_asset = False
-        if asset is None:
-            if content is None:
-                raise ValidationError("content must not be empty.")
-            asset = self.raw_storage.store(
-                content,
-                filename=(filename or "").strip(),
-                content_type=(content_type or "").strip(),
-            )
-            created_asset = True
         try:
+            if self.raw_storage is None:
+                raise ValidationError("Raw storage backend is not configured.")
+            self.authorization.require_contributor(project_id, actor=actor)
+            self.projects.get_project(project_id)
+            resolved_client_capture_id = _normalize_client_capture_id(client_capture_id)
+            if asset is None:
+                if content is None:
+                    raise ValidationError("content must not be empty.")
+                asset = self.raw_storage.store(
+                    content,
+                    filename=(filename or "").strip(),
+                    content_type=(content_type or "").strip(),
+                )
+                created_asset = True
             resolved_transcribed_text = transcribed_text.strip() if transcribed_text else None
-            note = self.create_note(
+            result = self.create_note_result(
                 project_id=project_id,
                 raw_content=None,
                 raw_asset=asset,
@@ -237,9 +366,11 @@ class NoteService(BaseService):
             if asset is not None and (created_asset or owns_raw_asset):
                 self._delete_raw_asset(asset)
             raise
-        if asset is not None and (created_asset or owns_raw_asset):
+        if result.reused and asset is not None and (created_asset or owns_raw_asset):
+            self._delete_raw_asset(asset)
+        if result.created and asset is not None and (created_asset or owns_raw_asset):
             self.run_after_rollback(lambda asset=asset: self._delete_raw_asset(asset))
-        return note
+        return result
 
     def find_note_by_client_capture_id(
         self,
@@ -269,6 +400,61 @@ class NoteService(BaseService):
             ),
         )
         return notes[0] if notes else None
+
+    @staticmethod
+    def _ensure_matching_capture_note(
+        existing: Note,
+        *,
+        raw_content: str,
+        raw_asset: NoteRawAsset | None,
+        transcribed_text: str | None,
+        targets: Iterable[EntityRef],
+        metadata: dict[str, str],
+        status: NoteStatus,
+        origin: EntityOrigin,
+        change_set_id: UUID | None,
+        origin_provider: str | None,
+        origin_model: str | None,
+        origin_prompt_version: str | None,
+        client_capture_id: str,
+        cause: Exception | None = None,
+    ) -> None:
+        supplied = {
+            "raw_content": raw_content,
+            "raw_asset": _canonical_raw_asset(raw_asset),
+            "transcribed_text": transcribed_text,
+            "targets": _canonical_targets(targets),
+            "metadata": _canonical_capture_metadata(metadata),
+            "status": status,
+            "origin": origin,
+            "change_set_id": change_set_id,
+            "origin_provider": origin_provider,
+            "origin_model": origin_model,
+            "origin_prompt_version": origin_prompt_version,
+        }
+        stored = {
+            "raw_content": existing.raw_content,
+            "raw_asset": _canonical_raw_asset(existing.raw_asset),
+            "transcribed_text": existing.transcribed_text,
+            "targets": _canonical_targets(existing.targets),
+            "metadata": _canonical_capture_metadata(existing.metadata),
+            "status": existing.status,
+            "origin": existing.origin,
+            "change_set_id": existing.change_set_id,
+            "origin_provider": existing.origin_provider,
+            "origin_model": existing.origin_model,
+            "origin_prompt_version": existing.origin_prompt_version,
+        }
+        conflicts = [field for field, value in supplied.items() if stored[field] != value]
+        if conflicts:
+            error = ConflictError(
+                "Note client_capture_id "
+                f"{client_capture_id!r} was already used with different "
+                f"field(s): {', '.join(conflicts)}."
+            )
+            if cause is not None:
+                raise error from cause
+            raise error
 
     def transcribe_voice_note(
         self,
@@ -502,5 +688,3 @@ def _transcript_text(transcript: Any) -> str:
         if isinstance(text, str):
             return text.strip()
     return ""
-
-

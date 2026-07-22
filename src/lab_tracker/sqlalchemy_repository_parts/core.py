@@ -78,6 +78,7 @@ class SQLAlchemyProjectRepository(SQLAlchemyModelRepository[Project, ProjectMode
         group_id: UUID | None = None,
         project_ids: set[UUID] | None = None,
         status: str | None = None,
+        created_by: str | None = None,
         client_capture_id: str | None = None,
         limit: int | None = None,
         offset: int = 0,
@@ -97,6 +98,9 @@ class SQLAlchemyProjectRepository(SQLAlchemyModelRepository[Project, ProjectMode
         if status is not None:
             stmt = stmt.where(ProjectModel.status == status)
             count_stmt = count_stmt.where(ProjectModel.status == status)
+        if created_by is not None:
+            stmt = stmt.where(ProjectModel.created_by == created_by)
+            count_stmt = count_stmt.where(ProjectModel.created_by == created_by)
         if client_capture_id is not None:
             stmt = stmt.where(ProjectModel.client_capture_id == client_capture_id)
             count_stmt = count_stmt.where(ProjectModel.client_capture_id == client_capture_id)
