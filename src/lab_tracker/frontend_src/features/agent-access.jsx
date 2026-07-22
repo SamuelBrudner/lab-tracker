@@ -37,9 +37,10 @@ const ACCESS_LEVELS = [
   {
     value: "scheduler",
     label: "Scheduler trigger (admin)",
-    description: "Read-only plus the daily-review run-due trigger.",
+    description: "Only the daily-review run-due trigger — no reads, no other writes.",
     role: "admin",
     readOnly: true,
+    scope: "batch_run_due",
   },
 ];
 
@@ -190,6 +191,7 @@ function AgentAccessPage({ token, user, authEnabled, navigate, setBusy, setFlash
           label: trimmedLabel,
           read_only: level.readOnly,
           role: level.role,
+          scope: level.scope || "all",
         },
         method: "POST",
         token,

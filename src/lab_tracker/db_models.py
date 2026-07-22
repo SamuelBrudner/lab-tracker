@@ -1296,6 +1296,9 @@ class PersonalAccessTokenModel(Base):
     token_hash: Mapped[str] = mapped_column(String(64), nullable=False)
     role: Mapped[str] = mapped_column(String(20), nullable=False)
     read_only: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    scope: Mapped[str] = mapped_column(
+        String(40), nullable=False, default="all", server_default="all"
+    )
     expires_at: Mapped[datetime] = mapped_column(UtcDateTime, nullable=False)
     created_at: Mapped[datetime] = mapped_column(UtcDateTime, default=_utc_now)
     last_used_at: Mapped[datetime | None] = mapped_column(UtcDateTime)

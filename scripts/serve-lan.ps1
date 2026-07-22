@@ -64,7 +64,11 @@ Write-Host "Repo: $repoRoot"
 Write-Host "Python: $Python"
 Write-Host "Bind: 0.0.0.0:$Port"
 if ($env:LAB_TRACKER_DATABASE_URL) {
-    Write-Host "Database: $($env:LAB_TRACKER_DATABASE_URL)"
+    # Redact any embedded password before printing so a credential-bearing
+    # DATABASE_URL never leaks to the console/logs.
+    $schedScript = Join-Path $PSScriptRoot "scheduler_install.py"
+    $redactedDbUrl = (& $Python $schedScript redact-url $env:LAB_TRACKER_DATABASE_URL | Out-String).Trim()
+    Write-Host "Database: $redactedDbUrl"
 } else {
     Write-Host "Database: repo/default settings"
     Write-Host "Tip: use -UsePostgres for the recommended multi-client runtime."

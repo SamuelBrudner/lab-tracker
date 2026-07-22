@@ -37,6 +37,42 @@ function renderPage(props = {}) {
 }
 
 describe("AgentAccessPage", () => {
+  it("mints a run-due-scoped token for the scheduler-trigger level", async () => {
+    let mintBody = null;
+    installFetchMock([
+      {
+        match: "/auth/tokens",
+        response: [
+          apiResponse([], 200, { limit: 1, offset: 0, total: 0 }),
+          apiResponse([issuedTokenPayload()], 200, { limit: 1, offset: 0, total: 1 }),
+        ],
+      },
+      {
+        match: "/auth/tokens",
+        method: "POST",
+        response: (request) => {
+          mintBody = JSON.parse(request.init.body);
+          return apiResponse(
+            issuedTokenPayload({ label: mintBody.label, secret: "lpat_test-secret" }),
+            201
+          );
+        },
+      },
+    ]);
+
+    renderPage({ setFlash: vi.fn() });
+
+    await waitFor(() => expect(screen.getByText("No agent tokens yet.")).toBeInTheDocument());
+
+    fireEvent.change(screen.getByLabelText("Label"), { target: { value: "Cron" } });
+    fireEvent.change(screen.getByLabelText("Access"), { target: { value: "scheduler" } });
+    fireEvent.click(screen.getByRole("button", { name: "Create agent token" }));
+
+    await waitFor(() => expect(mintBody).not.toBeNull());
+    expect(mintBody.role).toBe("admin");
+    expect(mintBody.scope).toBe("batch_run_due");
+  });
+
   it("mints a token and shows one-time setup commands", async () => {
     const setFlash = vi.fn();
     let mintBody = null;
@@ -79,6 +115,7 @@ describe("AgentAccessPage", () => {
     expect(mintBody.label).toBe("Laptop agent");
     expect(mintBody.role).toBe("viewer");
     expect(mintBody.read_only).toBe(true);
+    expect(mintBody.scope).toBe("all");
     const deltaDays = (new Date(mintBody.expires_at).getTime() - Date.now()) / 86400000;
     expect(deltaDays).toBeGreaterThan(29);
     expect(deltaDays).toBeLessThanOrEqual(30);

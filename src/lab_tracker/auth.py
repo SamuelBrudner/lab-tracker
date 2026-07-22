@@ -584,6 +584,14 @@ DEVICE_TOKEN_PREFIX = "ldev_"
 ENROLLMENT_OFFER_PREFIX = "lpair_"
 INVITATION_TOKEN_PREFIX = "linv_"
 LPAT_TOKEN_PREFIX = "lpat_"
+# Personal-access-token scopes. "all" preserves the role-based service policy;
+# "batch_run_due" narrows a token to POST /batches/run-due only (nothing else,
+# not even reads), so a leaked scheduler token cannot read other data or make
+# arbitrary writes. It can still trigger the (human-gated) drafting run that
+# endpoint performs — that is the token's sole purpose.
+PAT_SCOPE_ALL = "all"
+PAT_SCOPE_BATCH_RUN_DUE = "batch_run_due"
+PAT_SCOPES = frozenset({PAT_SCOPE_ALL, PAT_SCOPE_BATCH_RUN_DUE})
 DEVICE_LAST_USED_UPDATE_INTERVAL = timedelta(minutes=5)
 PERSONAL_ACCESS_TOKEN_LAST_USED_UPDATE_INTERVAL = timedelta(minutes=5)
 PERSONAL_ACCESS_TOKEN_MAX_TTL = timedelta(days=90)
@@ -626,9 +634,17 @@ def service_principal_can_access(
     *,
     read_only: bool,
     role: Role,
+    scope: str = PAT_SCOPE_ALL,
 ) -> bool:
     """Coarse-grained policy for lpat_ service principals."""
     method = method.upper()
+    if scope == PAT_SCOPE_BATCH_RUN_DUE:
+        # A batch-runner token may ONLY trigger the due-batch run — no reads, no
+        # other writes, no /auth — so a leaked scheduler credential cannot read
+        # other data or make arbitrary writes (it can still kick off the
+        # human-gated drafting run, which is its purpose). Still gated on the
+        # admin role that running the daily review requires.
+        return method == "POST" and path == "/batches/run-due" and role is Role.ADMIN
     if path.startswith("/auth"):
         return False
     if method in {"GET", "HEAD", "OPTIONS"}:
@@ -682,6 +698,7 @@ class PersonalAccessToken:
     label: str
     role: Role
     read_only: bool
+    scope: str
     expires_at: datetime
     created_at: datetime
     last_used_at: datetime | None
@@ -709,6 +726,7 @@ class PersonalAccessTokenPrincipal:
     label: str
     role: Role
     read_only: bool
+    scope: str = PAT_SCOPE_ALL
 
 
 def _hash_token(token: str) -> str:
@@ -737,6 +755,7 @@ def _personal_access_token_from_model(model: PersonalAccessTokenModel) -> Person
         label=model.label,
         role=Role(model.role),
         read_only=bool(model.read_only),
+        scope=model.scope,
         expires_at=model.expires_at,
         created_at=model.created_at,
         last_used_at=model.last_used_at,
@@ -917,10 +936,13 @@ class PersonalAccessTokenService:
         label: str,
         role: Role,
         read_only: bool = True,
+        scope: str = PAT_SCOPE_ALL,
         expires_at: datetime,
     ) -> IssuedPersonalAccessToken:
         if not label or not label.strip():
             raise ValidationError("Token label must not be empty.")
+        if scope not in PAT_SCOPES:
+            raise ValidationError(f"Unknown token scope: {scope!r}.")
         now = utc_now()
         expires_at = _as_utc(expires_at)
         if expires_at <= now:
@@ -936,6 +958,7 @@ class PersonalAccessTokenService:
             token_hash=_hash_token(secret),
             role=capped_role.value,
             read_only=bool(read_only),
+            scope=scope,
             expires_at=expires_at,
             created_at=now,
         )
@@ -998,6 +1021,7 @@ class PersonalAccessTokenService:
                 label=row.label,
                 role=Role(row.role),
                 read_only=bool(row.read_only),
+                scope=row.scope,
             )
 
 

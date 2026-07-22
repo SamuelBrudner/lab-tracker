@@ -45,6 +45,7 @@ def build_personal_access_tokens_router(
             label=payload.label,
             role=payload.role,
             read_only=payload.read_only,
+            scope=payload.scope,
             expires_at=payload.expires_at,
         )
         return Envelope(data=_issued_token_read(issued.token, secret=issued.secret))
@@ -83,6 +84,7 @@ def _token_read(token: PersonalAccessToken) -> PersonalAccessTokenRead:
         label=token.label,
         role=token.role,
         read_only=token.read_only,
+        scope=token.scope,
         expires_at=token.expires_at,
         created_at=token.created_at,
         last_used_at=token.last_used_at,

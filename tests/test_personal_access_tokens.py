@@ -12,6 +12,8 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from lab_tracker.auth import (
     LPAT_TOKEN_PREFIX,
+    PAT_SCOPE_ALL,
+    PAT_SCOPE_BATCH_RUN_DUE,
     PERSONAL_ACCESS_TOKEN_MAX_TTL,
     AuthService,
     PersonalAccessTokenService,
@@ -205,6 +207,66 @@ def test_service_principal_policy_is_read_only_by_default():
     assert service_principal_can_access(
         "POST", "/projects", read_only=False, role=Role.EDITOR
     )
+
+
+def test_batch_run_due_scope_allows_only_the_run_due_post():
+    # The scheduler scope must not permit anything except triggering the run —
+    # not reads, not other writes, not /auth — regardless of read_only.
+    assert service_principal_can_access(
+        "POST", "/batches/run-due", read_only=True, role=Role.ADMIN, scope=PAT_SCOPE_BATCH_RUN_DUE
+    )
+    assert not service_principal_can_access(
+        "GET", "/projects", read_only=True, role=Role.ADMIN, scope=PAT_SCOPE_BATCH_RUN_DUE
+    )
+    assert not service_principal_can_access(
+        "GET", "/batches/runs", read_only=True, role=Role.ADMIN, scope=PAT_SCOPE_BATCH_RUN_DUE
+    )
+    assert not service_principal_can_access(
+        "POST", "/batches/run-now", read_only=False, role=Role.ADMIN, scope=PAT_SCOPE_BATCH_RUN_DUE
+    )
+    assert not service_principal_can_access(
+        "GET", "/auth/me", read_only=True, role=Role.ADMIN, scope=PAT_SCOPE_BATCH_RUN_DUE
+    )
+    # Still gated on the admin role the daily review requires.
+    assert not service_principal_can_access(
+        "POST", "/batches/run-due", read_only=True, role=Role.EDITOR, scope=PAT_SCOPE_BATCH_RUN_DUE
+    )
+
+
+def test_issue_token_records_scope_and_defaults_to_all(session_factory):
+    auth_service, pat_service = _services(session_factory)
+    admin = auth_service.register_user("admin", "secret", Role.ADMIN)
+
+    default_token = pat_service.issue_token(
+        admin, label="Default", role=Role.ADMIN, expires_at=utc_now() + timedelta(days=7)
+    )
+    assert default_token.token.scope == PAT_SCOPE_ALL
+
+    scoped = pat_service.issue_token(
+        admin,
+        label="Scheduler",
+        role=Role.ADMIN,
+        scope=PAT_SCOPE_BATCH_RUN_DUE,
+        expires_at=utc_now() + timedelta(days=7),
+    )
+    assert scoped.token.scope == PAT_SCOPE_BATCH_RUN_DUE
+
+    principal = pat_service.verify_token(scoped.secret)
+    assert principal is not None
+    assert principal.scope == PAT_SCOPE_BATCH_RUN_DUE
+
+
+def test_issue_token_rejects_an_unknown_scope(session_factory):
+    auth_service, pat_service = _services(session_factory)
+    admin = auth_service.register_user("admin", "secret", Role.ADMIN)
+    with pytest.raises(ValidationError):
+        pat_service.issue_token(
+            admin,
+            label="Bad scope",
+            role=Role.ADMIN,
+            scope="everything",
+            expires_at=utc_now() + timedelta(days=7),
+        )
 
 
 def uuid_from(value: object) -> UUID:

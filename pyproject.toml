@@ -71,6 +71,18 @@ addopts = ["--cov=lab_tracker", "-n", "auto"]
 markers = [
   "postgres: requires LAB_TRACKER_POSTGRES_TEST_DATABASE_URL and a reachable Postgres server",
 ]
+filterwarnings = [
+  # Fail on an unclosed database connection: SQLite emits a ResourceWarning when
+  # a connection is finalized without being closed, so a test that leaks an
+  # engine/session (the class of leak the test fixtures were fixed for) turns
+  # into an error instead of quiet warning noise. pytest surfaces it through its
+  # unraisable-exception hook at the owning test's teardown.
+  "error::ResourceWarning",
+  # FastAPI's TestClient re-exports starlette.testclient, which warns that using
+  # httpx (rather than httpx2) is deprecated — a third-party transition Lab
+  # Tracker does not drive. Scoped to this exact message only.
+  "ignore:Using .httpx. with .starlette.testclient. is deprecated",
+]
 
 [tool.ruff]
 line-length = 100
