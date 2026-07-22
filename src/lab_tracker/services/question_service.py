@@ -386,8 +386,52 @@ class QuestionService(BaseService):
         origin_model: str | None = None,
         origin_prompt_version: str | None = None,
     ) -> Question:
-        question = self.get_question(question_id)
-        self.authorization.require_contributor(question.project_id, actor=actor)
+        with self.application_transaction():
+            located_question = self.get_question(question_id)
+            project_id = located_question.project_id
+            self.authorization.require_contributor(project_id, actor=actor)
+            self.repository.lock_project_question_dag(project_id)
+
+            # Question persistence writes a complete snapshot, including
+            # parent and supersession fields, even when a command only changes
+            # text or status. Every update must therefore serialize with DAG
+            # mutations. Never use locator state after the wait: the repository
+            # has refreshed its identity map so this read observes the winning
+            # transaction before validation or mutation.
+            question = self.get_question(question_id)
+            return self._update_question_in_transaction(
+                question,
+                text=text,
+                question_type=question_type,
+                hypothesis=hypothesis,
+                status=status,
+                terminal_reason=terminal_reason,
+                parent_question_ids=parent_question_ids,
+                actor=actor,
+                origin=origin,
+                change_set_id=change_set_id,
+                origin_provider=origin_provider,
+                origin_model=origin_model,
+                origin_prompt_version=origin_prompt_version,
+            )
+
+    def _update_question_in_transaction(
+        self,
+        question: Question,
+        *,
+        text: str | None,
+        question_type: QuestionType | None,
+        hypothesis: str | None,
+        status: QuestionStatus | None,
+        terminal_reason: str | None,
+        parent_question_ids: Iterable[UUID] | None,
+        actor: AuthContext | None,
+        origin: EntityOrigin | None,
+        change_set_id: UUID | None,
+        origin_provider: str | None,
+        origin_model: str | None,
+        origin_prompt_version: str | None,
+    ) -> Question:
         if text is not None:
             ensure_non_empty(text, "text")
             question.text = text.strip()
@@ -474,8 +518,42 @@ class QuestionService(BaseService):
         note_ids_to_retarget: Iterable[UUID] | None = None,
         actor: AuthContext | None = None,
     ) -> QuestionRefactorResult:
-        source = self.get_question(question_id)
-        self.authorization.require_contributor(source.project_id, actor=actor)
+        with self.application_transaction():
+            located_source = self.get_question(question_id)
+            project_id = located_source.project_id
+            self.authorization.require_contributor(project_id, actor=actor)
+            self.repository.lock_project_question_dag(project_id)
+
+            # Re-read after waiting for the project lock: another command may
+            # have superseded the source or changed the parent graph.
+            source = self.get_question(question_id)
+            return self._refactor_question_under_dag_lock(
+                source,
+                replacement_text=replacement_text,
+                replacement_question_type=replacement_question_type,
+                replacement_status=replacement_status,
+                reason=reason,
+                replacement_hypothesis=replacement_hypothesis,
+                replacement_parent_question_ids=replacement_parent_question_ids,
+                child_question_ids_to_reparent=child_question_ids_to_reparent,
+                note_ids_to_retarget=note_ids_to_retarget,
+                actor=actor,
+            )
+
+    def _refactor_question_under_dag_lock(
+        self,
+        source: Question,
+        *,
+        replacement_text: str,
+        replacement_question_type: QuestionType,
+        replacement_status: QuestionStatus,
+        reason: str,
+        replacement_hypothesis: str | None,
+        replacement_parent_question_ids: Iterable[UUID] | None,
+        child_question_ids_to_reparent: Iterable[UUID] | None,
+        note_ids_to_retarget: Iterable[UUID] | None,
+        actor: AuthContext | None,
+    ) -> QuestionRefactorResult:
         if source.status not in {QuestionStatus.STAGED, QuestionStatus.ACTIVE}:
             raise ValidationError("Only staged or active questions can be refactored.")
         if source.superseded_by_question_id is not None:

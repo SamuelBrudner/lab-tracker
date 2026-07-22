@@ -5,9 +5,10 @@ from __future__ import annotations
 from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import datetime
+from hashlib import blake2b
 from uuid import UUID
 
-from sqlalchemy import or_, select
+from sqlalchemy import or_, select, text
 from sqlalchemy.orm import Session as OrmSession
 
 from lab_tracker.db_models import (
@@ -95,6 +96,24 @@ from .usage import (
     summarize_usage_events,
 )
 from .versions import SQLAlchemyEntityVersionRepository
+
+_QUESTION_DAG_LOCK_DOMAIN = b"lab-tracker:question-dag:v1\0"
+
+
+def _project_question_dag_lock_key(project_id: UUID) -> int:
+    """Return a stable, domain-separated signed bigint lock key.
+
+    PostgreSQL advisory locks accept a signed 64-bit integer. Hashing all 128
+    UUID bits avoids coupling lock identity to a collision-prone UUID prefix,
+    while the domain prefix keeps this lock namespace separate from future
+    advisory-lock uses.
+    """
+
+    digest = blake2b(
+        _QUESTION_DAG_LOCK_DOMAIN + project_id.bytes,
+        digest_size=8,
+    ).digest()
+    return int.from_bytes(digest, byteorder="big", signed=True)
 
 
 class SQLAlchemyLabTrackerRepository(LabTrackerRepository):
@@ -187,6 +206,23 @@ class SQLAlchemyLabTrackerRepository(LabTrackerRepository):
         )
         by_id = {note.note_id: note for note in self.notes.notes_from_rows(rows)}
         return [by_id[note_id] for note_id in note_ids if note_id in by_id]
+
+    def lock_project_question_dag(self, project_id: UUID) -> None:
+        """Hold the project's question-DAG lock until transaction completion.
+
+        SQLite remains a supported single-process development backend, where
+        this deliberately has no effect. PostgreSQL waits transactionally,
+        then expires ORM state so reads after a wait observe the winning
+        transaction before validating a proposed graph mutation.
+        """
+
+        if self._session.get_bind().dialect.name != "postgresql":
+            return
+        self._session.execute(
+            text("SELECT pg_advisory_xact_lock(:lock_key)"),
+            {"lock_key": _project_question_dag_lock_key(project_id)},
+        )
+        self._session.expire_all()
 
     def list_dataset_files(self, dataset_id: UUID) -> list[DatasetFile]:
         return self.datasets.list_file_entities(dataset_id)
