@@ -306,7 +306,11 @@ function App() {
         // Pairing happens before the phone has a token; bypass the login form
         // and the workspace shell, render the enroll page directly.
         <section className="grid">
-          <EnrollPage replace={replace} setFlash={setFlash} />
+          <EnrollPage
+            persistTokenForReload={auth.persistTokenForReload}
+            replace={replace}
+            setFlash={setFlash}
+          />
         </section>
       ) : auth.authEnabled && !auth.token ? (
         <section className="grid">

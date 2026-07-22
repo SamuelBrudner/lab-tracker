@@ -1,9 +1,5 @@
 import * as React from "react";
 
-import {
-  TOKEN_EXPIRES_AT_STORAGE_KEY,
-  TOKEN_STORAGE_KEY,
-} from "../shared/constants.js";
 import { auth as authGateway } from "../shared/gateways/index.js";
 
 const { useEffect, useRef, useState } = React;
@@ -34,7 +30,13 @@ function suggestedLabel() {
   return "Phone";
 }
 
-function EnrollPage({ replace, setFlash }) {
+function reloadAt(path) {
+  if (typeof window !== "undefined") {
+    window.location.replace(path);
+  }
+}
+
+function EnrollPage({ persistTokenForReload, reload = reloadAt, replace, setFlash }) {
   const [offer] = useState(() => readQueryParam("offer"));
   const [labelOverride] = useState(() => readQueryParam("label"));
   const [status, setStatus] = useState("pairing"); // pairing | paired | error
@@ -56,29 +58,26 @@ function EnrollPage({ replace, setFlash }) {
     authGateway
       .consumeDeviceEnrollment({ offer_token: offer, label })
       .then((payload) => {
-        try {
-          localStorage.setItem(TOKEN_STORAGE_KEY, payload.secret);
-          localStorage.removeItem(TOKEN_EXPIRES_AT_STORAGE_KEY);
-        } catch {
-          // localStorage may be blocked; the user will see the failure on
-          // the next request rather than here, and can pair again.
+        if (!persistTokenForReload(payload.secret)) {
+          throw new Error(
+            "Pairing succeeded, but this browser couldn’t save the new credential. " +
+              "Enable browser storage and generate a new pairing code."
+          );
         }
         setPairedLabel(payload.label || label);
         setStatus("paired");
         setFlash(`Device paired as "${payload.label || label}".`);
         const captureInstallPath = "/app/capture?install=1";
         replace(captureInstallPath);
-        if (typeof window !== "undefined") {
-          // Force a reload so React picks up the new token on browsers that
-          // cache the initial token snapshot in module-level closures.
-          window.location.replace(captureInstallPath);
-        }
+        // Force a reload so React picks up the new token on browsers that cache
+        // the initial token snapshot in module-level closures.
+        reload(captureInstallPath);
       })
       .catch((err) => {
         setStatus("error");
         setError(err.message || "Pairing failed. Generate a new offer on your desktop.");
       });
-  }, [offer, labelOverride, replace, setFlash]);
+  }, [offer, labelOverride, persistTokenForReload, reload, replace, setFlash]);
 
   return (
     <article className="card span-12 enroll-card">

@@ -12,15 +12,31 @@
 // tab still has the last value it wrote. Failed writes become authoritative
 // overrides so a stale backing value cannot replace a newer live token, and a
 // tombstone prevents a failed logout removal from resurrecting the old token.
+import {
+  TOKEN_EXPIRES_AT_STORAGE_KEY,
+  TOKEN_STORAGE_KEY,
+} from "./constants.js";
 
 const DEFAULT_BACKING = Symbol("default-auth-backing");
 const TOMBSTONE = Symbol("auth-storage-tombstone");
 
+/**
+ * @typedef {{
+ *   getItem: (key: string) => string | null | undefined,
+ *   setItem: (key: string, value: string) => unknown,
+ *   removeItem: (key: string) => unknown,
+ * }} StorageLike
+ */
+
+/** @param {StorageLike | null | typeof DEFAULT_BACKING} [backing] */
 function createAuthStorage(backing = DEFAULT_BACKING) {
+  /** @type {Map<string, string | typeof TOMBSTONE>} */
   const shadow = new Map();
+  /** @type {Set<string>} */
   const authoritative = new Set();
   let degraded = false;
-  let resolvedBacking = backing;
+  /** @type {StorageLike | null} */
+  let resolvedBacking = null;
 
   // Merely reading globalThis.localStorage can throw a SecurityError in locked
   // down browser contexts, so default-backing discovery belongs inside the
@@ -32,19 +48,24 @@ function createAuthStorage(backing = DEFAULT_BACKING) {
       resolvedBacking = null;
       degraded = true;
     }
+  } else {
+    resolvedBacking = backing;
   }
   if (!resolvedBacking) {
     degraded = true;
   }
 
+  /** @param {string} key */
   function shadowValue(key) {
     if (!shadow.has(key) || shadow.get(key) === TOMBSTONE) {
       return "";
     }
-    return shadow.get(key);
+    const value = shadow.get(key);
+    return typeof value === "string" ? value : "";
   }
 
   return {
+    /** @param {string} key */
     getItem(key) {
       // A failed write/remove means the backing store is known to be stale for
       // this key. Do not let a later successful get resurrect that stale value.
@@ -64,6 +85,7 @@ function createAuthStorage(backing = DEFAULT_BACKING) {
       return shadowValue(key);
     },
 
+    /** @param {string} key @param {unknown} value */
     setItem(key, value) {
       const normalized = String(value);
       shadow.set(key, normalized);
@@ -71,15 +93,17 @@ function createAuthStorage(backing = DEFAULT_BACKING) {
         try {
           resolvedBacking.setItem(key, normalized);
           authoritative.delete(key);
-          return;
+          return true;
         } catch {
           degraded = true;
         }
       }
       authoritative.add(key);
       degraded = true;
+      return false;
     },
 
+    /** @param {string} key */
     removeItem(key) {
       shadow.set(key, TOMBSTONE);
       authoritative.add(key);
@@ -87,7 +111,7 @@ function createAuthStorage(backing = DEFAULT_BACKING) {
         try {
           resolvedBacking.removeItem(key);
           authoritative.delete(key);
-          return;
+          return true;
         } catch {
           degraded = true;
         }
@@ -98,11 +122,12 @@ function createAuthStorage(backing = DEFAULT_BACKING) {
         try {
           resolvedBacking.setItem(key, "");
           authoritative.delete(key);
-          return;
+          return true;
         } catch {
           degraded = true;
         }
       }
+      return false;
     },
 
     isDegraded() {
@@ -111,4 +136,21 @@ function createAuthStorage(backing = DEFAULT_BACKING) {
   };
 }
 
-export { createAuthStorage };
+/**
+ * Persist a complete reload-safe session through the resilient adapter. Both
+ * keys are attempted so the adapter's shadow/tombstone state remains coherent,
+ * but success means every required backing-store operation succeeded.
+ *
+ * @param {ReturnType<typeof createAuthStorage>} storage
+ * @param {string} token
+ * @param {string} [expiresAt]
+ */
+function persistAuthSession(storage, token, expiresAt = "") {
+  const tokenPersisted = storage.setItem(TOKEN_STORAGE_KEY, token);
+  const expiryPersisted = expiresAt
+    ? storage.setItem(TOKEN_EXPIRES_AT_STORAGE_KEY, expiresAt)
+    : storage.removeItem(TOKEN_EXPIRES_AT_STORAGE_KEY);
+  return tokenPersisted && expiryPersisted;
+}
+
+export { createAuthStorage, persistAuthSession };

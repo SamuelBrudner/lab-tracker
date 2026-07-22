@@ -2,7 +2,7 @@ import * as React from "react";
 
 import { AUTH_REJECTED_EVENT } from "../shared/api.js";
 import { auth as authGateway } from "../shared/gateways/index.js";
-import { createAuthStorage } from "../shared/auth-storage.js";
+import { createAuthStorage, persistAuthSession } from "../shared/auth-storage.js";
 import {
   TOKEN_EXPIRES_AT_STORAGE_KEY,
   TOKEN_STORAGE_KEY,
@@ -88,17 +88,23 @@ function useAuthSession({ replace, setBusy, setFlash, storage }) {
     setUser(payload?.user || null);
   }, []);
 
+  const persistTokenForReload = useCallback(
+    (nextToken, nextExpiresAt = "") => {
+      const persisted = persistAuthSession(authStorage, nextToken, nextExpiresAt);
+      if (authStorage.isDegraded()) {
+        setPersistenceDegraded(true);
+      }
+      return persisted;
+    },
+    [authStorage]
+  );
+
   useEffect(() => {
     // Route persistence through the adapter: these writes/removes can no longer
     // throw into the error boundary. The in-memory state above stays the source
     // of truth, so a degraded write never signs the user out.
     if (token) {
-      authStorage.setItem(TOKEN_STORAGE_KEY, token);
-      if (tokenExpiresAt) {
-        authStorage.setItem(TOKEN_EXPIRES_AT_STORAGE_KEY, tokenExpiresAt);
-      } else {
-        authStorage.removeItem(TOKEN_EXPIRES_AT_STORAGE_KEY);
-      }
+      persistTokenForReload(token, tokenExpiresAt);
     } else {
       authStorage.removeItem(TOKEN_STORAGE_KEY);
       authStorage.removeItem(TOKEN_EXPIRES_AT_STORAGE_KEY);
@@ -106,7 +112,7 @@ function useAuthSession({ replace, setBusy, setFlash, storage }) {
     if (authStorage.isDegraded()) {
       setPersistenceDegraded(true);
     }
-  }, [authStorage, token, tokenExpiresAt]);
+  }, [authStorage, persistTokenForReload, token, tokenExpiresAt]);
 
   useEffect(() => {
     function handleAuthRejected(event) {
@@ -336,6 +342,7 @@ function useAuthSession({ replace, setBusy, setFlash, storage }) {
     handleAuthSubmit,
     handleLogout,
     persistenceDegraded,
+    persistTokenForReload,
     setAuthMode,
     setAuthBootstrapToken,
     setAuthPassword,

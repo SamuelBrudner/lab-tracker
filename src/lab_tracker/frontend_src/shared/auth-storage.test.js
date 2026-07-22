@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vitest";
 
-import { createAuthStorage } from "./auth-storage.js";
+import { createAuthStorage, persistAuthSession } from "./auth-storage.js";
+import {
+  TOKEN_EXPIRES_AT_STORAGE_KEY,
+  TOKEN_STORAGE_KEY,
+} from "./constants.js";
 
 function mapBackedStore() {
   const backing = new Map();
@@ -33,12 +37,12 @@ describe("createAuthStorage", () => {
     const { backing, store } = mapBackedStore();
     const storage = createAuthStorage(store);
 
-    storage.setItem("tok", "abc");
+    expect(storage.setItem("tok", "abc")).toBe(true);
     expect(backing.get("tok")).toBe("abc");
     expect(storage.getItem("tok")).toBe("abc");
     expect(storage.isDegraded()).toBe(false);
 
-    storage.removeItem("tok");
+    expect(storage.removeItem("tok")).toBe(true);
     expect(backing.has("tok")).toBe(false);
     expect(storage.getItem("tok")).toBe("");
   });
@@ -46,7 +50,7 @@ describe("createAuthStorage", () => {
   it("falls back to memory and marks degraded when a write throws", () => {
     const storage = createAuthStorage(throwingStore());
 
-    storage.setItem("tok", "abc"); // backing throws -> in-memory
+    expect(storage.setItem("tok", "abc")).toBe(false); // backing throws -> in-memory
     expect(storage.isDegraded()).toBe(true);
     expect(storage.getItem("tok")).toBe("abc"); // still readable in-memory
   });
@@ -152,5 +156,22 @@ describe("createAuthStorage", () => {
     } finally {
       Object.defineProperty(globalThis, "localStorage", descriptor);
     }
+  });
+
+  it("reports reload persistence failure without resurrecting a stale token", () => {
+    const backing = new Map([[TOKEN_STORAGE_KEY, "stale-token"]]);
+    const storage = createAuthStorage({
+      getItem: (key) => backing.get(key) ?? null,
+      setItem: () => {
+        throw new Error("QuotaExceededError");
+      },
+      removeItem: (key) => backing.delete(key),
+    });
+
+    expect(storage.getItem(TOKEN_STORAGE_KEY)).toBe("stale-token");
+    expect(persistAuthSession(storage, "new-device-token")).toBe(false);
+    expect(backing.get(TOKEN_STORAGE_KEY)).toBe("stale-token");
+    expect(backing.has(TOKEN_EXPIRES_AT_STORAGE_KEY)).toBe(false);
+    expect(storage.getItem(TOKEN_STORAGE_KEY)).toBe("new-device-token");
   });
 });
