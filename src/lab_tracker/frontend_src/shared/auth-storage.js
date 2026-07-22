@@ -7,53 +7,98 @@
 // otherwise valid in memory.
 //
 // This adapter wraps a backing store (localStorage by default) with symmetric
-// guarded get/set/remove and an in-memory fallback. If the backing store is
-// unavailable or throws, the value lives in memory for the tab's lifetime and
-// the adapter reports `isDegraded()` so the UI can warn that persistence is
-// degraded — without discarding the live session.
+// guarded get/set/remove and a per-key in-memory shadow. The shadow is retained
+// even after a successful backing write: if a later read starts throwing, the
+// tab still has the last value it wrote. Failed writes become authoritative
+// overrides so a stale backing value cannot replace a newer live token, and a
+// tombstone prevents a failed logout removal from resurrecting the old token.
 
-function createAuthStorage(backing = globalThis.localStorage) {
-  const fallback = new Map();
+const DEFAULT_BACKING = Symbol("default-auth-backing");
+const TOMBSTONE = Symbol("auth-storage-tombstone");
+
+function createAuthStorage(backing = DEFAULT_BACKING) {
+  const shadow = new Map();
+  const authoritative = new Set();
   let degraded = false;
+  let resolvedBacking = backing;
+
+  // Merely reading globalThis.localStorage can throw a SecurityError in locked
+  // down browser contexts, so default-backing discovery belongs inside the
+  // same failure boundary as the storage methods themselves.
+  if (backing === DEFAULT_BACKING) {
+    try {
+      resolvedBacking = globalThis.localStorage ?? null;
+    } catch {
+      resolvedBacking = null;
+      degraded = true;
+    }
+  }
+  if (!resolvedBacking) {
+    degraded = true;
+  }
+
+  function shadowValue(key) {
+    if (!shadow.has(key) || shadow.get(key) === TOMBSTONE) {
+      return "";
+    }
+    return shadow.get(key);
+  }
 
   return {
     getItem(key) {
-      if (backing) {
+      // A failed write/remove means the backing store is known to be stale for
+      // this key. Do not let a later successful get resurrect that stale value.
+      if (authoritative.has(key)) {
+        return shadowValue(key);
+      }
+      if (resolvedBacking) {
         try {
-          const value = backing.getItem(key);
-          if (value !== null && value !== undefined) {
-            return value;
-          }
+          const value = resolvedBacking.getItem(key);
+          shadow.set(key, value === null || value === undefined ? TOMBSTONE : value);
+          return value === null || value === undefined ? "" : value;
         } catch {
-          // Fall back to the in-memory copy below.
+          degraded = true;
+          // Fall back to the last observed/written value below.
         }
       }
-      return fallback.has(key) ? fallback.get(key) : "";
+      return shadowValue(key);
     },
 
     setItem(key, value) {
-      if (backing) {
+      const normalized = String(value);
+      shadow.set(key, normalized);
+      if (resolvedBacking) {
         try {
-          backing.setItem(key, value);
-          // Backing store is authoritative on success; drop any stale fallback.
-          fallback.delete(key);
+          resolvedBacking.setItem(key, normalized);
+          authoritative.delete(key);
           return;
         } catch {
-          // Fall through to the in-memory fallback below.
+          degraded = true;
         }
       }
-      fallback.set(key, value);
+      authoritative.add(key);
       degraded = true;
     },
 
     removeItem(key) {
-      // Always drop the in-memory copy first, so a caller asking to forget a
-      // token (logout) can never have it resurrected by a later getItem, even
-      // if the backing store rejects the removal.
-      fallback.delete(key);
-      if (backing) {
+      shadow.set(key, TOMBSTONE);
+      authoritative.add(key);
+      if (resolvedBacking) {
         try {
-          backing.removeItem(key);
+          resolvedBacking.removeItem(key);
+          authoritative.delete(key);
+          return;
+        } catch {
+          degraded = true;
+        }
+
+        // Some privacy/quota implementations reject removeItem while still
+        // permitting a small write. Persist an empty value as a best-effort
+        // logout backstop. The tombstone remains the in-tab source of truth.
+        try {
+          resolvedBacking.setItem(key, "");
+          authoritative.delete(key);
+          return;
         } catch {
           degraded = true;
         }

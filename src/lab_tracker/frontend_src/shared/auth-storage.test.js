@@ -51,6 +51,42 @@ describe("createAuthStorage", () => {
     expect(storage.getItem("tok")).toBe("abc"); // still readable in-memory
   });
 
+  it("keeps a failed write authoritative over a stale readable backing value", () => {
+    const backing = new Map([["tok", "old"]]);
+    const storage = createAuthStorage({
+      getItem: (key) => backing.get(key) ?? null,
+      setItem: () => {
+        throw new Error("QuotaExceededError");
+      },
+      removeItem: (key) => backing.delete(key),
+    });
+
+    expect(storage.getItem("tok")).toBe("old");
+    storage.setItem("tok", "new");
+    expect(storage.getItem("tok")).toBe("new");
+    expect(storage.isDegraded()).toBe(true);
+  });
+
+  it("uses its successful-write shadow when a later backing read fails", () => {
+    let readsThrow = false;
+    const backing = new Map();
+    const storage = createAuthStorage({
+      getItem: (key) => {
+        if (readsThrow) {
+          throw new Error("SecurityError");
+        }
+        return backing.get(key) ?? null;
+      },
+      setItem: (key, value) => backing.set(key, value),
+      removeItem: (key) => backing.delete(key),
+    });
+
+    storage.setItem("tok", "new");
+    readsThrow = true;
+    expect(storage.getItem("tok")).toBe("new");
+    expect(storage.isDegraded()).toBe(true);
+  });
+
   it("drops the in-memory copy on removeItem even when the backing throws (logout)", () => {
     const storage = createAuthStorage(throwingStore());
     storage.setItem("tok", "abc");
@@ -59,11 +95,62 @@ describe("createAuthStorage", () => {
     expect(storage.isDegraded()).toBe(true);
   });
 
+  it("persists an empty logout value when remove throws but set still works", () => {
+    const backing = new Map([["tok", "old"]]);
+    const storage = createAuthStorage({
+      getItem: (key) => backing.get(key) ?? null,
+      setItem: (key, value) => backing.set(key, value),
+      removeItem: () => {
+        throw new Error("SecurityError");
+      },
+    });
+
+    storage.removeItem("tok");
+    expect(backing.get("tok")).toBe("");
+    expect(storage.getItem("tok")).toBe("");
+    expect(storage.isDegraded()).toBe(true);
+  });
+
+  it("keeps a logout tombstone authoritative when remove and empty-write both fail", () => {
+    const storage = createAuthStorage({
+      getItem: () => "old",
+      setItem: () => {
+        throw new Error("QuotaExceededError");
+      },
+      removeItem: () => {
+        throw new Error("SecurityError");
+      },
+    });
+
+    storage.removeItem("tok");
+    expect(storage.getItem("tok")).toBe("");
+    expect(storage.isDegraded()).toBe(true);
+  });
+
   it("works with no backing store at all, using the in-memory fallback", () => {
     const storage = createAuthStorage(null);
+    expect(storage.isDegraded()).toBe(true);
     expect(storage.getItem("tok")).toBe("");
     storage.setItem("tok", "abc");
     expect(storage.getItem("tok")).toBe("abc");
     expect(storage.isDegraded()).toBe(true);
+  });
+
+  it("guards access to the default localStorage getter itself", () => {
+    const descriptor = Object.getOwnPropertyDescriptor(globalThis, "localStorage");
+    Object.defineProperty(globalThis, "localStorage", {
+      configurable: true,
+      get() {
+        throw new Error("SecurityError");
+      },
+    });
+    try {
+      const storage = createAuthStorage();
+      expect(storage.isDegraded()).toBe(true);
+      storage.setItem("tok", "in-memory");
+      expect(storage.getItem("tok")).toBe("in-memory");
+    } finally {
+      Object.defineProperty(globalThis, "localStorage", descriptor);
+    }
   });
 });
