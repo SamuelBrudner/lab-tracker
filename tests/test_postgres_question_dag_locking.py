@@ -215,7 +215,7 @@ def test_opposite_parent_updates_serialize_and_cannot_commit_a_cycle(
                 .where(QuestionModel.project_id == str(project_id))
             ).tuples()
         )
-    assert edges == [(str(question_a), str(question_b))]
+    assert edges == [(question_a, question_b)]
 
 
 def test_disjoint_projects_with_the_same_uuid_prefix_do_not_block(
