@@ -28,6 +28,16 @@ class ProjectsApiMixin:
             project_id_attr="project_id",
         )
 
+    def create_project_result(self, *args: Any, **kwargs: Any) -> Any:
+        return self._with_usage_event(
+            lambda: self.projects.create_project_result(*args, **kwargs),
+            verb=UsageEventVerb.CREATE,
+            resource_type=UsageEventResourceType.PROJECT,
+            actor=kwargs.get("actor"),
+            resource_id_attr="project_id",
+            project_id_attr="project_id",
+        )
+
     def get_project(self, *args: Any, **kwargs: Any) -> Any:
         return self.projects.get_project(*args, **kwargs)
 

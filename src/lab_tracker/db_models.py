@@ -87,8 +87,9 @@ class ProjectModel(Base):
     __tablename__ = "projects"
     __table_args__ = (
         UniqueConstraint(
+            "created_by",
             "client_capture_id",
-            name="uq_projects_client_capture",
+            name="uq_projects_creator_client_capture",
         ),
     )
 

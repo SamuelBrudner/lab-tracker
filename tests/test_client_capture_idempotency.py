@@ -28,15 +28,23 @@ def test_create_project_is_idempotent_by_client_capture_id(
     )
     project_id = first["project_id"]
 
-    # Re-issuing the same capture id returns the same project (idempotent),
-    # even with different other fields — one canonical entity, not a duplicate.
+    # Re-issuing the same capture id with identical intent returns the same project.
     repeat = _project(
         client,
         admin_auth_headers,
-        name="A Different Name",
+        name="Idempotent Project",
         client_capture_id="cap-project-1",
     )
     assert repeat["project_id"] == project_id
+
+    # Reusing the key with changed intent is an explicit conflict, never a
+    # silent discard of the new name.
+    conflict = client.post(
+        "/projects",
+        json={"name": "A Different Name", "client_capture_id": "cap-project-1"},
+        headers=admin_auth_headers,
+    )
+    assert conflict.status_code == 409, conflict.text
 
     # A different capture id creates a distinct project.
     other = _project(
@@ -76,13 +84,26 @@ def test_create_question_is_idempotent_by_client_capture_id(
         "/questions",
         json={
             "project_id": project_id,
+            "text": "Does the key dedupe?",
+            "question_type": "descriptive",
+            "client_capture_id": "cap-question-1",
+        },
+        headers=admin_auth_headers,
+    )
+    assert repeat.status_code == 200, repeat.text
+    assert repeat.json()["data"]["question_id"] == question_id
+
+    conflict = client.post(
+        "/questions",
+        json={
+            "project_id": project_id,
             "text": "A different question?",
             "question_type": "descriptive",
             "client_capture_id": "cap-question-1",
         },
         headers=admin_auth_headers,
     )
-    assert repeat.json()["data"]["question_id"] == question_id
+    assert conflict.status_code == 409, conflict.text
 
     other = client.post(
         "/questions",

@@ -1634,6 +1634,15 @@ def test_capture_upload_reuses_client_capture_id_on_retry(
                 "project_id": project_id,
                 "client_capture_id": client_capture_id,
             },
+            files={"file": ("first.txt", b"first-capture", "text/plain")},
+            headers=headers,
+        )
+        conflicting_retry = client.post(
+            endpoint,
+            data={
+                "project_id": project_id,
+                "client_capture_id": client_capture_id,
+            },
             files={"file": ("retry.txt", b"retry-capture", "text/plain")},
             headers=headers,
         )
@@ -1645,6 +1654,8 @@ def test_capture_upload_reuses_client_capture_id_on_retry(
         assert retry_payload["note_id"] == first_payload["note_id"]
         assert retry_payload["raw_asset"]["filename"] == "first.txt"
         assert retry_payload["client_capture_id"] == client_capture_id
+        assert conflicting_retry.status_code == 409, conflicting_retry.text
+        assert conflicting_retry.json()["error"]["code"] == "conflict"
 
         with client.app.state.db_session_factory() as session:
             rows = list(

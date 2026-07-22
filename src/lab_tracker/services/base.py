@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import TypeVar
+from typing import Generic, Literal, TypeVar
 from uuid import UUID, uuid4
 
 from lab_tracker.auth import AuthContext
@@ -22,6 +22,32 @@ from lab_tracker.repository import LabTrackerRepository
 from lab_tracker.request_context import LabTrackerRequestContext
 
 EntityT = TypeVar("EntityT")
+
+
+@dataclass(frozen=True)
+class IdempotentCreateResult(Generic[EntityT]):
+    """Typed outcome for a capture-key-aware create command.
+
+    Domain-facing ``create_*`` methods continue to return the entity directly;
+    HTTP adapters use this richer result to distinguish a new ``201`` from an
+    idempotent ``200`` replay without inferring from a second query.
+    """
+
+    action: Literal["created", "reused"]
+    entity: EntityT
+
+    @property
+    def created(self) -> bool:
+        return self.action == "created"
+
+    @property
+    def reused(self) -> bool:
+        return self.action == "reused"
+
+    def __getattr__(self, name: str):
+        """Delegate entity identifiers for usage-event instrumentation."""
+
+        return getattr(self.entity, name)
 
 
 @dataclass(frozen=True)
