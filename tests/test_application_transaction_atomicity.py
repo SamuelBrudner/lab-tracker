@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import logging
 from collections.abc import Callable
 from uuid import UUID, uuid4
 
@@ -290,10 +289,19 @@ def test_commit_failure_rolls_back_hooks_and_leaves_boundary_reusable(
 @pytest.mark.parametrize("outcome", ["commit", "rollback"])
 def test_deferred_hook_failures_log_and_continue(
     outcome: str,
-    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     api = repository_backed_api()
     events: list[str] = []
+    warning_calls: list[tuple[str, bool]] = []
+
+    def record_warning(message: str, *args: object, **kwargs: object) -> None:
+        warning_calls.append((message % args, kwargs.get("exc_info") is True))
+
+    monkeypatch.setattr(
+        "lab_tracker.services.base._logger.warning",
+        record_warning,
+    )
 
     def fail_hook() -> None:
         raise RuntimeError(f"{outcome} hook failed")
@@ -304,8 +312,6 @@ def test_deferred_hook_failures_log_and_continue(
         if outcome == "commit"
         else api.questions.run_after_rollback
     )
-    caplog.set_level(logging.WARNING, logger="lab_tracker.services.base")
-
     if outcome == "commit":
         with api.questions.application_transaction():
             register(fail_hook)
@@ -320,7 +326,9 @@ def test_deferred_hook_failures_log_and_continue(
             raise RuntimeError("abort transaction")
 
     assert events == ["continued"]
-    assert f"Deferred after_{outcome} action failed" in caplog.text
+    assert warning_calls == [
+        (f"Deferred after_{outcome} action failed: {outcome} hook failed", True)
+    ]
 
 
 @pytest.mark.parametrize("client_capture_id", [None, "keyed-orphan-prevention"])
