@@ -78,7 +78,7 @@ export LAB_TRACKER_ACCESS_TOKEN="smoke-noauth"  # ignored by the auth-disabled s
 # than erroring), so we must inspect result.action explicitly.
 matlab -batch "
 try
-    result = run('$EXAMPLE');
+    run('$EXAMPLE');
 catch err
     fprintf(2, 'MATLAB error: %s\n', err.message); exit(1);
 end

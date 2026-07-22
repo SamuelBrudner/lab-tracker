@@ -95,11 +95,16 @@ class TestBuildCronLine:
             interval="15",
             base_url="https://lab.example.org",
             trigger="/opt/lt/trigger.sh",
+            secrets_file="/home/user/.config/lab-tracker/daily review.secrets.json",
             log="/home/user/daily review.log",  # spaces are fine (double-quoted)
             tag=self.TAG,
         )
         assert line.startswith("*/15 * * * * ")
         assert 'LAB_TRACKER_BASE_URL="https://lab.example.org"' in line
+        assert (
+            'LAB_TRACKER_SECRETS_FILE="/home/user/.config/lab-tracker/'
+            'daily review.secrets.json"' in line
+        )
         assert line.endswith(self.TAG)
 
     @pytest.mark.parametrize(
@@ -112,6 +117,7 @@ class TestBuildCronLine:
                 interval="15",
                 base_url="http://127.0.0.1:8000",
                 trigger="/opt/lt/trigger.sh",
+                secrets_file="/home/user/.config/lab-tracker/daily-review.secrets.json",
                 log=log,
                 tag=self.TAG,
             )
@@ -122,6 +128,18 @@ class TestBuildCronLine:
                 interval="15",
                 base_url="http://127.0.0.1:8000",
                 trigger='/opt/lt/"; id; "',
+                secrets_file="/home/user/.config/lab-tracker/daily-review.secrets.json",
+                log="/t/lt.log",
+                tag=self.TAG,
+            )
+
+    def test_rejects_unsafe_secrets_file_path(self):
+        with pytest.raises(mod.SchedulerConfigError):
+            mod.build_cron_line(
+                interval="15",
+                base_url="http://127.0.0.1:8000",
+                trigger="/opt/lt/trigger.sh",
+                secrets_file="/tmp/secrets$(touch /tmp/proof).json",
                 log="/t/lt.log",
                 tag=self.TAG,
             )
@@ -267,7 +285,13 @@ class TestSecretsFile:
 class TestCronInstallerAdapter:
     """End-to-end tests of install-daily-review.sh with a stub crontab on PATH."""
 
-    def _run(self, tmp_path, crontab_script: str):
+    def _run(
+        self,
+        tmp_path,
+        crontab_script: str,
+        *,
+        extra_env: dict[str, str] | None = None,
+    ):
         stub_dir = tmp_path / "bin"
         stub_dir.mkdir()
         crontab = stub_dir / "crontab"
@@ -279,6 +303,13 @@ class TestCronInstallerAdapter:
             "HOME": str(tmp_path),
             "LAB_TRACKER_DAILY_REVIEW_LOG": str(tmp_path / "daily-review.log"),
         }
+        for key in (
+            "LAB_TRACKER_API_KEY",
+            "LAB_TRACKER_ADMIN_USER",
+            "LAB_TRACKER_ADMIN_PASS",
+        ):
+            env.pop(key, None)
+        env.update(extra_env or {})
         return subprocess.run(
             ["sh", str(CRON_INSTALLER), "15", "http://127.0.0.1:8000"],
             capture_output=True,
@@ -297,6 +328,7 @@ class TestCronInstallerAdapter:
         assert result.returncode != 0
         # The crontab was never overwritten despite the read error.
         assert not installed.exists()
+        assert not (tmp_path / ".config/lab-tracker/daily-review.secrets.json").exists()
 
     def test_no_existing_crontab_installs_just_the_line(self, tmp_path):
         installed = tmp_path / "installed-crontab"
@@ -324,3 +356,64 @@ class TestCronInstallerAdapter:
         content = installed.read_text()
         assert "unrelated-job" in content
         assert content.count("lab-tracker-daily-review") == 1
+
+    def test_persists_adversarial_token_and_future_cron_run_uses_it(self, tmp_path):
+        installed = tmp_path / "installed-crontab"
+        crontab_script = (
+            "#!/bin/sh\n"
+            'if [ "$1" = "-l" ]; then echo "no crontab for tester" >&2; exit 1; fi\n'
+            f'cat > "{installed}"\n'
+        )
+        proof = tmp_path / "credential-was-executed"
+        secret = f'lpat_quoted "space" $(touch {proof})'
+
+        result = self._run(
+            tmp_path,
+            crontab_script,
+            extra_env={"LAB_TRACKER_API_KEY": secret},
+        )
+        assert result.returncode == 0, result.stderr
+        assert not proof.exists()
+
+        secrets_file = tmp_path / ".config/lab-tracker/daily-review.secrets.json"
+        assert stat.S_IMODE(secrets_file.stat().st_mode) == 0o600
+        assert json.loads(secrets_file.read_text()) == {"LAB_TRACKER_API_KEY": secret}
+
+        cron_line = next(
+            line
+            for line in installed.read_text().splitlines()
+            if "lab-tracker-daily-review" in line
+        )
+        assert f'LAB_TRACKER_SECRETS_FILE="{secrets_file}"' in cron_line
+        assert secret not in cron_line
+
+        # Simulate cron's minimal future environment: no inherited credential
+        # variables. The command must load the persisted token structurally and
+        # pass it as one literal Authorization header without executing payloads.
+        curl_args = tmp_path / "curl-args"
+        curl_stub = tmp_path / "bin/curl"
+        curl_stub.write_text('#!/bin/sh\nprintf "<%s>\\n" "$@" > "$CURL_ARGS"\n')
+        curl_stub.chmod(0o755)
+        command = cron_line.split(maxsplit=5)[5].rsplit(" # lab-tracker-daily-review", 1)[0]
+        cron_env = {
+            **os.environ,
+            "PATH": f"{tmp_path / 'bin'}{os.pathsep}{os.environ['PATH']}",
+            "HOME": str(tmp_path),
+            "CURL_ARGS": str(curl_args),
+        }
+        for key in (
+            "LAB_TRACKER_API_KEY",
+            "LAB_TRACKER_ADMIN_USER",
+            "LAB_TRACKER_ADMIN_PASS",
+            "LAB_TRACKER_SECRETS_FILE",
+        ):
+            cron_env.pop(key, None)
+        triggered = subprocess.run(
+            ["sh", "-c", command],
+            capture_output=True,
+            text=True,
+            env=cron_env,
+        )
+        assert triggered.returncode == 0, triggered.stderr
+        assert f"<Authorization: Bearer {secret}>" in curl_args.read_text()
+        assert not proof.exists()

@@ -1,10 +1,10 @@
 import { defineConfig, devices } from "@playwright/test";
 
 // Risk-focused browser lifecycle suite: only behavior that jsdom cannot validate
-// (root-path native links, offline/service-worker replay under identity changes,
-// route-race cleanup, and browser media/share-target fallbacks). Runs Chromium
-// only, single-worker (service-worker/IndexedDB state must not bleed across
-// tests), against two disposable local servers.
+// (root-path native links and offline/service-worker shell behavior), plus a
+// Node-side multipart request check for the share-target fallback. Runs
+// Chromium only, single-worker (service-worker/IndexedDB state must not bleed
+// across tests), against two disposable local servers.
 const CI = Boolean(process.env.CI);
 const AUTH_DISABLED_PORT = process.env.E2E_PORT || "8177";
 const AUTH_ENABLED_PORT = "8178";

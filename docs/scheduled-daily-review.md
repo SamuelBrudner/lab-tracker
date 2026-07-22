@@ -63,11 +63,12 @@ scripts/install-daily-review.sh
 That registers an external job (a Windows Scheduled Task, a launchd LaunchAgent,
 or a `cron` entry) that nudges the server every 15 minutes. Re-running it just
 updates the existing job. Both \*nix installers take the same optional arguments
-(`[interval_minutes] [base_url]`); when auth is enabled they read
-`LAB_TRACKER_ADMIN_USER` / `LAB_TRACKER_ADMIN_PASS` from the environment. The
-launchd installer writes those credentials to a `0600` file
-(`~/.config/lab-tracker/daily-review.env`) that the agent sources at run time,
-rather than into the world-readable plist.
+(`[interval_minutes] [base_url]`); when auth is enabled they persist
+`LAB_TRACKER_API_KEY` or the fallback `LAB_TRACKER_ADMIN_USER` /
+`LAB_TRACKER_ADMIN_PASS` from the installation environment in a `0600` JSON file
+(`~/.config/lab-tracker/daily-review.secrets.json`). The scheduled process reads
+that file structurally at run time; it is never sourced or shell-evaluated, and
+secret values never appear in the crontab or launchd plist.
 
 ### One thing to turn on first
 
@@ -92,8 +93,8 @@ worker fills the queue shortly after. Then review the queue at `/app/batches`.
 ### Remove it
 
 - **Windows:** `Unregister-ScheduledTask -TaskName LabTrackerDailyReview -Confirm:$false`
-- **macOS (launchd):** `launchctl bootout gui/$(id -u)/com.lab-tracker.daily-review; rm ~/Library/LaunchAgents/com.lab-tracker.daily-review.plist ~/.config/lab-tracker/daily-review.env`
-- **Linux / cron:** `crontab -l | grep -v '# lab-tracker-daily-review' | crontab -`
+- **macOS (launchd):** `launchctl bootout gui/$(id -u)/com.lab-tracker.daily-review; rm -f ~/Library/LaunchAgents/com.lab-tracker.daily-review.plist ~/.config/lab-tracker/daily-review.secrets.json`
+- **Linux / cron:** `crontab -l | grep -v '# lab-tracker-daily-review' | crontab -; rm -f ~/.config/lab-tracker/daily-review.secrets.json`
 
 ---
 
@@ -130,10 +131,10 @@ disabled, so no credentials are needed. Two things change when Lab Tracker is
   export LAB_TRACKER_ADMIN_PASS="…"
   ```
 
-  On macOS/Linux the launchd installer writes whatever secret you export to a
-  `0600` JSON file that the agent reads structurally at run time — it is never
-  sourced or shell-evaluated, so a credential containing shell metacharacters
-  cannot execute.
+  On macOS/Linux both installers write whatever secret you export to a `0600`
+  JSON file that the scheduled process reads structurally at run time — it is
+  never sourced or shell-evaluated, so a credential containing shell
+  metacharacters cannot execute.
 
   Pass a non-local URL to the installer with `-BaseUrl` (Windows) or as the
   second argument (`install-daily-review.sh 15 https://lab.example.org`).

@@ -139,19 +139,30 @@ def merge_crontab(
     return "\n".join(kept) + "\n"
 
 
-def build_cron_line(*, interval: object, base_url: object, trigger: str, log: str, tag: str) -> str:
+def build_cron_line(
+    *,
+    interval: object,
+    base_url: object,
+    trigger: str,
+    secrets_file: str,
+    log: str,
+    tag: str,
+) -> str:
     """Build a validated cron line for the daily-review trigger.
 
     Every interpolated field is validated first: the interval is an integer, the
-    base URL passes a strict charset, and the trigger/log paths cannot contain a
-    byte that would break out of their double quotes or split the cron line.
+    base URL passes a strict charset, and the trigger/secrets/log paths cannot
+    contain a byte that would break out of their double quotes or split the cron
+    line.
     """
     minutes = validate_interval(interval)
     url = validate_base_url(base_url)
     safe_trigger = validate_cron_field(trigger, name="Trigger path")
+    safe_secrets_file = validate_cron_field(secrets_file, name="Secrets-file path")
     safe_log = validate_cron_field(log, name="Log path")
     return (
         f'*/{minutes} * * * * LAB_TRACKER_BASE_URL="{url}" '
+        f'LAB_TRACKER_SECRETS_FILE="{safe_secrets_file}" '
         f'"{safe_trigger}" >> "{safe_log}" 2>&1 {tag}'
     )
 
@@ -256,6 +267,7 @@ def _cmd_cron_line(args: argparse.Namespace) -> int:
             interval=args.interval,
             base_url=args.base_url,
             trigger=args.trigger,
+            secrets_file=args.secrets_file,
             log=args.log,
             tag=args.tag,
         )
@@ -335,6 +347,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--interval", required=True)
     p.add_argument("--base-url", required=True)
     p.add_argument("--trigger", required=True)
+    p.add_argument("--secrets-file", required=True)
     p.add_argument("--log", required=True)
     p.add_argument("--tag", required=True)
     p.set_defaults(func=_cmd_cron_line)

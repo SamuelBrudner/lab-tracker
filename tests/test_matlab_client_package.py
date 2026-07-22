@@ -98,6 +98,11 @@ def test_matlab_runtime_smoke_runner_and_runbook_exist() -> None:
     # Skips green without MATLAB, runs the example, and checks the success action.
     assert "command -v matlab" in runner_source
     assert "capture_figure_smoke.m" in runner_source
+    # MATLAB run(scriptname) has no output. The script itself creates `result`
+    # in the caller workspace, which the runner must inspect after invocation.
+    assert "result = run(" not in runner_source
+    assert "run('$EXAMPLE');" in runner_source
+    assert "isstruct(result)" in runner_source
     assert "imported" in runner_source and "coalesced" in runner_source
 
     matlab_doc = _read(ROOT / "docs" / "lab-tracker-matlab.md")

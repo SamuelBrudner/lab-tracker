@@ -25,6 +25,8 @@ BASE_URL="${2:-http://127.0.0.1:8000}"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 TRIGGER="$SCRIPT_DIR/daily-review-run-due.sh"
 SCHED="$SCRIPT_DIR/scheduler_install.py"
+SECRETS_DIR="$HOME/.config/lab-tracker"
+SECRETS_FILE="$SECRETS_DIR/daily-review.secrets.json"
 LOG="${LAB_TRACKER_DAILY_REVIEW_LOG:-$HOME/.lab-tracker-daily-review.log}"
 TAG="# lab-tracker-daily-review"
 
@@ -44,7 +46,8 @@ chmod +x "$TRIGGER" 2>/dev/null || true
 # non-http(s) base URL) so nothing unchecked is interpolated into the crontab.
 LINE="$("$PYTHON" "$SCHED" cron-line \
     --interval "$INTERVAL" --base-url "$BASE_URL" \
-    --trigger "$TRIGGER" --log "$LOG" --tag "$TAG")"
+    --trigger "$TRIGGER" --secrets-file "$SECRETS_FILE" \
+    --log "$LOG" --tag "$TAG")"
 
 # Capture crontab -l stdout, stderr, and exit code separately. The Python merge
 # treats ONLY the recognized "no crontab" signal as empty; any other read error
@@ -68,10 +71,22 @@ if [ "$MERGE_EC" -ne 0 ]; then
     exit 1
 fi
 
+# Persist credentials for the future cron process. Cron does not inherit the
+# interactive shell used to run this installer, so the generated command points
+# at the same structurally-read 0600 JSON format as the launchd adapter. Secret
+# values never appear in the crontab and are never sourced or shell-evaluated.
+umask 077
+mkdir -p "$SECRETS_DIR"
+LAB_TRACKER_API_KEY="${LAB_TRACKER_API_KEY:-}" \
+LAB_TRACKER_ADMIN_USER="${LAB_TRACKER_ADMIN_USER:-}" \
+LAB_TRACKER_ADMIN_PASS="${LAB_TRACKER_ADMIN_PASS:-}" \
+    "$PYTHON" "$SCHED" write-secrets "$SECRETS_FILE"
+
 printf '%s' "$MERGED" | crontab -
 
 echo "Installed cron entry (every $INTERVAL min -> $BASE_URL/batches/run-due):"
 echo "  $LINE"
+echo "  secrets: $SECRETS_FILE (0600)"
 echo ""
 echo "Next: enable the daily review per project on the Batches page (/app/batches)."
-echo "Remove with: crontab -l | grep -v '$TAG' | crontab -"
+echo "Remove with: crontab -l | grep -v '$TAG' | crontab -; rm -f '$SECRETS_FILE'"
