@@ -1,10 +1,12 @@
 import { expect, test } from "@playwright/test";
 
-// Flow: native prefixed links. AppLink must render a real, correctly-prefixed
+// Flow: root-path native AppLink smoke test. AppLink must render a real /app
 // <a href> (so cmd/middle-click and browser navigation work) AND intercept the
-// click for SPA navigation without a full reload. jsdom validates neither the
-// real anchor href nor real in-browser navigation, so this runs in Chromium.
-test("a native AppLink anchor is prefixed and navigates in-browser", async ({ page }) => {
+// click for SPA navigation without a full reload. This intentionally does not
+// exercise deployment beneath a non-root prefix.
+test("a root-path AppLink renders a native href and navigates in-browser", async ({
+  page,
+}) => {
   await page.goto("/app/");
 
   const sessionLink = page.locator('a[href^="/app/sessions/"]').first();

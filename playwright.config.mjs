@@ -1,7 +1,7 @@
 import { defineConfig, devices } from "@playwright/test";
 
 // Risk-focused browser lifecycle suite: only behavior that jsdom cannot validate
-// (native prefixed links, offline/service-worker replay under identity changes,
+// (root-path native links, offline/service-worker replay under identity changes,
 // route-race cleanup, and browser media/share-target fallbacks). Runs Chromium
 // only, single-worker (service-worker/IndexedDB state must not bleed across
 // tests), against two disposable local servers.
