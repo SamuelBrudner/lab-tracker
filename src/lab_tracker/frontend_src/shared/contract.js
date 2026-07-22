@@ -14,6 +14,10 @@
 // changes never break a client that does not read the new field.
 
 /** @template T @typedef {(value: unknown, path?: string) => T} Validator */
+/**
+ * @template {Record<string, Validator<unknown>>} TShape
+ * @typedef {{[K in keyof TShape]: ReturnType<TShape[K]>} & Record<string, unknown>} ObjectValue
+ */
 
 class ContractError extends Error {
   /**
@@ -141,15 +145,15 @@ function arrayOf(inner) {
 }
 
 /**
- * @template T
- * @param {...T} allowed
- * @returns {Validator<T>}
+ * @template {unknown[]} TAllowed
+ * @param {TAllowed} allowed
+ * @returns {Validator<TAllowed[number]>}
  */
 function oneOf(...allowed) {
   const label = `one of ${allowed.map((entry) => JSON.stringify(entry)).join(", ")}`;
   return (value, path = "") =>
     allowed.some((entry) => Object.is(entry, value))
-      ? /** @type {T} */ (value)
+      ? /** @type {TAllowed[number]} */ (value)
       : violation(path, label, value);
 }
 
@@ -157,7 +161,7 @@ function oneOf(...allowed) {
 /**
  * @template {Record<string, Validator<unknown>>} TShape
  * @param {TShape} shape
- * @returns {Validator<Record<string, unknown>>}
+ * @returns {Validator<ObjectValue<TShape>>}
  */
 function object(shape) {
   const keys = Object.keys(shape);
@@ -171,7 +175,7 @@ function object(shape) {
     for (const key of keys) {
       result[key] = validators[key](record[key], path ? `${path}.${key}` : key);
     }
-    return result;
+    return /** @type {ObjectValue<TShape>} */ (result);
   };
 }
 
@@ -192,6 +196,9 @@ function parseResource(envelope, itemValidator) {
     violation("", "an object envelope with a data property", envelope);
   }
   const record = /** @type {Record<string, unknown>} */ (envelope);
+  if (record.data === null || record.data === undefined) {
+    violation("data", "non-null value", record.data);
+  }
   return itemValidator(record.data, "data");
 }
 
@@ -199,14 +206,11 @@ function parseResource(envelope, itemValidator) {
  * @typedef {{limit: number, offset: number, total: number}} PaginationMeta
  */
 
-/** @type {Validator<PaginationMeta>} */
-const paginationMetaShape = /** @type {Validator<PaginationMeta>} */ (
-  object({
-    limit: positiveInteger,
-    offset: nonNegativeInteger,
-    total: nonNegativeInteger,
-  })
-);
+const paginationMetaShape = object({
+  limit: positiveInteger,
+  offset: nonNegativeInteger,
+  total: nonNegativeInteger,
+});
 
 /**
  * Validate a resource envelope and a required metadata contract together.
@@ -259,8 +263,20 @@ function parseCollection(envelope, itemValidator) {
   if (data.length > meta.limit) {
     violation("data", `at most meta.limit (${meta.limit}) items`, data);
   }
-  if (data.length > meta.total) {
-    violation("meta.total", `at least the returned item count (${data.length})`, meta.total);
+  const pageEnd = meta.offset + data.length;
+  if (pageEnd > meta.total) {
+    violation(
+      "meta.total",
+      `at least the page end offset (${pageEnd})`,
+      meta.total
+    );
+  }
+  if (data.length < meta.limit && pageEnd < meta.total) {
+    violation(
+      "data",
+      `a full page while meta.total reports items after offset ${pageEnd}`,
+      data
+    );
   }
   return { data: items, meta };
 }

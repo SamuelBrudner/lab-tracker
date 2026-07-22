@@ -9,27 +9,36 @@ from typing import Any
 
 OUTPUT_PATH = Path("src/lab_tracker/frontend_src/generated/openapi.d.ts")
 
-# Keep this surface intentionally scoped to the gateways checked by
-# tsconfig.frontend-contracts.json. Referenced component schemas are discovered
-# recursively, so these declarations cannot silently drift from their enums or
-# nested response models.
-ROOT_SCHEMAS = (
-    "AuthBootstrapStatus",
-    "AuthInvitationRead",
-    "AuthTokenRead",
-    "AuthUserRead",
-    "Dataset",
-    "DeviceConsumeRead",
-    "DeviceEnrollmentRead",
-    "DeviceTokenRead",
-    "GraphChangeOperation",
-    "GraphChangeSet",
-    "Note",
-    "PaginationMeta",
-    "PersonalAccessTokenIssuedRead",
-    "PersonalAccessTokenRead",
-    "Project",
-    "ProjectMembership",
+# Keep the checked surface intentionally scoped to the transport gateways. The
+# declaration roots are the successful response schemas of these operations,
+# rather than a hand-maintained component list. Consequently, changing an
+# endpoint's response_model changes the generated operation type and trips the
+# drift gate even if the old component schema still exists in OpenAPI.
+SCOPED_OPERATIONS = (
+    ("get", "/auth/bootstrap-status"),
+    ("post", "/auth/register"),
+    ("post", "/auth/login"),
+    ("post", "/auth/refresh"),
+    ("get", "/auth/me"),
+    ("get", "/auth/users"),
+    ("patch", "/auth/users/{user_id}"),
+    ("get", "/auth/invitations"),
+    ("post", "/auth/invitations"),
+    ("delete", "/auth/invitations/{invitation_id}"),
+    ("get", "/auth/devices"),
+    ("post", "/auth/devices/enrollment"),
+    ("post", "/auth/devices/consume"),
+    ("delete", "/auth/devices/{device_token_id}"),
+    ("get", "/auth/tokens"),
+    ("post", "/auth/tokens"),
+    ("delete", "/auth/tokens/{token_id}"),
+    ("get", "/projects"),
+    ("get", "/projects/{project_id}/members"),
+    ("get", "/datasets"),
+    ("get", "/datasets/{dataset_id}"),
+    ("get", "/notes"),
+    ("get", "/notes/{note_id}"),
+    ("get", "/graph-drafts/{change_set_id}"),
 )
 
 
@@ -68,25 +77,108 @@ def main(argv: list[str] | None = None) -> int:
     return 0
 
 
-def generate_declaration(openapi: dict[str, Any]) -> str:
+def generate_declaration(
+    openapi: dict[str, Any],
+    scoped_operations: tuple[tuple[str, str], ...] = SCOPED_OPERATIONS,
+) -> str:
     components = openapi.get("components", {}).get("schemas", {})
-    selected = _referenced_schemas(components, ROOT_SCHEMAS)
+    operations = _select_operations(openapi, scoped_operations)
+    roots = {
+        ref.rsplit("/", 1)[-1]
+        for operation in operations
+        for response in operation[3].values()
+        for schema in response.values()
+        for ref in _walk_refs(schema)
+    }
+    selected = _referenced_schemas(components, tuple(sorted(roots)))
     lines = [
         "// Generated from FastAPI OpenAPI by scripts/generate_frontend_openapi_types.py.",
         "// Do not edit by hand.",
         "",
-        "export interface components {",
-        "  schemas: {",
+        "export interface paths {",
     ]
+    path_operations: dict[str, list[tuple[str, str]]] = {}
+    for method, path, operation_id, _responses in operations:
+        path_operations.setdefault(path, []).append((method, operation_id))
+    for path, methods in path_operations.items():
+        lines.append(f"  {json.dumps(path)}: {{")
+        for method, operation_id in methods:
+            lines.append(f"    {method}: operations[{json.dumps(operation_id)}];")
+        lines.append("  };")
+    lines.extend(["}", "", "export interface operations {"])
+    for _method, _path, operation_id, responses in operations:
+        lines.extend([f"  {json.dumps(operation_id)}: {{", "    responses: {"])
+        for status, content in responses.items():
+            lines.extend([f"      {status}: {{", "        content: {"])
+            for media_type, schema in content.items():
+                rendered = _schema_to_typescript(schema, 10)
+                lines.append(f"          {json.dumps(media_type)}: {rendered};")
+            lines.extend(["        };", "      };"])
+        lines.extend(["    };", "  };"])
+    lines.extend(
+        [
+            "}",
+            "",
+            "export interface components {",
+            "  schemas: {",
+        ]
+    )
     for name in sorted(selected):
         lines.append(f"    {json.dumps(name)}: {_schema_to_typescript(components[name], 4)};")
     lines.extend(["  };", "}", ""])
     return "\n".join(lines)
 
 
-def _referenced_schemas(
-    components: dict[str, Any], roots: tuple[str, ...]
-) -> set[str]:
+def _select_operations(
+    openapi: dict[str, Any], scoped_operations: tuple[tuple[str, str], ...]
+) -> list[tuple[str, str, str, dict[str, dict[str, dict[str, Any]]]]]:
+    paths = openapi.get("paths") or {}
+    selected = []
+    seen_ids: set[str] = set()
+    for method, path in scoped_operations:
+        path_item = paths.get(path)
+        operation = path_item.get(method) if isinstance(path_item, dict) else None
+        if not isinstance(operation, dict):
+            raise ValueError(f"OpenAPI operation {method.upper()} {path} is missing")
+        operation_id = operation.get("operationId")
+        if not isinstance(operation_id, str) or not operation_id:
+            raise ValueError(f"OpenAPI operation {method.upper()} {path} has no operationId")
+        if operation_id in seen_ids:
+            raise ValueError(f"Duplicate OpenAPI operationId {operation_id!r}")
+        seen_ids.add(operation_id)
+        responses = _successful_response_schemas(operation, method=method, path=path)
+        selected.append((method, path, operation_id, responses))
+    return selected
+
+
+def _successful_response_schemas(
+    operation: dict[str, Any], *, method: str, path: str
+) -> dict[str, dict[str, dict[str, Any]]]:
+    selected: dict[str, dict[str, dict[str, Any]]] = {}
+    responses = operation.get("responses") or {}
+    for status, response in sorted(responses.items(), key=lambda item: item[0]):
+        try:
+            status_code = int(status)
+        except (TypeError, ValueError):
+            continue
+        if not 200 <= status_code < 300 or not isinstance(response, dict):
+            continue
+        content = response.get("content") or {}
+        schemas = {
+            media_type: media["schema"]
+            for media_type, media in sorted(content.items())
+            if isinstance(media, dict) and isinstance(media.get("schema"), dict)
+        }
+        if schemas:
+            selected[str(status)] = schemas
+    if not selected:
+        raise ValueError(
+            f"OpenAPI operation {method.upper()} {path} has no typed successful response"
+        )
+    return selected
+
+
+def _referenced_schemas(components: dict[str, Any], roots: tuple[str, ...]) -> set[str]:
     selected: set[str] = set()
     pending = list(roots)
     while pending:
@@ -125,9 +217,7 @@ def _schema_to_typescript(schema: dict[str, Any], indent: int = 0) -> str:
     for keyword, operator in (("anyOf", " | "), ("oneOf", " | "), ("allOf", " & ")):
         variants = schema.get(keyword)
         if isinstance(variants, list):
-            rendered = operator.join(
-                _schema_to_typescript(item, indent) for item in variants
-            )
+            rendered = operator.join(_schema_to_typescript(item, indent) for item in variants)
             return f"({rendered})"
 
     enum = schema.get("enum")

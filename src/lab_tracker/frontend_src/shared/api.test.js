@@ -19,6 +19,14 @@ describe("strict JSON envelope helpers", () => {
     await expect(apiRequest("/resource")).rejects.toBeInstanceOf(ContractError);
   });
 
+  it("apiRequest rejects a null resource from a successful response", async () => {
+    installFetchMock([
+      { match: "/resource", response: apiResponse(null, 200) },
+    ]);
+
+    await expect(apiRequest("/resource")).rejects.toBeInstanceOf(ContractError);
+  });
+
   it("apiListRequest rejects missing and malformed pagination metadata", async () => {
     installFetchMock([
       { match: "/missing-meta", response: apiResponse([], 200, null) },
@@ -48,4 +56,5 @@ describe("strict JSON envelope helpers", () => {
       ContractError
     );
   });
+
 });

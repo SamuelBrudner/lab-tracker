@@ -103,6 +103,7 @@ describe("envelope parsers", () => {
   it("parseResource throws when the envelope has no data property", () => {
     expect(() => parseResource(null, itemShape)).toThrow(ContractError);
     expect(() => parseResource({}, itemShape)).toThrow(ContractError);
+    expect(() => parseResource({ data: null }, unknown)).toThrow(ContractError);
     expect(() => parseResource({ data: { wrong: true } }, itemShape)).toThrow(ContractError);
   });
 
@@ -163,6 +164,33 @@ describe("envelope parsers", () => {
         {
           data: [{ id: "a" }],
           meta: { limit: 1, offset: 0, total: 0 },
+        },
+        itemShape
+      )
+    ).toThrow(ContractError);
+    expect(() =>
+      parseCollection(
+        {
+          data: [{ id: "a" }, { id: "b" }],
+          meta: { limit: 2, offset: 2, total: 3 },
+        },
+        itemShape
+      )
+    ).toThrow(ContractError);
+    expect(() =>
+      parseCollection(
+        {
+          data: [{ id: "a" }],
+          meta: { limit: 2, offset: 0, total: 2 },
+        },
+        itemShape
+      )
+    ).toThrow(ContractError);
+    expect(() =>
+      parseCollection(
+        {
+          data: [],
+          meta: { limit: 2, offset: 0, total: 1 },
         },
         itemShape
       )

@@ -541,11 +541,11 @@ describe("App", () => {
       },
       {
         match: questionCountPath("project-1"),
-        response: paged([], { limit: 1, offset: 0, total: 1 }),
+        response: paged([question({ questionId })], { limit: 1, offset: 0, total: 1 }),
       },
       {
         match: datasetCountPath("project-1"),
-        response: paged([], { limit: 1, offset: 0, total: 1 }),
+        response: paged([dataset({ datasetId })], { limit: 1, offset: 0, total: 1 }),
       },
       {
         match: noteCountPath("project-1"),
@@ -1302,7 +1302,7 @@ describe("App", () => {
       },
       {
         match: noteCountPath("project-1"),
-        response: paged([], { limit: 1, offset: 0, total: 2 }),
+        response: paged([note()], { limit: 1, offset: 0, total: 2 }),
       },
       {
         match: activeSessionsPath("project-1"),
@@ -1472,8 +1472,8 @@ describe("App", () => {
         match: noteCountPath("project-1"),
         response: [
           paged([], { limit: 1, offset: 0, total: 0 }),
-          paged([], { limit: 1, offset: 0, total: 1 }),
-          paged([], { limit: 1, offset: 0, total: 1 }),
+          paged([note({ noteId })], { limit: 1, offset: 0, total: 1 }),
+          paged([note({ noteId })], { limit: 1, offset: 0, total: 1 }),
         ],
       },
       {
@@ -1540,15 +1540,31 @@ describe("App", () => {
       {
         match: questionCountPath("project-1"),
         response: [
-          paged([], { limit: 1, offset: 0, total: 1 }),
-          paged([], { limit: 1, offset: 0, total: 1 }),
+          paged([question({ questionId: "question-1" })], {
+            limit: 1,
+            offset: 0,
+            total: 1,
+          }),
+          paged([question({ questionId: "question-1" })], {
+            limit: 1,
+            offset: 0,
+            total: 1,
+          }),
         ],
       },
       {
         match: datasetCountPath("project-1"),
         response: [
-          paged([], { limit: 1, offset: 0, total: 1 }),
-          paged([], { limit: 1, offset: 0, total: 1 }),
+          paged([dataset({ datasetId: "dataset-1" })], {
+            limit: 1,
+            offset: 0,
+            total: 1,
+          }),
+          paged([dataset({ datasetId: "dataset-1" })], {
+            limit: 1,
+            offset: 0,
+            total: 1,
+          }),
         ],
       },
       {
@@ -1679,7 +1695,7 @@ describe("App", () => {
         match: noteCountPath("project-1"),
         response: [
           paged([], { limit: 1, offset: 0, total: 0 }),
-          paged([], { limit: 1, offset: 0, total: 2 }),
+          paged([note({ noteId: imageNoteId })], { limit: 1, offset: 0, total: 2 }),
         ],
       },
       {
@@ -1762,7 +1778,25 @@ describe("App", () => {
       },
       {
         match: recentNotesPath("project-1"),
-        response: paged([], { limit: 5, offset: 0, total: 2 }),
+        response: () =>
+          paged(
+            [
+              note({
+                metadata: { capture_bundle_id: bundleId, capture_kind: "image" },
+                noteId: imageNoteId,
+              }),
+              note({
+                metadata: {
+                  capture_bundle_id: bundleId,
+                  capture_kind: "voice",
+                  transcript_status: "pending",
+                },
+                noteId: voiceNoteId,
+                transcribedText: "",
+              }),
+            ],
+            { limit: 5, offset: 0, total: 2 }
+          ),
       },
       {
         match: `/notes/${voiceNoteId}/transcript`,
@@ -1933,7 +1967,7 @@ describe("App", () => {
         match: noteCountPath("project-1"),
         response: [
           paged([], { limit: 1, offset: 0, total: 0 }),
-          paged([], { limit: 1, offset: 0, total: 2 }),
+          paged([note({ noteId: imageNoteId })], { limit: 1, offset: 0, total: 2 }),
         ],
       },
       {
@@ -1988,7 +2022,25 @@ describe("App", () => {
       },
       {
         match: recentNotesPath("project-1"),
-        response: paged([], { limit: 5, offset: 0, total: 2 }),
+        response: () =>
+          paged(
+            [
+              note({
+                metadata: { capture_bundle_id: bundleId, capture_kind: "image" },
+                noteId: imageNoteId,
+              }),
+              note({
+                metadata: {
+                  capture_bundle_id: bundleId,
+                  capture_kind: "voice",
+                  transcript_status: "pending",
+                },
+                noteId: voiceNoteId,
+                transcribedText: "",
+              }),
+            ],
+            { limit: 5, offset: 0, total: 2 }
+          ),
       },
       {
         match: `/notes/${voiceNoteId}/transcript`,
@@ -2172,7 +2224,7 @@ describe("App", () => {
       },
       {
         match: noteCountPath("project-1"),
-        response: paged([], { limit: 1, offset: 0, total: 2 }),
+        response: paged([voiceCapture], { limit: 1, offset: 0, total: 2 }),
       },
       {
         match: activeSessionsPath("project-1"),
@@ -2358,11 +2410,11 @@ describe("App", () => {
       },
       {
         match: datasetCountPath("project-1"),
-        response: paged([], { limit: 1, offset: 0, total: 4 }),
+        response: paged([dataset()], { limit: 1, offset: 0, total: 4 }),
       },
       {
         match: noteCountPath("project-1"),
-        response: paged([], { limit: 1, offset: 0, total: 7 }),
+        response: paged([note()], { limit: 1, offset: 0, total: 7 }),
       },
       {
         match: `/questions/${questionId}`,
@@ -2452,7 +2504,11 @@ describe("App", () => {
       },
       {
         match: noteCountPath("project-1"),
-        response: paged([], { limit: 1, offset: 0, total: 4 }),
+        response: paged([note({ noteId: "note-1" })], {
+          limit: 1,
+          offset: 0,
+          total: 4,
+        }),
       },
       {
         match: recentNotesPath("project-1"),
@@ -2484,7 +2540,11 @@ describe("App", () => {
       },
       {
         match: noteCountPath("project-2"),
-        response: paged([], { limit: 1, offset: 0, total: 2 }),
+        response: paged([note({ noteId: "note-2", projectId: "project-2" })], {
+          limit: 1,
+          offset: 0,
+          total: 2,
+        }),
       },
       {
         match: recentNotesPath("project-2"),
@@ -2875,7 +2935,7 @@ describe("App", () => {
       },
       {
         match: noteCountPath("project-1"),
-        response: paged([], { limit: 1, offset: 0, total: 1 }),
+        response: paged([note()], { limit: 1, offset: 0, total: 1 }),
       },
       {
         match: `/questions/${sourceId}`,

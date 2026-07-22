@@ -1,7 +1,7 @@
 {
   "compilerOptions": {
     "allowJs": true,
-    "checkJs": false,
+    "checkJs": true,
     "lib": ["ES2022", "DOM", "DOM.Iterable"],
     "module": "ESNext",
     "moduleResolution": "Bundler",
@@ -10,9 +10,17 @@
     "strict": true,
     "target": "ES2022"
   },
-  "include": [
+  "files": [
     "src/lab_tracker/frontend_src/generated/openapi.d.ts",
+    "src/lab_tracker/frontend_src/shared/api.js",
+    "src/lab_tracker/frontend_src/shared/auth-storage.js",
     "src/lab_tracker/frontend_src/shared/contract.js",
-    "src/lab_tracker/frontend_src/shared/gateways/**/*.js"
+    "src/lab_tracker/frontend_src/shared/static-demo-api.d.ts",
+    "src/lab_tracker/frontend_src/shared/gateways/auth.js",
+    "src/lab_tracker/frontend_src/shared/gateways/datasets.js",
+    "src/lab_tracker/frontend_src/shared/gateways/graph-drafts.js",
+    "src/lab_tracker/frontend_src/shared/gateways/index.js",
+    "src/lab_tracker/frontend_src/shared/gateways/notes.js",
+    "src/lab_tracker/frontend_src/shared/gateways/projects.js"
   ]
 }

@@ -16,15 +16,28 @@ import {
   string,
 } from "../contract.js";
 
-/** @typedef {import("../../generated/openapi.js").components["schemas"]["AuthBootstrapStatus"]} AuthBootstrapStatus */
-/** @typedef {import("../../generated/openapi.js").components["schemas"]["AuthInvitationRead"]} AuthInvitationRead */
-/** @typedef {import("../../generated/openapi.js").components["schemas"]["AuthTokenRead"]} AuthTokenRead */
-/** @typedef {import("../../generated/openapi.js").components["schemas"]["AuthUserRead"]} AuthUserRead */
-/** @typedef {import("../../generated/openapi.js").components["schemas"]["DeviceConsumeRead"]} DeviceConsumeRead */
-/** @typedef {import("../../generated/openapi.js").components["schemas"]["DeviceEnrollmentRead"]} DeviceEnrollmentRead */
-/** @typedef {import("../../generated/openapi.js").components["schemas"]["DeviceTokenRead"]} DeviceTokenRead */
-/** @typedef {import("../../generated/openapi.js").components["schemas"]["PersonalAccessTokenIssuedRead"]} PersonalAccessTokenIssuedRead */
-/** @typedef {import("../../generated/openapi.js").components["schemas"]["PersonalAccessTokenRead"]} PersonalAccessTokenRead */
+/** @typedef {import("../../generated/openapi.js").operations["auth_bootstrap_status_auth_bootstrap_status_get"]["responses"][200]["content"]["application/json"]["data"]} AuthBootstrapStatus */
+/** @typedef {import("../../generated/openapi.js").operations["create_auth_invitation_auth_invitations_post"]["responses"][201]["content"]["application/json"]["data"]} CreatedAuthInvitation */
+/** @typedef {import("../../generated/openapi.js").operations["list_auth_invitations_auth_invitations_get"]["responses"][200]["content"]["application/json"]["data"][number]} ListedAuthInvitation */
+/** @typedef {import("../../generated/openapi.js").operations["revoke_auth_invitation_auth_invitations__invitation_id__delete"]["responses"][200]["content"]["application/json"]["data"]} RevokedAuthInvitation */
+/** @typedef {CreatedAuthInvitation & ListedAuthInvitation & RevokedAuthInvitation} AuthInvitationRead */
+/** @typedef {import("../../generated/openapi.js").operations["login_auth_auth_login_post"]["responses"][200]["content"]["application/json"]["data"]} LoginAuthToken */
+/** @typedef {import("../../generated/openapi.js").operations["register_auth_auth_register_post"]["responses"][201]["content"]["application/json"]["data"]} RegistrationAuthToken */
+/** @typedef {import("../../generated/openapi.js").operations["refresh_auth_auth_refresh_post"]["responses"][200]["content"]["application/json"]["data"]} RefreshedAuthToken */
+/** @typedef {LoginAuthToken & RegistrationAuthToken & RefreshedAuthToken} AuthTokenRead */
+/** @typedef {import("../../generated/openapi.js").operations["auth_me_auth_me_get"]["responses"][200]["content"]["application/json"]["data"]} CurrentAuthUser */
+/** @typedef {import("../../generated/openapi.js").operations["list_auth_users_auth_users_get"]["responses"][200]["content"]["application/json"]["data"][number]} ListedAuthUser */
+/** @typedef {import("../../generated/openapi.js").operations["update_auth_user_auth_users__user_id__patch"]["responses"][200]["content"]["application/json"]["data"]} UpdatedAuthUser */
+/** @typedef {CurrentAuthUser & ListedAuthUser & UpdatedAuthUser} AuthUserRead */
+/** @typedef {import("../../generated/openapi.js").operations["consume_enrollment_auth_devices_consume_post"]["responses"][201]["content"]["application/json"]["data"]} DeviceConsumeRead */
+/** @typedef {import("../../generated/openapi.js").operations["create_enrollment_auth_devices_enrollment_post"]["responses"][201]["content"]["application/json"]["data"]} DeviceEnrollmentRead */
+/** @typedef {import("../../generated/openapi.js").operations["list_devices_auth_devices_get"]["responses"][200]["content"]["application/json"]["data"][number]} ListedDeviceToken */
+/** @typedef {import("../../generated/openapi.js").operations["revoke_device_auth_devices__device_token_id__delete"]["responses"][200]["content"]["application/json"]["data"]} RevokedDeviceToken */
+/** @typedef {ListedDeviceToken & RevokedDeviceToken} DeviceTokenRead */
+/** @typedef {import("../../generated/openapi.js").operations["create_personal_access_token_auth_tokens_post"]["responses"][201]["content"]["application/json"]["data"]} PersonalAccessTokenIssuedRead */
+/** @typedef {import("../../generated/openapi.js").operations["list_personal_access_tokens_auth_tokens_get"]["responses"][200]["content"]["application/json"]["data"][number]} ListedPersonalAccessToken */
+/** @typedef {import("../../generated/openapi.js").operations["revoke_personal_access_token_auth_tokens__token_id__delete"]["responses"][200]["content"]["application/json"]["data"]} RevokedPersonalAccessToken */
+/** @typedef {ListedPersonalAccessToken & RevokedPersonalAccessToken} PersonalAccessTokenRead */
 /** @typedef {import("../contract.js").Validator<AuthBootstrapStatus>} AuthBootstrapStatusValidator */
 /** @typedef {import("../contract.js").Validator<AuthInvitationRead>} AuthInvitationValidator */
 /** @typedef {import("../contract.js").Validator<AuthTokenRead>} AuthTokenValidator */
@@ -35,118 +48,102 @@ import {
 /** @typedef {import("../contract.js").Validator<PersonalAccessTokenIssuedRead>} PersonalAccessTokenIssuedValidator */
 /** @typedef {import("../contract.js").Validator<PersonalAccessTokenRead>} PersonalAccessTokenValidator */
 
-const roleShape = oneOf("admin", "editor", "viewer");
-
-/** @type {AuthUserValidator} */
-const authUserShape = /** @type {AuthUserValidator} */ (
-  object({
-    created_at: string,
-    role: roleShape,
-    user_id: string,
-    username: string,
-  })
+const roleShape = /** @type {import("../contract.js").Validator<AuthUserRead["role"]>} */ (
+  oneOf("admin", "editor", "viewer")
 );
 
-/** @type {AuthTokenValidator} */
-const authTokenShape = /** @type {AuthTokenValidator} */ (
-  object({
-    access_token: string,
-    expires_at: string,
-    token_type: optional(string),
-    user: authUserShape,
-  })
-);
+/** @satisfies {AuthUserValidator} */
+const authUserShape = object({
+  created_at: string,
+  role: roleShape,
+  user_id: string,
+  username: string,
+});
 
-/** @type {AuthBootstrapStatusValidator} */
-const authBootstrapStatusShape = /** @type {AuthBootstrapStatusValidator} */ (
-  object({
-    bootstrap_admin_configured: boolean,
-    bootstrap_token: nullish(string),
-    bootstrap_token_warning: nullish(string),
-    first_admin_available: boolean,
-    has_users: boolean,
-  })
-);
+/** @satisfies {AuthTokenValidator} */
+const authTokenShape = object({
+  access_token: string,
+  expires_at: string,
+  token_type: optional(string),
+  user: authUserShape,
+});
+
+/** @satisfies {AuthBootstrapStatusValidator} */
+const authBootstrapStatusShape = object({
+  bootstrap_admin_configured: boolean,
+  bootstrap_token: nullish(string),
+  bootstrap_token_warning: nullish(string),
+  first_admin_available: boolean,
+  has_users: boolean,
+});
 
 const authMeMetaShape = object({ auth_enabled: boolean });
 
-/** @type {AuthInvitationValidator} */
-const authInvitationShape = /** @type {AuthInvitationValidator} */ (
-  object({
-    consumed_at: nullish(string),
-    created_at: string,
-    email: string,
-    expires_at: string,
-    invitation_id: string,
-    invite_url: nullish(string),
-    mailto_url: nullish(string),
-    revoked_at: nullish(string),
-    role: roleShape,
-    status: string,
-    warning: nullish(string),
-  })
-);
+/** @satisfies {AuthInvitationValidator} */
+const authInvitationShape = object({
+  consumed_at: nullish(string),
+  created_at: string,
+  email: string,
+  expires_at: string,
+  invitation_id: string,
+  invite_url: nullish(string),
+  mailto_url: nullish(string),
+  revoked_at: nullish(string),
+  role: roleShape,
+  status: string,
+  warning: nullish(string),
+});
 
-/** @type {DeviceTokenValidator} */
-const deviceTokenShape = /** @type {DeviceTokenValidator} */ (
-  object({
-    created_at: string,
-    device_token_id: string,
-    label: string,
-    last_used_at: nullish(string),
-    revoked_at: nullish(string),
-  })
-);
+/** @satisfies {DeviceTokenValidator} */
+const deviceTokenShape = object({
+  created_at: string,
+  device_token_id: string,
+  label: string,
+  last_used_at: nullish(string),
+  revoked_at: nullish(string),
+});
 
-/** @type {DeviceEnrollmentValidator} */
-const deviceEnrollmentShape = /** @type {DeviceEnrollmentValidator} */ (
-  object({
-    enrollment_id: string,
-    enrollment_qr_svg: string,
-    enrollment_url: string,
-    expires_at: string,
-    offer_token: string,
-  })
-);
+/** @satisfies {DeviceEnrollmentValidator} */
+const deviceEnrollmentShape = object({
+  enrollment_id: string,
+  enrollment_qr_svg: string,
+  enrollment_url: string,
+  expires_at: string,
+  offer_token: string,
+});
 
-/** @type {DeviceConsumeValidator} */
-const deviceConsumeShape = /** @type {DeviceConsumeValidator} */ (
-  object({
-    created_at: string,
-    device_token_id: string,
-    label: string,
-    secret: string,
-  })
-);
+/** @satisfies {DeviceConsumeValidator} */
+const deviceConsumeShape = object({
+  created_at: string,
+  device_token_id: string,
+  label: string,
+  secret: string,
+});
 
-/** @type {PersonalAccessTokenValidator} */
-const personalAccessTokenShape = /** @type {PersonalAccessTokenValidator} */ (
-  object({
-    created_at: string,
-    expires_at: string,
-    label: string,
-    last_used_at: nullish(string),
-    read_only: boolean,
-    revoked_at: nullish(string),
-    role: roleShape,
-    token_id: string,
-  })
-);
+/** @satisfies {PersonalAccessTokenValidator} */
+const personalAccessTokenShape = object({
+  created_at: string,
+  expires_at: string,
+  label: string,
+  last_used_at: nullish(string),
+  read_only: boolean,
+  revoked_at: nullish(string),
+  role: roleShape,
+  token_id: string,
+});
 
-/** @type {PersonalAccessTokenIssuedValidator} */
-const personalAccessTokenIssuedShape = /** @type {PersonalAccessTokenIssuedValidator} */ (
-  object({
-    created_at: string,
-    expires_at: string,
-    label: string,
-    last_used_at: nullish(string),
-    read_only: boolean,
-    revoked_at: nullish(string),
-    role: roleShape,
-    secret: string,
-    token_id: string,
-  })
-);
+/** @satisfies {PersonalAccessTokenIssuedValidator} */
+const personalAccessTokenIssuedShape = object({
+  created_at: string,
+  expires_at: string,
+  label: string,
+  last_used_at: nullish(string),
+  read_only: boolean,
+  revoked_at: nullish(string),
+  role: roleShape,
+  secret: string,
+  token_id: string,
+});
 
 /** @param {string} path @param {Record<string, unknown>} body */
 async function authenticate(path, body, options = {}) {

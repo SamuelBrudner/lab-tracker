@@ -1,24 +1,42 @@
 import { demoFetch, isStaticDemoEnabled } from "./static-demo-api.js";
 import { ContractError, parseCollection, parseResource, unknown } from "./contract.js";
 
+/** @typedef {Error & {payload: unknown, status: number}} ApiError */
+/**
+ * @typedef {{
+ *   accept?: string,
+ *   body?: unknown,
+ *   method?: string,
+ *   notifyAuthRejected?: boolean,
+ *   token?: string,
+ * }} ApiOptions
+ */
+
 const AUTH_REJECTED_EVENT = "lab-tracker:auth-rejected";
 const AUTH_REJECTION_MESSAGE_PATTERN =
   /auth(entication|orization)? required|authorization header|credential|invalid token|missing authorization|session|token (has )?expired|unrecognized token/i;
 
+/** @param {unknown} payload @param {string} fallbackMessage */
 function parseApiError(payload, fallbackMessage) {
-  if (!payload || typeof payload !== "object") {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
     return fallbackMessage;
   }
-  if (payload.error && payload.error.message) {
-    return payload.error.message;
+  const error = /** @type {Record<string, unknown>} */ (payload).error;
+  if (error && typeof error === "object" && !Array.isArray(error)) {
+    const message = /** @type {Record<string, unknown>} */ (error).message;
+    if (typeof message === "string" && message) {
+      return message;
+    }
   }
   return fallbackMessage;
 }
 
+/** @param {Response} response */
 function isJsonResponse(response) {
   return (response.headers.get("content-type") || "").includes("application/json");
 }
 
+/** @param {Response} response */
 async function parseErrorPayload(response) {
   if (!isJsonResponse(response)) {
     return null;
@@ -30,6 +48,7 @@ async function parseErrorPayload(response) {
   }
 }
 
+/** @param {ApiError} error @param {string} token */
 function notifyAuthRejected(error, token) {
   if (typeof window === "undefined" || typeof window.dispatchEvent !== "function") {
     return;
@@ -45,16 +64,24 @@ function notifyAuthRejected(error, token) {
   );
 }
 
+/** @param {unknown} message */
 function isAuthRejectedMessage(message) {
   return AUTH_REJECTION_MESSAGE_PATTERN.test(String(message || ""));
 }
 
+/**
+ * @param {Response} response
+ * @param {{notifyAuthRejected?: boolean, token?: string}} [options]
+ * @returns {Promise<never>}
+ */
 async function throwApiError(
   response,
   { notifyAuthRejected: shouldNotify = false, token = "" } = {}
 ) {
   const payload = await parseErrorPayload(response);
-  const error = new Error(parseApiError(payload, `Request failed with ${response.status}`));
+  const error = /** @type {ApiError} */ (
+    new Error(parseApiError(payload, `Request failed with ${response.status}`))
+  );
   error.status = response.status;
   error.payload = payload;
   if (shouldNotify && response.status === 401 && isAuthRejectedMessage(error.message)) {
@@ -63,8 +90,10 @@ async function throwApiError(
   throw error;
 }
 
+/** @param {{token?: string, body?: unknown, accept?: string}} [options] */
 function buildRequestHeaders({ token = "", body = null, accept = "application/json" } = {}) {
   const isFormData = typeof FormData !== "undefined" && body instanceof FormData;
+  /** @type {Record<string, string>} */
   const headers = {
     Accept: accept,
   };
@@ -79,6 +108,7 @@ function buildRequestHeaders({ token = "", body = null, accept = "application/js
   return { headers, isFormData };
 }
 
+/** @param {string} path @param {Record<string, unknown>} [params] */
 function buildApiPath(path, params = {}) {
   const url = new URL(path, "http://lab-tracker.local");
   Object.entries(params).forEach(([key, value]) => {
@@ -91,6 +121,7 @@ function buildApiPath(path, params = {}) {
   return `${url.pathname}${url.search}${url.hash}`;
 }
 
+/** @param {string} path @param {RequestInit} [init] @returns {Promise<Response>} */
 function appFetch(path, init = {}) {
   if (isStaticDemoEnabled()) {
     return demoFetch(path, init);
@@ -98,6 +129,7 @@ function appFetch(path, init = {}) {
   return fetch(path, init);
 }
 
+/** @param {string} path @param {ApiOptions} [options] @returns {Promise<unknown>} */
 async function apiFetch(path, options = {}) {
   const {
     method = "GET",
@@ -111,7 +143,12 @@ async function apiFetch(path, options = {}) {
   const response = await appFetch(path, {
     method,
     headers,
-    body: body === null ? undefined : isFormData ? body : JSON.stringify(body),
+    body:
+      body === null
+        ? undefined
+        : isFormData
+          ? /** @type {FormData} */ (body)
+          : JSON.stringify(body),
   });
 
   if (!response.ok) {
@@ -127,11 +164,13 @@ async function apiFetch(path, options = {}) {
   return response.json();
 }
 
+/** @param {string} path @param {ApiOptions} [options] */
 async function apiRequest(path, options = {}) {
   const payload = await apiFetch(path, options);
   return parseResource(payload, unknown);
 }
 
+/** @param {string} path @param {ApiOptions} [options] */
 async function apiTextRequest(path, options = {}) {
   const {
     method = "GET",
@@ -144,7 +183,12 @@ async function apiTextRequest(path, options = {}) {
   const response = await appFetch(path, {
     method,
     headers,
-    body: body === null ? undefined : isFormData ? body : JSON.stringify(body),
+    body:
+      body === null
+        ? undefined
+        : isFormData
+          ? /** @type {FormData} */ (body)
+          : JSON.stringify(body),
   });
 
   if (!response.ok) {
@@ -157,11 +201,13 @@ async function apiTextRequest(path, options = {}) {
   return response.text();
 }
 
+/** @param {string} path @param {ApiOptions} [options] */
 async function apiListRequest(path, options = {}) {
   const payload = await apiFetch(path, options);
   return parseCollection(payload, unknown);
 }
 
+/** @param {string} path @param {ApiOptions & {limit?: number}} [options] */
 async function fetchAllPages(path, options = {}) {
   const { limit = 200, ...requestOptions } = options;
   const items = [];
@@ -202,6 +248,7 @@ async function fetchAllPages(path, options = {}) {
   return items;
 }
 
+/** @param {unknown} headerValue */
 function parseContentDispositionFilename(headerValue) {
   const value = String(headerValue || "");
   if (!value) {
@@ -229,6 +276,7 @@ function parseContentDispositionFilename(headerValue) {
   return bareMatch ? bareMatch[1].trim().replace(/^"|"$/g, "") : "";
 }
 
+/** @param {{path: string, token?: string, filename?: string}} options */
 async function downloadProtectedResource({ path, token = "", filename = "" }) {
   const { headers } = buildRequestHeaders({ token, accept: "*/*" });
   const response = await appFetch(path, {

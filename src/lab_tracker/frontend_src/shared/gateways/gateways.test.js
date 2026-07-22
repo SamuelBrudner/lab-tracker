@@ -102,8 +102,8 @@ describe("graph-drafts gateway", () => {
         match: "/graph-drafts/cs-1",
         response: apiResponse({
           change_set_id: "cs-1",
-          status: "draft",
-          operations: [{ operation_id: "op-1", status: "pending", op: "create" }],
+          status: "drafting",
+          operations: [{ operation_id: "op-1", status: "proposed", op: "create" }],
         }),
       },
     ]);
