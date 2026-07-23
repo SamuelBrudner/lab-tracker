@@ -69,6 +69,7 @@ class GenerationContextBuilder(Protocol):
         note_id: UUID,
         *,
         mode: GraphDraftMode,
+        source_note_ids: list[UUID] | None = None,
     ) -> dict[str, Any]: ...
 
     def build_graph_context_packet(
@@ -433,7 +434,6 @@ class GraphDraftGenerationCoordinator(BaseService):
         try:
             self.patch_validator.validate_top_level(graph_patch)
             operations = self.patch_validator.operations_from_graph_patch(change_set, graph_patch)
-            _attach_batch_source_traceability(operations, note_ids)
         except GraphDraftingError as exc:
             change_set.status = GraphChangeSetStatus.FAILED
             change_set.error_metadata = {
@@ -482,10 +482,23 @@ class GraphDraftGenerationCoordinator(BaseService):
         """Generate a complete replacement proposal without mutating persistence."""
 
         mode = change_set.draft_mode
+        prior_context = change_set.context_packet
+        captured_source_artifacts = (
+            [
+                dict(item)
+                for item in prior_context.get("source_artifacts", [])
+                if isinstance(item, dict)
+            ]
+            if isinstance(prior_context, dict)
+            else []
+        )
         prepared = self.context_builder.prepare_note_sources_for_graph_draft(
             change_set.source_note_id,
             mode=mode,
+            source_note_ids=list(change_set.source_note_ids or [change_set.source_note_id]),
         )
+        if not captured_source_artifacts:
+            captured_source_artifacts = prepared["source_artifacts"]
         note = prepared["source_note"]
         if mode == GraphDraftMode.GRAPH_CONTEXT:
             context_packet = self.context_builder.build_graph_context_packet(
@@ -502,12 +515,13 @@ class GraphDraftGenerationCoordinator(BaseService):
             )
         else:
             raise ValidationError("Unsupported graph draft mode.")
+        context_packet["source_artifacts"] = captured_source_artifacts
         graph_patch = self._draft_graph_patch(
             draft_client,
             graph_context=context_packet,
             user_hint=user_hint,
             draft_mode=mode,
-            source_artifacts=prepared["source_artifacts"],
+            source_artifacts=captured_source_artifacts,
             image_bytes=prepared["image_bytes"],
             image_content_type=prepared["image_content_type"],
             extra_images=extra_images,
@@ -656,29 +670,3 @@ def _batch_input_snapshot(context_packet: dict[str, Any]) -> dict[str, Any]:
             if isinstance(item, dict)
         ],
     }
-
-
-def _attach_batch_source_traceability(
-    operations: list[GraphChangeOperation],
-    note_ids: list[UUID],
-) -> None:
-    note_id_strings = [str(note_id) for note_id in note_ids]
-    fallback_ref = {
-        "label": "batch source notes",
-        "quote": "",
-        "region": None,
-        "source_note_ids": note_id_strings,
-    }
-    for operation in operations:
-        if not operation.source_refs:
-            operation.source_refs = [dict(fallback_ref)]
-            continue
-        next_refs: list[dict[str, Any]] = []
-        for ref in operation.source_refs:
-            next_ref = dict(ref)
-            if not any(
-                key in next_ref for key in ("note_id", "source_note_id", "source_note_ids")
-            ):
-                next_ref["source_note_ids"] = note_id_strings
-            next_refs.append(next_ref)
-        operation.source_refs = next_refs

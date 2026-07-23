@@ -2,10 +2,13 @@ import * as React from "react";
 
 import { useGraphDraftWorkflow } from "../hooks/useGraphDraftWorkflow.js";
 import { useReviewDictation } from "../hooks/useReviewDictation.js";
+import { useSourceArtifactPreviews } from "../hooks/useSourceArtifactPreviews.js";
 import { AudioReviewConsole } from "./graph-drafts/AudioReviewConsole.jsx";
 import { OperationRow } from "./graph-drafts/OperationRow.jsx";
 import { ProvenanceDetails } from "./graph-drafts/ProvenanceDetails.jsx";
-import { operationTitle, sourceRefText, spokenReviewScript } from "./graph-drafts/format.js";
+import { SourceArtifactEvidence } from "./graph-drafts/SourceArtifactEvidence.jsx";
+import { spokenReviewScript } from "./graph-drafts/format.js";
+import { buildSourceArtifactReview } from "./graph-drafts/source-artifacts.js";
 
 function GraphDraftDetailCard({
   token,
@@ -40,19 +43,28 @@ function GraphDraftDetailCard({
     operationReviewNotes,
     loading,
     error,
-    sourceImage,
     commitMessage,
     setCommitMessage,
     reviewNote,
     setReviewNote,
     pendingCommands,
     acceptedCount,
-    visibleSourceRegions,
     canEditDraft,
     canSubmitDraft,
     canReviewDraft,
     canCommitDraft,
   } = workflow;
+  const sourceReview = React.useMemo(
+    () => buildSourceArtifactReview(changeSet),
+    [changeSet]
+  );
+  const sourcePreviews = useSourceArtifactPreviews(sourceReview.artifactsToLoad, token);
+  const reviewAttachmentEvidence = changeSet?.context_packet?.review_attachment_evidence;
+  const reviewAttachmentMessage =
+    reviewAttachmentEvidence?.status === "unavailable"
+      ? reviewAttachmentEvidence.message ||
+        "Reviewer attachment previews are unavailable for this revision."
+      : "";
 
   async function handleRevise() {
     const revised = await workflow.reviseDraft({
@@ -127,45 +139,43 @@ function GraphDraftDetailCard({
             <p className="flash error">{changeSet.error_metadata.message}</p>
           ) : null}
 
-          {sourceImage ? (
-            <div className="source-image-frame">
-              <img
-                className="note-image"
-                src={sourceImage}
-                alt={changeSet.source_filename || "Source note"}
-              />
-              {visibleSourceRegions.map((region, index) => (
-                <div
-                  aria-label={`Source region ${index + 1}: ${
-                    region.ref?.label || operationTitle(region.operation)
-                  }`}
-                  className="source-region-box"
-                  key={`${region.operation.operation_id}-${index}`}
-                  style={region.style}
-                  title={sourceRefText(region.ref)}
-                >
-                  <span>{index + 1}</span>
-                </div>
-              ))}
-            </div>
+          <SourceArtifactEvidence
+            artifacts={sourceReview.sharedArtifacts}
+            previews={sourcePreviews}
+            shared
+            sharedMessage={reviewAttachmentMessage}
+          />
+          {reviewAttachmentMessage && sourceReview.sharedArtifacts.length === 0 ? (
+            <p className="source-artifact-warning" role="status">
+              {reviewAttachmentMessage}
+            </p>
           ) : null}
 
           <div className="review-report">
-            {(changeSet.operations || []).map((operation) => (
-              <OperationRow
-                key={operation.operation_id}
-                operation={operation}
-                changeSet={changeSet}
-                payloadText={payloads[operation.operation_id]}
-                reviewNote={operationReviewNotes[operation.operation_id]}
-                canEditDraft={canEditDraft}
-                pending={pendingCommands[`op:${operation.operation_id}`]}
-                onPatchOperationPayload={workflow.patchOperationPayload}
-                onUpdatePayloadText={workflow.updatePayloadText}
-                onUpdateOperationReviewNote={workflow.updateOperationReviewNote}
-                onSaveOperation={workflow.saveOperation}
-              />
-            ))}
+            {(changeSet.operations || []).map((operation) => {
+              const sourceMapping = sourceReview.byOperationId[operation.operation_id] || {
+                ambiguous: false,
+                artifacts: [],
+              };
+              return (
+                <OperationRow
+                  key={operation.operation_id}
+                  operation={operation}
+                  changeSet={changeSet}
+                  payloadText={payloads[operation.operation_id]}
+                  reviewNote={operationReviewNotes[operation.operation_id]}
+                  canEditDraft={canEditDraft}
+                  pending={pendingCommands[`op:${operation.operation_id}`]}
+                  sourceArtifacts={sourceMapping.artifacts}
+                  sourcePreviews={sourcePreviews}
+                  usesSharedSourceEvidence={sourceMapping.ambiguous}
+                  onPatchOperationPayload={workflow.patchOperationPayload}
+                  onUpdatePayloadText={workflow.updatePayloadText}
+                  onUpdateOperationReviewNote={workflow.updateOperationReviewNote}
+                  onSaveOperation={workflow.saveOperation}
+                />
+              );
+            })}
           </div>
 
           {(changeSet.uncertain_fields || []).length > 0 ||

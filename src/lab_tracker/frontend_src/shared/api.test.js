@@ -1,8 +1,13 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
-import { apiListRequest, apiRequest, fetchAllPages } from "./api.js";
+import {
+  apiListRequest,
+  apiRequest,
+  fetchAllPages,
+  fetchProtectedBlobResource,
+} from "./api.js";
 import { ContractError } from "./contract.js";
-import { apiResponse, installFetchMock } from "../test/utils.js";
+import { apiResponse, binaryResponse, installFetchMock } from "../test/utils.js";
 
 describe("strict JSON envelope helpers", () => {
   it("apiRequest rejects malformed successful resource envelopes", async () => {
@@ -55,6 +60,39 @@ describe("strict JSON envelope helpers", () => {
     await expect(fetchAllPages("/items", { limit: 2 })).rejects.toBeInstanceOf(
       ContractError
     );
+  });
+
+  it("fetches an authenticated binary resource without forcing a download", async () => {
+    const requestSpy = vi.fn();
+    installFetchMock([
+      {
+        match: "/notes/figure-1/raw",
+        response: (request) => {
+          requestSpy(request);
+          return binaryResponse({
+            body: "figure-bytes",
+            contentType: "image/png",
+            disposition: "attachment; filename*=UTF-8''panel%20A.png",
+          });
+        },
+      },
+    ]);
+
+    const resource = await fetchProtectedBlobResource({
+      path: "/notes/figure-1/raw",
+      token: "secret-token",
+    });
+
+    expect(requestSpy).toHaveBeenCalledTimes(1);
+    expect(requestSpy.mock.calls[0][0].init.headers).toEqual({
+      Accept: "*/*",
+      Authorization: "Bearer secret-token",
+    });
+    expect(resource.contentType).toBe("image/png");
+    expect(resource.filename).toBe("panel A.png");
+    expect(resource.blob).toBeInstanceOf(Blob);
+    expect(resource.blob.size).toBe("figure-bytes".length);
+    expect(resource.blob.type).toBe("image/png");
   });
 
 });

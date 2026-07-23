@@ -9,7 +9,12 @@ from uuid import UUID
 
 from lab_tracker.auth import AuthContext
 from lab_tracker.errors import NotFoundError, ValidationError
-from lab_tracker.graph_drafting import GraphDraftClient, GraphDraftingError
+from lab_tracker.graph_drafting import (
+    PROMPT_VERSION,
+    PROVIDER,
+    GraphDraftClient,
+    GraphDraftingError,
+)
 from lab_tracker.models import (
     AcceptanceMode,
     GraphChangeOperation,
@@ -22,6 +27,10 @@ from lab_tracker.patching import NOT_PROVIDED, PatchValue, is_provided
 from lab_tracker.services.base import BaseService, ServiceContext
 from lab_tracker.services.graph_draft_generation import GeneratedDraftProposal
 from lab_tracker.services.shared import UserExistenceReader, actor_user_fk, actor_user_id
+
+_REVISION_ATTACHMENT_EVIDENCE_MESSAGE = (
+    "Reviewer attachment previews are unavailable because revision attachments are not persisted."
+)
 
 
 class ReviewRecords(Protocol):
@@ -156,9 +165,7 @@ class GraphDraftReviewCoordinator(BaseService):
                 }
             operation.payload = payload
         if is_provided(review_note):
-            operation.review_note = (
-                review_note.strip() or None if review_note is not None else None
-            )
+            operation.review_note = review_note.strip() or None if review_note is not None else None
         if is_provided(status):
             if status not in {
                 GraphChangeOperationStatus.PROPOSED,
@@ -225,9 +232,7 @@ class GraphDraftReviewCoordinator(BaseService):
                 "recorded; graph operations require an explicit human accept."
             )
         if operation.status == GraphChangeOperationStatus.ACCEPTED:
-            self.authorization.require_interactive(
-                actor, action="Accepting graph operations"
-            )
+            self.authorization.require_interactive(actor, action="Accepting graph operations")
             operation.acceptance_mode = acceptance_mode
             operation.accepted_by = actor_user_id(actor)
             operation.accepted_by_user_id = actor_user_fk(actor, self.user_reader)
@@ -255,9 +260,7 @@ class GraphDraftReviewCoordinator(BaseService):
             except ValidationError:
                 continue
             operation.status = GraphChangeOperationStatus.ACCEPTED
-            self._stamp_operation_acceptance(
-                operation, AcceptanceMode.BULK_ACCEPTED, actor
-            )
+            self._stamp_operation_acceptance(operation, AcceptanceMode.BULK_ACCEPTED, actor)
             operation.updated_at = utc_now()
             accepted_any = True
         if accepted_any:
@@ -351,6 +354,7 @@ class GraphDraftReviewCoordinator(BaseService):
             cleaned,
             attachment_labels=attachment_labels,
         )
+        prior_context = change_set.context_packet
         try:
             proposal = self.generation.propose_note_revision(
                 change_set,
@@ -363,8 +367,23 @@ class GraphDraftReviewCoordinator(BaseService):
             raise ValidationError(f"Could not revise the draft: {exc}") from exc
 
         revisions: list[dict[str, Any]] = []
-        if isinstance(change_set.context_packet, dict):
-            revisions = list(change_set.context_packet.get("reviewer_revisions") or [])
+        review_attachment_evidence: dict[str, Any] | None = None
+        if isinstance(prior_context, dict):
+            revisions = list(prior_context.get("reviewer_revisions") or [])
+            prior_marker = prior_context.get("review_attachment_evidence")
+            if isinstance(prior_marker, dict) and prior_marker.get("status") == "unavailable":
+                review_attachment_evidence = dict(prior_marker)
+        if attachment_labels:
+            review_attachment_evidence = {
+                "status": "unavailable",
+                "reason": "revision_attachments_not_persisted",
+                "attachment_labels": attachment_labels,
+                "message": _REVISION_ATTACHMENT_EVIDENCE_MESSAGE,
+            }
+        if review_attachment_evidence:
+            for operation in proposal.operations:
+                for source_ref in operation.source_refs:
+                    source_ref["source_note_ids_resolution"] = "ambiguous_bundle"
         revision_record: dict[str, Any] = {
             "feedback": cleaned,
             "at": utc_now().isoformat(),
@@ -373,6 +392,8 @@ class GraphDraftReviewCoordinator(BaseService):
             revision_record["dictated"] = True
         if attachment_labels:
             revision_record["attachments"] = attachment_labels
+        if review_attachment_evidence:
+            revision_record["review_attachment_evidence"] = review_attachment_evidence
         revisions.append(revision_record)
         change_set.operations = proposal.operations
         change_set.summary = proposal.summary
@@ -380,6 +401,11 @@ class GraphDraftReviewCoordinator(BaseService):
         change_set.clarification_requests = proposal.clarification_requests
         change_set.context_packet = proposal.context_packet
         change_set.context_packet["reviewer_revisions"] = revisions
+        if review_attachment_evidence:
+            change_set.context_packet["review_attachment_evidence"] = review_attachment_evidence
+        change_set.provider = getattr(draft_client, "provider", PROVIDER)
+        change_set.model = getattr(draft_client, "model", "unknown")
+        change_set.prompt_version = PROMPT_VERSION
         change_set.status = GraphChangeSetStatus.READY
         change_set.error_metadata = {}
         change_set.updated_at = utc_now()
@@ -429,9 +455,7 @@ class GraphDraftReviewCoordinator(BaseService):
                     f"Attached file {attachment.content_type!r} is not a supported image type."
                 )
             if not attachment.content:
-                raise ValidationError(
-                    f"Attached image {attachment.filename!r} is empty."
-                )
+                raise ValidationError(f"Attached image {attachment.filename!r} is empty.")
             extra_images.append(
                 {
                     "image_bytes": attachment.content,
@@ -451,9 +475,7 @@ class GraphDraftReviewCoordinator(BaseService):
         lines = []
         for operation in operations:
             semantic = (
-                operation.semantic_type.value
-                if operation.semantic_type
-                else operation.op.value
+                operation.semantic_type.value if operation.semantic_type else operation.op.value
             )
             try:
                 payload_text = json.dumps(operation.payload, default=str)
@@ -469,8 +491,7 @@ class GraphDraftReviewCoordinator(BaseService):
         if attachment_labels:
             joined = ", ".join(attachment_labels)
             attachment_note = (
-                f"\n\nThe reviewer attached image(s) as additional visual "
-                f"context: {joined}."
+                f"\n\nThe reviewer attached image(s) as additional visual context: {joined}."
             )
         return (
             "REVISION REQUEST. You previously proposed the graph operations below. "
