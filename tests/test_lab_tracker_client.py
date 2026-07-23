@@ -318,6 +318,51 @@ def test_get_or_create_question_distinguishes_created_reused_and_conflict() -> N
     assert len(post_bodies) == 1
 
 
+def test_get_or_create_question_explicit_null_clears_hypothesis_on_update() -> None:
+    question = {
+        "question_id": "question-1",
+        "project_id": "project-1",
+        "text": "How?",
+        "question_type": "descriptive",
+        "hypothesis": "The original hypothesis",
+        "status": "staged",
+        "parent_question_ids": [],
+    }
+    patch_bodies: list[dict] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET" and request.url.path == "/questions":
+            return _json_response(
+                200,
+                {
+                    "data": [question],
+                    "meta": {"limit": 200, "offset": 0, "total": 1},
+                },
+            )
+        if request.method == "PATCH" and request.url.path == "/questions/question-1":
+            body = json.loads(request.content.decode("utf-8"))
+            patch_bodies.append(body)
+            question.update(body)
+            return _json_response(200, {"data": question})
+        return _json_response(404, {"error": {"message": "not found"}})
+
+    with LabTracker(
+        base_url="http://testserver",
+        transport=httpx.MockTransport(handler),
+    ) as lt:
+        result = lt.get_or_create_question(
+            project_id="project-1",
+            text="How?",
+            hypothesis=None,
+            on_conflict="update",
+        )
+
+    assert result.action == "updated"
+    assert result.record.hypothesis is None
+    assert question["hypothesis"] is None
+    assert patch_bodies == [{"hypothesis": None}]
+
+
 @pytest.mark.parametrize(
     ("method_name", "list_path", "post_payload", "record"),
     [

@@ -38,6 +38,7 @@ from lab_tracker.models import (
     NoteStatus,
     utc_now,
 )
+from lab_tracker.patching import NOT_PROVIDED, PatchValue, is_provided
 from lab_tracker.services.analysis_service import AnalysisService
 from lab_tracker.services.base import BaseService, ServiceContext
 from lab_tracker.services.claim_service import ClaimService
@@ -493,20 +494,30 @@ class GraphDraftService(BaseService):
         self,
         project_id: UUID,
         *,
-        enabled: bool | None = None,
-        cadence_minutes: int | None = None,
-        run_at_local_time: str | None = None,
-        timezone_name: str | None = None,
-        user_id: UUID | None = None,
+        enabled: PatchValue[bool | None] = NOT_PROVIDED,
+        cadence_minutes: PatchValue[int | None] = NOT_PROVIDED,
+        run_at_local_time: PatchValue[str | None] = NOT_PROVIDED,
+        timezone_name: PatchValue[str | None] = NOT_PROVIDED,
+        user_id: PatchValue[UUID | None] = NOT_PROVIDED,
         actor: AuthContext | None = None,
     ) -> GraphDraftBatchSettings:
+        for field_name, value in (
+            ("enabled", enabled),
+            ("cadence_minutes", cadence_minutes),
+            ("run_at_local_time", run_at_local_time),
+            ("timezone_name", timezone_name),
+            ("user_id", user_id),
+        ):
+            if is_provided(value) and value is None:
+                raise ValidationError(f"{field_name} must not be null.")
+        resolved_user_id = user_id if is_provided(user_id) else None
         # Contributors may schedule their own project's daily batch -- the
         # project-level default (user_id is None) and their own per-user
         # settings (user_id == actor). Editing *another* user's per-user
         # settings still requires owner.
         editing_other_user = (
-            user_id is not None
-            and (actor is None or user_id != actor.user_id)
+            resolved_user_id is not None
+            and (actor is None or resolved_user_id != actor.user_id)
         )
         if editing_other_user:
             self.authorization.require_owner(project_id, actor=actor)
@@ -514,28 +525,39 @@ class GraphDraftService(BaseService):
             self.authorization.require_contributor(project_id, actor=actor)
         settings = self.repository.get_graph_draft_batch_settings_by_project(
             project_id,
-            user_id=user_id,
+            user_id=resolved_user_id,
         )
         if settings is None:
             default = self.repository.get_graph_draft_batch_settings_by_project(project_id)
             settings = _default_batch_settings(
                 project_id=project_id,
-                user_id=user_id,
+                user_id=resolved_user_id,
                 actor=actor,
                 inherit_from=default,
             )
-        if enabled is not None:
+        before = settings.model_copy(deep=True)
+        if is_provided(enabled):
             settings.enabled = enabled
-        if cadence_minutes is not None:
+        if is_provided(cadence_minutes):
             if cadence_minutes < 60:
                 raise ValidationError("cadence_minutes must be at least 60.")
             settings.cadence_minutes = cadence_minutes
-        if run_at_local_time is not None:
+        if is_provided(run_at_local_time):
             _validate_run_at_local_time(run_at_local_time)
             settings.run_at_local_time = run_at_local_time
-        if timezone_name is not None:
+        if is_provided(timezone_name):
             _zoneinfo(timezone_name)
             settings.timezone_name = timezone_name
+        scheduling_changed = any(
+            (
+                settings.enabled != before.enabled,
+                settings.cadence_minutes != before.cadence_minutes,
+                settings.run_at_local_time != before.run_at_local_time,
+                settings.timezone_name != before.timezone_name,
+            )
+        )
+        if not scheduling_changed:
+            return settings
         settings.next_run_at = (
             _next_run_at(
                 cadence_minutes=settings.cadence_minutes,
@@ -1234,16 +1256,23 @@ class GraphDraftService(BaseService):
         change_set_id: UUID,
         operation_id: UUID,
         *,
-        payload: dict[str, Any] | None = None,
-        status: GraphChangeOperationStatus | None = None,
-        review_note: str | None = None,
+        payload: PatchValue[dict[str, Any] | None] = NOT_PROVIDED,
+        status: PatchValue[GraphChangeOperationStatus | None] = NOT_PROVIDED,
+        review_note: PatchValue[str | None] = NOT_PROVIDED,
         acceptance_mode: AcceptanceMode = AcceptanceMode.HUMAN_SELECTED,
         actor: AuthContext | None = None,
     ) -> GraphChangeSet:
         change_set = self.get_graph_change_set(change_set_id)
         self._ensure_graph_change_set_editable(change_set, actor=actor)
         operation = self._find_graph_operation(change_set, operation_id)
-        if payload is not None:
+        if not any(is_provided(value) for value in (payload, status, review_note)):
+            return change_set
+        if is_provided(payload) and payload is None:
+            raise ValidationError("payload must not be null.")
+        if is_provided(status) and status is None:
+            raise ValidationError("status must not be null.")
+        before = operation.model_copy(deep=True)
+        if is_provided(payload):
             if not isinstance(payload, dict):
                 raise ValidationError("payload must be a JSON object.")
             if payload != operation.payload:
@@ -1253,9 +1282,11 @@ class GraphDraftService(BaseService):
                     "edited_by": actor_user_id(actor),
                 }
             operation.payload = payload
-        if review_note is not None:
-            operation.review_note = review_note.strip() or None
-        if status is not None:
+        if is_provided(review_note):
+            operation.review_note = (
+                review_note.strip() or None if review_note is not None else None
+            )
+        if is_provided(status):
             if status not in {
                 GraphChangeOperationStatus.PROPOSED,
                 GraphChangeOperationStatus.ACCEPTED,
@@ -1264,12 +1295,20 @@ class GraphDraftService(BaseService):
                 raise ValidationError("Operation status must be proposed, accepted, or rejected.")
             operation.status = status
         if operation.status == GraphChangeOperationStatus.REJECTED:
-            operation.error_metadata = {
-                **operation.error_metadata,
-                "reviewed_at": utc_now().isoformat(),
-                "reviewed_by": actor_user_id(actor),
-                "review_note": operation.review_note,
-            }
+            rejection_changed = any(
+                (
+                    operation.status != before.status,
+                    operation.review_note != before.review_note,
+                    operation.payload != before.payload,
+                )
+            )
+            if rejection_changed:
+                operation.error_metadata = {
+                    **operation.error_metadata,
+                    "reviewed_at": utc_now().isoformat(),
+                    "reviewed_by": actor_user_id(actor),
+                    "review_note": operation.review_note,
+                }
         else:
             try:
                 self.patch_validator.validate_operation(operation, operation.payload)
@@ -1293,6 +1332,8 @@ class GraphDraftService(BaseService):
                 }
                 if operation.status == GraphChangeOperationStatus.ACCEPTED:
                     operation.status = GraphChangeOperationStatus.PROPOSED
+        if operation == before:
+            return change_set
         self._stamp_operation_acceptance(operation, acceptance_mode, actor)
         operation.updated_at = utc_now()
         change_set.updated_at = utc_now()

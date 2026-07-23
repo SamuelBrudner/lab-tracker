@@ -20,6 +20,7 @@ from lab_tracker.models import (
     QuestionType,
     UsageEventResourceType,
 )
+from lab_tracker.patching import provided_fields
 from lab_tracker.schemas import (
     Envelope,
     ListEnvelope,
@@ -160,13 +161,8 @@ def build_questions_router(api: LabTrackerAPI) -> APIRouter:
         ensure_project_read(request, existing.project_id)
         question = api_from_request(request, api).update_question(
             question_id,
-            text=payload.text,
-            question_type=payload.question_type,
-            hypothesis=payload.hypothesis,
-            status=payload.status,
-            terminal_reason=payload.terminal_reason,
-            parent_question_ids=payload.parent_question_ids,
             actor=actor,
+            **provided_fields(payload),
         )
         return Envelope(data=question)
 

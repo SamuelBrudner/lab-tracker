@@ -27,6 +27,7 @@ from lab_tracker.db_models import (
 )
 from lab_tracker.db_types import ensure_uuid
 from lab_tracker.errors import AuthError, ConflictError, NotFoundError, ValidationError
+from lab_tracker.patching import NOT_PROVIDED, PatchValue, is_provided
 
 LOCAL_AUTH_USER_ID = ensure_uuid("00000000-0000-4000-8000-000000000001")
 LOCAL_AUTH_USERNAME = "local-tester"
@@ -220,20 +221,24 @@ class AuthService:
         self,
         user_id: UUID,
         *,
-        role: Role | None = None,
-        password: str | None = None,
+        role: PatchValue[Role | None] = NOT_PROVIDED,
+        password: PatchValue[str | None] = NOT_PROVIDED,
     ) -> User:
-        if role is None and password is None:
+        if not is_provided(role) and not is_provided(password):
             raise ValidationError("A role or password update is required.")
+        if role is None:
+            raise ValidationError("role must not be null.")
+        if password is None:
+            raise ValidationError("password must not be null.")
 
         if self._session_factory is None:
             user = self.get_user_by_id(user_id)
             if user is None:
                 raise NotFoundError("User does not exist.")
-            if role is not None:
+            if is_provided(role):
                 self._ensure_not_demoting_last_admin(user, role, self.list_users())
                 user.role = role
-            if password is not None:
+            if is_provided(password):
                 user.password_hash = PasswordHasher.hash_password(password)
             return user
 
@@ -241,13 +246,19 @@ class AuthService:
             row = session.get(UserModel, str(user_id))
             if row is None:
                 raise NotFoundError("User does not exist.")
-            if role is not None:
+            changed = False
+            if is_provided(role):
                 users = [_user_from_model(item) for item in session.scalars(select(UserModel))]
                 current = _user_from_model(row)
                 self._ensure_not_demoting_last_admin(current, role, users)
-                row.role = role.value
-            if password is not None:
+                if row.role != role.value:
+                    row.role = role.value
+                    changed = True
+            if is_provided(password):
                 row.password_hash = PasswordHasher.hash_password(password)
+                changed = True
+            if not changed:
+                return _user_from_model(row)
             session.commit()
             session.refresh(row)
             return _user_from_model(row)

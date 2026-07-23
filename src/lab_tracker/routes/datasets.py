@@ -14,6 +14,7 @@ from lab_tracker.api import LabTrackerAPI
 from lab_tracker.db_models import DatasetFileModel
 from lab_tracker.db_types import ensure_uuid
 from lab_tracker.models import Dataset, DatasetStatus, UsageEventResourceType
+from lab_tracker.patching import provided_fields
 from lab_tracker.schemas import DatasetCreate, DatasetUpdate, Envelope, ListEnvelope
 
 from .dataset_files import _delete_stored_dataset_file
@@ -112,12 +113,8 @@ def build_datasets_router(api: LabTrackerAPI) -> APIRouter:
         ensure_project_read(request, existing.project_id)
         dataset = api_from_request(request, api).update_dataset(
             dataset_id,
-            status=payload.status,
-            terminal_reason=payload.terminal_reason,
-            question_links=payload.question_links,
-            commit_manifest=payload.commit_manifest,
-            commit_hash=payload.commit_hash,
             actor=actor,
+            **provided_fields(payload),
         )
         return Envelope(data=dataset)
 

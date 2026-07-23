@@ -5,6 +5,9 @@ from types import SimpleNamespace
 from typing import Any
 from uuid import UUID, uuid4
 
+import pytest
+
+from lab_tracker.errors import ValidationError
 from lab_tracker.graph_drafting import BATCH_PROMPT_VERSION, _batch_instructions
 from lab_tracker.models import (
     EntityRef,
@@ -156,6 +159,30 @@ def test_graph_patch_validator_allows_client_refs_during_review_validation() -> 
     assert seen_refs == [(EntityType.PROJECT, project_id)]
 
 
+def test_graph_patch_validator_rejects_empty_update_payload() -> None:
+    project_id = uuid4()
+    operation = GraphChangeOperation(
+        operation_id=uuid4(),
+        change_set_id=uuid4(),
+        sequence=1,
+        op=GraphChangeOp.UPDATE,
+        entity_type=EntityType.QUESTION,
+        semantic_type=GraphDraftSemanticType.UPDATE_ENTITY,
+        target_entity_id=uuid4(),
+        payload={},
+        rationale="An empty update must never rewrite provenance.",
+    )
+    validator = GraphPatchValidator(
+        get_graph_entity=lambda entity_type, entity_id: Project(
+            project_id=project_id,
+            name="Project",
+        )
+    )
+
+    with pytest.raises(ValidationError, match="must include at least one field"):
+        validator.validate_operation(operation, operation.payload)
+
+
 def test_graph_patch_applier_resolves_client_refs_before_create_service_call() -> None:
     project_id = uuid4()
     question_id = uuid4()
@@ -234,6 +261,97 @@ def test_graph_patch_applier_resolves_client_refs_before_create_service_call() -
         EntityRef(entity_type=EntityType.QUESTION, entity_id=question_id)
     ]
     assert captured["actor"] is None
+
+
+def test_graph_patch_applier_preserves_update_field_presence_and_explicit_null() -> None:
+    project_id = uuid4()
+    question_id = uuid4()
+    captured: dict[str, Any] = {}
+
+    class Questions:
+        def update_question(self, entity_id: UUID, **kwargs: Any) -> Project:
+            captured["entity_id"] = entity_id
+            captured["kwargs"] = kwargs
+            return Project(project_id=project_id, name="Placeholder")
+
+    applier = GraphPatchApplier(
+        projects=SimpleNamespace(),
+        questions=Questions(),
+        notes=SimpleNamespace(),
+        sessions=SimpleNamespace(),
+        datasets=SimpleNamespace(),
+        analyses=SimpleNamespace(),
+        claims=SimpleNamespace(),
+        visualizations=SimpleNamespace(),
+    )
+    change_set = _change_set(project_id)
+    operation = GraphChangeOperation(
+        operation_id=uuid4(),
+        change_set_id=change_set.change_set_id,
+        sequence=1,
+        op=GraphChangeOp.UPDATE,
+        entity_type=EntityType.QUESTION,
+        semantic_type=GraphDraftSemanticType.UPDATE_ENTITY,
+        target_entity_id=question_id,
+        payload={"hypothesis": None},
+        rationale="Clear only the hypothesis.",
+    )
+
+    applier.apply_graph_operation(
+        operation,
+        ref_map={},
+        actor=None,
+        change_set=change_set,
+    )
+
+    assert captured["entity_id"] == question_id
+    assert captured["kwargs"]["hypothesis"] is None
+    assert "text" not in captured["kwargs"]
+    assert "status" not in captured["kwargs"]
+
+
+def test_graph_patch_applier_forwards_nullable_project_group_id() -> None:
+    project_id = uuid4()
+    captured: dict[str, Any] = {}
+
+    class Projects:
+        def update_project(self, entity_id: UUID, **kwargs: Any) -> Project:
+            captured.update({"entity_id": entity_id, **kwargs})
+            return Project(project_id=entity_id, name="Project")
+
+    applier = GraphPatchApplier(
+        projects=Projects(),
+        questions=SimpleNamespace(),
+        notes=SimpleNamespace(),
+        sessions=SimpleNamespace(),
+        datasets=SimpleNamespace(),
+        analyses=SimpleNamespace(),
+        claims=SimpleNamespace(),
+        visualizations=SimpleNamespace(),
+    )
+    change_set = _change_set(project_id)
+    operation = GraphChangeOperation(
+        operation_id=uuid4(),
+        change_set_id=change_set.change_set_id,
+        sequence=1,
+        op=GraphChangeOp.UPDATE,
+        entity_type=EntityType.PROJECT,
+        semantic_type=GraphDraftSemanticType.UPDATE_ENTITY,
+        target_entity_id=project_id,
+        payload={"group_id": None},
+        rationale="Detach from the group.",
+    )
+
+    applier.apply_graph_operation(
+        operation,
+        ref_map={},
+        actor=None,
+        change_set=change_set,
+    )
+
+    assert captured["entity_id"] == project_id
+    assert captured["group_id"] is None
+    assert "name" not in captured
 
 
 def _meeting_note() -> Note:

@@ -867,19 +867,41 @@ class LabTrackerAPIClient:
         target_date: str | None = None,
         external_ref: str | None = None,
         attributes: JsonObject | None = None,
+        clear_target_date: bool = False,
+        clear_external_ref: bool = False,
     ) -> JsonObject:
+        if target_date is not None and clear_target_date:
+            raise LabTrackerAPIValidationError(
+                "target_date cannot be supplied when clear_target_date is true.",
+                code="validation_error",
+            )
+        if external_ref is not None and clear_external_ref:
+            raise LabTrackerAPIValidationError(
+                "external_ref cannot be supplied when clear_external_ref is true.",
+                code="validation_error",
+            )
+        payload: JsonObject = {
+            name: value
+            for name, value in (
+                ("goal_type", _validate_goal_type(goal_type)),
+                ("title", title),
+                ("summary", summary),
+                ("status", _validate_goal_status(status)),
+                ("target_date", target_date),
+                ("external_ref", external_ref),
+                ("attributes", attributes),
+            )
+            if value is not None
+        }
+        if clear_target_date:
+            payload["target_date"] = None
+        if clear_external_ref:
+            payload["external_ref"] = None
         return self._request(
             "PATCH",
             f"/goals/{goal_id}",
-            json_payload={
-                "goal_type": _validate_goal_type(goal_type),
-                "title": title,
-                "summary": summary,
-                "status": _validate_goal_status(status),
-                "target_date": target_date,
-                "external_ref": external_ref,
-                "attributes": attributes,
-            },
+            json_payload=payload,
+            preserve_json_nulls=clear_target_date or clear_external_ref,
         )
 
     def link_node_to_goal(
@@ -972,6 +994,7 @@ class LabTrackerAPIClient:
         json_payload: JsonObject | None = None,
         files: dict[str, Any] | None = None,
         retry_on_unauthorized: bool = True,
+        preserve_json_nulls: bool = False,
     ) -> JsonObject:
         response = self._transport.request(
             method,
@@ -981,6 +1004,7 @@ class LabTrackerAPIClient:
             json=json_payload,
             files=files,
             retry_on_unauthorized=retry_on_unauthorized,
+            preserve_json_nulls=preserve_json_nulls,
         )
         if response.status_code >= 400:
             raise _api_error_from_response(response)

@@ -16,6 +16,7 @@ from lab_tracker.models import (
     ExplorationNodeType,
     utc_now,
 )
+from lab_tracker.patching import NOT_PROVIDED, PatchValue, is_provided
 from lab_tracker.services.base import BaseService, ServiceContext
 from lab_tracker.services.project_authorization import ProjectAuthorizationPolicy
 from lab_tracker.services.shared import actor_user_fk, actor_user_id, ensure_non_empty, unique_ids
@@ -174,21 +175,21 @@ class ExplorationService(BaseService):
         self,
         node_id: UUID,
         *,
-        title: str | None = None,
-        status: ExplorationNodeStatus | None = None,
-        choice: str | None = None,
-        alternatives_considered: Iterable[str] | None = None,
-        rationale: str | None = None,
-        evidence_refs: Iterable[EntityRef] | None = None,
-        hypothesis: str | None = None,
-        failure_mode: str | None = None,
-        lesson: str | None = None,
-        tooling_context: str | None = None,
-        trigger: str | None = None,
-        invalidates_node_id: UUID | None = None,
-        invalidates_claim_id: UUID | None = None,
-        parent_node_ids: Iterable[UUID] | None = None,
-        also_depends_on_node_ids: Iterable[UUID] | None = None,
+        title: PatchValue[str | None] = NOT_PROVIDED,
+        status: PatchValue[ExplorationNodeStatus | None] = NOT_PROVIDED,
+        choice: PatchValue[str | None] = NOT_PROVIDED,
+        alternatives_considered: PatchValue[Iterable[str] | None] = NOT_PROVIDED,
+        rationale: PatchValue[str | None] = NOT_PROVIDED,
+        evidence_refs: PatchValue[Iterable[EntityRef] | None] = NOT_PROVIDED,
+        hypothesis: PatchValue[str | None] = NOT_PROVIDED,
+        failure_mode: PatchValue[str | None] = NOT_PROVIDED,
+        lesson: PatchValue[str | None] = NOT_PROVIDED,
+        tooling_context: PatchValue[str | None] = NOT_PROVIDED,
+        trigger: PatchValue[str | None] = NOT_PROVIDED,
+        invalidates_node_id: PatchValue[UUID | None] = NOT_PROVIDED,
+        invalidates_claim_id: PatchValue[UUID | None] = NOT_PROVIDED,
+        parent_node_ids: PatchValue[Iterable[UUID] | None] = NOT_PROVIDED,
+        also_depends_on_node_ids: PatchValue[Iterable[UUID] | None] = NOT_PROVIDED,
         actor: AuthContext | None = None,
         origin: EntityOrigin | None = None,
         change_set_id: UUID | None = None,
@@ -198,10 +199,25 @@ class ExplorationService(BaseService):
     ) -> ExplorationNode:
         node = self.get_exploration_node(node_id)
         self.authorization.require_contributor(node.project_id, actor=actor)
-        next_status = status or node.status
+        before = node.model_copy(deep=True)
+        if is_provided(status):
+            if status is None:
+                raise ValidationError("status must not be null.")
+            next_status = status
+        else:
+            next_status = node.status
+        for field_name, value in (
+            ("title", title),
+            ("alternatives_considered", alternatives_considered),
+            ("evidence_refs", evidence_refs),
+            ("parent_node_ids", parent_node_ids),
+            ("also_depends_on_node_ids", also_depends_on_node_ids),
+        ):
+            if is_provided(value) and value is None:
+                raise ValidationError(f"{field_name} must not be null.")
         self._ensure_status_transition(node.status, next_status)
         content_edit = any(
-            item is not None
+            is_provided(item)
             for item in (
                 title,
                 choice,
@@ -221,16 +237,16 @@ class ExplorationService(BaseService):
         )
         if node.status != ExplorationNodeStatus.STAGED and content_edit:
             raise ValidationError("Only staged exploration nodes can be edited.")
-        if title is not None:
+        if is_provided(title):
             ensure_non_empty(title, "title")
             node.title = title.strip()
-        if choice is not None:
-            node.choice = _normalize_optional_text(choice)
-        if alternatives_considered is not None:
+        if is_provided(choice):
+            node.choice = _normalize_optional_text(choice) if choice is not None else None
+        if is_provided(alternatives_considered):
             node.alternatives_considered = _normalize_text_list(alternatives_considered)
-        if rationale is not None:
-            node.rationale = _normalize_optional_text(rationale)
-        if evidence_refs is not None:
+        if is_provided(rationale):
+            node.rationale = _normalize_optional_text(rationale) if rationale is not None else None
+        if is_provided(evidence_refs):
             node.evidence_refs = [
                 self._resolve_entity_ref(
                     ref,
@@ -240,31 +256,58 @@ class ExplorationService(BaseService):
                 )
                 for ref in evidence_refs
             ]
-        if hypothesis is not None:
-            node.hypothesis = _normalize_optional_text(hypothesis)
-        if failure_mode is not None:
-            node.failure_mode = _normalize_optional_text(failure_mode)
-        if lesson is not None:
-            node.lesson = _normalize_optional_text(lesson)
-        if tooling_context is not None:
-            node.tooling_context = _normalize_optional_text(tooling_context)
-        if trigger is not None:
-            node.trigger = _normalize_optional_text(trigger)
+        if is_provided(hypothesis):
+            node.hypothesis = (
+                _normalize_optional_text(hypothesis) if hypothesis is not None else None
+            )
+        if is_provided(failure_mode):
+            node.failure_mode = (
+                _normalize_optional_text(failure_mode)
+                if failure_mode is not None
+                else None
+            )
+        if is_provided(lesson):
+            node.lesson = _normalize_optional_text(lesson) if lesson is not None else None
+        if is_provided(tooling_context):
+            node.tooling_context = (
+                _normalize_optional_text(tooling_context)
+                if tooling_context is not None
+                else None
+            )
+        if is_provided(trigger):
+            node.trigger = _normalize_optional_text(trigger) if trigger is not None else None
         # Providing exactly one invalidation target re-points the pivot and
         # clears the other kind, so a staged pivot can switch between
         # invalidating a node and a claim without tripping the exactly-one
         # rule mid-update. Providing both still fails validation below.
-        if invalidates_node_id is not None:
-            node.invalidates_node_id = invalidates_node_id
-            if invalidates_claim_id is None:
-                node.invalidates_claim_id = None
-        if invalidates_claim_id is not None:
-            node.invalidates_claim_id = invalidates_claim_id
-            if invalidates_node_id is None:
-                node.invalidates_node_id = None
-        if parent_node_ids is not None:
+        if is_provided(invalidates_node_id) or is_provided(invalidates_claim_id):
+            next_invalidates_node_id = (
+                invalidates_node_id
+                if is_provided(invalidates_node_id)
+                else node.invalidates_node_id
+            )
+            next_invalidates_claim_id = (
+                invalidates_claim_id
+                if is_provided(invalidates_claim_id)
+                else node.invalidates_claim_id
+            )
+            if (
+                is_provided(invalidates_node_id)
+                and invalidates_node_id is not None
+                and not is_provided(invalidates_claim_id)
+            ):
+                next_invalidates_claim_id = None
+            if (
+                is_provided(invalidates_claim_id)
+                and invalidates_claim_id is not None
+                and not is_provided(invalidates_node_id)
+            ):
+                next_invalidates_node_id = None
+            node.invalidates_node_id = next_invalidates_node_id
+            node.invalidates_claim_id = next_invalidates_claim_id
+        if is_provided(parent_node_ids):
             node.parent_node_ids = unique_ids(parent_node_ids)
-        if also_depends_on_node_ids is not None:
+        if is_provided(also_depends_on_node_ids):
             node.also_depends_on_node_ids = unique_ids(also_depends_on_node_ids)
         node.status = next_status
         if origin is not None:
@@ -277,7 +320,6 @@ class ExplorationService(BaseService):
             node.origin_model = origin_model
         if origin_prompt_version is not None:
             node.origin_prompt_version = origin_prompt_version
-        node.updated_at = utc_now()
         if content_edit:
             self._validate_node(node)
         # Status-only transitions skip re-validation: the content was validated
@@ -286,6 +328,9 @@ class ExplorationService(BaseService):
         # (invalidates_* are ondelete=SET NULL). Re-running the exactly-one
         # check there would strand a committed/archived pivot that can no
         # longer be re-pointed.
+        if node == before:
+            return node
+        node.updated_at = utc_now()
         with self.unit_of_work() as repository:
             repository.exploration_nodes.save(node)
         return node

@@ -390,11 +390,14 @@ def lab_tracker_update_goal(
     target_date: str | None = None,
     external_ref: str | None = None,
     attributes: JsonObject | None = None,
+    clear_target_date: bool = False,
+    clear_external_ref: bool = False,
 ) -> JsonObject:
     """Update a Lab Tracker goal/output.
 
     Destructive: overwrites the canonical goal's fields in place. Only call it when the
-    user explicitly asks; confirm before overwriting.
+    user explicitly asks; confirm before overwriting. Set a clear flag to remove the
+    corresponding nullable value; omitted values are left unchanged.
     """
     return _write_tool(
         "lab_tracker_update_goal",
@@ -407,6 +410,8 @@ def lab_tracker_update_goal(
             target_date=target_date,
             external_ref=external_ref,
             attributes=attributes,
+            clear_target_date=clear_target_date,
+            clear_external_ref=clear_external_ref,
         ),
         hint=next_action(
             "lab_tracker_next_questions",

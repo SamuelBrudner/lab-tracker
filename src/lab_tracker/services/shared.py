@@ -32,6 +32,7 @@ from lab_tracker.models import (
     SessionStatus,
     external_artifact_uri_validation_error,
 )
+from lab_tracker.patching import NOT_PROVIDED, NotProvided, PatchValue, is_provided
 from lab_tracker.provenance_ingestion import external_artifacts_from_metadata
 
 if TYPE_CHECKING:
@@ -100,6 +101,41 @@ def terminal_reason_for_status(
         raise ValidationError(
             f"{entity_name} terminal_reason is required when status becomes "
             f"{terminal_status.value}."
+        )
+    if cleaned_reason is not None and next_status != terminal_status:
+        raise ValidationError(
+            f"{entity_name} terminal_reason can only be set for "
+            f"{terminal_status.value} status."
+        )
+    return cleaned_reason
+
+
+def terminal_reason_for_patch(
+    current_status: StatusT,
+    next_status: StatusT,
+    terminal_status: StatusT,
+    terminal_reason: PatchValue[str | None],
+    *,
+    entity_name: str,
+) -> str | None | NotProvided:
+    """Resolve a PATCH terminal reason without collapsing omission and null."""
+
+    entering_terminal = current_status != next_status and next_status == terminal_status
+    if not is_provided(terminal_reason):
+        if entering_terminal:
+            raise ValidationError(
+                f"{entity_name} terminal_reason is required when status becomes "
+                f"{terminal_status.value}."
+            )
+        return NOT_PROVIDED
+
+    cleaned_reason = terminal_reason.strip() if terminal_reason is not None else None
+    if terminal_reason is not None and not cleaned_reason:
+        raise ValidationError("terminal_reason must not be empty.")
+    if next_status == terminal_status and cleaned_reason is None:
+        raise ValidationError(
+            f"{entity_name} terminal_reason is required for "
+            f"{terminal_status.value} status."
         )
     if cleaned_reason is not None and next_status != terminal_status:
         raise ValidationError(

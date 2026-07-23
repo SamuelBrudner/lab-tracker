@@ -16,6 +16,7 @@ from lab_tracker.models import (
     ExplorationNodeType,
     UsageEventResourceType,
 )
+from lab_tracker.patching import provided_fields
 from lab_tracker.schemas import (
     Envelope,
     ExplorationNodeCreate,
@@ -125,22 +126,8 @@ def build_exploration_router(api: LabTrackerAPI) -> APIRouter:
         ensure_project_read(request, existing.project_id)
         node = api_from_request(request, api).update_exploration_node(
             node_id,
-            title=payload.title,
-            status=payload.status,
-            choice=payload.choice,
-            alternatives_considered=payload.alternatives_considered,
-            rationale=payload.rationale,
-            evidence_refs=payload.evidence_refs,
-            hypothesis=payload.hypothesis,
-            failure_mode=payload.failure_mode,
-            lesson=payload.lesson,
-            tooling_context=payload.tooling_context,
-            trigger=payload.trigger,
-            invalidates_node_id=payload.invalidates_node_id,
-            invalidates_claim_id=payload.invalidates_claim_id,
-            parent_node_ids=payload.parent_node_ids,
-            also_depends_on_node_ids=payload.also_depends_on_node_ids,
             actor=actor,
+            **provided_fields(payload),
         )
         return Envelope(data=node)
 

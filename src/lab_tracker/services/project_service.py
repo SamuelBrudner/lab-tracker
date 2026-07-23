@@ -18,6 +18,7 @@ from lab_tracker.models import (
     ProjectStatus,
     utc_now,
 )
+from lab_tracker.patching import NOT_PROVIDED, PatchValue, is_provided
 from lab_tracker.services.base import BaseService, IdempotentCreateResult, ServiceContext
 from lab_tracker.services.goal_link_cleanup import remove_goal_links_to_project_contents
 from lab_tracker.services.project_authorization import ProjectAuthorizationPolicy
@@ -28,8 +29,6 @@ from lab_tracker.services.shared import (
     ensure_non_empty,
     normalize_client_capture_id,
 )
-
-_GROUP_ID_UNSET = object()
 
 
 class ProjectService(BaseService):
@@ -216,26 +215,35 @@ class ProjectService(BaseService):
         self,
         project_id: UUID,
         *,
-        name: str | None = None,
-        description: str | None = None,
-        status: ProjectStatus | None = None,
-        group_id: UUID | None | object = _GROUP_ID_UNSET,
+        name: PatchValue[str | None] = NOT_PROVIDED,
+        description: PatchValue[str | None] = NOT_PROVIDED,
+        status: PatchValue[ProjectStatus | None] = NOT_PROVIDED,
+        group_id: PatchValue[UUID | None] = NOT_PROVIDED,
         actor: AuthContext | None = None,
     ) -> Project:
         self.authorization.require_owner(project_id, actor=actor)
         project = self.get_project(project_id)
-        if group_id is not _GROUP_ID_UNSET:
+        before = project.model_copy(deep=True)
+        if is_provided(group_id):
             if group_id is not None:
                 self.authorization.require_group_owner(group_id, actor=actor)
                 self.get_project_group(group_id)
             project.group_id = group_id
-        if name is not None:
+        if is_provided(name):
+            if name is None:
+                raise ValidationError("name must not be null.")
             ensure_non_empty(name, "name")
             project.name = name.strip()
-        if description is not None:
+        if is_provided(description):
+            if description is None:
+                raise ValidationError("description must not be null.")
             project.description = description.strip()
-        if status is not None:
+        if is_provided(status):
+            if status is None:
+                raise ValidationError("status must not be null.")
             project.status = status
+        if project == before:
+            return project
         project.updated_at = utc_now()
         with self.unit_of_work() as repository:
             repository.projects.save(project)
@@ -322,23 +330,34 @@ class ProjectService(BaseService):
         self,
         group_id: UUID,
         *,
-        name: str | None = None,
-        description: str | None = None,
-        kind: ProjectGroupKind | None = None,
-        group_read_all: bool | None = None,
+        name: PatchValue[str | None] = NOT_PROVIDED,
+        description: PatchValue[str | None] = NOT_PROVIDED,
+        kind: PatchValue[ProjectGroupKind | None] = NOT_PROVIDED,
+        group_read_all: PatchValue[bool | None] = NOT_PROVIDED,
         actor: AuthContext | None = None,
     ) -> ProjectGroup:
         self.authorization.require_group_owner(group_id, actor=actor)
         group = self.get_project_group(group_id)
-        if name is not None:
+        before = group.model_copy(deep=True)
+        if is_provided(name):
+            if name is None:
+                raise ValidationError("name must not be null.")
             ensure_non_empty(name, "name")
             group.name = name.strip()
-        if description is not None:
+        if is_provided(description):
+            if description is None:
+                raise ValidationError("description must not be null.")
             group.description = description.strip()
-        if kind is not None:
+        if is_provided(kind):
+            if kind is None:
+                raise ValidationError("kind must not be null.")
             group.kind = kind
-        if group_read_all is not None:
+        if is_provided(group_read_all):
+            if group_read_all is None:
+                raise ValidationError("group_read_all must not be null.")
             group.group_read_all = group_read_all
+        if group == before:
+            return group
         group.updated_at = utc_now()
         with self.unit_of_work() as repository:
             repository.project_groups.save(group)
@@ -431,6 +450,8 @@ class ProjectService(BaseService):
             )
         else:
             membership = existing
+            if membership.role == role:
+                return membership
             membership.role = role
             membership.updated_at = utc_now()
         with self.unit_of_work() as repository:
@@ -695,6 +716,8 @@ class ProjectService(BaseService):
         membership: ProjectMembership,
         role: ProjectMembershipRole,
     ) -> ProjectMembership:
+        if membership.role == role:
+            return membership
         if membership.role == ProjectMembershipRole.OWNER and role != membership.role:
             repository.lock_project_owner_memberships(project_id)
             refreshed = repository.get_project_membership(

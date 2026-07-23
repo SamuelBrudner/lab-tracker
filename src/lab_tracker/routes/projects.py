@@ -28,6 +28,7 @@ from lab_tracker.models import (
     PublicationReadinessReport,
     UsageEventResourceType,
 )
+from lab_tracker.patching import provided_fields
 from lab_tracker.schemas import (
     Envelope,
     ListEnvelope,
@@ -137,17 +138,10 @@ def build_projects_router(api: LabTrackerAPI) -> APIRouter:
     def update_project(project_id: UUID, payload: ProjectUpdate, request: Request):
         actor = actor_from_request(request)
         ensure_project_owner(request, project_id)
-        update_kwargs = {
-            "name": payload.name,
-            "description": payload.description,
-            "status": payload.status,
-            "actor": actor,
-        }
-        if "group_id" in payload.model_fields_set:
-            update_kwargs["group_id"] = payload.group_id
         project = api_from_request(request, api).update_project(
             project_id,
-            **update_kwargs,
+            actor=actor,
+            **provided_fields(payload),
         )
         return Envelope(data=project)
 

@@ -15,6 +15,7 @@ from lab_tracker.db_models import AnalysisModel
 from lab_tracker.db_types import ensure_uuid
 from lab_tracker.errors import NotFoundError
 from lab_tracker.models import Analysis, AnalysisStatus, UsageEventResourceType
+from lab_tracker.patching import provided_fields
 from lab_tracker.schemas import (
     AnalysisCommitRequest,
     AnalysisCommitResult,
@@ -130,11 +131,8 @@ def build_analyses_router(api: LabTrackerAPI) -> APIRouter:
         ensure_project_read(request, existing.project_id)
         analysis = api_from_request(request, api).update_analysis(
             analysis_id,
-            status=payload.status,
-            environment_hash=payload.environment_hash,
-            external_artifacts=payload.external_artifacts,
-            terminal_reason=payload.terminal_reason,
             actor=actor,
+            **provided_fields(payload),
         )
         return Envelope(data=analysis)
 

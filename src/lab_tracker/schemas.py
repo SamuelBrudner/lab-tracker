@@ -7,7 +7,7 @@ Envelope/ListEnvelope wrappers. Request payloads use purpose-built schemas below
 from __future__ import annotations
 
 from datetime import date, datetime
-from typing import Annotated, Any, Generic, Literal, TypeVar
+from typing import Annotated, Any, ClassVar, Generic, Literal, TypeVar
 from uuid import UUID
 
 from pydantic import AfterValidator, BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -105,6 +105,22 @@ def _normalize_note_metadata_for_request(
 
 class RequestModel(BaseModel):
     model_config = ConfigDict(extra="forbid")
+
+
+class PatchRequestModel(RequestModel):
+    """Request model whose subclasses declare fields that reject explicit null."""
+
+    non_nullable_fields: ClassVar[frozenset[str]] = frozenset()
+
+    @model_validator(mode="before")
+    @classmethod
+    def _reject_explicit_null_for_non_nullable_fields(cls, value: Any) -> Any:
+        if not isinstance(value, dict):
+            return value
+        for field_name in cls.non_nullable_fields:
+            if field_name in value and value[field_name] is None:
+                raise ValueError(f"{field_name} must not be null.")
+        return value
 
 
 class Envelope(BaseModel, Generic[T]):
@@ -208,9 +224,21 @@ class AuthRegisterRequest(RequestModel):
     invite_token: NonBlankStr | None = None
 
 
-class AuthUserUpdate(RequestModel):
-    password: NonBlankStr | None = None
-    role: Role | None = None
+class AuthUserUpdate(PatchRequestModel):
+    model_config = ConfigDict(
+        extra="forbid",
+        json_schema_extra={"minProperties": 1},
+    )
+    non_nullable_fields = frozenset({"password", "role"})
+
+    password: NonBlankStr | SkipJsonSchema[None] = None
+    role: Role | SkipJsonSchema[None] = None
+
+    @model_validator(mode="after")
+    def _require_password_or_role(self) -> AuthUserUpdate:
+        if not self.model_fields_set:
+            raise ValueError("At least one of password or role must be provided.")
+        return self
 
 
 class AuthInvitationCreate(RequestModel):
@@ -272,10 +300,12 @@ class ProjectCreate(RequestModel):
     client_capture_id: str | None = None
 
 
-class ProjectUpdate(RequestModel):
-    name: NonBlankStr | None = None
-    description: str | None = None
-    status: ProjectStatus | None = None
+class ProjectUpdate(PatchRequestModel):
+    non_nullable_fields = frozenset({"name", "description", "status"})
+
+    name: NonBlankStr | SkipJsonSchema[None] = None
+    description: str | SkipJsonSchema[None] = None
+    status: ProjectStatus | SkipJsonSchema[None] = None
     group_id: UUID | None = None
 
 
@@ -286,11 +316,13 @@ class ProjectGroupCreate(RequestModel):
     group_read_all: bool | None = None
 
 
-class ProjectGroupUpdate(RequestModel):
-    name: NonBlankStr | None = None
-    description: str | None = None
-    kind: ProjectGroupKind | None = None
-    group_read_all: bool | None = None
+class ProjectGroupUpdate(PatchRequestModel):
+    non_nullable_fields = frozenset({"name", "description", "kind", "group_read_all"})
+
+    name: NonBlankStr | SkipJsonSchema[None] = None
+    description: str | SkipJsonSchema[None] = None
+    kind: ProjectGroupKind | SkipJsonSchema[None] = None
+    group_read_all: bool | SkipJsonSchema[None] = None
 
 
 class GroupMembershipCreate(RequestModel):
@@ -333,10 +365,14 @@ class SupervisionEdgeCreate(RequestModel):
     ended_at: datetime | None = None
 
 
-class SupervisionEdgeUpdate(RequestModel):
-    supervisor_user_id: UUID | None = None
-    supervisee_user_id: UUID | None = None
-    started_at: datetime | None = None
+class SupervisionEdgeUpdate(PatchRequestModel):
+    non_nullable_fields = frozenset(
+        {"supervisor_user_id", "supervisee_user_id", "started_at"}
+    )
+
+    supervisor_user_id: UUID | SkipJsonSchema[None] = None
+    supervisee_user_id: UUID | SkipJsonSchema[None] = None
+    started_at: datetime | SkipJsonSchema[None] = None
     ended_at: datetime | None = None
 
 
@@ -368,13 +404,17 @@ class QuestionCreate(RequestModel):
         return _unique_uuid_list(value)
 
 
-class QuestionUpdate(RequestModel):
-    text: NonBlankStr | None = None
-    question_type: QuestionType | None = None
+class QuestionUpdate(PatchRequestModel):
+    non_nullable_fields = frozenset(
+        {"text", "question_type", "status", "parent_question_ids"}
+    )
+
+    text: NonBlankStr | SkipJsonSchema[None] = None
+    question_type: QuestionType | SkipJsonSchema[None] = None
     hypothesis: str | None = None
-    status: QuestionStatus | None = None
+    status: QuestionStatus | SkipJsonSchema[None] = None
     terminal_reason: NonBlankStr | None = None
-    parent_question_ids: list[UUID] | None = None
+    parent_question_ids: list[UUID] | SkipJsonSchema[None] = None
 
     @field_validator("parent_question_ids")
     @classmethod
@@ -428,12 +468,16 @@ class DatasetCreate(RequestModel):
         return _unique_uuid_list(value)
 
 
-class DatasetUpdate(RequestModel):
-    commit_manifest: DatasetCommitManifestInput | None = None
-    commit_hash: str | None = None
-    status: DatasetStatus | None = None
+class DatasetUpdate(PatchRequestModel):
+    non_nullable_fields = frozenset(
+        {"commit_manifest", "commit_hash", "status", "question_links"}
+    )
+
+    commit_manifest: DatasetCommitManifestInput | SkipJsonSchema[None] = None
+    commit_hash: str | SkipJsonSchema[None] = None
+    status: DatasetStatus | SkipJsonSchema[None] = None
     terminal_reason: NonBlankStr | None = None
-    question_links: list[QuestionLink] | None = None
+    question_links: list[QuestionLink] | SkipJsonSchema[None] = None
 
 
 class NoteCreate(RequestModel):
@@ -454,11 +498,13 @@ class NoteCreate(RequestModel):
         return _normalize_note_metadata_for_request(value)
 
 
-class NoteUpdate(RequestModel):
+class NoteUpdate(PatchRequestModel):
+    non_nullable_fields = frozenset({"targets", "metadata", "status"})
+
     transcribed_text: str | None = None
-    targets: list[EntityRef] | None = None
-    metadata: dict[str, NoteMetadataScalar] | None = None
-    status: NoteStatus | None = None
+    targets: list[EntityRef] | SkipJsonSchema[None] = None
+    metadata: dict[str, NoteMetadataScalar] | SkipJsonSchema[None] = None
+    status: NoteStatus | SkipJsonSchema[None] = None
 
     @field_validator("metadata")
     @classmethod
@@ -477,9 +523,11 @@ class NoteArchiveRequest(RequestModel):
     reason: NoteArchiveReason = NoteArchiveReason.ARCHIVED_UNREVIEWED
 
 
-class GraphDraftOperationUpdate(RequestModel):
-    payload: dict[str, Any] | None = None
-    status: GraphChangeOperationStatus | None = None
+class GraphDraftOperationUpdate(PatchRequestModel):
+    non_nullable_fields = frozenset({"payload", "status"})
+
+    payload: dict[str, Any] | SkipJsonSchema[None] = None
+    status: GraphChangeOperationStatus | SkipJsonSchema[None] = None
     review_note: str | None = None
 
 
@@ -546,12 +594,16 @@ class GraphDraftListFilters(BaseModel):
     source_note_id: UUID | None = None
 
 
-class GraphDraftBatchSettingsUpdate(RequestModel):
-    enabled: bool | None = None
-    cadence_minutes: int | None = Field(default=None, ge=60)
-    run_at_local_time: str | None = None
-    timezone_name: str | None = None
-    user_id: UUID | None = None
+class GraphDraftBatchSettingsUpdate(PatchRequestModel):
+    non_nullable_fields = frozenset(
+        {"enabled", "cadence_minutes", "run_at_local_time", "timezone_name", "user_id"}
+    )
+
+    enabled: bool | SkipJsonSchema[None] = None
+    cadence_minutes: int | SkipJsonSchema[None] = Field(default=None, ge=60)
+    run_at_local_time: str | SkipJsonSchema[None] = None
+    timezone_name: str | SkipJsonSchema[None] = None
+    user_id: UUID | SkipJsonSchema[None] = None
 
 
 class GraphDraftBatchRunRequest(RequestModel):
@@ -587,8 +639,10 @@ class SessionCreate(RequestModel):
     primary_question_id: UUID | None = None
 
 
-class SessionUpdate(RequestModel):
-    status: SessionStatus | None = None
+class SessionUpdate(PatchRequestModel):
+    non_nullable_fields = frozenset({"status"})
+
+    status: SessionStatus | SkipJsonSchema[None] = None
     ended_at: datetime | None = None
 
 
@@ -632,10 +686,12 @@ class AnalysisCreate(RequestModel):
         return _unique_uuid_list(value) or []
 
 
-class AnalysisUpdate(RequestModel):
-    status: AnalysisStatus | None = None
+class AnalysisUpdate(PatchRequestModel):
+    non_nullable_fields = frozenset({"status", "external_artifacts"})
+
+    status: AnalysisStatus | SkipJsonSchema[None] = None
     environment_hash: str | None = None
-    external_artifacts: list[ExternalArtifactReference] | None = None
+    external_artifacts: list[ExternalArtifactReference] | SkipJsonSchema[None] = None
     terminal_reason: NonBlankStr | None = None
 
 
@@ -661,18 +717,30 @@ class ClaimCreate(RequestModel):
         return _unique_uuid_list(value)
 
 
-class ClaimUpdate(RequestModel):
-    statement: NonBlankStr | None = None
-    confidence: ClaimConfidence | None = None
-    status: ClaimStatus | None = None
+class ClaimUpdate(PatchRequestModel):
+    non_nullable_fields = frozenset(
+        {
+            "statement",
+            "confidence",
+            "status",
+            "supported_by_dataset_ids",
+            "supported_by_analysis_ids",
+            "answers_question_ids",
+            "external_citations",
+        }
+    )
+
+    statement: NonBlankStr | SkipJsonSchema[None] = None
+    confidence: ClaimConfidence | SkipJsonSchema[None] = None
+    status: ClaimStatus | SkipJsonSchema[None] = None
     terminal_reason: NonBlankStr | None = None
     falsification_criteria: NonBlankStr | None = None
     verification_plan: NonBlankStr | None = None
     refuting_outcome: NonBlankStr | None = None
-    supported_by_dataset_ids: list[UUID] | None = None
-    supported_by_analysis_ids: list[UUID] | None = None
-    answers_question_ids: list[UUID] | None = None
-    external_citations: list[ExternalArtifactReference] | None = None
+    supported_by_dataset_ids: list[UUID] | SkipJsonSchema[None] = None
+    supported_by_analysis_ids: list[UUID] | SkipJsonSchema[None] = None
+    answers_question_ids: list[UUID] | SkipJsonSchema[None] = None
+    external_citations: list[ExternalArtifactReference] | SkipJsonSchema[None] = None
 
     @field_validator(
         "supported_by_dataset_ids", "supported_by_analysis_ids", "answers_question_ids"
@@ -713,13 +781,24 @@ class ExplorationNodeCreate(RequestModel):
         return _unique_uuid_list(value)
 
 
-class ExplorationNodeUpdate(RequestModel):
-    title: NonBlankStr | None = None
-    status: ExplorationNodeStatus | None = None
+class ExplorationNodeUpdate(PatchRequestModel):
+    non_nullable_fields = frozenset(
+        {
+            "title",
+            "status",
+            "alternatives_considered",
+            "evidence_refs",
+            "parent_node_ids",
+            "also_depends_on_node_ids",
+        }
+    )
+
+    title: NonBlankStr | SkipJsonSchema[None] = None
+    status: ExplorationNodeStatus | SkipJsonSchema[None] = None
     choice: NonBlankStr | None = None
-    alternatives_considered: list[NonBlankStr] | None = None
+    alternatives_considered: list[NonBlankStr] | SkipJsonSchema[None] = None
     rationale: NonBlankStr | None = None
-    evidence_refs: list[EntityRef] | None = None
+    evidence_refs: list[EntityRef] | SkipJsonSchema[None] = None
     hypothesis: NonBlankStr | None = None
     failure_mode: NonBlankStr | None = None
     lesson: NonBlankStr | None = None
@@ -727,8 +806,8 @@ class ExplorationNodeUpdate(RequestModel):
     trigger: NonBlankStr | None = None
     invalidates_node_id: UUID | None = None
     invalidates_claim_id: UUID | None = None
-    parent_node_ids: list[UUID] | None = None
-    also_depends_on_node_ids: list[UUID] | None = None
+    parent_node_ids: list[UUID] | SkipJsonSchema[None] = None
+    also_depends_on_node_ids: list[UUID] | SkipJsonSchema[None] = None
 
     @field_validator("parent_node_ids", "also_depends_on_node_ids")
     @classmethod
@@ -781,15 +860,19 @@ class GoalCreate(GoalCreateFields):
     links: list[GoalLinkCreate] | None = None
 
 
-class GoalUpdate(RequestModel):
-    goal_type: GoalType | None = None
-    title: NonBlankStr | None = None
-    summary: str | None = None
-    status: GoalStatus | None = None
+class GoalUpdate(PatchRequestModel):
+    non_nullable_fields = frozenset(
+        {"goal_type", "title", "summary", "status", "attributes", "links"}
+    )
+
+    goal_type: GoalType | SkipJsonSchema[None] = None
+    title: NonBlankStr | SkipJsonSchema[None] = None
+    summary: str | SkipJsonSchema[None] = None
+    status: GoalStatus | SkipJsonSchema[None] = None
     target_date: date | None = None
     external_ref: str | None = None
-    attributes: dict[str, Any] | None = None
-    links: list[GoalLinkCreate] | None = None
+    attributes: dict[str, Any] | SkipJsonSchema[None] = None
+    links: list[GoalLinkCreate] | SkipJsonSchema[None] = None
 
     @model_validator(mode="after")
     def _attributes_match_goal_type(self) -> GoalUpdate:
@@ -798,9 +881,11 @@ class GoalUpdate(RequestModel):
         return self
 
 
-class GoalLinkUpdate(RequestModel):
-    relation: GoalRelation | None = None
-    link_status: GoalLinkStatus | None = None
+class GoalLinkUpdate(PatchRequestModel):
+    non_nullable_fields = frozenset({"relation", "link_status"})
+
+    relation: GoalRelation | SkipJsonSchema[None] = None
+    link_status: GoalLinkStatus | SkipJsonSchema[None] = None
     slot: str | None = Field(default=None, max_length=120)
 
 
@@ -842,11 +927,13 @@ class VisualizationCreate(RequestModel):
         return _unique_uuid_list(value)
 
 
-class VisualizationUpdate(RequestModel):
-    viz_type: NonBlankStr | None = None
-    file_path: NonBlankStr | None = None
+class VisualizationUpdate(PatchRequestModel):
+    non_nullable_fields = frozenset({"viz_type", "file_path", "related_claim_ids"})
+
+    viz_type: NonBlankStr | SkipJsonSchema[None] = None
+    file_path: NonBlankStr | SkipJsonSchema[None] = None
     caption: str | None = None
-    related_claim_ids: list[UUID] | None = None
+    related_claim_ids: list[UUID] | SkipJsonSchema[None] = None
 
     @field_validator("related_claim_ids")
     @classmethod
