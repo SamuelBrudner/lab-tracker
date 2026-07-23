@@ -10,7 +10,7 @@ from threading import Barrier, Event, Lock
 import pytest
 from fastapi.testclient import TestClient
 
-from lab_tracker.routes import visualizations as visualization_routes
+from lab_tracker.application import file_commands as visualization_file_commands
 
 pytestmark = pytest.mark.postgres
 
@@ -76,7 +76,7 @@ def _create_visualization(
 
 
 def _synchronize_row_lock(monkeypatch: pytest.MonkeyPatch) -> None:
-    original_lock = visualization_routes._locked_visualization_row
+    original_lock = visualization_file_commands.locked_visualization_row
     before_lock = Barrier(2)
 
     def synchronized_lock(db_session, visualization_id):  # noqa: ANN001
@@ -84,8 +84,8 @@ def _synchronize_row_lock(monkeypatch: pytest.MonkeyPatch) -> None:
         return original_lock(db_session, visualization_id)
 
     monkeypatch.setattr(
-        visualization_routes,
-        "_locked_visualization_row",
+        visualization_file_commands,
+        "locked_visualization_row",
         synchronized_lock,
     )
 
@@ -220,7 +220,7 @@ def test_postgres_upload_then_delete_serializes_and_cleans_committed_blob(
 
     monkeypatch.setattr(storage_backend, "store_stream", paused_store_stream)
 
-    original_lock = visualization_routes._locked_visualization_row
+    original_lock = visualization_file_commands.locked_visualization_row
     call_guard = Lock()
     lock_calls = 0
 
@@ -234,8 +234,8 @@ def test_postgres_upload_then_delete_serializes_and_cleans_committed_blob(
         return original_lock(db_session, visualization_id)
 
     monkeypatch.setattr(
-        visualization_routes,
-        "_locked_visualization_row",
+        visualization_file_commands,
+        "locked_visualization_row",
         observed_lock,
     )
 

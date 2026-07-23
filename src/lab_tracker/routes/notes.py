@@ -42,18 +42,17 @@ from lab_tracker.upload_security import (
 
 from .shared import (
     CreatedByFilter,
-    accessible_project_ids_from_request,
     actor_from_request,
     api_from_request,
     content_disposition_header,
     ensure_project_contributor,
     ensure_project_read,
+    handlers_from_request,
     list_response,
     note_default_status,
     parse_entity_refs_form,
     parse_metadata_form,
     record_usage_view,
-    repository_from_request,
     validate_pagination,
 )
 
@@ -190,14 +189,9 @@ def build_notes_router(api: LabTrackerAPI) -> APIRouter:
         offset: int = 0,
     ):
         validate_pagination(limit, offset)
-        if project_id is not None:
-            ensure_project_read(request, project_id)
-            project_ids = None
-        else:
-            project_ids = accessible_project_ids_from_request(request)
-        notes, total = repository_from_request(request).query_notes(
+        page = handlers_from_request(request).catalogs.list_notes(
+            actor=actor_from_request(request),
             project_id=project_id,
-            project_ids=project_ids,
             status=status.value if status is not None else None,
             created_by=created_by,
             since=since,
@@ -207,7 +201,12 @@ def build_notes_router(api: LabTrackerAPI) -> APIRouter:
             limit=limit,
             offset=offset,
         )
-        return list_response(notes, limit=limit, offset=offset, total=total)
+        return list_response(
+            page.items,
+            limit=limit,
+            offset=offset,
+            total=page.total,
+        )
 
     @router.get("/notes/{note_id:uuid}", response_model=Envelope[Note])
     def get_note(note_id: UUID, request: Request):

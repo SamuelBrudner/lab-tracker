@@ -10,11 +10,11 @@ from urllib.parse import quote, unquote
 from uuid import UUID
 
 from fastapi import Query
-from sqlalchemy.orm import Session
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
 from lab_tracker.api import LabTrackerAPI
+from lab_tracker.application import RequestHandlers
 from lab_tracker.auth import AuthContext, AuthService, TokenService, User, extract_bearer_token
 from lab_tracker.errors import AuthError, ValidationError
 from lab_tracker.models import (
@@ -29,7 +29,6 @@ from lab_tracker.models import (
     UsageEventResourceType,
     UsageEventVerb,
 )
-from lab_tracker.repository import LabTrackerRepository
 from lab_tracker.schemas import (
     AuthTokenRead,
     AuthUserRead,
@@ -276,25 +275,11 @@ def parse_metadata_form(raw_value: str | None) -> dict[str, NoteMetadataScalar] 
     return parsed
 
 
-def db_session_from_request(request: Request) -> Session:
-    session = getattr(request.state, "db_session", None)
-    if session is None:
-        raise RuntimeError("Database session is not available on request state.")
-    return session
-
-
-def repository_from_request(request: Request) -> LabTrackerRepository:
-    repository = getattr(request.state, "lab_tracker_repository", None)
-    if repository is None:
-        raise RuntimeError("Repository is not available on request state.")
-    return repository
-
-
-def file_storage_from_request(request: Request) -> Any:
-    storage_backend = getattr(request.app.state, "file_storage_backend", None)
-    if storage_backend is None:
-        raise ValidationError("File storage backend is not configured.")
-    return storage_backend
+def handlers_from_request(request: Request) -> RequestHandlers:
+    handlers = getattr(request.state, "lab_tracker_handlers", None)
+    if handlers is None:
+        raise RuntimeError("Application handlers are not available on request state.")
+    return handlers
 
 
 def project_default_status() -> ProjectStatus:

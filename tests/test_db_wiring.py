@@ -10,6 +10,7 @@ from starlette.responses import JSONResponse
 
 from lab_tracker.app import create_app
 from lab_tracker.app_parts.runtime import _log_startup_config_summary
+from lab_tracker.application import RequestHandlers
 from lab_tracker.config import Settings
 from lab_tracker.db import Base, get_engine
 from lab_tracker.db_models import ProjectModel, QuestionModel
@@ -144,25 +145,59 @@ def test_handled_lab_tracker_errors_are_logged(monkeypatch):
     assert kwargs == {}
 
 
-def test_global_repository_dependency_is_wired():
+def test_request_handlers_share_the_middleware_transaction_identity():
     app = create_app()
 
-    @app.get("/_test/repository")
-    def repository_probe(request: Request):
-        repository = getattr(request.state, "lab_tracker_repository", None)
-        db_session = getattr(request.state, "db_session", None)
+    @app.get("/_test/handlers")
+    def handler_probe(request: Request):
+        handlers = getattr(request.state, "lab_tracker_handlers", None)
+        request_api = getattr(request.state, "lab_tracker_api", None)
+        repositories = [
+            handlers.catalogs.repository,
+            handlers.context.repository,
+            handlers.dataset_files.repository,
+        ]
+        sessions = [
+            handlers.context.session,
+            handlers.dataset_files.session,
+            handlers.visualization_files.session,
+            handlers.deletions.session,
+        ]
         return {
-            "has_repository": isinstance(repository, SQLAlchemyLabTrackerRepository),
-            "shares_session": repository is not None and repository._session is db_session,
+            "has_handlers": isinstance(handlers, RequestHandlers),
+            "shares_api": all(
+                handler.api is request_api
+                for handler in (
+                    handlers.catalogs,
+                    handlers.context,
+                    handlers.dataset_files,
+                    handlers.visualization_files,
+                    handlers.deletions,
+                )
+            ),
+            "shares_repository": (
+                isinstance(repositories[0], SQLAlchemyLabTrackerRepository)
+                and all(repository is repositories[0] for repository in repositories)
+            ),
+            "shares_session": all(
+                session is repositories[0]._session for session in sessions
+            ),
+            "raw_dependencies_hidden": (
+                not hasattr(request.state, "lab_tracker_repository")
+                and not hasattr(request.state, "db_session")
+            ),
         }
 
     with TestClient(app) as client:
-        response = client.get("/_test/repository")
+        response = client.get("/_test/handlers")
 
     payload = response.json()
     assert response.status_code == 200
-    assert payload["has_repository"] is True
+    assert payload["has_handlers"] is True
+    assert payload["shares_api"] is True
+    assert payload["shares_repository"] is True
     assert payload["shares_session"] is True
+    assert payload["raw_dependencies_hidden"] is True
 
 
 def test_sqlite_engine_enforces_foreign_keys_and_busy_wal_pragmas(tmp_path):
