@@ -15,13 +15,17 @@ import re
 from collections.abc import Mapping
 from datetime import date, datetime, timezone
 from enum import Enum
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 from urllib.parse import urlsplit
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, computed_field, field_validator, model_validator
 
 NoteMetadataScalar = str | bool | int | float
+ClaimConfidence = Annotated[
+    float,
+    Field(ge=0.0, le=100.0, allow_inf_nan=False),
+]
 _EXTERNAL_ARTIFACT_URI_SCHEME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*$")
 
 
@@ -913,7 +917,7 @@ class ClaimInput(_DomainModel):
     model_config = ConfigDict(from_attributes=True, frozen=True)
 
     statement: str
-    confidence: float
+    confidence: ClaimConfidence
     status: ClaimStatus = ClaimStatus.PROPOSED
     terminal_reason: str | None = None
     falsification_criteria: str | None = None
@@ -926,10 +930,12 @@ class ClaimInput(_DomainModel):
 
 
 class Claim(_DomainModel):
+    model_config = ConfigDict(from_attributes=True, validate_assignment=True)
+
     claim_id: UUID
     project_id: UUID
     statement: str
-    confidence: float
+    confidence: ClaimConfidence
     status: ClaimStatus = ClaimStatus.PROPOSED
     terminal_reason: str | None = None
     falsification_criteria: str | None = None

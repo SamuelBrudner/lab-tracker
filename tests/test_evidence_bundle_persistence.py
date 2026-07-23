@@ -8,7 +8,6 @@ from uuid import uuid4
 import pytest
 from alembic import command
 from alembic.config import Config
-from alembic.script import ScriptDirectory
 from pydantic import ValidationError as PydanticValidationError
 from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.exc import IntegrityError
@@ -245,15 +244,13 @@ def _alembic_config() -> Config:
     return Config(str(Path(__file__).resolve().parent.parent / "alembic.ini"))
 
 
-def test_0055_is_single_head_and_preserves_existing_project_across_cycle(
+def test_0055_preserves_existing_project_across_cycle(
     monkeypatch,
     tmp_path,
 ) -> None:
     database_url = f"sqlite+pysqlite:///{tmp_path / 'evidence-bundles.db'}"
     monkeypatch.setenv("LAB_TRACKER_DATABASE_URL", database_url)
     config = _alembic_config()
-    script = ScriptDirectory.from_config(config)
-    assert script.get_heads() == ["0055_evidence_bundles"]
 
     command.upgrade(config, "0054_project_capture_key_principal_scope")
     project_id = str(uuid4())

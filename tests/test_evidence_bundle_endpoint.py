@@ -318,6 +318,7 @@ def test_complete_bundle_infers_links_and_note_target(
                 "kind": "create",
                 "statement": "The evidence is linked.",
                 "confidence": 80,
+                "status": "supported",
             },
             "visualization": {
                 "kind": "create",
@@ -351,6 +352,7 @@ def test_complete_bundle_infers_links_and_note_target(
     analysis = client.get(f"/analyses/{ids['analysis_id']}", headers=admin_auth_headers)
     assert analysis.json()["data"]["dataset_ids"] == [ids["dataset_id"]]
     claim = client.get(f"/claims/{ids['claim_id']}", headers=admin_auth_headers)
+    assert claim.json()["data"]["status"] == "supported"
     assert claim.json()["data"]["supported_by_dataset_ids"] == [ids["dataset_id"]]
     assert claim.json()["data"]["supported_by_analysis_ids"] == [ids["analysis_id"]]
     assert claim.json()["data"]["answers_question_ids"] == [question_id]

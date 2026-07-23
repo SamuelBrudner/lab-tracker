@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 from collections.abc import Iterable, Mapping
 from enum import Enum
 from typing import TYPE_CHECKING, TypeVar
@@ -349,8 +350,8 @@ def ensure_primary_question_active(question: Question) -> None:
 
 
 def _ensure_claim_confidence(confidence: float) -> None:
-    if confidence < 0 or confidence > 100:
-        raise ValidationError("confidence must be between 0 and 100.")
+    if not math.isfinite(confidence) or not 0 <= confidence <= 100:
+        raise ValidationError("confidence must be a finite value between 0 and 100.")
 
 
 def _ensure_claim_support_links(
