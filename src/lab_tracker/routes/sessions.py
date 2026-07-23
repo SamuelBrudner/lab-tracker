@@ -18,6 +18,7 @@ from lab_tracker.models import (
     SessionType,
     UsageEventResourceType,
 )
+from lab_tracker.patching import provided_fields
 from lab_tracker.schemas import (
     AcquisitionOutputCreate,
     Envelope,
@@ -114,9 +115,8 @@ def build_sessions_router(api: LabTrackerAPI) -> APIRouter:
         ensure_project_read(request, existing.project_id)
         session = api_from_request(request, api).update_session(
             session_id,
-            status=payload.status,
-            ended_at=payload.ended_at,
             actor=actor,
+            **provided_fields(payload),
         )
         return Envelope(data=session)
 

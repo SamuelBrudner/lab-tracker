@@ -23,6 +23,7 @@ from lab_tracker.models import (
     NoteStatus,
     utc_now,
 )
+from lab_tracker.patching import NOT_PROVIDED, PatchValue, is_provided
 from lab_tracker.services.analysis_service import AnalysisService
 from lab_tracker.services.base import BaseService, IdempotentCreateResult, ServiceContext
 from lab_tracker.services.claim_service import ClaimService
@@ -553,10 +554,10 @@ class NoteService(BaseService):
         self,
         note_id: UUID,
         *,
-        transcribed_text: str | None = None,
-        targets: Iterable[EntityRef] | None = None,
-        metadata: dict[str, NoteMetadataScalar] | None = None,
-        status: NoteStatus | None = None,
+        transcribed_text: PatchValue[str | None] = NOT_PROVIDED,
+        targets: PatchValue[Iterable[EntityRef] | None] = NOT_PROVIDED,
+        metadata: PatchValue[dict[str, NoteMetadataScalar] | None] = NOT_PROVIDED,
+        status: PatchValue[NoteStatus | None] = NOT_PROVIDED,
         actor: AuthContext | None = None,
         origin: EntityOrigin | None = None,
         change_set_id: UUID | None = None,
@@ -566,16 +567,23 @@ class NoteService(BaseService):
     ) -> Note:
         note = self.get_note(note_id)
         self.authorization.require_contributor(note.project_id, actor=actor)
-        if transcribed_text is not None:
+        before = note.model_copy(deep=True)
+        if is_provided(transcribed_text):
             note.transcribed_text = transcribed_text.strip() if transcribed_text else None
-        if targets is not None:
+        if is_provided(targets):
+            if targets is None:
+                raise ValidationError("targets must not be null.")
             resolved_targets = list(targets)
             for target in resolved_targets:
                 self.validate_target(target, note.project_id)
             note.targets = resolved_targets
-        if metadata is not None:
+        if is_provided(metadata):
+            if metadata is None:
+                raise ValidationError("metadata must not be null.")
             note.metadata = normalize_note_metadata(metadata)
-        if status is not None:
+        if is_provided(status):
+            if status is None:
+                raise ValidationError("status must not be null.")
             note.status = status
         if origin is not None:
             note.origin = origin
@@ -587,6 +595,8 @@ class NoteService(BaseService):
             note.origin_model = origin_model
         if origin_prompt_version is not None:
             note.origin_prompt_version = origin_prompt_version
+        if note == before:
+            return note
         note.updated_at = utc_now()
         with self.unit_of_work() as repository:
             repository.notes.save(note)

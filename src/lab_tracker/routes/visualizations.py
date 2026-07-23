@@ -21,6 +21,7 @@ from lab_tracker.db_types import ensure_uuid
 from lab_tracker.errors import ConflictError, NotFoundError, ValidationError
 from lab_tracker.file_storage import StoredFileMetadata
 from lab_tracker.models import UsageEventResourceType, Visualization, utc_now
+from lab_tracker.patching import provided_fields
 from lab_tracker.schemas import Envelope, ListEnvelope, VisualizationCreate, VisualizationUpdate
 from lab_tracker.upload_security import (
     enforce_request_content_length_limit,
@@ -446,11 +447,8 @@ def build_visualizations_router(api: LabTrackerAPI) -> APIRouter:
         ensure_project_read(request, analysis.project_id)
         visualization = api_from_request(request, api).update_visualization(
             viz_id,
-            viz_type=payload.viz_type,
-            file_path=payload.file_path,
-            caption=payload.caption,
-            related_claim_ids=payload.related_claim_ids,
             actor=actor,
+            **provided_fields(payload),
         )
         return Envelope(data=visualization)
 

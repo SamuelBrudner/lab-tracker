@@ -21,6 +21,7 @@ from lab_tracker.models import (
     QuestionType,
     utc_now,
 )
+from lab_tracker.patching import NOT_PROVIDED, PatchValue, is_provided
 from lab_tracker.services.base import BaseService, IdempotentCreateResult, ServiceContext
 from lab_tracker.services.goal_link_cleanup import remove_goal_links_to_entity
 from lab_tracker.services.project_authorization import ProjectAuthorizationPolicy
@@ -33,6 +34,7 @@ from lab_tracker.services.shared import (
     ensure_non_empty,
     normalize_client_capture_id,
     question_matches_substring,
+    terminal_reason_for_patch,
     terminal_reason_for_status,
     unique_ids,
 )
@@ -373,12 +375,12 @@ class QuestionService(BaseService):
         self,
         question_id: UUID,
         *,
-        text: str | None = None,
-        question_type: QuestionType | None = None,
-        hypothesis: str | None = None,
-        status: QuestionStatus | None = None,
-        terminal_reason: str | None = None,
-        parent_question_ids: Iterable[UUID] | None = None,
+        text: PatchValue[str | None] = NOT_PROVIDED,
+        question_type: PatchValue[QuestionType | None] = NOT_PROVIDED,
+        hypothesis: PatchValue[str | None] = NOT_PROVIDED,
+        status: PatchValue[QuestionStatus | None] = NOT_PROVIDED,
+        terminal_reason: PatchValue[str | None] = NOT_PROVIDED,
+        parent_question_ids: PatchValue[Iterable[UUID] | None] = NOT_PROVIDED,
         actor: AuthContext | None = None,
         origin: EntityOrigin | None = None,
         change_set_id: UUID | None = None,
@@ -419,12 +421,12 @@ class QuestionService(BaseService):
         self,
         question: Question,
         *,
-        text: str | None,
-        question_type: QuestionType | None,
-        hypothesis: str | None,
-        status: QuestionStatus | None,
-        terminal_reason: str | None,
-        parent_question_ids: Iterable[UUID] | None,
+        text: PatchValue[str | None],
+        question_type: PatchValue[QuestionType | None],
+        hypothesis: PatchValue[str | None],
+        status: PatchValue[QuestionStatus | None],
+        terminal_reason: PatchValue[str | None],
+        parent_question_ids: PatchValue[Iterable[UUID] | None],
         actor: AuthContext | None,
         origin: EntityOrigin | None,
         change_set_id: UUID | None,
@@ -432,29 +434,40 @@ class QuestionService(BaseService):
         origin_model: str | None,
         origin_prompt_version: str | None,
     ) -> Question:
-        if text is not None:
+        before = question.model_copy(deep=True)
+        if is_provided(text):
+            if text is None:
+                raise ValidationError("text must not be null.")
             ensure_non_empty(text, "text")
             question.text = text.strip()
-        if question_type is not None:
+        if is_provided(question_type):
+            if question_type is None:
+                raise ValidationError("question_type must not be null.")
             question.question_type = question_type
-        if hypothesis is not None:
+        if is_provided(hypothesis):
             question.hypothesis = hypothesis.strip() if hypothesis else None
         current_status = question.status
-        next_status = status or current_status
-        if status is not None:
+        if is_provided(status):
+            if status is None:
+                raise ValidationError("status must not be null.")
+            next_status = status
             _ensure_question_status_transition(current_status, status)
-        resolved_terminal_reason = terminal_reason_for_status(
+        else:
+            next_status = current_status
+        resolved_terminal_reason = terminal_reason_for_patch(
             current_status,
             next_status,
             QuestionStatus.ABANDONED,
             terminal_reason,
             entity_name="Question",
         )
-        if status is not None:
+        if is_provided(status):
             question.status = status
-        if resolved_terminal_reason is not None:
+        if is_provided(resolved_terminal_reason):
             question.terminal_reason = resolved_terminal_reason
-        if parent_question_ids is not None:
+        if is_provided(parent_question_ids):
+            if parent_question_ids is None:
+                raise ValidationError("parent_question_ids must not be null.")
             parent_ids = unique_ids(parent_question_ids)
             for parent_id in parent_ids:
                 parent = self.get_question(parent_id)
@@ -476,6 +489,8 @@ class QuestionService(BaseService):
             question.origin_model = origin_model
         if origin_prompt_version is not None:
             question.origin_prompt_version = origin_prompt_version
+        if question == before:
+            return question
         question.updated_at = utc_now()
         with self.unit_of_work() as repository:
             repository.questions.save(question)

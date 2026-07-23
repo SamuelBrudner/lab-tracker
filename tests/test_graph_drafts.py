@@ -13,7 +13,7 @@ from fastapi.testclient import TestClient
 from lab_tracker.app_parts.middleware import system_auth_context
 from lab_tracker.auth import AuthContext, PrincipalType, Role, utc_now
 from lab_tracker.config import Settings
-from lab_tracker.db_models import GraphChangeSetModel
+from lab_tracker.db_models import GraphChangeOperationModel, GraphChangeSetModel
 from lab_tracker.errors import AuthError, ValidationError
 from lab_tracker.graph_drafting import (
     AnthropicGraphDraftClient,
@@ -1908,6 +1908,105 @@ def test_operation_payload_edit_validates_without_mutating_canonical_records(
     assert questions.json()["data"] == []
 
 
+def test_commit_rejects_accepted_empty_update_without_rewriting_provenance(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+) -> None:
+    project_id = _project(client, admin_auth_headers)
+    question_response = client.post(
+        "/questions",
+        json={
+            "project_id": project_id,
+            "text": "Does an empty graph update change provenance?",
+            "question_type": "descriptive",
+            "hypothesis": "Canonical hypothesis",
+        },
+        headers=admin_auth_headers,
+    )
+    assert question_response.status_code == 201, question_response.text
+    question = question_response.json()["data"]
+    question_id = question["question_id"]
+    note_id = _image_note(client, admin_auth_headers, project_id)
+    update_patch = {
+        "summary": "Update one question.",
+        "uncertain_fields": [],
+        "clarification_requests": [],
+        "operations": [
+            {
+                "client_ref": "question-update",
+                "op": "update",
+                "entity_type": "question",
+                "semantic_type": "update_entity",
+                "target_entity_id": question_id,
+                "payload_json": json.dumps({"hypothesis": "Drafted hypothesis"}),
+                "rationale": "The source proposes a revised hypothesis.",
+                "confidence": 0.8,
+                "source_refs": [],
+            }
+        ],
+    }
+    client.app.state.graph_draft_client_factory = lambda settings: FakeDraftClient(
+        update_patch
+    )
+    draft_response = client.post(
+        f"/notes/{note_id}/graph-drafts",
+        headers=admin_auth_headers,
+    )
+    assert draft_response.status_code == 201, draft_response.text
+    draft = draft_response.json()["data"]
+    operation = draft["operations"][0]
+    accepted = client.patch(
+        f"/graph-drafts/{draft['change_set_id']}/operations/{operation['operation_id']}",
+        json={"payload": operation["payload"], "status": "accepted"},
+        headers=admin_auth_headers,
+    )
+    assert accepted.status_code == 200, accepted.text
+
+    # Simulate a stale/corrupt accepted row that bypassed review-time validation.
+    # The commit/applier boundary must still fail closed before touching the entity.
+    with client.app.state.db_session_factory() as session:
+        row = session.get(GraphChangeOperationModel, operation["operation_id"])
+        assert row is not None
+        row.payload = {}
+        session.commit()
+
+    versions_path = f"/questions/{question_id}/versions"
+    before = client.get(
+        f"/questions/{question_id}",
+        headers=admin_auth_headers,
+    ).json()["data"]
+    before_version_total = client.get(
+        versions_path,
+        headers=admin_auth_headers,
+    ).json()["meta"]["total"]
+
+    commit = client.post(
+        f"/graph-drafts/{draft['change_set_id']}/commit",
+        json={"message": "Must not apply an empty update"},
+        headers=admin_auth_headers,
+    )
+
+    assert commit.status_code == 422, commit.text
+    assert "must include at least one field" in commit.json()["error"]["message"]
+    after = client.get(
+        f"/questions/{question_id}",
+        headers=admin_auth_headers,
+    ).json()["data"]
+    assert after == before
+    assert after["origin"] == question["origin"]
+    assert after["change_set_id"] == question["change_set_id"]
+    assert (
+        client.get(versions_path, headers=admin_auth_headers).json()["meta"]["total"]
+        == before_version_total
+    )
+    persisted_draft = client.get(
+        f"/graph-drafts/{draft['change_set_id']}",
+        headers=admin_auth_headers,
+    ).json()["data"]
+    assert persisted_draft["status"] == "ready"
+    assert persisted_draft["operations"][0]["status"] == "accepted"
+
+
 def test_commit_failure_rolls_back_canonical_changes(
     client: TestClient,
     admin_auth_headers: dict[str, str],
@@ -2481,6 +2580,125 @@ def test_system_actor_cannot_accept_single_operation(
             status=GraphChangeOperationStatus.ACCEPTED,
             actor=system_auth_context(),
         )
+
+
+def test_graph_operation_patch_empty_is_noop_and_null_clears_review_note(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+) -> None:
+    change_set_id, operation = _note_graph_draft(client, admin_auth_headers)
+    operation_id = operation["operation_id"]
+    path = f"/graph-drafts/{change_set_id}/operations/{operation_id}"
+    before = client.get(
+        f"/graph-drafts/{change_set_id}",
+        headers=admin_auth_headers,
+    ).json()["data"]
+    before_operation = next(
+        item for item in before["operations"] if item["operation_id"] == operation_id
+    )
+
+    no_op = client.patch(path, json={}, headers=admin_auth_headers)
+
+    assert no_op.status_code == 200, no_op.text
+    no_op_data = no_op.json()["data"]
+    no_op_operation = next(
+        item for item in no_op_data["operations"] if item["operation_id"] == operation_id
+    )
+    assert no_op_data["updated_at"] == before["updated_at"]
+    assert no_op_operation["updated_at"] == before_operation["updated_at"]
+    assert no_op_operation["acceptance_mode"] == before_operation["acceptance_mode"]
+
+    noted = client.patch(
+        path,
+        json={"review_note": "Needs one correction."},
+        headers=admin_auth_headers,
+    )
+    assert noted.status_code == 200, noted.text
+    assert next(
+        item
+        for item in noted.json()["data"]["operations"]
+        if item["operation_id"] == operation_id
+    )["review_note"] == "Needs one correction."
+
+    cleared = client.patch(
+        path,
+        json={"review_note": None},
+        headers=admin_auth_headers,
+    )
+    assert cleared.status_code == 200, cleared.text
+    assert (
+        next(
+            item
+            for item in cleared.json()["data"]["operations"]
+            if item["operation_id"] == operation_id
+        )["review_note"]
+        is None
+    )
+
+    rejected = client.patch(
+        path,
+        json={"status": "rejected", "review_note": "Not supported by the source."},
+        headers=admin_auth_headers,
+    )
+    assert rejected.status_code == 200, rejected.text
+    rejected_data = rejected.json()["data"]
+    rejected_operation = next(
+        item
+        for item in rejected_data["operations"]
+        if item["operation_id"] == operation_id
+    )
+
+    repeated_rejection = client.patch(
+        path,
+        json={"status": "rejected", "review_note": "Not supported by the source."},
+        headers=admin_auth_headers,
+    )
+    assert repeated_rejection.status_code == 200, repeated_rejection.text
+    repeated_data = repeated_rejection.json()["data"]
+    repeated_operation = next(
+        item
+        for item in repeated_data["operations"]
+        if item["operation_id"] == operation_id
+    )
+    assert repeated_data["updated_at"] == rejected_data["updated_at"]
+    assert repeated_operation["updated_at"] == rejected_operation["updated_at"]
+    assert (
+        repeated_operation["error_metadata"]["reviewed_at"]
+        == rejected_operation["error_metadata"]["reviewed_at"]
+    )
+
+    cleared_rejection_note = client.patch(
+        path,
+        json={"status": "rejected", "review_note": None},
+        headers=admin_auth_headers,
+    )
+    assert cleared_rejection_note.status_code == 200, cleared_rejection_note.text
+    cleared_rejection_data = cleared_rejection_note.json()["data"]
+    cleared_rejection_operation = next(
+        item
+        for item in cleared_rejection_data["operations"]
+        if item["operation_id"] == operation_id
+    )
+    assert cleared_rejection_operation["review_note"] is None
+
+    repeated_null = client.patch(
+        path,
+        json={"status": "rejected", "review_note": None},
+        headers=admin_auth_headers,
+    )
+    assert repeated_null.status_code == 200, repeated_null.text
+    repeated_null_data = repeated_null.json()["data"]
+    repeated_null_operation = next(
+        item
+        for item in repeated_null_data["operations"]
+        if item["operation_id"] == operation_id
+    )
+    assert repeated_null_data["updated_at"] == cleared_rejection_data["updated_at"]
+    assert repeated_null_operation["updated_at"] == cleared_rejection_operation["updated_at"]
+    assert (
+        repeated_null_operation["error_metadata"]["reviewed_at"]
+        == cleared_rejection_operation["error_metadata"]["reviewed_at"]
+    )
 
 
 def test_human_owner_can_still_commit_after_automation_is_blocked(

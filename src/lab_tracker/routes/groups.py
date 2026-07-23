@@ -17,6 +17,7 @@ from lab_tracker.models import (
     ProjectMembership,
     UsageEventResourceType,
 )
+from lab_tracker.patching import provided_fields
 from lab_tracker.schemas import (
     Envelope,
     GroupMembershipCreate,
@@ -89,11 +90,8 @@ def build_groups_router(api: LabTrackerAPI) -> APIRouter:
         actor = actor_from_request(request)
         group = api_from_request(request, api).update_project_group(
             group_id,
-            name=payload.name,
-            description=payload.description,
-            kind=payload.kind,
-            group_read_all=payload.group_read_all,
             actor=actor,
+            **provided_fields(payload),
         )
         return Envelope(data=group)
 

@@ -21,6 +21,7 @@ from lab_tracker.models import (
     SessionType,
     utc_now,
 )
+from lab_tracker.patching import NOT_PROVIDED, PatchValue, is_provided
 from lab_tracker.services.base import BaseService, ServiceContext
 from lab_tracker.services.goal_link_cleanup import remove_goal_links_to_entity
 from lab_tracker.services.project_authorization import ProjectAuthorizationPolicy
@@ -37,6 +38,7 @@ from lab_tracker.services.shared import (
     build_commit_manifest,
     compute_commit_hash,
     ensure_primary_question_active,
+    terminal_reason_for_patch,
     terminal_reason_for_status,
     unique_ids,
     validate_commit_hash,
@@ -210,11 +212,13 @@ class DatasetService(BaseService):
         self,
         dataset_id: UUID,
         *,
-        status: DatasetStatus | None = None,
-        terminal_reason: str | None = None,
-        question_links: Iterable[QuestionLink] | None = None,
-        commit_manifest: DatasetCommitManifestInput | DatasetCommitManifest | None = None,
-        commit_hash: str | None = None,
+        status: PatchValue[DatasetStatus | None] = NOT_PROVIDED,
+        terminal_reason: PatchValue[str | None] = NOT_PROVIDED,
+        question_links: PatchValue[Iterable[QuestionLink] | None] = NOT_PROVIDED,
+        commit_manifest: PatchValue[
+            DatasetCommitManifestInput | DatasetCommitManifest | None
+        ] = NOT_PROVIDED,
+        commit_hash: PatchValue[str | None] = NOT_PROVIDED,
         actor: AuthContext | None = None,
         origin: EntityOrigin | None = None,
         change_set_id: UUID | None = None,
@@ -224,23 +228,36 @@ class DatasetService(BaseService):
     ) -> Dataset:
         dataset = self.get_dataset(dataset_id)
         self.authorization.require_contributor(dataset.project_id, actor=actor)
+        before = dataset.model_copy(deep=True)
         current_status = dataset.status
-        next_status = status or current_status
-        if status is not None:
+        if is_provided(status):
+            if status is None:
+                raise ValidationError("status must not be null.")
+            next_status = status
             _ensure_dataset_status_transition(current_status, status)
-        resolved_terminal_reason = terminal_reason_for_status(
+        else:
+            next_status = current_status
+        resolved_terminal_reason = terminal_reason_for_patch(
             current_status,
             next_status,
             DatasetStatus.ARCHIVED,
             terminal_reason,
             entity_name="Dataset",
         )
+        if is_provided(question_links) and question_links is None:
+            raise ValidationError("question_links must not be null.")
+        if is_provided(commit_manifest) and commit_manifest is None:
+            raise ValidationError("commit_manifest must not be null.")
+        if is_provided(commit_hash) and commit_hash is None:
+            raise ValidationError("commit_hash must not be null.")
         was_committed = current_status == DatasetStatus.COMMITTED
         if was_committed and (
-            commit_hash is not None or question_links is not None or commit_manifest is not None
+            is_provided(commit_hash)
+            or is_provided(question_links)
+            or is_provided(commit_manifest)
         ):
             raise ValidationError("Committed datasets are immutable.")
-        if question_links is not None:
+        if is_provided(question_links):
             links = list(question_links)
             primary_links = [link for link in links if link.role == QuestionLinkRole.PRIMARY]
             if len(primary_links) != 1:
@@ -257,7 +274,9 @@ class DatasetService(BaseService):
             dataset.primary_question_id = primary_links[0].question_id
 
         commit_requested = (
-            status == DatasetStatus.COMMITTED and dataset.status != DatasetStatus.COMMITTED
+            is_provided(status)
+            and status == DatasetStatus.COMMITTED
+            and dataset.status != DatasetStatus.COMMITTED
         )
 
         if commit_requested:
@@ -265,10 +284,10 @@ class DatasetService(BaseService):
             ensure_primary_question_active(primary_question)
 
         should_refresh_manifest = (
-            commit_manifest is not None or question_links is not None or commit_requested
+            is_provided(commit_manifest) or is_provided(question_links) or commit_requested
         )
         if should_refresh_manifest:
-            if commit_manifest is None:
+            if not is_provided(commit_manifest):
                 base_manifest = _manifest_input_from_commit(dataset.commit_manifest)
             elif isinstance(commit_manifest, DatasetCommitManifest):
                 base_manifest = _manifest_input_from_commit(commit_manifest)
@@ -313,14 +332,17 @@ class DatasetService(BaseService):
                     "At least one file or external artifact is required to commit a dataset."
                 )
             resolved_commit_hash = compute_commit_hash(resolved_manifest)
-            validate_commit_hash(commit_hash, resolved_commit_hash)
+            validate_commit_hash(
+                commit_hash if is_provided(commit_hash) else None,
+                resolved_commit_hash,
+            )
             dataset.commit_manifest = resolved_manifest
             dataset.commit_hash = resolved_commit_hash
-        else:
+        elif is_provided(commit_hash):
             validate_commit_hash(commit_hash, compute_commit_hash(dataset.commit_manifest))
-        if status is not None:
+        if is_provided(status):
             dataset.status = status
-        if resolved_terminal_reason is not None:
+        if is_provided(resolved_terminal_reason):
             dataset.terminal_reason = resolved_terminal_reason
         if origin is not None:
             dataset.origin = origin
@@ -332,6 +354,8 @@ class DatasetService(BaseService):
             dataset.origin_model = origin_model
         if origin_prompt_version is not None:
             dataset.origin_prompt_version = origin_prompt_version
+        if dataset == before:
+            return dataset
         dataset.updated_at = utc_now()
         with self.unit_of_work() as repository:
             repository.datasets.save(dataset)

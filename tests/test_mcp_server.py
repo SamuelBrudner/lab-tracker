@@ -1326,6 +1326,125 @@ def test_client_create_evidence_tools_send_api_payloads() -> None:
     ]
 
 
+def test_client_update_goal_omits_absent_fields_and_sends_explicit_clears() -> None:
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        assert request.method == "PATCH"
+        assert request.url.path == "/goals/goal-1"
+        return _json_response(200, {"data": {"goal_id": "goal-1"}})
+
+    client = mcp_server.LabTrackerAPIClient(
+        mcp_server.MCPSettings(base_url="http://testserver"),
+        transport=httpx.MockTransport(handler),
+    )
+
+    try:
+        client.update_goal(goal_id="goal-1", title="Renamed goal")
+        client.update_goal(
+            goal_id="goal-1",
+            clear_target_date=True,
+            clear_external_ref=True,
+        )
+    finally:
+        client.close()
+
+    assert [json.loads(request.content) for request in requests] == [
+        {"title": "Renamed goal"},
+        {"target_date": None, "external_ref": None},
+    ]
+
+
+def test_client_update_goal_retries_401_without_dropping_explicit_nulls(
+    monkeypatch,
+) -> None:
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if len(requests) == 1:
+            return _json_response(401, {"error": {"message": "expired"}})
+        return _json_response(200, {"data": {"goal_id": "goal-1"}})
+
+    client = mcp_server.LabTrackerAPIClient(
+        mcp_server.MCPSettings(base_url="http://testserver"),
+        transport=httpx.MockTransport(handler),
+    )
+    monkeypatch.setattr(client, "initial_bearer", lambda: "expired-token")
+    monkeypatch.setattr(client, "refresh_bearer", lambda _response: "refreshed-token")
+
+    try:
+        client.update_goal(goal_id="goal-1", clear_target_date=True)
+    finally:
+        client.close()
+
+    assert [json.loads(request.content) for request in requests] == [
+        {"target_date": None},
+        {"target_date": None},
+    ]
+    assert [request.headers["authorization"] for request in requests] == [
+        "Bearer expired-token",
+        "Bearer refreshed-token",
+    ]
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "field"),
+    [
+        ({"target_date": "2026-12-01", "clear_target_date": True}, "target_date"),
+        ({"external_ref": "doi:10.1234/example", "clear_external_ref": True}, "external_ref"),
+    ],
+)
+def test_client_update_goal_rejects_value_and_clear_conflicts(
+    kwargs: dict[str, object],
+    field: str,
+) -> None:
+    def handler(_request: httpx.Request) -> httpx.Response:
+        raise AssertionError("conflicting update must fail before an HTTP request")
+
+    client = mcp_server.LabTrackerAPIClient(
+        mcp_server.MCPSettings(base_url="http://testserver"),
+        transport=httpx.MockTransport(handler),
+    )
+
+    try:
+        with pytest.raises(mcp_server.LabTrackerAPIValidationError) as exc_info:
+            client.update_goal(goal_id="goal-1", **kwargs)
+    finally:
+        client.close()
+
+    assert exc_info.value.code == "validation_error"
+    assert field in str(exc_info.value)
+
+
+def test_update_goal_tool_forwards_explicit_clear_flags(monkeypatch) -> None:
+    from lab_tracker.mcp_tools import write as write_tools
+
+    captured: dict[str, object] = {}
+
+    class FakeClient:
+        def update_goal(self, **kwargs):
+            captured.update(kwargs)
+            return {"data": {"goal_id": "goal-1"}}
+
+        def close(self) -> None:
+            return None
+
+    monkeypatch.setattr(write_tools, "client_from_env", lambda: FakeClient())
+
+    payload = write_tools.lab_tracker_update_goal(
+        goal_id="goal-1",
+        title="Renamed goal",
+        clear_target_date=True,
+        clear_external_ref=True,
+    )
+
+    assert payload["data"]["goal_id"] == "goal-1"
+    assert captured["clear_target_date"] is True
+    assert captured["clear_external_ref"] is True
+
+
 def test_client_upload_visualization_file_posts_multipart(tmp_path) -> None:
     figure_path = tmp_path / "figure.png"
     figure_bytes = b"figure-bytes"

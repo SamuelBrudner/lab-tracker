@@ -19,6 +19,7 @@ from lab_tracker.models import (
     GraphDraftBatchSettings,
     UsageEventResourceType,
 )
+from lab_tracker.patching import provided_fields
 from lab_tracker.schemas import (
     Envelope,
     GraphDraftBatchRunRequest,
@@ -126,12 +127,8 @@ def build_graph_batches_router(api: LabTrackerAPI) -> APIRouter:
         actor = actor_from_request(request)
         settings = api_from_request(request, api).update_graph_draft_batch_settings(
             project_id,
-            enabled=payload.enabled,
-            cadence_minutes=payload.cadence_minutes,
-            run_at_local_time=payload.run_at_local_time,
-            timezone_name=payload.timezone_name,
-            user_id=payload.user_id,
             actor=actor,
+            **provided_fields(payload),
         )
         return Envelope(data=settings)
 

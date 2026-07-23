@@ -140,20 +140,24 @@ class HttpTransport:
         data: Mapping[str, str] | None = None,
         files: dict[str, Any] | None = None,
         retry_on_unauthorized: bool = True,
+        preserve_json_nulls: bool = False,
         timeout: Any = None,
     ) -> httpx.Response:
         """Send with the surface header + bearer auth and a single 401 retry.
 
         Returns the raw response; the facade translates status codes and JSON so
-        its exact error types and messages are preserved.
+        its exact error types and messages are preserved. JSON ``None`` values
+        are omitted by default; callers that already distinguish field presence
+        may opt in to preserving them for explicit-null PATCH semantics.
         """
 
         headers = self._headers(authenticated)
+        prepared_json = json if preserve_json_nulls else drop_empty(json)
         response = self.send(
             method,
             path,
             params=drop_empty(params),
-            json=drop_empty(json),
+            json=prepared_json,
             data=data,
             files=files,
             headers=headers,
@@ -165,7 +169,7 @@ class HttpTransport:
                 method,
                 path,
                 params=drop_empty(params),
-                json=drop_empty(json),
+                json=prepared_json,
                 data=data,
                 files=files,
                 headers=headers,

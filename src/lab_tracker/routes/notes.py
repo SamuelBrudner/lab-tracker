@@ -25,6 +25,7 @@ from lab_tracker.models import (
     UsageEventResourceType,
     utc_now,
 )
+from lab_tracker.patching import provided_fields
 from lab_tracker.schemas import (
     Envelope,
     ListEnvelope,
@@ -250,11 +251,8 @@ def build_notes_router(api: LabTrackerAPI) -> APIRouter:
         ensure_project_contributor(request, note.project_id)
         note = api_from_request(request, api).update_note(
             note_id,
-            transcribed_text=payload.transcribed_text,
-            targets=payload.targets,
-            metadata=payload.metadata,
-            status=payload.status,
             actor=actor,
+            **provided_fields(payload),
         )
         return Envelope(data=note)
 

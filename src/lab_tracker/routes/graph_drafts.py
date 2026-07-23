@@ -14,6 +14,7 @@ from lab_tracker.config import get_settings
 from lab_tracker.db_types import ensure_uuid
 from lab_tracker.graph_drafting import make_graph_draft_client
 from lab_tracker.models import GraphChangeSet, GraphChangeSetStatus, UsageEventResourceType
+from lab_tracker.patching import provided_fields
 from lab_tracker.schemas import (
     Envelope,
     GraphChangeSetSummary,
@@ -153,10 +154,8 @@ def build_graph_drafts_router(api: LabTrackerAPI) -> APIRouter:
         change_set = api_from_request(request, api).update_graph_change_operation(
             change_set_id,
             operation_id,
-            payload=payload.payload,
-            status=payload.status,
-            review_note=payload.review_note,
             actor=actor,
+            **provided_fields(payload),
         )
         return Envelope(data=_attach_graph_usernames(request, change_set))
 

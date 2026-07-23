@@ -22,6 +22,7 @@ from lab_tracker.auth import (
 )
 from lab_tracker.db_types import ensure_uuid
 from lab_tracker.errors import AuthError, ConflictError
+from lab_tracker.patching import provided_fields
 from lab_tracker.schemas import (
     AuthBootstrapStatus,
     AuthInvitationCreate,
@@ -197,8 +198,7 @@ def build_auth_router(
         _ensure_admin(request)
         user = auth_service.update_user(
             user_id,
-            role=payload.role,
-            password=payload.password,
+            **provided_fields(payload),
         )
         return Envelope(data=auth_user_read(user))
 

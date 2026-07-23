@@ -154,6 +154,7 @@ describe("GraphDraftDetailCard route identity", () => {
   it("targets a mutation at the route id, not the stale loaded draft", async () => {
     const draftA = draftFixture({ change_set_id: ID_A, summary: "Draft A summary." });
     const patchedUrls = [];
+    const patchedBodies = [];
     installFetchMock([
       { match: `/graph-drafts/${ID_A}`, response: apiResponse(draftA) },
       {
@@ -161,6 +162,7 @@ describe("GraphDraftDetailCard route identity", () => {
         method: "PATCH",
         response: (request) => {
           patchedUrls.push(request.url);
+          patchedBodies.push(JSON.parse(request.init.body));
           return apiResponse({ ...draftA, status: "ready" });
         },
       },
@@ -171,6 +173,7 @@ describe("GraphDraftDetailCard route identity", () => {
     fireEvent.click(await screen.findByRole("button", { name: "Accept" }));
     await waitFor(() => expect(patchedUrls.length).toBe(1));
     expect(patchedUrls[0]).toContain(`/graph-drafts/${ID_A}/operations/`);
+    expect(patchedBodies[0].review_note).toBeNull();
   });
 });
 

@@ -304,6 +304,8 @@ def _validate_graph_operation_payload(
         raise ValidationError("Operation payload must be a JSON object.")
     if operation.op == GraphChangeOp.UPDATE and operation.target_entity_id is None:
         raise ValidationError("Update operations require target_entity_id.")
+    if operation.op == GraphChangeOp.UPDATE and not candidate:
+        raise ValidationError("Update operation payload must include at least one field.")
     schema_map = _CREATE_SCHEMAS if operation.op == GraphChangeOp.CREATE else _UPDATE_SCHEMAS
     schema_type = schema_map.get(operation.entity_type)
     if schema_type is None:

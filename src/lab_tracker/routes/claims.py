@@ -19,6 +19,7 @@ from lab_tracker.models import (
     EntityVersionDiff,
     UsageEventResourceType,
 )
+from lab_tracker.patching import provided_fields
 from lab_tracker.schemas import ClaimCreate, ClaimEdgeCreate, ClaimUpdate, Envelope, ListEnvelope
 
 from .provenance import claim_provenance_payload, jsonld_response
@@ -160,18 +161,8 @@ def build_claims_router(api: LabTrackerAPI) -> APIRouter:
         ensure_project_read(request, existing.project_id)
         claim = api_from_request(request, api).update_claim(
             claim_id,
-            statement=payload.statement,
-            confidence=payload.confidence,
-            status=payload.status,
-            terminal_reason=payload.terminal_reason,
-            falsification_criteria=payload.falsification_criteria,
-            verification_plan=payload.verification_plan,
-            refuting_outcome=payload.refuting_outcome,
-            supported_by_dataset_ids=payload.supported_by_dataset_ids,
-            supported_by_analysis_ids=payload.supported_by_analysis_ids,
-            answers_question_ids=payload.answers_question_ids,
-            external_citations=payload.external_citations,
             actor=actor,
+            **provided_fields(payload),
         )
         return Envelope(data=claim)
 
