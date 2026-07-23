@@ -24,7 +24,7 @@ from lab_tracker.schemas import (
     GraphDraftReviewRequest,
     ListEnvelope,
 )
-from lab_tracker.services.graph_draft_service import RevisionInputs, RevisionUpload
+from lab_tracker.services.graph_draft_review import RevisionInputs, RevisionUpload
 from lab_tracker.upload_security import (
     enforce_request_content_length_limit,
     enforce_stream_size_limit,

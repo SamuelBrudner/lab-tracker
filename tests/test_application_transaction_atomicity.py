@@ -134,8 +134,7 @@ def _seed_direct_invalid_graph(api, actor):  # noqa: ANN001
         actor=actor,
     )
     change_set = _invalid_graph_change_set(project.project_id, note.note_id)
-    api.graph_drafts.repository.graph_change_sets.save(change_set)
-    api.graph_drafts.repository.commit()
+    api.graph_drafts.records.save_graph_change_set(change_set)
     return project, change_set
 
 
@@ -245,8 +244,7 @@ def test_graph_commit_rolls_back_before_applying_supported_claim_without_evidenc
         status=GraphChangeSetStatus.READY,
         operations=operations,
     )
-    api.graph_drafts.repository.graph_change_sets.save(change_set)
-    api.graph_drafts.repository.commit()
+    api.graph_drafts.records.save_graph_change_set(change_set)
 
     with pytest.raises(LabTrackerError, match="Supported claims require"):
         api.commit_graph_change_set(
