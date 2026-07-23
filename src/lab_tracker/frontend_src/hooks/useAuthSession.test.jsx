@@ -3,6 +3,7 @@ import { act, fireEvent, render, screen, waitFor } from "@testing-library/react"
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { apiRequest } from "../shared/api.js";
+import { createAuthStorage } from "../shared/auth-storage.js";
 import {
   TOKEN_EXPIRES_AT_STORAGE_KEY,
   TOKEN_STORAGE_KEY,
@@ -27,9 +28,10 @@ function AuthHarness({
   replace = noop,
   setBusy = noop,
   setFlash = noop,
+  storage = undefined,
   withProbe = false,
 }) {
-  const session = useAuthSession({ replace, setBusy, setFlash });
+  const session = useAuthSession({ replace, setBusy, setFlash, storage });
   async function probe() {
     try {
       await apiRequest("/protected", { token: session.token });
@@ -43,6 +45,7 @@ function AuthHarness({
       <span data-testid="expires-at">{session.tokenExpiresAt}</span>
       <span data-testid="auth-mode">{session.authMode}</span>
       <span data-testid="bootstrap-token">{session.authBootstrapToken}</span>
+      <span data-testid="degraded">{String(session.persistenceDegraded)}</span>
       {withProbe ? (
         <button type="button" onClick={probe}>
           Probe API
@@ -269,6 +272,33 @@ describe("useAuthSession", () => {
       "",
       "Your session expired. Please sign in again."
     );
+  });
+
+  it("keeps a valid session and reports degraded persistence when storage writes throw", async () => {
+    // Backing store rejects every write/remove (quota/SecurityError), but the
+    // live session must survive and the degradation must be surfaced, not crash.
+    const throwingStorage = createAuthStorage({
+      getItem: () => "stored-token",
+      setItem: () => {
+        throw new Error("QuotaExceededError");
+      },
+      removeItem: () => {
+        throw new Error("SecurityError");
+      },
+    });
+    const setBusy = vi.fn();
+    installFetchMock([
+      {
+        match: "/auth/me",
+        response: apiResponse(USER, 200, { auth_enabled: true }),
+      },
+    ]);
+
+    render(<AuthHarness setBusy={setBusy} storage={throwingStorage} />);
+
+    await waitFor(() => expect(setBusy).toHaveBeenLastCalledWith(false));
+    expect(screen.getByTestId("token")).toHaveTextContent("stored-token");
+    await waitFor(() => expect(screen.getByTestId("degraded")).toHaveTextContent("true"));
   });
 
   it("loads a surfaced first-admin token into setup mode", async () => {

@@ -23,6 +23,8 @@ from lab_tracker.graph_drafting import (
 )
 from lab_tracker.models import (
     AcceptanceMode,
+    EntityType,
+    GraphChangeOp,
     GraphChangeOperation,
     GraphChangeOperationStatus,
     GraphChangeSet,
@@ -1665,45 +1667,75 @@ class GraphDraftService(BaseService):
         if not accepted:
             raise ValidationError("At least one accepted operation is required to commit.")
         _ensure_accepted_operation_refs_available(accepted)
-        claimed = self.repository.claim_graph_change_set_for_commit(change_set_id)
-        if claimed is None:
-            latest = self.get_graph_change_set(change_set_id)
-            if latest.status == GraphChangeSetStatus.COMMITTED:
-                raise ValidationError("This graph draft has already been committed.")
-            if latest.status == GraphChangeSetStatus.COMMITTING:
-                raise ValidationError("This graph draft is already being committed.")
-            raise ValidationError("Only ready or submitted graph drafts can be committed.")
-        change_set = claimed
-        accepted = [
-            operation
-            for operation in sorted(change_set.operations, key=lambda item: item.sequence)
-            if operation.status == GraphChangeOperationStatus.ACCEPTED
-        ]
-        for operation in accepted:
-            entity = self.patch_applier.apply_graph_operation(
-                operation,
-                ref_map=ref_map,
-                actor=actor,
-                change_set=change_set,
+        with self.application_transaction():
+            claimed = self.repository.claim_graph_change_set_for_commit(change_set_id)
+            if claimed is None:
+                latest = self.get_graph_change_set(change_set_id)
+                if latest.status == GraphChangeSetStatus.COMMITTED:
+                    raise ValidationError("This graph draft has already been committed.")
+                if latest.status == GraphChangeSetStatus.COMMITTING:
+                    raise ValidationError("This graph draft is already being committed.")
+                raise ValidationError("Only ready or submitted graph drafts can be committed.")
+            change_set = claimed
+            accepted = [
+                operation
+                for operation in sorted(change_set.operations, key=lambda item: item.sequence)
+                if operation.status == GraphChangeOperationStatus.ACCEPTED
+            ]
+            self._lock_question_update_projects(accepted)
+            for operation in accepted:
+                entity = self.patch_applier.apply_graph_operation(
+                    operation,
+                    ref_map=ref_map,
+                    actor=actor,
+                    change_set=change_set,
+                )
+                resolved_entity_id = graph_entity_id(operation.entity_type, entity)
+                if operation.client_ref:
+                    ref_map[operation.client_ref] = resolved_entity_id
+                operation.status = GraphChangeOperationStatus.APPLIED
+                operation.result_entity_id = resolved_entity_id
+                operation.error_metadata = {}
+                operation.updated_at = utc_now()
+            change_set.status = GraphChangeSetStatus.COMMITTED
+            change_set.commit_message = message.strip()
+            change_set.committed_at = utc_now()
+            change_set.committed_by = actor_user_id(actor)
+            change_set.updated_at = change_set.committed_at
+            self.versions.mark_change_set_committed(
+                change_set.change_set_id,
+                change_set.committed_at,
             )
-            resolved_entity_id = graph_entity_id(operation.entity_type, entity)
-            if operation.client_ref:
-                ref_map[operation.client_ref] = resolved_entity_id
-            operation.status = GraphChangeOperationStatus.APPLIED
-            operation.result_entity_id = resolved_entity_id
-            operation.error_metadata = {}
-            operation.updated_at = utc_now()
-        change_set.status = GraphChangeSetStatus.COMMITTED
-        change_set.commit_message = message.strip()
-        change_set.committed_at = utc_now()
-        change_set.committed_by = actor_user_id(actor)
-        change_set.updated_at = change_set.committed_at
-        self.versions.mark_change_set_committed(
-            change_set.change_set_id,
-            change_set.committed_at,
-        )
-        self._save_graph_change_set(change_set)
+            self._save_graph_change_set(change_set)
         return change_set
+
+    def _lock_question_update_projects(
+        self,
+        operations: list[GraphChangeOperation],
+    ) -> None:
+        """Pre-lock every question project in one canonical order.
+
+        A graph draft may contain accepted updates for more than one project.
+        Individual question commands retain transaction-scoped locks until the
+        outer graph commit finishes, so acquiring them in operation order could
+        deadlock against a draft with the reverse order. Project identity is
+        immutable; resolve it first, then lock the complete set by UUID order
+        before applying any operation.
+        """
+
+        project_ids: set[UUID] = set()
+        for operation in operations:
+            if (
+                operation.op != GraphChangeOp.UPDATE
+                or operation.entity_type != EntityType.QUESTION
+            ):
+                continue
+            if operation.target_entity_id is None:
+                raise ValidationError("Question updates require target_entity_id.")
+            question = self.questions.get_question(operation.target_entity_id)
+            project_ids.add(question.project_id)
+        for project_id in sorted(project_ids, key=str):
+            self.repository.lock_project_question_dag(project_id)
 
     def _is_graph_change_set_author(
         self,

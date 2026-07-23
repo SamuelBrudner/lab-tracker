@@ -13,7 +13,7 @@ from contextlib import suppress
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import httpx
 
@@ -175,6 +175,10 @@ class LTAPIError(LTError):
     """Raised when the Lab Tracker API returns an error or malformed response."""
 
 
+class LTConflictError(LTAPIError):
+    """Raised when an idempotency key is reused with conflicting intent."""
+
+
 class LTValidationError(LTError):
     """Raised when client-side validation catches a bad request shape."""
 
@@ -216,7 +220,7 @@ class GetOrCreateResult:
     keep working.
     """
 
-    action: str
+    action: Literal["created", "reused", "updated"]
     record: LTRecord
 
     @property
@@ -779,19 +783,18 @@ class LabTracker:
                     "'update' to apply the change, or reconcile the inputs."
                 )
             return GetOrCreateResult("reused", existing)
-        record = self._data_record(
-            self._request(
-                "POST",
-                "/projects",
-                json_payload={
-                    "name": cleaned_name,
-                    "description": "" if description is _UNSET else description,
-                    "status": None if resolved_status is _UNSET else resolved_status,
-                    "client_capture_id": _derive_capture_id("project", cleaned_name),
-                },
-            )
+        payload, status_code = self._request_with_status(
+            "POST",
+            "/projects",
+            json_payload={
+                "name": cleaned_name,
+                "description": "" if description is _UNSET else description,
+                "status": None if resolved_status is _UNSET else resolved_status,
+                "client_capture_id": _derive_capture_id("project", cleaned_name),
+            },
         )
-        return GetOrCreateResult("created", record)
+        record = self._data_record(payload)
+        return GetOrCreateResult("created" if status_code == 201 else "reused", record)
 
     def _patch_project(
         self, project_id: Any, *, description: str | Any, status: str | None | Any
@@ -904,28 +907,27 @@ class LabTracker:
                     "'update' to apply the change, or reconcile the inputs."
                 )
             return GetOrCreateResult("reused", existing)
-        record = self._data_record(
-            self._request(
-                "POST",
-                "/questions",
-                json_payload={
-                    "project_id": str(project_id),
-                    "text": cleaned_text,
-                    "question_type": (
-                        QuestionType.OTHER.value if resolved_type is _UNSET else resolved_type
-                    ),
-                    "hypothesis": None if hypothesis is _UNSET else hypothesis,
-                    "status": None if resolved_status is _UNSET else resolved_status,
-                    "parent_question_ids": (
-                        [] if parent_question_ids is _UNSET else list(parent_question_ids or [])
-                    ),
-                    "client_capture_id": _derive_capture_id(
-                        "question", str(project_id), cleaned_text
-                    ),
-                },
-            )
+        payload, status_code = self._request_with_status(
+            "POST",
+            "/questions",
+            json_payload={
+                "project_id": str(project_id),
+                "text": cleaned_text,
+                "question_type": (
+                    QuestionType.OTHER.value if resolved_type is _UNSET else resolved_type
+                ),
+                "hypothesis": None if hypothesis is _UNSET else hypothesis,
+                "status": None if resolved_status is _UNSET else resolved_status,
+                "parent_question_ids": (
+                    [] if parent_question_ids is _UNSET else list(parent_question_ids or [])
+                ),
+                "client_capture_id": _derive_capture_id(
+                    "question", str(project_id), cleaned_text
+                ),
+            },
         )
-        return GetOrCreateResult("created", record)
+        record = self._data_record(payload)
+        return GetOrCreateResult("created" if status_code == 201 else "reused", record)
 
     def _patch_question(
         self, question_id: Any, *, status: str | None | Any, hypothesis: str | None | Any
@@ -1169,6 +1171,8 @@ class LabTracker:
         )
         if response.status_code == 422:
             raise LTValidationError(_response_error(response))
+        if response.status_code == 409:
+            raise LTConflictError(_response_error(response))
         if response.status_code >= 400:
             raise LTAPIError(_response_error(response))
         return self._data_record(_response_json(response))
@@ -1514,6 +1518,8 @@ class LabTracker:
         )
         if response.status_code == 422:
             raise LTValidationError(_response_error(response))
+        if response.status_code == 409:
+            raise LTConflictError(_response_error(response))
         if response.status_code >= 400:
             raise LTAPIError(_response_error(response))
         return _response_json(response), response.status_code
@@ -1540,6 +1546,8 @@ class LabTracker:
         )
         if response.status_code == 422:
             raise LTValidationError(_response_error(response))
+        if response.status_code == 409:
+            raise LTConflictError(_response_error(response))
         if response.status_code >= 400:
             raise LTAPIError(_response_error(response))
         payload = _response_json(response)

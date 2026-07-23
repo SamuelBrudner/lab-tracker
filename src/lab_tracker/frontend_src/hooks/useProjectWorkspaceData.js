@@ -1,6 +1,7 @@
 import * as React from "react";
 
 import { apiListRequest, buildApiPath, fetchAllPages } from "../shared/api.js";
+import { projects as projectsGateway } from "../shared/gateways/index.js";
 
 const { useCallback, useEffect, useMemo, useRef, useState } = React;
 
@@ -138,7 +139,7 @@ function useProjectWorkspaceData({
     }
     const requestId = projectsRequestRef.current + 1;
     projectsRequestRef.current = requestId;
-    const nextProjects = await fetchAllPages("/projects", { token });
+    const nextProjects = await projectsGateway.listProjects({ token });
     if (projectsRequestRef.current !== requestId) {
       return nextProjects;
     }

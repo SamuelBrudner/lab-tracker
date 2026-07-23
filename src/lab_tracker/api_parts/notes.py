@@ -29,6 +29,15 @@ class NotesApiMixin:
             resource_id_attr="note_id",
         )
 
+    def create_note_result(self, *args: Any, **kwargs: Any) -> Any:
+        return self._with_usage_event(
+            lambda: self.notes.create_note_result(*args, **kwargs),
+            verb=UsageEventVerb.CREATE,
+            resource_type=UsageEventResourceType.NOTE,
+            actor=kwargs.get("actor"),
+            resource_id_attr="note_id",
+        )
+
     def store_note_raw_asset(self, *args: Any, **kwargs: Any) -> Any:
         return self.notes.store_note_raw_asset(*args, **kwargs)
 
@@ -38,6 +47,15 @@ class NotesApiMixin:
     def upload_note_raw(self, *args: Any, **kwargs: Any) -> Any:
         return self._with_usage_event(
             lambda: self.notes.upload_note_raw(*args, **kwargs),
+            verb=UsageEventVerb.UPLOAD,
+            resource_type=UsageEventResourceType.NOTE,
+            actor=kwargs.get("actor"),
+            resource_id_attr="note_id",
+        )
+
+    def upload_note_raw_result(self, *args: Any, **kwargs: Any) -> Any:
+        return self._with_usage_event(
+            lambda: self.notes.upload_note_raw_result(*args, **kwargs),
             verb=UsageEventVerb.UPLOAD,
             resource_type=UsageEventResourceType.NOTE,
             actor=kwargs.get("actor"),

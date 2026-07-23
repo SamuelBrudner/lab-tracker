@@ -1,10 +1,8 @@
-from fastapi.testclient import TestClient
-
-from lab_tracker.app import create_app
+from api_helpers import app_test_client
 
 
 def test_health_endpoint():
-    client = TestClient(create_app())
+    client = app_test_client()
     response = client.get("/health")
     assert response.status_code == 200
     payload = response.json()

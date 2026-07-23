@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from contextlib import AbstractContextManager
 from datetime import datetime
 from typing import Generic, Protocol, TypeVar
 from uuid import UUID
@@ -98,12 +99,16 @@ class LabTrackerRepository(Protocol):
     def fetch_notes(self, note_ids: list[UUID]) -> list[Note]:
         """Fetch notes in the provided order."""
 
+    def lock_project_question_dag(self, project_id: UUID) -> None:
+        """Serialize question-DAG validation and mutation for one project."""
+
     def query_projects(
         self,
         *,
         group_id: UUID | None = None,
         project_ids: set[UUID] | None = None,
         status: str | None = None,
+        created_by: str | None = None,
         client_capture_id: str | None = None,
         limit: int | None = None,
         offset: int = 0,
@@ -560,3 +565,6 @@ class LabTrackerRepository(Protocol):
 
     def rollback(self) -> None:
         """Rollback the current unit of work."""
+
+    def savepoint(self) -> AbstractContextManager[None]:
+        """Isolate a recoverable write inside the current transaction."""

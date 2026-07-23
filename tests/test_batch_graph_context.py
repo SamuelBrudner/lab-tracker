@@ -75,7 +75,7 @@ def _quick_capture(
         files={"file": (filename, body, content_type)},
         headers=headers,
     )
-    assert response.status_code == 202, response.text
+    assert response.status_code == 201, response.text
     return response.json()["data"]["note_id"]
 
 

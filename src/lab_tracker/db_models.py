@@ -8,6 +8,7 @@ from uuid import UUID, uuid4
 from sqlalchemy import (
     JSON,
     Boolean,
+    CheckConstraint,
     Date,
     Float,
     ForeignKey,
@@ -87,8 +88,14 @@ class ProjectModel(Base):
     __tablename__ = "projects"
     __table_args__ = (
         UniqueConstraint(
+            "created_by",
             "client_capture_id",
-            name="uq_projects_client_capture",
+            name="uq_projects_creator_client_capture",
+        ),
+        CheckConstraint(
+            "client_capture_id IS NULL OR "
+            "(created_by IS NOT NULL AND TRIM(created_by) <> '')",
+            name="ck_projects_client_capture_creator",
         ),
     )
 
@@ -1296,6 +1303,9 @@ class PersonalAccessTokenModel(Base):
     token_hash: Mapped[str] = mapped_column(String(64), nullable=False)
     role: Mapped[str] = mapped_column(String(20), nullable=False)
     read_only: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    scope: Mapped[str] = mapped_column(
+        String(40), nullable=False, default="all", server_default="all"
+    )
     expires_at: Mapped[datetime] = mapped_column(UtcDateTime, nullable=False)
     created_at: Mapped[datetime] = mapped_column(UtcDateTime, default=_utc_now)
     last_used_at: Mapped[datetime | None] = mapped_column(UtcDateTime)

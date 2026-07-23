@@ -205,7 +205,7 @@ def test_device_token_can_post_captures(
         files={"file": ("snap2.jpg", b"image-2", "image/jpeg")},
         headers=_device_headers(secret),
     )
-    assert quick.status_code == 202, quick.text
+    assert quick.status_code == 201, quick.text
 
 
 def test_device_token_can_read_but_not_mutate_other_entities(

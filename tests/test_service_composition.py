@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from uuid import uuid4
 
-from api_helpers import repository_backed_api
+from api_helpers import register_test_resources, repository_backed_api
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
@@ -59,6 +59,7 @@ def _repository() -> SQLAlchemyLabTrackerRepository:
     session = session_factory()
     repository = SQLAlchemyLabTrackerRepository(session)
     repository._test_resources = (engine, session)  # type: ignore[attr-defined]
+    register_test_resources(engine, session)
     return repository
 
 

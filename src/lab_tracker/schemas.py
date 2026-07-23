@@ -176,6 +176,9 @@ class PersonalAccessTokenCreate(RequestModel):
     label: Annotated[str, Field(min_length=1, max_length=150), AfterValidator(_non_blank_string)]
     role: Role = Role.VIEWER
     read_only: bool = True
+    # "all" keeps the role-based service policy; "batch_run_due" narrows the token
+    # to POST /batches/run-due only (the daily-review scheduler credential).
+    scope: Literal["all", "batch_run_due"] = "all"
     expires_at: datetime
 
 
@@ -184,6 +187,7 @@ class PersonalAccessTokenRead(BaseModel):
     label: str
     role: Role
     read_only: bool
+    scope: str
     expires_at: datetime
     created_at: datetime
     last_used_at: datetime | None = None
