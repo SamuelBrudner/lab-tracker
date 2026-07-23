@@ -66,7 +66,7 @@ function ArtifactPreview({ artifact, operation, operationArtifactCount, preview 
     ["Preview freshness", previewFreshness],
   ].filter(([, value]) => value !== null && value !== undefined && value !== "");
 
-  let previewBody = null;
+  let previewBody;
   if (artifact.missing) {
     previewBody = (
       <p className="source-artifact-state source-artifact-missing" role="status">
