@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 from pathlib import Path
 
@@ -55,9 +56,7 @@ def test_fastmcp_registers_lab_tracker_tools() -> None:
     assert "lab_tracker_record_evidence_bundle" in names
     assert "lab_tracker_list_question_refactors" in names
     assert mcp_server.server.instructions is not None
-    assert "CALL THIS FIRST before research-facing decisions" in (
-        mcp_server.server.instructions
-    )
+    assert "CALL THIS FIRST before research-facing decisions" in (mcp_server.server.instructions)
     assert "what to plot" in mcp_server.server.instructions
     assert "AI can suggest; only a person commits" in mcp_server.server.instructions
 
@@ -92,8 +91,9 @@ def test_fastmcp_tool_annotations_mark_reads_and_writes_for_copilot() -> None:
 
     evidence_bundle = tools_by_name["lab_tracker_record_evidence_bundle"]
     description = evidence_bundle.description or ""
-    assert description.startswith("Preview a dataset-analysis-claim-visualization evidence bundle")
+    assert description.startswith("Preview or atomically record an evidence bundle")
     assert "defaults to dry-run" in description
+    assert "idempotency_key is required" in description
 
 
 def test_fastmcp_registers_agent_consultation_policy_resource() -> None:
@@ -146,9 +146,7 @@ def test_mcp_target_guard_allows_loopback_without_probe(monkeypatch) -> None:
 
     monkeypatch.setattr(mcp_server, "LabTrackerAPIClient", fail_client)
 
-    mcp_server._ensure_mcp_target_safe(
-        mcp_server.MCPSettings(base_url="http://127.0.0.1:8000")
-    )
+    mcp_server._ensure_mcp_target_safe(mcp_server.MCPSettings(base_url="http://127.0.0.1:8000"))
 
 
 def test_mcp_target_guard_refuses_remote_auth_disabled_target(monkeypatch) -> None:
@@ -427,9 +425,7 @@ def test_username_password_login_emits_deprecation_warning(capsys) -> None:
         return _json_response(200, {"data": [], "meta": {"total": 0}})
 
     client = mcp_server.LabTrackerAPIClient(
-        mcp_server.MCPSettings(
-            base_url="http://lab.example.test", username="svc", password="pw"
-        ),
+        mcp_server.MCPSettings(base_url="http://lab.example.test", username="svc", password="pw"),
         transport=httpx.MockTransport(handler),
     )
     try:
@@ -575,33 +571,24 @@ def test_client_low_level_read_tools_call_retained_routes() -> None:
     )
 
     try:
-        assert client.list_sessions(
-            project_id="project-1",
-            session_type="scientific",
-        )["data"][0]["session_id"] == "session-1"
-        assert client.list_datasets(status="committed")["data"][0]["dataset_id"] == (
-            "dataset-1"
+        assert (
+            client.list_sessions(
+                project_id="project-1",
+                session_type="scientific",
+            )["data"][0]["session_id"]
+            == "session-1"
         )
+        assert client.list_datasets(status="committed")["data"][0]["dataset_id"] == ("dataset-1")
         assert client.list_analyses(dataset_id="dataset-1")["data"][0]["analysis_id"] == (
             "analysis-1"
         )
-        assert client.list_claims(analysis_id="analysis-1")["data"][0]["claim_id"] == (
-            "claim-1"
-        )
-        assert client.list_visualizations(claim_id="claim-1")["data"][0]["viz_id"] == (
-            "viz-1"
-        )
+        assert client.list_claims(analysis_id="analysis-1")["data"][0]["claim_id"] == ("claim-1")
+        assert client.list_visualizations(claim_id="claim-1")["data"][0]["viz_id"] == ("viz-1")
         assert client.get_dataset_provenance("dataset-1")["data"]["@id"] == "dataset-1"
-        assert client.get_analysis_provenance("analysis-1")["data"]["@id"] == (
-            "analysis-1"
-        )
+        assert client.get_analysis_provenance("analysis-1")["data"]["@id"] == ("analysis-1")
         assert client.get_claim_provenance("claim-1")["data"]["@id"] == "claim-1"
-        assert client.export_goal_artifact("goal-1", layer="src")["data"]["@id"] == (
-            "goal-src"
-        )
-        assert client.export_question_subtree("question-1")["data"]["@id"] == (
-            "question-artifact"
-        )
+        assert client.export_goal_artifact("goal-1", layer="src")["data"]["@id"] == ("goal-src")
+        assert client.export_question_subtree("question-1")["data"]["@id"] == ("question-artifact")
         assert client.publication_readiness("project-1")["data"]["seal_level"] == "ara_l1"
     finally:
         client.close()
@@ -675,9 +662,7 @@ def test_client_describe_schema_calls_api_discovery_route() -> None:
                     "data": {
                         "entities": {
                             "claim": {
-                                "status": {
-                                    "allowed_values": ["proposed", "supported", "rejected"]
-                                }
+                                "status": {"allowed_values": ["proposed", "supported", "rejected"]}
                             }
                         }
                     }
@@ -1116,8 +1101,10 @@ def test_create_note_rejects_invalid_status_before_api_request() -> None:
     client = mcp_server.LabTrackerAPIClient(
         mcp_server.MCPSettings(base_url="http://testserver"),
         transport=httpx.MockTransport(
-            lambda request: requests.append(request)
-            or _json_response(500, {"error": {"message": "unexpected request"}})
+            lambda request: (
+                requests.append(request)
+                or _json_response(500, {"error": {"message": "unexpected request"}})
+            )
         ),
     )
 
@@ -1278,40 +1265,55 @@ def test_client_create_evidence_tools_send_api_payloads() -> None:
     )
 
     try:
-        assert client.create_dataset(
-            project_id="project-1",
-            primary_question_id="question-1",
-            secondary_question_ids=["question-2"],
-            commit_manifest={"metadata": {"source": "paper"}},
-            commit_hash="hash-1",
-            status="STAGED",
-        )["data"]["dataset_id"] == "dataset-1"
-        assert client.create_analysis(
-            project_id="project-1",
-            dataset_ids=["dataset-1"],
-            method_hash="publication:method",
-            code_version="published-pdf:v1",
-            environment_hash="env-1",
-        )["data"]["analysis_id"] == "analysis-1"
-        assert client.create_claim(
-            project_id="project-1",
-            statement="Interpretation only",
-            confidence=55.0,
-        )["data"]["claim_id"] == "claim-1"
-        assert client.create_claim(
-            project_id="project-1",
-            statement="Analysis supports the effect",
-            confidence=82.5,
-            status="SUPPORTED",
-            supported_by_analysis_ids=["analysis-1"],
-        )["data"]["claim_id"] == "claim-1"
-        assert client.create_visualization(
-            analysis_id="analysis-1",
-            viz_type="figure",
-            file_path="doi:10.1371/journal.pcbi.1011051#fig5",
-            caption="Paper figure 5",
-            related_claim_ids=["claim-1"],
-        )["data"]["viz_id"] == "viz-1"
+        assert (
+            client.create_dataset(
+                project_id="project-1",
+                primary_question_id="question-1",
+                secondary_question_ids=["question-2"],
+                commit_manifest={"metadata": {"source": "paper"}},
+                commit_hash="hash-1",
+                status="STAGED",
+            )["data"]["dataset_id"]
+            == "dataset-1"
+        )
+        assert (
+            client.create_analysis(
+                project_id="project-1",
+                dataset_ids=["dataset-1"],
+                method_hash="publication:method",
+                code_version="published-pdf:v1",
+                environment_hash="env-1",
+            )["data"]["analysis_id"]
+            == "analysis-1"
+        )
+        assert (
+            client.create_claim(
+                project_id="project-1",
+                statement="Interpretation only",
+                confidence=55.0,
+            )["data"]["claim_id"]
+            == "claim-1"
+        )
+        assert (
+            client.create_claim(
+                project_id="project-1",
+                statement="Analysis supports the effect",
+                confidence=82.5,
+                status="SUPPORTED",
+                supported_by_analysis_ids=["analysis-1"],
+            )["data"]["claim_id"]
+            == "claim-1"
+        )
+        assert (
+            client.create_visualization(
+                analysis_id="analysis-1",
+                viz_type="figure",
+                file_path="doi:10.1371/journal.pcbi.1011051#fig5",
+                caption="Paper figure 5",
+                related_claim_ids=["claim-1"],
+            )["data"]["viz_id"]
+            == "viz-1"
+        )
     finally:
         client.close()
 
@@ -1324,9 +1326,130 @@ def test_client_create_evidence_tools_send_api_payloads() -> None:
     ]
 
 
+def test_client_update_goal_omits_absent_fields_and_sends_explicit_clears() -> None:
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        assert request.method == "PATCH"
+        assert request.url.path == "/goals/goal-1"
+        return _json_response(200, {"data": {"goal_id": "goal-1"}})
+
+    client = mcp_server.LabTrackerAPIClient(
+        mcp_server.MCPSettings(base_url="http://testserver"),
+        transport=httpx.MockTransport(handler),
+    )
+
+    try:
+        client.update_goal(goal_id="goal-1", title="Renamed goal")
+        client.update_goal(
+            goal_id="goal-1",
+            clear_target_date=True,
+            clear_external_ref=True,
+        )
+    finally:
+        client.close()
+
+    assert [json.loads(request.content) for request in requests] == [
+        {"title": "Renamed goal"},
+        {"target_date": None, "external_ref": None},
+    ]
+
+
+def test_client_update_goal_retries_401_without_dropping_explicit_nulls(
+    monkeypatch,
+) -> None:
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if len(requests) == 1:
+            return _json_response(401, {"error": {"message": "expired"}})
+        return _json_response(200, {"data": {"goal_id": "goal-1"}})
+
+    client = mcp_server.LabTrackerAPIClient(
+        mcp_server.MCPSettings(base_url="http://testserver"),
+        transport=httpx.MockTransport(handler),
+    )
+    monkeypatch.setattr(client, "initial_bearer", lambda: "expired-token")
+    monkeypatch.setattr(client, "refresh_bearer", lambda _response: "refreshed-token")
+
+    try:
+        client.update_goal(goal_id="goal-1", clear_target_date=True)
+    finally:
+        client.close()
+
+    assert [json.loads(request.content) for request in requests] == [
+        {"target_date": None},
+        {"target_date": None},
+    ]
+    assert [request.headers["authorization"] for request in requests] == [
+        "Bearer expired-token",
+        "Bearer refreshed-token",
+    ]
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "field"),
+    [
+        ({"target_date": "2026-12-01", "clear_target_date": True}, "target_date"),
+        ({"external_ref": "doi:10.1234/example", "clear_external_ref": True}, "external_ref"),
+    ],
+)
+def test_client_update_goal_rejects_value_and_clear_conflicts(
+    kwargs: dict[str, object],
+    field: str,
+) -> None:
+    def handler(_request: httpx.Request) -> httpx.Response:
+        raise AssertionError("conflicting update must fail before an HTTP request")
+
+    client = mcp_server.LabTrackerAPIClient(
+        mcp_server.MCPSettings(base_url="http://testserver"),
+        transport=httpx.MockTransport(handler),
+    )
+
+    try:
+        with pytest.raises(mcp_server.LabTrackerAPIValidationError) as exc_info:
+            client.update_goal(goal_id="goal-1", **kwargs)
+    finally:
+        client.close()
+
+    assert exc_info.value.code == "validation_error"
+    assert field in str(exc_info.value)
+
+
+def test_update_goal_tool_forwards_explicit_clear_flags(monkeypatch) -> None:
+    from lab_tracker.mcp_tools import write as write_tools
+
+    captured: dict[str, object] = {}
+
+    class FakeClient:
+        def update_goal(self, **kwargs):
+            captured.update(kwargs)
+            return {"data": {"goal_id": "goal-1"}}
+
+        def close(self) -> None:
+            return None
+
+    monkeypatch.setattr(write_tools, "client_from_env", lambda: FakeClient())
+
+    payload = write_tools.lab_tracker_update_goal(
+        goal_id="goal-1",
+        title="Renamed goal",
+        clear_target_date=True,
+        clear_external_ref=True,
+    )
+
+    assert payload["data"]["goal_id"] == "goal-1"
+    assert captured["clear_target_date"] is True
+    assert captured["clear_external_ref"] is True
+
+
 def test_client_upload_visualization_file_posts_multipart(tmp_path) -> None:
     figure_path = tmp_path / "figure.png"
-    figure_path.write_bytes(b"figure-bytes")
+    figure_bytes = b"figure-bytes"
+    figure_path.write_bytes(figure_bytes)
+    checksum = hashlib.sha256(figure_bytes).hexdigest()
     seen: list[httpx.Request] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -1336,6 +1459,9 @@ def test_client_upload_visualization_file_posts_multipart(tmp_path) -> None:
         assert request.headers["content-type"].startswith("multipart/form-data")
         assert b"figure.png" in request.content
         assert b"figure-bytes" in request.content
+        assert checksum.encode() in request.content
+        assert b"expected_current_storage_id" in request.content
+        assert b"absent" in request.content
         return _json_response(
             201,
             {
@@ -1355,6 +1481,9 @@ def test_client_upload_visualization_file_posts_multipart(tmp_path) -> None:
         payload = client.upload_visualization_file(
             viz_id="viz-1",
             file_path=str(figure_path),
+            checksum_sha256=checksum,
+            size_bytes=len(figure_bytes),
+            expected_current_storage_id="absent",
         )
     finally:
         client.close()
@@ -1407,8 +1536,10 @@ def test_create_evidence_tools_reject_invalid_status_before_api_request(
     client = mcp_server.LabTrackerAPIClient(
         mcp_server.MCPSettings(base_url="http://testserver"),
         transport=httpx.MockTransport(
-            lambda request: requests.append(request)
-            or _json_response(500, {"error": {"message": "unexpected request"}})
+            lambda request: (
+                requests.append(request)
+                or _json_response(500, {"error": {"message": "unexpected request"}})
+            )
         ),
     )
 
@@ -1427,8 +1558,10 @@ def test_create_note_rejects_nested_metadata_before_api_request() -> None:
     client = mcp_server.LabTrackerAPIClient(
         mcp_server.MCPSettings(base_url="http://testserver"),
         transport=httpx.MockTransport(
-            lambda request: requests.append(request)
-            or _json_response(500, {"error": {"message": "unexpected request"}})
+            lambda request: (
+                requests.append(request)
+                or _json_response(500, {"error": {"message": "unexpected request"}})
+            )
         ),
     )
 

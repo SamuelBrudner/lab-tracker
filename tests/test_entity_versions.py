@@ -132,7 +132,7 @@ def test_graph_draft_commit_stamps_entity_version_with_committed_at():
         payload={"statement": "Graph-draft revised claim."},
         status=GraphChangeOperationStatus.ACCEPTED,
     )
-    api.graph_drafts._save_graph_change_set(  # noqa: SLF001
+    api.graph_drafts.records.save_graph_change_set(
         GraphChangeSet(
             change_set_id=change_set_id,
             project_id=project.project_id,

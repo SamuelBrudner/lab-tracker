@@ -428,6 +428,13 @@ def test_dataset_commit_merges_attached_files_with_manifest_files(
         "manifest-only.csv": "sha256:manifest",
         "uploaded.bin": uploaded_checksum,
     }
+    assert {file["path"]: file["size_bytes"] for file in committed_files} == {
+        "manifest-only.csv": None,
+        "uploaded.bin": len(content),
+    }
+    reload_response = client.get(f"/datasets/{dataset_id}", headers=headers)
+    assert reload_response.status_code == 200
+    assert reload_response.json()["data"]["commit_manifest"]["files"] == committed_files
 
 
 def test_dataset_commit_rejects_attached_manifest_file_checksum_conflict(

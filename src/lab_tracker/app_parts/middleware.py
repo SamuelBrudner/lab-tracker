@@ -9,6 +9,7 @@ from starlette.concurrency import run_in_threadpool
 from starlette.responses import JSONResponse
 
 from lab_tracker.api import LabTrackerAPI
+from lab_tracker.application import RequestHandlers
 from lab_tracker.auth import (
     DEVICE_TOKEN_PREFIX,
     LOCAL_AUTH_USER_ID,
@@ -241,9 +242,7 @@ def configure_database_session_middleware(
     @app.middleware("http")
     async def db_session_middleware(request: Request, call_next):
         db_session = request.app.state.db_session_factory()
-        request.state.db_session = db_session
         repository = SQLAlchemyLabTrackerRepository(db_session)
-        request.state.lab_tracker_repository = repository
         request_scope = api.request_scope(
             repository,
             surface=_usage_surface_from_request(request),
@@ -252,6 +251,19 @@ def configure_database_session_middleware(
         request_scope.__enter__()
         try:
             request.state.lab_tracker_api = request_scope.api
+            request.state.lab_tracker_handlers = RequestHandlers.compose(
+                api=request_scope.api,
+                repository=repository,
+                session=db_session,
+                file_storage=request.app.state.file_storage_backend,
+                raw_note_storage=request.app.state.raw_note_storage,
+                settings=request.app.state.settings,
+                resolver_registry=getattr(
+                    request.app.state,
+                    "resolver_registry",
+                    None,
+                ),
+            )
             response = await call_next(request)
         except BaseException as exc:
             await run_in_threadpool(

@@ -891,6 +891,36 @@ def test_evidence_authoring_routes_reject_invalid_graph_writes(
     assert supported_without_evidence.status_code == 422
     assert "Supported claims require" in supported_without_evidence.json()["error"]["message"]
 
+    proposed_claim = client.post(
+        "/claims",
+        json={
+            "project_id": project_id,
+            "statement": "Proposed before support review",
+            "confidence": 50.0,
+        },
+        headers=headers,
+    )
+    assert proposed_claim.status_code == 201
+    proposed_claim_id = proposed_claim.json()["data"]["claim_id"]
+    unsupported_transition = client.patch(
+        f"/claims/{proposed_claim_id}",
+        json={
+            "statement": "Must not persist",
+            "confidence": 90.0,
+            "status": "supported",
+        },
+        headers=headers,
+    )
+    assert unsupported_transition.status_code == 422
+    reloaded_claim = client.get(
+        f"/claims/{proposed_claim_id}",
+        headers=headers,
+    )
+    assert reloaded_claim.status_code == 200
+    assert reloaded_claim.json()["data"]["statement"] == "Proposed before support review"
+    assert reloaded_claim.json()["data"]["confidence"] == 50.0
+    assert reloaded_claim.json()["data"]["status"] == "proposed"
+
     visualization_with_unknown_claim = client.post(
         "/visualizations",
         json={

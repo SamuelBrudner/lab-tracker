@@ -134,8 +134,7 @@ def _seed_direct_invalid_graph(api, actor):  # noqa: ANN001
         actor=actor,
     )
     change_set = _invalid_graph_change_set(project.project_id, note.note_id)
-    api.graph_drafts.repository.graph_change_sets.save(change_set)
-    api.graph_drafts.repository.commit()
+    api.graph_drafts.records.save_graph_change_set(change_set)
     return project, change_set
 
 
@@ -187,6 +186,75 @@ def test_commit_graph_change_set_rolls_back_all_components_via_direct_facade() -
         )
 
     assert api.list_questions(project_id=project.project_id, search="whiteboard") == []
+    reloaded = api.get_graph_change_set(change_set.change_set_id)
+    assert reloaded.status == GraphChangeSetStatus.READY
+    assert all(
+        operation.status == GraphChangeOperationStatus.ACCEPTED
+        for operation in reloaded.operations
+    )
+
+
+def test_graph_commit_rolls_back_before_applying_supported_claim_without_evidence() -> None:
+    api = repository_backed_api()
+    actor = _actor()
+    project = api.create_project("Supported graph claim", actor=actor)
+    note = api.create_note(
+        project_id=project.project_id,
+        raw_content="Graph claim source",
+        actor=actor,
+    )
+    change_set_id = uuid4()
+    operations = [
+        GraphChangeOperation(
+            operation_id=uuid4(),
+            change_set_id=change_set_id,
+            sequence=0,
+            op=GraphChangeOp.CREATE,
+            entity_type=EntityType.QUESTION,
+            payload={
+                "project_id": str(project.project_id),
+                "text": "Must roll back with the invalid claim?",
+                "question_type": "descriptive",
+            },
+            status=GraphChangeOperationStatus.ACCEPTED,
+            acceptance_mode=AcceptanceMode.BULK_ACCEPTED,
+        ),
+        GraphChangeOperation(
+            operation_id=uuid4(),
+            change_set_id=change_set_id,
+            sequence=1,
+            op=GraphChangeOp.CREATE,
+            entity_type=EntityType.CLAIM,
+            payload={
+                "project_id": str(project.project_id),
+                "statement": "Supported without evidence",
+                "confidence": 80.0,
+                "status": "supported",
+            },
+            status=GraphChangeOperationStatus.ACCEPTED,
+            acceptance_mode=AcceptanceMode.BULK_ACCEPTED,
+        ),
+    ]
+    change_set = GraphChangeSet(
+        change_set_id=change_set_id,
+        project_id=project.project_id,
+        source_note_id=note.note_id,
+        model="test-model",
+        prompt_version="v1",
+        status=GraphChangeSetStatus.READY,
+        operations=operations,
+    )
+    api.graph_drafts.records.save_graph_change_set(change_set)
+
+    with pytest.raises(LabTrackerError, match="Supported claims require"):
+        api.commit_graph_change_set(
+            change_set.change_set_id,
+            message="must remain atomic",
+            actor=actor,
+        )
+
+    assert api.list_questions(project_id=project.project_id) == []
+    assert api.list_claims(project_id=project.project_id) == []
     reloaded = api.get_graph_change_set(change_set.change_set_id)
     assert reloaded.status == GraphChangeSetStatus.READY
     assert all(

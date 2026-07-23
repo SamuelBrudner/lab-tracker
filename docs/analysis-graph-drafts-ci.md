@@ -30,7 +30,7 @@ methods, code version, environment hash, dataset IDs, outputs, figures, metrics,
 the interpretation brief. The model also receives current project context from Lab
 Tracker before proposing operations.
 
-The API uses `analysis-graph-draft-v1` as the prompt version. Drafts use the same
+The API uses `analysis-graph-draft-v2` as the prompt version. Drafts use the same
 `GraphChangeSet` and `GraphChangeOperation` review model as image and batch graph
 drafts, so they appear in the existing review UI at `/app/graph-drafts/{change_set_id}`.
 

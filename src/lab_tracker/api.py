@@ -6,12 +6,13 @@ import logging
 import time
 from collections.abc import Callable
 from types import TracebackType
-from typing import Any, TypeVar
+from typing import Protocol, TypeVar
 from uuid import UUID
 
 from lab_tracker.api_parts import (
     AnalysesApiMixin,
     DatasetsApiMixin,
+    EvidenceBundlesApiMixin,
     ExplorationApiMixin,
     GoalsApiMixin,
     GraphDraftsApiMixin,
@@ -23,10 +24,12 @@ from lab_tracker.api_parts import (
     UsageApiMixin,
 )
 from lab_tracker.api_parts._base import _elapsed_ms, _uuid_attr
+from lab_tracker.auth import AuthContext
 from lab_tracker.config import Settings, get_settings
 from lab_tracker.models import (
     UsageEventOutcome,
     UsageEventResourceType,
+    UsageEventSurface,
     UsageEventVerb,
 )
 from lab_tracker.note_storage import LocalNoteStorage
@@ -34,13 +37,21 @@ from lab_tracker.repository import LabTrackerRepository
 from lab_tracker.request_context import LabTrackerRequestContext
 from lab_tracker.services import (
     AnalysisService,
+    BatchSchedulingCoordinator,
     ClaimService,
     DatasetService,
     DataStoreService,
     EntityVersionService,
+    EvidenceBundleService,
     ExplorationService,
     GoalService,
+    GraphContextBuilder,
+    GraphDraftGenerationCoordinator,
+    GraphDraftRecords,
+    GraphDraftReviewCoordinator,
     GraphDraftService,
+    GraphPatchApplier,
+    GraphPatchValidator,
     NoteService,
     OwnershipReassignmentService,
     ProjectAuthorizationPolicy,
@@ -52,11 +63,19 @@ from lab_tracker.services import (
     ServiceContext,
     SessionService,
     SupervisionService,
+    TransactionalDraftCommitCoordinator,
     VisualizationService,
 )
 
 _logger = logging.getLogger(__name__)
-ResponseT = TypeVar("ResponseT")
+
+
+class HttpResponse(Protocol):
+    status_code: int
+
+
+ResponseT = TypeVar("ResponseT", bound=HttpResponse)
+UsageResultT = TypeVar("UsageResultT")
 
 
 class LabTrackerAPI(
@@ -64,6 +83,7 @@ class LabTrackerAPI(
     QuestionsApiMixin,
     NotesApiMixin,
     DatasetsApiMixin,
+    EvidenceBundlesApiMixin,
     SessionsApiMixin,
     AnalysesApiMixin,
     GoalsApiMixin,
@@ -197,8 +217,18 @@ class LabTrackerAPI(
             goals_provider=lambda: self.goals,
             authorization=self.project_authorization,
         )
-        self.graph_drafts: GraphDraftService = GraphDraftService(
+        self.evidence_bundles: EvidenceBundleService = EvidenceBundleService(
             context,
+            projects=self.projects,
+            questions=self.questions,
+            datasets=self.datasets,
+            analyses=self.analyses,
+            claims=self.claims,
+            visualizations=self.visualizations,
+            notes=self.notes,
+            authorization=self.project_authorization,
+        )
+        graph_context_builder = GraphContextBuilder(
             projects=self.projects,
             questions=self.questions,
             notes=self.notes,
@@ -208,9 +238,60 @@ class LabTrackerAPI(
             claims=self.claims,
             visualizations=self.visualizations,
             goals=self.goals,
+        )
+        graph_patch_validator = GraphPatchValidator(
+            get_graph_entity=graph_context_builder.get_graph_entity,
+        )
+        graph_patch_applier = GraphPatchApplier(
+            projects=self.projects,
+            questions=self.questions,
+            notes=self.notes,
+            sessions=self.sessions,
+            datasets=self.datasets,
+            analyses=self.analyses,
+            claims=self.claims,
+            visualizations=self.visualizations,
+            goals=self.goals,
+        )
+        graph_draft_records = GraphDraftRecords(context)
+        graph_draft_generation = GraphDraftGenerationCoordinator(
+            context,
+            records=graph_draft_records,
+            notes=self.notes,
+            authorization=self.project_authorization,
+            context_builder=graph_context_builder,
+            patch_validator=graph_patch_validator,
+        )
+        graph_draft_review = GraphDraftReviewCoordinator(
+            context,
+            records=graph_draft_records,
+            generation=graph_draft_generation,
+            patch_validator=graph_patch_validator,
+            authorization=self.project_authorization,
+        )
+        graph_draft_commit = TransactionalDraftCommitCoordinator(
+            context,
+            records=graph_draft_records,
+            patch_applier=graph_patch_applier,
             versions=self.entity_versions,
+            questions=self.questions,
+            authorization=self.project_authorization,
+        )
+        graph_draft_scheduling = BatchSchedulingCoordinator(
+            context,
+            records=graph_draft_records,
+            generation=graph_draft_generation,
+            projects=self.projects,
+            notes=self.notes,
             authorization=self.project_authorization,
             provenance_links=self.provenance_links,
+        )
+        self.graph_drafts: GraphDraftService = GraphDraftService(
+            records=graph_draft_records,
+            generation=graph_draft_generation,
+            review=graph_draft_review,
+            commit=graph_draft_commit,
+            scheduling=graph_draft_scheduling,
         )
 
     def for_request(self, repository: LabTrackerRepository) -> LabTrackerAPI:
@@ -266,21 +347,43 @@ class LabTrackerAPI(
             return
         self._request_context.after_rollback_actions.append(action)
 
-    def record_usage_event(self, *args: Any, **kwargs: Any) -> Any:
-        return self.projects.record_usage_event(*args, **kwargs)
+    def record_usage_event(
+        self,
+        *,
+        verb: UsageEventVerb | str,
+        resource_type: UsageEventResourceType | str,
+        resource_id: UUID | None = None,
+        project_id: UUID | None = None,
+        actor: AuthContext | None = None,
+        outcome: UsageEventOutcome | str = UsageEventOutcome.OK,
+        duration_ms: int | None = None,
+        result_count: int | None = None,
+        surface: UsageEventSurface | str | None = None,
+    ) -> None:
+        self.projects.record_usage_event(
+            verb=verb,
+            resource_type=resource_type,
+            resource_id=resource_id,
+            project_id=project_id,
+            actor=actor,
+            outcome=outcome,
+            duration_ms=duration_ms,
+            result_count=result_count,
+            surface=surface,
+        )
 
     def _with_usage_event(
         self,
-        action: Callable[[], Any],
+        action: Callable[[], UsageResultT],
         *,
         verb: UsageEventVerb,
         resource_type: UsageEventResourceType,
-        actor: Any = None,
+        actor: AuthContext | None = None,
         resource_id: UUID | None = None,
         project_id: UUID | None = None,
         resource_id_attr: str | None = None,
         project_id_attr: str | None = "project_id",
-    ) -> Any:
+    ) -> UsageResultT:
         start = time.perf_counter()
         with self._service_context.application_transaction():
             try:

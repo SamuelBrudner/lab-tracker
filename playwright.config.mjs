@@ -29,12 +29,15 @@ export default defineConfig({
     screenshot: "only-on-failure",
   },
   projects: [{ name: "chromium", use: { ...devices["Desktop Chrome"] } }],
+  // Both app servers receive mutations, and the proxy must target this run's
+  // disposable upstream. A port collision must fail instead of attaching the
+  // suite to an unrelated process.
   webServer: [
     {
       command: "node e2e/serve-e2e.mjs",
       env: { E2E_PORT: AUTH_DISABLED_PORT, E2E_AUTH_ENABLED: "false" },
       url: `http://127.0.0.1:${AUTH_DISABLED_PORT}/health`,
-      reuseExistingServer: !CI,
+      reuseExistingServer: false,
       timeout: 120_000,
     },
     {
@@ -45,7 +48,7 @@ export default defineConfig({
         E2E_BOOTSTRAP_TOKEN: BOOTSTRAP_TOKEN,
       },
       url: `http://127.0.0.1:${AUTH_ENABLED_PORT}/health`,
-      reuseExistingServer: !CI,
+      reuseExistingServer: false,
       timeout: 120_000,
     },
     {
@@ -55,7 +58,7 @@ export default defineConfig({
         E2E_UPSTREAM_PORT: AUTH_DISABLED_PORT,
       },
       url: `${prefixedBaseURL}/health`,
-      reuseExistingServer: !CI,
+      reuseExistingServer: false,
       timeout: 120_000,
     },
   ],

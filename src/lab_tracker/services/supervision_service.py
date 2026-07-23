@@ -3,16 +3,14 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Final
 from uuid import UUID, uuid4
 
 from lab_tracker.auth import AuthContext, require_role
 from lab_tracker.errors import ConflictError, NotFoundError, ValidationError
 from lab_tracker.models import SupervisionEdge, utc_now
+from lab_tracker.patching import NOT_PROVIDED, PatchValue, is_provided
 from lab_tracker.services.base import BaseService, ServiceContext
 from lab_tracker.services.shared import WRITE_ROLES
-
-_UNSET: Final = object()
 
 
 class SupervisionService(BaseService):
@@ -85,32 +83,35 @@ class SupervisionService(BaseService):
         self,
         edge_id: UUID,
         *,
-        supervisor_user_id: UUID | None | object = _UNSET,
-        supervisee_user_id: UUID | None | object = _UNSET,
-        started_at: datetime | None | object = _UNSET,
-        ended_at: datetime | None | object = _UNSET,
+        supervisor_user_id: PatchValue[UUID | None] = NOT_PROVIDED,
+        supervisee_user_id: PatchValue[UUID | None] = NOT_PROVIDED,
+        started_at: PatchValue[datetime | None] = NOT_PROVIDED,
+        ended_at: PatchValue[datetime | None] = NOT_PROVIDED,
         actor: AuthContext | None = None,
     ) -> SupervisionEdge:
         require_role(actor, WRITE_ROLES)
         edge = self.get_supervision_edge(edge_id, actor=actor)
-        if supervisor_user_id is not _UNSET:
+        before = edge.model_copy(deep=True)
+        if is_provided(supervisor_user_id):
             if supervisor_user_id is None:
                 raise ValidationError("supervisor_user_id must not be null.")
             edge.supervisor_user_id = supervisor_user_id
-        if supervisee_user_id is not _UNSET:
+        if is_provided(supervisee_user_id):
             if supervisee_user_id is None:
                 raise ValidationError("supervisee_user_id must not be null.")
             edge.supervisee_user_id = supervisee_user_id
-        if started_at is not _UNSET:
+        if is_provided(started_at):
             if started_at is None:
                 raise ValidationError("started_at must not be null.")
             edge.started_at = started_at
-        if ended_at is not _UNSET:
+        if is_provided(ended_at):
             edge.ended_at = ended_at
-        edge.updated_at = utc_now()
         self._validate_edge(edge)
         if edge.ended_at is None:
             self._ensure_active_pair_available(edge, excluding_edge_id=edge.edge_id)
+        if edge == before:
+            return edge
+        edge.updated_at = utc_now()
         with self.unit_of_work() as repository:
             repository.supervision_edges.save(edge)
             saved = repository.supervision_edges.get(edge.edge_id)

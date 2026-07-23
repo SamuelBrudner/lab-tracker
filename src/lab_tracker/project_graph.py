@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable
-from typing import Any
+from collections.abc import Callable, Iterable
+from typing import Protocol, TypeVar
 from uuid import UUID
 
 from lab_tracker.models import (
@@ -18,10 +18,10 @@ from lab_tracker.models import (
     Note,
     Question,
     QuestionLink,
+    QuestionLinkRole,
     Session,
     Visualization,
 )
-from lab_tracker.repository import LabTrackerRepository
 from lab_tracker.schemas import (
     ProjectGraphEdge,
     ProjectGraphNode,
@@ -44,10 +44,95 @@ _NODE_TYPE_ORDER = {
 }
 _QUESTION_LINK_ROLE_ORDER = {"primary": 0, "secondary": 1}
 _GRAPH_LABEL_LIMIT = 180
+EntityT = TypeVar("EntityT")
+
+
+class ProjectGraphRepository(Protocol):
+    """Read capabilities needed to project one project's graph."""
+
+    def query_questions(
+        self,
+        *,
+        project_id: UUID,
+        limit: int | None,
+        offset: int,
+    ) -> tuple[list[Question], int]: ...
+
+    def query_datasets(
+        self,
+        *,
+        project_id: UUID,
+        limit: int | None,
+        offset: int,
+    ) -> tuple[list[Dataset], int]: ...
+
+    def query_analyses(
+        self,
+        *,
+        project_id: UUID,
+        limit: int | None,
+        offset: int,
+    ) -> tuple[list[Analysis], int]: ...
+
+    def query_claims(
+        self,
+        *,
+        project_id: UUID,
+        limit: int | None,
+        offset: int,
+    ) -> tuple[list[Claim], int]: ...
+
+    def query_visualizations(
+        self,
+        *,
+        project_id: UUID,
+        limit: int | None,
+        offset: int,
+    ) -> tuple[list[Visualization], int]: ...
+
+    def query_goals(
+        self,
+        *,
+        project_id: UUID,
+        limit: int | None,
+        offset: int,
+    ) -> tuple[list[Goal], int]: ...
+
+    def query_claim_edges(
+        self,
+        *,
+        project_id: UUID,
+        limit: int | None,
+        offset: int,
+    ) -> tuple[list[ClaimEdge], int]: ...
+
+    def query_exploration_nodes(
+        self,
+        *,
+        project_id: UUID,
+        limit: int | None,
+        offset: int,
+    ) -> tuple[list[ExplorationNode], int]: ...
+
+    def query_notes(
+        self,
+        *,
+        project_id: UUID,
+        limit: int | None,
+        offset: int,
+    ) -> tuple[list[Note], int]: ...
+
+    def query_sessions(
+        self,
+        *,
+        project_id: UUID,
+        limit: int | None,
+        offset: int,
+    ) -> tuple[list[Session], int]: ...
 
 
 def build_project_graph(
-    repository: LabTrackerRepository,
+    repository: ProjectGraphRepository,
     project_id: UUID,
     *,
     view: ProjectGraphView = "evidence",
@@ -197,9 +282,13 @@ class _ProjectGraphBuilder:
 
 def _normalize_view(view: ProjectGraphView) -> ProjectGraphView:
     view_value = str(view)
-    if view_value not in _VIEW_VALUES:
-        raise ValueError(f"Unknown project graph view: {view_value}")
-    return view_value  # type: ignore[return-value]
+    if view_value == "evidence":
+        return "evidence"
+    if view_value == "questions":
+        return "questions"
+    if view_value == "full":
+        return "full"
+    raise ValueError(f"Unknown project graph view: {view_value}")
 
 
 def _entity_node_id(entity_type: str, entity_id: UUID | str) -> str:
@@ -227,7 +316,11 @@ def _short_id(value: UUID) -> str:
     return str(value).split("-", 1)[0]
 
 
-def _sort_entities(items: Iterable[Any], id_attr: str, label_getter) -> list[Any]:
+def _sort_entities(
+    items: Iterable[EntityT],
+    id_attr: str,
+    label_getter: Callable[[EntityT], str],
+) -> list[EntityT]:
     return sorted(
         items,
         key=lambda item: (
@@ -474,25 +567,25 @@ def _add_evidence_edges(
             )
     for analysis in _sort_entities(analyses, "analysis_id", _analysis_label):
         analysis_id = _entity_node_id("analysis", analysis.analysis_id)
-        for dataset_id in sorted(analysis.dataset_ids, key=str):
+        for analysis_dataset_id in sorted(analysis.dataset_ids, key=str):
             builder.add_edge(
-                _entity_node_id("dataset", dataset_id),
+                _entity_node_id("dataset", analysis_dataset_id),
                 analysis_id,
                 "used by",
                 "analysis_dataset",
             )
     for claim in _sort_entities(claims, "claim_id", _claim_label):
         claim_id = _entity_node_id("claim", claim.claim_id)
-        for dataset_id in sorted(claim.supported_by_dataset_ids, key=str):
+        for claim_dataset_id in sorted(claim.supported_by_dataset_ids, key=str):
             builder.add_edge(
-                _entity_node_id("dataset", dataset_id),
+                _entity_node_id("dataset", claim_dataset_id),
                 claim_id,
                 "supports",
                 "claim_dataset_support",
             )
-        for analysis_id in sorted(claim.supported_by_analysis_ids, key=str):
+        for supporting_analysis_id in sorted(claim.supported_by_analysis_ids, key=str):
             builder.add_edge(
-                _entity_node_id("analysis", analysis_id),
+                _entity_node_id("analysis", supporting_analysis_id),
                 claim_id,
                 "supports",
                 "claim_analysis_support",
@@ -531,23 +624,23 @@ def _add_evidence_edges(
             "generates",
             "visualization_analysis",
         )
-        for dataset_id in sorted(visualization.dataset_ids, key=str):
+        for visualization_dataset_id in sorted(visualization.dataset_ids, key=str):
             builder.add_edge(
-                _entity_node_id("dataset", dataset_id),
+                _entity_node_id("dataset", visualization_dataset_id),
                 visualization_id,
                 "grounds",
                 "visualization_dataset",
             )
-        for claim_id in sorted(visualization.related_claim_ids, key=str):
+        for related_claim_id in sorted(visualization.related_claim_ids, key=str):
             builder.add_edge(
-                _entity_node_id("claim", claim_id),
+                _entity_node_id("claim", related_claim_id),
                 visualization_id,
                 "related claim",
                 "visualization_claim",
             )
     for goal in _sort_entities(goals, "goal_id", _goal_label):
         goal_id = _entity_node_id("goal", goal.goal_id)
-        for link in sorted(
+        for goal_link in sorted(
             goal.links,
             key=lambda item: (
                 _enum_value(item.target.entity_type) or "",
@@ -556,13 +649,16 @@ def _add_evidence_edges(
                 item.slot or "",
             ),
         ):
-            relation = _enum_value(link.relation) or "linked"
-            status = _enum_value(link.link_status) or "candidate"
+            relation = _enum_value(goal_link.relation) or "linked"
+            status = _enum_value(goal_link.link_status) or "candidate"
             label = relation.replace("_", " ")
-            if link.slot:
-                label = f"{label}: {link.slot}"
+            if goal_link.slot:
+                label = f"{label}: {goal_link.slot}"
             builder.add_edge(
-                _entity_node_id(_entity_type_value(link.target.entity_type), link.target.entity_id),
+                _entity_node_id(
+                    _entity_type_value(goal_link.target.entity_type),
+                    goal_link.target.entity_id,
+                ),
                 goal_id,
                 label,
                 f"goal_{relation}_{status}",
@@ -671,7 +767,7 @@ def _sorted_question_links(dataset: Dataset) -> list[QuestionLink]:
         return [
             QuestionLink(
                 question_id=dataset.primary_question_id,
-                role="primary",
+                role=QuestionLinkRole.PRIMARY,
             )
         ]
     return sorted(

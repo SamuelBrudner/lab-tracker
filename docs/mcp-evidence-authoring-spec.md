@@ -236,8 +236,8 @@ create tools because agents often need to build evidence maps incrementally.
 
 Acceptance criteria:
 
-- MCP can plan or record a one-result evidence bundle through existing strict API
-  create/upload behavior.
+- MCP can plan or record a one-result evidence bundle through the strict atomic
+  bundle API, with a client-side managed-file upload follow-up when requested.
 - Skill guidance recommends individual create tools for incremental graph
   population and the bundle helper for one-shot analysis-output recording.
 

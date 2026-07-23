@@ -193,6 +193,10 @@ def test_run_now_persists_pending_batch_with_source_traceability(
     assert set(payload["source_note_ids"]) == {note_a, note_b}
     assert payload["source_note_count"] == 2
     assert payload["operations"][0]["source_refs"][0]["source_note_ids"] == [note_a, note_b]
+    assert (
+        payload["operations"][0]["source_refs"][0]["source_note_ids_resolution"]
+        == "ambiguous_bundle"
+    )
 
     operation = payload["operations"][0]
     rejected = client.patch(
@@ -493,6 +497,29 @@ def test_batch_cadence_settings_are_user_visible_and_rescheduled(
     assert payload["cadence_minutes"] == 720
     assert payload["run_at_local_time"] == "07:30"
     assert payload["next_run_at"]
+
+
+def test_empty_batch_settings_patch_does_not_materialize_default_row(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+) -> None:
+    project_id = _project(client, admin_auth_headers)
+
+    response = client.patch(
+        f"/projects/{project_id}/graph-draft-batch-settings",
+        json={},
+        headers=admin_auth_headers,
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["data"]["enabled"] is False
+    with client.app.state.db_session_factory() as session:
+        persisted = session.scalar(
+            select(GraphDraftBatchSettingsModel).where(
+                GraphDraftBatchSettingsModel.project_id == project_id
+            )
+        )
+    assert persisted is None
 
 
 def test_batch_run_validates_and_clamps_manual_windows(

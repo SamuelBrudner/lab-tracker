@@ -942,6 +942,7 @@ class LabTracker:
                 "PATCH",
                 f"/questions/{_require_non_empty(str(question_id), 'question_id')}",
                 json_payload=payload,
+                preserve_json_nulls=True,
             )
         )
 
@@ -1477,6 +1478,7 @@ class LabTracker:
         data: Mapping[str, str] | None = None,
         files: dict[str, Any] | None = None,
         retry_on_unauthorized: bool = True,
+        preserve_json_nulls: bool = False,
         timeout: Any = None,
     ) -> JsonObject:
         payload, _status_code = self._request_with_status(
@@ -1488,6 +1490,7 @@ class LabTracker:
             data=data,
             files=files,
             retry_on_unauthorized=retry_on_unauthorized,
+            preserve_json_nulls=preserve_json_nulls,
             timeout=timeout,
         )
         return payload
@@ -1503,6 +1506,7 @@ class LabTracker:
         data: Mapping[str, str] | None = None,
         files: dict[str, Any] | None = None,
         retry_on_unauthorized: bool = True,
+        preserve_json_nulls: bool = False,
         timeout: Any = None,
     ) -> tuple[JsonObject, int]:
         response = self._transport.request(
@@ -1514,6 +1518,7 @@ class LabTracker:
             data=data,
             files=files,
             retry_on_unauthorized=retry_on_unauthorized,
+            preserve_json_nulls=preserve_json_nulls,
             timeout=timeout,
         )
         if response.status_code == 422:

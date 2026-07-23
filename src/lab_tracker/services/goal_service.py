@@ -24,6 +24,7 @@ from lab_tracker.models import (
     GoalType,
     utc_now,
 )
+from lab_tracker.patching import NOT_PROVIDED, PatchValue, is_provided
 from lab_tracker.services.base import BaseService, ServiceContext
 from lab_tracker.services.dataset_service import DatasetService
 from lab_tracker.services.project_authorization import ProjectAuthorizationPolicy
@@ -219,14 +220,14 @@ class GoalService(BaseService):
         self,
         goal_id: UUID,
         *,
-        goal_type: GoalType | None = None,
-        title: str | None = None,
-        summary: str | None = None,
-        status: GoalStatus | None = None,
-        target_date: date | None = None,
-        external_ref: str | None = None,
-        attributes: dict[str, object] | None = None,
-        links: Iterable[GoalLinkSpec] | None = None,
+        goal_type: PatchValue[GoalType | None] = NOT_PROVIDED,
+        title: PatchValue[str | None] = NOT_PROVIDED,
+        summary: PatchValue[str | None] = NOT_PROVIDED,
+        status: PatchValue[GoalStatus | None] = NOT_PROVIDED,
+        target_date: PatchValue[date | None] = NOT_PROVIDED,
+        external_ref: PatchValue[str | None] = NOT_PROVIDED,
+        attributes: PatchValue[dict[str, object] | None] = NOT_PROVIDED,
+        links: PatchValue[Iterable[GoalLinkSpec] | None] = NOT_PROVIDED,
         actor: AuthContext | None = None,
         origin: EntityOrigin | None = None,
         change_set_id: UUID | None = None,
@@ -236,26 +237,37 @@ class GoalService(BaseService):
     ) -> Goal:
         goal = self.get_goal(goal_id)
         self._require_goal_contributor(goal, actor=actor)
-        next_goal_type = goal_type or goal.goal_type
-        if title is not None:
+        before = goal.model_copy(deep=True)
+        for field_name, value in (
+            ("goal_type", goal_type),
+            ("title", title),
+            ("summary", summary),
+            ("status", status),
+            ("attributes", attributes),
+            ("links", links),
+        ):
+            if is_provided(value) and value is None:
+                raise ValidationError(f"{field_name} must not be null.")
+        next_goal_type = goal_type if is_provided(goal_type) else goal.goal_type
+        if is_provided(title):
             ensure_non_empty(title, "title")
             goal.title = title.strip()
-        if summary is not None:
+        if is_provided(summary):
             goal.summary = summary.strip()
-        if status is not None:
+        if is_provided(status):
             goal.status = status
-        if goal_type is not None:
+        if is_provided(goal_type):
             goal.goal_type = goal_type
-        if target_date is not None:
+        if is_provided(target_date):
             goal.target_date = target_date
-        if external_ref is not None:
+        if is_provided(external_ref):
             goal.external_ref = external_ref.strip() if external_ref else None
-        if attributes is not None or goal_type is not None:
+        if is_provided(attributes) or is_provided(goal_type):
             goal.attributes = self._validate_attributes(
                 next_goal_type,
-                attributes if attributes is not None else goal.attributes,
+                attributes if is_provided(attributes) else goal.attributes,
             )
-        if links is not None:
+        if is_provided(links):
             for link in links:
                 self._ensure_target_exists(link.target, goal.project_id)
                 self._upsert_goal_link(
@@ -276,10 +288,12 @@ class GoalService(BaseService):
             goal.origin_model = origin_model
         if origin_prompt_version is not None:
             goal.origin_prompt_version = origin_prompt_version
-        goal.updated_at = utc_now()
         self._ensure_unique_goal_links(goal.links)
         self._ensure_goal_has_scope(goal)
         self._require_goal_contributor(goal, actor=actor)
+        if goal == before:
+            return goal
+        goal.updated_at = utc_now()
         with self.unit_of_work() as repository:
             repository.goals.save(goal)
         return goal
@@ -325,24 +339,31 @@ class GoalService(BaseService):
         goal_id: UUID,
         link_id: UUID,
         *,
-        relation: GoalRelation | None = None,
-        link_status: GoalLinkStatus | None = None,
-        slot: str | None = None,
+        relation: PatchValue[GoalRelation | None] = NOT_PROVIDED,
+        link_status: PatchValue[GoalLinkStatus | None] = NOT_PROVIDED,
+        slot: PatchValue[str | None] = NOT_PROVIDED,
         actor: AuthContext | None = None,
     ) -> GoalLink:
         goal = self.get_goal(goal_id)
         self._require_goal_contributor(goal, actor=actor)
         link = self._find_goal_link(goal, link_id)
-        if relation is not None:
+        before = goal.model_copy(deep=True)
+        if is_provided(relation):
+            if relation is None:
+                raise ValidationError("relation must not be null.")
             link.relation = relation
-        if link_status is not None:
+        if is_provided(link_status):
+            if link_status is None:
+                raise ValidationError("link_status must not be null.")
             link.link_status = link_status
-        if slot is not None:
-            link.slot = self._clean_slot(slot)
-        goal.updated_at = utc_now()
+        if is_provided(slot):
+            link.slot = self._clean_slot(slot) if slot is not None else None
         self._ensure_unique_goal_links(goal.links)
         self._ensure_goal_has_scope(goal)
         self._require_goal_contributor(goal, actor=actor)
+        if goal == before:
+            return link
+        goal.updated_at = utc_now()
         with self.unit_of_work() as repository:
             repository.goals.save(goal)
         return link

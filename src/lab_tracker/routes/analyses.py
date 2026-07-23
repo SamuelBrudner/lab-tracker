@@ -6,14 +6,12 @@ from datetime import datetime
 from uuid import UUID
 
 from fastapi import APIRouter
-from sqlalchemy import select
 from starlette import status as http_status
 from starlette.requests import Request
 
 from lab_tracker.api import LabTrackerAPI
-from lab_tracker.db_models import VisualizationModel
-from lab_tracker.db_types import ensure_uuid
 from lab_tracker.models import Analysis, AnalysisStatus, UsageEventResourceType
+from lab_tracker.patching import provided_fields
 from lab_tracker.schemas import (
     AnalysisCommitRequest,
     AnalysisCommitResult,
@@ -26,21 +24,17 @@ from lab_tracker.schemas import (
 from .provenance import analysis_provenance_payload, jsonld_response
 from .shared import (
     CreatedByFilter,
-    accessible_project_ids_from_request,
     actor_from_request,
     analysis_default_status,
     api_from_request,
-    db_session_from_request,
     ensure_project_read,
-    file_storage_from_request,
+    handlers_from_request,
     list_response,
     provenance_base_url,
     record_usage_view,
-    repository_from_request,
     validate_pagination,
     wants_jsonld,
 )
-from .visualizations import _delete_stored_visualization_file
 
 
 def build_analyses_router(api: LabTrackerAPI) -> APIRouter:
@@ -81,14 +75,9 @@ def build_analyses_router(api: LabTrackerAPI) -> APIRouter:
         offset: int = 0,
     ):
         validate_pagination(limit, offset)
-        if project_id is not None:
-            ensure_project_read(request, project_id)
-            project_ids = None
-        else:
-            project_ids = accessible_project_ids_from_request(request)
-        analyses, total = repository_from_request(request).query_analyses(
+        page = handlers_from_request(request).catalogs.list_analyses(
+            actor=actor_from_request(request),
             project_id=project_id,
-            project_ids=project_ids,
             dataset_id=dataset_id,
             question_id=question_id,
             status=status.value if status is not None else None,
@@ -99,7 +88,12 @@ def build_analyses_router(api: LabTrackerAPI) -> APIRouter:
             offset=offset,
             recent_first=recent_first,
         )
-        return list_response(analyses, limit=limit, offset=offset, total=total)
+        return list_response(
+            page.items,
+            limit=limit,
+            offset=offset,
+            total=page.total,
+        )
 
     @router.get("/analyses/{analysis_id}", response_model=Envelope[Analysis])
     def get_analysis(analysis_id: UUID, request: Request):
@@ -126,11 +120,8 @@ def build_analyses_router(api: LabTrackerAPI) -> APIRouter:
         ensure_project_read(request, existing.project_id)
         analysis = api_from_request(request, api).update_analysis(
             analysis_id,
-            status=payload.status,
-            environment_hash=payload.environment_hash,
-            external_artifacts=payload.external_artifacts,
-            terminal_reason=payload.terminal_reason,
             actor=actor,
+            **provided_fields(payload),
         )
         return Envelope(data=analysis)
 
@@ -157,30 +148,11 @@ def build_analyses_router(api: LabTrackerAPI) -> APIRouter:
 
     @router.delete("/analyses/{analysis_id}", response_model=Envelope[Analysis])
     def delete_analysis(analysis_id: UUID, request: Request):
-        request_api = api_from_request(request, api)
         actor = actor_from_request(request)
-        existing = request_api.get_analysis(analysis_id)
-        ensure_project_read(request, existing.project_id)
-        db_session = db_session_from_request(request)
-        storage_backend = file_storage_from_request(request)
-        storage_ids = [
-            ensure_uuid(value)
-            for value in db_session.scalars(
-                select(VisualizationModel.asset_storage_id).where(
-                    VisualizationModel.analysis_id == str(analysis_id),
-                    VisualizationModel.asset_storage_id.is_not(None),
-                )
-            )
-        ]
-        analysis = request_api.delete_analysis(analysis_id, actor=actor)
-        db_session.flush()
-        for storage_id in storage_ids:
-            request_api.run_after_commit(
-                lambda storage_id=storage_id: _delete_stored_visualization_file(
-                    storage_backend,
-                    storage_id,
-                )
-            )
+        analysis = handlers_from_request(request).deletions.delete_analysis(
+            analysis_id,
+            actor=actor,
+        )
         return Envelope(data=analysis)
 
     return router

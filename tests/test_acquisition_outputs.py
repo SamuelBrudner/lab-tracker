@@ -70,6 +70,7 @@ def test_promote_operational_session_merges_outputs():
         session.session_id,
         file_path="acq.bin",
         checksum="abc123",
+        size_bytes=4096,
         actor=actor,
     )
     api.register_acquisition_output(
@@ -88,9 +89,9 @@ def test_promote_operational_session_merges_outputs():
         commit_manifest=manifest,
         actor=actor,
     )
-    paths = {file.path for file in dataset.commit_manifest.files}
-    assert "acq.bin" in paths
-    assert "rig.log" in paths
+    files = {file.path: file for file in dataset.commit_manifest.files}
+    assert files["acq.bin"].size_bytes == 4096
+    assert files["rig.log"].size_bytes is None
 
 
 def test_register_acquisition_output_updates_existing():

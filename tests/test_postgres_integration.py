@@ -270,7 +270,17 @@ def _create_representative_project_tree(
                 project_id=project_id,
                 commit_hash="sha256:pg",
                 primary_question_id=question_id,
-                manifest_files=[{"path": "data/postgres.csv", "checksum": "sha256:pg"}],
+                manifest_files=[
+                    {
+                        "path": "data/postgres.csv",
+                        "checksum": "sha256:pg",
+                        "size_bytes": 12,
+                    },
+                    {
+                        "path": "data/legacy-postgres.csv",
+                        "checksum": "sha256:legacy-pg",
+                    },
+                ],
                 manifest_metadata={"backend": "postgres"},
                 status="committed",
             )
@@ -447,5 +457,16 @@ def test_postgres_json_and_boolean_round_trip(
 
     assert note.note_metadata == {"backend": "postgres"}
     assert dataset.manifest_metadata == {"backend": "postgres"}
+    assert dataset.manifest_files == [
+        {
+            "path": "data/postgres.csv",
+            "checksum": "sha256:pg",
+            "size_bytes": 12,
+        },
+        {
+            "path": "data/legacy-postgres.csv",
+            "checksum": "sha256:legacy-pg",
+        },
+    ]
     assert settings.enabled is True
     assert settings_count == 1

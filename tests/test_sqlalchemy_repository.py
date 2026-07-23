@@ -6,7 +6,7 @@ from sqlalchemy import create_engine, event
 from sqlalchemy.orm import sessionmaker
 
 from lab_tracker.db import Base
-from lab_tracker.db_models import DatasetFileModel, UserModel
+from lab_tracker.db_models import DatasetFileModel, DatasetModel, UserModel
 from lab_tracker.models import (
     AcquisitionOutput,
     Analysis,
@@ -17,6 +17,7 @@ from lab_tracker.models import (
     ClaimStatus,
     Dataset,
     DatasetCommitManifest,
+    DatasetFile,
     DatasetStatus,
     EntityRef,
     EntityType,
@@ -313,7 +314,13 @@ def test_dataset_repository_preserves_commit_manifest(db_session):
             )
         ],
         commit_manifest=DatasetCommitManifest(
-            files=[],
+            files=[
+                DatasetFile(
+                    path="raw/data.csv",
+                    checksum="sha256:dataset-file",
+                    size_bytes=12,
+                )
+            ],
             metadata={"run": "7"},
             nwb_metadata={"Session Description": "baseline"},
             bids_metadata={"Name": "Example"},
@@ -339,6 +346,7 @@ def test_dataset_repository_preserves_commit_manifest(db_session):
 
     loaded_dataset = repo.datasets.get(dataset.dataset_id)
     assert loaded_dataset is not None
+    assert loaded_dataset.commit_manifest.files == dataset.commit_manifest.files
     assert loaded_dataset.commit_manifest.metadata == {"run": "7"}
     assert loaded_dataset.commit_manifest.nwb_metadata == {"Session Description": "baseline"}
     assert loaded_dataset.commit_manifest.bids_metadata == {"Name": "Example"}
@@ -347,6 +355,78 @@ def test_dataset_repository_preserves_commit_manifest(db_session):
         loaded_dataset.commit_manifest.source_session_id
         == dataset.commit_manifest.source_session_id
     )
+    stored_dataset = db_session.get(DatasetModel, dataset.dataset_id)
+    assert stored_dataset is not None
+    assert stored_dataset.manifest_files[0]["size_bytes"] == 12
+
+
+def test_dataset_repository_reads_legacy_manifest_file_without_size(db_session):
+    repo = SQLAlchemyLabTrackerRepository(db_session)
+    project = Project(
+        project_id=uuid4(),
+        name="Legacy dataset",
+        status=ProjectStatus.ACTIVE,
+        created_at=_ts(),
+        updated_at=_ts(),
+    )
+    question = Question(
+        question_id=uuid4(),
+        project_id=project.project_id,
+        text="Does a legacy manifest remain readable?",
+        question_type=QuestionType.DESCRIPTIVE,
+        status=QuestionStatus.ACTIVE,
+        parent_question_ids=[],
+        created_at=_ts(1),
+        updated_at=_ts(1),
+    )
+    dataset = Dataset(
+        dataset_id=uuid4(),
+        project_id=project.project_id,
+        commit_hash="legacy-commit",
+        primary_question_id=question.question_id,
+        question_links=[
+            QuestionLink(
+                question_id=question.question_id,
+                role=QuestionLinkRole.PRIMARY,
+                outcome_status=OutcomeStatus.SUPPORTS,
+            )
+        ],
+        commit_manifest=DatasetCommitManifest(
+            files=[],
+            question_links=[
+                QuestionLink(
+                    question_id=question.question_id,
+                    role=QuestionLinkRole.PRIMARY,
+                    outcome_status=OutcomeStatus.SUPPORTS,
+                )
+            ],
+        ),
+        status=DatasetStatus.COMMITTED,
+        created_at=_ts(2),
+        updated_at=_ts(2),
+    )
+
+    repo.projects.save(project)
+    repo.questions.save(question)
+    repo.datasets.save(dataset)
+    repo.commit()
+    row = db_session.get(DatasetModel, dataset.dataset_id)
+    assert row is not None
+    row.manifest_files = [{"path": "legacy/data.csv", "checksum": "sha256:legacy"}]
+    db_session.commit()
+    db_session.expire_all()
+
+    loaded = repo.datasets.get(dataset.dataset_id)
+
+    assert loaded is not None
+    assert loaded.commit_hash == "legacy-commit"
+    assert loaded.commit_manifest.files == [
+        DatasetFile(
+            path="legacy/data.csv",
+            checksum="sha256:legacy",
+            size_bytes=None,
+        )
+    ]
 
 
 def test_acquisition_output_repository_crud(db_session):
