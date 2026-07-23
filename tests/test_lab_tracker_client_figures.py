@@ -539,6 +539,49 @@ def test_run_context_adds_scalar_metadata_and_expires(tmp_path: Path) -> None:
     assert "run_expired" not in metadata_payloads[1]
 
 
+def test_run_context_strips_credentials_from_repo_remote(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    metadata_seen: dict[str, object] = {}
+
+    def fake_git_output(*args: str) -> str:
+        if args == ("config", "--get", "remote.origin.url"):
+            return (
+                "https://sam:ghp_secret@github.com/example/research.git"
+                "?access_token=query_secret#credential-fragment"
+            )
+        return ""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        metadata_seen.update(json.loads(_multipart_field(request.content, "metadata")))
+        return _json_response(
+            201,
+            {
+                "data": {
+                    "note_id": "note-credential-safe",
+                    "project_id": "project-1",
+                    "status": "staged",
+                    "metadata": metadata_seen,
+                }
+            },
+        )
+
+    monkeypatch.setattr(figure_module, "_git_output", fake_git_output)
+    with LabTracker(
+        base_url="http://testserver",
+        default_project_id="project-1",
+        transport=httpx.MockTransport(handler),
+    ) as lt, run_context():
+        savefig(FakeFigure(), tmp_path / "safe-remote.png", client=lt)
+
+    assert metadata_seen["run_repo_remote_url"] == "github.com/example/research"
+    assert "sam" not in str(metadata_seen["run_repo_remote_url"])
+    assert "ghp_secret" not in str(metadata_seen["run_repo_remote_url"])
+    assert "query_secret" not in str(metadata_seen["run_repo_remote_url"])
+    assert "credential-fragment" not in str(metadata_seen["run_repo_remote_url"])
+
+
 def test_capture_figures_captures_new_and_modified_files_after_body_exception(
     tmp_path: Path,
 ) -> None:

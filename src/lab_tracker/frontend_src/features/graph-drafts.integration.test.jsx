@@ -11,7 +11,7 @@ import { App } from "../app-shell.jsx";
 
 import { TOKEN_STORAGE_KEY } from "../shared/constants.js";
 
-import { installFetchMock } from "../test/utils.js";
+import { binaryResponse, installFetchMock } from "../test/utils.js";
 
 import {
   apiResponse,
@@ -221,14 +221,7 @@ describe("App", () => {
       },
       {
         match: `/notes/${noteId}/raw`,
-        response: apiResponse({
-          checksum: "abc",
-          content_base64: "aW1n",
-          content_type: "image/jpeg",
-          filename: "whiteboard.jpg",
-          size_bytes: 4,
-          storage_id: "55555555-5555-4555-8555-555555555555",
-        }),
+        response: binaryResponse({ body: "img", contentType: "image/jpeg" }),
       },
       {
         match: `/graph-drafts/${draftId}/operations/${operationId}`,

@@ -193,6 +193,10 @@ def test_run_now_persists_pending_batch_with_source_traceability(
     assert set(payload["source_note_ids"]) == {note_a, note_b}
     assert payload["source_note_count"] == 2
     assert payload["operations"][0]["source_refs"][0]["source_note_ids"] == [note_a, note_b]
+    assert (
+        payload["operations"][0]["source_refs"][0]["source_note_ids_resolution"]
+        == "ambiguous_bundle"
+    )
 
     operation = payload["operations"][0]
     rejected = client.patch(

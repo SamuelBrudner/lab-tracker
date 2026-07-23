@@ -168,9 +168,14 @@ class GraphContextBuilder:
         note_id: UUID,
         *,
         mode: GraphDraftMode,
+        source_note_ids: list[UUID] | None = None,
     ) -> dict[str, Any]:
         note = self.notes.get_note(note_id)
-        source_notes = self._source_notes_for_capture(note)
+        source_notes = (
+            self._source_notes_for_capture(note)
+            if source_note_ids is None
+            else self._source_notes_for_ids(note, source_note_ids)
+        )
         audio_notes = [
             item
             for item in source_notes
@@ -238,6 +243,24 @@ class GraphContextBuilder:
             bundle_notes,
             key=lambda item: (item.created_at, str(item.note_id)),
         )[:_CAPTURE_BUNDLE_LIMIT]
+
+    def _source_notes_for_ids(self, note: Note, source_note_ids: list[UUID]) -> list[Note]:
+        """Load a frozen source set while preserving its original order."""
+
+        requested_ids = list(source_note_ids)
+        if note.note_id not in requested_ids:
+            requested_ids.insert(0, note.note_id)
+        source_notes: list[Note] = []
+        seen: set[UUID] = set()
+        for source_note_id in requested_ids:
+            if source_note_id in seen:
+                continue
+            seen.add(source_note_id)
+            source_note = self.notes.get_note(source_note_id)
+            if source_note.project_id != note.project_id:
+                raise ValidationError("Graph draft source notes must share one project.")
+            source_notes.append(source_note)
+        return source_notes
 
     def build_graph_context_packet(
         self,
