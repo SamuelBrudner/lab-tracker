@@ -266,6 +266,7 @@ documented in [`configuration.md`](configuration.md).
 ```bash
 uv run pytest -q
 uv run ruff check .
+uv run mypy
 ```
 
 ### Frontend

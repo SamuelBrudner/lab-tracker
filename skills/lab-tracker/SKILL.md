@@ -158,7 +158,7 @@ Write tools:
 - `lab_tracker_update_goal`: Update a Lab Tracker goal/output.
 - `lab_tracker_link_node_to_goal`: Tag an existing graph node in relation to a goal/output.
 - `lab_tracker_upload_visualization_file`: Upload a local file into managed storage for a visualization node.
-- `lab_tracker_record_evidence_bundle`: Preview a dataset-analysis-claim-visualization evidence bundle; defaults to dry-run.
+- `lab_tracker_record_evidence_bundle`: Preview or atomically record an evidence bundle; defaults to dry-run.
 <!-- END GENERATED MCP TOOL LIST -->
 
 Creation tools write through the API, using the configured service account when

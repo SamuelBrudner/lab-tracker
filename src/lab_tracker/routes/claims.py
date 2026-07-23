@@ -19,20 +19,20 @@ from lab_tracker.models import (
     EntityVersionDiff,
     UsageEventResourceType,
 )
+from lab_tracker.patching import provided_fields
 from lab_tracker.schemas import ClaimCreate, ClaimEdgeCreate, ClaimUpdate, Envelope, ListEnvelope
 
 from .provenance import claim_provenance_payload, jsonld_response
 from .shared import (
     CreatedByFilter,
-    accessible_project_ids_from_request,
     actor_from_request,
     api_from_request,
     ensure_project_read,
+    handlers_from_request,
     list_response,
     paginate,
     provenance_base_url,
     record_usage_view,
-    repository_from_request,
     validate_pagination,
     wants_jsonld,
 )
@@ -79,14 +79,9 @@ def build_claims_router(api: LabTrackerAPI) -> APIRouter:
         offset: int = 0,
     ):
         validate_pagination(limit, offset)
-        if project_id is not None:
-            ensure_project_read(request, project_id)
-            project_ids = None
-        else:
-            project_ids = accessible_project_ids_from_request(request)
-        claims, total = repository_from_request(request).query_claims(
+        page = handlers_from_request(request).catalogs.list_claims(
+            actor=actor_from_request(request),
             project_id=project_id,
-            project_ids=project_ids,
             status=status.value if status is not None else None,
             dataset_id=dataset_id,
             analysis_id=analysis_id,
@@ -96,7 +91,12 @@ def build_claims_router(api: LabTrackerAPI) -> APIRouter:
             limit=limit,
             offset=offset,
         )
-        return list_response(claims, limit=limit, offset=offset, total=total)
+        return list_response(
+            page.items,
+            limit=limit,
+            offset=offset,
+            total=page.total,
+        )
 
     @router.get("/claims/{claim_id}", response_model=Envelope[Claim])
     def get_claim(claim_id: UUID, request: Request):
@@ -160,18 +160,8 @@ def build_claims_router(api: LabTrackerAPI) -> APIRouter:
         ensure_project_read(request, existing.project_id)
         claim = api_from_request(request, api).update_claim(
             claim_id,
-            statement=payload.statement,
-            confidence=payload.confidence,
-            status=payload.status,
-            terminal_reason=payload.terminal_reason,
-            falsification_criteria=payload.falsification_criteria,
-            verification_plan=payload.verification_plan,
-            refuting_outcome=payload.refuting_outcome,
-            supported_by_dataset_ids=payload.supported_by_dataset_ids,
-            supported_by_analysis_ids=payload.supported_by_analysis_ids,
-            answers_question_ids=payload.answers_question_ids,
-            external_citations=payload.external_citations,
             actor=actor,
+            **provided_fields(payload),
         )
         return Envelope(data=claim)
 

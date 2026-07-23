@@ -33,6 +33,7 @@ from lab_tracker_client.client import (
     capture_host_metadata,
     file_sha256,
 )
+from lab_tracker_client.repo import normalize_remote
 
 FIGURE_CAPTURE_TIMEOUT_SECONDS = 2.5
 FIGURE_CIRCUIT_COOLDOWN_SECONDS = 30.0
@@ -263,7 +264,9 @@ def run_context(
         run_id=uuid.uuid4().hex,
         git_commit=_git_output("rev-parse", "HEAD"),
         git_dirty=bool(_git_output("status", "--porcelain")),
-        repo_remote_url=_git_output("config", "--get", "remote.origin.url"),
+        repo_remote_url=_credential_free_repo_remote(
+            _git_output("config", "--get", "remote.origin.url")
+        ),
         code_file=str(pointer.get("code_file", "")),
         code_symbol=str(pointer.get("code_symbol", "")),
         code_line=int(pointer.get("code_line", 0) or 0),
@@ -953,6 +956,14 @@ def _git_output(*args: str) -> str:
     if result.returncode != 0:
         return ""
     return result.stdout.strip()
+
+
+def _credential_free_repo_remote(remote: str) -> str:
+    """Return a stable remote identity without URL-carried credentials."""
+
+    without_query = remote.partition("?")[0]
+    without_fragment = without_query.partition("#")[0]
+    return normalize_remote(without_fragment)
 
 
 def _is_transport_failure(exc: BaseException) -> bool:

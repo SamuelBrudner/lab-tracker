@@ -13,9 +13,7 @@ from starlette.requests import Request
 from starlette.responses import Response
 
 from lab_tracker.api import LabTrackerAPI
-from lab_tracker.config import get_settings
 from lab_tracker.errors import ValidationError
-from lab_tracker.graph_drafting import make_graph_draft_client
 from lab_tracker.models import (
     EntityType,
     Note,
@@ -25,6 +23,7 @@ from lab_tracker.models import (
     UsageEventResourceType,
     utc_now,
 )
+from lab_tracker.patching import provided_fields
 from lab_tracker.schemas import (
     Envelope,
     ListEnvelope,
@@ -39,20 +38,20 @@ from lab_tracker.upload_security import (
     validate_upload_content_type,
 )
 
+from .graph_draft_clients import draft_client_from_request as _transcription_client_from_request
 from .shared import (
     CreatedByFilter,
-    accessible_project_ids_from_request,
     actor_from_request,
     api_from_request,
     content_disposition_header,
     ensure_project_contributor,
     ensure_project_read,
+    handlers_from_request,
     list_response,
     note_default_status,
     parse_entity_refs_form,
     parse_metadata_form,
     record_usage_view,
-    repository_from_request,
     validate_pagination,
 )
 
@@ -189,14 +188,9 @@ def build_notes_router(api: LabTrackerAPI) -> APIRouter:
         offset: int = 0,
     ):
         validate_pagination(limit, offset)
-        if project_id is not None:
-            ensure_project_read(request, project_id)
-            project_ids = None
-        else:
-            project_ids = accessible_project_ids_from_request(request)
-        notes, total = repository_from_request(request).query_notes(
+        page = handlers_from_request(request).catalogs.list_notes(
+            actor=actor_from_request(request),
             project_id=project_id,
-            project_ids=project_ids,
             status=status.value if status is not None else None,
             created_by=created_by,
             since=since,
@@ -206,7 +200,12 @@ def build_notes_router(api: LabTrackerAPI) -> APIRouter:
             limit=limit,
             offset=offset,
         )
-        return list_response(notes, limit=limit, offset=offset, total=total)
+        return list_response(
+            page.items,
+            limit=limit,
+            offset=offset,
+            total=page.total,
+        )
 
     @router.get("/notes/{note_id:uuid}", response_model=Envelope[Note])
     def get_note(note_id: UUID, request: Request):
@@ -250,11 +249,8 @@ def build_notes_router(api: LabTrackerAPI) -> APIRouter:
         ensure_project_contributor(request, note.project_id)
         note = api_from_request(request, api).update_note(
             note_id,
-            transcribed_text=payload.transcribed_text,
-            targets=payload.targets,
-            metadata=payload.metadata,
-            status=payload.status,
             actor=actor,
+            **provided_fields(payload),
         )
         return Envelope(data=note)
 
@@ -373,11 +369,3 @@ def _optional_epoch_ms(value: object) -> str | None:
     if milliseconds < 0:
         raise ValidationError("source_file_last_modified_ms must be non-negative.")
     return str(milliseconds)
-
-
-def _transcription_client_from_request(request: Request):
-    settings = getattr(request.app.state, "settings", None) or get_settings()
-    factory = getattr(request.app.state, "graph_draft_client_factory", None)
-    if callable(factory):
-        return factory(settings)
-    return make_graph_draft_client(settings)

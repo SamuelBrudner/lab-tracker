@@ -519,9 +519,9 @@ def test_batch_context_truncates_overflow_and_reports_count(
     admin_auth_headers: dict[str, str],
     monkeypatch,
 ):
-    from lab_tracker.services import graph_draft_service
+    from lab_tracker.services import graph_draft_batch_policy
 
-    monkeypatch.setattr(graph_draft_service, "_BATCH_NOTE_LIMIT", 3)
+    monkeypatch.setattr(graph_draft_batch_policy, "BATCH_NOTE_LIMIT", 3)
 
     project_id = _create_project(client, admin_auth_headers, "Truncation")
     note_ids: list[str] = []

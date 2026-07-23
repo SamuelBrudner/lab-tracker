@@ -134,12 +134,12 @@ def test_graph_draft_prelocks_question_projects_in_canonical_order(
     ]
     locked_projects: list[UUID] = []
     monkeypatch.setattr(
-        api.graph_drafts.repository,
+        api.graph_drafts.commit.repository,
         "lock_project_question_dag",
         locked_projects.append,
     )
 
-    api.graph_drafts._lock_question_update_projects(operations)  # noqa: SLF001
+    api.graph_drafts.commit._lock_question_update_projects(operations)  # noqa: SLF001
 
     assert locked_projects == sorted(
         [first_project.project_id, second_project.project_id],

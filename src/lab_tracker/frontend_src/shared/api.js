@@ -276,8 +276,8 @@ function parseContentDispositionFilename(headerValue) {
   return bareMatch ? bareMatch[1].trim().replace(/^"|"$/g, "") : "";
 }
 
-/** @param {{path: string, token?: string, filename?: string}} options */
-async function downloadProtectedResource({ path, token = "", filename = "" }) {
+/** @param {{path: string, token?: string}} options */
+async function fetchProtectedBlobResource({ path, token = "" }) {
   const { headers } = buildRequestHeaders({ token, accept: "*/*" });
   const response = await appFetch(path, {
     method: "GET",
@@ -292,12 +292,20 @@ async function downloadProtectedResource({ path, token = "", filename = "" }) {
   }
 
   const blob = await response.blob();
-  const resolvedFilename =
-    filename ||
-    parseContentDispositionFilename(response.headers.get("content-disposition")) ||
-    "download";
+  return {
+    blob,
+    contentType:
+      response.headers.get("content-type") || blob.type || "application/octet-stream",
+    filename: parseContentDispositionFilename(response.headers.get("content-disposition")),
+  };
+}
 
-  const objectUrl = URL.createObjectURL(blob);
+/** @param {{path: string, token?: string, filename?: string}} options */
+async function downloadProtectedResource({ path, token = "", filename = "" }) {
+  const resource = await fetchProtectedBlobResource({ path, token });
+  const resolvedFilename = filename || resource.filename || "download";
+
+  const objectUrl = URL.createObjectURL(resource.blob);
   const anchor = document.createElement("a");
   anchor.href = objectUrl;
   anchor.download = resolvedFilename;
@@ -321,6 +329,7 @@ export {
   apiListRequest,
   buildApiPath,
   downloadProtectedResource,
+  fetchProtectedBlobResource,
   fetchAllPages,
   isStaticDemoEnabled,
   parseApiError,

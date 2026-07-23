@@ -390,6 +390,44 @@ def test_admin_can_manage_users(monkeypatch, tmp_path):
         assert "At least one admin" in demote_last_admin_response.json()["error"]["message"]
 
 
+def test_auth_user_update_rejects_empty_payload_and_advertises_constraint(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    _bootstrap_database(monkeypatch, tmp_path)
+    with TestClient(create_app()) as client:
+        _seed_admin(client)
+        admin_token = _login(client, "root", "secret")
+        root_id = client.get(
+            "/auth/users",
+            headers=_auth_headers(admin_token),
+        ).json()["data"][0]["user_id"]
+
+        response = client.patch(
+            f"/auth/users/{root_id}",
+            json={},
+            headers=_auth_headers(admin_token),
+        )
+
+        assert response.status_code == 422
+        error = response.json()["error"]
+        assert error["code"] == "request_validation_error"
+        assert error["issues"] == [
+            {
+                "field": None,
+                "message": (
+                    "Value error, At least one of password or role must be provided."
+                ),
+            }
+        ]
+
+        auth_update_schema = client.get("/openapi.json").json()["components"]["schemas"][
+            "AuthUserUpdate"
+        ]
+        assert auth_update_schema["minProperties"] == 1
+        assert "required" not in auth_update_schema
+
+
 def test_admin_can_invite_user_by_email(monkeypatch, tmp_path):
     _bootstrap_database(monkeypatch, tmp_path)
     monkeypatch.setenv("LAB_TRACKER_PUBLIC_BASE_URL", "https://lab.example.org")

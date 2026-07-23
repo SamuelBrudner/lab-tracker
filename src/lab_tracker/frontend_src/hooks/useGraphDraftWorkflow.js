@@ -5,11 +5,9 @@ import { graphDrafts } from "../shared/gateways/index.js";
 import {
   canContributeWithRole,
   canManageWithRole,
-  imageDataUrl,
   operationReviewNoteText,
   parsedPayloadFromText,
   payloadText,
-  sourceRegions,
   spokenReviewScript,
 } from "../features/graph-drafts/format.js";
 
@@ -35,7 +33,6 @@ function useGraphDraftWorkflow({
   const [draftProjectId, setDraftProjectId] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
-  const [sourceImage, setSourceImage] = useState("");
   const [commitMessage, setCommitMessage] = useState("");
   const [reviewNote, setReviewNote] = useState("");
   // Last-started load wins: a superseded load's response is ignored.
@@ -66,7 +63,6 @@ function useGraphDraftWorkflow({
       (changeSet?.operations || []).filter((operation) => operation.status === "accepted").length,
     [changeSet]
   );
-  const visibleSourceRegions = useMemo(() => sourceRegions(changeSet), [changeSet]);
   const spokenReview = useMemo(() => spokenReviewScript(changeSet, payloads), [changeSet, payloads]);
 
   const isAdmin = user?.role === "admin";
@@ -141,7 +137,6 @@ function useGraphDraftWorkflow({
       setOperationReviewNotes({});
       setCommitMessage("");
       setReviewNote("");
-      setSourceImage("");
       setError("");
     }
   }, [changeSetId]);
@@ -192,31 +187,6 @@ function useGraphDraftWorkflow({
       canceled = true;
     };
   }, [changeSet?.project_id, token, user?.role, user?.user_id]);
-
-  useEffect(() => {
-    let canceled = false;
-    setSourceImage("");
-    const contentType = changeSet?.source_content_type || "";
-    if (!changeSet?.source_note_id || !contentType.startsWith("image/")) {
-      return () => {
-        canceled = true;
-      };
-    }
-    apiRequest(`/notes/${changeSet.source_note_id}/raw`, { token })
-      .then((raw) => {
-        if (!canceled) {
-          setSourceImage(imageDataUrl(raw));
-        }
-      })
-      .catch(() => {
-        if (!canceled) {
-          setSourceImage("");
-        }
-      });
-    return () => {
-      canceled = true;
-    };
-  }, [changeSet, token]);
 
   function updatePayloadText(operationId, value) {
     setPayloads((current) => ({ ...current, [operationId]: value }));
@@ -457,14 +427,12 @@ function useGraphDraftWorkflow({
     operationReviewNotes,
     loading,
     error,
-    sourceImage,
     commitMessage,
     setCommitMessage,
     reviewNote,
     setReviewNote,
     pendingCommands,
     acceptedCount,
-    visibleSourceRegions,
     spokenReview,
     canEditDraft,
     canSubmitDraft,

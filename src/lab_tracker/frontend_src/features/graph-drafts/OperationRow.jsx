@@ -11,6 +11,7 @@ import {
   sourceRefText,
   statusClass,
 } from "./format.js";
+import { SourceArtifactEvidence } from "./SourceArtifactEvidence.jsx";
 
 // Presentational per-proposal editor: proposal body, evidence, typed and raw
 // payload edits, and the accept/defer/reject decision controls. All edit and
@@ -22,6 +23,9 @@ function OperationRow({
   reviewNote,
   canEditDraft,
   pending,
+  sourceArtifacts = [],
+  sourcePreviews = {},
+  usesSharedSourceEvidence = false,
   onPatchOperationPayload,
   onUpdatePayloadText,
   onUpdateOperationReviewNote,
@@ -53,6 +57,14 @@ function OperationRow({
               </p>
             ))}
           </div>
+        ) : null}
+        <SourceArtifactEvidence
+          artifacts={sourceArtifacts}
+          previews={sourcePreviews}
+          operation={operation}
+        />
+        {usesSharedSourceEvidence ? (
+          <p className="source-artifact-shared-link subtle">See shared source evidence above.</p>
         ) : null}
         {operation.error_metadata?.message ? (
           <p className="flash error">{operation.error_metadata.message}</p>

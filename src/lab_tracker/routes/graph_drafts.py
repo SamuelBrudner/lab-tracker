@@ -10,10 +10,9 @@ from starlette import status as http_status
 from starlette.requests import Request
 
 from lab_tracker.api import LabTrackerAPI
-from lab_tracker.config import get_settings
 from lab_tracker.db_types import ensure_uuid
-from lab_tracker.graph_drafting import make_graph_draft_client
 from lab_tracker.models import GraphChangeSet, GraphChangeSetStatus, UsageEventResourceType
+from lab_tracker.patching import provided_fields
 from lab_tracker.schemas import (
     Envelope,
     GraphChangeSetSummary,
@@ -23,13 +22,14 @@ from lab_tracker.schemas import (
     GraphDraftReviewRequest,
     ListEnvelope,
 )
-from lab_tracker.services.graph_draft_service import RevisionInputs, RevisionUpload
+from lab_tracker.services.graph_draft_review import RevisionInputs, RevisionUpload
 from lab_tracker.upload_security import (
     enforce_request_content_length_limit,
     enforce_stream_size_limit,
     validate_upload_content_type,
 )
 
+from .graph_draft_clients import draft_client_from_request as _draft_client_from_request
 from .shared import (
     accessible_project_ids_from_request,
     actor_from_request,
@@ -153,10 +153,8 @@ def build_graph_drafts_router(api: LabTrackerAPI) -> APIRouter:
         change_set = api_from_request(request, api).update_graph_change_operation(
             change_set_id,
             operation_id,
-            payload=payload.payload,
-            status=payload.status,
-            review_note=payload.review_note,
             actor=actor,
+            **provided_fields(payload),
         )
         return Envelope(data=_attach_graph_usernames(request, change_set))
 
@@ -301,14 +299,6 @@ def _read_revision_inputs(
             upload for item in attachments or [] if (upload := read(item)) is not None
         ],
     )
-
-
-def _draft_client_from_request(request: Request):
-    settings = getattr(request.app.state, "settings", None) or get_settings()
-    factory = getattr(request.app.state, "graph_draft_client_factory", None)
-    if callable(factory):
-        return factory(settings)
-    return make_graph_draft_client(settings)
 
 
 def _attach_graph_usernames(request: Request, change_set: GraphChangeSet) -> GraphChangeSet:

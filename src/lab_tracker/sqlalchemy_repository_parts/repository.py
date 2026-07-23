@@ -45,6 +45,7 @@ from lab_tracker.models import (
     OwnershipReassignment,
     Project,
     ProjectGroup,
+    ProjectMembership,
     ProvenanceLink,
     Question,
     QuestionRefactor,
@@ -52,9 +53,9 @@ from lab_tracker.models import (
     RecordExportRecords,
     Session,
     SupervisionEdge,
+    UsageEvent,
     Visualization,
 )
-from lab_tracker.repository import LabTrackerRepository
 from lab_tracker.sqlalchemy_mappers import session_from_model
 
 from .analyses import (
@@ -74,6 +75,7 @@ from .core import (
 )
 from .data_stores import SQLAlchemyDataStoreRepository
 from .datasets import SQLAlchemyDatasetRepository
+from .evidence_bundles import SQLAlchemyEvidenceBundleRepository
 from .exploration import SQLAlchemyExplorationNodeRepository
 from .goals import SQLAlchemyGoalRepository
 from .graph_batches import (
@@ -116,7 +118,7 @@ def _project_question_dag_lock_key(project_id: UUID) -> int:
     return int.from_bytes(digest, byteorder="big", signed=True)
 
 
-class SQLAlchemyLabTrackerRepository(LabTrackerRepository):
+class SQLAlchemyLabTrackerRepository:
     """Repository scaffold backed by a SQLAlchemy ORM session."""
 
     def __init__(self, session: OrmSession) -> None:
@@ -144,6 +146,7 @@ class SQLAlchemyLabTrackerRepository(LabTrackerRepository):
         self.entity_versions = SQLAlchemyEntityVersionRepository(session)
         self.goals = SQLAlchemyGoalRepository(session)
         self.data_stores = SQLAlchemyDataStoreRepository(session)
+        self.evidence_bundles = SQLAlchemyEvidenceBundleRepository(session)
         self.visualizations = SQLAlchemyVisualizationRepository(session)
         self.graph_change_sets = SQLAlchemyGraphChangeSetRepository(session)
         self.graph_draft_batch_settings = SQLAlchemyGraphDraftBatchSettingsRepository(session)
@@ -267,7 +270,7 @@ class SQLAlchemyLabTrackerRepository(LabTrackerRepository):
         user_id: UUID | None = None,
         limit: int | None = None,
         offset: int = 0,
-    ):
+    ) -> tuple[list[ProjectMembership], int]:
         return self.project_memberships.query(
             project_id=project_id,
             user_id=user_id,
@@ -280,7 +283,7 @@ class SQLAlchemyLabTrackerRepository(LabTrackerRepository):
         *,
         project_id: UUID,
         user_id: UUID,
-    ):
+    ) -> ProjectMembership | None:
         return self.project_memberships.get_by_project_user(
             project_id=project_id,
             user_id=user_id,
@@ -397,7 +400,7 @@ class SQLAlchemyLabTrackerRepository(LabTrackerRepository):
         occurred_on_or_after: datetime | None = None,
         limit: int | None = None,
         offset: int = 0,
-    ):
+    ) -> tuple[list[UsageEvent], int]:
         return self.usage_events.query(
             project_id=project_id,
             verb=verb,

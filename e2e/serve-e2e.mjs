@@ -65,6 +65,7 @@ run("uv", ["run", "alembic", "upgrade", "head"]);
 // rendered content to navigate. Auth-disabled runs act as the local admin.
 if (!authEnabled) {
   run("uv", ["run", "lab-tracker", "seed-demo"]);
+  run("uv", ["run", "python", "e2e/seed-graph-drafts.py"]);
 }
 
 server = spawn(

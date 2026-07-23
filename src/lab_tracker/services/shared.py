@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 from collections.abc import Iterable, Mapping
 from enum import Enum
-from typing import TYPE_CHECKING, TypeVar
+from typing import Protocol, TypeVar
 from uuid import UUID
 
 from lab_tracker.auth import LOCAL_AUTH_USER_ID, AuthContext, Role
@@ -31,13 +32,12 @@ from lab_tracker.models import (
     SessionStatus,
     external_artifact_uri_validation_error,
 )
+from lab_tracker.patching import NOT_PROVIDED, NotProvided, PatchValue, is_provided
 from lab_tracker.provenance_ingestion import external_artifacts_from_metadata
-
-if TYPE_CHECKING:
-    from lab_tracker.repository import LabTrackerRepository
 
 WRITE_ROLES = {Role.ADMIN, Role.EDITOR}
 StatusT = TypeVar("StatusT", bound=Enum)
+EntityT = TypeVar("EntityT")
 
 # Free-form note metadata convention for marking a captured note as a meeting.
 # Stored under the existing notes.metadata JSON column, so this needs no schema
@@ -45,6 +45,10 @@ StatusT = TypeVar("StatusT", bound=Enum)
 # the review nudge all agree on the exact key/value.
 NOTE_TYPE_METADATA_KEY = "note_type"
 MEETING_NOTE_TYPE = "meeting"
+
+
+class UserExistenceReader(Protocol):
+    def user_exists(self, user_id: UUID) -> bool: ...
 
 
 def actor_user_id(actor: AuthContext | None) -> str | None:
@@ -55,7 +59,7 @@ def actor_user_id(actor: AuthContext | None) -> str | None:
 
 def actor_user_fk(
     actor: AuthContext | None,
-    repository: LabTrackerRepository,
+    repository: UserExistenceReader,
 ) -> UUID | None:
     if actor is None or actor.user_id == LOCAL_AUTH_USER_ID:
         return None
@@ -99,6 +103,41 @@ def terminal_reason_for_status(
         raise ValidationError(
             f"{entity_name} terminal_reason is required when status becomes "
             f"{terminal_status.value}."
+        )
+    if cleaned_reason is not None and next_status != terminal_status:
+        raise ValidationError(
+            f"{entity_name} terminal_reason can only be set for "
+            f"{terminal_status.value} status."
+        )
+    return cleaned_reason
+
+
+def terminal_reason_for_patch(
+    current_status: StatusT,
+    next_status: StatusT,
+    terminal_status: StatusT,
+    terminal_reason: PatchValue[str | None],
+    *,
+    entity_name: str,
+) -> str | None | NotProvided:
+    """Resolve a PATCH terminal reason without collapsing omission and null."""
+
+    entering_terminal = current_status != next_status and next_status == terminal_status
+    if not is_provided(terminal_reason):
+        if entering_terminal:
+            raise ValidationError(
+                f"{entity_name} terminal_reason is required when status becomes "
+                f"{terminal_status.value}."
+            )
+        return NOT_PROVIDED
+
+    cleaned_reason = terminal_reason.strip() if terminal_reason is not None else None
+    if terminal_reason is not None and not cleaned_reason:
+        raise ValidationError("terminal_reason must not be empty.")
+    if next_status == terminal_status and cleaned_reason is None:
+        raise ValidationError(
+            f"{entity_name} terminal_reason is required for "
+            f"{terminal_status.value} status."
         )
     if cleaned_reason is not None and next_status != terminal_status:
         raise ValidationError(
@@ -159,7 +198,11 @@ def note_matches_substring(note: Note, query: str) -> bool:
     return note.transcribed_text is not None and needle in note.transcribed_text.casefold()
 
 
-def _get_or_raise(store: dict[UUID, object], entity_id: UUID, label: str):
+def _get_or_raise(
+    store: Mapping[UUID, EntityT],
+    entity_id: UUID,
+    label: str,
+) -> EntityT:
     try:
         return store[entity_id]
     except KeyError as exc:
@@ -343,14 +386,14 @@ def _is_question_ancestor(
     return False
 
 
-def _ensure_primary_question_active(question: Question) -> None:
+def ensure_primary_question_active(question: Question) -> None:
     if question.status != QuestionStatus.ACTIVE:
         raise ValidationError("Primary question must be active to commit a dataset.")
 
 
 def _ensure_claim_confidence(confidence: float) -> None:
-    if confidence < 0 or confidence > 100:
-        raise ValidationError("confidence must be between 0 and 100.")
+    if not math.isfinite(confidence) or not 0 <= confidence <= 100:
+        raise ValidationError("confidence must be a finite value between 0 and 100.")
 
 
 def _ensure_claim_support_links(
@@ -376,19 +419,59 @@ def _analysis_has_question_link(
     return False
 
 
+def _normalize_dataset_file(file: DatasetFile) -> DatasetFile:
+    ensure_non_empty(file.path, "file.path")
+    ensure_non_empty(file.checksum, "file.checksum")
+    if file.size_bytes is not None and file.size_bytes < 0:
+        raise ValidationError("file.size_bytes must not be negative.")
+    return DatasetFile(
+        path=file.path.strip(),
+        checksum=file.checksum.strip(),
+        size_bytes=file.size_bytes,
+    )
+
+
 def _normalize_dataset_files(files: Iterable[DatasetFile]) -> list[DatasetFile]:
     normalized: list[DatasetFile] = []
     seen: set[str] = set()
     for file in files:
-        ensure_non_empty(file.path, "file.path")
-        ensure_non_empty(file.checksum, "file.checksum")
-        path = file.path.strip()
-        checksum = file.checksum.strip()
-        if path in seen:
+        normalized_file = _normalize_dataset_file(file)
+        if normalized_file.path in seen:
             raise ValidationError("Duplicate file path in commit manifest.")
-        seen.add(path)
-        normalized.append(DatasetFile(path=path, checksum=checksum))
+        seen.add(normalized_file.path)
+        normalized.append(normalized_file)
     return normalized
+
+
+def _merge_normalized_dataset_file(
+    merged_files: list[DatasetFile],
+    file_indexes: dict[str, int],
+    candidate: DatasetFile,
+    *,
+    checksum_conflict_message: str,
+    size_conflict_message: str,
+) -> None:
+    existing_index = file_indexes.get(candidate.path)
+    if existing_index is None:
+        file_indexes[candidate.path] = len(merged_files)
+        merged_files.append(candidate)
+        return
+
+    existing = merged_files[existing_index]
+    if existing.checksum != candidate.checksum:
+        raise ValidationError(checksum_conflict_message)
+    if (
+        existing.size_bytes is not None
+        and candidate.size_bytes is not None
+        and existing.size_bytes != candidate.size_bytes
+    ):
+        raise ValidationError(size_conflict_message)
+    if existing.size_bytes is None and candidate.size_bytes is not None:
+        merged_files[existing_index] = DatasetFile(
+            path=existing.path,
+            checksum=existing.checksum,
+            size_bytes=candidate.size_bytes,
+        )
 
 
 def _find_acquisition_output(
@@ -413,18 +496,25 @@ def _merge_acquisition_outputs(
         manifest_input = _manifest_input_from_commit(manifest)
     else:
         manifest_input = manifest or DatasetCommitManifestInput()
-    merged_files = list(manifest_input.files)
-    seen = {file.path.strip(): file.checksum.strip() for file in manifest_input.files}
+    merged_files = _normalize_dataset_files(manifest_input.files)
+    file_indexes = {file.path: index for index, file in enumerate(merged_files)}
     for output in outputs_list:
-        path = output.file_path.strip()
-        checksum = output.checksum.strip()
-        existing = seen.get(path)
-        if existing is None:
-            merged_files.append(DatasetFile(path=path, checksum=checksum))
-            seen[path] = checksum
-            continue
-        if existing != checksum:
-            raise ValidationError("Acquisition output checksum conflict for file path.")
+        candidate = _normalize_dataset_file(
+            DatasetFile(
+                path=output.file_path,
+                checksum=output.checksum,
+                size_bytes=output.size_bytes,
+            )
+        )
+        _merge_normalized_dataset_file(
+            merged_files,
+            file_indexes,
+            candidate,
+            checksum_conflict_message=(
+                "Acquisition output checksum conflict for file path."
+            ),
+            size_conflict_message="Acquisition output size conflict for file path.",
+        )
     return DatasetCommitManifestInput(
         files=merged_files,
         external_artifacts=manifest_input.external_artifacts,
@@ -517,7 +607,9 @@ def _manifest_input_with_source(
     source_session_id: UUID,
 ) -> DatasetCommitManifestInput:
     if isinstance(manifest, DatasetCommitManifest):
-        manifest_input = _manifest_input_from_commit(manifest)
+        manifest_input: DatasetCommitManifestInput | None = _manifest_input_from_commit(
+            manifest
+        )
     else:
         manifest_input = manifest
     if manifest_input is None:
@@ -538,7 +630,7 @@ def _manifest_input_with_source(
     )
 
 
-def _build_commit_manifest(
+def build_commit_manifest(
     manifest: DatasetCommitManifestInput | DatasetCommitManifest | None,
     question_links: list[QuestionLink],
 ) -> DatasetCommitManifest:
@@ -569,7 +661,7 @@ def _build_commit_manifest(
     )
 
 
-def _validate_commit_hash(provided: str | None, expected: str) -> None:
+def validate_commit_hash(provided: str | None, expected: str) -> None:
     if provided is None:
         return
     ensure_non_empty(provided, "commit_hash")
@@ -580,7 +672,13 @@ def _validate_commit_hash(provided: str | None, expected: str) -> None:
 _ROLE_ORDER = {QuestionLinkRole.PRIMARY.value: 0, QuestionLinkRole.SECONDARY.value: 1}
 
 
-def _manifest_payload(manifest: DatasetCommitManifest) -> dict[str, object]:
+def dataset_manifest_payload(manifest: DatasetCommitManifest) -> dict[str, object]:
+    """Return the canonical, content-addressed dataset manifest payload.
+
+    ``file_id`` and ``size_bytes`` are provenance metadata rather than dataset
+    identity, so they are deliberately excluded to preserve commit hashes.
+    """
+
     files = sorted(
         ({"path": file.path, "checksum": file.checksum} for file in manifest.files),
         key=lambda item: (item["path"], item["checksum"]),
@@ -637,7 +735,7 @@ def _external_artifacts_payload(
     )
 
 
-def _compute_commit_hash(manifest: DatasetCommitManifest) -> str:
-    payload = _manifest_payload(manifest)
+def compute_commit_hash(manifest: DatasetCommitManifest) -> str:
+    payload = dataset_manifest_payload(manifest)
     encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()

@@ -20,6 +20,7 @@ from lab_tracker.models import (
     QuestionType,
     UsageEventResourceType,
 )
+from lab_tracker.patching import provided_fields
 from lab_tracker.schemas import (
     Envelope,
     ListEnvelope,
@@ -31,15 +32,14 @@ from lab_tracker.schemas import (
 
 from .shared import (
     CreatedByFilter,
-    accessible_project_ids_from_request,
     actor_from_request,
     api_from_request,
     ensure_project_read,
+    handlers_from_request,
     list_response,
     paginate,
     question_default_status,
     record_usage_view,
-    repository_from_request,
     validate_pagination,
 )
 
@@ -85,14 +85,9 @@ def build_questions_router(api: LabTrackerAPI) -> APIRouter:
     ):
         validate_pagination(limit, offset)
         resolved_search = search or q
-        if project_id is not None:
-            ensure_project_read(request, project_id)
-            project_ids = None
-        else:
-            project_ids = accessible_project_ids_from_request(request)
-        questions, total = repository_from_request(request).query_questions(
+        page = handlers_from_request(request).catalogs.list_questions(
+            actor=actor_from_request(request),
             project_id=project_id,
-            project_ids=project_ids,
             status=status.value if status is not None else None,
             question_type=question_type.value if question_type is not None else None,
             search=resolved_search,
@@ -102,7 +97,12 @@ def build_questions_router(api: LabTrackerAPI) -> APIRouter:
             limit=limit,
             offset=offset,
         )
-        return list_response(questions, limit=limit, offset=offset, total=total)
+        return list_response(
+            page.items,
+            limit=limit,
+            offset=offset,
+            total=page.total,
+        )
 
     @router.get("/questions/{question_id}", response_model=Envelope[Question])
     def get_question(question_id: UUID, request: Request):
@@ -160,13 +160,8 @@ def build_questions_router(api: LabTrackerAPI) -> APIRouter:
         ensure_project_read(request, existing.project_id)
         question = api_from_request(request, api).update_question(
             question_id,
-            text=payload.text,
-            question_type=payload.question_type,
-            hypothesis=payload.hypothesis,
-            status=payload.status,
-            terminal_reason=payload.terminal_reason,
-            parent_question_ids=payload.parent_question_ids,
             actor=actor,
+            **provided_fields(payload),
         )
         return Envelope(data=question)
 

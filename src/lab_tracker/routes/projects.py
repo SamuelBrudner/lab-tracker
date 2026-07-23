@@ -2,24 +2,14 @@
 
 from __future__ import annotations
 
-import logging
 from uuid import UUID
 
 from fastapi import APIRouter
-from sqlalchemy import select
 from starlette import status as http_status
 from starlette.requests import Request
 from starlette.responses import Response
 
 from lab_tracker.api import LabTrackerAPI
-from lab_tracker.db_models import (
-    AnalysisModel,
-    DatasetFileModel,
-    DatasetModel,
-    NoteModel,
-    VisualizationModel,
-)
-from lab_tracker.db_types import ensure_uuid
 from lab_tracker.errors import NotFoundError
 from lab_tracker.models import (
     Project,
@@ -28,6 +18,7 @@ from lab_tracker.models import (
     PublicationReadinessReport,
     UsageEventResourceType,
 )
+from lab_tracker.patching import provided_fields
 from lab_tracker.schemas import (
     Envelope,
     ListEnvelope,
@@ -38,36 +29,17 @@ from lab_tracker.schemas import (
 )
 
 from .shared import (
-    accessible_project_ids_from_request,
     actor_from_request,
     api_from_request,
-    db_session_from_request,
     ensure_project_owner,
     ensure_project_read,
-    file_storage_from_request,
+    handlers_from_request,
     list_response,
     paginate,
     project_default_status,
     record_usage_view,
-    repository_from_request,
     validate_pagination,
 )
-
-_logger = logging.getLogger(__name__)
-
-
-def _delete_stored_file(storage_backend: object, storage_id: UUID) -> None:
-    try:
-        storage_backend.delete(storage_id)
-    except NotFoundError:
-        return
-    except Exception as exc:
-        _logger.warning(
-            "Failed to delete project-scoped storage object %s: %s",
-            storage_id,
-            exc,
-            exc_info=True,
-        )
 
 
 def build_projects_router(api: LabTrackerAPI) -> APIRouter:
@@ -100,13 +72,18 @@ def build_projects_router(api: LabTrackerAPI) -> APIRouter:
         offset: int = 0,
     ):
         validate_pagination(limit, offset)
-        items, total = repository_from_request(request).query_projects(
-            project_ids=accessible_project_ids_from_request(request),
+        page = handlers_from_request(request).catalogs.list_projects(
+            actor=actor_from_request(request),
             status=status.value if status is not None else None,
             limit=limit,
             offset=offset,
         )
-        return list_response(items, limit=limit, offset=offset, total=total)
+        return list_response(
+            page.items,
+            limit=limit,
+            offset=offset,
+            total=page.total,
+        )
 
     @router.get("/projects/{project_id}", response_model=Envelope[Project])
     def get_project(project_id: UUID, request: Request):
@@ -136,82 +113,20 @@ def build_projects_router(api: LabTrackerAPI) -> APIRouter:
     def update_project(project_id: UUID, payload: ProjectUpdate, request: Request):
         actor = actor_from_request(request)
         ensure_project_owner(request, project_id)
-        update_kwargs = {
-            "name": payload.name,
-            "description": payload.description,
-            "status": payload.status,
-            "actor": actor,
-        }
-        if "group_id" in payload.model_fields_set:
-            update_kwargs["group_id"] = payload.group_id
         project = api_from_request(request, api).update_project(
             project_id,
-            **update_kwargs,
+            actor=actor,
+            **provided_fields(payload),
         )
         return Envelope(data=project)
 
     @router.delete("/projects/{project_id}", response_model=Envelope[Project])
     def delete_project(project_id: UUID, request: Request):
-        request_api = api_from_request(request, api)
         actor = actor_from_request(request)
-        ensure_project_owner(request, project_id)
-        db_session = db_session_from_request(request)
-        file_storage_backend = file_storage_from_request(request)
-        raw_note_storage = request.app.state.raw_note_storage
-        dataset_file_storage_ids = [
-            ensure_uuid(value)
-            for value in db_session.scalars(
-                select(DatasetFileModel.storage_id)
-                .join(DatasetModel, DatasetModel.dataset_id == DatasetFileModel.dataset_id)
-                .where(DatasetModel.project_id == str(project_id))
-            )
-        ]
-        raw_note_storage_ids = [
-            ensure_uuid(value)
-            for value in db_session.scalars(
-                select(NoteModel.raw_storage_id).where(
-                    NoteModel.project_id == str(project_id),
-                    NoteModel.raw_storage_id.is_not(None),
-                )
-            )
-        ]
-        visualization_storage_ids = [
-            ensure_uuid(value)
-            for value in db_session.scalars(
-                select(VisualizationModel.asset_storage_id)
-                .join(
-                    AnalysisModel,
-                    AnalysisModel.analysis_id == VisualizationModel.analysis_id,
-                )
-                .where(
-                    AnalysisModel.project_id == str(project_id),
-                    VisualizationModel.asset_storage_id.is_not(None),
-                )
-            )
-        ]
-        project = request_api.delete_project(project_id, actor=actor)
-        db_session.flush()
-        for storage_id in dataset_file_storage_ids:
-            request_api.run_after_commit(
-                lambda storage_id=storage_id: _delete_stored_file(
-                    file_storage_backend,
-                    storage_id,
-                )
-            )
-        for storage_id in raw_note_storage_ids:
-            request_api.run_after_commit(
-                lambda storage_id=storage_id: _delete_stored_file(
-                    raw_note_storage,
-                    storage_id,
-                )
-            )
-        for storage_id in visualization_storage_ids:
-            request_api.run_after_commit(
-                lambda storage_id=storage_id: _delete_stored_file(
-                    file_storage_backend,
-                    storage_id,
-                )
-            )
+        project = handlers_from_request(request).deletions.delete_project(
+            project_id,
+            actor=actor,
+        )
         return Envelope(data=project)
 
     @router.get("/projects/{project_id}/members", response_model=ListEnvelope[ProjectMembership])

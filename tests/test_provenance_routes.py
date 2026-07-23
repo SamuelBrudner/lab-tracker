@@ -125,6 +125,14 @@ def test_dataset_provenance_route_exports_json_ld_graph(
     assert dataset_response.status_code == 200
     assert dataset_response.headers["content-type"].startswith("application/json")
     assert dataset_response.json()["data"]["dataset_id"] == dataset_id
+    assert dataset_response.json()["data"]["commit_manifest"]["files"] == [
+        {
+            "file_id": None,
+            "path": "raw/data.csv",
+            "checksum": "abc123",
+            "size_bytes": 12,
+        }
+    ]
 
     response = client.get(f"/datasets/{dataset_id}/provenance", headers=headers)
     assert response.status_code == 200
@@ -144,6 +152,10 @@ def test_dataset_provenance_route_exports_json_ld_graph(
     secondary_question_link = _node_by_id(payload, secondary_question_link_iri)
     creator_node = _node_by_id(payload, creator_iri)
     supervisor_node = _node_by_id(payload, supervisor_iri)
+    file_node = _node_by_id(
+        payload,
+        f"{dataset_iri}/provenance/files/raw%2Fdata.csv",
+    )
 
     assert dataset_node["@type"] == "prov:Entity"
     assert dataset_node["wasGeneratedBy"] == {"@id": commit_iri}
@@ -160,6 +172,7 @@ def test_dataset_provenance_route_exports_json_ld_graph(
         {"@id": primary_question_link_iri},
         {"@id": secondary_question_link_iri},
     ]
+    assert file_node["contentSize"] == 12
     assert primary_question_link["question"] == {
         "@id": f"http://testserver/questions/{primary_question_id}"
     }
