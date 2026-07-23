@@ -99,7 +99,7 @@ describe("migrateIncomingShares", () => {
 
     const result = await migrateIncomingShares({
       projectId: "proj-a",
-      token: "tok-1",
+      ownerId: "owner-1",
       uploadQueue,
       storage,
     });
@@ -109,7 +109,7 @@ describe("migrateIncomingShares", () => {
     const queued = await uploadQueue.listPending();
     expect(queued).toHaveLength(2);
     expect(queued.every((item) => item.endpoint === UPLOAD_FILE_PATH)).toBe(true);
-    expect(queued.every((item) => item.token === "tok-1")).toBe(true);
+    expect(queued.every((item) => item.ownerId === "owner-1")).toBe(true);
     expect(queued.every((item) => item.fields.project_id === "proj-a")).toBe(true);
     const firstMetadata = JSON.parse(queued[0].fields.metadata);
     expect(firstMetadata.capture_source).toBe("share_target");
@@ -124,7 +124,7 @@ describe("migrateIncomingShares", () => {
 
     const result = await migrateIncomingShares({
       projectId: "",
-      token: "tok-1",
+      ownerId: "owner-1",
       uploadQueue,
       storage,
     });
@@ -140,7 +140,7 @@ describe("migrateIncomingShares", () => {
 
     const result = await migrateIncomingShares({
       projectId: "proj-a",
-      token: "tok-1",
+      ownerId: "owner-1",
       uploadQueue,
       storage,
     });
@@ -155,7 +155,7 @@ describe("migrateIncomingShares", () => {
 
     const result = await migrateIncomingShares({
       projectId: "proj-a",
-      token: "tok-1",
+      ownerId: "owner-1",
       uploadQueue,
       storage,
     });
@@ -179,7 +179,7 @@ describe("migrateIncomingShares", () => {
     const result = await migrateIncomingShares({
       createTextNote,
       projectId: "proj-a",
-      token: "tok-1",
+      ownerId: "owner-1",
       uploadQueue,
       storage,
     });
@@ -201,7 +201,6 @@ describe("migrateIncomingShares", () => {
         title: "Paper link",
         url: "https://example.test/protocol",
       }),
-      token: "tok-1",
     });
   });
 
@@ -211,7 +210,7 @@ describe("migrateIncomingShares", () => {
 
     const result = await migrateIncomingShares({
       projectId: "proj-a",
-      token: "tok-1",
+      ownerId: "owner-1",
       uploadQueue,
       storage,
     });
@@ -284,7 +283,7 @@ describe("migrateIncomingShares", () => {
 
     const result = await migrateIncomingShares({
       projectId: "proj-a",
-      token: "fresh-token",
+      ownerId: "owner-1",
       uploadQueue,
       storage,
     });
@@ -296,7 +295,7 @@ describe("migrateIncomingShares", () => {
     expect(queued[0]).toMatchObject({
       endpoint: UPLOAD_FILE_PATH,
       filename: "idb-share.jpg",
-      token: "fresh-token",
+      ownerId: "owner-1",
       fields: {
         project_id: "proj-a",
       },

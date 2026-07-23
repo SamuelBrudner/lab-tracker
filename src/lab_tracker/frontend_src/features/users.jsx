@@ -1,6 +1,6 @@
 import * as React from "react";
 
-import { apiListRequest, apiRequest, buildApiPath } from "../shared/api.js";
+import { auth as authGateway } from "../shared/gateways/index.js";
 
 function UsersPage({ token, canManageUsers, setBusy, setFlash }) {
   const [inviteEmail, setInviteEmail] = React.useState("");
@@ -16,9 +16,7 @@ function UsersPage({ token, canManageUsers, setBusy, setFlash }) {
       return;
     }
     try {
-      const { data } = await apiListRequest(buildApiPath("/auth/users", { limit: 200 }), {
-        token,
-      });
+      const { data } = await authGateway.listUsers({ token });
       setUsers(data);
     } catch (err) {
       setUsers([]);
@@ -32,9 +30,7 @@ function UsersPage({ token, canManageUsers, setBusy, setFlash }) {
       return;
     }
     try {
-      const { data } = await apiListRequest(buildApiPath("/auth/invitations", { limit: 200 }), {
-        token,
-      });
+      const { data } = await authGateway.listInvitations({ token });
       setInvitations(data);
     } catch (err) {
       setInvitations([]);
@@ -54,11 +50,7 @@ function UsersPage({ token, canManageUsers, setBusy, setFlash }) {
     setBusy(true);
     setFlash("", "");
     try {
-      await apiRequest(`/auth/users/${userId}`, {
-        body,
-        method: "PATCH",
-        token,
-      });
+      await authGateway.updateUser(userId, body, { token });
       await refreshUsers();
       setFlash(successMessage);
     } catch (err) {
@@ -77,14 +69,13 @@ function UsersPage({ token, canManageUsers, setBusy, setFlash }) {
     setBusy(true);
     setFlash("", "");
     try {
-      const invitation = await apiRequest("/auth/invitations", {
-        body: {
+      const invitation = await authGateway.createInvitation(
+        {
           email: inviteEmail.trim(),
           role: inviteRole,
         },
-        method: "POST",
-        token,
-      });
+        { token }
+      );
       setLatestInvitation(invitation);
       setInviteEmail("");
       await refreshInvitations();
@@ -103,10 +94,7 @@ function UsersPage({ token, canManageUsers, setBusy, setFlash }) {
     setBusy(true);
     setFlash("", "");
     try {
-      await apiRequest(`/auth/invitations/${invitationId}`, {
-        method: "DELETE",
-        token,
-      });
+      await authGateway.revokeInvitation(invitationId, { token });
       setLatestInvitation((current) =>
         current?.invitation_id === invitationId ? null : current
       );

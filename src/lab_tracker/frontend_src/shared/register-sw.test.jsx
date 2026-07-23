@@ -82,14 +82,14 @@ describe("installOfflineRetry", () => {
     const onDropped = vi.fn();
 
     const cleanup = installOfflineRetry({
+      getSession: () => ({ token: "fresh-token", ownerId: "owner-1" }),
       queue,
-      getToken: () => "fresh-token",
       onDropped,
     });
 
     await Promise.resolve();
 
-    expect(queue.drain).toHaveBeenCalledWith({ token: "fresh-token" });
+    expect(queue.drain).toHaveBeenCalledWith({ token: "fresh-token", ownerId: "owner-1" });
     expect(onDropped).toHaveBeenCalledWith(dropped, {
       dropped,
       uploaded: [],

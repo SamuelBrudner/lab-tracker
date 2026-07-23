@@ -10,6 +10,7 @@ from lab_tracker_client import (
     EntityRef,
     LabTracker,
     LTAPIError,
+    LTConflictError,
     LTRecord,
     LTValidationError,
     build_evidence_metadata,
@@ -317,6 +318,92 @@ def test_get_or_create_question_distinguishes_created_reused_and_conflict() -> N
     assert len(post_bodies) == 1
 
 
+@pytest.mark.parametrize(
+    ("method_name", "list_path", "post_payload", "record"),
+    [
+        (
+            "get_or_create_project",
+            "/projects",
+            {"name": "Concurrent project"},
+            {"project_id": "project-winner", "name": "Concurrent project"},
+        ),
+        (
+            "get_or_create_question",
+            "/questions",
+            {"project_id": "project-1", "text": "Concurrent question?"},
+            {
+                "question_id": "question-winner",
+                "project_id": "project-1",
+                "text": "Concurrent question?",
+            },
+        ),
+    ],
+)
+def test_get_or_create_reports_server_side_race_reuse(
+    method_name: str,
+    list_path: str,
+    post_payload: dict[str, str],
+    record: dict[str, str],
+) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET" and request.url.path == list_path:
+            return _json_response(
+                200,
+                {"data": [], "meta": {"limit": 200, "offset": 0, "total": 0}},
+            )
+        if request.method == "POST" and request.url.path == list_path:
+            return _json_response(200, {"data": record})
+        return _json_response(404, {"error": {"message": "not found"}})
+
+    with LabTracker(
+        base_url="http://testserver", transport=httpx.MockTransport(handler)
+    ) as lt:
+        result = getattr(lt, method_name)(**post_payload)
+
+    assert result.action == "reused"
+    assert result.record == record
+
+
+def test_http_409_maps_to_conflict_error() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET" and request.url.path == "/projects":
+            return _json_response(
+                200,
+                {"data": [], "meta": {"limit": 200, "offset": 0, "total": 0}},
+            )
+        return _json_response(
+            409,
+            {"error": {"code": "conflict", "message": "capture key conflict"}},
+        )
+
+    with (
+        LabTracker(base_url="http://testserver", transport=httpx.MockTransport(handler)) as lt,
+        pytest.raises(LTConflictError, match="capture key conflict"),
+    ):
+        lt.get_or_create_project(name="Conflict")
+
+
+def test_upload_409_maps_to_conflict_error(tmp_path) -> None:
+    upload = tmp_path / "conflict.txt"
+    upload.write_text("different capture content", encoding="utf-8")
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return _json_response(
+            409,
+            {"error": {"code": "conflict", "message": "upload key conflict"}},
+        )
+
+    with (
+        LabTracker(base_url="http://testserver", transport=httpx.MockTransport(handler)) as lt,
+        pytest.raises(LTConflictError, match="upload key conflict"),
+    ):
+        lt.upload_note_file(
+            project_id="project-1",
+            file_path=upload,
+            client_capture_id="duplicate-upload-key",
+        )
+
+
 def test_entity_ref_and_first_line_marker_helpers() -> None:
     assert first_line_marker("\n\n  # Marker  \nbody") == "# Marker"
     assert EntityRef("question", "question-1").to_payload() == {
@@ -340,7 +427,7 @@ def test_quick_capture_posts_text_as_multipart_file() -> None:
         assert b'"source": "cli"' in request.content
         assert b"client-capture-quick" in request.content
         return _json_response(
-            202,
+            201,
             {
                 "data": {
                     "note_id": "note-quick",

@@ -1,12 +1,10 @@
 import json
 
-from fastapi.testclient import TestClient
-
-from lab_tracker.app import create_app
+from api_helpers import app_test_client
 
 
 def test_frontend_routes_and_assets_are_served():
-    client = TestClient(create_app())
+    client = app_test_client()
 
     root_response = client.get("/", follow_redirects=False)
     assert root_response.status_code in (302, 307)
@@ -49,7 +47,7 @@ def test_frontend_routes_and_assets_are_served():
 
 
 def test_https_responses_include_hsts():
-    client = TestClient(create_app(), base_url="https://lab.example.org")
+    client = app_test_client(base_url="https://lab.example.org")
 
     response = client.get("/app/")
 
@@ -58,7 +56,7 @@ def test_https_responses_include_hsts():
 
 
 def test_service_worker_is_served_with_app_scope():
-    client = TestClient(create_app())
+    client = app_test_client()
 
     response = client.get("/app/sw.js")
     assert response.status_code == 200
@@ -74,7 +72,7 @@ def test_service_worker_is_served_with_app_scope():
 
 
 def test_share_target_post_falls_back_to_capture_redirect():
-    client = TestClient(create_app())
+    client = app_test_client()
 
     response = client.post(
         "/app/share-target",
@@ -86,7 +84,7 @@ def test_share_target_post_falls_back_to_capture_redirect():
 
 
 def test_manifest_declares_web_share_target():
-    client = TestClient(create_app())
+    client = app_test_client()
 
     manifest = client.get("/app/static/manifest.json").json()
     share_target = manifest["share_target"]
@@ -100,7 +98,7 @@ def test_manifest_declares_web_share_target():
 
 
 def test_pwa_manifest_and_icons_are_served():
-    client = TestClient(create_app())
+    client = app_test_client()
 
     app_response = client.get("/app/")
     assert '<link rel="manifest" href="/app/static/manifest.json" />' in app_response.text

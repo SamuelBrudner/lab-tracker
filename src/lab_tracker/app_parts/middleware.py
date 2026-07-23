@@ -165,6 +165,7 @@ def configure_auth_middleware(app: FastAPI) -> None:
                     request.url.path,
                     read_only=principal.read_only,
                     role=principal.role,
+                    scope=principal.scope,
                 ):
                     app.state.pat_rate_limiter.record_failure(pat_rate_key)
                     return _service_forbidden_response("Not permitted for this token.")

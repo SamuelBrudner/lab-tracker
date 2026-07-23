@@ -1,8 +1,10 @@
 import * as React from "react";
 
 import { apiRequest } from "../shared/api.js";
+import { noteShape } from "../shared/gateways/notes.js";
 import { formatDate } from "../shared/formatters.js";
 import { useApiResource } from "../hooks/useApiResource.js";
+import { useProjectAccess } from "../hooks/useProjectAccess.js";
 
 const { useEffect, useMemo, useState } = React;
 
@@ -127,15 +129,26 @@ function NoteDetailCard({
   projects,
   navigate,
   onSetActiveProject,
-  canWrite,
+  canWrite: dashboardCanWrite,
+  user = null,
   setBusy,
   setFlash,
 }) {
   const { data: note, error, loading } = useApiResource(
     noteId ? `/notes/${noteId}` : "",
     token,
-    "Failed to load note."
+    "Failed to load note.",
+    { validate: noteShape }
   );
+  // Key write access to the loaded note's OWN project (a direct-linked note may
+  // belong to a different project than the dashboard selection); fall back to
+  // the passed permission until the note's project is known.
+  const noteAccess = useProjectAccess(note?.project_id, {
+    token,
+    user,
+    enabled: Boolean(note?.project_id),
+  });
+  const canWrite = note?.project_id ? noteAccess.canContribute : dashboardCanWrite;
   const [imagePreview, setImagePreview] = useState("");
   const [audioPreview, setAudioPreview] = useState("");
   const [transcriptText, setTranscriptText] = useState("");

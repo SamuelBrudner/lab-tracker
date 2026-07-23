@@ -5,6 +5,7 @@ import { AppLink } from "../../shared/routing.jsx";
 import { SessionLinkedNotesSection } from "./SessionLinkedNotesSection.jsx";
 import { SessionOutputsSection } from "./SessionOutputsSection.jsx";
 import { useSessionDetailData } from "./useSessionDetailData.js";
+import { useProjectAccess } from "../../hooks/useProjectAccess.js";
 
 const { useEffect, useMemo, useState } = React;
 
@@ -14,7 +15,8 @@ function SessionDetailCard({
   projects,
   navigate,
   onSetActiveProject,
-  canWrite,
+  canWrite: dashboardCanWrite,
+  user = null,
   onCloseSession,
   onPromoteSession,
 }) {
@@ -36,6 +38,14 @@ function SessionDetailCard({
     sessionId,
     projects,
   });
+  // Key write access to the loaded session's own project, not the dashboard
+  // selection; fall back to the passed permission until the project is known.
+  const sessionAccess = useProjectAccess(session?.project_id, {
+    token,
+    user,
+    enabled: Boolean(session?.project_id),
+  });
+  const canWrite = session?.project_id ? sessionAccess.canContribute : dashboardCanWrite;
 
   const promotionOptions = useMemo(() => {
     const items = [...(activeQuestionState.items || [])];

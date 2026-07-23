@@ -1,3 +1,4 @@
+from api_helpers import app_test_client
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
 
@@ -43,7 +44,7 @@ def test_readiness_endpoint(monkeypatch, tmp_path):
     Base.metadata.create_all(bind=engine)
     engine.dispose()
 
-    client = TestClient(create_app())
+    client = app_test_client()
     response = client.get("/readiness")
     assert response.status_code == 200
     payload = response.json()
@@ -71,7 +72,7 @@ def test_metrics_endpoint(monkeypatch, tmp_path):
     Base.metadata.create_all(bind=engine)
     engine.dispose()
 
-    client = TestClient(create_app())
+    client = app_test_client()
     response = client.get("/metrics")
     assert response.status_code == 200
     payload = response.json()
@@ -88,7 +89,7 @@ def test_observability_reports_database_failures(monkeypatch, tmp_path):
     monkeypatch.setenv("LAB_TRACKER_FILE_STORAGE_PATH", str(tmp_path / "file-storage"))
     monkeypatch.setenv("LAB_TRACKER_NOTE_STORAGE_PATH", str(tmp_path))
 
-    client = TestClient(create_app())
+    client = app_test_client()
 
     readiness = client.get("/readiness")
     assert readiness.status_code == 503

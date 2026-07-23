@@ -28,3 +28,9 @@ lab_tracker.db.lock
 
 # Beads / Dolt files (added by bd init)
 .beads/proxieddb/
+
+# Playwright e2e
+/test-results/
+/playwright-report/
+/blob-report/
+/.playwright/

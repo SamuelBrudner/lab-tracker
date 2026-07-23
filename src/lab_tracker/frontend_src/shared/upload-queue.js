@@ -182,7 +182,15 @@ function createUploadQueue({
     });
   }
 
-  async function enqueue({ endpoint, file, fields = {}, token = "", filename = "", contentType = "" }) {
+  async function enqueue({
+    endpoint,
+    file,
+    fields = {},
+    ownerId = "",
+    ownerLabel = "",
+    filename = "",
+    contentType = "",
+  }) {
     if (!endpoint) {
       throw new Error("enqueue requires endpoint");
     }
@@ -193,13 +201,17 @@ function createUploadQueue({
       throw new Error("enqueue requires fields.project_id");
     }
     const clientCaptureId = fields.client_capture_id || createClientCaptureId();
+    // Persist a stable, non-secret OWNER identity and never a bearer credential:
+    // a queued job is only ever drained under a live session whose identity
+    // matches ownerId. ownerLabel is non-secret UI text for quarantine prompts.
     const record = {
       endpoint,
       file,
       fields: { ...fields, client_capture_id: clientCaptureId },
       filename: filename || file.name || "capture",
       contentType: contentType || file.type || "application/octet-stream",
-      token,
+      ownerId,
+      ownerLabel,
       clientCaptureId,
       enqueuedAt: now(),
     };
@@ -217,11 +229,51 @@ function createUploadQueue({
     return adapter.list();
   }
 
-  async function drainOnce({ token = "" } = {}) {
+  async function stripLegacyToken(item) {
+    // A record from before owner-identity binding may carry a persisted bearer
+    // token but no provable owner. Strip the token so it can never be sent, and
+    // mark it quarantined for the user to re-capture or re-attach.
+    if (typeof adapter.update === "function" && (item.token || !item.quarantined)) {
+      return (
+        (await adapter.update(item.id, { token: "", quarantined: true })) || {
+          ...item,
+          token: "",
+          quarantined: true,
+        }
+      );
+    }
+    return { ...item, token: "", quarantined: true };
+  }
+
+  async function drainOnce({ token = "", ownerId = "" } = {}) {
     const items = await adapter.list();
-    const results = { dropped: [], uploaded: [], stillQueued: [] };
+    const results = {
+      dropped: [],
+      uploaded: [],
+      stillQueued: [],
+      quarantined: [],
+      skipped: [],
+    };
     for (const item of items) {
       let queuedItem = item;
+      // Legacy / ownerless records cannot be attributed to a provable identity:
+      // never send them, strip any persisted token, and surface for re-capture.
+      if (!queuedItem.ownerId) {
+        results.quarantined.push(await stripLegacyToken(queuedItem));
+        continue;
+      }
+      // No active session identity -> nothing may drain. This closes the
+      // post-logout path: a blanked token/owner sends no queued job.
+      if (!token || !ownerId) {
+        results.stillQueued.push(queuedItem);
+        continue;
+      }
+      // Owner mismatch -> never submit one user's queued job under another's
+      // session (no silent misattribution after account switching).
+      if (queuedItem.ownerId !== ownerId) {
+        results.skipped.push(queuedItem);
+        continue;
+      }
       const payload = new FormData();
       payload.append("file", queuedItem.file, queuedItem.filename);
       let fields = queuedItem.fields || { project_id: queuedItem.projectId };
@@ -244,8 +296,8 @@ function createUploadQueue({
         }
         payload.append(key, value);
       }
-      const bearerToken = token || queuedItem.token || "";
-      const headers = bearerToken ? { Authorization: `Bearer ${bearerToken}` } : {};
+      // Only ever the live session token — never a value persisted with the job.
+      const headers = token ? { Authorization: `Bearer ${token}` } : {};
       const endpoint = queuedItem.endpoint || QUICK_CAPTURE_PATH;
       let response;
       try {

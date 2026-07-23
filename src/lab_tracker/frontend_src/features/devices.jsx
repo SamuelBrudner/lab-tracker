@@ -1,6 +1,6 @@
 import * as React from "react";
 
-import { apiListRequest, apiRequest } from "../shared/api.js";
+import { auth as authGateway } from "../shared/gateways/index.js";
 import { formatDate } from "../shared/formatters.js";
 
 const { useCallback, useEffect, useState } = React;
@@ -15,8 +15,8 @@ function DevicesPage({ token, canWrite, navigate, setFlash }) {
   const refresh = useCallback(async () => {
     setLoading(true);
     try {
-      const page = await apiListRequest("/auth/devices", { token });
-      setDevices(page.data || []);
+      const page = await authGateway.listDevices({ token });
+      setDevices(page.data);
     } catch (err) {
       setFlash("", err.message || "Failed to load paired devices.");
     } finally {
@@ -32,11 +32,7 @@ function DevicesPage({ token, canWrite, navigate, setFlash }) {
     setCreating(true);
     setFlash("", "");
     try {
-      const offer = await apiRequest("/auth/devices/enrollment", {
-        body: {},
-        method: "POST",
-        token,
-      });
+      const offer = await authGateway.createDeviceEnrollment({}, { token });
       setPendingOffer(offer);
     } catch (err) {
       setFlash("", err.message || "Failed to create enrollment offer.");
@@ -49,10 +45,7 @@ function DevicesPage({ token, canWrite, navigate, setFlash }) {
     setRevokingId(deviceTokenId);
     setFlash("", "");
     try {
-      await apiRequest(`/auth/devices/${deviceTokenId}`, {
-        method: "DELETE",
-        token,
-      });
+      await authGateway.revokeDevice(deviceTokenId, { token });
       setFlash("Device revoked.");
       await refresh();
     } catch (err) {

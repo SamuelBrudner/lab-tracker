@@ -21,6 +21,7 @@ def _create_token(
     label: str = "Copilot",
     role: str = "viewer",
     read_only: bool = True,
+    scope: str = "all",
 ) -> dict:
     response = client.post(
         "/auth/tokens",
@@ -28,12 +29,38 @@ def _create_token(
             "label": label,
             "role": role,
             "read_only": read_only,
+            "scope": scope,
             "expires_at": (utc_now() + timedelta(days=7)).isoformat(),
         },
         headers=headers,
     )
     assert response.status_code == 201, response.text
     return response.json()["data"]
+
+
+def test_batch_run_due_scoped_token_can_only_trigger_the_run(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+):
+    issued = _create_token(
+        client, admin_auth_headers, role="admin", scope="batch_run_due"
+    )
+    assert issued["scope"] == "batch_run_due"
+    pat_headers = _bearer(issued["secret"])
+
+    # The scheduler token triggers the due-batch run...
+    run_due = client.post("/batches/run-due", headers=pat_headers)
+    assert run_due.status_code == 200, run_due.text
+
+    # ...but can do nothing else: not read, not other writes, not /auth.
+    denied = [
+        client.get("/projects", headers=pat_headers),
+        client.get("/batches/runs", headers=pat_headers),
+        client.get("/auth/me", headers=pat_headers),
+        client.post("/projects", json={"name": "Blocked"}, headers=pat_headers),
+        client.post("/batches/run-now", json={}, headers=pat_headers),
+    ]
+    assert [response.status_code for response in denied] == [403] * len(denied)
 
 
 def test_create_list_and_revoke_personal_access_token(
