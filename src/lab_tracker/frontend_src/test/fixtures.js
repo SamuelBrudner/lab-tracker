@@ -3,7 +3,53 @@
 // and by feature-scoped integration tests so route mocks stay identical and
 // installFetchMock's unexpected-request strictness is preserved everywhere.
 import { buildApiPath } from "../shared/api.js";
-import { apiResponse } from "./utils.js";
+import { apiResponse as rawApiResponse } from "./utils.js";
+
+const AUTH_USER_CREATED_AT = "2026-04-20T00:00:00Z";
+
+// Full-App journeys use compact auth fixtures. Complete the fields FastAPI
+// always serializes while gateway unit tests continue to exercise malformed
+// auth payloads through the raw response helper.
+function apiResponse(data, status = 200, meta = undefined) {
+  if (
+    data &&
+    typeof data === "object" &&
+    !Array.isArray(data) &&
+    "role" in data &&
+    "username" in data
+  ) {
+    return rawApiResponse(
+      {
+        created_at: AUTH_USER_CREATED_AT,
+        user_id: "user-1",
+        ...data,
+      },
+      status,
+      meta ?? { auth_enabled: true }
+    );
+  }
+  if (
+    data &&
+    typeof data === "object" &&
+    !Array.isArray(data) &&
+    "access_token" in data &&
+    data.user
+  ) {
+    return rawApiResponse(
+      {
+        ...data,
+        user: {
+          created_at: AUTH_USER_CREATED_AT,
+          user_id: "user-1",
+          ...data.user,
+        },
+      },
+      status,
+      meta
+    );
+  }
+  return rawApiResponse(data, status, meta);
+}
 
 const projectsPath = buildApiPath("/projects", { limit: 200, offset: 0 });
 
@@ -332,6 +378,7 @@ function requestedUrls(fetchMock) {
 export {
   activeSessionsPath,
   analysis,
+  apiResponse,
   captureAnalysesPath,
   captureClaimsPath,
   claim,
