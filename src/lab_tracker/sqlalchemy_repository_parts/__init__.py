@@ -13,6 +13,9 @@ from lab_tracker.sqlalchemy_repository_parts.core import (
     SQLAlchemyQuestionRepository,
 )
 from lab_tracker.sqlalchemy_repository_parts.datasets import SQLAlchemyDatasetRepository
+from lab_tracker.sqlalchemy_repository_parts.evidence_bundles import (
+    SQLAlchemyEvidenceBundleRepository,
+)
 from lab_tracker.sqlalchemy_repository_parts.exploration import (
     SQLAlchemyExplorationNodeRepository,
 )
@@ -40,6 +43,7 @@ __all__ = [
     "SQLAlchemyClaimRepository",
     "SQLAlchemyDatasetRepository",
     "SQLAlchemyEntityVersionRepository",
+    "SQLAlchemyEvidenceBundleRepository",
     "SQLAlchemyExplorationNodeRepository",
     "SQLAlchemyGoalRepository",
     "SQLAlchemyGroupMembershipRepository",

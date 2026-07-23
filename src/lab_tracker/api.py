@@ -12,6 +12,7 @@ from uuid import UUID
 from lab_tracker.api_parts import (
     AnalysesApiMixin,
     DatasetsApiMixin,
+    EvidenceBundlesApiMixin,
     ExplorationApiMixin,
     GoalsApiMixin,
     GraphDraftsApiMixin,
@@ -38,6 +39,7 @@ from lab_tracker.services import (
     DatasetService,
     DataStoreService,
     EntityVersionService,
+    EvidenceBundleService,
     ExplorationService,
     GoalService,
     GraphDraftService,
@@ -64,6 +66,7 @@ class LabTrackerAPI(
     QuestionsApiMixin,
     NotesApiMixin,
     DatasetsApiMixin,
+    EvidenceBundlesApiMixin,
     SessionsApiMixin,
     AnalysesApiMixin,
     GoalsApiMixin,
@@ -195,6 +198,17 @@ class LabTrackerAPI(
             claims=self.claims,
             visualizations=self.visualizations,
             goals_provider=lambda: self.goals,
+            authorization=self.project_authorization,
+        )
+        self.evidence_bundles: EvidenceBundleService = EvidenceBundleService(
+            context,
+            projects=self.projects,
+            questions=self.questions,
+            datasets=self.datasets,
+            analyses=self.analyses,
+            claims=self.claims,
+            visualizations=self.visualizations,
+            notes=self.notes,
             authorization=self.project_authorization,
         )
         self.graph_drafts: GraphDraftService = GraphDraftService(

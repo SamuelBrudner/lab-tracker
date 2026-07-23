@@ -27,16 +27,16 @@ from lab_tracker.services.project_authorization import ProjectAuthorizationPolic
 from lab_tracker.services.project_service import ProjectService
 from lab_tracker.services.question_service import QuestionService
 from lab_tracker.services.shared import (
-    _build_commit_manifest,
-    _compute_commit_hash,
     _ensure_dataset_status_transition,
-    _ensure_primary_question_active,
     _manifest_input_from_commit,
-    _validate_commit_hash,
     actor_user_fk,
     actor_user_id,
+    build_commit_manifest,
+    compute_commit_hash,
+    ensure_primary_question_active,
     terminal_reason_for_status,
     unique_ids,
+    validate_commit_hash,
 )
 
 if TYPE_CHECKING:
@@ -142,11 +142,11 @@ class DatasetService(BaseService):
                 for question_id in secondary_ids
             ],
         ]
-        resolved_manifest = _build_commit_manifest(
+        resolved_manifest = build_commit_manifest(
             commit_manifest,
             question_links,
         )
-        self._ensure_source_session_valid(resolved_manifest.source_session_id, project_id)
+        self.validate_source_session(resolved_manifest.source_session_id, project_id)
         if (
             status == DatasetStatus.COMMITTED
             and not resolved_manifest.files
@@ -155,8 +155,8 @@ class DatasetService(BaseService):
             raise ValidationError(
                 "At least one file or external artifact is required to commit a dataset."
             )
-        resolved_commit_hash = _compute_commit_hash(resolved_manifest)
-        _validate_commit_hash(commit_hash, resolved_commit_hash)
+        resolved_commit_hash = compute_commit_hash(resolved_manifest)
+        validate_commit_hash(commit_hash, resolved_commit_hash)
         resolved_terminal_reason = terminal_reason_for_status(
             None,
             status,
@@ -183,7 +183,7 @@ class DatasetService(BaseService):
             origin_prompt_version=origin_prompt_version,
         )
         if commit_requested:
-            _ensure_primary_question_active(primary_question)
+            ensure_primary_question_active(primary_question)
         with self.unit_of_work() as repository:
             repository.datasets.save(dataset)
         return dataset
@@ -260,7 +260,7 @@ class DatasetService(BaseService):
 
         if commit_requested:
             primary_question = self.questions.get_question(dataset.primary_question_id)
-            _ensure_primary_question_active(primary_question)
+            ensure_primary_question_active(primary_question)
 
         should_refresh_manifest = (
             commit_manifest is not None or question_links is not None or commit_requested
@@ -295,11 +295,11 @@ class DatasetService(BaseService):
                     source_session_id=base_manifest.source_session_id,
                 )
 
-            resolved_manifest = _build_commit_manifest(
+            resolved_manifest = build_commit_manifest(
                 base_manifest,
                 dataset.question_links,
             )
-            self._ensure_source_session_valid(
+            self.validate_source_session(
                 resolved_manifest.source_session_id, dataset.project_id
             )
             if (
@@ -310,12 +310,12 @@ class DatasetService(BaseService):
                 raise ValidationError(
                     "At least one file or external artifact is required to commit a dataset."
                 )
-            resolved_commit_hash = _compute_commit_hash(resolved_manifest)
-            _validate_commit_hash(commit_hash, resolved_commit_hash)
+            resolved_commit_hash = compute_commit_hash(resolved_manifest)
+            validate_commit_hash(commit_hash, resolved_commit_hash)
             dataset.commit_manifest = resolved_manifest
             dataset.commit_hash = resolved_commit_hash
         else:
-            _validate_commit_hash(commit_hash, _compute_commit_hash(dataset.commit_manifest))
+            validate_commit_hash(commit_hash, compute_commit_hash(dataset.commit_manifest))
         if status is not None:
             dataset.status = status
         if resolved_terminal_reason is not None:
@@ -372,9 +372,10 @@ class DatasetService(BaseService):
         if analyses:
             raise ValidationError("Dataset cannot be deleted while analyses reference it.")
 
-    def _ensure_source_session_valid(
+    def validate_source_session(
         self, source_session_id: UUID | None, project_id: UUID
     ) -> None:
+        """Validate an optional dataset source session without writing."""
         if source_session_id is None:
             return
         session = self.sessions.get_session(source_session_id)

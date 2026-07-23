@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import base64
 import binascii
+import json
 import math
 import re
 from collections.abc import Mapping
@@ -1147,6 +1148,32 @@ class DataStore(_DomainModel):
         if (self.project_id is None) == (self.group_id is None):
             raise ValueError("DataStore must be scoped to exactly one of project_id or group_id.")
         return self
+
+
+class EvidenceBundleRecord(_DomainModel):
+    """Durable idempotency record for an atomic evidence-bundle command."""
+
+    bundle_id: UUID
+    project_id: UUID
+    created_by: str = Field(min_length=1, max_length=255)
+    idempotency_key: str = Field(min_length=1, max_length=200)
+    request_fingerprint: str = Field(pattern=r"^[0-9a-f]{64}$")
+    result: dict[str, Any]
+    created_at: datetime = Field(default_factory=utc_now)
+
+    @field_validator("created_by", "idempotency_key", mode="before")
+    @classmethod
+    def _normalize_required_text(cls, value: object) -> object:
+        return value.strip() if isinstance(value, str) else value
+
+    @field_validator("result")
+    @classmethod
+    def _result_must_be_json_safe(cls, value: dict[str, Any]) -> dict[str, Any]:
+        try:
+            json.dumps(value, allow_nan=False)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("Evidence bundle result must be JSON-safe.") from exc
+        return value
 
 
 class Visualization(_DomainModel):

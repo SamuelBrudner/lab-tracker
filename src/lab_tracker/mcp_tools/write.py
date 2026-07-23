@@ -472,13 +472,20 @@ def lab_tracker_record_evidence_bundle(
     dry_run: bool = True,
     idempotency_key: str | None = None,
 ) -> JsonObject:
-    """Preview a dataset-analysis-claim-visualization evidence bundle; defaults to dry-run.
+    """Preview or atomically record an evidence bundle; defaults to dry-run.
 
     dry_run defaults to true and only previews. Pass dry_run=false to commit ONLY when
     the user has explicitly asked you to record the bundle — the created dataset, analysis,
-    claim, and visualization are canonical graph records, not proposals for later review.
-    With dry_run=false this still writes only through the existing strict create/upload API
-    endpoints and returns created or reused stable IDs.
+    claim, visualization, and source note are canonical graph records, not proposals for
+    later review. A non-blank idempotency_key is required whenever dry_run=false; an
+    identical replay reuses the first result and conflicting key reuse is rejected.
+
+    Component inputs remain flat MCP objects. Supply dataset_id, analysis_id, claim_id,
+    viz_id/visualization_id, or note_id to reuse an existing component; otherwise supply
+    that component's create fields. With dry_run=false the graph records are committed
+    through one atomic bundle endpoint. A requested local visualization upload is a
+    client-side follow-up after that commit; an attachment failure is reported explicitly
+    and does not roll the graph records back.
     """
     return _write_tool(
         "lab_tracker_record_evidence_bundle",

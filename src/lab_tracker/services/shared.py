@@ -343,7 +343,7 @@ def _is_question_ancestor(
     return False
 
 
-def _ensure_primary_question_active(question: Question) -> None:
+def ensure_primary_question_active(question: Question) -> None:
     if question.status != QuestionStatus.ACTIVE:
         raise ValidationError("Primary question must be active to commit a dataset.")
 
@@ -538,7 +538,7 @@ def _manifest_input_with_source(
     )
 
 
-def _build_commit_manifest(
+def build_commit_manifest(
     manifest: DatasetCommitManifestInput | DatasetCommitManifest | None,
     question_links: list[QuestionLink],
 ) -> DatasetCommitManifest:
@@ -569,7 +569,7 @@ def _build_commit_manifest(
     )
 
 
-def _validate_commit_hash(provided: str | None, expected: str) -> None:
+def validate_commit_hash(provided: str | None, expected: str) -> None:
     if provided is None:
         return
     ensure_non_empty(provided, "commit_hash")
@@ -580,7 +580,7 @@ def _validate_commit_hash(provided: str | None, expected: str) -> None:
 _ROLE_ORDER = {QuestionLinkRole.PRIMARY.value: 0, QuestionLinkRole.SECONDARY.value: 1}
 
 
-def _manifest_payload(manifest: DatasetCommitManifest) -> dict[str, object]:
+def dataset_manifest_payload(manifest: DatasetCommitManifest) -> dict[str, object]:
     files = sorted(
         ({"path": file.path, "checksum": file.checksum} for file in manifest.files),
         key=lambda item: (item["path"], item["checksum"]),
@@ -637,7 +637,7 @@ def _external_artifacts_payload(
     )
 
 
-def _compute_commit_hash(manifest: DatasetCommitManifest) -> str:
-    payload = _manifest_payload(manifest)
+def compute_commit_hash(manifest: DatasetCommitManifest) -> str:
+    payload = dataset_manifest_payload(manifest)
     encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()

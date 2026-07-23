@@ -1103,6 +1103,42 @@ class DataStoreModel(Base):
     )
 
 
+class EvidenceBundleModel(Base):
+    __tablename__ = "evidence_bundles"
+    __table_args__ = (
+        UniqueConstraint(
+            "project_id",
+            "created_by",
+            "idempotency_key",
+            name="uq_evidence_bundles_project_creator_key",
+        ),
+    )
+
+    bundle_id: Mapped[UUID] = mapped_column(
+        GUID,
+        primary_key=True,
+        default=uuid4,
+    )
+    project_id: Mapped[UUID] = mapped_column(
+        GUID,
+        ForeignKey("projects.project_id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    created_by: Mapped[str] = mapped_column(String(255), nullable=False)
+    idempotency_key: Mapped[str] = mapped_column(String(200), nullable=False)
+    request_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
+    result: Mapped[dict[str, object]] = mapped_column(
+        JSON,
+        nullable=False,
+        default=dict,
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        UtcDateTime,
+        nullable=False,
+        default=_utc_now,
+    )
+
+
 class GoalModel(Base):
     __tablename__ = "goals"
 

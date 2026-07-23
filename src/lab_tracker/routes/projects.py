@@ -17,7 +17,7 @@ from lab_tracker.db_models import (
     DatasetFileModel,
     DatasetModel,
     NoteModel,
-    VisualizationModel,
+    ProjectModel,
 )
 from lab_tracker.db_types import ensure_uuid
 from lab_tracker.errors import NotFoundError
@@ -52,6 +52,7 @@ from .shared import (
     repository_from_request,
     validate_pagination,
 )
+from .visualizations import _locked_visualization_rows
 
 _logger = logging.getLogger(__name__)
 
@@ -158,6 +159,25 @@ def build_projects_router(api: LabTrackerAPI) -> APIRouter:
         db_session = db_session_from_request(request)
         file_storage_backend = file_storage_from_request(request)
         raw_note_storage = request.app.state.raw_note_storage
+        locked_project = db_session.scalar(
+            select(ProjectModel)
+            .where(ProjectModel.project_id == str(project_id))
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+        if locked_project is None:
+            raise NotFoundError("Project does not exist.")
+        db_session.scalars(
+            select(AnalysisModel)
+            .where(AnalysisModel.project_id == str(project_id))
+            .order_by(AnalysisModel.analysis_id)
+            .with_for_update(of=AnalysisModel)
+            .execution_options(populate_existing=True)
+        ).all()
+        visualization_rows = _locked_visualization_rows(
+            db_session,
+            project_id=project_id,
+        )
         dataset_file_storage_ids = [
             ensure_uuid(value)
             for value in db_session.scalars(
@@ -176,18 +196,9 @@ def build_projects_router(api: LabTrackerAPI) -> APIRouter:
             )
         ]
         visualization_storage_ids = [
-            ensure_uuid(value)
-            for value in db_session.scalars(
-                select(VisualizationModel.asset_storage_id)
-                .join(
-                    AnalysisModel,
-                    AnalysisModel.analysis_id == VisualizationModel.analysis_id,
-                )
-                .where(
-                    AnalysisModel.project_id == str(project_id),
-                    VisualizationModel.asset_storage_id.is_not(None),
-                )
-            )
+            ensure_uuid(row.asset_storage_id)
+            for row in visualization_rows
+            if row.asset_storage_id is not None
         ]
         project = request_api.delete_project(project_id, actor=actor)
         db_session.flush()
