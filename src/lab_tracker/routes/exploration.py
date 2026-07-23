@@ -26,13 +26,12 @@ from lab_tracker.schemas import (
 
 from .shared import (
     CreatedByFilter,
-    accessible_project_ids_from_request,
     actor_from_request,
     api_from_request,
     ensure_project_read,
+    handlers_from_request,
     list_response,
     record_usage_view,
-    repository_from_request,
     validate_pagination,
 )
 
@@ -83,14 +82,9 @@ def build_exploration_router(api: LabTrackerAPI) -> APIRouter:
         offset: int = 0,
     ):
         validate_pagination(limit, offset)
-        if project_id is not None:
-            ensure_project_read(request, project_id)
-            project_ids = None
-        else:
-            project_ids = accessible_project_ids_from_request(request)
-        nodes, total = repository_from_request(request).query_exploration_nodes(
+        page = handlers_from_request(request).catalogs.list_exploration_nodes(
+            actor=actor_from_request(request),
             project_id=project_id,
-            project_ids=project_ids,
             node_type=node_type.value if node_type is not None else None,
             status=status.value if status is not None else None,
             target_entity_type=(
@@ -101,7 +95,12 @@ def build_exploration_router(api: LabTrackerAPI) -> APIRouter:
             limit=limit,
             offset=offset,
         )
-        return list_response(nodes, limit=limit, offset=offset, total=total)
+        return list_response(
+            page.items,
+            limit=limit,
+            offset=offset,
+            total=page.total,
+        )
 
     @router.get("/exploration-nodes/{node_id}", response_model=Envelope[ExplorationNode])
     def get_exploration_node(node_id: UUID, request: Request):
