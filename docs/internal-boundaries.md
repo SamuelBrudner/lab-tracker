@@ -173,6 +173,34 @@ enforces that routes import neither SQLAlchemy nor persistence implementations,
 cannot recover raw request session/repository state, and use the typed boundary
 for the migrated surfaces.
 
+The application modules own narrow structural `Protocol` ports beside each
+consumer. `CatalogQueries`, `ContextQueries`, file commands, managed deletions,
+decision-context assembly, and project-graph projection name only the
+capabilities they call. The SQLAlchemy adapter satisfies those ports
+structurally; it does not inherit the broad `LabTrackerRepository` protocol.
+Broad entity-repository attributes are read-only protocol properties so focused
+implementations remain covariant. `tests/typing/contracts.py` makes the adapter,
+application facade, graph collaborators, and provider factories pass these
+ports at compile time.
+
+Graph generation, review, commit, and scheduling follow the same rule. Each
+coordinator receives lifecycle-specific roles, and only the commit coordinator
+receives the graph patch applier. Provider clients and their
+`Callable[[Settings], GraphDraftClient]` factory stay typed from app startup
+through request-state helpers and background dispatch. The compatibility API
+uses explicit signatures matching `GraphDraftService`, including keyword-only
+parameters and tri-state patch defaults.
+
+Run the incremental strict boundary locally with:
+
+```bash
+uv run mypy
+```
+
+CI runs this alongside Ruff. The target list is intentionally incremental:
+expand it as additional consumers acquire local ports rather than weakening
+strictness for the existing boundary.
+
 ## Repository Layout
 
 The SQLAlchemy repository is now split into focused modules under

@@ -7,7 +7,7 @@ import json
 import math
 from collections.abc import Iterable, Mapping
 from enum import Enum
-from typing import TYPE_CHECKING, TypeVar
+from typing import Protocol, TypeVar
 from uuid import UUID
 
 from lab_tracker.auth import LOCAL_AUTH_USER_ID, AuthContext, Role
@@ -35,11 +35,9 @@ from lab_tracker.models import (
 from lab_tracker.patching import NOT_PROVIDED, NotProvided, PatchValue, is_provided
 from lab_tracker.provenance_ingestion import external_artifacts_from_metadata
 
-if TYPE_CHECKING:
-    from lab_tracker.repository import LabTrackerRepository
-
 WRITE_ROLES = {Role.ADMIN, Role.EDITOR}
 StatusT = TypeVar("StatusT", bound=Enum)
+EntityT = TypeVar("EntityT")
 
 # Free-form note metadata convention for marking a captured note as a meeting.
 # Stored under the existing notes.metadata JSON column, so this needs no schema
@@ -47,6 +45,10 @@ StatusT = TypeVar("StatusT", bound=Enum)
 # the review nudge all agree on the exact key/value.
 NOTE_TYPE_METADATA_KEY = "note_type"
 MEETING_NOTE_TYPE = "meeting"
+
+
+class UserExistenceReader(Protocol):
+    def user_exists(self, user_id: UUID) -> bool: ...
 
 
 def actor_user_id(actor: AuthContext | None) -> str | None:
@@ -57,7 +59,7 @@ def actor_user_id(actor: AuthContext | None) -> str | None:
 
 def actor_user_fk(
     actor: AuthContext | None,
-    repository: LabTrackerRepository,
+    repository: UserExistenceReader,
 ) -> UUID | None:
     if actor is None or actor.user_id == LOCAL_AUTH_USER_ID:
         return None
@@ -196,7 +198,11 @@ def note_matches_substring(note: Note, query: str) -> bool:
     return note.transcribed_text is not None and needle in note.transcribed_text.casefold()
 
 
-def _get_or_raise(store: dict[UUID, object], entity_id: UUID, label: str):
+def _get_or_raise(
+    store: Mapping[UUID, EntityT],
+    entity_id: UUID,
+    label: str,
+) -> EntityT:
     try:
         return store[entity_id]
     except KeyError as exc:
@@ -601,7 +607,9 @@ def _manifest_input_with_source(
     source_session_id: UUID,
 ) -> DatasetCommitManifestInput:
     if isinstance(manifest, DatasetCommitManifest):
-        manifest_input = _manifest_input_from_commit(manifest)
+        manifest_input: DatasetCommitManifestInput | None = _manifest_input_from_commit(
+            manifest
+        )
     else:
         manifest_input = manifest
     if manifest_input is None:

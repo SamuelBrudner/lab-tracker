@@ -6,7 +6,7 @@ import hashlib
 import time
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any
+from typing import Any, Protocol
 from uuid import UUID, uuid4
 
 from lab_tracker.auth import AuthContext
@@ -16,6 +16,7 @@ from lab_tracker.graph_drafting import (
     BATCH_PROMPT_VERSION,
     PROMPT_VERSION,
     PROVIDER,
+    GraphDraftClient,
     GraphDraftingError,
 )
 from lab_tracker.models import (
@@ -24,19 +25,113 @@ from lab_tracker.models import (
     GraphChangeSetStatus,
     GraphDraftMode,
     Note,
+    NoteRawAsset,
     NoteStatus,
     utc_now,
 )
 from lab_tracker.services import graph_draft_batch_policy as batch_policy
 from lab_tracker.services.base import BaseService, ServiceContext
-from lab_tracker.services.graph_draft_context import GraphContextBuilder
-from lab_tracker.services.graph_draft_records import GraphDraftRecords
-from lab_tracker.services.graph_draft_validation import GraphPatchValidator, string_list
-from lab_tracker.services.note_service import NoteService
-from lab_tracker.services.project_authorization import ProjectAuthorizationPolicy
-from lab_tracker.services.shared import actor_user_fk, actor_user_id
+from lab_tracker.services.graph_draft_validation import string_list
+from lab_tracker.services.shared import UserExistenceReader, actor_user_fk, actor_user_id
 
 DEFAULT_BATCH_RETRY_ATTEMPTS = 3
+
+
+class GenerationRecords(Protocol):
+    def save_graph_change_set(self, change_set: GraphChangeSet) -> None: ...
+
+    def list_graph_change_sets(
+        self,
+        *,
+        draft_mode: GraphDraftMode | None = None,
+        batch_key: str | None = None,
+    ) -> list[GraphChangeSet]: ...
+
+
+class GenerationNotes(Protocol):
+    def get_note(self, note_id: UUID) -> Note: ...
+
+    def download_note_raw(self, note_id: UUID) -> tuple[NoteRawAsset, bytes]: ...
+
+
+class GenerationAuthorization(Protocol):
+    def require_contributor(
+        self,
+        project_id: UUID,
+        *,
+        actor: AuthContext | None,
+    ) -> None: ...
+
+
+class GenerationContextBuilder(Protocol):
+    def prepare_note_sources_for_graph_draft(
+        self,
+        note_id: UUID,
+        *,
+        mode: GraphDraftMode,
+    ) -> dict[str, Any]: ...
+
+    def build_graph_context_packet(
+        self,
+        note: Note,
+        *,
+        source_notes: list[Note],
+        user_hint: str | None,
+        actor: AuthContext | None,
+    ) -> dict[str, Any]: ...
+
+    def image_only_context_packet(
+        self,
+        note: Note,
+        *,
+        source_notes: list[Note],
+        user_hint: str | None,
+    ) -> dict[str, Any]: ...
+
+    def build_batch_graph_context(
+        self,
+        notes: list[Note],
+        *,
+        window: tuple[datetime, datetime] | None,
+        actor: AuthContext | None,
+        batch_note_limit: int,
+    ) -> dict[str, Any]: ...
+
+
+class GenerationPatchValidator(Protocol):
+    def validate_top_level(self, graph_patch: dict[str, Any]) -> None: ...
+
+    def operations_from_graph_patch(
+        self,
+        change_set: GraphChangeSet,
+        graph_patch: dict[str, Any],
+    ) -> list[GraphChangeOperation]: ...
+
+
+class DraftFromNoteCallable(Protocol):
+    def __call__(
+        self,
+        *,
+        graph_context: dict[str, Any],
+        user_hint: str | None,
+        draft_mode: str,
+        source_artifacts: list[dict[str, Any]],
+        image_bytes: bytes | None,
+        image_content_type: str | None,
+        extra_images: list[dict[str, Any]],
+    ) -> dict[str, Any]: ...
+
+
+class DraftFromImageCallable(Protocol):
+    def __call__(
+        self,
+        *,
+        image_bytes: bytes,
+        content_type: str,
+        graph_context: dict[str, Any],
+        user_hint: str | None,
+        draft_mode: str,
+    ) -> dict[str, Any]: ...
 
 
 @dataclass(frozen=True)
@@ -57,11 +152,11 @@ class GraphDraftGenerationCoordinator(BaseService):
         self,
         context: ServiceContext,
         *,
-        records: GraphDraftRecords,
-        notes: NoteService,
-        authorization: ProjectAuthorizationPolicy,
-        context_builder: GraphContextBuilder,
-        patch_validator: GraphPatchValidator,
+        records: GenerationRecords,
+        notes: GenerationNotes,
+        authorization: GenerationAuthorization,
+        context_builder: GenerationContextBuilder,
+        patch_validator: GenerationPatchValidator,
     ) -> None:
         super().__init__(context)
         self.records = records
@@ -70,11 +165,17 @@ class GraphDraftGenerationCoordinator(BaseService):
         self.context_builder = context_builder
         self.patch_validator = patch_validator
 
+    @property
+    def user_reader(self) -> UserExistenceReader:
+        """Expose only the lookup needed to attribute generated proposals."""
+
+        return self._context.active_repository()
+
     def create_graph_draft_from_note(
         self,
         note_id: UUID,
         *,
-        draft_client: Any,
+        draft_client: GraphDraftClient,
         mode: GraphDraftMode = GraphDraftMode.GRAPH_CONTEXT,
         user_hint: str | None = None,
         actor: AuthContext | None = None,
@@ -113,7 +214,7 @@ class GraphDraftGenerationCoordinator(BaseService):
             draft_mode=mode,
             context_packet=context_packet,
             created_by=actor_user_id(actor),
-            created_by_user_id=actor_user_fk(actor, self.repository),
+            created_by_user_id=actor_user_fk(actor, self.user_reader),
         )
         self.records.save_graph_change_set(change_set)
         try:
@@ -150,7 +251,7 @@ class GraphDraftGenerationCoordinator(BaseService):
         self,
         note_id: UUID,
         *,
-        draft_client: Any,
+        draft_client: GraphDraftClient,
         actor: AuthContext | None = None,
     ) -> GraphChangeSet:
         note = self.notes.get_note(note_id)
@@ -180,7 +281,7 @@ class GraphDraftGenerationCoordinator(BaseService):
             draft_mode=GraphDraftMode.GRAPH_CONTEXT,
             context_packet=context_packet,
             created_by=actor_user_id(actor),
-            created_by_user_id=actor_user_fk(actor, self.repository),
+            created_by_user_id=actor_user_fk(actor, self.user_reader),
         )
         self.records.save_graph_change_set(change_set)
         try:
@@ -212,7 +313,7 @@ class GraphDraftGenerationCoordinator(BaseService):
         self,
         notes: list[Note],
         *,
-        draft_client: Any,
+        draft_client: GraphDraftClient,
         user_hint: str | None = None,
         actor: AuthContext | None = None,
         window: tuple[datetime, datetime] | None = None,
@@ -286,7 +387,7 @@ class GraphDraftGenerationCoordinator(BaseService):
             draft_mode=GraphDraftMode.GRAPH_BATCH,
             context_packet=context_packet,
             created_by=actor_user_id(actor),
-            created_by_user_id=actor_user_fk(actor, self.repository),
+            created_by_user_id=actor_user_fk(actor, self.user_reader),
             review_assignee=review_assignee,
             review_assignee_user_id=review_assignee_user_id,
         )
@@ -357,7 +458,7 @@ class GraphDraftGenerationCoordinator(BaseService):
 
     @staticmethod
     def _ensure_draft_client_allowed_here(
-        draft_client: Any,
+        draft_client: GraphDraftClient,
         *,
         actor: AuthContext | None,
     ) -> None:
@@ -374,7 +475,7 @@ class GraphDraftGenerationCoordinator(BaseService):
         change_set: GraphChangeSet,
         *,
         user_hint: str,
-        draft_client: Any,
+        draft_client: GraphDraftClient,
         actor: AuthContext | None,
         extra_images: list[dict[str, Any]],
     ) -> GeneratedDraftProposal:
@@ -477,7 +578,7 @@ class GraphDraftGenerationCoordinator(BaseService):
         self,
         notes: list[Note],
         *,
-        window: tuple[Any, Any] | None = None,
+        window: tuple[datetime, datetime] | None = None,
         actor: AuthContext | None = None,
     ) -> dict[str, Any]:
         return self.context_builder.build_batch_graph_context(
@@ -489,7 +590,7 @@ class GraphDraftGenerationCoordinator(BaseService):
 
     @staticmethod
     def _draft_graph_patch(
-        draft_client: Any,
+        draft_client: GraphDraftClient,
         *,
         graph_context: dict[str, Any],
         user_hint: str | None,
@@ -499,7 +600,11 @@ class GraphDraftGenerationCoordinator(BaseService):
         image_content_type: str | None,
         extra_images: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
-        draft_from_note = getattr(draft_client, "draft_from_note", None)
+        draft_from_note: DraftFromNoteCallable | None = getattr(
+            draft_client,
+            "draft_from_note",
+            None,
+        )
         if callable(draft_from_note):
             return draft_from_note(
                 graph_context=graph_context,
@@ -510,7 +615,11 @@ class GraphDraftGenerationCoordinator(BaseService):
                 image_content_type=image_content_type,
                 extra_images=extra_images or [],
             )
-        draft_from_image = getattr(draft_client, "draft_from_image", None)
+        draft_from_image: DraftFromImageCallable | None = getattr(
+            draft_client,
+            "draft_from_image",
+            None,
+        )
         if callable(draft_from_image) and image_bytes and image_content_type:
             return draft_from_image(
                 image_bytes=image_bytes,

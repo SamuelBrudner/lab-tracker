@@ -13,9 +13,7 @@ from starlette.requests import Request
 from starlette.responses import Response
 
 from lab_tracker.api import LabTrackerAPI
-from lab_tracker.config import get_settings
 from lab_tracker.errors import ValidationError
-from lab_tracker.graph_drafting import make_graph_draft_client
 from lab_tracker.models import (
     EntityType,
     Note,
@@ -40,6 +38,7 @@ from lab_tracker.upload_security import (
     validate_upload_content_type,
 )
 
+from .graph_draft_clients import draft_client_from_request as _transcription_client_from_request
 from .shared import (
     CreatedByFilter,
     actor_from_request,
@@ -370,11 +369,3 @@ def _optional_epoch_ms(value: object) -> str | None:
     if milliseconds < 0:
         raise ValidationError("source_file_last_modified_ms must be non-negative.")
     return str(milliseconds)
-
-
-def _transcription_client_from_request(request: Request):
-    settings = getattr(request.app.state, "settings", None) or get_settings()
-    factory = getattr(request.app.state, "graph_draft_client_factory", None)
-    if callable(factory):
-        return factory(settings)
-    return make_graph_draft_client(settings)

@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime
-from typing import Any
+from typing import TypeVar
 from uuid import UUID, uuid4
 
 from lab_tracker.auth import AuthContext
+from lab_tracker.config import Settings
 from lab_tracker.errors import AuthError, NotFoundError, ValidationError
+from lab_tracker.graph_drafting import GraphDraftClient, GraphDraftClientFactory
 from lab_tracker.models import (
     GraphChangeSetStatus,
     GraphDraftBatchRun,
@@ -22,15 +24,30 @@ from lab_tracker.models import (
 from lab_tracker.patching import NOT_PROVIDED, PatchValue, is_provided
 from lab_tracker.services import graph_draft_batch_policy as batch_policy
 from lab_tracker.services.base import BaseService, ServiceContext
-from lab_tracker.services.graph_draft_generation import GraphDraftGenerationCoordinator
-from lab_tracker.services.graph_draft_records import GraphDraftRecords
-from lab_tracker.services.note_service import NoteService
-from lab_tracker.services.project_authorization import ProjectAuthorizationPolicy
-from lab_tracker.services.project_service import ProjectService
-from lab_tracker.services.provenance_link_service import ProvenanceLinkService
+from lab_tracker.services.graph_draft_scheduling_ports import (
+    BatchDraftGenerator,
+    SchedulingAuthorization,
+    SchedulingNotes,
+    SchedulingProjects,
+    SchedulingProvenanceLinks,
+    SchedulingRecords,
+    SchedulingRepository,
+)
 from lab_tracker.services.shared import actor_user_fk, actor_user_id
 
 logger = logging.getLogger(__name__)
+SettingValueT = TypeVar("SettingValueT")
+
+
+def _validated_setting_patch(
+    value: PatchValue[SettingValueT | None],
+    field_name: str,
+) -> PatchValue[SettingValueT]:
+    if not is_provided(value):
+        return NOT_PROVIDED
+    if value is None:
+        raise ValidationError(f"{field_name} must not be null.")
+    return value
 
 
 class BatchSchedulingCoordinator(BaseService):
@@ -40,12 +57,12 @@ class BatchSchedulingCoordinator(BaseService):
         self,
         context: ServiceContext,
         *,
-        records: GraphDraftRecords,
-        generation: GraphDraftGenerationCoordinator,
-        projects: ProjectService,
-        notes: NoteService,
-        authorization: ProjectAuthorizationPolicy,
-        provenance_links: ProvenanceLinkService | None = None,
+        records: SchedulingRecords,
+        generation: BatchDraftGenerator,
+        projects: SchedulingProjects,
+        notes: SchedulingNotes,
+        authorization: SchedulingAuthorization,
+        provenance_links: SchedulingProvenanceLinks | None = None,
     ) -> None:
         super().__init__(context)
         self.records = records
@@ -55,6 +72,10 @@ class BatchSchedulingCoordinator(BaseService):
         self.authorization = authorization
         self.provenance_links = provenance_links
 
+    @property
+    def scheduling_repository(self) -> SchedulingRepository:
+        return self._context.active_repository()
+
     def get_graph_draft_batch_settings(
         self,
         project_id: UUID,
@@ -63,13 +84,13 @@ class BatchSchedulingCoordinator(BaseService):
         actor: AuthContext | None = None,
     ) -> GraphDraftBatchSettings:
         self.authorization.require_read(project_id, actor=actor)
-        settings = self.repository.get_graph_draft_batch_settings_by_project(
+        settings = self.scheduling_repository.get_graph_draft_batch_settings_by_project(
             project_id,
             user_id=user_id,
         )
         if settings is not None:
             return settings
-        default = self.repository.get_graph_draft_batch_settings_by_project(project_id)
+        default = self.scheduling_repository.get_graph_draft_batch_settings_by_project(project_id)
         return batch_policy.default_batch_settings(
             project_id=project_id,
             user_id=user_id,
@@ -88,15 +109,14 @@ class BatchSchedulingCoordinator(BaseService):
         user_id: PatchValue[UUID | None] = NOT_PROVIDED,
         actor: AuthContext | None = None,
     ) -> GraphDraftBatchSettings:
-        for field_name, value in (
-            ("enabled", enabled),
-            ("cadence_minutes", cadence_minutes),
-            ("run_at_local_time", run_at_local_time),
-            ("timezone_name", timezone_name),
-            ("user_id", user_id),
-        ):
-            if is_provided(value) and value is None:
-                raise ValidationError(f"{field_name} must not be null.")
+        enabled = _validated_setting_patch(enabled, "enabled")
+        cadence_minutes = _validated_setting_patch(cadence_minutes, "cadence_minutes")
+        run_at_local_time = _validated_setting_patch(
+            run_at_local_time,
+            "run_at_local_time",
+        )
+        timezone_name = _validated_setting_patch(timezone_name, "timezone_name")
+        user_id = _validated_setting_patch(user_id, "user_id")
         resolved_user_id = user_id if is_provided(user_id) else None
         # Contributors may schedule their own project's daily batch -- the
         # project-level default (user_id is None) and their own per-user
@@ -110,12 +130,14 @@ class BatchSchedulingCoordinator(BaseService):
             self.authorization.require_owner(project_id, actor=actor)
         else:
             self.authorization.require_contributor(project_id, actor=actor)
-        settings = self.repository.get_graph_draft_batch_settings_by_project(
+        settings = self.scheduling_repository.get_graph_draft_batch_settings_by_project(
             project_id,
             user_id=resolved_user_id,
         )
         if settings is None:
-            default = self.repository.get_graph_draft_batch_settings_by_project(project_id)
+            default = self.scheduling_repository.get_graph_draft_batch_settings_by_project(
+                project_id
+            )
             settings = batch_policy.default_batch_settings(
                 project_id=project_id,
                 user_id=resolved_user_id,
@@ -156,15 +178,15 @@ class BatchSchedulingCoordinator(BaseService):
         )
         settings.updated_at = utc_now()
         settings.updated_by = actor_user_id(actor)
-        with self.unit_of_work() as repository:
-            repository.graph_draft_batch_settings.save(settings)
+        with self.unit_of_work():
+            self.scheduling_repository.graph_draft_batch_settings.save(settings)
         return settings
 
     def run_graph_draft_batch_for_project(
         self,
         project_id: UUID,
         *,
-        draft_client: Any,
+        draft_client: GraphDraftClient,
         since: datetime | None = None,
         until: datetime | None = None,
         trigger: GraphDraftBatchTrigger = GraphDraftBatchTrigger.MANUAL,
@@ -185,7 +207,7 @@ class BatchSchedulingCoordinator(BaseService):
             review_assignee_user_id=review_assignee_user_id,
             initial_status=GraphDraftBatchRunStatus.RUNNING,
         )
-        existing = self.repository.get_graph_draft_batch_run_by_key(run.batch_key)
+        existing = self.scheduling_repository.get_graph_draft_batch_run_by_key(run.batch_key)
         if existing is not None:
             return existing
         # Independent, best-effort deterministic stage: propose content-hash
@@ -198,15 +220,15 @@ class BatchSchedulingCoordinator(BaseService):
                 logger.exception(
                     "provenance-link detector failed for project %s", project_id
                 )
-        with self.unit_of_work() as repository:
-            repository.graph_draft_batch_runs.save(run)
+        with self.unit_of_work():
+            self.scheduling_repository.graph_draft_batch_runs.save(run)
         if not notes:
             run.status = GraphDraftBatchRunStatus.SKIPPED
             run.summary = "No staged notes landed in this batch window."
             run.finished_at = utc_now()
             run.updated_at = run.finished_at
-            with self.unit_of_work() as repository:
-                repository.graph_draft_batch_runs.save(run)
+            with self.unit_of_work():
+                self.scheduling_repository.graph_draft_batch_runs.save(run)
             return run
         try:
             change_set = self.generation.create_batch_graph_draft(
@@ -228,8 +250,8 @@ class BatchSchedulingCoordinator(BaseService):
             }
             run.finished_at = utc_now()
             run.updated_at = run.finished_at
-            with self.unit_of_work() as repository:
-                repository.graph_draft_batch_runs.save(run)
+            with self.unit_of_work():
+                self.scheduling_repository.graph_draft_batch_runs.save(run)
             return run
         run.change_set_id = change_set.change_set_id
         run.summary = change_set.summary
@@ -241,8 +263,8 @@ class BatchSchedulingCoordinator(BaseService):
         )
         run.finished_at = utc_now()
         run.updated_at = run.finished_at
-        with self.unit_of_work() as repository:
-            repository.graph_draft_batch_runs.save(run)
+        with self.unit_of_work():
+            self.scheduling_repository.graph_draft_batch_runs.save(run)
         return run
 
     def enqueue_graph_draft_batch_for_project(
@@ -269,11 +291,11 @@ class BatchSchedulingCoordinator(BaseService):
             review_assignee_user_id=review_assignee_user_id,
             initial_status=GraphDraftBatchRunStatus.PENDING,
         )
-        existing = self.repository.get_graph_draft_batch_run_by_key(run.batch_key)
+        existing = self.scheduling_repository.get_graph_draft_batch_run_by_key(run.batch_key)
         if existing is not None:
             return existing
-        with self.unit_of_work() as repository:
-            repository.graph_draft_batch_runs.save(run)
+        with self.unit_of_work():
+            self.scheduling_repository.graph_draft_batch_runs.save(run)
         return run
 
     def _prepare_graph_draft_batch_run(
@@ -303,7 +325,7 @@ class BatchSchedulingCoordinator(BaseService):
         now = batch_policy.as_utc(utc_now())
         requested_window_end = batch_policy.as_utc(until) if until is not None else now
         window_end = min(requested_window_end, now)
-        latest_success = self.repository.latest_successful_graph_draft_batch_run(
+        latest_success = self.scheduling_repository.latest_successful_graph_draft_batch_run(
             project_id,
             review_assignee_user_id=(
                 reviewer_filter.reviewer_user_id if reviewer_filter is not None else None
@@ -318,7 +340,7 @@ class BatchSchedulingCoordinator(BaseService):
             raise ValidationError("Batch window since must be before until.")
         continuing_auto_window = since is None and latest_success is not None
         already_drafted_note_ids = (
-            self.repository.successful_graph_draft_batch_source_note_ids_at_window_end(
+            self.scheduling_repository.successful_graph_draft_batch_source_note_ids_at_window_end(
                 project_id,
                 window_start,
                 review_assignee_user_id=reviewer.reviewer_user_id,
@@ -356,7 +378,7 @@ class BatchSchedulingCoordinator(BaseService):
             ),
             user_hint=user_hint.strip() if user_hint else None,
             created_by=actor_user_id(actor),
-            created_by_user_id=actor_user_fk(actor, self.repository),
+            created_by_user_id=actor_user_fk(actor, self.scheduling_repository),
             review_assignee=reviewer.reviewer,
             review_assignee_user_id=reviewer.reviewer_user_id,
         )
@@ -365,14 +387,14 @@ class BatchSchedulingCoordinator(BaseService):
     def process_next_graph_draft_batch_run(
         self,
         *,
-        draft_client_factory: Any,
-        app_settings: Any,
+        draft_client_factory: GraphDraftClientFactory,
+        app_settings: Settings,
         actor: AuthContext | None = None,
     ) -> GraphDraftBatchRun | None:
         claimed = self.claim_next_graph_draft_batch_run()
         if claimed is None:
             return None
-        draft_client = None
+        draft_client: GraphDraftClient | None = None
         try:
             draft_client = draft_client_factory(app_settings)
             return self.execute_graph_draft_batch_run(
@@ -394,8 +416,8 @@ class BatchSchedulingCoordinator(BaseService):
                     close()
 
     def claim_next_graph_draft_batch_run(self) -> GraphDraftBatchRun | None:
-        with self.unit_of_work() as repository:
-            return repository.claim_next_pending_graph_draft_batch_run(
+        with self.unit_of_work():
+            return self.scheduling_repository.claim_next_pending_graph_draft_batch_run(
                 claimed_at=utc_now(),
             )
 
@@ -403,19 +425,19 @@ class BatchSchedulingCoordinator(BaseService):
         self,
         run_id: UUID,
         *,
-        draft_client: Any,
+        draft_client: GraphDraftClient,
         actor: AuthContext | None = None,
     ) -> GraphDraftBatchRun:
         run = self.records.get_graph_draft_batch_run(run_id)
         if run.status == GraphDraftBatchRunStatus.PENDING:
-            with self.unit_of_work() as repository:
-                claimed = repository.graph_draft_batch_runs.get(run_id)
+            with self.unit_of_work():
+                claimed = self.scheduling_repository.graph_draft_batch_runs.get(run_id)
                 if claimed is None:
                     raise NotFoundError("Graph draft batch run does not exist.")
                 claimed.status = GraphDraftBatchRunStatus.RUNNING
                 claimed.started_at = utc_now()
                 claimed.updated_at = claimed.started_at
-                repository.graph_draft_batch_runs.save(claimed)
+                self.scheduling_repository.graph_draft_batch_runs.save(claimed)
                 run = claimed
         if run.status != GraphDraftBatchRunStatus.RUNNING:
             return run
@@ -425,8 +447,8 @@ class BatchSchedulingCoordinator(BaseService):
             run.summary = "No staged notes landed in this batch window."
             run.finished_at = utc_now()
             run.updated_at = run.finished_at
-            with self.unit_of_work() as repository:
-                repository.graph_draft_batch_runs.save(run)
+            with self.unit_of_work():
+                self.scheduling_repository.graph_draft_batch_runs.save(run)
             return run
         try:
             change_set = self.generation.create_batch_graph_draft(
@@ -456,8 +478,8 @@ class BatchSchedulingCoordinator(BaseService):
         )
         run.finished_at = utc_now()
         run.updated_at = run.finished_at
-        with self.unit_of_work() as repository:
-            repository.graph_draft_batch_runs.save(run)
+        with self.unit_of_work():
+            self.scheduling_repository.graph_draft_batch_runs.save(run)
         return run
 
     def get_graph_draft_batch_run(self, run_id: UUID) -> GraphDraftBatchRun:
@@ -490,8 +512,8 @@ class BatchSchedulingCoordinator(BaseService):
         }
         run.finished_at = utc_now()
         run.updated_at = run.finished_at
-        with self.unit_of_work() as repository:
-            repository.graph_draft_batch_runs.save(run)
+        with self.unit_of_work():
+            self.scheduling_repository.graph_draft_batch_runs.save(run)
         return run
 
     def _ensure_graph_draft_batch_settings_row(
@@ -502,15 +524,15 @@ class BatchSchedulingCoordinator(BaseService):
         user_id: UUID | None = None,
     ) -> None:
         if (
-            self.repository.get_graph_draft_batch_settings_by_project(
+            self.scheduling_repository.get_graph_draft_batch_settings_by_project(
                 project_id,
                 user_id=user_id,
             )
             is not None
         ):
             return
-        with self.unit_of_work() as repository:
-            repository.graph_draft_batch_settings.save(
+        with self.unit_of_work():
+            self.scheduling_repository.graph_draft_batch_settings.save(
                 batch_policy.default_batch_settings(
                     project_id=project_id,
                     user_id=user_id,
@@ -521,8 +543,8 @@ class BatchSchedulingCoordinator(BaseService):
     def run_due_graph_draft_batches(
         self,
         *,
-        draft_client_factory: Any,
-        app_settings: Any,
+        draft_client_factory: GraphDraftClientFactory,
+        app_settings: Settings,
         actor: AuthContext | None = None,
         now: datetime | None = None,
     ) -> list[GraphDraftBatchRun]:
@@ -551,8 +573,8 @@ class BatchSchedulingCoordinator(BaseService):
     def _dispatch_due_graph_draft_batches(
         self,
         *,
-        draft_client_factory: Any,
-        app_settings: Any,
+        draft_client_factory: GraphDraftClientFactory | None,
+        app_settings: Settings | None,
         actor: AuthContext | None,
         now: datetime | None,
         enqueue: bool,
@@ -560,7 +582,9 @@ class BatchSchedulingCoordinator(BaseService):
         if not self.authorization.has_global_admin(actor):
             raise AuthError("Only admins can run scheduled batch drafts.")
         current_time = batch_policy.as_utc(now or utc_now())
-        due_settings = self.repository.list_due_graph_draft_batch_settings(current_time)
+        due_settings = self.scheduling_repository.list_due_graph_draft_batch_settings(
+            current_time
+        )
         runs: list[GraphDraftBatchRun] = []
         for batch_settings in due_settings:
             if batch_settings.next_run_at is None:
@@ -571,13 +595,15 @@ class BatchSchedulingCoordinator(BaseService):
                 timezone_name=batch_settings.timezone_name,
                 now=current_time,
             )
-            with self.unit_of_work() as repository:
-                claimed_settings = repository.claim_due_graph_draft_batch_settings(
-                    batch_settings.settings_id,
-                    observed_next_run_at=batch_settings.next_run_at,
-                    next_run_at=claimed_next_run_at,
-                    updated_at=utc_now(),
-                    updated_by=actor_user_id(actor),
+            with self.unit_of_work():
+                claimed_settings = (
+                    self.scheduling_repository.claim_due_graph_draft_batch_settings(
+                        batch_settings.settings_id,
+                        observed_next_run_at=batch_settings.next_run_at,
+                        next_run_at=claimed_next_run_at,
+                        updated_at=utc_now(),
+                        updated_by=actor_user_id(actor),
+                    )
                 )
             if claimed_settings is None:
                 continue
@@ -589,15 +615,17 @@ class BatchSchedulingCoordinator(BaseService):
                 batch_settings.next_run_at = None
                 batch_settings.updated_at = utc_now()
                 batch_settings.updated_by = actor_user_id(actor)
-                with self.unit_of_work() as repository:
-                    repository.graph_draft_batch_settings.save(batch_settings)
+                with self.unit_of_work():
+                    self.scheduling_repository.graph_draft_batch_settings.save(
+                        batch_settings
+                    )
                 continue
             reviewers = self._scheduled_reviewers_for_settings(
                 batch_settings,
                 until=current_time,
             )
             for reviewer in reviewers:
-                draft_client = None
+                draft_client: GraphDraftClient | None = None
                 try:
                     if enqueue:
                         run = self.enqueue_graph_draft_batch_for_project(
@@ -609,6 +637,11 @@ class BatchSchedulingCoordinator(BaseService):
                             review_assignee_user_id=reviewer.reviewer_user_id,
                         )
                     else:
+                        if draft_client_factory is None or app_settings is None:
+                            raise RuntimeError(
+                                "Scheduled graph drafting requires a client factory "
+                                "and application settings."
+                            )
                         draft_client = draft_client_factory(app_settings)
                         run = self.run_graph_draft_batch_for_project(
                             batch_settings.project_id,
@@ -651,14 +684,14 @@ class BatchSchedulingCoordinator(BaseService):
         def note_is_new_for_reviewer(note: Note, reviewer: batch_policy.BatchReviewer) -> bool:
             key = (reviewer.reviewer, reviewer.reviewer_user_id)
             if key not in latest_by_reviewer:
-                latest = self.repository.latest_successful_graph_draft_batch_run(
+                latest = self.scheduling_repository.latest_successful_graph_draft_batch_run(
                     settings.project_id,
                     review_assignee_user_id=reviewer.reviewer_user_id,
                     review_assignee=reviewer.reviewer,
                 )
                 latest_by_reviewer[key] = latest
                 drafted_note_ids_by_reviewer[key] = (
-                    self.repository.successful_graph_draft_batch_source_note_ids_at_window_end(
+                    self.scheduling_repository.successful_graph_draft_batch_source_note_ids_at_window_end(
                         settings.project_id,
                         latest.window_end,
                         review_assignee_user_id=reviewer.reviewer_user_id,
@@ -699,7 +732,7 @@ class BatchSchedulingCoordinator(BaseService):
             return []
         explicit_user_ids = {
             row.user_id
-            for row in self.repository.list_graph_draft_batch_settings_for_project(
+            for row in self.scheduling_repository.list_graph_draft_batch_settings_for_project(
                 settings.project_id
             )
             if row.user_id is not None
@@ -732,7 +765,7 @@ class BatchSchedulingCoordinator(BaseService):
         review_assignee: str | None = None,
         review_assignee_user_id: UUID | None = None,
     ) -> GraphDraftBatchRun:
-        latest_success = self.repository.latest_successful_graph_draft_batch_run(
+        latest_success = self.scheduling_repository.latest_successful_graph_draft_batch_run(
             project_id,
             review_assignee_user_id=review_assignee_user_id,
             review_assignee=review_assignee,
@@ -740,6 +773,7 @@ class BatchSchedulingCoordinator(BaseService):
         window_start = batch_policy.as_utc(
             latest_success.window_end if latest_success is not None else datetime(1970, 1, 1)
         )
+        finished_at = utc_now()
         run = GraphDraftBatchRun(
             run_id=uuid4(),
             project_id=project_id,
@@ -761,13 +795,13 @@ class BatchSchedulingCoordinator(BaseService):
                 "category": "scheduler_error",
                 "message": str(error),
             },
-            finished_at=utc_now(),
+            finished_at=finished_at,
             created_by=actor_user_id(actor),
-            created_by_user_id=actor_user_fk(actor, self.repository),
+            created_by_user_id=actor_user_fk(actor, self.scheduling_repository),
             review_assignee=review_assignee,
             review_assignee_user_id=review_assignee_user_id,
         )
-        run.updated_at = run.finished_at
-        with self.unit_of_work() as repository:
-            repository.graph_draft_batch_runs.save(run)
+        run.updated_at = finished_at
+        with self.unit_of_work():
+            self.scheduling_repository.graph_draft_batch_runs.save(run)
         return run

@@ -7,6 +7,8 @@ from typing import Any
 from uuid import UUID
 
 from lab_tracker.auth import AuthContext
+from lab_tracker.config import Settings
+from lab_tracker.graph_drafting import GraphDraftClient, GraphDraftClientFactory
 from lab_tracker.models import (
     AcceptanceMode,
     GraphChangeOperationStatus,
@@ -58,7 +60,7 @@ class GraphDraftService:
         self,
         note_id: UUID,
         *,
-        draft_client: Any,
+        draft_client: GraphDraftClient,
         mode: GraphDraftMode = GraphDraftMode.GRAPH_CONTEXT,
         user_hint: str | None = None,
         actor: AuthContext | None = None,
@@ -75,7 +77,7 @@ class GraphDraftService:
         self,
         note_id: UUID,
         *,
-        draft_client: Any,
+        draft_client: GraphDraftClient,
         actor: AuthContext | None = None,
     ) -> GraphChangeSet:
         return self.generation.create_analysis_graph_draft_from_note(
@@ -88,7 +90,7 @@ class GraphDraftService:
         self,
         notes: list[Note],
         *,
-        draft_client: Any,
+        draft_client: GraphDraftClient,
         user_hint: str | None = None,
         actor: AuthContext | None = None,
         window: tuple[datetime, datetime] | None = None,
@@ -228,7 +230,7 @@ class GraphDraftService:
         *,
         feedback: str | None = None,
         inputs: RevisionInputs | None = None,
-        draft_client: Any,
+        draft_client: GraphDraftClient,
         actor: AuthContext | None = None,
     ) -> GraphChangeSet:
         return self.review.revise_graph_change_set(
@@ -269,7 +271,7 @@ class GraphDraftService:
         self,
         notes: list[Note],
         *,
-        window: tuple[Any, Any] | None = None,
+        window: tuple[datetime, datetime] | None = None,
         actor: AuthContext | None = None,
     ) -> dict[str, Any]:
         return self.generation.build_batch_graph_context(
@@ -316,7 +318,7 @@ class GraphDraftService:
         self,
         project_id: UUID,
         *,
-        draft_client: Any,
+        draft_client: GraphDraftClient,
         since: datetime | None = None,
         until: datetime | None = None,
         trigger: GraphDraftBatchTrigger = GraphDraftBatchTrigger.MANUAL,
@@ -363,8 +365,8 @@ class GraphDraftService:
     def process_next_graph_draft_batch_run(
         self,
         *,
-        draft_client_factory: Any,
-        app_settings: Any,
+        draft_client_factory: GraphDraftClientFactory,
+        app_settings: Settings,
         actor: AuthContext | None = None,
     ) -> GraphDraftBatchRun | None:
         return self.scheduling.process_next_graph_draft_batch_run(
@@ -380,7 +382,7 @@ class GraphDraftService:
         self,
         run_id: UUID,
         *,
-        draft_client: Any,
+        draft_client: GraphDraftClient,
         actor: AuthContext | None = None,
     ) -> GraphDraftBatchRun:
         return self.scheduling.execute_graph_draft_batch_run(
@@ -395,8 +397,8 @@ class GraphDraftService:
     def run_due_graph_draft_batches(
         self,
         *,
-        draft_client_factory: Any,
-        app_settings: Any,
+        draft_client_factory: GraphDraftClientFactory,
+        app_settings: Settings,
         actor: AuthContext | None = None,
         now: datetime | None = None,
     ) -> list[GraphDraftBatchRun]:

@@ -6,7 +6,7 @@ import logging
 import time
 from collections.abc import Callable
 from types import TracebackType
-from typing import Any, TypeVar
+from typing import Protocol, TypeVar
 from uuid import UUID
 
 from lab_tracker.api_parts import (
@@ -24,10 +24,12 @@ from lab_tracker.api_parts import (
     UsageApiMixin,
 )
 from lab_tracker.api_parts._base import _elapsed_ms, _uuid_attr
+from lab_tracker.auth import AuthContext
 from lab_tracker.config import Settings, get_settings
 from lab_tracker.models import (
     UsageEventOutcome,
     UsageEventResourceType,
+    UsageEventSurface,
     UsageEventVerb,
 )
 from lab_tracker.note_storage import LocalNoteStorage
@@ -66,7 +68,14 @@ from lab_tracker.services import (
 )
 
 _logger = logging.getLogger(__name__)
-ResponseT = TypeVar("ResponseT")
+
+
+class HttpResponse(Protocol):
+    status_code: int
+
+
+ResponseT = TypeVar("ResponseT", bound=HttpResponse)
+UsageResultT = TypeVar("UsageResultT")
 
 
 class LabTrackerAPI(
@@ -338,21 +347,43 @@ class LabTrackerAPI(
             return
         self._request_context.after_rollback_actions.append(action)
 
-    def record_usage_event(self, *args: Any, **kwargs: Any) -> Any:
-        return self.projects.record_usage_event(*args, **kwargs)
+    def record_usage_event(
+        self,
+        *,
+        verb: UsageEventVerb | str,
+        resource_type: UsageEventResourceType | str,
+        resource_id: UUID | None = None,
+        project_id: UUID | None = None,
+        actor: AuthContext | None = None,
+        outcome: UsageEventOutcome | str = UsageEventOutcome.OK,
+        duration_ms: int | None = None,
+        result_count: int | None = None,
+        surface: UsageEventSurface | str | None = None,
+    ) -> None:
+        self.projects.record_usage_event(
+            verb=verb,
+            resource_type=resource_type,
+            resource_id=resource_id,
+            project_id=project_id,
+            actor=actor,
+            outcome=outcome,
+            duration_ms=duration_ms,
+            result_count=result_count,
+            surface=surface,
+        )
 
     def _with_usage_event(
         self,
-        action: Callable[[], Any],
+        action: Callable[[], UsageResultT],
         *,
         verb: UsageEventVerb,
         resource_type: UsageEventResourceType,
-        actor: Any = None,
+        actor: AuthContext | None = None,
         resource_id: UUID | None = None,
         project_id: UUID | None = None,
         resource_id_attr: str | None = None,
         project_id_attr: str | None = "project_id",
-    ) -> Any:
+    ) -> UsageResultT:
         start = time.perf_counter()
         with self._service_context.application_transaction():
             try:

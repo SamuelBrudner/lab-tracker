@@ -3,14 +3,15 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from dataclasses import dataclass
+from functools import partial
 from typing import Protocol
 from uuid import UUID
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session as OrmSession
 
-from lab_tracker.api import LabTrackerAPI
 from lab_tracker.auth import AuthContext
 from lab_tracker.db_models import (
     AnalysisModel,
@@ -21,7 +22,6 @@ from lab_tracker.db_models import (
 )
 from lab_tracker.db_types import ensure_uuid
 from lab_tracker.errors import NotFoundError
-from lab_tracker.file_storage import FileStorageBackend
 from lab_tracker.models import Analysis, Dataset, Project, Visualization
 
 from . import file_commands
@@ -32,6 +32,60 @@ _logger = logging.getLogger(__name__)
 
 class DeleteStorage(Protocol):
     def delete(self, storage_id: UUID) -> None: ...
+
+
+class ManagedDeletionAccess(Protocol):
+    """Domain commands and transaction callbacks required by managed deletes."""
+
+    def require_project_owner(
+        self,
+        project_id: UUID,
+        *,
+        actor: AuthContext | None,
+    ) -> None: ...
+
+    def require_project_read(
+        self,
+        project_id: UUID,
+        *,
+        actor: AuthContext | None,
+    ) -> None: ...
+
+    def get_dataset(self, dataset_id: UUID) -> Dataset: ...
+
+    def get_analysis(self, analysis_id: UUID) -> Analysis: ...
+
+    def get_visualization(self, viz_id: UUID) -> Visualization: ...
+
+    def delete_project(
+        self,
+        project_id: UUID,
+        *,
+        actor: AuthContext | None,
+    ) -> Project: ...
+
+    def delete_dataset(
+        self,
+        dataset_id: UUID,
+        *,
+        actor: AuthContext | None,
+    ) -> Dataset: ...
+
+    def delete_analysis(
+        self,
+        analysis_id: UUID,
+        *,
+        actor: AuthContext | None,
+    ) -> Analysis: ...
+
+    def delete_visualization(
+        self,
+        viz_id: UUID,
+        *,
+        actor: AuthContext | None,
+    ) -> Visualization: ...
+
+    def run_after_commit(self, action: Callable[[], None]) -> None: ...
 
 
 def _delete_project_scoped_file(
@@ -55,9 +109,9 @@ def _delete_project_scoped_file(
 class ManagedDeletionCommands:
     """Deletes whose database cascade must coordinate with blob cleanup."""
 
-    api: LabTrackerAPI
+    api: ManagedDeletionAccess
     session: OrmSession
-    file_storage: FileStorageBackend
+    file_storage: DeleteStorage
     raw_note_storage: DeleteStorage
 
     def delete_project(
@@ -105,6 +159,7 @@ class ManagedDeletionCommands:
                     NoteModel.raw_storage_id.is_not(None),
                 )
             )
+            if value is not None
         ]
         visualization_storage_ids = [
             ensure_uuid(row.asset_storage_id)
@@ -115,21 +170,24 @@ class ManagedDeletionCommands:
         self.session.flush()
         for storage_id in dataset_file_storage_ids:
             self.api.run_after_commit(
-                lambda storage_id=storage_id: _delete_project_scoped_file(
+                partial(
+                    _delete_project_scoped_file,
                     self.file_storage,
                     storage_id,
                 )
             )
         for storage_id in raw_note_storage_ids:
             self.api.run_after_commit(
-                lambda storage_id=storage_id: _delete_project_scoped_file(
+                partial(
+                    _delete_project_scoped_file,
                     self.raw_note_storage,
                     storage_id,
                 )
             )
         for storage_id in visualization_storage_ids:
             self.api.run_after_commit(
-                lambda storage_id=storage_id: _delete_project_scoped_file(
+                partial(
+                    _delete_project_scoped_file,
                     self.file_storage,
                     storage_id,
                 )
@@ -156,7 +214,8 @@ class ManagedDeletionCommands:
         self.session.flush()
         for storage_id in storage_ids:
             self.api.run_after_commit(
-                lambda storage_id=storage_id: delete_stored_dataset_file(
+                partial(
+                    delete_stored_dataset_file,
                     self.file_storage,
                     storage_id,
                 )
@@ -192,7 +251,8 @@ class ManagedDeletionCommands:
         self.session.flush()
         for storage_id in storage_ids:
             self.api.run_after_commit(
-                lambda storage_id=storage_id: delete_stored_visualization_file(
+                partial(
+                    delete_stored_visualization_file,
                     self.file_storage,
                     storage_id,
                 )
@@ -218,7 +278,8 @@ class ManagedDeletionCommands:
         self.session.flush()
         if storage_id is not None:
             self.api.run_after_commit(
-                lambda storage_id=storage_id: delete_stored_visualization_file(
+                partial(
+                    delete_stored_visualization_file,
                     self.file_storage,
                     storage_id,
                 )

@@ -10,7 +10,8 @@ from __future__ import annotations
 
 import base64
 import json
-from typing import Any, Protocol, runtime_checkable
+from collections.abc import Callable
+from typing import Any, Protocol, TypeAlias, runtime_checkable
 
 import httpx
 
@@ -188,6 +189,20 @@ class GraphDraftClient(Protocol):
 
     def close(self) -> None:
         ...
+
+
+GraphDraftClientFactory: TypeAlias = Callable[[Settings], GraphDraftClient]
+
+
+class AudioTranscriber(Protocol):
+    def __call__(
+        self,
+        *,
+        audio_bytes: bytes,
+        filename: str,
+        content_type: str,
+        prompt: str | None,
+    ) -> dict[str, Any]: ...
 
 
 class OpenAIGraphDraftClient:
@@ -891,12 +906,28 @@ class AgenticGraphDraftClient:
         if callable(close):
             close()
 
-    def draft_from_note(self, **_kwargs: Any) -> dict[str, Any]:
+    def draft_from_note(
+        self,
+        *,
+        graph_context: dict[str, Any] | None = None,
+        user_hint: str | None = None,
+        draft_mode: str = "graph_context",
+        project_context: dict[str, Any] | None = None,
+        source_artifacts: list[dict[str, Any]] | None = None,
+        image_bytes: bytes | None = None,
+        image_content_type: str | None = None,
+        extra_images: list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
         raise GraphDraftingError(
             "Agentic graph drafting is only supported for background batch drafts."
         )
 
-    def draft_from_analysis_evidence(self, **_kwargs: Any) -> dict[str, Any]:
+    def draft_from_analysis_evidence(
+        self,
+        *,
+        evidence_text: str,
+        project_context: dict[str, Any],
+    ) -> dict[str, Any]:
         raise GraphDraftingError(
             "Agentic graph drafting is only supported for background batch drafts."
         )
@@ -924,7 +955,11 @@ class AgenticGraphDraftClient:
         content_type: str,
         prompt: str | None = None,
     ) -> dict[str, Any]:
-        transcribe = getattr(self._base_client, "transcribe_audio", None)
+        transcribe: AudioTranscriber | None = getattr(
+            self._base_client,
+            "transcribe_audio",
+            None,
+        )
         if not callable(transcribe):
             raise GraphDraftingError(
                 "The configured agentic base client does not support audio transcription."

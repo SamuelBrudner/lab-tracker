@@ -3,20 +3,46 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Protocol
 
 from sqlalchemy.orm import Session as OrmSession
 
-from lab_tracker.api import LabTrackerAPI
 from lab_tracker.artifact_resolution import ResolverRegistry
 from lab_tracker.config import Settings
-from lab_tracker.file_storage import FileStorageBackend
-from lab_tracker.note_storage import LocalNoteStorage
-from lab_tracker.repository import LabTrackerRepository
 
-from .catalog_queries import CatalogQueries
-from .context_queries import ContextQueries
-from .file_commands import DatasetFileCommands, VisualizationFileCommands
-from .managed_deletions import ManagedDeletionCommands
+from .catalog_queries import CatalogAccess, CatalogQueries, CatalogRepository
+from .context_queries import ContextAccess, ContextQueries, ContextRepository
+from .file_commands import (
+    DatasetFileCommands,
+    DatasetFileRepository,
+    FileCommandAccess,
+    FileStorage,
+    VisualizationFileCommands,
+)
+from .managed_deletions import (
+    DeleteStorage,
+    ManagedDeletionAccess,
+    ManagedDeletionCommands,
+)
+
+
+class RequestHandlerApi(
+    CatalogAccess,
+    ContextAccess,
+    FileCommandAccess,
+    ManagedDeletionAccess,
+    Protocol,
+):
+    """Aggregate of the narrow API roles bound to one request."""
+
+
+class RequestHandlerRepository(
+    CatalogRepository,
+    ContextRepository,
+    DatasetFileRepository,
+    Protocol,
+):
+    """Aggregate of repository roles used by request handlers."""
 
 
 @dataclass(frozen=True)
@@ -33,11 +59,11 @@ class RequestHandlers:
     def compose(
         cls,
         *,
-        api: LabTrackerAPI,
-        repository: LabTrackerRepository,
+        api: RequestHandlerApi,
+        repository: RequestHandlerRepository,
         session: OrmSession,
-        file_storage: FileStorageBackend,
-        raw_note_storage: LocalNoteStorage,
+        file_storage: FileStorage,
+        raw_note_storage: DeleteStorage,
         settings: Settings,
         resolver_registry: ResolverRegistry | None,
     ) -> RequestHandlers:

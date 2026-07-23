@@ -5,9 +5,8 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import AsyncIterator, Callable
-from contextlib import asynccontextmanager
+from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from dataclasses import dataclass
-from typing import Any
 
 from fastapi import FastAPI
 from sqlalchemy.engine import Engine
@@ -28,7 +27,7 @@ from lab_tracker.backup import database_lock_path
 from lab_tracker.config import Settings
 from lab_tracker.db import get_engine, get_session_factory
 from lab_tracker.file_storage import LocalFileStorageBackend
-from lab_tracker.graph_drafting import make_graph_draft_client
+from lab_tracker.graph_drafting import GraphDraftClientFactory, make_graph_draft_client
 from lab_tracker.logging import configure_logging
 from lab_tracker.note_storage import LocalNoteStorage
 from lab_tracker.process_lock import ProcessLock
@@ -52,7 +51,7 @@ class AppRuntime:
     file_storage_backend: LocalFileStorageBackend
     raw_note_storage: LocalNoteStorage
     lab_tracker_api: LabTrackerAPI
-    graph_draft_client_factory: Callable[..., Any]
+    graph_draft_client_factory: GraphDraftClientFactory
     auth_rate_limiter: InMemoryRateLimiter
     pat_rate_limiter: InMemoryRateLimiter
 
@@ -122,7 +121,9 @@ def build_app_runtime(settings: Settings) -> AppRuntime:
     )
 
 
-def make_lifespan(engine: Engine):
+def make_lifespan(
+    engine: Engine,
+) -> Callable[[FastAPI], AbstractAsyncContextManager[None]]:
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         lock = _acquire_database_lock(engine)

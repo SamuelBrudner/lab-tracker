@@ -4,16 +4,17 @@ from __future__ import annotations
 
 import logging
 import re
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from contextlib import suppress
 from dataclasses import dataclass
+from functools import partial
+from typing import Protocol
 from uuid import UUID
 
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session as OrmSession
 
-from lab_tracker.api import LabTrackerAPI
 from lab_tracker.auth import AuthContext
 from lab_tracker.config import Settings
 from lab_tracker.db_models import AnalysisModel, DatasetFileModel, DatasetModel, VisualizationModel
@@ -24,9 +25,8 @@ from lab_tracker.errors import (
     PayloadTooLargeError,
     ValidationError,
 )
-from lab_tracker.file_storage import FileStorageBackend, StoredFileMetadata
-from lab_tracker.models import DatasetFile, DatasetStatus, Visualization, utc_now
-from lab_tracker.repository import LabTrackerRepository
+from lab_tracker.file_storage import StoredFileMetadata
+from lab_tracker.models import Analysis, DatasetFile, DatasetStatus, Visualization, utc_now
 from lab_tracker.upload_security import validate_upload_content_type
 
 from .types import AssetMutationResult, FileDownload, Page
@@ -37,8 +37,70 @@ _ABSENT_ASSET_PRECONDITION = "absent"
 _SHA256_RE = re.compile(r"^[0-9a-fA-F]{64}$")
 
 
+class FileDeleteStorage(Protocol):
+    def delete(self, storage_id: UUID) -> None: ...
+
+
+class FileStorage(FileDeleteStorage, Protocol):
+    """Blob operations used by dataset and visualization file commands."""
+
+    def store_stream(
+        self,
+        chunks: Iterable[bytes],
+        *,
+        filename: str,
+        content_type: str,
+        max_bytes: int | None = None,
+    ) -> StoredFileMetadata: ...
+
+    def iter_chunks(
+        self,
+        storage_id: UUID,
+        *,
+        chunk_size: int = 1024 * 1024,
+    ) -> Iterable[bytes]: ...
+
+    def exists(self, storage_id: UUID) -> bool: ...
+
+
+class FileCommandAccess(Protocol):
+    """Domain and transaction callbacks used by file commands."""
+
+    def get_analysis(self, analysis_id: UUID) -> Analysis: ...
+
+    def get_visualization(self, viz_id: UUID) -> Visualization: ...
+
+    def require_project_read(
+        self,
+        project_id: UUID,
+        *,
+        actor: AuthContext | None,
+    ) -> None: ...
+
+    def require_project_contributor(
+        self,
+        project_id: UUID,
+        *,
+        actor: AuthContext | None,
+    ) -> None: ...
+
+    def run_after_commit(self, action: Callable[[], None]) -> None: ...
+
+    def run_after_rollback(self, action: Callable[[], None]) -> None: ...
+
+
+class DatasetFileRepository(Protocol):
+    def query_dataset_files(
+        self,
+        *,
+        dataset_id: UUID,
+        limit: int | None = None,
+        offset: int = 0,
+    ) -> tuple[list[DatasetFile], int]: ...
+
+
 def delete_stored_dataset_file(
-    storage_backend: FileStorageBackend,
+    storage_backend: FileDeleteStorage,
     storage_id: UUID,
 ) -> None:
     try:
@@ -55,7 +117,7 @@ def delete_stored_dataset_file(
 
 
 def delete_stored_visualization_file(
-    storage_backend: FileStorageBackend,
+    storage_backend: FileDeleteStorage,
     storage_id: UUID,
 ) -> None:
     try:
@@ -129,10 +191,10 @@ def _enforce_content_length_limit(
 class DatasetFileCommands:
     """Dataset blob operations sharing the request transaction and cleanup queues."""
 
-    api: LabTrackerAPI
-    repository: LabTrackerRepository
+    api: FileCommandAccess
+    repository: DatasetFileRepository
     session: OrmSession
-    storage: FileStorageBackend
+    storage: FileStorage
     settings: Settings
 
     def upload(
@@ -206,7 +268,8 @@ class DatasetFileCommands:
                 self.storage.delete(storage_id)
             raise
         self.api.run_after_rollback(
-            lambda storage_id=storage_id: delete_stored_dataset_file(
+            partial(
+                delete_stored_dataset_file,
                 self.storage,
                 storage_id,
             )
@@ -295,7 +358,8 @@ class DatasetFileCommands:
         self.session.delete(row)
         self.session.flush()
         self.api.run_after_commit(
-            lambda storage_id=storage_id: delete_stored_dataset_file(
+            partial(
+                delete_stored_dataset_file,
                 self.storage,
                 storage_id,
             )
@@ -307,9 +371,9 @@ class DatasetFileCommands:
 class VisualizationFileCommands:
     """Visualization asset operations with locking and compare-and-set semantics."""
 
-    api: LabTrackerAPI
+    api: FileCommandAccess
     session: OrmSession
-    storage: FileStorageBackend
+    storage: FileStorage
     settings: Settings
 
     def upload(
@@ -397,7 +461,7 @@ class VisualizationFileCommands:
             )
 
         try:
-            row.asset_storage_id = str(storage_id)
+            row.asset_storage_id = storage_id
             row.asset_filename = cleaned_filename
             row.asset_content_type = normalized_content_type
             row.asset_size_bytes = metadata.size_bytes
@@ -410,16 +474,18 @@ class VisualizationFileCommands:
             raise
 
         self.api.run_after_rollback(
-            lambda storage_id=storage_id: delete_stored_visualization_file(
+            partial(
+                delete_stored_visualization_file,
                 self.storage,
                 storage_id,
             )
         )
         if old_storage_id is not None:
             self.api.run_after_commit(
-                lambda storage_id=old_storage_id: delete_stored_visualization_file(
+                partial(
+                    delete_stored_visualization_file,
                     self.storage,
-                    storage_id,
+                    old_storage_id,
                 )
             )
         return AssetMutationResult(
@@ -501,7 +567,7 @@ def _row_asset_matches(
 
 def _stored_row_asset_matches(
     row: VisualizationModel,
-    storage_backend: FileStorageBackend,
+    storage_backend: FileStorage,
     *,
     filename: str,
     content_type: str,
@@ -516,13 +582,16 @@ def _stored_row_asset_matches(
         checksum=checksum,
     ):
         return False
-    return bool(storage_backend.exists(ensure_uuid(row.asset_storage_id)))
+    storage_id = row.asset_storage_id
+    if storage_id is None:
+        return False
+    return bool(storage_backend.exists(storage_id))
 
 
 def _metadata_matches_row(
     metadata: StoredFileMetadata,
     row: VisualizationModel,
-    storage_backend: FileStorageBackend,
+    storage_backend: FileStorage,
 ) -> bool:
     return _stored_row_asset_matches(
         row,

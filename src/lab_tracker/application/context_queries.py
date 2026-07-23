@@ -4,13 +4,12 @@ from __future__ import annotations
 
 import base64
 from dataclasses import dataclass
-from typing import Any, Literal
+from typing import Any, Literal, Protocol
 from urllib.parse import urlsplit
 from uuid import UUID
 
 from sqlalchemy.orm import Session as OrmSession
 
-from lab_tracker.api import LabTrackerAPI
 from lab_tracker.artifact_resolution import (
     DEFAULT_MAX_BYTES,
     ResolvedArtifact,
@@ -20,16 +19,27 @@ from lab_tracker.artifact_resolution import (
     unresolved,
 )
 from lab_tracker.auth import AuthContext
-from lab_tracker.decision_context import (
-    JsonObject,
+from lab_tracker.decision_context import JsonObject, build_decision_context
+from lab_tracker.decision_context_query import (
+    DecisionContextRepository,
     RepositoryDecisionContextReader,
-    build_decision_context,
 )
 from lab_tracker.errors import NotFoundError, ValidationError
 from lab_tracker.models import (
+    Analysis,
+    Claim,
+    ClaimEdge,
+    Dataset,
+    DataStore,
     EntityType,
+    ExplorationNode,
     ExternalArtifactReference,
+    Goal,
+    GoalLink,
+    Project,
     ProjectStatus,
+    Question,
+    SupervisionEdge,
     UsageEventResourceType,
     UsageEventVerb,
 )
@@ -40,7 +50,6 @@ from lab_tracker.provenance import (
     build_claim_provenance_document,
     build_dataset_provenance_document,
 )
-from lab_tracker.repository import LabTrackerRepository
 from lab_tracker.schemas import (
     AssistantDecisionContextRequest,
     PortfolioProjectGroupSummary,
@@ -54,12 +63,104 @@ from .types import Page
 ExternalArtifactEntityType = Literal["analysis", "claim", "dataset"]
 
 
+class ContextDataStoreLookup(Protocol):
+    def get_by_name(self, project_id: UUID, name: str) -> DataStore | None: ...
+
+
+class ContextAccess(Protocol):
+    """Domain reads and authorization needed by cross-aggregate queries."""
+
+    def accessible_project_ids(self, actor: AuthContext | None) -> set[UUID] | None: ...
+
+    def require_project_read(
+        self,
+        project_id: UUID,
+        *,
+        actor: AuthContext | None,
+    ) -> None: ...
+
+    def get_project(self, project_id: UUID) -> Project: ...
+
+    def get_dataset(self, dataset_id: UUID) -> Dataset: ...
+
+    def get_analysis(self, analysis_id: UUID) -> Analysis: ...
+
+    def get_claim(self, claim_id: UUID) -> Claim: ...
+
+    def get_question(self, question_id: UUID) -> Question: ...
+
+    def get_goal(self, goal_id: UUID) -> Goal: ...
+
+    def record_usage_event(
+        self,
+        *,
+        verb: UsageEventVerb | str,
+        resource_type: UsageEventResourceType | str,
+        project_id: UUID | None,
+        actor: AuthContext | None,
+        result_count: int | None,
+    ) -> None: ...
+
+
+class ContextRepository(DecisionContextRepository, Protocol):
+    """Repository roles used directly or by delegated context projections."""
+
+    @property
+    def data_stores(self) -> ContextDataStoreLookup: ...
+
+    def query_supervision_edges(
+        self,
+        *,
+        limit: int | None,
+        offset: int,
+    ) -> tuple[list[SupervisionEdge], int]: ...
+
+    def query_claim_edges(
+        self,
+        *,
+        project_id: UUID,
+        limit: int | None,
+        offset: int,
+    ) -> tuple[list[ClaimEdge], int]: ...
+
+    def query_goal_links(
+        self,
+        *,
+        goal_id: UUID,
+        limit: int | None,
+        offset: int,
+    ) -> tuple[list[GoalLink], int]: ...
+
+    def query_goals(
+        self,
+        *,
+        project_id: UUID,
+        limit: int | None,
+        offset: int,
+    ) -> tuple[list[Goal], int]: ...
+
+    def query_exploration_nodes(
+        self,
+        *,
+        project_id: UUID | None = None,
+        project_ids: set[UUID] | None = None,
+        node_type: str | None = None,
+        status: str | None = None,
+        target_entity_type: str | None = None,
+        target_entity_id: UUID | None = None,
+        created_by: str | None = None,
+        limit: int | None = None,
+        offset: int = 0,
+        recent_first: bool = False,
+    ) -> tuple[list[ExplorationNode], int]: ...
+
+
 @dataclass(frozen=True)
 class ContextQueries:
     """Cross-aggregate reads hidden behind a typed application boundary."""
 
-    api: LabTrackerAPI
-    repository: LabTrackerRepository
+    api: ContextAccess
+    repository: ContextRepository
     session: OrmSession
     resolver_registry: ResolverRegistry | None = None
 
@@ -266,10 +367,13 @@ class ContextQueries:
         linked_note_ids: set[UUID] | None = None
         if goal_id is not None:
             goal = self.api.get_goal(goal_id)
-            self.api.require_project_read(goal.project_id, actor=actor)
-            if project_id is not None and goal.project_id != project_id:
+            goal_project_id = goal.project_id
+            if goal_project_id is None:
+                raise ValidationError("goal_id must identify a project-scoped goal.")
+            self.api.require_project_read(goal_project_id, actor=actor)
+            if project_id is not None and goal_project_id != project_id:
                 raise ValidationError("goal_id must belong to project_id.")
-            project_ids = {goal.project_id}
+            project_ids = {goal_project_id}
             links, _ = self.repository.query_goal_links(
                 goal_id=goal_id,
                 limit=None,

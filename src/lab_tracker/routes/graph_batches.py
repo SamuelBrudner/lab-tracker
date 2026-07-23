@@ -10,7 +10,6 @@ from starlette.requests import Request
 
 from lab_tracker.api import LabTrackerAPI
 from lab_tracker.config import get_settings
-from lab_tracker.graph_drafting import make_graph_draft_client
 from lab_tracker.models import (
     GraphChangeSet,
     GraphChangeSetStatus,
@@ -27,6 +26,10 @@ from lab_tracker.schemas import (
     ListEnvelope,
 )
 
+from .graph_draft_clients import (
+    draft_client_factory_from_request as _draft_client_factory_from_request,
+)
+from .graph_draft_clients import draft_client_from_request as _draft_client_from_request
 from .graph_drafts import attach_graph_usernames
 from .shared import (
     actor_from_request,
@@ -205,18 +208,6 @@ def build_graph_batches_router(api: LabTrackerAPI) -> APIRouter:
         return list_response(runs, limit=max(1, len(runs) or 1), offset=0, total=len(runs))
 
     return router
-
-
-def _draft_client_factory_from_request(request: Request):
-    factory = getattr(request.app.state, "graph_draft_client_factory", None)
-    if callable(factory):
-        return factory
-    return make_graph_draft_client
-
-
-def _draft_client_from_request(request: Request):
-    settings = getattr(request.app.state, "settings", None) or get_settings()
-    return _draft_client_factory_from_request(request)(settings)
 
 
 def _background_drafting_enabled(request: Request) -> bool:

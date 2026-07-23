@@ -8,18 +8,42 @@ its own edit locality. These are mixins: LabTrackerAPI inherits them, so
 
 from __future__ import annotations
 
-from typing import Any
+from collections.abc import Callable
+from typing import TYPE_CHECKING, Any, TypeVar
 from uuid import UUID
 
 from lab_tracker.api_parts._base import _first_uuid
+from lab_tracker.auth import AuthContext
 from lab_tracker.models import (
     Question,
     UsageEventResourceType,
     UsageEventVerb,
 )
 
+if TYPE_CHECKING:
+    from lab_tracker.services import QuestionService, ServiceContext
+
+UsageResultT = TypeVar("UsageResultT")
+
 
 class QuestionsApiMixin:
+    if TYPE_CHECKING:
+        questions: QuestionService
+        _service_context: ServiceContext
+
+        def _with_usage_event(
+            self,
+            action: Callable[[], UsageResultT],
+            *,
+            verb: UsageEventVerb,
+            resource_type: UsageEventResourceType,
+            actor: AuthContext | None = None,
+            resource_id: UUID | None = None,
+            project_id: UUID | None = None,
+            resource_id_attr: str | None = None,
+            project_id_attr: str | None = "project_id",
+        ) -> UsageResultT: ...
+
     def create_question(self, *args: Any, **kwargs: Any) -> Any:
         return self._with_usage_event(
             lambda: self.questions.create_question(*args, **kwargs),
@@ -38,8 +62,8 @@ class QuestionsApiMixin:
             resource_id_attr="question_id",
         )
 
-    def get_question(self, *args: Any, **kwargs: Any) -> Any:
-        return self.questions.get_question(*args, **kwargs)
+    def get_question(self, question_id: UUID) -> Question:
+        return self.questions.get_question(question_id)
 
     def list_questions(self, *args: Any, **kwargs: Any) -> Any:
         return self.questions.list_questions(*args, **kwargs)

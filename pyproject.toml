@@ -28,6 +28,7 @@ test = [
   "pyld",
 ]
 lint = [
+  "mypy>=1.15,<2",
   "ruff",
 ]
 figure = [
@@ -94,3 +95,38 @@ select = ["E", "F", "I", "B", "UP", "SIM"]
 
 [tool.ruff.lint.isort]
 known-third-party = ["alembic"]
+
+[tool.mypy]
+python_version = "3.10"
+strict = true
+follow_imports = "silent"
+warn_unused_configs = true
+show_error_codes = true
+files = [
+  "src/lab_tracker/patching.py",
+  "src/lab_tracker/repository.py",
+  "src/lab_tracker/decision_context_types.py",
+  "src/lab_tracker/decision_context_query.py",
+  "src/lab_tracker/decision_context_use_case.py",
+  "src/lab_tracker/project_graph.py",
+  "src/lab_tracker/application",
+  "src/lab_tracker/graph_drafting.py",
+  "src/lab_tracker/services/shared.py",
+  "src/lab_tracker/services/graph_draft_generation.py",
+  "src/lab_tracker/services/graph_draft_review.py",
+  "src/lab_tracker/services/graph_draft_commit.py",
+  "src/lab_tracker/services/graph_draft_scheduling.py",
+  "src/lab_tracker/services/graph_draft_scheduling_ports.py",
+  "src/lab_tracker/services/graph_draft_service.py",
+  "src/lab_tracker/api_parts/graph_drafts.py",
+  "src/lab_tracker/api_parts/projects.py",
+  "src/lab_tracker/api_parts/questions.py",
+  "src/lab_tracker/api_parts/datasets.py",
+  "src/lab_tracker/api_parts/sessions.py",
+  "src/lab_tracker/api_parts/analyses.py",
+  "src/lab_tracker/api_parts/goals.py",
+  "src/lab_tracker/api.py",
+  "src/lab_tracker/app_parts/runtime.py",
+  "src/lab_tracker/routes/graph_draft_clients.py",
+  "tests/typing/contracts.py",
+]
