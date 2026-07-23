@@ -128,9 +128,22 @@ def test_promote_operational_session_to_dataset_over_http(
     assert dataset["status"] == "committed"
     assert dataset["commit_manifest"]["source_session_id"] == session["session_id"]
     assert dataset["commit_manifest"]["metadata"] == {"source": "session-route-test"}
-    assert [file["path"] for file in dataset["commit_manifest"]["files"]] == [
-        "sessions/run-001.nwb"
+    assert dataset["commit_manifest"]["files"] == [
+        {
+            "file_id": None,
+            "path": "sessions/run-001.nwb",
+            "checksum": "sha256:session-output",
+            "size_bytes": 128,
+        }
     ]
+    reloaded = client.get(
+        f"/datasets/{dataset['dataset_id']}",
+        headers=admin_auth_headers,
+    )
+    assert reloaded.status_code == 200
+    assert (
+        reloaded.json()["data"]["commit_manifest"]["files"] == dataset["commit_manifest"]["files"]
+    )
 
 
 def test_delete_session_rejects_promoted_dataset_source(

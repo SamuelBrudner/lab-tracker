@@ -29,6 +29,9 @@ from lab_tracker.services.question_service import QuestionService
 from lab_tracker.services.shared import (
     _ensure_dataset_status_transition,
     _manifest_input_from_commit,
+    _merge_normalized_dataset_file,
+    _normalize_dataset_file,
+    _normalize_dataset_files,
     actor_user_fk,
     actor_user_id,
     build_commit_manifest,
@@ -66,18 +69,17 @@ def _merge_manifest_files_with_attached_files(
     manifest_files: Iterable[DatasetFile],
     attached_files: Iterable[DatasetFile] | None,
 ) -> list[DatasetFile]:
-    merged = list(manifest_files)
-    seen = {file.path.strip(): file.checksum.strip() for file in merged}
+    merged = _normalize_dataset_files(manifest_files)
+    file_indexes = {file.path: index for index, file in enumerate(merged)}
     for file in attached_files or []:
-        path = file.path.strip()
-        checksum = file.checksum.strip()
-        existing = seen.get(path)
-        if existing is None:
-            merged.append(DatasetFile(path=path, checksum=checksum))
-            seen[path] = checksum
-            continue
-        if existing != checksum:
-            raise ValidationError("Attached file checksum conflict for file path.")
+        candidate = _normalize_dataset_file(file)
+        _merge_normalized_dataset_file(
+            merged,
+            file_indexes,
+            candidate,
+            checksum_conflict_message="Attached file checksum conflict for file path.",
+            size_conflict_message="Attached file size conflict for file path.",
+        )
     return merged
 
 
