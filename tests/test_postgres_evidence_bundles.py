@@ -56,6 +56,7 @@ _MUTATED_MODELS = (
 )
 
 _EVIDENCE_BUNDLE_REVISION = "0055_evidence_bundles"
+_CURRENT_HEAD_REVISION = "0056_claim_confidence_bounds"
 _PRINCIPAL_CAPTURE_KEY_REVISION = "0054_project_capture_key_principal_scope"
 
 
@@ -407,7 +408,9 @@ def test_0055_postgres_migration_cycle_preserves_existing_principals_and_project
         # disposable PostgreSQL fixture to a clean head, even after an assertion.
         command.downgrade(config, _PRINCIPAL_CAPTURE_KEY_REVISION)
         command.upgrade(config, "head")
-        assert _current_revision(migrated_postgres_database_url) == (_EVIDENCE_BUNDLE_REVISION)
+        assert _current_revision(migrated_postgres_database_url) == (
+            _CURRENT_HEAD_REVISION
+        )
         with engine.connect() as connection:
             assert connection.scalar(text("SELECT COUNT(*) FROM evidence_bundles")) == 0
         engine.dispose()

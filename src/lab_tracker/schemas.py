@@ -19,6 +19,7 @@ from lab_tracker.models import (
     Analysis,
     AnalysisStatus,
     Claim,
+    ClaimConfidence,
     ClaimInput,
     ClaimRelation,
     ClaimStatus,
@@ -641,7 +642,7 @@ class AnalysisUpdate(RequestModel):
 class ClaimCreate(RequestModel):
     project_id: UUID
     statement: NonBlankStr
-    confidence: float = Field(..., ge=0.0, le=100.0)
+    confidence: ClaimConfidence
     status: ClaimStatus | None = None
     terminal_reason: NonBlankStr | None = None
     falsification_criteria: NonBlankStr | None = None
@@ -662,7 +663,7 @@ class ClaimCreate(RequestModel):
 
 class ClaimUpdate(RequestModel):
     statement: NonBlankStr | None = None
-    confidence: float | None = Field(None, ge=0.0, le=100.0)
+    confidence: ClaimConfidence | None = None
     status: ClaimStatus | None = None
     terminal_reason: NonBlankStr | None = None
     falsification_criteria: NonBlankStr | None = None
@@ -930,7 +931,7 @@ class EvidenceBundleExistingClaim(RequestModel):
 class EvidenceBundleCreateClaim(RequestModel):
     kind: Literal["create"]
     statement: NonBlankStr
-    confidence: float = Field(..., ge=0.0, le=100.0)
+    confidence: ClaimConfidence
     status: ClaimStatus = ClaimStatus.PROPOSED
     terminal_reason: NonBlankStr | None = None
     falsification_criteria: NonBlankStr | None = None

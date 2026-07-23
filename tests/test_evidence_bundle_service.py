@@ -10,6 +10,7 @@ from lab_tracker.auth import AuthContext, Role
 from lab_tracker.db_models import UserModel
 from lab_tracker.errors import ConflictError, NotFoundError, ValidationError
 from lab_tracker.models import (
+    ClaimStatus,
     EvidenceBundleRecord,
     ProjectMembershipRole,
 )
@@ -211,6 +212,31 @@ def test_invalid_late_component_is_rejected_before_any_component_write(
         api.record_evidence_bundle(command, actor=actor)
 
     assert writes == 0
+
+
+@pytest.mark.parametrize("dry_run", [True, False])
+def test_direct_bundle_rejects_supported_claim_without_evidence(
+    dry_run: bool,
+) -> None:
+    api = repository_backed_api()
+    actor = _actor()
+    project = api.create_project("Unsupported direct bundle", actor=actor)
+    command = RecordEvidenceBundleCommand(
+        project_id=project.project_id,
+        claim=CreateClaimIntent(
+            statement="Unbacked bundle claim",
+            confidence=80,
+            status=ClaimStatus.SUPPORTED,
+        ),
+        dry_run=dry_run,
+        idempotency_key=None if dry_run else "unsupported-direct-bundle",
+    )
+
+    with pytest.raises(ValidationError, match="Supported claims require"):
+        api.record_evidence_bundle(command, actor=actor)
+
+    assert api.list_claims(project_id=project.project_id) == []
+    assert api.evidence_bundles.repository.evidence_bundles.list() == []
 
 
 def test_direct_bundle_rejects_reserved_metadata_key() -> None:

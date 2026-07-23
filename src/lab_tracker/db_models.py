@@ -786,6 +786,12 @@ class AnalysisDatasetModel(Base):
 
 class ClaimModel(Base):
     __tablename__ = "claims"
+    __table_args__ = (
+        CheckConstraint(
+            "confidence >= 0 AND confidence <= 100",
+            name="ck_claims_confidence_range",
+        ),
+    )
 
     claim_id: Mapped[UUID] = mapped_column(
         GUID,

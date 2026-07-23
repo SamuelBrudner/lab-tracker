@@ -210,14 +210,19 @@ class ClaimService(BaseService):
             or refuting_outcome is not None
         ):
             raise ValidationError("Only proposed claims can be edited.")
+        normalized_statement: str | None = None
         if statement is not None:
             ensure_non_empty(statement, "statement")
-            claim.statement = statement.strip()
+            normalized_statement = statement.strip()
         if confidence is not None:
             _ensure_claim_confidence(confidence)
-            claim.confidence = confidence
-        if supported_by_dataset_ids is not None or supported_by_analysis_ids is not None:
-            dataset_ids, analysis_ids = self._resolve_claim_support_links(
+        support_links_changed = (
+            supported_by_dataset_ids is not None or supported_by_analysis_ids is not None
+        )
+        next_dataset_ids = claim.supported_by_dataset_ids
+        next_analysis_ids = claim.supported_by_analysis_ids
+        if support_links_changed:
+            next_dataset_ids, next_analysis_ids = self._resolve_claim_support_links(
                 claim.project_id,
                 claim.supported_by_dataset_ids
                 if supported_by_dataset_ids is None
@@ -226,23 +231,48 @@ class ClaimService(BaseService):
                 if supported_by_analysis_ids is None
                 else supported_by_analysis_ids,
             )
-            claim.supported_by_dataset_ids = dataset_ids
-            claim.supported_by_analysis_ids = analysis_ids
+        next_question_ids: list[UUID] | None = None
         if answers_question_ids is not None:
-            claim.answers_question_ids = self._resolve_claim_question_links(
+            next_question_ids = self._resolve_claim_question_links(
                 claim.project_id, answers_question_ids
             )
+        normalized_citations: list[ExternalArtifactReference] | None = None
         if external_citations is not None:
-            claim.external_citations = _normalize_external_citations(external_citations)
+            normalized_citations = _normalize_external_citations(external_citations)
+        normalized_falsification_criteria: str | None = None
         if falsification_criteria is not None:
-            claim.falsification_criteria = _normalize_optional_text(falsification_criteria)
+            normalized_falsification_criteria = _normalize_optional_text(
+                falsification_criteria
+            )
+        normalized_verification_plan: str | None = None
         if verification_plan is not None:
-            claim.verification_plan = _normalize_optional_text(verification_plan)
+            normalized_verification_plan = _normalize_optional_text(verification_plan)
+        normalized_refuting_outcome: str | None = None
         if refuting_outcome is not None:
-            claim.refuting_outcome = _normalize_optional_text(refuting_outcome)
+            normalized_refuting_outcome = _normalize_optional_text(refuting_outcome)
         _ensure_claim_support_links(
-            next_status, claim.supported_by_dataset_ids, claim.supported_by_analysis_ids
+            next_status,
+            next_dataset_ids,
+            next_analysis_ids,
         )
+
+        if normalized_statement is not None:
+            claim.statement = normalized_statement
+        if confidence is not None:
+            claim.confidence = confidence
+        if support_links_changed:
+            claim.supported_by_dataset_ids = next_dataset_ids
+            claim.supported_by_analysis_ids = next_analysis_ids
+        if next_question_ids is not None:
+            claim.answers_question_ids = next_question_ids
+        if normalized_citations is not None:
+            claim.external_citations = normalized_citations
+        if falsification_criteria is not None:
+            claim.falsification_criteria = normalized_falsification_criteria
+        if verification_plan is not None:
+            claim.verification_plan = normalized_verification_plan
+        if refuting_outcome is not None:
+            claim.refuting_outcome = normalized_refuting_outcome
         if status is not None:
             claim.status = status
         if resolved_terminal_reason is not None:
