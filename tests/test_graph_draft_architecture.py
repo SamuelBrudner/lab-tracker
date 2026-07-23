@@ -4,11 +4,13 @@ import ast
 import inspect
 import textwrap
 from pathlib import Path
+from typing import Any
 
 from api_helpers import repository_backed_api
 
 from lab_tracker.api import LabTrackerAPI
 from lab_tracker.api_parts.graph_drafts import GraphDraftsApiMixin
+from lab_tracker.patching import NOT_PROVIDED
 from lab_tracker.services import (
     BatchSchedulingCoordinator,
     GraphDraftGenerationCoordinator,
@@ -340,7 +342,8 @@ def test_only_commit_coordinator_references_or_owns_the_patch_applier() -> None:
     for module_name in ARCHITECTURE_MODULES:
         tree = _module_tree(services_dir, module_name)
         may_apply = module_name == "graph_draft_commit.py"
-        assert _references_symbol(tree, "GraphPatchApplier") is may_apply
+        if not may_apply:
+            assert not _references_symbol(tree, "GraphPatchApplier")
         assert _calls_method(tree, "apply_graph_operation") is may_apply
 
 
@@ -383,6 +386,40 @@ def test_compatibility_facade_is_an_explicit_one_hop_delegate() -> None:
     for method_name, owner_name in DELEGATE_OWNERS.items():
         owner, target = _direct_delegate(getattr(GraphDraftService, method_name))
         assert (owner, target) == (owner_name, method_name)
+
+
+def test_compatibility_facade_signatures_exactly_match_the_service() -> None:
+    for method_name in DELEGATE_OWNERS:
+        service_signature = inspect.signature(getattr(GraphDraftService, method_name))
+        facade_signature = inspect.signature(getattr(GraphDraftsApiMixin, method_name))
+
+        assert tuple(service_signature.parameters) == tuple(facade_signature.parameters)
+        for name, service_parameter in service_signature.parameters.items():
+            facade_parameter = facade_signature.parameters[name]
+            assert facade_parameter.kind is service_parameter.kind
+            assert facade_parameter.annotation == service_parameter.annotation
+            if service_parameter.default is inspect.Parameter.empty:
+                assert facade_parameter.default is inspect.Parameter.empty
+            elif service_parameter.default is NOT_PROVIDED:
+                assert facade_parameter.default is NOT_PROVIDED
+            else:
+                assert facade_parameter.default == service_parameter.default
+        assert facade_signature.return_annotation == service_signature.return_annotation
+
+
+def test_graph_draft_api_has_no_variadic_any_delegates() -> None:
+    for method_name in DELEGATE_OWNERS:
+        method = getattr(GraphDraftsApiMixin, method_name)
+        signature = inspect.signature(method)
+        assert all(
+            parameter.kind
+            not in {inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD}
+            for parameter in signature.parameters.values()
+        )
+        tree = _source_tree(method)
+        assert tree.args.vararg is None
+        assert tree.args.kwarg is None
+        assert signature.return_annotation not in {Any, "Any"}
 
 
 def test_coordinator_modules_do_not_import_the_facade_or_api() -> None:

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Any, Protocol
 
 JsonObject = dict[str, Any]
@@ -59,6 +60,8 @@ class DecisionContextReader(Protocol):
         project_id: str | None = None,
         status: str | None = None,
         created_by: str | None = None,
+        since: datetime | None = None,
+        until: datetime | None = None,
         target_entity_type: str | None = None,
         target_entity_id: str | None = None,
         limit: int = 50,
@@ -87,6 +90,9 @@ class DecisionContextReader(Protocol):
         project_id: str | None = None,
         status: str | None = None,
         session_type: str | None = None,
+        created_by: str | None = None,
+        since: datetime | None = None,
+        until: datetime | None = None,
         limit: int = 50,
         offset: int = 0,
         recent_first: bool = False,
@@ -99,6 +105,8 @@ class DecisionContextReader(Protocol):
         project_id: str | None = None,
         status: str | None = None,
         created_by: str | None = None,
+        since: datetime | None = None,
+        until: datetime | None = None,
         limit: int = 50,
         offset: int = 0,
         recent_first: bool = False,
@@ -113,6 +121,8 @@ class DecisionContextReader(Protocol):
         question_id: str | None = None,
         status: str | None = None,
         created_by: str | None = None,
+        since: datetime | None = None,
+        until: datetime | None = None,
         limit: int = 50,
         offset: int = 0,
         recent_first: bool = False,
@@ -127,6 +137,8 @@ class DecisionContextReader(Protocol):
         dataset_id: str | None = None,
         analysis_id: str | None = None,
         created_by: str | None = None,
+        since: datetime | None = None,
+        until: datetime | None = None,
         limit: int = 50,
         offset: int = 0,
         recent_first: bool = False,
@@ -139,6 +151,9 @@ class DecisionContextReader(Protocol):
         project_id: str | None = None,
         analysis_id: str | None = None,
         claim_id: str | None = None,
+        created_by: str | None = None,
+        since: datetime | None = None,
+        until: datetime | None = None,
         limit: int = 50,
         offset: int = 0,
         recent_first: bool = False,

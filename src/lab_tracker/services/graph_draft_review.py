@@ -4,12 +4,12 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Protocol
 from uuid import UUID
 
 from lab_tracker.auth import AuthContext
 from lab_tracker.errors import NotFoundError, ValidationError
-from lab_tracker.graph_drafting import GraphDraftingError
+from lab_tracker.graph_drafting import GraphDraftClient, GraphDraftingError
 from lab_tracker.models import (
     AcceptanceMode,
     GraphChangeOperation,
@@ -20,11 +20,59 @@ from lab_tracker.models import (
 )
 from lab_tracker.patching import NOT_PROVIDED, PatchValue, is_provided
 from lab_tracker.services.base import BaseService, ServiceContext
-from lab_tracker.services.graph_draft_generation import GraphDraftGenerationCoordinator
-from lab_tracker.services.graph_draft_records import GraphDraftRecords
-from lab_tracker.services.graph_draft_validation import GraphPatchValidator
-from lab_tracker.services.project_authorization import ProjectAuthorizationPolicy
-from lab_tracker.services.shared import actor_user_fk, actor_user_id
+from lab_tracker.services.graph_draft_generation import GeneratedDraftProposal
+from lab_tracker.services.shared import UserExistenceReader, actor_user_fk, actor_user_id
+
+
+class ReviewRecords(Protocol):
+    def get_graph_change_set(self, change_set_id: UUID) -> GraphChangeSet: ...
+
+    def save_graph_change_set(self, change_set: GraphChangeSet) -> None: ...
+
+
+class RevisionGenerator(Protocol):
+    def propose_note_revision(
+        self,
+        change_set: GraphChangeSet,
+        *,
+        user_hint: str,
+        draft_client: GraphDraftClient,
+        actor: AuthContext | None,
+        extra_images: list[dict[str, Any]],
+    ) -> GeneratedDraftProposal: ...
+
+
+class ReviewPatchValidator(Protocol):
+    def validate_operation(
+        self,
+        operation: GraphChangeOperation,
+        payload: dict[str, Any],
+    ) -> None: ...
+
+
+class ReviewAuthorization(Protocol):
+    def has_global_write(self, actor: AuthContext | None) -> bool: ...
+
+    def require_interactive(
+        self,
+        actor: AuthContext | None,
+        *,
+        action: str,
+    ) -> None: ...
+
+    def require_contributor(
+        self,
+        project_id: UUID,
+        *,
+        actor: AuthContext | None,
+    ) -> None: ...
+
+    def require_owner(
+        self,
+        project_id: UUID,
+        *,
+        actor: AuthContext | None,
+    ) -> None: ...
 
 
 @dataclass(frozen=True)
@@ -59,16 +107,22 @@ class GraphDraftReviewCoordinator(BaseService):
         self,
         context: ServiceContext,
         *,
-        records: GraphDraftRecords,
-        generation: GraphDraftGenerationCoordinator,
-        patch_validator: GraphPatchValidator,
-        authorization: ProjectAuthorizationPolicy,
+        records: ReviewRecords,
+        generation: RevisionGenerator,
+        patch_validator: ReviewPatchValidator,
+        authorization: ReviewAuthorization,
     ) -> None:
         super().__init__(context)
         self.records = records
         self.generation = generation
         self.patch_validator = patch_validator
         self.authorization = authorization
+
+    @property
+    def user_reader(self) -> UserExistenceReader:
+        """Expose only the lookup needed to attribute review decisions."""
+
+        return self._context.active_repository()
 
     def update_graph_change_operation(
         self,
@@ -176,7 +230,7 @@ class GraphDraftReviewCoordinator(BaseService):
             )
             operation.acceptance_mode = acceptance_mode
             operation.accepted_by = actor_user_id(actor)
-            operation.accepted_by_user_id = actor_user_fk(actor, self.repository)
+            operation.accepted_by_user_id = actor_user_fk(actor, self.user_reader)
             operation.accepted_at = utc_now()
         else:
             operation.acceptance_mode = None
@@ -271,7 +325,7 @@ class GraphDraftReviewCoordinator(BaseService):
         *,
         feedback: str | None = None,
         inputs: RevisionInputs | None = None,
-        draft_client: Any,
+        draft_client: GraphDraftClient,
         actor: AuthContext | None = None,
     ) -> GraphChangeSet:
         """Regenerate the complete operation set without risking the old draft."""
@@ -336,7 +390,7 @@ class GraphDraftReviewCoordinator(BaseService):
     def _resolve_revision_feedback(
         feedback: str | None,
         audio: RevisionUpload | None,
-        draft_client: Any,
+        draft_client: GraphDraftClient,
     ) -> tuple[str, str]:
         typed = (feedback or "").strip()
         transcript = ""

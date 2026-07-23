@@ -8,16 +8,41 @@ its own edit locality. These are mixins: LabTrackerAPI inherits them, so
 
 from __future__ import annotations
 
-from typing import Any
+from collections.abc import Callable
+from typing import TYPE_CHECKING, Any, TypeVar
+from uuid import UUID
 
 from lab_tracker.api_parts._base import _first_uuid
+from lab_tracker.auth import AuthContext
 from lab_tracker.models import (
+    Session,
     UsageEventResourceType,
     UsageEventVerb,
 )
 
+if TYPE_CHECKING:
+    from lab_tracker.services import SessionService
+
+UsageResultT = TypeVar("UsageResultT")
+
 
 class SessionsApiMixin:
+    if TYPE_CHECKING:
+        sessions: SessionService
+
+        def _with_usage_event(
+            self,
+            action: Callable[[], UsageResultT],
+            *,
+            verb: UsageEventVerb,
+            resource_type: UsageEventResourceType,
+            actor: AuthContext | None = None,
+            resource_id: UUID | None = None,
+            project_id: UUID | None = None,
+            resource_id_attr: str | None = None,
+            project_id_attr: str | None = "project_id",
+        ) -> UsageResultT: ...
+
     def create_session(self, *args: Any, **kwargs: Any) -> Any:
         return self._with_usage_event(
             lambda: self.sessions.create_session(*args, **kwargs),
@@ -27,8 +52,8 @@ class SessionsApiMixin:
             resource_id_attr="session_id",
         )
 
-    def get_session(self, *args: Any, **kwargs: Any) -> Any:
-        return self.sessions.get_session(*args, **kwargs)
+    def get_session(self, session_id: UUID) -> Session:
+        return self.sessions.get_session(session_id)
 
     def get_session_by_link_code(self, *args: Any, **kwargs: Any) -> Any:
         return self.sessions.get_session_by_link_code(*args, **kwargs)

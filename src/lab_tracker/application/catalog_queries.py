@@ -4,9 +4,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
+from typing import Protocol
 from uuid import UUID
 
-from lab_tracker.api import LabTrackerAPI
 from lab_tracker.auth import AuthContext
 from lab_tracker.models import (
     AcquisitionOutput,
@@ -21,17 +21,194 @@ from lab_tracker.models import (
     Session,
     Visualization,
 )
-from lab_tracker.repository import LabTrackerRepository
 
 from .types import Page
+
+
+class CatalogAccess(Protocol):
+    """Authorization and entity lookups used by catalog queries."""
+
+    def accessible_project_ids(self, actor: AuthContext | None) -> set[UUID] | None: ...
+
+    def require_project_read(
+        self,
+        project_id: UUID,
+        *,
+        actor: AuthContext | None,
+    ) -> None: ...
+
+    def get_session(self, session_id: UUID) -> Session: ...
+
+
+class CatalogRepository(Protocol):
+    """Only the paged read operations consumed by ``CatalogQueries``."""
+
+    def query_projects(
+        self,
+        *,
+        group_id: UUID | None = None,
+        project_ids: set[UUID] | None = None,
+        status: str | None = None,
+        created_by: str | None = None,
+        client_capture_id: str | None = None,
+        limit: int | None = None,
+        offset: int = 0,
+    ) -> tuple[list[Project], int]: ...
+
+    def query_questions(
+        self,
+        *,
+        project_id: UUID | None = None,
+        project_ids: set[UUID] | None = None,
+        status: str | None = None,
+        question_type: str | None = None,
+        search: str | None = None,
+        created_by: str | None = None,
+        client_capture_id: str | None = None,
+        parent_question_id: UUID | None = None,
+        ancestor_question_id: UUID | None = None,
+        superseded_by_question_ids: set[UUID] | None = None,
+        limit: int | None = None,
+        offset: int = 0,
+        recent_first: bool = False,
+        updated_first: bool = False,
+    ) -> tuple[list[Question], int]: ...
+
+    def query_notes(
+        self,
+        *,
+        project_id: UUID | None = None,
+        project_ids: set[UUID] | None = None,
+        status: str | None = None,
+        search: str | None = None,
+        created_by: str | None = None,
+        since: datetime | None = None,
+        until: datetime | None = None,
+        client_capture_id: str | None = None,
+        target_entity_type: str | None = None,
+        target_entity_id: UUID | None = None,
+        limit: int | None = None,
+        offset: int = 0,
+        recent_first: bool = False,
+    ) -> tuple[list[Note], int]: ...
+
+    def query_datasets(
+        self,
+        *,
+        project_id: UUID | None = None,
+        project_ids: set[UUID] | None = None,
+        status: str | None = None,
+        created_by: str | None = None,
+        since: datetime | None = None,
+        until: datetime | None = None,
+        limit: int | None = None,
+        offset: int = 0,
+        recent_first: bool = False,
+    ) -> tuple[list[Dataset], int]: ...
+
+    def query_sessions(
+        self,
+        *,
+        project_id: UUID | None = None,
+        project_ids: set[UUID] | None = None,
+        status: str | None = None,
+        session_type: str | None = None,
+        created_by: str | None = None,
+        since: datetime | None = None,
+        until: datetime | None = None,
+        limit: int | None = None,
+        offset: int = 0,
+        recent_first: bool = False,
+    ) -> tuple[list[Session], int]: ...
+
+    def query_acquisition_outputs(
+        self,
+        *,
+        session_id: UUID | None = None,
+        limit: int | None = None,
+        offset: int = 0,
+    ) -> tuple[list[AcquisitionOutput], int]: ...
+
+    def query_analyses(
+        self,
+        *,
+        project_id: UUID | None = None,
+        project_ids: set[UUID] | None = None,
+        dataset_id: UUID | None = None,
+        question_id: UUID | None = None,
+        status: str | None = None,
+        created_by: str | None = None,
+        since: datetime | None = None,
+        until: datetime | None = None,
+        limit: int | None = None,
+        offset: int = 0,
+        recent_first: bool = False,
+    ) -> tuple[list[Analysis], int]: ...
+
+    def query_claims(
+        self,
+        *,
+        project_id: UUID | None = None,
+        project_ids: set[UUID] | None = None,
+        status: str | None = None,
+        dataset_id: UUID | None = None,
+        analysis_id: UUID | None = None,
+        created_by: str | None = None,
+        since: datetime | None = None,
+        until: datetime | None = None,
+        limit: int | None = None,
+        offset: int = 0,
+        recent_first: bool = False,
+    ) -> tuple[list[Claim], int]: ...
+
+    def query_exploration_nodes(
+        self,
+        *,
+        project_id: UUID | None = None,
+        project_ids: set[UUID] | None = None,
+        node_type: str | None = None,
+        status: str | None = None,
+        target_entity_type: str | None = None,
+        target_entity_id: UUID | None = None,
+        created_by: str | None = None,
+        limit: int | None = None,
+        offset: int = 0,
+        recent_first: bool = False,
+    ) -> tuple[list[ExplorationNode], int]: ...
+
+    def query_provenance_links(
+        self,
+        *,
+        project_id: UUID | None = None,
+        project_ids: set[UUID] | None = None,
+        status: str | None = None,
+        limit: int | None = None,
+        offset: int = 0,
+        recent_first: bool = False,
+    ) -> tuple[list[ProvenanceLink], int]: ...
+
+    def query_visualizations(
+        self,
+        *,
+        project_id: UUID | None = None,
+        project_ids: set[UUID] | None = None,
+        analysis_id: UUID | None = None,
+        claim_id: UUID | None = None,
+        created_by: str | None = None,
+        since: datetime | None = None,
+        until: datetime | None = None,
+        limit: int | None = None,
+        offset: int = 0,
+        recent_first: bool = False,
+    ) -> tuple[list[Visualization], int]: ...
 
 
 @dataclass(frozen=True)
 class CatalogQueries:
     """Optimized list/read-model queries behind the application boundary."""
 
-    api: LabTrackerAPI
-    repository: LabTrackerRepository
+    api: CatalogAccess
+    repository: CatalogRepository
 
     def _project_scope(
         self,

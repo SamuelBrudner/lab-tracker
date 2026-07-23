@@ -23,6 +23,8 @@ jobs:
         run: npm ci
       - name: Lint
         run: uv run ruff check .
+      - name: Typecheck Python architecture contracts
+        run: uv run mypy
       - name: Lint frontend
         run: npm run lint:frontend -- --quiet
       - name: Check frontend OpenAPI declarations

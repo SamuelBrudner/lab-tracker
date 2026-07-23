@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from typing import Any
+from datetime import datetime
+from typing import Any, Protocol
 from uuid import UUID
 
 from lab_tracker.auth import AuthContext
@@ -14,16 +15,67 @@ from lab_tracker.models import (
     GraphChangeOperationStatus,
     GraphChangeSet,
     GraphChangeSetStatus,
+    Question,
     utc_now,
 )
 from lab_tracker.services.base import BaseService, ServiceContext
-from lab_tracker.services.entity_version_service import EntityVersionService
-from lab_tracker.services.graph_draft_applier import GraphPatchApplier
+from lab_tracker.services.graph_draft_context import EntityResult
 from lab_tracker.services.graph_draft_context import entity_id as graph_entity_id
-from lab_tracker.services.graph_draft_records import GraphDraftRecords
-from lab_tracker.services.project_authorization import ProjectAuthorizationPolicy
-from lab_tracker.services.question_service import QuestionService
 from lab_tracker.services.shared import actor_user_id
+
+
+class CommitRecords(Protocol):
+    def get_graph_change_set(self, change_set_id: UUID) -> GraphChangeSet: ...
+
+    def save_graph_change_set(self, change_set: GraphChangeSet) -> None: ...
+
+
+class CommitPatchApplier(Protocol):
+    def apply_graph_operation(
+        self,
+        operation: GraphChangeOperation,
+        *,
+        ref_map: dict[str, UUID],
+        actor: AuthContext | None,
+        change_set: GraphChangeSet,
+    ) -> EntityResult: ...
+
+
+class CommitVersions(Protocol):
+    def mark_change_set_committed(
+        self,
+        change_set_id: UUID,
+        committed_at: datetime | None,
+    ) -> None: ...
+
+
+class CommitQuestions(Protocol):
+    def get_question(self, question_id: UUID) -> Question: ...
+
+
+class CommitAuthorization(Protocol):
+    def require_interactive(
+        self,
+        actor: AuthContext | None,
+        *,
+        action: str,
+    ) -> None: ...
+
+    def require_owner(
+        self,
+        project_id: UUID,
+        *,
+        actor: AuthContext | None,
+    ) -> None: ...
+
+
+class CommitRepository(Protocol):
+    def claim_graph_change_set_for_commit(
+        self,
+        change_set_id: UUID,
+    ) -> GraphChangeSet | None: ...
+
+    def lock_project_question_dag(self, project_id: UUID) -> None: ...
 
 
 class TransactionalDraftCommitCoordinator(BaseService):
@@ -33,11 +85,11 @@ class TransactionalDraftCommitCoordinator(BaseService):
         self,
         context: ServiceContext,
         *,
-        records: GraphDraftRecords,
-        patch_applier: GraphPatchApplier,
-        versions: EntityVersionService,
-        questions: QuestionService,
-        authorization: ProjectAuthorizationPolicy,
+        records: CommitRecords,
+        patch_applier: CommitPatchApplier,
+        versions: CommitVersions,
+        questions: CommitQuestions,
+        authorization: CommitAuthorization,
     ) -> None:
         super().__init__(context)
         self.records = records
@@ -45,6 +97,10 @@ class TransactionalDraftCommitCoordinator(BaseService):
         self.versions = versions
         self.questions = questions
         self.authorization = authorization
+
+    @property
+    def commit_repository(self) -> CommitRepository:
+        return self._context.active_repository()
 
     def commit_graph_change_set(
         self,
@@ -77,7 +133,7 @@ class TransactionalDraftCommitCoordinator(BaseService):
             raise ValidationError("At least one accepted operation is required to commit.")
         _ensure_accepted_operation_refs_available(accepted)
         with self.application_transaction():
-            claimed = self.repository.claim_graph_change_set_for_commit(change_set_id)
+            claimed = self.commit_repository.claim_graph_change_set_for_commit(change_set_id)
             if claimed is None:
                 latest = self.records.get_graph_change_set(change_set_id)
                 if latest.status == GraphChangeSetStatus.COMMITTED:
@@ -136,7 +192,7 @@ class TransactionalDraftCommitCoordinator(BaseService):
             question = self.questions.get_question(operation.target_entity_id)
             project_ids.add(question.project_id)
         for project_id in sorted(project_ids, key=str):
-            self.repository.lock_project_question_dag(project_id)
+            self.commit_repository.lock_project_question_dag(project_id)
 
 
 def _ensure_accepted_operation_refs_available(
@@ -146,10 +202,10 @@ def _ensure_accepted_operation_refs_available(
     for operation in operations:
         missing = sorted(_payload_ref_names(operation.payload) - available_refs)
         if missing:
-            refs = ", ".join(missing)
+            missing_refs = ", ".join(missing)
             raise ValidationError(
                 "Accepted graph draft operation "
-                f"{operation.sequence} references unavailable operation ref(s): {refs}. "
+                f"{operation.sequence} references unavailable operation ref(s): {missing_refs}. "
                 "Accept the referenced operation and make sure it appears earlier in the draft, "
                 "or edit this operation before committing."
             )
@@ -168,7 +224,7 @@ def _payload_ref_names(value: Any) -> set[str]:
     if set(value) == {"$ref"}:
         ref_name = value["$ref"]
         return {ref_name} if isinstance(ref_name, str) else set()
-    refs: set[str] = set()
+    nested_refs: set[str] = set()
     for item in value.values():
-        refs.update(_payload_ref_names(item))
-    return refs
+        nested_refs.update(_payload_ref_names(item))
+    return nested_refs

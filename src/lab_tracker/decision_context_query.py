@@ -2,11 +2,195 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from datetime import datetime
+from typing import Any, Literal, Protocol, TypeVar
 from uuid import UUID
 
 from lab_tracker.decision_context_types import JsonObject
-from lab_tracker.repository import LabTrackerRepository
+from lab_tracker.models import (
+    Analysis,
+    Claim,
+    Dataset,
+    Note,
+    Project,
+    Question,
+    Session,
+    Visualization,
+)
+
+EntityT_co = TypeVar("EntityT_co", covariant=True)
+
+
+class DecisionContextEntityReader(Protocol[EntityT_co]):
+    """Read one entity for decision-context anchor resolution."""
+
+    def get(self, entity_id: UUID) -> EntityT_co | None: ...
+
+
+class DecisionContextJsonModel(Protocol):
+    """Pydantic-shaped value serialized into a decision-context envelope."""
+
+    def model_dump(self, *, mode: Literal["json"]) -> dict[str, Any]: ...
+
+
+class DecisionContextProjectModel(DecisionContextJsonModel, Protocol):
+    project_id: UUID
+
+
+class DecisionContextRepository(Protocol):
+    """Persistence capabilities consumed by ``RepositoryDecisionContextReader``."""
+
+    @property
+    def projects(self) -> DecisionContextEntityReader[Project]: ...
+
+    @property
+    def questions(self) -> DecisionContextEntityReader[Question]: ...
+
+    @property
+    def datasets(self) -> DecisionContextEntityReader[Dataset]: ...
+
+    @property
+    def analyses(self) -> DecisionContextEntityReader[Analysis]: ...
+
+    @property
+    def claims(self) -> DecisionContextEntityReader[Claim]: ...
+
+    @property
+    def visualizations(self) -> DecisionContextEntityReader[Visualization]: ...
+
+    def query_projects(
+        self,
+        *,
+        group_id: UUID | None = None,
+        project_ids: set[UUID] | None = None,
+        status: str | None = None,
+        created_by: str | None = None,
+        client_capture_id: str | None = None,
+        limit: int | None = None,
+        offset: int = 0,
+    ) -> tuple[list[Project], int]: ...
+
+    def query_questions(
+        self,
+        *,
+        project_id: UUID | None = None,
+        project_ids: set[UUID] | None = None,
+        status: str | None = None,
+        question_type: str | None = None,
+        search: str | None = None,
+        created_by: str | None = None,
+        client_capture_id: str | None = None,
+        parent_question_id: UUID | None = None,
+        ancestor_question_id: UUID | None = None,
+        superseded_by_question_ids: set[UUID] | None = None,
+        limit: int | None = None,
+        offset: int = 0,
+        recent_first: bool = False,
+        updated_first: bool = False,
+    ) -> tuple[list[Question], int]: ...
+
+    def query_notes(
+        self,
+        *,
+        project_id: UUID | None = None,
+        project_ids: set[UUID] | None = None,
+        status: str | None = None,
+        search: str | None = None,
+        created_by: str | None = None,
+        since: datetime | None = None,
+        until: datetime | None = None,
+        client_capture_id: str | None = None,
+        target_entity_type: str | None = None,
+        target_entity_id: UUID | None = None,
+        limit: int | None = None,
+        offset: int = 0,
+        recent_first: bool = False,
+    ) -> tuple[list[Note], int]: ...
+
+    def project_ids_with_search_matches(
+        self,
+        *,
+        search: str,
+        project_ids: set[UUID] | None = None,
+        limit: int | None = None,
+    ) -> set[UUID]: ...
+
+    def query_sessions(
+        self,
+        *,
+        project_id: UUID | None = None,
+        project_ids: set[UUID] | None = None,
+        status: str | None = None,
+        session_type: str | None = None,
+        created_by: str | None = None,
+        since: datetime | None = None,
+        until: datetime | None = None,
+        limit: int | None = None,
+        offset: int = 0,
+        recent_first: bool = False,
+    ) -> tuple[list[Session], int]: ...
+
+    def query_datasets(
+        self,
+        *,
+        project_id: UUID | None = None,
+        project_ids: set[UUID] | None = None,
+        status: str | None = None,
+        created_by: str | None = None,
+        since: datetime | None = None,
+        until: datetime | None = None,
+        limit: int | None = None,
+        offset: int = 0,
+        recent_first: bool = False,
+    ) -> tuple[list[Dataset], int]: ...
+
+    def query_analyses(
+        self,
+        *,
+        project_id: UUID | None = None,
+        project_ids: set[UUID] | None = None,
+        dataset_id: UUID | None = None,
+        question_id: UUID | None = None,
+        status: str | None = None,
+        created_by: str | None = None,
+        since: datetime | None = None,
+        until: datetime | None = None,
+        limit: int | None = None,
+        offset: int = 0,
+        recent_first: bool = False,
+    ) -> tuple[list[Analysis], int]: ...
+
+    def query_claims(
+        self,
+        *,
+        project_id: UUID | None = None,
+        project_ids: set[UUID] | None = None,
+        status: str | None = None,
+        dataset_id: UUID | None = None,
+        analysis_id: UUID | None = None,
+        created_by: str | None = None,
+        since: datetime | None = None,
+        until: datetime | None = None,
+        limit: int | None = None,
+        offset: int = 0,
+        recent_first: bool = False,
+    ) -> tuple[list[Claim], int]: ...
+
+    def query_visualizations(
+        self,
+        *,
+        project_id: UUID | None = None,
+        project_ids: set[UUID] | None = None,
+        analysis_id: UUID | None = None,
+        claim_id: UUID | None = None,
+        created_by: str | None = None,
+        since: datetime | None = None,
+        until: datetime | None = None,
+        limit: int | None = None,
+        offset: int = 0,
+        recent_first: bool = False,
+    ) -> tuple[list[Visualization], int]: ...
 
 
 class RepositoryDecisionContextReader:
@@ -14,7 +198,7 @@ class RepositoryDecisionContextReader:
 
     def __init__(
         self,
-        repository: LabTrackerRepository,
+        repository: DecisionContextRepository,
         *,
         accessible_project_ids: set[UUID] | None = None,
     ) -> None:
@@ -82,7 +266,10 @@ class RepositoryDecisionContextReader:
             return None
         return _entity_to_json(visualization)
 
-    def _project_entity_to_json(self, entity: object | None) -> JsonObject | None:
+    def _project_entity_to_json(
+        self,
+        entity: DecisionContextProjectModel | None,
+    ) -> JsonObject | None:
         if entity is None:
             return None
         project_id = getattr(entity, "project_id", None)
@@ -368,11 +555,16 @@ def _uuid_or_none(value: str | None) -> UUID | None:
     return UUID(str(value))
 
 
-def _entity_to_json(entity: object) -> JsonObject:
-    return entity.model_dump(mode="json")  # type: ignore[attr-defined]
+def _entity_to_json(entity: DecisionContextJsonModel) -> JsonObject:
+    return entity.model_dump(mode="json")
 
 
-def _list_payload(items: list[object], total: int, limit: int, offset: int) -> JsonObject:
+def _list_payload(
+    items: Iterable[DecisionContextJsonModel],
+    total: int,
+    limit: int,
+    offset: int,
+) -> JsonObject:
     return {
         "data": [_entity_to_json(item) for item in items],
         "meta": {"limit": limit, "offset": offset, "total": total},
