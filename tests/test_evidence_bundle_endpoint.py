@@ -505,7 +505,12 @@ def test_manifest_normalization_controls_replay_and_size_conflicts(
     assert created.status_code == 201, created.text
     dataset_id = created.json()["data"]["component_ids"]["dataset_id"]
     dataset = client.get(f"/datasets/{dataset_id}", headers=admin_auth_headers)
-    commit_hash = dataset.json()["data"]["commit_hash"]
+    assert dataset.status_code == 200, dataset.text
+    dataset_payload = dataset.json()["data"]
+    commit_hash = dataset_payload["commit_hash"]
+    assert {
+        file["path"]: file["size_bytes"] for file in dataset_payload["commit_manifest"]["files"]
+    } == {"a.csv": 10, "b.csv": 20}
 
     equivalent = deepcopy(base)
     equivalent["dataset"] = {
