@@ -121,8 +121,7 @@ class MCPSettings:
             base_url=os.getenv("LAB_TRACKER_MCP_BASE_URL", DEFAULT_BASE_URL).rstrip("/"),
             username=os.getenv("LAB_TRACKER_MCP_USERNAME"),
             password=os.getenv("LAB_TRACKER_MCP_PASSWORD"),
-            api_key=os.getenv("LAB_TRACKER_MCP_API_KEY")
-            or os.getenv("LAB_TRACKER_MCP_TOKEN"),
+            api_key=os.getenv("LAB_TRACKER_MCP_API_KEY") or os.getenv("LAB_TRACKER_MCP_TOKEN"),
             timeout_seconds=float(
                 os.getenv("LAB_TRACKER_MCP_TIMEOUT_SECONDS", str(DEFAULT_TIMEOUT_SECONDS))
             ),
@@ -405,6 +404,9 @@ class LabTrackerAPIClient:
             },
         )
 
+    def get_visualization(self, visualization_id: str) -> JsonObject:
+        return self._request("GET", f"/visualizations/{visualization_id}")
+
     def list_goals(
         self,
         *,
@@ -465,9 +467,7 @@ class LabTrackerAPIClient:
             payload["byte_start"] = byte_start
         if byte_end is not None:
             payload["byte_end"] = byte_end
-        return self._request(
-            "POST", "/external-artifacts/resolve", json_payload=payload
-        )
+        return self._request("POST", "/external-artifacts/resolve", json_payload=payload)
 
     def export_goal_artifact(
         self,
@@ -548,9 +548,7 @@ class LabTrackerAPIClient:
                     limit=200,
                 )
                 questions.extend(_payload_items(payload))
-            claims.extend(
-                _payload_items(self.list_claims(project_id=lookup_project_id, limit=200))
-            )
+            claims.extend(_payload_items(self.list_claims(project_id=lookup_project_id, limit=200)))
 
         return build_next_questions_payload(goals, questions, claims, limit=limit)
 
@@ -794,6 +792,44 @@ class LabTrackerAPIClient:
             },
         )
 
+    def record_evidence_bundle(
+        self,
+        *,
+        project_id: str,
+        primary_question_id: str | None = None,
+        dataset: JsonObject | None = None,
+        analysis: JsonObject | None = None,
+        claim: JsonObject | None = None,
+        visualization: JsonObject | None = None,
+        source_note: JsonObject | None = None,
+        dry_run: bool = True,
+        idempotency_key: str | None = None,
+    ) -> JsonObject:
+        payload: JsonObject = {
+            "project_id": project_id,
+            "primary_question_id": primary_question_id,
+            "dry_run": dry_run,
+            "idempotency_key": idempotency_key,
+        }
+        payload.update(
+            {
+                name: component
+                for name, component in (
+                    ("dataset", dataset),
+                    ("analysis", analysis),
+                    ("claim", claim),
+                    ("visualization", visualization),
+                    ("source_note", source_note),
+                )
+                if component is not None
+            }
+        )
+        return self._request(
+            "POST",
+            "/evidence-bundles",
+            json_payload=payload,
+        )
+
     def create_goal(
         self,
         *,
@@ -889,6 +925,9 @@ class LabTrackerAPIClient:
         viz_id: str,
         file_path: str,
         content_type: str | None = None,
+        checksum_sha256: str | None = None,
+        size_bytes: int | None = None,
+        expected_current_storage_id: str | None = None,
     ) -> JsonObject:
         path = Path(file_path).expanduser()
         if not path.is_file():
@@ -898,9 +937,7 @@ class LabTrackerAPIClient:
         except UploadTooLargeError as exc:
             raise LabTrackerAPIValidationError(str(exc), code="validation_error") from exc
         resolved_content_type = (
-            content_type
-            or mimetypes.guess_type(path.name)[0]
-            or "application/octet-stream"
+            content_type or mimetypes.guess_type(path.name)[0] or "application/octet-stream"
         )
         # Stream the file handle instead of reading it all into memory; open_file
         # re-opens per attempt so a 401 retry replays cleanly.
@@ -911,6 +948,15 @@ class LabTrackerAPIClient:
             open_file=lambda: path.open("rb"),
             filename=path.name,
             content_type=resolved_content_type,
+            data={
+                key: str(value)
+                for key, value in {
+                    "checksum_sha256": checksum_sha256,
+                    "size_bytes": size_bytes,
+                    "expected_current_storage_id": expected_current_storage_id,
+                }.items()
+                if value is not None
+            },
         )
         if response.status_code >= 400:
             raise _api_error_from_response(response)
@@ -987,8 +1033,6 @@ class LabTrackerAPIClient:
         return token
 
 
-
-
 def _is_note_metadata_scalar(value: object) -> bool:
     return isinstance(value, (str, bool, int, float))
 
@@ -1006,9 +1050,7 @@ def _validate_note_metadata(metadata: object) -> dict[str, NoteMetadataScalar] |
         if not isinstance(key, str) or not key.strip():
             raise LabTrackerAPIError("Note metadata keys must be non-empty strings.")
         if not _is_note_metadata_scalar(value):
-            raise LabTrackerAPIError(
-                "Note metadata values must be strings, numbers, or booleans."
-            )
+            raise LabTrackerAPIError("Note metadata values must be strings, numbers, or booleans.")
         validated[key] = value
     return validated
 
@@ -1176,11 +1218,7 @@ def _project_ids_for_next_question_lookup(
     if project_id is not None:
         return [project_id]
     goal_project_ids = sorted(
-        {
-            str(goal["project_id"])
-            for goal in goals
-            if goal.get("project_id") is not None
-        }
+        {str(goal["project_id"]) for goal in goals if goal.get("project_id") is not None}
     )
     return goal_project_ids or [None]
 

@@ -11,8 +11,9 @@ from starlette import status as http_status
 from starlette.requests import Request
 
 from lab_tracker.api import LabTrackerAPI
-from lab_tracker.db_models import VisualizationModel
+from lab_tracker.db_models import AnalysisModel
 from lab_tracker.db_types import ensure_uuid
+from lab_tracker.errors import NotFoundError
 from lab_tracker.models import Analysis, AnalysisStatus, UsageEventResourceType
 from lab_tracker.schemas import (
     AnalysisCommitRequest,
@@ -40,7 +41,10 @@ from .shared import (
     validate_pagination,
     wants_jsonld,
 )
-from .visualizations import _delete_stored_visualization_file
+from .visualizations import (
+    _delete_stored_visualization_file,
+    _locked_visualization_rows,
+)
 
 
 def build_analyses_router(api: LabTrackerAPI) -> APIRouter:
@@ -163,14 +167,22 @@ def build_analyses_router(api: LabTrackerAPI) -> APIRouter:
         ensure_project_read(request, existing.project_id)
         db_session = db_session_from_request(request)
         storage_backend = file_storage_from_request(request)
+        locked_analysis = db_session.scalar(
+            select(AnalysisModel)
+            .where(AnalysisModel.analysis_id == str(analysis_id))
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+        if locked_analysis is None:
+            raise NotFoundError("Analysis does not exist.")
+        visualization_rows = _locked_visualization_rows(
+            db_session,
+            analysis_id=analysis_id,
+        )
         storage_ids = [
-            ensure_uuid(value)
-            for value in db_session.scalars(
-                select(VisualizationModel.asset_storage_id).where(
-                    VisualizationModel.analysis_id == str(analysis_id),
-                    VisualizationModel.asset_storage_id.is_not(None),
-                )
-            )
+            ensure_uuid(row.asset_storage_id)
+            for row in visualization_rows
+            if row.asset_storage_id is not None
         ]
         analysis = request_api.delete_analysis(analysis_id, actor=actor)
         db_session.flush()

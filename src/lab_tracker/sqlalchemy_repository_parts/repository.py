@@ -74,6 +74,7 @@ from .core import (
 )
 from .data_stores import SQLAlchemyDataStoreRepository
 from .datasets import SQLAlchemyDatasetRepository
+from .evidence_bundles import SQLAlchemyEvidenceBundleRepository
 from .exploration import SQLAlchemyExplorationNodeRepository
 from .goals import SQLAlchemyGoalRepository
 from .graph_batches import (
@@ -144,6 +145,7 @@ class SQLAlchemyLabTrackerRepository(LabTrackerRepository):
         self.entity_versions = SQLAlchemyEntityVersionRepository(session)
         self.goals = SQLAlchemyGoalRepository(session)
         self.data_stores = SQLAlchemyDataStoreRepository(session)
+        self.evidence_bundles = SQLAlchemyEvidenceBundleRepository(session)
         self.visualizations = SQLAlchemyVisualizationRepository(session)
         self.graph_change_sets = SQLAlchemyGraphChangeSetRepository(session)
         self.graph_draft_batch_settings = SQLAlchemyGraphDraftBatchSettingsRepository(session)

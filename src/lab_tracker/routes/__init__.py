@@ -22,6 +22,7 @@ from .dataset_files import build_dataset_files_router
 from .datasets import build_datasets_router
 from .device_auth import build_device_auth_router
 from .errors import register_error_handlers
+from .evidence_bundles import build_evidence_bundles_router
 from .exploration import build_exploration_router
 from .external_artifacts import build_external_artifacts_router
 from .goals import build_goals_router
@@ -84,6 +85,7 @@ def register_routes(
     app.include_router(build_project_graph_router(api))
     app.include_router(build_questions_router(api))
     app.include_router(build_datasets_router(api))
+    app.include_router(build_evidence_bundles_router(api))
     app.include_router(build_dataset_files_router(api))
     app.include_router(build_notes_router(api))
     app.include_router(build_graph_drafts_router(api))

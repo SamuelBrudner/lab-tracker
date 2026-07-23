@@ -16,6 +16,7 @@ from lab_tracker.models import (
     DatasetFile,
     DataStore,
     EntityVersion,
+    EvidenceBundleRecord,
     ExplorationNode,
     Goal,
     GoalLink,
@@ -43,6 +44,10 @@ from lab_tracker.models import (
 EntityT = TypeVar("EntityT")
 
 
+class EvidenceBundleKeyRaceError(Exception):
+    """The scoped evidence-bundle idempotency key lost a concurrent insert race."""
+
+
 class EntityRepository(Protocol, Generic[EntityT]):
     """CRUD contract for a single entity type."""
 
@@ -57,6 +62,28 @@ class EntityRepository(Protocol, Generic[EntityT]):
 
     def delete(self, entity_id: UUID) -> EntityT | None:
         """Delete one entity by ID and return the removed value."""
+
+
+class EvidenceBundleRepository(Protocol):
+    """Append-only persistence needed by the atomic evidence-bundle command."""
+
+    def get(self, entity_id: UUID) -> EvidenceBundleRecord | None:
+        """Return one durable idempotency record by ID."""
+
+    def list(self) -> list[EvidenceBundleRecord]:
+        """Return durable idempotency records for diagnostics."""
+
+    def insert(self, entity: EvidenceBundleRecord) -> None:
+        """Append a durable idempotency record; existing records are immutable."""
+
+    def get_by_key(
+        self,
+        *,
+        project_id: UUID,
+        created_by: str,
+        idempotency_key: str,
+    ) -> EvidenceBundleRecord | None:
+        """Return the record for one principal-scoped idempotency key."""
 
 
 class LabTrackerRepository(Protocol):
@@ -85,6 +112,7 @@ class LabTrackerRepository(Protocol):
     entity_versions: EntityRepository[EntityVersion]
     goals: EntityRepository[Goal]
     data_stores: EntityRepository[DataStore]
+    evidence_bundles: EvidenceBundleRepository
     visualizations: EntityRepository[Visualization]
     graph_change_sets: EntityRepository[GraphChangeSet]
     graph_draft_batch_settings: EntityRepository[GraphDraftBatchSettings]

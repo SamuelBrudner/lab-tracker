@@ -11,6 +11,7 @@ from typing import Annotated, Any, Generic, Literal, TypeVar
 from uuid import UUID
 
 from pydantic import AfterValidator, BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic.json_schema import SkipJsonSchema
 
 from lab_tracker.auth import Role
 from lab_tracker.goals_attributes import validate_goal_attributes
@@ -850,6 +851,237 @@ class VisualizationUpdate(RequestModel):
     @classmethod
     def _related_claim_ids_unique(cls, value: list[UUID] | None) -> list[UUID] | None:
         return _unique_uuid_list(value)
+
+
+class EvidenceBundleUploadIntent(RequestModel):
+    checksum_sha256: Annotated[str, Field(pattern=r"^[0-9a-fA-F]{64}$")]
+    size_bytes: int = Field(..., gt=0)
+    filename: NonBlankStr
+    content_type: NonBlankStr
+
+    @field_validator("checksum_sha256")
+    @classmethod
+    def _normalize_checksum(cls, value: str) -> str:
+        return value.lower()
+
+
+class EvidenceBundleExistingDataset(RequestModel):
+    kind: Literal["existing"]
+    dataset_id: UUID
+
+
+class EvidenceBundleCreateDataset(RequestModel):
+    kind: Literal["create"]
+    primary_question_id: UUID | None = None
+    secondary_question_ids: list[UUID] | None = None
+    commit_manifest: DatasetCommitManifestInput | None = None
+    commit_hash: str | None = None
+    status: DatasetStatus = DatasetStatus.STAGED
+    terminal_reason: NonBlankStr | None = None
+
+    @field_validator("secondary_question_ids")
+    @classmethod
+    def _secondary_ids_unique(cls, value: list[UUID] | None) -> list[UUID] | None:
+        return _unique_uuid_list(value)
+
+
+EvidenceBundleDataset = Annotated[
+    EvidenceBundleExistingDataset | EvidenceBundleCreateDataset,
+    Field(discriminator="kind"),
+]
+
+
+class EvidenceBundleExistingAnalysis(RequestModel):
+    kind: Literal["existing"]
+    analysis_id: UUID
+
+
+class EvidenceBundleCreateAnalysis(RequestModel):
+    kind: Literal["create"]
+    dataset_ids: list[UUID] | None = None
+    method_hash: NonBlankStr
+    code_version: NonBlankStr
+    environment_hash: str | None = None
+    external_artifacts: list[ExternalArtifactReference] | None = None
+    status: AnalysisStatus = AnalysisStatus.STAGED
+    terminal_reason: NonBlankStr | None = None
+    derive_code_provenance: bool = False
+
+    @field_validator("dataset_ids")
+    @classmethod
+    def _analysis_dataset_ids_unique(
+        cls,
+        value: list[UUID] | None,
+    ) -> list[UUID] | None:
+        return _unique_uuid_list(value)
+
+
+EvidenceBundleAnalysis = Annotated[
+    EvidenceBundleExistingAnalysis | EvidenceBundleCreateAnalysis,
+    Field(discriminator="kind"),
+]
+
+
+class EvidenceBundleExistingClaim(RequestModel):
+    kind: Literal["existing"]
+    claim_id: UUID
+
+
+class EvidenceBundleCreateClaim(RequestModel):
+    kind: Literal["create"]
+    statement: NonBlankStr
+    confidence: float = Field(..., ge=0.0, le=100.0)
+    status: ClaimStatus = ClaimStatus.PROPOSED
+    terminal_reason: NonBlankStr | None = None
+    falsification_criteria: NonBlankStr | None = None
+    verification_plan: NonBlankStr | None = None
+    refuting_outcome: NonBlankStr | None = None
+    supported_by_dataset_ids: list[UUID] | None = None
+    supported_by_analysis_ids: list[UUID] | None = None
+    answers_question_ids: list[UUID] | None = None
+    external_citations: list[ExternalArtifactReference] | None = None
+
+    @field_validator(
+        "supported_by_dataset_ids",
+        "supported_by_analysis_ids",
+        "answers_question_ids",
+    )
+    @classmethod
+    def _claim_link_ids_unique(cls, value: list[UUID] | None) -> list[UUID] | None:
+        return _unique_uuid_list(value)
+
+
+EvidenceBundleClaim = Annotated[
+    EvidenceBundleExistingClaim | EvidenceBundleCreateClaim,
+    Field(discriminator="kind"),
+]
+
+
+class EvidenceBundleExistingVisualization(RequestModel):
+    kind: Literal["existing"]
+    viz_id: UUID
+    upload_intent: EvidenceBundleUploadIntent | None = None
+
+
+class EvidenceBundleCreateVisualization(RequestModel):
+    kind: Literal["create"]
+    analysis_id: UUID | None = None
+    viz_type: NonBlankStr
+    file_path: NonBlankStr
+    caption: str | None = None
+    related_claim_ids: list[UUID] | None = None
+    upload_intent: EvidenceBundleUploadIntent | None = None
+
+    @field_validator("related_claim_ids")
+    @classmethod
+    def _bundle_claim_ids_unique(
+        cls,
+        value: list[UUID] | None,
+    ) -> list[UUID] | None:
+        return _unique_uuid_list(value)
+
+
+EvidenceBundleVisualization = Annotated[
+    EvidenceBundleExistingVisualization | EvidenceBundleCreateVisualization,
+    Field(discriminator="kind"),
+]
+
+
+class EvidenceBundleExistingSourceNote(RequestModel):
+    kind: Literal["existing"]
+    note_id: UUID
+
+
+class EvidenceBundleCreateSourceNote(RequestModel):
+    kind: Literal["create"]
+    raw_content: NonBlankStr
+    transcribed_text: str | None = None
+    targets: list[EntityRef] | None = None
+    metadata: dict[str, NoteMetadataScalar] | None = None
+    status: NoteStatus = NoteStatus.STAGED
+
+    @field_validator("metadata")
+    @classmethod
+    def _bundle_note_metadata_normalized(
+        cls,
+        value: dict[str, NoteMetadataScalar] | None,
+    ) -> dict[str, str] | None:
+        return _normalize_note_metadata_for_request(value)
+
+
+EvidenceBundleSourceNote = Annotated[
+    EvidenceBundleExistingSourceNote | EvidenceBundleCreateSourceNote,
+    Field(discriminator="kind"),
+]
+
+
+class EvidenceBundleRequest(RequestModel):
+    project_id: UUID
+    primary_question_id: UUID | None = None
+    dataset: EvidenceBundleDataset | SkipJsonSchema[None] = None
+    analysis: EvidenceBundleAnalysis | SkipJsonSchema[None] = None
+    claim: EvidenceBundleClaim | SkipJsonSchema[None] = None
+    visualization: EvidenceBundleVisualization | SkipJsonSchema[None] = None
+    source_note: EvidenceBundleSourceNote | SkipJsonSchema[None] = None
+    dry_run: bool = True
+    idempotency_key: Annotated[
+        str,
+        Field(min_length=1, max_length=200),
+        AfterValidator(_non_blank_string),
+    ] | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def _reject_explicit_null_components(cls, value: Any) -> Any:
+        if not isinstance(value, dict):
+            return value
+        for field_name in ("dataset", "analysis", "claim", "visualization", "source_note"):
+            if field_name in value and value[field_name] is None:
+                raise ValueError(f"{field_name} must be omitted rather than null")
+        return value
+
+    @model_validator(mode="after")
+    def _validate_bundle_boundary(self) -> EvidenceBundleRequest:
+        if not any(
+            component is not None
+            for component in (
+                self.dataset,
+                self.analysis,
+                self.claim,
+                self.visualization,
+                self.source_note,
+            )
+        ):
+            raise ValueError("At least one evidence-bundle component is required.")
+        if not self.dry_run and self.idempotency_key is None:
+            raise ValueError("idempotency_key is required when dry_run is false.")
+        return self
+
+
+class EvidenceBundleComponentIds(BaseModel):
+    dataset_id: UUID | None = None
+    analysis_id: UUID | None = None
+    claim_id: UUID | None = None
+    visualization_id: UUID | None = None
+    source_note_id: UUID | None = None
+
+
+class EvidenceBundlePlanStep(BaseModel):
+    action: Literal["create", "reuse"]
+    entity_type: Literal["dataset", "analysis", "claim", "visualization", "source_note"]
+    entity_id: UUID | None = None
+    reason: str | None = None
+    details: dict[str, Any] | None = None
+
+
+class EvidenceBundleResultRead(BaseModel):
+    outcome: Literal["preview", "created", "reused"]
+    dry_run: bool
+    project_id: UUID
+    idempotency_key: str | None = None
+    component_ids: EvidenceBundleComponentIds
+    plan: list[EvidenceBundlePlanStep]
+    warnings: list[str] = Field(default_factory=list)
 
 
 ProjectGraphView = Literal["evidence", "questions", "full"]

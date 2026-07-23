@@ -20,6 +20,7 @@ from lab_tracker.db_models import (
     DatasetQuestionLinkModel,
     DataStoreModel,
     EntityVersionModel,
+    EvidenceBundleModel,
     ExplorationNodeEdgeModel,
     ExplorationNodeModel,
     GoalLinkModel,
@@ -47,6 +48,7 @@ from lab_tracker.models import (
     EntityOrigin,
     EntityRef,
     EntityVersion,
+    EvidenceBundleRecord,
     ExplorationNode,
     ExternalArtifactReference,
     Goal,
@@ -1283,6 +1285,30 @@ def apply_data_store_to_model(row: DataStoreModel, store: DataStore) -> None:
     )
     row.created_at = store.created_at
     row.updated_at = store.updated_at
+
+
+def evidence_bundle_record_to_model(record: EvidenceBundleRecord) -> EvidenceBundleModel:
+    return EvidenceBundleModel(
+        bundle_id=record.bundle_id,
+        project_id=record.project_id,
+        created_by=record.created_by,
+        idempotency_key=record.idempotency_key,
+        request_fingerprint=record.request_fingerprint,
+        result=dict(record.result),
+        created_at=record.created_at,
+    )
+
+
+def evidence_bundle_record_from_model(row: EvidenceBundleModel) -> EvidenceBundleRecord:
+    return EvidenceBundleRecord(
+        bundle_id=row.bundle_id,
+        project_id=row.project_id,
+        created_by=row.created_by,
+        idempotency_key=row.idempotency_key,
+        request_fingerprint=row.request_fingerprint,
+        result=dict(row.result or {}),
+        created_at=_as_utc(row.created_at),
+    )
 
 
 def goal_to_model(goal: Goal) -> GoalModel:

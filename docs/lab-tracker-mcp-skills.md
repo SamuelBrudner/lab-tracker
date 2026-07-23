@@ -159,12 +159,18 @@ file exists.
 
 `lab_tracker_record_evidence_bundle` is the composite MCP authoring helper for
 one result. `dry_run` defaults to `true` and returns a reviewable plan with
-proposed creates, reused records, warnings, and idempotency behavior. With
-`dry_run=false`, it still writes only through existing strict API create/upload
-endpoints. Provide `idempotency_key` plus concrete dataset manifest/hash,
+proposed creates, reused records, warnings, and idempotency behavior. Component
+objects use the existing flat MCP shape; an entity ID selects an existing record,
+while create fields request a new one. With `dry_run=false`, a non-blank
+`idempotency_key` is required and the graph records are committed through one
+strict atomic bundle endpoint. An identical principal-scoped replay returns the
+same stable IDs; reusing the key with conflicting fields returns `409` rather
+than matching records semantically. Provide concrete dataset manifest/hash,
 analysis `method_hash`/`code_version`, claim text/confidence, and visualization
-path or upload details; the tool will reuse matching existing records on retry
-instead of creating duplicates.
+path or upload details. Local visualization files are snapshotted and
+fingerprinted before the atomic command, then uploaded as an explicit
+client-side follow-up; attachment failure cannot roll back an already committed
+graph bundle and is reported as such.
 
 ## Postgres Runtime
 

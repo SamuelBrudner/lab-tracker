@@ -190,7 +190,7 @@ class NoteService(BaseService):
         resolved_transcribed_text = transcribed_text.strip() if transcribed_text else None
         resolved_targets = list(targets or [])
         for target in resolved_targets:
-            self._ensure_target_exists(target, project_id)
+            self.validate_target(target, project_id)
         resolved_metadata = normalize_note_metadata(metadata)
         resolved_client_capture_id = _normalize_client_capture_id(client_capture_id)
         if resolved_client_capture_id is not None:
@@ -571,7 +571,7 @@ class NoteService(BaseService):
         if targets is not None:
             resolved_targets = list(targets)
             for target in resolved_targets:
-                self._ensure_target_exists(target, note.project_id)
+                self.validate_target(target, note.project_id)
             note.targets = resolved_targets
         if metadata is not None:
             note.metadata = normalize_note_metadata(metadata)
@@ -659,7 +659,8 @@ class NoteService(BaseService):
         ):
             raise ValidationError("Note cannot be deleted while graph drafts reference it.")
 
-    def _ensure_target_exists(self, target: EntityRef, project_id: UUID) -> None:
+    def validate_target(self, target: EntityRef, project_id: UUID) -> None:
+        """Validate one note target and project scope without writing."""
         entity_getters = {
             EntityType.PROJECT: self.projects.get_project,
             EntityType.QUESTION: self.questions.get_question,
