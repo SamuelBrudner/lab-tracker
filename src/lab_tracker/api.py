@@ -35,6 +35,7 @@ from lab_tracker.repository import LabTrackerRepository
 from lab_tracker.request_context import LabTrackerRequestContext
 from lab_tracker.services import (
     AnalysisService,
+    BatchSchedulingCoordinator,
     ClaimService,
     DatasetService,
     DataStoreService,
@@ -42,7 +43,13 @@ from lab_tracker.services import (
     EvidenceBundleService,
     ExplorationService,
     GoalService,
+    GraphContextBuilder,
+    GraphDraftGenerationCoordinator,
+    GraphDraftRecords,
+    GraphDraftReviewCoordinator,
     GraphDraftService,
+    GraphPatchApplier,
+    GraphPatchValidator,
     NoteService,
     OwnershipReassignmentService,
     ProjectAuthorizationPolicy,
@@ -54,6 +61,7 @@ from lab_tracker.services import (
     ServiceContext,
     SessionService,
     SupervisionService,
+    TransactionalDraftCommitCoordinator,
     VisualizationService,
 )
 
@@ -211,8 +219,7 @@ class LabTrackerAPI(
             notes=self.notes,
             authorization=self.project_authorization,
         )
-        self.graph_drafts: GraphDraftService = GraphDraftService(
-            context,
+        graph_context_builder = GraphContextBuilder(
             projects=self.projects,
             questions=self.questions,
             notes=self.notes,
@@ -222,9 +229,60 @@ class LabTrackerAPI(
             claims=self.claims,
             visualizations=self.visualizations,
             goals=self.goals,
+        )
+        graph_patch_validator = GraphPatchValidator(
+            get_graph_entity=graph_context_builder.get_graph_entity,
+        )
+        graph_patch_applier = GraphPatchApplier(
+            projects=self.projects,
+            questions=self.questions,
+            notes=self.notes,
+            sessions=self.sessions,
+            datasets=self.datasets,
+            analyses=self.analyses,
+            claims=self.claims,
+            visualizations=self.visualizations,
+            goals=self.goals,
+        )
+        graph_draft_records = GraphDraftRecords(context)
+        graph_draft_generation = GraphDraftGenerationCoordinator(
+            context,
+            records=graph_draft_records,
+            notes=self.notes,
+            authorization=self.project_authorization,
+            context_builder=graph_context_builder,
+            patch_validator=graph_patch_validator,
+        )
+        graph_draft_review = GraphDraftReviewCoordinator(
+            context,
+            records=graph_draft_records,
+            generation=graph_draft_generation,
+            patch_validator=graph_patch_validator,
+            authorization=self.project_authorization,
+        )
+        graph_draft_commit = TransactionalDraftCommitCoordinator(
+            context,
+            records=graph_draft_records,
+            patch_applier=graph_patch_applier,
             versions=self.entity_versions,
+            questions=self.questions,
+            authorization=self.project_authorization,
+        )
+        graph_draft_scheduling = BatchSchedulingCoordinator(
+            context,
+            records=graph_draft_records,
+            generation=graph_draft_generation,
+            projects=self.projects,
+            notes=self.notes,
             authorization=self.project_authorization,
             provenance_links=self.provenance_links,
+        )
+        self.graph_drafts: GraphDraftService = GraphDraftService(
+            records=graph_draft_records,
+            generation=graph_draft_generation,
+            review=graph_draft_review,
+            commit=graph_draft_commit,
+            scheduling=graph_draft_scheduling,
         )
 
     def for_request(self, repository: LabTrackerRepository) -> LabTrackerAPI:

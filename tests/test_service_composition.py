@@ -12,8 +12,12 @@ from lab_tracker.auth import AuthContext, Role
 from lab_tracker.db import Base
 from lab_tracker.services import (
     AnalysisService,
+    BatchSchedulingCoordinator,
     ClaimService,
     DatasetService,
+    GraphDraftGenerationCoordinator,
+    GraphDraftRecords,
+    GraphDraftReviewCoordinator,
     GraphDraftService,
     NoteService,
     ProjectAuthorizationPolicy,
@@ -21,6 +25,7 @@ from lab_tracker.services import (
     QuestionService,
     ServiceContext,
     SessionService,
+    TransactionalDraftCommitCoordinator,
     VisualizationService,
 )
 from lab_tracker.sqlalchemy_repository import SQLAlchemyLabTrackerRepository
@@ -34,6 +39,11 @@ SERVICE_TYPES = (
     AnalysisService,
     ClaimService,
     VisualizationService,
+    GraphDraftRecords,
+    GraphDraftGenerationCoordinator,
+    GraphDraftReviewCoordinator,
+    TransactionalDraftCommitCoordinator,
+    BatchSchedulingCoordinator,
     GraphDraftService,
 )
 
@@ -80,9 +90,15 @@ def test_api_composes_named_service_instances() -> None:
     assert isinstance(api.claims, ClaimService)
     assert isinstance(api.visualizations, VisualizationService)
     assert isinstance(api.graph_drafts, GraphDraftService)
+    assert isinstance(api.graph_drafts.records, GraphDraftRecords)
+    assert isinstance(api.graph_drafts.generation, GraphDraftGenerationCoordinator)
+    assert isinstance(api.graph_drafts.review, GraphDraftReviewCoordinator)
+    assert isinstance(api.graph_drafts.commit, TransactionalDraftCommitCoordinator)
+    assert isinstance(api.graph_drafts.scheduling, BatchSchedulingCoordinator)
     assert api.questions.projects is api.projects
     assert api.datasets.sessions is api.sessions
-    assert api.graph_drafts.notes is api.notes
+    assert api.graph_drafts.generation.notes is api.notes
+    assert api.graph_drafts.scheduling.notes is api.notes
     assert api.projects.authorization is api.project_authorization
     assert api.questions.authorization is api.project_authorization
     assert api.datasets.authorization is api.project_authorization
@@ -91,7 +107,10 @@ def test_api_composes_named_service_instances() -> None:
     assert api.analyses.authorization is api.project_authorization
     assert api.claims.authorization is api.project_authorization
     assert api.visualizations.authorization is api.project_authorization
-    assert api.graph_drafts.authorization is api.project_authorization
+    assert api.graph_drafts.generation.authorization is api.project_authorization
+    assert api.graph_drafts.review.authorization is api.project_authorization
+    assert api.graph_drafts.commit.authorization is api.project_authorization
+    assert api.graph_drafts.scheduling.authorization is api.project_authorization
 
 
 def test_project_service_can_run_without_api_facade() -> None:

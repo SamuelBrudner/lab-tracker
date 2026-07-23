@@ -28,7 +28,7 @@ flowchart TD
     facade[["LabTrackerAPI facade<br/>api.py + api_parts/ mixins<br/>composition root + request scope<br/>attached per request via api_from_request()"]]
 
     subgraph app["Application / domain services"]
-      services["26 services · ~11k LOC<br/>services/*.py"]
+      services["32 service modules · ~14.7k LOC<br/>services/*.py"]
     end
 
     subgraph data["Persistence"]
@@ -91,6 +91,20 @@ Reading the diagram:
   one domain's surface touches that domain's mixin, not a single 1300-line file.
   The usage-telemetry helpers (`_with_usage_event`, `record_usage_event`) and the
   UUID/timing helpers in `api_parts/_base.py` are shared by all mixins.
+- **Graph drafting has lifecycle owners behind a compatibility façade.**
+  `GraphDraftService` preserves the flat method surface used by
+  `api_parts/graph_drafts.py`, but every method is an explicit one-hop delegate:
+  `GraphDraftGenerationCoordinator` builds and validates proposals,
+  `GraphDraftReviewCoordinator` owns editing and human review,
+  `TransactionalDraftCommitCoordinator` alone owns `GraphPatchApplier` and the
+  atomic canonical commit, and `BatchSchedulingCoordinator` owns settings,
+  workers, and due-run dispatch. `GraphDraftRecords` supplies their shared
+  change-set/run record operations, while `graph_draft_batch_policy.py` contains
+  deterministic batch identity, window, reviewer, and schedule rules. All five
+  owners receive the exact same `ServiceContext`; scheduling calls generation
+  directly, review calls a non-persisting generation seam for revisions, and no
+  coordinator calls `GraphDraftService` or `LabTrackerAPI`. Usage telemetry
+  therefore remains at the outer API façade and fires once.
 - **The mapper + domain-model seam (blue) is the largest structural multiplier.**
   Each retained entity exists as a Pydantic domain type (`models.py`) and a
   SQLAlchemy row (`db_models.py`), joined by hand-written translators in

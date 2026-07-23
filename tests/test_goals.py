@@ -696,7 +696,10 @@ def test_graph_draft_goal_operations_validate_and_apply_committed_links():
         },
     )
     with pytest.raises(ValidationError):
-        api.graph_drafts.patch_validator.validate_operation(invalid_create, invalid_create.payload)
+        api.graph_drafts.generation.patch_validator.validate_operation(
+            invalid_create,
+            invalid_create.payload,
+        )
 
     link_operation = GraphChangeOperation(
         operation_id=uuid4(),
@@ -716,7 +719,10 @@ def test_graph_draft_goal_operations_validate_and_apply_committed_links():
             ]
         },
     )
-    api.graph_drafts.patch_validator.validate_operation(link_operation, link_operation.payload)
+    api.graph_drafts.generation.patch_validator.validate_operation(
+        link_operation,
+        link_operation.payload,
+    )
     source_note = api.create_note(
         project.project_id,
         "Goal draft source",
@@ -729,9 +735,8 @@ def test_graph_draft_goal_operations_validate_and_apply_committed_links():
         model="fake-gpt",
         prompt_version="test",
     )
-    api.graph_drafts.repository.graph_change_sets.save(change_set)
-    api.graph_drafts.repository.commit()
-    api.graph_drafts.patch_applier.apply_graph_operation(
+    api.graph_drafts.records.save_graph_change_set(change_set)
+    api.graph_drafts.commit.patch_applier.apply_graph_operation(
         link_operation,
         ref_map={},
         actor=actor,
@@ -763,7 +768,7 @@ def test_graph_draft_goal_update_validation_uses_existing_goal_type():
         payload={"attributes": {"typo_field": "blocked"}},
     )
     with pytest.raises(ValidationError, match="Goal attributes are invalid"):
-        api.graph_drafts.patch_validator.validate_operation(
+        api.graph_drafts.generation.patch_validator.validate_operation(
             invalid_attributes,
             invalid_attributes.payload,
         )
@@ -779,7 +784,7 @@ def test_graph_draft_goal_update_validation_uses_existing_goal_type():
         payload={"goal_type": "grant"},
     )
     with pytest.raises(ValidationError, match="Goal attributes are invalid"):
-        api.graph_drafts.patch_validator.validate_operation(
+        api.graph_drafts.generation.patch_validator.validate_operation(
             invalid_type_change,
             invalid_type_change.payload,
         )
@@ -794,7 +799,7 @@ def test_graph_draft_goal_update_validation_uses_existing_goal_type():
         target_entity_id=goal.goal_id,
         payload={"goal_type": "grant", "attributes": {"funding_agency": "NIH"}},
     )
-    api.graph_drafts.patch_validator.validate_operation(
+    api.graph_drafts.generation.patch_validator.validate_operation(
         valid_type_change,
         valid_type_change.payload,
     )
