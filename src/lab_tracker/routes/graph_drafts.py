@@ -127,8 +127,11 @@ def build_graph_drafts_router(api: LabTrackerAPI) -> APIRouter:
 
     @router.get("/graph-drafts/{change_set_id:uuid}", response_model=Envelope[GraphChangeSet])
     def get_graph_draft(change_set_id: UUID, request: Request):
-        change_set = api_from_request(request, api).get_graph_change_set(change_set_id)
-        ensure_project_read(request, change_set.project_id)
+        actor = actor_from_request(request)
+        change_set = api_from_request(request, api).get_graph_change_set_for_read(
+            change_set_id,
+            actor=actor,
+        )
         record_usage_view(
             request,
             resource_type=UsageEventResourceType.GRAPH_CHANGE_SET,
