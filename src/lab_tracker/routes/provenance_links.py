@@ -15,7 +15,6 @@ from .shared import (
     actor_from_request,
     api_from_request,
     ensure_project_contributor,
-    ensure_project_read,
     handlers_from_request,
     list_response,
     record_usage_view,
@@ -51,8 +50,10 @@ def build_provenance_links_router(api: LabTrackerAPI) -> APIRouter:
 
     @router.get("/provenance-links/{link_id}", response_model=Envelope[ProvenanceLink])
     def get_provenance_link(link_id: UUID, request: Request):
-        link = api_from_request(request, api).get_provenance_link(link_id)
-        ensure_project_read(request, link.project_id)
+        link = api_from_request(request, api).get_provenance_link_for_read(
+            link_id,
+            actor=actor_from_request(request),
+        )
         record_usage_view(
             request,
             resource_type=UsageEventResourceType.PROVENANCE_LINK,

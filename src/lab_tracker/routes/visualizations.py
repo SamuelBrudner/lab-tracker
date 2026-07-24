@@ -84,14 +84,18 @@ def build_visualizations_router(api: LabTrackerAPI) -> APIRouter:
 
     @router.get("/visualizations/{viz_id}", response_model=Envelope[Visualization])
     def get_visualization(viz_id: UUID, request: Request):
-        visualization = api_from_request(request, api).get_visualization(viz_id)
-        analysis = api_from_request(request, api).get_analysis(visualization.analysis_id)
-        ensure_project_read(request, analysis.project_id)
+        visualization, project_id = api_from_request(
+            request,
+            api,
+        ).get_visualization_for_read(
+            viz_id,
+            actor=actor_from_request(request),
+        )
         record_usage_view(
             request,
             resource_type=UsageEventResourceType.VISUALIZATION,
             resource_id=visualization.viz_id,
-            project_id=analysis.project_id,
+            project_id=project_id,
         )
         return Envelope(data=visualization)
 

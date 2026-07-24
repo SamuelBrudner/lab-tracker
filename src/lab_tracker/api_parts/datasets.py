@@ -59,6 +59,14 @@ class DatasetsApiMixin:
     def get_dataset(self, dataset_id: UUID) -> Dataset:
         return self.datasets.get_dataset(dataset_id)
 
+    def get_dataset_for_read(
+        self,
+        dataset_id: UUID,
+        *,
+        actor: AuthContext | None = None,
+    ) -> Dataset:
+        return self.datasets.get_dataset_for_read(dataset_id, actor=actor)
+
     def list_datasets(self, *args: Any, **kwargs: Any) -> Any:
         return self.datasets.list_datasets(*args, **kwargs)
 

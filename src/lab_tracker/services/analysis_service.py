@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING
 from uuid import UUID, uuid4
 
 from lab_tracker.auth import AuthContext
-from lab_tracker.errors import ValidationError
+from lab_tracker.errors import NotFoundError, OpaqueTargetNotFoundError, ValidationError
 from lab_tracker.models import (
     Analysis,
     AnalysisStatus,
@@ -149,6 +149,20 @@ class AnalysisService(BaseService):
             label="Analysis",
             loader=lambda repository: repository.analyses.get(analysis_id),
         )
+
+    def get_analysis_for_read(
+        self,
+        analysis_id: UUID,
+        *,
+        actor: AuthContext | None = None,
+    ) -> Analysis:
+        try:
+            analysis = self.get_analysis(analysis_id)
+        except NotFoundError as exc:
+            raise OpaqueTargetNotFoundError("Analysis does not exist.") from exc
+        if not self.authorization.can_read(analysis.project_id, actor=actor):
+            raise OpaqueTargetNotFoundError("Analysis does not exist.")
+        return analysis
 
     def list_analyses(
         self,

@@ -9,9 +9,12 @@ its own edit locality. These are mixins: LabTrackerAPI inherits them, so
 from __future__ import annotations
 
 from typing import Any
+from uuid import UUID
 
 from lab_tracker.api_parts._base import _first_uuid
+from lab_tracker.auth import AuthContext
 from lab_tracker.models import (
+    ExplorationNode,
     UsageEventResourceType,
     UsageEventVerb,
 )
@@ -29,6 +32,17 @@ class ExplorationApiMixin:
 
     def get_exploration_node(self, *args: Any, **kwargs: Any) -> Any:
         return self.exploration.get_exploration_node(*args, **kwargs)
+
+    def get_exploration_node_for_read(
+        self,
+        node_id: UUID,
+        *,
+        actor: AuthContext | None = None,
+    ) -> ExplorationNode:
+        return self.exploration.get_exploration_node_for_read(
+            node_id,
+            actor=actor,
+        )
 
     def list_exploration_nodes(self, *args: Any, **kwargs: Any) -> Any:
         return self.exploration.list_exploration_nodes(*args, **kwargs)

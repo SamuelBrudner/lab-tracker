@@ -685,6 +685,58 @@ def test_client_resolve_artifact_posts_to_resolve_route() -> None:
     assert "byte_start" not in body
 
 
+def test_client_does_not_remint_credentials_after_opaque_resolver_not_found() -> None:
+    captured: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured.append(request)
+        if request.url.path == "/auth/login":
+            return _json_response(
+                200,
+                {"data": {"access_token": "token-1"}},
+            )
+        if request.url.path == "/external-artifacts/resolve":
+            assert request.headers["authorization"] == "Bearer token-1"
+            return _json_response(
+                404,
+                {
+                    "error": {
+                        "code": "not_found",
+                        "message": "Dataset does not exist.",
+                        "issues": None,
+                    }
+                },
+            )
+        raise AssertionError(f"Unexpected request: {request.method} {request.url.path}")
+
+    client = mcp_server.LabTrackerAPIClient(
+        mcp_server.MCPSettings(
+            base_url="http://testserver",
+            username="service-user",
+            password="secret",
+        ),
+        transport=httpx.MockTransport(handler),
+    )
+    try:
+        with pytest.raises(mcp_server.LabTrackerAPIError) as captured_error:
+            client.resolve_external_artifact(
+                entity_type="dataset",
+                entity_id="hidden-dataset",
+            )
+    finally:
+        client.close()
+
+    error = captured_error.value
+    assert not isinstance(error, mcp_server.LabTrackerAPIAuthError)
+    assert error.status_code == 404
+    assert error.code == "not_found"
+    assert str(error) == "Dataset does not exist."
+    assert [request.url.path for request in captured] == [
+        "/auth/login",
+        "/external-artifacts/resolve",
+    ]
+
+
 def test_resolve_artifact_is_registered_read_tool() -> None:
     assert "lab_tracker_resolve_artifact" in {tool.__name__ for tool in READ_TOOLS}
     assert "lab_tracker_resolve_artifact" not in {tool.__name__ for tool in WRITE_TOOLS}

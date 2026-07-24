@@ -89,9 +89,30 @@ class ContextAccess(Protocol):
 
     def get_dataset(self, dataset_id: UUID) -> Dataset: ...
 
+    def get_dataset_for_read(
+        self,
+        dataset_id: UUID,
+        *,
+        actor: AuthContext | None,
+    ) -> Dataset: ...
+
     def get_analysis(self, analysis_id: UUID) -> Analysis: ...
 
+    def get_analysis_for_read(
+        self,
+        analysis_id: UUID,
+        *,
+        actor: AuthContext | None,
+    ) -> Analysis: ...
+
     def get_claim(self, claim_id: UUID) -> Claim: ...
+
+    def get_claim_for_read(
+        self,
+        claim_id: UUID,
+        *,
+        actor: AuthContext | None,
+    ) -> Claim: ...
 
     def get_question(self, question_id: UUID) -> Question: ...
 
@@ -237,8 +258,7 @@ class ContextQueries:
         actor: AuthContext,
         base_url: str,
     ) -> dict[str, object]:
-        dataset = self.api.get_dataset(dataset_id)
-        self.api.require_project_read(dataset.project_id, actor=actor)
+        dataset = self.api.get_dataset_for_read(dataset_id, actor=actor)
         supervision_edges, _ = self.repository.query_supervision_edges(
             limit=None,
             offset=0,
@@ -256,8 +276,7 @@ class ContextQueries:
         actor: AuthContext,
         base_url: str,
     ) -> dict[str, object]:
-        analysis = self.api.get_analysis(analysis_id)
-        self.api.require_project_read(analysis.project_id, actor=actor)
+        analysis = self.api.get_analysis_for_read(analysis_id, actor=actor)
         datasets = [
             self.api.get_dataset(dataset_id) for dataset_id in analysis.dataset_ids
         ]
@@ -299,8 +318,7 @@ class ContextQueries:
         actor: AuthContext,
         base_url: str,
     ) -> dict[str, object]:
-        claim = self.api.get_claim(claim_id)
-        self.api.require_project_read(claim.project_id, actor=actor)
+        claim = self.api.get_claim_for_read(claim_id, actor=actor)
         analyses = [
             self.api.get_analysis(analysis_id)
             for analysis_id in claim.supported_by_analysis_ids
@@ -439,14 +457,6 @@ class ContextQueries:
         byte_start: int | None,
         byte_end: int | None,
     ) -> dict[str, Any]:
-        reference, project_id = self._locate_external_reference(
-            entity_type=entity_type,
-            entity_id=entity_id,
-            artifact_index=artifact_index,
-            content_hash=content_hash,
-        )
-        self.api.require_project_read(project_id, actor=actor)
-
         byte_range: tuple[int, int] | None = None
         if byte_start is not None or byte_end is not None:
             if byte_start is None or byte_end is None:
@@ -454,6 +464,14 @@ class ContextQueries:
                     "byte_start and byte_end must be provided together."
                 )
             byte_range = (byte_start, byte_end)
+
+        reference, project_id = self._locate_external_reference(
+            actor=actor,
+            entity_type=entity_type,
+            entity_id=entity_id,
+            artifact_index=artifact_index,
+            content_hash=content_hash,
+        )
 
         materialized = self._materialize_reference(reference, project_id)
         if isinstance(materialized, ResolvedArtifact):
@@ -479,12 +497,14 @@ class ContextQueries:
     def _locate_external_reference(
         self,
         *,
+        actor: AuthContext,
         entity_type: ExternalArtifactEntityType,
         entity_id: UUID,
         artifact_index: int,
         content_hash: str | None,
     ) -> tuple[ExternalArtifactReference, UUID]:
         artifacts, project_id = self._entity_artifacts(
+            actor=actor,
             entity_type=entity_type,
             entity_id=entity_id,
         )
@@ -503,16 +523,17 @@ class ContextQueries:
     def _entity_artifacts(
         self,
         *,
+        actor: AuthContext,
         entity_type: ExternalArtifactEntityType,
         entity_id: UUID,
     ) -> tuple[list[ExternalArtifactReference], UUID]:
         if entity_type == "analysis":
-            analysis = self.api.get_analysis(entity_id)
+            analysis = self.api.get_analysis_for_read(entity_id, actor=actor)
             return list(analysis.external_artifacts), analysis.project_id
         if entity_type == "claim":
-            claim = self.api.get_claim(entity_id)
+            claim = self.api.get_claim_for_read(entity_id, actor=actor)
             return list(claim.external_citations), claim.project_id
-        dataset = self.api.get_dataset(entity_id)
+        dataset = self.api.get_dataset_for_read(entity_id, actor=actor)
         manifest = dataset.commit_manifest
         artifacts = list(manifest.external_artifacts) if manifest is not None else []
         return artifacts, dataset.project_id
