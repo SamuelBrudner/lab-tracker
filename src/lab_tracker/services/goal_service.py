@@ -213,8 +213,15 @@ class GoalService(BaseService):
             return False
         return True
 
-    def require_goal_read(self, goal: Goal, *, actor: AuthContext | None = None) -> None:
-        self._require_goal_read(goal, actor=actor)
+    def require_goal_read(
+        self,
+        goal: Goal,
+        *,
+        actor: AuthContext | None = None,
+    ) -> set[UUID]:
+        """Require access to the complete goal scope and return that scope."""
+
+        return self._require_goal_read(goal, actor=actor)
 
     def update_goal(
         self,
@@ -466,12 +473,18 @@ class GoalService(BaseService):
             return
         raise ValidationError("Projectless goals must include at least one project link.")
 
-    def _require_goal_read(self, goal: Goal, *, actor: AuthContext | None = None) -> None:
+    def _require_goal_read(
+        self,
+        goal: Goal,
+        *,
+        actor: AuthContext | None = None,
+    ) -> set[UUID]:
         project_ids = self._goal_scope_project_ids(goal)
         if not project_ids and not self.authorization.has_global_read(actor):
             raise AuthError("Project access required.")
         for project_id in project_ids:
             self.authorization.require_read(project_id, actor=actor)
+        return project_ids
 
     def _require_goal_contributor(
         self,

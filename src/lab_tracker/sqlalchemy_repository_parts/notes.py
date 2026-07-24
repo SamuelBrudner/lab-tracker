@@ -104,6 +104,7 @@ class SQLAlchemyNoteRepository(EntityRepository[Note]):
         *,
         project_id: UUID | None = None,
         project_ids: set[UUID] | None = None,
+        note_ids: set[UUID] | None = None,
         status: str | None = None,
         search: str | None = None,
         created_by: str | None = None,
@@ -119,6 +120,8 @@ class SQLAlchemyNoteRepository(EntityRepository[Note]):
         self._session.flush()
         if project_ids is not None and not project_ids:
             return [], 0
+        if note_ids is not None and not note_ids:
+            return [], 0
         stmt = select(NoteModel)
         count_stmt = select(NoteModel.note_id)
         if project_id is not None:
@@ -128,6 +131,10 @@ class SQLAlchemyNoteRepository(EntityRepository[Note]):
             project_values = uuid_values(project_ids)
             stmt = stmt.where(NoteModel.project_id.in_(project_values))
             count_stmt = count_stmt.where(NoteModel.project_id.in_(project_values))
+        if note_ids is not None:
+            note_values = uuid_values(note_ids)
+            stmt = stmt.where(NoteModel.note_id.in_(note_values))
+            count_stmt = count_stmt.where(NoteModel.note_id.in_(note_values))
         if status is not None:
             stmt = stmt.where(NoteModel.status == status)
             count_stmt = count_stmt.where(NoteModel.status == status)

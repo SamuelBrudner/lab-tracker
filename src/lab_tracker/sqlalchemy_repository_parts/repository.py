@@ -755,6 +755,7 @@ class SQLAlchemyLabTrackerRepository:
         *,
         project_id: UUID | None = None,
         project_ids: set[UUID] | None = None,
+        question_ids: set[UUID] | None = None,
         status: str | None = None,
         question_type: str | None = None,
         search: str | None = None,
@@ -771,6 +772,7 @@ class SQLAlchemyLabTrackerRepository:
         return self.questions.query(
             project_id=project_id,
             project_ids=project_ids,
+            question_ids=question_ids,
             status=status,
             question_type=question_type,
             search=search,
@@ -828,6 +830,7 @@ class SQLAlchemyLabTrackerRepository:
         *,
         project_id: UUID | None = None,
         project_ids: set[UUID] | None = None,
+        note_ids: set[UUID] | None = None,
         status: str | None = None,
         search: str | None = None,
         created_by: str | None = None,
@@ -843,6 +846,7 @@ class SQLAlchemyLabTrackerRepository:
         return self.notes.query(
             project_id=project_id,
             project_ids=project_ids,
+            note_ids=note_ids,
             status=status,
             search=search,
             created_by=created_by,
