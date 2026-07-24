@@ -144,7 +144,7 @@ def build_goals_router(api: LabTrackerAPI) -> APIRouter:
         request_api = api_from_request(request, api)
         actor = actor_from_request(request)
         goal = request_api.get_goal(goal_id)
-        request_api.goals.require_goal_read(goal, actor=actor)
+        request_api.require_goal_read(goal, actor=actor)
         record_usage_view(
             request,
             resource_type=UsageEventResourceType.GOAL,

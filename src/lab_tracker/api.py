@@ -126,10 +126,6 @@ class LabTrackerAPI(
         self.ownership_reassignments: OwnershipReassignmentService = OwnershipReassignmentService(
             context
         )
-        self.record_exports: RecordExportService = RecordExportService(
-            context,
-            authorization=self.project_authorization,
-        )
         self.publication_readiness: PublicationReadinessService = PublicationReadinessService(
             context,
             projects=self.projects,
@@ -198,6 +194,11 @@ class LabTrackerAPI(
             claims_provider=lambda: self.claims,
             visualizations_provider=lambda: self.visualizations,
             notes_provider=lambda: self.notes,
+            authorization=self.project_authorization,
+        )
+        self.record_exports: RecordExportService = RecordExportService(
+            context,
+            goals=self.goals,
             authorization=self.project_authorization,
         )
         self.data_stores: DataStoreService = DataStoreService(
