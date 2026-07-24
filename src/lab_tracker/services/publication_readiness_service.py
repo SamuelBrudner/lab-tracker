@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from typing import Protocol
 from uuid import UUID
 
 from lab_tracker.auth import AuthContext
@@ -16,6 +17,7 @@ from lab_tracker.models import (
     ExternalArtifactReference,
     Goal,
     Note,
+    Project,
     PublicationReadinessBrokenExternalRef,
     PublicationReadinessOrphanedEntity,
     PublicationReadinessReport,
@@ -28,8 +30,17 @@ from lab_tracker.models import (
     external_artifact_uri_validation_error,
 )
 from lab_tracker.services.base import BaseService, ServiceContext
-from lab_tracker.services.project_authorization import ProjectAuthorizationPolicy
-from lab_tracker.services.project_service import ProjectService
+
+
+class ProjectReadAccess(Protocol):
+    """Opaque project lookup needed by publication-readiness checks."""
+
+    def get_project_for_read(
+        self,
+        project_id: UUID,
+        *,
+        actor: AuthContext | None,
+    ) -> Project: ...
 
 
 class PublicationReadinessService(BaseService):
@@ -37,12 +48,10 @@ class PublicationReadinessService(BaseService):
         self,
         context: ServiceContext,
         *,
-        projects: ProjectService,
-        authorization: ProjectAuthorizationPolicy,
+        projects: ProjectReadAccess,
     ) -> None:
         super().__init__(context)
         self.projects = projects
-        self.authorization = authorization
 
     def check(
         self,
@@ -50,8 +59,7 @@ class PublicationReadinessService(BaseService):
         *,
         actor: AuthContext | None = None,
     ) -> PublicationReadinessReport:
-        self.projects.get_project(project_id)
-        self.authorization.require_read(project_id, actor=actor)
+        self.projects.get_project_for_read(project_id, actor=actor)
         repository = self.repository
         questions, _ = repository.query_questions(project_id=project_id, limit=None, offset=0)
         datasets, _ = repository.query_datasets(project_id=project_id, limit=None, offset=0)

@@ -1,11 +1,15 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
+from datetime import timedelta
 from uuid import uuid4
 
+import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import delete
+from sqlalchemy import delete, select
 
-from lab_tracker.db_models import ProjectMembershipModel
+from lab_tracker.auth import utc_now
+from lab_tracker.db_models import ProjectMembershipModel, UsageEventModel
 from lab_tracker.sqlalchemy_repository_parts.core import (
     SQLAlchemyProjectMembershipRepository,
 )
@@ -45,6 +49,200 @@ def _create_project(
     response = client.post("/projects", json=payload, headers=headers)
     assert response.status_code == 201
     return response.json()["data"]["project_id"]
+
+
+@dataclass(frozen=True, slots=True)
+class GroupReadScope:
+    group_id: str
+    member_headers: dict[str, str]
+    outsider_headers: dict[str, str]
+
+
+@pytest.fixture
+def group_read_scope(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+) -> GroupReadScope:
+    group_response = client.post(
+        "/groups",
+        json={"name": f"Opaque group {uuid4().hex[:8]}"},
+        headers=admin_auth_headers,
+    )
+    assert group_response.status_code == 201, group_response.text
+    group_id = group_response.json()["data"]["group_id"]
+
+    member_name = f"opaque-group-member-{uuid4().hex[:8]}"
+    member_token, _ = _register_user(client, member_name)
+    outsider_token, _ = _register_user(
+        client,
+        f"opaque-group-outsider-{uuid4().hex[:8]}",
+    )
+    membership_response = client.post(
+        f"/groups/{group_id}/members",
+        json={"username": member_name, "role": "viewer"},
+        headers=admin_auth_headers,
+    )
+    assert membership_response.status_code == 201, membership_response.text
+
+    return GroupReadScope(
+        group_id=group_id,
+        member_headers=_auth_headers(member_token),
+        outsider_headers=_auth_headers(outsider_token),
+    )
+
+
+def test_direct_group_read_is_opaque_to_outsiders_and_visible_to_members(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+    group_read_scope: GroupReadScope,
+) -> None:
+    existing = client.get(
+        f"/groups/{group_read_scope.group_id}",
+        headers=group_read_scope.outsider_headers,
+    )
+    missing = client.get(
+        f"/groups/{uuid4()}",
+        headers=group_read_scope.outsider_headers,
+    )
+
+    assert existing.status_code == missing.status_code == 404
+    assert existing.json() == missing.json() == {
+        "error": {
+            "code": "not_found",
+            "message": "Project group does not exist.",
+            "issues": None,
+        }
+    }
+
+    for headers in (group_read_scope.member_headers, admin_auth_headers):
+        response = client.get(f"/groups/{group_read_scope.group_id}", headers=headers)
+        assert response.status_code == 200, response.text
+        assert response.json()["data"]["group_id"] == group_read_scope.group_id
+
+
+def test_direct_group_read_preserves_auth_capability_and_route_validation(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+    group_read_scope: GroupReadScope,
+) -> None:
+    missing_auth = client.get(f"/groups/{group_read_scope.group_id}")
+    invalid_auth = client.get(
+        f"/groups/{group_read_scope.group_id}",
+        headers={"Authorization": "Bearer invalid-token"},
+    )
+    issued = client.post(
+        "/auth/tokens",
+        json={
+            "label": "Opaque group capability test",
+            "role": "admin",
+            "read_only": False,
+            "scope": "batch_run_due",
+            "expires_at": (utc_now() + timedelta(days=1)).isoformat(),
+        },
+        headers=admin_auth_headers,
+    )
+    assert issued.status_code == 201, issued.text
+    scoped = client.get(
+        f"/groups/{group_read_scope.group_id}",
+        headers={
+            "Authorization": f"Bearer {issued.json()['data']['secret']}",
+        },
+    )
+    malformed = client.get("/groups/not-a-uuid", headers=admin_auth_headers)
+
+    assert missing_auth.status_code == 401
+    assert invalid_auth.status_code == 401
+    assert scoped.status_code == 403
+    assert scoped.json()["error"] == {
+        "code": "service_forbidden",
+        "message": "Not permitted for this token.",
+        "issues": None,
+    }
+    assert malformed.status_code == 404
+
+
+def test_group_read_opacity_does_not_change_group_mutation_authorization(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+    group_read_scope: GroupReadScope,
+) -> None:
+    member_list = client.get(
+        f"/groups/{group_read_scope.group_id}/members",
+        headers=group_read_scope.member_headers,
+    )
+    member_patch = client.patch(
+        f"/groups/{group_read_scope.group_id}",
+        json={"description": "Forbidden edit"},
+        headers=group_read_scope.member_headers,
+    )
+    member_delete = client.delete(
+        f"/groups/{group_read_scope.group_id}",
+        headers=group_read_scope.member_headers,
+    )
+
+    assert member_list.status_code == 401
+    assert member_patch.status_code == 401
+    assert member_delete.status_code == 401
+
+    after_denial = client.get(
+        f"/groups/{group_read_scope.group_id}",
+        headers=admin_auth_headers,
+    )
+    assert after_denial.status_code == 200
+    assert after_denial.json()["data"]["description"] == ""
+
+    admin_list = client.get(
+        f"/groups/{group_read_scope.group_id}/members",
+        headers=admin_auth_headers,
+    )
+    admin_patch = client.patch(
+        f"/groups/{group_read_scope.group_id}",
+        json={"description": "Authorized edit"},
+        headers=admin_auth_headers,
+    )
+    admin_delete = client.delete(
+        f"/groups/{group_read_scope.group_id}",
+        headers=admin_auth_headers,
+    )
+
+    assert admin_list.status_code == 200
+    assert admin_patch.status_code == 200
+    assert admin_patch.json()["data"]["description"] == "Authorized edit"
+    assert admin_delete.status_code == 200
+
+
+def test_denied_and_missing_group_reads_do_not_emit_usage_events(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+    group_read_scope: GroupReadScope,
+) -> None:
+    client.app.state.settings.usage_events = True
+
+    denied = client.get(
+        f"/groups/{group_read_scope.group_id}",
+        headers=group_read_scope.outsider_headers,
+    )
+    missing = client.get(
+        f"/groups/{uuid4()}",
+        headers=group_read_scope.outsider_headers,
+    )
+    assert denied.status_code == missing.status_code == 404
+
+    with client.app.state.db_session_factory() as session:
+        usage_events = session.scalars(select(UsageEventModel)).all()
+    assert usage_events == []
+
+    authorized = client.get(
+        f"/groups/{group_read_scope.group_id}",
+        headers=admin_auth_headers,
+    )
+    assert authorized.status_code == 200
+    with client.app.state.db_session_factory() as session:
+        usage_events = session.scalars(select(UsageEventModel)).all()
+    assert len(usage_events) == 1
+    assert usage_events[0].verb == "view"
+    assert usage_events[0].resource_type == "project_group"
+    assert str(usage_events[0].resource_id) == group_read_scope.group_id
 
 
 def test_editor_group_creator_bootstraps_owner_and_manages_members(

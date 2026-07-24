@@ -59,6 +59,14 @@ class AnalysesApiMixin:
     def get_analysis(self, analysis_id: UUID) -> Analysis:
         return self.analyses.get_analysis(analysis_id)
 
+    def get_analysis_for_read(
+        self,
+        analysis_id: UUID,
+        *,
+        actor: AuthContext | None = None,
+    ) -> Analysis:
+        return self.analyses.get_analysis_for_read(analysis_id, actor=actor)
+
     def list_analyses(self, *args: Any, **kwargs: Any) -> Any:
         return self.analyses.list_analyses(*args, **kwargs)
 
@@ -109,6 +117,14 @@ class AnalysesApiMixin:
     def get_claim(self, claim_id: UUID) -> Claim:
         return self.claims.get_claim(claim_id)
 
+    def get_claim_for_read(
+        self,
+        claim_id: UUID,
+        *,
+        actor: AuthContext | None = None,
+    ) -> Claim:
+        return self.claims.get_claim_for_read(claim_id, actor=actor)
+
     def list_claims(self, *args: Any, **kwargs: Any) -> Any:
         return self.claims.list_claims(*args, **kwargs)
 
@@ -156,6 +172,17 @@ class AnalysesApiMixin:
 
     def get_visualization(self, viz_id: UUID) -> Visualization:
         return self.visualizations.get_visualization(viz_id)
+
+    def get_visualization_for_read(
+        self,
+        viz_id: UUID,
+        *,
+        actor: AuthContext | None = None,
+    ) -> tuple[Visualization, UUID]:
+        return self.visualizations.get_visualization_for_read(
+            viz_id,
+            actor=actor,
+        )
 
     def list_visualizations(self, *args: Any, **kwargs: Any) -> Any:
         return self.visualizations.list_visualizations(*args, **kwargs)

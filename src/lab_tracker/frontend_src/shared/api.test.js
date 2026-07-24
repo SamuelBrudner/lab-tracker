@@ -1,13 +1,19 @@
 import { describe, expect, it, vi } from "vitest";
 
 import {
+  AUTH_REJECTED_EVENT,
   apiListRequest,
   apiRequest,
   fetchAllPages,
   fetchProtectedBlobResource,
 } from "./api.js";
 import { ContractError } from "./contract.js";
-import { apiResponse, binaryResponse, installFetchMock } from "../test/utils.js";
+import {
+  apiResponse,
+  binaryResponse,
+  errorResponse,
+  installFetchMock,
+} from "../test/utils.js";
 
 describe("strict JSON envelope helpers", () => {
   it("apiRequest rejects malformed successful resource envelopes", async () => {
@@ -93,6 +99,32 @@ describe("strict JSON envelope helpers", () => {
     expect(resource.blob).toBeInstanceOf(Blob);
     expect(resource.blob.size).toBe("figure-bytes".length);
     expect(resource.blob.type).toBe("image/png");
+  });
+
+  it("does not reject authentication when a protected blob read is opaquely absent", async () => {
+    const authRejected = vi.fn();
+    window.addEventListener(AUTH_REJECTED_EVENT, authRejected);
+    installFetchMock([
+      {
+        match: "/visualizations/hidden/file/download",
+        response: errorResponse("Visualization does not exist.", 404),
+      },
+    ]);
+
+    try {
+      await expect(
+        fetchProtectedBlobResource({
+          path: "/visualizations/hidden/file/download",
+          token: "still-valid-token",
+        })
+      ).rejects.toMatchObject({
+        message: "Visualization does not exist.",
+        status: 404,
+      });
+      expect(authRejected).not.toHaveBeenCalled();
+    } finally {
+      window.removeEventListener(AUTH_REJECTED_EVENT, authRejected);
+    }
   });
 
 });

@@ -105,12 +105,16 @@ describe("App", () => {
       expect(screen.getByLabelText("Primary question (required)")).toHaveValue("question-1");
     });
 
-    fireEvent.click(screen.getByRole("button", { name: "Start session" }));
+    const startButton = screen.getByRole("button", { name: "Start session" });
+    await waitFor(() => expect(startButton).toBeEnabled());
+    fireEvent.click(startButton);
 
     expect(await screen.findByText("ABC123")).toBeInTheDocument();
     expect(await screen.findByText("Session started.")).toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole("button", { name: "Close session" }));
+    const closeButton = screen.getByRole("button", { name: "Close session" });
+    await waitFor(() => expect(closeButton).toBeEnabled());
+    fireEvent.click(closeButton);
 
     expect(await screen.findByText("Session closed.")).toBeInTheDocument();
     await waitFor(() => {

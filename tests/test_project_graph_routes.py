@@ -606,12 +606,13 @@ def test_project_graph_mermaid_export_is_stable_and_escaped(
     assert "\nYes" not in first
 
 
-def test_project_graph_routes_require_project_access(
+def test_project_graph_routes_are_opaque_to_outsiders_but_require_authentication(
     client: TestClient,
     admin_auth_headers: dict[str, str],
 ):
     ids = _create_graph_fixture(client, admin_auth_headers)
     viewer_headers = _auth_headers(client, role=Role.VIEWER)
+    missing_project_id = uuid4()
 
     graph_response = client.get(
         f"/projects/{ids['project_id']}/graph",
@@ -621,8 +622,24 @@ def test_project_graph_routes_require_project_access(
         f"/projects/{ids['project_id']}/graph/mermaid",
         headers=viewer_headers,
     )
+    missing_graph = client.get(
+        f"/projects/{missing_project_id}/graph",
+        headers=viewer_headers,
+    )
+    missing_mermaid = client.get(
+        f"/projects/{missing_project_id}/graph/mermaid",
+        headers=viewer_headers,
+    )
     unauthenticated_response = client.get(f"/projects/{ids['project_id']}/graph")
 
-    assert graph_response.status_code == 401
-    assert mermaid_response.status_code == 401
+    assert graph_response.status_code == missing_graph.status_code == 404
+    assert mermaid_response.status_code == missing_mermaid.status_code == 404
+    assert graph_response.json() == missing_graph.json() == {
+        "error": {
+            "code": "not_found",
+            "message": "Project does not exist.",
+            "issues": None,
+        }
+    }
+    assert mermaid_response.json() == missing_mermaid.json() == graph_response.json()
     assert unauthenticated_response.status_code == 401

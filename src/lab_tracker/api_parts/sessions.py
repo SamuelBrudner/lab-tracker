@@ -55,8 +55,24 @@ class SessionsApiMixin:
     def get_session(self, session_id: UUID) -> Session:
         return self.sessions.get_session(session_id)
 
+    def get_session_for_read(
+        self,
+        session_id: UUID,
+        *,
+        actor: AuthContext | None = None,
+    ) -> Session:
+        return self.sessions.get_session_for_read(session_id, actor=actor)
+
     def get_session_by_link_code(self, *args: Any, **kwargs: Any) -> Any:
         return self.sessions.get_session_by_link_code(*args, **kwargs)
+
+    def get_session_by_link_code_for_read(
+        self,
+        link_code: str,
+        *,
+        actor: AuthContext | None = None,
+    ) -> Session:
+        return self.sessions.get_session_by_link_code_for_read(link_code, actor=actor)
 
     def list_sessions(self, *args: Any, **kwargs: Any) -> Any:
         return self.sessions.list_sessions(*args, **kwargs)

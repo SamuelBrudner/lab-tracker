@@ -100,8 +100,10 @@ def build_claims_router(api: LabTrackerAPI) -> APIRouter:
 
     @router.get("/claims/{claim_id}", response_model=Envelope[Claim])
     def get_claim(claim_id: UUID, request: Request):
-        claim = api_from_request(request, api).get_claim(claim_id)
-        ensure_project_read(request, claim.project_id)
+        claim = api_from_request(request, api).get_claim_for_read(
+            claim_id,
+            actor=actor_from_request(request),
+        )
         record_usage_view(
             request,
             resource_type=UsageEventResourceType.CLAIM,
@@ -124,8 +126,10 @@ def build_claims_router(api: LabTrackerAPI) -> APIRouter:
         offset: int = 0,
     ):
         validate_pagination(limit, offset)
-        claim = api_from_request(request, api).get_claim(claim_id)
-        ensure_project_read(request, claim.project_id)
+        api_from_request(request, api).get_claim_for_read(
+            claim_id,
+            actor=actor_from_request(request),
+        )
         versions = api_from_request(request, api).list_entity_versions(
             entity_type=EntityType.CLAIM,
             entity_id=claim_id,
@@ -143,8 +147,10 @@ def build_claims_router(api: LabTrackerAPI) -> APIRouter:
         from_version: int,
         to_version: int,
     ):
-        claim = api_from_request(request, api).get_claim(claim_id)
-        ensure_project_read(request, claim.project_id)
+        api_from_request(request, api).get_claim_for_read(
+            claim_id,
+            actor=actor_from_request(request),
+        )
         diff = api_from_request(request, api).diff_entity_versions(
             entity_type=EntityType.CLAIM,
             entity_id=claim_id,
@@ -190,8 +196,10 @@ def build_claims_router(api: LabTrackerAPI) -> APIRouter:
         offset: int = 0,
     ):
         validate_pagination(limit, offset)
-        claim = api_from_request(request, api).get_claim(claim_id)
-        ensure_project_read(request, claim.project_id)
+        api_from_request(request, api).get_claim_for_read(
+            claim_id,
+            actor=actor_from_request(request),
+        )
         edges = api_from_request(request, api).list_claim_edges(claim_id=claim_id)
         items, total = paginate(edges, limit, offset)
         return list_response(items, limit=limit, offset=offset, total=total)

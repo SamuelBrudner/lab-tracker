@@ -2,8 +2,11 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from typing import Any
+from uuid import uuid4
 
 from fastapi.testclient import TestClient
+
+from lab_tracker.models import encode_session_link_code
 
 
 def _create_project(client: TestClient, headers: dict[str, str], name: str) -> str:
@@ -47,7 +50,7 @@ def _create_operational_session(
     return response.json()["data"]
 
 
-def test_get_session_by_link_respects_project_access(
+def test_get_session_by_link_is_opaque_to_outsiders(
     client: TestClient,
     admin_auth_headers: dict[str, str],
     scoped_project_member,
@@ -67,11 +70,21 @@ def test_get_session_by_link_respects_project_access(
         f"/sessions/by-link/{session['link_code']}",
         headers=viewer_user.headers,
     )
+    missing = client.get(
+        f"/sessions/by-link/{encode_session_link_code(uuid4())}",
+        headers=viewer_user.headers,
+    )
 
     assert allowed.status_code == 200
     assert allowed.json()["data"]["session_id"] == session["session_id"]
-    assert denied.status_code == 401
-    assert denied.json()["error"]["message"] == "Project access required."
+    assert denied.status_code == missing.status_code == 404
+    assert denied.json() == missing.json() == {
+        "error": {
+            "code": "not_found",
+            "message": "Session does not exist.",
+            "issues": None,
+        }
+    }
 
 
 def test_promote_operational_session_to_scientific_over_http(
@@ -224,11 +237,14 @@ def test_session_lifecycle_routes_reject_non_member(
     question_id = _create_question(client, admin_auth_headers, project_id)
     session = _create_operational_session(client, admin_auth_headers, project_id)
 
+    denied_read = client.get(
+        f"/sessions/by-link/{session['link_code']}",
+        headers=viewer_user.headers,
+    )
+    assert denied_read.status_code == 404
+    assert denied_read.json()["error"]["message"] == "Session does not exist."
+
     requests: list[Callable[[], Any]] = [
-        lambda: client.get(
-            f"/sessions/by-link/{session['link_code']}",
-            headers=viewer_user.headers,
-        ),
         lambda: client.post(
             f"/sessions/{session['session_id']}/promote",
             json={"primary_question_id": question_id},

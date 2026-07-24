@@ -45,7 +45,6 @@ from .shared import (
     api_from_request,
     content_disposition_header,
     ensure_project_contributor,
-    ensure_project_read,
     handlers_from_request,
     list_response,
     note_default_status,
@@ -209,8 +208,10 @@ def build_notes_router(api: LabTrackerAPI) -> APIRouter:
 
     @router.get("/notes/{note_id:uuid}", response_model=Envelope[Note])
     def get_note(note_id: UUID, request: Request):
-        note = api_from_request(request, api).get_note(note_id)
-        ensure_project_read(request, note.project_id)
+        note = api_from_request(request, api).get_note_for_read(
+            note_id,
+            actor=actor_from_request(request),
+        )
         record_usage_view(
             request,
             resource_type=UsageEventResourceType.NOTE,
@@ -221,8 +222,10 @@ def build_notes_router(api: LabTrackerAPI) -> APIRouter:
 
     @router.get("/notes/{note_id:uuid}/raw")
     def download_note_raw(note_id: UUID, request: Request):
-        note = api_from_request(request, api).get_note(note_id)
-        ensure_project_read(request, note.project_id)
+        api_from_request(request, api).get_note_for_read(
+            note_id,
+            actor=actor_from_request(request),
+        )
         raw_asset, content = api_from_request(request, api).download_note_raw(note_id)
         accept = (request.headers.get("accept") or "").lower()
         if "application/json" not in accept:
