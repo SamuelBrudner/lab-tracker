@@ -189,6 +189,45 @@ def test_unauthenticated_and_unrelated_actors_are_denied() -> None:
         api.project_authorization.require_owner(project.project_id, actor=unrelated)
 
 
+def test_read_predicates_are_non_throwing_for_absent_and_unrelated_actors() -> None:
+    api, admin, project = _project_with_admin()
+    project_member = _registered_actor(api, Role.VIEWER)
+    unrelated = _registered_actor(api, Role.VIEWER)
+    api.upsert_project_membership(
+        project.project_id,
+        project_member.user_id,
+        ProjectMembershipRole.VIEWER,
+        actor=admin,
+    )
+    group = _create_group(api)
+    group_member = _registered_actor(api, Role.VIEWER)
+    _add_group_membership(
+        api,
+        group,
+        group_member,
+        ProjectMembershipRole.VIEWER,
+    )
+
+    assert api.project_authorization.can_read(project.project_id, actor=admin) is True
+    assert (
+        api.project_authorization.can_read(project.project_id, actor=project_member)
+        is True
+    )
+    assert api.project_authorization.can_read(project.project_id, actor=unrelated) is False
+    assert api.project_authorization.can_read(project.project_id, actor=None) is False
+
+    assert api.project_authorization.can_group_read(group.group_id, actor=admin) is True
+    assert (
+        api.project_authorization.can_group_read(group.group_id, actor=group_member)
+        is True
+    )
+    assert (
+        api.project_authorization.can_group_read(group.group_id, actor=unrelated)
+        is False
+    )
+    assert api.project_authorization.can_group_read(group.group_id, actor=None) is False
+
+
 def test_group_owner_inherits_owner_access_to_child_projects() -> None:
     api, admin, first_project = _project_with_admin()
     second_project = api.create_project("Second grouped project", actor=admin)
@@ -205,6 +244,10 @@ def test_group_owner_inherits_owner_access_to_child_projects() -> None:
     assert (
         api.project_authorization.membership_role(first_project.project_id, group_owner)
         == ProjectMembershipRole.OWNER
+    )
+    assert (
+        api.project_authorization.can_read(first_project.project_id, actor=group_owner)
+        is True
     )
     api.project_authorization.require_read(first_project.project_id, actor=group_owner)
     api.project_authorization.require_contributor(first_project.project_id, actor=group_owner)
@@ -248,6 +291,7 @@ def test_group_read_all_grants_read_only_access_to_non_owner_group_members() -> 
             api.project_authorization.membership_role(project.project_id, actor)
             == ProjectMembershipRole.VIEWER
         )
+        assert api.project_authorization.can_read(project.project_id, actor=actor) is True
         api.project_authorization.require_read(project.project_id, actor=actor)
         with pytest.raises(AuthError, match="Project contributor access required."):
             api.project_authorization.require_contributor(project.project_id, actor=actor)

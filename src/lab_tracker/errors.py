@@ -13,6 +13,10 @@ class NotFoundError(LabTrackerError):
     """Requested entity does not exist."""
 
 
+class OpaqueTargetNotFoundError(NotFoundError):
+    """A read target is deliberately indistinguishable from an inaccessible one."""
+
+
 class AuthError(LabTrackerError):
     """Authentication or authorization failure."""
 

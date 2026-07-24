@@ -12,6 +12,7 @@ from typing import Any
 from uuid import UUID
 
 from lab_tracker.api_parts._base import _first_uuid
+from lab_tracker.auth import AuthContext
 from lab_tracker.models import (
     Note,
     UsageEventResourceType,
@@ -73,6 +74,14 @@ class NotesApiMixin:
 
     def get_note(self, *args: Any, **kwargs: Any) -> Any:
         return self.notes.get_note(*args, **kwargs)
+
+    def get_note_for_read(
+        self,
+        note_id: UUID,
+        *,
+        actor: AuthContext | None = None,
+    ) -> Note:
+        return self.notes.get_note_for_read(note_id, actor=actor)
 
     def list_notes(self, *args: Any, **kwargs: Any) -> Any:
         return self.notes.list_notes(*args, **kwargs)

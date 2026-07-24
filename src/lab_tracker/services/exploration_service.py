@@ -6,7 +6,7 @@ from collections.abc import Iterable
 from uuid import UUID, uuid4
 
 from lab_tracker.auth import AuthContext
-from lab_tracker.errors import NotFoundError, ValidationError
+from lab_tracker.errors import NotFoundError, OpaqueTargetNotFoundError, ValidationError
 from lab_tracker.models import (
     EntityOrigin,
     EntityRef,
@@ -145,6 +145,20 @@ class ExplorationService(BaseService):
             label="Exploration node",
             loader=lambda repository: repository.exploration_nodes.get(node_id),
         )
+
+    def get_exploration_node_for_read(
+        self,
+        node_id: UUID,
+        *,
+        actor: AuthContext | None = None,
+    ) -> ExplorationNode:
+        try:
+            node = self.get_exploration_node(node_id)
+        except NotFoundError as exc:
+            raise OpaqueTargetNotFoundError("Exploration node does not exist.") from exc
+        if not self.authorization.can_read(node.project_id, actor=actor):
+            raise OpaqueTargetNotFoundError("Exploration node does not exist.")
+        return node
 
     def list_exploration_nodes(
         self,

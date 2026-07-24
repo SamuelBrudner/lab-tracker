@@ -26,6 +26,7 @@ from lab_tracker.api_parts import (
 from lab_tracker.api_parts._base import _elapsed_ms, _uuid_attr
 from lab_tracker.auth import AuthContext
 from lab_tracker.config import Settings, get_settings
+from lab_tracker.errors import OpaqueTargetNotFoundError
 from lab_tracker.models import (
     UsageEventOutcome,
     UsageEventResourceType,
@@ -129,7 +130,6 @@ class LabTrackerAPI(
         self.publication_readiness: PublicationReadinessService = PublicationReadinessService(
             context,
             projects=self.projects,
-            authorization=self.project_authorization,
         )
         self.entity_versions: EntityVersionService = EntityVersionService(context)
         self.questions: QuestionService = QuestionService(
@@ -199,6 +199,7 @@ class LabTrackerAPI(
         self.record_exports: RecordExportService = RecordExportService(
             context,
             goals=self.goals,
+            questions=self.questions,
             authorization=self.project_authorization,
         )
         self.data_stores: DataStoreService = DataStoreService(
@@ -385,21 +386,26 @@ class LabTrackerAPI(
         project_id: UUID | None = None,
         resource_id_attr: str | None = None,
         project_id_attr: str | None = "project_id",
+        suppress_opaque_target_not_found: bool = False,
     ) -> UsageResultT:
         start = time.perf_counter()
         with self._service_context.application_transaction():
             try:
                 result = action()
-            except Exception:
-                self.record_usage_event(
-                    verb=verb,
-                    resource_type=resource_type,
-                    resource_id=resource_id,
-                    project_id=project_id,
-                    actor=actor,
-                    outcome=UsageEventOutcome.ERROR,
-                    duration_ms=_elapsed_ms(start),
-                )
+            except Exception as exc:
+                if not (
+                    suppress_opaque_target_not_found
+                    and isinstance(exc, OpaqueTargetNotFoundError)
+                ):
+                    self.record_usage_event(
+                        verb=verb,
+                        resource_type=resource_type,
+                        resource_id=resource_id,
+                        project_id=project_id,
+                        actor=actor,
+                        outcome=UsageEventOutcome.ERROR,
+                        duration_ms=_elapsed_ms(start),
+                    )
                 raise
             self.record_usage_event(
                 verb=verb,

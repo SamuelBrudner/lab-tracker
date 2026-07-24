@@ -12,7 +12,7 @@ from collections import defaultdict
 from uuid import UUID, uuid4
 
 from lab_tracker.auth import AuthContext
-from lab_tracker.errors import ValidationError
+from lab_tracker.errors import NotFoundError, OpaqueTargetNotFoundError, ValidationError
 from lab_tracker.models import (
     AcceptanceMode,
     EntityRef,
@@ -135,6 +135,20 @@ class ProvenanceLinkService(BaseService):
             label="Provenance link",
             loader=lambda repository: repository.provenance_links.get(link_id),
         )
+
+    def get_provenance_link_for_read(
+        self,
+        link_id: UUID,
+        *,
+        actor: AuthContext | None = None,
+    ) -> ProvenanceLink:
+        try:
+            link = self.get_provenance_link(link_id)
+        except NotFoundError as exc:
+            raise OpaqueTargetNotFoundError("Provenance link does not exist.") from exc
+        if not self.authorization.can_read(link.project_id, actor=actor):
+            raise OpaqueTargetNotFoundError("Provenance link does not exist.")
+        return link
 
     def list_provenance_links(
         self,

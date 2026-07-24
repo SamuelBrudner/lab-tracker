@@ -274,6 +274,44 @@ describe("useAuthSession", () => {
     );
   });
 
+  it("keeps the token and expiry when a protected read returns an opaque 404", async () => {
+    const expiresAt = new Date(Date.now() + 60 * 60 * 1000).toISOString();
+    localStorage.setItem(TOKEN_STORAGE_KEY, "stored-token");
+    localStorage.setItem(TOKEN_EXPIRES_AT_STORAGE_KEY, expiresAt);
+    const setBusy = vi.fn();
+    const setFlash = vi.fn();
+    const fetchMock = installFetchMock([
+      {
+        match: "/auth/me",
+        response: apiResponse(USER, 200, { auth_enabled: true }),
+      },
+      {
+        match: "/protected",
+        response: errorResponse("Project does not exist.", 404),
+      },
+    ]);
+
+    render(<AuthHarness setBusy={setBusy} setFlash={setFlash} withProbe />);
+
+    await waitFor(() => expect(setBusy).toHaveBeenLastCalledWith(false));
+    fireEvent.click(screen.getByRole("button", { name: "Probe API" }));
+
+    await waitFor(() =>
+      expect(fetchMock).toHaveBeenCalledWith(
+        "/protected",
+        expect.objectContaining({ method: "GET" })
+      )
+    );
+    expect(localStorage.getItem(TOKEN_STORAGE_KEY)).toBe("stored-token");
+    expect(localStorage.getItem(TOKEN_EXPIRES_AT_STORAGE_KEY)).toBe(expiresAt);
+    expect(screen.getByTestId("token")).toHaveTextContent("stored-token");
+    expect(screen.getByTestId("expires-at")).toHaveTextContent(expiresAt);
+    expect(setFlash).not.toHaveBeenCalledWith(
+      "",
+      "Your session expired. Please sign in again."
+    );
+  });
+
   it("keeps a valid session and reports degraded persistence when storage writes throw", async () => {
     // Backing store rejects every write/remove (quota/SecurityError), but the
     // live session must survive and the degradation must be surfaced, not crash.

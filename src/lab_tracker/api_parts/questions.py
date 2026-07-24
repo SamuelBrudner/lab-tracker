@@ -65,6 +65,14 @@ class QuestionsApiMixin:
     def get_question(self, question_id: UUID) -> Question:
         return self.questions.get_question(question_id)
 
+    def get_question_for_read(
+        self,
+        question_id: UUID,
+        *,
+        actor: AuthContext | None = None,
+    ) -> Question:
+        return self.questions.get_question_for_read(question_id, actor=actor)
+
     def list_questions(self, *args: Any, **kwargs: Any) -> Any:
         return self.questions.list_questions(*args, **kwargs)
 

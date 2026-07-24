@@ -649,6 +649,10 @@ def service_principal_can_access(
 ) -> bool:
     """Coarse-grained policy for lpat_ service principals."""
     method = method.upper()
+    if scope not in PAT_SCOPES:
+        # Persisted corruption or a token created by a newer server must not
+        # inherit the ordinary "all" policy through a permissive fallback.
+        return False
     if scope == PAT_SCOPE_BATCH_RUN_DUE:
         # A batch-runner token may ONLY trigger the due-batch run — no reads, no
         # other writes, no /auth — so a leaked scheduler credential cannot read
@@ -656,12 +660,26 @@ def service_principal_can_access(
         # human-gated drafting run, which is its purpose). Still gated on the
         # admin role that running the daily review requires.
         return method == "POST" and path == "/batches/run-due" and role is Role.ADMIN
+    if scope != PAT_SCOPE_ALL:
+        # New registered scopes remain fail-closed until this policy gives them
+        # an explicit branch above.
+        return False
     if path.startswith("/auth"):
         return False
     if method in {"GET", "HEAD", "OPTIONS"}:
         return True
     if method == "POST" and path == "/batches/run-due":
         return role is Role.ADMIN
+    if (
+        scope == PAT_SCOPE_ALL
+        and read_only
+        and method == "POST"
+        and path == "/external-artifacts/resolve"
+    ):
+        # This POST is semantically read-only: it selects a captured artifact,
+        # verifies its bytes, and returns a bounded representation. Entity-level
+        # authorization and opaque target handling remain inside the route.
+        return True
     if read_only:
         return False
     return role in {Role.ADMIN, Role.EDITOR}

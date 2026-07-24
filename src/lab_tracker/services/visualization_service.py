@@ -6,7 +6,7 @@ from collections.abc import Iterable
 from uuid import UUID, uuid4
 
 from lab_tracker.auth import AuthContext
-from lab_tracker.errors import ValidationError
+from lab_tracker.errors import NotFoundError, OpaqueTargetNotFoundError, ValidationError
 from lab_tracker.models import EntityOrigin, EntityType, Visualization, utc_now
 from lab_tracker.patching import NOT_PROVIDED, PatchValue, is_provided
 from lab_tracker.services.analysis_service import AnalysisService
@@ -86,6 +86,26 @@ class VisualizationService(BaseService):
             label="Visualization",
             loader=lambda repository: repository.visualizations.get(viz_id),
         )
+
+    def get_visualization_for_read(
+        self,
+        viz_id: UUID,
+        *,
+        actor: AuthContext | None = None,
+    ) -> tuple[Visualization, UUID]:
+        try:
+            visualization = self.get_visualization(viz_id)
+        except NotFoundError as exc:
+            raise OpaqueTargetNotFoundError("Visualization does not exist.") from exc
+        try:
+            analysis = self.analyses.get_analysis(visualization.analysis_id)
+        except NotFoundError as exc:
+            if not self.authorization.has_global_read(actor):
+                raise OpaqueTargetNotFoundError("Visualization does not exist.") from exc
+            raise
+        if not self.authorization.can_read(analysis.project_id, actor=actor):
+            raise OpaqueTargetNotFoundError("Visualization does not exist.")
+        return visualization, analysis.project_id
 
     def list_visualizations(
         self,

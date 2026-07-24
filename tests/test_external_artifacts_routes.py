@@ -162,7 +162,14 @@ def test_resolve_endpoint_rejects_unauthorized_caller(
         headers=scoped_project_member.member_headers,
     )
 
-    assert response.status_code == 401
+    assert response.status_code == 404
+    assert response.json() == {
+        "error": {
+            "code": "not_found",
+            "message": "Dataset does not exist.",
+            "issues": None,
+        }
+    }
     assert "content_base64" not in response.text
 
 

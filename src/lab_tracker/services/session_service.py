@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING
 from uuid import UUID, uuid4
 
 from lab_tracker.auth import AuthContext
-from lab_tracker.errors import ValidationError
+from lab_tracker.errors import NotFoundError, ValidationError
 from lab_tracker.models import (
     AcquisitionOutput,
     Dataset,
@@ -131,6 +131,17 @@ class SessionService(BaseService):
             loader=lambda repository: repository.sessions.get(session_id),
         )
 
+    def get_session_for_read(
+        self,
+        session_id: UUID,
+        *,
+        actor: AuthContext | None = None,
+    ) -> Session:
+        session = self.get_session(session_id)
+        if not self.authorization.can_read(session.project_id, actor=actor):
+            raise NotFoundError("Session does not exist.")
+        return session
+
     def get_session_by_link_code(self, link_code: str) -> Session:
         ensure_non_empty(link_code, "link_code")
         try:
@@ -138,6 +149,17 @@ class SessionService(BaseService):
         except ValueError as exc:
             raise ValidationError("Invalid session link code.") from exc
         return self.get_session(session_id)
+
+    def get_session_by_link_code_for_read(
+        self,
+        link_code: str,
+        *,
+        actor: AuthContext | None = None,
+    ) -> Session:
+        session = self.get_session_by_link_code(link_code)
+        if not self.authorization.can_read(session.project_id, actor=actor):
+            raise NotFoundError("Session does not exist.")
+        return session
 
     def list_sessions(self, *, project_id: UUID | None = None) -> list[Session]:
         return self.query_from_repository(

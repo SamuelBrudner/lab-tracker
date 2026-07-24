@@ -37,7 +37,12 @@ class CatalogAccess(Protocol):
         actor: AuthContext | None,
     ) -> None: ...
 
-    def get_session(self, session_id: UUID) -> Session: ...
+    def get_session_for_read(
+        self,
+        session_id: UUID,
+        *,
+        actor: AuthContext | None,
+    ) -> Session: ...
 
 
 class CatalogRepository(Protocol):
@@ -349,8 +354,7 @@ class CatalogQueries:
         limit: int,
         offset: int,
     ) -> Page[AcquisitionOutput]:
-        session = self.api.get_session(session_id)
-        self.api.require_project_read(session.project_id, actor=actor)
+        self.api.get_session_for_read(session_id, actor=actor)
         items, total = self.repository.query_acquisition_outputs(
             session_id=session_id,
             limit=limit,

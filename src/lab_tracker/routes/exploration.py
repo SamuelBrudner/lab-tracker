@@ -104,8 +104,10 @@ def build_exploration_router(api: LabTrackerAPI) -> APIRouter:
 
     @router.get("/exploration-nodes/{node_id}", response_model=Envelope[ExplorationNode])
     def get_exploration_node(node_id: UUID, request: Request):
-        node = api_from_request(request, api).get_exploration_node(node_id)
-        ensure_project_read(request, node.project_id)
+        node = api_from_request(request, api).get_exploration_node_for_read(
+            node_id,
+            actor=actor_from_request(request),
+        )
         record_usage_view(
             request,
             resource_type=UsageEventResourceType.EXPLORATION_NODE,
