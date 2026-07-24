@@ -127,4 +127,35 @@ describe("strict JSON envelope helpers", () => {
     }
   });
 
+  it("rejects authentication when a protected blob read reports an expired token", async () => {
+    const authRejected = vi.fn();
+    const token = "expired-token";
+    window.addEventListener(AUTH_REJECTED_EVENT, authRejected);
+    installFetchMock([
+      {
+        match: "/visualizations/protected/file/download",
+        response: errorResponse("Token expired.", 401),
+      },
+    ]);
+
+    try {
+      await expect(
+        fetchProtectedBlobResource({
+          path: "/visualizations/protected/file/download",
+          token,
+        })
+      ).rejects.toMatchObject({
+        message: "Token expired.",
+        status: 401,
+      });
+      expect(authRejected).toHaveBeenCalledTimes(1);
+      expect(authRejected.mock.calls[0][0].detail).toEqual({
+        message: "Token expired.",
+        status: 401,
+        token,
+      });
+    } finally {
+      window.removeEventListener(AUTH_REJECTED_EVENT, authRejected);
+    }
+  });
 });
