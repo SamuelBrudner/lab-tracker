@@ -11,14 +11,14 @@ from uuid import UUID, uuid4
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import select
 
+from lab_tracker.api import LabTrackerAPI
+from lab_tracker.application.context_queries import ContextQueries
 from lab_tracker.artifact_resolution import (
     LocalFilesystemResolver,
     ResolverRegistry,
 )
 from lab_tracker.auth import utc_now
-from lab_tracker.db_models import UsageEventModel
 from lab_tracker.errors import NotFoundError
 from lab_tracker.models import (
     EntityRef,
@@ -31,15 +31,14 @@ from lab_tracker.models import (
 )
 from lab_tracker.services.analysis_service import AnalysisService
 from lab_tracker.services.dataset_service import DatasetService
+from lab_tracker.services.question_service import QuestionService
 from lab_tracker.sqlalchemy_repository import SQLAlchemyLabTrackerRepository
-from lab_tracker.sqlalchemy_repository_parts.data_stores import (
-    SQLAlchemyDataStoreRepository,
-)
 
 
 @dataclass(frozen=True)
 class EvidenceArtifactRecords:
     project_id: str
+    question_id: str
     dataset_id: str
     dataset_file_id: str
     analysis_id: str
@@ -322,6 +321,7 @@ def _create_evidence_artifact_records(
 
     return EvidenceArtifactRecords(
         project_id=project_id,
+        question_id=question_id,
         dataset_id=dataset_id,
         dataset_file_id=dataset_file_id,
         analysis_id=analysis_id,
@@ -1143,16 +1143,26 @@ def test_mutations_keep_permission_errors_and_never_write_file_storage(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     records = evidence_artifact_records
-    storage_writes: list[object] = []
+    storage_mutations: list[tuple[str, object]] = []
 
-    def fail_if_stored(*args, **kwargs):  # noqa: ANN002, ANN003
-        storage_writes.append((args, kwargs))
-        raise AssertionError("storage must not run before mutation authorization")
+    def fail_storage_mutation(operation: str):
+        def _fail(*args, **kwargs):  # noqa: ANN002, ANN003
+            storage_mutations.append((operation, (args, kwargs)))
+            raise AssertionError(
+                f"storage {operation} must not run before mutation authorization"
+            )
+
+        return _fail
 
     monkeypatch.setattr(
         client.app.state.file_storage_backend,
         "store_stream",
-        fail_if_stored,
+        fail_storage_mutation("store_stream"),
+    )
+    monkeypatch.setattr(
+        client.app.state.file_storage_backend,
+        "delete",
+        fail_storage_mutation("delete"),
     )
 
     cases: tuple[
@@ -1178,6 +1188,15 @@ def test_mutations_keep_permission_errors_and_never_write_file_storage(
             {"file": ("forbidden.txt", b"forbidden", "text/plain")},
         ),
         (
+            "DELETE",
+            (
+                f"/datasets/{records.dataset_id}/files/"
+                f"{records.dataset_file_id}"
+            ),
+            None,
+            None,
+        ),
+        (
             "PATCH",
             f"/analyses/{records.analysis_id}",
             {"environment_hash": "forbidden"},
@@ -1187,6 +1206,12 @@ def test_mutations_keep_permission_errors_and_never_write_file_storage(
             "POST",
             f"/analyses/{records.analysis_id}/commit",
             {"environment_hash": "forbidden"},
+            None,
+        ),
+        (
+            "DELETE",
+            f"/analyses/{records.analysis_id}",
+            None,
             None,
         ),
         (
@@ -1205,10 +1230,22 @@ def test_mutations_keep_permission_errors_and_never_write_file_storage(
             None,
         ),
         (
+            "DELETE",
+            f"/claims/{records.claim_id}",
+            None,
+            None,
+        ),
+        (
             "POST",
             f"/visualizations/{records.visualization_id}/file",
             None,
             {"file": ("forbidden.png", b"forbidden", "image/png")},
+        ),
+        (
+            "PATCH",
+            f"/visualizations/{records.visualization_id}",
+            {"caption": "Forbidden mutation"},
+            None,
         ),
         (
             "DELETE",
@@ -1220,6 +1257,12 @@ def test_mutations_keep_permission_errors_and_never_write_file_storage(
             "PATCH",
             f"/exploration-nodes/{records.exploration_node_id}",
             {"title": "Forbidden mutation"},
+            None,
+        ),
+        (
+            "DELETE",
+            f"/exploration-nodes/{records.exploration_node_id}",
+            None,
             None,
         ),
         (
@@ -1253,7 +1296,7 @@ def test_mutations_keep_permission_errors_and_never_write_file_storage(
         assert response.status_code == 401, f"{method} {path}: {response.text}"
         assert response.json()["error"]["code"] == "auth_error", path
 
-    assert storage_writes == []
+    assert storage_mutations == []
 
 
 def test_denied_roots_precede_children_storage_resolvers_and_usage(
@@ -1286,14 +1329,19 @@ def test_denied_roots_precede_children_storage_resolvers_and_usage(
             fail_repository(method_name),
         )
     monkeypatch.setattr(
-        SQLAlchemyDataStoreRepository,
-        "get_by_name",
-        fail_repository("data_store_lookup"),
+        ContextQueries,
+        "_materialize_reference",
+        fail_repository("materialize_reference"),
     )
     monkeypatch.setattr(
         client.app.state.file_storage_backend,
         "iter_chunks",
         fail_repository("file_storage"),
+    )
+    monkeypatch.setattr(
+        LabTrackerAPI,
+        "record_usage_event",
+        fail_repository("usage_event"),
     )
 
     class FailResolverRegistry:
@@ -1328,16 +1376,55 @@ def test_denied_roots_precede_children_storage_resolvers_and_usage(
         )
 
     assert calls == []
-    with client.app.state.db_session_factory() as session:
-        events = list(
-            session.scalars(
-                select(UsageEventModel).where(
-                    UsageEventModel.actor_user_id
-                    == scoped_project_member.member_user_id
-                )
-            )
-        )
-    assert events == []
+
+
+def test_claim_provenance_loads_raw_descendants_only_after_root_authorization(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+    scoped_project_member,
+    evidence_artifact_records: EvidenceArtifactRecords,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    records = evidence_artifact_records
+    analysis_calls: list[UUID] = []
+    dataset_calls: list[UUID] = []
+    question_calls: list[UUID] = []
+    original_get_analysis = AnalysisService.get_analysis
+    original_get_dataset = DatasetService.get_dataset
+    original_get_question = QuestionService.get_question
+
+    def spy_get_analysis(self, analysis_id: UUID):  # noqa: ANN001
+        analysis_calls.append(analysis_id)
+        return original_get_analysis(self, analysis_id)
+
+    def spy_get_dataset(self, dataset_id: UUID):  # noqa: ANN001
+        dataset_calls.append(dataset_id)
+        return original_get_dataset(self, dataset_id)
+
+    def spy_get_question(self, question_id: UUID):  # noqa: ANN001
+        question_calls.append(question_id)
+        return original_get_question(self, question_id)
+
+    monkeypatch.setattr(AnalysisService, "get_analysis", spy_get_analysis)
+    monkeypatch.setattr(DatasetService, "get_dataset", spy_get_dataset)
+    monkeypatch.setattr(QuestionService, "get_question", spy_get_question)
+
+    path = f"/claims/{records.claim_id}/provenance"
+    outsider = client.get(
+        path,
+        headers=scoped_project_member.member_headers,
+    )
+    assert outsider.status_code == 404
+    assert outsider.json() == _not_found_body("Claim")
+    assert analysis_calls == []
+    assert dataset_calls == []
+    assert question_calls == []
+
+    authorized = client.get(path, headers=admin_auth_headers)
+    assert authorized.status_code == 200, authorized.text
+    assert analysis_calls == [UUID(records.analysis_id)]
+    assert dataset_calls == [UUID(records.dataset_id)]
+    assert question_calls == [UUID(records.question_id)]
 
 
 def test_provenance_authorizes_parent_before_loading_descendants(
@@ -1405,6 +1492,25 @@ def test_dangling_visualization_parent_has_stable_authority_classification(
         assert outsider.status_code == 404, outsider.text
         assert outsider.json() == _not_found_body("Visualization")
 
+    membership = client.post(
+        f"/projects/{records.project_id}/members",
+        json={
+            "user_id": scoped_project_member.member_user_id,
+            "role": "viewer",
+        },
+        headers=admin_auth_headers,
+    )
+    assert membership.status_code == 201, membership.text
+
+    for path in paths:
+        project_viewer = client.get(
+            path,
+            headers=scoped_project_member.member_headers,
+        )
+        assert project_viewer.status_code == 404, project_viewer.text
+        assert project_viewer.json() == _not_found_body("Visualization")
+
+    for path in paths:
         authorized = client.get(path, headers=admin_auth_headers)
         assert authorized.status_code == 404, authorized.text
         assert authorized.json()["error"]["message"] == "Analysis does not exist."
