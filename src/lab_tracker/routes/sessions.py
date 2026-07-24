@@ -85,8 +85,10 @@ def build_sessions_router(api: LabTrackerAPI) -> APIRouter:
 
     @router.get("/sessions/by-link/{link_code}", response_model=Envelope[Session])
     def get_session_by_link_code(link_code: str, request: Request):
-        session = api_from_request(request, api).get_session_by_link_code(link_code)
-        ensure_project_read(request, session.project_id)
+        session = api_from_request(request, api).get_session_by_link_code_for_read(
+            link_code,
+            actor=actor_from_request(request),
+        )
         record_usage_view(
             request,
             resource_type=UsageEventResourceType.SESSION,
@@ -97,8 +99,10 @@ def build_sessions_router(api: LabTrackerAPI) -> APIRouter:
 
     @router.get("/sessions/{session_id}", response_model=Envelope[Session])
     def get_session(session_id: UUID, request: Request):
-        session = api_from_request(request, api).get_session(session_id)
-        ensure_project_read(request, session.project_id)
+        session = api_from_request(request, api).get_session_for_read(
+            session_id,
+            actor=actor_from_request(request),
+        )
         record_usage_view(
             request,
             resource_type=UsageEventResourceType.SESSION,

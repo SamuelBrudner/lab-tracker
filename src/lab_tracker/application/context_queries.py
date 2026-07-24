@@ -80,6 +80,13 @@ class ContextAccess(Protocol):
 
     def get_project(self, project_id: UUID) -> Project: ...
 
+    def get_project_for_read(
+        self,
+        project_id: UUID,
+        *,
+        actor: AuthContext | None,
+    ) -> Project: ...
+
     def get_dataset(self, dataset_id: UUID) -> Dataset: ...
 
     def get_analysis(self, analysis_id: UUID) -> Analysis: ...
@@ -220,8 +227,7 @@ class ContextQueries:
         actor: AuthContext,
         view: ProjectGraphView,
     ) -> ProjectGraphRead:
-        project = self.api.get_project(project_id)
-        self.api.require_project_read(project.project_id, actor=actor)
+        project = self.api.get_project_for_read(project_id, actor=actor)
         return build_project_graph(self.repository, project.project_id, view=view)
 
     def dataset_provenance(
