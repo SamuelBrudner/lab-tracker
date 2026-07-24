@@ -6,8 +6,12 @@ import pytest
 from fastapi import FastAPI
 from pydantic import ValidationError
 
+from lab_tracker.app_parts import runtime as runtime_module
 from lab_tracker.app_parts.runtime import build_app_runtime, configure_app_state
-from lab_tracker.artifact_resolution import outbound_http_policy_from_config
+from lab_tracker.artifact_resolution import (
+    ResolverRegistry,
+    outbound_http_policy_from_config,
+)
 from lab_tracker.config import DEFAULT_AUTH_SECRET_KEY, Settings
 
 
@@ -69,7 +73,8 @@ def test_dotenv_loads_outbound_http_policy_settings(tmp_path, monkeypatch):
     dotenv_path.write_text(
         "LAB_TRACKER_ENVIRONMENT=local\n"
         "LAB_TRACKER_RESOLVER_HTTP_ALLOWED_AUTHORITIES=http://10.20.1.7\n"
-        "LAB_TRACKER_RESOLVER_HTTP_ALLOWED_NETWORKS=10.20.0.0/16\n",
+        "LAB_TRACKER_RESOLVER_HTTP_ALLOWED_NETWORKS=10.20.0.0/16\n"
+        "LAB_TRACKER_RESOLVER_HTTP_DEADLINE_SECONDS=12.5\n",
         encoding="utf-8",
     )
 
@@ -80,6 +85,34 @@ def test_dotenv_loads_outbound_http_policy_settings(tmp_path, monkeypatch):
     )
 
     assert policy.authorize("http://10.20.1.7/artifact.bin").hostname == "10.20.1.7"
+    assert settings.resolver_http_deadline_seconds == 12.5
+
+
+def test_resolver_http_deadline_defaults_to_thirty_seconds(monkeypatch):
+    _clear_auth_env(monkeypatch)
+    monkeypatch.delenv("LAB_TRACKER_RESOLVER_HTTP_DEADLINE_SECONDS", raising=False)
+
+    assert _settings_from_environment().resolver_http_deadline_seconds == 30.0
+
+
+@pytest.mark.parametrize("value", ["0", "-1", "nan", "inf", "-inf"])
+def test_resolver_http_deadline_must_be_finite_and_positive(monkeypatch, value):
+    _clear_auth_env(monkeypatch)
+    monkeypatch.setenv("LAB_TRACKER_RESOLVER_HTTP_DEADLINE_SECONDS", value)
+
+    with pytest.raises(ValidationError, match="must be finite and greater than 0"):
+        _settings_from_environment()
+
+
+def test_resolver_http_deadline_cannot_exceed_one_day(monkeypatch):
+    _clear_auth_env(monkeypatch)
+    monkeypatch.setenv("LAB_TRACKER_RESOLVER_HTTP_DEADLINE_SECONDS", "86400.0001")
+
+    with pytest.raises(
+        ValidationError,
+        match="LAB_TRACKER_RESOLVER_HTTP_DEADLINE_SECONDS",
+    ):
+        _settings_from_environment()
 
 
 def test_invalid_dotenv_http_policy_fails_runtime_composition(tmp_path, monkeypatch):
@@ -99,11 +132,29 @@ def test_invalid_dotenv_http_policy_fails_runtime_composition(tmp_path, monkeypa
 
 def test_runtime_installs_one_validated_http_policy_and_registry(monkeypatch):
     _clear_auth_env(monkeypatch)
+    resolver_registry = ResolverRegistry()
+    captured: dict[str, object] = {}
+
+    def recording_registry_from_env(
+        *,
+        http_policy,
+        http_deadline_seconds,
+    ):
+        captured["http_policy"] = http_policy
+        captured["http_deadline_seconds"] = http_deadline_seconds
+        return resolver_registry
+
+    monkeypatch.setattr(
+        runtime_module,
+        "registry_from_env",
+        recording_registry_from_env,
+    )
     settings = Settings(
         _env_file=None,
         database_url="sqlite+pysqlite:///:memory:",
         resolver_http_allowed_authorities="http://10.20.1.7",
         resolver_http_allowed_networks="10.20.0.0/16",
+        resolver_http_deadline_seconds=12.5,
     )
     runtime = build_app_runtime(settings)
     app = FastAPI()
@@ -111,7 +162,11 @@ def test_runtime_installs_one_validated_http_policy_and_registry(monkeypatch):
         configure_app_state(app, runtime)
 
         assert app.state.outbound_http_policy is runtime.outbound_http_policy
-        assert app.state.resolver_registry is runtime.resolver_registry
+        assert app.state.resolver_registry is resolver_registry
+        assert captured == {
+            "http_policy": runtime.outbound_http_policy,
+            "http_deadline_seconds": 12.5,
+        }
         assert (
             runtime.outbound_http_policy.authorize(
                 "http://10.20.1.7/artifact.bin"
@@ -132,6 +187,10 @@ def test_compose_forwards_outbound_http_policy_settings():
     assert (
         "LAB_TRACKER_RESOLVER_HTTP_ALLOWED_NETWORKS: "
         "${LAB_TRACKER_RESOLVER_HTTP_ALLOWED_NETWORKS:-}"
+    ) in compose
+    assert (
+        "LAB_TRACKER_RESOLVER_HTTP_DEADLINE_SECONDS: "
+        "${LAB_TRACKER_RESOLVER_HTTP_DEADLINE_SECONDS:-30}"
     ) in compose
 
 

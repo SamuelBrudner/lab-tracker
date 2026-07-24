@@ -70,7 +70,10 @@ def build_app_runtime(settings: Settings) -> AppRuntime:
         allowed_authorities=settings.resolver_http_allowed_authorities,
         allowed_networks=settings.resolver_http_allowed_networks,
     )
-    resolver_registry = registry_from_env(http_policy=outbound_http_policy)
+    resolver_registry = registry_from_env(
+        http_policy=outbound_http_policy,
+        http_deadline_seconds=settings.resolver_http_deadline_seconds,
+    )
     engine = get_engine(settings)
     session_factory = get_session_factory(engine=engine)
     auth_enabled = settings.is_auth_enabled()

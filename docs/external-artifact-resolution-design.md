@@ -158,6 +158,16 @@ sending a request:
 4. Follow redirects only within a finite hop limit. Each `Location` is parsed,
    authorized, resolved, and pinned independently before another request is
    sent; approval of the initial URL never carries over to a redirect target.
+5. Enforce one monotonic wall-clock deadline for the complete resolution. The
+   `LAB_TRACKER_RESOLVER_HTTP_DEADLINE_SECONDS` budget (default: `30`) includes
+   DNS, connect and TLS setup, response headers, every redirect hop, body
+   verification, and hashing. It is not reset by progress or redirects, so a
+   drip-fed response cannot extend the request indefinitely. The setting must
+   be finite, greater than zero, and no greater than `86400` seconds (one day);
+   invalid values fail application startup. Cancellable lookups use dnspython
+   with the host's configured DNS servers and search domains; names available
+   only through platform-specific NSS, mDNS, or local-hosts integrations are
+   not guaranteed to resolve.
 
 Public global destinations need no operator entry. An internal or otherwise
 non-public destination requires both:
@@ -338,7 +348,8 @@ Shipped (`src/lab_tracker/artifact_resolution.py`, tested in
   `registry_from_env()`; `LAB_TRACKER_RESOLVER_ALLOWED_ROOTS` gates local roots
   (unset → local artifacts resolve `UNRESOLVED`), HTTP(S) is constrained by the
   outbound destination policy, and rclone is constrained by its configured
-  remote-name allowlist.
+  remote-name allowlist. HTTP resolution additionally uses the single total
+  deadline configured by `LAB_TRACKER_RESOLVER_HTTP_DEADLINE_SECONDS`.
 - ✅ `lab_tracker_resolve_artifact` MCP read tool + `resolve_external_artifact`
   client method.
 

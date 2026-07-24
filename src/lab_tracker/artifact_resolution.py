@@ -28,10 +28,12 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import mimetypes
 import os
 import shutil
 import tempfile
+import time
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Iterable, Iterator, Sequence
 from contextlib import suppress
@@ -43,7 +45,10 @@ from urllib.parse import unquote, urljoin, urlsplit
 
 from lab_tracker.models import DataStore, ExternalArtifactReference, StoreKind
 from lab_tracker.outbound_http import (
+    DEFAULT_OUTBOUND_HTTP_DEADLINE_SECONDS,
+    MAX_OUTBOUND_HTTP_DEADLINE_SECONDS,
     OutboundHttpClient,
+    OutboundHttpDeadline,
     OutboundHttpPolicy,
     OutboundHttpPolicyError,
     OutboundHttpTransportError,
@@ -682,14 +687,33 @@ class HttpResolver(ArtifactResolver):
         *,
         policy: OutboundHttpPolicy | None = None,
         client: OutboundHttpClient | None = None,
-        timeout: float = 30.0,
+        deadline_seconds: float = DEFAULT_OUTBOUND_HTTP_DEADLINE_SECONDS,
+        clock: Callable[[], float] = time.monotonic,
+        timeout: float | None = None,
         max_fetch_bytes: int = DEFAULT_MAX_FETCH_BYTES,
         max_redirects: int = DEFAULT_MAX_HTTP_REDIRECTS,
     ) -> None:
         if max_redirects < 0:
             raise ValueError("max_redirects must be non-negative.")
+        if timeout is not None:
+            if deadline_seconds != DEFAULT_OUTBOUND_HTTP_DEADLINE_SECONDS:
+                raise ValueError(
+                    "Configure either deadline_seconds or the legacy timeout alias."
+                )
+            deadline_seconds = timeout
+        if (
+            not math.isfinite(deadline_seconds)
+            or deadline_seconds <= 0
+            or deadline_seconds > MAX_OUTBOUND_HTTP_DEADLINE_SECONDS
+        ):
+            raise ValueError(
+                "HTTP deadline must be finite, positive, and no greater than "
+                f"{MAX_OUTBOUND_HTTP_DEADLINE_SECONDS:g} seconds."
+            )
         self._policy = policy or OutboundHttpPolicy()
-        self._client = client or SafeHttpClient(timeout=timeout)
+        self._client = client or SafeHttpClient(timeout=deadline_seconds)
+        self._deadline_seconds = deadline_seconds
+        self._clock = clock
         self._max_fetch_bytes = max_fetch_bytes
         self._max_redirects = max_redirects
 
@@ -719,12 +743,18 @@ class HttpResolver(ArtifactResolver):
             )
 
         algorithm, _ = parse_content_hash(ref.content_hash)
+        deadline = OutboundHttpDeadline.after(
+            self._deadline_seconds,
+            clock=self._clock,
+        )
         current_url = ref.uri
         seen_targets: set[str] = set()
         for redirect_count in range(self._max_redirects + 1):
             try:
-                target = self._policy.authorize(current_url)
-            except OutboundHttpPolicyError:
+                deadline.check()
+                target = self._policy.authorize(current_url, deadline=deadline)
+                deadline.check()
+            except (OutboundHttpPolicyError, OutboundHttpTransportError):
                 return _unresolved(
                     ref, detail="HTTP artifact fetch failed or was denied."
                 )
@@ -733,9 +763,12 @@ class HttpResolver(ArtifactResolver):
             seen_targets.add(target.absolute_url)
 
             try:
-                with self._client.open("GET", target) as response:
+                deadline.check()
+                with self._client.open("GET", target, deadline=deadline) as response:
+                    deadline.check()
                     if response.status_code in {301, 302, 303, 307, 308}:
                         location = response.get_header("location")
+                        deadline.check()
                         if not location or redirect_count >= self._max_redirects:
                             return _unresolved(
                                 ref, detail="HTTP redirect limit was exceeded."
@@ -754,6 +787,7 @@ class HttpResolver(ArtifactResolver):
                                 detail="HTTP artifact fetch failed or was denied.",
                             )
                         current_url = next_url
+                        deadline.check()
                         continue
                     if not 200 <= response.status_code < 300:
                         return _unresolved(
@@ -779,8 +813,11 @@ class HttpResolver(ArtifactResolver):
                         max_bytes=max_bytes,
                         window=window,
                         max_total=self._max_fetch_bytes,
+                        budget_check=deadline.check,
                     )
+                    deadline.check()
                     content_type = response.get_header("content-type")
+                    deadline.check()
             except _FetchTooLarge as exc:
                 return _unresolved(ref, detail=str(exc))
             except OutboundHttpTransportError:
@@ -790,14 +827,22 @@ class HttpResolver(ArtifactResolver):
 
             if content_type:
                 content_type = content_type.split(";", 1)[0].strip()
-            return _build_resolved(
-                ref,
-                observed=observed,
-                content=content,
-                total=total,
-                truncated=truncated,
-                content_type=content_type or "application/octet-stream",
-            )
+            try:
+                deadline.check()
+                resolved = _build_resolved(
+                    ref,
+                    observed=observed,
+                    content=content,
+                    total=total,
+                    truncated=truncated,
+                    content_type=content_type or "application/octet-stream",
+                )
+                deadline.check()
+                return resolved
+            except OutboundHttpTransportError:
+                return _unresolved(
+                    ref, detail="HTTP artifact fetch failed or was denied."
+                )
         return _unresolved(ref, detail="HTTP redirect limit was exceeded.")
 
 
@@ -1263,6 +1308,7 @@ def _hash_and_collect(
     max_bytes: int,
     window: tuple[int, int] | None,
     max_total: int | None = None,
+    budget_check: Callable[[], None] | None = None,
 ) -> tuple[bytes, int, bool, str]:
     """Stream ``chunks`` through a hasher, collecting the bounded returned bytes.
 
@@ -1277,9 +1323,13 @@ def _hash_and_collect(
     collected = bytearray()
     total = 0
     for chunk in chunks:
+        if budget_check is not None:
+            budget_check()
         if not chunk:
             continue
         hasher.update(chunk)
+        if budget_check is not None:
+            budget_check()
         chunk_start = total
         total += len(chunk)
         if max_total is not None and total > max_total:
@@ -1294,7 +1344,11 @@ def _hash_and_collect(
             if hi > lo:
                 collected.extend(chunk[lo - chunk_start : hi - chunk_start])
 
+    if budget_check is not None:
+        budget_check()
     observed = f"{algorithm}:{hasher.hexdigest()}"
+    if budget_check is not None:
+        budget_check()
     content = bytes(collected)
     truncated = len(content) < total
     return content, total, truncated, observed
@@ -1343,6 +1397,7 @@ def default_registry(
     recovery: RecoveryPolicy | None = None,
     http_policy: OutboundHttpPolicy | None = None,
     http_client: OutboundHttpClient | None = None,
+    http_deadline_seconds: float = DEFAULT_OUTBOUND_HTTP_DEADLINE_SECONDS,
     rclone_allowed_remotes: Sequence[str] | None = None,
     git_allowed_remotes: Sequence[str] | None = None,
     git_cache_root: str | Path | None = None,
@@ -1363,7 +1418,11 @@ def default_registry(
     return ResolverRegistry(
         [
             LocalFilesystemResolver(allowed_roots=allowed_roots, recovery=recovery),
-            HttpResolver(policy=http_policy, client=http_client),
+            HttpResolver(
+                policy=http_policy,
+                client=http_client,
+                deadline_seconds=http_deadline_seconds,
+            ),
             RcloneResolver(allowed_remotes=rclone_allowed_remotes),
             GitResolver(
                 allowed_remotes=git_allowed_remotes,
@@ -1397,6 +1456,9 @@ LAB_TRACKER_RESOLVER_HTTP_ALLOWED_AUTHORITIES_ENV = (
 )
 LAB_TRACKER_RESOLVER_HTTP_ALLOWED_NETWORKS_ENV = (
     "LAB_TRACKER_RESOLVER_HTTP_ALLOWED_NETWORKS"
+)
+LAB_TRACKER_RESOLVER_HTTP_DEADLINE_SECONDS_ENV = (
+    "LAB_TRACKER_RESOLVER_HTTP_DEADLINE_SECONDS"
 )
 
 # Comma-separated allowlist of rclone remote NAMES the rclone resolver may read.
@@ -1492,7 +1554,9 @@ def _strict_comma_separated_values(
 
 
 def registry_from_env(
-    *, http_policy: OutboundHttpPolicy | None = None
+    *,
+    http_policy: OutboundHttpPolicy | None = None,
+    http_deadline_seconds: float | None = None,
 ) -> ResolverRegistry:
     """Build the default registry, reading resolver config from the env."""
 
@@ -1518,10 +1582,35 @@ def registry_from_env(
     git_max_cache_bytes = _env_positive_int(
         os.environ.get(LAB_TRACKER_GIT_CACHE_MAX_BYTES_ENV), 0
     )
+    if http_deadline_seconds is None:
+        raw_deadline = os.environ.get(
+            LAB_TRACKER_RESOLVER_HTTP_DEADLINE_SECONDS_ENV
+        )
+        try:
+            http_deadline_seconds = (
+                float(raw_deadline)
+                if raw_deadline is not None
+                else DEFAULT_OUTBOUND_HTTP_DEADLINE_SECONDS
+            )
+        except ValueError:
+            raise ValueError(
+                f"{LAB_TRACKER_RESOLVER_HTTP_DEADLINE_SECONDS_ENV} must be "
+                "finite and positive."
+            ) from None
+    if (
+        not math.isfinite(http_deadline_seconds)
+        or http_deadline_seconds <= 0
+        or http_deadline_seconds > MAX_OUTBOUND_HTTP_DEADLINE_SECONDS
+    ):
+        raise ValueError(
+            f"{LAB_TRACKER_RESOLVER_HTTP_DEADLINE_SECONDS_ENV} must be finite "
+            f"and between 0 and {MAX_OUTBOUND_HTTP_DEADLINE_SECONDS:g} seconds."
+        )
     return default_registry(
         allowed_roots=allowed_roots,
         recovery=recovery_from_env(),
         http_policy=http_policy or outbound_http_policy_from_env(),
+        http_deadline_seconds=http_deadline_seconds,
         rclone_allowed_remotes=rclone_allowed_remotes,
         git_allowed_remotes=git_allowed_remotes,
         git_cache_root=git_cache_root,

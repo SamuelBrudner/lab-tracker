@@ -1,10 +1,26 @@
 import base64
 import hashlib
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
+from http_security_fakes import (
+    FakeAddressResolver,
+    FakeClock,
+    FakeHttpResponse,
+    FakeSafeHttpClient,
+)
+from sqlalchemy import create_engine, event
+from sqlalchemy.orm import sessionmaker
+from sqlalchemy.pool import QueuePool
 from starlette.testclient import TestClient
 
-from lab_tracker.artifact_resolution import LocalFilesystemResolver, ResolverRegistry
+from lab_tracker.artifact_resolution import (
+    HttpResolver,
+    LocalFilesystemResolver,
+    ResolverRegistry,
+)
+from lab_tracker.outbound_http import OutboundHttpPolicy
 
 
 def _sha256(data: bytes) -> str:
@@ -90,6 +106,163 @@ def test_resolve_endpoint_redacts_denied_http_credentials_and_target(
     assert body["content_base64"] is None
     assert secret not in response.text
     assert "169.254.169.254" not in response.text
+
+
+def test_resolve_endpoint_deadline_discards_partial_body_and_closes_session(
+    client,
+    admin_auth_headers,
+):
+    clock = FakeClock()
+    stream_entered = threading.Event()
+    expire_stream = threading.Event()
+
+    def wait_then_expire(_index: int) -> None:
+        stream_entered.set()
+        assert expire_stream.wait(timeout=5.0)
+        clock.advance(2.0)
+
+    response = FakeHttpResponse(
+        chunks=(b"partial secret bytes",),
+        on_chunk=wait_then_expire,
+    )
+    http_client = FakeSafeHttpClient((response,))
+    client.app.state.resolver_registry = ResolverRegistry(
+        [
+            HttpResolver(
+                policy=OutboundHttpPolicy(
+                    address_resolver=FakeAddressResolver(
+                        {"slow.example": ["93.184.216.34"]}
+                    )
+                ),
+                client=http_client,
+                deadline_seconds=1.0,
+                clock=clock,
+            )
+        ]
+    )
+    project_id = client.post(
+        "/projects",
+        json={"name": "Deadline cleanup project"},
+        headers=admin_auth_headers,
+    ).json()["data"]["project_id"]
+    dataset_id = _create_dataset_with_artifact(
+        client,
+        admin_auth_headers,
+        project_id=project_id,
+        source_system="http",
+        uri="https://slow.example/private-result.bin",
+        content_hash=_sha256(b"partial secret bytes"),
+    )
+
+    original_factory = client.app.state.db_session_factory
+    pool_lock = threading.Lock()
+    second_checkout_waiting = threading.Event()
+    second_connection_acquired = threading.Event()
+    first_connection_released = threading.Event()
+    checkout_attempts = 0
+
+    class OneSlotSignalingPool(QueuePool):
+        def _do_get(self):
+            nonlocal checkout_attempts
+            with pool_lock:
+                checkout_attempts += 1
+                attempt = checkout_attempts
+            if attempt == 2:
+                second_checkout_waiting.set()
+            connection = super()._do_get()
+            if attempt == 2:
+                assert first_connection_released.is_set()
+                second_connection_acquired.set()
+            return connection
+
+    bounded_engine = create_engine(
+        client.app.state.settings.database_url,
+        future=True,
+        pool_pre_ping=True,
+        poolclass=OneSlotSignalingPool,
+        pool_size=1,
+        max_overflow=0,
+        pool_timeout=5.0,
+        connect_args={"check_same_thread": False},
+    )
+    bounded_factory = sessionmaker(
+        bind=bounded_engine,
+        autoflush=False,
+        autocommit=False,
+        future=True,
+    )
+    connection_checkins = 0
+
+    @event.listens_for(bounded_engine, "checkin")
+    def record_connection_release(*_args) -> None:
+        nonlocal connection_checkins
+        with pool_lock:
+            connection_checkins += 1
+            checkin = connection_checkins
+        if checkin == 1:
+            first_connection_released.set()
+
+    factory_lock = threading.Lock()
+    factory_calls = 0
+    closed_session_indexes: list[int] = []
+
+    def tracking_session_factory():
+        nonlocal factory_calls
+        with factory_lock:
+            factory_calls += 1
+            session_index = factory_calls
+        session = bounded_factory()
+        original_close = session.close
+
+        def tracked_close() -> None:
+            try:
+                original_close()
+            finally:
+                closed_session_indexes.append(session_index)
+
+        session.close = tracked_close
+        return session
+
+    client.app.state.db_session_factory = tracking_session_factory
+    executor = ThreadPoolExecutor(max_workers=2)
+    try:
+        resolve_future = executor.submit(
+            client.post,
+            "/external-artifacts/resolve",
+            json={"entity_type": "dataset", "entity_id": dataset_id},
+            headers=admin_auth_headers,
+        )
+        assert stream_entered.wait(timeout=5.0)
+
+        follow_up_future = executor.submit(
+            client.get,
+            f"/projects/{project_id}",
+            headers=admin_auth_headers,
+        )
+        assert second_checkout_waiting.wait(timeout=5.0)
+        assert follow_up_future.done() is False
+
+        expire_stream.set()
+        resolve_response = resolve_future.result(timeout=5.0)
+        follow_up = follow_up_future.result(timeout=5.0)
+    finally:
+        expire_stream.set()
+        executor.shutdown(wait=True)
+        client.app.state.db_session_factory = original_factory
+        bounded_engine.dispose()
+
+    assert resolve_response.status_code == 200, resolve_response.text
+    body = resolve_response.json()["data"]
+    assert body["status"] == "unresolved"
+    assert body["content_base64"] is None
+    assert body["returned_bytes"] == 0
+    assert "partial secret bytes" not in resolve_response.text
+    assert "slow.example" not in resolve_response.text
+    assert response.closed is True
+    assert first_connection_released.is_set()
+    assert second_connection_acquired.is_set()
+    assert sorted(closed_session_indexes) == [1, 2]
+    assert follow_up.status_code == 200, follow_up.text
 
 
 def test_dataset_write_rejects_malformed_http_uri_without_server_error(
