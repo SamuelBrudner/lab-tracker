@@ -38,6 +38,10 @@
       "@id": "lab:cites",
       "@type": "@id"
     },
+    "claim": {
+      "@id": "lab:claim",
+      "@type": "@id"
+    },
     "claimRelation": {
       "@id": "lab:claimRelation",
       "@type": "@id"
@@ -51,6 +55,11 @@
       "@type": "@id"
     },
     "claimRelationType": "lab:claimRelationType",
+    "classifiedAs": {
+      "@id": "dcterms:type",
+      "@type": "@id"
+    },
+    "codeEnvironment": "lab:codeEnvironment",
     "codeVersion": "lab:codeVersion",
     "commitHash": "lab:commitHash",
     "confidence": "lab:confidence",
@@ -62,6 +71,11 @@
     "createdAt": "dcterms:created",
     "crossLayerBinding": {
       "@id": "lab:crossLayerBinding",
+      "@type": "@id"
+    },
+    "crossLayerBindings": "lab:crossLayerBinding",
+    "dataset": {
+      "@id": "lab:dataset",
       "@type": "@id"
     },
     "dcterms": "http://purl.org/dc/terms/",
@@ -103,6 +117,7 @@
       "@id": "lab:goalLink",
       "@type": "@id"
     },
+    "goalType": "lab:goalType",
     "groundingDataset": {
       "@id": "lab:groundingDataset",
       "@type": "@id"
@@ -164,6 +179,7 @@
     "sessionType": "lab:sessionType",
     "sha256": "lab:checksum",
     "sizeBytes": "schema:contentSize",
+    "slot": "lab:slot",
     "sourceSession": {
       "@id": "lab:sourceSession",
       "@type": "@id"
@@ -171,6 +187,7 @@
     "startedAt": "prov:startedAtTime",
     "statement": "lab:statement",
     "status": "lab:status",
+    "summary": "lab:summary",
     "supervisionEndedAt": "lab:supervisionEndedAt",
     "supervisionStartedAt": "lab:supervisionStartedAt",
     "supportsAnalysis": {
@@ -227,10 +244,18 @@
   "@graph": [
     {
       "@id": "https://lab.example.org/datasets/6fce1866-5432-4b70-b582-3f342a9f4f13",
-      "@type": "prov:Entity",
+      "@type": "lab:Dataset",
       "changeSet": {
         "@id": "https://lab.example.org/graph-drafts/2f3e4d5c-6b7a-4980-9102-a3b4c5d6e7f8"
       },
+      "classifiedAs": [
+        {
+          "@id": "lab:datasetStatus/committed"
+        },
+        {
+          "@id": "lab:entityOrigin/ai_suggested"
+        }
+      ],
       "commitHash": "sha256:1f8ac10f23c5b5bc1167bda84b833e5c057a77d2",
       "origin": "ai_suggested",
       "status": "committed",
@@ -292,10 +317,7 @@
     },
     {
       "@id": "https://lab.example.org/graph-drafts/2f3e4d5c-6b7a-4980-9102-a3b4c5d6e7f8/software-agent",
-      "@type": [
-        "prov:Agent",
-        "prov:SoftwareAgent"
-      ],
+      "@type": "prov:SoftwareAgent",
       "aiModel": "claude-sonnet-5",
       "aiPromptVersion": "drafting-v3",
       "aiProvider": "anthropic"
@@ -316,6 +338,15 @@
     },
     {
       "@id": "https://lab.example.org/datasets/6fce1866-5432-4b70-b582-3f342a9f4f13/provenance/question-links/9c1f6c33-9d1e-4b2e-9d55-73f4dbb0f2c1",
+      "@type": "lab:QuestionLink",
+      "classifiedAs": [
+        {
+          "@id": "lab:questionLinkRole/primary"
+        },
+        {
+          "@id": "lab:outcomeStatus/supports"
+        }
+      ],
       "outcomeStatus": "supports",
       "question": {
         "@id": "https://lab.example.org/questions/9c1f6c33-9d1e-4b2e-9d55-73f4dbb0f2c1"
@@ -324,6 +355,15 @@
     },
     {
       "@id": "https://lab.example.org/datasets/6fce1866-5432-4b70-b582-3f342a9f4f13/provenance/question-links/d0e2b7c8-4d0f-4a3b-8f61-0f4f3f81c9d2",
+      "@type": "lab:QuestionLink",
+      "classifiedAs": [
+        {
+          "@id": "lab:questionLinkRole/secondary"
+        },
+        {
+          "@id": "lab:outcomeStatus/inconclusive"
+        }
+      ],
       "outcomeStatus": "inconclusive",
       "question": {
         "@id": "https://lab.example.org/questions/d0e2b7c8-4d0f-4a3b-8f61-0f4f3f81c9d2"
@@ -332,10 +372,7 @@
     },
     {
       "@id": "https://lab.example.org/agents/57a1c8b2-8d3e-4f50-a617-b8c9d0e1f2a3",
-      "@type": [
-        "prov:Agent",
-        "prov:Person"
-      ],
+      "@type": "prov:Person",
       "actedOnBehalfOf": {
         "@id": "https://lab.example.org/agents/c4d5e6f7-a8b9-4a0b-8c1d-2e3f4a5b6c7d",
         "supervisionStartedAt": "2024-09-01T00:00:00+00:00"
@@ -344,10 +381,7 @@
     },
     {
       "@id": "https://lab.example.org/agents/c4d5e6f7-a8b9-4a0b-8c1d-2e3f4a5b6c7d",
-      "@type": [
-        "prov:Agent",
-        "prov:Person"
-      ],
+      "@type": "prov:Person",
       "userId": "c4d5e6f7-a8b9-4a0b-8c1d-2e3f4a5b6c7d"
     }
   ]

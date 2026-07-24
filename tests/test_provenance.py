@@ -19,14 +19,20 @@ from lab_tracker.models import (
     EntityOrigin,
     EntityRef,
     EntityType,
+    EntityVersion,
     ExplorationNode,
     ExplorationNodeStatus,
     ExplorationNodeType,
     ExternalArtifactKind,
     ExternalArtifactReference,
     Goal,
+    GoalLink,
+    GoalLinkStatus,
+    GoalRelation,
     GoalStatus,
     GoalType,
+    Note,
+    NoteStatus,
     OutcomeStatus,
     Question,
     QuestionLink,
@@ -34,6 +40,9 @@ from lab_tracker.models import (
     QuestionStatus,
     QuestionType,
     RecordExportRecords,
+    Session,
+    SessionStatus,
+    SessionType,
     SupervisionEdge,
     Visualization,
     VisualizationAsset,
@@ -68,6 +77,188 @@ def _node_type_includes(node: dict[str, object], node_type: str) -> bool:
     if isinstance(node_types, list):
         return node_type in node_types
     return node_types == node_type
+
+
+def _classification_ids(node: dict[str, object]) -> set[str]:
+    classifications = node["classifiedAs"]
+    assert isinstance(classifications, list)
+    return {
+        str(classification["@id"])
+        for classification in classifications
+        if isinstance(classification, dict)
+    }
+
+
+def test_record_export_uses_minimal_profile_classes_and_controlled_concepts():
+    base_url = "http://example.test"
+    project_id = uuid4()
+    question_id = uuid4()
+    dataset_id = uuid4()
+    session_id = uuid4()
+    analysis_id = uuid4()
+    claim_id = uuid4()
+    note_id = uuid4()
+    exploration_node_id = uuid4()
+    visualization_id = uuid4()
+
+    question = Question(
+        question_id=question_id,
+        project_id=project_id,
+        text="Does the profile remain minimal?",
+        question_type=QuestionType.HYPOTHESIS_DRIVEN,
+        status=QuestionStatus.ACTIVE,
+    )
+    dataset = Dataset(
+        dataset_id=dataset_id,
+        project_id=project_id,
+        commit_hash="profile-classes",
+        primary_question_id=question_id,
+        question_links=[
+            QuestionLink(
+                question_id=question_id,
+                role=QuestionLinkRole.PRIMARY,
+                outcome_status=OutcomeStatus.SUPPORTS,
+            )
+        ],
+        commit_manifest=DatasetCommitManifest(
+            question_links=[
+                QuestionLink(
+                    question_id=question_id,
+                    role=QuestionLinkRole.PRIMARY,
+                    outcome_status=OutcomeStatus.SUPPORTS,
+                )
+            ],
+        ),
+        status=DatasetStatus.COMMITTED,
+    )
+    session = Session(
+        session_id=session_id,
+        project_id=project_id,
+        session_type=SessionType.SCIENTIFIC,
+        status=SessionStatus.CLOSED,
+        primary_question_id=question_id,
+    )
+    analysis = Analysis(
+        analysis_id=analysis_id,
+        project_id=project_id,
+        dataset_ids=[dataset_id],
+        method_hash="profile-method",
+        code_version="profile-v1",
+        status=AnalysisStatus.COMMITTED,
+    )
+    claim = Claim(
+        claim_id=claim_id,
+        project_id=project_id,
+        statement="The semantic profile is stable.",
+        confidence=90,
+        status=ClaimStatus.SUPPORTED,
+        supported_by_analysis_ids=[analysis_id],
+    )
+    note = Note(
+        note_id=note_id,
+        project_id=project_id,
+        raw_content="Profile review note",
+        status=NoteStatus.COMMITTED,
+    )
+    exploration_node = ExplorationNode(
+        node_id=exploration_node_id,
+        project_id=project_id,
+        node_type=ExplorationNodeType.DECISION,
+        title="Adopt the minimal profile",
+        target=EntityRef(entity_type=EntityType.CLAIM, entity_id=claim_id),
+        status=ExplorationNodeStatus.COMMITTED,
+        choice="Use concepts for refinements.",
+    )
+    visualization = Visualization(
+        viz_id=visualization_id,
+        analysis_id=analysis_id,
+        dataset_ids=[dataset_id],
+        viz_type="line",
+        file_path="figures/profile.png",
+    )
+
+    document = build_record_export_provenance_document(
+        base_url,
+        RecordExportRecords(
+            questions=[question],
+            datasets=[dataset],
+            sessions=[session],
+            analyses=[analysis],
+            claims=[claim],
+            exploration_nodes=[exploration_node],
+            notes=[note],
+            visualizations=[visualization],
+        ),
+    )
+
+    expected_types = {
+        f"{base_url}/questions/{question_id}": "lab:ResearchQuestion",
+        f"{base_url}/datasets/{dataset_id}": "lab:Dataset",
+        f"{base_url}/sessions/{session_id}": "lab:AcquisitionSession",
+        f"{base_url}/analyses/{analysis_id}": "lab:Analysis",
+        f"{base_url}/claims/{claim_id}": "lab:Claim",
+        f"{base_url}/notes/{note_id}": "lab:Note",
+        f"{base_url}/exploration-nodes/{exploration_node_id}": "lab:ExplorationNode",
+        f"{base_url}/visualizations/{visualization_id}": "lab:Visualization",
+    }
+    for node_id, expected_type in expected_types.items():
+        assert _node_by_id(document, node_id)["@type"] == expected_type
+
+    question_node = _node_by_id(document, f"{base_url}/questions/{question_id}")
+    assert {
+        "lab:questionType/hypothesis_driven",
+        "lab:questionStatus/active",
+        "lab:entityOrigin/user",
+    } <= _classification_ids(question_node)
+    dataset_node = _node_by_id(document, f"{base_url}/datasets/{dataset_id}")
+    assert {
+        "lab:datasetStatus/committed",
+        "lab:entityOrigin/user",
+    } <= _classification_ids(dataset_node)
+    session_node = _node_by_id(document, f"{base_url}/sessions/{session_id}")
+    assert {
+        "lab:sessionType/scientific",
+        "lab:sessionStatus/closed",
+        "lab:entityOrigin/user",
+    } <= _classification_ids(session_node)
+    analysis_node = _node_by_id(document, f"{base_url}/analyses/{analysis_id}")
+    assert {
+        "lab:analysisStatus/committed",
+        "lab:entityOrigin/user",
+    } <= _classification_ids(analysis_node)
+    claim_node = _node_by_id(document, f"{base_url}/claims/{claim_id}")
+    assert {
+        "lab:claimStatus/supported",
+        "lab:entityOrigin/user",
+    } <= _classification_ids(claim_node)
+    note_node = _node_by_id(document, f"{base_url}/notes/{note_id}")
+    assert {
+        "lab:noteStatus/committed",
+        "lab:entityOrigin/user",
+    } <= _classification_ids(note_node)
+    exploration_node_jsonld = _node_by_id(
+        document,
+        f"{base_url}/exploration-nodes/{exploration_node_id}",
+    )
+    assert {
+        "lab:explorationNodeType/decision",
+        "lab:explorationNodeStatus/committed",
+        "lab:entityOrigin/user",
+    } <= _classification_ids(exploration_node_jsonld)
+    visualization_node = _node_by_id(
+        document,
+        f"{base_url}/visualizations/{visualization_id}",
+    )
+    assert {"lab:entityOrigin/user"} <= _classification_ids(visualization_node)
+    question_link_node = _node_by_id(
+        document,
+        f"{base_url}/datasets/{dataset_id}/provenance/question-links/{question_id}",
+    )
+    assert question_link_node["@type"] == "lab:QuestionLink"
+    assert _classification_ids(question_link_node) == {
+        "lab:questionLinkRole/primary",
+        "lab:outcomeStatus/supports",
+    }
 
 
 def test_record_export_provenance_includes_terminal_reasons():
@@ -466,6 +657,7 @@ def test_analysis_provenance_distinguishes_ai_suggested_and_user_revised_nodes()
 def test_goal_ara_logic_layer_materializes_origin_nodes():
     goal_id = UUID("aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee")
     change_set_id = UUID("99999999-8888-4777-8666-555555555555")
+    goal_link_id = UUID("11111111-2222-4333-8444-555555555555")
     goal = Goal(
         goal_id=goal_id,
         project_id=uuid4(),
@@ -477,6 +669,14 @@ def test_goal_ara_logic_layer_materializes_origin_nodes():
         origin_provider="openai",
         origin_model="fake-gpt",
         origin_prompt_version="goal-draft-v1",
+    )
+    goal_link = GoalLink(
+        link_id=goal_link_id,
+        goal_id=goal_id,
+        target=EntityRef(entity_type=EntityType.QUESTION, entity_id=uuid4()),
+        relation=GoalRelation.METHODS,
+        link_status=GoalLinkStatus.COMMITTED,
+        slot="Methods",
     )
 
     document = build_ara_artifact_document(
@@ -493,6 +693,7 @@ def test_goal_ara_logic_layer_materializes_origin_nodes():
             visualizations=[],
             entity_versions=[],
             goal=goal,
+            goal_links=[goal_link],
         ),
         generated_at=datetime(2026, 6, 19, tzinfo=timezone.utc),
         layer_name="logic",
@@ -502,11 +703,21 @@ def test_goal_ara_logic_layer_materializes_origin_nodes():
     draft_iri = f"http://example.test/graph-drafts/{change_set_id}"
     agent_iri = f"{draft_iri}/software-agent"
     before_iri = f"{goal_iri}/versions/before/{change_set_id}"
+    goal_link_iri = f"{goal_iri}/links/{goal_link_id}"
     goal_node = _node_by_id(document, goal_iri)
+    goal_link_node = _node_by_id(document, goal_link_iri)
     draft_node = _node_by_id(document, draft_iri)
     agent_node = _node_by_id(document, agent_iri)
     before_node = _node_by_id(document, before_iri)
 
+    assert document["@type"] == "lab:AraLayer"
+    assert goal_node["@type"] == "lab:Goal"
+    assert goal_node["goalType"] == "paper"
+    assert {
+        "lab:goalType/paper",
+        "lab:goalStatus/in_progress",
+        "lab:entityOrigin/user_revised",
+    } <= _classification_ids(goal_node)
     assert goal_node["origin"] == "user_revised"
     assert goal_node["wasRevisionOf"] == {"@id": before_iri}
     assert goal_node["changeSet"] == {"@id": draft_iri}
@@ -517,6 +728,46 @@ def test_goal_ara_logic_layer_materializes_origin_nodes():
     assert agent_node["aiProvider"] == "openai"
     assert agent_node["aiModel"] == "fake-gpt"
     assert agent_node["aiPromptVersion"] == "goal-draft-v1"
+    assert goal_link_node["@type"] == "lab:GoalLink"
+    assert _classification_ids(goal_link_node) == {
+        "lab:goalRelation/methods",
+        "lab:goalLinkStatus/committed",
+    }
+
+
+def test_ara_trace_uses_the_entity_version_profile_class():
+    question_id = uuid4()
+    version = EntityVersion(
+        version_id=uuid4(),
+        entity_type=EntityType.QUESTION,
+        entity_id=question_id,
+        version_number=2,
+        snapshot={"text": "Earlier wording"},
+    )
+
+    document = build_ara_artifact_document(
+        "http://example.test",
+        scope_type=EntityType.QUESTION,
+        scope_id=question_id,
+        records=AraArtifactRecords(
+            questions=[],
+            datasets=[],
+            analyses=[],
+            claims=[],
+            claim_edges=[],
+            notes=[],
+            visualizations=[],
+            entity_versions=[version],
+        ),
+        generated_at=datetime(2026, 6, 19, tzinfo=timezone.utc),
+        layer_name="trace",
+    )
+
+    version_node = _node_by_id(
+        document,
+        f"http://example.test/questions/{question_id}/versions/2",
+    )
+    assert version_node["@type"] == "lab:EntityVersion"
 
 
 def test_dataset_provenance_uses_inline_context_and_json_metadata():
@@ -642,8 +893,7 @@ def test_dataset_provenance_attributes_creator_and_active_supervisor():
     supervisor_node = _node_by_id(document, supervisor_iri)
 
     assert dataset_node["wasAttributedTo"] == {"@id": creator_iri}
-    assert _node_type_includes(creator_node, "prov:Agent")
-    assert _node_type_includes(creator_node, "prov:Person")
+    assert creator_node["@type"] == "prov:Person"
     assert creator_node["userId"] == str(creator_user_id)
     assert creator_node["actedOnBehalfOf"] == {
         "@id": supervisor_iri,
@@ -967,7 +1217,7 @@ def test_analysis_provenance_omits_optional_fields_and_preserves_support_links()
         "http://example.test/visualizations/88888888-8888-8888-8888-888888888888",
     )
 
-    assert analysis_node["@type"] == "prov:Activity"
+    assert analysis_node["@type"] == "lab:Analysis"
     assert analysis_node["executedAt"] == "2026-04-23T00:00:00+00:00"
     assert analysis_node["used"] == [
         {"@id": "http://example.test/datasets/66666666-6666-6666-6666-666666666666"}

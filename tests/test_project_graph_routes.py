@@ -5,8 +5,26 @@ from uuid import uuid4
 from fastapi.testclient import TestClient
 
 from lab_tracker.auth import Role
-from lab_tracker.models import Question, QuestionStatus, QuestionType
-from lab_tracker.project_graph import build_project_graph
+from lab_tracker.models import (
+    ClaimRelation,
+    EntityType,
+    GoalLinkStatus,
+    GoalRelation,
+    Question,
+    QuestionLinkRole,
+    QuestionStatus,
+    QuestionType,
+)
+from lab_tracker.project_graph import (
+    PROJECT_GRAPH_CONDITIONAL_NODE_CLASS_IRIS,
+    PROJECT_GRAPH_DIRECT_RELATIONSHIP_SEMANTICS,
+    PROJECT_GRAPH_NODE_CLASS_IRIS,
+    PROJECT_GRAPH_PRESENTATION_ONLY_NODE_TYPES,
+    PROJECT_GRAPH_QUALIFIED_RELATIONSHIP_SEMANTICS,
+    PROJECT_GRAPH_SUPPRESSED_RELATIONSHIP_TOKENS,
+    build_project_graph,
+)
+from lab_tracker.vocabulary import TERMS
 
 
 def _ids(items: list[dict[str, object]]) -> set[str]:
@@ -238,7 +256,7 @@ def _create_graph_fixture(
         },
         headers=headers,
     ).json()["data"]["goal_id"]
-    client.post(
+    goal_link_response = client.post(
         f"/goals/{goal_id}/links",
         json={
             "entity_type": "visualization",
@@ -248,6 +266,8 @@ def _create_graph_fixture(
         },
         headers=headers,
     )
+    assert goal_link_response.status_code == 201
+    goal_link_id = goal_link_response.json()["data"]["link_id"]
     return {
         "analysis_id": analysis_id,
         "child_question_id": child_question_id,
@@ -256,6 +276,7 @@ def _create_graph_fixture(
         "dead_end_node_id": dead_end_node_id,
         "decision_node_id": decision_node_id,
         "goal_id": goal_id,
+        "goal_link_id": goal_link_id,
         "note_id": note_id,
         "project_id": project_id,
         "pivot_node_id": pivot_node_id,
@@ -283,6 +304,165 @@ def test_project_graph_questions_view_only_queries_questions():
     assert repository.calls == ["questions"]
     assert [node.id for node in graph.nodes] == [f"question:{question.question_id}"]
     assert graph.edges == []
+
+
+def test_project_graph_node_tokens_have_explicit_semantic_classes_or_exclusions():
+    assert dict(PROJECT_GRAPH_NODE_CLASS_IRIS) == {
+        "question": "lab:ResearchQuestion",
+        "dataset": "lab:Dataset",
+        "analysis": "lab:Analysis",
+        "claim": "lab:Claim",
+        "exploration_node": "lab:ExplorationNode",
+        "visualization": "lab:Visualization",
+        "goal": "lab:Goal",
+        "note": "lab:Note",
+        "session": "lab:AcquisitionSession",
+    }
+    assert {
+        token: dict(classes)
+        for token, classes in PROJECT_GRAPH_CONDITIONAL_NODE_CLASS_IRIS.items()
+    } == {
+        "external_artifact": {
+            "entity": "prov:Entity",
+            "activity": "prov:Activity",
+        }
+    }
+    assert set(PROJECT_GRAPH_NODE_CLASS_IRIS) | set(
+        PROJECT_GRAPH_CONDITIONAL_NODE_CLASS_IRIS
+    ) == {
+        "question",
+        "session",
+        "note",
+        "dataset",
+        "analysis",
+        "claim",
+        "exploration_node",
+        "external_artifact",
+        "visualization",
+        "goal",
+    }
+    assert set(PROJECT_GRAPH_PRESENTATION_ONLY_NODE_TYPES) == {"project"}
+    assert "first-class export" in PROJECT_GRAPH_PRESENTATION_ONLY_NODE_TYPES["project"]
+
+
+def test_project_graph_direct_relationship_tokens_have_exhaustive_semantic_mappings():
+    expected = {
+        "question_parent": ("prov:wasDerivedFrom", "target_to_source"),
+        "question_superseded_by": ("prov:wasRevisionOf", "target_to_source"),
+        "question_supersedes": ("prov:wasRevisionOf", "source_to_target"),
+        "analysis_dataset": ("prov:used", "target_to_source"),
+        "claim_dataset_support": ("lab:supportsDataset", "target_to_source"),
+        "claim_analysis_support": ("lab:supportsAnalysis", "target_to_source"),
+        "claim_question_answers": ("lab:answersQuestion", "source_to_target"),
+        "claim_cites": ("lab:cites", "source_to_target"),
+        "exploration_target": ("lab:target", "target_to_source"),
+        "exploration_evidence": ("lab:evidence", "target_to_source"),
+        "exploration_parent": ("prov:wasDerivedFrom", "target_to_source"),
+        "exploration_dependency": ("lab:alsoDependsOn", "target_to_source"),
+        "exploration_invalidates_node": ("lab:invalidates", "source_to_target"),
+        "exploration_invalidates_claim": ("lab:invalidates", "source_to_target"),
+        "visualization_analysis": ("prov:wasGeneratedBy", "target_to_source"),
+        "visualization_dataset": ("prov:wasDerivedFrom", "target_to_source"),
+        "visualization_claim": ("lab:relatedClaim", "target_to_source"),
+        "session_question": ("lab:primaryQuestion", "target_to_source"),
+        "dataset_source_session": ("lab:sourceSession", "target_to_source"),
+    }
+    expected.update(
+        {
+            f"note_target_{entity_type.value}": ("lab:target", "source_to_target")
+            for entity_type in EntityType
+            if entity_type is not EntityType.PROJECT
+        }
+    )
+
+    assert {
+        token: (mapping.predicate_iri, mapping.direction)
+        for token, mapping in PROJECT_GRAPH_DIRECT_RELATIONSHIP_SEMANTICS.items()
+    } == expected
+    assert set(PROJECT_GRAPH_SUPPRESSED_RELATIONSHIP_TOKENS) == {
+        "note_target_project"
+    }
+    assert "no project node" in PROJECT_GRAPH_SUPPRESSED_RELATIONSHIP_TOKENS[
+        "note_target_project"
+    ]
+
+
+def test_project_graph_composite_relationship_tokens_map_to_qualified_resources():
+    expected: dict[
+        str,
+        tuple[str, str, tuple[str, ...], tuple[str, ...], str],
+    ] = {}
+    expected.update(
+        {
+            f"dataset_question_{role.value}": (
+                "lab:QuestionLink",
+                "target_to_source",
+                (f"lab:questionLinkRole/{role.value}",),
+                ("outcomeStatus",),
+                "dcterms:type",
+            )
+            for role in QuestionLinkRole
+        }
+    )
+    expected.update(
+        {
+            f"claim_relation_{relation.value}": (
+                "lab:ClaimRelation",
+                "source_to_target",
+                (f"lab:claimRelation/{relation.value}",),
+                (),
+                "dcterms:type",
+            )
+            for relation in ClaimRelation
+        }
+    )
+    expected.update(
+        {
+            f"goal_{relation.value}_{status.value}": (
+                "lab:GoalLink",
+                "target_to_source",
+                (
+                    f"lab:goalRelation/{relation.value}",
+                    f"lab:goalLinkStatus/{status.value}",
+                ),
+                (),
+                "dcterms:type",
+            )
+            for relation in GoalRelation
+            for status in GoalLinkStatus
+        }
+    )
+
+    assert not (
+        set(PROJECT_GRAPH_DIRECT_RELATIONSHIP_SEMANTICS)
+        & set(PROJECT_GRAPH_QUALIFIED_RELATIONSHIP_SEMANTICS)
+    )
+    assert {
+        token: (
+            mapping.class_iri,
+            mapping.direction,
+            mapping.concept_iris,
+            mapping.additional_concept_schemes,
+            mapping.classification_predicate_iri,
+        )
+        for token, mapping in PROJECT_GRAPH_QUALIFIED_RELATIONSHIP_SEMANTICS.items()
+    } == expected
+
+
+def test_project_graph_custom_semantics_share_the_public_vocabulary_registry():
+    semantic_iris = set(PROJECT_GRAPH_NODE_CLASS_IRIS.values())
+    semantic_iris.update(
+        mapping.predicate_iri
+        for mapping in PROJECT_GRAPH_DIRECT_RELATIONSHIP_SEMANTICS.values()
+    )
+    for mapping in PROJECT_GRAPH_QUALIFIED_RELATIONSHIP_SEMANTICS.values():
+        semantic_iris.add(mapping.class_iri)
+        semantic_iris.add(mapping.classification_predicate_iri)
+        semantic_iris.update(mapping.concept_iris)
+
+    registered_iris = {term.iri for term in TERMS}
+    assert {iri for iri in semantic_iris if iri.startswith("lab:")} <= registered_iris
+    assert "lab:Project" not in registered_iris
 
 
 def test_project_graph_questions_view_contains_question_edges(
@@ -378,7 +558,11 @@ def test_project_graph_evidence_and_full_views_include_expected_links(
         f"visualization_analysis:analysis:{ids['analysis_id']}->visualization:{ids['viz_id']}",
         f"visualization_dataset:dataset:{ids['dataset_id']}->visualization:{ids['viz_id']}",
         f"visualization_claim:claim:{ids['claim_id']}->visualization:{ids['viz_id']}",
-        f"goal_candidate_figure_candidate:visualization:{ids['viz_id']}->goal:{ids['goal_id']}",
+        (
+            "goal_candidate_figure_candidate:"
+            f"visualization:{ids['viz_id']}->goal:{ids['goal_id']}"
+            f"#goal-link={ids['goal_link_id']}"
+        ),
     }.issubset(_edge_ids(evidence["edges"]))
 
     assert f"goal:{ids['goal_id']}" in _ids(evidence["nodes"])
@@ -397,6 +581,66 @@ def test_project_graph_evidence_and_full_views_include_expected_links(
             f"session:{ids['source_session_id']}->dataset:{ids['dataset_id']}"
         ),
     }.issubset(_edge_ids(full["edges"]))
+
+
+def test_project_graph_goal_link_edge_ids_preserve_slot_distinct_links(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+):
+    ids = _create_graph_fixture(client, admin_auth_headers)
+    second_slotted = client.post(
+        f"/goals/{ids['goal_id']}/links",
+        json={
+            "entity_type": "visualization",
+            "entity_id": ids["viz_id"],
+            "relation": "candidate_figure",
+            "slot": "Figure 4",
+        },
+        headers=admin_auth_headers,
+    )
+    unslotted = client.post(
+        f"/goals/{ids['goal_id']}/links",
+        json={
+            "entity_type": "visualization",
+            "entity_id": ids["viz_id"],
+            "relation": "candidate_figure",
+        },
+        headers=admin_auth_headers,
+    )
+    assert second_slotted.status_code == 201
+    assert unslotted.status_code == 201
+
+    first_graph = client.get(
+        f"/projects/{ids['project_id']}/graph",
+        headers=admin_auth_headers,
+    ).json()["data"]
+    second_graph = client.get(
+        f"/projects/{ids['project_id']}/graph",
+        headers=admin_auth_headers,
+    ).json()["data"]
+
+    assert first_graph == second_graph
+    goal_edges = [
+        edge
+        for edge in first_graph["edges"]
+        if edge["relationship"] == "goal_candidate_figure_candidate"
+        and edge["source"] == f"visualization:{ids['viz_id']}"
+        and edge["target"] == f"goal:{ids['goal_id']}"
+    ]
+    base_id = (
+        "goal_candidate_figure_candidate:"
+        f"visualization:{ids['viz_id']}->goal:{ids['goal_id']}"
+    )
+    assert _edge_ids(goal_edges) == {
+        base_id,
+        f"{base_id}#goal-link={ids['goal_link_id']}",
+        f"{base_id}#goal-link={second_slotted.json()['data']['link_id']}",
+    }
+    assert {edge["label"] for edge in goal_edges} == {
+        "candidate figure",
+        "candidate figure: Figure 3",
+        "candidate figure: Figure 4",
+    }
 
 
 def test_project_graph_full_view_truncates_long_note_and_claim_labels(
