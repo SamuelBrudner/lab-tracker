@@ -10,7 +10,12 @@ from uuid import UUID, uuid4
 from pydantic import ValidationError as PydanticValidationError
 
 from lab_tracker.auth import AuthContext
-from lab_tracker.errors import AuthError, NotFoundError, ValidationError
+from lab_tracker.errors import (
+    AuthError,
+    NotFoundError,
+    OpaqueTargetNotFoundError,
+    ValidationError,
+)
 from lab_tracker.goals_attributes import validate_goal_attributes
 from lab_tracker.models import (
     EntityOrigin,
@@ -223,10 +228,20 @@ class GoalService(BaseService):
 
         try:
             return self._require_goal_read(goal, actor=actor)
-        except (AuthError, NotFoundError) as exc:
-            # Resolving polymorphic links can encounter a concurrently deleted
-            # target. Both that case and an inaccessible scope must look exactly
-            # like a missing goal on read-only surfaces.
+        except AuthError as exc:
+            raise OpaqueTargetNotFoundError("Goal does not exist.") from exc
+        except NotFoundError as exc:
+            # A linked target can disappear while resolving the goal scope.
+            # Scope resolution happens before linked-project authorization, so
+            # classify the failure from authority that does not depend on the
+            # missing target.
+            can_read_stable_scope = (
+                self.authorization.can_read(goal.project_id, actor=actor)
+                if goal.project_id is not None
+                else self.authorization.has_global_read(actor)
+            )
+            if not can_read_stable_scope:
+                raise OpaqueTargetNotFoundError("Goal does not exist.") from exc
             raise NotFoundError("Goal does not exist.") from exc
 
     def update_goal(

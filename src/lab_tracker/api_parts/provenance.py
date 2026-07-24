@@ -86,6 +86,7 @@ class ProvenanceApiMixin:
             actor=kwargs.get("actor"),
             resource_id=_first_uuid(args) or kwargs.get("goal_id"),
             project_id_attr="project_id",
+            suppress_opaque_target_not_found=True,
         )
 
     def export_question_subtree(self, *args: Any, **kwargs: Any) -> Any:
@@ -94,8 +95,9 @@ class ProvenanceApiMixin:
             verb=UsageEventVerb.EXPORT,
             resource_type=UsageEventResourceType.QUESTION,
             actor=kwargs.get("actor"),
-            resource_id=_first_uuid(args) or kwargs.get("question_id"),
+            resource_id=_first_uuid(args) or kwargs.get("root_id"),
             project_id_attr="project_id",
+            suppress_opaque_target_not_found=True,
         )
 
     def check_publication_readiness(self, *args: Any, **kwargs: Any) -> Any:
