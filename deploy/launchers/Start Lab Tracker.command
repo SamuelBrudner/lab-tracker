@@ -1,7 +1,7 @@
 #!/bin/sh
 set -eu
 
-cd "$(dirname "$0")/.."
+cd "$(dirname "$0")/../.."
 
 if command -v lab-tracker >/dev/null 2>&1; then
     exec lab-tracker serve

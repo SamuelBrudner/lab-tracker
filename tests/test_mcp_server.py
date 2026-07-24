@@ -112,19 +112,18 @@ def test_code_conventions_resource_matches_package_generator() -> None:
         assert forbidden not in instructions
 
 
-def test_copilot_mcp_configs_use_servers_schema() -> None:
-    for config_path in (Path(".vscode/mcp.json"), Path("mcp.visualstudio.json")):
-        config = json.loads(config_path.read_text(encoding="utf-8"))
-        server = config["servers"]["lab-tracker"]
-        env = server["env"]
+def test_copilot_mcp_config_uses_servers_schema() -> None:
+    config = json.loads(Path(".vscode/mcp.json").read_text(encoding="utf-8"))
+    server = config["servers"]["lab-tracker"]
+    env = server["env"]
 
-        assert "mcpServers" not in config
-        assert server["type"] == "stdio"
-        assert server["command"] == "lt-mcp"
-        assert env["LAB_TRACKER_MCP_BASE_URL"] == "http://127.0.0.1:8000"
-        assert env["LAB_TRACKER_MCP_API_KEY"] == "${input:lt-token}"
-        assert env["LAB_TRACKER_MCP_USERNAME"] == "${input:lt-username}"
-        assert env["LAB_TRACKER_MCP_PASSWORD"] == "${input:lt-password}"
+    assert "mcpServers" not in config
+    assert server["type"] == "stdio"
+    assert server["command"] == "lt-mcp"
+    assert env["LAB_TRACKER_MCP_BASE_URL"] == "http://127.0.0.1:8000"
+    assert env["LAB_TRACKER_MCP_API_KEY"] == "${input:lt-token}"
+    assert env["LAB_TRACKER_MCP_USERNAME"] == "${input:lt-username}"
+    assert env["LAB_TRACKER_MCP_PASSWORD"] == "${input:lt-password}"
 
 
 def test_committed_mcp_json_matches_init_template() -> None:

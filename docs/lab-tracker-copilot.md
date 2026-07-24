@@ -59,12 +59,9 @@ clients, but the API denies writes made through that hosted token.
 
 ## Visual Studio
 
-Visual Studio uses the same top-level `servers` shape as VS Code. This repo keeps
-that example in `mcp.visualstudio.json` so it does not collide with `.mcp.json`,
-which is the Claude/Codex-shaped config using top-level `mcpServers`.
-
-Use `mcp.visualstudio.json` as the Visual Studio MCP config source for this
-repository. Keep `.mcp.json` for clients that expect `mcpServers`.
+Visual Studio discovers the same `.vscode/mcp.json` file and top-level `servers`
+shape as VS Code, so no second root-level config is needed. Keep `.mcp.json` for
+clients that expect the top-level `mcpServers` shape.
 
 ## Source Checkout Fallback
 

@@ -91,7 +91,9 @@ def test_dockerfile_runs_app_as_non_root_user():
 
 def test_docker_entrypoint_has_short_migration_retry_budget():
     repo_root = Path(__file__).resolve().parent.parent
-    entrypoint = (repo_root / "docker-entrypoint.sh").read_text(encoding="utf-8")
+    entrypoint = (repo_root / "deploy" / "docker-entrypoint.sh").read_text(
+        encoding="utf-8"
+    )
 
     assert 'max_attempts="${MIGRATION_MAX_ATTEMPTS:-3}"' in entrypoint
     assert "fix the migration or database before restarting the container" in entrypoint
