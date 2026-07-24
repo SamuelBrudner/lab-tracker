@@ -16,6 +16,7 @@ from lab_tracker.api_parts._base import _first_uuid
 from lab_tracker.auth import AuthContext
 from lab_tracker.models import (
     Dataset,
+    DataStore,
     UsageEventResourceType,
     UsageEventVerb,
 )
@@ -98,8 +99,16 @@ class DatasetsApiMixin:
     def create_data_store(self, *args: Any, **kwargs: Any) -> Any:
         return self.data_stores.create_data_store(*args, **kwargs)
 
-    def get_data_store(self, *args: Any, **kwargs: Any) -> Any:
-        return self.data_stores.get_data_store(*args, **kwargs)
+    def get_data_store(self, store_id: UUID) -> DataStore:
+        return self.data_stores.get_data_store(store_id)
+
+    def get_data_store_for_read(
+        self,
+        store_id: UUID,
+        *,
+        actor: AuthContext | None = None,
+    ) -> DataStore:
+        return self.data_stores.get_data_store_for_read(store_id, actor=actor)
 
     def list_data_stores(self, *args: Any, **kwargs: Any) -> Any:
         return self.data_stores.list_data_stores(*args, **kwargs)

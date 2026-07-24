@@ -255,7 +255,10 @@ class LabTrackerAPI(
             visualizations=self.visualizations,
             goals=self.goals,
         )
-        graph_draft_records = GraphDraftRecords(context)
+        graph_draft_records = GraphDraftRecords(
+            context,
+            authorization=self.project_authorization,
+        )
         graph_draft_generation = GraphDraftGenerationCoordinator(
             context,
             records=graph_draft_records,

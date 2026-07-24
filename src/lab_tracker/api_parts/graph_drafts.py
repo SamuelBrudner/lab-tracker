@@ -135,6 +135,17 @@ class GraphDraftsApiMixin:
     def get_graph_change_set(self, change_set_id: UUID) -> GraphChangeSet:
         return self.graph_drafts.get_graph_change_set(change_set_id)
 
+    def get_graph_change_set_for_read(
+        self,
+        change_set_id: UUID,
+        *,
+        actor: AuthContext | None = None,
+    ) -> GraphChangeSet:
+        return self.graph_drafts.get_graph_change_set_for_read(
+            change_set_id,
+            actor=actor,
+        )
+
     def list_graph_change_sets(
         self,
         *,
