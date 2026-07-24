@@ -1,9 +1,10 @@
 # Lab Tracker
 
-**Lab Tracker preserves the reasoning around research data: the question that
-motivated an experiment, the evidence behind a claim, and the analysis that
-produced a figure.** Capture evidence while you work, let AI propose where it
-belongs, and decide what enters the durable record yourself.
+**Lab Tracker turns the notes, photos, voice memos, and figures you already
+produce into a connected account of what changed, why it mattered, and what
+evidence supports it—so next week's meeting and next year's report start from a
+scientific thread already assembled.** Capture evidence while you work, let AI
+propose where it belongs, and decide what enters the durable record yourself.
 
 A file named `2025_12_10_Rig2_session001.nwb` says when and where it was
 collected. It rarely says *why* it exists, what you expected, or what you
@@ -21,6 +22,19 @@ visualizations.
 > defaults may still change. The
 > [supported v1 surface](docs/retained-v1-surface.md) is authoritative.
 
+## The payoff: start from an assembled record
+
+Author and time-window filters let an authorized assistant assemble what a
+person committed within a period: sessions, datasets, analyses, figures,
+claims, and notes. That can become the evidence packet for a progress report,
+grant renewal, trainee meeting, lab meeting, or committee update. You supply
+the window—Lab Tracker does not own the meeting calendar—and the assistant
+starts from your curated record instead of a blank page.
+
+The result is only as complete as what the lab captured and committed. Lab
+Tracker does not invent missing experiments or evidence, and assistant-written
+prose remains a draft to verify against the underlying graph.
+
 ## From capture to durable context
 
 The core loop is deliberately small:
@@ -32,10 +46,13 @@ The core loop is deliberately small:
    and `lt hpc` adapters keep durable local outboxes for folder, repository,
    and Slurm evidence, then sync compact records when the API is reachable.
    Large source artifacts can remain in their original data store.
-2. **AI proposes.** On demand or on a configured schedule, a drafting model
-   reads staged captures and relevant graph context, then proposes typed graph
-   changes with rationale, confidence, and source references. Drafting creates
-   a reviewable change set; it does not create canonical graph records.
+2. **AI proposes.** For an individual image note, the configured vision-capable
+   model receives the image itself and can use visible text, handwriting, plots,
+   and diagrams as context—there is no separate OCR-to-transcript step first.
+   Scheduled batch drafts use the available text, voice transcripts, capture
+   hints, links, and metadata. Both paths propose typed graph changes with
+   rationale, confidence, and source references; neither creates canonical
+   graph records.
 3. **A person decides.** The review assignee can edit, accept, or reject
    individual operations, or ask the model to revise the draft. A project owner
    commits the accepted operations. **No AI-proposed graph change is committed
@@ -60,9 +77,24 @@ peer-review workflow.
   >
 </p>
 
+## The daily review is part of the science
+
+The daily review is the human half of the system: time set aside to return to
+the work, notice what changed, test the model's interpretation, connect results
+to the questions that made them worth collecting, and decide what remains
+uncertain. That reflection is scientific work in its own right—often the part
+bench work leaves too little room for—so Lab Tracker is built to support
+attention rather than rush it.
+
+Review proposals one at a time when they deserve close attention, or use bulk
+acceptance for routine items. The record preserves which review mode you used,
+so bulk acceptance is never represented later as individual review. Proposal
+preparation can run on a schedule; judgment cannot. Some reviews take minutes,
+and some science deserves longer.
+
 Captured notes stay staged and visible until they are incorporated or archived
-with a reason. Skipping a review therefore leaves an inspectable coverage gap
-instead of silently making the record look complete.
+with a reason. If you skip a review, the captures wait for you and the coverage
+gap remains inspectable instead of silently making the record look complete.
 
 ## Questions are the spine, not a claim that everything is complete
 
@@ -83,19 +115,6 @@ question, visualizations do not universally have to name a related claim, and
 notes can target the most relevant retained entity. That distinction matters:
 Lab Tracker makes provenance explicit where it exists without pretending that
 every historical record arrived fully connected.
-
-## The payoff comes when you need the story
-
-Author and time-window filters let an authorized assistant assemble what a
-person committed within a period: sessions, datasets, analyses, figures,
-claims, and notes. That can become the evidence packet for a progress report,
-grant renewal, trainee meeting, lab meeting, or committee update. You supply
-the window—Lab Tracker does not own the meeting calendar—and the assistant
-starts from your curated record instead of a blank page.
-
-The result is only as complete as what the lab captured and committed. Lab
-Tracker does not invent missing experiments or evidence, and assistant-written
-prose remains a draft to verify against the underlying graph.
 
 ## What ships today
 
@@ -156,10 +175,12 @@ drafting supports three server-side providers:
 | Google (Gemini) | `google` or `gemini` | Yes |
 
 Set `LAB_TRACKER_GRAPH_DRAFT_PROVIDER` and the matching server-held API key.
-All three providers can draft from text, images, figures, and an existing voice
-transcript. Voice transcription is a separate, explicit note action—not an
-automatic upload step—and currently requires OpenAI or Google; Anthropic can
-draft from a transcript created another way.
+With a vision-capable model, each provider can draft directly from an individual
+image note or figure as well as text. Scheduled batch drafts currently use
+text, voice transcripts, capture hints, links, and metadata rather than image
+bytes. Voice transcription is a separate, explicit note action—not an automatic
+upload step—and currently requires OpenAI or Google; Anthropic can draft from a
+transcript created another way.
 
 Any MCP-capable coding agent can read the same permission-bounded context.
 `lab_tracker init` scaffolds common client configurations, and the policy stays
@@ -187,9 +208,10 @@ MCP, and verification.
 
 - This repository does not currently declare an open-source license. Public
   source availability should not be read as permission to redistribute it.
-- OCR, semantic/vector search, automatic transcription on every upload, and a
-  standing system-selected extraction inbox are outside the supported v1
-  surface.
+- Standalone OCR-to-transcript workflows, semantic/vector search, automatic
+  transcription on every upload, and a standing system-selected extraction
+  inbox are outside the supported v1 surface. Individual image-note drafting
+  remains multimodal.
 - Full research artifacts often remain outside Lab Tracker. External resolution
   is opt-in, read-only, bounded, and hash-checked; operators must configure the
   allowed roots or remotes.
