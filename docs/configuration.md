@@ -85,7 +85,13 @@ addresses cannot be enabled even by an internal exception. The connection uses
 one of the already-vetted numeric addresses, so a second DNS answer cannot
 change its destination. Proxy environment variables are ignored. Redirects
 have a finite limit, and every redirect target goes through the same
-authorization and address-pinning process before the next request.
+authorization and address-pinning process before the next request. One total
+wall-clock deadline covers DNS, connect and TLS setup, response headers, every
+redirect hop, body verification, and hashing.
+DNS lookups use the host's configured DNS servers and search domains through
+dnspython so they can be cancelled at the deadline. Names available only
+through platform-specific NSS, mDNS, or local-hosts integrations may therefore
+need a normal DNS record.
 
 Private or otherwise non-public destinations are deny-by-default. Operators can
 opt in a destination only with both of these settings:
@@ -106,6 +112,14 @@ fall within a configured CIDR. An authority without a network, a network
 without an authority, or one unapproved address in a multi-address answer is
 denied. Invalid authority or CIDR configuration fails application startup
 rather than weakening the policy.
+
+Request duration is controlled separately:
+
+- `LAB_TRACKER_RESOLVER_HTTP_DEADLINE_SECONDS`: total wall-clock budget for one
+  HTTP artifact resolution, including DNS, connect and TLS setup, response
+  headers, redirects, body verification, and hashing (default: `30`). The value
+  must be finite, greater than zero, and no greater than `86400` seconds (one
+  day); invalid values fail application startup.
 
 This opt-in changes only whether the host may make the outbound connection. It
 does not bypass resolve-by-entity authorization or opaque not-found behavior,

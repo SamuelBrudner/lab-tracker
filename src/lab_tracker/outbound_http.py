@@ -9,21 +9,30 @@ certificate hostname verification.
 
 from __future__ import annotations
 
+import asyncio
 import http.client
+import io
 import ipaddress
+import math
 import socket
 import ssl
 import time
-from collections.abc import Iterable, Iterator, Sequence
-from dataclasses import dataclass
+from collections.abc import Awaitable, Callable, Iterable, Iterator, Sequence
+from contextlib import suppress
+from dataclasses import dataclass, field
 from enum import Enum
-from typing import Protocol
+from typing import Protocol, cast
 from urllib.parse import SplitResult, quote, urlsplit
+
+import dns.asyncresolver
+import dns.exception
 
 _HTTP_SCHEMES = frozenset({"http", "https"})
 _DEFAULT_PORTS = {"http": 80, "https": 443}
 _MAX_URL_LENGTH = 8192
 _STREAM_CHUNK_SIZE = 1024 * 1024
+DEFAULT_OUTBOUND_HTTP_DEADLINE_SECONDS = 30.0
+MAX_OUTBOUND_HTTP_DEADLINE_SECONDS = 86_400.0
 _GENERIC_POLICY_DETAIL = "Outbound HTTP destination is not allowed."
 _GENERIC_TRANSPORT_DETAIL = "Outbound HTTP request failed."
 _PATH_SAFE_CHARACTERS = "/:@!$&'()*+,;=-._~%"
@@ -57,6 +66,55 @@ class OutboundHttpTransportError(RuntimeError):
     """A vetted HTTP request failed without exposing target or network details."""
 
 
+class OutboundHttpDeadlineExceeded(OutboundHttpTransportError):
+    """The request-wide outbound HTTP budget expired."""
+
+
+Clock = Callable[[], float]
+
+
+@dataclass(frozen=True)
+class OutboundHttpDeadline:
+    """One immutable monotonic deadline shared by every phase of a request."""
+
+    expires_at: float
+    clock: Clock = field(default=time.monotonic, repr=False, compare=False)
+
+    @classmethod
+    def after(
+        cls,
+        seconds: float,
+        *,
+        clock: Clock = time.monotonic,
+    ) -> OutboundHttpDeadline:
+        """Create a deadline ``seconds`` from the supplied monotonic clock."""
+
+        _validate_timeout(seconds, name="Outbound HTTP deadline")
+        now = clock()
+        if not math.isfinite(now) or not math.isfinite(now + seconds):
+            raise ValueError("Outbound HTTP deadline clock must be finite.")
+        return cls(expires_at=now + seconds, clock=clock)
+
+    def remaining(self) -> float:
+        """Return remaining seconds, clamped to zero after expiry."""
+
+        remaining = self.expires_at - self.clock()
+        return remaining if math.isfinite(remaining) and remaining > 0 else 0.0
+
+    def timeout(self) -> float:
+        """Return a positive per-operation timeout or raise after expiry."""
+
+        remaining = self.remaining()
+        if remaining <= 0:
+            raise OutboundHttpDeadlineExceeded(_GENERIC_TRANSPORT_DETAIL)
+        return remaining
+
+    def check(self) -> None:
+        """Raise once the request-wide budget has expired."""
+
+        self.timeout()
+
+
 class _AddressScope(Enum):
     PUBLIC = "public"
     INTERNAL = "internal"
@@ -78,6 +136,8 @@ class ApprovedSocketAddress:
         """Build a TCP socket address from an IP literal for tests and adapters."""
 
         _validate_port(port)
+        if "%" in value:
+            raise ValueError("Scoped IP addresses are not allowed.")
         parsed = ipaddress.ip_address(value)
         if isinstance(parsed, ipaddress.IPv4Address):
             return cls(
@@ -119,21 +179,85 @@ class ApprovedHttpTarget:
 class AddressResolver(Protocol):
     """Resolve one logical hostname without making a connection."""
 
-    def resolve(self, hostname: str, port: int) -> Sequence[ApprovedSocketAddress]: ...
+    def resolve(
+        self,
+        hostname: str,
+        port: int,
+        *,
+        deadline: OutboundHttpDeadline | None = None,
+    ) -> Sequence[ApprovedSocketAddress]: ...
+
+
+AsyncAddressLookup = Callable[[str, float], Awaitable[Sequence[str]]]
+
+
+async def _system_address_lookup(
+    hostname: str,
+    lifetime: float,
+) -> Sequence[str]:
+    resolver = dns.asyncresolver.Resolver(configure=True)
+    answers = await resolver.resolve_name(
+        hostname,
+        family=socket.AF_UNSPEC,
+        lifetime=lifetime,
+        search=True,
+    )
+    return tuple(answers.addresses())
 
 
 class SystemAddressResolver:
-    """Resolve TCP addresses with the operating system resolver."""
+    """Resolve A/AAAA records with cancellable asynchronous DNS I/O."""
 
-    def resolve(self, hostname: str, port: int) -> Sequence[ApprovedSocketAddress]:
-        answers = socket.getaddrinfo(
-            hostname,
-            port,
-            family=socket.AF_UNSPEC,
-            type=socket.SOCK_STREAM,
-            proto=socket.IPPROTO_TCP,
-        )
-        return tuple(_approved_address_from_getaddrinfo(answer, port) for answer in answers)
+    def __init__(
+        self,
+        *,
+        lookup: AsyncAddressLookup | None = None,
+        default_timeout: float = DEFAULT_OUTBOUND_HTTP_DEADLINE_SECONDS,
+    ) -> None:
+        _validate_timeout(default_timeout, name="DNS timeout")
+        self._lookup = lookup or _system_address_lookup
+        self._default_timeout = default_timeout
+
+    def resolve(
+        self,
+        hostname: str,
+        port: int,
+        *,
+        deadline: OutboundHttpDeadline | None = None,
+    ) -> Sequence[ApprovedSocketAddress]:
+        active_deadline = deadline or OutboundHttpDeadline.after(self._default_timeout)
+        active_deadline.check()
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            pass
+        else:
+            # The public resolver is synchronous and FastAPI runs it in a worker
+            # thread. Failing closed here avoids nesting or abandoning event loops.
+            raise OSError(_GENERIC_POLICY_DETAIL)
+
+        async def resolve_addresses() -> Sequence[str]:
+            timeout = active_deadline.timeout()
+            return await asyncio.wait_for(
+                self._lookup(hostname, timeout),
+                timeout=timeout,
+            )
+
+        try:
+            raw_addresses = asyncio.run(resolve_addresses())
+            active_deadline.check()
+            return tuple(
+                ApprovedSocketAddress.from_ip(address, port)
+                for address in raw_addresses
+            )
+        except (
+            asyncio.TimeoutError,
+            dns.exception.DNSException,
+            OSError,
+            OutboundHttpTransportError,
+            ValueError,
+        ):
+            raise OSError(_GENERIC_POLICY_DETAIL) from None
 
 
 class OutboundHttpPolicy:
@@ -151,12 +275,15 @@ class OutboundHttpPolicy:
         address_resolver: AddressResolver | None = None,
         allowed_authorities: Sequence[str] = (),
         allowed_networks: Sequence[str] = (),
+        default_timeout: float = DEFAULT_OUTBOUND_HTTP_DEADLINE_SECONDS,
     ) -> None:
+        _validate_timeout(default_timeout, name="Outbound HTTP policy timeout")
         if bool(allowed_authorities) != bool(allowed_networks):
             raise ValueError(
                 "Internal HTTP exceptions require both exact authorities and networks."
             )
         self._address_resolver = address_resolver or SystemAddressResolver()
+        self._default_timeout = default_timeout
         configured_authorities = tuple(allowed_authorities)
         configured_networks = tuple(allowed_networks)
         self._allowed_origins = frozenset(
@@ -173,9 +300,19 @@ class OutboundHttpPolicy:
         if len(set(self._allowed_networks)) != len(configured_networks):
             raise ValueError("Duplicate internal HTTP networks are not allowed.")
 
-    def authorize(self, url: str) -> ApprovedHttpTarget:
+    def authorize(
+        self,
+        url: str,
+        *,
+        deadline: OutboundHttpDeadline | None = None,
+    ) -> ApprovedHttpTarget:
         """Parse, resolve, and authorize one URL without sending request bytes."""
 
+        active_deadline = deadline or OutboundHttpDeadline.after(self._default_timeout)
+        try:
+            active_deadline.check()
+        except OutboundHttpTransportError:
+            raise OutboundHttpPolicyError(_GENERIC_POLICY_DETAIL) from None
         parsed = _parse_http_url(url)
         is_internal_exception = parsed.origin in self._allowed_origins
         if _is_local_hostname(parsed.hostname) and not is_internal_exception:
@@ -184,8 +321,12 @@ class OutboundHttpPolicy:
         literal = _ip_literal(parsed.hostname)
         if literal is None:
             try:
-                raw_addresses = self._address_resolver.resolve(parsed.hostname, parsed.port)
-            except OSError:
+                raw_addresses = self._address_resolver.resolve(
+                    parsed.hostname,
+                    parsed.port,
+                    deadline=active_deadline,
+                )
+            except (OSError, OutboundHttpTransportError):
                 raise OutboundHttpPolicyError(_GENERIC_POLICY_DETAIL) from None
         else:
             raw_addresses = (ApprovedSocketAddress.from_ip(str(literal), parsed.port),)
@@ -203,6 +344,10 @@ class OutboundHttpPolicy:
         elif scopes != {_AddressScope.PUBLIC}:
             raise OutboundHttpPolicyError(_GENERIC_POLICY_DETAIL)
 
+        try:
+            active_deadline.check()
+        except OutboundHttpTransportError:
+            raise OutboundHttpPolicyError(_GENERIC_POLICY_DETAIL) from None
         return ApprovedHttpTarget(
             scheme=parsed.scheme,
             hostname=parsed.hostname,
@@ -218,35 +363,156 @@ class PinnedSocketConnector(Protocol):
     """Open a socket using only the addresses approved by the policy."""
 
     def connect(
-        self, addresses: Sequence[ApprovedSocketAddress], timeout: float
+        self,
+        addresses: Sequence[ApprovedSocketAddress],
+        deadline: OutboundHttpDeadline | float,
     ) -> socket.socket: ...
 
 
 class SystemPinnedSocketConnector:
     """Connect directly to vetted numeric sockaddrs under one shared deadline."""
 
-    def connect(self, addresses: Sequence[ApprovedSocketAddress], timeout: float) -> socket.socket:
-        deadline = time.monotonic() + timeout
+    def connect(
+        self,
+        addresses: Sequence[ApprovedSocketAddress],
+        deadline: OutboundHttpDeadline | float,
+    ) -> socket.socket:
+        active_deadline = _coerce_deadline(deadline)
         for address in addresses:
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                break
             candidate: socket.socket | None = None
             try:
+                active_deadline.check()
                 candidate = socket.socket(address.family, address.socktype, address.protocol)
-                candidate.settimeout(remaining)
+                _set_socket_deadline(candidate, active_deadline)
                 candidate.connect(address.sockaddr)
+                active_deadline.check()
                 peer = candidate.getpeername()
                 peer_ip = ipaddress.ip_address(str(peer[0]).split("%", 1)[0])
                 peer_port = int(peer[1])
                 if peer_ip != address.ip or peer_port != address.sockaddr[1]:
                     candidate.close()
                     continue
+                _set_socket_deadline(candidate, active_deadline)
                 return candidate
-            except (OSError, ValueError):
+            except OutboundHttpDeadlineExceeded:
+                if candidate is not None:
+                    candidate.close()
+                raise
+            except (OSError, ValueError, OutboundHttpTransportError):
                 if candidate is not None:
                     candidate.close()
         raise OutboundHttpTransportError(_GENERIC_TRANSPORT_DETAIL)
+
+
+def _validate_timeout(value: float, *, name: str) -> None:
+    if (
+        not math.isfinite(value)
+        or value <= 0
+        or value > MAX_OUTBOUND_HTTP_DEADLINE_SECONDS
+    ):
+        raise ValueError(
+            f"{name} must be finite, positive, and no greater than "
+            f"{MAX_OUTBOUND_HTTP_DEADLINE_SECONDS:g} seconds."
+        )
+
+
+def _coerce_deadline(
+    value: OutboundHttpDeadline | float,
+) -> OutboundHttpDeadline:
+    if isinstance(value, OutboundHttpDeadline):
+        return value
+    return OutboundHttpDeadline.after(value)
+
+
+def _set_socket_deadline(
+    raw_socket: socket.socket,
+    deadline: OutboundHttpDeadline,
+) -> None:
+    timeout = min(deadline.timeout(), MAX_OUTBOUND_HTTP_DEADLINE_SECONDS)
+    try:
+        raw_socket.settimeout(timeout)
+    except (OSError, OverflowError, ValueError):
+        raise OutboundHttpTransportError(_GENERIC_TRANSPORT_DETAIL) from None
+
+
+class _DeadlineSocketIO(io.RawIOBase):
+    """Raw response stream that reclamps every receive to one total deadline."""
+
+    def __init__(
+        self,
+        raw_socket: socket.socket,
+        deadline: OutboundHttpDeadline,
+    ) -> None:
+        super().__init__()
+        self._socket = raw_socket
+        self._deadline = deadline
+
+    def readable(self) -> bool:
+        return True
+
+    def readinto(  # type: ignore[override]
+        self,
+        buffer: bytearray | memoryview,
+    ) -> int | None:
+        if self.closed:
+            raise ValueError("I/O operation on closed response stream.")
+        _set_socket_deadline(self._socket, self._deadline)
+        count = self._socket.recv_into(buffer)
+        self._deadline.check()
+        return count
+
+    def fileno(self) -> int:
+        return self._socket.fileno()
+
+
+class _DeadlineSocket:
+    """Minimal socket facade used by ``http.client`` after connection setup."""
+
+    def __init__(
+        self,
+        raw_socket: socket.socket,
+        deadline: OutboundHttpDeadline,
+    ) -> None:
+        self._socket = raw_socket
+        self._deadline = deadline
+
+    def sendall(self, data: bytes, flags: int = 0) -> None:
+        _set_socket_deadline(self._socket, self._deadline)
+        self._socket.sendall(data, flags)
+        self._deadline.check()
+
+    def makefile(
+        self,
+        mode: str,
+        buffering: int | None = None,
+    ) -> io.BufferedReader | _DeadlineSocketIO:
+        if mode != "rb":
+            raise ValueError("Outbound HTTP sockets support binary reads only.")
+        raw_stream = _DeadlineSocketIO(self._socket, self._deadline)
+        if buffering == 0:
+            return raw_stream
+        buffer_size = (
+            io.DEFAULT_BUFFER_SIZE
+            if buffering is None or buffering < 0
+            else buffering
+        )
+        return io.BufferedReader(raw_stream, buffer_size=buffer_size)
+
+    def settimeout(self, _value: float | None) -> None:
+        _set_socket_deadline(self._socket, self._deadline)
+
+    def close(self) -> None:
+        self._socket.close()
+
+
+class _Closable(Protocol):
+    def close(self) -> None: ...
+
+
+def _close_quietly(resource: _Closable) -> None:
+    # Cleanup must not replace the original generic transport failure.
+    with suppress(Exception):
+        resource.close()
 
 
 class OutboundHttpResponse(Protocol):
@@ -273,7 +539,13 @@ class OutboundHttpResponse(Protocol):
 class OutboundHttpClient(Protocol):
     """Perform one request to an already-approved target without redirects."""
 
-    def open(self, method: str, target: ApprovedHttpTarget) -> OutboundHttpResponse: ...
+    def open(
+        self,
+        method: str,
+        target: ApprovedHttpTarget,
+        *,
+        deadline: OutboundHttpDeadline | None = None,
+    ) -> OutboundHttpResponse: ...
 
 
 class _StreamingResponse:
@@ -281,22 +553,31 @@ class _StreamingResponse:
         self,
         connection: http.client.HTTPConnection,
         response: http.client.HTTPResponse,
+        deadline: OutboundHttpDeadline,
     ) -> None:
         self._connection = connection
         self._response = response
+        self._deadline = deadline
         self.status_code = response.status
 
     def get_header(self, name: str) -> str | None:
-        return self._response.getheader(name)
+        self._deadline.check()
+        value = self._response.getheader(name)
+        self._deadline.check()
+        return value
 
     def iter_bytes(self) -> Iterator[bytes]:
         try:
             while True:
+                self._deadline.check()
                 chunk = self._response.read(_STREAM_CHUNK_SIZE)
+                self._deadline.check()
                 if not chunk:
                     return
                 yield chunk
-        except (OSError, http.client.HTTPException):
+                self._deadline.check()
+        except (OSError, http.client.HTTPException, OutboundHttpTransportError):
+            _close_quietly(self)
             raise OutboundHttpTransportError(_GENERIC_TRANSPORT_DETAIL) from None
 
     def close(self) -> None:
@@ -322,15 +603,16 @@ class _PinnedHttpConnection(http.client.HTTPConnection):
         self,
         target: ApprovedHttpTarget,
         connector: PinnedSocketConnector,
-        timeout: float,
+        deadline: OutboundHttpDeadline,
     ) -> None:
-        super().__init__(target.hostname, target.port, timeout=timeout)
+        super().__init__(target.hostname, target.port, timeout=deadline.timeout())
         self._approved_addresses = target.addresses
         self._connector = connector
-        self._pinned_timeout = timeout
+        self._deadline = deadline
 
     def connect(self) -> None:
-        self.sock = self._connector.connect(self._approved_addresses, self._pinned_timeout)
+        raw_socket = self._connector.connect(self._approved_addresses, self._deadline)
+        self.sock = cast(socket.socket, _DeadlineSocket(raw_socket, self._deadline))
 
 
 class _PinnedHttpsConnection(http.client.HTTPSConnection):
@@ -338,28 +620,41 @@ class _PinnedHttpsConnection(http.client.HTTPSConnection):
         self,
         target: ApprovedHttpTarget,
         connector: PinnedSocketConnector,
-        timeout: float,
+        deadline: OutboundHttpDeadline,
         context: ssl.SSLContext,
     ) -> None:
         super().__init__(
             target.hostname,
             target.port,
-            timeout=timeout,
+            timeout=deadline.timeout(),
             context=context,
         )
         self._approved_addresses = target.addresses
         self._connector = connector
-        self._pinned_timeout = timeout
+        self._deadline = deadline
         self._pinned_ssl_context = context
 
     def connect(self) -> None:
-        raw_socket = self._connector.connect(self._approved_addresses, self._pinned_timeout)
+        raw_socket = self._connector.connect(self._approved_addresses, self._deadline)
+        wrapped_socket: socket.socket | None = None
         try:
+            _set_socket_deadline(raw_socket, self._deadline)
             # ``self.host`` is the canonical logical hostname, not the numeric
             # address, preserving both SNI and certificate hostname checks.
-            self.sock = self._pinned_ssl_context.wrap_socket(raw_socket, server_hostname=self.host)
-        except Exception:
-            raw_socket.close()
+            wrapped_socket = self._pinned_ssl_context.wrap_socket(
+                raw_socket,
+                server_hostname=self.host,
+            )
+            self._deadline.check()
+            _set_socket_deadline(wrapped_socket, self._deadline)
+            self.sock = cast(
+                socket.socket,
+                _DeadlineSocket(wrapped_socket, self._deadline),
+            )
+        except BaseException:
+            if wrapped_socket is not None and wrapped_socket is not raw_socket:
+                _close_quietly(wrapped_socket)
+            _close_quietly(raw_socket)
             raise
 
 
@@ -373,27 +668,39 @@ class SafeHttpClient:
         connector: PinnedSocketConnector | None = None,
         ssl_context: ssl.SSLContext | None = None,
     ) -> None:
-        if timeout <= 0:
-            raise ValueError("HTTP timeout must be positive.")
+        _validate_timeout(timeout, name="HTTP timeout")
         self._timeout = timeout
         self._connector = connector or SystemPinnedSocketConnector()
         self._ssl_context = ssl_context or ssl.create_default_context()
 
-    def open(self, method: str, target: ApprovedHttpTarget) -> OutboundHttpResponse:
+    def open(
+        self,
+        method: str,
+        target: ApprovedHttpTarget,
+        *,
+        deadline: OutboundHttpDeadline | None = None,
+    ) -> OutboundHttpResponse:
         normalized_method = method.upper()
         if normalized_method not in {"GET", "HEAD"}:
             raise ValueError("SafeHttpClient supports only GET and HEAD.")
+        active_deadline = deadline or OutboundHttpDeadline.after(self._timeout)
+        active_deadline.check()
         connection: http.client.HTTPConnection
         if target.scheme == "https":
             connection = _PinnedHttpsConnection(
                 target,
                 self._connector,
-                self._timeout,
+                active_deadline,
                 self._ssl_context,
             )
         else:
-            connection = _PinnedHttpConnection(target, self._connector, self._timeout)
+            connection = _PinnedHttpConnection(
+                target,
+                self._connector,
+                active_deadline,
+            )
         try:
+            active_deadline.check()
             connection.request(
                 normalized_method,
                 target.request_target,
@@ -402,20 +709,22 @@ class SafeHttpClient:
                     "User-Agent": "lab-tracker/0.1",
                 },
             )
+            active_deadline.check()
             response = connection.getresponse()
+            active_deadline.check()
             content_encoding = response.getheader("content-encoding")
             if content_encoding and content_encoding.strip().lower() != "identity":
-                response.close()
-                connection.close()
+                _close_quietly(response)
+                _close_quietly(connection)
                 raise OutboundHttpTransportError(_GENERIC_TRANSPORT_DETAIL)
-            return _StreamingResponse(connection, response)
+            return _StreamingResponse(connection, response, active_deadline)
         except (
             OSError,
             UnicodeError,
             http.client.HTTPException,
             OutboundHttpTransportError,
         ):
-            connection.close()
+            _close_quietly(connection)
             raise OutboundHttpTransportError(_GENERIC_TRANSPORT_DETAIL) from None
 
 
@@ -548,47 +857,6 @@ def _is_local_hostname(hostname: str) -> bool:
 def _validate_port(port: int) -> None:
     if not 1 <= port <= 65535:
         raise ValueError("Port is outside the valid TCP range.")
-
-
-def _approved_address_from_getaddrinfo(
-    answer: tuple[int, int, int, str, tuple[object, ...]], expected_port: int
-) -> ApprovedSocketAddress:
-    family, socktype, protocol, _canonical_name, sockaddr = answer
-    if family not in {socket.AF_INET, socket.AF_INET6}:
-        raise OutboundHttpPolicyError(_GENERIC_POLICY_DETAIL)
-    if socktype != socket.SOCK_STREAM or protocol not in {0, socket.IPPROTO_TCP}:
-        raise OutboundHttpPolicyError(_GENERIC_POLICY_DETAIL)
-    if len(sockaddr) < 2 or not isinstance(sockaddr[0], str) or not isinstance(sockaddr[1], int):
-        raise OutboundHttpPolicyError(_GENERIC_POLICY_DETAIL)
-    try:
-        port = sockaddr[1]
-        if port != expected_port or "%" in sockaddr[0]:
-            raise ValueError
-        parsed_ip = ipaddress.ip_address(sockaddr[0])
-    except (TypeError, ValueError):
-        raise OutboundHttpPolicyError(_GENERIC_POLICY_DETAIL) from None
-    if (family == socket.AF_INET) != isinstance(parsed_ip, ipaddress.IPv4Address):
-        raise OutboundHttpPolicyError(_GENERIC_POLICY_DETAIL)
-    if family == socket.AF_INET:
-        normalized_sockaddr: tuple[object, ...] = (str(parsed_ip), port)
-    else:
-        if (
-            len(sockaddr) > 2
-            and not isinstance(sockaddr[2], int)
-            or len(sockaddr) > 3
-            and not isinstance(sockaddr[3], int)
-        ):
-            raise OutboundHttpPolicyError(_GENERIC_POLICY_DETAIL)
-        flowinfo = sockaddr[2] if len(sockaddr) > 2 else 0
-        scope_id = sockaddr[3] if len(sockaddr) > 3 else 0
-        normalized_sockaddr = (str(parsed_ip), port, flowinfo, scope_id)
-    return ApprovedSocketAddress(
-        family=int(family),
-        socktype=socket.SOCK_STREAM,
-        protocol=socket.IPPROTO_TCP,
-        sockaddr=normalized_sockaddr,
-        ip=parsed_ip,
-    )
 
 
 def _validate_and_deduplicate_addresses(

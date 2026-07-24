@@ -1,16 +1,21 @@
 from __future__ import annotations
 
 import ssl
+from collections.abc import Callable
 
 import pytest
 from http_security_fakes import (
     FakeAddressResolver,
+    FakeClock,
     RecordingPinnedConnector,
+    RecordingSocket,
     RecordingSslContext,
 )
 
 from lab_tracker.outbound_http import (
     ApprovedSocketAddress,
+    OutboundHttpDeadline,
+    OutboundHttpDeadlineExceeded,
     OutboundHttpPolicy,
     OutboundHttpTransportError,
     SafeHttpClient,
@@ -22,17 +27,31 @@ HTTP_RESPONSE = b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\nContent-Type: text/pla
 
 
 class _FakeConnectSocket:
-    def __init__(self, *, peer: tuple[str, int]) -> None:
+    def __init__(
+        self,
+        *,
+        peer: tuple[str, int],
+        on_connect: Callable[[], None] | None = None,
+        connect_error: OSError | None = None,
+    ) -> None:
         self.peer = peer
         self.timeout: float | None = None
+        self.timeouts: list[float] = []
         self.connected_to: tuple[object, ...] | None = None
         self.closed = False
+        self._on_connect = on_connect
+        self._connect_error = connect_error
 
     def settimeout(self, value: float) -> None:
         self.timeout = value
+        self.timeouts.append(value)
 
     def connect(self, sockaddr: tuple[object, ...]) -> None:
         self.connected_to = sockaddr
+        if self._on_connect is not None:
+            self._on_connect()
+        if self._connect_error is not None:
+            raise self._connect_error
 
     def getpeername(self) -> tuple[str, int]:
         return self.peer
@@ -98,6 +117,81 @@ def test_system_connector_rejects_unexpected_peer_port(
     assert fake_socket.closed is True
 
 
+def test_system_connector_closes_socket_when_connect_exhausts_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    approved = ApprovedSocketAddress.from_ip(PUBLIC_IP, 443)
+    clock = FakeClock()
+    deadline = OutboundHttpDeadline.after(1.0, clock=clock)
+    fake_socket = _FakeConnectSocket(
+        peer=(PUBLIC_IP, 443),
+        on_connect=lambda: clock.advance(1.0),
+    )
+    monkeypatch.setattr(
+        "lab_tracker.outbound_http.socket.socket",
+        lambda *args: fake_socket,
+    )
+
+    with pytest.raises(OutboundHttpDeadlineExceeded):
+        SystemPinnedSocketConnector().connect((approved,), deadline)
+
+    assert fake_socket.closed is True
+    assert fake_socket.timeouts == [1.0]
+
+
+def test_system_connector_closes_socket_and_redacts_timeout_overflow(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    approved = ApprovedSocketAddress.from_ip(PUBLIC_IP, 443)
+    fake_socket = _FakeConnectSocket(peer=(PUBLIC_IP, 443))
+
+    def reject_timeout(_value: float) -> None:
+        raise OverflowError("platform time_t cannot represent secret deadline")
+
+    fake_socket.settimeout = reject_timeout  # type: ignore[method-assign]
+    monkeypatch.setattr(
+        "lab_tracker.outbound_http.socket.socket",
+        lambda *args: fake_socket,
+    )
+
+    with pytest.raises(OutboundHttpTransportError) as exc_info:
+        SystemPinnedSocketConnector().connect((approved,), 5.0)
+
+    assert fake_socket.closed is True
+    assert "secret" not in str(exc_info.value)
+    assert "time_t" not in str(exc_info.value)
+
+
+def test_system_connector_does_not_reset_deadline_between_addresses(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    first_address = ApprovedSocketAddress.from_ip("93.184.216.34", 443)
+    second_address = ApprovedSocketAddress.from_ip("142.250.72.14", 443)
+    clock = FakeClock()
+    deadline = OutboundHttpDeadline.after(1.0, clock=clock)
+    first_socket = _FakeConnectSocket(
+        peer=(str(first_address.ip), 443),
+        on_connect=lambda: clock.advance(0.25),
+        connect_error=OSError("first address refused"),
+    )
+    second_socket = _FakeConnectSocket(peer=(str(second_address.ip), 443))
+    sockets = iter((first_socket, second_socket))
+    monkeypatch.setattr(
+        "lab_tracker.outbound_http.socket.socket",
+        lambda *args: next(sockets),
+    )
+
+    connected = SystemPinnedSocketConnector().connect(
+        (first_address, second_address),
+        deadline,
+    )
+
+    assert connected is second_socket
+    assert first_socket.closed is True
+    assert first_socket.timeouts == [1.0]
+    assert second_socket.timeouts == [0.75, 0.75]
+
+
 def test_safe_http_client_ignores_proxy_env_and_uses_vetted_ip_with_logical_host(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -116,8 +210,10 @@ def test_safe_http_client_ignores_proxy_env_and_uses_vetted_ip_with_logical_host
     )
     connector = RecordingPinnedConnector(HTTP_RESPONSE)
     client = SafeHttpClient(timeout=7.5, connector=connector)
+    clock = FakeClock(10.0)
+    deadline = OutboundHttpDeadline.after(7.5, clock=clock)
 
-    with client.open("GET", target) as response:
+    with client.open("GET", target, deadline=deadline) as response:
         assert response.status_code == 200
         assert response.get_header("Content-Type") == "text/plain"
         assert b"".join(response.iter_bytes()) == b"data"
@@ -126,7 +222,7 @@ def test_safe_http_client_ignores_proxy_env_and_uses_vetted_ip_with_logical_host
     assert connector.calls == [
         (
             (ApprovedSocketAddress.from_ip(PUBLIC_IP, 8080),),
-            7.5,
+            deadline,
         )
     ]
     request = bytes(connector.socket.sent)
@@ -167,6 +263,86 @@ def test_safe_https_client_preserves_logical_hostname_for_sni_and_host() -> None
 
     assert ssl_context.calls == [(connector.socket, "files.example")]
     assert b"\r\nHost: files.example\r\n" in bytes(connector.socket.sent)
+
+
+def test_safe_https_client_closes_socket_when_tls_exhausts_deadline() -> None:
+    target = OutboundHttpPolicy(
+        address_resolver=FakeAddressResolver({"files.example": [PUBLIC_IP]})
+    ).authorize("https://files.example/artifact.bin")
+    clock = FakeClock()
+    deadline = OutboundHttpDeadline.after(1.0, clock=clock)
+    raw_socket = RecordingSocket(HTTP_RESPONSE)
+    wrapped_socket = RecordingSocket(HTTP_RESPONSE)
+    connector = RecordingPinnedConnector(b"", socket=raw_socket)
+    ssl_context = RecordingSslContext(
+        on_wrap=lambda: clock.advance(1.0),
+        wrapped_socket=wrapped_socket,
+    )
+
+    with pytest.raises(OutboundHttpTransportError):
+        SafeHttpClient(
+            connector=connector,
+            ssl_context=ssl_context,  # type: ignore[arg-type]
+        ).open("GET", target, deadline=deadline)
+
+    assert connector.calls == [(target.addresses, deadline)]
+    assert raw_socket.closed is True
+    assert wrapped_socket.closed is True
+
+
+def test_safe_http_client_stops_drip_fed_headers_at_total_deadline() -> None:
+    target = OutboundHttpPolicy(
+        address_resolver=FakeAddressResolver({"files.example": [PUBLIC_IP]})
+    ).authorize("http://files.example/artifact.bin")
+    clock = FakeClock()
+    deadline = OutboundHttpDeadline.after(1.0, clock=clock)
+    raw_socket = RecordingSocket(
+        HTTP_RESPONSE,
+        clock=clock,
+        recv_delays=(0.4, 0.4, 0.4, 0.4),
+        recv_sizes=(1, 1, 1, 1),
+    )
+    connector = RecordingPinnedConnector(b"", socket=raw_socket)
+
+    with pytest.raises(OutboundHttpTransportError):
+        SafeHttpClient(connector=connector).open(
+            "GET",
+            target,
+            deadline=deadline,
+        )
+
+    assert raw_socket.closed is True
+    assert clock.now >= deadline.expires_at
+    assert all(timeout <= 1.0 for timeout in raw_socket.timeouts)
+
+
+def test_safe_http_client_stops_drip_fed_body_at_total_deadline() -> None:
+    header = b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\nContent-Type: text/plain\r\n\r\n"
+    target = OutboundHttpPolicy(
+        address_resolver=FakeAddressResolver({"files.example": [PUBLIC_IP]})
+    ).authorize("http://files.example/artifact.bin")
+    clock = FakeClock()
+    deadline = OutboundHttpDeadline.after(1.0, clock=clock)
+    raw_socket = RecordingSocket(
+        header + b"data",
+        clock=clock,
+        recv_delays=(0.0, 0.4, 0.4, 0.4, 0.4),
+        recv_sizes=(len(header), 1, 1, 1, 1),
+    )
+    connector = RecordingPinnedConnector(b"", socket=raw_socket)
+
+    response = SafeHttpClient(connector=connector).open(
+        "GET",
+        target,
+        deadline=deadline,
+    )
+
+    with pytest.raises(OutboundHttpTransportError):
+        b"".join(response.iter_bytes())
+
+    assert raw_socket.closed is True
+    assert clock.now >= deadline.expires_at
+    assert all(timeout <= 1.0 for timeout in raw_socket.timeouts)
 
 
 def test_safe_http_client_redacts_connector_failures() -> None:

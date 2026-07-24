@@ -8,6 +8,7 @@ import httpx
 import pytest
 from http_security_fakes import (
     FakeAddressResolver,
+    FakeClock,
     FakeHttpResponse,
     FakeSafeHttpClient,
 )
@@ -290,6 +291,8 @@ def _http_ref(
 def _safe_http_resolver(
     *outcomes: FakeHttpResponse | BaseException,
     dns: FakeAddressResolver | None = None,
+    clock: FakeClock | None = None,
+    deadline_seconds: float = 30.0,
     max_fetch_bytes: int = 64 * 1024 * 1024,
     max_redirects: int = 3,
 ) -> tuple[HttpResolver, FakeSafeHttpClient, FakeAddressResolver]:
@@ -300,6 +303,8 @@ def _safe_http_resolver(
     resolver = HttpResolver(
         policy=OutboundHttpPolicy(address_resolver=address_resolver),
         client=client,
+        deadline_seconds=deadline_seconds,
+        clock=clock or FakeClock(),
         max_fetch_bytes=max_fetch_bytes,
         max_redirects=max_redirects,
     )
@@ -501,7 +506,14 @@ def test_http_resolver_revalidates_and_pins_each_redirect_hop():
             "archive.example": ["142.250.72.14"],
         }
     )
-    resolver, client, _ = _safe_http_resolver(first, final, dns=dns)
+    clock = FakeClock(100.0)
+    resolver, client, _ = _safe_http_resolver(
+        first,
+        final,
+        dns=dns,
+        clock=clock,
+        deadline_seconds=5.0,
+    )
 
     result = resolver.resolve(
         _http_ref("https://store.example/start", _sha256(body))
@@ -520,6 +532,114 @@ def test_http_resolver_revalidates_and_pins_each_redirect_hop():
     assert client.calls[1][1].addresses == (
         ApprovedSocketAddress.from_ip("142.250.72.14", 443),
     )
+    assert len(dns.deadlines) == 2
+    assert len(client.deadlines) == 2
+    shared_deadline = dns.deadlines[0]
+    assert shared_deadline is not None
+    assert shared_deadline.expires_at == 105.0
+    assert all(
+        deadline is shared_deadline
+        for deadline in (*dns.deadlines, *client.deadlines)
+    )
+
+
+def test_http_resolver_redirect_chain_expires_before_next_hop() -> None:
+    clock = FakeClock()
+
+    def advance_on_location(seconds: float):
+        def advance(header_name: str) -> None:
+            if header_name.lower() == "location":
+                clock.advance(seconds)
+
+        return advance
+
+    first = FakeHttpResponse(
+        status_code=302,
+        headers={"Location": "https://archive.example/middle"},
+        on_get_header=advance_on_location(0.6),
+    )
+    second = FakeHttpResponse(
+        status_code=302,
+        headers={"Location": "https://final.example/artifact"},
+        on_get_header=advance_on_location(0.5),
+    )
+    final = FakeHttpResponse(chunks=(b"must not be fetched",))
+    dns = FakeAddressResolver(
+        {
+            "store.example": [_PUBLIC_HTTP_IP],
+            "archive.example": ["142.250.72.14"],
+            "final.example": ["151.101.1.69"],
+        }
+    )
+    resolver, client, _ = _safe_http_resolver(
+        first,
+        second,
+        final,
+        dns=dns,
+        clock=clock,
+        deadline_seconds=1.0,
+    )
+
+    result = resolver.resolve(
+        _http_ref("https://store.example/start", _sha256(b"must not be fetched"))
+    )
+
+    assert result.status is ResolutionStatus.UNRESOLVED
+    assert result.content is None
+    assert result.observed_hash is None
+    assert result.detail == "HTTP artifact fetch failed or was denied."
+    assert clock.now == pytest.approx(1.1)
+    assert dns.calls == [
+        ("store.example", 443),
+        ("archive.example", 443),
+    ]
+    assert [target.hostname for _, target in client.calls] == [
+        "store.example",
+        "archive.example",
+    ]
+    assert first.closed is True
+    assert second.closed is True
+    assert final.closed is False
+
+
+def test_http_resolver_hashing_expiry_discards_partial_state(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    body = b"partially hashed artifact"
+    reference = _http_ref("https://store.example/x", _sha256(body))
+    clock = FakeClock()
+    response = FakeHttpResponse(chunks=(body,))
+    resolver, client, dns = _safe_http_resolver(
+        response,
+        clock=clock,
+        deadline_seconds=1.0,
+    )
+    real_hashlib_new = hashlib.new
+
+    class AdvancingHasher:
+        def __init__(self, algorithm: str) -> None:
+            self._hasher = real_hashlib_new(algorithm)
+
+        def update(self, chunk: bytes) -> None:
+            self._hasher.update(chunk)
+            clock.advance(1.0)
+
+        def hexdigest(self) -> str:
+            return self._hasher.hexdigest()
+
+    monkeypatch.setattr(
+        "lab_tracker.artifact_resolution.hashlib.new",
+        AdvancingHasher,
+    )
+
+    result = resolver.resolve(reference)
+
+    assert result.status is ResolutionStatus.UNRESOLVED
+    assert result.content is None
+    assert result.observed_hash is None
+    assert result.size_bytes is None
+    assert response.closed is True
+    assert dns.deadlines[0] is client.deadlines[0]
 
 
 def test_http_resolver_unsafe_redirect_never_reaches_second_target():
@@ -1354,6 +1474,58 @@ def test_registry_from_env_recovery_off_by_default(tmp_path, monkeypatch):
     result = registry_from_env().resolve(_local_ref(missing, _sha256(data)))
 
     assert result.status is ResolutionStatus.UNRESOLVED
+
+
+def test_registry_from_env_honors_http_deadline_without_runtime_settings(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(
+        "LAB_TRACKER_RESOLVER_HTTP_DEADLINE_SECONDS",
+        "2.5",
+    )
+
+    registry = registry_from_env(
+        http_policy=OutboundHttpPolicy(
+            address_resolver=FakeAddressResolver(),
+        )
+    )
+
+    http_resolver = next(
+        resolver for resolver in registry._resolvers if isinstance(resolver, HttpResolver)
+    )
+    assert http_resolver._deadline_seconds == 2.5
+
+
+@pytest.mark.parametrize("value", ("0", "-1", "nan", "inf", "not-a-number"))
+def test_registry_from_env_rejects_invalid_http_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+    value: str,
+) -> None:
+    monkeypatch.setenv(
+        "LAB_TRACKER_RESOLVER_HTTP_DEADLINE_SECONDS",
+        value,
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="LAB_TRACKER_RESOLVER_HTTP_DEADLINE_SECONDS",
+    ):
+        registry_from_env()
+
+
+def test_registry_from_env_rejects_http_deadline_above_one_day(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(
+        "LAB_TRACKER_RESOLVER_HTTP_DEADLINE_SECONDS",
+        "86400.0001",
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="LAB_TRACKER_RESOLVER_HTTP_DEADLINE_SECONDS",
+    ):
+        registry_from_env()
 
 
 def test_outbound_http_policy_from_env_requires_complete_internal_override(

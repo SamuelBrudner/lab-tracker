@@ -1,13 +1,17 @@
 from __future__ import annotations
 
+import asyncio
 import socket
+from concurrent.futures import ThreadPoolExecutor
+from threading import Event
 from urllib.parse import urlsplit
 
 import pytest
-from http_security_fakes import FakeAddressResolver
+from http_security_fakes import FakeAddressResolver, FakeClock
 
 from lab_tracker.outbound_http import (
     ApprovedSocketAddress,
+    OutboundHttpDeadline,
     OutboundHttpPolicy,
     OutboundHttpPolicyError,
     SystemAddressResolver,
@@ -103,10 +107,16 @@ def test_non_global_literal_addresses_are_denied_without_dns(url: str) -> None:
 def test_public_dns_answers_are_preserved_as_approved_socket_addresses() -> None:
     dns = FakeAddressResolver({"files.example": [PUBLIC_IPV4, PUBLIC_IPV6, PUBLIC_IPV4]})
     policy = OutboundHttpPolicy(address_resolver=dns)
+    clock = FakeClock(100.0)
+    deadline = OutboundHttpDeadline.after(5.0, clock=clock)
 
-    target = policy.authorize("https://files.example/artifact.bin")
+    target = policy.authorize(
+        "https://files.example/artifact.bin",
+        deadline=deadline,
+    )
 
     assert dns.calls == [("files.example", 443)]
+    assert dns.deadlines == [deadline]
     assert target.hostname == "files.example"
     assert target.port == 443
     assert target.addresses == (
@@ -144,91 +154,118 @@ def test_unencodable_iri_component_fails_before_dns() -> None:
     assert dns.calls == []
 
 
-def test_system_address_resolver_converts_ipv4_and_ipv6_answers(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    calls: list[tuple[object, ...]] = []
+def test_system_address_resolver_converts_ipv4_and_ipv6_answers() -> None:
+    calls: list[tuple[str, float]] = []
+    clock = FakeClock(10.0)
+    deadline = OutboundHttpDeadline.after(7.5, clock=clock)
 
-    def getaddrinfo(
-        hostname: str,
-        port: int,
-        *,
-        family: int,
-        type: int,
-        proto: int,
-    ):
-        calls.append((hostname, port, family, type, proto))
-        return [
-            (
-                socket.AF_INET,
-                socket.SOCK_STREAM,
-                socket.IPPROTO_TCP,
-                "",
-                (PUBLIC_IPV4, port),
-            ),
-            (
-                socket.AF_INET6,
-                socket.SOCK_STREAM,
-                socket.IPPROTO_TCP,
-                "",
-                (PUBLIC_IPV6, port, 0, 0),
-            ),
-        ]
+    async def lookup(hostname: str, lifetime: float) -> tuple[str, ...]:
+        calls.append((hostname, lifetime))
+        return (PUBLIC_IPV4, PUBLIC_IPV6)
 
-    monkeypatch.setattr(
-        "lab_tracker.outbound_http.socket.getaddrinfo",
-        getaddrinfo,
+    answers = SystemAddressResolver(lookup=lookup).resolve(
+        "files.example",
+        443,
+        deadline=deadline,
     )
 
-    answers = SystemAddressResolver().resolve("files.example", 443)
-
-    assert calls == [
-        (
-            "files.example",
-            443,
-            socket.AF_UNSPEC,
-            socket.SOCK_STREAM,
-            socket.IPPROTO_TCP,
-        )
-    ]
+    assert calls == [("files.example", 7.5)]
     assert answers == (
         ApprovedSocketAddress.from_ip(PUBLIC_IPV4, 443),
         ApprovedSocketAddress.from_ip(PUBLIC_IPV6, 443),
     )
 
 
+def test_system_address_resolver_uses_configured_dns_search_domains(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    constructor_calls: list[bool] = []
+    resolve_calls: list[tuple[str, int, float, bool]] = []
+
+    class FakeAnswers:
+        def addresses(self) -> tuple[str, ...]:
+            return (PUBLIC_IPV4, PUBLIC_IPV6)
+
+    class FakeResolver:
+        async def resolve_name(
+            self,
+            hostname: str,
+            *,
+            family: int,
+            lifetime: float,
+            search: bool,
+        ) -> FakeAnswers:
+            resolve_calls.append((hostname, family, lifetime, search))
+            return FakeAnswers()
+
+    def resolver_factory(*, configure: bool) -> FakeResolver:
+        constructor_calls.append(configure)
+        return FakeResolver()
+
+    monkeypatch.setattr(
+        "lab_tracker.outbound_http.dns.asyncresolver.Resolver",
+        resolver_factory,
+    )
+
+    deadline = OutboundHttpDeadline.after(30.0, clock=FakeClock())
+    answers = SystemAddressResolver().resolve(
+        "instrument",
+        8080,
+        deadline=deadline,
+    )
+
+    assert constructor_calls == [True]
+    assert resolve_calls == [
+        ("instrument", socket.AF_UNSPEC, 30.0, True),
+    ]
+    assert answers == (
+        ApprovedSocketAddress.from_ip(PUBLIC_IPV4, 8080),
+        ApprovedSocketAddress.from_ip(PUBLIC_IPV6, 8080),
+    )
+
+
 @pytest.mark.parametrize(
     "answer",
     (
-        (socket.AF_UNIX, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", ("x", 443)),
-        (socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP, "", (PUBLIC_IPV4, 443)),
-        (
-            socket.AF_INET,
-            socket.SOCK_STREAM,
-            socket.IPPROTO_TCP,
-            "",
-            (PUBLIC_IPV4, 80),
-        ),
-        (
-            socket.AF_INET6,
-            socket.SOCK_STREAM,
-            socket.IPPROTO_TCP,
-            "",
-            ("fe80::1%en0", 443, 0, 1),
-        ),
+        "not-an-ip-address",
+        "fe80::1%en0",
+        "93.184.216.34:443",
     ),
 )
 def test_system_address_resolver_rejects_malformed_answers(
-    monkeypatch: pytest.MonkeyPatch,
-    answer: tuple[object, ...],
+    answer: str,
 ) -> None:
-    monkeypatch.setattr(
-        "lab_tracker.outbound_http.socket.getaddrinfo",
-        lambda *args, **kwargs: [answer],
-    )
+    async def lookup(_hostname: str, _lifetime: float) -> tuple[str, ...]:
+        return (answer,)
 
-    with pytest.raises(OutboundHttpPolicyError):
-        SystemAddressResolver().resolve("files.example", 443)
+    with pytest.raises(OSError):
+        SystemAddressResolver(lookup=lookup).resolve("files.example", 443)
+
+
+def test_system_address_resolver_real_timeout_cancels_slow_dns_coroutine() -> None:
+    started = Event()
+    cancelled = Event()
+
+    async def lookup(_hostname: str, _lifetime: float) -> tuple[str, ...]:
+        started.set()
+        try:
+            await asyncio.Future()
+        finally:
+            cancelled.set()
+
+    resolver = SystemAddressResolver(lookup=lookup, default_timeout=0.05)
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        future = executor.submit(
+            resolver.resolve,
+            "secret.internal.example",
+            443,
+        )
+        assert started.wait(timeout=1.0)
+        with pytest.raises(OSError) as exc_info:
+            future.result(timeout=1.0)
+
+    assert cancelled.wait(timeout=1.0)
+    assert "secret.internal.example" not in str(exc_info.value)
 
 
 @pytest.mark.parametrize(

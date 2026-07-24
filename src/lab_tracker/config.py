@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import math
 from typing import Literal
 
 from pydantic import field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+from lab_tracker.outbound_http import MAX_OUTBOUND_HTTP_DEADLINE_SECONDS
 
 DEFAULT_AUTH_SECRET_KEY = "dev-only-change-me"
 INSECURE_AUTH_SECRET_KEYS = {
@@ -39,6 +42,7 @@ class Settings(BaseSettings):
     max_upload_bytes: int = 100 * 1024 * 1024
     resolver_http_allowed_authorities: str = ""
     resolver_http_allowed_networks: str = ""
+    resolver_http_deadline_seconds: float = 30.0
     graph_draft_provider: str = "openai"
     graph_draft_background_enabled: bool = False
     graph_draft_scheduler_enabled: bool = False
@@ -79,6 +83,21 @@ class Settings(BaseSettings):
         if cleaned.startswith("postgresql://"):
             return f"postgresql+psycopg://{cleaned.removeprefix('postgresql://')}"
         return cleaned
+
+    @field_validator("resolver_http_deadline_seconds")
+    @classmethod
+    def _validate_resolver_http_deadline_seconds(cls, value: float) -> float:
+        if (
+            not math.isfinite(value)
+            or value <= 0
+            or value > MAX_OUTBOUND_HTTP_DEADLINE_SECONDS
+        ):
+            raise ValueError(
+                "LAB_TRACKER_RESOLVER_HTTP_DEADLINE_SECONDS must be finite and "
+                "greater than 0, and no greater than "
+                f"{MAX_OUTBOUND_HTTP_DEADLINE_SECONDS:g}."
+            )
+        return value
 
     @model_validator(mode="after")
     def _validate_auth_secret_key(self) -> Settings:
