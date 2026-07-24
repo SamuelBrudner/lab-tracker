@@ -110,14 +110,18 @@ describe("App", () => {
     fireEvent.change(screen.getByLabelText("Question text"), {
       target: { value: "How stable is the rig?" },
     });
-    fireEvent.click(screen.getByRole("button", { name: "Stage question" }));
+    const stageButton = screen.getByRole("button", { name: "Stage question" });
+    await waitFor(() => expect(stageButton).toBeEnabled());
+    fireEvent.click(stageButton);
 
     expect(await screen.findByText("Question staged.")).toBeInTheDocument();
     expect(
       await screen.findByText("How stable is the rig?", { selector: ".item strong" })
     ).toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole("button", { name: "Commit (activate)" }));
+    const activateButton = screen.getByRole("button", { name: "Commit (activate)" });
+    await waitFor(() => expect(activateButton).toBeEnabled());
+    fireEvent.click(activateButton);
 
     expect(await screen.findByText("Question activated.")).toBeInTheDocument();
     await waitFor(() => {
@@ -242,7 +246,9 @@ describe("App", () => {
     fireEvent.change(screen.getByLabelText("Question text"), {
       target: { value: "Which plume gaps change run length?" },
     });
-    fireEvent.click(screen.getByRole("button", { name: "Stage question" }));
+    const stageButton = screen.getByRole("button", { name: "Stage question" });
+    await waitFor(() => expect(stageButton).toBeEnabled());
+    fireEvent.click(stageButton);
 
     expect(await screen.findByText("Question staged.")).toBeInTheDocument();
     const questionPost = fetchMock.mock.calls.find(

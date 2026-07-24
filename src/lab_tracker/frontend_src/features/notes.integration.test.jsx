@@ -115,7 +115,9 @@ describe("App", () => {
     fireEvent.change(screen.getByLabelText("Manual transcript (optional)"), {
       target: { value: "Captured session note" },
     });
-    fireEvent.click(screen.getByRole("button", { name: "Upload note file" }));
+    const uploadButton = screen.getByRole("button", { name: "Upload note file" });
+    await waitFor(() => expect(uploadButton).toBeEnabled());
+    fireEvent.click(uploadButton);
 
     expect(await screen.findByText("Note file uploaded.")).toBeInTheDocument();
     expect(await screen.findByText("Captured session note")).toBeInTheDocument();
