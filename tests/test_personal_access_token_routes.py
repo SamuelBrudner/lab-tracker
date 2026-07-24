@@ -42,6 +42,19 @@ def test_batch_run_due_scoped_token_can_only_trigger_the_run(
     client: TestClient,
     admin_auth_headers: dict[str, str],
 ):
+    project = client.post(
+        "/projects",
+        json={"name": "Scheduler token forbidden reads"},
+        headers=admin_auth_headers,
+    )
+    assert project.status_code == 201, project.text
+    goal = client.post(
+        f"/projects/{project.json()['data']['project_id']}/goals",
+        json={"goal_type": "paper", "title": "Scheduler-hidden goal"},
+        headers=admin_auth_headers,
+    )
+    assert goal.status_code == 201, goal.text
+    goal_id = goal.json()["data"]["goal_id"]
     issued = _create_token(
         client, admin_auth_headers, role="admin", scope="batch_run_due"
     )
@@ -56,6 +69,8 @@ def test_batch_run_due_scoped_token_can_only_trigger_the_run(
     denied = [
         client.get("/projects", headers=pat_headers),
         client.get("/batches/runs", headers=pat_headers),
+        client.get(f"/goals/{goal_id}", headers=pat_headers),
+        client.get(f"/goals/{goal_id}/ara-artifact", headers=pat_headers),
         client.get("/auth/me", headers=pat_headers),
         client.post("/projects", json={"name": "Blocked"}, headers=pat_headers),
         client.post("/batches/run-now", json={}, headers=pat_headers),

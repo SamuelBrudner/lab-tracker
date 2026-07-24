@@ -41,6 +41,7 @@ MIGRATED_SERVICE_METHODS = {
     "get_visualization": (VisualizationService, "get_visualization"),
     "delete_visualization": (VisualizationService, "delete_visualization"),
     "get_goal": (GoalService, "get_goal"),
+    "require_goal_read": (GoalService, "require_goal_read"),
 }
 REQUEST_HANDLER_METHODS = {
     name

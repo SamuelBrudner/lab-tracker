@@ -24,6 +24,7 @@ from lab_tracker.models import (
     utc_now,
 )
 from lab_tracker.patching import NOT_PROVIDED, PatchValue, is_provided
+from lab_tracker.provider_error_redaction import provider_error_message
 from lab_tracker.services.analysis_service import AnalysisService
 from lab_tracker.services.base import BaseService, IdempotentCreateResult, ServiceContext
 from lab_tracker.services.claim_service import ClaimService
@@ -495,7 +496,9 @@ class NoteService(BaseService):
                 prompt=prompt,
             )
         except GraphDraftingError as exc:
-            raise ValidationError(f"Voice transcription failed: {exc}") from exc
+            raise ValidationError(
+                f"Voice transcription failed: {provider_error_message(exc)}"
+            ) from exc
         text = _transcript_text(transcript)
         if not text:
             raise ValidationError("Voice transcription response did not include text.")

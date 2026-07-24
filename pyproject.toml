@@ -5,8 +5,26 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "lab-tracker"
 version = "0.1.0"
-description = "Lab tracker project"
+description = "Human-gated research provenance for questions, evidence, analyses, claims, and figures"
+readme = "README.md"
 requires-python = ">=3.10"
+keywords = [
+  "research provenance",
+  "scientific workflows",
+  "research data",
+  "knowledge graph",
+  "human-in-the-loop",
+]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Intended Audience :: Science/Research",
+  "Framework :: FastAPI",
+  "Operating System :: OS Independent",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Topic :: Scientific/Engineering",
+]
 dependencies = [
   "alembic",
   "fastapi",
@@ -19,6 +37,12 @@ dependencies = [
   "sqlalchemy>=2.0",
   "uvicorn",
 ]
+
+[project.urls]
+Homepage = "https://github.com/SamuelBrudner/lab-tracker"
+Demo = "https://samuelbrudner.github.io/lab-tracker/app/"
+Documentation = "https://github.com/SamuelBrudner/lab-tracker/tree/main/docs"
+Issues = "https://github.com/SamuelBrudner/lab-tracker/issues"
 
 [project.optional-dependencies]
 test = [
@@ -109,6 +133,7 @@ files = [
   "src/lab_tracker/decision_context_query.py",
   "src/lab_tracker/decision_context_use_case.py",
   "src/lab_tracker/project_graph.py",
+  "src/lab_tracker/provider_error_redaction.py",
   "src/lab_tracker/application",
   "src/lab_tracker/graph_drafting.py",
   "src/lab_tracker/services/shared.py",

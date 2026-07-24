@@ -104,6 +104,7 @@ class SQLAlchemyNoteRepository(EntityRepository[Note]):
         *,
         project_id: UUID | None = None,
         project_ids: set[UUID] | None = None,
+        note_ids: set[UUID] | None = None,
         status: str | None = None,
         search: str | None = None,
         created_by: str | None = None,
@@ -119,6 +120,8 @@ class SQLAlchemyNoteRepository(EntityRepository[Note]):
         self._session.flush()
         if project_ids is not None and not project_ids:
             return [], 0
+        if note_ids is not None and not note_ids:
+            return [], 0
         stmt = select(NoteModel)
         count_stmt = select(NoteModel.note_id)
         if project_id is not None:
@@ -128,6 +131,10 @@ class SQLAlchemyNoteRepository(EntityRepository[Note]):
             project_values = uuid_values(project_ids)
             stmt = stmt.where(NoteModel.project_id.in_(project_values))
             count_stmt = count_stmt.where(NoteModel.project_id.in_(project_values))
+        if note_ids is not None:
+            note_values = uuid_values(note_ids)
+            stmt = stmt.where(NoteModel.note_id.in_(note_values))
+            count_stmt = count_stmt.where(NoteModel.note_id.in_(note_values))
         if status is not None:
             stmt = stmt.where(NoteModel.status == status)
             count_stmt = count_stmt.where(NoteModel.status == status)
@@ -152,24 +159,17 @@ class SQLAlchemyNoteRepository(EntityRepository[Note]):
             stmt = stmt.where(search_clause)
             count_stmt = count_stmt.where(search_clause)
         if target_entity_type is not None or target_entity_id is not None:
-            target_conditions = []
+            matching_note_ids = select(NoteTargetModel.note_id)
             if target_entity_type is not None:
-                target_conditions.append(NoteTargetModel.entity_type == target_entity_type)
-            if target_entity_id is not None:
-                target_conditions.append(NoteTargetModel.entity_id == str(target_entity_id))
-            stmt = (
-                stmt.join(NoteTargetModel, NoteTargetModel.note_id == NoteModel.note_id)
-                .where(*target_conditions)
-                .distinct()
-            )
-            count_stmt = (
-                count_stmt.join(
-                    NoteTargetModel,
-                    NoteTargetModel.note_id == NoteModel.note_id,
+                matching_note_ids = matching_note_ids.where(
+                    NoteTargetModel.entity_type == target_entity_type
                 )
-                .where(*target_conditions)
-                .distinct()
-            )
+            if target_entity_id is not None:
+                matching_note_ids = matching_note_ids.where(
+                    NoteTargetModel.entity_id == str(target_entity_id)
+                )
+            stmt = stmt.where(NoteModel.note_id.in_(matching_note_ids))
+            count_stmt = count_stmt.where(NoteModel.note_id.in_(matching_note_ids))
         if recent_first:
             stmt = stmt.order_by(NoteModel.created_at.desc(), NoteModel.note_id.desc())
         else:

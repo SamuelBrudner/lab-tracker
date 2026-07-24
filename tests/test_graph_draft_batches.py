@@ -12,7 +12,12 @@ from sqlalchemy import select
 from lab_tracker.api import LabTrackerAPI
 from lab_tracker.app_parts.middleware import system_auth_context
 from lab_tracker.auth import Role
-from lab_tracker.db_models import GraphDraftBatchSettingsModel, NoteModel
+from lab_tracker.db_models import (
+    GraphChangeSetModel,
+    GraphDraftBatchRunModel,
+    GraphDraftBatchSettingsModel,
+    NoteModel,
+)
 from lab_tracker.graph_drafting import (
     READ_ONLY_AGENT_TOOLS,
     AgenticGraphDraftClient,
@@ -345,6 +350,46 @@ def test_background_run_now_enqueues_and_worker_processes(
     assert draft.json()["data"]["status"] == "ready"
 
 
+def test_background_worker_redacts_configured_provider_secret_from_failed_run(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+) -> None:
+    api_key = "nonstandard queued/google secret"
+    project_id = _project(client, admin_auth_headers)
+    _note(client, admin_auth_headers, project_id, "Queued background failure.")
+    client.app.state.settings.google_api_key = api_key
+    client.app.state.settings.graph_draft_background_enabled = True
+
+    def failing_factory(settings):  # noqa: ANN001
+        raise RuntimeError(
+            f"provider factory unavailable for {api_key} at "
+            f"https://provider.test/v1?key={api_key}"
+        )
+
+    client.app.state.graph_draft_client_factory = failing_factory
+    queued_response = client.post(
+        "/batches/run-now",
+        json={"project_id": project_id},
+        headers=admin_auth_headers,
+    )
+    assert queued_response.status_code == 201
+    queued = queued_response.json()["data"]
+    assert queued["status"] == "pending"
+
+    processed = _process_next_background_run(client)
+
+    assert processed.status.value == "failed"
+    assert processed.error_metadata["category"] == "worker_error"
+    message = str(processed.error_metadata["message"])
+    assert "provider factory unavailable" in message
+    assert api_key not in message
+    assert "?key=" not in message
+    with client.app.state.db_session_factory() as session:
+        persisted = session.get(GraphDraftBatchRunModel, queued["run_id"])
+        assert persisted is not None
+        assert persisted.error_metadata == processed.error_metadata
+
+
 def test_batch_run_is_idempotent_for_same_window(
     client: TestClient,
     admin_auth_headers: dict[str, str],
@@ -458,6 +503,51 @@ def test_empty_batch_window_skips_without_creating_change_set(
         )
     assert settings is not None
     assert settings.enabled is False
+
+
+def test_failed_batch_redacts_provider_secret_from_persisted_metadata(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+) -> None:
+    api_key = "AIza" + ("0" * 35)
+    project_id = _project(client, admin_auth_headers)
+    _note(client, admin_auth_headers, project_id, "Draft this staged note.")
+    failing_client = FakeBatchDraftClient(
+        fail_attempts=10,
+        error=(
+            f"quota exceeded for credential {api_key} at "
+            f"https://provider.test/v1?key={api_key}&retry=true"
+        ),
+    )
+    client.app.state.graph_draft_client_factory = lambda settings: failing_client
+
+    response = client.post(
+        "/batches/run-now",
+        json={"project_id": project_id},
+        headers=admin_auth_headers,
+    )
+
+    assert response.status_code == 201
+    run = response.json()["data"]
+    assert run["status"] == "failed"
+    assert run["error_metadata"]["category"] == "model_error"
+    assert "quota exceeded" in run["error_metadata"]["message"]
+    with client.app.state.db_session_factory() as session:
+        persisted_run = session.get(GraphDraftBatchRunModel, run["run_id"])
+        persisted_change_set = session.get(
+            GraphChangeSetModel,
+            run["change_set_id"],
+        )
+        assert persisted_run is not None
+        assert persisted_change_set is not None
+        persisted_messages = (
+            str(persisted_run.error_metadata["message"]),
+            str(persisted_change_set.error_metadata["message"]),
+        )
+    for message in persisted_messages:
+        assert "quota exceeded" in message
+        assert api_key not in message
+        assert "?key=" not in message
 
 
 def test_batch_cadence_settings_are_user_visible_and_rescheduled(
@@ -692,13 +782,18 @@ def test_run_due_isolates_project_errors_and_continues(
         session.commit()
 
     calls = 0
+    api_key = "nonstandard scheduled/google secret"
+    client.app.state.settings.google_api_key = api_key
     healthy_client = FakeBatchDraftClient(_batch_patch(second_project_id))
 
     def factory(settings):  # noqa: ANN001
         nonlocal calls
         calls += 1
         if calls == 1:
-            raise RuntimeError("factory down")
+            raise RuntimeError(
+                f"factory down for {api_key} at "
+                f"https://provider.test/v1?key={api_key}&retry=true"
+            )
         return healthy_client
 
     client.app.state.graph_draft_client_factory = factory
@@ -709,6 +804,9 @@ def test_run_due_isolates_project_errors_and_continues(
     runs = response.json()["data"]
     assert [run["status"] for run in runs] == ["failed", "ready"]
     assert runs[0]["error_metadata"]["category"] == "scheduler_error"
+    assert "factory down" in runs[0]["error_metadata"]["message"]
+    assert api_key not in runs[0]["error_metadata"]["message"]
+    assert "?key=" not in runs[0]["error_metadata"]["message"]
     assert runs[1]["project_id"] == second_project_id
     assert healthy_client.closed is True
 

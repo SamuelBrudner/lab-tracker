@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 from dataclasses import replace
+from typing import Protocol
 from uuid import UUID, uuid4
 
 from lab_tracker.auth import AuthContext, Role, require_role
@@ -39,14 +40,29 @@ from lab_tracker.services.shared import actor_user_fk, actor_user_id
 ADMIN_ROLES = {Role.ADMIN}
 
 
+class GoalReadAccess(Protocol):
+    """Opaque goal reads needed by Ara artifact exports."""
+
+    def get_goal(self, goal_id: UUID) -> Goal: ...
+
+    def require_goal_read(
+        self,
+        goal: Goal,
+        *,
+        actor: AuthContext | None,
+    ) -> set[UUID]: ...
+
+
 class RecordExportService(BaseService):
     def __init__(
         self,
         context: ServiceContext,
         *,
+        goals: GoalReadAccess,
         authorization: ProjectAuthorizationPolicy,
     ) -> None:
         super().__init__(context)
+        self.goals = goals
         self.authorization = authorization
 
     def export_user_records(
@@ -101,10 +117,14 @@ class RecordExportService(BaseService):
         actor: AuthContext | None = None,
     ) -> dict[str, object]:
         self._validate_layer_name(layer_name)
-        goal = self.get_goal_for_export(goal_id)
-        scope_project_ids = self._goal_scope_project_ids(goal)
-        self._require_scope_read(scope_project_ids, actor=actor)
-        records = self._collect_goal_artifact_records(goal, scope_project_ids)
+        goal = self.goals.get_goal(goal_id)
+        scope_project_ids = self.goals.require_goal_read(goal, actor=actor)
+        try:
+            records = self._collect_goal_artifact_records(goal, scope_project_ids)
+        except NotFoundError as exc:
+            # Under READ COMMITTED, a linked target can disappear after scope
+            # authorization but before artifact assembly re-reads it.
+            raise NotFoundError("Goal does not exist.") from exc
         supervision_edges, _ = self.repository.query_supervision_edges(limit=None, offset=0)
         return build_ara_artifact_document(
             base_url,
@@ -139,12 +159,6 @@ class RecordExportService(BaseService):
             supervision_edges=supervision_edges,
         )
 
-    def get_goal_for_export(self, goal_id: UUID) -> Goal:
-        goal = self.repository.goals.get(goal_id)
-        if goal is None:
-            raise NotFoundError("Goal does not exist.")
-        return goal
-
     def _validate_layer_name(self, layer_name: str | None) -> None:
         if layer_name is None:
             return
@@ -152,53 +166,6 @@ class RecordExportService(BaseService):
             raise ValidationError(
                 f"Unknown Ara layer {layer_name!r}; expected one of {', '.join(ARA_LAYER_NAMES)}."
             )
-
-    def _require_scope_read(
-        self,
-        project_ids: set[UUID],
-        *,
-        actor: AuthContext | None,
-    ) -> None:
-        if not project_ids:
-            require_role(actor, ADMIN_ROLES)
-            return
-        for project_id in project_ids:
-            self.authorization.require_read(project_id, actor=actor)
-
-    def _goal_scope_project_ids(self, goal: Goal) -> set[UUID]:
-        project_ids: set[UUID] = set()
-        if goal.project_id is not None:
-            project_ids.add(goal.project_id)
-        for link in goal.links:
-            project_id = self._target_project_id(link.target)
-            if project_id is not None:
-                project_ids.add(project_id)
-        return project_ids
-
-    def _target_project_id(self, target: EntityRef) -> UUID | None:
-        if target.entity_type == EntityType.PROJECT:
-            if self.repository.projects.get(target.entity_id) is None:
-                raise NotFoundError("Goal link project target does not exist.")
-            return target.entity_id
-        if target.entity_type == EntityType.VISUALIZATION:
-            visualization = self._get_visualization(target.entity_id)
-            analysis = self._get_analysis(visualization.analysis_id)
-            return analysis.project_id
-        getters = {
-            EntityType.QUESTION: self._get_question,
-            EntityType.NOTE: self._get_note,
-            EntityType.SESSION: self.repository.sessions.get,
-            EntityType.DATASET: self._get_dataset,
-            EntityType.ANALYSIS: self._get_analysis,
-            EntityType.CLAIM: self._get_claim,
-        }
-        getter = getters.get(target.entity_type)
-        if getter is None:
-            return None
-        entity = getter(target.entity_id)
-        if entity is None:
-            raise NotFoundError(f"Goal link {target.entity_type.value} target does not exist.")
-        return getattr(entity, "project_id", None)
 
     def _collect_goal_artifact_records(
         self,

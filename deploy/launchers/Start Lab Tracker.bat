@@ -1,7 +1,7 @@
 @echo off
 setlocal
 
-cd /d "%~dp0\.."
+cd /d "%~dp0\..\.."
 
 where lab-tracker >nul 2>nul
 if %ERRORLEVEL%==0 (

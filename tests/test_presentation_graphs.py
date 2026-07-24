@@ -13,15 +13,10 @@ from lab_tracker.presentation_graphs import (
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 MANIFEST_PATH = REPO_ROOT / "docs" / "research-group-presentation-graphs.json"
-PPTX_PATH = (
-    REPO_ROOT
-    / "outputs"
-    / "019e93bf-5861-7ba2-af6a-d3677b8793cd"
-    / "presentations"
-    / "lab-tracker-research-group"
-    / "output"
-    / "lab-tracker-research-group-presentation.pptx"
+PPTX_RELATIVE_PATH = Path(
+    "docs/presentations/lab-tracker-research-group-presentation.pptx"
 )
+PPTX_PATH = REPO_ROOT / PPTX_RELATIVE_PATH
 
 
 def test_research_group_presentation_graph_manifest_validates() -> None:
@@ -29,6 +24,7 @@ def test_research_group_presentation_graph_manifest_validates() -> None:
 
     assert isinstance(manifest, PresentationGraphManifest)
     assert manifest.deck_id == "lab-tracker-research-group-presentation"
+    assert manifest.pptx_path == PPTX_RELATIVE_PATH.as_posix()
     # The manifest documents only slides with a backend-aligned *native* diagram.
     # Slides 1-2 (title, premise) and the slides that now embed a UI screenshot
     # (capture + first-use-case) carry no native diagram, so the manifest is a

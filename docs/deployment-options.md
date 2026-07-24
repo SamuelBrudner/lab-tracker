@@ -19,7 +19,7 @@ TLS URL, restarts, and platform database backups. See
 
 ### Local Desktop Launcher
 
-Use one of the files in `launchers/`:
+Use one of the files in `deploy/launchers/`:
 
 - macOS: double-click `Start Lab Tracker.command`
 - Windows: double-click `Start Lab Tracker.bat`

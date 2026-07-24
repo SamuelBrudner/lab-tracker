@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import json
+import logging
+import traceback
 from contextlib import contextmanager
 from datetime import timedelta
 from typing import Any
+from urllib.parse import quote
 from uuid import UUID, uuid4
 
 import httpx
@@ -665,9 +668,11 @@ def test_anthropic_graph_draft_client_drafts_note_and_batch() -> None:
 
 def test_google_graph_draft_client_drafts_and_transcribes() -> None:
     requests: list[dict[str, Any]] = []
+    request_metadata: list[httpx.Request] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
         assert request.url.path == "/v1beta/models/gemini-test:generateContent"
+        request_metadata.append(request)
         requests.append(json.loads(request.content.decode("utf-8")))
         if len(requests) == 3:
             return httpx.Response(
@@ -720,12 +725,69 @@ def test_google_graph_draft_client_drafts_and_transcribes() -> None:
         filename="voice.webm",
         content_type="audio/webm",
     )
+    analysis_result = client.draft_from_analysis_evidence(
+        evidence_text="method_hash=abc123",
+        project_context={"project": {"id": "p1"}},
+    )
 
     assert note_result["summary"] == "google ok"
     assert batch_result["summary"] == "google ok"
     assert transcript["text"] == "Fly 12 tracked cleanly."
+    assert analysis_result["summary"] == "google ok"
+    assert all(request.url.query == b"" for request in request_metadata)
+    assert all(request.headers["x-goog-api-key"] == "google-key" for request in request_metadata)
     assert requests[0]["generationConfig"]["response_mime_type"] == "application/json"
     assert requests[2]["contents"][0]["parts"][1]["inline_data"]["mime_type"] == "audio/webm"
+    client.close()
+
+
+def test_google_request_info_log_contains_no_credential_url(
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    api_key = "nonstandard/google secret"
+    # Alembic's logging fileConfig disables already-created non-root loggers.
+    # Re-enable httpx explicitly so this remains a non-vacuous wire-log
+    # regression regardless of which migration-backed test ran first.
+    monkeypatch.setattr(logging.getLogger("httpx"), "disabled", False)
+    client = GoogleGraphDraftClient(
+        api_key=api_key,
+        model="gemini-test",
+        transport=httpx.MockTransport(
+            lambda request: httpx.Response(
+                200,
+                json={
+                    "candidates": [
+                        {
+                            "content": {
+                                "parts": [
+                                    {
+                                        "text": json.dumps(
+                                            {
+                                                "summary": "ok",
+                                                "uncertain_fields": [],
+                                                "clarification_requests": [],
+                                                "operations": [],
+                                            }
+                                        )
+                                    }
+                                ]
+                            }
+                        }
+                    ]
+                },
+            )
+        ),
+    )
+
+    with caplog.at_level(logging.INFO, logger="httpx"):
+        client.draft_from_batch(
+            batch_context={"mode": "graph_batch", "batch_notes": [{"id": "note-1"}]}
+        )
+
+    assert "models/gemini-test:generateContent" in caplog.text
+    assert api_key not in caplog.text
+    assert "?key=" not in caplog.text
     client.close()
 
 
@@ -783,6 +845,125 @@ def test_anthropic_and_google_clients_report_api_errors() -> None:
         )
     anthropic.close()
     google.close()
+
+
+@pytest.mark.parametrize(
+    "error_type",
+    [httpx.ReadTimeout, httpx.RemoteProtocolError],
+)
+def test_google_transport_failures_redact_url_header_and_exception_chain(
+    error_type: type[httpx.HTTPError],
+) -> None:
+    api_key = "nonstandard/google secret"
+    encoded_key = quote(api_key, safe="")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert not request.url.query
+        assert request.headers["x-goog-api-key"] == api_key
+        raise error_type(
+            "network stalled for "
+            f"{request.url}?key={encoded_key}; x-goog-api-key: {api_key}",
+            request=request,
+        )
+
+    client = GoogleGraphDraftClient(
+        api_key=api_key,
+        model="gemini-test",
+        transport=httpx.MockTransport(handler),
+    )
+
+    with pytest.raises(GraphDraftingError, match="Google request failed") as raised:
+        client.draft_from_batch(
+            batch_context={"mode": "graph_batch", "batch_notes": [{"id": "note-1"}]}
+        )
+
+    rendered = "".join(
+        traceback.format_exception(
+            type(raised.value),
+            raised.value,
+            raised.value.__traceback__,
+        )
+    )
+    assert "network stalled" in rendered
+    assert api_key not in rendered
+    assert encoded_key not in rendered
+    assert "?key=" not in rendered
+    assert raised.value.__cause__ is None
+    assert raised.value.__context__ is None
+    client.close()
+
+
+def test_google_http_and_protocol_failures_redact_response_content() -> None:
+    api_key = "nonstandard/google secret"
+    encoded_key = quote(api_key, safe="")
+    responses = iter(
+        [
+            httpx.Response(
+                429,
+                json={
+                    "error": {
+                        "message": (
+                            "structured quota exceeded at "
+                            f"https://provider.test/v1?key={api_key}&retry=true"
+                        )
+                    }
+                },
+            ),
+            httpx.Response(
+                429,
+                text=(
+                    "quota exceeded at "
+                    f"https://provider.test/v1?key={api_key}&retry=true "
+                    f"https%3A%2F%2Fprovider.test%2Fv1%3Fkey%3D{encoded_key}"
+                ),
+            ),
+            httpx.Response(
+                200,
+                text=f"not-json response echoed ?key={api_key}",
+            ),
+        ]
+    )
+
+    client = GoogleGraphDraftClient(
+        api_key=api_key,
+        model="gemini-test",
+        transport=httpx.MockTransport(lambda request: next(responses)),
+    )
+
+    with pytest.raises(
+        GraphDraftingError,
+        match="structured quota exceeded",
+    ) as structured_http_failure:
+        client.transcribe_audio(
+            audio_bytes=b"audio",
+            filename="voice.webm",
+            content_type="audio/webm",
+        )
+    with pytest.raises(GraphDraftingError, match="quota exceeded") as text_http_failure:
+        client.transcribe_audio(
+            audio_bytes=b"audio",
+            filename="voice.webm",
+            content_type="audio/webm",
+        )
+    with pytest.raises(GraphDraftingError, match="non-JSON content") as protocol_failure:
+        client.draft_from_batch(
+            batch_context={"mode": "graph_batch", "batch_notes": [{"id": "note-1"}]}
+        )
+
+    for error in (
+        structured_http_failure.value,
+        text_http_failure.value,
+        protocol_failure.value,
+    ):
+        rendered = "".join(
+            traceback.format_exception(type(error), error, error.__traceback__)
+        )
+        assert api_key not in rendered
+        assert encoded_key not in rendered
+        assert "?key=" not in rendered
+        assert "%3Fkey%3D" not in rendered
+    assert "Google returned HTTP 429" in str(text_http_failure.value)
+    client.close()
 
 
 @pytest.mark.parametrize(
@@ -1311,6 +1492,50 @@ def test_voice_note_transcription_stores_editable_transcript(
 
     assert edited.status_code == 200
     assert edited.json()["data"]["transcribed_text"] == "Edited transcript"
+
+
+def test_voice_note_transcription_failure_redacts_provider_error_response_and_log(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    api_key = "nonstandard/google secret"
+    project_id = _project(client, admin_auth_headers)
+    voice_note = client.post(
+        "/notes/upload-file",
+        data={"project_id": project_id},
+        files={"file": ("voice.webm", b"fake-audio-bytes", "audio/webm")},
+        headers=admin_auth_headers,
+    ).json()["data"]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert not request.url.query
+        assert request.headers["x-goog-api-key"] == api_key
+        return httpx.Response(
+            429,
+            text=(
+                "voice quota exceeded at "
+                f"https://provider.test/v1?key={api_key}&retry=true"
+            ),
+        )
+
+    client.app.state.graph_draft_client_factory = lambda settings: GoogleGraphDraftClient(
+        api_key=api_key,
+        model="gemini-test",
+        transport=httpx.MockTransport(handler),
+    )
+    caplog.clear()
+
+    response = client.post(
+        f"/notes/{voice_note['note_id']}/transcript",
+        headers=admin_auth_headers,
+    )
+
+    assert response.status_code == 422
+    rendered_failure = response.text + caplog.text
+    assert "voice quota exceeded" in rendered_failure
+    assert api_key not in rendered_failure
+    assert "?key=" not in rendered_failure
 
 
 def test_photo_voice_bundle_draft_uses_image_and_voice_transcript_context(
@@ -2429,6 +2654,7 @@ def test_revise_graph_draft_enforces_cumulative_cap_without_content_length(
 def test_revise_graph_draft_keeps_draft_on_model_failure(
     client: TestClient,
     admin_auth_headers: dict[str, str],
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     project_id = _project(client, admin_auth_headers)
     note_id = _image_note(client, admin_auth_headers, project_id)
@@ -2441,14 +2667,25 @@ def test_revise_graph_draft_keeps_draft_on_model_failure(
     change_set_id = created["change_set_id"]
     assert len(created["operations"]) == 2
 
-    failing = FakeDraftClient(error="model exploded")
+    api_key = "AIza" + ("0" * 35)
+    failing = FakeDraftClient(
+        error=(
+            f"model exploded for {api_key} at "
+            f"https://provider.test/v1?key={api_key}&retry=true"
+        )
+    )
     client.app.state.graph_draft_client_factory = lambda settings: failing
+    caplog.clear()
     response = client.post(
         f"/graph-drafts/{change_set_id}/revise",
         data={"feedback": "Try again with fewer operations."},
         headers=admin_auth_headers,
     )
     assert response.status_code == 422
+    rendered_failure = response.text + caplog.text
+    assert "model exploded" in rendered_failure
+    assert api_key not in rendered_failure
+    assert "?key=" not in rendered_failure
 
     # The existing draft is left intact (operations + ready status preserved).
     after = client.get(

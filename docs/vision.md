@@ -321,7 +321,8 @@ the Restoration Ledger in [retained-v1-surface.md](retained-v1-surface.md):
 
 ## How this was reconstructed
 
-This document synthesizes: the founding spec [`idea.md`](../idea.md); the
+This document synthesizes: the founding
+[`Connected Lab Platform v1.2` spec](archive/connected-lab-platform-v1.2.md); the
 retained-v1 and boundary docs; the SQLAlchemy models, services, routes, and
 Alembic history; the backend test suite (the executable form of these invariants);
 the consumer client and MATLAB packages; the frontend; the MCP surface; the beads
