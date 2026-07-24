@@ -16,6 +16,7 @@ from typing import Any, Protocol, TypeAlias, runtime_checkable
 import httpx
 
 from lab_tracker.config import Settings
+from lab_tracker.provider_error_redaction import provider_error_message
 
 PROMPT_VERSION = "multimodal-graph-draft-v2"
 BATCH_PROMPT_VERSION = "daily-batch-graph-draft-v3"
@@ -45,6 +46,9 @@ SEMANTIC_TYPES = [
 
 class GraphDraftingError(RuntimeError):
     """Raised when GPT graph drafting cannot produce a usable patch."""
+
+    def __init__(self, message: object, *, secrets: tuple[str, ...] = ()) -> None:
+        super().__init__(provider_error_message(message, secrets=secrets))
 
 
 def _missing_api_key_error(env_var: str, action: str) -> GraphDraftingError:
@@ -329,6 +333,7 @@ class OpenAIGraphDraftClient:
             self._client,
             "OpenAI",
             "/responses",
+            secrets=(self._api_key,),
             headers={
                 "Authorization": f"Bearer {self._api_key}",
                 "Content-Type": "application/json",
@@ -353,7 +358,9 @@ class OpenAIGraphDraftClient:
             },
         )
         if response.status_code >= 400:
-            raise GraphDraftingError(_response_error(response))
+            raise GraphDraftingError(
+                _response_error(response, secrets=(self._api_key,))
+            )
         payload = _response_json(response)
         output_text = _extract_output_text(payload)
         try:
@@ -390,6 +397,7 @@ class OpenAIGraphDraftClient:
             self._client,
             "OpenAI",
             "/responses",
+            secrets=(self._api_key,),
             headers={
                 "Authorization": f"Bearer {self._api_key}",
                 "Content-Type": "application/json",
@@ -409,7 +417,9 @@ class OpenAIGraphDraftClient:
             },
         )
         if response.status_code >= 400:
-            raise GraphDraftingError(_response_error(response))
+            raise GraphDraftingError(
+                _response_error(response, secrets=(self._api_key,))
+            )
         payload = _response_json(response)
         output_text = _extract_output_text(payload)
         try:
@@ -440,6 +450,7 @@ class OpenAIGraphDraftClient:
             self._client,
             "OpenAI",
             "/responses",
+            secrets=(self._api_key,),
             headers={
                 "Authorization": f"Bearer {self._api_key}",
                 "Content-Type": "application/json",
@@ -472,7 +483,9 @@ class OpenAIGraphDraftClient:
             },
         )
         if response.status_code >= 400:
-            raise GraphDraftingError(_response_error(response))
+            raise GraphDraftingError(
+                _response_error(response, secrets=(self._api_key,))
+            )
         payload = _response_json(response)
         return _parse_graph_patch_text(_extract_output_text(payload), "OpenAI")
 
@@ -500,12 +513,15 @@ class OpenAIGraphDraftClient:
             self._client,
             "OpenAI",
             "/audio/transcriptions",
+            secrets=(self._api_key,),
             headers={"Authorization": f"Bearer {self._api_key}"},
             data=data,
             files={"file": (filename, audio_bytes, content_type)},
         )
         if response.status_code >= 400:
-            raise GraphDraftingError(_response_error(response))
+            raise GraphDraftingError(
+                _response_error(response, secrets=(self._api_key,))
+            )
         payload = _response_json(response)
         text = payload.get("text")
         if not isinstance(text, str) or not text.strip():
@@ -674,6 +690,7 @@ class AnthropicGraphDraftClient:
             self._client,
             "Anthropic",
             "/messages",
+            secrets=(self._api_key,),
             headers={
                 "x-api-key": self._api_key,
                 "anthropic-version": "2023-06-01",
@@ -689,7 +706,13 @@ class AnthropicGraphDraftClient:
             },
         )
         if response.status_code >= 400:
-            raise GraphDraftingError(_provider_response_error(response, "Anthropic"))
+            raise GraphDraftingError(
+                _provider_response_error(
+                    response,
+                    "Anthropic",
+                    secrets=(self._api_key,),
+                )
+            )
         payload = _provider_response_json(response, "Anthropic")
         output_text = _anthropic_output_text(payload)
         return _parse_graph_patch_text(output_text, "Anthropic")
@@ -827,7 +850,11 @@ class GoogleGraphDraftClient:
             self._client,
             "Google",
             f"/{_gemini_model_path(self.model)}:generateContent",
-            params={"key": self._api_key},
+            secrets=(self._api_key,),
+            headers={
+                "x-goog-api-key": self._api_key,
+                "Content-Type": "application/json",
+            },
             json={
                 "contents": [
                     {
@@ -844,7 +871,13 @@ class GoogleGraphDraftClient:
             },
         )
         if response.status_code >= 400:
-            raise GraphDraftingError(_provider_response_error(response, "Google"))
+            raise GraphDraftingError(
+                _provider_response_error(
+                    response,
+                    "Google",
+                    secrets=(self._api_key,),
+                )
+            )
         payload = _provider_response_json(response, "Google")
         text = _gemini_output_text(payload)
         if not text.strip():
@@ -861,7 +894,11 @@ class GoogleGraphDraftClient:
             self._client,
             "Google",
             f"/{_gemini_model_path(self.model)}:generateContent",
-            params={"key": self._api_key},
+            secrets=(self._api_key,),
+            headers={
+                "x-goog-api-key": self._api_key,
+                "Content-Type": "application/json",
+            },
             json={
                 "systemInstruction": {
                     "parts": [
@@ -877,7 +914,13 @@ class GoogleGraphDraftClient:
             },
         )
         if response.status_code >= 400:
-            raise GraphDraftingError(_provider_response_error(response, "Google"))
+            raise GraphDraftingError(
+                _provider_response_error(
+                    response,
+                    "Google",
+                    secrets=(self._api_key,),
+                )
+            )
         payload = _provider_response_json(response, "Google")
         return _parse_graph_patch_text(_gemini_output_text(payload), "Google")
 
@@ -1365,12 +1408,22 @@ def _post_provider_request(
     client: httpx.Client,
     provider_name: str,
     *args: Any,
+    secrets: tuple[str, ...] = (),
     **kwargs: Any,
 ) -> httpx.Response:
     try:
         return client.post(*args, **kwargs)
     except httpx.HTTPError as exc:
-        raise GraphDraftingError(f"{provider_name} request failed: {exc}") from exc
+        # httpx exceptions can render request URLs and custom transports can
+        # include headers. Do not retain the raw exception as a chained cause:
+        # traceback formatters would render it after sanitizing this boundary.
+        normalized_error = GraphDraftingError(
+            f"{provider_name} request failed: {exc}",
+            secrets=secrets,
+        )
+    # Raise outside the ``except`` suite so the unsafe provider exception is
+    # not retained as either ``__cause__`` or ``__context__``.
+    raise normalized_error
 
 
 def _provider_response_json(response: httpx.Response, provider_name: str) -> dict[str, Any]:
@@ -1383,18 +1436,25 @@ def _provider_response_json(response: httpx.Response, provider_name: str) -> dic
     return payload
 
 
-def _provider_response_error(response: httpx.Response, provider_name: str) -> str:
+def _provider_response_error(
+    response: httpx.Response,
+    provider_name: str,
+    *,
+    secrets: tuple[str, ...] = (),
+) -> str:
     try:
         payload = response.json()
     except ValueError:
-        return f"{provider_name} returned HTTP {response.status_code}: {response.text}"
+        detail = f"{provider_name} returned HTTP {response.status_code}: {response.text}"
+        return provider_error_message(detail, secrets=secrets)
     if isinstance(payload, dict):
         error = payload.get("error")
         if isinstance(error, dict) and error.get("message"):
-            return str(error["message"])
+            return provider_error_message(error["message"], secrets=secrets)
         if isinstance(error, str) and error:
-            return error
-    return f"{provider_name} returned HTTP {response.status_code}: {payload}"
+            return provider_error_message(error, secrets=secrets)
+    detail = f"{provider_name} returned HTTP {response.status_code}: {payload}"
+    return provider_error_message(detail, secrets=secrets)
 
 
 def _anthropic_output_text(payload: dict[str, Any]) -> str:
@@ -1447,7 +1507,11 @@ def _response_json(response: httpx.Response) -> dict[str, Any]:
     return payload
 
 
-def _response_error(response: httpx.Response) -> str:
+def _response_error(
+    response: httpx.Response,
+    *,
+    secrets: tuple[str, ...] = (),
+) -> str:
     status_hint = {
         401: "OpenAI rejected the API key",
         403: "OpenAI denied access to this model or account",
@@ -1458,14 +1522,15 @@ def _response_error(response: httpx.Response) -> str:
         payload = response.json()
     except ValueError:
         prefix = status_hint or f"OpenAI returned HTTP {response.status_code}"
-        return f"{prefix}: {response.text}"
+        return provider_error_message(f"{prefix}: {response.text}", secrets=secrets)
     if isinstance(payload, dict):
         error = payload.get("error")
         if isinstance(error, dict) and error.get("message"):
             message = str(error["message"])
-            return f"{status_hint}: {message}" if status_hint else message
+            detail = f"{status_hint}: {message}" if status_hint else message
+            return provider_error_message(detail, secrets=secrets)
     prefix = status_hint or f"OpenAI returned HTTP {response.status_code}"
-    return f"{prefix}: {payload}"
+    return provider_error_message(f"{prefix}: {payload}", secrets=secrets)
 
 
 def _extract_output_text(payload: dict[str, Any]) -> str:

@@ -22,6 +22,10 @@ from lab_tracker.models import (
     utc_now,
 )
 from lab_tracker.patching import NOT_PROVIDED, PatchValue, is_provided
+from lab_tracker.provider_error_redaction import (
+    configured_provider_secrets,
+    provider_error_message,
+)
 from lab_tracker.services import graph_draft_batch_policy as batch_policy
 from lab_tracker.services.base import BaseService, ServiceContext
 from lab_tracker.services.graph_draft_scheduling_ports import (
@@ -246,7 +250,7 @@ class BatchSchedulingCoordinator(BaseService):
             run.summary = "Batch draft failed before a change set could be stored."
             run.error_metadata = {
                 "category": "runner_error",
-                "message": str(exc),
+                "message": provider_error_message(exc),
             }
             run.finished_at = utc_now()
             run.updated_at = run.finished_at
@@ -408,6 +412,7 @@ class BatchSchedulingCoordinator(BaseService):
                 summary="Queued batch draft failed before a change set could be stored.",
                 category="worker_error",
                 error=exc,
+                secrets=configured_provider_secrets(app_settings),
             )
         finally:
             if draft_client is not None:
@@ -503,12 +508,13 @@ class BatchSchedulingCoordinator(BaseService):
         summary: str,
         category: str,
         error: Exception,
+        secrets: tuple[str, ...] = (),
     ) -> GraphDraftBatchRun:
         run.status = GraphDraftBatchRunStatus.FAILED
         run.summary = summary
         run.error_metadata = {
             "category": category,
-            "message": str(error),
+            "message": provider_error_message(error, secrets=secrets),
         }
         run.finished_at = utc_now()
         run.updated_at = run.finished_at
@@ -660,6 +666,7 @@ class BatchSchedulingCoordinator(BaseService):
                         actor=actor,
                         review_assignee=reviewer.reviewer,
                         review_assignee_user_id=reviewer.reviewer_user_id,
+                        secrets=configured_provider_secrets(app_settings),
                     )
                 finally:
                     if draft_client is not None:
@@ -764,6 +771,7 @@ class BatchSchedulingCoordinator(BaseService):
         actor: AuthContext | None,
         review_assignee: str | None = None,
         review_assignee_user_id: UUID | None = None,
+        secrets: tuple[str, ...] = (),
     ) -> GraphDraftBatchRun:
         latest_success = self.scheduling_repository.latest_successful_graph_draft_batch_run(
             project_id,
@@ -793,7 +801,7 @@ class BatchSchedulingCoordinator(BaseService):
             summary="Scheduled batch draft failed before a project run could complete.",
             error_metadata={
                 "category": "scheduler_error",
-                "message": str(error),
+                "message": provider_error_message(error, secrets=secrets),
             },
             finished_at=finished_at,
             created_by=actor_user_id(actor),
