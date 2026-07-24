@@ -16,6 +16,7 @@ from lab_tracker.api_parts._base import _first_uuid
 from lab_tracker.auth import AuthContext
 from lab_tracker.models import (
     Project,
+    ProjectGroup,
     UsageEventResourceType,
     UsageEventVerb,
 )
@@ -117,8 +118,16 @@ class ProjectsApiMixin:
             project_id_attr=None,
         )
 
-    def get_project_group(self, *args: Any, **kwargs: Any) -> Any:
-        return self.projects.get_project_group(*args, **kwargs)
+    def get_project_group(self, group_id: UUID) -> ProjectGroup:
+        return self.projects.get_project_group(group_id)
+
+    def get_project_group_for_read(
+        self,
+        group_id: UUID,
+        *,
+        actor: AuthContext | None = None,
+    ) -> ProjectGroup:
+        return self.projects.get_project_group_for_read(group_id, actor=actor)
 
     def list_project_groups(self, *args: Any, **kwargs: Any) -> Any:
         return self.projects.list_project_groups(*args, **kwargs)

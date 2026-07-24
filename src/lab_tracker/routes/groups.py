@@ -32,7 +32,6 @@ from .shared import (
     actor_from_request,
     api_from_request,
     ensure_group_owner,
-    ensure_group_read,
     list_response,
     paginate,
     record_usage_view,
@@ -76,8 +75,11 @@ def build_groups_router(api: LabTrackerAPI) -> APIRouter:
 
     @router.get("/groups/{group_id:uuid}", response_model=Envelope[ProjectGroup])
     def get_group(group_id: UUID, request: Request):
-        group = api_from_request(request, api).get_project_group(group_id)
-        ensure_group_read(request, group.group_id)
+        actor = actor_from_request(request)
+        group = api_from_request(request, api).get_project_group_for_read(
+            group_id,
+            actor=actor,
+        )
         record_usage_view(
             request,
             resource_type=UsageEventResourceType.PROJECT_GROUP,

@@ -312,6 +312,17 @@ class ProjectService(BaseService):
             loader=lambda repository: repository.project_groups.get(group_id),
         )
 
+    def get_project_group_for_read(
+        self,
+        group_id: UUID,
+        *,
+        actor: AuthContext | None = None,
+    ) -> ProjectGroup:
+        group = self.get_project_group(group_id)
+        if not self.authorization.can_group_read(group_id, actor=actor):
+            raise NotFoundError("Project group does not exist.")
+        return group
+
     def list_project_groups(
         self,
         *,
