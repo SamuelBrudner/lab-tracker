@@ -143,13 +143,17 @@ describe("App", () => {
 
     expect(await screen.findByText("viz/analysis-committed.png")).toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole("button", { name: "Commit analysis" }));
+    const commitButton = screen.getByRole("button", { name: "Commit analysis" });
+    await waitFor(() => expect(commitButton).toBeEnabled());
+    fireEvent.click(commitButton);
 
     expect(await screen.findByText("Analysis committed.")).toBeInTheDocument();
     expect(await screen.findByText("analysis-staged")).toBeInTheDocument();
 
     const committedRow = screen.getByText("analysis-committed").closest("article");
-    fireEvent.click(within(committedRow).getByRole("button", { name: "Archive analysis" }));
+    const archiveButton = within(committedRow).getByRole("button", { name: "Archive analysis" });
+    await waitFor(() => expect(archiveButton).toBeEnabled());
+    fireEvent.click(archiveButton);
 
     expect(await screen.findByText("Analysis archived.")).toBeInTheDocument();
     await waitFor(() => {
