@@ -37,6 +37,8 @@ class Settings(BaseSettings):
     bootstrap_admin_token_disclosure: Literal["local", "first_run", "never"] = "local"
     auth_enabled: bool | None = None
     max_upload_bytes: int = 100 * 1024 * 1024
+    resolver_http_allowed_authorities: str = ""
+    resolver_http_allowed_networks: str = ""
     graph_draft_provider: str = "openai"
     graph_draft_background_enabled: bool = False
     graph_draft_scheduler_enabled: bool = False

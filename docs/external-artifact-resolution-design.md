@@ -121,7 +121,7 @@ doc explicitly permits.
 | Adapter | `source_system` | Phase | Notes |
 | --- | --- | --- | --- |
 | Local filesystem | `local`, or any `file://`/path locator | v1 slice | Resolves a path on *this host*. Needs the host-local mount config below. |
-| Generic HTTP(S) | `http`/`https`, `doi` (follow to file) | v1 slice | Range requests for bounding; no credentials. |
+| Generic HTTP(S) | `http`/`https`, `doi` (follow to file) | v1 slice | Bounded, hash-verified reads; public global destinations or explicit exact-authority/CIDR exceptions only. |
 | S3 / MinIO | `s3` | next | Object storage; the boundary doc's primary byte target. Credentials via adapter config. |
 | OneDrive / Box | `onedrive`, `box` | later | Graph/Box API + OAuth. This is the "offload credential/session/device-grant plumbing later" boundary — do it once auth is offloaded. |
 | DataLad / DVC | `datalad`, `dvc` | later | `datalad get` / `dvc pull` by hash; substrate already models content. |
@@ -131,6 +131,50 @@ files consolidated into a OneDrive folder that is **locally synced** on the
 machine the agent runs on resolve as local paths today, with no cloud
 credentials. The cloud-API adapters are the upgrade for when the file is *not*
 synced locally.
+
+## Outbound HTTP destination policy
+
+The generic HTTP(S) adapter treats every persisted URL as untrusted input. A
+content hash proves which bytes arrived; it does not make the server-side
+connection safe. The adapter therefore authorizes the destination before
+sending a request:
+
+1. Parse and normalize the URL. Only HTTP(S) with a valid hostname and port is
+   accepted. Malformed URLs, user information, and unsafe literal addresses are
+   denied. Local and single-label names require an exact internal exception.
+2. Resolve the hostname once and inspect every IPv4 and IPv6 answer. The normal
+   public path requires all answers to be globally routable. Private, loopback,
+   link-local, unspecified, multicast, reserved, metadata-service, mixed
+   public/non-public, or otherwise unsafe answer sets are denied as a whole.
+   Link-local metadata-service, unspecified, multicast, reserved, and IPv6
+   transition addresses remain forbidden even when an internal exception is
+   configured.
+3. Connect directly to one of those already-vetted numeric addresses while
+   retaining the normalized hostname for the HTTP `Host` header and HTTPS SNI
+   and certificate verification. The HTTP client does not consult proxy
+   environment variables. This pinning removes the DNS-check/connect race:
+   DNS rebinding after authorization cannot substitute a different target.
+4. Follow redirects only within a finite hop limit. Each `Location` is parsed,
+   authorized, resolved, and pinned independently before another request is
+   sent; approval of the initial URL never carries over to a redirect target.
+
+Public global destinations need no operator entry. An internal or otherwise
+non-public destination requires both:
+
+- an exact normalized scheme + hostname + effective-port entry in
+  `LAB_TRACKER_RESOLVER_HTTP_ALLOWED_AUTHORITIES`; and
+- CIDRs in `LAB_TRACKER_RESOLVER_HTTP_ALLOWED_NETWORKS` that contain every
+  resolved address, or the literal IP.
+
+The settings are deliberately conjunctive. Neither an authority nor a network
+alone grants access, and a single answer outside the configured networks denies
+the entire destination. Authority matching is exact after normalization; no
+wildcard or hostname-suffix rules are supported. Invalid authority or CIDR
+configuration fails application startup rather than silently broadening
+access. This exception changes destination reachability only: the pointer stays
+read-only, the owning entity's opaque authorization boundary still runs first,
+the whole response still passes the content-hash integrity gate, and the fetch
+and returned payload remain bounded.
 
 ## The host-local locator problem
 
@@ -225,6 +269,10 @@ and prompt-injection surface, so the resolver is bounded by construction:
 - **Content type is metadata.** The response reports `content_type`, but both
   text and binary payloads use bounded base64 in the current HTTP/MCP contract.
   There is no implemented metadata-only HEAD endpoint or streaming handle.
+- **HTTP display locators are redacted.** An unresolved HTTP result reports a
+  generic redacted locator. Verified or drifted HTTP results omit URL user
+  information, query, and fragment components, so signed-URL credentials and
+  denied targets are not copied into API/MCP response envelopes or errors.
 - **Untrusted by default.** Resolved bytes are external data and must be tagged
   as such where surfaced (the same caution the project already applies to
   webhook/PR content), so downstream reasoning treats file contents as data, not
@@ -262,7 +310,12 @@ Shipped (`src/lab_tracker/artifact_resolution.py`, tested in
   root resolves `VERIFIED` instead of `UNRESOLVED` (read-only; the `uri` is not
   rewritten).
 - ✅ `HttpResolver` — `http(s)`, full-body verify with a `max_fetch_bytes` cap
-  (oversized → `UNRESOLVED`, never uncertified bytes).
+  (oversized → `UNRESOLVED`, never uncertified bytes), plus a shared outbound
+  destination policy that validates every IPv4/IPv6 answer, pins the vetted
+  connection address, ignores proxy environment variables, and reauthorizes
+  each bounded redirect hop. Public destinations must resolve entirely to
+  globally routable addresses; internal exceptions require the exact-authority
+  and CIDR settings described above.
 - ✅ `RcloneResolver` — `rclone://<remote>/<path>`, the locked-in unifier for
   S3 / SFTP / Dropbox / Google Drive / Box / OneDrive; stats then fetches, and
   degrades to `UNRESOLVED` when the binary is absent. Gated by an operator
@@ -278,7 +331,9 @@ Shipped (`src/lab_tracker/artifact_resolution.py`, tested in
   hash comparison, materialization, or resolver work; returns the envelope plus
   base64 content. Registry comes from `request.app.state.resolver_registry` or
   `registry_from_env()`; `LAB_TRACKER_RESOLVER_ALLOWED_ROOTS` gates local roots
-  (unset → local artifacts resolve `UNRESOLVED`; HTTP/rclone unaffected).
+  (unset → local artifacts resolve `UNRESOLVED`), HTTP(S) is constrained by the
+  outbound destination policy, and rclone is constrained by its configured
+  remote-name allowlist.
 - ✅ `lab_tracker_resolve_artifact` MCP read tool + `resolve_external_artifact`
   client method.
 
