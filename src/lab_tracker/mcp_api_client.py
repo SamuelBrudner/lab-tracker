@@ -61,6 +61,27 @@ GOAL_LINK_STATUS_TEXT = ", ".join(GOAL_LINK_STATUS_VALUES)
 _BEARER_SECRET_RE = re.compile(r"Bearer\s+[^\s\"'\\,}\]]+", re.IGNORECASE)
 _LPAT_SECRET_RE = re.compile(r"lpat_[A-Za-z0-9_-]+")
 
+
+def suppress_unverified_artifact_content(payload: JsonObject) -> JsonObject:
+    """Fail closed if an artifact response carries content without verification."""
+
+    data = payload.get("data")
+    if data is None and isinstance(payload.get("error"), dict):
+        return payload
+    if not isinstance(data, dict):
+        raise LabTrackerAPIError(
+            "Lab Tracker API artifact response did not include object data."
+        )
+    if data.get("status") == "verified":
+        return payload
+
+    safe_data = dict(data)
+    safe_data["content_base64"] = None
+    safe_data["returned_bytes"] = 0
+    safe_payload = dict(payload)
+    safe_payload["data"] = safe_data
+    return safe_payload
+
 # Remediation guidance appended to auth failures so a rejected credential is
 # self-describing at the tool boundary rather than an opaque "Invalid
 # credentials" (GH #74, #79). Desktop MCP hosts only re-read env on a full
@@ -467,7 +488,12 @@ class LabTrackerAPIClient:
             payload["byte_start"] = byte_start
         if byte_end is not None:
             payload["byte_end"] = byte_end
-        return self._request("POST", "/external-artifacts/resolve", json_payload=payload)
+        response = self._request(
+            "POST",
+            "/external-artifacts/resolve",
+            json_payload=payload,
+        )
+        return suppress_unverified_artifact_content(response)
 
     def export_goal_artifact(
         self,

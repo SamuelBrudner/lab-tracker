@@ -121,7 +121,8 @@ class ResolutionStatus(str, Enum):
 class ResolvedArtifact:
     """The result of resolving an :class:`ExternalArtifactReference`.
 
-    ``content`` holds the bounded, returned bytes (``None`` when unresolved).
+    ``content`` holds bounded bytes only after integrity verification.  Drifted
+    and unresolved results retain diagnostics but never retain artifact bytes.
     ``size_bytes`` is the *full* artifact size, which may exceed the returned
     payload when ``truncated`` is True.
     """
@@ -137,6 +138,20 @@ class ResolvedArtifact:
     content: bytes | None = None
     truncated: bool = False
     detail: str | None = None
+
+    def __post_init__(self) -> None:
+        """Fail closed when an adapter marks uncertified bytes as verified."""
+
+        if self.status is ResolutionStatus.VERIFIED:
+            if self.observed_hash is None or not is_verifiable_hash(self.expected_hash):
+                object.__setattr__(self, "status", ResolutionStatus.UNRESOLVED)
+            elif parse_content_hash(self.observed_hash) != parse_content_hash(
+                self.expected_hash
+            ):
+                object.__setattr__(self, "status", ResolutionStatus.DRIFTED)
+
+        if self.status is not ResolutionStatus.VERIFIED and self.content is not None:
+            object.__setattr__(self, "content", None)
 
     @property
     def is_verified(self) -> bool:
@@ -1315,7 +1330,7 @@ def _build_resolved(
         observed_hash=observed,
         content_type=content_type or "application/octet-stream",
         size_bytes=total,
-        content=content,
+        content=content if verified else None,
         truncated=truncated,
         fetched_at=_now(),
         detail=None if verified else "Recomputed hash does not match content_hash.",

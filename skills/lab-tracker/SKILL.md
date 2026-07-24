@@ -138,7 +138,7 @@ Read tools:
 - `lab_tracker_get_dataset_provenance`: Get dataset provenance JSON-LD before reusing evidence.
 - `lab_tracker_get_analysis_provenance`: Get analysis provenance JSON-LD before reusing derived evidence.
 - `lab_tracker_get_claim_provenance`: Get claim-centric provenance JSON-LD with analysis/dataset/question ancestry.
-- `lab_tracker_resolve_artifact`: Resolve an external artifact pointer to bounded, hash-verified content.
+- `lab_tracker_resolve_artifact`: Resolve an artifact pointer; only verified results include bounded content.
 - `lab_tracker_export_goal_artifact`: Compile a goal into an Ara artifact; pass layer logic/src/trace/evidence for one layer.
 - `lab_tracker_export_question_subtree`: Compile a question subtree into layered Ara JSON-LD.
 - `lab_tracker_get_decision_context`: CALL THIS FIRST before research-facing decisions.

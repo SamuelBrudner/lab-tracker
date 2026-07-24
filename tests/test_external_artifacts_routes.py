@@ -166,6 +166,7 @@ def test_resolve_endpoint_returns_verified_content(client, admin_auth_headers, t
 
 
 def test_resolve_endpoint_reports_drift(client, admin_auth_headers, tmp_path):
+    recorded_hash = _sha256(b"what was recorded at capture")
     artifact = tmp_path / "result.txt"
     artifact.write_bytes(b"actual bytes on disk")
     _install_local_registry(client, tmp_path)
@@ -178,7 +179,7 @@ def test_resolve_endpoint_reports_drift(client, admin_auth_headers, tmp_path):
         admin_auth_headers,
         project_id=project_id,
         uri=artifact.as_uri(),
-        content_hash=_sha256(b"what was recorded at capture"),
+        content_hash=recorded_hash,
     )
 
     response = client.post(
@@ -188,7 +189,18 @@ def test_resolve_endpoint_reports_drift(client, admin_auth_headers, tmp_path):
     )
 
     assert response.status_code == 200
-    assert response.json()["data"]["status"] == "drifted"
+    body = response.json()["data"]
+    assert body["status"] == "drifted"
+    assert body["uri"] == artifact.as_uri()
+    assert body["expected_hash"] == recorded_hash
+    assert body["observed_hash"] == _sha256(b"actual bytes on disk")
+    assert body["content_type"] == "text/plain"
+    assert body["size_bytes"] == len(b"actual bytes on disk")
+    assert body["content_base64"] is None
+    assert body["returned_bytes"] == 0
+    assert body["truncated"] is False
+    assert body["detail"] == "Recomputed hash does not match content_hash."
+    assert base64.b64encode(b"actual bytes on disk").decode("ascii") not in response.text
 
 
 def test_resolve_endpoint_missing_index_is_404(client, admin_auth_headers, tmp_path):
@@ -383,6 +395,8 @@ def test_resolve_endpoint_unknown_store_is_unresolved(client, admin_auth_headers
     body = response.json()["data"]
     assert body["status"] == "unresolved"
     assert "nonexistent" in (body["detail"] or "")
+    assert body["content_base64"] is None
+    assert body["returned_bytes"] == 0
 
 
 def test_resolve_endpoint_denies_local_paths_without_configured_roots(
@@ -414,3 +428,4 @@ def test_resolve_endpoint_denies_local_paths_without_configured_roots(
     body = response.json()["data"]
     assert body["status"] == "unresolved"
     assert body["content_base64"] is None
+    assert body["returned_bytes"] == 0

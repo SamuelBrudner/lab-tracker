@@ -62,9 +62,10 @@ tri-state, and the agent must be told which:
 
 - **`verified`** — fetched bytes hash to the stored `content_hash`. This is
   exactly the content the graph reasoned about. Safe to use.
-- **`drifted`** — the locator resolved and returned bytes, but the digest does
-  **not** match. The file moved/changed/was overwritten since capture. Surface
-  loudly; never silently substitute drifted content for the captured artifact.
+- **`drifted`** — the locator resolved and bytes were inspected, but the digest
+  does **not** match. The file moved/changed/was overwritten since capture.
+  Surface the diagnostic metadata loudly, but withhold the mismatched bytes;
+  never substitute drifted content for the captured artifact.
 - **`unresolved`** — no adapter for this `source_system`, the locator is
   unreachable on this host, or access was denied. Return the pointer and the
   reason, not content.
@@ -94,7 +95,7 @@ class ResolvedArtifact:
     observed_hash: str | None       # recomputed digest, when bytes were fetched
     content_type: str | None
     size_bytes: int | None
-    content: bytes | None           # bounded; None when unresolved
+    content: bytes | None           # bounded; present only when verified
     truncated: bool                 # True if size exceeded max_bytes / a range was used
     fetched_at: datetime
     detail: str | None              # reason when unresolved/drifted
@@ -266,6 +267,10 @@ and prompt-injection surface, so the resolver is bounded by construction:
   whole artifact is still hashed for integrity and `truncated=True` reports
   that the response omits bytes. Optional `byte_start`/`byte_end` fields request
   a bounded slice and must be supplied together.
+- **Integrity before content.** Only `verified` results include
+  `content_base64`. `drifted` results preserve the observed hash, full size,
+  content type, truncation flag, and mismatch detail while returning
+  `content_base64=null` and `returned_bytes=0`.
 - **Content type is metadata.** The response reports `content_type`, but both
   text and binary payloads use bounded base64 in the current HTTP/MCP contract.
   There is no implemented metadata-only HEAD endpoint or streaming handle.

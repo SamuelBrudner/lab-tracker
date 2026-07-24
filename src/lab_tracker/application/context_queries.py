@@ -489,7 +489,7 @@ class ContextQueries:
         body["artifact_index"] = artifact_index
         body["content_base64"] = (
             base64.b64encode(result.content).decode("ascii")
-            if result.content is not None
+            if result.is_verified and result.content is not None
             else None
         )
         return body
