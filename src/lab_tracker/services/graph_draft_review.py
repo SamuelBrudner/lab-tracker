@@ -24,6 +24,7 @@ from lab_tracker.models import (
     utc_now,
 )
 from lab_tracker.patching import NOT_PROVIDED, PatchValue, is_provided
+from lab_tracker.provider_error_redaction import provider_error_message
 from lab_tracker.services.base import BaseService, ServiceContext
 from lab_tracker.services.graph_draft_generation import GeneratedDraftProposal
 from lab_tracker.services.shared import UserExistenceReader, actor_user_fk, actor_user_id
@@ -364,7 +365,9 @@ class GraphDraftReviewCoordinator(BaseService):
                 extra_images=extra_images,
             )
         except GraphDraftingError as exc:
-            raise ValidationError(f"Could not revise the draft: {exc}") from exc
+            raise ValidationError(
+                f"Could not revise the draft: {provider_error_message(exc)}"
+            ) from exc
 
         revisions: list[dict[str, Any]] = []
         review_attachment_evidence: dict[str, Any] | None = None
@@ -436,7 +439,10 @@ class GraphDraftReviewCoordinator(BaseService):
                     prompt=typed or None,
                 )
             except GraphDraftingError as exc:
-                raise ValidationError(f"Could not transcribe dictated feedback: {exc}") from exc
+                raise ValidationError(
+                    "Could not transcribe dictated feedback: "
+                    f"{provider_error_message(exc)}"
+                ) from exc
             transcript = _revision_transcript_text(response)
             if not transcript:
                 raise ValidationError("Dictated feedback transcription returned no text.")

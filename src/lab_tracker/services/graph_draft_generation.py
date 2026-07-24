@@ -29,6 +29,7 @@ from lab_tracker.models import (
     NoteStatus,
     utc_now,
 )
+from lab_tracker.provider_error_redaction import provider_error_message
 from lab_tracker.services import graph_draft_batch_policy as batch_policy
 from lab_tracker.services.base import BaseService, ServiceContext
 from lab_tracker.services.graph_draft_validation import string_list
@@ -242,7 +243,9 @@ class GraphDraftGenerationCoordinator(BaseService):
             change_set.error_metadata = {}
         except GraphDraftingError as exc:
             change_set.status = GraphChangeSetStatus.FAILED
-            change_set.error_metadata = {"message": str(exc)}
+            change_set.error_metadata = {
+                "message": provider_error_message(exc),
+            }
         finally:
             change_set.updated_at = utc_now()
             self.records.save_graph_change_set(change_set)
@@ -304,7 +307,9 @@ class GraphDraftGenerationCoordinator(BaseService):
             change_set.error_metadata = {}
         except GraphDraftingError as exc:
             change_set.status = GraphChangeSetStatus.FAILED
-            change_set.error_metadata = {"message": str(exc)}
+            change_set.error_metadata = {
+                "message": provider_error_message(exc),
+            }
         finally:
             change_set.updated_at = utc_now()
             self.records.save_graph_change_set(change_set)
@@ -409,7 +414,7 @@ class GraphDraftGenerationCoordinator(BaseService):
                     change_set.status = GraphChangeSetStatus.FAILED
                     change_set.error_metadata = {
                         "category": "model_error",
-                        "message": str(exc),
+                        "message": provider_error_message(exc),
                         "attempts": attempt,
                         "input_snapshot": _batch_input_snapshot(context_packet),
                     }
@@ -419,7 +424,11 @@ class GraphDraftGenerationCoordinator(BaseService):
                 if retry_backoff_seconds > 0:
                     time.sleep(retry_backoff_seconds * attempt)
         else:
-            message = str(last_error) if last_error is not None else "Model did not return a patch."
+            message = (
+                provider_error_message(last_error)
+                if last_error is not None
+                else "Model did not return a patch."
+            )
             change_set.status = GraphChangeSetStatus.FAILED
             change_set.error_metadata = {
                 "category": "model_error",
@@ -438,7 +447,7 @@ class GraphDraftGenerationCoordinator(BaseService):
             change_set.status = GraphChangeSetStatus.FAILED
             change_set.error_metadata = {
                 "category": "validation_error",
-                "message": str(exc),
+                "message": provider_error_message(exc),
                 "attempts": attempts if last_error is not None else 1,
                 "input_snapshot": _batch_input_snapshot(context_packet),
             }
