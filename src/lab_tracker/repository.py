@@ -87,6 +87,13 @@ class EvidenceBundleRepository(Protocol):
         """Return the record for one principal-scoped idempotency key."""
 
 
+class GraphChangeSetRepository(EntityRepository[GraphChangeSet], Protocol):
+    """Persistence operations specific to graph-draft change sets."""
+
+    def project_id_for(self, change_set_id: UUID) -> UUID | None:
+        """Resolve a draft's project without materializing its operations."""
+
+
 class LabTrackerRepository(Protocol):
     """Repository surface expected by the Lab Tracker domain layer."""
 
@@ -170,7 +177,7 @@ class LabTrackerRepository(Protocol):
     def visualizations(self) -> EntityRepository[Visualization]: ...
 
     @property
-    def graph_change_sets(self) -> EntityRepository[GraphChangeSet]: ...
+    def graph_change_sets(self) -> GraphChangeSetRepository: ...
 
     @property
     def graph_draft_batch_settings(self) -> EntityRepository[GraphDraftBatchSettings]: ...

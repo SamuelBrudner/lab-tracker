@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import hashlib
 from pathlib import Path
+from uuid import uuid4
 
 from starlette.testclient import TestClient
 
@@ -88,6 +89,16 @@ def _create_project_in_group(
     )
     assert response.status_code == 201, response.text
     return response.json()["data"]["project_id"]
+
+
+def _data_store_not_found_body() -> dict[str, object]:
+    return {
+        "error": {
+            "code": "not_found",
+            "message": "Data store does not exist.",
+            "issues": None,
+        }
+    }
 
 
 def test_create_and_get_data_store(client, admin_auth_headers):
@@ -310,7 +321,8 @@ def test_data_store_health_denied_for_unauthorized_project(
     response = client.get(
         f"/data-stores/{store_id}/health", headers=scoped_project_member.member_headers
     )
-    assert response.status_code == 401
+    assert response.status_code == 404
+    assert response.json() == _data_store_not_found_body()
 
 
 def test_get_data_store_denied_for_unauthorized_project(
@@ -325,13 +337,12 @@ def test_get_data_store_denied_for_unauthorized_project(
     response = client.get(
         f"/data-stores/{store_id}", headers=scoped_project_member.member_headers
     )
-    assert response.status_code == 401
+    assert response.status_code == 404
+    assert response.json() == _data_store_not_found_body()
 
 
 def _register_group_member(client, admin_auth_headers, group_id: str) -> dict[str, str]:
     """Register a fresh viewer-role user and add them to the group."""
-
-    from uuid import uuid4
 
     from lab_tracker.auth import Role
 
@@ -404,6 +415,26 @@ def test_group_scoped_store_still_denied_for_non_member(
         f"/data-stores/{store_id}/health",
         headers=scoped_project_member.member_headers,
     )
+    missing_store_id = uuid4()
+    missing = client.get(
+        f"/data-stores/{missing_store_id}",
+        headers=scoped_project_member.member_headers,
+    )
+    missing_health = client.get(
+        f"/data-stores/{missing_store_id}/health",
+        headers=scoped_project_member.member_headers,
+    )
 
-    assert response.status_code == 401
-    assert health.status_code == 401
+    assert {
+        response.status_code,
+        health.status_code,
+        missing.status_code,
+        missing_health.status_code,
+    } == {404}
+    assert (
+        response.json()
+        == health.json()
+        == missing.json()
+        == missing_health.json()
+        == _data_store_not_found_body()
+    )

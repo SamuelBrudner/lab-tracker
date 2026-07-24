@@ -48,6 +48,7 @@ DELEGATE_OWNERS = {
     "create_analysis_graph_draft_from_note": "generation",
     "create_batch_graph_draft": "generation",
     "get_graph_change_set": "records",
+    "get_graph_change_set_for_read": "records",
     "list_graph_change_sets": "records",
     "query_graph_change_sets": "records",
     "list_batch_graph_drafts": "records",

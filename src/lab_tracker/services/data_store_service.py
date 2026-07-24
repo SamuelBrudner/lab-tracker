@@ -6,7 +6,12 @@ from collections.abc import Iterable
 from uuid import UUID, uuid4
 
 from lab_tracker.auth import AuthContext
-from lab_tracker.errors import ConflictError, ValidationError
+from lab_tracker.errors import (
+    ConflictError,
+    NotFoundError,
+    OpaqueTargetNotFoundError,
+    ValidationError,
+)
 from lab_tracker.models import (
     DataStore,
     StoreCapability,
@@ -96,6 +101,27 @@ class DataStoreService(BaseService):
             label="Data store",
             loader=lambda repository: repository.data_stores.get(store_id),
         )
+
+    def get_data_store_for_read(
+        self,
+        store_id: UUID,
+        *,
+        actor: AuthContext | None = None,
+    ) -> DataStore:
+        try:
+            store = self.get_data_store(store_id)
+        except NotFoundError as exc:
+            raise OpaqueTargetNotFoundError("Data store does not exist.") from exc
+
+        if store.project_id is not None:
+            can_read = self.authorization.can_read(store.project_id, actor=actor)
+        elif store.group_id is not None:
+            can_read = self.authorization.can_group_read(store.group_id, actor=actor)
+        else:
+            can_read = False
+        if not can_read:
+            raise OpaqueTargetNotFoundError("Data store does not exist.")
+        return store
 
     def list_data_stores(
         self,
