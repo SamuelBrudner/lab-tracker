@@ -9,6 +9,11 @@ from uuid import uuid4
 
 import pytest
 from fastapi.testclient import TestClient
+from read_opacity_inventory import (
+    READ_OPACITY_VARIANTS_BY_ID,
+    WORKFLOW_REGISTRY_READ_OPACITY_VARIANTS,
+    WORKFLOW_REGISTRY_SUITE,
+)
 
 from lab_tracker.api import LabTrackerAPI
 from lab_tracker.artifact_resolution import StoreHealth, StoreHealthStatus
@@ -263,29 +268,54 @@ def test_exact_workflow_registry_read_variants_are_opaque(
     records = workflow_registry_records
     cases = (
         (
+            "graph-draft-detail",
             f"/graph-drafts/{records.graph_change_set_id}",
             f"/graph-drafts/{records.missing_graph_change_set_id}",
             "Graph draft",
         ),
         (
+            "batch-detail",
             f"/batches/{records.graph_change_set_id}",
             f"/batches/{records.missing_graph_change_set_id}",
             "Graph draft",
         ),
         (
+            "data-store-detail",
             f"/data-stores/{records.store_id}",
             f"/data-stores/{records.missing_store_id}",
             "Data store",
         ),
         (
+            "data-store-health",
             f"/data-stores/{records.store_id}/health",
             f"/data-stores/{records.missing_store_id}/health",
             "Data store",
         ),
     )
     assert len(cases) == 4
+    inventory_coverage_ids = {
+        variant.coverage_id
+        for variant in WORKFLOW_REGISTRY_READ_OPACITY_VARIANTS
+    }
+    assert {
+        f"{WORKFLOW_REGISTRY_SUITE}.{case_name}"
+        for case_name, _existing_path, _missing_path, _label in cases
+    } == inventory_coverage_ids
 
-    for existing_path, missing_path, label in cases:
+    for case_name, existing_path, missing_path, label in cases:
+        coverage_id = f"{WORKFLOW_REGISTRY_SUITE}.{case_name}"
+        assert coverage_id in inventory_coverage_ids
+        inventory_variant = READ_OPACITY_VARIANTS_BY_ID[coverage_id]
+        assert inventory_variant.matches_request(
+            method="GET",
+            request_target=existing_path,
+            variant="default",
+        )
+        assert inventory_variant.matches_request(
+            method="GET",
+            request_target=missing_path,
+            variant="default",
+        )
         hidden = client.get(
             existing_path,
             headers=scoped_project_member.member_headers,

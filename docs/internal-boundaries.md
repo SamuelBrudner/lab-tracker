@@ -148,6 +148,34 @@ The lifecycle is:
 
 Service logic should not depend on hidden globals or `ContextVar` state for request orchestration.
 
+## Opaque Targeted-Read Ordering
+
+Project- and group-scoped targeted reads follow one boundary order:
+
+1. Authenticate the principal and apply coarse service-token capabilities,
+   preserving `401` for missing or invalid credentials and `403` for a valid
+   token outside its capability.
+2. Validate the target locator, resolve only the scope needed for authorization,
+   and map both an absent target and a denied target to the same canonical
+   `404` response.
+3. Complete that authorization before selecting children, indices, or hashes;
+   hydrating the full record; attaching attribution; touching storage,
+   resolvers, or health probes; or recording usage.
+4. Only an authorized read may materialize and render the requested
+   representation or perform those downstream actions.
+
+Collection reads instead filter to accessible scopes, and mutations retain
+explicit permission errors. The frozen targeted-read inventory and behavioral
+suites are in [Read Opacity Inventory](read-opacity-inventory.md).
+
+Known scope-adjacent exceptions:
+
+- `GET /groups/{group_id}` is the equivalent group-scoped boundary.
+  `lab-tracker-n5kp.33` is closed, and the route now conforms.
+- `GET /projects/{project_id}/graph-draft-batch-settings` can still synthesize
+  defaults for a missing project. `lab-tracker-n5kp.32` remains open, and this
+  operation is outside the 37-variant inventory until that boundary is fixed.
+
 ## Application Handler Boundary
 
 The request-scoped handlers live under
