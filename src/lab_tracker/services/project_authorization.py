@@ -84,6 +84,18 @@ class ProjectAuthorizationPolicy(BaseService):
         if role not in GROUP_READ_ROLES:
             raise AuthError("Group access required.")
 
+    def can_group_read(
+        self,
+        group_id: UUID,
+        *,
+        actor: AuthContext | None = None,
+    ) -> bool:
+        """Return whether an actor can read a group without raising on denial."""
+
+        if actor is None:
+            return False
+        return self.group_membership_role(group_id, actor) in GROUP_READ_ROLES
+
     def require_group_owner(
         self,
         group_id: UUID,
@@ -178,6 +190,18 @@ class ProjectAuthorizationPolicy(BaseService):
         role = self.membership_role(project_id, actor)
         if role not in PROJECT_READ_ROLES:
             raise AuthError("Project access required.")
+
+    def can_read(
+        self,
+        project_id: UUID,
+        *,
+        actor: AuthContext | None = None,
+    ) -> bool:
+        """Return whether an actor can read a project without raising on denial."""
+
+        if actor is None:
+            return False
+        return self.membership_role(project_id, actor) in PROJECT_READ_ROLES
 
     def require_contributor(
         self,

@@ -1104,6 +1104,55 @@ def test_client_retries_once_after_expired_token() -> None:
     ]
 
 
+def test_client_does_not_remint_or_retry_after_opaque_not_found() -> None:
+    calls: list[tuple[str, str, str | None]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append((request.method, request.url.path, request.headers.get("authorization")))
+        if request.url.path == "/auth/login":
+            return _json_response(200, {"data": {"access_token": "token-1"}})
+        if request.url.path == "/projects/project-1/publication-readiness":
+            return _json_response(
+                404,
+                {
+                    "error": {
+                        "code": "not_found",
+                        "message": "Project does not exist.",
+                        "issues": None,
+                    }
+                },
+            )
+        return _json_response(500, {"error": {"message": "unexpected request"}})
+
+    client = mcp_server.LabTrackerAPIClient(
+        mcp_server.MCPSettings(
+            base_url="http://testserver",
+            username="mcp-user",
+            password="mcp-pass",
+        ),
+        transport=httpx.MockTransport(handler),
+    )
+
+    try:
+        with pytest.raises(mcp_server.LabTrackerAPIError) as excinfo:
+            client.publication_readiness("project-1")
+    finally:
+        client.close()
+
+    assert not isinstance(excinfo.value, mcp_server.LabTrackerAPIAuthError)
+    assert excinfo.value.status_code == 404
+    assert excinfo.value.code == "not_found"
+    assert str(excinfo.value) == "Project does not exist."
+    assert calls == [
+        ("POST", "/auth/login", None),
+        (
+            "GET",
+            "/projects/project-1/publication-readiness",
+            "Bearer token-1",
+        ),
+    ]
+
+
 def test_create_project_uses_api_validation_path() -> None:
     requests: list[httpx.Request] = []
 

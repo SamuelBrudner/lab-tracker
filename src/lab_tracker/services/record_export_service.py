@@ -53,16 +53,29 @@ class GoalReadAccess(Protocol):
     ) -> set[UUID]: ...
 
 
+class QuestionReadAccess(Protocol):
+    """Opaque question reads needed by Ara artifact exports."""
+
+    def get_question_for_read(
+        self,
+        question_id: UUID,
+        *,
+        actor: AuthContext | None,
+    ) -> Question: ...
+
+
 class RecordExportService(BaseService):
     def __init__(
         self,
         context: ServiceContext,
         *,
         goals: GoalReadAccess,
+        questions: QuestionReadAccess,
         authorization: ProjectAuthorizationPolicy,
     ) -> None:
         super().__init__(context)
         self.goals = goals
+        self.questions = questions
         self.authorization = authorization
 
     def export_user_records(
@@ -145,8 +158,7 @@ class RecordExportService(BaseService):
         actor: AuthContext | None = None,
     ) -> dict[str, object]:
         self._validate_layer_name(layer_name)
-        root = self._get_question(root_id)
-        self.authorization.require_read(root.project_id, actor=actor)
+        root = self.questions.get_question_for_read(root_id, actor=actor)
         records = self._collect_question_subtree_records(root)
         supervision_edges, _ = self.repository.query_supervision_edges(limit=None, offset=0)
         return build_ara_artifact_document(

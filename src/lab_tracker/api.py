@@ -129,7 +129,6 @@ class LabTrackerAPI(
         self.publication_readiness: PublicationReadinessService = PublicationReadinessService(
             context,
             projects=self.projects,
-            authorization=self.project_authorization,
         )
         self.entity_versions: EntityVersionService = EntityVersionService(context)
         self.questions: QuestionService = QuestionService(
@@ -199,6 +198,7 @@ class LabTrackerAPI(
         self.record_exports: RecordExportService = RecordExportService(
             context,
             goals=self.goals,
+            questions=self.questions,
             authorization=self.project_authorization,
         )
         self.data_stores: DataStoreService = DataStoreService(

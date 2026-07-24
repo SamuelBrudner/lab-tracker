@@ -67,6 +67,14 @@ class ProjectsApiMixin:
     def get_project(self, project_id: UUID) -> Project:
         return self.projects.get_project(project_id)
 
+    def get_project_for_read(
+        self,
+        project_id: UUID,
+        *,
+        actor: AuthContext | None = None,
+    ) -> Project:
+        return self.projects.get_project_for_read(project_id, actor=actor)
+
     def list_projects(self, *args: Any, **kwargs: Any) -> Any:
         return self.projects.list_projects(*args, **kwargs)
 

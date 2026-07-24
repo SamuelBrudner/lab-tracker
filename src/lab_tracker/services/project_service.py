@@ -206,6 +206,17 @@ class ProjectService(BaseService):
             loader=lambda repository: repository.projects.get(project_id),
         )
 
+    def get_project_for_read(
+        self,
+        project_id: UUID,
+        *,
+        actor: AuthContext | None = None,
+    ) -> Project:
+        project = self.get_project(project_id)
+        if not self.authorization.can_read(project.project_id, actor=actor):
+            raise NotFoundError("Project does not exist.")
+        return project
+
     def list_projects(self) -> list[Project]:
         return self.list_from_repository(
             loader=lambda repository: repository.projects.list(),

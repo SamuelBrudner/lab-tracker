@@ -114,7 +114,15 @@ def test_project_membership_scopes_reads_and_contributor_notes(
     ]
 
     denied_project = client.get(f"/projects/{other_project}", headers=undergrad_headers)
-    assert denied_project.status_code == 401
+    missing_project = client.get(f"/projects/{uuid4()}", headers=undergrad_headers)
+    assert denied_project.status_code == missing_project.status_code == 404
+    assert denied_project.json() == missing_project.json() == {
+        "error": {
+            "code": "not_found",
+            "message": "Project does not exist.",
+            "issues": None,
+        }
+    }
 
     create_note = client.post(
         "/notes",
@@ -272,7 +280,9 @@ def test_project_member_delete_revokes_project_access(
     assert delete_member.status_code == 200
     assert delete_member.json()["data"]["user_id"] == member_user_id
     hidden_after = client.get(f"/projects/{project_id}", headers=member_headers)
-    assert hidden_after.status_code == 401
+    missing_project = client.get(f"/projects/{uuid4()}", headers=member_headers)
+    assert hidden_after.status_code == missing_project.status_code == 404
+    assert hidden_after.json() == missing_project.json()
     list_members = client.get(f"/projects/{project_id}/members", headers=admin_auth_headers)
     assert member_user_id not in {item["user_id"] for item in list_members.json()["data"]}
 

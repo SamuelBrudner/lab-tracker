@@ -670,3 +670,73 @@ def test_question_subtree_ara_artifact_scopes_to_descendants(
     assert layer["crossLayerBindings"][0]["claim"] == {
         "@id": f"http://testserver/claims/{records['claim_id']}"
     }
+
+
+def test_question_subtree_ara_authorizes_before_collecting_records(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+    monkeypatch,
+):
+    records = _create_ara_bundle(client, admin_auth_headers)
+    viewer_headers, _ = _register_user(client, role=Role.VIEWER)
+    missing_question_id = uuid4()
+    collection_calls: list[object] = []
+
+    def fail_if_collected(service, root):  # noqa: ANN001
+        collection_calls.append((service, root))
+        raise AssertionError("question records must not be collected before authorization")
+
+    monkeypatch.setattr(
+        RecordExportService,
+        "_collect_question_subtree_records",
+        fail_if_collected,
+    )
+
+    existing = client.get(
+        f"/questions/{records['root_question_id']}/ara-artifact",
+        headers=viewer_headers,
+    )
+    missing = client.get(
+        f"/questions/{missing_question_id}/ara-artifact",
+        headers=viewer_headers,
+    )
+
+    assert existing.status_code == missing.status_code == 404
+    assert existing.json() == missing.json() == {
+        "error": {
+            "code": "not_found",
+            "message": "Question does not exist.",
+            "issues": None,
+        }
+    }
+    assert collection_calls == []
+
+
+def test_question_subtree_ara_preserves_descendant_not_found_error(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+    monkeypatch,
+):
+    records = _create_ara_bundle(client, admin_auth_headers)
+
+    def descendant_deleted(service, root):  # noqa: ANN001
+        del service, root
+        raise NotFoundError("Dataset does not exist.")
+
+    monkeypatch.setattr(
+        RecordExportService,
+        "_collect_question_subtree_records",
+        descendant_deleted,
+    )
+
+    response = client.get(
+        f"/questions/{records['root_question_id']}/ara-artifact",
+        headers=admin_auth_headers,
+    )
+
+    assert response.status_code == 404
+    assert response.json()["error"] == {
+        "code": "not_found",
+        "message": "Dataset does not exist.",
+        "issues": None,
+    }

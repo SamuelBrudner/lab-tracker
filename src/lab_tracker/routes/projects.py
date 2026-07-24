@@ -87,8 +87,10 @@ def build_projects_router(api: LabTrackerAPI) -> APIRouter:
 
     @router.get("/projects/{project_id}", response_model=Envelope[Project])
     def get_project(project_id: UUID, request: Request):
-        project = api_from_request(request, api).get_project(project_id)
-        ensure_project_read(request, project.project_id)
+        project = api_from_request(request, api).get_project_for_read(
+            project_id,
+            actor=actor_from_request(request),
+        )
         record_usage_view(
             request,
             resource_type=UsageEventResourceType.PROJECT,

@@ -532,6 +532,17 @@ class NoteService(BaseService):
             loader=lambda repository: repository.notes.get(note_id),
         )
 
+    def get_note_for_read(
+        self,
+        note_id: UUID,
+        *,
+        actor: AuthContext | None = None,
+    ) -> Note:
+        note = self.get_note(note_id)
+        if not self.authorization.can_read(note.project_id, actor=actor):
+            raise NotFoundError("Note does not exist.")
+        return note
+
     def list_notes(
         self,
         *,
