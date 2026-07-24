@@ -124,6 +124,33 @@ def test_auth_doctor_handles_vscode_servers_schema_with_leftover_keys(tmp_path: 
     assert payload["warning_count"] == 1
 
 
+def test_auth_doctor_keeps_scanning_legacy_visual_studio_config(
+    tmp_path: Path,
+) -> None:
+    home = tmp_path / "home"
+    repo = tmp_path / "repo"
+    _write_json(
+        repo / "mcp.visualstudio.json",
+        {
+            "servers": {
+                "lab-tracker": {
+                    "command": "lt-mcp",
+                    "env": {"LAB_TRACKER_MCP_API_KEY": "lpat_legacy"},
+                }
+            }
+        },
+    )
+
+    payload = auth_helpers.auth_doctor(repo, home=home)
+
+    reg = next(
+        registration
+        for registration in payload["registrations"]
+        if registration["surface"] == "repo:mcp.visualstudio.json"
+    )
+    assert reg["auth_mode"] == "api_key"
+
+
 def test_auth_doctor_is_fail_soft_on_malformed_config(tmp_path: Path) -> None:
     home = tmp_path / "home"
     repo = tmp_path / "repo"

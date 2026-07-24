@@ -71,7 +71,7 @@ first writes a migration-safety snapshot to `LAB_TRACKER_BACKUP_PATH`
 
 ### Double-click launchers
 
-Double-click launchers are available in `launchers/` for macOS and Windows:
+Double-click launchers are available in `deploy/launchers/` for macOS and Windows:
 
 - macOS: `Start Lab Tracker.command`
 - Windows: `Start Lab Tracker.bat`

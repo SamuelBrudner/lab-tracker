@@ -20,7 +20,7 @@ COPY src /app/src
 RUN pip install --no-cache-dir uv \
     && uv sync --frozen --no-dev --no-editable --compile-bytecode
 
-COPY docker-entrypoint.sh /app/docker-entrypoint.sh
+COPY deploy/docker-entrypoint.sh /app/docker-entrypoint.sh
 RUN chmod +x /app/docker-entrypoint.sh \
     && mkdir -p /app/data /var/data \
     && chown -R labtracker:labtracker /app /var/data

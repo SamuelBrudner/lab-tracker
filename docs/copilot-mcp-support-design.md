@@ -43,9 +43,9 @@ product (OpenAPI/declarative-agent integration) and is an explicit non-goal.
   one 401 retry (`mcp_api_client.py`). The MCP client sends
   `X-LabTracker-Surface: mcp`.
 - Committed client configs now include `.mcp.json` in **Claude/Codex shape**
-  (top-level `mcpServers`) plus Copilot-shaped examples `.vscode/mcp.json` and
-  `mcp.visualstudio.json` (top-level `servers`). GitHub Copilot IDEs read the
-  `servers` schema and will not read `.mcp.json`.
+  (top-level `mcpServers`) plus the Copilot-shaped `.vscode/mcp.json`
+  (top-level `servers`) shared by VS Code and Visual Studio. GitHub Copilot IDEs
+  read the `servers` schema and will not read `.mcp.json`.
 - Auth middleware (`app_parts/middleware.py`) branches on token prefix:
   `ldev_` → device principal; `lpat_` → service principal with capped role and
   `read_only`; otherwise JWT → user. When auth is disabled (the default for
@@ -124,12 +124,12 @@ launch:
 }
 ```
 
-Also: a Visual Studio-shaped repo-root config (same `servers` schema; flag that
-the existing `.mcp.json` uses `mcpServers` and VS will not read it — keep them as
-separate documented files); reconcile the committed `.mcp.json` with
-`cli.py::_mcp_json()` (they disagree today); a short `instructions=` string on
-`FastMCP(...)` carrying the two load-bearing rules (decision-context-first;
-"only a person commits") since Copilot has no skills system; and a new
+Also: use `.vscode/mcp.json` as the shared VS Code and Visual Studio config
+(`servers` schema), while documenting that `.mcp.json` serves Claude/Codex
+clients that expect `mcpServers`; keep the committed `.mcp.json` aligned with
+`cli.py::_mcp_json()`; add a short `instructions=` string on `FastMCP(...)`
+carrying the two load-bearing rules (decision-context-first; "only a person
+commits") since Copilot has no skills system; and add a
 `docs/lab-tracker-copilot.md` user doc + a README "Capture and integrate"
 pointer.
 
@@ -293,10 +293,11 @@ not client config.
 
 ## Phased plan
 
-**P0a — Local Copilot IDE onboarding.** `.vscode/mcp.json` + VS config, portable
-launch, `instructions=` string, `docs/lab-tracker-copilot.md` + README pointer.
-No migration. Makes auth-disabled local + username/password stdio work in Copilot
-IDEs immediately. *Lowest risk; do first.*
+**P0a — Local Copilot IDE onboarding.** Shared `.vscode/mcp.json` for VS Code
+and Visual Studio, portable launch, `instructions=` string,
+`docs/lab-tracker-copilot.md` + README pointer. No migration. Makes
+auth-disabled local + username/password stdio work in Copilot IDEs immediately.
+*Lowest risk; do first.*
 
 **P0b — Tool annotations.** `readOnlyHint`/`destructiveHint`/`title` table +
 reclassify `list_question_refactors`. No migration. Reads auto-run; writes prompt.
