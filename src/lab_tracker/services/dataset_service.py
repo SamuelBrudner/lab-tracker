@@ -226,8 +226,49 @@ class DatasetService(BaseService):
         origin_model: str | None = None,
         origin_prompt_version: str | None = None,
     ) -> Dataset:
-        dataset = self.get_dataset(dataset_id)
-        self.authorization.require_contributor(dataset.project_id, actor=actor)
+        with self.application_transaction():
+            located_dataset = self.get_dataset(dataset_id)
+            project_id = located_dataset.project_id
+            self.authorization.require_contributor(project_id, actor=actor)
+            self.repository.lock_dataset_updates(project_id, (dataset_id,))
+
+            # Dataset persistence writes a complete snapshot, including the
+            # provenance manifest and hash. Never mutate locator state after a
+            # lock wait: PostgreSQL expires the identity map so this read and
+            # every subsequent validation observe the winning file/status
+            # transaction.
+            dataset = self.get_dataset(dataset_id)
+            return self._update_dataset_in_transaction(
+                dataset,
+                status=status,
+                terminal_reason=terminal_reason,
+                question_links=question_links,
+                commit_manifest=commit_manifest,
+                commit_hash=commit_hash,
+                actor=actor,
+                origin=origin,
+                change_set_id=change_set_id,
+                origin_provider=origin_provider,
+                origin_model=origin_model,
+                origin_prompt_version=origin_prompt_version,
+            )
+
+    def _update_dataset_in_transaction(
+        self,
+        dataset: Dataset,
+        *,
+        status: PatchValue[DatasetStatus | None],
+        terminal_reason: PatchValue[str | None],
+        question_links: PatchValue[Iterable[QuestionLink] | None],
+        commit_manifest: PatchValue[DatasetCommitManifestInput | DatasetCommitManifest | None],
+        commit_hash: PatchValue[str | None],
+        actor: AuthContext | None,
+        origin: EntityOrigin | None,
+        change_set_id: UUID | None,
+        origin_provider: str | None,
+        origin_model: str | None,
+        origin_prompt_version: str | None,
+    ) -> Dataset:
         before = dataset.model_copy(deep=True)
         current_status = dataset.status
         if is_provided(status):
@@ -252,9 +293,7 @@ class DatasetService(BaseService):
             raise ValidationError("commit_hash must not be null.")
         was_committed = current_status == DatasetStatus.COMMITTED
         if was_committed and (
-            is_provided(commit_hash)
-            or is_provided(question_links)
-            or is_provided(commit_manifest)
+            is_provided(commit_hash) or is_provided(question_links) or is_provided(commit_manifest)
         ):
             raise ValidationError("Committed datasets are immutable.")
         if is_provided(question_links):
@@ -320,9 +359,7 @@ class DatasetService(BaseService):
                 base_manifest,
                 dataset.question_links,
             )
-            self.validate_source_session(
-                resolved_manifest.source_session_id, dataset.project_id
-            )
+            self.validate_source_session(resolved_manifest.source_session_id, dataset.project_id)
             if (
                 commit_requested
                 and not resolved_manifest.files
@@ -398,9 +435,7 @@ class DatasetService(BaseService):
         if analyses:
             raise ValidationError("Dataset cannot be deleted while analyses reference it.")
 
-    def validate_source_session(
-        self, source_session_id: UUID | None, project_id: UUID
-    ) -> None:
+    def validate_source_session(self, source_session_id: UUID | None, project_id: UUID) -> None:
         """Validate an optional dataset source session without writing."""
         if source_session_id is None:
             return

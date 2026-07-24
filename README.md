@@ -1,196 +1,198 @@
 # Lab Tracker
 
-**Lab Tracker builds a living model of your research projects — your questions, data, claims, and figures, all connected — while asking for as little input effort as possible.** You capture in seconds: type a note, snap a photo, record a voice memo, save a figure from your analysis code. AI proposes where each capture fits in the model, and you settle it in one daily review. The clerical work happens for you; what's left is the part worth having — a short, unhurried sitting with your own day's science, deciding what each result actually means.
+**Lab Tracker preserves the reasoning around research data: the question that
+motivated an experiment, the evidence behind a claim, and the analysis that
+produced a figure.** Capture evidence while you work, let AI propose where it
+belongs, and decide what enters the durable record yourself.
 
-Why it matters: a file named `2025_12_10_Rig2_session001.nwb` tells you *when*, *where*, and *what* — but not *why* you collected it, what you expected, or what you actually saw at the bench. That reasoning lives on paper towels, on whiteboards, and in people's heads — and it walks out the door when they do. Lab Tracker gives it a durable place to live, next to the data.
+A file named `2025_12_10_Rig2_session001.nwb` says when and where it was
+collected. It rarely says *why* it exists, what you expected, or what you
+learned. That reasoning lives on whiteboards, on paper towels, and in people's
+heads—and walks out the door when they do. Lab Tracker gives it a queryable home
+alongside projects, questions, sessions, datasets, analyses, claims, and
+visualizations.
 
-**[Open the read-only demo →](https://samuelbrudner.github.io/lab-tracker/app/)** — seeded fly-olfaction data, no install, no login. Click around for 60 seconds.
+[**Read-only demo**](https://samuelbrudner.github.io/lab-tracker/app/) ·
+[**Deploy to Render**](https://render.com/deploy?repo=https://github.com/SamuelBrudner/lab-tracker) ·
+[**Documentation**](#documentation) · [**Run locally**](#run-locally)
 
-## Write your next progress report from your captured year
+> **Status:** Lab Tracker is at `0.1.0` and under active development. It is
+> intended for evaluation and early research use; interfaces and deployment
+> defaults may still change. The
+> [supported v1 surface](docs/retained-v1-surface.md) is authoritative.
 
-This workflow should not only pay off for whoever inherits your data years from now. It should pay off for *you* on the next progress report, renewal, lab meeting, or committee update you already owe.
+## From capture to durable context
 
-Because every analysis, claim, and figure is committed against the question it answers, you can pull a bounded slice of your own record — *"the advances and plots for project X since last July"* — and hand it to an assistant to draft a progress report or grant renewal. The retrieval is windowed and scoped to what you can read; the assistant turns it into prose. You still write the report — but you start from your year, assembled, instead of a blank page.
+The core loop is deliberately small:
 
-The same scoped retrieval pays off on a weekly cadence, not just at report time:
+1. **Capture.** Send a text note, photo, voice note, or photo-and-voice bundle
+   from the browser or a paired phone. In Python, `lab_tracker_client.savefig`,
+   `capture_figures()`, and `run_context()` stage figures with content hashes
+   and git context; MATLAB has `labtracker.savefig`. The `lt watch`, `lt repo`,
+   and `lt hpc` adapters keep durable local outboxes for folder, repository,
+   and Slurm evidence, then sync compact records when the API is reachable.
+   Large source artifacts can remain in their original data store.
+2. **AI proposes.** On demand or on a configured schedule, a drafting model
+   reads staged captures and relevant graph context, then proposes typed graph
+   changes with rationale, confidence, and source references. Drafting creates
+   a reviewable change set; it does not create canonical graph records.
+3. **A person decides.** The review assignee can edit, accept, or reject
+   individual operations, or ask the model to revise the draft. A project owner
+   commits the accepted operations. **No AI-proposed graph change is committed
+   until a person accepts it**, and non-interactive service or automation
+   principals cannot accept, bulk-accept, or commit. Acceptance provenance
+   distinguishes individually selected operations from bulk acceptance.
+4. **Retrieve and export.** Search the record, inspect the project graph, ask
+   an MCP-capable assistant for bounded decision context, or export PROV-O /
+   JSON-LD provenance and plaintext sidecars that can travel with the data.
 
-- **Before a trainee meeting, a PI can request a briefing.** Ahead of the weekly one-on-one, pull what a trainee committed *since last week's meeting* — the sessions they ran, the analyses and figures they produced, the claims they advanced — across every project the PI oversees. (Cross-project scope is automatic: a PI's view already spans the projects under their oversight, governed by the same access rules as everything else.) The assistant turns it into a two-minute briefing so the meeting starts from *"here's what moved"* instead of *"so, what have you been up to?"*
-- **Before lab meeting, a trainee pulls their own thread.** Presenting again? Ask for everything *you've* done since you last presented, and walk in with the arc already assembled.
+Direct human work is intentionally different from AI output. A person with
+project contributor access can create and commit datasets, analyses, claims,
+and visualizations without a mandatory second-person approval step. The human
+gate protects the record from machine-authored changes; it is not a universal
+peer-review workflow.
 
-In both cases you supply the date — *"since last Tuesday"* — and trust your own calendar; Lab Tracker doesn't try to own your meeting schedule. It just filters the record by **who** and **when**.
+<p align="center">
+  <img
+    src="docs/screenshots/capture-draft-op-evidence.png"
+    width="680"
+    alt="A proposed claim-evidence update with rationale, source evidence, confidence, and Accept, Defer, and Reject controls"
+  >
+</p>
 
+Captured notes stay staged and visible until they are incorporated or archived
+with a reason. Skipping a review therefore leaves an inspectable coverage gap
+instead of silently making the record look complete.
 
-## All you need to do at the bench is capture
+## Questions are the spine, not a claim that everything is complete
 
-![The capture composer — a quick note, photo, or voice memo, sent for review](docs/screenshots/capture-draft-review.png)
+Lab Tracker starts with the questions a project is trying to answer. Broad
+questions can branch into atomic experimental, method, control, and analysis
+questions, and a question may have more than one parent.
 
-No forms, no filing. Pair your phone once (scan a QR), then the whole loop is: **type a note, snap a photo, or record a voice memo — and tap send.** Running analysis from code instead? In Python, swap `plt.savefig(...)` for `lab_tracker_client.savefig(...)`, or wrap your plotting in `with capture_figures():`; wrap the run in `with run_context():` and the exact git commit rides along. In MATLAB, call `labtracker.savefig(...)`. Either way, every figure you save is captured automatically with its content hash.
+The schema enforces a few important links:
 
-Either way, captures land *staged* — held for review, never written straight into your graph. You pick the project; the system fills in the rest. It even works with no signal: captures queue and upload when you reconnect.
+- A dataset must name one primary question; secondary question links are
+  optional.
+- An analysis must name its source dataset or datasets.
+- A visualization must name its analysis.
+- A claim marked `supported` must cite a dataset or analysis as evidence.
 
-## Then confirm — the daily review
+Other useful links remain optional. Claims do not universally have to answer a
+question, visualizations do not universally have to name a related claim, and
+notes can target the most relevant retained entity. That distinction matters:
+Lab Tracker makes provenance explicit where it exists without pretending that
+every historical record arrived fully connected.
 
-![The daily review — AI-proposed graph changes from the day's captures, each waiting for you to accept, edit, or reject](docs/screenshots/daily-review-queue.png)
+## The payoff comes when you need the story
 
-At the end of each day — on a cadence you set, or on demand — **the daily review** gathers your staged captures and proposes how they fit the graph: *link this photo to that question, draft a note from this voice memo, suggest a new sub-question, flag this one as unclear.* You get **one review queue**. Accept, edit, or reject each proposal; commit the ones you keep. Each proposal arrives with the model's rationale, its confidence, and references back to the evidence it read — down to the region of the photo — and you can push back by typing, dictating, or attaching an image.
+Author and time-window filters let an authorized assistant assemble what a
+person committed within a period: sessions, datasets, analyses, figures,
+claims, and notes. That can become the evidence packet for a progress report,
+grant renewal, trainee meeting, lab meeting, or committee update. You supply
+the window—Lab Tracker does not own the meeting calendar—and the assistant
+starts from your curated record instead of a blank page.
 
-The model only ever proposes. Nothing touches your record until a person says yes — **AI can suggest; only a person commits.**
-
-The review is where the real thinking happens — and it's the enjoyable kind: a quiet, end-of-day pass over your own results, the sort of reflection bench work rarely leaves room for. So it's built to reward attention rather than rush it: accept the proposals you've actually scrutinized one at a time, or accept a batch in bulk when you've skimmed it — and the record remembers which you did, so a bulk rubber-stamp is never mistaken later for a considered call. Some people print the queue and sit with it on paper before replying; that's a feature, not a workaround. Captures you don't get to stay **staged and visible** — never silently dropped — and when you do set one aside, you say *why* (not relevant, superseded, or simply archived-unreviewed). A skipped evening costs you visible coverage, never silent trust.
-
-Want it to run on its own? One command — or one double-click on Windows — sets up the schedule. See [Make the daily review run on its own](docs/scheduled-daily-review.md).
-
-## The daily routine
-
-The whole thing is built to cost you almost nothing while you work, and one focused sitting before you head home — the good kind of effort, thinking about your science rather than filing it.
-
-- **At the bench — just capture.** As you work, you capture without stopping to file anything: snap the prep, record a thirty-second voice note on what looked off, type a one-line observation. Tap send and keep going. Nothing asks you which question it belongs to — that's for the evening review. If a result makes you ask something new, say it into a voice note; it becomes a candidate question.
-- **Running analysis — figures file themselves.** When you plot results, `lab_tracker_client.savefig(...)` (or a `with capture_figures():` block) in Python, and `labtracker.savefig(...)` in MATLAB, register each figure as staged evidence with its content hash; wrap Python runs in `with run_context():` and the exact git commit that produced them rides along. You upload nothing by hand.
-- **Watching folders — outputs leave breadcrumbs.** `lt watch` can scan folders or workflow-written manifests into a local outbox, then sync raw evidence files as staged notes or register acquisition outputs against a session. If your analysis lives on Slurm, `lt hpc` adds scheduler-aware submit, begin, finish, and run-manifest capture on top of the same offline-first idea.
-- **Evening — confirm the day.** Before you head out, you open the daily review and see what the model made of the day's captures: this whiteboard photo attaches to *"Does PV inhibition broaden tuning?"*, this voice note becomes a research note on the session, these two observations suggest a new sub-question. This is real work, not a rubber stamp — read each proposal, fix what it misread, reject the rest, and commit. (Some days that's five minutes; some days it deserves longer. Prefer mornings? It's a setting — point the review at whatever time fits your bench.)
-- **When you write it up — pull the window.** Quarterly report, committee update, grant renewal: ask your assistant for the advances and plots committed since the last one, and start from your assembled year instead of a blank page.
-- **Over months — nothing is orphaned.** Because every dataset named its question and every claim names its evidence, the folder of `.nwb` files you (or whoever inherits them) open next year still says *why*. From any figure you can walk back to the analysis, the dataset, the question, and the note you scribbled the morning you ran it. And with `lt export`, that *why* can ride as a plaintext sidecar right next to the data, so it outlives this app too.
-
-Capture all day, confirm before you leave, and the year assembles itself for when you need to report on it. A person is always the one who says yes.
-
-## Why the graph starts with questions
-
-The capture loop can stay light because the underlying record is opinionated.
-
-![The question hierarchy for a project](docs/screenshots/project-graph-questions.png)
-
-The spine of every project is a graph of **questions** — your broad motivating question at the top, broken down into the atomic ones you can actually answer with data. Questions are first-class: you write them down *first*, before any data exists, and they persist whether the experiment works or not. A question can roll up to more than one parent, so the structure branches and converges as your thinking does.
-
-## Everything else hangs off a question
-
-![The whole project as a graph](docs/screenshots/project-graph-full.png)
-
-Once the questions exist, the rest of your record points back at them:
-
-- **A dataset must name the question it addresses** — you can't commit one without it. Tag secondary questions too, and mark whether the data supported, refuted, or was inconclusive for each.
-- **Notes** pin to the question (or session, or dataset) they describe.
-- **Sessions** point at the question you're collecting data for.
-- **Claims** answer questions — and only count as *supported* once a real dataset or analysis backs them.
-- **Analyses and visualizations** inherit their questions from the data and claims they're built on.
-
-So from any figure you can walk backward — to the claim, the analysis, the dataset, the question, and the note you scribbled the morning you ran it. Nothing is orphaned.
-
-## Who it's for
-
-Wet labs — initially neuroscience — that generate high-bandwidth data on specialized instruments and want the reasoning preserved alongside it. If you've ever inherited a folder of `.nwb` files with no idea why they exist, this is for you.
-
-## Scientists start here
-
-No install. No terminal.
-
-- **Just looking?** [Open the demo](https://samuelbrudner.github.io/lab-tracker/app/) — read-only, seeded data, no login.
-- **Your lab already runs it?** Open the link your admin gave you. Local instances start with sign-in off, so you can jump straight into `/app`. Where sign-in is on, public sign-up creates a viewer account — ask your admin for editor access to write.
-- **Capturing from your phone?** Pair it from the **Devices** page, then use the capture link. See the [phone capture quickstart](docs/phone-capture-quickstart.md).
-
-That's it. The rest of this page is for whoever sets it up.
-
-## Set it up for your lab
-
-This part is for the lab member or IT contact comfortable installing software. Two common paths, no terminal required for the first:
-
-- **Hosted, zero-terminal:** one click provisions a managed instance with a web URL, managed Postgres, and first-admin setup in the browser.
-
-  [![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https://github.com/SamuelBrudner/lab-tracker)
-
-- **Run it locally:** `lab-tracker serve` runs migrations, opens http://127.0.0.1:8000/app, and starts the server. There are double-click launchers for macOS and Windows in [`launchers/`](launchers/).
-
-Manual server runs should apply migrations first with
-`uv run alembic upgrade head` before starting
-`uv run uvicorn lab_tracker.asgi:app --reload`.
-
-Full install, configuration, and deployment instructions live in the docs below — start with the [setup guide](docs/setup.md).
-
-### Set up the AI — your model, your agent, one human gate
-
-The proposal workflow — captures in, AI-drafted graph proposals out, a person
-approving each one — needs two choices, and both are deliberately yours:
-
-- **Drafting model.** OpenAI, Anthropic (Claude), and Google (Gemini) are
-  equally supported: set `LAB_TRACKER_GRAPH_DRAFT_PROVIDER` and that
-  provider's API key. Drafting runs server-side with server-held keys, and
-  the same multimodal loop — photos, voice transcripts, figures — works on
-  any of them. (Voice-note transcription currently needs OpenAI or Google.)
-- **Coding agent.** Any MCP-capable agent connects the same way:
-  `lab_tracker init` scaffolds MCP config for Claude Code, Codex CLI, Gemini
-  CLI, and Cursor, with the same policy text in each agent's instruction file
-  (`CLAUDE.md`, `AGENTS.md`, `GEMINI.md`); GitHub Copilot has its own guide.
-  Use whichever your lab already uses.
-
-However drafting is triggered — the built-in scheduler, cron, or your agent
-platform's own automation — the shape of the work never changes: **agents and
-models propose; a person reviews and commits.**
-
-The explicit walkthrough (provider, scheduling, credentials, MCP, verification)
-is **[Set up AI agents for the proposal workflow](docs/agent-setup.md)**.
-
-**Connecting an analysis repo?** In any repo, with the package installed, a
-coding agent (or you) can bootstrap capture from one read-only command:
-
-```bash
-lt setup status   # read-only inventory + suggestions for what to set up next
-```
-
-It reports what is configured and names the consent-gated commands
-(`lt setup init`, `lt project bind`, `lt watch add`, `lt hooks install`)
-that close each gap; every write takes a `--dry-run` preview.
+The result is only as complete as what the lab captured and committed. Lab
+Tracker does not invent missing experiments or evidence, and assistant-written
+prose remains a draft to verify against the underlying graph.
 
 ## What ships today
 
-What ships today is the minimum that preserves the core research record:
+- **Research context:** projects and lab groups, role-based access, question
+  graphs, notes, sessions, datasets, analyses, claims, visualizations, goals,
+  and exploration records for decisions, dead ends, and pivots.
+- **Evidence capture:** browser and paired-device capture, raw files and
+  editable voice transcripts, Python and MATLAB figure capture, and
+  offline-first watch-folder, repository, and HPC adapters.
+- **Human-gated drafting:** note-scoped and batch graph drafts, scheduled or
+  run-now drafting, accept/edit/reject review, and durable curation provenance.
+- **Retrieval and portability:** substring search, project graph views,
+  permission-bounded assistant context, publication-readiness checks,
+  provenance export, and hash-verified external artifact references.
 
-- Projects, groups, roles, and memberships for bounded access.
-- Question graphs, notes, sessions, datasets, analyses, claims, visualizations, goals, and goal links.
-- Exploration nodes — decisions, dead ends, and pivots — that record the divergent research trajectory alongside the graph.
-- Phone capture, figure capture from Python, generic watch-folder capture, staged notes, human-gated graph draft review, and scheduled daily batches.
-- Curation provenance that distinguishes careful per-operation review from bulk acceptance.
-- Read-only assistant/MCP context, provenance sidecar export, and external artifact references.
+Lab Tracker owns the question-and-provenance spine. It integrates with data
+stores, analysis repositories, experiment trackers, and ELNs rather than trying
+to replace them.
 
-The authoritative list of what's supported is **[docs/retained-v1-surface.md](docs/retained-v1-surface.md)** — if this README disagrees with it, that document wins. The broader vision (OCR, semantic search, PI review gates) lives in [idea.md](idea.md) and is explicitly deferred.
+## Run locally
+
+The shortest source install on macOS or Linux uses
+[uv](https://docs.astral.sh/uv/):
+
+```bash
+git clone https://github.com/SamuelBrudner/lab-tracker.git
+cd lab-tracker
+uv venv
+source .venv/bin/activate
+uv pip install -e .
+lab-tracker serve
+```
+
+`lab-tracker serve` applies migrations, snapshots a file-backed SQLite database
+before migrating it, opens `http://127.0.0.1:8000/app`, and starts the server.
+Windows instructions and development dependencies are in the
+[setup guide](docs/setup.md). Double-click macOS and Windows launchers live in
+[`deploy/launchers/`](deploy/launchers/).
+
+SQLite is the convenient single-client local default. Use Postgres, enable
+authentication, and establish backups for a shared or hosted lab instance; see
+[deployment options](docs/deployment-options.md) and
+[self-hosted operations](docs/self-hosted-operations.md).
+
+For a no-terminal hosted start:
+
+[![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https://github.com/SamuelBrudner/lab-tracker)
+
+## Configure AI only if you want drafting
+
+The graph and direct human workflows work without an AI provider. Graph
+drafting supports three server-side providers:
+
+| Provider | Draft setting | Voice transcription |
+| --- | --- | --- |
+| OpenAI | `openai` | Yes |
+| Anthropic (Claude) | `anthropic` or `claude` | No |
+| Google (Gemini) | `google` or `gemini` | Yes |
+
+Set `LAB_TRACKER_GRAPH_DRAFT_PROVIDER` and the matching server-held API key.
+All three providers can draft from text, images, figures, and an existing voice
+transcript. Voice transcription is a separate, explicit note action—not an
+automatic upload step—and currently requires OpenAI or Google; Anthropic can
+draft from a transcript created another way.
+
+Any MCP-capable coding agent can read the same permission-bounded context.
+`lab_tracker init` scaffolds common client configurations, and the policy stays
+the same across vendors: agents may suggest and stage when asked, but they do
+not operate the human commit gate. Follow the
+[AI and agent setup guide](docs/agent-setup.md) for credentials, scheduling,
+MCP, and verification.
 
 ## Documentation
 
-**Set it up**
-- [Local setup, run, and validate](docs/setup.md) — install, `lab-tracker serve`, frontend build, migrations, tests
-- [Configuration reference](docs/configuration.md) — every `LAB_TRACKER_*` variable, optional AI/transcription config, and auth behavior
-- [Windows fresh-clone setup](docs/windows-fresh-clone.md) — PowerShell install plus Beads/Dolt bootstrap
-
-**Deploy and run it for a lab**
-- [Deployment options](docs/deployment-options.md) — choose between launcher, Docker/Postgres, and managed cloud
-- [One-click cloud deploy (Render)](docs/one-click-cloud-deploy.md) — managed instance with browser invites and first admin
-- [Self-hosted operations](docs/self-hosted-operations.md) — Docker/Postgres backup, restore, upgrade, and first-admin setup
-- [Serve the shared graph on a LAN/VPN](docs/lan-shared-graph.md) — one live Postgres graph for browsers, scripts, and assistants
-
-**Capture and integrate**
-- [Phone capture quickstart](docs/phone-capture-quickstart.md) — pair a phone for LAN capture
-- [Watch folder capture](docs/watch-folder-capture.md) — scan evidence folders, manifest outputs, and acquisition-session outputs into an offline outbox
-- [MATLAB figure capture](docs/lab-tracker-matlab.md) — capture MATLAB figures as staged evidence notes without Python
-- [Evidence source metadata](docs/evidence-source-metadata.md) — import a synced folder as staged evidence notes with `lt import-folder`
-- [HPC analysis capture](docs/hpc-analysis-capture.md) — capture Slurm/HPC run summaries, logs, metrics, and artifact pointers with `lt hpc`
-- [Curation states](docs/curation-states.md) — how the graph records the way each edge was reviewed, and why captures are archived with a reason
-- [Provenance export](docs/provenance-export.md) — write `lt export` sidecars that survive without a running instance
-
-**Agents and the proposal workflow**
-- [Set up AI agents for the proposal workflow](docs/agent-setup.md) — pick a drafting provider (OpenAI, Anthropic, or Google), schedule the daily review, mint credentials, and connect coding agents over MCP
-- [Make the daily review run on its own](docs/scheduled-daily-review.md) — built-in scheduler, cron/launchd/Task Scheduler, or your agent platform's automation
-- [Analysis graph drafts from CI and git hooks](docs/analysis-graph-drafts-ci.md) — stage commit evidence from analysis repos and draft it for review
-- [MCP server, skills, and Dolt mirror](docs/lab-tracker-mcp-skills.md) — wire up assistants and the export-only versioned mirror
-- [GitHub Copilot MCP setup](docs/lab-tracker-copilot.md) — connect Copilot IDEs to the local Lab Tracker MCP server
-- [Cursor MCP setup](docs/lab-tracker-cursor.md) — connect Cursor to the local Lab Tracker MCP server via `.cursor/mcp.json`
-
-**Scope and vision**
-- [Vision](docs/vision.md) — the north star: a question-rooted provenance graph that is human-readable, agent-readable, and AI-maintained but human-committed
-- [LOUD alignment plan](docs/loud-alignment-plan.md) — phased plan to make the provenance surface stable, dereferenceable, and self-describing linked data
-- [Supported v1 surface (authoritative)](docs/retained-v1-surface.md) — the definitive list of what ships
-- [Deferred long-term vision](idea.md) — OCR, vector search, and PI review gates, explicitly out of v1
+- **Start and deploy:** [local setup](docs/setup.md) ·
+  [deployment options](docs/deployment-options.md) ·
+  [configuration](docs/configuration.md)
+- **Capture and integrate:** [phone capture](docs/phone-capture-quickstart.md) ·
+  [watch folders](docs/watch-folder-capture.md) ·
+  [MATLAB integration](docs/lab-tracker-matlab.md) ·
+  [provenance export](docs/provenance-export.md)
+- **Understand the model:** [vision](docs/vision.md) ·
+  [review and commit](docs/review-and-commit-model.md) ·
+  [supported v1 surface](docs/retained-v1-surface.md)
+- **Operate AI drafting:** [agent setup](docs/agent-setup.md) ·
+  [scheduled review](docs/scheduled-daily-review.md)
 
 ## Caveats
 
-- Lab Tracker assembles the record you actually captured and committed. It does not invent missing experiments, results, or evidence.
-- Assistant-written summaries are only as trustworthy as the curated graph behind them. The app records how graph changes were accepted so a bulk review is not later mistaken for a careful one.
-- AI features require provider configuration, and model output remains proposal-only: every graph change still needs a person to accept, edit, or reject it.
-- This README is an orientation. For supported behavior, deployment assumptions, and deferred workflows, treat [docs/retained-v1-surface.md](docs/retained-v1-surface.md) as canonical.
+- This repository does not currently declare an open-source license. Public
+  source availability should not be read as permission to redistribute it.
+- OCR, semantic/vector search, automatic transcription on every upload, and a
+  standing system-selected extraction inbox are outside the supported v1
+  surface.
+- Full research artifacts often remain outside Lab Tracker. External resolution
+  is opt-in, read-only, bounded, and hash-checked; operators must configure the
+  allowed roots or remotes.
+- A shared deployment is an operated service: the lab remains responsible for
+  provider approval, credentials, access policy, database backups, and durable
+  file storage.

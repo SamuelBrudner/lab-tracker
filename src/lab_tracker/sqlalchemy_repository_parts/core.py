@@ -458,6 +458,7 @@ class SQLAlchemyQuestionRepository(EntityRepository[Question]):
         *,
         project_id: UUID | None = None,
         project_ids: set[UUID] | None = None,
+        question_ids: set[UUID] | None = None,
         status: str | None = None,
         question_type: str | None = None,
         search: str | None = None,
@@ -474,6 +475,8 @@ class SQLAlchemyQuestionRepository(EntityRepository[Question]):
         self._session.flush()
         if project_ids is not None and not project_ids:
             return [], 0
+        if question_ids is not None and not question_ids:
+            return [], 0
         if superseded_by_question_ids is not None and not superseded_by_question_ids:
             return [], 0
         stmt = select(QuestionModel)
@@ -485,6 +488,10 @@ class SQLAlchemyQuestionRepository(EntityRepository[Question]):
             project_values = uuid_values(project_ids)
             stmt = stmt.where(QuestionModel.project_id.in_(project_values))
             count_stmt = count_stmt.where(QuestionModel.project_id.in_(project_values))
+        if question_ids is not None:
+            question_values = uuid_values(question_ids)
+            stmt = stmt.where(QuestionModel.question_id.in_(question_values))
+            count_stmt = count_stmt.where(QuestionModel.question_id.in_(question_values))
         if status is not None:
             stmt = stmt.where(QuestionModel.status == status)
             count_stmt = count_stmt.where(QuestionModel.status == status)

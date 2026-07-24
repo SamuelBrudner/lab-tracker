@@ -494,5 +494,5 @@ npm run build
 ## Boundaries
 
 The retained-v1 runtime is defined by `docs/retained-v1-surface.md`. Deferred
-ideas from `idea.md` should not be treated as active product requirements unless
-a bead explicitly says to implement them.
+ideas from `docs/archive/connected-lab-platform-v1.2.md` should not be treated
+as active product requirements unless a bead explicitly says to implement them.

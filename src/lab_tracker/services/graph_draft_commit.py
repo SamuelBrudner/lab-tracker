@@ -9,6 +9,7 @@ from uuid import UUID
 from lab_tracker.auth import AuthContext
 from lab_tracker.errors import ValidationError
 from lab_tracker.models import (
+    Dataset,
     EntityType,
     GraphChangeOp,
     GraphChangeOperation,
@@ -53,6 +54,10 @@ class CommitQuestions(Protocol):
     def get_question(self, question_id: UUID) -> Question: ...
 
 
+class CommitDatasets(Protocol):
+    def get_dataset(self, dataset_id: UUID) -> Dataset: ...
+
+
 class CommitAuthorization(Protocol):
     def require_interactive(
         self,
@@ -70,12 +75,20 @@ class CommitAuthorization(Protocol):
 
 
 class CommitRepository(Protocol):
+    def lock_project_deletion_guard(self, project_id: UUID) -> None: ...
+
     def claim_graph_change_set_for_commit(
         self,
         change_set_id: UUID,
     ) -> GraphChangeSet | None: ...
 
     def lock_project_question_dag(self, project_id: UUID) -> None: ...
+
+    def lock_dataset_updates(
+        self,
+        project_id: UUID,
+        dataset_ids: list[UUID],
+    ) -> None: ...
 
 
 class TransactionalDraftCommitCoordinator(BaseService):
@@ -89,6 +102,7 @@ class TransactionalDraftCommitCoordinator(BaseService):
         patch_applier: CommitPatchApplier,
         versions: CommitVersions,
         questions: CommitQuestions,
+        datasets: CommitDatasets,
         authorization: CommitAuthorization,
     ) -> None:
         super().__init__(context)
@@ -96,6 +110,7 @@ class TransactionalDraftCommitCoordinator(BaseService):
         self.patch_applier = patch_applier
         self.versions = versions
         self.questions = questions
+        self.datasets = datasets
         self.authorization = authorization
 
     @property
@@ -113,9 +128,7 @@ class TransactionalDraftCommitCoordinator(BaseService):
             raise ValidationError("message must not be empty.")
         change_set = self.records.get_graph_change_set(change_set_id)
         self.authorization.require_owner(change_set.project_id, actor=actor)
-        self.authorization.require_interactive(
-            actor, action="Committing graph changes"
-        )
+        self.authorization.require_interactive(actor, action="Committing graph changes")
         if change_set.status == GraphChangeSetStatus.COMMITTING:
             raise ValidationError("This graph draft is already being committed.")
         if change_set.status not in {
@@ -133,6 +146,11 @@ class TransactionalDraftCommitCoordinator(BaseService):
             raise ValidationError("At least one accepted operation is required to commit.")
         _ensure_accepted_operation_refs_available(accepted)
         with self.application_transaction():
+            # Project deletion takes this scope exclusively before cascading
+            # into graph rows. Take it shared before claiming the change-set
+            # row so graph commit and project deletion cannot invert those two
+            # locks and deadlock.
+            self.commit_repository.lock_project_deletion_guard(change_set.project_id)
             claimed = self.commit_repository.claim_graph_change_set_for_commit(change_set_id)
             if claimed is None:
                 latest = self.records.get_graph_change_set(change_set_id)
@@ -148,6 +166,11 @@ class TransactionalDraftCommitCoordinator(BaseService):
                 if operation.status == GraphChangeOperationStatus.ACCEPTED
             ]
             self._lock_question_update_projects(accepted)
+            self._lock_dataset_update_projects(
+                accepted,
+                project_id=change_set.project_id,
+                actor=actor,
+            )
             for operation in accepted:
                 entity = self.patch_applier.apply_graph_operation(
                     operation,
@@ -182,10 +205,7 @@ class TransactionalDraftCommitCoordinator(BaseService):
 
         project_ids: set[UUID] = set()
         for operation in operations:
-            if (
-                operation.op != GraphChangeOp.UPDATE
-                or operation.entity_type != EntityType.QUESTION
-            ):
+            if operation.op != GraphChangeOp.UPDATE or operation.entity_type != EntityType.QUESTION:
                 continue
             if operation.target_entity_id is None:
                 raise ValidationError("Question updates require target_entity_id.")
@@ -193,6 +213,32 @@ class TransactionalDraftCommitCoordinator(BaseService):
             project_ids.add(question.project_id)
         for project_id in sorted(project_ids, key=str):
             self.commit_repository.lock_project_question_dag(project_id)
+
+    def _lock_dataset_update_projects(
+        self,
+        operations: list[GraphChangeOperation],
+        *,
+        project_id: UUID,
+        actor: AuthContext | None,
+    ) -> None:
+        """Pre-lock existing dataset update targets in canonical order."""
+
+        dataset_ids_by_project: dict[UUID, set[UUID]] = {}
+        for operation in operations:
+            if operation.op != GraphChangeOp.UPDATE or operation.entity_type != EntityType.DATASET:
+                continue
+            if operation.target_entity_id is None:
+                raise ValidationError("Dataset updates require target_entity_id.")
+            dataset = self.datasets.get_dataset(operation.target_entity_id)
+            if dataset.project_id != project_id:
+                raise ValidationError("Dataset updates must belong to the graph draft project.")
+            self.authorization.require_owner(dataset.project_id, actor=actor)
+            dataset_ids_by_project.setdefault(dataset.project_id, set()).add(dataset.dataset_id)
+        for project_id in sorted(dataset_ids_by_project, key=str):
+            self.commit_repository.lock_dataset_updates(
+                project_id,
+                sorted(dataset_ids_by_project[project_id], key=str),
+            )
 
 
 def _ensure_accepted_operation_refs_available(

@@ -35,7 +35,6 @@ from lab_tracker.models import (
     ExplorationNode,
     ExternalArtifactReference,
     Goal,
-    GoalLink,
     Project,
     ProjectStatus,
     Question,
@@ -91,6 +90,13 @@ class ContextAccess(Protocol):
 
     def get_goal(self, goal_id: UUID) -> Goal: ...
 
+    def require_goal_read(
+        self,
+        goal: Goal,
+        *,
+        actor: AuthContext | None,
+    ) -> set[UUID]: ...
+
     def record_usage_event(
         self,
         *,
@@ -122,14 +128,6 @@ class ContextRepository(DecisionContextRepository, Protocol):
         limit: int | None,
         offset: int,
     ) -> tuple[list[ClaimEdge], int]: ...
-
-    def query_goal_links(
-        self,
-        *,
-        goal_id: UUID,
-        limit: int | None,
-        offset: int,
-    ) -> tuple[list[GoalLink], int]: ...
 
     def query_goals(
         self,
@@ -354,48 +352,50 @@ class ContextQueries:
         limit: int,
         offset: int,
     ) -> SearchResults:
-        allowed_project_ids = self.api.accessible_project_ids(actor)
-        if project_id is not None:
-            self.api.require_project_read(project_id, actor=actor)
         include_set = {
             item.strip().casefold()
             for item in (include.split(",") if include else ["questions", "notes"])
             if item.strip()
         }
-        project_ids = {project_id} if project_id is not None else allowed_project_ids
+        project_ids: set[UUID] | None
         linked_question_ids: set[UUID] | None = None
         linked_note_ids: set[UUID] | None = None
         if goal_id is not None:
             goal = self.api.get_goal(goal_id)
-            goal_project_id = goal.project_id
-            if goal_project_id is None:
-                raise ValidationError("goal_id must identify a project-scoped goal.")
-            self.api.require_project_read(goal_project_id, actor=actor)
-            if project_id is not None and goal_project_id != project_id:
+            goal_project_ids = self.api.require_goal_read(goal, actor=actor)
+            if project_id is not None and not _goal_matches_project(
+                goal,
+                project_id=project_id,
+                scope_project_ids=goal_project_ids,
+            ):
+                # Preserve the existing project mismatch behavior without
+                # revealing it to callers who cannot read the full goal.
+                self.api.require_project_read(project_id, actor=actor)
                 raise ValidationError("goal_id must belong to project_id.")
-            project_ids = {goal_project_id}
-            links, _ = self.repository.query_goal_links(
-                goal_id=goal_id,
-                limit=None,
-                offset=0,
-            )
+            project_ids = {project_id} if project_id is not None else goal_project_ids
             linked_question_ids = {
                 link.target.entity_id
-                for link in links
+                for link in goal.links
                 if link.target.entity_type == EntityType.QUESTION
             }
             linked_note_ids = {
                 link.target.entity_id
-                for link in links
+                for link in goal.links
                 if link.target.entity_type == EntityType.NOTE
             }
+        elif project_id is not None:
+            self.api.require_project_read(project_id, actor=actor)
+            project_ids = {project_id}
+        else:
+            project_ids = self.api.accessible_project_ids(actor)
         questions = (
             self.repository.query_questions(
                 project_id=None,
                 project_ids=project_ids,
+                question_ids=linked_question_ids,
                 search=query,
-                limit=None if linked_question_ids is not None else limit,
-                offset=0 if linked_question_ids is not None else offset,
+                limit=limit,
+                offset=offset,
             )[0]
             if not include_set or "questions" in include_set
             else []
@@ -404,23 +404,14 @@ class ContextQueries:
             self.repository.query_notes(
                 project_id=None,
                 project_ids=project_ids,
+                note_ids=linked_note_ids,
                 search=query,
-                limit=None if linked_note_ids is not None else limit,
-                offset=0 if linked_note_ids is not None else offset,
+                limit=limit,
+                offset=offset,
             )[0]
             if not include_set or "notes" in include_set
             else []
         )
-        if linked_question_ids is not None:
-            questions = [
-                item for item in questions if item.question_id in linked_question_ids
-            ]
-        if linked_note_ids is not None:
-            notes = [item for item in notes if item.note_id in linked_note_ids]
-        if linked_question_ids is not None:
-            questions = questions[offset : offset + limit]
-        if linked_note_ids is not None:
-            notes = notes[offset : offset + limit]
         self.api.record_usage_event(
             verb=UsageEventVerb.SEARCH,
             resource_type=UsageEventResourceType.SEARCH,
@@ -572,6 +563,17 @@ class ContextQueries:
                 detail=f"Store kind '{store.kind.value}' is not resolvable yet.",
             )
         return concrete
+
+
+def _goal_matches_project(
+    goal: Goal,
+    *,
+    project_id: UUID,
+    scope_project_ids: set[UUID],
+) -> bool:
+    if goal.project_id is not None:
+        return goal.project_id == project_id
+    return project_id in scope_project_ids
 
 
 def _single_project_id(project_ids: set[UUID] | None) -> UUID | None:

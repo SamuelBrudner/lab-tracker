@@ -25,7 +25,11 @@ from lab_tracker.errors import NotFoundError
 from lab_tracker.models import Analysis, Dataset, Project, Visualization
 
 from . import file_commands
-from .file_commands import delete_stored_dataset_file, delete_stored_visualization_file
+from .file_commands import (
+    DatasetFileLocking,
+    delete_stored_dataset_file,
+    delete_stored_visualization_file,
+)
 
 _logger = logging.getLogger(__name__)
 
@@ -110,6 +114,7 @@ class ManagedDeletionCommands:
     """Deletes whose database cascade must coordinate with blob cleanup."""
 
     api: ManagedDeletionAccess
+    locks: DatasetFileLocking
     session: OrmSession
     file_storage: DeleteStorage
     raw_note_storage: DeleteStorage
@@ -121,6 +126,7 @@ class ManagedDeletionCommands:
         actor: AuthContext,
     ) -> Project:
         self.api.require_project_owner(project_id, actor=actor)
+        self.locks.lock_project_deletion(project_id)
         locked_project = self.session.scalar(
             select(ProjectModel)
             .where(ProjectModel.project_id == str(project_id))
@@ -200,6 +206,9 @@ class ManagedDeletionCommands:
         *,
         actor: AuthContext,
     ) -> Dataset:
+        existing = self.api.get_dataset(dataset_id)
+        self.api.require_project_read(existing.project_id, actor=actor)
+        self.locks.lock_dataset_deletion(existing.project_id, dataset_id)
         existing = self.api.get_dataset(dataset_id)
         self.api.require_project_read(existing.project_id, actor=actor)
         storage_ids = [

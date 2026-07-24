@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator
 from contextlib import contextmanager
 from datetime import datetime
 from hashlib import blake2b
@@ -100,9 +100,11 @@ from .usage import (
 from .versions import SQLAlchemyEntityVersionRepository
 
 _QUESTION_DAG_LOCK_DOMAIN = b"lab-tracker:question-dag:v1\0"
+_DATASET_FILE_PROJECT_LOCK_DOMAIN = b"lab-tracker:dataset-file-project:v1\0"
+_DATASET_FILE_DATASET_LOCK_DOMAIN = b"lab-tracker:dataset-file-dataset:v1\0"
 
 
-def _project_question_dag_lock_key(project_id: UUID) -> int:
+def _scoped_advisory_lock_key(domain: bytes, entity_id: UUID) -> int:
     """Return a stable, domain-separated signed bigint lock key.
 
     PostgreSQL advisory locks accept a signed 64-bit integer. Hashing all 128
@@ -111,11 +113,20 @@ def _project_question_dag_lock_key(project_id: UUID) -> int:
     advisory-lock uses.
     """
 
-    digest = blake2b(
-        _QUESTION_DAG_LOCK_DOMAIN + project_id.bytes,
-        digest_size=8,
-    ).digest()
+    digest = blake2b(domain + entity_id.bytes, digest_size=8).digest()
     return int.from_bytes(digest, byteorder="big", signed=True)
+
+
+def _project_question_dag_lock_key(project_id: UUID) -> int:
+    return _scoped_advisory_lock_key(_QUESTION_DAG_LOCK_DOMAIN, project_id)
+
+
+def _dataset_file_project_lock_key(project_id: UUID) -> int:
+    return _scoped_advisory_lock_key(_DATASET_FILE_PROJECT_LOCK_DOMAIN, project_id)
+
+
+def _dataset_file_dataset_lock_key(dataset_id: UUID) -> int:
+    return _scoped_advisory_lock_key(_DATASET_FILE_DATASET_LOCK_DOMAIN, dataset_id)
 
 
 class SQLAlchemyLabTrackerRepository:
@@ -226,6 +237,84 @@ class SQLAlchemyLabTrackerRepository:
             {"lock_key": _project_question_dag_lock_key(project_id)},
         )
         self._session.expire_all()
+
+    def _lock_dataset_file_scopes(
+        self,
+        locks: tuple[tuple[int, bool], ...],
+    ) -> None:
+        """Acquire a canonical dataset-file lock plan for this transaction."""
+
+        if self._session.get_bind().dialect.name != "postgresql":
+            return
+        for lock_key, shared in locks:
+            statement = (
+                text("SELECT pg_advisory_xact_lock_shared(:lock_key)")
+                if shared
+                else text("SELECT pg_advisory_xact_lock(:lock_key)")
+            )
+            self._session.execute(statement, {"lock_key": lock_key})
+        # A lock wait may have outlived rows already loaded into this identity
+        # map. Force every post-lock validation to observe the winning commit.
+        self._session.expire_all()
+
+    def lock_dataset_file_mutation(
+        self,
+        project_id: UUID,
+        dataset_id: UUID,
+    ) -> None:
+        """Let file writes coexist while excluding dataset/project deletion."""
+
+        self._lock_dataset_file_scopes(
+            (
+                (_dataset_file_project_lock_key(project_id), True),
+                (_dataset_file_dataset_lock_key(dataset_id), True),
+            )
+        )
+
+    def lock_dataset_deletion(
+        self,
+        project_id: UUID,
+        dataset_id: UUID,
+    ) -> None:
+        """Exclude file writes for one dataset without blocking sibling datasets."""
+
+        self.lock_dataset_updates(project_id, (dataset_id,))
+
+    def lock_dataset_updates(
+        self,
+        project_id: UUID,
+        dataset_ids: Iterable[UUID],
+    ) -> None:
+        """Lock a project's dataset snapshots in canonical UUID order.
+
+        Full-snapshot dataset writes exclude file writes to each affected
+        dataset, but retain a shared project scope so sibling datasets remain
+        concurrent and project deletion waits. Graph commits pass every update
+        target together so reverse D1/D2 operation order cannot deadlock.
+        """
+
+        ordered_dataset_ids = sorted(set(dataset_ids), key=str)
+        if not ordered_dataset_ids:
+            return
+        self._lock_dataset_file_scopes(
+            (
+                (_dataset_file_project_lock_key(project_id), True),
+                *(
+                    (_dataset_file_dataset_lock_key(locked_dataset_id), False)
+                    for locked_dataset_id in ordered_dataset_ids
+                ),
+            )
+        )
+
+    def lock_project_deletion_guard(self, project_id: UUID) -> None:
+        """Keep project-scoped graph rows alive while a command locks them."""
+
+        self._lock_dataset_file_scopes(((_dataset_file_project_lock_key(project_id), True),))
+
+    def lock_project_deletion(self, project_id: UUID) -> None:
+        """Exclude every dataset-file write below one project."""
+
+        self._lock_dataset_file_scopes(((_dataset_file_project_lock_key(project_id), False),))
 
     def list_dataset_files(self, dataset_id: UUID) -> list[DatasetFile]:
         return self.datasets.list_file_entities(dataset_id)
@@ -666,6 +755,7 @@ class SQLAlchemyLabTrackerRepository:
         *,
         project_id: UUID | None = None,
         project_ids: set[UUID] | None = None,
+        question_ids: set[UUID] | None = None,
         status: str | None = None,
         question_type: str | None = None,
         search: str | None = None,
@@ -682,6 +772,7 @@ class SQLAlchemyLabTrackerRepository:
         return self.questions.query(
             project_id=project_id,
             project_ids=project_ids,
+            question_ids=question_ids,
             status=status,
             question_type=question_type,
             search=search,
@@ -739,6 +830,7 @@ class SQLAlchemyLabTrackerRepository:
         *,
         project_id: UUID | None = None,
         project_ids: set[UUID] | None = None,
+        note_ids: set[UUID] | None = None,
         status: str | None = None,
         search: str | None = None,
         created_by: str | None = None,
@@ -754,6 +846,7 @@ class SQLAlchemyLabTrackerRepository:
         return self.notes.query(
             project_id=project_id,
             project_ids=project_ids,
+            note_ids=note_ids,
             status=status,
             search=search,
             created_by=created_by,
