@@ -1,5 +1,6 @@
 import hashlib
 import os
+from datetime import datetime, timezone
 from pathlib import Path
 from uuid import uuid4
 
@@ -124,6 +125,8 @@ def test_local_resolver_reports_drift_on_hash_mismatch(tmp_path):
     assert result.status is ResolutionStatus.DRIFTED
     assert result.is_verified is False
     assert result.observed_hash == _sha256(b"actual content")
+    assert result.content is None
+    assert result.returned_bytes == 0
     assert result.detail is not None
 
 
@@ -192,6 +195,23 @@ def test_local_resolver_truncates_payload_but_still_verifies(tmp_path):
     assert result.returned_bytes == 4
 
 
+def test_local_resolver_withholds_truncated_payload_when_hash_drifts(tmp_path):
+    data = b"abcdefghij"
+    path = _write(tmp_path, "drifted-big.bin", data)
+
+    result = LocalFilesystemResolver().resolve(
+        _local_ref(path, _sha256(b"recorded bytes")),
+        max_bytes=4,
+    )
+
+    assert result.status is ResolutionStatus.DRIFTED
+    assert result.observed_hash == _sha256(data)
+    assert result.content is None
+    assert result.returned_bytes == 0
+    assert result.truncated is True
+    assert result.size_bytes == len(data)
+
+
 def test_local_resolver_returns_byte_range_slice(tmp_path):
     data = b"0123456789"
     path = _write(tmp_path, "ranged.bin", data)
@@ -204,6 +224,24 @@ def test_local_resolver_returns_byte_range_slice(tmp_path):
     assert result.content == b"234"
     assert result.truncated is True
     assert result.size_bytes == 10
+
+
+def test_local_resolver_withholds_byte_range_when_hash_drifts(tmp_path):
+    data = b"0123456789"
+    path = _write(tmp_path, "drifted-range.bin", data)
+
+    result = LocalFilesystemResolver().resolve(
+        _local_ref(path, _sha256(b"recorded bytes")),
+        byte_range=(2, 5),
+    )
+
+    assert result.status is ResolutionStatus.DRIFTED
+    assert result.observed_hash == _sha256(data)
+    assert result.content is None
+    assert result.returned_bytes == 0
+    assert result.truncated is True
+    assert result.size_bytes == len(data)
+    assert result.detail == "Recomputed hash does not match content_hash."
 
 
 def test_local_resolver_rejects_invalid_byte_range(tmp_path):
@@ -299,8 +337,8 @@ def test_http_resolver_reports_drift_on_mismatch():
 
     assert result.status is ResolutionStatus.DRIFTED
     assert result.observed_hash == _sha256(b"actual bytes")
-    # Drifted-content suppression is tracked separately by n5kp.43.
-    assert result.content == b"actual bytes"
+    assert result.content is None
+    assert result.returned_bytes == 0
 
 
 def test_http_resolver_http_error_status_is_unresolved():
@@ -732,6 +770,10 @@ def test_rclone_resolver_reports_drift():
     result = resolver.resolve(_rclone_ref("rclone://r/x", _sha256(b"recorded")))
 
     assert result.status is ResolutionStatus.DRIFTED
+    assert result.observed_hash == _sha256(data)
+    assert result.size_bytes == len(data)
+    assert result.content is None
+    assert result.returned_bytes == 0
 
 
 def test_rclone_resolver_missing_object_is_unresolved():
@@ -1115,6 +1157,48 @@ def test_resolved_artifact_to_json_dict_omits_raw_bytes(tmp_path):
     assert "content" not in payload
 
 
+@pytest.mark.parametrize(
+    "status",
+    [ResolutionStatus.DRIFTED, ResolutionStatus.UNRESOLVED],
+)
+def test_resolved_artifact_discards_content_unless_verified(status):
+    result = ResolvedArtifact(
+        status=status,
+        source_system="custom",
+        uri="custom://artifact",
+        expected_hash=_sha256(b"recorded"),
+        observed_hash=_sha256(b"attacker-controlled"),
+        content=b"attacker-controlled",
+        size_bytes=len(b"attacker-controlled"),
+        fetched_at=datetime.now(timezone.utc),
+        detail="diagnostic",
+    )
+
+    assert result.content is None
+    assert result.returned_bytes == 0
+    assert result.observed_hash == _sha256(b"attacker-controlled")
+    assert result.size_bytes == len(b"attacker-controlled")
+    assert result.detail == "diagnostic"
+
+
+def test_resolved_artifact_downgrades_false_verified_status():
+    result = ResolvedArtifact(
+        status=ResolutionStatus.VERIFIED,
+        source_system="custom",
+        uri="custom://artifact",
+        expected_hash=_sha256(b"recorded"),
+        observed_hash=_sha256(b"attacker-controlled"),
+        content=b"attacker-controlled",
+        size_bytes=len(b"attacker-controlled"),
+        fetched_at=datetime.now(timezone.utc),
+    )
+
+    assert result.status is ResolutionStatus.DRIFTED
+    assert result.is_verified is False
+    assert result.content is None
+    assert result.returned_bytes == 0
+
+
 # --- content-hash recovery of moved/renamed local artifacts ---------------
 
 
@@ -1404,6 +1488,8 @@ def test_git_resolver_reports_drift_on_mismatch(tmp_path):
 
     assert result.status is ResolutionStatus.DRIFTED
     assert result.observed_hash == _sha256(b"actual")
+    assert result.content is None
+    assert result.returned_bytes == 0
     assert result.detail is not None
 
 

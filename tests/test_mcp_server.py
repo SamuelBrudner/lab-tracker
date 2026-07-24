@@ -660,7 +660,16 @@ def test_client_resolve_artifact_posts_to_resolve_route() -> None:
             assert body["entity_id"] == "dataset-1"
             assert body["artifact_index"] == 2
             assert body["max_bytes"] == 1024
-            return _json_response(200, {"data": {"status": "verified"}})
+            return _json_response(
+                200,
+                {
+                    "data": {
+                        "status": "verified",
+                        "content_base64": "dmVyaWZpZWQ=",
+                        "returned_bytes": 8,
+                    }
+                },
+            )
         return _json_response(404, {"error": {"message": "not found"}})
 
     client = mcp_server.LabTrackerAPIClient(
@@ -678,11 +687,99 @@ def test_client_resolve_artifact_posts_to_resolve_route() -> None:
         client.close()
 
     assert result["data"]["status"] == "verified"
+    assert result["data"]["content_base64"] == "dmVyaWZpZWQ="
+    assert result["data"]["returned_bytes"] == 8
     assert [request.url.path for request in captured] == ["/external-artifacts/resolve"]
     # Optional fields left unset are omitted, so extra="forbid" on the route is safe.
     body = json.loads(captured[0].content)
     assert "content_hash" not in body
     assert "byte_start" not in body
+
+
+@pytest.mark.parametrize("status", ["drifted", "unresolved", None, "future-status"])
+def test_client_suppresses_content_from_unverified_artifact_response(status) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/external-artifacts/resolve"
+        data = {
+            "observed_hash": "sha256:observed",
+            "size_bytes": 8,
+            "content_base64": "c2VudGluZWw=",
+            "returned_bytes": 8,
+            "detail": "Recomputed hash does not match content_hash.",
+        }
+        if status is not None:
+            data["status"] = status
+        return _json_response(
+            200,
+            {"data": data},
+        )
+
+    client = mcp_server.LabTrackerAPIClient(
+        mcp_server.MCPSettings(base_url="http://testserver"),
+        transport=httpx.MockTransport(handler),
+    )
+    try:
+        result = client.resolve_external_artifact(
+            entity_type="dataset",
+            entity_id="dataset-1",
+        )
+    finally:
+        client.close()
+
+    if status is None:
+        assert "status" not in result["data"]
+    else:
+        assert result["data"]["status"] == status
+    assert result["data"]["observed_hash"] == "sha256:observed"
+    assert result["data"]["size_bytes"] == 8
+    assert result["data"]["content_base64"] is None
+    assert result["data"]["returned_bytes"] == 0
+
+
+def test_client_rejects_malformed_artifact_data_without_leaking_content() -> None:
+    sentinel = "c2VudGluZWw="
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/external-artifacts/resolve"
+        return _json_response(
+            200,
+            {
+                "data": [
+                    {
+                        "status": "drifted",
+                        "content_base64": sentinel,
+                        "returned_bytes": 8,
+                    }
+                ]
+            },
+        )
+
+    client = mcp_server.LabTrackerAPIClient(
+        mcp_server.MCPSettings(base_url="http://testserver"),
+        transport=httpx.MockTransport(handler),
+    )
+    try:
+        with pytest.raises(mcp_server.LabTrackerAPIError) as exc_info:
+            client.resolve_external_artifact(
+                entity_type="dataset",
+                entity_id="dataset-1",
+            )
+    finally:
+        client.close()
+
+    assert "object data" in str(exc_info.value)
+    assert sentinel not in str(exc_info.value)
+
+
+def test_artifact_content_filter_preserves_error_envelope() -> None:
+    from lab_tracker.mcp_api_client import suppress_unverified_artifact_content
+
+    payload = {
+        "error": {"code": "not_found", "message": "Dataset does not exist."},
+        "data": None,
+    }
+
+    assert suppress_unverified_artifact_content(payload) == payload
 
 
 def test_client_does_not_remint_credentials_after_opaque_resolver_not_found() -> None:
@@ -740,6 +837,119 @@ def test_client_does_not_remint_credentials_after_opaque_resolver_not_found() ->
 def test_resolve_artifact_is_registered_read_tool() -> None:
     assert "lab_tracker_resolve_artifact" in {tool.__name__ for tool in READ_TOOLS}
     assert "lab_tracker_resolve_artifact" not in {tool.__name__ for tool in WRITE_TOOLS}
+
+
+@pytest.mark.parametrize("status", ["drifted", "unresolved", None, "future-status"])
+def test_resolve_artifact_tool_suppresses_unverified_content(monkeypatch, status) -> None:
+    from lab_tracker.mcp_tools import read as read_tools
+
+    class FakeClient:
+        def resolve_external_artifact(self, **_kwargs):
+            data = {
+                "observed_hash": "sha256:observed",
+                "size_bytes": 8,
+                "content_base64": "c2VudGluZWw=",
+                "returned_bytes": 8,
+            }
+            if status is not None:
+                data["status"] = status
+            return {"data": data}
+
+        def close(self) -> None:
+            pass
+
+    read_tools.close_cached_read_client()
+    monkeypatch.setattr(read_tools, "client_from_env", lambda: FakeClient())
+
+    try:
+        payload = read_tools.lab_tracker_resolve_artifact(
+            entity_type="dataset",
+            entity_id="dataset-1",
+        )
+    finally:
+        read_tools.close_cached_read_client()
+
+    if status is None:
+        assert "status" not in payload["data"]
+    else:
+        assert payload["data"]["status"] == status
+    assert payload["data"]["observed_hash"] == "sha256:observed"
+    assert payload["data"]["size_bytes"] == 8
+    assert payload["data"]["content_base64"] is None
+    assert payload["data"]["returned_bytes"] == 0
+    assert payload["next_action"]["tool"] == "lab_tracker_get_claim_provenance"
+
+
+def test_resolve_artifact_tool_preserves_verified_content(monkeypatch) -> None:
+    from lab_tracker.mcp_tools import read as read_tools
+
+    class FakeClient:
+        def resolve_external_artifact(self, **_kwargs):
+            return {
+                "data": {
+                    "status": "verified",
+                    "content_base64": "dmVyaWZpZWQ=",
+                    "returned_bytes": 8,
+                }
+            }
+
+        def close(self) -> None:
+            pass
+
+    read_tools.close_cached_read_client()
+    monkeypatch.setattr(read_tools, "client_from_env", lambda: FakeClient())
+
+    try:
+        payload = read_tools.lab_tracker_resolve_artifact(
+            entity_type="dataset",
+            entity_id="dataset-1",
+        )
+    finally:
+        read_tools.close_cached_read_client()
+
+    assert payload["data"]["status"] == "verified"
+    assert payload["data"]["content_base64"] == "dmVyaWZpZWQ="
+    assert payload["data"]["returned_bytes"] == 8
+    assert payload["next_action"]["tool"] == "lab_tracker_get_claim_provenance"
+
+
+def test_resolve_artifact_tool_rejects_malformed_data_without_leaking_content(
+    monkeypatch,
+) -> None:
+    from lab_tracker.mcp_tools import read as read_tools
+
+    sentinel = "c2VudGluZWw="
+
+    class FakeClient:
+        def resolve_external_artifact(self, **_kwargs):
+            return {
+                "data": [
+                    {
+                        "status": "drifted",
+                        "content_base64": sentinel,
+                        "returned_bytes": 8,
+                    }
+                ]
+            }
+
+        def close(self) -> None:
+            pass
+
+    read_tools.close_cached_read_client()
+    monkeypatch.setattr(read_tools, "client_from_env", lambda: FakeClient())
+
+    try:
+        payload = read_tools.lab_tracker_resolve_artifact(
+            entity_type="dataset",
+            entity_id="dataset-1",
+        )
+    finally:
+        read_tools.close_cached_read_client()
+
+    assert payload["data"] is None
+    assert payload["error"]["code"] == "lab_tracker_api_error"
+    assert "object data" in payload["error"]["message"]
+    assert sentinel not in json.dumps(payload)
 
 
 def test_client_describe_schema_calls_api_discovery_route() -> None:
