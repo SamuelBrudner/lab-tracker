@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING
 from uuid import UUID, uuid4
 
 from lab_tracker.auth import AuthContext
-from lab_tracker.errors import ValidationError
+from lab_tracker.errors import NotFoundError, OpaqueTargetNotFoundError, ValidationError
 from lab_tracker.models import (
     Dataset,
     DatasetCommitManifest,
@@ -198,6 +198,20 @@ class DatasetService(BaseService):
             label="Dataset",
             loader=lambda repository: repository.datasets.get(dataset_id),
         )
+
+    def get_dataset_for_read(
+        self,
+        dataset_id: UUID,
+        *,
+        actor: AuthContext | None = None,
+    ) -> Dataset:
+        try:
+            dataset = self.get_dataset(dataset_id)
+        except NotFoundError as exc:
+            raise OpaqueTargetNotFoundError("Dataset does not exist.") from exc
+        if not self.authorization.can_read(dataset.project_id, actor=actor):
+            raise OpaqueTargetNotFoundError("Dataset does not exist.")
+        return dataset
 
     def list_datasets(self, *, project_id: UUID | None = None) -> list[Dataset]:
         return self.query_from_repository(

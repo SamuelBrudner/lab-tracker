@@ -83,8 +83,10 @@ def build_datasets_router(api: LabTrackerAPI) -> APIRouter:
 
     @router.get("/datasets/{dataset_id}", response_model=Envelope[Dataset])
     def get_dataset(dataset_id: UUID, request: Request):
-        dataset = api_from_request(request, api).get_dataset(dataset_id)
-        ensure_project_read(request, dataset.project_id)
+        dataset = api_from_request(request, api).get_dataset_for_read(
+            dataset_id,
+            actor=actor_from_request(request),
+        )
         record_usage_view(
             request,
             resource_type=UsageEventResourceType.DATASET,

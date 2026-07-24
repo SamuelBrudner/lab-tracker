@@ -97,8 +97,10 @@ def build_analyses_router(api: LabTrackerAPI) -> APIRouter:
 
     @router.get("/analyses/{analysis_id}", response_model=Envelope[Analysis])
     def get_analysis(analysis_id: UUID, request: Request):
-        analysis = api_from_request(request, api).get_analysis(analysis_id)
-        ensure_project_read(request, analysis.project_id)
+        analysis = api_from_request(request, api).get_analysis_for_read(
+            analysis_id,
+            actor=actor_from_request(request),
+        )
         record_usage_view(
             request,
             resource_type=UsageEventResourceType.ANALYSIS,

@@ -26,7 +26,14 @@ from lab_tracker.errors import (
     ValidationError,
 )
 from lab_tracker.file_storage import StoredFileMetadata
-from lab_tracker.models import Analysis, DatasetFile, DatasetStatus, Visualization, utc_now
+from lab_tracker.models import (
+    Analysis,
+    Dataset,
+    DatasetFile,
+    DatasetStatus,
+    Visualization,
+    utc_now,
+)
 from lab_tracker.upload_security import validate_upload_content_type
 
 from .types import AssetMutationResult, FileDownload, Page
@@ -68,14 +75,21 @@ class FileCommandAccess(Protocol):
 
     def get_analysis(self, analysis_id: UUID) -> Analysis: ...
 
-    def get_visualization(self, viz_id: UUID) -> Visualization: ...
-
-    def require_project_read(
+    def get_dataset_for_read(
         self,
-        project_id: UUID,
+        dataset_id: UUID,
         *,
         actor: AuthContext | None,
-    ) -> None: ...
+    ) -> Dataset: ...
+
+    def get_visualization(self, viz_id: UUID) -> Visualization: ...
+
+    def get_visualization_for_read(
+        self,
+        viz_id: UUID,
+        *,
+        actor: AuthContext | None,
+    ) -> tuple[Visualization, UUID]: ...
 
     def require_project_contributor(
         self,
@@ -316,13 +330,7 @@ class DatasetFileCommands:
         limit: int,
         offset: int,
     ) -> Page[DatasetFile]:
-        dataset_row = self.session.get(DatasetModel, str(dataset_id))
-        if dataset_row is None:
-            raise NotFoundError("Dataset does not exist.")
-        self.api.require_project_read(
-            ensure_uuid(dataset_row.project_id),
-            actor=actor,
-        )
+        self.api.get_dataset_for_read(dataset_id, actor=actor)
         files, total = self.repository.query_dataset_files(
             dataset_id=dataset_id,
             limit=limit,
@@ -337,13 +345,7 @@ class DatasetFileCommands:
         *,
         actor: AuthContext,
     ) -> FileDownload:
-        dataset_row = self.session.get(DatasetModel, str(dataset_id))
-        if dataset_row is None:
-            raise NotFoundError("Dataset does not exist.")
-        self.api.require_project_read(
-            ensure_uuid(dataset_row.project_id),
-            actor=actor,
-        )
+        self.api.get_dataset_for_read(dataset_id, actor=actor)
         row = self.session.get(DatasetFileModel, str(file_id))
         if row is None or str(row.dataset_id) != str(dataset_id):
             raise NotFoundError("Dataset file does not exist.")
@@ -535,9 +537,7 @@ class VisualizationFileCommands:
         *,
         actor: AuthContext,
     ) -> FileDownload:
-        visualization = self.api.get_visualization(viz_id)
-        analysis = self.api.get_analysis(visualization.analysis_id)
-        self.api.require_project_read(analysis.project_id, actor=actor)
+        self.api.get_visualization_for_read(viz_id, actor=actor)
         row = self.session.get(VisualizationModel, str(viz_id))
         if row is None:
             raise NotFoundError("Visualization does not exist.")

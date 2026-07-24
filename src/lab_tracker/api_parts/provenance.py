@@ -9,9 +9,12 @@ its own edit locality. These are mixins: LabTrackerAPI inherits them, so
 from __future__ import annotations
 
 from typing import Any
+from uuid import UUID
 
 from lab_tracker.api_parts._base import _first_uuid
+from lab_tracker.auth import AuthContext
 from lab_tracker.models import (
+    ProvenanceLink,
     UsageEventResourceType,
     UsageEventVerb,
 )
@@ -111,6 +114,17 @@ class ProvenanceApiMixin:
 
     def get_provenance_link(self, *args: Any, **kwargs: Any) -> Any:
         return self.provenance_links.get_provenance_link(*args, **kwargs)
+
+    def get_provenance_link_for_read(
+        self,
+        link_id: UUID,
+        *,
+        actor: AuthContext | None = None,
+    ) -> ProvenanceLink:
+        return self.provenance_links.get_provenance_link_for_read(
+            link_id,
+            actor=actor,
+        )
 
     def list_provenance_links(self, *args: Any, **kwargs: Any) -> Any:
         return self.provenance_links.list_provenance_links(*args, **kwargs)

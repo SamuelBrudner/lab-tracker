@@ -347,7 +347,14 @@ def test_visualization_file_download_requires_project_access(
         headers=_auth_headers(outsider.json()["data"]["access_token"]),
     )
 
-    assert response.status_code == 401
+    assert response.status_code == 404
+    assert response.json() == {
+        "error": {
+            "code": "not_found",
+            "message": "Visualization does not exist.",
+            "issues": None,
+        }
+    }
 
 
 def test_visualization_delete_removes_managed_file_from_storage(

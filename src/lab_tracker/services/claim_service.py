@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING
 from uuid import UUID, uuid4
 
 from lab_tracker.auth import AuthContext
-from lab_tracker.errors import ValidationError
+from lab_tracker.errors import NotFoundError, OpaqueTargetNotFoundError, ValidationError
 from lab_tracker.models import (
     Claim,
     ClaimEdge,
@@ -147,6 +147,20 @@ class ClaimService(BaseService):
             label="Claim",
             loader=lambda repository: repository.claims.get(claim_id),
         )
+
+    def get_claim_for_read(
+        self,
+        claim_id: UUID,
+        *,
+        actor: AuthContext | None = None,
+    ) -> Claim:
+        try:
+            claim = self.get_claim(claim_id)
+        except NotFoundError as exc:
+            raise OpaqueTargetNotFoundError("Claim does not exist.") from exc
+        if not self.authorization.can_read(claim.project_id, actor=actor):
+            raise OpaqueTargetNotFoundError("Claim does not exist.")
+        return claim
 
     def list_claims(
         self,
