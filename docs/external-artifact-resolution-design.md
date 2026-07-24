@@ -11,14 +11,13 @@ boundary — see [`build-vs-buy-boundaries.md`](build-vs-buy-boundaries.md): byt
 durability, transfer, and cross-workstation availability belong to object
 storage and data substrates, not to Lab Tracker.
 
-But the pointer is currently **dead**. Nothing in the codebase dereferences a
-reference to fetch its content — the search confirmed there is no resolver,
-downloader, object-store adapter, or content-hash verifier. So when an agent
-reasons over the graph and needs content that was *never captured in the
-metadata snapshot* — the actual sample→condition map inside `samples.xlsx`, the
-full text of an as-run protocol, the values behind a plate map, a region of an
-`.fcs` file — it has a URI it cannot open. The graph can tell the agent *that*
-an artifact exists and *where*; it cannot let the agent *read* it.
+Before this capability shipped, the pointer was **dead**: nothing in the
+codebase dereferenced a reference to fetch its content. When an agent needed
+content that was *never captured in the metadata snapshot* — the actual
+sample→condition map inside `samples.xlsx`, the full text of an as-run protocol,
+the values behind a plate map, a region of an `.fcs` file — the graph could tell
+the agent *that* an artifact existed and *where*, but could not let the agent
+*read* it.
 
 For artifacts that reach a durable store (OneDrive, Box, S3, a DataLad remote),
 Lab Tracker needs a way to **resolve the pointer on demand**: given a reference
@@ -95,15 +94,13 @@ class ResolvedArtifact:
     observed_hash: str | None       # recomputed digest, when bytes were fetched
     content_type: str | None
     size_bytes: int | None
-    content: bytes | None           # bounded; None when unresolved or HEAD-only
+    content: bytes | None           # bounded; None when unresolved
     truncated: bool                 # True if size exceeded max_bytes / a range was used
     fetched_at: datetime
     detail: str | None              # reason when unresolved/drifted
 
 class ArtifactResolver(Protocol):
     def can_resolve(self, ref: ExternalArtifactReference) -> bool: ...
-    def head(self, ref: ExternalArtifactReference) -> ResolvedArtifact:
-        """Existence, size, content-type — no full fetch."""
     def resolve(
         self,
         ref: ExternalArtifactReference,
@@ -194,30 +191,40 @@ documents (`routes/provenance.py`, `provenance.py:_external_artifact_node`)
 already hand the agent the pointer. The agent decides *when* it needs bytes and
 makes one more call:
 
-- **HTTP (read-only):** `POST /external-artifacts/resolve` with the reference
-  (or `?source_system=&uri=&content_hash=&max_bytes=`), returning a
-  `ResolvedArtifact`; a `HEAD`-style variant returns metadata only.
-- **MCP read tool:** `lab_tracker_resolve_artifact(source_system, uri,
-  content_hash, max_bytes?, byte_range?)`, sitting next to
-  `lab_tracker_get_dataset_provenance` / `_analysis_provenance` /
+- **HTTP (read-only):** `POST /external-artifacts/resolve` with
+  `entity_type` (`dataset`, `analysis`, or `claim`), `entity_id`, and an optional
+  `artifact_index` (default `0`). Optional `content_hash`, `max_bytes`,
+  `byte_start`, and `byte_end` fields constrain and verify the selected
+  reference; byte-range bounds must be supplied together. The response contains
+  the `ResolvedArtifact` fields plus the selected entity type and ID, artifact
+  index, and base64-encoded content.
+- **MCP read tool:** `lab_tracker_resolve_artifact(entity_type, entity_id,
+  artifact_index=0, content_hash?, max_bytes?, byte_start?, byte_end?)`, sitting
+  next to `lab_tracker_get_dataset_provenance` / `_analysis_provenance` /
   `_claim_provenance` in `mcp_tools/read.py`. Stays within "read-only assistant
   and MCP decision-context endpoints" — no autonomous graph commits.
 
-Authorization: resolving a reference requires the **same project read access**
-as reading the entity that embeds it. The resolver must not become a way to
-fetch bytes for a project the caller cannot read.
+Authorization is resolve-by-entity and uses the **same opaque project-read
+boundary** as reading the dataset, analysis, or claim that embeds the reference.
+The entity must be found and authorized before artifact-index selection,
+caller-supplied content-hash comparison, data-store materialization, or resolver
+work. A missing entity and an existing but inaccessible entity therefore return
+the same canonical entity-not-found response regardless of whether the supplied
+index or hash would be valid. The resolver cannot become a way to enumerate
+artifacts or fetch bytes for a project the caller cannot read.
 
 ## Bounding and untrusted content
 
 Resolving arbitrary external content into an agent's context is a payload-size
 and prompt-injection surface, so the resolver is bounded by construction:
 
-- **Size cap.** A default `max_bytes`; refuse to inline a multi-GB `.fcs`. Over
-  the cap, return `head()` metadata plus `truncated=True`, and require an
-  explicit `byte_range` to pull a slice.
-- **Content-type aware.** Text/CSV/Markdown/JSON come back as readable text;
-  binary (`.fcs`, images) returns a bounded excerpt or verified metadata plus a
-  streaming handle, never the whole blob inlined.
+- **Size cap.** `max_bytes` bounds the bytes returned in `content_base64`; the
+  whole artifact is still hashed for integrity and `truncated=True` reports
+  that the response omits bytes. Optional `byte_start`/`byte_end` fields request
+  a bounded slice and must be supplied together.
+- **Content type is metadata.** The response reports `content_type`, but both
+  text and binary payloads use bounded base64 in the current HTTP/MCP contract.
+  There is no implemented metadata-only HEAD endpoint or streaming handle.
 - **Untrusted by default.** Resolved bytes are external data and must be tagged
   as such where surfaced (the same caution the project already applies to
   webhook/PR content), so downstream reasoning treats file contents as data, not
@@ -266,8 +273,9 @@ Shipped (`src/lab_tracker/artifact_resolution.py`, tested in
 - ✅ Content hash is the integrity gate across all adapters (the whole object is
   hashed; `max_bytes`/`byte_range` bound only the returned payload), via the
   shared `_hash_and_collect` helper.
-- ✅ `POST /external-artifacts/resolve` — resolve-by-entity, RBAC-gated with
-  `ensure_project_read` on the owning entity's project; returns the envelope plus
+- ✅ `POST /external-artifacts/resolve` — resolve-by-entity, gated by the owning
+  dataset, analysis, or claim's opaque read boundary before artifact selection,
+  hash comparison, materialization, or resolver work; returns the envelope plus
   base64 content. Registry comes from `request.app.state.resolver_registry` or
   `registry_from_env()`; `LAB_TRACKER_RESOLVER_ALLOWED_ROOTS` gates local roots
   (unset → local artifacts resolve `UNRESOLVED`; HTTP/rclone unaffected).

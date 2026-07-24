@@ -209,6 +209,86 @@ def test_service_principal_policy_is_read_only_by_default():
     )
 
 
+@pytest.mark.parametrize("role", (Role.VIEWER, Role.EDITOR, Role.ADMIN))
+def test_read_only_all_scope_allows_exact_external_artifact_semantic_read(
+    role: Role,
+) -> None:
+    assert service_principal_can_access(
+        "POST",
+        "/external-artifacts/resolve",
+        read_only=True,
+        role=role,
+        scope=PAT_SCOPE_ALL,
+    )
+
+
+@pytest.mark.parametrize(
+    ("role", "expected"),
+    (
+        (Role.VIEWER, False),
+        (Role.EDITOR, True),
+        (Role.ADMIN, True),
+    ),
+)
+def test_external_artifact_semantic_read_preserves_write_enabled_role_policy(
+    role: Role,
+    expected: bool,
+) -> None:
+    assert (
+        service_principal_can_access(
+            "POST",
+            "/external-artifacts/resolve",
+            read_only=False,
+            role=role,
+            scope=PAT_SCOPE_ALL,
+        )
+        is expected
+    )
+
+
+@pytest.mark.parametrize(
+    "path",
+    (
+        "/projects",
+        "/api/external-artifacts/resolve",
+        "/external-artifacts/resolve/",
+    ),
+)
+def test_read_only_external_artifact_exception_rejects_post_near_misses(
+    path: str,
+) -> None:
+    assert not service_principal_can_access(
+        "POST",
+        path,
+        read_only=True,
+        role=Role.ADMIN,
+        scope=PAT_SCOPE_ALL,
+    )
+
+
+@pytest.mark.parametrize("read_only", (True, False))
+@pytest.mark.parametrize(
+    ("method", "path"),
+    (
+        ("GET", "/auth"),
+        ("GET", "/auth/me"),
+        ("POST", "/auth/tokens"),
+    ),
+)
+def test_all_scope_keeps_auth_paths_fail_closed(
+    method: str,
+    path: str,
+    read_only: bool,
+) -> None:
+    assert not service_principal_can_access(
+        method,
+        path,
+        read_only=read_only,
+        role=Role.ADMIN,
+        scope=PAT_SCOPE_ALL,
+    )
+
+
 def test_batch_run_due_scope_allows_only_the_run_due_post():
     # The scheduler scope must not permit anything except triggering the run —
     # not reads, not other writes, not /auth — regardless of read_only.
@@ -222,6 +302,13 @@ def test_batch_run_due_scope_allows_only_the_run_due_post():
         "GET", "/batches/runs", read_only=True, role=Role.ADMIN, scope=PAT_SCOPE_BATCH_RUN_DUE
     )
     assert not service_principal_can_access(
+        "POST",
+        "/external-artifacts/resolve",
+        read_only=True,
+        role=Role.ADMIN,
+        scope=PAT_SCOPE_BATCH_RUN_DUE,
+    )
+    assert not service_principal_can_access(
         "POST", "/batches/run-now", read_only=False, role=Role.ADMIN, scope=PAT_SCOPE_BATCH_RUN_DUE
     )
     assert not service_principal_can_access(
@@ -230,6 +317,65 @@ def test_batch_run_due_scope_allows_only_the_run_due_post():
     # Still gated on the admin role the daily review requires.
     assert not service_principal_can_access(
         "POST", "/batches/run-due", read_only=True, role=Role.EDITOR, scope=PAT_SCOPE_BATCH_RUN_DUE
+    )
+
+
+@pytest.mark.parametrize(
+    ("method", "path", "read_only"),
+    (
+        ("GET", "/projects", True),
+        ("POST", "/batches/run-due", True),
+        ("POST", "/external-artifacts/resolve", True),
+        ("POST", "/projects", False),
+    ),
+)
+def test_unknown_service_principal_scopes_fail_closed_before_every_allowance(
+    method: str,
+    path: str,
+    read_only: bool,
+) -> None:
+    assert not service_principal_can_access(
+        method,
+        path,
+        read_only=read_only,
+        role=Role.ADMIN,
+        scope="future_semantic_read",
+    )
+
+
+@pytest.mark.parametrize(
+    ("method", "path", "read_only"),
+    (
+        ("GET", "/projects", True),
+        ("POST", "/batches/run-due", True),
+        ("POST", "/external-artifacts/resolve", True),
+        ("POST", "/projects", False),
+    ),
+)
+def test_registered_but_unhandled_future_scopes_remain_fail_closed(
+    method: str,
+    path: str,
+    read_only: bool,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    future_scope = "future_semantic_read"
+    monkeypatch.setattr(
+        "lab_tracker.auth.PAT_SCOPES",
+        frozenset(
+            {
+                PAT_SCOPE_ALL,
+                PAT_SCOPE_BATCH_RUN_DUE,
+                future_scope,
+            }
+        ),
+    )
+
+    assert not service_principal_can_access(
+        method,
+        path,
+        read_only=read_only,
+        role=Role.ADMIN,
+        scope=future_scope,
     )
 
 

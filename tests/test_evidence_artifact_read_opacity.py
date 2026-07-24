@@ -834,9 +834,10 @@ def test_all_fifteen_reads_and_three_resolver_modes_still_require_authentication
 
 def _issue_token(
     client: TestClient,
-    admin_auth_headers: dict[str, str],
+    issuer_headers: dict[str, str],
     *,
     label: str,
+    role: str = "admin",
     read_only: bool,
     scope: str,
 ) -> dict[str, str]:
@@ -844,12 +845,12 @@ def _issue_token(
         "/auth/tokens",
         json={
             "label": label,
-            "role": "admin",
+            "role": role,
             "read_only": read_only,
             "scope": scope,
             "expires_at": (utc_now() + timedelta(days=1)).isoformat(),
         },
-        headers=admin_auth_headers,
+        headers=issuer_headers,
     )
     assert response.status_code == 201, response.text
     return {"Authorization": f"Bearer {response.json()['data']['secret']}"}
@@ -910,16 +911,133 @@ def test_invalid_credentials_and_capability_tokens_keep_transport_semantics(
         f"/datasets/{evidence_artifact_records.dataset_id}",
         headers=read_only_headers,
     )
-    forbidden_post_read = client.post(
+    allowed_post_read = client.post(
         "/external-artifacts/resolve",
         json=_resolver_payload(resolver_case),
         headers=read_only_headers,
     )
     assert allowed_get.status_code == 200, allowed_get.text
-    # POST-based read-only resolution is deliberately retained for the
-    # dedicated capability-policy follow-up; this bead must not widen LPATs.
-    assert forbidden_post_read.status_code == 403, forbidden_post_read.text
-    assert forbidden_post_read.json()["error"]["code"] == "service_forbidden"
+    assert allowed_post_read.status_code == 200, allowed_post_read.text
+
+
+def test_read_only_viewer_lpat_preserves_opaque_project_authorization(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+    scoped_project_member,
+    evidence_artifact_records: EvidenceArtifactRecords,
+) -> None:
+    records = evidence_artifact_records
+    resolver_case = _resolver_cases(records)[0]
+    read_only_viewer_headers = _issue_token(
+        client,
+        scoped_project_member.member_headers,
+        label="Scoped read-only resolver",
+        role="viewer",
+        read_only=True,
+        scope="all",
+    )
+
+    hidden_payloads = (
+        _resolver_payload(resolver_case),
+        _resolver_payload(resolver_case, artifact_index=99),
+        _resolver_payload(
+            resolver_case,
+            content_hash=_sha256(b"wrong"),
+        ),
+        _resolver_payload(
+            resolver_case,
+            entity_id=resolver_case.missing_id,
+        ),
+    )
+    hidden_responses = [
+        client.post(
+            "/external-artifacts/resolve",
+            json=payload,
+            headers=read_only_viewer_headers,
+        )
+        for payload in hidden_payloads
+    ]
+    for response in hidden_responses:
+        assert response.status_code == 404, response.text
+        assert response.json() == _not_found_body("Dataset")
+
+    membership = client.post(
+        f"/projects/{records.project_id}/members",
+        json={
+            "user_id": scoped_project_member.member_user_id,
+            "role": "viewer",
+        },
+        headers=admin_auth_headers,
+    )
+    assert membership.status_code == 201, membership.text
+
+    authorized = client.post(
+        "/external-artifacts/resolve",
+        json=_resolver_payload(resolver_case),
+        headers=read_only_viewer_headers,
+    )
+    assert authorized.status_code == 200, authorized.text
+    body = authorized.json()["data"]
+    assert body["status"] == "verified"
+    assert body["entity_type"] == "dataset"
+    assert body["entity_id"] == records.dataset_id
+    assert body["observed_hash"] == records.artifact_hash
+    assert base64.b64decode(body["content_base64"]) == records.artifact_content
+
+    write_viewer_headers = _issue_token(
+        client,
+        scoped_project_member.member_headers,
+        label="Scoped write-enabled viewer",
+        role="viewer",
+        read_only=False,
+        scope="all",
+    )
+    forbidden = client.post(
+        "/external-artifacts/resolve",
+        json=_resolver_payload(resolver_case),
+        headers=write_viewer_headers,
+    )
+    assert forbidden.status_code == 403, forbidden.text
+    assert forbidden.json()["error"]["code"] == "service_forbidden"
+
+
+@pytest.mark.parametrize("role", ("editor", "admin"))
+def test_read_write_editor_and_admin_lpats_keep_resolver_access(
+    role: str,
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+    evidence_artifact_records: EvidenceArtifactRecords,
+) -> None:
+    resolver_case = _resolver_cases(evidence_artifact_records)[0]
+    current_user = client.get("/auth/me", headers=admin_auth_headers)
+    assert current_user.status_code == 200, current_user.text
+    membership = client.post(
+        f"/projects/{evidence_artifact_records.project_id}/members",
+        json={
+            "user_id": current_user.json()["data"]["user_id"],
+            "role": "contributor",
+        },
+        headers=admin_auth_headers,
+    )
+    assert membership.status_code == 201, membership.text
+
+    headers = _issue_token(
+        client,
+        admin_auth_headers,
+        label=f"Read-write {role} resolver",
+        role=role,
+        read_only=False,
+        scope="all",
+    )
+
+    response = client.post(
+        "/external-artifacts/resolve",
+        json=_resolver_payload(resolver_case),
+        headers=headers,
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["data"]["status"] == "verified"
 
 
 def test_group_read_all_inheritance_authorizes_every_frozen_read_mode(
