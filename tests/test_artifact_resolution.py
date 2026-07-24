@@ -5,6 +5,11 @@ from uuid import uuid4
 
 import httpx
 import pytest
+from http_security_fakes import (
+    FakeAddressResolver,
+    FakeHttpResponse,
+    FakeSafeHttpClient,
+)
 
 from lab_tracker.artifact_resolution import (
     DEFAULT_MAX_BYTES,
@@ -23,11 +28,17 @@ from lab_tracker.artifact_resolution import (
     check_store_health,
     default_registry,
     is_verifiable_hash,
+    outbound_http_policy_from_env,
     parse_content_hash,
     registry_from_env,
     store_relative_reference,
 )
 from lab_tracker.models import DataStore, ExternalArtifactReference, StoreKind
+from lab_tracker.outbound_http import (
+    ApprovedSocketAddress,
+    OutboundHttpPolicy,
+    OutboundHttpTransportError,
+)
 
 
 def _sha256(data: bytes) -> str:
@@ -227,6 +238,8 @@ def test_local_resolver_can_resolve_by_source_system_and_scheme(tmp_path):
 
 # --- HttpResolver ---------------------------------------------------------
 
+_PUBLIC_HTTP_IP = "93.184.216.34"
+
 
 def _http_ref(
     url: str, content_hash: str, *, source_system: str = "http"
@@ -236,19 +249,32 @@ def _http_ref(
     )
 
 
-def _mock_http_client(
-    *, body: bytes = b"", status: int = 200, content_type: str = "application/octet-stream"
-) -> httpx.Client:
-    def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(status, content=body, headers={"content-type": content_type})
-
-    return httpx.Client(transport=httpx.MockTransport(handler))
+def _safe_http_resolver(
+    *outcomes: FakeHttpResponse | BaseException,
+    dns: FakeAddressResolver | None = None,
+    max_fetch_bytes: int = 64 * 1024 * 1024,
+    max_redirects: int = 3,
+) -> tuple[HttpResolver, FakeSafeHttpClient, FakeAddressResolver]:
+    address_resolver = dns or FakeAddressResolver(
+        {"store.example": [_PUBLIC_HTTP_IP]}
+    )
+    client = FakeSafeHttpClient(outcomes)
+    resolver = HttpResolver(
+        policy=OutboundHttpPolicy(address_resolver=address_resolver),
+        client=client,
+        max_fetch_bytes=max_fetch_bytes,
+        max_redirects=max_redirects,
+    )
+    return resolver, client, address_resolver
 
 
 def test_http_resolver_verifies_matching_body():
     body = b"flow cytometry export"
-    client = _mock_http_client(body=body, content_type="text/csv; charset=utf-8")
-    resolver = HttpResolver(client=client)
+    response = FakeHttpResponse(
+        headers={"content-type": "text/csv; charset=utf-8"},
+        chunks=(body,),
+    )
+    resolver, client, dns = _safe_http_resolver(response)
 
     result = resolver.resolve(_http_ref("https://store.example/sample.csv", _sha256(body)))
 
@@ -256,19 +282,29 @@ def test_http_resolver_verifies_matching_body():
     assert result.content == body
     assert result.size_bytes == len(body)
     assert result.content_type == "text/csv"
+    assert response.closed is True
+    assert dns.calls == [("store.example", 443)]
+    assert client.calls[0][0] == "GET"
+    assert client.calls[0][1].addresses == (
+        ApprovedSocketAddress.from_ip(_PUBLIC_HTTP_IP, 443),
+    )
 
 
 def test_http_resolver_reports_drift_on_mismatch():
-    resolver = HttpResolver(client=_mock_http_client(body=b"actual bytes"))
+    resolver, _, _ = _safe_http_resolver(
+        FakeHttpResponse(chunks=(b"actual bytes",))
+    )
 
     result = resolver.resolve(_http_ref("https://store.example/x", _sha256(b"recorded bytes")))
 
     assert result.status is ResolutionStatus.DRIFTED
     assert result.observed_hash == _sha256(b"actual bytes")
+    # Drifted-content suppression is tracked separately by n5kp.43.
+    assert result.content == b"actual bytes"
 
 
 def test_http_resolver_http_error_status_is_unresolved():
-    resolver = HttpResolver(client=_mock_http_client(body=b"", status=404))
+    resolver, _, _ = _safe_http_resolver(FakeHttpResponse(status_code=404))
 
     result = resolver.resolve(_http_ref("https://store.example/missing", _sha256(b"x")))
 
@@ -278,18 +314,43 @@ def test_http_resolver_http_error_status_is_unresolved():
 
 def test_http_resolver_refuses_oversized_fetch():
     body = b"0123456789" * 10  # 100 bytes
-    resolver = HttpResolver(client=_mock_http_client(body=body), max_fetch_bytes=16)
+    response = FakeHttpResponse(chunks=(body[:10], body[10:]))
+    resolver, _, _ = _safe_http_resolver(
+        response,
+        max_fetch_bytes=16,
+    )
 
     result = resolver.resolve(_http_ref("https://store.example/big.bin", _sha256(body)))
 
     assert result.status is ResolutionStatus.UNRESOLVED
     assert "limit" in (result.detail or "").lower()
     assert result.content is None
+    assert response.closed is True
+
+
+def test_http_resolver_rejects_declared_oversize_without_reading_body():
+    response = FakeHttpResponse(
+        headers={"content-length": "100"},
+        chunks=(b"body must not be read",),
+    )
+    resolver, _, _ = _safe_http_resolver(
+        response,
+        max_fetch_bytes=16,
+    )
+
+    result = resolver.resolve(
+        _http_ref("https://store.example/big.bin", _sha256(b"x"))
+    )
+
+    assert result.status is ResolutionStatus.UNRESOLVED
+    assert result.content is None
+    assert response.iterated_chunks == 0
+    assert response.closed is True
 
 
 def test_http_resolver_truncates_payload_but_verifies():
     body = b"abcdefghij"
-    resolver = HttpResolver(client=_mock_http_client(body=body))
+    resolver, _, _ = _safe_http_resolver(FakeHttpResponse(chunks=(body,)))
 
     result = resolver.resolve(_http_ref("https://store.example/x", _sha256(body)), max_bytes=4)
 
@@ -299,17 +360,238 @@ def test_http_resolver_truncates_payload_but_verifies():
     assert result.size_bytes == 10
 
 
-def test_http_resolver_connection_error_is_unresolved():
-    def handler(request: httpx.Request) -> httpx.Response:
-        raise httpx.ConnectError("boom", request=request)
-
-    client = httpx.Client(transport=httpx.MockTransport(handler))
-    resolver = HttpResolver(client=client)
+def test_http_resolver_transport_error_is_unresolved_and_redacted():
+    secret = "hunter2"
+    resolver, _, _ = _safe_http_resolver(
+        OutboundHttpTransportError(
+            f"cannot fetch https://user:{secret}@store.example/x?token={secret}"
+        )
+    )
 
     result = resolver.resolve(_http_ref("https://store.example/x", _sha256(b"x")))
 
     assert result.status is ResolutionStatus.UNRESOLVED
     assert "fetch" in (result.detail or "").lower()
+    assert secret not in (result.detail or "")
+    assert "store.example" not in (result.detail or "")
+
+
+def test_http_resolver_read_error_is_unresolved_and_closes_response():
+    secret = "read-secret"
+    response = FakeHttpResponse(
+        chunks=(
+            b"partial",
+            OutboundHttpTransportError(
+                f"socket error at store.example?token={secret}"
+            ),
+        )
+    )
+    resolver, _, _ = _safe_http_resolver(response)
+
+    result = resolver.resolve(
+        _http_ref("https://store.example/x", _sha256(b"x"))
+    )
+
+    assert result.status is ResolutionStatus.UNRESOLVED
+    assert result.content is None
+    assert secret not in (result.detail or "")
+    assert "store.example" not in (result.detail or "")
+    assert response.closed is True
+
+
+def test_http_resolver_credentialed_uri_is_denied_before_open():
+    secret = "hunter2"
+    resolver, client, dns = _safe_http_resolver()
+
+    result = resolver.resolve(
+        _http_ref(
+            f"https://user:{secret}@store.example/x",
+            _sha256(b"x"),
+        )
+    )
+
+    assert result.status is ResolutionStatus.UNRESOLVED
+    assert secret not in (result.detail or "")
+    assert client.calls == []
+    assert dns.calls == []
+    payload = result.to_json_dict()
+    assert payload["uri"] == "http(s)://[redacted]"
+    assert secret not in str(payload)
+
+
+def test_http_resolver_omits_query_credentials_from_verified_display_uri():
+    body = b"authorized signed download"
+    resolver, _, _ = _safe_http_resolver(FakeHttpResponse(chunks=(body,)))
+
+    result = resolver.resolve(
+        _http_ref(
+            "https://store.example/x?signature=hunter2#fragment",
+            _sha256(body),
+        )
+    )
+
+    assert result.status is ResolutionStatus.VERIFIED
+    assert result.to_json_dict()["uri"] == "https://store.example/x"
+
+
+def test_http_resolver_denies_unsafe_literal_without_opening_client():
+    resolver, client, dns = _safe_http_resolver()
+
+    result = resolver.resolve(
+        _http_ref(
+            "http://169.254.169.254/latest/meta-data/",
+            _sha256(b"x"),
+        )
+    )
+
+    assert result.status is ResolutionStatus.UNRESOLVED
+    assert result.content is None
+    assert client.calls == []
+    assert dns.calls == []
+
+
+def test_http_resolver_revalidates_and_pins_each_redirect_hop():
+    first = FakeHttpResponse(
+        status_code=302,
+        headers={"location": "https://archive.example/final.bin"},
+    )
+    body = b"redirected artifact"
+    final = FakeHttpResponse(chunks=(body,))
+    dns = FakeAddressResolver(
+        {
+            "store.example": [_PUBLIC_HTTP_IP],
+            "archive.example": ["142.250.72.14"],
+        }
+    )
+    resolver, client, _ = _safe_http_resolver(first, final, dns=dns)
+
+    result = resolver.resolve(
+        _http_ref("https://store.example/start", _sha256(body))
+    )
+
+    assert result.status is ResolutionStatus.VERIFIED
+    assert result.content == body
+    assert dns.calls == [
+        ("store.example", 443),
+        ("archive.example", 443),
+    ]
+    assert [target.hostname for _, target in client.calls] == [
+        "store.example",
+        "archive.example",
+    ]
+    assert client.calls[1][1].addresses == (
+        ApprovedSocketAddress.from_ip("142.250.72.14", 443),
+    )
+
+
+def test_http_resolver_unsafe_redirect_never_reaches_second_target():
+    redirect = FakeHttpResponse(
+        status_code=302,
+        headers={
+            "location": "http://169.254.169.254/latest/meta-data/",
+        },
+    )
+    resolver, client, dns = _safe_http_resolver(redirect)
+
+    result = resolver.resolve(
+        _http_ref("https://store.example/start", _sha256(b"x"))
+    )
+
+    assert result.status is ResolutionStatus.UNRESOLVED
+    assert len(client.calls) == 1
+    assert dns.calls == [("store.example", 443)]
+
+
+@pytest.mark.parametrize(
+    "location",
+    (
+        "http://archive.example/final.bin",
+        "https://user:secret@archive.example/final.bin",
+    ),
+)
+def test_http_resolver_rejects_downgrade_and_credentialed_redirects_before_open(
+    location: str,
+):
+    redirect = FakeHttpResponse(
+        status_code=302,
+        headers={"location": location},
+    )
+    dns = FakeAddressResolver(
+        {
+            "store.example": [_PUBLIC_HTTP_IP],
+            "archive.example": ["142.250.72.14"],
+        }
+    )
+    resolver, client, _ = _safe_http_resolver(redirect, dns=dns)
+
+    result = resolver.resolve(
+        _http_ref("https://store.example/start", _sha256(b"x"))
+    )
+
+    assert result.status is ResolutionStatus.UNRESOLVED
+    assert len(client.calls) == 1
+    assert dns.calls == [("store.example", 443)]
+
+
+def test_http_resolver_malformed_redirect_is_redacted_unresolved():
+    redirect = FakeHttpResponse(
+        status_code=302,
+        headers={"location": "http://[::1"},
+    )
+    resolver, client, dns = _safe_http_resolver(redirect)
+
+    result = resolver.resolve(
+        _http_ref("https://store.example/start", _sha256(b"x"))
+    )
+
+    assert result.status is ResolutionStatus.UNRESOLVED
+    assert result.content is None
+    assert result.detail == "HTTP artifact fetch failed or was denied."
+    assert redirect.closed is True
+    assert len(client.calls) == 1
+    assert dns.calls == [("store.example", 443)]
+
+
+def test_http_resolver_redirect_rebinding_is_denied_before_second_open():
+    redirect = FakeHttpResponse(status_code=302, headers={"location": "/next"})
+    dns = FakeAddressResolver(
+        sequences={
+            "store.example": (
+                (_PUBLIC_HTTP_IP,),
+                ("127.0.0.1",),
+            )
+        }
+    )
+    resolver, client, _ = _safe_http_resolver(redirect, dns=dns)
+
+    result = resolver.resolve(
+        _http_ref("https://store.example/start", _sha256(b"x"))
+    )
+
+    assert result.status is ResolutionStatus.UNRESOLVED
+    assert len(client.calls) == 1
+    assert dns.calls == [
+        ("store.example", 443),
+        ("store.example", 443),
+    ]
+
+
+def test_http_resolver_enforces_finite_redirect_limit():
+    resolver, client, _ = _safe_http_resolver(
+        FakeHttpResponse(
+            status_code=302,
+            headers={"location": "https://archive.example/next"},
+        ),
+        max_redirects=0,
+    )
+
+    result = resolver.resolve(
+        _http_ref("https://store.example/start", _sha256(b"x"))
+    )
+
+    assert result.status is ResolutionStatus.UNRESOLVED
+    assert "redirect" in (result.detail or "").lower()
+    assert len(client.calls) == 1
 
 
 def test_http_resolver_can_resolve_only_http_schemes():
@@ -326,16 +608,75 @@ def test_http_resolver_can_resolve_only_http_schemes():
     )
 
 
-def test_default_registry_dispatches_http(monkeypatch):
-    body = b"served over http"
-    # default_registry's HttpResolver creates its own client; patch it to a mock.
-    import lab_tracker.artifact_resolution as ar
+def test_http_resolver_treats_malformed_legacy_reference_as_unresolved():
+    resolver = HttpResolver()
+    ref = _http_ref("https://[::1", _sha256(b"x"))
 
-    registry = ar.ResolverRegistry(
-        [ar.HttpResolver(client=_mock_http_client(body=body))]
+    assert resolver.can_resolve(ref) is True
+
+    result = resolver.resolve(ref)
+
+    assert result.status is ResolutionStatus.UNRESOLVED
+    assert result.content is None
+    assert result.to_json_dict()["uri"] == "http(s)://[redacted]"
+    assert result.detail == "HTTP artifact fetch failed or was denied."
+
+
+def test_malformed_legacy_http_uri_is_redacted_despite_mismatched_source_label():
+    secret = "hunter2"
+    ref = ExternalArtifactReference(
+        source_system="anything",
+        uri=f"HTTP://user:{secret}@[::1",
+        content_hash=_sha256(b"x"),
+    )
+
+    result = ResolverRegistry().resolve(ref)
+    payload = result.to_json_dict()
+
+    assert result.status is ResolutionStatus.UNRESOLVED
+    assert payload["uri"] == "http(s)://[redacted]"
+    assert secret not in str(payload)
+
+
+def test_default_registry_dispatches_http():
+    body = b"served over http"
+    client = FakeSafeHttpClient((FakeHttpResponse(chunks=(body,)),))
+    policy = OutboundHttpPolicy(
+        address_resolver=FakeAddressResolver(
+            {"store.example": [_PUBLIC_HTTP_IP]}
+        )
+    )
+    registry = default_registry(
+        http_policy=policy,
+        http_client=client,
     )
     result = registry.resolve(_http_ref("https://store.example/x", _sha256(body)))
     assert result.status is ResolutionStatus.VERIFIED
+
+
+def test_http_resolver_resolves_explicitly_approved_internal_destination():
+    body = b"internal instrument export"
+    dns = FakeAddressResolver({"instrument.lab.example": ["10.20.1.7"]})
+    policy = OutboundHttpPolicy(
+        address_resolver=dns,
+        allowed_authorities=("https://instrument.lab.example",),
+        allowed_networks=("10.20.0.0/16",),
+    )
+    client = FakeSafeHttpClient((FakeHttpResponse(chunks=(body,)),))
+    resolver = HttpResolver(policy=policy, client=client)
+
+    result = resolver.resolve(
+        _http_ref(
+            "https://instrument.lab.example/export.bin",
+            _sha256(body),
+        )
+    )
+
+    assert result.status is ResolutionStatus.VERIFIED
+    assert result.content == body
+    assert client.calls[0][1].addresses == (
+        ApprovedSocketAddress.from_ip("10.20.1.7", 443),
+    )
 
 
 # --- RcloneResolver -------------------------------------------------------
@@ -929,6 +1270,59 @@ def test_registry_from_env_recovery_off_by_default(tmp_path, monkeypatch):
     result = registry_from_env().resolve(_local_ref(missing, _sha256(data)))
 
     assert result.status is ResolutionStatus.UNRESOLVED
+
+
+def test_outbound_http_policy_from_env_requires_complete_internal_override(
+    monkeypatch,
+):
+    monkeypatch.setenv(
+        "LAB_TRACKER_RESOLVER_HTTP_ALLOWED_AUTHORITIES",
+        "http://10.20.1.7",
+    )
+    monkeypatch.delenv(
+        "LAB_TRACKER_RESOLVER_HTTP_ALLOWED_NETWORKS",
+        raising=False,
+    )
+
+    with pytest.raises(ValueError, match="both exact authorities and networks"):
+        outbound_http_policy_from_env()
+
+
+def test_outbound_http_policy_from_env_allows_exact_internal_literal(
+    monkeypatch,
+):
+    monkeypatch.setenv(
+        "LAB_TRACKER_RESOLVER_HTTP_ALLOWED_AUTHORITIES",
+        "http://10.20.1.7",
+    )
+    monkeypatch.setenv(
+        "LAB_TRACKER_RESOLVER_HTTP_ALLOWED_NETWORKS",
+        "10.20.0.0/16",
+    )
+
+    target = outbound_http_policy_from_env().authorize(
+        "http://10.20.1.7/artifact.bin"
+    )
+
+    assert target.addresses == (
+        ApprovedSocketAddress.from_ip("10.20.1.7", 80),
+    )
+
+
+def test_outbound_http_policy_from_env_rejects_empty_list_entries(
+    monkeypatch,
+):
+    monkeypatch.setenv(
+        "LAB_TRACKER_RESOLVER_HTTP_ALLOWED_AUTHORITIES",
+        "http://10.20.1.7,",
+    )
+    monkeypatch.setenv(
+        "LAB_TRACKER_RESOLVER_HTTP_ALLOWED_NETWORKS",
+        "10.20.0.0/16",
+    )
+
+    with pytest.raises(ValueError, match="contains an empty entry"):
+        outbound_http_policy_from_env()
 
 
 # --- GitResolver ----------------------------------------------------------

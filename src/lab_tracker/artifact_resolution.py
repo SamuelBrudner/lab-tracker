@@ -39,9 +39,16 @@ from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
-from urllib.parse import unquote, urlsplit
+from urllib.parse import unquote, urljoin, urlsplit
 
 from lab_tracker.models import DataStore, ExternalArtifactReference, StoreKind
+from lab_tracker.outbound_http import (
+    OutboundHttpClient,
+    OutboundHttpPolicy,
+    OutboundHttpPolicyError,
+    OutboundHttpTransportError,
+    SafeHttpClient,
+)
 
 # Default cap on the bytes returned inline to a caller. Bounds payload size, not
 # verification: the full artifact is always hashed regardless of this cap.
@@ -61,6 +68,7 @@ _HTTP_SCHEMES = frozenset({"http", "https"})
 # be hashed to certify it, so an artifact larger than this is refused
 # (UNRESOLVED) rather than returned uncertified.
 DEFAULT_MAX_FETCH_BYTES = 64 * 1024 * 1024
+DEFAULT_MAX_HTTP_REDIRECTS = 3
 
 # Protocols the git resolver's subprocess is allowed to use. Restricting this
 # blocks `file://` (local reads) and `ext::`/`fd::` (arbitrary command execution)
@@ -75,6 +83,13 @@ _STREAM_CHUNK_SIZE = 1024 * 1024
 # bounded — see :class:`RecoveryPolicy` and :class:`LocalFilesystemResolver`.
 DEFAULT_RECOVERY_MAX_FILES = 4096
 DEFAULT_RECOVERY_MAX_BYTES = 512 * 1024 * 1024
+
+
+def _uri_scheme(uri: str) -> str:
+    try:
+        return urlsplit(uri).scheme.lower()
+    except ValueError:
+        return ""
 
 
 @dataclass(frozen=True)
@@ -137,7 +152,7 @@ class ResolvedArtifact:
         return {
             "status": self.status.value,
             "source_system": self.source_system,
-            "uri": self.uri,
+            "uri": _resolution_display_uri(self),
             "expected_hash": self.expected_hash,
             "observed_hash": self.observed_hash,
             "content_type": self.content_type,
@@ -147,6 +162,30 @@ class ResolvedArtifact:
             "fetched_at": self.fetched_at.isoformat(),
             "detail": self.detail,
         }
+
+
+def _resolution_display_uri(result: ResolvedArtifact) -> str:
+    scheme = _uri_scheme(result.uri)
+    is_http = (
+        scheme in _HTTP_SCHEMES
+        or result.source_system.strip().lower() in _HTTP_SCHEMES
+        or result.uri.lstrip().lower().startswith(("http:", "https:"))
+    )
+    if not is_http:
+        return result.uri
+    if result.status is ResolutionStatus.UNRESOLVED:
+        return "http(s)://[redacted]"
+    try:
+        parsed = urlsplit(result.uri)
+        hostname = parsed.hostname
+        if not hostname:
+            raise ValueError
+        port = parsed.port
+    except ValueError:
+        return "http(s)://[redacted]"
+    host = f"[{hostname}]" if ":" in hostname else hostname
+    authority = f"{host}:{port}" if port is not None else host
+    return f"{parsed.scheme.lower()}://{authority}{parsed.path or '/'}"
 
 
 def _now() -> datetime:
@@ -446,7 +485,7 @@ class LocalFilesystemResolver(ArtifactResolver):
     def can_resolve(self, ref: ExternalArtifactReference) -> bool:
         if ref.source_system.strip().lower() in _LOCAL_SOURCE_SYSTEMS:
             return True
-        return urlsplit(ref.uri).scheme.lower() == "file"
+        return _uri_scheme(ref.uri) == "file"
 
     def resolve(
         self,
@@ -504,7 +543,10 @@ class LocalFilesystemResolver(ArtifactResolver):
         )
 
     def _local_path(self, uri: str) -> str | None:
-        parsed = urlsplit(uri)
+        try:
+            parsed = urlsplit(uri)
+        except ValueError:
+            return None
         scheme = parsed.scheme.lower()
         if scheme == "file":
             # file:///abs/path -> /abs/path ; tolerate a localhost netloc.
@@ -614,23 +656,33 @@ class HttpResolver(ArtifactResolver):
 
     Streams the full body through the hasher to verify it, capping the fetch at
     ``max_fetch_bytes``; an artifact larger than that is refused as UNRESOLVED
-    rather than returned uncertified. A custom ``client`` may be injected (e.g.
-    for tests); otherwise a short-lived client is created per call.
+    rather than returned uncertified. Every destination is authorized before
+    the request and the client connects only to the policy's vetted numeric
+    addresses. Redirects are followed manually, with the complete policy
+    reapplied to every hop.
     """
 
     def __init__(
         self,
         *,
-        client: object | None = None,
+        policy: OutboundHttpPolicy | None = None,
+        client: OutboundHttpClient | None = None,
         timeout: float = 30.0,
         max_fetch_bytes: int = DEFAULT_MAX_FETCH_BYTES,
+        max_redirects: int = DEFAULT_MAX_HTTP_REDIRECTS,
     ) -> None:
-        self._client = client
-        self._timeout = timeout
+        if max_redirects < 0:
+            raise ValueError("max_redirects must be non-negative.")
+        self._policy = policy or OutboundHttpPolicy()
+        self._client = client or SafeHttpClient(timeout=timeout)
         self._max_fetch_bytes = max_fetch_bytes
+        self._max_redirects = max_redirects
 
     def can_resolve(self, ref: ExternalArtifactReference) -> bool:
-        return urlsplit(ref.uri).scheme.lower() in _HTTP_SCHEMES
+        scheme = _uri_scheme(ref.uri)
+        return scheme in _HTTP_SCHEMES or (
+            not scheme and ref.source_system.lower() in _HTTP_SCHEMES
+        )
 
     def resolve(
         self,
@@ -651,43 +703,87 @@ class HttpResolver(ArtifactResolver):
                 detail=f"Cannot verify content hash with algorithm '{algorithm}'.",
             )
 
-        import httpx
-
         algorithm, _ = parse_content_hash(ref.content_hash)
-        owns_client = self._client is None
-        client = self._client or httpx.Client(timeout=self._timeout)
-        try:
-            with client.stream("GET", ref.uri) as response:
-                if response.status_code >= 400:
-                    return _unresolved(
-                        ref, detail=f"HTTP {response.status_code} fetching artifact."
-                    )
-                content, total, truncated, observed = _hash_and_collect(
-                    response.iter_bytes(),
-                    algorithm=algorithm,
-                    max_bytes=max_bytes,
-                    window=window,
-                    max_total=self._max_fetch_bytes,
+        current_url = ref.uri
+        seen_targets: set[str] = set()
+        for redirect_count in range(self._max_redirects + 1):
+            try:
+                target = self._policy.authorize(current_url)
+            except OutboundHttpPolicyError:
+                return _unresolved(
+                    ref, detail="HTTP artifact fetch failed or was denied."
                 )
-                content_type = response.headers.get("content-type")
-        except _FetchTooLarge as exc:
-            return _unresolved(ref, detail=str(exc))
-        except httpx.HTTPError as exc:
-            return _unresolved(ref, detail=f"Failed to fetch artifact: {exc}")
-        finally:
-            if owns_client:
-                client.close()
+            if target.absolute_url in seen_targets:
+                return _unresolved(ref, detail="HTTP redirect loop was refused.")
+            seen_targets.add(target.absolute_url)
 
-        if content_type:
-            content_type = content_type.split(";", 1)[0].strip()
-        return _build_resolved(
-            ref,
-            observed=observed,
-            content=content,
-            total=total,
-            truncated=truncated,
-            content_type=content_type or "application/octet-stream",
-        )
+            try:
+                with self._client.open("GET", target) as response:
+                    if response.status_code in {301, 302, 303, 307, 308}:
+                        location = response.get_header("location")
+                        if not location or redirect_count >= self._max_redirects:
+                            return _unresolved(
+                                ref, detail="HTTP redirect limit was exceeded."
+                            )
+                        try:
+                            next_url = urljoin(target.absolute_url, location)
+                            next_scheme = urlsplit(next_url).scheme.lower()
+                        except ValueError:
+                            return _unresolved(
+                                ref,
+                                detail="HTTP artifact fetch failed or was denied.",
+                            )
+                        if target.scheme == "https" and next_scheme == "http":
+                            return _unresolved(
+                                ref,
+                                detail="HTTP artifact fetch failed or was denied.",
+                            )
+                        current_url = next_url
+                        continue
+                    if not 200 <= response.status_code < 300:
+                        return _unresolved(
+                            ref,
+                            detail=(
+                                f"HTTP {response.status_code} fetching artifact."
+                            ),
+                        )
+                    declared_size = _http_content_length(
+                        response.get_header("content-length")
+                    )
+                    if (
+                        declared_size is not None
+                        and declared_size > self._max_fetch_bytes
+                    ):
+                        return _unresolved(
+                            ref,
+                            detail=str(_FetchTooLarge(self._max_fetch_bytes)),
+                        )
+                    content, total, truncated, observed = _hash_and_collect(
+                        response.iter_bytes(),
+                        algorithm=algorithm,
+                        max_bytes=max_bytes,
+                        window=window,
+                        max_total=self._max_fetch_bytes,
+                    )
+                    content_type = response.get_header("content-type")
+            except _FetchTooLarge as exc:
+                return _unresolved(ref, detail=str(exc))
+            except OutboundHttpTransportError:
+                return _unresolved(
+                    ref, detail="HTTP artifact fetch failed or was denied."
+                )
+
+            if content_type:
+                content_type = content_type.split(";", 1)[0].strip()
+            return _build_resolved(
+                ref,
+                observed=observed,
+                content=content,
+                total=total,
+                truncated=truncated,
+                content_type=content_type or "application/octet-stream",
+            )
+        return _unresolved(ref, detail="HTTP redirect limit was exceeded.")
 
 
 @dataclass(frozen=True)
@@ -758,7 +854,7 @@ class RcloneResolver(ArtifactResolver):
         self._max_fetch_bytes = max_fetch_bytes
 
     def can_resolve(self, ref: ExternalArtifactReference) -> bool:
-        return urlsplit(ref.uri).scheme.lower() == "rclone"
+        return _uri_scheme(ref.uri) == "rclone"
 
     def _remote_allowed(self, remote: str) -> bool:
         if self._allowed_remotes is None:
@@ -841,7 +937,10 @@ class RcloneResolver(ArtifactResolver):
         return size if isinstance(size, int) and size >= 0 else None
 
     def _rclone_target(self, uri: str) -> str | None:
-        parsed = urlsplit(uri)
+        try:
+            parsed = urlsplit(uri)
+        except ValueError:
+            return None
         if parsed.scheme.lower() != "rclone" or not parsed.netloc:
             return None
         path = unquote(parsed.path).lstrip("/")
@@ -1128,6 +1227,20 @@ class _FetchTooLarge(Exception):
         self.limit = limit
 
 
+def _http_content_length(value: str | None) -> int | None:
+    if value is None:
+        return None
+    try:
+        parsed = int(value)
+    except ValueError:
+        raise OutboundHttpTransportError(
+            "Outbound HTTP request failed."
+        ) from None
+    if parsed < 0:
+        raise OutboundHttpTransportError("Outbound HTTP request failed.")
+    return parsed
+
+
 def _hash_and_collect(
     chunks: Iterable[bytes],
     *,
@@ -1213,6 +1326,8 @@ def default_registry(
     *,
     allowed_roots: Sequence[str | Path] | None = None,
     recovery: RecoveryPolicy | None = None,
+    http_policy: OutboundHttpPolicy | None = None,
+    http_client: OutboundHttpClient | None = None,
     rclone_allowed_remotes: Sequence[str] | None = None,
     git_allowed_remotes: Sequence[str] | None = None,
     git_cache_root: str | Path | None = None,
@@ -1224,14 +1339,16 @@ def default_registry(
     adapters degrade to UNRESOLVED when their binary is absent, so including them
     is safe by default. Native store-backed adapters (s3, ssh, database) register
     here as they land. ``recovery`` opts the local resolver into content-hash
-    recovery of missing files within ``allowed_roots``. ``git_allowed_remotes``
-    (``None`` = unrestricted) gates which remotes the git resolver may fetch.
+    recovery of missing files within ``allowed_roots``. ``http_policy`` is the
+    shared outbound destination policy later reused by store-health probes.
+    ``git_allowed_remotes`` (``None`` = unrestricted) gates which remotes the
+    git resolver may fetch.
     """
 
     return ResolverRegistry(
         [
             LocalFilesystemResolver(allowed_roots=allowed_roots, recovery=recovery),
-            HttpResolver(),
+            HttpResolver(policy=http_policy, client=http_client),
             RcloneResolver(allowed_remotes=rclone_allowed_remotes),
             GitResolver(
                 allowed_remotes=git_allowed_remotes,
@@ -1244,8 +1361,8 @@ def default_registry(
 
 # os.pathsep-separated list of directories the local resolver may read. When
 # unset, the local resolver is restricted to *no* roots, so filesystem artifacts
-# resolve as UNRESOLVED until an operator opts specific roots in. HTTP(S)
-# resolution is unaffected.
+# resolve as UNRESOLVED until an operator opts specific roots in. HTTP(S) uses
+# the separate public-destination policy and conjunctive internal exceptions.
 LAB_TRACKER_RESOLVER_ALLOWED_ROOTS_ENV = "LAB_TRACKER_RESOLVER_ALLOWED_ROOTS"
 
 # Opt-in flag for content-hash recovery of missing local artifacts (off unless
@@ -1254,6 +1371,18 @@ LAB_TRACKER_RESOLVER_ALLOWED_ROOTS_ENV = "LAB_TRACKER_RESOLVER_ALLOWED_ROOTS"
 LAB_TRACKER_RESOLVER_RECOVERY_ENV = "LAB_TRACKER_RESOLVER_RECOVERY"
 LAB_TRACKER_RESOLVER_RECOVERY_MAX_FILES_ENV = "LAB_TRACKER_RESOLVER_RECOVERY_MAX_FILES"
 LAB_TRACKER_RESOLVER_RECOVERY_MAX_BYTES_ENV = "LAB_TRACKER_RESOLVER_RECOVERY_MAX_BYTES"
+
+# Comma-separated exact HTTP(S) origins and IP networks for internal artifact
+# destinations. Both variables are required for an exception: the normalized
+# scheme/host/effective-port origin must match exactly and every DNS answer must
+# fall inside one configured CIDR. Without an exception, every answer must be a
+# globally routable public address.
+LAB_TRACKER_RESOLVER_HTTP_ALLOWED_AUTHORITIES_ENV = (
+    "LAB_TRACKER_RESOLVER_HTTP_ALLOWED_AUTHORITIES"
+)
+LAB_TRACKER_RESOLVER_HTTP_ALLOWED_NETWORKS_ENV = (
+    "LAB_TRACKER_RESOLVER_HTTP_ALLOWED_NETWORKS"
+)
 
 # Comma-separated allowlist of rclone remote NAMES the rclone resolver may read.
 # When unset, registry_from_env denies all rclone remotes (references resolve
@@ -1302,7 +1431,54 @@ def recovery_from_env() -> RecoveryPolicy:
     )
 
 
-def registry_from_env() -> ResolverRegistry:
+def outbound_http_policy_from_env() -> OutboundHttpPolicy:
+    """Build and validate the outbound HTTP policy from environment variables."""
+
+    return outbound_http_policy_from_config(
+        allowed_authorities=os.environ.get(
+            LAB_TRACKER_RESOLVER_HTTP_ALLOWED_AUTHORITIES_ENV
+        ),
+        allowed_networks=os.environ.get(
+            LAB_TRACKER_RESOLVER_HTTP_ALLOWED_NETWORKS_ENV
+        ),
+    )
+
+
+def outbound_http_policy_from_config(
+    *,
+    allowed_authorities: str | None,
+    allowed_networks: str | None,
+) -> OutboundHttpPolicy:
+    """Build and validate a policy from the application's loaded settings."""
+
+    authorities = _strict_comma_separated_values(
+        allowed_authorities,
+        variable=LAB_TRACKER_RESOLVER_HTTP_ALLOWED_AUTHORITIES_ENV,
+    )
+    networks = _strict_comma_separated_values(
+        allowed_networks,
+        variable=LAB_TRACKER_RESOLVER_HTTP_ALLOWED_NETWORKS_ENV,
+    )
+    return OutboundHttpPolicy(
+        allowed_authorities=authorities,
+        allowed_networks=networks,
+    )
+
+
+def _strict_comma_separated_values(
+    raw: str | None, *, variable: str
+) -> list[str]:
+    if raw is None or not raw.strip():
+        return []
+    values = [part.strip() for part in raw.split(",")]
+    if any(not value for value in values):
+        raise ValueError(f"{variable} contains an empty entry.")
+    return values
+
+
+def registry_from_env(
+    *, http_policy: OutboundHttpPolicy | None = None
+) -> ResolverRegistry:
     """Build the default registry, reading resolver config from the env."""
 
     raw = os.environ.get(LAB_TRACKER_RESOLVER_ALLOWED_ROOTS_ENV)
@@ -1330,6 +1506,7 @@ def registry_from_env() -> ResolverRegistry:
     return default_registry(
         allowed_roots=allowed_roots,
         recovery=recovery_from_env(),
+        http_policy=http_policy or outbound_http_policy_from_env(),
         rclone_allowed_remotes=rclone_allowed_remotes,
         git_allowed_remotes=git_allowed_remotes,
         git_cache_root=git_cache_root,

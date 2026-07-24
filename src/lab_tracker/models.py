@@ -62,7 +62,10 @@ def external_artifact_uri_validation_error(uri: str) -> str | None:
         return "External artifact URI must not be empty."
     if any(ch.isspace() or ord(ch) < 0x20 for ch in cleaned):
         return "External artifact URI must not contain spaces or control characters."
-    parsed = urlsplit(cleaned)
+    try:
+        parsed = urlsplit(cleaned)
+    except ValueError:
+        return "External artifact URI must be a well-formed IRI with a scheme."
     if not parsed.scheme or not _EXTERNAL_ARTIFACT_URI_SCHEME_RE.fullmatch(parsed.scheme):
         return "External artifact URI must be a well-formed IRI with a scheme."
     if not parsed.netloc and not parsed.path:

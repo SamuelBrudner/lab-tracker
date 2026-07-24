@@ -550,7 +550,10 @@ class ContextQueries:
                 reference.store_name,
                 reference.locator,
             )
-        parsed = urlsplit(reference.uri)
+        try:
+            parsed = urlsplit(reference.uri)
+        except ValueError:
+            return reference
         if parsed.scheme.lower() != "store":
             return reference
         name = parsed.netloc

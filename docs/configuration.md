@@ -71,6 +71,49 @@ that destination through your normal off-machine backup process.
   Uploads that exceed the limit are rejected and partial local files are
   cleaned up.
 
+### External HTTP artifact resolution
+
+HTTP(S) external-artifact resolution has an outbound destination policy
+independent of the pointer's content hash and response-size limits. A public
+destination is eligible only when every address returned for its hostname is
+globally routable. Malformed URLs, URLs containing user information,
+localhost/local/single-label names without an exact internal exception, unsafe
+literal or resolved addresses, and DNS answers that mix public and non-public
+addresses are denied before an HTTP request is sent. Link-local
+metadata-service, unspecified, multicast, reserved, and IPv6 transition
+addresses cannot be enabled even by an internal exception. The connection uses
+one of the already-vetted numeric addresses, so a second DNS answer cannot
+change its destination. Proxy environment variables are ignored. Redirects
+have a finite limit, and every redirect target goes through the same
+authorization and address-pinning process before the next request.
+
+Private or otherwise non-public destinations are deny-by-default. Operators can
+opt in a destination only with both of these settings:
+
+- `LAB_TRACKER_RESOLVER_HTTP_ALLOWED_AUTHORITIES`: comma-separated exact
+  HTTP(S) authorities. Each entry is normalized to its scheme, hostname, and
+  effective port; for example, `https://files.lab.example` and
+  `https://files.lab.example:443` identify the same authority. Entries cannot
+  contain user information, paths, queries, fragments, wildcards, or suffix
+  patterns.
+- `LAB_TRACKER_RESOLVER_HTTP_ALLOWED_NETWORKS`: comma-separated IPv4 or IPv6
+  CIDRs containing the approved destination addresses, for example
+  `10.42.0.0/16,fd42:1234::/48`.
+
+The two settings are conjunctive: the normalized request authority must be an
+exact configured authority **and** every DNS answer (or the literal IP) must
+fall within a configured CIDR. An authority without a network, a network
+without an authority, or one unapproved address in a multi-address answer is
+denied. Invalid authority or CIDR configuration fails application startup
+rather than weakening the policy.
+
+This opt-in changes only whether the host may make the outbound connection. It
+does not bypass resolve-by-entity authorization or opaque not-found behavior,
+does not weaken full-content hash verification, and does not increase the
+configured fetch or returned-content bounds. See
+[`external-artifact-resolution-design.md`](external-artifact-resolution-design.md)
+for the complete resolution contract.
+
 ### Bootstrap (first admin)
 
 - `LAB_TRACKER_BOOTSTRAP_ADMIN_TOKEN`: one-time token for creating the first

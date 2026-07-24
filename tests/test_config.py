@@ -1,8 +1,13 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
+from fastapi import FastAPI
 from pydantic import ValidationError
 
+from lab_tracker.app_parts.runtime import build_app_runtime, configure_app_state
+from lab_tracker.artifact_resolution import outbound_http_policy_from_config
 from lab_tracker.config import DEFAULT_AUTH_SECRET_KEY, Settings
 
 
@@ -56,6 +61,78 @@ def test_dotenv_ignores_non_lab_tracker_keys(tmp_path, monkeypatch):
 
     assert settings.environment == "local"
     assert settings.openai_model == "gpt-test"
+
+
+def test_dotenv_loads_outbound_http_policy_settings(tmp_path, monkeypatch):
+    _clear_auth_env(monkeypatch)
+    dotenv_path = tmp_path / ".env"
+    dotenv_path.write_text(
+        "LAB_TRACKER_ENVIRONMENT=local\n"
+        "LAB_TRACKER_RESOLVER_HTTP_ALLOWED_AUTHORITIES=http://10.20.1.7\n"
+        "LAB_TRACKER_RESOLVER_HTTP_ALLOWED_NETWORKS=10.20.0.0/16\n",
+        encoding="utf-8",
+    )
+
+    settings = Settings(_env_file=dotenv_path)
+    policy = outbound_http_policy_from_config(
+        allowed_authorities=settings.resolver_http_allowed_authorities,
+        allowed_networks=settings.resolver_http_allowed_networks,
+    )
+
+    assert policy.authorize("http://10.20.1.7/artifact.bin").hostname == "10.20.1.7"
+
+
+def test_invalid_dotenv_http_policy_fails_runtime_composition(tmp_path, monkeypatch):
+    _clear_auth_env(monkeypatch)
+    dotenv_path = tmp_path / ".env"
+    dotenv_path.write_text(
+        "LAB_TRACKER_ENVIRONMENT=local\n"
+        "LAB_TRACKER_RESOLVER_HTTP_ALLOWED_AUTHORITIES=https://files.lab/path\n"
+        "LAB_TRACKER_RESOLVER_HTTP_ALLOWED_NETWORKS=10.20.0.0/16\n",
+        encoding="utf-8",
+    )
+    settings = Settings(_env_file=dotenv_path)
+
+    with pytest.raises(ValueError, match="exact origins"):
+        build_app_runtime(settings)
+
+
+def test_runtime_installs_one_validated_http_policy_and_registry(monkeypatch):
+    _clear_auth_env(monkeypatch)
+    settings = Settings(
+        _env_file=None,
+        database_url="sqlite+pysqlite:///:memory:",
+        resolver_http_allowed_authorities="http://10.20.1.7",
+        resolver_http_allowed_networks="10.20.0.0/16",
+    )
+    runtime = build_app_runtime(settings)
+    app = FastAPI()
+    try:
+        configure_app_state(app, runtime)
+
+        assert app.state.outbound_http_policy is runtime.outbound_http_policy
+        assert app.state.resolver_registry is runtime.resolver_registry
+        assert (
+            runtime.outbound_http_policy.authorize(
+                "http://10.20.1.7/artifact.bin"
+            ).hostname
+            == "10.20.1.7"
+        )
+    finally:
+        runtime.engine.dispose()
+
+
+def test_compose_forwards_outbound_http_policy_settings():
+    compose = Path("docker-compose.yml").read_text(encoding="utf-8")
+
+    assert (
+        "LAB_TRACKER_RESOLVER_HTTP_ALLOWED_AUTHORITIES: "
+        "${LAB_TRACKER_RESOLVER_HTTP_ALLOWED_AUTHORITIES:-}"
+    ) in compose
+    assert (
+        "LAB_TRACKER_RESOLVER_HTTP_ALLOWED_NETWORKS: "
+        "${LAB_TRACKER_RESOLVER_HTTP_ALLOWED_NETWORKS:-}"
+    ) in compose
 
 
 def test_default_openai_model_is_standard_account_model(monkeypatch):

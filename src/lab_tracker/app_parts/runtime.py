@@ -15,6 +15,11 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from lab_tracker.api import LabTrackerAPI
 from lab_tracker.app_parts.middleware import system_auth_context
+from lab_tracker.artifact_resolution import (
+    ResolverRegistry,
+    outbound_http_policy_from_config,
+    registry_from_env,
+)
 from lab_tracker.auth import (
     AuthService,
     DeviceAuthService,
@@ -30,6 +35,7 @@ from lab_tracker.file_storage import LocalFileStorageBackend
 from lab_tracker.graph_drafting import GraphDraftClientFactory, make_graph_draft_client
 from lab_tracker.logging import configure_logging
 from lab_tracker.note_storage import LocalNoteStorage
+from lab_tracker.outbound_http import OutboundHttpPolicy
 from lab_tracker.process_lock import ProcessLock
 from lab_tracker.rate_limit import InMemoryRateLimiter
 from lab_tracker.sqlalchemy_repository import SQLAlchemyLabTrackerRepository
@@ -54,10 +60,17 @@ class AppRuntime:
     graph_draft_client_factory: GraphDraftClientFactory
     auth_rate_limiter: InMemoryRateLimiter
     pat_rate_limiter: InMemoryRateLimiter
+    outbound_http_policy: OutboundHttpPolicy
+    resolver_registry: ResolverRegistry
 
 
 def build_app_runtime(settings: Settings) -> AppRuntime:
     configure_logging(settings.log_level)
+    outbound_http_policy = outbound_http_policy_from_config(
+        allowed_authorities=settings.resolver_http_allowed_authorities,
+        allowed_networks=settings.resolver_http_allowed_networks,
+    )
+    resolver_registry = registry_from_env(http_policy=outbound_http_policy)
     engine = get_engine(settings)
     session_factory = get_session_factory(engine=engine)
     auth_enabled = settings.is_auth_enabled()
@@ -118,6 +131,8 @@ def build_app_runtime(settings: Settings) -> AppRuntime:
         graph_draft_client_factory=make_graph_draft_client,
         auth_rate_limiter=auth_rate_limiter,
         pat_rate_limiter=pat_rate_limiter,
+        outbound_http_policy=outbound_http_policy,
+        resolver_registry=resolver_registry,
     )
 
 
@@ -258,6 +273,8 @@ def configure_app_state(app: FastAPI, runtime: AppRuntime) -> None:
     app.state.graph_draft_client_factory = runtime.graph_draft_client_factory
     app.state.auth_rate_limiter = runtime.auth_rate_limiter
     app.state.pat_rate_limiter = runtime.pat_rate_limiter
+    app.state.outbound_http_policy = runtime.outbound_http_policy
+    app.state.resolver_registry = runtime.resolver_registry
 
 
 def _log_startup_config_summary(

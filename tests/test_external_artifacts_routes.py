@@ -24,6 +24,7 @@ def _create_dataset_with_artifact(
     project_id: str,
     uri: str,
     content_hash: str,
+    source_system: str = "local",
 ) -> str:
     question_id = client.post(
         "/questions",
@@ -44,7 +45,7 @@ def _create_dataset_with_artifact(
             "commit_manifest": {
                 "external_artifacts": [
                     {
-                        "source_system": "local",
+                        "source_system": source_system,
                         "uri": uri,
                         "content_hash": content_hash,
                     }
@@ -55,6 +56,82 @@ def _create_dataset_with_artifact(
     )
     assert response.status_code == 201, response.text
     return response.json()["data"]["dataset_id"]
+
+
+def test_resolve_endpoint_redacts_denied_http_credentials_and_target(
+    client,
+    admin_auth_headers,
+):
+    secret = "hunter2"
+    project_id = client.post(
+        "/projects",
+        json={"name": "Denied HTTP target"},
+        headers=admin_auth_headers,
+    ).json()["data"]["project_id"]
+    dataset_id = _create_dataset_with_artifact(
+        client,
+        admin_auth_headers,
+        project_id=project_id,
+        source_system="http",
+        uri=f"http://user:{secret}@169.254.169.254/latest?token={secret}",
+        content_hash=_sha256(b"x"),
+    )
+
+    response = client.post(
+        "/external-artifacts/resolve",
+        json={"entity_type": "dataset", "entity_id": dataset_id},
+        headers=admin_auth_headers,
+    )
+
+    assert response.status_code == 200, response.text
+    body = response.json()["data"]
+    assert body["status"] == "unresolved"
+    assert body["uri"] == "http(s)://[redacted]"
+    assert body["content_base64"] is None
+    assert secret not in response.text
+    assert "169.254.169.254" not in response.text
+
+
+def test_dataset_write_rejects_malformed_http_uri_without_server_error(
+    client,
+    admin_auth_headers,
+):
+    project_id = client.post(
+        "/projects",
+        json={"name": "Malformed HTTP target"},
+        headers=admin_auth_headers,
+    ).json()["data"]["project_id"]
+    question_id = client.post(
+        "/questions",
+        json={
+            "project_id": project_id,
+            "text": "Can malformed references be stored?",
+            "question_type": "descriptive",
+            "status": "active",
+        },
+        headers=admin_auth_headers,
+    ).json()["data"]["question_id"]
+    response = client.post(
+        "/datasets",
+        json={
+            "project_id": project_id,
+            "primary_question_id": question_id,
+            "status": "committed",
+            "commit_manifest": {
+                "external_artifacts": [
+                    {
+                        "source_system": "http",
+                        "uri": "https://[::1",
+                        "content_hash": _sha256(b"x"),
+                    }
+                ]
+            },
+        },
+        headers=admin_auth_headers,
+    )
+
+    assert response.status_code == 422, response.text
+    assert "well-formed IRI" in response.json()["error"]["message"]
 
 
 def test_resolve_endpoint_returns_verified_content(client, admin_auth_headers, tmp_path):
