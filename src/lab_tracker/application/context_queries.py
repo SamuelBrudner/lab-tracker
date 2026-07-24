@@ -24,7 +24,7 @@ from lab_tracker.decision_context_query import (
     DecisionContextRepository,
     RepositoryDecisionContextReader,
 )
-from lab_tracker.errors import AuthError, NotFoundError, ValidationError
+from lab_tracker.errors import NotFoundError, ValidationError
 from lab_tracker.models import (
     Analysis,
     Claim,
@@ -362,13 +362,7 @@ class ContextQueries:
         linked_note_ids: set[UUID] | None = None
         if goal_id is not None:
             goal = self.api.get_goal(goal_id)
-            try:
-                goal_project_ids = self.api.require_goal_read(goal, actor=actor)
-            except (AuthError, NotFoundError) as exc:
-                # Goal scope resolution dereferences polymorphic link targets.
-                # Keep a dangling target or concurrent target deletion from
-                # exposing the goal's existence or the missing target's type.
-                raise NotFoundError("Goal does not exist.") from exc
+            goal_project_ids = self.api.require_goal_read(goal, actor=actor)
             if project_id is not None and not _goal_matches_project(
                 goal,
                 project_id=project_id,

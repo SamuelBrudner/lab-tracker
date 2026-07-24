@@ -10,7 +10,7 @@ from uuid import UUID, uuid4
 from pydantic import ValidationError as PydanticValidationError
 
 from lab_tracker.auth import AuthContext
-from lab_tracker.errors import AuthError, ValidationError
+from lab_tracker.errors import AuthError, NotFoundError, ValidationError
 from lab_tracker.goals_attributes import validate_goal_attributes
 from lab_tracker.models import (
     EntityOrigin,
@@ -219,9 +219,15 @@ class GoalService(BaseService):
         *,
         actor: AuthContext | None = None,
     ) -> set[UUID]:
-        """Require access to the complete goal scope and return that scope."""
+        """Require the complete goal scope without exposing inaccessible goals."""
 
-        return self._require_goal_read(goal, actor=actor)
+        try:
+            return self._require_goal_read(goal, actor=actor)
+        except (AuthError, NotFoundError) as exc:
+            # Resolving polymorphic links can encounter a concurrently deleted
+            # target. Both that case and an inaccessible scope must look exactly
+            # like a missing goal on read-only surfaces.
+            raise NotFoundError("Goal does not exist.") from exc
 
     def update_goal(
         self,

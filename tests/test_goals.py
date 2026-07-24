@@ -644,18 +644,19 @@ def test_spanning_goal_index_requires_access_to_all_linked_projects(
         f"goal-viewer-{uuid4().hex[:8]}",
     )
 
-    _add_project_member(
-        client,
-        admin_auth_headers,
-        project_id=project_a,
-        user_id=viewer_user_id,
-    )
     hidden_goal = client.post(
         f"/projects/{project_c}/goals",
         json={"goal_type": "paper", "title": "Hidden manuscript"},
         headers=admin_auth_headers,
     )
     assert hidden_goal.status_code == 201
+    hidden_goal_id = hidden_goal.json()["data"]["goal_id"]
+    readable_project_goal = client.get(
+        f"/goals/{hidden_goal_id}",
+        headers=admin_auth_headers,
+    )
+    assert readable_project_goal.status_code == 200
+    assert readable_project_goal.json()["data"]["goal_id"] == hidden_goal_id
     created = client.post(
         "/goals",
         json={
@@ -683,18 +684,57 @@ def test_spanning_goal_index_requires_access_to_all_linked_projects(
     assert goal["project_id"] is None
     assert {link["target"]["entity_id"] for link in goal["links"]} == {project_a, project_b}
 
+    missing_goal_id = str(uuid4())
+    missing = client.get(f"/goals/{missing_goal_id}", headers=viewer_headers)
+    zero_scope_spanning = client.get(f"/goals/{goal_id}", headers=viewer_headers)
+    zero_scope_project = client.get(f"/goals/{hidden_goal_id}", headers=viewer_headers)
+
+    assert missing.status_code == zero_scope_spanning.status_code == 404
+    assert missing.status_code == zero_scope_project.status_code
+    assert zero_scope_spanning.json() == zero_scope_project.json() == missing.json()
+    assert missing.json()["error"] == {
+        "code": "not_found",
+        "message": "Goal does not exist.",
+        "issues": None,
+    }
+    assert client.get(f"/goals/{goal_id}").status_code == 401
+    invalid_credentials = client.get(
+        f"/goals/{goal_id}",
+        headers={"Authorization": "Bearer invalid-token"},
+    )
+    assert invalid_credentials.status_code == 401
+
+    _add_project_member(
+        client,
+        admin_auth_headers,
+        project_id=project_a,
+        user_id=viewer_user_id,
+    )
     partially_scoped = client.get("/goals", headers=viewer_headers)
     partially_scoped_project = client.get(
         f"/projects/{project_a}/goals",
         headers=viewer_headers,
     )
     partially_scoped_get = client.get(f"/goals/{goal_id}", headers=viewer_headers)
+    partial_missing = client.get(f"/goals/{missing_goal_id}", headers=viewer_headers)
 
     assert partially_scoped.status_code == 200
     assert partially_scoped.json()["data"] == []
     assert partially_scoped_project.status_code == 200
     assert partially_scoped_project.json()["data"] == []
-    assert partially_scoped_get.status_code == 401
+    assert partially_scoped_get.status_code == partial_missing.status_code == 404
+    assert partially_scoped_get.json() == partial_missing.json()
+
+    unauthorized_patch = client.patch(
+        f"/goals/{goal_id}",
+        json={"title": "Must remain forbidden"},
+        headers=viewer_headers,
+    )
+    unauthorized_delete = client.delete(
+        f"/goals/{goal_id}",
+        headers=viewer_headers,
+    )
+    assert unauthorized_patch.status_code == unauthorized_delete.status_code == 401
 
     _add_project_member(
         client,
@@ -994,6 +1034,22 @@ def test_goal_search_hides_a_dangling_link_target_as_a_missing_goal(
         session.delete(question_row)
         session.commit()
         assert session.get(GoalLinkModel, link_id) is not None
+
+    direct_existing = client.get(
+        f"/goals/{goal_id}",
+        headers=admin_auth_headers,
+    )
+    direct_missing = client.get(
+        f"/goals/{uuid4()}",
+        headers=admin_auth_headers,
+    )
+    assert direct_existing.status_code == direct_missing.status_code == 404
+    assert direct_existing.json() == direct_missing.json()
+    assert direct_existing.json()["error"] == {
+        "code": "not_found",
+        "message": "Goal does not exist.",
+        "issues": None,
+    }
 
     viewer_headers, _ = _register_user(
         client,
