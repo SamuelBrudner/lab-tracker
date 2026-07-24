@@ -9,7 +9,7 @@ from pydantic import ValidationError as PydanticValidationError
 from sqlalchemy.exc import IntegrityError
 
 from lab_tracker.auth import AuthContext, Role
-from lab_tracker.db_models import GoalLinkModel
+from lab_tracker.db_models import GoalLinkModel, QuestionModel
 from lab_tracker.errors import ValidationError
 from lab_tracker.goals_attributes import validate_goal_attributes
 from lab_tracker.models import (
@@ -31,6 +31,7 @@ from lab_tracker.models import (
 )
 from lab_tracker.services import goal_link_cleanup
 from lab_tracker.services.goal_service import GoalLinkSpec
+from lab_tracker.sqlalchemy_repository import SQLAlchemyLabTrackerRepository
 
 
 def _actor(role: Role = Role.ADMIN) -> AuthContext:
@@ -478,6 +479,47 @@ def test_projectless_goal_requires_project_link_scope():
         )
 
 
+def test_require_goal_read_returns_the_complete_authorized_scope():
+    api = repository_backed_api()
+    actor = _actor()
+    project_a = api.create_project("Goal scope A", actor=actor)
+    project_b = api.create_project("Goal scope B", actor=actor)
+    question_b = api.create_question(
+        project_id=project_b.project_id,
+        text="Does the authorization scope include linked entity projects?",
+        question_type=QuestionType.DESCRIPTIVE,
+        status=QuestionStatus.ACTIVE,
+        actor=actor,
+    )
+    goal = api.create_goal(
+        None,
+        goal_type=GoalType.GRANT,
+        title="Cross-project authorization scope",
+        links=[
+            GoalLinkSpec(
+                target=EntityRef(
+                    entity_type=EntityType.PROJECT,
+                    entity_id=project_a.project_id,
+                ),
+                relation=GoalRelation.CONTRIBUTES_TO,
+            ),
+            GoalLinkSpec(
+                target=EntityRef(
+                    entity_type=EntityType.QUESTION,
+                    entity_id=question_b.question_id,
+                ),
+                relation=GoalRelation.ADDRESSES,
+            ),
+        ],
+        actor=actor,
+    )
+
+    assert api.require_goal_read(goal, actor=actor) == {
+        project_a.project_id,
+        project_b.project_id,
+    }
+
+
 def test_goal_links_use_empty_db_slot_to_enforce_unslotted_uniqueness():
     api, actor, project, question = _api_project_question()
     goal = api.create_goal(
@@ -602,18 +644,19 @@ def test_spanning_goal_index_requires_access_to_all_linked_projects(
         f"goal-viewer-{uuid4().hex[:8]}",
     )
 
-    _add_project_member(
-        client,
-        admin_auth_headers,
-        project_id=project_a,
-        user_id=viewer_user_id,
-    )
     hidden_goal = client.post(
         f"/projects/{project_c}/goals",
         json={"goal_type": "paper", "title": "Hidden manuscript"},
         headers=admin_auth_headers,
     )
     assert hidden_goal.status_code == 201
+    hidden_goal_id = hidden_goal.json()["data"]["goal_id"]
+    readable_project_goal = client.get(
+        f"/goals/{hidden_goal_id}",
+        headers=admin_auth_headers,
+    )
+    assert readable_project_goal.status_code == 200
+    assert readable_project_goal.json()["data"]["goal_id"] == hidden_goal_id
     created = client.post(
         "/goals",
         json={
@@ -641,18 +684,57 @@ def test_spanning_goal_index_requires_access_to_all_linked_projects(
     assert goal["project_id"] is None
     assert {link["target"]["entity_id"] for link in goal["links"]} == {project_a, project_b}
 
+    missing_goal_id = str(uuid4())
+    missing = client.get(f"/goals/{missing_goal_id}", headers=viewer_headers)
+    zero_scope_spanning = client.get(f"/goals/{goal_id}", headers=viewer_headers)
+    zero_scope_project = client.get(f"/goals/{hidden_goal_id}", headers=viewer_headers)
+
+    assert missing.status_code == zero_scope_spanning.status_code == 404
+    assert missing.status_code == zero_scope_project.status_code
+    assert zero_scope_spanning.json() == zero_scope_project.json() == missing.json()
+    assert missing.json()["error"] == {
+        "code": "not_found",
+        "message": "Goal does not exist.",
+        "issues": None,
+    }
+    assert client.get(f"/goals/{goal_id}").status_code == 401
+    invalid_credentials = client.get(
+        f"/goals/{goal_id}",
+        headers={"Authorization": "Bearer invalid-token"},
+    )
+    assert invalid_credentials.status_code == 401
+
+    _add_project_member(
+        client,
+        admin_auth_headers,
+        project_id=project_a,
+        user_id=viewer_user_id,
+    )
     partially_scoped = client.get("/goals", headers=viewer_headers)
     partially_scoped_project = client.get(
         f"/projects/{project_a}/goals",
         headers=viewer_headers,
     )
     partially_scoped_get = client.get(f"/goals/{goal_id}", headers=viewer_headers)
+    partial_missing = client.get(f"/goals/{missing_goal_id}", headers=viewer_headers)
 
     assert partially_scoped.status_code == 200
     assert partially_scoped.json()["data"] == []
     assert partially_scoped_project.status_code == 200
     assert partially_scoped_project.json()["data"] == []
-    assert partially_scoped_get.status_code == 401
+    assert partially_scoped_get.status_code == partial_missing.status_code == 404
+    assert partially_scoped_get.json() == partial_missing.json()
+
+    unauthorized_patch = client.patch(
+        f"/goals/{goal_id}",
+        json={"title": "Must remain forbidden"},
+        headers=viewer_headers,
+    )
+    unauthorized_delete = client.delete(
+        f"/goals/{goal_id}",
+        headers=viewer_headers,
+    )
+    assert unauthorized_patch.status_code == unauthorized_delete.status_code == 401
 
     _add_project_member(
         client,
@@ -671,6 +753,504 @@ def test_spanning_goal_index_requires_access_to_all_linked_projects(
     assert [item["goal_id"] for item in project_index.json()["data"]] == [goal_id]
     assert direct_get.status_code == 200
     assert direct_get.json()["data"]["goal_id"] == goal_id
+
+
+def test_spanning_goal_search_is_opaque_until_the_full_scope_is_authorized(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+):
+    project_a = _create_project(client, admin_auth_headers, "Search scope A")
+    project_b = _create_project(client, admin_auth_headers, "Search scope B")
+    project_c = _create_project(client, admin_auth_headers, "Search scope C")
+
+    linked_question = client.post(
+        "/questions",
+        json={
+            "project_id": project_a,
+            "text": "Spanning needle linked question",
+            "question_type": "descriptive",
+        },
+        headers=admin_auth_headers,
+    )
+    assert linked_question.status_code == 201
+    linked_question_id = linked_question.json()["data"]["question_id"]
+    unlinked_question = client.post(
+        "/questions",
+        json={
+            "project_id": project_a,
+            "text": "Spanning needle unlinked question",
+            "question_type": "descriptive",
+        },
+        headers=admin_auth_headers,
+    )
+    assert unlinked_question.status_code == 201
+    outside_question = client.post(
+        "/questions",
+        json={
+            "project_id": project_c,
+            "text": "Spanning needle outside question",
+            "question_type": "descriptive",
+        },
+        headers=admin_auth_headers,
+    )
+    assert outside_question.status_code == 201
+
+    linked_note = client.post(
+        "/notes",
+        json={
+            "project_id": project_b,
+            "raw_content": "Spanning needle linked note",
+        },
+        headers=admin_auth_headers,
+    )
+    assert linked_note.status_code == 201
+    linked_note_id = linked_note.json()["data"]["note_id"]
+    unlinked_note = client.post(
+        "/notes",
+        json={
+            "project_id": project_b,
+            "raw_content": "Spanning needle unlinked note",
+        },
+        headers=admin_auth_headers,
+    )
+    assert unlinked_note.status_code == 201
+
+    created = client.post(
+        "/goals",
+        json={
+            "project_id": None,
+            "goal_type": "grant",
+            "title": "Search across projects",
+            "links": [
+                {
+                    "entity_type": "project",
+                    "entity_id": project_a,
+                    "relation": "contributes_to",
+                },
+                {
+                    "entity_type": "project",
+                    "entity_id": project_b,
+                    "relation": "contributes_to",
+                },
+                {
+                    "entity_type": "question",
+                    "entity_id": linked_question_id,
+                    "relation": "addresses",
+                },
+                {
+                    "entity_type": "note",
+                    "entity_id": linked_note_id,
+                    "relation": "supporting_evidence",
+                },
+            ],
+        },
+        headers=admin_auth_headers,
+    )
+    assert created.status_code == 201
+    goal_id = created.json()["data"]["goal_id"]
+    missing_goal_id = str(uuid4())
+    viewer_headers, viewer_user_id = _register_user(
+        client,
+        f"spanning-search-viewer-{uuid4().hex[:8]}",
+    )
+
+    unaffiliated = client.get(
+        "/search",
+        params={"q": "spanning needle", "goal_id": goal_id},
+        headers=viewer_headers,
+    )
+    missing = client.get(
+        "/search",
+        params={"q": "spanning needle", "goal_id": missing_goal_id},
+        headers=viewer_headers,
+    )
+
+    assert unaffiliated.status_code == missing.status_code == 404
+    assert unaffiliated.json() == missing.json()
+    assert unaffiliated.json()["error"] == {
+        "code": "not_found",
+        "message": "Goal does not exist.",
+        "issues": None,
+    }
+
+    _add_project_member(
+        client,
+        admin_auth_headers,
+        project_id=project_a,
+        user_id=viewer_user_id,
+    )
+    partially_authorized = client.get(
+        "/search",
+        params={
+            "q": "spanning needle",
+            "goal_id": goal_id,
+            "project_id": project_a,
+        },
+        headers=viewer_headers,
+    )
+    partial_missing = client.get(
+        "/search",
+        params={
+            "q": "spanning needle",
+            "goal_id": missing_goal_id,
+            "project_id": project_a,
+        },
+        headers=viewer_headers,
+    )
+
+    assert partially_authorized.status_code == partial_missing.status_code == 404
+    assert partially_authorized.json() == partial_missing.json()
+
+    partial_unreadable_project = client.get(
+        "/search",
+        params={
+            "q": "spanning needle",
+            "goal_id": goal_id,
+            "project_id": project_c,
+        },
+        headers=viewer_headers,
+    )
+    partial_unreadable_project_missing = client.get(
+        "/search",
+        params={
+            "q": "spanning needle",
+            "goal_id": missing_goal_id,
+            "project_id": project_c,
+        },
+        headers=viewer_headers,
+    )
+
+    assert (
+        partial_unreadable_project.status_code
+        == partial_unreadable_project_missing.status_code
+        == 404
+    )
+    assert partial_unreadable_project.json() == partial_unreadable_project_missing.json()
+
+    _add_project_member(
+        client,
+        admin_auth_headers,
+        project_id=project_b,
+        user_id=viewer_user_id,
+    )
+    unreadable_mismatch = client.get(
+        "/search",
+        params={
+            "q": "spanning needle",
+            "goal_id": goal_id,
+            "project_id": project_c,
+        },
+        headers=viewer_headers,
+    )
+
+    assert unreadable_mismatch.status_code == 401
+    assert unreadable_mismatch.json()["error"] == {
+        "code": "auth_error",
+        "message": "Project access required.",
+        "issues": None,
+    }
+
+    _add_project_member(
+        client,
+        admin_auth_headers,
+        project_id=project_c,
+        user_id=viewer_user_id,
+    )
+
+    spanning = client.get(
+        "/search",
+        params={"q": "spanning needle", "goal_id": goal_id},
+        headers=viewer_headers,
+    )
+    project_a_only = client.get(
+        "/search",
+        params={
+            "q": "spanning needle",
+            "goal_id": goal_id,
+            "project_id": project_a,
+        },
+        headers=viewer_headers,
+    )
+    mismatch = client.get(
+        "/search",
+        params={
+            "q": "spanning needle",
+            "goal_id": goal_id,
+            "project_id": project_c,
+        },
+        headers=viewer_headers,
+    )
+
+    assert spanning.status_code == 200
+    spanning_data = spanning.json()["data"]
+    assert [item["question_id"] for item in spanning_data["questions"]] == [linked_question_id]
+    assert [item["note_id"] for item in spanning_data["notes"]] == [linked_note_id]
+    assert project_a_only.status_code == 200
+    project_a_data = project_a_only.json()["data"]
+    assert [item["question_id"] for item in project_a_data["questions"]] == [linked_question_id]
+    assert project_a_data["notes"] == []
+    assert mismatch.status_code == 422
+    assert mismatch.json()["error"]["message"] == "goal_id must belong to project_id."
+
+
+def test_goal_search_hides_a_dangling_link_target_as_a_missing_goal(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+):
+    project_id = _create_project(client, admin_auth_headers, "Dangling search target")
+    question = client.post(
+        "/questions",
+        json={
+            "project_id": project_id,
+            "text": "Dangling target needle",
+            "question_type": "descriptive",
+        },
+        headers=admin_auth_headers,
+    )
+    assert question.status_code == 201
+    question_id = question.json()["data"]["question_id"]
+    goal = client.post(
+        f"/projects/{project_id}/goals",
+        json={"goal_type": "paper", "title": "Dangling target goal"},
+        headers=admin_auth_headers,
+    )
+    assert goal.status_code == 201
+    goal_id = goal.json()["data"]["goal_id"]
+    link = client.post(
+        f"/goals/{goal_id}/links",
+        json={
+            "entity_type": "question",
+            "entity_id": question_id,
+            "relation": "addresses",
+        },
+        headers=admin_auth_headers,
+    )
+    assert link.status_code == 201
+    link_id = link.json()["data"]["link_id"]
+
+    with client.app.state.db_session_factory() as session:
+        question_row = session.get(QuestionModel, question_id)
+        assert question_row is not None
+        session.delete(question_row)
+        session.commit()
+        assert session.get(GoalLinkModel, link_id) is not None
+
+    direct_existing = client.get(
+        f"/goals/{goal_id}",
+        headers=admin_auth_headers,
+    )
+    direct_missing = client.get(
+        f"/goals/{uuid4()}",
+        headers=admin_auth_headers,
+    )
+    assert direct_existing.status_code == direct_missing.status_code == 404
+    assert direct_existing.json() == direct_missing.json()
+    assert direct_existing.json()["error"] == {
+        "code": "not_found",
+        "message": "Goal does not exist.",
+        "issues": None,
+    }
+
+    viewer_headers, _ = _register_user(
+        client,
+        f"dangling-search-viewer-{uuid4().hex[:8]}",
+    )
+    existing = client.get(
+        "/search",
+        params={"q": "needle", "goal_id": goal_id},
+        headers=viewer_headers,
+    )
+    missing = client.get(
+        "/search",
+        params={"q": "needle", "goal_id": str(uuid4())},
+        headers=viewer_headers,
+    )
+
+    assert existing.status_code == missing.status_code == 404
+    assert existing.json() == missing.json()
+    assert existing.json()["error"] == {
+        "code": "not_found",
+        "message": "Goal does not exist.",
+        "issues": None,
+    }
+
+
+def test_project_scoped_goal_search_preserves_opaque_auth_and_exact_project_match(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+):
+    goal_project_id = _create_project(client, admin_auth_headers, "Scoped search goal")
+    other_project_id = _create_project(client, admin_auth_headers, "Scoped search other")
+    question = client.post(
+        "/questions",
+        json={
+            "project_id": goal_project_id,
+            "text": "Project scoped needle",
+            "question_type": "descriptive",
+        },
+        headers=admin_auth_headers,
+    )
+    assert question.status_code == 201
+    question_id = question.json()["data"]["question_id"]
+    created = client.post(
+        f"/projects/{goal_project_id}/goals",
+        json={"goal_type": "paper", "title": "Project scoped search"},
+        headers=admin_auth_headers,
+    )
+    assert created.status_code == 201
+    goal_id = created.json()["data"]["goal_id"]
+    linked = client.post(
+        f"/goals/{goal_id}/links",
+        json={
+            "entity_type": "question",
+            "entity_id": question_id,
+            "relation": "addresses",
+        },
+        headers=admin_auth_headers,
+    )
+    assert linked.status_code == 201
+
+    viewer_headers, viewer_user_id = _register_user(
+        client,
+        f"project-search-viewer-{uuid4().hex[:8]}",
+    )
+    unauthorized = client.get(
+        "/search",
+        params={"q": "project scoped needle", "goal_id": goal_id},
+        headers=viewer_headers,
+    )
+    missing = client.get(
+        "/search",
+        params={"q": "project scoped needle", "goal_id": str(uuid4())},
+        headers=viewer_headers,
+    )
+
+    assert unauthorized.status_code == missing.status_code == 404
+    assert unauthorized.json() == missing.json()
+
+    for project_id in (goal_project_id, other_project_id):
+        _add_project_member(
+            client,
+            admin_auth_headers,
+            project_id=project_id,
+            user_id=viewer_user_id,
+        )
+
+    matching = client.get(
+        "/search",
+        params={
+            "q": "project scoped needle",
+            "goal_id": goal_id,
+            "project_id": goal_project_id,
+        },
+        headers=viewer_headers,
+    )
+    mismatch = client.get(
+        "/search",
+        params={
+            "q": "project scoped needle",
+            "goal_id": goal_id,
+            "project_id": other_project_id,
+        },
+        headers=viewer_headers,
+    )
+
+    assert matching.status_code == 200
+    assert [item["question_id"] for item in matching.json()["data"]["questions"]] == [question_id]
+    assert mismatch.status_code == 422
+    assert mismatch.json()["error"]["message"] == "goal_id must belong to project_id."
+
+
+def test_project_only_spanning_goal_search_pushes_empty_link_filters_and_page_to_database(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+    monkeypatch: pytest.MonkeyPatch,
+):
+    project_a = _create_project(client, admin_auth_headers, "Project-only scope A")
+    project_b = _create_project(client, admin_auth_headers, "Project-only scope B")
+    for index in range(8):
+        project_id = project_a if index % 2 == 0 else project_b
+        question = client.post(
+            "/questions",
+            json={
+                "project_id": project_id,
+                "text": f"Unrelated spanning question {index}",
+                "question_type": "descriptive",
+            },
+            headers=admin_auth_headers,
+        )
+        note = client.post(
+            "/notes",
+            json={
+                "project_id": project_id,
+                "raw_content": f"Unrelated spanning note {index}",
+            },
+            headers=admin_auth_headers,
+        )
+        assert question.status_code == note.status_code == 201
+
+    goal = client.post(
+        "/goals",
+        json={
+            "project_id": None,
+            "goal_type": "grant",
+            "title": "Project-only spanning goal",
+            "links": [
+                {
+                    "entity_type": "project",
+                    "entity_id": project_a,
+                    "relation": "contributes_to",
+                },
+                {
+                    "entity_type": "project",
+                    "entity_id": project_b,
+                    "relation": "contributes_to",
+                },
+            ],
+        },
+        headers=admin_auth_headers,
+    )
+    assert goal.status_code == 201
+    goal_id = goal.json()["data"]["goal_id"]
+
+    question_calls: list[dict[str, object]] = []
+    note_calls: list[dict[str, object]] = []
+    original_query_questions = SQLAlchemyLabTrackerRepository.query_questions
+    original_query_notes = SQLAlchemyLabTrackerRepository.query_notes
+
+    def track_questions(self, **kwargs):  # noqa: ANN001, ANN003, ANN202
+        question_calls.append(dict(kwargs))
+        return original_query_questions(self, **kwargs)
+
+    def track_notes(self, **kwargs):  # noqa: ANN001, ANN003, ANN202
+        note_calls.append(dict(kwargs))
+        return original_query_notes(self, **kwargs)
+
+    monkeypatch.setattr(
+        SQLAlchemyLabTrackerRepository,
+        "query_questions",
+        track_questions,
+    )
+    monkeypatch.setattr(
+        SQLAlchemyLabTrackerRepository,
+        "query_notes",
+        track_notes,
+    )
+
+    response = client.get(
+        "/search",
+        params={"q": "", "goal_id": goal_id, "limit": 1, "offset": 3},
+        headers=admin_auth_headers,
+    )
+
+    assert response.status_code == 200
+    assert response.json()["data"] == {"questions": [], "notes": []}
+    assert len(question_calls) == len(note_calls) == 1
+    assert question_calls[0]["question_ids"] == set()
+    assert note_calls[0]["note_ids"] == set()
+    for call in (*question_calls, *note_calls):
+        assert call["limit"] == 1
+        assert call["offset"] == 3
 
 
 def test_graph_draft_goal_operations_validate_and_apply_committed_links():

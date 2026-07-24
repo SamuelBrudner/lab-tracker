@@ -55,6 +55,14 @@ class GoalsApiMixin:
     def get_goal(self, goal_id: UUID) -> Goal:
         return self.goals.get_goal(goal_id)
 
+    def require_goal_read(
+        self,
+        goal: Goal,
+        *,
+        actor: AuthContext | None = None,
+    ) -> set[UUID]:
+        return self.goals.require_goal_read(goal, actor=actor)
+
     def list_goals(self, *args: Any, **kwargs: Any) -> Any:
         return self.goals.list_goals(*args, **kwargs)
 

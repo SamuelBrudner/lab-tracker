@@ -7,6 +7,8 @@ from sqlalchemy import select
 
 from lab_tracker.auth import Role
 from lab_tracker.db_models import RecordExportEventModel
+from lab_tracker.errors import NotFoundError
+from lab_tracker.services.record_export_service import RecordExportService
 
 
 def _auth_headers(token: str) -> dict[str, str]:
@@ -496,6 +498,154 @@ def test_goal_ara_artifact_exposes_four_independently_retrievable_layers(
             "environmentHash": "uv:lock123",
         }
     ]
+
+
+def test_spanning_goal_ara_artifact_is_opaque_until_full_scope_is_authorized(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+):
+    project_a = client.post(
+        "/projects",
+        json={"name": "Ara spanning A"},
+        headers=admin_auth_headers,
+    ).json()["data"]["project_id"]
+    project_b = client.post(
+        "/projects",
+        json={"name": "Ara spanning B"},
+        headers=admin_auth_headers,
+    ).json()["data"]["project_id"]
+    goal = client.post(
+        "/goals",
+        json={
+            "project_id": None,
+            "goal_type": "paper",
+            "title": "Ara spanning goal",
+            "links": [
+                {
+                    "entity_type": "project",
+                    "entity_id": project_a,
+                    "relation": "contributes_to",
+                },
+                {
+                    "entity_type": "project",
+                    "entity_id": project_b,
+                    "relation": "contributes_to",
+                },
+            ],
+        },
+        headers=admin_auth_headers,
+    )
+    assert goal.status_code == 201, goal.text
+    goal_id = goal.json()["data"]["goal_id"]
+    missing_goal_id = str(uuid4())
+    viewer_headers, viewer_user_id = _register_user(client, role=Role.VIEWER)
+
+    for suffix in ("", "/src"):
+        existing = client.get(
+            f"/goals/{goal_id}/ara-artifact{suffix}",
+            headers=viewer_headers,
+        )
+        missing = client.get(
+            f"/goals/{missing_goal_id}/ara-artifact{suffix}",
+            headers=viewer_headers,
+        )
+        assert existing.status_code == missing.status_code == 404
+        assert existing.json() == missing.json()
+        assert existing.json()["error"] == {
+            "code": "not_found",
+            "message": "Goal does not exist.",
+            "issues": None,
+        }
+
+    membership = client.post(
+        f"/projects/{project_a}/members",
+        json={"user_id": viewer_user_id, "role": "viewer"},
+        headers=admin_auth_headers,
+    )
+    assert membership.status_code == 201, membership.text
+
+    partial = client.get(
+        f"/goals/{goal_id}/ara-artifact/evidence",
+        headers=viewer_headers,
+    )
+    partial_missing = client.get(
+        f"/goals/{missing_goal_id}/ara-artifact/evidence",
+        headers=viewer_headers,
+    )
+    assert partial.status_code == partial_missing.status_code == 404
+    assert partial.json() == partial_missing.json()
+
+    invalid_existing = client.get(
+        f"/goals/{goal_id}/ara-artifact/not-a-layer",
+        headers=viewer_headers,
+    )
+    invalid_missing = client.get(
+        f"/goals/{missing_goal_id}/ara-artifact/not-a-layer",
+        headers=viewer_headers,
+    )
+    assert invalid_existing.status_code == invalid_missing.status_code == 422
+    assert invalid_existing.json() == invalid_missing.json()
+
+    membership = client.post(
+        f"/projects/{project_b}/members",
+        json={"user_id": viewer_user_id, "role": "viewer"},
+        headers=admin_auth_headers,
+    )
+    assert membership.status_code == 201, membership.text
+
+    artifact = client.get(
+        f"/goals/{goal_id}/ara-artifact",
+        headers=viewer_headers,
+    )
+    layer = client.get(
+        f"/goals/{goal_id}/ara-artifact/src",
+        headers=viewer_headers,
+    )
+    assert artifact.status_code == layer.status_code == 200
+    assert artifact.headers["content-type"].startswith("application/ld+json")
+    assert layer.headers["content-type"].startswith("application/ld+json")
+
+
+def test_goal_ara_artifact_hides_target_deleted_after_authorization(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+    monkeypatch,
+):
+    records = _create_ara_bundle(client, admin_auth_headers)
+    missing = client.get(
+        f"/goals/{uuid4()}/ara-artifact",
+        headers=admin_auth_headers,
+    )
+    collection_started = False
+
+    def target_deleted_after_authorization(
+        service,
+        goal,
+        scope_project_ids,
+    ):
+        nonlocal collection_started
+        collection_started = True
+        del service, goal, scope_project_ids
+        raise NotFoundError("Question does not exist.")
+
+    monkeypatch.setattr(
+        RecordExportService,
+        "_collect_goal_artifact_records",
+        target_deleted_after_authorization,
+    )
+    existing = client.get(
+        f"/goals/{records['goal_id']}/ara-artifact",
+        headers=admin_auth_headers,
+    )
+    assert collection_started is True
+
+    assert existing.status_code == missing.status_code == 404
+    assert existing.json() == missing.json()
+    assert existing.json()["error"] == {
+        "code": "not_found",
+        "message": "Goal does not exist.",
+        "issues": None,
+    }
 
 
 def test_question_subtree_ara_artifact_scopes_to_descendants(

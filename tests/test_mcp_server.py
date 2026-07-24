@@ -544,6 +544,8 @@ def test_client_low_level_read_tools_call_retained_routes() -> None:
             return _json_response(200, {"data": {"@id": "analysis-1"}})
         if request.url.path == "/claims/claim-1/provenance":
             return _json_response(200, {"data": {"@id": "claim-1"}})
+        if request.url.path == "/goals/goal-1":
+            return _json_response(200, {"data": {"goal_id": "goal-1"}})
         if request.url.path == "/goals/goal-1/ara-artifact/src":
             return _json_response(200, {"data": {"@id": "goal-src"}})
         if request.url.path == "/questions/question-1/ara-artifact":
@@ -586,6 +588,7 @@ def test_client_low_level_read_tools_call_retained_routes() -> None:
         assert client.get_dataset_provenance("dataset-1")["data"]["@id"] == "dataset-1"
         assert client.get_analysis_provenance("analysis-1")["data"]["@id"] == ("analysis-1")
         assert client.get_claim_provenance("claim-1")["data"]["@id"] == "claim-1"
+        assert client.get_goal("goal-1")["data"]["goal_id"] == "goal-1"
         assert client.export_goal_artifact("goal-1", layer="src")["data"]["@id"] == ("goal-src")
         assert client.export_question_subtree("question-1")["data"]["@id"] == ("question-artifact")
         assert client.publication_readiness("project-1")["data"]["seal_level"] == "ara_l1"
@@ -601,10 +604,49 @@ def test_client_low_level_read_tools_call_retained_routes() -> None:
         "/datasets/dataset-1/provenance",
         "/analyses/analysis-1/provenance",
         "/claims/claim-1/provenance",
+        "/goals/goal-1",
         "/goals/goal-1/ara-artifact/src",
         "/questions/question-1/ara-artifact",
         "/projects/project-1/publication-readiness",
     ]
+
+
+def test_client_serializes_json_bearing_association_filters() -> None:
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if request.url.path == "/analyses":
+            assert request.url.params["project_id"] == "project-1"
+            assert request.url.params["dataset_id"] == "dataset-1"
+            assert request.url.params["question_id"] == "question-1"
+            return _json_response(200, {"data": []})
+        if request.url.path == "/notes":
+            assert request.url.params["project_id"] == "project-1"
+            assert request.url.params["target_entity_type"] == "dataset"
+            assert request.url.params["target_entity_id"] == "dataset-1"
+            return _json_response(200, {"data": []})
+        return _json_response(404, {"error": {"message": "not found"}})
+
+    client = mcp_server.LabTrackerAPIClient(
+        mcp_server.MCPSettings(base_url="http://testserver"),
+        transport=httpx.MockTransport(handler),
+    )
+    try:
+        assert client.list_analyses(
+            project_id="project-1",
+            dataset_id="dataset-1",
+            question_id="question-1",
+        ) == {"data": []}
+        assert client.list_notes(
+            project_id="project-1",
+            target_entity_type="dataset",
+            target_entity_id="dataset-1",
+        ) == {"data": []}
+    finally:
+        client.close()
+
+    assert [request.url.path for request in requests] == ["/analyses", "/notes"]
 
 
 def test_client_resolve_artifact_posts_to_resolve_route() -> None:

@@ -92,6 +92,7 @@ class RequestHandlers:
             ),
             deletions=ManagedDeletionCommands(
                 api=api,
+                locks=repository,
                 session=session,
                 file_storage=file_storage,
                 raw_note_storage=raw_note_storage,

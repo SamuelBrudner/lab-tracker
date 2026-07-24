@@ -132,8 +132,6 @@ class SQLAlchemyAnalysisRepository(EntityRepository[Analysis]):
             return [], 0
         stmt = select(AnalysisModel)
         count_stmt = select(AnalysisModel.analysis_id)
-        distinct_required = False
-        joined_analysis_datasets = False
         if project_id is not None:
             stmt = stmt.where(AnalysisModel.project_id == str(project_id))
             count_stmt = count_stmt.where(AnalysisModel.project_id == str(project_id))
@@ -141,35 +139,19 @@ class SQLAlchemyAnalysisRepository(EntityRepository[Analysis]):
             project_values = uuid_values(project_ids)
             stmt = stmt.where(AnalysisModel.project_id.in_(project_values))
             count_stmt = count_stmt.where(AnalysisModel.project_id.in_(project_values))
-        if dataset_id is not None:
-            stmt = stmt.join(
-                AnalysisDatasetModel,
-                AnalysisDatasetModel.analysis_id == AnalysisModel.analysis_id,
-            ).where(AnalysisDatasetModel.dataset_id == str(dataset_id))
-            count_stmt = count_stmt.join(
-                AnalysisDatasetModel,
-                AnalysisDatasetModel.analysis_id == AnalysisModel.analysis_id,
-            ).where(AnalysisDatasetModel.dataset_id == str(dataset_id))
-            joined_analysis_datasets = True
-        if question_id is not None:
-            distinct_required = True
-            if not joined_analysis_datasets:
-                stmt = stmt.join(
-                    AnalysisDatasetModel,
-                    AnalysisDatasetModel.analysis_id == AnalysisModel.analysis_id,
+        if dataset_id is not None or question_id is not None:
+            matching_analysis_ids = select(AnalysisDatasetModel.analysis_id)
+            if dataset_id is not None:
+                matching_analysis_ids = matching_analysis_ids.where(
+                    AnalysisDatasetModel.dataset_id == str(dataset_id)
                 )
-                count_stmt = count_stmt.join(
-                    AnalysisDatasetModel,
-                    AnalysisDatasetModel.analysis_id == AnalysisModel.analysis_id,
-                )
-            stmt = stmt.join(
-                DatasetQuestionLinkModel,
-                DatasetQuestionLinkModel.dataset_id == AnalysisDatasetModel.dataset_id,
-            ).where(DatasetQuestionLinkModel.question_id == str(question_id))
-            count_stmt = count_stmt.join(
-                DatasetQuestionLinkModel,
-                DatasetQuestionLinkModel.dataset_id == AnalysisDatasetModel.dataset_id,
-            ).where(DatasetQuestionLinkModel.question_id == str(question_id))
+            if question_id is not None:
+                matching_analysis_ids = matching_analysis_ids.join(
+                    DatasetQuestionLinkModel,
+                    DatasetQuestionLinkModel.dataset_id == AnalysisDatasetModel.dataset_id,
+                ).where(DatasetQuestionLinkModel.question_id == str(question_id))
+            stmt = stmt.where(AnalysisModel.analysis_id.in_(matching_analysis_ids))
+            count_stmt = count_stmt.where(AnalysisModel.analysis_id.in_(matching_analysis_ids))
         if status is not None:
             stmt = stmt.where(AnalysisModel.status == status)
             count_stmt = count_stmt.where(AnalysisModel.status == status)
@@ -182,9 +164,6 @@ class SQLAlchemyAnalysisRepository(EntityRepository[Analysis]):
         if created_by is not None:
             stmt = stmt.where(AnalysisModel.executed_by_user_id == created_by)
             count_stmt = count_stmt.where(AnalysisModel.executed_by_user_id == created_by)
-        if distinct_required:
-            stmt = stmt.distinct()
-            count_stmt = count_stmt.distinct()
         if recent_first:
             stmt = stmt.order_by(
                 AnalysisModel.created_at.desc(),
@@ -324,7 +303,6 @@ class SQLAlchemyClaimRepository(EntityRepository[Claim]):
             return [], 0
         stmt = select(ClaimModel)
         count_stmt = select(ClaimModel.claim_id)
-        distinct_required = False
         if project_id is not None:
             stmt = stmt.where(ClaimModel.project_id == str(project_id))
             count_stmt = count_stmt.where(ClaimModel.project_id == str(project_id))
@@ -365,28 +343,17 @@ class SQLAlchemyClaimRepository(EntityRepository[Claim]):
             stmt = stmt.where(ClaimModel.created_at < until)
             count_stmt = count_stmt.where(ClaimModel.created_at < until)
         if dataset_id is not None:
-            distinct_required = True
-            stmt = stmt.join(
-                ClaimDatasetModel,
-                ClaimDatasetModel.claim_id == ClaimModel.claim_id,
-            ).where(ClaimDatasetModel.dataset_id == str(dataset_id))
-            count_stmt = count_stmt.join(
-                ClaimDatasetModel,
-                ClaimDatasetModel.claim_id == ClaimModel.claim_id,
-            ).where(ClaimDatasetModel.dataset_id == str(dataset_id))
+            dataset_claim_ids = select(ClaimDatasetModel.claim_id).where(
+                ClaimDatasetModel.dataset_id == str(dataset_id)
+            )
+            stmt = stmt.where(ClaimModel.claim_id.in_(dataset_claim_ids))
+            count_stmt = count_stmt.where(ClaimModel.claim_id.in_(dataset_claim_ids))
         if analysis_id is not None:
-            distinct_required = True
-            stmt = stmt.join(
-                ClaimAnalysisModel,
-                ClaimAnalysisModel.claim_id == ClaimModel.claim_id,
-            ).where(ClaimAnalysisModel.analysis_id == str(analysis_id))
-            count_stmt = count_stmt.join(
-                ClaimAnalysisModel,
-                ClaimAnalysisModel.claim_id == ClaimModel.claim_id,
-            ).where(ClaimAnalysisModel.analysis_id == str(analysis_id))
-        if distinct_required:
-            stmt = stmt.distinct()
-            count_stmt = count_stmt.distinct()
+            analysis_claim_ids = select(ClaimAnalysisModel.claim_id).where(
+                ClaimAnalysisModel.analysis_id == str(analysis_id)
+            )
+            stmt = stmt.where(ClaimModel.claim_id.in_(analysis_claim_ids))
+            count_stmt = count_stmt.where(ClaimModel.claim_id.in_(analysis_claim_ids))
         if recent_first:
             stmt = stmt.order_by(ClaimModel.created_at.desc(), ClaimModel.claim_id.desc())
         else:
@@ -467,9 +434,7 @@ class SQLAlchemyClaimEdgeRepository(EntityRepository[ClaimEdge]):
             count_stmt = count_stmt.where(ClaimEdgeModel.claim_id == str(claim_id))
         if target_claim_id is not None:
             stmt = stmt.where(ClaimEdgeModel.target_claim_id == str(target_claim_id))
-            count_stmt = count_stmt.where(
-                ClaimEdgeModel.target_claim_id == str(target_claim_id)
-            )
+            count_stmt = count_stmt.where(ClaimEdgeModel.target_claim_id == str(target_claim_id))
         if relation is not None:
             stmt = stmt.where(ClaimEdgeModel.relation == relation)
             count_stmt = count_stmt.where(ClaimEdgeModel.relation == relation)
