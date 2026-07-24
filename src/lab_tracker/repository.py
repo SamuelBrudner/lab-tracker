@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from contextlib import AbstractContextManager
 from datetime import datetime
 from typing import Generic, Protocol, TypeVar
@@ -188,6 +189,16 @@ class LabTrackerRepository(Protocol):
 
     def lock_project_question_dag(self, project_id: UUID) -> None:
         """Serialize question-DAG validation and mutation for one project."""
+
+    def lock_project_deletion_guard(self, project_id: UUID) -> None:
+        """Keep a project alive while a graph command locks its child rows."""
+
+    def lock_dataset_updates(
+        self,
+        project_id: UUID,
+        dataset_ids: Iterable[UUID],
+    ) -> None:
+        """Serialize full-snapshot dataset writes with file mutations."""
 
     def query_projects(
         self,

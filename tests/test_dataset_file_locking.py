@@ -134,6 +134,46 @@ def test_dataset_deletion_locks_project_shared_then_dataset_exclusive() -> None:
     assert session.expire_count == 1
 
 
+def test_dataset_updates_lock_project_then_datasets_in_canonical_uuid_order() -> None:
+    repository, session = _recording_repository()
+    project_id = UUID(int=1)
+    first_dataset_id = UUID(int=2)
+    second_dataset_id = UUID(int=3)
+
+    repository.lock_dataset_updates(
+        project_id,
+        [second_dataset_id, first_dataset_id, second_dataset_id],
+    )
+
+    assert session.calls == [
+        (
+            "SELECT pg_advisory_xact_lock_shared(:lock_key)",
+            {
+                "lock_key": repository_module._dataset_file_project_lock_key(  # noqa: SLF001
+                    project_id
+                )
+            },
+        ),
+        (
+            "SELECT pg_advisory_xact_lock(:lock_key)",
+            {
+                "lock_key": repository_module._dataset_file_dataset_lock_key(  # noqa: SLF001
+                    first_dataset_id
+                )
+            },
+        ),
+        (
+            "SELECT pg_advisory_xact_lock(:lock_key)",
+            {
+                "lock_key": repository_module._dataset_file_dataset_lock_key(  # noqa: SLF001
+                    second_dataset_id
+                )
+            },
+        ),
+    ]
+    assert session.expire_count == 1
+
+
 def test_project_deletion_uses_the_exclusive_project_scope() -> None:
     repository, session = _recording_repository()
     project_id = UUID(int=1)
@@ -153,6 +193,25 @@ def test_project_deletion_uses_the_exclusive_project_scope() -> None:
     assert session.expire_count == 1
 
 
+def test_project_deletion_guard_uses_the_shared_project_scope() -> None:
+    repository, session = _recording_repository()
+    project_id = UUID(int=1)
+
+    repository.lock_project_deletion_guard(project_id)
+
+    assert session.calls == [
+        (
+            "SELECT pg_advisory_xact_lock_shared(:lock_key)",
+            {
+                "lock_key": repository_module._dataset_file_project_lock_key(  # noqa: SLF001
+                    project_id
+                )
+            },
+        )
+    ]
+    assert session.expire_count == 1
+
+
 def test_sqlite_dataset_file_locks_are_no_ops() -> None:
     engine = create_engine("sqlite+pysqlite:///:memory:", future=True)
     try:
@@ -161,6 +220,8 @@ def test_sqlite_dataset_file_locks_are_no_ops() -> None:
 
             repository.lock_dataset_file_mutation(UUID(int=1), UUID(int=2))
             repository.lock_dataset_deletion(UUID(int=1), UUID(int=2))
+            repository.lock_dataset_updates(UUID(int=1), [UUID(int=3), UUID(int=2)])
+            repository.lock_project_deletion_guard(UUID(int=1))
             repository.lock_project_deletion(UUID(int=1))
 
             assert not session.in_transaction()

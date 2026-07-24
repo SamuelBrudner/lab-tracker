@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator
 from contextlib import contextmanager
 from datetime import datetime
 from hashlib import blake2b
@@ -278,12 +278,38 @@ class SQLAlchemyLabTrackerRepository:
     ) -> None:
         """Exclude file writes for one dataset without blocking sibling datasets."""
 
+        self.lock_dataset_updates(project_id, (dataset_id,))
+
+    def lock_dataset_updates(
+        self,
+        project_id: UUID,
+        dataset_ids: Iterable[UUID],
+    ) -> None:
+        """Lock a project's dataset snapshots in canonical UUID order.
+
+        Full-snapshot dataset writes exclude file writes to each affected
+        dataset, but retain a shared project scope so sibling datasets remain
+        concurrent and project deletion waits. Graph commits pass every update
+        target together so reverse D1/D2 operation order cannot deadlock.
+        """
+
+        ordered_dataset_ids = sorted(set(dataset_ids), key=str)
+        if not ordered_dataset_ids:
+            return
         self._lock_dataset_file_scopes(
             (
                 (_dataset_file_project_lock_key(project_id), True),
-                (_dataset_file_dataset_lock_key(dataset_id), False),
+                *(
+                    (_dataset_file_dataset_lock_key(locked_dataset_id), False)
+                    for locked_dataset_id in ordered_dataset_ids
+                ),
             )
         )
+
+    def lock_project_deletion_guard(self, project_id: UUID) -> None:
+        """Keep project-scoped graph rows alive while a command locks them."""
+
+        self._lock_dataset_file_scopes(((_dataset_file_project_lock_key(project_id), True),))
 
     def lock_project_deletion(self, project_id: UUID) -> None:
         """Exclude every dataset-file write below one project."""

@@ -43,6 +43,7 @@ from lab_tracker.services import (
 )
 from lab_tracker.services.graph_draft_commit import (
     CommitAuthorization,
+    CommitDatasets,
     CommitPatchApplier,
     CommitQuestions,
     CommitRecords,
@@ -298,6 +299,10 @@ def _requires_commit_questions(value: CommitQuestions) -> None:
     pass
 
 
+def _requires_commit_datasets(value: CommitDatasets) -> None:
+    pass
+
+
 def _requires_scheduling_projects(value: SchedulingProjects) -> None:
     pass
 
@@ -318,6 +323,7 @@ def remaining_collaborator_contracts(api: LabTrackerAPI) -> None:
     _requires_commit_patch_applier(api.graph_drafts.commit.patch_applier)
     _requires_commit_versions(api.entity_versions)
     _requires_commit_questions(api.questions)
+    _requires_commit_datasets(api.datasets)
     _requires_scheduling_projects(api.projects)
     _requires_scheduling_provenance(api.provenance_links)
 
