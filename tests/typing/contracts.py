@@ -10,6 +10,7 @@ from lab_tracker.app_parts.runtime import AppRuntime
 from lab_tracker.application.catalog_queries import CatalogAccess, CatalogRepository
 from lab_tracker.application.context_queries import ContextAccess, ContextRepository
 from lab_tracker.application.file_commands import (
+    DatasetFileLocking,
     DatasetFileRepository,
     FileCommandAccess,
     FileStorage,
@@ -91,6 +92,10 @@ def _requires_dataset_file_repository(value: DatasetFileRepository) -> None:
     pass
 
 
+def _requires_dataset_file_locking(value: DatasetFileLocking) -> None:
+    pass
+
+
 def _requires_decision_context_repository(value: DecisionContextRepository) -> None:
     pass
 
@@ -110,6 +115,7 @@ def repository_contracts(repository: SQLAlchemyLabTrackerRepository) -> None:
     _requires_catalog_repository(repository)
     _requires_context_repository(repository)
     _requires_dataset_file_repository(repository)
+    _requires_dataset_file_locking(repository)
     _requires_decision_context_repository(repository)
     _requires_project_graph_repository(repository)
     _requires_handler_repository(repository)

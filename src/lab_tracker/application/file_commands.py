@@ -89,7 +89,25 @@ class FileCommandAccess(Protocol):
     def run_after_rollback(self, action: Callable[[], None]) -> None: ...
 
 
-class DatasetFileRepository(Protocol):
+class DatasetFileLocking(Protocol):
+    """Transaction-scoped lock intents shared by file writes and cascades."""
+
+    def lock_dataset_file_mutation(
+        self,
+        project_id: UUID,
+        dataset_id: UUID,
+    ) -> None: ...
+
+    def lock_dataset_deletion(
+        self,
+        project_id: UUID,
+        dataset_id: UUID,
+    ) -> None: ...
+
+    def lock_project_deletion(self, project_id: UUID) -> None: ...
+
+
+class DatasetFileRepository(DatasetFileLocking, Protocol):
     def query_dataset_files(
         self,
         *,
@@ -210,8 +228,9 @@ class DatasetFileCommands:
         dataset_row = self.session.get(DatasetModel, str(dataset_id))
         if dataset_row is None:
             raise NotFoundError("Dataset does not exist.")
+        project_id = ensure_uuid(dataset_row.project_id)
         self.api.require_project_contributor(
-            ensure_uuid(dataset_row.project_id),
+            project_id,
             actor=actor,
         )
         if dataset_row.status != DatasetStatus.STAGED.value:
@@ -227,6 +246,14 @@ class DatasetFileCommands:
         if not cleaned_filename:
             raise ValidationError("filename must not be empty.")
         path = cleaned_filename
+        self.repository.lock_dataset_file_mutation(project_id, dataset_id)
+        dataset_row = self.session.get(DatasetModel, str(dataset_id))
+        if dataset_row is None:
+            raise NotFoundError("Dataset does not exist.")
+        if dataset_row.status != DatasetStatus.STAGED.value:
+            raise ValidationError(
+                "Files can only be attached while dataset status is staged."
+            )
         existing = self.session.scalar(
             select(DatasetFileModel).where(
                 DatasetFileModel.dataset_id == str(dataset_id),
@@ -337,10 +364,19 @@ class DatasetFileCommands:
         dataset_row = self.session.get(DatasetModel, str(dataset_id))
         if dataset_row is None:
             raise NotFoundError("Dataset does not exist.")
+        project_id = ensure_uuid(dataset_row.project_id)
         self.api.require_project_contributor(
-            ensure_uuid(dataset_row.project_id),
+            project_id,
             actor=actor,
         )
+        if dataset_row.status != DatasetStatus.STAGED.value:
+            raise ValidationError(
+                "Files can only be attached while dataset status is staged."
+            )
+        self.repository.lock_dataset_file_mutation(project_id, dataset_id)
+        dataset_row = self.session.get(DatasetModel, str(dataset_id))
+        if dataset_row is None:
+            raise NotFoundError("Dataset does not exist.")
         if dataset_row.status != DatasetStatus.STAGED.value:
             raise ValidationError(
                 "Files can only be attached while dataset status is staged."
