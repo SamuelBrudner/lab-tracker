@@ -71,9 +71,17 @@ mode and works today over stdio once a Copilot-shaped config file exists.
 ### Mode 2 — Shared private read-only hosted endpoint (optional)
 
 One hosted MCP server over the lab's VPN/tailnet, serving **read-only** decision
-context to many IDEs. Because it is read-only, inbound auth can be a single
+support to many IDEs. Because it is read-only, inbound auth can be a single
 shared read-only `lpat_` (or per-user read-only tokens for nicer revocation), and
 no token forwarding is required. Still fronted by TLS + Origin/Host validation.
+
+Current limitation: `lab_tracker_get_decision_context` calls the semantic-read
+`POST /assistant/decision-context`, which is not yet in the LPAT policy's
+explicit allowlist. A read-only LPAT can use ordinary GET-backed read tools and
+the explicitly allowed artifact resolver, but receives `service_forbidden` for
+decision context until that operation is separately reviewed and allowlisted.
+The resolver exception must not be treated as a generic permission for MCP POST
+reads.
 
 ```
   Mode 1 (stdio, per-user, writes OK)        Mode 2 (hosted, read-only)
@@ -159,30 +167,48 @@ endpoints (`device_principal_can_access`), wrong for a read-everything assistant
 - **DB model** (`db_models.py`, new `personal_access_tokens` table): `id`,
   `user_id` FK, `label`, `token_hash` (unique, indexed; `_hash_token` only —
   never store raw), `role` (capped ≤ issuer's role at issuance), `read_only`
-  (bool, default **True**), `created_at`, `last_used_at` (throttled 5 min like
-  devices), `revoked_at`, **`expires_at` (REQUIRED, with a max TTL)**.
+  (bool, default **True**), `scope` (`all` or the scheduler-only
+  `batch_run_due`), `created_at`, `last_used_at` (throttled 5 min like devices),
+  `revoked_at`, **`expires_at` (REQUIRED, with a max TTL)**.
 - **Migration:** additive table. Per CLAUDE.md, run `uv run alembic heads` (must
   be 1), set `down_revision` to it, never renumber; rebase `down_revision` onto
   whatever head exists **at merge time** and run `test_alembic_has_single_head`
   post-merge.
 - **Service** `PersonalAccessTokenService`: `issue_token(user, *, label, role,
-  read_only, expires_at)` (returns raw secret once; caps role; rejects TTL beyond
-  max), `verify_token` (hash lookup; reject revoked/expired; throttled
-  `last_used_at`; **no caching of validity** so revocation is immediate),
-  `list_tokens`, `revoke_token`.
+  read_only, scope, expires_at)` (returns raw secret once; caps role; rejects TTL
+  beyond max and unknown scopes), `verify_token` (hash lookup; reject
+  revoked/expired; throttled `last_used_at`; **no caching of validity** so
+  revocation is immediate), `list_tokens`, `revoke_token`.
 - **Access policy** `service_principal_can_access(method, path, *, read_only,
-  role)` — the **single authorization decision point**: reads allowed everywhere
-  except `/auth/*`; writes **denied if `read_only`**, otherwise role-gated.
+  role, scope)` — the **single coarse-grained authorization decision point**:
+  unknown scopes fail closed, and `batch_run_due` scope permits only an admin
+  `POST /batches/run-due` (no reads, resolver access, other writes, or
+  `/auth/*`). For `scope=all`, `/auth/*` remains denied and ordinary
+  `GET`/`HEAD`/`OPTIONS` reads are allowed. Side-effect-free POST reads are
+  admitted only through an explicit semantic-read allowlist; currently that
+  allowlist contains the exact `POST /external-artifacts/resolve` path for
+  `read_only=true` tokens. The existing admin-only `POST /batches/run-due`
+  exception is handled separately. Every other write is denied when
+  `read_only=true`; write-enabled tokens remain role-gated, so a write-enabled
+  viewer does not inherit the resolver exception.
 - **Middleware branch** (new `elif` before the JWT `else`):
 
   ```python
   elif token.startswith(LPAT_TOKEN_PREFIX):
-      principal = await run_in_threadpool(app.state.pat_service.verify_token, token)
+      principal = await run_in_threadpool(
+          app.state.personal_access_token_service.verify_token,
+          token,
+      )
       if principal is None:
           raise AuthError("Invalid personal access token.")
-      if not service_principal_can_access(request.method, request.url.path,
-                                          read_only=principal.read_only, role=principal.role):
-          return _device_forbidden_response("Not permitted for this token.")
+      if not service_principal_can_access(
+          request.method,
+          request.url.path,
+          read_only=principal.read_only,
+          role=principal.role,
+          scope=principal.scope,
+      ):
+          return _service_forbidden_response("Not permitted for this token.")
       user = await run_in_threadpool(app.state.auth_service.get_user_by_id, principal.user_id)
       if user is None:
           raise AuthError("Invalid personal access token.")
@@ -199,9 +225,11 @@ endpoints (`device_principal_can_access`), wrong for a read-everything assistant
 - **Endpoints** `/auth/tokens` (issue/list/revoke), mirroring device-management
   routes, with a **dedicated fail-closed throttle on `lpat_` 401/403** (the
   existing `auth_rate_limit_*` only guards `/auth/login`).
-- **Belt-and-suspenders:** the path-level `read_only` check is the first gate;
-  service-layer `require_role` is the independent second gate. Audit every write
-  service for uniform `require_role` before enabling any write.
+- **Belt-and-suspenders:** the path policy first fails closed on scope and
+  `/auth/*`, then distinguishes ordinary protocol reads, explicitly enumerated
+  semantic POST reads, and writes. Service-layer project authorization and
+  `require_role` remain independent gates. Audit every write service for uniform
+  `require_role` before enabling any write.
 
 ### B3 — MCP client static API key
 
