@@ -9,7 +9,12 @@ from uuid import UUID, uuid4
 from sqlalchemy.exc import IntegrityError
 
 from lab_tracker.auth import AuthContext
-from lab_tracker.errors import ConflictError, NotFoundError, ValidationError
+from lab_tracker.errors import (
+    ConflictError,
+    NotFoundError,
+    OpaqueTargetNotFoundError,
+    ValidationError,
+)
 from lab_tracker.models import (
     EntityOrigin,
     EntityRef,
@@ -330,9 +335,12 @@ class QuestionService(BaseService):
         *,
         actor: AuthContext | None = None,
     ) -> Question:
-        question = self.get_question(question_id)
+        try:
+            question = self.get_question(question_id)
+        except NotFoundError as exc:
+            raise OpaqueTargetNotFoundError("Question does not exist.") from exc
         if not self.authorization.can_read(question.project_id, actor=actor):
-            raise NotFoundError("Question does not exist.")
+            raise OpaqueTargetNotFoundError("Question does not exist.")
         return question
 
     def list_questions(

@@ -8,7 +8,7 @@ from typing import Protocol
 from uuid import UUID, uuid4
 
 from lab_tracker.auth import AuthContext, Role, require_role
-from lab_tracker.errors import NotFoundError, ValidationError
+from lab_tracker.errors import NotFoundError, OpaqueTargetNotFoundError, ValidationError
 from lab_tracker.models import (
     Analysis,
     Claim,
@@ -130,7 +130,10 @@ class RecordExportService(BaseService):
         actor: AuthContext | None = None,
     ) -> dict[str, object]:
         self._validate_layer_name(layer_name)
-        goal = self.goals.get_goal(goal_id)
+        try:
+            goal = self.goals.get_goal(goal_id)
+        except NotFoundError as exc:
+            raise OpaqueTargetNotFoundError("Goal does not exist.") from exc
         scope_project_ids = self.goals.require_goal_read(goal, actor=actor)
         try:
             records = self._collect_goal_artifact_records(goal, scope_project_ids)

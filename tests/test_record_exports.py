@@ -2,12 +2,19 @@ from __future__ import annotations
 
 from uuid import uuid4
 
+import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import select
 
 from lab_tracker.auth import Role
-from lab_tracker.db_models import RecordExportEventModel
+from lab_tracker.db_models import (
+    GoalLinkModel,
+    QuestionModel,
+    RecordExportEventModel,
+    UsageEventModel,
+)
 from lab_tracker.errors import NotFoundError
+from lab_tracker.services.goal_service import GoalService
 from lab_tracker.services.record_export_service import RecordExportService
 
 
@@ -142,6 +149,31 @@ def _node_by_id(document: dict[str, object], node_id: str) -> dict[str, object]:
 def _record_export_event_count(client: TestClient) -> int:
     with client.app.state.db_session_factory() as session:
         return len(list(session.scalars(select(RecordExportEventModel.export_id))))
+
+
+def _usage_events(client: TestClient) -> list[UsageEventModel]:
+    with client.app.state.db_session_factory() as session:
+        return list(session.scalars(select(UsageEventModel)))
+
+
+def _assert_single_ara_usage_event(
+    client: TestClient,
+    *,
+    resource_type: str,
+    resource_id: str,
+    outcome: str,
+    actor_user_id: str | None = None,
+) -> None:
+    [event] = _usage_events(client)
+    assert event.verb == "export"
+    assert event.resource_type == resource_type
+    assert str(event.resource_id) == resource_id
+    assert event.outcome == outcome
+    assert event.surface == "http"
+    assert event.actor_role == "admin"
+    assert event.principal_type == "user"
+    if actor_user_id is not None:
+        assert str(event.actor_user_id) == actor_user_id
 
 
 def _create_ara_bundle(
@@ -500,6 +532,174 @@ def test_goal_ara_artifact_exposes_four_independently_retrievable_layers(
     ]
 
 
+def test_opaque_ara_target_misses_do_not_record_usage_events(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+) -> None:
+    records = _create_ara_bundle(client, admin_auth_headers)
+    outsider_headers, _ = _register_user(client, role=Role.VIEWER)
+    missing_goal_id = str(uuid4())
+    missing_question_id = str(uuid4())
+    client.app.state.settings.usage_events = True
+
+    cases = (
+        (
+            f"/goals/{records['goal_id']}/ara-artifact",
+            f"/goals/{missing_goal_id}/ara-artifact",
+            "Goal",
+        ),
+        (
+            f"/goals/{records['goal_id']}/ara-artifact/src",
+            f"/goals/{missing_goal_id}/ara-artifact/src",
+            "Goal",
+        ),
+        (
+            f"/questions/{records['root_question_id']}/ara-artifact",
+            f"/questions/{missing_question_id}/ara-artifact",
+            "Question",
+        ),
+        (
+            f"/questions/{records['root_question_id']}/ara-artifact/src",
+            f"/questions/{missing_question_id}/ara-artifact/src",
+            "Question",
+        ),
+    )
+    for existing_path, missing_path, entity_name in cases:
+        existing = client.get(existing_path, headers=outsider_headers)
+        missing = client.get(missing_path, headers=outsider_headers)
+
+        assert existing.status_code == missing.status_code == 404
+        assert existing.json() == missing.json() == {
+            "error": {
+                "code": "not_found",
+                "message": f"{entity_name} does not exist.",
+                "issues": None,
+            }
+        }
+
+    assert _usage_events(client) == []
+
+
+def test_outsider_dangling_goal_link_is_opaque_without_usage_events(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+) -> None:
+    project_response = client.post(
+        "/projects",
+        json={"name": "Dangling Ara target project"},
+        headers=admin_auth_headers,
+    )
+    assert project_response.status_code == 201, project_response.text
+    project_id = project_response.json()["data"]["project_id"]
+    question_response = client.post(
+        "/questions",
+        json={
+            "project_id": project_id,
+            "text": "Question deleted after goal linking",
+            "question_type": "descriptive",
+        },
+        headers=admin_auth_headers,
+    )
+    assert question_response.status_code == 201, question_response.text
+    question_id = question_response.json()["data"]["question_id"]
+    goal_response = client.post(
+        f"/projects/{project_id}/goals",
+        json={"goal_type": "paper", "title": "Goal with dangling question"},
+        headers=admin_auth_headers,
+    )
+    assert goal_response.status_code == 201, goal_response.text
+    goal_id = goal_response.json()["data"]["goal_id"]
+    link_response = client.post(
+        f"/goals/{goal_id}/links",
+        json={
+            "entity_type": "question",
+            "entity_id": question_id,
+            "relation": "addresses",
+        },
+        headers=admin_auth_headers,
+    )
+    assert link_response.status_code == 201, link_response.text
+    link_id = link_response.json()["data"]["link_id"]
+    outsider_headers, _ = _register_user(client, role=Role.VIEWER)
+
+    with client.app.state.db_session_factory() as session:
+        question_row = session.get(QuestionModel, question_id)
+        assert question_row is not None
+        session.delete(question_row)
+        session.commit()
+        assert session.get(GoalLinkModel, link_id) is not None
+
+    client.app.state.settings.usage_events = True
+    missing_goal_id = str(uuid4())
+    for suffix in ("", "/src"):
+        existing = client.get(
+            f"/goals/{goal_id}/ara-artifact{suffix}",
+            headers=outsider_headers,
+        )
+        missing = client.get(
+            f"/goals/{missing_goal_id}/ara-artifact{suffix}",
+            headers=outsider_headers,
+        )
+
+        assert existing.status_code == missing.status_code == 404
+        assert existing.json() == missing.json() == {
+            "error": {
+                "code": "not_found",
+                "message": "Goal does not exist.",
+                "issues": None,
+            }
+        }
+
+    assert _usage_events(client) == []
+
+
+@pytest.mark.parametrize(
+    ("entity_type", "resource_id_key", "path_prefix", "suffix"),
+    [
+        pytest.param("goal", "goal_id", "goals", "", id="goal-whole"),
+        pytest.param("goal", "goal_id", "goals", "/src", id="goal-layer"),
+        pytest.param(
+            "question",
+            "root_question_id",
+            "questions",
+            "",
+            id="question-whole",
+        ),
+        pytest.param(
+            "question",
+            "root_question_id",
+            "questions",
+            "/src",
+            id="question-layer",
+        ),
+    ],
+)
+def test_authorized_ara_export_records_one_attributed_usage_event(
+    client: TestClient,
+    entity_type: str,
+    resource_id_key: str,
+    path_prefix: str,
+    suffix: str,
+) -> None:
+    admin_headers, admin_user_id = _register_user(client, role=Role.ADMIN)
+    records = _create_ara_bundle(client, admin_headers)
+    client.app.state.settings.usage_events = True
+
+    response = client.get(
+        f"/{path_prefix}/{records[resource_id_key]}/ara-artifact{suffix}",
+        headers=admin_headers,
+    )
+
+    assert response.status_code == 200, response.text
+    _assert_single_ara_usage_event(
+        client,
+        resource_type=entity_type,
+        resource_id=records[resource_id_key],
+        outcome="ok",
+        actor_user_id=admin_user_id,
+    )
+
+
 def test_spanning_goal_ara_artifact_is_opaque_until_full_scope_is_authorized(
     client: TestClient,
     admin_auth_headers: dict[str, str],
@@ -612,6 +812,7 @@ def test_goal_ara_artifact_hides_target_deleted_after_authorization(
     monkeypatch,
 ):
     records = _create_ara_bundle(client, admin_auth_headers)
+    client.app.state.settings.usage_events = True
     missing = client.get(
         f"/goals/{uuid4()}/ara-artifact",
         headers=admin_auth_headers,
@@ -646,6 +847,52 @@ def test_goal_ara_artifact_hides_target_deleted_after_authorization(
         "message": "Goal does not exist.",
         "issues": None,
     }
+    _assert_single_ara_usage_event(
+        client,
+        resource_type="goal",
+        resource_id=records["goal_id"],
+        outcome="error",
+    )
+
+
+def test_goal_ara_scope_failure_remains_canonical_and_records_error_usage(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+    monkeypatch,
+) -> None:
+    records = _create_ara_bundle(client, admin_auth_headers)
+    client.app.state.settings.usage_events = True
+
+    def linked_target_deleted(
+        service,
+        goal,
+        *,
+        actor=None,
+    ):
+        del service, goal, actor
+        raise NotFoundError("Question does not exist.")
+
+    monkeypatch.setattr(GoalService, "_require_goal_read", linked_target_deleted)
+
+    response = client.get(
+        f"/goals/{records['goal_id']}/ara-artifact",
+        headers=admin_auth_headers,
+    )
+
+    assert response.status_code == 404
+    assert response.json() == {
+        "error": {
+            "code": "not_found",
+            "message": "Goal does not exist.",
+            "issues": None,
+        }
+    }
+    _assert_single_ara_usage_event(
+        client,
+        resource_type="goal",
+        resource_id=records["goal_id"],
+        outcome="error",
+    )
 
 
 def test_question_subtree_ara_artifact_scopes_to_descendants(
@@ -718,6 +965,7 @@ def test_question_subtree_ara_preserves_descendant_not_found_error(
     monkeypatch,
 ):
     records = _create_ara_bundle(client, admin_auth_headers)
+    client.app.state.settings.usage_events = True
 
     def descendant_deleted(service, root):  # noqa: ANN001
         del service, root
@@ -740,3 +988,9 @@ def test_question_subtree_ara_preserves_descendant_not_found_error(
         "message": "Dataset does not exist.",
         "issues": None,
     }
+    _assert_single_ara_usage_event(
+        client,
+        resource_type="question",
+        resource_id=records["root_question_id"],
+        outcome="error",
+    )
