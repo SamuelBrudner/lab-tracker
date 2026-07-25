@@ -128,6 +128,43 @@ configured fetch or returned-content bounds. See
 [`external-artifact-resolution-design.md`](external-artifact-resolution-design.md)
 for the complete resolution contract.
 
+### External rclone and Git artifact resolution
+
+Rclone and Git adapters execute optional host binaries under a separate process
+budget. The configured budget is one monotonic deadline for the entire logical
+resolution: rclone metadata lookup, transfer, and verification share one
+deadline, as do Git fetch, object inspection, transfer, and verification.
+Progress or moving between subprocesses does not reset it.
+
+- `LAB_TRACKER_RESOLVER_SUBPROCESS_DEADLINE_SECONDS`: execution and verification
+  budget for one rclone or Git artifact resolution (default: `30`). The value
+  must be finite, greater than zero, and no greater than `86400` seconds (one
+  day); invalid values fail application startup. This setting is independent of
+  `LAB_TRACKER_RESOLVER_HTTP_DEADLINE_SECONDS`.
+
+Subprocess metadata output and stderr have independent fixed memory caps. Actual
+artifact bytes are streamed and checked against the resolver's existing
+`max_fetch_bytes` limit as they arrive; a preflight size is advisory and cannot
+permit a growing object to exceed that limit. Timeout, output overflow,
+malformed metadata, or failed cleanup produces a generic unresolved result
+without exposing a remote, path, credential, or raw stderr. Pipes are closed and
+an uncooperative process is terminated, then killed and reaped within a separate
+fixed cleanup grace. A failed call can therefore exceed the configured
+execution deadline only by that bounded cleanup grace.
+
+Git URLs with embedded HTTP/Git userinfo, a URL password, or a query string are
+refused before process creation; configure credentials through host-side Git or
+SSH facilities.
+
+The bounded rclone/Git process boundary currently requires POSIX process-group
+containment. On Windows these two optional resolvers fail closed as
+`UNRESOLVED`; local and HTTP artifact resolution remain available. Native
+Windows process-tree containment requires a Job Object implementation.
+
+The deadline and process-output caps bound one resolution, but they do not bound
+Git cache growth or concurrent cache mutation. Git fetch disk and cache
+containment remain a separate follow-up.
+
 ### Bootstrap (first admin)
 
 - `LAB_TRACKER_BOOTSTRAP_ADMIN_TOKEN`: one-time token for creating the first

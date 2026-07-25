@@ -2,6 +2,7 @@ import hashlib
 import os
 from datetime import datetime, timezone
 from pathlib import Path
+from types import SimpleNamespace
 from uuid import uuid4
 
 import httpx
@@ -45,6 +46,62 @@ from lab_tracker.outbound_http import (
 
 def _sha256(data: bytes) -> str:
     return "sha256:" + hashlib.sha256(data).hexdigest()
+
+
+class _FakeProcessExecutor:
+    """Deterministic executor seam that still exercises streaming consumers."""
+
+    def __init__(self, steps, *, on_run=None):
+        self.steps = list(steps)
+        self.on_run = on_run
+        self.calls = []
+
+    def run(
+        self,
+        command,
+        *,
+        deadline,
+        stdout_limit_bytes,
+        stderr_limit_bytes,
+        stdout_consumer=None,
+        cwd=None,
+        env=None,
+    ):
+        deadline.check()
+        index = len(self.calls)
+        self.calls.append(
+            {
+                "command": list(command),
+                "deadline": deadline,
+                "stdout_limit_bytes": stdout_limit_bytes,
+                "stderr_limit_bytes": stderr_limit_bytes,
+                "streaming": stdout_consumer is not None,
+                "cwd": cwd,
+                "env": env,
+            }
+        )
+        if self.on_run is not None:
+            self.on_run(index, deadline)
+        deadline.check()
+        step = self.steps.pop(0)
+        if isinstance(step, BaseException):
+            raise step
+        returncode, chunks, stderr = step
+        stdout = b"".join(chunks)
+        assert len(stderr) <= stderr_limit_bytes
+        if stdout_consumer is None:
+            assert len(stdout) <= stdout_limit_bytes
+        else:
+            for chunk in chunks:
+                deadline.check()
+                stdout_consumer(chunk)
+                deadline.check()
+            stdout = b""
+        return SimpleNamespace(
+            returncode=returncode,
+            stdout=stdout,
+            stderr=stderr,
+        )
 
 
 def _local_ref(
@@ -938,7 +995,7 @@ def test_rclone_resolver_cat_failure_is_unresolved():
     result = resolver.resolve(_rclone_ref("rclone://r/x", _sha256(data)))
 
     assert result.status is ResolutionStatus.UNRESOLVED
-    assert "rclone" in (result.detail or "").lower()
+    assert result.detail == "rclone artifact resolution failed."
 
 
 def test_rclone_resolver_missing_binary_is_unresolved():
@@ -950,7 +1007,134 @@ def test_rclone_resolver_missing_binary_is_unresolved():
     )
 
     assert result.status is ResolutionStatus.UNRESOLVED
-    assert "unavailable" in (result.detail or "").lower()
+    assert result.detail == "rclone artifact resolution failed."
+
+
+def test_rclone_executor_streams_under_one_deadline_and_verifies():
+    data = b"streamed object"
+    executor = _FakeProcessExecutor(
+        [
+            (0, (f'{{"bytes":{len(data)}}}'.encode(),), b""),
+            (0, (b"streamed ", b"object"), b""),
+        ]
+    )
+    resolver = RcloneResolver(
+        executor=executor,
+        allowed_remotes=["lab"],
+        max_fetch_bytes=len(data),
+    )
+
+    result = resolver.resolve(_rclone_ref("rclone://lab/private/x.bin", _sha256(data)))
+
+    assert result.status is ResolutionStatus.VERIFIED
+    assert result.content == data
+    assert [call["command"][1] for call in executor.calls] == ["size", "cat"]
+    assert executor.calls[1]["streaming"] is True
+    assert executor.calls[1]["stdout_limit_bytes"] == len(data)
+    assert len({id(call["deadline"]) for call in executor.calls}) == 1
+
+
+def test_rclone_actual_stream_growth_over_cap_discards_partial_result():
+    executor = _FakeProcessExecutor(
+        [
+            (0, (b'{"bytes":2}',), b""),
+            (0, (b"ab", b"secret-growth"), b""),
+        ]
+    )
+    result = RcloneResolver(
+        executor=executor,
+        max_fetch_bytes=2,
+    ).resolve(_rclone_ref("rclone://private/secret.bin", _sha256(b"ab")))
+
+    assert result.status is ResolutionStatus.UNRESOLVED
+    assert result.content is None
+    assert result.observed_hash is None
+    assert result.size_bytes is None
+    assert result.detail == "rclone artifact resolution failed."
+    assert result.to_json_dict()["uri"] == "rclone://[redacted]"
+
+
+@pytest.mark.parametrize(
+    "metadata",
+    [
+        b'{"bytes":true}',
+        b"[]",
+        b"null",
+        b"true",
+        b'"text"',
+        b"[" * 30_000 + b"0" + b"]" * 30_000,
+    ],
+    ids=("boolean-size", "array", "null", "boolean", "string", "deeply-nested"),
+)
+def test_rclone_non_integer_or_non_object_size_metadata_is_rejected(metadata):
+    executor = _FakeProcessExecutor([(0, (metadata,), b"")])
+
+    result = RcloneResolver(executor=executor).resolve(
+        _rclone_ref("rclone://private/x", _sha256(b"x"))
+    )
+
+    assert result.status is ResolutionStatus.UNRESOLVED
+    assert result.detail == "rclone artifact resolution failed."
+    assert len(executor.calls) == 1
+
+
+def test_rclone_rejects_decoded_control_character_before_spawn():
+    executor = _FakeProcessExecutor([])
+
+    result = RcloneResolver(executor=executor).resolve(
+        _rclone_ref("rclone://private/path%00secret", _sha256(b"x"))
+    )
+
+    assert result.status is ResolutionStatus.UNRESOLVED
+    assert result.detail == "Reference URI is not an rclone locator."
+    assert result.to_json_dict()["uri"] == "rclone://[redacted]"
+    assert executor.calls == []
+
+
+def test_rclone_process_failure_redacts_target_credentials_and_stderr():
+    secret = "remote-token-and-target"
+    executor = _FakeProcessExecutor([OSError(secret)])
+    result = RcloneResolver(executor=executor).resolve(
+        _rclone_ref(f"rclone://private/{secret}.bin", _sha256(b"x"))
+    )
+
+    serialized = str(result.to_json_dict())
+    assert result.status is ResolutionStatus.UNRESOLVED
+    assert result.detail == "rclone artifact resolution failed."
+    assert secret not in serialized
+
+
+def test_rclone_deadline_is_not_reset_between_stat_and_cat():
+    clock = FakeClock()
+
+    def consume_budget(index, _deadline):
+        clock.advance(0.75 if index == 0 else 0.5)
+
+    executor = _FakeProcessExecutor(
+        [
+            (0, (b'{"bytes":1}',), b""),
+            (0, (b"x",), b""),
+        ],
+        on_run=consume_budget,
+    )
+    result = RcloneResolver(
+        executor=executor,
+        deadline_seconds=1.0,
+        clock=clock,
+    ).resolve(_rclone_ref("rclone://private/x", _sha256(b"x")))
+
+    assert result.status is ResolutionStatus.UNRESOLVED
+    assert result.detail == "rclone artifact resolution failed."
+    assert len(executor.calls) == 2
+    assert executor.calls[0]["deadline"] is executor.calls[1]["deadline"]
+
+
+def test_rclone_rejects_ambiguous_process_seams():
+    with pytest.raises(ValueError, match="either runner or executor"):
+        RcloneResolver(
+            runner=_fake_rclone_runner(size_bytes=1, body=b"x"),
+            executor=_FakeProcessExecutor([]),
+        )
 
 
 def test_rclone_resolver_can_resolve_only_rclone_scheme():
@@ -1528,6 +1712,57 @@ def test_registry_from_env_rejects_http_deadline_above_one_day(
         registry_from_env()
 
 
+def test_registry_from_env_honors_subprocess_deadline_without_runtime_settings(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(
+        "LAB_TRACKER_RESOLVER_SUBPROCESS_DEADLINE_SECONDS",
+        "2.5",
+    )
+
+    registry = registry_from_env()
+
+    process_resolvers = [
+        resolver
+        for resolver in registry._resolvers
+        if isinstance(resolver, (RcloneResolver, GitResolver))
+    ]
+    assert len(process_resolvers) == 2
+    assert all(resolver._deadline_seconds == 2.5 for resolver in process_resolvers)
+
+
+@pytest.mark.parametrize("value", ("0", "-1", "nan", "inf", "not-a-number"))
+def test_registry_from_env_rejects_invalid_subprocess_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+    value: str,
+) -> None:
+    monkeypatch.setenv(
+        "LAB_TRACKER_RESOLVER_SUBPROCESS_DEADLINE_SECONDS",
+        value,
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="LAB_TRACKER_RESOLVER_SUBPROCESS_DEADLINE_SECONDS",
+    ):
+        registry_from_env()
+
+
+def test_registry_from_env_rejects_subprocess_deadline_above_one_day(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(
+        "LAB_TRACKER_RESOLVER_SUBPROCESS_DEADLINE_SECONDS",
+        "86400.0001",
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="LAB_TRACKER_RESOLVER_SUBPROCESS_DEADLINE_SECONDS",
+    ):
+        registry_from_env()
+
+
 def test_outbound_http_policy_from_env_requires_complete_internal_override(
     monkeypatch,
 ):
@@ -1673,7 +1908,7 @@ def test_git_resolver_missing_object_is_unresolved(tmp_path):
     result = resolver.resolve(_git_ref(_sha256(b"x")))
 
     assert result.status is ResolutionStatus.UNRESOLVED
-    assert "git failed" in (result.detail or "")
+    assert result.detail == "Git artifact resolution failed."
 
 
 def test_git_resolver_fetch_failure_is_unresolved(tmp_path):
@@ -1684,7 +1919,7 @@ def test_git_resolver_fetch_failure_is_unresolved(tmp_path):
     result = resolver.resolve(_git_ref(_sha256(b"x")))
 
     assert result.status is ResolutionStatus.UNRESOLVED
-    assert "not found" in (result.detail or "")
+    assert result.detail == "Git artifact resolution failed."
 
 
 def test_git_resolver_unverifiable_hash_is_unresolved(tmp_path):
@@ -1719,7 +1954,213 @@ def test_git_resolver_missing_binary_is_unresolved(tmp_path):
     )
 
     assert result.status is ResolutionStatus.UNRESOLVED
-    assert "git is unavailable" in (result.detail or "")
+    assert result.detail == "Git artifact resolution failed."
+
+
+def test_git_executor_streams_blob_under_one_deadline(tmp_path):
+    data = b"streamed git blob"
+    executor = _FakeProcessExecutor(
+        [
+            (0, (), b""),
+            (0, (), b""),
+            (0, (f"{len(data)}\n".encode(),), b""),
+            (0, (b"streamed ", b"git blob"), b""),
+        ]
+    )
+    resolver = GitResolver(
+        executor=executor,
+        cache_root=tmp_path,
+        max_fetch_bytes=len(data),
+    )
+
+    result = resolver.resolve(_git_ref(_sha256(data)))
+
+    assert result.status is ResolutionStatus.VERIFIED
+    assert result.content == data
+    assert executor.calls[-1]["streaming"] is True
+    assert executor.calls[-1]["stdout_limit_bytes"] == len(data)
+    assert len({id(call["deadline"]) for call in executor.calls}) == 1
+    assert all(call["env"]["GIT_TERMINAL_PROMPT"] == "0" for call in executor.calls)
+    assert all(
+        call["env"]["GIT_ALLOW_PROTOCOL"] == "https:ssh:git"
+        for call in executor.calls
+    )
+
+
+def test_git_actual_blob_growth_over_cap_discards_partial_result(tmp_path):
+    executor = _FakeProcessExecutor(
+        [
+            (0, (), b""),
+            (0, (), b""),
+            (0, (b"2\n",), b""),
+            (0, (b"ab", b"secret-growth"), b""),
+        ]
+    )
+    result = GitResolver(
+        executor=executor,
+        cache_root=tmp_path,
+        max_fetch_bytes=2,
+    ).resolve(_git_ref(_sha256(b"ab"), path="private/result.bin"))
+
+    assert result.status is ResolutionStatus.UNRESOLVED
+    assert result.content is None
+    assert result.observed_hash is None
+    assert result.size_bytes is None
+    assert result.detail == "Git artifact resolution failed."
+    assert result.to_json_dict()["uri"] == "git+[redacted]"
+
+
+def test_git_process_failure_redacts_remote_path_and_stderr(tmp_path):
+    secret = "private-target-and-stderr"
+    executor = _FakeProcessExecutor(
+        [
+            (0, (), b""),
+            (128, (), f"fatal: {secret}".encode()),
+        ]
+    )
+    result = GitResolver(executor=executor, cache_root=tmp_path).resolve(
+        _git_ref(
+            _sha256(b"x"),
+            path=f"private/{secret}.bin",
+        )
+    )
+
+    serialized = str(result.to_json_dict())
+    assert result.status is ResolutionStatus.UNRESOLVED
+    assert result.detail == "Git artifact resolution failed."
+    assert secret not in serialized
+    assert "example.com" not in serialized
+
+
+@pytest.mark.parametrize(
+    "remote",
+    [
+        "https://user:embedded-token@example.com/private.git",
+        "https://example.com/private.git?token=embedded-token",
+    ],
+)
+def test_git_rejects_embedded_credentials_before_spawn(tmp_path, remote):
+    secret = "embedded-token"
+    executor = _FakeProcessExecutor([])
+    result = GitResolver(executor=executor, cache_root=tmp_path).resolve(
+        _git_ref(
+            _sha256(b"x"),
+            remote=remote,
+        )
+    )
+
+    serialized = str(result.to_json_dict())
+    assert result.status is ResolutionStatus.UNRESOLVED
+    assert result.detail == "Embedded Git credentials are not accepted."
+    assert executor.calls == []
+    assert secret not in serialized
+
+
+def test_git_allows_ssh_routing_username(tmp_path):
+    data = b"ssh-routed blob"
+    result = GitResolver(
+        runner=_fake_git_runner(blob=data),
+        cache_root=tmp_path,
+    ).resolve(
+        _git_ref(
+            _sha256(data),
+            remote="ssh://git@example.com/org/repo.git",
+        )
+    )
+
+    assert result.status is ResolutionStatus.VERIFIED
+    assert result.content == data
+
+
+def test_git_deadline_is_not_reset_between_commands(tmp_path):
+    clock = FakeClock()
+
+    def consume_budget(_index, _deadline):
+        clock.advance(0.3)
+
+    executor = _FakeProcessExecutor(
+        [
+            (0, (), b""),
+            (0, (), b""),
+            (0, (b"1\n",), b""),
+            (0, (b"x",), b""),
+        ],
+        on_run=consume_budget,
+    )
+    result = GitResolver(
+        executor=executor,
+        cache_root=tmp_path,
+        deadline_seconds=1.0,
+        clock=clock,
+    ).resolve(_git_ref(_sha256(b"x")))
+
+    assert result.status is ResolutionStatus.UNRESOLVED
+    assert result.detail == "Git artifact resolution failed."
+    assert len(executor.calls) == 4
+    assert len({id(call["deadline"]) for call in executor.calls}) == 1
+
+
+@pytest.mark.parametrize("size_output", [b"not-a-size\n", b"-1\n", b"\xff\n"])
+def test_git_malformed_object_size_is_generic_unresolved(tmp_path, size_output):
+    executor = _FakeProcessExecutor(
+        [
+            (0, (), b""),
+            (0, (), b""),
+            (0, (size_output,), b"private diagnostic"),
+        ]
+    )
+    result = GitResolver(executor=executor, cache_root=tmp_path).resolve(
+        _git_ref(_sha256(b"x"))
+    )
+
+    assert result.status is ResolutionStatus.UNRESOLVED
+    assert result.detail == "Git artifact resolution failed."
+    assert result.observed_hash is None
+    assert result.content is None
+
+
+def test_git_excessive_integer_metadata_is_generic_unresolved(tmp_path):
+    executor = _FakeProcessExecutor(
+        [
+            (0, (), b""),
+            (0, (), b""),
+            (0, (b"9" * 5000,), b"private diagnostic"),
+        ]
+    )
+
+    result = GitResolver(executor=executor, cache_root=tmp_path).resolve(
+        _git_ref(_sha256(b"x"))
+    )
+
+    assert result.status is ResolutionStatus.UNRESOLVED
+    assert result.detail == "Git artifact resolution failed."
+    assert result.observed_hash is None
+    assert result.content is None
+
+
+def test_git_rejects_control_character_before_spawn(tmp_path):
+    executor = _FakeProcessExecutor([])
+    ref = ExternalArtifactReference(
+        source_system="git",
+        uri=f"git+https://example.com/repo.git#{'a' * 40}:private/\x00secret",
+        content_hash=_sha256(b"x"),
+    )
+
+    result = GitResolver(executor=executor, cache_root=tmp_path).resolve(ref)
+
+    assert result.status is ResolutionStatus.UNRESOLVED
+    assert result.detail == "Reference URI is not a git locator."
+    assert result.to_json_dict()["uri"] == "git+[redacted]"
+    assert executor.calls == []
+
+
+def test_git_rejects_ambiguous_process_seams(tmp_path):
+    with pytest.raises(ValueError, match="either runner or executor"):
+        GitResolver(
+            runner=_fake_git_runner(blob=b"x"),
+            executor=_FakeProcessExecutor([]),
+            cache_root=tmp_path,
+        )
 
 
 def test_git_resolver_truncates_payload_but_verifies(tmp_path):

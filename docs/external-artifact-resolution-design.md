@@ -187,6 +187,44 @@ read-only, the owning entity's opaque authorization boundary still runs first,
 the whole response still passes the content-hash integrity gate, and the fetch
 and returned payload remain bounded.
 
+## Bounded rclone and Git subprocesses
+
+Rclone and Git resolution use optional host binaries, but a persisted artifact
+reference cannot be allowed to control an unbounded child process. The shared
+subprocess boundary therefore applies one monotonic deadline to each complete
+logical resolution. Rclone's metadata lookup, content transfer, hashing, and
+collection consume one budget; Git fetch, object inspection, content transfer,
+hashing, and collection consume another. A successful subprocess or incremental
+output never resets the deadline.
+
+`LAB_TRACKER_RESOLVER_SUBPROCESS_DEADLINE_SECONDS` controls that budget
+(default: `30`). It is independent from the HTTP deadline and must be finite,
+greater than zero, and no greater than `86400` seconds. Metadata stdout and
+stderr are captured under separate fixed byte caps. Artifact stdout is streamed
+instead: actual bytes read, rather than advisory rclone or Git metadata, are
+enforced against the existing `max_fetch_bytes` limit while the full object is
+hashed. An object that grows after a size preflight therefore cannot bypass the
+fetch cap.
+
+On deadline expiry, output overflow, malformed output, or process failure, the
+boundary closes pipes and performs terminate-then-kill-and-reap cleanup under a
+separate fixed grace. A failed call can exceed the configured execution
+deadline only by this bounded cleanup grace. Resolution then returns a generic
+`UNRESOLVED` diagnostic; remote names, paths, credentials, and raw stderr are
+never copied into result details. These controls bound execution time and
+process-output memory for a resolution. Structural Git remote authorization is
+handled separately, and Git fetch disk/cache growth and concurrent cache
+containment remain follow-up work.
+
+Persisted Git locators cannot carry HTTP/Git userinfo, URL passwords, or query
+strings; those forms are refused before process creation. SSH routing usernames
+remain valid, while authentication material must come from host-side Git or SSH
+configuration.
+
+This bounded host-process implementation currently uses POSIX process groups.
+On Windows, rclone/Git resolution fails closed as `UNRESOLVED` until equivalent
+Job Object containment is available; local and HTTP resolvers are unaffected.
+
 ## The host-local locator problem
 
 A stored `uri` is portable identity-wise but not location-wise: OneDrive mounts
@@ -337,7 +375,16 @@ Shipped (`src/lab_tracker/artifact_resolution.py`, tested in
   remote-name allowlist (`LAB_TRACKER_RCLONE_ALLOWED_REMOTES`, deny-by-default
   when unset) so a reference cannot drive server-side `rclone cat` against
   arbitrary remotes in the host's rclone config — the same opt-in posture as
-  local allowed roots and the git remote allowlist.
+  local allowed roots and the git remote allowlist. Metadata and stderr are
+  independently capped, content is streamed under the actual-byte fetch limit,
+  and one subprocess deadline covers stat, transfer, and verification; failed
+  process cleanup uses the separate fixed grace described above.
+- ✅ `GitResolver` — resolves a pinned repository object only after the remote
+  allowlist check, with one subprocess deadline across fetch, object metadata,
+  streamed content verification, and bounded cleanup. Metadata and stderr are
+  independently capped, while the object stream is subject to the actual-byte
+  fetch limit. Structural remote policy and cache disk containment remain
+  separate hardening work.
 - ✅ Content hash is the integrity gate across all adapters (the whole object is
   hashed; `max_bytes`/`byte_range` bound only the returned payload), via the
   shared `_hash_and_collect` helper.
@@ -349,7 +396,9 @@ Shipped (`src/lab_tracker/artifact_resolution.py`, tested in
   (unset → local artifacts resolve `UNRESOLVED`), HTTP(S) is constrained by the
   outbound destination policy, and rclone is constrained by its configured
   remote-name allowlist. HTTP resolution additionally uses the single total
-  deadline configured by `LAB_TRACKER_RESOLVER_HTTP_DEADLINE_SECONDS`.
+  deadline configured by `LAB_TRACKER_RESOLVER_HTTP_DEADLINE_SECONDS`; rclone
+  and Git use the independent single total deadline configured by
+  `LAB_TRACKER_RESOLVER_SUBPROCESS_DEADLINE_SECONDS`.
 - ✅ `lab_tracker_resolve_artifact` MCP read tool + `resolve_external_artifact`
   client method.
 

@@ -67,14 +67,15 @@ def test_dotenv_ignores_non_lab_tracker_keys(tmp_path, monkeypatch):
     assert settings.openai_model == "gpt-test"
 
 
-def test_dotenv_loads_outbound_http_policy_settings(tmp_path, monkeypatch):
+def test_dotenv_loads_resolver_settings(tmp_path, monkeypatch):
     _clear_auth_env(monkeypatch)
     dotenv_path = tmp_path / ".env"
     dotenv_path.write_text(
         "LAB_TRACKER_ENVIRONMENT=local\n"
         "LAB_TRACKER_RESOLVER_HTTP_ALLOWED_AUTHORITIES=http://10.20.1.7\n"
         "LAB_TRACKER_RESOLVER_HTTP_ALLOWED_NETWORKS=10.20.0.0/16\n"
-        "LAB_TRACKER_RESOLVER_HTTP_DEADLINE_SECONDS=12.5\n",
+        "LAB_TRACKER_RESOLVER_HTTP_DEADLINE_SECONDS=12.5\n"
+        "LAB_TRACKER_RESOLVER_SUBPROCESS_DEADLINE_SECONDS=7.25\n",
         encoding="utf-8",
     )
 
@@ -86,6 +87,7 @@ def test_dotenv_loads_outbound_http_policy_settings(tmp_path, monkeypatch):
 
     assert policy.authorize("http://10.20.1.7/artifact.bin").hostname == "10.20.1.7"
     assert settings.resolver_http_deadline_seconds == 12.5
+    assert settings.resolver_subprocess_deadline_seconds == 7.25
 
 
 def test_resolver_http_deadline_defaults_to_thirty_seconds(monkeypatch):
@@ -115,6 +117,62 @@ def test_resolver_http_deadline_cannot_exceed_one_day(monkeypatch):
         _settings_from_environment()
 
 
+def test_resolver_subprocess_deadline_defaults_to_thirty_seconds(monkeypatch):
+    _clear_auth_env(monkeypatch)
+    monkeypatch.delenv(
+        "LAB_TRACKER_RESOLVER_SUBPROCESS_DEADLINE_SECONDS",
+        raising=False,
+    )
+
+    assert _settings_from_environment().resolver_subprocess_deadline_seconds == 30.0
+
+
+@pytest.mark.parametrize("value", ["0", "-1", "nan", "inf", "-inf"])
+def test_resolver_subprocess_deadline_must_be_finite_and_positive(
+    monkeypatch,
+    value,
+):
+    _clear_auth_env(monkeypatch)
+    monkeypatch.setenv("LAB_TRACKER_RESOLVER_SUBPROCESS_DEADLINE_SECONDS", value)
+
+    with pytest.raises(ValidationError, match="must be finite and greater than 0"):
+        _settings_from_environment()
+
+
+def test_resolver_subprocess_deadline_cannot_exceed_one_day(monkeypatch):
+    _clear_auth_env(monkeypatch)
+    monkeypatch.setenv(
+        "LAB_TRACKER_RESOLVER_SUBPROCESS_DEADLINE_SECONDS",
+        "86400.0001",
+    )
+
+    with pytest.raises(
+        ValidationError,
+        match="LAB_TRACKER_RESOLVER_SUBPROCESS_DEADLINE_SECONDS",
+    ):
+        _settings_from_environment()
+
+
+@pytest.mark.parametrize(
+    ("variable", "field"),
+    [
+        (
+            "LAB_TRACKER_RESOLVER_HTTP_DEADLINE_SECONDS",
+            "resolver_http_deadline_seconds",
+        ),
+        (
+            "LAB_TRACKER_RESOLVER_SUBPROCESS_DEADLINE_SECONDS",
+            "resolver_subprocess_deadline_seconds",
+        ),
+    ],
+)
+def test_resolver_deadlines_allow_exactly_one_day(monkeypatch, variable, field):
+    _clear_auth_env(monkeypatch)
+    monkeypatch.setenv(variable, "86400")
+
+    assert getattr(_settings_from_environment(), field) == 86_400.0
+
+
 def test_invalid_dotenv_http_policy_fails_runtime_composition(tmp_path, monkeypatch):
     _clear_auth_env(monkeypatch)
     dotenv_path = tmp_path / ".env"
@@ -139,9 +197,11 @@ def test_runtime_installs_one_validated_http_policy_and_registry(monkeypatch):
         *,
         http_policy,
         http_deadline_seconds,
+        subprocess_deadline_seconds,
     ):
         captured["http_policy"] = http_policy
         captured["http_deadline_seconds"] = http_deadline_seconds
+        captured["subprocess_deadline_seconds"] = subprocess_deadline_seconds
         return resolver_registry
 
     monkeypatch.setattr(
@@ -155,6 +215,7 @@ def test_runtime_installs_one_validated_http_policy_and_registry(monkeypatch):
         resolver_http_allowed_authorities="http://10.20.1.7",
         resolver_http_allowed_networks="10.20.0.0/16",
         resolver_http_deadline_seconds=12.5,
+        resolver_subprocess_deadline_seconds=7.25,
     )
     runtime = build_app_runtime(settings)
     app = FastAPI()
@@ -166,6 +227,7 @@ def test_runtime_installs_one_validated_http_policy_and_registry(monkeypatch):
         assert captured == {
             "http_policy": runtime.outbound_http_policy,
             "http_deadline_seconds": 12.5,
+            "subprocess_deadline_seconds": 7.25,
         }
         assert (
             runtime.outbound_http_policy.authorize(
@@ -191,6 +253,10 @@ def test_compose_forwards_outbound_http_policy_settings():
     assert (
         "LAB_TRACKER_RESOLVER_HTTP_DEADLINE_SECONDS: "
         "${LAB_TRACKER_RESOLVER_HTTP_DEADLINE_SECONDS:-30}"
+    ) in compose
+    assert (
+        "LAB_TRACKER_RESOLVER_SUBPROCESS_DEADLINE_SECONDS: "
+        "${LAB_TRACKER_RESOLVER_SUBPROCESS_DEADLINE_SECONDS:-30}"
     ) in compose
 
 

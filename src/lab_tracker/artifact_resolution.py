@@ -43,6 +43,15 @@ from enum import Enum
 from pathlib import Path
 from urllib.parse import unquote, urljoin, urlsplit
 
+from lab_tracker.bounded_subprocess import (
+    DEFAULT_PROCESS_DEADLINE_SECONDS,
+    DEFAULT_PROCESS_STDERR_LIMIT_BYTES,
+    MAX_PROCESS_DEADLINE_SECONDS,
+    BoundedSubprocessExecutor,
+    ProcessDeadline,
+    ProcessExecutionError,
+    ProcessExecutor,
+)
 from lab_tracker.models import DataStore, ExternalArtifactReference, StoreKind
 from lab_tracker.outbound_http import (
     DEFAULT_OUTBOUND_HTTP_DEADLINE_SECONDS,
@@ -74,6 +83,13 @@ _HTTP_SCHEMES = frozenset({"http", "https"})
 # (UNRESOLVED) rather than returned uncertified.
 DEFAULT_MAX_FETCH_BYTES = 64 * 1024 * 1024
 DEFAULT_MAX_HTTP_REDIRECTS = 3
+DEFAULT_SUBPROCESS_DEADLINE_SECONDS = DEFAULT_PROCESS_DEADLINE_SECONDS
+MAX_SUBPROCESS_DEADLINE_SECONDS = MAX_PROCESS_DEADLINE_SECONDS
+
+# Command metadata is small and machine-readable. These caps are intentionally
+# independent so a noisy stderr cannot consume the stdout budget (or vice versa).
+_PROCESS_METADATA_LIMIT_BYTES = 64 * 1024
+_PROCESS_STDERR_LIMIT_BYTES = DEFAULT_PROCESS_STDERR_LIMIT_BYTES
 
 # Protocols the git resolver's subprocess is allowed to use. Restricting this
 # blocks `file://` (local reads) and `ext::`/`fd::` (arbitrary command execution)
@@ -95,6 +111,10 @@ def _uri_scheme(uri: str) -> str:
         return urlsplit(uri).scheme.lower()
     except ValueError:
         return ""
+
+
+def _has_control_characters(value: str) -> bool:
+    return any(ord(character) < 32 or ord(character) == 127 for character in value)
 
 
 @dataclass(frozen=True)
@@ -186,6 +206,13 @@ class ResolvedArtifact:
 
 def _resolution_display_uri(result: ResolvedArtifact) -> str:
     scheme = _uri_scheme(result.uri)
+    if result.status is ResolutionStatus.UNRESOLVED:
+        if scheme == "rclone" or result.source_system.strip().lower() == "rclone":
+            return "rclone://[redacted]"
+        if result.uri.lstrip().lower().startswith(
+            "git+"
+        ) or result.source_system.strip().lower() == "git":
+            return "git+[redacted]"
     is_http = (
         scheme in _HTTP_SCHEMES
         or result.source_system.strip().lower() in _HTTP_SCHEMES
@@ -859,6 +886,23 @@ class RcloneCompleted:
 RcloneRunner = Callable[[list[str]], RcloneCompleted]
 
 
+class _LegacyProcessOutputExceeded(Exception):
+    """A trusted injected test runner returned more data than its declared cap."""
+
+
+def _validate_subprocess_deadline_seconds(value: float) -> float:
+    if (
+        not math.isfinite(value)
+        or value <= 0
+        or value > MAX_SUBPROCESS_DEADLINE_SECONDS
+    ):
+        raise ValueError(
+            "Subprocess deadline must be finite and greater than 0, and no greater "
+            f"than {MAX_SUBPROCESS_DEADLINE_SECONDS:g} seconds."
+        )
+    return value
+
+
 def _subprocess_rclone_runner(binary: str) -> RcloneRunner:
     def run(args: list[str]) -> RcloneCompleted:
         import subprocess
@@ -903,15 +947,26 @@ class RcloneResolver(ArtifactResolver):
         self,
         *,
         runner: RcloneRunner | None = None,
+        executor: ProcessExecutor | None = None,
         binary: str = "rclone",
         allowed_remotes: Sequence[str] | None = None,
         max_fetch_bytes: int = DEFAULT_MAX_FETCH_BYTES,
+        deadline_seconds: float = DEFAULT_SUBPROCESS_DEADLINE_SECONDS,
+        clock: Callable[[], float] = time.monotonic,
     ) -> None:
-        self._runner = runner or _subprocess_rclone_runner(binary)
+        if runner is not None and executor is not None:
+            raise ValueError("Configure either runner or executor, not both.")
+        self._runner = runner
+        self._executor = executor or BoundedSubprocessExecutor()
+        self._binary = binary
         self._allowed_remotes = (
             None if allowed_remotes is None else list(allowed_remotes)
         )
         self._max_fetch_bytes = max_fetch_bytes
+        self._deadline_seconds = _validate_subprocess_deadline_seconds(
+            deadline_seconds
+        )
+        self._clock = clock
 
     def can_resolve(self, ref: ExternalArtifactReference) -> bool:
         return _uri_scheme(ref.uri) == "rclone"
@@ -949,10 +1004,22 @@ class RcloneResolver(ArtifactResolver):
                 ref, detail="Remote is not in the rclone resolver allowlist."
             )
 
+        algorithm, _ = parse_content_hash(ref.content_hash)
+        deadline = ProcessDeadline.after(
+            self._deadline_seconds,
+            clock=self._clock,
+        )
+        collector = _HashCollector(
+            algorithm=algorithm,
+            max_bytes=max_bytes,
+            window=window,
+            max_total=self._max_fetch_bytes,
+            budget_check=deadline.check,
+        )
         try:
-            size = self._object_size(target)
+            size = self._object_size(target, deadline=deadline)
             if size is None:
-                return _unresolved(ref, detail="rclone could not stat the artifact.")
+                return _unresolved(ref, detail="rclone artifact resolution failed.")
             if size > self._max_fetch_bytes:
                 return _unresolved(
                     ref,
@@ -961,40 +1028,102 @@ class RcloneResolver(ArtifactResolver):
                         f"{self._max_fetch_bytes}-byte fetch limit."
                     ),
                 )
-            cat = self._runner(["cat", target])
-        except OSError as exc:
-            return _unresolved(ref, detail=f"rclone is unavailable: {exc}")
+            cat = self._run_command(
+                ["cat", target],
+                deadline=deadline,
+                stdout_limit_bytes=self._max_fetch_bytes,
+                stdout_consumer=collector.consume,
+            )
+            if cat.returncode != 0:
+                return _unresolved(
+                    ref, detail="rclone artifact resolution failed."
+                )
+            content, total, truncated, observed = collector.finish()
+            deadline.check()
+        except (
+            _FetchTooLarge,
+            _LegacyProcessOutputExceeded,
+            OSError,
+            ProcessExecutionError,
+            ValueError,
+        ):
+            return _unresolved(ref, detail="rclone artifact resolution failed.")
 
-        if cat.returncode != 0:
-            return _unresolved(ref, detail=_rclone_error_detail(cat))
+        try:
+            content_type, _ = mimetypes.guess_type(target)
+            resolved = _build_resolved(
+                ref,
+                observed=observed,
+                content=content,
+                total=total,
+                truncated=truncated,
+                content_type=content_type or "application/octet-stream",
+            )
+            deadline.check()
+            return resolved
+        except ProcessExecutionError:
+            return _unresolved(ref, detail="rclone artifact resolution failed.")
 
-        algorithm, _ = parse_content_hash(ref.content_hash)
-        content, total, truncated, observed = _hash_and_collect(
-            [cat.stdout],
-            algorithm=algorithm,
-            max_bytes=max_bytes,
-            window=window,
+    def _object_size(
+        self,
+        target: str,
+        *,
+        deadline: ProcessDeadline,
+    ) -> int | None:
+        completed = self._run_command(
+            ["size", "--json", target],
+            deadline=deadline,
+            stdout_limit_bytes=_PROCESS_METADATA_LIMIT_BYTES,
         )
-        content_type, _ = mimetypes.guess_type(target)
-        return _build_resolved(
-            ref,
-            observed=observed,
-            content=content,
-            total=total,
-            truncated=truncated,
-            content_type=content_type or "application/octet-stream",
-        )
-
-    def _object_size(self, target: str) -> int | None:
-        completed = self._runner(["size", "--json", target])
         if completed.returncode != 0:
             return None
         try:
             payload = json.loads(completed.stdout.decode("utf-8") or "{}")
-        except (ValueError, UnicodeDecodeError):
+        except (RecursionError, ValueError, UnicodeDecodeError):
+            return None
+        if not isinstance(payload, dict):
             return None
         size = payload.get("bytes")
-        return size if isinstance(size, int) and size >= 0 else None
+        return size if type(size) is int and size >= 0 else None
+
+    def _run_command(
+        self,
+        args: list[str],
+        *,
+        deadline: ProcessDeadline,
+        stdout_limit_bytes: int,
+        stdout_consumer: Callable[[bytes], None] | None = None,
+    ) -> RcloneCompleted:
+        if self._runner is not None:
+            # This compatibility seam is for trusted, synchronous test runners.
+            # Production always uses the preemptible bounded executor.
+            deadline.check()
+            completed = self._runner(args)
+            deadline.check()
+            if (
+                len(completed.stdout) > stdout_limit_bytes
+                or len(completed.stderr) > _PROCESS_STDERR_LIMIT_BYTES
+            ):
+                raise _LegacyProcessOutputExceeded
+            stdout = completed.stdout
+            if stdout_consumer is not None:
+                stdout_consumer(stdout)
+                deadline.check()
+                stdout = b""
+            return RcloneCompleted(completed.returncode, stdout, completed.stderr)
+
+        completed = self._executor.run(
+            [self._binary, *args],
+            deadline=deadline,
+            stdout_limit_bytes=stdout_limit_bytes,
+            stderr_limit_bytes=_PROCESS_STDERR_LIMIT_BYTES,
+            stdout_consumer=stdout_consumer,
+        )
+        return RcloneCompleted(
+            completed.returncode,
+            completed.stdout,
+            b"",
+        )
 
     def _rclone_target(self, uri: str) -> str | None:
         try:
@@ -1004,10 +1133,14 @@ class RcloneResolver(ArtifactResolver):
         if parsed.scheme.lower() != "rclone" or not parsed.netloc:
             return None
         path = unquote(parsed.path).lstrip("/")
+        if _has_control_characters(parsed.netloc) or _has_control_characters(path):
+            return None
         return f"{parsed.netloc}:{path}"
 
 
 def _rclone_error_detail(completed: RcloneCompleted) -> str:
+    """Legacy store-health diagnostic; resolver subprocesses use generic errors."""
+
     stderr = completed.stderr.decode("utf-8", errors="replace").strip()
     if stderr:
         return f"rclone failed: {stderr.splitlines()[-1]}"
@@ -1081,11 +1214,35 @@ def _parse_git_locator(uri: str) -> tuple[str, str, str] | None:
     remote, commit, path = remote.strip(), commit.strip(), path.strip()
     if not remote or not commit or not path:
         return None
+    if any(_has_control_characters(part) for part in (remote, commit, path)):
+        return None
     # Guard against argument injection: a leading '-' could be read by git as an
     # option (e.g. remote='--upload-pack=<cmd>', which executes a command).
     if any(part.startswith("-") for part in (remote, commit, path)):
         return None
     return remote, commit, path
+
+
+def _git_remote_has_embedded_credentials(remote: str) -> bool:
+    """Return whether a hierarchical Git URL persists userinfo in the locator."""
+
+    try:
+        parsed = urlsplit(remote)
+        if not parsed.netloc:
+            return False
+        # Query strings on repository URLs are commonly signed credentials and
+        # would be exposed in the child argv just like URL userinfo.
+        if parsed.query:
+            return True
+        if parsed.password is not None:
+            return True
+        # An SSH username is routing identity (the common ``ssh://git@host``
+        # form), while HTTP/Git URL userinfo is commonly an access token.
+        return parsed.username is not None and parsed.scheme.lower() != "ssh"
+    except ValueError:
+        # Structural remote validation is handled by the dedicated remote-policy
+        # layer. A malformed URL cannot safely be inspected for credentials here.
+        return True
 
 
 class GitResolver(ArtifactResolver):
@@ -1109,6 +1266,8 @@ class GitResolver(ArtifactResolver):
       allowed-roots posture.
     * ``allow_protocol`` — passed to git as ``GIT_ALLOW_PROTOCOL`` so ``file://``
       and ``ext::`` command-execution vectors are refused.
+    * Embedded URL credentials are refused before process creation. Credentials
+      must come from host-side Git/SSH configuration.
     * The blob's size is checked (``git cat-file -s``) before it is read, so an
       object larger than ``max_fetch_bytes`` is refused rather than buffered.
     * ``max_cache_bytes`` bounds the on-disk fetch cache; least-recently-used
@@ -1119,22 +1278,32 @@ class GitResolver(ArtifactResolver):
         self,
         *,
         runner: GitRunner | None = None,
+        executor: ProcessExecutor | None = None,
         binary: str = "git",
         cache_root: str | Path | None = None,
         allowed_remotes: Sequence[str] | None = None,
         allow_protocol: str | None = DEFAULT_GIT_ALLOW_PROTOCOL,
         max_fetch_bytes: int = DEFAULT_MAX_FETCH_BYTES,
         max_cache_bytes: int | None = None,
+        deadline_seconds: float = DEFAULT_SUBPROCESS_DEADLINE_SECONDS,
+        clock: Callable[[], float] = time.monotonic,
     ) -> None:
-        self._runner = runner or _subprocess_git_runner(
-            binary, allow_protocol=allow_protocol
-        )
+        if runner is not None and executor is not None:
+            raise ValueError("Configure either runner or executor, not both.")
+        self._runner = runner
+        self._executor = executor or BoundedSubprocessExecutor()
+        self._binary = binary
+        self._allow_protocol = allow_protocol
         self._cache_root = cache_root
         self._allowed_remotes = (
             None if allowed_remotes is None else list(allowed_remotes)
         )
         self._max_fetch_bytes = max_fetch_bytes
         self._max_cache_bytes = max_cache_bytes
+        self._deadline_seconds = _validate_subprocess_deadline_seconds(
+            deadline_seconds
+        )
+        self._clock = clock
 
     def can_resolve(self, ref: ExternalArtifactReference) -> bool:
         if ref.source_system.strip().lower() == "git":
@@ -1172,6 +1341,11 @@ class GitResolver(ArtifactResolver):
         if locator is None:
             return _unresolved(ref, detail="Reference URI is not a git locator.")
         remote, commit, path = locator
+        if _git_remote_has_embedded_credentials(remote):
+            return _unresolved(
+                ref,
+                detail="Embedded Git credentials are not accepted.",
+            )
 
         if not self._remote_allowed(remote):
             return _unresolved(
@@ -1179,54 +1353,167 @@ class GitResolver(ArtifactResolver):
             )
 
         algorithm, _ = parse_content_hash(ref.content_hash)
-        try:
-            blob = self._read_blob(remote, commit, path)
-        except _GitReadError as exc:
-            return _unresolved(ref, detail=exc.detail)
-        except OSError as exc:
-            return _unresolved(ref, detail=f"git is unavailable: {exc}")
-
-        content, total, truncated, observed = _hash_and_collect(
-            [blob],
+        deadline = ProcessDeadline.after(
+            self._deadline_seconds,
+            clock=self._clock,
+        )
+        collector = _HashCollector(
             algorithm=algorithm,
             max_bytes=max_bytes,
             window=window,
+            max_total=self._max_fetch_bytes,
+            budget_check=deadline.check,
         )
-        content_type, _ = mimetypes.guess_type(path)
-        return _build_resolved(
-            ref,
-            observed=observed,
-            content=content,
-            total=total,
-            truncated=truncated,
-            content_type=content_type or "application/octet-stream",
-        )
+        try:
+            self._read_blob(
+                remote,
+                commit,
+                path,
+                deadline=deadline,
+                stdout_consumer=collector.consume,
+            )
+            content, total, truncated, observed = collector.finish()
+            deadline.check()
+        except _GitReadError as exc:
+            return _unresolved(ref, detail=exc.detail)
+        except (
+            _FetchTooLarge,
+            _LegacyProcessOutputExceeded,
+            OSError,
+            ProcessExecutionError,
+            ValueError,
+        ):
+            return _unresolved(ref, detail="Git artifact resolution failed.")
 
-    def _read_blob(self, remote: str, commit: str, path: str) -> bytes:
+        try:
+            content_type, _ = mimetypes.guess_type(path)
+            resolved = _build_resolved(
+                ref,
+                observed=observed,
+                content=content,
+                total=total,
+                truncated=truncated,
+                content_type=content_type or "application/octet-stream",
+            )
+            deadline.check()
+            return resolved
+        except ProcessExecutionError:
+            return _unresolved(ref, detail="Git artifact resolution failed.")
+
+    def _read_blob(
+        self,
+        remote: str,
+        commit: str,
+        path: str,
+        *,
+        deadline: ProcessDeadline,
+        stdout_consumer: Callable[[bytes], None],
+    ) -> None:
+        deadline.check()
         cache = self._repo_cache(remote)
+        deadline.check()
         rev = f"{commit}:{path}"
         # Idempotent: a fresh cache is initialised once, an existing one reused.
-        self._runner(["-C", cache, "init", "-q"])
-        fetch = self._runner(["-C", cache, "fetch", "--depth", "1", remote, commit])
+        initialized = self._run_command(
+            ["-C", cache, "init", "-q"],
+            deadline=deadline,
+            stdout_limit_bytes=_PROCESS_METADATA_LIMIT_BYTES,
+        )
+        if initialized.returncode != 0:
+            raise _GitReadError("Git artifact resolution failed.")
+        fetch = self._run_command(
+            [
+                "-C",
+                cache,
+                "fetch",
+                "--quiet",
+                "--no-tags",
+                "--depth",
+                "1",
+                remote,
+                commit,
+            ],
+            deadline=deadline,
+            stdout_limit_bytes=_PROCESS_METADATA_LIMIT_BYTES,
+        )
         if fetch.returncode != 0:
-            raise _GitReadError(_git_error_detail(fetch))
+            raise _GitReadError("Git artifact resolution failed.")
         # Refuse an oversized object before reading it into memory.
-        size_out = self._runner(["-C", cache, "cat-file", "-s", rev])
+        size_out = self._run_command(
+            ["-C", cache, "cat-file", "-s", rev],
+            deadline=deadline,
+            stdout_limit_bytes=_PROCESS_METADATA_LIMIT_BYTES,
+        )
         if size_out.returncode != 0:
-            raise _GitReadError(_git_error_detail(size_out))
+            raise _GitReadError("Git artifact resolution failed.")
         try:
-            size = int(size_out.stdout.decode("utf-8", errors="replace").strip())
+            size_text = size_out.stdout.decode("ascii").strip()
+        except UnicodeDecodeError:
+            raise _GitReadError("Git artifact resolution failed.") from None
+        if not size_text.isdigit():
+            raise _GitReadError("Git artifact resolution failed.")
+        try:
+            size = int(size_text)
         except ValueError:
-            raise _GitReadError("git returned an unparseable object size.") from None
+            raise _GitReadError("Git artifact resolution failed.") from None
         if size > self._max_fetch_bytes:
             raise _GitReadError(
                 f"Artifact ({size} bytes) exceeds the "
                 f"{self._max_fetch_bytes}-byte fetch limit."
             )
-        cat = self._runner(["-C", cache, "cat-file", "blob", rev])
+        cat = self._run_command(
+            ["-C", cache, "cat-file", "blob", rev],
+            deadline=deadline,
+            stdout_limit_bytes=self._max_fetch_bytes,
+            stdout_consumer=stdout_consumer,
+        )
         if cat.returncode != 0:
-            raise _GitReadError(_git_error_detail(cat))
-        return cat.stdout
+            raise _GitReadError("Git artifact resolution failed.")
+        deadline.check()
+
+    def _run_command(
+        self,
+        args: list[str],
+        *,
+        deadline: ProcessDeadline,
+        stdout_limit_bytes: int,
+        stdout_consumer: Callable[[bytes], None] | None = None,
+    ) -> GitCompleted:
+        if self._runner is not None:
+            # This compatibility seam is for trusted, synchronous test runners.
+            # Production always uses the preemptible bounded executor.
+            deadline.check()
+            completed = self._runner(args)
+            deadline.check()
+            if (
+                len(completed.stdout) > stdout_limit_bytes
+                or len(completed.stderr) > _PROCESS_STDERR_LIMIT_BYTES
+            ):
+                raise _LegacyProcessOutputExceeded
+            stdout = completed.stdout
+            if stdout_consumer is not None:
+                stdout_consumer(stdout)
+                deadline.check()
+                stdout = b""
+            return GitCompleted(completed.returncode, stdout, completed.stderr)
+
+        env = dict(os.environ)
+        env["GIT_TERMINAL_PROMPT"] = "0"
+        if self._allow_protocol:
+            env["GIT_ALLOW_PROTOCOL"] = self._allow_protocol
+        completed = self._executor.run(
+            [self._binary, *args],
+            deadline=deadline,
+            stdout_limit_bytes=stdout_limit_bytes,
+            stderr_limit_bytes=_PROCESS_STDERR_LIMIT_BYTES,
+            stdout_consumer=stdout_consumer,
+            env=env,
+        )
+        return GitCompleted(
+            completed.returncode,
+            completed.stdout,
+            b"",
+        )
 
     def _repo_cache(self, remote: str) -> str:
         base = os.fspath(self._cache_root) if self._cache_root else os.path.join(
@@ -1262,6 +1549,8 @@ class GitResolver(ArtifactResolver):
 
 
 def _git_error_detail(completed: GitCompleted) -> str:
+    """Legacy store-health diagnostic; resolver subprocesses use generic errors."""
+
     stderr = completed.stderr.decode("utf-8", errors="replace").strip()
     if stderr:
         return f"git failed: {stderr.splitlines()[-1]}"
@@ -1319,39 +1608,77 @@ def _hash_and_collect(
     returned uncertified).
     """
 
-    hasher = hashlib.new(algorithm)
-    collected = bytearray()
-    total = 0
+    collector = _HashCollector(
+        algorithm=algorithm,
+        max_bytes=max_bytes,
+        window=window,
+        max_total=max_total,
+        budget_check=budget_check,
+    )
     for chunk in chunks:
-        if budget_check is not None:
-            budget_check()
-        if not chunk:
-            continue
-        hasher.update(chunk)
-        if budget_check is not None:
-            budget_check()
-        chunk_start = total
-        total += len(chunk)
-        if max_total is not None and total > max_total:
-            raise _FetchTooLarge(max_total)
-        if window is None:
-            if len(collected) < max_bytes:
-                collected.extend(chunk[: max_bytes - len(collected)])
-        else:
-            start, end = window
-            lo = max(start, chunk_start)
-            hi = min(end, total)
-            if hi > lo:
-                collected.extend(chunk[lo - chunk_start : hi - chunk_start])
+        collector.consume(chunk)
+    return collector.finish()
 
-    if budget_check is not None:
-        budget_check()
-    observed = f"{algorithm}:{hasher.hexdigest()}"
-    if budget_check is not None:
-        budget_check()
-    content = bytes(collected)
-    truncated = len(content) < total
-    return content, total, truncated, observed
+
+class _HashCollector:
+    """Incrementally hash a stream while retaining only the requested window."""
+
+    def __init__(
+        self,
+        *,
+        algorithm: str,
+        max_bytes: int,
+        window: tuple[int, int] | None,
+        max_total: int | None = None,
+        budget_check: Callable[[], None] | None = None,
+    ) -> None:
+        self._algorithm = algorithm
+        self._hasher = hashlib.new(algorithm)
+        self._collected = bytearray()
+        self._total = 0
+        self._max_bytes = max_bytes
+        self._window = window
+        self._max_total = max_total
+        self._budget_check = budget_check
+
+    def consume(self, chunk: bytes) -> None:
+        """Consume one stream chunk, failing before accepting bytes over the cap."""
+
+        self._check_budget()
+        if not chunk:
+            return
+        next_total = self._total + len(chunk)
+        if self._max_total is not None and next_total > self._max_total:
+            raise _FetchTooLarge(self._max_total)
+
+        chunk_start = self._total
+        self._hasher.update(chunk)
+        self._total = next_total
+        if self._window is None:
+            if len(self._collected) < self._max_bytes:
+                self._collected.extend(
+                    chunk[: self._max_bytes - len(self._collected)]
+                )
+        else:
+            start, end = self._window
+            lo = max(start, chunk_start)
+            hi = min(end, self._total)
+            if hi > lo:
+                self._collected.extend(chunk[lo - chunk_start : hi - chunk_start])
+        self._check_budget()
+
+    def finish(self) -> tuple[bytes, int, bool, str]:
+        """Return the collected view and digest after the complete stream."""
+
+        self._check_budget()
+        observed = f"{self._algorithm}:{self._hasher.hexdigest()}"
+        self._check_budget()
+        content = bytes(self._collected)
+        return content, self._total, len(content) < self._total, observed
+
+    def _check_budget(self) -> None:
+        if self._budget_check is not None:
+            self._budget_check()
 
 
 def _read_file_chunks(path: str) -> Iterable[bytes]:
@@ -1398,6 +1725,7 @@ def default_registry(
     http_policy: OutboundHttpPolicy | None = None,
     http_client: OutboundHttpClient | None = None,
     http_deadline_seconds: float = DEFAULT_OUTBOUND_HTTP_DEADLINE_SECONDS,
+    subprocess_deadline_seconds: float = DEFAULT_SUBPROCESS_DEADLINE_SECONDS,
     rclone_allowed_remotes: Sequence[str] | None = None,
     git_allowed_remotes: Sequence[str] | None = None,
     git_cache_root: str | Path | None = None,
@@ -1411,6 +1739,8 @@ def default_registry(
     here as they land. ``recovery`` opts the local resolver into content-hash
     recovery of missing files within ``allowed_roots``. ``http_policy`` is the
     shared outbound destination policy later reused by store-health probes.
+    ``subprocess_deadline_seconds`` is one shared execution/verification budget
+    for every command in a single rclone or Git resolution.
     ``git_allowed_remotes`` (``None`` = unrestricted) gates which remotes the
     git resolver may fetch.
     """
@@ -1423,11 +1753,15 @@ def default_registry(
                 client=http_client,
                 deadline_seconds=http_deadline_seconds,
             ),
-            RcloneResolver(allowed_remotes=rclone_allowed_remotes),
+            RcloneResolver(
+                allowed_remotes=rclone_allowed_remotes,
+                deadline_seconds=subprocess_deadline_seconds,
+            ),
             GitResolver(
                 allowed_remotes=git_allowed_remotes,
                 cache_root=git_cache_root,
                 max_cache_bytes=git_max_cache_bytes,
+                deadline_seconds=subprocess_deadline_seconds,
             ),
         ]
     )
@@ -1459,6 +1793,9 @@ LAB_TRACKER_RESOLVER_HTTP_ALLOWED_NETWORKS_ENV = (
 )
 LAB_TRACKER_RESOLVER_HTTP_DEADLINE_SECONDS_ENV = (
     "LAB_TRACKER_RESOLVER_HTTP_DEADLINE_SECONDS"
+)
+LAB_TRACKER_RESOLVER_SUBPROCESS_DEADLINE_SECONDS_ENV = (
+    "LAB_TRACKER_RESOLVER_SUBPROCESS_DEADLINE_SECONDS"
 )
 
 # Comma-separated allowlist of rclone remote NAMES the rclone resolver may read.
@@ -1557,6 +1894,7 @@ def registry_from_env(
     *,
     http_policy: OutboundHttpPolicy | None = None,
     http_deadline_seconds: float | None = None,
+    subprocess_deadline_seconds: float | None = None,
 ) -> ResolverRegistry:
     """Build the default registry, reading resolver config from the env."""
 
@@ -1606,11 +1944,36 @@ def registry_from_env(
             f"{LAB_TRACKER_RESOLVER_HTTP_DEADLINE_SECONDS_ENV} must be finite "
             f"and between 0 and {MAX_OUTBOUND_HTTP_DEADLINE_SECONDS:g} seconds."
         )
+    if subprocess_deadline_seconds is None:
+        raw_subprocess_deadline = os.environ.get(
+            LAB_TRACKER_RESOLVER_SUBPROCESS_DEADLINE_SECONDS_ENV
+        )
+        try:
+            subprocess_deadline_seconds = (
+                float(raw_subprocess_deadline)
+                if raw_subprocess_deadline is not None
+                else DEFAULT_SUBPROCESS_DEADLINE_SECONDS
+            )
+        except ValueError:
+            raise ValueError(
+                f"{LAB_TRACKER_RESOLVER_SUBPROCESS_DEADLINE_SECONDS_ENV} must be "
+                "finite and positive."
+            ) from None
+    try:
+        subprocess_deadline_seconds = _validate_subprocess_deadline_seconds(
+            subprocess_deadline_seconds
+        )
+    except ValueError:
+        raise ValueError(
+            f"{LAB_TRACKER_RESOLVER_SUBPROCESS_DEADLINE_SECONDS_ENV} must be finite "
+            f"and between 0 and {MAX_SUBPROCESS_DEADLINE_SECONDS:g} seconds."
+        ) from None
     return default_registry(
         allowed_roots=allowed_roots,
         recovery=recovery_from_env(),
         http_policy=http_policy or outbound_http_policy_from_env(),
         http_deadline_seconds=http_deadline_seconds,
+        subprocess_deadline_seconds=subprocess_deadline_seconds,
         rclone_allowed_remotes=rclone_allowed_remotes,
         git_allowed_remotes=git_allowed_remotes,
         git_cache_root=git_cache_root,
