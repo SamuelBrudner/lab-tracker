@@ -8,7 +8,11 @@ import zipfile
 from pathlib import Path, PurePosixPath
 
 import pytest
-import tomllib
+
+try:
+    import tomllib
+except ModuleNotFoundError:  # pragma: no cover - exercised by Python 3.10 CI
+    import tomli as tomllib
 
 
 def _packaged_files(package_root: Path, subdir: str) -> set[str]:

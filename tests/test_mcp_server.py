@@ -7,7 +7,11 @@ from pathlib import Path
 
 import httpx
 import pytest
-import tomllib
+
+try:
+    import tomllib
+except ModuleNotFoundError:  # pragma: no cover - exercised by Python 3.10 CI
+    import tomli as tomllib
 
 from lab_tracker import mcp_server
 from lab_tracker.cli import _cursor_mcp_json, _mcp_json
