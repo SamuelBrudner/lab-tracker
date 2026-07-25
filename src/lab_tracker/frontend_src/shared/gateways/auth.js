@@ -29,6 +29,7 @@ import {
 /** @typedef {import("../../generated/openapi.js").operations["list_auth_users_auth_users_get"]["responses"][200]["content"]["application/json"]["data"][number]} ListedAuthUser */
 /** @typedef {import("../../generated/openapi.js").operations["update_auth_user_auth_users__user_id__patch"]["responses"][200]["content"]["application/json"]["data"]} UpdatedAuthUser */
 /** @typedef {CurrentAuthUser & ListedAuthUser & UpdatedAuthUser} AuthUserRead */
+/** @typedef {import("../../generated/openapi.js").operations["auth_setup_readiness_auth_setup_readiness_get"]["responses"][200]["content"]["application/json"]["data"]} AuthSetupReadiness */
 /** @typedef {import("../../generated/openapi.js").operations["consume_enrollment_auth_devices_consume_post"]["responses"][201]["content"]["application/json"]["data"]} DeviceConsumeRead */
 /** @typedef {import("../../generated/openapi.js").operations["create_enrollment_auth_devices_enrollment_post"]["responses"][201]["content"]["application/json"]["data"]} DeviceEnrollmentRead */
 /** @typedef {import("../../generated/openapi.js").operations["list_devices_auth_devices_get"]["responses"][200]["content"]["application/json"]["data"][number]} ListedDeviceToken */
@@ -42,6 +43,7 @@ import {
 /** @typedef {import("../contract.js").Validator<AuthInvitationRead>} AuthInvitationValidator */
 /** @typedef {import("../contract.js").Validator<AuthTokenRead>} AuthTokenValidator */
 /** @typedef {import("../contract.js").Validator<AuthUserRead>} AuthUserValidator */
+/** @typedef {import("../contract.js").Validator<AuthSetupReadiness>} AuthSetupReadinessValidator */
 /** @typedef {import("../contract.js").Validator<DeviceConsumeRead>} DeviceConsumeValidator */
 /** @typedef {import("../contract.js").Validator<DeviceEnrollmentRead>} DeviceEnrollmentValidator */
 /** @typedef {import("../contract.js").Validator<DeviceTokenRead>} DeviceTokenValidator */
@@ -78,6 +80,14 @@ const authBootstrapStatusShape = object({
 });
 
 const authMeMetaShape = object({ auth_enabled: boolean });
+
+/** @satisfies {AuthSetupReadinessValidator} */
+const authSetupReadinessShape = object({
+  background_worker_enabled: boolean,
+  provider: string,
+  provider_credential_configured: boolean,
+  scheduler_enabled: boolean,
+});
 
 /** @satisfies {AuthInvitationValidator} */
 const authInvitationShape = object({
@@ -162,6 +172,11 @@ async function getCurrentUser(options = {}) {
   const envelope = await apiFetch("/auth/me", options);
   const result = parseResourceWithMeta(envelope, authUserShape, authMeMetaShape);
   return { authEnabled: result.meta.auth_enabled, user: result.data };
+}
+
+async function getSetupReadiness(options = {}) {
+  const envelope = await apiFetch("/auth/setup-readiness", options);
+  return parseResource(envelope, authSetupReadinessShape);
 }
 
 async function refreshSession(options = {}) {
@@ -272,6 +287,7 @@ async function revokePersonalAccessToken(tokenId, options = {}) {
 export {
   authBootstrapStatusShape,
   authInvitationShape,
+  authSetupReadinessShape,
   authTokenShape,
   authUserShape,
   authenticate,
@@ -284,6 +300,7 @@ export {
   deviceTokenShape,
   getBootstrapStatus,
   getCurrentUser,
+  getSetupReadiness,
   listDevices,
   listInvitations,
   listPersonalAccessTokens,

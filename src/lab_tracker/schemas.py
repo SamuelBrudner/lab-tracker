@@ -183,6 +183,13 @@ class AuthBootstrapStatus(BaseModel):
     bootstrap_token_warning: str | None = None
 
 
+class AuthSetupReadiness(BaseModel):
+    scheduler_enabled: bool
+    background_worker_enabled: bool
+    provider: str
+    provider_credential_configured: bool
+
+
 class AuthTokenRead(BaseModel):
     access_token: str
     token_type: str = "bearer"

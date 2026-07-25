@@ -140,6 +140,7 @@ function AppNavigation({ activeKind, isAdmin = false, navigate }) {
     ["capture", "/app/capture", "Capture"],
     ["devices", "/app/devices", "Devices"],
     ["agents", "/app/agents", "Agents"],
+    ["setup", "/app/setup", "Setup"],
   ];
   if (isAdmin) {
     links.push(["users", "/app/users", "Users"]);

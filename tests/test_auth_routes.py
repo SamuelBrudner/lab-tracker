@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+from urllib.parse import parse_qs, urlparse
 
+import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
 from starlette.requests import Request
@@ -20,6 +22,9 @@ def _bootstrap_database(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("LAB_TRACKER_NOTE_STORAGE_PATH", str(tmp_path / "note-storage"))
     monkeypatch.setenv("LAB_TRACKER_AUTH_SECRET_KEY", "test-secret")
     monkeypatch.setenv("LAB_TRACKER_AUTH_ENABLED", "true")
+    # Keep test instances independent from any operator-local .env file.
+    monkeypatch.setenv("LAB_TRACKER_PUBLIC_BASE_URL", "")
+    monkeypatch.setenv("LAB_TRACKER_CANONICAL_BASE_URL", "")
 
     engine = create_engine(
         database_url,
@@ -76,6 +81,127 @@ def test_register_login_and_me_round_trip(monkeypatch, tmp_path):
         assert login_response.status_code == 200
         login_payload = login_response.json()["data"]
         assert login_payload["user"]["user_id"] == me_payload["user_id"]
+
+
+def test_setup_readiness_requires_auth_and_never_returns_provider_secret(
+    monkeypatch,
+    tmp_path,
+):
+    _bootstrap_database(monkeypatch, tmp_path)
+    monkeypatch.setenv("LAB_TRACKER_GRAPH_DRAFT_PROVIDER", "openai")
+    monkeypatch.setenv("LAB_TRACKER_OPENAI_API_KEY", "super-secret-provider-key")
+    monkeypatch.setenv("LAB_TRACKER_GRAPH_DRAFT_SCHEDULER_ENABLED", "true")
+    monkeypatch.setenv("LAB_TRACKER_GRAPH_DRAFT_BACKGROUND_ENABLED", "false")
+
+    with TestClient(create_app()) as client:
+        denied_response = client.get("/auth/setup-readiness")
+        assert denied_response.status_code == 401
+
+        _seed_admin(client, username="sam", password="secret")
+        token = _login(client, "sam", "secret")
+        response = client.get(
+            "/auth/setup-readiness",
+            headers=_auth_headers(token),
+        )
+
+    assert response.status_code == 200
+    assert response.json()["data"] == {
+        "scheduler_enabled": True,
+        "background_worker_enabled": True,
+        "provider": "openai",
+        "provider_credential_configured": True,
+    }
+    assert "super-secret-provider-key" not in response.text
+
+
+@pytest.mark.parametrize(
+    (
+        "provider",
+        "credential_name",
+        "credential_value",
+        "scheduler_enabled",
+        "background_enabled",
+        "expected_provider",
+        "expected_credential_configured",
+        "expected_background_worker_enabled",
+    ),
+    [
+        (
+            " CLAUDE ",
+            "LAB_TRACKER_ANTHROPIC_API_KEY",
+            "anthropic-key",
+            False,
+            False,
+            "anthropic",
+            True,
+            False,
+        ),
+        ("Gemini", "LAB_TRACKER_GOOGLE_API_KEY", "", False, True, "google", False, True),
+        (
+            "agentic_openai",
+            "LAB_TRACKER_OPENAI_API_KEY",
+            "openai-key",
+            True,
+            False,
+            "agentic",
+            True,
+            True,
+        ),
+        (
+            "custom",
+            "LAB_TRACKER_OPENAI_API_KEY",
+            "unused-key",
+            False,
+            False,
+            "custom",
+            False,
+            False,
+        ),
+    ],
+)
+def test_setup_readiness_normalizes_provider_and_reports_runtime_flags(
+    monkeypatch,
+    tmp_path,
+    provider,
+    credential_name,
+    credential_value,
+    scheduler_enabled,
+    background_enabled,
+    expected_provider,
+    expected_credential_configured,
+    expected_background_worker_enabled,
+):
+    _bootstrap_database(monkeypatch, tmp_path)
+    monkeypatch.setenv("LAB_TRACKER_GRAPH_DRAFT_PROVIDER", provider)
+    monkeypatch.setenv("LAB_TRACKER_OPENAI_API_KEY", "")
+    monkeypatch.setenv("LAB_TRACKER_ANTHROPIC_API_KEY", "")
+    monkeypatch.setenv("LAB_TRACKER_GOOGLE_API_KEY", "")
+    monkeypatch.setenv(credential_name, credential_value)
+    monkeypatch.setenv(
+        "LAB_TRACKER_GRAPH_DRAFT_SCHEDULER_ENABLED",
+        str(scheduler_enabled).lower(),
+    )
+    monkeypatch.setenv(
+        "LAB_TRACKER_GRAPH_DRAFT_BACKGROUND_ENABLED",
+        str(background_enabled).lower(),
+    )
+
+    with TestClient(create_app()) as client:
+        _seed_admin(client, username="sam", password="secret")
+        token = _login(client, "sam", "secret")
+        response = client.get(
+            "/auth/setup-readiness",
+            headers=_auth_headers(token),
+        )
+
+    assert response.status_code == 200
+    assert response.json()["data"] == {
+        "scheduler_enabled": scheduler_enabled,
+        "background_worker_enabled": expected_background_worker_enabled,
+        "provider": expected_provider,
+        "provider_credential_configured": expected_credential_configured,
+    }
+    assert credential_value not in response.text or credential_value == ""
 
 
 def test_login_rejects_invalid_credentials(monkeypatch, tmp_path):
@@ -455,6 +581,9 @@ def test_admin_can_invite_user_by_email(monkeypatch, tmp_path):
         assert invitation["warning"] is None
         assert invitation["invite_url"].startswith("https://lab.example.org/app?invite=")
         assert "mailto:member%40example.org" in invitation["mailto_url"]
+        invitation_body = parse_qs(urlparse(invitation["mailto_url"]).query)["body"][0]
+        assert "guided setup" in invitation_body
+        assert "daily review time" in invitation_body
 
         invitations_response = client.get(
             "/auth/invitations",

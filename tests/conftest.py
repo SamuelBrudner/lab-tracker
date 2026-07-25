@@ -46,7 +46,7 @@ def _isolate_lab_tracker_home(tmp_path_factory, monkeypatch):
 
     init/update/hooks record into ~/.lab-tracker/applied-repos.json,
     from_env reads ~/.lab-tracker/config.json, and --install-skills writes
-    into ~/.claude/skills — none of which a test run may touch or observe.
+    into agent skill homes — none of which a test run may touch or observe.
     Tests that care about these paths override the env vars themselves.
     """
 
