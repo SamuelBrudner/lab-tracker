@@ -7,8 +7,8 @@ import { SessionDetailCard } from "./sessions.jsx";
 import { apiResponse, installFetchMock } from "../test/utils.js";
 
 describe("SessionDetailCard", () => {
-  it("loads paginated outputs and scoped linked notes", async () => {
-    installFetchMock([
+  it("loads bounded legacy outputs only after expansion and loads scoped linked notes", async () => {
+    const fetchMock = installFetchMock([
       {
         match: /\/projects\/project-1\/members/,
         response: apiResponse([{ role: "contributor", user_id: "user-1" }]),
@@ -39,7 +39,7 @@ describe("SessionDetailCard", () => {
         ]),
       },
       {
-        match: "/sessions/session-1/outputs?limit=200&offset=0",
+        match: "/sessions/session-1/outputs?limit=100&offset=0",
         response: apiResponse([
           {
             checksum: "sha256-output",
@@ -49,6 +49,14 @@ describe("SessionDetailCard", () => {
             size_bytes: 512,
           },
         ]),
+      },
+      {
+        match: "/sessions/session-1/experiments?limit=50&offset=0",
+        response: apiResponse([]),
+      },
+      {
+        match: "/sessions/session-1/collections?limit=20&offset=0",
+        response: apiResponse([]),
       },
       {
         match:
@@ -85,8 +93,15 @@ describe("SessionDetailCard", () => {
       />
     );
 
-    expect(await screen.findByText("rig/output-1.bin")).toBeInTheDocument();
     expect(await screen.findByText("Session-linked note")).toBeInTheDocument();
+    expect(
+      fetchMock.mock.calls.some(([input]) =>
+        String(input).includes("/sessions/session-1/outputs")
+      )
+    ).toBe(false);
+
+    fireEvent.click(screen.getByRole("button", { name: "Show legacy outputs" }));
+    expect(await screen.findByText("rig/output-1.bin")).toBeInTheDocument();
   });
 
   it("calls the close handler with the session and project ids", async () => {
@@ -134,7 +149,15 @@ describe("SessionDetailCard", () => {
         ]),
       },
       {
-        match: "/sessions/session-1/outputs?limit=200&offset=0",
+        match: "/sessions/session-1/outputs?limit=100&offset=0",
+        response: apiResponse([]),
+      },
+      {
+        match: "/sessions/session-1/experiments?limit=50&offset=0",
+        response: apiResponse([]),
+      },
+      {
+        match: "/sessions/session-1/collections?limit=20&offset=0",
         response: apiResponse([]),
       },
       {
@@ -225,7 +248,15 @@ describe("SessionDetailCard", () => {
         ]),
       },
       {
-        match: "/sessions/session-1/outputs?limit=200&offset=0",
+        match: "/sessions/session-1/outputs?limit=100&offset=0",
+        response: apiResponse([]),
+      },
+      {
+        match: "/sessions/session-1/experiments?limit=50&offset=0",
+        response: apiResponse([]),
+      },
+      {
+        match: "/sessions/session-1/collections?limit=20&offset=0",
         response: apiResponse([]),
       },
       {

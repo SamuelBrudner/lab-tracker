@@ -80,6 +80,15 @@ docker compose logs -f app
 If migrations fail after the configured retry budget, the app container exits
 with an error. Restore from backup or fix the migration before restarting.
 
+When enabling high-cardinality acquisition collections, deploy the database and
+server before upgrading or enabling collection watches. Verify
+`acquisition_collections_v1` through `/schema/describe`; a new client connected
+to an older server keeps its collection event queued and never falls back to
+per-file writes. The feature adds tables without backfilling existing
+acquisition outputs. See
+[Acquisition Collections: Use and Rollout](acquisition-collections.md) for the
+full rollout, compatibility, and rollback checklist.
+
 ## First Admin Token
 
 When no `LAB_TRACKER_BOOTSTRAP_ADMIN_TOKEN` is provided, the Docker entrypoint

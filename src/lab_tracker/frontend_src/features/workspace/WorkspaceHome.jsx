@@ -3,6 +3,7 @@ import * as React from "react";
 import { Dashboard } from "../dashboard-projects.jsx";
 import { AnalysisPanel } from "../analysis/AnalysisPanel.jsx";
 import { DatasetPanel } from "../datasets/index.js";
+import { ExperimentPanel } from "../experiments/index.js";
 import { NotePanel } from "../notes.jsx";
 import { PortfolioHome } from "../portfolio-home.jsx";
 import { QuestionPanel } from "../questions/QuestionPanel.jsx";
@@ -134,6 +135,14 @@ function WorkspaceHome({
         navigate={navigate}
       />
 
+      <ExperimentPanel
+        token={auth.token}
+        canWrite={canContribute}
+        selectedProjectId={workspaceData.selectedProjectId}
+        questions={workspaceData.questions}
+        navigate={navigate}
+      />
+
       <NotePanel
         canWrite={canContribute}
         busy={busy}
@@ -226,6 +235,10 @@ function WorkspaceHome({
           <p>
             <strong>Question</strong>
             <span>A staged or active scientific question that records why data was collected.</span>
+          </p>
+          <p>
+            <strong>Experiment</strong>
+            <span>A lightweight grouping for the Sessions and Datasets in one scientific run.</span>
           </p>
           <p>
             <strong>Dataset</strong>

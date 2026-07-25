@@ -67,7 +67,7 @@ function questionCountPath(projectId) {
 }
 
 function datasetListPath(projectId, { limit = 200, offset = 0, ...rest } = {}) {
-  return buildApiPath("/datasets", {
+  return buildApiPath("/datasets/summaries", {
     project_id: projectId,
     ...rest,
     limit,
@@ -76,7 +76,11 @@ function datasetListPath(projectId, { limit = 200, offset = 0, ...rest } = {}) {
 }
 
 function datasetCountPath(projectId) {
-  return buildApiPath("/datasets", { project_id: projectId, limit: 1, offset: 0 });
+  return buildApiPath("/datasets/summaries", {
+    project_id: projectId,
+    limit: 1,
+    offset: 0,
+  });
 }
 
 function noteCountPath(projectId) {
@@ -137,7 +141,7 @@ function captureClaimsPath(projectId) {
 }
 
 function datasetFilesPath(datasetId) {
-  return buildApiPath(`/datasets/${datasetId}/files`, { limit: 200, offset: 0 });
+  return buildApiPath(`/datasets/${datasetId}/files`, { limit: 100, offset: 0 });
 }
 
 function visualizationsPath(analysisId) {

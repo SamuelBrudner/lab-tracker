@@ -1,9 +1,10 @@
 import * as React from "react";
 
-import { buildApiPath, fetchAllPages } from "../../shared/api.js";
+import { apiListRequest, buildApiPath, fetchAllPages } from "../../shared/api.js";
 import { useApiResource } from "../../hooks/useApiResource.js";
 
-const { useEffect, useMemo, useState } = React;
+const { useCallback, useEffect, useMemo, useState } = React;
+const OUTPUT_PAGE_SIZE = 100;
 
 function useSessionDetailData({ token, sessionId, projects }) {
   const { data: session, error: loadError, loading, setData: setSession } = useApiResource(
@@ -11,7 +12,13 @@ function useSessionDetailData({ token, sessionId, projects }) {
     token,
     "Failed to load session."
   );
-  const [outputsState, setOutputsState] = useState({ loading: false, error: "", items: [] });
+  const [outputsState, setOutputsState] = useState({
+    loading: false,
+    loaded: false,
+    error: "",
+    items: [],
+    meta: { limit: OUTPUT_PAGE_SIZE, offset: 0, total: 0 },
+  });
   const [noteState, setNoteState] = useState({ loading: false, error: "", items: [] });
   const [activeQuestionState, setActiveQuestionState] = useState({
     loading: false,
@@ -42,42 +49,54 @@ function useSessionDetailData({ token, sessionId, projects }) {
     );
   }, [activeQuestionState.items, primaryQuestionData, session]);
 
-  useEffect(() => {
-    let canceled = false;
-    if (!token || !sessionId) {
-      setOutputsState({ loading: false, error: "", items: [] });
-      return () => {
-        canceled = true;
-      };
-    }
-
-    setOutputsState({ loading: true, error: "", items: [] });
-    fetchAllPages(`/sessions/${sessionId}/outputs`, { token })
-      .then((items) => {
-        if (canceled) {
-          return;
-        }
-        const normalized = Array.isArray(items) ? items : [];
+  const loadOutputs = useCallback(
+    async (offset = 0) => {
+      if (!sessionId) {
+        return;
+      }
+      setOutputsState((current) => ({ ...current, loading: true, error: "" }));
+      try {
+        const page = await apiListRequest(
+          buildApiPath(`/sessions/${sessionId}/outputs`, {
+            limit: OUTPUT_PAGE_SIZE,
+            offset,
+          }),
+          { token }
+        );
+        const normalized = Array.isArray(page.data) ? [...page.data] : [];
         normalized.sort((a, b) => {
           const aTime = Date.parse(a.created_at || "") || 0;
           const bTime = Date.parse(b.created_at || "") || 0;
           return bTime - aTime;
         });
-        setOutputsState({ loading: false, error: "", items: normalized });
-      })
-      .catch((err) => {
-        if (!canceled) {
-          setOutputsState({
-            loading: false,
-            error: err.message || "Failed to load outputs.",
-            items: [],
-          });
-        }
-      });
+        setOutputsState({
+          loading: false,
+          loaded: true,
+          error: "",
+          items: normalized,
+          meta: page.meta,
+        });
+      } catch (err) {
+        setOutputsState({
+          loading: false,
+          loaded: true,
+          error: err.message || "Failed to load outputs.",
+          items: [],
+          meta: { limit: OUTPUT_PAGE_SIZE, offset: 0, total: 0 },
+        });
+      }
+    },
+    [sessionId, token]
+  );
 
-    return () => {
-      canceled = true;
-    };
+  useEffect(() => {
+    setOutputsState({
+      loading: false,
+      loaded: false,
+      error: "",
+      items: [],
+      meta: { limit: OUTPUT_PAGE_SIZE, offset: 0, total: 0 },
+    });
   }, [sessionId, token]);
 
   useEffect(() => {
@@ -170,6 +189,7 @@ function useSessionDetailData({ token, sessionId, projects }) {
   return {
     activeQuestionState,
     loadError,
+    loadOutputs,
     loading,
     noteState,
     outputsState,

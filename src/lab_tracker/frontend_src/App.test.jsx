@@ -519,13 +519,27 @@ describe("App", () => {
         response: textResponse("graph LR\n  n0[\"question\"]\n", 200, "text/vnd.mermaid"),
       },
       {
-        match: `/datasets/${datasetId}`,
-        response: apiResponse(
-          dataset({
-            datasetId,
-            status: "committed",
-          })
+        match: buildApiPath("/datasets/summaries", {
+          dataset_id: datasetId,
+          limit: 1,
+          offset: 0,
+        }),
+        response: paged(
+          [
+            dataset({
+              datasetId,
+              status: "committed",
+            }),
+          ],
+          { limit: 1, offset: 0, total: 1 }
         ),
+      },
+      {
+        match: buildApiPath(`/datasets/${datasetId}/experiments`, {
+          limit: 50,
+          offset: 0,
+        }),
+        response: paged([]),
       },
     ]);
 

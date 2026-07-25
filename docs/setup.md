@@ -214,6 +214,11 @@ uv run alembic upgrade head
 `lab-tracker serve` and the LAN helpers run this for you. The Alembic head and
 branch policy lives in the project `CLAUDE.md`.
 
+High-cardinality acquisition collections require a server-first additive
+rollout: migrate and verify the server capability before enabling collection
+watches. See
+[`acquisition-collections.md`](acquisition-collections.md#server-first-rollout).
+
 For local SQLite databases, create an explicit backup before risky changes:
 
 ```bash
