@@ -476,6 +476,142 @@ def test_mcp_settings_from_env_accepts_api_key_aliases(monkeypatch) -> None:
     assert mcp_server.MCPSettings.from_env().api_key == "lpat_alias"
 
 
+def test_mcp_settings_from_env_falls_back_to_connection_profile(
+    monkeypatch, tmp_path
+) -> None:
+    config_dir = tmp_path / "lab-tracker"
+    config_dir.mkdir()
+    (config_dir / "config.json").write_text(
+        json.dumps(
+            {
+                "base_url": "https://profile.lab.example.test/",
+                "access_token": "lpat_profile",
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("LAB_TRACKER_CONFIG_DIR", str(config_dir))
+    for name in (
+        "LAB_TRACKER_MCP_BASE_URL",
+        "LAB_TRACKER_MCP_USERNAME",
+        "LAB_TRACKER_MCP_PASSWORD",
+        "LAB_TRACKER_MCP_API_KEY",
+        "LAB_TRACKER_MCP_TOKEN",
+    ):
+        monkeypatch.delenv(name, raising=False)
+
+    settings = mcp_server.MCPSettings.from_env()
+
+    assert settings.base_url == "https://profile.lab.example.test"
+    assert settings.api_key == "lpat_profile"
+    assert settings.username is None
+    assert settings.password is None
+
+
+def test_mcp_settings_from_env_values_override_connection_profile(
+    monkeypatch, tmp_path
+) -> None:
+    config_dir = tmp_path / "lab-tracker"
+    config_dir.mkdir()
+    (config_dir / "config.json").write_text(
+        json.dumps(
+            {
+                "base_url": "https://profile.lab.example.test",
+                "access_token": "lpat_profile",
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("LAB_TRACKER_CONFIG_DIR", str(config_dir))
+    monkeypatch.setenv("LAB_TRACKER_MCP_BASE_URL", "https://env.lab.example.test/")
+    monkeypatch.setenv("LAB_TRACKER_MCP_API_KEY", "lpat_env")
+    monkeypatch.setenv("LAB_TRACKER_MCP_USERNAME", "env-user")
+    monkeypatch.setenv("LAB_TRACKER_MCP_PASSWORD", "env-password")
+
+    settings = mcp_server.MCPSettings.from_env()
+
+    assert settings.base_url == "https://env.lab.example.test"
+    assert settings.api_key == "lpat_env"
+    assert settings.username == "env-user"
+    assert settings.password == "env-password"
+
+
+def test_mcp_settings_from_env_suppresses_profile_token_for_username(
+    monkeypatch, tmp_path
+) -> None:
+    config_dir = tmp_path / "lab-tracker"
+    config_dir.mkdir()
+    (config_dir / "config.json").write_text(
+        json.dumps(
+            {
+                "base_url": "https://profile.lab.example.test",
+                "access_token": "lpat_profile",
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("LAB_TRACKER_CONFIG_DIR", str(config_dir))
+    monkeypatch.setenv("LAB_TRACKER_MCP_USERNAME", "legacy-user")
+    monkeypatch.delenv("LAB_TRACKER_MCP_API_KEY", raising=False)
+    monkeypatch.delenv("LAB_TRACKER_MCP_TOKEN", raising=False)
+
+    settings = mcp_server.MCPSettings.from_env()
+
+    assert settings.base_url == "https://profile.lab.example.test"
+    assert settings.username == "legacy-user"
+    assert settings.api_key is None
+
+
+def test_mcp_settings_from_env_suppresses_profile_token_for_different_server(
+    monkeypatch, tmp_path
+) -> None:
+    config_dir = tmp_path / "lab-tracker"
+    config_dir.mkdir()
+    (config_dir / "config.json").write_text(
+        json.dumps(
+            {
+                "base_url": "https://profile.lab.example.test",
+                "access_token": "lpat_profile",
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("LAB_TRACKER_CONFIG_DIR", str(config_dir))
+    monkeypatch.setenv("LAB_TRACKER_MCP_BASE_URL", "https://other.lab.example.test/")
+    monkeypatch.delenv("LAB_TRACKER_MCP_USERNAME", raising=False)
+    monkeypatch.delenv("LAB_TRACKER_MCP_API_KEY", raising=False)
+    monkeypatch.delenv("LAB_TRACKER_MCP_TOKEN", raising=False)
+
+    settings = mcp_server.MCPSettings.from_env()
+
+    assert settings.base_url == "https://other.lab.example.test"
+    assert settings.api_key is None
+
+
+@pytest.mark.parametrize("profile_text", [None, "{not valid json"])
+def test_mcp_settings_from_env_ignores_missing_or_malformed_profile(
+    monkeypatch, tmp_path, profile_text
+) -> None:
+    config_dir = tmp_path / "lab-tracker"
+    config_dir.mkdir()
+    if profile_text is not None:
+        (config_dir / "config.json").write_text(profile_text, encoding="utf-8")
+    monkeypatch.setenv("LAB_TRACKER_CONFIG_DIR", str(config_dir))
+    for name in (
+        "LAB_TRACKER_MCP_BASE_URL",
+        "LAB_TRACKER_MCP_USERNAME",
+        "LAB_TRACKER_MCP_PASSWORD",
+        "LAB_TRACKER_MCP_API_KEY",
+        "LAB_TRACKER_MCP_TOKEN",
+    ):
+        monkeypatch.delenv(name, raising=False)
+
+    settings = mcp_server.MCPSettings.from_env()
+
+    assert settings.base_url == mcp_server.DEFAULT_BASE_URL
+    assert settings.api_key is None
+
+
 def test_mcp_api_error_redacts_bearer_and_lpat_secrets() -> None:
     exc = mcp_server.LabTrackerAPIUnavailableError(
         "GET failed with Authorization: Bearer lpat_supersecret",
