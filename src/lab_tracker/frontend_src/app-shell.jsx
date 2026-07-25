@@ -33,6 +33,7 @@ import {
   AppHeader,
   AuthForm,
   FlashMessages,
+  UpdateAvailableBanner,
   UnknownRouteCard,
   WorkflowCoverageCard,
 } from "./shared/ui.jsx";
@@ -41,7 +42,7 @@ import { droppedUploadsMessage, installOfflineRetry } from "./shared/register-sw
 import { PendingUploadsBadge } from "./shared/upload-status.jsx";
 import { apiRequest } from "./shared/api.js";
 
-function App() {
+function App({ onReloadForUpdate = null }) {
   const { navigate, replace, route } = useAppRoute();
   const isHomeRoute = route.kind === "home";
   const needsProjectData = isHomeRoute || route.kind === "capture" || route.kind === "batches";
@@ -289,6 +290,7 @@ function App() {
         onLogout={auth.handleLogout}
       />
 
+      <UpdateAvailableBanner onReload={onReloadForUpdate} />
       <FlashMessages message={message} error={error} />
       {auth.persistenceDegraded ? (
         <p className="flash warning" role="status">

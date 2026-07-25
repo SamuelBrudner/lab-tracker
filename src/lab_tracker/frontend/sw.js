@@ -10,12 +10,12 @@
  * one place.
  */
 
-const CACHE_VERSION = "v-579b29c24066";
+const CACHE_VERSION = "v-e746c0716093";
 const CACHE_NAME = `lab-tracker-shell-${CACHE_VERSION}`;
 const SHELL_ASSETS = [
   "/app/",
-  "/app/static/app.js?v=579b29c24066",
-  "/app/static/styles.css?v=579b29c24066",
+  "/app/static/app.js?v=e746c0716093",
+  "/app/static/styles.css?v=e746c0716093",
   "/app/static/manifest.json",
   "/app/static/icon-180.png",
   "/app/static/icon-192.png",
@@ -25,12 +25,35 @@ const SHELL_ASSETS = [
 const SHARE_TARGET_PATH = "/app/share-target";
 const SHARE_INBOX_DB = "lab-tracker-share-inbox";
 const SHARE_INBOX_STORE = "pending";
+const UPDATE_PROMPT_HANDSHAKE_MS = 1500;
+
+let updatePromptSupported = false;
 
 self.addEventListener("install", (event) => {
   event.waitUntil(
-    caches.open(CACHE_NAME).then((cache) => cache.addAll(SHELL_ASSETS))
+    Promise.all([
+      caches.open(CACHE_NAME).then((cache) => cache.addAll(SHELL_ASSETS)),
+      new Promise((resolve) => setTimeout(resolve, UPDATE_PROMPT_HANDSHAKE_MS)),
+    ]).then(() => {
+      // Legacy pages do not know how to activate a waiting worker. Preserve a
+      // seamless first rollout (and quiet first install) unless a controlled,
+      // prompt-capable page explicitly advertises support.
+      if (!updatePromptSupported) {
+        return self.skipWaiting();
+      }
+      return undefined;
+    })
   );
-  self.skipWaiting();
+});
+
+self.addEventListener("message", (event) => {
+  if (event.data?.type === "UPDATE_PROMPT_SUPPORTED") {
+    updatePromptSupported = true;
+    return;
+  }
+  if (event.data?.type === "SKIP_WAITING") {
+    event.waitUntil(self.skipWaiting());
+  }
 });
 
 self.addEventListener("activate", (event) => {

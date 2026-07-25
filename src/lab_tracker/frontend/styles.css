@@ -1235,6 +1235,14 @@ button.project-graph-legend-item:hover {
   gap: 0.6rem;
 }
 
+.app-update-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 0.6rem;
+}
+
 .flash.error {
   border-color: #e3b7bd;
   background: var(--danger-soft);

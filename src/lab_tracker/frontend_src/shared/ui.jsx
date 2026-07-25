@@ -174,6 +174,21 @@ function FlashMessages({ message, error }) {
   );
 }
 
+function UpdateAvailableBanner({ onReload }) {
+  if (typeof onReload !== "function") {
+    return null;
+  }
+
+  return (
+    <div className="flash ok app-update-banner" role="status">
+      <span>An updated version of Lab Tracker is ready.</span>
+      <button type="button" className="btn-primary" onClick={onReload}>
+        Reload to update
+      </button>
+    </div>
+  );
+}
+
 function AuthForm({
   authBootstrapStatus,
   authBootstrapToken,
@@ -339,6 +354,7 @@ export {
   FlashMessages,
   ProjectContextCard,
   RequestEditAccess,
+  UpdateAvailableBanner,
   UnknownRouteCard,
   WorkflowCoverageCard,
 };

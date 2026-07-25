@@ -76,16 +76,19 @@ function surfaceDroppedUploads(result, onDropped) {
 
 export function registerServiceWorker(
   scriptUrl = "/app/sw.js",
-  { reloadOnControllerChange = true, reloadWindow = () => window.location.reload() } = {}
+  {
+    onUpdateReady = () => {},
+    reloadWindow = () => window.location.reload(),
+  } = {}
 ) {
   if (!hasServiceWorker()) {
     return Promise.resolve(null);
   }
   const serviceWorker = navigator.serviceWorker;
-  const shouldReloadOnUpdate = reloadOnControllerChange && Boolean(serviceWorker.controller);
-  let reloadingForUpdate = false;
-  if (shouldReloadOnUpdate) {
-    serviceWorker.addEventListener(
+  const hadController = Boolean(serviceWorker.controller);
+  if (hadController) {
+    let reloadingForUpdate = false;
+    serviceWorker.addEventListener?.(
       "controllerchange",
       () => {
         if (reloadingForUpdate) {
@@ -100,10 +103,73 @@ export function registerServiceWorker(
   return serviceWorker
     .register(scriptUrl, { updateViaCache: "none" })
     .then((registration) => {
-      registration.update?.().catch(() => {});
+      const advertisedWorkers = new WeakSet();
+      const advertiseUpdatePrompt = (worker) => {
+        // Only an already-controlled page can be running an older app shell.
+        // First installs should continue to activate without a prompt.
+        if (
+          !hadController ||
+          typeof worker?.postMessage !== "function" ||
+          advertisedWorkers.has(worker)
+        ) {
+          return;
+        }
+        try {
+          worker.postMessage({ type: "UPDATE_PROMPT_SUPPORTED" });
+          advertisedWorkers.add(worker);
+        } catch {
+          // A worker can become redundant between inspection and postMessage.
+        }
+      };
+      const notifyWhenWaiting = () => {
+        const waiting = registration.waiting;
+        if (!waiting || !hadController) {
+          return;
+        }
+        advertiseUpdatePrompt(waiting);
+        onUpdateReady(registration);
+      };
+      let observedInstalling = null;
+      const observeInstalling = (installing) => {
+        if (!installing || installing === observedInstalling) {
+          return;
+        }
+        observedInstalling = installing;
+        advertiseUpdatePrompt(installing);
+        installing.addEventListener?.("statechange", () => {
+          if (installing.state === "installed") {
+            notifyWhenWaiting();
+          }
+        });
+      };
+
+      observeInstalling(registration.installing);
+      notifyWhenWaiting();
+      registration.addEventListener?.("updatefound", () => {
+        observeInstalling(registration.installing);
+      });
+      try {
+        Promise.resolve(registration.update?.()).catch(() => {});
+      } catch {
+        // Registration remains usable even if an explicit update check fails.
+      }
       return registration;
     })
     .catch(() => null);
+}
+
+export function applyServiceWorkerUpdate(registration) {
+  const waiting = registration?.waiting;
+  if (!waiting || !hasServiceWorker()) {
+    return false;
+  }
+
+  try {
+    waiting.postMessage({ type: "SKIP_WAITING" });
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 export function installOfflineRetry({
