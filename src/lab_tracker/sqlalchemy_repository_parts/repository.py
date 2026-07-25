@@ -81,6 +81,7 @@ from .goals import SQLAlchemyGoalRepository
 from .graph_batches import (
     SQLAlchemyGraphDraftBatchRunRepository,
     SQLAlchemyGraphDraftBatchSettingsRepository,
+    SQLAlchemyReviewEmailOutboxRepository,
 )
 from .graph_drafts import SQLAlchemyGraphChangeSetRepository
 from .notes import SQLAlchemyNoteRepository
@@ -162,6 +163,7 @@ class SQLAlchemyLabTrackerRepository:
         self.graph_change_sets = SQLAlchemyGraphChangeSetRepository(session)
         self.graph_draft_batch_settings = SQLAlchemyGraphDraftBatchSettingsRepository(session)
         self.graph_draft_batch_runs = SQLAlchemyGraphDraftBatchRunRepository(session)
+        self.review_email_outbox = SQLAlchemyReviewEmailOutboxRepository(session)
 
     def commit(self) -> None:
         self._session.commit()

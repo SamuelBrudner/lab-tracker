@@ -47,6 +47,7 @@ from lab_tracker.models import (
     QuestionLinkRole,
     QuestionStatus,
     QuestionType,
+    ReviewEmailDeliveryStatus,
     SessionStatus,
     SessionType,
     StoreKind,
@@ -593,6 +594,13 @@ class GraphDraftBatchSettingsModel(Base):
         default="America/New_York",
     )
     next_run_at: Mapped[datetime | None] = mapped_column(UtcDateTime)
+    email_notifications_enabled: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=False,
+    )
+    notification_email: Mapped[str | None] = mapped_column(String(320))
+    notification_email_confirmed_at: Mapped[datetime | None] = mapped_column(UtcDateTime)
     created_at: Mapped[datetime] = mapped_column(UtcDateTime, default=_utc_now)
     updated_at: Mapped[datetime] = mapped_column(
         UtcDateTime,
@@ -600,6 +608,81 @@ class GraphDraftBatchSettingsModel(Base):
         onupdate=_utc_now,
     )
     updated_by: Mapped[str | None] = mapped_column(String(255))
+
+
+class ReviewEmailOutboxModel(Base):
+    __tablename__ = "review_email_outbox"
+    __table_args__ = (
+        UniqueConstraint(
+            "idempotency_key",
+            name="uq_review_email_outbox_idempotency_key",
+        ),
+        CheckConstraint(
+            "event_type IN ('review_ready', 'test')",
+            name="ck_review_email_outbox_event_type",
+        ),
+        CheckConstraint(
+            "status IN ('pending', 'sending', 'retryable', 'accepted', 'failed')",
+            name="ck_review_email_outbox_status",
+        ),
+        CheckConstraint(
+            "attempt_count >= 0",
+            name="ck_review_email_outbox_attempt_count",
+        ),
+        CheckConstraint(
+            "TRIM(destination_email) <> ''",
+            name="ck_review_email_outbox_destination_email",
+        ),
+        CheckConstraint(
+            "TRIM(idempotency_key) <> ''",
+            name="ck_review_email_outbox_idempotency_key",
+        ),
+        CheckConstraint(
+            "(status = 'accepted' AND accepted_at IS NOT NULL) "
+            "OR (status <> 'accepted' AND accepted_at IS NULL)",
+            name="ck_review_email_outbox_accepted_at",
+        ),
+    )
+
+    delivery_id: Mapped[UUID] = mapped_column(
+        GUID,
+        primary_key=True,
+        default=uuid4,
+    )
+    change_set_id: Mapped[UUID | None] = mapped_column(
+        GUID,
+        ForeignKey("graph_change_sets.change_set_id", ondelete="SET NULL"),
+    )
+    recipient_user_id: Mapped[UUID | None] = mapped_column(
+        GUID,
+        ForeignKey("users.user_id", ondelete="SET NULL"),
+    )
+    event_type: Mapped[str] = mapped_column(String(30), nullable=False)
+    destination_email: Mapped[str] = mapped_column(String(320), nullable=False)
+    idempotency_key: Mapped[str] = mapped_column(String(200), nullable=False)
+    status: Mapped[ReviewEmailDeliveryStatus] = mapped_column(
+        EnumType(ReviewEmailDeliveryStatus, length=20),
+        nullable=False,
+        default=ReviewEmailDeliveryStatus.PENDING,
+    )
+    attempt_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    next_attempt_at: Mapped[datetime | None] = mapped_column(
+        UtcDateTime,
+        nullable=True,
+        default=_utc_now,
+    )
+    claim_token: Mapped[UUID | None] = mapped_column(GUID)
+    claimed_at: Mapped[datetime | None] = mapped_column(UtcDateTime)
+    lease_expires_at: Mapped[datetime | None] = mapped_column(UtcDateTime)
+    provider_message_id: Mapped[str | None] = mapped_column(String(500))
+    last_error: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(UtcDateTime, default=_utc_now)
+    updated_at: Mapped[datetime] = mapped_column(
+        UtcDateTime,
+        default=_utc_now,
+        onupdate=_utc_now,
+    )
+    accepted_at: Mapped[datetime | None] = mapped_column(UtcDateTime)
 
 
 class GraphDraftBatchRunModel(Base):
@@ -1646,6 +1729,21 @@ Index(
     unique=True,
     sqlite_where=GraphDraftBatchSettingsModel.user_id.is_(None),
     postgresql_where=GraphDraftBatchSettingsModel.user_id.is_(None),
+)
+Index(
+    "ix_review_email_outbox_claim",
+    ReviewEmailOutboxModel.status,
+    ReviewEmailOutboxModel.next_attempt_at,
+    ReviewEmailOutboxModel.lease_expires_at,
+    ReviewEmailOutboxModel.created_at,
+)
+Index(
+    "ix_review_email_outbox_change_set_id",
+    ReviewEmailOutboxModel.change_set_id,
+)
+Index(
+    "ix_review_email_outbox_recipient_user_id",
+    ReviewEmailOutboxModel.recipient_user_id,
 )
 Index("ix_sessions_created_by_user_id", SessionModel.created_by_user_id)
 Index("ix_analyses_executed_by_user_id", AnalysisModel.executed_by_user_id)

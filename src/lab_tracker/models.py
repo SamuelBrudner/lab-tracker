@@ -410,6 +410,16 @@ class GraphDraftBatchTrigger(str, Enum):
     MANUAL = "manual"
 
 
+class ReviewEmailDeliveryStatus(str, Enum):
+    """Durable states for one review-email outbox delivery."""
+
+    PENDING = "pending"
+    SENDING = "sending"
+    RETRYABLE = "retryable"
+    ACCEPTED = "accepted"
+    FAILED = "failed"
+
+
 class GraphDraftSemanticType(str, Enum):
     CREATE_ENTITY = "create_entity"
     UPDATE_ENTITY = "update_entity"
@@ -673,9 +683,34 @@ class GraphDraftBatchSettings(_DomainModel):
     run_at_local_time: str = "18:00"
     timezone_name: str = "America/New_York"
     next_run_at: datetime | None = None
+    email_notifications_enabled: bool = False
+    notification_email: str | None = None
+    notification_email_confirmed_at: datetime | None = None
     created_at: datetime = Field(default_factory=utc_now)
     updated_at: datetime = Field(default_factory=utc_now)
     updated_by: str | None = None
+
+
+class ReviewEmailDelivery(_DomainModel):
+    """One durable, recipient-scoped review-email delivery."""
+
+    delivery_id: UUID
+    change_set_id: UUID | None = None
+    recipient_user_id: UUID | None = None
+    event_type: Literal["review_ready", "test"] = "review_ready"
+    destination_email: str
+    idempotency_key: str
+    status: ReviewEmailDeliveryStatus = ReviewEmailDeliveryStatus.PENDING
+    attempt_count: int = Field(default=0, ge=0)
+    next_attempt_at: datetime | None = Field(default_factory=utc_now)
+    claim_token: UUID | None = None
+    claimed_at: datetime | None = None
+    lease_expires_at: datetime | None = None
+    provider_message_id: str | None = None
+    last_error: str | None = None
+    created_at: datetime = Field(default_factory=utc_now)
+    updated_at: datetime = Field(default_factory=utc_now)
+    accepted_at: datetime | None = None
 
 
 class GraphDraftBatchRun(_DomainModel):

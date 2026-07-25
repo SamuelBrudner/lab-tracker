@@ -315,6 +315,53 @@ credentials, MCP) is [`agent-setup.md`](agent-setup.md).
 - `LAB_TRACKER_GOOGLE_TIMEOUT_SECONDS`: Google graph draft API timeout in
   seconds (default: `60`)
 
+### Daily-review email alerts
+
+Email alerts are per-user and opt-in. They are queued only when an assigned
+batch review reaches `ready`; generic graph changes, failed drafts, unassigned
+batches, and empty proposals do not send mail. The message deliberately omits
+the project name, note text, proposal summary, operation count, and all other
+research content. Its signed short-lived link remains a pointer, not an
+authorization grant: normal sign-in and project access are still required.
+
+- `LAB_TRACKER_REVIEW_EMAIL_ENABLED`: enable delivery processing (default:
+  `false`)
+- `LAB_TRACKER_REVIEW_EMAIL_TRANSPORT`: `external` for a mailbox-owned worker,
+  or `smtp` for the built-in worker (default: `external`)
+- `LAB_TRACKER_REVIEW_EMAIL_WORKER_POLL_SECONDS`: built-in SMTP worker idle
+  polling interval (default: `10`)
+- `LAB_TRACKER_REVIEW_EMAIL_CLAIM_LEASE_SECONDS`: time before a crashed
+  delivery worker's lease can be recovered (default: `300`)
+- `LAB_TRACKER_REVIEW_EMAIL_MAX_ATTEMPTS`: provider attempts before a delivery
+  becomes terminally failed (default: `8`)
+- `LAB_TRACKER_REVIEW_EMAIL_LINK_TTL_MINUTES`: signed review-link lifetime
+  (default: `1440`)
+- `LAB_TRACKER_REVIEW_EMAIL_SMTP_HOST`: SMTP server hostname
+- `LAB_TRACKER_REVIEW_EMAIL_SMTP_PORT`: SMTP server port (default: `587`)
+- `LAB_TRACKER_REVIEW_EMAIL_SMTP_USERNAME`: optional SMTP login username
+- `LAB_TRACKER_REVIEW_EMAIL_SMTP_PASSWORD`: optional SMTP login password;
+  configure it together with the username or configure neither
+- `LAB_TRACKER_REVIEW_EMAIL_SMTP_FROM_ADDRESS`: required sender for SMTP
+- `LAB_TRACKER_REVIEW_EMAIL_SMTP_TLS_MODE`: `none`, `starttls` (default), or
+  `implicit`
+- `LAB_TRACKER_REVIEW_EMAIL_SMTP_TIMEOUT_SECONDS`: bounded SMTP timeout
+  (default: `10`, maximum: `30`)
+
+Enabling alerts requires authentication and an HTTPS
+`LAB_TRACKER_PUBLIC_BASE_URL`. Delivery state is durable in
+`review_email_outbox`: unique idempotency keys prevent duplicate enqueue,
+leases recover after worker crashes, transient failures back off, and
+`accepted` means the provider accepted the message—not that it reached an
+inbox. See [daily-review-email-alerts.md](daily-review-email-alerts.md).
+
+For Docker deployments using `external`, invoke the bridge inside the primary
+app container or through the root Compose file's default-off
+`review-email-external` profile. A bare host invocation uses host defaults and
+does not target the deployed Postgres database. The optional
+`LAB_TRACKER_AUTH_SECRET_KEY_FILE` escape hatch is consumed only by the
+one-shot external bridge; it lets the profile read the app's existing runtime
+secret from a read-only volume rather than duplicating that secret in Compose.
+
 ### MCP service client (`lt-mcp`)
 
 These variables are read by the MCP server process, not the FastAPI app. The

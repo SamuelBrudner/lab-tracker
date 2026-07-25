@@ -44,11 +44,20 @@ from lab_tracker.file_storage import LocalFileStorageBackend
 from lab_tracker.git_remote_policy import GitRemotePolicy
 from lab_tracker.graph_drafting import GraphDraftClientFactory, make_graph_draft_client
 from lab_tracker.logging import configure_logging
-from lab_tracker.models import DataStore
+from lab_tracker.models import DataStore, ReviewEmailDelivery
 from lab_tracker.note_storage import LocalNoteStorage
 from lab_tracker.outbound_http import OutboundHttpPolicy
 from lab_tracker.process_lock import ProcessLock
 from lab_tracker.rate_limit import InMemoryRateLimiter
+from lab_tracker.review_email_transport import (
+    ReviewEmailDeliveryError,
+    ReviewEmailProvider,
+    ReviewReadyEmail,
+    SMTPReviewEmailProvider,
+    SMTPSettings,
+    SMTPTLSMode,
+)
+from lab_tracker.review_links import sign_review_link
 from lab_tracker.sqlalchemy_repository import SQLAlchemyLabTrackerRepository
 
 _logger = logging.getLogger(__name__)
@@ -108,6 +117,7 @@ class AppRuntime:
     raw_note_storage: LocalNoteStorage
     lab_tracker_api: LabTrackerAPI
     graph_draft_client_factory: GraphDraftClientFactory
+    review_email_provider: ReviewEmailProvider | None
     auth_rate_limiter: InMemoryRateLimiter
     pat_rate_limiter: InMemoryRateLimiter
     outbound_http_policy: OutboundHttpPolicy
@@ -218,6 +228,7 @@ def _build_app_runtime(
         git_remote_policy=git_remote_policy,
         git_health_workdir=git_health_workdir,
     )
+    review_email_provider = _build_review_email_provider(settings)
     return AppRuntime(
         settings=settings,
         engine=engine,
@@ -232,6 +243,7 @@ def _build_app_runtime(
         raw_note_storage=raw_note_storage,
         lab_tracker_api=lab_tracker_api,
         graph_draft_client_factory=make_graph_draft_client,
+        review_email_provider=review_email_provider,
         auth_rate_limiter=auth_rate_limiter,
         pat_rate_limiter=pat_rate_limiter,
         outbound_http_policy=outbound_http_policy,
@@ -253,7 +265,10 @@ def make_lifespan(
         background_tasks: list[asyncio.Task[None]] = []
         try:
             lock = _acquire_database_lock(runtime.engine)
-            background_tasks = _start_graph_draft_background_tasks(app)
+            background_tasks = [
+                *_start_graph_draft_background_tasks(app),
+                *_start_review_email_background_tasks(app),
+            ]
             yield
         finally:
             try:
@@ -279,6 +294,19 @@ def _start_graph_draft_background_tasks(app: FastAPI) -> list[asyncio.Task[None]
     if settings.graph_draft_scheduler_enabled:
         tasks.append(asyncio.create_task(_graph_draft_scheduler_loop(app)))
     return tasks
+
+
+def _start_review_email_background_tasks(app: FastAPI) -> list[asyncio.Task[None]]:
+    settings = getattr(app.state, "settings", None)
+    provider = getattr(app.state, "review_email_provider", None)
+    if (
+        settings is None
+        or not settings.review_email_enabled
+        or settings.review_email_transport != "smtp"
+        or provider is None
+    ):
+        return []
+    return [asyncio.create_task(_review_email_worker_loop(app))]
 
 
 async def _stop_background_tasks(tasks: list[asyncio.Task[None]]) -> None:
@@ -320,6 +348,20 @@ async def _graph_draft_scheduler_loop(app: FastAPI) -> None:
         await asyncio.sleep(interval_seconds)
 
 
+async def _review_email_worker_loop(app: FastAPI) -> None:
+    settings = app.state.settings
+    while True:
+        try:
+            processed = await asyncio.to_thread(_process_one_review_email, app)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            _logger.exception("Review email worker tick failed.")
+            processed = False
+        if not processed:
+            await asyncio.sleep(settings.review_email_worker_poll_seconds)
+
+
 def _process_one_graph_draft_batch_run(app: FastAPI) -> bool:
     with app.state.db_session_factory() as session:
         api = LabTrackerAPI(
@@ -345,6 +387,97 @@ def _enqueue_due_graph_draft_batches(app: FastAPI) -> None:
             surface="background",
         )
         api.enqueue_due_graph_draft_batches(actor=system_auth_context())
+
+
+def _process_one_review_email(app: FastAPI) -> bool:
+    provider = app.state.review_email_provider
+    if provider is None:
+        return False
+    with app.state.db_session_factory() as session:
+        api = LabTrackerAPI(
+            raw_storage=app.state.raw_note_storage,
+            repository=SQLAlchemyLabTrackerRepository(session),
+            settings=app.state.settings,
+            surface="background",
+        )
+        delivery = api.review_emails.claim_next(
+            lease_seconds=app.state.settings.review_email_claim_lease_seconds
+        )
+        if delivery is None:
+            return False
+        claim_token = delivery.claim_token
+        if claim_token is None:
+            raise RuntimeError("Claimed review email has no lease token.")
+        try:
+            review_url = _review_email_url(app.state.settings, delivery)
+            result = provider.send_review_ready(
+                ReviewReadyEmail(
+                    recipient_email=delivery.destination_email,
+                    review_url=review_url,
+                    idempotency_key=delivery.idempotency_key,
+                    event_type=delivery.event_type,
+                )
+            )
+        except ReviewEmailDeliveryError as exc:
+            api.review_emails.mark_failed(
+                delivery.delivery_id,
+                claim_token=claim_token,
+                error_message=str(exc),
+                retryable=exc.retryable,
+            )
+        except Exception:
+            _logger.exception("Review email message preparation failed.")
+            api.review_emails.mark_failed(
+                delivery.delivery_id,
+                claim_token=claim_token,
+                error_message="Review email message preparation failed.",
+                retryable=False,
+            )
+        else:
+            api.review_emails.mark_accepted(
+                delivery.delivery_id,
+                claim_token=claim_token,
+                provider_message_id=result.message_id,
+            )
+        return True
+
+
+def _review_email_url(
+    settings: Settings,
+    delivery: ReviewEmailDelivery,
+) -> str:
+    base_url = settings.public_base_url.rstrip("/")
+    if delivery.event_type == "test":
+        return f"{base_url}/app/"
+    if (
+        delivery.change_set_id is None
+        or delivery.recipient_user_id is None
+    ):
+        raise ValueError("Review-ready delivery is missing its review binding.")
+    token = sign_review_link(
+        settings.auth_secret_key,
+        delivery.change_set_id,
+        recipient_user_id=delivery.recipient_user_id,
+        delivery_id=delivery.delivery_id,
+        ttl_minutes=settings.review_email_link_ttl_minutes,
+    )
+    return f"{base_url}/r/{token}"
+
+
+def _build_review_email_provider(settings: Settings) -> ReviewEmailProvider | None:
+    if not settings.review_email_enabled or settings.review_email_transport != "smtp":
+        return None
+    return SMTPReviewEmailProvider(
+        SMTPSettings(
+            host=settings.review_email_smtp_host,
+            port=settings.review_email_smtp_port,
+            sender_email=settings.review_email_smtp_from_address,
+            username=settings.review_email_smtp_username or None,
+            password=settings.review_email_smtp_password or None,
+            tls_mode=SMTPTLSMode(settings.review_email_smtp_tls_mode),
+            timeout_seconds=settings.review_email_smtp_timeout_seconds,
+        )
+    )
 
 
 def _acquire_database_lock(engine: Engine) -> ProcessLock | None:
@@ -388,6 +521,7 @@ def configure_app_state(app: FastAPI, runtime: AppRuntime) -> None:
     app.state.raw_note_storage = runtime.raw_note_storage
     app.state.lab_tracker_api = runtime.lab_tracker_api
     app.state.graph_draft_client_factory = runtime.graph_draft_client_factory
+    app.state.review_email_provider = runtime.review_email_provider
     app.state.auth_rate_limiter = runtime.auth_rate_limiter
     app.state.pat_rate_limiter = runtime.pat_rate_limiter
     app.state.outbound_http_policy = runtime.outbound_http_policy

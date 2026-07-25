@@ -128,6 +128,7 @@ def _is_public_path(path: str) -> bool:
         path.startswith("/docs/")
         or path.startswith("/redoc/")
         or path.startswith("/app/")
+        or path.startswith("/r/")
     )
 
 

@@ -35,6 +35,7 @@ from lab_tracker.models import (
     QuestionRefactor,
     RecordExportEvent,
     RecordExportRecords,
+    ReviewEmailDelivery,
     Session,
     SupervisionEdge,
     UsageEvent,
@@ -92,6 +93,34 @@ class GraphChangeSetRepository(EntityRepository[GraphChangeSet], Protocol):
 
     def project_id_for(self, change_set_id: UUID) -> UUID | None:
         """Resolve a draft's project without materializing its operations."""
+
+
+class ReviewEmailOutboxRepository(Protocol):
+    """Persistence contract for durable review-email delivery."""
+
+    def get(self, entity_id: UUID) -> ReviewEmailDelivery | None:
+        """Return one delivery by ID, or None when it does not exist."""
+
+    def list(self) -> list[ReviewEmailDelivery]:
+        """Return all deliveries for diagnostics."""
+
+    def save(self, entity: ReviewEmailDelivery) -> None:
+        """Persist a delivery create/update operation."""
+
+    def get_by_idempotency_key(
+        self,
+        idempotency_key: str,
+    ) -> ReviewEmailDelivery | None:
+        """Return the delivery for one globally unique idempotency key."""
+
+    def claim_next(
+        self,
+        *,
+        now: datetime,
+        lease_until: datetime,
+        claim_token: UUID,
+    ) -> ReviewEmailDelivery | None:
+        """Atomically lease the next due or stale delivery."""
 
 
 class LabTrackerRepository(Protocol):
@@ -184,6 +213,9 @@ class LabTrackerRepository(Protocol):
 
     @property
     def graph_draft_batch_runs(self) -> EntityRepository[GraphDraftBatchRun]: ...
+
+    @property
+    def review_email_outbox(self) -> ReviewEmailOutboxRepository: ...
 
     def user_exists(self, user_id: UUID) -> bool:
         """Return whether a user exists for FK-backed attribution."""
