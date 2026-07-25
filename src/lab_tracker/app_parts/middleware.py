@@ -6,7 +6,8 @@ import hashlib
 
 from fastapi import FastAPI, Request
 from starlette.concurrency import run_in_threadpool
-from starlette.responses import JSONResponse
+from starlette.middleware.base import RequestResponseEndpoint
+from starlette.responses import JSONResponse, Response
 
 from lab_tracker.api import LabTrackerAPI
 from lab_tracker.application import RequestHandlers
@@ -67,6 +68,10 @@ _CSP_PATH_PREFIXES = (
     "/visualizations/",
 )
 
+_ARTIFACT_RESOLUTION_PATH = "/external-artifacts/resolve"
+_ARTIFACT_RESOLUTION_RETRY_AFTER_SECONDS = "1"
+_ARTIFACT_RESOLUTION_SATURATED_MESSAGE = "Artifact resolution is temporarily unavailable."
+
 
 def _auth_error_response(message: str) -> JSONResponse:
     payload = ErrorEnvelope(error=ErrorInfo(code="auth_error", message=message))
@@ -86,6 +91,14 @@ def _service_forbidden_response(message: str) -> JSONResponse:
 def _rate_limited_response(message: str) -> JSONResponse:
     payload = ErrorEnvelope(error=ErrorInfo(code="rate_limited", message=message))
     return JSONResponse(status_code=429, content=payload.model_dump())
+
+
+def _artifact_resolution_saturated_response() -> JSONResponse:
+    """Return the same opaque response for global and actor saturation."""
+
+    response = _rate_limited_response(_ARTIFACT_RESOLUTION_SATURATED_MESSAGE)
+    response.headers["Retry-After"] = _ARTIFACT_RESOLUTION_RETRY_AFTER_SECONDS
+    return response
 
 
 def local_auth_context() -> AuthContext:
@@ -222,6 +235,38 @@ def configure_security_headers_middleware(app: FastAPI) -> None:
         return response
 
 
+async def _apply_artifact_resolution_admission(
+    request: Request,
+    call_next: RequestResponseEndpoint,
+) -> Response:
+    """Apply no-wait resolution capacity after authoritative authentication."""
+
+    if (
+        request.method != "POST"
+        or request.scope["path"] != _ARTIFACT_RESOLUTION_PATH
+    ):
+        return await call_next(request)
+    actor = getattr(request.state, "auth_context", None)
+    if not isinstance(actor, AuthContext):
+        return _auth_error_response("Authentication required.")
+    lease = request.app.state.artifact_resolution_admission.try_acquire(actor.user_id)
+    if lease is None:
+        return _artifact_resolution_saturated_response()
+    try:
+        return await call_next(request)
+    finally:
+        lease.release()
+
+
+def configure_artifact_resolution_admission_middleware(app: FastAPI) -> None:
+    @app.middleware("http")
+    async def artifact_resolution_admission_middleware(
+        request: Request,
+        call_next: RequestResponseEndpoint,
+    ) -> Response:
+        return await _apply_artifact_resolution_admission(request, call_next)
+
+
 def _should_apply_csp(path: str) -> bool:
     if path == "/" or path.startswith("/openapi"):
         return False
@@ -263,6 +308,7 @@ def configure_database_session_middleware(
                     "resolver_registry",
                     None,
                 ),
+                release_read_scope=request_scope.release_read_scope,
             )
             response = await call_next(request)
         except BaseException as exc:

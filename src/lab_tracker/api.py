@@ -434,6 +434,7 @@ class LabTrackerRequestScope:
         self._context = LabTrackerRequestContext(repository=repository, surface=surface)
         self._close = close
         self._completed = False
+        self._closed = False
         self.api = root_api._for_request_context(self._context)
 
     def __enter__(self) -> LabTrackerRequestScope:
@@ -449,8 +450,7 @@ class LabTrackerRequestScope:
             if not self._completed:
                 self.rollback()
         finally:
-            if self._close is not None:
-                self._close()
+            self._close_once()
 
     def complete_response(self, response: ResponseT) -> ResponseT:
         if response.status_code >= 400:
@@ -464,11 +464,21 @@ class LabTrackerRequestScope:
             return
         try:
             self._context.repository.commit()
-        except Exception:
-            self._context.repository.rollback()
-            self._complete_rollback()
+        except BaseException:
+            try:
+                self._context.repository.rollback()
+            finally:
+                self._complete_rollback()
             raise
         self._complete_commit()
+
+    def release_read_scope(self) -> None:
+        """Rollback and close a read-only scope before slow external work."""
+
+        try:
+            self.rollback()
+        finally:
+            self._close_once()
 
     def rollback(self) -> None:
         if self._completed:
@@ -495,3 +505,10 @@ class LabTrackerRequestScope:
                 label=label,
             ),
         )
+
+    def _close_once(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        if self._close is not None:
+            self._close()

@@ -282,8 +282,7 @@ def test_resolve_endpoint_deadline_discards_partial_body_and_closes_session(
 
     original_factory = client.app.state.db_session_factory
     pool_lock = threading.Lock()
-    second_checkout_waiting = threading.Event()
-    second_connection_acquired = threading.Event()
+    unrelated_connection_acquired = threading.Event()
     first_connection_released = threading.Event()
     checkout_attempts = 0
 
@@ -293,12 +292,10 @@ def test_resolve_endpoint_deadline_discards_partial_body_and_closes_session(
             with pool_lock:
                 checkout_attempts += 1
                 attempt = checkout_attempts
-            if attempt == 2:
-                second_checkout_waiting.set()
             connection = super()._do_get()
             if attempt == 2:
                 assert first_connection_released.is_set()
-                second_connection_acquired.set()
+                unrelated_connection_acquired.set()
             return connection
 
     bounded_engine = create_engine(
@@ -359,18 +356,21 @@ def test_resolve_endpoint_deadline_discards_partial_body_and_closes_session(
             headers=admin_auth_headers,
         )
         assert stream_entered.wait(timeout=5.0)
+        # The resolver remains deliberately blocked, but its read scope must
+        # already have returned this sole connection to the pool.
+        assert first_connection_released.wait(timeout=5.0)
 
         follow_up_future = executor.submit(
             client.get,
             f"/projects/{project_id}",
             headers=admin_auth_headers,
         )
-        assert second_checkout_waiting.wait(timeout=5.0)
-        assert follow_up_future.done() is False
+        follow_up = follow_up_future.result(timeout=5.0)
+        assert unrelated_connection_acquired.is_set()
+        assert resolve_future.done() is False
 
         expire_stream.set()
         resolve_response = resolve_future.result(timeout=5.0)
-        follow_up = follow_up_future.result(timeout=5.0)
     finally:
         expire_stream.set()
         executor.shutdown(wait=True)
@@ -386,7 +386,7 @@ def test_resolve_endpoint_deadline_discards_partial_body_and_closes_session(
     assert "slow.example" not in resolve_response.text
     assert response.closed is True
     assert first_connection_released.is_set()
-    assert second_connection_acquired.is_set()
+    assert unrelated_connection_acquired.is_set()
     assert sorted(closed_session_indexes) == [1, 2]
     assert follow_up.status_code == 200, follow_up.text
 

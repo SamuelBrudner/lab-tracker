@@ -2,12 +2,14 @@ from __future__ import annotations
 
 from uuid import uuid4
 
+import pytest
 from fastapi import Request
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, delete, select
 from sqlalchemy.orm import Session
 from starlette.responses import JSONResponse
 
+from lab_tracker.api import LabTrackerAPI
 from lab_tracker.app import create_app
 from lab_tracker.app_parts.runtime import _log_startup_config_summary
 from lab_tracker.application import RequestHandlers
@@ -42,6 +44,21 @@ class _SessionFactorySpy:
         session = _SessionSpy()
         self.sessions.append(session)
         return session
+
+
+class _RequestScopeRepositorySpy:
+    def __init__(self, *, commit_error: BaseException | None = None) -> None:
+        self.commit_error = commit_error
+        self.commits = 0
+        self.rollbacks = 0
+
+    def commit(self) -> None:
+        self.commits += 1
+        if self.commit_error is not None:
+            raise self.commit_error
+
+    def rollback(self) -> None:
+        self.rollbacks += 1
 
 
 class _LoggerSpy:
@@ -92,6 +109,49 @@ def test_db_session_middleware_rolls_back_and_closes_on_error():
     assert session.commits == 0
     assert session.rollbacks == 1
     assert session.closes == 1
+
+
+def test_read_scope_release_rolls_back_and_closes_exactly_once():
+    repository = _RequestScopeRepositorySpy()
+    closed: list[str] = []
+    events: list[str] = []
+    scope = LabTrackerAPI().request_scope(
+        repository,
+        close=lambda: closed.append("closed"),
+    )
+
+    scope.__enter__()
+    scope.api.run_after_commit(lambda: events.append("commit"))
+    scope.api.run_after_rollback(lambda: events.append("rollback"))
+    scope.release_read_scope()
+    scope.release_read_scope()
+    scope.__exit__(None, None, None)
+
+    assert repository.commits == 0
+    assert repository.rollbacks == 1
+    assert closed == ["closed"]
+    assert events == ["rollback"]
+
+
+def test_scope_commit_base_exception_rolls_back_before_close():
+    repository = _RequestScopeRepositorySpy(commit_error=KeyboardInterrupt("stop"))
+    closed: list[str] = []
+    events: list[str] = []
+    scope = LabTrackerAPI().request_scope(
+        repository,
+        close=lambda: closed.append("closed"),
+    )
+
+    scope.__enter__()
+    scope.api.run_after_rollback(lambda: events.append("rollback"))
+    with pytest.raises(KeyboardInterrupt, match="stop"):
+        scope.commit()
+    scope.__exit__(None, None, None)
+
+    assert repository.commits == 1
+    assert repository.rollbacks == 1
+    assert closed == ["closed"]
+    assert events == ["rollback"]
 
 
 def test_unhandled_exceptions_return_error_envelope_and_log(monkeypatch):

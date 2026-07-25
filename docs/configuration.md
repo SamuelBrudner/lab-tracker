@@ -128,6 +128,33 @@ configured fetch or returned-content bounds. See
 [`external-artifact-resolution-design.md`](external-artifact-resolution-design.md)
 for the complete resolution contract.
 
+### External-artifact resolution admission
+
+`POST /external-artifacts/resolve` is admission-controlled independently of
+the resolver's HTTP and subprocess deadlines. Authentication completes first;
+then the service either obtains a slot immediately or returns one fixed generic
+`429` response with `Retry-After`. The response intentionally does not reveal
+whether the global or caller-specific limit was full, or anything about the
+requested project or entity. A rejected request does not create the ordinary
+request database session or begin artifact resolution.
+
+- `LAB_TRACKER_ARTIFACT_RESOLUTION_GLOBAL_IN_FLIGHT_LIMIT`: maximum concurrent
+  resolutions in one application process (default: `8`). It must be a positive
+  integer no greater than `32`.
+- `LAB_TRACKER_ARTIFACT_RESOLUTION_PER_ACTOR_IN_FLIGHT_LIMIT`: maximum
+  concurrent resolutions for one authenticated `actor.user_id` in that process
+  (default: `2`). It must be a positive integer no greater than the configured
+  global limit.
+
+The global limit is deliberately capped below the standard AnyIO shared worker
+capacity of 40 so accepted synchronous resolution work leaves worker capacity
+for authentication, cleanup, and ordinary requests. These limits are
+process-local, not distributed: each Uvicorn worker or replica has its own
+global and per-actor counters. The supported deployment therefore uses one
+Uvicorn worker per service process. Do not enable multiple workers/replicas
+while treating either value as a cluster-wide quota; distributed admission is a
+separate requirement.
+
 ### External rclone and Git artifact resolution
 
 Rclone and Git adapters execute optional host binaries under a separate process
