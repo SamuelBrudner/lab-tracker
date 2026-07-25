@@ -208,21 +208,30 @@ def _normalize_postgres_url(value: str) -> str:
 
 
 def _app_with_disposed_engine(application):
-    """Yield a created app and dispose its DB engine on teardown.
+    """Yield a created app and release its runtime resources on teardown.
 
     create_app builds an engine that is only disposed by the app's lifespan
     shutdown. Tests that use the `app` fixture directly (their own bare
     TestClient, or app.state access) never run that shutdown, so dispose the
-    engine here to keep in-memory SQLite connections from leaking. Idempotent
-    with the lifespan's own dispose when a TestClient context is used.
+    engine and remove the app-owned Git health directory here. Both operations
+    are idempotent with lifespan shutdown.
     """
 
     try:
         yield application
     finally:
         engine = getattr(application.state, "db_engine", None)
-        if engine is not None:
-            engine.dispose()
+        cleanup_git_health_workdir = getattr(
+            application.state,
+            "cleanup_git_health_workdir",
+            None,
+        )
+        try:
+            if engine is not None:
+                engine.dispose()
+        finally:
+            if cleanup_git_health_workdir is not None:
+                cleanup_git_health_workdir()
 
 
 @pytest.fixture()

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from collections.abc import Callable
+
 from fastapi.testclient import TestClient
 from sqlalchemy import Engine, create_engine
 from sqlalchemy.orm import Session, sessionmaker
@@ -11,34 +13,51 @@ from lab_tracker.db import Base
 from lab_tracker.note_storage import LocalNoteStorage
 from lab_tracker.sqlalchemy_repository import SQLAlchemyLabTrackerRepository
 
-# Registry of test-owned (engine, session) pairs awaiting deterministic
+# Registry of test-owned resources awaiting deterministic
 # teardown. Populated by the helpers here (and the two hand-rolled builders in
 # the suite) and drained by the autouse fixture in conftest after every test, so
 # SQLite connections close on both success and failure instead of leaking as
-# GC-time ResourceWarnings. Per-process, so xdist workers stay independent. A
-# None session marks an engine-only entry (e.g. an app engine whose lifespan
-# shutdown never ran).
-_TEST_RESOURCES: list[tuple[Engine, Session | None]] = []
+# GC-time ResourceWarnings. Per-process, so xdist workers stay independent.
+_TEST_RESOURCES: list[
+    tuple[Engine, Session | None, Callable[[], None] | None]
+] = []
 
 
-def register_test_resources(engine: Engine, session: Session | None) -> None:
-    """Enroll a test-owned engine/session for teardown by drain_test_resources."""
-    _TEST_RESOURCES.append((engine, session))
+def register_test_resources(
+    engine: Engine,
+    session: Session | None,
+    cleanup: Callable[[], None] | None = None,
+) -> None:
+    """Enroll test resources for teardown by :func:`drain_test_resources`."""
+
+    _TEST_RESOURCES.append((engine, session, cleanup))
 
 
 def drain_test_resources() -> None:
     """Close every registered session and dispose its engine.
 
-    Idempotent and defensive: a test that already closed its own session/engine
-    is harmless, and one failing close never blocks the rest.
+    Idempotent and defensive: a test that already closed its own resources is
+    harmless, and one failing close never blocks the remaining cleanup.
     """
+
+    failure: BaseException | None = None
     while _TEST_RESOURCES:
-        engine, session = _TEST_RESOURCES.pop()
-        try:
-            if session is not None:
-                session.close()
-        finally:
-            engine.dispose()
+        engine, session, cleanup = _TEST_RESOURCES.pop()
+        operations: tuple[Callable[[], None] | None, ...] = (
+            session.close if session is not None else None,
+            engine.dispose,
+            cleanup,
+        )
+        for operation in operations:
+            if operation is None:
+                continue
+            try:
+                operation()
+            except BaseException as exc:
+                if failure is None:
+                    failure = exc
+    if failure is not None:
+        raise failure
 
 
 def app_test_client(**client_kwargs) -> TestClient:
@@ -47,11 +66,16 @@ def app_test_client(**client_kwargs) -> TestClient:
     ``TestClient(create_app())`` used without a ``with`` block never runs the
     app's lifespan shutdown, so its DB engine is never disposed and leaks a
     connection. This preserves that no-lifespan behavior while enrolling the
-    engine for deterministic teardown via the autouse drain fixture.
+    engine and app-owned Git health directory for deterministic teardown via the
+    autouse drain fixture.
     """
 
     app = create_app()
-    register_test_resources(app.state.db_engine, None)
+    register_test_resources(
+        app.state.db_engine,
+        None,
+        app.state.cleanup_git_health_workdir,
+    )
     return TestClient(app, **client_kwargs)
 
 

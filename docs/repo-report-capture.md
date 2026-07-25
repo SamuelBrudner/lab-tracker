@@ -116,8 +116,21 @@ fields (pure helpers; nothing auto-commits):
 To pin a specific *code file* verifiably, register the repository as a `git`
 data store and use a `path@commit` locator (`repo_bridge.git_code_pin`); the
 GitResolver fetches the blob read-only and verifies its hash. Resolution is
-gated by `LAB_TRACKER_GIT_ALLOWED_REMOTES` (deny-by-default), a protocol
-allowlist, a size cap, and a bounded fetch cache — see
+gated by the strict structural `LAB_TRACKER_GIT_ALLOWED_REMOTES` policy
+(deny-by-default), a protocol allowlist, a size cap, and a bounded fetch cache.
+Grants match the scheme, normalized host, effective port, SSH user, URL/SCP path
+style, and case-sensitive whole path segments—not a raw string prefix. Git's
+effective URL must use the exact reconstructed canonical spelling before a
+query or fetch, and HTTP redirects are disabled.
+
+That policy approves a logical Git endpoint; it does not sandbox host-owned
+transport configuration. The service operator must exclusively control Git
+credential helpers, Git/HTTP proxy and TLS configuration, the SSH agent and
+keys, and OpenSSH routing such as `HostName`, `ProxyJump`, or `ProxyCommand`.
+Those facilities may route an approved name through another host, so do not
+mount researcher-writable Git, credential, proxy, or SSH configuration into the
+Lab Tracker service. Persisted roots and policy entries must never contain
+credentials. See
 [external-artifact-resolution-design.md](external-artifact-resolution-design.md).
 
 ## Boundaries

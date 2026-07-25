@@ -1,13 +1,24 @@
 from __future__ import annotations
 
+import asyncio
+import gc
+import os
+import stat
+import warnings
 from pathlib import Path
 
 import pytest
+from api_helpers import drain_test_resources, register_test_resources
 from fastapi import FastAPI
 from pydantic import ValidationError
+from starlette.testclient import TestClient
 
 from lab_tracker.app_parts import runtime as runtime_module
-from lab_tracker.app_parts.runtime import build_app_runtime, configure_app_state
+from lab_tracker.app_parts.runtime import (
+    build_app_runtime,
+    configure_app_state,
+    make_lifespan,
+)
 from lab_tracker.artifact_resolution import (
     ResolverRegistry,
     outbound_http_policy_from_config,
@@ -75,7 +86,8 @@ def test_dotenv_loads_resolver_settings(tmp_path, monkeypatch):
         "LAB_TRACKER_RESOLVER_HTTP_ALLOWED_AUTHORITIES=http://10.20.1.7\n"
         "LAB_TRACKER_RESOLVER_HTTP_ALLOWED_NETWORKS=10.20.0.0/16\n"
         "LAB_TRACKER_RESOLVER_HTTP_DEADLINE_SECONDS=12.5\n"
-        "LAB_TRACKER_RESOLVER_SUBPROCESS_DEADLINE_SECONDS=7.25\n",
+        "LAB_TRACKER_RESOLVER_SUBPROCESS_DEADLINE_SECONDS=7.25\n"
+        "LAB_TRACKER_GIT_ALLOWED_REMOTES=https://git.example/lab\n",
         encoding="utf-8",
     )
 
@@ -88,6 +100,14 @@ def test_dotenv_loads_resolver_settings(tmp_path, monkeypatch):
     assert policy.authorize("http://10.20.1.7/artifact.bin").hostname == "10.20.1.7"
     assert settings.resolver_http_deadline_seconds == 12.5
     assert settings.resolver_subprocess_deadline_seconds == 7.25
+    assert settings.git_allowed_remotes == "https://git.example/lab"
+
+
+def test_git_remote_policy_defaults_to_deny_all(monkeypatch):
+    _clear_auth_env(monkeypatch)
+    monkeypatch.delenv("LAB_TRACKER_GIT_ALLOWED_REMOTES", raising=False)
+
+    assert _settings_from_environment().git_allowed_remotes == ""
 
 
 def test_resolver_http_deadline_defaults_to_thirty_seconds(monkeypatch):
@@ -188,18 +208,49 @@ def test_invalid_dotenv_http_policy_fails_runtime_composition(tmp_path, monkeypa
         build_app_runtime(settings)
 
 
-def test_runtime_installs_one_validated_http_policy_and_registry(monkeypatch):
+def test_invalid_git_policy_fails_before_workdir_or_database_without_secret_leak(
+    monkeypatch,
+):
     _clear_auth_env(monkeypatch)
+    secret = "startup-secret-must-not-leak"
+    settings = Settings(
+        _env_file=None,
+        database_url="sqlite+pysqlite:///:memory:",
+        git_allowed_remotes=f"https://operator:{secret}@git.example/lab/repo.git",
+    )
+
+    def unexpected_side_effect(*_args, **_kwargs):
+        pytest.fail("invalid Git policy reached a runtime side effect")
+
+    monkeypatch.setattr(runtime_module, "mkdtemp", unexpected_side_effect)
+    monkeypatch.setattr(runtime_module, "get_engine", unexpected_side_effect)
+
+    with pytest.raises(ValueError) as exc_info:
+        build_app_runtime(settings)
+
+    rendered = f"{exc_info.value!s}\n{exc_info.value!r}"
+    assert "LAB_TRACKER_GIT_ALLOWED_REMOTES" in rendered
+    assert secret not in rendered
+
+
+def test_runtime_installs_one_validated_policy_graph_and_registry(monkeypatch):
+    _clear_auth_env(monkeypatch)
+    monkeypatch.setenv(
+        "LAB_TRACKER_GIT_ALLOWED_REMOTES",
+        "https://environment.example/ignored",
+    )
     resolver_registry = ResolverRegistry()
     captured: dict[str, object] = {}
 
     def recording_registry_from_env(
         *,
         http_policy,
+        git_remote_policy,
         http_deadline_seconds,
         subprocess_deadline_seconds,
     ):
         captured["http_policy"] = http_policy
+        captured["git_remote_policy"] = git_remote_policy
         captured["http_deadline_seconds"] = http_deadline_seconds
         captured["subprocess_deadline_seconds"] = subprocess_deadline_seconds
         return resolver_registry
@@ -216,19 +267,51 @@ def test_runtime_installs_one_validated_http_policy_and_registry(monkeypatch):
         resolver_http_allowed_networks="10.20.0.0/16",
         resolver_http_deadline_seconds=12.5,
         resolver_subprocess_deadline_seconds=7.25,
+        git_allowed_remotes="https://settings.example/lab",
     )
     runtime = build_app_runtime(settings)
     app = FastAPI()
+    git_health_workdir = runtime.git_health_workdir
     try:
         configure_app_state(app, runtime)
 
         assert app.state.outbound_http_policy is runtime.outbound_http_policy
+        assert app.state.git_remote_policy is runtime.git_remote_policy
         assert app.state.resolver_registry is resolver_registry
+        assert app.state.git_health_workdir is runtime.git_health_workdir
+        assert app.state.store_health_checker is runtime.store_health_checker
+        assert app.state.cleanup_git_health_workdir.__self__ is runtime
+        assert (
+            runtime.store_health_checker.git_remote_policy
+            is runtime.git_remote_policy
+        )
+        assert (
+            runtime.store_health_checker.git_health_workdir
+            is runtime.git_health_workdir
+        )
         assert captured == {
             "http_policy": runtime.outbound_http_policy,
+            "git_remote_policy": runtime.git_remote_policy,
             "http_deadline_seconds": 12.5,
             "subprocess_deadline_seconds": 7.25,
         }
+        assert git_health_workdir.is_dir()
+        assert list(git_health_workdir.iterdir()) == []
+        assert not (git_health_workdir / ".git").exists()
+        if os.name != "nt":
+            assert stat.S_IMODE(git_health_workdir.stat().st_mode) == 0o700
+        assert (
+            runtime.git_remote_policy.authorize(
+                "https://settings.example/lab/repo.git"
+            )
+            is not None
+        )
+        assert (
+            runtime.git_remote_policy.authorize(
+                "https://environment.example/ignored/repo.git"
+            )
+            is None
+        )
         assert (
             runtime.outbound_http_policy.authorize(
                 "http://10.20.1.7/artifact.bin"
@@ -237,9 +320,138 @@ def test_runtime_installs_one_validated_http_policy_and_registry(monkeypatch):
         )
     finally:
         runtime.engine.dispose()
+        app.state.cleanup_git_health_workdir()
+        app.state.cleanup_git_health_workdir()
+
+    assert not git_health_workdir.exists()
 
 
-def test_compose_forwards_outbound_http_policy_settings():
+def test_lifespan_removes_app_owned_git_health_workdir(monkeypatch):
+    _clear_auth_env(monkeypatch)
+    resolver_registry = ResolverRegistry()
+
+    def recording_registry_from_env(
+        *,
+        http_policy,
+        git_remote_policy,
+        http_deadline_seconds,
+        subprocess_deadline_seconds,
+    ):
+        del (
+            http_policy,
+            git_remote_policy,
+            http_deadline_seconds,
+            subprocess_deadline_seconds,
+        )
+        return resolver_registry
+
+    monkeypatch.setattr(
+        runtime_module,
+        "registry_from_env",
+        recording_registry_from_env,
+    )
+    runtime = build_app_runtime(
+        Settings(
+            _env_file=None,
+            database_url="sqlite+pysqlite:///:memory:",
+        )
+    )
+    git_health_workdir = runtime.git_health_workdir
+    app = FastAPI(lifespan=make_lifespan(runtime))
+    configure_app_state(app, runtime)
+
+    with TestClient(app):
+        assert git_health_workdir.is_dir()
+        assert list(git_health_workdir.iterdir()) == []
+        assert not (git_health_workdir / ".git").exists()
+
+    assert not git_health_workdir.exists()
+
+
+def test_lifespan_removes_git_health_workdir_when_engine_disposal_fails(
+    monkeypatch,
+):
+    _clear_auth_env(monkeypatch)
+    monkeypatch.setattr(
+        runtime_module,
+        "registry_from_env",
+        lambda **_kwargs: ResolverRegistry(),
+    )
+    runtime = build_app_runtime(
+        Settings(
+            _env_file=None,
+            database_url="sqlite+pysqlite:///:memory:",
+        )
+    )
+    git_health_workdir = runtime.git_health_workdir
+    original_dispose = runtime.engine.dispose
+
+    def raising_dispose():
+        original_dispose()
+        raise RuntimeError("engine disposal failed")
+
+    monkeypatch.setattr(runtime.engine, "dispose", raising_dispose)
+
+    async def run_lifespan() -> None:
+        app = FastAPI()
+        configure_app_state(app, runtime)
+        async with make_lifespan(runtime)(app):
+            assert git_health_workdir.is_dir()
+
+    with pytest.raises(RuntimeError, match="engine disposal failed"):
+        asyncio.run(run_lifespan())
+
+    assert not git_health_workdir.exists()
+
+
+def test_git_health_workdir_gc_fallback_is_silent(monkeypatch):
+    _clear_auth_env(monkeypatch)
+    monkeypatch.setattr(
+        runtime_module,
+        "registry_from_env",
+        lambda **_kwargs: ResolverRegistry(),
+    )
+    runtime = build_app_runtime(
+        Settings(
+            _env_file=None,
+            database_url="sqlite+pysqlite:///:memory:",
+        )
+    )
+    git_health_workdir = runtime.git_health_workdir
+    runtime.engine.dispose()
+
+    with warnings.catch_warnings(record=True) as captured:
+        warnings.simplefilter("always", ResourceWarning)
+        del runtime
+        gc.collect()
+
+    assert not git_health_workdir.exists()
+    assert not [
+        warning for warning in captured if issubclass(warning.category, ResourceWarning)
+    ]
+
+
+def test_test_resource_drain_runs_cleanup_after_engine_disposal_error():
+    events: list[str] = []
+
+    class RaisingEngine:
+        def dispose(self) -> None:
+            events.append("engine")
+            raise RuntimeError("engine disposal failed")
+
+    register_test_resources(
+        RaisingEngine(),  # type: ignore[arg-type]
+        None,
+        lambda: events.append("cleanup"),
+    )
+
+    with pytest.raises(RuntimeError, match="engine disposal failed"):
+        drain_test_resources()
+
+    assert events == ["engine", "cleanup"]
+
+
+def test_compose_forwards_outbound_artifact_policy_settings():
     compose = Path("docker-compose.yml").read_text(encoding="utf-8")
 
     assert (
@@ -257,6 +469,10 @@ def test_compose_forwards_outbound_http_policy_settings():
     assert (
         "LAB_TRACKER_RESOLVER_SUBPROCESS_DEADLINE_SECONDS: "
         "${LAB_TRACKER_RESOLVER_SUBPROCESS_DEADLINE_SECONDS:-30}"
+    ) in compose
+    assert (
+        "LAB_TRACKER_GIT_ALLOWED_REMOTES: "
+        "${LAB_TRACKER_GIT_ALLOWED_REMOTES:-}"
     ) in compose
 
 

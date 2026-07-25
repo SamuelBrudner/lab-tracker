@@ -1,5 +1,7 @@
 import hashlib
 import os
+import shutil
+import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -36,6 +38,7 @@ from lab_tracker.artifact_resolution import (
     registry_from_env,
     store_relative_reference,
 )
+from lab_tracker.git_remote_policy import GitRemotePolicy
 from lab_tracker.models import DataStore, ExternalArtifactReference, StoreKind
 from lab_tracker.outbound_http import (
     ApprovedSocketAddress,
@@ -46,6 +49,20 @@ from lab_tracker.outbound_http import (
 
 def _sha256(data: bytes) -> str:
     return "sha256:" + hashlib.sha256(data).hexdigest()
+
+
+_GIT_REMOTE = "https://example.com/org/repo.git"
+
+
+def _git_policy(*grants: str) -> GitRemotePolicy:
+    return GitRemotePolicy.from_config(",".join(grants))
+
+
+def _git_resolver(*, remote_policy: GitRemotePolicy | None = None, **kwargs):
+    return GitResolver(
+        remote_policy=remote_policy or _git_policy(_GIT_REMOTE),
+        **kwargs,
+    )
 
 
 class _FakeProcessExecutor:
@@ -83,6 +100,16 @@ class _FakeProcessExecutor:
         if self.on_run is not None:
             self.on_run(index, deadline)
         deadline.check()
+        if "ls-remote" in command and "--get-url" in command:
+            remote = command[-1]
+            stdout = f"{remote}\n".encode()
+            assert len(stdout) <= stdout_limit_bytes
+            return SimpleNamespace(
+                returncode=0,
+                stdout=stdout,
+                stdout_bytes=len(stdout),
+                stderr_bytes=0,
+            )
         step = self.steps.pop(0)
         if isinstance(step, BaseException):
             raise step
@@ -1262,7 +1289,7 @@ def test_store_relative_reference_git_resolves_end_to_end(tmp_path):
     )
     assert ref is not None
     registry = ResolverRegistry(
-        [GitResolver(runner=_fake_git_runner(blob=data), cache_root=tmp_path)]
+        [_git_resolver(runner=_fake_git_runner(blob=data), cache_root=tmp_path)]
     )
 
     result = registry.resolve(ref)
@@ -1353,37 +1380,247 @@ def test_check_store_health_database_is_unsupported():
     assert health.status is StoreHealthStatus.UNSUPPORTED
 
 
-def test_check_store_health_git_healthy_via_runner():
+def test_check_store_health_git_healthy_via_runner(tmp_path):
     store = _data_store(StoreKind.GIT, "https://example.com/org/repo.git", name="repo")
+    calls = []
 
     def runner(args):
-        assert args == ["ls-remote", store.root, "HEAD"]
+        calls.append(args)
+        if "--get-url" in args:
+            return GitCompleted(0, f"{store.root}\n".encode(), b"")
         return GitCompleted(0, b"a" * 40 + b"\tHEAD\n", b"")
 
-    health = check_store_health(store, git_runner=runner)
+    health = check_store_health(
+        store,
+        git_runner=runner,
+        git_remote_policy=_git_policy(store.root),
+        git_health_cwd=tmp_path,
+    )
     assert health.status is StoreHealthStatus.HEALTHY
+    assert len(calls) == 2
+    expected_config = [
+        "-c",
+        "http.followRedirects=false",
+        "-c",
+        f"http.{store.root}.followRedirects=false",
+    ]
+    assert all(call[:4] == expected_config for call in calls)
+    assert calls[0][-4:] == ["ls-remote", "--get-url", "--", store.root]
+    assert calls[1][-4:] == ["ls-remote", "--", store.root, "HEAD"]
 
 
-def test_check_store_health_git_unreachable_via_runner():
+def test_check_store_health_git_unreachable_via_runner(tmp_path):
     store = _data_store(StoreKind.GIT, "https://example.com/org/missing.git", name="repo")
 
     def runner(args):
+        if "--get-url" in args:
+            return GitCompleted(0, f"{store.root}\n".encode(), b"")
         return GitCompleted(128, b"", b"fatal: repository not found")
 
-    health = check_store_health(store, git_runner=runner)
+    health = check_store_health(
+        store,
+        git_runner=runner,
+        git_remote_policy=_git_policy(store.root),
+        git_health_cwd=tmp_path,
+    )
     assert health.status is StoreHealthStatus.UNREACHABLE
-    assert "not found" in (health.detail or "")
+    assert health.detail == "Git store health check failed."
 
 
-def test_check_store_health_git_missing_binary():
+def test_check_store_health_git_missing_binary(tmp_path):
     store = _data_store(StoreKind.GIT, "https://example.com/org/repo.git", name="repo")
 
     def runner(args):
         raise OSError("git not found")
 
-    health = check_store_health(store, git_runner=runner)
+    health = check_store_health(
+        store,
+        git_runner=runner,
+        git_remote_policy=_git_policy(store.root),
+        git_health_cwd=tmp_path,
+    )
     assert health.status is StoreHealthStatus.UNREACHABLE
-    assert "git is unavailable" in (health.detail or "")
+    assert health.detail == "Git store health check failed."
+
+
+def test_check_store_health_git_denial_does_no_process_or_cwd_work(tmp_path):
+    store = _data_store(StoreKind.GIT, _GIT_REMOTE, name="repo")
+    calls = []
+
+    def runner(args):
+        calls.append(args)
+        raise AssertionError("denied health check must not invoke Git")
+
+    missing_cwd = tmp_path / "must-not-be-inspected"
+    health = check_store_health(
+        store,
+        git_runner=runner,
+        git_remote_policy=GitRemotePolicy.deny_all(),
+        git_health_cwd=missing_cwd,
+    )
+
+    assert health.status is StoreHealthStatus.UNREACHABLE
+    assert health.detail == "Git store health check failed."
+    assert calls == []
+
+
+def test_check_store_health_git_runner_exception_is_redacted(tmp_path):
+    secret = "private-runner-diagnostic"
+    store = _data_store(StoreKind.GIT, _GIT_REMOTE, name="repo")
+
+    def runner(args):
+        raise RuntimeError(secret)
+
+    health = check_store_health(
+        store,
+        git_runner=runner,
+        git_remote_policy=_git_policy(_GIT_REMOTE),
+        git_health_cwd=tmp_path,
+    )
+
+    assert health.status is StoreHealthStatus.UNREACHABLE
+    assert health.detail == "Git store health check failed."
+    assert secret not in str(health.to_json_dict())
+
+
+def test_check_store_health_git_preflight_mismatch_prevents_network_call(tmp_path):
+    store = _data_store(StoreKind.GIT, _GIT_REMOTE, name="repo")
+    calls = []
+
+    def runner(args):
+        calls.append(args)
+        if "--get-url" in args:
+            return GitCompleted(
+                0,
+                b"https://attacker.invalid/rewrite.git\n",
+                b"private preflight diagnostic",
+            )
+        raise AssertionError("health probe must stop before network-capable ls-remote")
+
+    health = check_store_health(
+        store,
+        git_runner=runner,
+        git_remote_policy=_git_policy(_GIT_REMOTE),
+        git_health_cwd=tmp_path,
+    )
+
+    assert health.status is StoreHealthStatus.UNREACHABLE
+    assert health.detail == "Git store health check failed."
+    assert len(calls) == 1
+    assert "--get-url" in calls[0]
+
+
+def test_check_store_health_git_does_not_inherit_parent_repository_config(
+    tmp_path,
+    monkeypatch,
+):
+    git = shutil.which("git")
+    if git is None:
+        pytest.skip("git is unavailable")
+    _isolate_real_git_config(monkeypatch, tmp_path)
+    parent_repo = tmp_path / "parent-repository"
+    health_cwd = parent_repo / "health-cwd"
+    parent_repo.mkdir()
+    health_cwd.mkdir()
+    remote = "https://ceiling-regression.example/org/repo.git"
+    rewritten = "https://attacker.invalid/rewritten.git"
+    clean_env = dict(os.environ)
+    for variable in (
+        "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+        "GIT_CEILING_DIRECTORIES",
+        "GIT_COMMON_DIR",
+        "GIT_DIR",
+        "GIT_INDEX_FILE",
+        "GIT_OBJECT_DIRECTORY",
+        "GIT_WORK_TREE",
+    ):
+        clean_env.pop(variable, None)
+    subprocess.run(  # noqa: S603 - fixed executable and controlled test path
+        [git, "init", "-q", os.fspath(parent_repo)],
+        check=True,
+        capture_output=True,
+        env=clean_env,
+    )
+    subprocess.run(  # noqa: S603 - fixed executable and controlled test values
+        [
+            git,
+            "-C",
+            os.fspath(parent_repo),
+            "config",
+            f"url.{rewritten}.insteadOf",
+            remote,
+        ],
+        check=True,
+        capture_output=True,
+        env=clean_env,
+    )
+    inherited = subprocess.run(  # noqa: S603 - no-network Git metadata query
+        [
+            git,
+            "-C",
+            os.fspath(health_cwd),
+            "ls-remote",
+            "--get-url",
+            "--",
+            remote,
+        ],
+        check=True,
+        capture_output=True,
+        env=clean_env,
+    )
+    assert inherited.stdout == f"{rewritten}\n".encode()
+
+    class RealPreflightExecutor:
+        def __init__(self):
+            self.calls = []
+            self.preflight_stdout = None
+
+        def run(
+            self,
+            command,
+            *,
+            deadline,
+            stdout_limit_bytes,
+            stderr_limit_bytes,
+            stdout_consumer=None,
+            cwd=None,
+            env=None,
+        ):
+            self.calls.append({"command": command, "cwd": cwd, "env": env})
+            if "--get-url" in command:
+                completed = subprocess.run(  # noqa: S603 - built Git argv
+                    command,
+                    check=False,
+                    capture_output=True,
+                    cwd=cwd,
+                    env=env,
+                )
+                self.preflight_stdout = completed.stdout
+                return SimpleNamespace(
+                    returncode=completed.returncode,
+                    stdout=completed.stdout,
+                    stderr=completed.stderr,
+                )
+            return SimpleNamespace(returncode=128, stdout=b"", stderr=b"intercepted")
+
+    executor = RealPreflightExecutor()
+    health = check_store_health(
+        _data_store(StoreKind.GIT, remote, name="repo"),
+        git_executor=executor,
+        git_remote_policy=_git_policy(remote),
+        git_health_cwd=health_cwd,
+        git_binary=git,
+    )
+
+    assert health.status is StoreHealthStatus.UNREACHABLE
+    assert health.detail == "Git store health check failed."
+    assert executor.preflight_stdout == f"{remote}\n".encode()
+    assert len(executor.calls) == 2
+    assert all(call["cwd"] == os.path.realpath(health_cwd) for call in executor.calls)
+    assert all(
+        call["env"]["GIT_CEILING_DIRECTORIES"] == os.path.realpath(parent_repo)
+        for call in executor.calls
+    )
 
 
 # --- ResolverRegistry -----------------------------------------------------
@@ -1819,9 +2056,6 @@ def test_outbound_http_policy_from_env_rejects_empty_list_entries(
 # --- GitResolver ----------------------------------------------------------
 
 
-_GIT_REMOTE = "https://example.com/org/repo.git"
-
-
 def _git_ref(
     content_hash: str,
     *,
@@ -1849,10 +2083,21 @@ def _fake_git_runner(
 
     def runner(args):
         calls.append(args)
-        # args are like ["-C", <cache>, <command>, ...].
-        command = args[2] if len(args) >= 3 and args[0] == "-C" else args[0]
+        command = next(
+            candidate
+            for candidate in ("init", "ls-remote", "fetch", "cat-file")
+            if candidate in args
+        )
+        command_index = args.index(command)
         if command == "init":
             return GitCompleted(0, b"", b"")
+        if command == "ls-remote":
+            assert args[command_index + 1 : command_index + 3] == [
+                "--get-url",
+                "--",
+            ]
+            remote = args[command_index + 3]
+            return GitCompleted(0, f"{remote}\n".encode(), b"")
         if command == "fetch":
             return GitCompleted(
                 fetch_returncode,
@@ -1860,7 +2105,7 @@ def _fake_git_runner(
                 b"" if fetch_returncode == 0 else b"remote error: not found",
             )
         if command == "cat-file":
-            mode = args[3] if len(args) >= 4 else ""
+            mode = args[command_index + 1] if len(args) > command_index + 1 else ""
             if mode == "-s":
                 if size_returncode != 0:
                     return GitCompleted(size_returncode, b"", b"fatal: bad object")
@@ -1877,7 +2122,7 @@ def _fake_git_runner(
 
 def test_git_resolver_verifies_blob(tmp_path):
     data = b"import numpy as np  # the pinned analysis script"
-    resolver = GitResolver(runner=_fake_git_runner(blob=data), cache_root=tmp_path)
+    resolver = _git_resolver(runner=_fake_git_runner(blob=data), cache_root=tmp_path)
 
     result = resolver.resolve(_git_ref(_sha256(data)))
 
@@ -1889,7 +2134,7 @@ def test_git_resolver_verifies_blob(tmp_path):
 
 
 def test_git_resolver_reports_drift_on_mismatch(tmp_path):
-    resolver = GitResolver(runner=_fake_git_runner(blob=b"actual"), cache_root=tmp_path)
+    resolver = _git_resolver(runner=_fake_git_runner(blob=b"actual"), cache_root=tmp_path)
 
     result = resolver.resolve(_git_ref(_sha256(b"what the graph recorded")))
 
@@ -1901,7 +2146,7 @@ def test_git_resolver_reports_drift_on_mismatch(tmp_path):
 
 
 def test_git_resolver_missing_object_is_unresolved(tmp_path):
-    resolver = GitResolver(
+    resolver = _git_resolver(
         runner=_fake_git_runner(blob=None, cat_returncode=128), cache_root=tmp_path
     )
 
@@ -1912,7 +2157,7 @@ def test_git_resolver_missing_object_is_unresolved(tmp_path):
 
 
 def test_git_resolver_fetch_failure_is_unresolved(tmp_path):
-    resolver = GitResolver(
+    resolver = _git_resolver(
         runner=_fake_git_runner(blob=None, fetch_returncode=128), cache_root=tmp_path
     )
 
@@ -1923,7 +2168,7 @@ def test_git_resolver_fetch_failure_is_unresolved(tmp_path):
 
 
 def test_git_resolver_unverifiable_hash_is_unresolved(tmp_path):
-    resolver = GitResolver(runner=_fake_git_runner(blob=b"data"), cache_root=tmp_path)
+    resolver = _git_resolver(runner=_fake_git_runner(blob=b"data"), cache_root=tmp_path)
 
     result = resolver.resolve(_git_ref("datalad-key:MD5E-s4--abc"))
 
@@ -1932,7 +2177,7 @@ def test_git_resolver_unverifiable_hash_is_unresolved(tmp_path):
 
 
 def test_git_resolver_bad_locator_is_unresolved(tmp_path):
-    resolver = GitResolver(runner=_fake_git_runner(blob=b"data"), cache_root=tmp_path)
+    resolver = _git_resolver(runner=_fake_git_runner(blob=b"data"), cache_root=tmp_path)
     ref = ExternalArtifactReference(
         source_system="git",
         uri=f"git+{_GIT_REMOTE}",  # no #<commit>:<path>
@@ -1949,7 +2194,7 @@ def test_git_resolver_missing_binary_is_unresolved(tmp_path):
     def runner(args):
         raise OSError("git not found")
 
-    result = GitResolver(runner=runner, cache_root=tmp_path).resolve(
+    result = _git_resolver(runner=runner, cache_root=tmp_path).resolve(
         _git_ref(_sha256(b"x"))
     )
 
@@ -1967,7 +2212,7 @@ def test_git_executor_streams_blob_under_one_deadline(tmp_path):
             (0, (b"streamed ", b"git blob"), b""),
         ]
     )
-    resolver = GitResolver(
+    resolver = _git_resolver(
         executor=executor,
         cache_root=tmp_path,
         max_fetch_bytes=len(data),
@@ -1985,6 +2230,70 @@ def test_git_executor_streams_blob_under_one_deadline(tmp_path):
         call["env"]["GIT_ALLOW_PROTOCOL"] == "https:ssh:git"
         for call in executor.calls
     )
+    assert len({id(call["env"]) for call in executor.calls}) == 1
+    assert len({call["cwd"] for call in executor.calls}) == 1
+    operation_cwd = executor.calls[0]["cwd"]
+    assert executor.calls[0]["env"]["GIT_CEILING_DIRECTORIES"] == os.path.dirname(
+        os.path.realpath(operation_cwd)
+    )
+    config_prefix = [
+        "git",
+        "-c",
+        "http.followRedirects=false",
+        "-c",
+        f"http.{_GIT_REMOTE}.followRedirects=false",
+    ]
+    assert all(
+        call["command"][: len(config_prefix)] == config_prefix
+        for call in executor.calls
+    )
+    preflight = next(
+        call["command"]
+        for call in executor.calls
+        if "ls-remote" in call["command"]
+    )
+    assert preflight[-4:] == ["ls-remote", "--get-url", "--", _GIT_REMOTE]
+    fetch = next(call["command"] for call in executor.calls if "fetch" in call["command"])
+    assert fetch[-3:] == ["--", _GIT_REMOTE, "a" * 40]
+
+
+def test_git_executor_uses_one_environment_snapshot_across_preflight(
+    tmp_path,
+    monkeypatch,
+):
+    data = b"stable environment"
+    monkeypatch.setenv("GIT_TERMINAL_PROMPT", "1")
+    monkeypatch.setenv("GIT_ALLOW_PROTOCOL", "file")
+
+    def mutate_ambient_environment(index, _deadline):
+        if index == 1:  # ls-remote --get-url preflight
+            monkeypatch.setenv("GIT_TERMINAL_PROMPT", "ask")
+            monkeypatch.setenv("GIT_ALLOW_PROTOCOL", "ext:file")
+
+    executor = _FakeProcessExecutor(
+        [
+            (0, (), b""),
+            (0, (), b""),
+            (0, (f"{len(data)}\n".encode(),), b""),
+            (0, (data,), b""),
+        ],
+        on_run=mutate_ambient_environment,
+    )
+
+    result = _git_resolver(executor=executor, cache_root=tmp_path).resolve(
+        _git_ref(_sha256(data))
+    )
+
+    assert result.status is ResolutionStatus.VERIFIED
+    assert len({id(call["env"]) for call in executor.calls}) == 1
+    assert all(
+        call["env"]["GIT_TERMINAL_PROMPT"] == "0"
+        for call in executor.calls
+    )
+    assert all(
+        call["env"]["GIT_ALLOW_PROTOCOL"] == "https:ssh:git"
+        for call in executor.calls
+    )
 
 
 def test_git_actual_blob_growth_over_cap_discards_partial_result(tmp_path):
@@ -1996,7 +2305,7 @@ def test_git_actual_blob_growth_over_cap_discards_partial_result(tmp_path):
             (0, (b"ab", b"secret-growth"), b""),
         ]
     )
-    result = GitResolver(
+    result = _git_resolver(
         executor=executor,
         cache_root=tmp_path,
         max_fetch_bytes=2,
@@ -2018,7 +2327,7 @@ def test_git_process_failure_redacts_remote_path_and_stderr(tmp_path):
             (128, (), f"fatal: {secret}".encode()),
         ]
     )
-    result = GitResolver(executor=executor, cache_root=tmp_path).resolve(
+    result = _git_resolver(executor=executor, cache_root=tmp_path).resolve(
         _git_ref(
             _sha256(b"x"),
             path=f"private/{secret}.bin",
@@ -2032,6 +2341,23 @@ def test_git_process_failure_redacts_remote_path_and_stderr(tmp_path):
     assert "example.com" not in serialized
 
 
+def test_git_runner_arbitrary_exception_is_redacted(tmp_path):
+    secret = "runner-secret-that-must-not-escape"
+
+    def runner(_args):
+        raise KeyError(secret)
+
+    result = _git_resolver(runner=runner, cache_root=tmp_path).resolve(
+        _git_ref(_sha256(b"x"))
+    )
+
+    serialized = str(result.to_json_dict())
+    assert result.status is ResolutionStatus.UNRESOLVED
+    assert result.detail == "Git artifact resolution failed."
+    assert secret not in serialized
+    assert _GIT_REMOTE not in serialized
+
+
 @pytest.mark.parametrize(
     "remote",
     [
@@ -2042,7 +2368,7 @@ def test_git_process_failure_redacts_remote_path_and_stderr(tmp_path):
 def test_git_rejects_embedded_credentials_before_spawn(tmp_path, remote):
     secret = "embedded-token"
     executor = _FakeProcessExecutor([])
-    result = GitResolver(executor=executor, cache_root=tmp_path).resolve(
+    result = _git_resolver(executor=executor, cache_root=tmp_path).resolve(
         _git_ref(
             _sha256(b"x"),
             remote=remote,
@@ -2051,20 +2377,22 @@ def test_git_rejects_embedded_credentials_before_spawn(tmp_path, remote):
 
     serialized = str(result.to_json_dict())
     assert result.status is ResolutionStatus.UNRESOLVED
-    assert result.detail == "Embedded Git credentials are not accepted."
+    assert result.detail == "Remote is not in the git resolver allowlist."
     assert executor.calls == []
     assert secret not in serialized
 
 
 def test_git_allows_ssh_routing_username(tmp_path):
     data = b"ssh-routed blob"
-    result = GitResolver(
+    remote = "ssh://git@example.com/org/repo.git"
+    result = _git_resolver(
         runner=_fake_git_runner(blob=data),
         cache_root=tmp_path,
+        remote_policy=_git_policy(remote),
     ).resolve(
         _git_ref(
             _sha256(data),
-            remote="ssh://git@example.com/org/repo.git",
+            remote=remote,
         )
     )
 
@@ -2087,7 +2415,7 @@ def test_git_deadline_is_not_reset_between_commands(tmp_path):
         ],
         on_run=consume_budget,
     )
-    result = GitResolver(
+    result = _git_resolver(
         executor=executor,
         cache_root=tmp_path,
         deadline_seconds=1.0,
@@ -2109,7 +2437,7 @@ def test_git_malformed_object_size_is_generic_unresolved(tmp_path, size_output):
             (0, (size_output,), b"private diagnostic"),
         ]
     )
-    result = GitResolver(executor=executor, cache_root=tmp_path).resolve(
+    result = _git_resolver(executor=executor, cache_root=tmp_path).resolve(
         _git_ref(_sha256(b"x"))
     )
 
@@ -2128,7 +2456,7 @@ def test_git_excessive_integer_metadata_is_generic_unresolved(tmp_path):
         ]
     )
 
-    result = GitResolver(executor=executor, cache_root=tmp_path).resolve(
+    result = _git_resolver(executor=executor, cache_root=tmp_path).resolve(
         _git_ref(_sha256(b"x"))
     )
 
@@ -2146,7 +2474,7 @@ def test_git_rejects_control_character_before_spawn(tmp_path):
         content_hash=_sha256(b"x"),
     )
 
-    result = GitResolver(executor=executor, cache_root=tmp_path).resolve(ref)
+    result = _git_resolver(executor=executor, cache_root=tmp_path).resolve(ref)
 
     assert result.status is ResolutionStatus.UNRESOLVED
     assert result.detail == "Reference URI is not a git locator."
@@ -2156,7 +2484,7 @@ def test_git_rejects_control_character_before_spawn(tmp_path):
 
 def test_git_rejects_ambiguous_process_seams(tmp_path):
     with pytest.raises(ValueError, match="either runner or executor"):
-        GitResolver(
+        _git_resolver(
             runner=_fake_git_runner(blob=b"x"),
             executor=_FakeProcessExecutor([]),
             cache_root=tmp_path,
@@ -2165,7 +2493,7 @@ def test_git_rejects_ambiguous_process_seams(tmp_path):
 
 def test_git_resolver_truncates_payload_but_verifies(tmp_path):
     data = b"y" * 100
-    resolver = GitResolver(runner=_fake_git_runner(blob=data), cache_root=tmp_path)
+    resolver = _git_resolver(runner=_fake_git_runner(blob=data), cache_root=tmp_path)
 
     result = resolver.resolve(_git_ref(_sha256(data)), max_bytes=10)
 
@@ -2177,7 +2505,7 @@ def test_git_resolver_truncates_payload_but_verifies(tmp_path):
 
 def test_git_resolver_returns_byte_range_slice(tmp_path):
     data = b"0123456789abcdef"
-    resolver = GitResolver(runner=_fake_git_runner(blob=data), cache_root=tmp_path)
+    resolver = _git_resolver(runner=_fake_git_runner(blob=data), cache_root=tmp_path)
 
     result = resolver.resolve(_git_ref(_sha256(data)), byte_range=(4, 8))
 
@@ -2186,7 +2514,7 @@ def test_git_resolver_returns_byte_range_slice(tmp_path):
 
 
 def test_git_resolver_can_resolve_by_source_system_and_scheme():
-    resolver = GitResolver(runner=_fake_git_runner(blob=b""))
+    resolver = _git_resolver(runner=_fake_git_runner(blob=b""))
 
     assert resolver.can_resolve(_git_ref(_sha256(b""))) is True
     # A git+ URI is recognised even under a different source_system.
@@ -2208,7 +2536,7 @@ def test_registry_dispatches_git(tmp_path):
     registry = ResolverRegistry(
         [
             LocalFilesystemResolver(),
-            GitResolver(runner=_fake_git_runner(blob=data), cache_root=tmp_path),
+            _git_resolver(runner=_fake_git_runner(blob=data), cache_root=tmp_path),
         ]
     )
 
@@ -2232,10 +2560,10 @@ def test_default_capabilities_for_git():
 
 def test_git_resolver_refuses_remote_not_in_allowlist(tmp_path):
     runner = _fake_git_runner(blob=b"data")
-    resolver = GitResolver(
+    resolver = _git_resolver(
         runner=runner,
         cache_root=tmp_path,
-        allowed_remotes=["https://allowed.example/"],
+        remote_policy=_git_policy("https://allowed.example/"),
     )
 
     result = resolver.resolve(_git_ref(_sha256(b"data")))  # remote example.com
@@ -2243,14 +2571,47 @@ def test_git_resolver_refuses_remote_not_in_allowlist(tmp_path):
     assert result.status is ResolutionStatus.UNRESOLVED
     assert "allowlist" in (result.detail or "")
     assert runner.calls == []  # refused before any git subprocess
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_git_resolver_default_policy_denies_before_cache_or_executor(tmp_path):
+    executor = _FakeProcessExecutor([])
+    resolver = GitResolver(executor=executor, cache_root=tmp_path)
+
+    result = resolver.resolve(_git_ref(_sha256(b"x")))
+
+    assert result.status is ResolutionStatus.UNRESOLVED
+    assert result.detail == "Remote is not in the git resolver allowlist."
+    assert executor.calls == []
+    assert list(tmp_path.iterdir()) == []
+
+
+@pytest.mark.parametrize(
+    "raw_remote",
+    [f" {_GIT_REMOTE}", f"{_GIT_REMOTE} "],
+    ids=["leading-space", "trailing-space"],
+)
+def test_git_resolver_does_not_strip_remote_before_authorization(
+    tmp_path,
+    raw_remote,
+):
+    executor = _FakeProcessExecutor([])
+    result = _git_resolver(executor=executor, cache_root=tmp_path).resolve(
+        _git_ref(_sha256(b"x"), remote=raw_remote)
+    )
+
+    assert result.status is ResolutionStatus.UNRESOLVED
+    assert result.detail == "Remote is not in the git resolver allowlist."
+    assert executor.calls == []
+    assert list(tmp_path.iterdir()) == []
 
 
 def test_git_resolver_allows_remote_in_allowlist_by_prefix(tmp_path):
     data = b"allowed remote payload"
-    resolver = GitResolver(
+    resolver = _git_resolver(
         runner=_fake_git_runner(blob=data),
         cache_root=tmp_path,
-        allowed_remotes=["https://example.com/"],
+        remote_policy=_git_policy("https://example.com/"),
     )
 
     result = resolver.resolve(_git_ref(_sha256(data)))
@@ -2259,8 +2620,76 @@ def test_git_resolver_allows_remote_in_allowlist_by_prefix(tmp_path):
     assert result.content == data
 
 
+def test_git_resolver_passes_only_policy_canonical_remote_to_git(tmp_path):
+    data = b"canonicalized remote"
+    raw_remote = "HTTPS://EXAMPLE.COM:443/org/repo.git"
+    runner = _fake_git_runner(blob=data)
+
+    result = _git_resolver(runner=runner, cache_root=tmp_path).resolve(
+        _git_ref(_sha256(data), remote=raw_remote)
+    )
+
+    assert result.status is ResolutionStatus.VERIFIED
+    assert all(raw_remote not in call for call in runner.calls)
+    preflight = next(call for call in runner.calls if "ls-remote" in call)
+    assert preflight[-4:] == ["ls-remote", "--get-url", "--", _GIT_REMOTE]
+    fetch = next(call for call in runner.calls if "fetch" in call)
+    assert fetch[-3:] == ["--", _GIT_REMOTE, "a" * 40]
+
+
+@pytest.mark.parametrize(
+    "preflight",
+    [
+        GitCompleted(0, b"https://attacker.invalid/rewrite.git\n", b""),
+        GitCompleted(128, f"{_GIT_REMOTE}\n".encode(), b"private error"),
+        GitCompleted(0, b"", b""),
+        GitCompleted(
+            0,
+            f"{_GIT_REMOTE}\n{_GIT_REMOTE}\n".encode(),
+            b"",
+        ),
+        GitCompleted(0, _GIT_REMOTE.encode(), b""),
+        GitCompleted(0, b"\xff\n", b""),
+        GitCompleted(0, b"x" * (64 * 1024 + 1), b""),
+    ],
+    ids=[
+        "mismatch",
+        "nonzero",
+        "empty",
+        "multiple-lines",
+        "missing-newline",
+        "invalid-utf8",
+        "output-overflow",
+    ],
+)
+def test_git_preflight_failure_prevents_fetch_and_is_redacted(
+    tmp_path,
+    preflight,
+):
+    calls = []
+
+    def runner(args):
+        calls.append(args)
+        if "init" in args:
+            return GitCompleted(0, b"", b"")
+        if "--get-url" in args:
+            return preflight
+        raise AssertionError("preflight failure must prevent git fetch")
+
+    result = _git_resolver(runner=runner, cache_root=tmp_path).resolve(
+        _git_ref(_sha256(b"x"))
+    )
+
+    serialized = str(result.to_json_dict())
+    assert result.status is ResolutionStatus.UNRESOLVED
+    assert result.detail == "Git artifact resolution failed."
+    assert not any("fetch" in call for call in calls)
+    assert "attacker.invalid" not in serialized
+    assert "private error" not in serialized
+
+
 def test_git_resolver_refuses_oversized_blob(tmp_path):
-    resolver = GitResolver(
+    resolver = _git_resolver(
         runner=_fake_git_runner(blob=b"x", reported_size=10_000),
         cache_root=tmp_path,
         max_fetch_bytes=1024,
@@ -2281,7 +2710,7 @@ def test_git_resolver_evicts_cache_over_quota(tmp_path):
     os.utime(old, (1, 1))  # mark as the least-recently-used cache
 
     data = b"new pinned code"
-    resolver = GitResolver(
+    resolver = _git_resolver(
         runner=_fake_git_runner(blob=data),
         cache_root=base,
         max_cache_bytes=1024,  # smaller than the 5000-byte old cache
@@ -2311,9 +2740,160 @@ def test_registry_from_env_git_allowlist_excludes_unlisted_remote(monkeypatch):
     assert "allowlist" in (result.detail or "")
 
 
+def test_default_registry_preserves_explicit_git_policy_identity():
+    policy = _git_policy(_GIT_REMOTE)
+
+    registry = default_registry(git_remote_policy=policy)
+
+    resolver = next(
+        candidate
+        for candidate in registry._resolvers
+        if isinstance(candidate, GitResolver)
+    )
+    assert resolver._remote_policy is policy
+
+
+def test_registry_from_env_explicit_git_policy_overrides_environment(monkeypatch):
+    policy = _git_policy(_GIT_REMOTE)
+    monkeypatch.setenv(
+        "LAB_TRACKER_GIT_ALLOWED_REMOTES",
+        "this environment value is intentionally invalid",
+    )
+
+    registry = registry_from_env(
+        git_remote_policy=policy,
+        http_policy=OutboundHttpPolicy(),
+    )
+
+    resolver = next(
+        candidate
+        for candidate in registry._resolvers
+        if isinstance(candidate, GitResolver)
+    )
+    assert resolver._remote_policy is policy
+
+
+def _isolate_real_git_config(monkeypatch, tmp_path):
+    home = tmp_path / "home"
+    xdg = tmp_path / "xdg"
+    home.mkdir()
+    xdg.mkdir()
+    for variable in tuple(os.environ):
+        if variable.startswith("GIT_CONFIG_"):
+            monkeypatch.delenv(variable, raising=False)
+    for variable in (
+        "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+        "GIT_CEILING_DIRECTORIES",
+        "GIT_COMMON_DIR",
+        "GIT_DIR",
+        "GIT_INDEX_FILE",
+        "GIT_OBJECT_DIRECTORY",
+        "GIT_WORK_TREE",
+    ):
+        monkeypatch.delenv(variable, raising=False)
+    monkeypatch.setenv("HOME", os.fspath(home))
+    monkeypatch.setenv("XDG_CONFIG_HOME", os.fspath(xdg))
+    monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
+
+
+def test_real_git_preflight_detects_inherited_instead_of_rewrite(
+    tmp_path,
+    monkeypatch,
+):
+    git = shutil.which("git")
+    if git is None:
+        pytest.skip("git is unavailable")
+    _isolate_real_git_config(monkeypatch, tmp_path)
+    rewritten = "https://attacker.invalid/private.git"
+    subprocess.run(  # noqa: S603 - fixed executable and controlled test values
+        [
+            git,
+            "config",
+            "--global",
+            f"url.{rewritten}.insteadOf",
+            _GIT_REMOTE,
+        ],
+        check=True,
+        capture_output=True,
+    )
+    calls = []
+
+    def runner(args):
+        calls.append(args)
+        completed = subprocess.run(  # noqa: S603 - fixed executable, built argv
+            [git, *args],
+            check=False,
+            capture_output=True,
+        )
+        return GitCompleted(
+            completed.returncode,
+            completed.stdout,
+            completed.stderr,
+        )
+
+    result = _git_resolver(runner=runner, cache_root=tmp_path / "cache").resolve(
+        _git_ref(_sha256(b"x"))
+    )
+
+    assert result.status is ResolutionStatus.UNRESOLVED
+    assert result.detail == "Git artifact resolution failed."
+    assert not any("fetch" in call for call in calls)
+    preflight = next(call for call in calls if "--get-url" in call)
+    assert preflight[-1] == _GIT_REMOTE
+
+
+def test_real_git_cli_config_overrides_inherited_exact_redirect_setting(
+    tmp_path,
+    monkeypatch,
+):
+    git = shutil.which("git")
+    if git is None:
+        pytest.skip("git is unavailable")
+    _isolate_real_git_config(monkeypatch, tmp_path)
+    exact_key = f"http.{_GIT_REMOTE}.followRedirects"
+    subprocess.run(  # noqa: S603 - fixed executable and controlled test values
+        [git, "config", "--global", exact_key, "true"],
+        check=True,
+        capture_output=True,
+    )
+
+    generic_only = subprocess.run(  # noqa: S603 - fixed executable and controlled argv
+        [
+            git,
+            "-c",
+            "http.followRedirects=false",
+            "config",
+            "--get-urlmatch",
+            "http.followRedirects",
+            _GIT_REMOTE,
+        ],
+        check=True,
+        capture_output=True,
+    )
+    assert generic_only.stdout == b"true\n"
+
+    completed = subprocess.run(  # noqa: S603 - fixed executable and controlled argv
+        [
+            git,
+            "-c",
+            "http.followRedirects=false",
+            "-c",
+            f"{exact_key}=false",
+            "config",
+            "--get-urlmatch",
+            "http.followRedirects",
+            _GIT_REMOTE,
+        ],
+        check=True,
+        capture_output=True,
+    )
+
+    assert completed.stdout == b"false\n"
+
+
 def test_git_resolver_rejects_option_like_components(tmp_path):
     runner = _fake_git_runner(blob=b"data")
-    resolver = GitResolver(runner=runner, cache_root=tmp_path)
+    resolver = _git_resolver(runner=runner, cache_root=tmp_path)
     # A remote that would be read as a git option must not reach the subprocess.
     ref = ExternalArtifactReference(
         source_system="git",
