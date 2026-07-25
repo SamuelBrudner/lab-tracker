@@ -4,9 +4,14 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
+import shutil
+import weakref
 from collections.abc import AsyncIterator, Callable
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from pathlib import Path
+from tempfile import mkdtemp
 
 from fastapi import FastAPI
 from sqlalchemy.engine import Engine
@@ -16,7 +21,10 @@ from sqlalchemy.orm import Session, sessionmaker
 from lab_tracker.api import LabTrackerAPI
 from lab_tracker.app_parts.middleware import system_auth_context
 from lab_tracker.artifact_resolution import (
+    LAB_TRACKER_GIT_ALLOWED_REMOTES_ENV,
     ResolverRegistry,
+    StoreHealth,
+    check_store_health,
     outbound_http_policy_from_config,
     registry_from_env,
 )
@@ -32,8 +40,10 @@ from lab_tracker.backup import database_lock_path
 from lab_tracker.config import Settings
 from lab_tracker.db import get_engine, get_session_factory
 from lab_tracker.file_storage import LocalFileStorageBackend
+from lab_tracker.git_remote_policy import GitRemotePolicy
 from lab_tracker.graph_drafting import GraphDraftClientFactory, make_graph_draft_client
 from lab_tracker.logging import configure_logging
+from lab_tracker.models import DataStore
 from lab_tracker.note_storage import LocalNoteStorage
 from lab_tracker.outbound_http import OutboundHttpPolicy
 from lab_tracker.process_lock import ProcessLock
@@ -41,6 +51,45 @@ from lab_tracker.rate_limit import InMemoryRateLimiter
 from lab_tracker.sqlalchemy_repository import SQLAlchemyLabTrackerRepository
 
 _logger = logging.getLogger(__name__)
+
+
+class _OwnedGitHealthWorkdir:
+    """Own a private empty directory with silent GC fallback cleanup."""
+
+    def __init__(self) -> None:
+        path = Path(mkdtemp(prefix="lab-tracker-git-health-"))
+        try:
+            os.chmod(path, 0o700)
+        except BaseException:
+            shutil.rmtree(path, ignore_errors=True)
+            raise
+        self.path = path
+        self._finalizer = weakref.finalize(
+            self,
+            shutil.rmtree,
+            path,
+            ignore_errors=True,
+        )
+
+    def cleanup(self) -> None:
+        """Remove the directory at most once."""
+
+        self._finalizer()
+
+
+@dataclass(frozen=True)
+class StoreHealthChecker:
+    """Apply the runtime's immutable Git policy to every store health probe."""
+
+    git_remote_policy: GitRemotePolicy
+    git_health_workdir: Path
+
+    def __call__(self, store: DataStore) -> StoreHealth:
+        return check_store_health(
+            store,
+            git_remote_policy=self.git_remote_policy,
+            git_health_cwd=self.git_health_workdir,
+        )
 
 
 @dataclass(frozen=True)
@@ -61,7 +110,19 @@ class AppRuntime:
     auth_rate_limiter: InMemoryRateLimiter
     pat_rate_limiter: InMemoryRateLimiter
     outbound_http_policy: OutboundHttpPolicy
+    git_remote_policy: GitRemotePolicy
     resolver_registry: ResolverRegistry
+    git_health_workdir: Path
+    store_health_checker: StoreHealthChecker
+    _git_health_workdir_owner: _OwnedGitHealthWorkdir = field(
+        repr=False,
+        compare=False,
+    )
+
+    def cleanup_git_health_workdir(self) -> None:
+        """Remove the app-owned non-repository Git health working directory."""
+
+        self._git_health_workdir_owner.cleanup()
 
 
 def build_app_runtime(settings: Settings) -> AppRuntime:
@@ -70,11 +131,39 @@ def build_app_runtime(settings: Settings) -> AppRuntime:
         allowed_authorities=settings.resolver_http_allowed_authorities,
         allowed_networks=settings.resolver_http_allowed_networks,
     )
-    resolver_registry = registry_from_env(
-        http_policy=outbound_http_policy,
-        http_deadline_seconds=settings.resolver_http_deadline_seconds,
-        subprocess_deadline_seconds=settings.resolver_subprocess_deadline_seconds,
+    git_remote_policy = GitRemotePolicy.from_config(
+        settings.git_allowed_remotes,
+        variable=LAB_TRACKER_GIT_ALLOWED_REMOTES_ENV,
     )
+    git_health_workdir_owner = _OwnedGitHealthWorkdir()
+    try:
+        resolver_registry = registry_from_env(
+            http_policy=outbound_http_policy,
+            git_remote_policy=git_remote_policy,
+            http_deadline_seconds=settings.resolver_http_deadline_seconds,
+            subprocess_deadline_seconds=settings.resolver_subprocess_deadline_seconds,
+        )
+        return _build_app_runtime(
+            settings,
+            outbound_http_policy=outbound_http_policy,
+            git_remote_policy=git_remote_policy,
+            resolver_registry=resolver_registry,
+            git_health_workdir_owner=git_health_workdir_owner,
+        )
+    except BaseException:
+        git_health_workdir_owner.cleanup()
+        raise
+
+
+def _build_app_runtime(
+    settings: Settings,
+    *,
+    outbound_http_policy: OutboundHttpPolicy,
+    git_remote_policy: GitRemotePolicy,
+    resolver_registry: ResolverRegistry,
+    git_health_workdir_owner: _OwnedGitHealthWorkdir,
+) -> AppRuntime:
+    git_health_workdir = git_health_workdir_owner.path
     engine = get_engine(settings)
     session_factory = get_session_factory(engine=engine)
     auth_enabled = settings.is_auth_enabled()
@@ -119,6 +208,10 @@ def build_app_runtime(settings: Settings) -> AppRuntime:
         max_attempts=settings.auth_rate_limit_attempts,
         window_seconds=settings.auth_rate_limit_window_seconds,
     )
+    store_health_checker = StoreHealthChecker(
+        git_remote_policy=git_remote_policy,
+        git_health_workdir=git_health_workdir,
+    )
     return AppRuntime(
         settings=settings,
         engine=engine,
@@ -136,24 +229,37 @@ def build_app_runtime(settings: Settings) -> AppRuntime:
         auth_rate_limiter=auth_rate_limiter,
         pat_rate_limiter=pat_rate_limiter,
         outbound_http_policy=outbound_http_policy,
+        git_remote_policy=git_remote_policy,
         resolver_registry=resolver_registry,
+        git_health_workdir=git_health_workdir,
+        store_health_checker=store_health_checker,
+        _git_health_workdir_owner=git_health_workdir_owner,
     )
 
 
 def make_lifespan(
-    engine: Engine,
+    runtime: AppRuntime,
 ) -> Callable[[FastAPI], AbstractAsyncContextManager[None]]:
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-        lock = _acquire_database_lock(engine)
-        background_tasks = _start_graph_draft_background_tasks(app)
+        lock: ProcessLock | None = None
+        background_tasks: list[asyncio.Task[None]] = []
         try:
+            lock = _acquire_database_lock(runtime.engine)
+            background_tasks = _start_graph_draft_background_tasks(app)
             yield
         finally:
-            await _stop_background_tasks(background_tasks)
-            if lock is not None:
-                lock.release()
-            engine.dispose()
+            try:
+                try:
+                    await _stop_background_tasks(background_tasks)
+                finally:
+                    if lock is not None:
+                        lock.release()
+            finally:
+                try:
+                    runtime.engine.dispose()
+                finally:
+                    runtime.cleanup_git_health_workdir()
 
     return lifespan
 
@@ -278,7 +384,11 @@ def configure_app_state(app: FastAPI, runtime: AppRuntime) -> None:
     app.state.auth_rate_limiter = runtime.auth_rate_limiter
     app.state.pat_rate_limiter = runtime.pat_rate_limiter
     app.state.outbound_http_policy = runtime.outbound_http_policy
+    app.state.git_remote_policy = runtime.git_remote_policy
     app.state.resolver_registry = runtime.resolver_registry
+    app.state.git_health_workdir = runtime.git_health_workdir
+    app.state.store_health_checker = runtime.store_health_checker
+    app.state.cleanup_git_health_workdir = runtime.cleanup_git_health_workdir
 
 
 def _log_startup_config_summary(

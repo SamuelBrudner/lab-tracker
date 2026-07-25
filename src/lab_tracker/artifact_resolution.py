@@ -52,6 +52,7 @@ from lab_tracker.bounded_subprocess import (
     ProcessExecutionError,
     ProcessExecutor,
 )
+from lab_tracker.git_remote_policy import ApprovedGitRemote, GitRemotePolicy
 from lab_tracker.models import DataStore, ExternalArtifactReference, StoreKind
 from lab_tracker.outbound_http import (
     DEFAULT_OUTBOUND_HTTP_DEADLINE_SECONDS,
@@ -95,6 +96,8 @@ _PROCESS_STDERR_LIMIT_BYTES = DEFAULT_PROCESS_STDERR_LIMIT_BYTES
 # blocks `file://` (local reads) and `ext::`/`fd::` (arbitrary command execution)
 # vectors that a malicious reference could otherwise trigger via git.
 DEFAULT_GIT_ALLOW_PROTOCOL = "https:ssh:git"
+_GIT_GENERIC_HTTP_REDIRECT_CONFIG = "http.followRedirects=false"
+_GIT_HEALTH_FAILURE_DETAIL = "Git store health check failed."
 
 _STREAM_CHUNK_SIZE = 1024 * 1024
 
@@ -412,6 +415,13 @@ def check_store_health(
     *,
     rclone_runner: RcloneRunner | None = None,
     git_runner: GitRunner | None = None,
+    git_executor: ProcessExecutor | None = None,
+    git_remote_policy: GitRemotePolicy | None = None,
+    git_health_cwd: str | Path | None = None,
+    git_binary: str = "git",
+    git_allow_protocol: str | None = DEFAULT_GIT_ALLOW_PROTOCOL,
+    git_deadline_seconds: float = DEFAULT_SUBPROCESS_DEADLINE_SECONDS,
+    git_clock: Callable[[], float] = time.monotonic,
     http_client: object | None = None,
     http_timeout: float = 10.0,
 ) -> StoreHealth:
@@ -448,16 +458,74 @@ def check_store_health(
         return StoreHealth(StoreHealthStatus.UNREACHABLE, _rclone_error_detail(completed))
 
     if kind is StoreKind.GIT:
-        runner = git_runner or _subprocess_git_runner(
-            "git", allow_protocol=DEFAULT_GIT_ALLOW_PROTOCOL
+        policy = (
+            git_remote_policy
+            if git_remote_policy is not None
+            else GitRemotePolicy.deny_all()
         )
+        approved = policy.authorize(store.root)
+        if approved is None or git_health_cwd is None:
+            return StoreHealth(
+                StoreHealthStatus.UNREACHABLE,
+                _GIT_HEALTH_FAILURE_DETAIL,
+            )
+        cwd = os.path.realpath(os.fspath(git_health_cwd))
+        if not os.path.isdir(cwd) or (git_runner is not None and git_executor is not None):
+            return StoreHealth(
+                StoreHealthStatus.UNREACHABLE,
+                _GIT_HEALTH_FAILURE_DETAIL,
+            )
         try:
-            completed = runner(["ls-remote", store.root, "HEAD"])
-        except OSError as exc:
-            return StoreHealth(StoreHealthStatus.UNREACHABLE, f"git is unavailable: {exc}")
+            deadline = ProcessDeadline.after(
+                _validate_subprocess_deadline_seconds(git_deadline_seconds),
+                clock=git_clock,
+            )
+            env = _git_environment(git_allow_protocol, cwd=cwd)
+            config_args = _git_http_config_args(approved)
+            executor = (
+                git_executor
+                if git_executor is not None
+                else BoundedSubprocessExecutor()
+            )
+            preflight = _run_git_command(
+                runner=git_runner,
+                executor=executor,
+                binary=git_binary,
+                args=["ls-remote", "--get-url", "--", approved.subprocess_value],
+                cwd=cwd,
+                env=env,
+                config_args=config_args,
+                deadline=deadline,
+                stdout_limit_bytes=_PROCESS_METADATA_LIMIT_BYTES,
+            )
+            if not _git_remote_preflight_matches(preflight, approved.subprocess_value):
+                return StoreHealth(
+                    StoreHealthStatus.UNREACHABLE,
+                    _GIT_HEALTH_FAILURE_DETAIL,
+                )
+            completed = _run_git_command(
+                runner=git_runner,
+                executor=executor,
+                binary=git_binary,
+                args=["ls-remote", "--", approved.subprocess_value, "HEAD"],
+                cwd=cwd,
+                env=env,
+                config_args=config_args,
+                deadline=deadline,
+                stdout_limit_bytes=_PROCESS_METADATA_LIMIT_BYTES,
+            )
+            deadline.check()
+        except Exception:
+            return StoreHealth(
+                StoreHealthStatus.UNREACHABLE,
+                _GIT_HEALTH_FAILURE_DETAIL,
+            )
         if completed.returncode == 0:
             return StoreHealth(StoreHealthStatus.HEALTHY)
-        return StoreHealth(StoreHealthStatus.UNREACHABLE, _git_error_detail(completed))
+        return StoreHealth(
+            StoreHealthStatus.UNREACHABLE,
+            _GIT_HEALTH_FAILURE_DETAIL,
+        )
 
     return StoreHealth(
         StoreHealthStatus.UNSUPPORTED,
@@ -1160,30 +1228,120 @@ class GitCompleted:
 GitRunner = Callable[[list[str]], GitCompleted]
 
 
-def _subprocess_git_runner(
-    binary: str, *, allow_protocol: str | None = None
-) -> GitRunner:
-    def run(args: list[str]) -> GitCompleted:
-        import subprocess
+def _git_environment(
+    allow_protocol: str | None,
+    *,
+    cwd: str,
+) -> dict[str, str]:
+    """Capture one non-interactive Git environment for a logical operation."""
 
-        env = dict(os.environ)
-        # Never block on an interactive credential prompt (would hang the server).
-        env["GIT_TERMINAL_PROMPT"] = "0"
-        if allow_protocol:
-            env["GIT_ALLOW_PROTOCOL"] = allow_protocol
-        completed = subprocess.run(  # noqa: S603 - args are built, not shell
-            [binary, *args],
-            capture_output=True,
-            check=False,
-            env=env,
-        )
-        return GitCompleted(
-            returncode=completed.returncode,
-            stdout=completed.stdout,
-            stderr=completed.stderr,
-        )
+    env = dict(os.environ)
+    for variable in (
+        "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+        "GIT_COMMON_DIR",
+        "GIT_DIR",
+        "GIT_INDEX_FILE",
+        "GIT_OBJECT_DIRECTORY",
+        "GIT_WORK_TREE",
+    ):
+        env.pop(variable, None)
+    env["GIT_TERMINAL_PROMPT"] = "0"
+    # The operation cwd may sit below an unrelated repository (notably under a
+    # shared /tmp). Let Git discover the cache repository at ``cwd``, but never
+    # walk into its parent and inherit repository-local URL rewrites or hooks.
+    env["GIT_CEILING_DIRECTORIES"] = os.path.dirname(os.path.realpath(cwd))
+    if allow_protocol is None:
+        env.pop("GIT_ALLOW_PROTOCOL", None)
+    else:
+        env["GIT_ALLOW_PROTOCOL"] = allow_protocol
+    return env
 
-    return run
+
+def _git_http_config_args(approved: ApprovedGitRemote) -> list[str]:
+    """Disable generic and approved-URL redirects before every Git subcommand."""
+
+    args = ["-c", _GIT_GENERIC_HTTP_REDIRECT_CONFIG]
+    if approved.scheme == "https":
+        args.extend(
+            [
+                "-c",
+                (
+                    f"http.{approved.subprocess_value}."
+                    "followRedirects=false"
+                ),
+            ]
+        )
+    return args
+
+
+def _run_git_command(
+    *,
+    runner: GitRunner | None,
+    executor: ProcessExecutor,
+    binary: str,
+    args: list[str],
+    cwd: str,
+    env: dict[str, str],
+    config_args: Sequence[str],
+    deadline: ProcessDeadline,
+    stdout_limit_bytes: int,
+    stdout_consumer: Callable[[bytes], None] | None = None,
+) -> GitCompleted:
+    """Run one Git command through the trusted runner or bounded production seam."""
+
+    if runner is not None:
+        # The callable seam is retained for deterministic tests and trusted callers.
+        # Encoding the cwd in argv keeps its command interpretation identical.
+        deadline.check()
+        completed = runner([*config_args, "-C", cwd, *args])
+        deadline.check()
+        if (
+            len(completed.stdout) > stdout_limit_bytes
+            or len(completed.stderr) > _PROCESS_STDERR_LIMIT_BYTES
+        ):
+            raise _LegacyProcessOutputExceeded
+        stdout = completed.stdout
+        if stdout_consumer is not None:
+            stdout_consumer(stdout)
+            deadline.check()
+            stdout = b""
+        return GitCompleted(completed.returncode, stdout, completed.stderr)
+
+    completed = executor.run(
+        [binary, *config_args, *args],
+        cwd=cwd,
+        deadline=deadline,
+        stdout_limit_bytes=stdout_limit_bytes,
+        stderr_limit_bytes=_PROCESS_STDERR_LIMIT_BYTES,
+        stdout_consumer=stdout_consumer,
+        env=env,
+    )
+    return GitCompleted(
+        completed.returncode,
+        completed.stdout,
+        b"",
+    )
+
+
+def _git_remote_preflight_matches(
+    completed: GitCompleted,
+    canonical_remote: str,
+) -> bool:
+    """Require one exact, terminal UTF-8 line from ``ls-remote --get-url``."""
+
+    if completed.returncode != 0:
+        return False
+    try:
+        output = completed.stdout.decode("utf-8")
+    except UnicodeDecodeError:
+        return False
+    if output.endswith("\r\n"):
+        line = output[:-2]
+    elif output.endswith("\n"):
+        line = output[:-1]
+    else:
+        return False
+    return line == canonical_remote
 
 
 class _GitReadError(Exception):
@@ -1211,7 +1369,6 @@ def _parse_git_locator(uri: str) -> tuple[str, str, str] | None:
     commit, sep2, path = fragment.partition(":")
     if not sep2:
         return None
-    remote, commit, path = remote.strip(), commit.strip(), path.strip()
     if not remote or not commit or not path:
         return None
     if any(_has_control_characters(part) for part in (remote, commit, path)):
@@ -1221,28 +1378,6 @@ def _parse_git_locator(uri: str) -> tuple[str, str, str] | None:
     if any(part.startswith("-") for part in (remote, commit, path)):
         return None
     return remote, commit, path
-
-
-def _git_remote_has_embedded_credentials(remote: str) -> bool:
-    """Return whether a hierarchical Git URL persists userinfo in the locator."""
-
-    try:
-        parsed = urlsplit(remote)
-        if not parsed.netloc:
-            return False
-        # Query strings on repository URLs are commonly signed credentials and
-        # would be exposed in the child argv just like URL userinfo.
-        if parsed.query:
-            return True
-        if parsed.password is not None:
-            return True
-        # An SSH username is routing identity (the common ``ssh://git@host``
-        # form), while HTTP/Git URL userinfo is commonly an access token.
-        return parsed.username is not None and parsed.scheme.lower() != "ssh"
-    except ValueError:
-        # Structural remote validation is handled by the dedicated remote-policy
-        # layer. A malformed URL cannot safely be inspected for credentials here.
-        return True
 
 
 class GitResolver(ArtifactResolver):
@@ -1256,18 +1391,17 @@ class GitResolver(ArtifactResolver):
     tests; otherwise git is invoked as a subprocess and the resolver degrades to
     UNRESOLVED when the binary is absent.
 
-    Security controls (all opt-in via the injected config or the environment):
+    Security controls:
 
-    * ``allowed_remotes`` — ``None`` means unrestricted (library default); a list
-      restricts fetches to remotes matching one of its prefixes, and anything
-      else resolves UNRESOLVED *before* any git subprocess runs (SSRF guard).
-      ``registry_from_env`` denies all remotes unless
-      ``LAB_TRACKER_GIT_ALLOWED_REMOTES`` is set, mirroring the local resolver's
-      allowed-roots posture.
+    * ``remote_policy`` structurally authorizes and canonically reconstructs a
+      remote before cache or process work. The default policy denies everything.
     * ``allow_protocol`` — passed to git as ``GIT_ALLOW_PROTOCOL`` so ``file://``
       and ``ext::`` command-execution vectors are refused.
-    * Embedded URL credentials are refused before process creation. Credentials
-      must come from host-side Git/SSH configuration.
+    * A bounded ``ls-remote --get-url`` preflight must return the exact canonical
+      remote before the network-capable fetch runs, preventing host Git URL
+      rewrite configuration from escaping the operator policy.
+    * HTTP redirects are disabled generically and for the exact approved HTTPS
+      URL on every Git invocation.
     * The blob's size is checked (``git cat-file -s``) before it is read, so an
       object larger than ``max_fetch_bytes`` is refused rather than buffered.
     * ``max_cache_bytes`` bounds the on-disk fetch cache; least-recently-used
@@ -1281,7 +1415,7 @@ class GitResolver(ArtifactResolver):
         executor: ProcessExecutor | None = None,
         binary: str = "git",
         cache_root: str | Path | None = None,
-        allowed_remotes: Sequence[str] | None = None,
+        remote_policy: GitRemotePolicy | None = None,
         allow_protocol: str | None = DEFAULT_GIT_ALLOW_PROTOCOL,
         max_fetch_bytes: int = DEFAULT_MAX_FETCH_BYTES,
         max_cache_bytes: int | None = None,
@@ -1291,12 +1425,12 @@ class GitResolver(ArtifactResolver):
         if runner is not None and executor is not None:
             raise ValueError("Configure either runner or executor, not both.")
         self._runner = runner
-        self._executor = executor or BoundedSubprocessExecutor()
+        self._executor = executor
         self._binary = binary
         self._allow_protocol = allow_protocol
         self._cache_root = cache_root
-        self._allowed_remotes = (
-            None if allowed_remotes is None else list(allowed_remotes)
+        self._remote_policy = (
+            remote_policy if remote_policy is not None else GitRemotePolicy.deny_all()
         )
         self._max_fetch_bytes = max_fetch_bytes
         self._max_cache_bytes = max_cache_bytes
@@ -1309,14 +1443,6 @@ class GitResolver(ArtifactResolver):
         if ref.source_system.strip().lower() == "git":
             return True
         return ref.uri.startswith("git+")
-
-    def _remote_allowed(self, remote: str) -> bool:
-        if self._allowed_remotes is None:
-            return True
-        return any(
-            remote == allowed or remote.startswith(allowed)
-            for allowed in self._allowed_remotes
-        )
 
     def resolve(
         self,
@@ -1341,34 +1467,41 @@ class GitResolver(ArtifactResolver):
         if locator is None:
             return _unresolved(ref, detail="Reference URI is not a git locator.")
         remote, commit, path = locator
-        if _git_remote_has_embedded_credentials(remote):
-            return _unresolved(
-                ref,
-                detail="Embedded Git credentials are not accepted.",
-            )
-
-        if not self._remote_allowed(remote):
+        approved = self._remote_policy.authorize(remote)
+        if approved is None:
             return _unresolved(
                 ref, detail="Remote is not in the git resolver allowlist."
             )
 
         algorithm, _ = parse_content_hash(ref.content_hash)
-        deadline = ProcessDeadline.after(
-            self._deadline_seconds,
-            clock=self._clock,
-        )
-        collector = _HashCollector(
-            algorithm=algorithm,
-            max_bytes=max_bytes,
-            window=window,
-            max_total=self._max_fetch_bytes,
-            budget_check=deadline.check,
-        )
         try:
+            deadline = ProcessDeadline.after(
+                self._deadline_seconds,
+                clock=self._clock,
+            )
+            executor = (
+                self._executor
+                if self._executor is not None
+                else BoundedSubprocessExecutor()
+            )
+            deadline.check()
+            cache = self._repo_cache(approved.subprocess_value)
+            deadline.check()
+            env = _git_environment(self._allow_protocol, cwd=cache)
+            collector = _HashCollector(
+                algorithm=algorithm,
+                max_bytes=max_bytes,
+                window=window,
+                max_total=self._max_fetch_bytes,
+                budget_check=deadline.check,
+            )
             self._read_blob(
-                remote,
+                approved,
                 commit,
                 path,
+                cache=cache,
+                executor=executor,
+                env=env,
                 deadline=deadline,
                 stdout_consumer=collector.consume,
             )
@@ -1376,13 +1509,7 @@ class GitResolver(ArtifactResolver):
             deadline.check()
         except _GitReadError as exc:
             return _unresolved(ref, detail=exc.detail)
-        except (
-            _FetchTooLarge,
-            _LegacyProcessOutputExceeded,
-            OSError,
-            ProcessExecutionError,
-            ValueError,
-        ):
+        except Exception:
             return _unresolved(ref, detail="Git artifact resolution failed.")
 
         try:
@@ -1402,37 +1529,58 @@ class GitResolver(ArtifactResolver):
 
     def _read_blob(
         self,
-        remote: str,
+        approved: ApprovedGitRemote,
         commit: str,
         path: str,
         *,
+        cache: str,
+        executor: ProcessExecutor,
+        env: dict[str, str],
         deadline: ProcessDeadline,
         stdout_consumer: Callable[[bytes], None],
     ) -> None:
-        deadline.check()
-        cache = self._repo_cache(remote)
+        remote = approved.subprocess_value
         deadline.check()
         rev = f"{commit}:{path}"
+        config_args = _git_http_config_args(approved)
         # Idempotent: a fresh cache is initialised once, an existing one reused.
         initialized = self._run_command(
-            ["-C", cache, "init", "-q"],
+            ["init", "-q"],
+            executor=executor,
+            cwd=cache,
+            env=env,
+            config_args=config_args,
             deadline=deadline,
             stdout_limit_bytes=_PROCESS_METADATA_LIMIT_BYTES,
         )
         if initialized.returncode != 0:
             raise _GitReadError("Git artifact resolution failed.")
+        preflight = self._run_command(
+            ["ls-remote", "--get-url", "--", remote],
+            executor=executor,
+            cwd=cache,
+            env=env,
+            config_args=config_args,
+            deadline=deadline,
+            stdout_limit_bytes=_PROCESS_METADATA_LIMIT_BYTES,
+        )
+        if not _git_remote_preflight_matches(preflight, remote):
+            raise _GitReadError("Git artifact resolution failed.")
         fetch = self._run_command(
             [
-                "-C",
-                cache,
                 "fetch",
                 "--quiet",
                 "--no-tags",
                 "--depth",
                 "1",
+                "--",
                 remote,
                 commit,
             ],
+            executor=executor,
+            cwd=cache,
+            env=env,
+            config_args=config_args,
             deadline=deadline,
             stdout_limit_bytes=_PROCESS_METADATA_LIMIT_BYTES,
         )
@@ -1440,7 +1588,11 @@ class GitResolver(ArtifactResolver):
             raise _GitReadError("Git artifact resolution failed.")
         # Refuse an oversized object before reading it into memory.
         size_out = self._run_command(
-            ["-C", cache, "cat-file", "-s", rev],
+            ["cat-file", "-s", rev],
+            executor=executor,
+            cwd=cache,
+            env=env,
+            config_args=config_args,
             deadline=deadline,
             stdout_limit_bytes=_PROCESS_METADATA_LIMIT_BYTES,
         )
@@ -1462,7 +1614,11 @@ class GitResolver(ArtifactResolver):
                 f"{self._max_fetch_bytes}-byte fetch limit."
             )
         cat = self._run_command(
-            ["-C", cache, "cat-file", "blob", rev],
+            ["cat-file", "blob", rev],
+            executor=executor,
+            cwd=cache,
+            env=env,
+            config_args=config_args,
             deadline=deadline,
             stdout_limit_bytes=self._max_fetch_bytes,
             stdout_consumer=stdout_consumer,
@@ -1475,44 +1631,25 @@ class GitResolver(ArtifactResolver):
         self,
         args: list[str],
         *,
+        executor: ProcessExecutor,
+        cwd: str,
+        env: dict[str, str],
+        config_args: Sequence[str],
         deadline: ProcessDeadline,
         stdout_limit_bytes: int,
         stdout_consumer: Callable[[bytes], None] | None = None,
     ) -> GitCompleted:
-        if self._runner is not None:
-            # This compatibility seam is for trusted, synchronous test runners.
-            # Production always uses the preemptible bounded executor.
-            deadline.check()
-            completed = self._runner(args)
-            deadline.check()
-            if (
-                len(completed.stdout) > stdout_limit_bytes
-                or len(completed.stderr) > _PROCESS_STDERR_LIMIT_BYTES
-            ):
-                raise _LegacyProcessOutputExceeded
-            stdout = completed.stdout
-            if stdout_consumer is not None:
-                stdout_consumer(stdout)
-                deadline.check()
-                stdout = b""
-            return GitCompleted(completed.returncode, stdout, completed.stderr)
-
-        env = dict(os.environ)
-        env["GIT_TERMINAL_PROMPT"] = "0"
-        if self._allow_protocol:
-            env["GIT_ALLOW_PROTOCOL"] = self._allow_protocol
-        completed = self._executor.run(
-            [self._binary, *args],
+        return _run_git_command(
+            runner=self._runner,
+            executor=executor,
+            binary=self._binary,
+            args=args,
+            cwd=cwd,
+            env=env,
+            config_args=config_args,
             deadline=deadline,
             stdout_limit_bytes=stdout_limit_bytes,
-            stderr_limit_bytes=_PROCESS_STDERR_LIMIT_BYTES,
             stdout_consumer=stdout_consumer,
-            env=env,
-        )
-        return GitCompleted(
-            completed.returncode,
-            completed.stdout,
-            b"",
         )
 
     def _repo_cache(self, remote: str) -> str:
@@ -1546,15 +1683,6 @@ class GitResolver(ArtifactResolver):
                 break
             shutil.rmtree(path, ignore_errors=True)
             total -= size
-
-
-def _git_error_detail(completed: GitCompleted) -> str:
-    """Legacy store-health diagnostic; resolver subprocesses use generic errors."""
-
-    stderr = completed.stderr.decode("utf-8", errors="replace").strip()
-    if stderr:
-        return f"git failed: {stderr.splitlines()[-1]}"
-    return f"git exited with status {completed.returncode}."
 
 
 def _dir_size(path: str) -> int:
@@ -1727,7 +1855,7 @@ def default_registry(
     http_deadline_seconds: float = DEFAULT_OUTBOUND_HTTP_DEADLINE_SECONDS,
     subprocess_deadline_seconds: float = DEFAULT_SUBPROCESS_DEADLINE_SECONDS,
     rclone_allowed_remotes: Sequence[str] | None = None,
-    git_allowed_remotes: Sequence[str] | None = None,
+    git_remote_policy: GitRemotePolicy | None = None,
     git_cache_root: str | Path | None = None,
     git_max_cache_bytes: int | None = None,
 ) -> ResolverRegistry:
@@ -1741,8 +1869,8 @@ def default_registry(
     shared outbound destination policy later reused by store-health probes.
     ``subprocess_deadline_seconds`` is one shared execution/verification budget
     for every command in a single rclone or Git resolution.
-    ``git_allowed_remotes`` (``None`` = unrestricted) gates which remotes the
-    git resolver may fetch.
+    ``git_remote_policy`` is one immutable structural policy shared with health
+    composition; omission denies every Git remote.
     """
 
     return ResolverRegistry(
@@ -1758,7 +1886,7 @@ def default_registry(
                 deadline_seconds=subprocess_deadline_seconds,
             ),
             GitResolver(
-                allowed_remotes=git_allowed_remotes,
+                remote_policy=git_remote_policy,
                 cache_root=git_cache_root,
                 max_cache_bytes=git_max_cache_bytes,
                 deadline_seconds=subprocess_deadline_seconds,
@@ -1805,9 +1933,9 @@ LAB_TRACKER_RESOLVER_SUBPROCESS_DEADLINE_SECONDS_ENV = (
 # host's rclone config.
 LAB_TRACKER_RCLONE_ALLOWED_REMOTES_ENV = "LAB_TRACKER_RCLONE_ALLOWED_REMOTES"
 
-# Comma-separated allowlist of git remote prefixes the git resolver may fetch.
-# When unset, registry_from_env denies all remotes (git pins resolve UNRESOLVED)
-# until an operator opts specific remotes in — the same posture as allowed roots.
+# Comma-separated structural Git grants. Each grant is parsed and canonicalized;
+# candidates are authorized by scheme, host, effective port, optional SSH user,
+# and repository path boundary. When unset, registry_from_env denies all remotes.
 LAB_TRACKER_GIT_ALLOWED_REMOTES_ENV = "LAB_TRACKER_GIT_ALLOWED_REMOTES"
 LAB_TRACKER_GIT_CACHE_ROOT_ENV = "LAB_TRACKER_GIT_CACHE_ROOT"
 LAB_TRACKER_GIT_CACHE_MAX_BYTES_ENV = "LAB_TRACKER_GIT_CACHE_MAX_BYTES"
@@ -1895,6 +2023,7 @@ def registry_from_env(
     http_policy: OutboundHttpPolicy | None = None,
     http_deadline_seconds: float | None = None,
     subprocess_deadline_seconds: float | None = None,
+    git_remote_policy: GitRemotePolicy | None = None,
 ) -> ResolverRegistry:
     """Build the default registry, reading resolver config from the env."""
 
@@ -1909,13 +2038,11 @@ def registry_from_env(
         if raw_rclone
         else []
     )
-    raw_remotes = os.environ.get(LAB_TRACKER_GIT_ALLOWED_REMOTES_ENV)
-    # Unset -> [] -> deny all git remotes (opt-in, mirroring allowed roots).
-    git_allowed_remotes = (
-        [part.strip() for part in raw_remotes.split(",") if part.strip()]
-        if raw_remotes
-        else []
-    )
+    if git_remote_policy is None:
+        git_remote_policy = GitRemotePolicy.from_config(
+            os.environ.get(LAB_TRACKER_GIT_ALLOWED_REMOTES_ENV),
+            variable=LAB_TRACKER_GIT_ALLOWED_REMOTES_ENV,
+        )
     git_cache_root = os.environ.get(LAB_TRACKER_GIT_CACHE_ROOT_ENV) or None
     git_max_cache_bytes = _env_positive_int(
         os.environ.get(LAB_TRACKER_GIT_CACHE_MAX_BYTES_ENV), 0
@@ -1975,7 +2102,7 @@ def registry_from_env(
         http_deadline_seconds=http_deadline_seconds,
         subprocess_deadline_seconds=subprocess_deadline_seconds,
         rclone_allowed_remotes=rclone_allowed_remotes,
-        git_allowed_remotes=git_allowed_remotes,
+        git_remote_policy=git_remote_policy,
         git_cache_root=git_cache_root,
         git_max_cache_bytes=git_max_cache_bytes or None,
     )
