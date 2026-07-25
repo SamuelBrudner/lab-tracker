@@ -83,6 +83,10 @@ from lab_tracker.outbound_http import (
     RegisteredHttpPrefix,
     SafeHttpClient,
 )
+from lab_tracker.rclone_store_locator import (
+    RcloneRemoteName,
+    RegisteredRcloneRoot,
+)
 
 # Default cap on the bytes returned inline to a caller. Bounds payload size, not
 # verification: the full artifact is always hashed regardless of this cap.
@@ -301,6 +305,7 @@ class ArtifactResolver(ABC):
 
 _LOCAL_STORE_TARGET_FACTORY_TOKEN = object()
 _HTTP_STORE_TARGET_FACTORY_TOKEN = object()
+_RCLONE_STORE_TARGET_FACTORY_TOKEN = object()
 
 
 @dataclass(frozen=True, slots=True, init=False)
@@ -422,10 +427,76 @@ class ScopedHttpStoreResolver(ABC):
         """Resolve ``target`` while retaining its registered-prefix boundary."""
 
 
+@dataclass(frozen=True, slots=True, init=False)
+class RcloneStoreResolutionTarget:
+    """Detached authority for one artifact beneath a registered rclone root."""
+
+    logical_reference: ExternalArtifactReference
+    remote: RcloneRemoteName
+    registered_root: RegisteredRcloneRoot
+    locator: PortableStorePath
+
+    def __init__(
+        self,
+        logical_reference: ExternalArtifactReference,
+        remote: RcloneRemoteName,
+        registered_root: RegisteredRcloneRoot,
+        locator: PortableStorePath,
+        *,
+        _factory_token: object,
+    ) -> None:
+        if _factory_token is not _RCLONE_STORE_TARGET_FACTORY_TOKEN:
+            raise TypeError(
+                "RcloneStoreResolutionTarget must be built by its validated factory."
+            )
+        store_name = logical_reference.store_name
+        canonical_uri = (
+            canonical_store_uri(store_name, locator)
+            if store_name is not None
+            else None
+        )
+        if (
+            logical_reference.source_system != "store"
+            or logical_reference.locator != locator.path
+            or canonical_uri is None
+            or logical_reference.uri != canonical_uri
+            or registered_root.compose(remote, locator) is None
+        ):
+            raise ValueError("rclone store resolution target is inconsistent.")
+        object.__setattr__(self, "logical_reference", logical_reference)
+        object.__setattr__(self, "remote", remote)
+        object.__setattr__(self, "registered_root", registered_root)
+        object.__setattr__(self, "locator", locator)
+
+    @property
+    def argv_target(self) -> str:
+        """Return the exact validated rclone positional target."""
+
+        target = self.registered_root.compose(self.remote, self.locator)
+        if target is None:  # pragma: no cover - constructor proves this invariant
+            raise RuntimeError("Validated rclone target could not be recomposed.")
+        return target
+
+
+class ScopedRcloneStoreResolver(ABC):
+    """Narrow capability for resolving beneath a registered rclone root."""
+
+    @abstractmethod
+    def resolve_within_rclone_store(
+        self,
+        target: RcloneStoreResolutionTarget,
+        *,
+        max_bytes: int = DEFAULT_MAX_BYTES,
+        byte_range: tuple[int, int] | None = None,
+    ) -> ResolvedArtifact:
+        """Resolve ``target`` without reparsing its registered authority."""
+
+
 PreparedArtifactResolutionTarget: TypeAlias = (
     ExternalArtifactReference
     | LocalStoreResolutionTarget
     | HttpStoreResolutionTarget
+    | RcloneStoreResolutionTarget
     | ResolvedArtifact
 )
 
@@ -459,6 +530,12 @@ class ResolverRegistry:
             )
         if isinstance(runtime_target, HttpStoreResolutionTarget):
             return self.resolve_http_store(
+                runtime_target,
+                max_bytes=max_bytes,
+                byte_range=byte_range,
+            )
+        if isinstance(runtime_target, RcloneStoreResolutionTarget):
+            return self.resolve_rclone_store(
                 runtime_target,
                 max_bytes=max_bytes,
                 byte_range=byte_range,
@@ -535,6 +612,27 @@ class ResolverRegistry:
             detail="No scoped HTTP-store resolver is registered.",
         )
 
+    def resolve_rclone_store(
+        self,
+        target: RcloneStoreResolutionTarget,
+        *,
+        max_bytes: int = DEFAULT_MAX_BYTES,
+        byte_range: tuple[int, int] | None = None,
+    ) -> ResolvedArtifact:
+        """Dispatch only to a resolver that honors registered rclone scoping."""
+
+        for resolver in self._resolvers:
+            if isinstance(resolver, ScopedRcloneStoreResolver):
+                return resolver.resolve_within_rclone_store(
+                    target,
+                    max_bytes=max_bytes,
+                    byte_range=byte_range,
+                )
+        return _unresolved(
+            target.logical_reference,
+            detail="No scoped rclone-store resolver is registered.",
+        )
+
 
 def resolver_registry_for_prepared_target(
     target: PreparedArtifactResolutionTarget,
@@ -589,8 +687,10 @@ _RCLONE_STORE_KINDS = frozenset(
 )
 
 
-def _join_store_path(root: str, path: str) -> str:
-    return f"{root.rstrip('/')}/{path.lstrip('/')}" if path else root
+def is_rclone_store_kind(kind: StoreKind) -> bool:
+    """Return whether ``kind`` resolves through the rclone adapter."""
+
+    return kind in _RCLONE_STORE_KINDS
 
 
 def local_store_resolution_target(
@@ -645,18 +745,52 @@ def http_store_resolution_target(
         return None
 
 
+def rclone_store_resolution_target(
+    store: DataStore,
+    *,
+    locator: PortableStorePath,
+    logical_reference: ExternalArtifactReference,
+) -> RcloneStoreResolutionTarget | None:
+    """Build one internally consistent, root-scoped rclone target."""
+
+    if (
+        not is_rclone_store_kind(store.kind)
+        or logical_reference.store_name != store.name
+    ):
+        return None
+    remote_value = (
+        store.name if store.credential_ref is None else store.credential_ref
+    )
+    remote = RcloneRemoteName.parse(remote_value)
+    registered_root = RegisteredRcloneRoot.parse_decoded(store.root)
+    if remote is None or registered_root is None:
+        return None
+    try:
+        return RcloneStoreResolutionTarget(
+            logical_reference=logical_reference,
+            remote=remote,
+            registered_root=registered_root,
+            locator=locator,
+            _factory_token=_RCLONE_STORE_TARGET_FACTORY_TOKEN,
+        )
+    except ValueError:
+        return None
+
+
 def store_relative_reference(
     store: DataStore, *, path: str, content_hash: str
 ) -> (
     ExternalArtifactReference
     | LocalStoreResolutionTarget
     | HttpStoreResolutionTarget
+    | RcloneStoreResolutionTarget
     | None
 ):
     """Translate one legacy store-relative path into a resolvable target.
 
-    Registered local and HTTP stores apply the same portable path grammar and
-    yield scoped targets. Other adapters retain their established semantics.
+    Registered local, HTTP, and rclone stores apply the same portable path
+    grammar and yield scoped targets. Other adapters retain their established
+    semantics.
     """
 
     if store.kind is StoreKind.LOCAL_FS:
@@ -699,13 +833,26 @@ def store_relative_reference(
             logical_reference=logical_reference,
         )
 
-    joined = _join_store_path(store.root, path)
-    if store.kind in _RCLONE_STORE_KINDS:
-        remote = store.credential_ref or store.name
-        return ExternalArtifactReference(
-            source_system="rclone",
-            uri=f"rclone://{remote}/{joined.lstrip('/')}",
+    if is_rclone_store_kind(store.kind):
+        locator = PortableStorePath.parse_decoded(path)
+        canonical_uri = (
+            canonical_store_uri(store.name, locator)
+            if locator is not None
+            else None
+        )
+        if locator is None or canonical_uri is None:
+            return None
+        logical_reference = ExternalArtifactReference(
+            source_system="store",
+            uri=canonical_uri,
             content_hash=content_hash,
+            store_name=store.name,
+            locator=locator.path,
+        )
+        return rclone_store_resolution_target(
+            store,
+            locator=locator,
+            logical_reference=logical_reference,
         )
     if store.kind is StoreKind.GIT:
         # The locator carries the commit pin as a ``<path>@<commit>`` suffix; the
@@ -1537,7 +1684,7 @@ def _subprocess_rclone_runner(binary: str) -> RcloneRunner:
     return run
 
 
-class RcloneResolver(ArtifactResolver):
+class RcloneResolver(ArtifactResolver, ScopedRcloneStoreResolver):
     """Resolves artifacts via ``rclone``, the unifier for cloud and remote stores.
 
     One adapter covers S3, SFTP, Dropbox, Google Drive, Box, OneDrive and the
@@ -1621,6 +1768,60 @@ class RcloneResolver(ArtifactResolver):
             )
 
         algorithm, _ = parse_content_hash(ref.content_hash)
+        return self._resolve_validated_target(
+            ref,
+            target=target,
+            algorithm=algorithm,
+            window=window,
+            max_bytes=max_bytes,
+        )
+
+    def resolve_within_rclone_store(
+        self,
+        target: RcloneStoreResolutionTarget,
+        *,
+        max_bytes: int = DEFAULT_MAX_BYTES,
+        byte_range: tuple[int, int] | None = None,
+    ) -> ResolvedArtifact:
+        """Resolve a prevalidated registered target without URI reparsing."""
+
+        ref = target.logical_reference
+        try:
+            window = _normalize_byte_range(byte_range)
+        except ValueError as exc:
+            return _unresolved(ref, detail=str(exc))
+
+        if not is_verifiable_hash(ref.content_hash):
+            algorithm, _ = parse_content_hash(ref.content_hash)
+            return _unresolved(
+                ref,
+                detail=f"Cannot verify content hash with algorithm '{algorithm}'.",
+            )
+        if not self._remote_allowed(target.remote.value):
+            return _unresolved(
+                ref, detail="Remote is not in the rclone resolver allowlist."
+            )
+
+        algorithm, _ = parse_content_hash(ref.content_hash)
+        return self._resolve_validated_target(
+            ref,
+            target=target.argv_target,
+            algorithm=algorithm,
+            window=window,
+            max_bytes=max_bytes,
+        )
+
+    def _resolve_validated_target(
+        self,
+        ref: ExternalArtifactReference,
+        *,
+        target: str,
+        algorithm: str,
+        window: tuple[int, int] | None,
+        max_bytes: int,
+    ) -> ResolvedArtifact:
+        """Run the shared bounded size/cat/hash lifecycle for one exact target."""
+
         deadline = ProcessDeadline.after(
             self._deadline_seconds,
             clock=self._clock,

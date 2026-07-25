@@ -423,8 +423,8 @@ not exposed in store-scoped diagnostics.
 The raw-absolute rule applies to registered store roots, not operator
 configuration: global resolver roots preserve their established `~` expansion
 and relative-to-process-working-directory behavior. Non-local locator syntax is
-also unchanged here; Git, HTTP, and rclone prefix confinement is a separate
-adapter-specific follow-up.
+also unchanged here; each remote adapter owns a separate typed authority
+boundary.
 
 ## Recovering moved/renamed local artifacts
 
@@ -588,6 +588,16 @@ Shipped (`src/lab_tracker/artifact_resolution.py`, tested in
   independently capped, content is streamed under the actual-byte fetch limit,
   and one subprocess deadline covers stat, transfer, and verification; failed
   process cleanup uses the separate fixed grace described above.
+- ✅ Registered rclone stores use a separate nominally dispatched target.
+  `RcloneRemoteName` preserves one exact configured remote, while
+  `RegisteredRcloneRoot` retains `remote:path` versus `remote:/path` as
+  structural state. Preparation validates the portable locator and total
+  root-plus-locator budget before process work, then a frozen factory-only
+  `RcloneStoreResolutionTarget` crosses the database-scope boundary. The scoped
+  resolver checks the typed remote directly against the allowlist and composes
+  one exact positional token without URI decoding or path normalization.
+  Results retain the logical `store://` identity. Ordinary direct
+  `rclone://` references keep their existing parser and subprocess lifecycle.
 - ✅ `GitResolver` — resolves a pinned repository object only after the remote
   allowlist check, with one subprocess deadline across fetch, object metadata,
   streamed content verification, and bounded cleanup. Metadata and stderr are

@@ -144,6 +144,7 @@ jobs:
           uv run pytest -q
           tests/test_local_store_locator.py
           tests/test_registered_http_prefix.py
+          tests/test_rclone_store_locator.py
           tests/test_local_path_policy.py
           tests/test_local_file_access.py
           tests/test_windows_local_file.py

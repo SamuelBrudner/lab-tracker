@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+from dataclasses import FrozenInstanceError
 from datetime import datetime, timezone
 from types import SimpleNamespace
 from uuid import UUID, uuid4
@@ -12,6 +13,7 @@ from lab_tracker.artifact_resolution import (
     HttpStoreResolutionTarget,
     LocalStoreResolutionTarget,
     PreparedArtifactResolutionTarget,
+    RcloneStoreResolutionTarget,
     ResolutionStatus,
     ResolvedArtifact,
 )
@@ -89,6 +91,7 @@ class _ResolverRegistry:
         self.references: list[ExternalArtifactReference] = []
         self.local_targets: list[LocalStoreResolutionTarget] = []
         self.http_targets: list[HttpStoreResolutionTarget] = []
+        self.rclone_targets: list[RcloneStoreResolutionTarget] = []
 
     def resolve_prepared(
         self,
@@ -111,6 +114,9 @@ class _ResolverRegistry:
             reference = target.logical_reference
         elif isinstance(target, HttpStoreResolutionTarget):
             self.http_targets.append(target)
+            reference = target.logical_reference
+        elif isinstance(target, RcloneStoreResolutionTarget):
+            self.rclone_targets.append(target)
             reference = target.logical_reference
         else:
             raise AssertionError("unsupported prepared target reached test registry")
@@ -859,6 +865,362 @@ def test_invalid_http_store_definition_or_locator_never_reaches_resolver_io(
     assert result["uri"] == "store://[redacted]"
     assert result["detail"] == expected_detail
     assert "secret" not in str(result)
+
+
+def test_structured_and_uri_rclone_store_references_prepare_equal_targets():
+    project_id = uuid4()
+    store_name = "cloud store"
+    logical_uri = "store://cloud%20store/caf%C3%A9/file%20name.bin"
+    metadata = {"nested": {"value": "prepared"}}
+    store = DataStore(
+        store_id=uuid4(),
+        project_id=project_id,
+        name=store_name,
+        kind=StoreKind.RCLONE,
+        root="/Lab Data",
+        credential_ref="lab remote",
+    )
+    structured = ExternalArtifactReference.for_store(
+        store_name=store_name,
+        locator="café/file name.bin",
+        content_hash=_sha256(b"ok"),
+        source_system="legacy-rclone",
+        metadata=metadata,
+    )
+    uri_only = ExternalArtifactReference(
+        source_system="legacy-rclone",
+        uri=logical_uri,
+        content_hash=_sha256(b"ok"),
+        metadata=metadata,
+    )
+
+    def prepare(reference: ExternalArtifactReference) -> RcloneStoreResolutionTarget:
+        queries = ContextQueries(
+            api=_ContextApi(project_id=project_id, reference=reference),
+            repository=_ContextRepository(_DataStoreLookup(store)),
+            session=object(),
+            release_read_scope=lambda: None,
+        )
+        prepared = queries.prepare_external_artifact_resolution(
+            actor=AuthContext(user_id="reader", role=Role.VIEWER),
+            entity_type="dataset",
+            entity_id=uuid4(),
+            artifact_index=0,
+            content_hash=None,
+            max_bytes=None,
+            byte_start=None,
+            byte_end=None,
+        )
+        assert isinstance(prepared.target, RcloneStoreResolutionTarget)
+        return prepared.target
+
+    structured_target = prepare(structured)
+    uri_target = prepare(uri_only)
+
+    assert structured.uri == "store://cloud store/café/file name.bin"
+    assert structured_target == uri_target
+    assert structured_target.logical_reference.source_system == "store"
+    assert structured_target.logical_reference.store_name == store_name
+    assert structured_target.logical_reference.uri == logical_uri
+    assert structured_target.logical_reference.locator == "café/file name.bin"
+    assert structured_target.remote.value == "lab remote"
+    assert structured_target.registered_root.rooted is True
+    assert structured_target.registered_root.components == ("Lab Data",)
+    assert structured_target.locator.components == ("café", "file name.bin")
+    with pytest.raises(FrozenInstanceError):
+        structured_target.locator = uri_target.locator
+
+
+def test_rclone_preparation_preserves_relative_rooted_and_remote_root_modes():
+    project_id = uuid4()
+    reference = ExternalArtifactReference.for_store(
+        store_name="archive",
+        locator="artifact.bin",
+        content_hash=_sha256(b"ok"),
+    )
+
+    def prepare(root: str) -> RcloneStoreResolutionTarget:
+        store = DataStore(
+            store_id=uuid4(),
+            project_id=project_id,
+            name="archive",
+            kind=StoreKind.ONEDRIVE,
+            root=root,
+            credential_ref="lab-onedrive",
+        )
+        queries = ContextQueries(
+            api=_ContextApi(project_id=project_id, reference=reference),
+            repository=_ContextRepository(_DataStoreLookup(store)),
+            session=object(),
+            release_read_scope=lambda: None,
+        )
+        prepared = queries.prepare_external_artifact_resolution(
+            actor=AuthContext(user_id="reader", role=Role.VIEWER),
+            entity_type="dataset",
+            entity_id=uuid4(),
+            artifact_index=0,
+            content_hash=None,
+            max_bytes=None,
+            byte_start=None,
+            byte_end=None,
+        )
+        assert isinstance(prepared.target, RcloneStoreResolutionTarget)
+        return prepared.target
+
+    relative = prepare("experiments")
+    rooted = prepare("/experiments")
+    remote_root = prepare("/")
+
+    assert relative != rooted
+    assert relative.registered_root.rooted is False
+    assert relative.registered_root.components == ("experiments",)
+    assert relative.argv_target == "lab-onedrive:experiments/artifact.bin"
+    assert rooted.registered_root.rooted is True
+    assert rooted.registered_root.components == ("experiments",)
+    assert rooted.argv_target == "lab-onedrive:/experiments/artifact.bin"
+    assert remote_root.registered_root.rooted is True
+    assert remote_root.registered_root.components == ()
+    assert remote_root.argv_target == "lab-onedrive:/artifact.bin"
+
+
+def test_prepared_rclone_store_resolution_is_detached_and_uses_scoped_dispatch():
+    project_id = uuid4()
+    dataset_id = uuid4()
+    source_reference = ExternalArtifactReference.for_store(
+        store_name="archive",
+        locator="nested/artifact.txt",
+        content_hash=_sha256(b"ok"),
+        source_system="legacy-rclone",
+        metadata={"nested": {"value": "prepared"}},
+    )
+    store = DataStore(
+        store_id=uuid4(),
+        project_id=project_id,
+        name="archive",
+        kind=StoreKind.ONEDRIVE,
+        root="/OneDrive/experiments",
+        credential_ref="lab-onedrive",
+    )
+    api = _ContextApi(project_id=project_id, reference=source_reference)
+    lookup = _DataStoreLookup(store)
+    calls: list[str] = []
+    registry = _ResolverRegistry(calls)
+    queries = ContextQueries(
+        api=api,
+        repository=_ContextRepository(lookup),
+        session=object(),
+        release_read_scope=lambda: calls.append("release"),
+        resolver_registry=registry,
+    )
+
+    prepared = queries.prepare_external_artifact_resolution(
+        actor=AuthContext(user_id="reader", role=Role.VIEWER),
+        entity_type="dataset",
+        entity_id=dataset_id,
+        artifact_index=0,
+        content_hash=None,
+        max_bytes=64,
+        byte_start=1,
+        byte_end=3,
+    )
+    assert isinstance(prepared.target, RcloneStoreResolutionTarget)
+    source_reference.metadata["nested"]["value"] = "mutated"
+    store.root = "/mutated/outside"
+    store.credential_ref = "mutated-remote"
+    api.raise_on_read = True
+
+    assert prepared.target.argv_target == (
+        "lab-onedrive:/OneDrive/experiments/nested/artifact.txt"
+    )
+    assert prepared.target.logical_reference.metadata == {
+        "nested": {"value": "prepared"}
+    }
+
+    result = queries.resolve_prepared_external_artifact(prepared)
+
+    assert api.calls == ["authorized:reader"]
+    assert lookup.calls == ["store"]
+    assert lookup.names == ["archive"]
+    assert calls == ["release", "resolve-prepared"]
+    assert registry.prepared_targets == [prepared.target]
+    assert registry.parameters == [(64, (1, 3))]
+    assert registry.references == []
+    assert registry.local_targets == []
+    assert registry.http_targets == []
+    assert registry.rclone_targets == [prepared.target]
+    assert result["status"] == "verified"
+    assert result["uri"] == "store://archive/nested/artifact.txt"
+    assert result["content_base64"] == "b2s="
+    assert "lab-onedrive" not in str(result)
+    assert "OneDrive" not in str(result)
+
+
+def test_present_empty_rclone_credential_fails_closed_without_scoped_dispatch():
+    project_id = uuid4()
+    reference = ExternalArtifactReference.for_store(
+        store_name="archive",
+        locator="nested/artifact.bin",
+        content_hash=_sha256(b"secret"),
+    )
+    store = DataStore(
+        store_id=uuid4(),
+        project_id=project_id,
+        name="archive",
+        kind=StoreKind.RCLONE,
+        root="/experiments",
+        credential_ref="",
+    )
+    calls: list[str] = []
+    registry = _ResolverRegistry(calls)
+    queries = ContextQueries(
+        api=_ContextApi(project_id=project_id, reference=reference),
+        repository=_ContextRepository(_DataStoreLookup(store)),
+        session=object(),
+        release_read_scope=lambda: calls.append("release"),
+        resolver_registry=registry,
+    )
+
+    prepared = queries.prepare_external_artifact_resolution(
+        actor=AuthContext(user_id="reader", role=Role.VIEWER),
+        entity_type="dataset",
+        entity_id=uuid4(),
+        artifact_index=0,
+        content_hash=None,
+        max_bytes=None,
+        byte_start=None,
+        byte_end=None,
+    )
+    result = queries.resolve_prepared_external_artifact(prepared)
+
+    assert isinstance(prepared.target, ResolvedArtifact)
+    assert calls == ["release", "resolve-prepared"]
+    assert registry.references == []
+    assert registry.rclone_targets == []
+    assert result["status"] == "unresolved"
+    assert result["uri"] == "store://[redacted]"
+    assert result["detail"] == "Store artifact could not be resolved."
+    assert "archive" not in str(result)
+
+
+@pytest.mark.parametrize(
+    ("reference", "root", "credential_ref", "forbidden"),
+    (
+        (
+            ExternalArtifactReference(
+                source_system="store",
+                uri="store://archive/nested/artifact.bin?download=secret",
+                content_hash=_sha256(b"secret"),
+            ),
+            "/experiments",
+            "lab-remote",
+            "download",
+        ),
+        (
+            ExternalArtifactReference(
+                source_system="store",
+                uri="store://archive/nested/artifact.bin#secret-fragment",
+                content_hash=_sha256(b"secret"),
+            ),
+            "/experiments",
+            "lab-remote",
+            "fragment",
+        ),
+        (
+            ExternalArtifactReference(
+                source_system="store",
+                uri="store://archive/nested%2Fsecret.bin",
+                content_hash=_sha256(b"secret"),
+            ),
+            "/experiments",
+            "lab-remote",
+            "secret.bin",
+        ),
+        (
+            ExternalArtifactReference.for_store(
+                store_name="archive",
+                locator="../secret.bin",
+                content_hash=_sha256(b"secret"),
+            ),
+            "/experiments",
+            "lab-remote",
+            "secret.bin",
+        ),
+        (
+            ExternalArtifactReference.for_store(
+                store_name="archive",
+                locator="artifact.bin",
+                content_hash=_sha256(b"secret"),
+            ),
+            "../outside",
+            "lab-remote",
+            "outside",
+        ),
+        (
+            ExternalArtifactReference.for_store(
+                store_name="archive",
+                locator="artifact.bin",
+                content_hash=_sha256(b"secret"),
+            ),
+            "/experiments",
+            ":s3,env_auth=true",
+            "env_auth",
+        ),
+        (
+            ExternalArtifactReference.for_store(
+                store_name="archive",
+                locator="artifact.bin",
+                content_hash=_sha256(b"secret"),
+            ),
+            "/experiments",
+            "-config",
+            "config",
+        ),
+    ),
+)
+def test_invalid_rclone_identity_locator_root_or_remote_fails_opaquely(
+    reference: ExternalArtifactReference,
+    root: str,
+    credential_ref: str,
+    forbidden: str,
+) -> None:
+    project_id = uuid4()
+    store = DataStore(
+        store_id=uuid4(),
+        project_id=project_id,
+        name="archive",
+        kind=StoreKind.RCLONE,
+        root=root,
+        credential_ref=credential_ref,
+    )
+    calls: list[str] = []
+    registry = _ResolverRegistry(calls)
+    queries = ContextQueries(
+        api=_ContextApi(project_id=project_id, reference=reference),
+        repository=_ContextRepository(_DataStoreLookup(store)),
+        session=object(),
+        release_read_scope=lambda: calls.append("release"),
+        resolver_registry=registry,
+    )
+
+    prepared = queries.prepare_external_artifact_resolution(
+        actor=AuthContext(user_id="reader", role=Role.VIEWER),
+        entity_type="dataset",
+        entity_id=uuid4(),
+        artifact_index=0,
+        content_hash=None,
+        max_bytes=None,
+        byte_start=None,
+        byte_end=None,
+    )
+    result = queries.resolve_prepared_external_artifact(prepared)
+
+    assert isinstance(prepared.target, ResolvedArtifact)
+    assert calls == ["release", "resolve-prepared"]
+    assert registry.references == []
+    assert registry.rclone_targets == []
+    assert result["status"] == "unresolved"
+    assert result["uri"] == "store://[redacted]"
+    assert forbidden not in str(result)
 
 
 def test_preexisting_raw_at_git_pin_keeps_one_canonical_store_identity():

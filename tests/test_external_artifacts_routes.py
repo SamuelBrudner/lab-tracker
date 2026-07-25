@@ -4,6 +4,7 @@ import threading
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
+import pytest
 from http_security_fakes import (
     FakeAddressResolver,
     FakeClock,
@@ -23,6 +24,7 @@ from lab_tracker.artifact_resolution import (
     RcloneResolver,
     ResolverRegistry,
 )
+from lab_tracker.db_models import DataStoreModel
 from lab_tracker.outbound_http import OutboundHttpPolicy
 
 
@@ -542,6 +544,210 @@ def test_resolve_endpoint_uses_registered_http_store_prefix_and_logical_identity
     assert http_client.calls[0][1].absolute_url == (
         "https://store.example/base/nested/artifact.bin"
     )
+
+
+def test_resolve_endpoint_uses_registered_rclone_root_and_logical_identity(
+    client,
+    admin_auth_headers,
+):
+    data = b"registered rclone bytes"
+    calls: list[list[str]] = []
+
+    def runner(args: list[str]) -> RcloneCompleted:
+        calls.append(args)
+        if args[0] == "size":
+            return RcloneCompleted(
+                returncode=0,
+                stdout=f'{{"count":1,"bytes":{len(data)}}}'.encode(),
+                stderr=b"",
+            )
+        if args[0] == "cat":
+            return RcloneCompleted(returncode=0, stdout=data, stderr=b"")
+        raise AssertionError(f"unexpected rclone args: {args}")
+
+    client.app.state.resolver_registry = ResolverRegistry(
+        [
+            RcloneResolver(
+                runner=runner,
+                allowed_remotes=["lab-onedrive"],
+            )
+        ]
+    )
+    project_id = client.post(
+        "/projects",
+        json={"name": "Registered rclone resolve project"},
+        headers=admin_auth_headers,
+    ).json()["data"]["project_id"]
+    store_response = client.post(
+        "/data-stores",
+        json={
+            "project_id": project_id,
+            "name": "cloud",
+            "kind": "onedrive",
+            "root": "/experiments",
+            "credential_ref": "lab-onedrive",
+        },
+        headers=admin_auth_headers,
+    )
+    assert store_response.status_code == 201, store_response.text
+    dataset_id = _create_dataset_with_artifact(
+        client,
+        admin_auth_headers,
+        project_id=project_id,
+        source_system="legacy-rclone",
+        uri="store://cloud/nested/artifact.bin",
+        store_name="cloud",
+        locator="nested/artifact.bin",
+        content_hash=_sha256(data),
+    )
+
+    response = client.post(
+        "/external-artifacts/resolve",
+        json={
+            "entity_type": "dataset",
+            "entity_id": dataset_id,
+            "artifact_index": 0,
+        },
+        headers=admin_auth_headers,
+    )
+
+    assert response.status_code == 200, response.text
+    body = response.json()["data"]
+    assert body["status"] == "verified"
+    assert body["source_system"] == "store"
+    assert body["uri"] == "store://cloud/nested/artifact.bin"
+    assert base64.b64decode(body["content_base64"]) == data
+    assert calls == [
+        ["size", "--json", "lab-onedrive:/experiments/nested/artifact.bin"],
+        ["cat", "lab-onedrive:/experiments/nested/artifact.bin"],
+    ]
+    assert "lab-onedrive" not in response.text
+    assert "/experiments" not in response.text
+
+
+@pytest.mark.parametrize(
+    (
+        "case_name",
+        "uri",
+        "legacy_root",
+        "legacy_credential_ref",
+        "forbidden_values",
+    ),
+    (
+        (
+            "encoded traversal",
+            "store://cloud/nested/%2e%2e/encoded-traversal-secret.bin",
+            None,
+            None,
+            (
+                "encoded-traversal-secret",
+                "configured-root-secret",
+                "configured-remote-secret",
+            ),
+        ),
+        (
+            "invalid registered root",
+            "store://cloud/nested/artifact.bin",
+            "../invalid-root-secret",
+            None,
+            (
+                "configured-root-secret",
+                "invalid-root-secret",
+                "configured-remote-secret",
+            ),
+        ),
+        (
+            "invalid registered remote",
+            "store://cloud/nested/artifact.bin",
+            None,
+            ":s3,env_auth=invalid-remote-secret",
+            ("configured-root-secret", "invalid-remote-secret", "env_auth"),
+        ),
+    ),
+)
+def test_resolve_endpoint_rejects_invalid_registered_rclone_targets_before_process_work(
+    client,
+    admin_auth_headers,
+    case_name: str,
+    uri: str,
+    legacy_root: str | None,
+    legacy_credential_ref: str | None,
+    forbidden_values: tuple[str, ...],
+):
+    class ZeroCallProcessSpy:
+        def __init__(self):
+            self.calls: list[tuple[list[str], object]] = []
+
+        def run(self, command, *, cwd=None, **_kwargs):
+            self.calls.append((list(command), cwd))
+            raise AssertionError("invalid registered target reached process execution")
+
+    process_spy = ZeroCallProcessSpy()
+    allowed_remotes = ["configured-remote-secret"]
+    if legacy_credential_ref is not None:
+        allowed_remotes.append(legacy_credential_ref)
+    client.app.state.resolver_registry = ResolverRegistry(
+        [
+            RcloneResolver(
+                executor=process_spy,
+                allowed_remotes=allowed_remotes,
+            )
+        ]
+    )
+    project_id = client.post(
+        "/projects",
+        json={"name": f"Rejected rclone target: {case_name}"},
+        headers=admin_auth_headers,
+    ).json()["data"]["project_id"]
+    store_response = client.post(
+        "/data-stores",
+        json={
+            "project_id": project_id,
+            "name": "cloud",
+            "kind": "rclone",
+            "root": "/configured-root-secret",
+            "credential_ref": "configured-remote-secret",
+        },
+        headers=admin_auth_headers,
+    )
+    assert store_response.status_code == 201, store_response.text
+    store_id = store_response.json()["data"]["store_id"]
+    if legacy_root is not None or legacy_credential_ref is not None:
+        with client.app.state.db_session_factory() as session:
+            store = session.get(DataStoreModel, store_id)
+            assert store is not None
+            if legacy_root is not None:
+                store.root = legacy_root
+            if legacy_credential_ref is not None:
+                store.credential_ref = legacy_credential_ref
+            session.commit()
+    dataset_id = _create_dataset_with_artifact(
+        client,
+        admin_auth_headers,
+        project_id=project_id,
+        source_system="legacy-rclone",
+        uri=uri,
+        content_hash=_sha256(b"unreachable"),
+    )
+
+    response = client.post(
+        "/external-artifacts/resolve",
+        json={
+            "entity_type": "dataset",
+            "entity_id": dataset_id,
+            "artifact_index": 0,
+        },
+        headers=admin_auth_headers,
+    )
+
+    assert response.status_code == 200, response.text
+    body = response.json()["data"]
+    assert body["status"] == "unresolved"
+    assert body["source_system"] == "store"
+    assert body["uri"] == "store://[redacted]"
+    assert body["content_base64"] is None
+    assert process_spy.calls == []  # No subprocess invocation or cwd selection.
+    assert all(value not in response.text for value in forbidden_values)
 
 
 def test_resolve_endpoint_reports_drift(client, admin_auth_headers, tmp_path):
