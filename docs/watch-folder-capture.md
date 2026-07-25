@@ -10,6 +10,9 @@ The first sinks are:
   staged notes for normal human review.
 - `acquisition-output`: register observed files as outputs of an existing
   acquisition session so the session can later be promoted into a dataset.
+- `acquisition-collection`: fingerprint an entire acquisition folder into one
+  immutable collection snapshot. The files are manifest members, not individual
+  Lab Tracker records.
 
 The boundary is the same as the rest of retained v1: capture facts and pointers
 automatically, leave scientific meaning and graph commits to human review.
@@ -87,6 +90,46 @@ Sync calls the existing session-output API with the root-relative path, SHA-256
 checksum, and size. It does not create notes, commit datasets, or choose a
 question. Dataset promotion still happens through the retained session workflow.
 
+## High-cardinality Acquisition Collection
+
+Use `acquisition-collection` when one experimental run emits many trial files
+that belong together. One scan writes one outbox event, and one sync request
+registers a content-addressed snapshot containing the root-relative path,
+SHA-256 checksum, and size of every member:
+
+```bash
+lt watch scan \
+  --mode files \
+  --sink acquisition-collection \
+  --root D:/rig2/session-001 \
+  --session <SESSION_UUID> \
+  --collection rig2-session-001 \
+  --complete
+
+lt watch sync
+```
+
+`--collection` is the stable collection key: 1–120 characters, starting with a
+letter or digit and containing only letters, digits, periods, underscores, or
+hyphens. `--complete` explicitly seals the snapshot for later Dataset
+promotion; omit it while the acquisition is still being assembled. Completion
+is never inferred from folder quiet time. A complete collection scan cannot be
+combined with a truncating `--limit`.
+
+The local event keeps the canonical manifest and the watched root, but Lab
+Tracker does not upload the member bytes. A standalone `lt watch sync`, or a
+retry from a later command, rehashes every member and marks the event stale if
+anything changed. `lt watch run` reuses the stable fingerprints it just
+computed, avoiding a second pass over a large folder in the same process.
+
+Collection sync first checks `/schema/describe` for
+`acquisition_collections_v1`. If the server does not advertise it, the event
+stays queued with upgrade guidance. The client never falls back to thousands of
+`acquisition-output` requests.
+
+For server-first deployment, compatibility, device scope, and recovery, see
+[Acquisition Collections: Use and Rollout](acquisition-collections.md).
+
 ## Manifest-Producing Workflows
 
 Use `manifest` mode when a workflow can write a compact JSON summary alongside
@@ -148,11 +191,23 @@ You can edit `.lab-tracker/watch.json` to scan repeatable roots:
       "name": "rig2-session",
       "mode": "files",
       "root": "D:/rig2/session-001",
-      "sink": "acquisition-output",
-      "session_id": "SESSION_UUID"
+      "sink": "acquisition-collection",
+      "session_id": "SESSION_UUID",
+      "complete": true
     }
   ]
 }
+```
+
+For an `acquisition-collection` entry, `name` is required and is used as the
+immutable collection key. The equivalent command is:
+
+```bash
+lt watch add D:/rig2/session-001 \
+  --sink acquisition-collection \
+  --session <SESSION_UUID> \
+  --name rig2-session \
+  --complete
 ```
 
 Then run:
@@ -181,6 +236,11 @@ Use generic `lt watch` for non-HPC folders and manifest-producing tools. Use
   `lt watch scan` again to capture the new checksum.
 - `session_id must not be empty`: `acquisition-output` events need
   `--session <SESSION_UUID>` or a configured `session_id`.
+- `acquisition-collection scans require --collection`: direct collection scans
+  need a stable key; configured collection watches use their required `name`.
+- `server does not advertise acquisition_collections_v1`: upgrade the Lab
+  Tracker server, then retry `lt watch sync`; the collection event remains in
+  the local outbox.
 - Sync fails but events remain local: fix connectivity/authentication and rerun
   `lt watch sync`; failed events are retryable.
 - Large outputs should not be uploaded as raw files: write a manifest with

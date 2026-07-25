@@ -8,6 +8,8 @@ import httpx
 import lab_tracker_client.watch as watch_module
 from lab_tracker_client import LabTracker
 from lab_tracker_client.watch import (
+    ACQUISITION_COLLECTION_CAPABILITY,
+    SINK_ACQUISITION_COLLECTION,
     SINK_ACQUISITION_OUTPUT,
     SINK_STAGED_NOTE,
     _event_metadata,
@@ -46,6 +48,30 @@ def test_scan_files_writes_idempotent_staged_note_event(tmp_path, monkeypatch) -
     assert event["sink"] == SINK_STAGED_NOTE
     assert event["context"]["project_id"] == "project-1"
     assert outbox_status(config.outbox_path())["pending"] == 1
+
+
+def test_collection_watch_rejects_a_key_the_server_would_reject(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    config = init_config()
+    outputs = tmp_path / "outputs"
+    outputs.mkdir()
+    (outputs / "trial.bin").write_bytes(b"data")
+
+    summary = scan_watch(
+        config,
+        mode="files",
+        root=outputs,
+        sink=SINK_ACQUISITION_COLLECTION,
+        session_id="session-1",
+        collection_key="trial folder",
+    )
+
+    assert len(summary["errors"]) == 1
+    assert "collection_key" in summary["errors"][0]["error"]
+    assert list(config.outbox_path().glob("*.json")) == []
 
 
 def test_scan_records_capture_host_on_event_and_note_metadata(tmp_path, monkeypatch) -> None:
@@ -441,3 +467,184 @@ def test_scan_manifest_batch_reports_malformed_without_aborting(tmp_path, monkey
     assert "bad" in summary["errors"][0]["source"]
     assert summary["errors"][0]["error"]
     assert len(list(config.outbox_path().glob("*.json"))) == 1
+
+
+def test_scan_collection_writes_one_event_and_syncs_one_snapshot_without_rehash(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    config = init_config()
+    outputs = tmp_path / "outputs"
+    outputs.mkdir()
+    (outputs / "trial-2.bin").write_bytes(b"second")
+    (outputs / "trial-1.bin").write_bytes(b"first")
+    fingerprint_calls: list[str] = []
+    original_fingerprint = watch_module.stable_file_fingerprint
+
+    def counted_fingerprint(path):
+        fingerprint_calls.append(str(path))
+        return original_fingerprint(path)
+
+    monkeypatch.setattr(
+        watch_module,
+        "stable_file_fingerprint",
+        counted_fingerprint,
+    )
+    verified_event_ids: set[str] = set()
+    scanned = scan_watch(
+        config,
+        mode="files",
+        root=outputs,
+        sink=SINK_ACQUISITION_COLLECTION,
+        session_id="session-1",
+        collection_key="rig-2-session",
+        complete=True,
+        verified_event_ids=verified_event_ids,
+    )
+    event_path = next(config.outbox_path().glob("*.json"))
+    event = read_event(event_path)
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if request.method == "GET" and request.url.path == "/schema/describe":
+            return _json_response(
+                200,
+                {"data": {"capabilities": [ACQUISITION_COLLECTION_CAPABILITY]}},
+            )
+        if (
+            request.method == "POST"
+            and request.url.path
+            == "/sessions/session-1/collections/rig-2-session/snapshots"
+        ):
+            payload = json.loads(request.content)
+            assert payload["client_capture_id"] == event["capture_id"]
+            assert payload["complete"] is True
+            assert [member["path"] for member in payload["manifest"]["members"]] == [
+                "trial-1.bin",
+                "trial-2.bin",
+            ]
+            return _json_response(
+                201,
+                {
+                    "data": {
+                        "collection_id": "collection-1",
+                        "snapshot_id": "snapshot-1",
+                    }
+                },
+            )
+        raise AssertionError(f"unexpected request: {request.method} {request.url.path}")
+
+    assert scanned["matched"] == 2
+    assert scanned["processed"] == 2
+    assert len(scanned["imported"]) == 1
+    assert len(fingerprint_calls) == 2
+    assert verified_event_ids == {event["event_id"]}
+
+    with LabTracker(base_url="http://testserver", transport=httpx.MockTransport(handler)) as lt:
+        synced = sync_outbox(
+            lt,
+            config,
+            preverified_event_ids=verified_event_ids,
+        )
+
+    assert len(fingerprint_calls) == 2
+    assert synced["errors"] == []
+    assert synced["results"][0]["collection_id"] == "collection-1"
+    assert synced["results"][0]["snapshot_id"] == "snapshot-1"
+    assert read_event(event_path)["sync"]["status"] == "synced"
+    assert [request.url.path for request in requests] == [
+        "/schema/describe",
+        "/sessions/session-1/collections/rig-2-session/snapshots",
+    ]
+
+
+def test_collection_sync_keeps_event_queued_when_server_lacks_capability(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    config = init_config()
+    outputs = tmp_path / "outputs"
+    outputs.mkdir()
+    (outputs / "trial.bin").write_bytes(b"data")
+    scan_watch(
+        config,
+        mode="files",
+        root=outputs,
+        sink=SINK_ACQUISITION_COLLECTION,
+        session_id="session-1",
+        collection_key="trials",
+    )
+    event_path = next(config.outbox_path().glob("*.json"))
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if request.method == "GET" and request.url.path == "/schema/describe":
+            return _json_response(200, {"data": {"capabilities": []}})
+        raise AssertionError("unsupported servers must not receive per-file fallback calls")
+
+    with LabTracker(base_url="http://testserver", transport=httpx.MockTransport(handler)) as lt:
+        summary = sync_outbox(lt, config)
+
+    assert len(summary["errors"]) == 1
+    assert ACQUISITION_COLLECTION_CAPABILITY in summary["errors"][0]["error"]
+    assert "no per-file fallback" in summary["errors"][0]["error"]
+    assert read_event(event_path)["sync"]["status"] == "failed"
+    assert outbox_status(config.outbox_path())["failed"] == 1
+    assert [request.url.path for request in requests] == ["/schema/describe"]
+
+
+def test_deferred_collection_sync_rehashes_every_member_and_marks_change_stale(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    config = init_config()
+    outputs = tmp_path / "outputs"
+    outputs.mkdir()
+    for name in ("a.bin", "b.bin", "c.bin"):
+        (outputs / name).write_text(name, encoding="utf-8")
+    scan_watch(
+        config,
+        mode="files",
+        root=outputs,
+        sink=SINK_ACQUISITION_COLLECTION,
+        session_id="session-1",
+        collection_key="trials",
+    )
+    event_path = next(config.outbox_path().glob("*.json"))
+    (outputs / "a.bin").write_text("changed", encoding="utf-8")
+    fingerprint_calls: list[str] = []
+    original_fingerprint = watch_module.stable_file_fingerprint
+
+    def counted_fingerprint(path):
+        fingerprint_calls.append(str(path))
+        return original_fingerprint(path)
+
+    monkeypatch.setattr(
+        watch_module,
+        "stable_file_fingerprint",
+        counted_fingerprint,
+    )
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if request.method == "GET" and request.url.path == "/schema/describe":
+            return _json_response(
+                200,
+                {"data": {"capabilities": [ACQUISITION_COLLECTION_CAPABILITY]}},
+            )
+        raise AssertionError("a stale collection must not be uploaded")
+
+    with LabTracker(base_url="http://testserver", transport=httpx.MockTransport(handler)) as lt:
+        summary = sync_outbox(lt, config)
+
+    assert len(fingerprint_calls) == 3
+    assert summary["results"][0]["action"] == "stale"
+    assert "acquisition collection changed since scan" in summary["errors"][0]["error"]
+    assert read_event(event_path)["sync"]["status"] == "stale"
+    assert [request.url.path for request in requests] == ["/schema/describe"]

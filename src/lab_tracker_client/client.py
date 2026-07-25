@@ -14,6 +14,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Literal
+from urllib.parse import quote
 
 import httpx
 
@@ -22,6 +23,8 @@ from lab_tracker.assistant_next_questions import (
     OPEN_QUESTION_STATUSES,
     build_next_questions_payload,
 )
+from lab_tracker.collection_manifest import canonicalize_collection_key
+from lab_tracker.errors import ValidationError
 from lab_tracker.models import (
     AnalysisStatus,
     ClaimStatus,
@@ -75,6 +78,9 @@ _ID_FIELDS = (
     "output_id",
     "project_id",
     "goal_id",
+    "snapshot_id",
+    "collection_snapshot_id",
+    "collection_id",
 )
 
 EVIDENCE_METADATA_KEYS = (
@@ -408,6 +414,31 @@ class LabTracker:
     def readiness(self) -> JsonObject:
         return self._request("GET", "/readiness")
 
+    def describe_schema(self, *, entity_type: str | None = None) -> JsonObject:
+        """Return server-advertised schemas and additive client capabilities."""
+
+        return self._request(
+            "GET",
+            "/schema/describe",
+            params={"entity_type": entity_type},
+        )
+
+    def supports_capability(self, capability: str) -> bool:
+        """Check an explicitly advertised server capability."""
+
+        resolved_capability = _require_non_empty(capability, "capability")
+        payload = self.describe_schema()
+        data = payload.get("data")
+        if not isinstance(data, Mapping):
+            return False
+        capabilities = data.get("capabilities")
+        if not isinstance(capabilities, Sequence) or isinstance(
+            capabilities,
+            (str, bytes),
+        ):
+            return False
+        return resolved_capability in {str(item) for item in capabilities}
+
     def list_projects(
         self,
         *,
@@ -549,6 +580,55 @@ class LabTracker:
             self._request(
                 "POST",
                 f"/sessions/{_require_non_empty(str(session_id), 'session_id')}/outputs",
+                json_payload=payload,
+            )
+        )
+
+    def create_acquisition_collection_snapshot(
+        self,
+        session_id: str,
+        collection_key: str,
+        *,
+        client_capture_id: str,
+        observed_at: str,
+        complete: bool,
+        manifest: Mapping[str, Any],
+        source_provider: str | None = None,
+        source_uri: str | None = None,
+    ) -> LTRecord:
+        """Create or idempotently reuse one immutable acquisition snapshot."""
+
+        resolved_session_id = _require_non_empty(str(session_id), "session_id")
+        try:
+            resolved_collection_key = canonicalize_collection_key(collection_key)
+        except ValidationError as exc:
+            raise LTValidationError(str(exc)) from exc
+        manifest_payload = dict(manifest)
+        if not manifest_payload:
+            raise LTValidationError("manifest must not be empty.")
+        payload: JsonObject = {
+            "client_capture_id": _require_non_empty(
+                client_capture_id,
+                "client_capture_id",
+            ),
+            "observed_at": _require_non_empty(observed_at, "observed_at"),
+            "complete": bool(complete),
+            "manifest": manifest_payload,
+        }
+        if source_provider is not None:
+            payload["source_provider"] = _require_non_empty(
+                source_provider,
+                "source_provider",
+            )
+        if source_uri is not None:
+            payload["source_uri"] = _require_non_empty(source_uri, "source_uri")
+        return self._data_record(
+            self._request(
+                "POST",
+                (
+                    f"/sessions/{quote(resolved_session_id, safe='')}/collections/"
+                    f"{quote(resolved_collection_key, safe='')}/snapshots"
+                ),
                 json_payload=payload,
             )
         )
@@ -1750,6 +1830,10 @@ def readiness() -> JsonObject:
     return client.readiness()
 
 
+def describe_schema(**kwargs: Any) -> JsonObject:
+    return client.describe_schema(**kwargs)
+
+
 def list_projects(**kwargs: Any) -> list[LTRecord]:
     return client.list_projects(**kwargs)
 
@@ -1768,6 +1852,18 @@ def list_sessions(**kwargs: Any) -> list[LTRecord]:
 
 def register_acquisition_output(session_id: str, **kwargs: Any) -> LTRecord:
     return client.register_acquisition_output(session_id, **kwargs)
+
+
+def create_acquisition_collection_snapshot(
+    session_id: str,
+    collection_key: str,
+    **kwargs: Any,
+) -> LTRecord:
+    return client.create_acquisition_collection_snapshot(
+        session_id,
+        collection_key,
+        **kwargs,
+    )
 
 
 def list_datasets(**kwargs: Any) -> list[LTRecord]:

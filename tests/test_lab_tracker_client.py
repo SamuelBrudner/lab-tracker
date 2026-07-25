@@ -6,6 +6,7 @@ import json
 import httpx
 import pytest
 
+from lab_tracker.collection_manifest import ACQUISITION_COLLECTION_CAPABILITY
 from lab_tracker_client import (
     EntityRef,
     LabTracker,
@@ -163,6 +164,106 @@ def test_bad_enum_values_fail_before_request() -> None:
         )
 
     lt.close()
+    assert requests == []
+
+
+def test_collection_snapshot_uses_capability_probe_and_compact_post() -> None:
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if request.method == "GET" and request.url.path == "/schema/describe":
+            return _json_response(
+                200,
+                {"data": {"capabilities": [ACQUISITION_COLLECTION_CAPABILITY]}},
+            )
+        if (
+            request.method == "POST"
+            and request.url.path == "/sessions/session-1/collections/trials/snapshots"
+        ):
+            assert json.loads(request.content) == {
+                "client_capture_id": "capture-1",
+                "observed_at": "2026-07-24T12:00:00Z",
+                "complete": True,
+                "manifest": {
+                    "schema_version": 1,
+                    "members": [
+                        {
+                            "path": "trial-0001/data.bin",
+                            "checksum": "a" * 64,
+                            "size_bytes": 3,
+                        }
+                    ],
+                },
+                "source_provider": "local-folder",
+                "source_uri": "file:///data/run-1",
+            }
+            return _json_response(
+                201,
+                {
+                    "data": {
+                        "collection_id": "collection-1",
+                        "snapshot_id": "snapshot-1",
+                    }
+                },
+            )
+        raise AssertionError(f"unexpected request: {request.method} {request.url.path}")
+
+    with LabTracker(
+        base_url="http://testserver",
+        transport=httpx.MockTransport(handler),
+    ) as lt:
+        assert lt.supports_capability(ACQUISITION_COLLECTION_CAPABILITY) is True
+        result = lt.create_acquisition_collection_snapshot(
+            "session-1",
+            "trials",
+            client_capture_id="capture-1",
+            observed_at="2026-07-24T12:00:00Z",
+            complete=True,
+            manifest={
+                "schema_version": 1,
+                "members": [
+                    {
+                        "path": "trial-0001/data.bin",
+                        "checksum": "a" * 64,
+                        "size_bytes": 3,
+                    }
+                ],
+            },
+            source_provider="local-folder",
+            source_uri="file:///data/run-1",
+        )
+
+    assert result.snapshot_id == "snapshot-1"
+    assert [request.url.path for request in requests] == [
+        "/schema/describe",
+        "/sessions/session-1/collections/trials/snapshots",
+    ]
+
+
+def test_collection_key_validation_fails_before_request() -> None:
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return _json_response(201, {"data": {"snapshot_id": "snapshot-1"}})
+
+    with (
+        LabTracker(
+            base_url="http://testserver",
+            transport=httpx.MockTransport(handler),
+        ) as lt,
+        pytest.raises(LTValidationError, match="collection_key"),
+    ):
+        lt.create_acquisition_collection_snapshot(
+            "session-1",
+            "trial folder",
+            client_capture_id="capture-1",
+            observed_at="2026-07-24T12:00:00Z",
+            complete=True,
+            manifest={"schema_version": 1, "members": []},
+        )
+
     assert requests == []
 
 
