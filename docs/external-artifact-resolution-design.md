@@ -221,9 +221,15 @@ strings; those forms are refused before process creation. SSH routing usernames
 remain valid, while authentication material must come from host-side Git or SSH
 configuration.
 
-This bounded host-process implementation currently uses POSIX process groups.
-On Windows, rclone/Git resolution fails closed as `UNRESOLVED` until equivalent
-Job Object containment is available; local and HTTP resolvers are unaffected.
+The bounded host-process implementation contains complete descendant trees on
+each supported process platform. POSIX hosts use a dedicated process group.
+Windows hosts create an unnamed, non-inheritable Job Object with
+`JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`, start the leader suspended, assign and
+verify it in the Job Object, and resume its primary thread only after verified
+containment. Failure before verified assignment cannot execute artifact
+resolver code. Deadline, output-overflow, consumer-failure, and cleanup paths
+terminate the whole Job Object; closing its handle is the final kill-on-close
+backstop.
 
 ## The host-local locator problem
 

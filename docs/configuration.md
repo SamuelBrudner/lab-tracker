@@ -156,10 +156,13 @@ Git URLs with embedded HTTP/Git userinfo, a URL password, or a query string are
 refused before process creation; configure credentials through host-side Git or
 SSH facilities.
 
-The bounded rclone/Git process boundary currently requires POSIX process-group
-containment. On Windows these two optional resolvers fail closed as
-`UNRESOLVED`; local and HTTP artifact resolution remain available. Native
-Windows process-tree containment requires a Job Object implementation.
+The bounded rclone/Git process boundary contains complete descendant trees on
+both supported process platforms. POSIX hosts use a dedicated process group.
+Windows hosts create an unnamed, non-inheritable Job Object configured with
+`JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`, start the leader suspended, assign and
+verify it in the Job Object, and only then resume its primary thread. If secure
+containment cannot be established, the child never executes and resolution
+fails closed as `UNRESOLVED`.
 
 The deadline and process-output caps bound one resolution, but they do not bound
 Git cache growth or concurrent cache mutation. Git fetch disk and cache

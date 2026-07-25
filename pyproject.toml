@@ -137,6 +137,7 @@ files = [
   "src/lab_tracker/provider_error_redaction.py",
   "src/lab_tracker/outbound_http.py",
   "src/lab_tracker/bounded_subprocess.py",
+  "src/lab_tracker/_windows_job.py",
   "src/lab_tracker/application",
   "src/lab_tracker/graph_drafting.py",
   "src/lab_tracker/services/shared.py",
