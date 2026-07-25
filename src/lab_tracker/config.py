@@ -66,6 +66,10 @@ class Settings(BaseSettings):
     canonical_base_url: str = ""
     openai_api_key: str = ""
     openai_model: str = "gpt-4o-mini"
+    openai_reasoning_effort: Literal[
+        "none", "low", "medium", "high", "xhigh", "max"
+    ] | None = None
+    openai_reasoning_mode: Literal["standard", "pro"] | None = None
     openai_transcription_model: str = "gpt-4o-mini-transcribe"
     openai_base_url: str = "https://api.openai.com/v1"
     openai_timeout_seconds: float = 60.0

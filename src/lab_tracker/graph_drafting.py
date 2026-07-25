@@ -225,12 +225,16 @@ class OpenAIGraphDraftClient:
         *,
         api_key: str,
         model: str,
+        reasoning_effort: str | None = None,
+        reasoning_mode: str | None = None,
         transcription_model: str = "gpt-4o-mini-transcribe",
         base_url: str = "https://api.openai.com/v1",
         timeout_seconds: float = 60.0,
         transport: httpx.BaseTransport | None = None,
     ) -> None:
         self.model = model
+        self.reasoning_effort = reasoning_effort
+        self.reasoning_mode = reasoning_mode
         self.transcription_model = transcription_model
         self._api_key = api_key.strip()
         self._client = httpx.Client(
@@ -244,6 +248,8 @@ class OpenAIGraphDraftClient:
         return cls(
             api_key=settings.openai_api_key,
             model=settings.openai_model,
+            reasoning_effort=settings.openai_reasoning_effort,
+            reasoning_mode=settings.openai_reasoning_mode,
             transcription_model=settings.openai_transcription_model,
             base_url=settings.openai_base_url,
             timeout_seconds=settings.openai_timeout_seconds,
@@ -251,6 +257,19 @@ class OpenAIGraphDraftClient:
 
     def close(self) -> None:
         self._client.close()
+
+    def _with_reasoning(self, payload: dict[str, Any]) -> dict[str, Any]:
+        reasoning = {
+            key: value
+            for key, value in (
+                ("effort", self.reasoning_effort),
+                ("mode", self.reasoning_mode),
+            )
+            if value is not None
+        }
+        if reasoning:
+            payload["reasoning"] = reasoning
+        return payload
 
     def draft_from_image(
         self,
@@ -338,24 +357,26 @@ class OpenAIGraphDraftClient:
                 "Authorization": f"Bearer {self._api_key}",
                 "Content-Type": "application/json",
             },
-            json={
-                "model": self.model,
-                "instructions": _instructions(),
-                "input": [
-                    {
-                        "role": "user",
-                        "content": content,
-                    }
-                ],
-                "text": {
-                    "format": {
-                        "type": "json_schema",
-                        "name": "lab_tracker_graph_patch",
-                        "schema": graph_patch_response_schema(),
-                        "strict": True,
-                    }
-                },
-            },
+            json=self._with_reasoning(
+                {
+                    "model": self.model,
+                    "instructions": _instructions(),
+                    "input": [
+                        {
+                            "role": "user",
+                            "content": content,
+                        }
+                    ],
+                    "text": {
+                        "format": {
+                            "type": "json_schema",
+                            "name": "lab_tracker_graph_patch",
+                            "schema": graph_patch_response_schema(),
+                            "strict": True,
+                        }
+                    },
+                }
+            ),
         )
         if response.status_code >= 400:
             raise GraphDraftingError(
@@ -402,19 +423,21 @@ class OpenAIGraphDraftClient:
                 "Authorization": f"Bearer {self._api_key}",
                 "Content-Type": "application/json",
             },
-            json={
-                "model": self.model,
-                "instructions": _batch_instructions(),
-                "input": [{"role": "user", "content": content}],
-                "text": {
-                    "format": {
-                        "type": "json_schema",
-                        "name": "lab_tracker_graph_patch",
-                        "schema": graph_patch_response_schema(),
-                        "strict": True,
-                    }
-                },
-            },
+            json=self._with_reasoning(
+                {
+                    "model": self.model,
+                    "instructions": _batch_instructions(),
+                    "input": [{"role": "user", "content": content}],
+                    "text": {
+                        "format": {
+                            "type": "json_schema",
+                            "name": "lab_tracker_graph_patch",
+                            "schema": graph_patch_response_schema(),
+                            "strict": True,
+                        }
+                    },
+                }
+            ),
         )
         if response.status_code >= 400:
             raise GraphDraftingError(
@@ -455,32 +478,34 @@ class OpenAIGraphDraftClient:
                 "Authorization": f"Bearer {self._api_key}",
                 "Content-Type": "application/json",
             },
-            json={
-                "model": self.model,
-                "instructions": _analysis_instructions(),
-                "input": [
-                    {
-                        "role": "user",
-                        "content": [
-                            {
-                                "type": "input_text",
-                                "text": _analysis_prompt_text(
-                                    evidence_text=cleaned_evidence,
-                                    project_context=project_context,
-                                ),
-                            }
-                        ],
-                    }
-                ],
-                "text": {
-                    "format": {
-                        "type": "json_schema",
-                        "name": "lab_tracker_graph_patch",
-                        "schema": graph_patch_response_schema(),
-                        "strict": True,
-                    }
-                },
-            },
+            json=self._with_reasoning(
+                {
+                    "model": self.model,
+                    "instructions": _analysis_instructions(),
+                    "input": [
+                        {
+                            "role": "user",
+                            "content": [
+                                {
+                                    "type": "input_text",
+                                    "text": _analysis_prompt_text(
+                                        evidence_text=cleaned_evidence,
+                                        project_context=project_context,
+                                    ),
+                                }
+                            ],
+                        }
+                    ],
+                    "text": {
+                        "format": {
+                            "type": "json_schema",
+                            "name": "lab_tracker_graph_patch",
+                            "schema": graph_patch_response_schema(),
+                            "strict": True,
+                        }
+                    },
+                }
+            ),
         )
         if response.status_code >= 400:
             raise GraphDraftingError(

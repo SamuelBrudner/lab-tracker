@@ -541,6 +541,36 @@ def test_default_openai_model_is_standard_account_model(monkeypatch):
     monkeypatch.setenv("LAB_TRACKER_ENVIRONMENT", "local")
     settings = _settings_from_environment()
     assert settings.openai_model == "gpt-4o-mini"
+    assert settings.openai_reasoning_effort is None
+    assert settings.openai_reasoning_mode is None
+
+
+def test_openai_reasoning_settings_load_from_environment(monkeypatch):
+    _clear_auth_env(monkeypatch)
+    monkeypatch.setenv("LAB_TRACKER_ENVIRONMENT", "local")
+    monkeypatch.setenv("LAB_TRACKER_OPENAI_REASONING_EFFORT", "max")
+    monkeypatch.setenv("LAB_TRACKER_OPENAI_REASONING_MODE", "pro")
+
+    settings = _settings_from_environment()
+
+    assert settings.openai_reasoning_effort == "max"
+    assert settings.openai_reasoning_mode == "pro"
+
+
+@pytest.mark.parametrize(
+    ("variable", "value"),
+    [
+        ("LAB_TRACKER_OPENAI_REASONING_EFFORT", "ultra"),
+        ("LAB_TRACKER_OPENAI_REASONING_MODE", "turbo"),
+    ],
+)
+def test_openai_reasoning_settings_reject_unknown_values(monkeypatch, variable, value):
+    _clear_auth_env(monkeypatch)
+    monkeypatch.setenv("LAB_TRACKER_ENVIRONMENT", "local")
+    monkeypatch.setenv(variable, value)
+
+    with pytest.raises(ValidationError):
+        _settings_from_environment()
 
 
 def test_managed_postgres_urls_use_installed_psycopg_driver(monkeypatch):

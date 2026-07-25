@@ -284,6 +284,14 @@ credentials, MCP) is [`agent-setup.md`](agent-setup.md).
   OpenAI voice-note transcription
 - `LAB_TRACKER_OPENAI_MODEL`: OpenAI model for graph drafts (default:
   `gpt-4o-mini`; set another compatible model to override)
+- `LAB_TRACKER_OPENAI_REASONING_EFFORT`: optional Responses API reasoning
+  effort for graph drafts (`none`, `low`, `medium`, `high`, `xhigh`, or
+  `max`; omitted by default)
+- `LAB_TRACKER_OPENAI_REASONING_MODE`: optional Responses API reasoning mode
+  for graph drafts (`standard` or `pro`; omitted by default). For a
+  quality-first GPT-5.6 Sol deployment, use model `gpt-5.6-sol`, effort
+  `max`, and mode `pro`. Codex Ultra is a separate agent-orchestration mode,
+  not an API reasoning value.
 - `LAB_TRACKER_OPENAI_TRANSCRIPTION_MODEL`: OpenAI model for voice-note
   transcription (default: `gpt-4o-mini-transcribe`)
 - `LAB_TRACKER_OPENAI_BASE_URL`: OpenAI API base URL (default:
