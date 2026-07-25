@@ -139,6 +139,8 @@ files = [
   "src/lab_tracker/outbound_http.py",
   "src/lab_tracker/git_remote_policy.py",
   "src/lab_tracker/local_path_policy.py",
+  "src/lab_tracker/local_file_access.py",
+  "src/lab_tracker/_windows_local_file.py",
   "src/lab_tracker/artifact_resolution_admission.py",
   "src/lab_tracker/bounded_subprocess.py",
   "src/lab_tracker/_windows_job.py",

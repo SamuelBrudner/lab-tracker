@@ -41,6 +41,7 @@ from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
+from typing import BinaryIO
 from urllib.parse import unquote, urljoin, urlsplit
 
 from lab_tracker.bounded_subprocess import (
@@ -53,6 +54,12 @@ from lab_tracker.bounded_subprocess import (
     ProcessExecutor,
 )
 from lab_tracker.git_remote_policy import ApprovedGitRemote, GitRemotePolicy
+from lab_tracker.local_file_access import (
+    HandleBoundLocalFileAccess,
+    LocalFileReader,
+    LocalOpenFailure,
+    LocalOpenFailureReason,
+)
 from lab_tracker.local_path_policy import LocalPathPolicy, native_local_path_from_uri
 from lab_tracker.models import DataStore, ExternalArtifactReference, StoreKind
 from lab_tracker.outbound_http import (
@@ -581,8 +588,9 @@ class LocalFilesystemResolver(ArtifactResolver):
     content-hash search of those roots: a file whose recomputed digest matches
     the reference is returned VERIFIED instead of UNRESOLVED. Canonical
     pathname checks constrain the scan to the allowed roots and the content
-    hash remains mandatory. Handle-bound protection against a concurrent path
-    replacement is tracked separately by ``lab-tracker-n5kp.59``.
+    hash remains mandatory. Direct and recovery reads retain one validated
+    descriptor through hashing, so a concurrent pathname replacement cannot
+    redirect the bytes being verified.
     """
 
     def __init__(
@@ -590,8 +598,15 @@ class LocalFilesystemResolver(ArtifactResolver):
         allowed_roots: Sequence[str | Path] | None = None,
         *,
         recovery: RecoveryPolicy | None = None,
+        file_reader_factory: Callable[[LocalPathPolicy], LocalFileReader] | None = None,
     ) -> None:
         self._path_policy = LocalPathPolicy(allowed_roots)
+        reader_factory = (
+            HandleBoundLocalFileAccess
+            if file_reader_factory is None
+            else file_reader_factory
+        )
+        self._file_reader = reader_factory(self._path_policy)
         self._recovery_roots = self._path_policy.canonical_roots
         self._recovery = recovery or RecoveryPolicy()
 
@@ -625,37 +640,55 @@ class LocalFilesystemResolver(ArtifactResolver):
                 ref,
                 detail="Reference URI is not a local filesystem path.",
             )
-        real_path = self._path_policy.authorize_path(local_path)
-        if real_path is None:
-            return _unresolved(ref, detail="Path is outside the allowed resolver roots.")
-        if not os.path.isfile(real_path):
+        planned_path = self._path_policy.authorize_path(local_path)
+        if planned_path is None:
+            return _unresolved(
+                ref,
+                detail="Local artifact is not an authorized readable regular file.",
+            )
+
+        algorithm, _ = parse_content_hash(ref.content_hash)
+        failure: LocalOpenFailure | None = None
+        with self._file_reader.open_regular_file(planned_path) as opened:
+            if isinstance(opened, LocalOpenFailure):
+                failure = opened
+            else:
+                try:
+                    content, total, truncated, observed = _hash_and_collect(
+                        _read_stream_chunks(opened.stream),
+                        algorithm=algorithm,
+                        max_bytes=max_bytes,
+                        window=window,
+                    )
+                except OSError:
+                    return _unresolved(ref, detail="Failed to read local artifact.")
+
+                content_type, _ = mimetypes.guess_type(opened.display_path)
+                return _build_resolved(
+                    ref,
+                    observed=observed,
+                    content=content,
+                    total=total,
+                    truncated=truncated,
+                    content_type=content_type or "application/octet-stream",
+                )
+
+        if failure is not None and failure.reason is LocalOpenFailureReason.MISSING:
             recovered = self._recover_by_hash(
-                ref, max_bytes=max_bytes, window=window, missing_path=real_path
+                ref,
+                max_bytes=max_bytes,
+                window=window,
+                missing_path=planned_path,
             )
             if recovered is not None:
                 return recovered
             return _unresolved(ref, detail="Local artifact not found.")
-
-        algorithm, _ = parse_content_hash(ref.content_hash)
-        try:
-            content, total, truncated, observed = _hash_and_collect(
-                _read_file_chunks(real_path),
-                algorithm=algorithm,
-                max_bytes=max_bytes,
-                window=window,
+        if failure is not None and failure.reason is LocalOpenFailureReason.DENIED:
+            return _unresolved(
+                ref,
+                detail="Local artifact is not an authorized readable regular file.",
             )
-        except OSError as exc:
-            return _unresolved(ref, detail=f"Failed to read local artifact: {exc}")
-
-        content_type, _ = mimetypes.guess_type(real_path)
-        return _build_resolved(
-            ref,
-            observed=observed,
-            content=content,
-            total=total,
-            truncated=truncated,
-            content_type=content_type or "application/octet-stream",
-        )
+        return _unresolved(ref, detail="Failed to read local artifact.")
 
     def _recover_by_hash(
         self,
@@ -681,7 +714,7 @@ class LocalFilesystemResolver(ArtifactResolver):
         target_name = os.path.basename(missing_path) or None
 
         considered = 0
-        hashed_bytes = 0
+        byte_budget = _CumulativeByteBudget(self._recovery.max_bytes)
         # Two passes so a moved file that kept its name is found first and
         # cheaply; skip the name-first pass when we have no basename to match.
         passes = (True, False) if target_name is not None else (False,)
@@ -690,40 +723,52 @@ class LocalFilesystemResolver(ArtifactResolver):
                 considered += 1
                 if considered > self._recovery.max_files:
                     return None
-                real = self._path_policy.authorize_path(candidate)
-                if real is None:
+                remaining_bytes = byte_budget.remaining
+                if remaining_bytes <= 0:
+                    return None
+                planned_candidate = self._path_policy.authorize_path(candidate)
+                if planned_candidate is None:
                     continue
-                try:
-                    size = os.path.getsize(real)
-                except OSError:
-                    continue
-                if hashed_bytes + size > self._recovery.max_bytes:
-                    continue
-                try:
-                    content, total, truncated, observed = _hash_and_collect(
-                        _read_file_chunks(real),
-                        algorithm=algorithm,
-                        max_bytes=max_bytes,
-                        window=window,
+                with self._file_reader.open_regular_file(planned_candidate) as opened:
+                    if isinstance(opened, LocalOpenFailure):
+                        continue
+                    if opened.size_hint_bytes > remaining_bytes:
+                        continue
+                    try:
+                        content, total, truncated, observed = _hash_and_collect(
+                            _read_stream_chunks(
+                                opened.stream,
+                                byte_budget=byte_budget,
+                            ),
+                            algorithm=algorithm,
+                            max_bytes=max_bytes,
+                            window=window,
+                            max_total=remaining_bytes,
+                        )
+                    except _FetchTooLarge:
+                        # The candidate consumed the remaining logical budget
+                        # before changing/growing past its same-handle size hint.
+                        return None
+                    except OSError:
+                        continue
+                    if parse_content_hash(observed)[1] != expected_digest:
+                        continue
+                    content_type, _ = mimetypes.guess_type(opened.display_path)
+                    resolved = _build_resolved(
+                        ref,
+                        observed=observed,
+                        content=content,
+                        total=total,
+                        truncated=truncated,
+                        content_type=content_type or "application/octet-stream",
                     )
-                except OSError:
-                    continue
-                hashed_bytes += total
-                if parse_content_hash(observed)[1] != expected_digest:
-                    continue
-                content_type, _ = mimetypes.guess_type(real)
-                resolved = _build_resolved(
-                    ref,
-                    observed=observed,
-                    content=content,
-                    total=total,
-                    truncated=truncated,
-                    content_type=content_type or "application/octet-stream",
-                )
-                return replace(
-                    resolved,
-                    detail=f"Recovered from {real} (differs from reference URI).",
-                )
+                    return replace(
+                        resolved,
+                        detail=(
+                            f"Recovered from {opened.display_path} "
+                            "(differs from reference URI)."
+                        ),
+                    )
         return None
 
     def _iter_candidate_files(
@@ -1686,6 +1731,24 @@ class _FetchTooLarge(Exception):
         self.limit = limit
 
 
+class _CumulativeByteBudget:
+    """Debit a shared logical byte allowance as candidate streams are read."""
+
+    def __init__(self, limit: int) -> None:
+        self._limit = limit
+        self._consumed = 0
+
+    @property
+    def remaining(self) -> int:
+        return self._limit - self._consumed
+
+    def debit(self, size: int) -> None:
+        next_consumed = self._consumed + size
+        if next_consumed > self._limit:
+            raise _FetchTooLarge(self._limit)
+        self._consumed = next_consumed
+
+
 def _http_content_length(value: str | None) -> int | None:
     if value is None:
         return None
@@ -1791,13 +1854,18 @@ class _HashCollector:
             self._budget_check()
 
 
-def _read_file_chunks(path: str) -> Iterable[bytes]:
-    with open(path, "rb") as handle:
-        while True:
-            chunk = handle.read(_STREAM_CHUNK_SIZE)
-            if not chunk:
-                break
-            yield chunk
+def _read_stream_chunks(
+    handle: BinaryIO,
+    *,
+    byte_budget: _CumulativeByteBudget | None = None,
+) -> Iterable[bytes]:
+    while True:
+        chunk = handle.read(_STREAM_CHUNK_SIZE)
+        if not chunk:
+            break
+        if byte_budget is not None:
+            byte_budget.debit(len(chunk))
+        yield chunk
 
 
 def _build_resolved(

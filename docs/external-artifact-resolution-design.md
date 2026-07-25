@@ -373,13 +373,32 @@ bytes; `lab-tracker-n5kp.61` separately owns pre-follow reparse inspection plus
 explicit directory-count and wall-clock budgets, so this slice does not
 overstate traversal availability.
 
-These path-name checks do not make the later open handle-bound. A local attacker
-who can mutate the traversed filesystem could replace a checked path between
-authorization and open. The separately tracked P1 hardening follow-up
-`lab-tracker-n5kp.59` owns descriptor/handle-relative opening and post-open
-identity verification across POSIX and Windows; this slice fixes cross-platform
-URI decoding and canonical-path containment without overstating that remaining
-TOCTOU boundary.
+Canonical pathname authorization is a preliminary plan, not a capability that
+the resolver may later reopen. The local access boundary opens one file and
+retains that descriptor through hashing and range collection:
+
+- On POSIX, the canonical absolute path is opened one component at a time,
+  relative to the preceding directory descriptor. Parent directories and the
+  leaf use no-follow operations. An obvious non-regular leaf is rejected by a
+  descriptor-relative metadata check before open; the leaf is then opened
+  nonblocking and the same fd is revalidated as regular before any content read.
+- On Windows, the file is opened once and its borrowed native handle is queried
+  with `GetFinalPathNameByHandleW(FILE_NAME_NORMALIZED | VOLUME_NAME_DOS)`.
+  Only a supported drive path contained by the canonical roots is accepted, and
+  the same CRT descriptor is validated and read. UNC, device, GUID-volume, and
+  malformed final namespaces fail closed.
+
+A rename after open cannot redirect the descriptor, and an outside
+symlink/junction target is rejected before the first content read. Safe
+in-root links remain supported because canonical planning resolves them before
+the handle-bound step. This is not snapshot isolation: a concurrent writer can
+still produce drift or a mixed sequential view, but the full content-hash gate
+prevents unmatched bytes from being returned as `VERIFIED`.
+
+Windows may initiate target-side I/O while opening a path through a reparse
+point before the final handle path is authorized. The resolver never returns
+those outside bytes; pre-follow reparse inspection and traversal availability
+remain explicitly owned by `lab-tracker-n5kp.61`.
 
 ## Recovering moved/renamed local artifacts
 
@@ -397,18 +416,22 @@ Within the canonical-path threat model, recovery preserves these boundaries:
 - **Integrity is unchanged.** A recovered file is verified by the same
   re-hash-and-compare as any other resolve, so it is exactly as trustworthy as
   one found at the `uri`; a same-named decoy with different bytes does not match.
-- **Canonical path confinement.** The scan starts from canonical
-  `allowed_roots`, prunes linked/reparse directories, and re-checks canonical
-  containment per candidate. A separately tracked handle-bound fix
-  (`lab-tracker-n5kp.59`) closes the remaining concurrent path-replacement race.
-- **Opt-in and file/byte-bounded.** Recovery is off unless
+- **Handle-bound confinement.** The scan starts from canonical
+  `allowed_roots`, prunes linked/reparse directories, and opens each candidate
+  through the same handle-bound access layer as direct resolution. Pathname
+  replacement cannot redirect the descriptor that is hashed.
+- **Opt-in and logically file/byte-bounded.** Recovery is off unless
   `LAB_TRACKER_RESOLVER_RECOVERY` is truthy *and* roots are configured. A
   `RecoveryPolicy` budget (`max_files`, `max_bytes`, overridable via
   `LAB_TRACKER_RESOLVER_RECOVERY_MAX_FILES` / `_MAX_BYTES`) caps the scan;
   candidates that share the original basename are tried first so the common case
   (a rename that kept the filename, or a moved parent directory) is cheap. When
-  nothing matches within budget the result is `UNRESOLVED`; directory/time
-  bounds are tracked by `lab-tracker-n5kp.61`.
+  the same-fd size hint fits, the remaining logical hashing budget is still
+  debited as chunks are read—even when a later read fails—so failed or growing
+  candidates cannot collectively exceed it. Exact OS bytes-read and local
+  resolution deadlines are tracked by
+  `lab-tracker-n5kp.47`; directory/time traversal bounds are tracked by
+  `lab-tracker-n5kp.61`.
 
 ## Read-surface integration
 
@@ -495,12 +518,19 @@ Shipped (`src/lab_tracker/artifact_resolution.py`, tested in
   and canonical `allowed_roots` containment. Component-aware comparison uses
   `commonpath` on POSIX and exact canonical components on Windows to deny
   sibling-prefix, case-sensitive-sibling, and cross-drive escapes; static
-  symlink and Windows-junction targets outside the roots are rejected.
+  symlink and Windows-junction targets outside the roots are rejected. A narrow
+  handle-bound reader then validates a same-descriptor regular file: POSIX uses
+  descriptor-relative no-follow component traversal, while Windows validates
+  the normalized final path from the borrowed handle before reading. Hashing
+  never reopens an authorized pathname.
 - ✅ Content-hash recovery of moved/renamed local artifacts — opt-in
-  (`LAB_TRACKER_RESOLVER_RECOVERY`), file/byte-bounded by a `RecoveryPolicy`,
+  (`LAB_TRACKER_RESOLVER_RECOVERY`), logically file/byte-bounded by a
+  `RecoveryPolicy`,
   scans only `allowed_roots`, prunes symlink/junction escapes, and searches
-  basename-first; a missing file whose bytes still exist under a root resolves
-  `VERIFIED` instead of `UNRESOLVED` (read-only; the `uri` is not rewritten).
+  basename-first. Each candidate's same descriptor supplies the size hint and
+  bytes being hashed; a missing file whose bytes still exist under a root
+  resolves `VERIFIED` instead of `UNRESOLVED` (read-only; the `uri` is not
+  rewritten).
 - ✅ `HttpResolver` — `http(s)`, full-body verify with a `max_fetch_bytes` cap
   (oversized → `UNRESOLVED`, never uncertified bytes), plus a shared outbound
   destination policy that validates every IPv4/IPv6 answer, pins the vetted
