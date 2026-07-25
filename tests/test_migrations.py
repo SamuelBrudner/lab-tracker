@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from uuid import uuid4
 
+import pytest
 from alembic import command
 from alembic.config import Config
 from alembic.script import ScriptDirectory
@@ -90,10 +91,15 @@ def _current_revision(database_url: str) -> str | None:
 
 
 def _current_revisions(database_url: str) -> set[str]:
+    connect_args = (
+        {"check_same_thread": False}
+        if database_url.startswith("sqlite")
+        else {}
+    )
     engine = create_engine(
         database_url,
         future=True,
-        connect_args={"check_same_thread": False},
+        connect_args=connect_args,
     )
     try:
         inspector = inspect(engine)
@@ -109,6 +115,136 @@ def _current_revisions(database_url: str) -> set[str]:
 def _upgrade_head(database_url: str, monkeypatch) -> None:
     _set_database_url(monkeypatch, database_url)
     command.upgrade(_alembic_config(), "head")
+
+
+def _normalized_server_default(value: object) -> str | None:
+    if value is None:
+        return None
+    rendered = str(value).split("::", maxsplit=1)[0].strip()
+    return rendered.strip("()'\"").lower()
+
+
+def _assert_retained_review_schema(database_url: str) -> None:
+    engine = create_engine(database_url, future=True)
+    try:
+        inspector = inspect(engine)
+        review_columns = {
+            column["name"]: column
+            for column in inspector.get_columns("dataset_reviews")
+        }
+        assert review_columns["review_id"]["nullable"] is False
+        assert review_columns["dataset_id"]["nullable"] is False
+        assert review_columns["reviewer_user_id"]["nullable"] is True
+        assert review_columns["status"]["nullable"] is False
+        assert (
+            _normalized_server_default(review_columns["status"]["default"])
+            == "pending"
+        )
+        assert review_columns["comments"]["nullable"] is True
+        assert review_columns["requested_at"]["nullable"] is False
+        assert review_columns["resolved_at"]["nullable"] is True
+
+        review_indexes = {
+            index["name"]: (
+                tuple(index["column_names"]),
+                bool(index["unique"]),
+            )
+            for index in inspector.get_indexes("dataset_reviews")
+        }
+        assert review_indexes == {
+            "ix_dataset_reviews_dataset_id": (("dataset_id",), False),
+            "ix_dataset_reviews_dataset_requested_at": (
+                ("dataset_id", "requested_at"),
+                False,
+            ),
+            "ix_dataset_reviews_reviewer_status_requested_at": (
+                ("reviewer_user_id", "status", "requested_at"),
+                False,
+            ),
+        }
+
+        project_columns = {
+            column["name"]: column
+            for column in inspector.get_columns("projects")
+        }
+        assert project_columns["review_policy"]["nullable"] is False
+        assert (
+            _normalized_server_default(
+                project_columns["review_policy"]["default"]
+            )
+            == "none"
+        )
+
+        question_columns = {
+            column["name"]: column
+            for column in inspector.get_columns("questions")
+        }
+        assert question_columns["created_from"]["nullable"] is False
+        assert (
+            _normalized_server_default(
+                question_columns["created_from"]["default"]
+            )
+            == "manual"
+        )
+
+        suggestion_columns = {
+            column["name"]: column
+            for column in inspector.get_columns("note_tag_suggestions")
+        }
+        assert suggestion_columns["status"]["nullable"] is False
+        assert (
+            _normalized_server_default(
+                suggestion_columns["status"]["default"]
+            )
+            == "staged"
+        )
+    finally:
+        engine.dispose()
+
+
+def _assert_dataset_review_schema_at_0007(database_url: str) -> None:
+    engine = create_engine(database_url, future=True)
+    try:
+        inspector = inspect(engine)
+        assert {
+            index["name"]: tuple(index["column_names"])
+            for index in inspector.get_indexes("dataset_reviews")
+        } == {"ix_dataset_reviews_dataset_id": ("dataset_id",)}
+        project_columns = {
+            column["name"]: column
+            for column in inspector.get_columns("projects")
+        }
+        review_required = project_columns["dataset_review_required"]
+        assert review_required["nullable"] is False
+        assert _normalized_server_default(review_required["default"]) in {
+            "0",
+            "false",
+        }
+    finally:
+        engine.dispose()
+
+
+def _assert_head_base_head_round_trip(database_url: str) -> None:
+    config = _alembic_config()
+    assert _current_revision(database_url) == _single_script_head(config)
+
+    command.downgrade(config, "0012_manifest_and_note_metadata")
+    assert _current_revision(database_url) == "0012_manifest_and_note_metadata"
+    _assert_retained_review_schema(database_url)
+
+    command.downgrade(config, "0007_dataset_reviews")
+    assert _current_revision(database_url) == "0007_dataset_reviews"
+    _assert_dataset_review_schema_at_0007(database_url)
+
+    command.downgrade(config, "base")
+    assert _current_revision(database_url) is None
+
+    command.upgrade(config, "0012_manifest_and_note_metadata")
+    assert _current_revision(database_url) == "0012_manifest_and_note_metadata"
+    _assert_retained_review_schema(database_url)
+
+    command.upgrade(config, "head")
+    assert _current_revision(database_url) == _single_script_head(config)
 
 
 def test_alembic_upgrade_chain_from_empty_to_head(monkeypatch, tmp_path):
@@ -137,6 +273,26 @@ def test_alembic_has_single_head() -> None:
         "down_revision to the current head (run `uv run alembic heads`). If two "
         "branches each added a head, reconcile them with `uv run alembic merge`."
     )
+
+
+def test_alembic_head_base_head_round_trip_restores_0012_review_schema(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    db_path = tmp_path / "migrations-round-trip.db"
+    database_url = f"sqlite+pysqlite:///{db_path}"
+    config = _alembic_config()
+    _set_database_url(monkeypatch, database_url)
+
+    command.upgrade(config, "head")
+    _assert_head_base_head_round_trip(database_url)
+
+
+@pytest.mark.postgres
+def test_alembic_postgres_head_base_head_round_trip_restores_0012_review_schema(
+    migrated_postgres_database_url: str,
+) -> None:
+    _assert_head_base_head_round_trip(migrated_postgres_database_url)
 
 
 def test_alembic_upgrade_head_creates_expected_tables(monkeypatch, tmp_path):
