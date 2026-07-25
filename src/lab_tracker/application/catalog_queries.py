@@ -8,6 +8,7 @@ from typing import Protocol
 from uuid import UUID
 
 from lab_tracker.auth import AuthContext
+from lab_tracker.collection_models import DatasetSummary
 from lab_tracker.models import (
     AcquisitionOutput,
     Analysis,
@@ -112,6 +113,20 @@ class CatalogRepository(Protocol):
         offset: int = 0,
         recent_first: bool = False,
     ) -> tuple[list[Dataset], int]: ...
+
+    def query_dataset_summaries(
+        self,
+        *,
+        dataset_id: UUID | None = None,
+        project_id: UUID | None = None,
+        project_ids: set[UUID] | None = None,
+        status: str | None = None,
+        created_by: str | None = None,
+        since: datetime | None = None,
+        until: datetime | None = None,
+        limit: int | None = None,
+        offset: int = 0,
+    ) -> tuple[list[DatasetSummary], int]: ...
 
     def query_sessions(
         self,
@@ -315,6 +330,32 @@ class CatalogQueries:
         offset: int,
     ) -> Page[Dataset]:
         items, total = self.repository.query_datasets(
+            project_id=project_id,
+            project_ids=self._project_scope(project_id=project_id, actor=actor),
+            status=status,
+            created_by=created_by,
+            since=since,
+            until=until,
+            limit=limit,
+            offset=offset,
+        )
+        return Page(items=items, total=total)
+
+    def list_dataset_summaries(
+        self,
+        *,
+        actor: AuthContext,
+        dataset_id: UUID | None,
+        project_id: UUID | None,
+        status: str | None,
+        created_by: str | None,
+        since: datetime | None,
+        until: datetime | None,
+        limit: int,
+        offset: int,
+    ) -> Page[DatasetSummary]:
+        items, total = self.repository.query_dataset_summaries(
+            dataset_id=dataset_id,
             project_id=project_id,
             project_ids=self._project_scope(project_id=project_id, actor=actor),
             status=status,

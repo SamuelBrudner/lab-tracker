@@ -29,6 +29,7 @@ from lab_tracker.models import (
     ClaimStatus,
     DatasetStatus,
     EntityType,
+    ExperimentStatus,
     ExplorationNodeStatus,
     ExplorationNodeType,
     GoalLinkStatus,
@@ -236,6 +237,116 @@ class QuestionRefactorModel(Base):
     created_at: Mapped[datetime] = mapped_column(UtcDateTime, default=_utc_now)
 
 
+class ExperimentModel(Base):
+    __tablename__ = "experiments"
+
+    experiment_id: Mapped[UUID] = mapped_column(
+        GUID,
+        primary_key=True,
+        default=uuid4,
+    )
+    project_id: Mapped[UUID] = mapped_column(
+        GUID,
+        ForeignKey("projects.project_id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    description: Mapped[str] = mapped_column(
+        Text,
+        nullable=False,
+        default="",
+    )
+    primary_question_id: Mapped[UUID] = mapped_column(
+        GUID,
+        ForeignKey("questions.question_id"),
+        nullable=False,
+    )
+    status: Mapped[ExperimentStatus] = mapped_column(
+        EnumType(ExperimentStatus, length=20),
+        nullable=False,
+        default="active",
+    )
+    closed_at: Mapped[datetime | None] = mapped_column(UtcDateTime)
+    archived_at: Mapped[datetime | None] = mapped_column(UtcDateTime)
+    created_by: Mapped[str | None] = mapped_column(String(255))
+    created_by_user_id: Mapped[UUID | None] = mapped_column(
+        GUID,
+        ForeignKey("users.user_id", ondelete="SET NULL"),
+    )
+    origin: Mapped[str] = mapped_column(
+        String(32),
+        nullable=False,
+        default="user",
+    )
+    change_set_id: Mapped[UUID | None] = mapped_column(
+        GUID,
+        ForeignKey(
+            "graph_change_sets.change_set_id",
+            ondelete="SET NULL",
+        ),
+    )
+    origin_provider: Mapped[str | None] = mapped_column(String(80))
+    origin_model: Mapped[str | None] = mapped_column(String(255))
+    origin_prompt_version: Mapped[str | None] = mapped_column(String(120))
+    created_at: Mapped[datetime] = mapped_column(
+        UtcDateTime,
+        default=_utc_now,
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        UtcDateTime,
+        default=_utc_now,
+        onupdate=_utc_now,
+    )
+
+
+class ExperimentSessionModel(Base):
+    __tablename__ = "experiment_sessions"
+
+    experiment_id: Mapped[UUID] = mapped_column(
+        GUID,
+        ForeignKey("experiments.experiment_id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    session_id: Mapped[UUID] = mapped_column(
+        GUID,
+        ForeignKey("sessions.session_id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    created_by: Mapped[str | None] = mapped_column(String(255))
+    created_by_user_id: Mapped[UUID | None] = mapped_column(
+        GUID,
+        ForeignKey("users.user_id", ondelete="SET NULL"),
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        UtcDateTime,
+        default=_utc_now,
+    )
+
+
+class ExperimentDatasetModel(Base):
+    __tablename__ = "experiment_datasets"
+
+    experiment_id: Mapped[UUID] = mapped_column(
+        GUID,
+        ForeignKey("experiments.experiment_id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    dataset_id: Mapped[UUID] = mapped_column(
+        GUID,
+        ForeignKey("datasets.dataset_id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    created_by: Mapped[str | None] = mapped_column(String(255))
+    created_by_user_id: Mapped[UUID | None] = mapped_column(
+        GUID,
+        ForeignKey("users.user_id", ondelete="SET NULL"),
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        UtcDateTime,
+        default=_utc_now,
+    )
+
+
 class DatasetModel(Base):
     __tablename__ = "datasets"
 
@@ -257,6 +368,10 @@ class DatasetModel(Base):
     )
     manifest_files: Mapped[list[dict[str, object]]] = mapped_column(JSON, default=list)
     manifest_external_artifacts: Mapped[list[dict[str, object]]] = mapped_column(
+        JSON,
+        default=list,
+    )
+    manifest_collection_snapshots: Mapped[list[dict[str, object]]] = mapped_column(
         JSON,
         default=list,
     )
@@ -1621,6 +1736,22 @@ class DeviceEnrollmentModel(Base):
 
 
 Index("ix_questions_project_created_at", QuestionModel.project_id, QuestionModel.created_at)
+Index(
+    "ix_experiments_project_created_at",
+    ExperimentModel.project_id,
+    ExperimentModel.created_at,
+)
+Index(
+    "ix_experiments_primary_question_id",
+    ExperimentModel.primary_question_id,
+)
+Index(
+    "ix_experiments_created_by_user_id",
+    ExperimentModel.created_by_user_id,
+)
+Index("ix_experiments_change_set_id", ExperimentModel.change_set_id)
+Index("ix_experiment_sessions_session_id", ExperimentSessionModel.session_id)
+Index("ix_experiment_datasets_dataset_id", ExperimentDatasetModel.dataset_id)
 Index("ix_projects_group_id", ProjectModel.group_id)
 Index("ix_project_groups_created_by_user_id", ProjectGroupModel.created_by_user_id)
 Index("ix_projects_created_by_user_id", ProjectModel.created_by_user_id)
@@ -1836,3 +1967,13 @@ Index(
     VisualizationModel.created_at,
 )
 Index("ix_visualization_claims_claim_id", VisualizationClaimModel.claim_id)
+
+# Keep high-cardinality manifest tables in a focused module while preserving
+# the guarantee that importing db_models registers the production schema.
+from lab_tracker.collection_db_models import (  # noqa: E402, F401
+    AcquisitionCollectionCaptureModel,
+    AcquisitionCollectionManifestModel,
+    AcquisitionCollectionModel,
+    AcquisitionCollectionSnapshotModel,
+    DatasetCollectionSnapshotLinkModel,
+)

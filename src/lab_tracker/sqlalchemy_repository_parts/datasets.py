@@ -6,9 +6,14 @@ from collections import defaultdict
 from datetime import datetime
 from uuid import UUID
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session as OrmSession
 
+from lab_tracker.collection_db_models import DatasetCollectionSnapshotLinkModel
+from lab_tracker.collection_models import (
+    DatasetCollectionSnapshotReference,
+    DatasetSummary,
+)
 from lab_tracker.db_models import (
     DatasetFileModel,
     DatasetModel,
@@ -91,6 +96,19 @@ class SQLAlchemyDatasetRepository(EntityRepository[Dataset]):
             entity_id,
             dataset_question_link_models(entity),
         )
+        replace_child_rows(
+            self._session,
+            DatasetCollectionSnapshotLinkModel,
+            DatasetCollectionSnapshotLinkModel.dataset_id,
+            entity_id,
+            [
+                DatasetCollectionSnapshotLinkModel(
+                    dataset_id=entity.dataset_id,
+                    snapshot_id=snapshot.snapshot_id,
+                )
+                for snapshot in entity.commit_manifest.collection_snapshots
+            ],
+        )
 
     def delete(self, entity_id: UUID) -> Dataset | None:
         entity = self.get(entity_id)
@@ -148,6 +166,131 @@ class SQLAlchemyDatasetRepository(EntityRepository[Dataset]):
         total = count_from_statement(self._session, count_stmt)
         rows = list(self._session.scalars(apply_pagination(stmt, limit=limit, offset=offset)))
         return self.datasets_from_rows(rows), total
+
+    def query_summaries(
+        self,
+        *,
+        dataset_id: UUID | None = None,
+        project_id: UUID | None = None,
+        project_ids: set[UUID] | None = None,
+        status: str | None = None,
+        created_by: str | None = None,
+        since: datetime | None = None,
+        until: datetime | None = None,
+        limit: int | None = None,
+        offset: int = 0,
+        recent_first: bool = False,
+    ) -> tuple[list[DatasetSummary], int]:
+        self._session.flush()
+        if project_ids is not None and not project_ids:
+            return [], 0
+        stmt = select(
+            DatasetModel.dataset_id,
+            DatasetModel.project_id,
+            DatasetModel.commit_hash,
+            DatasetModel.primary_question_id,
+            DatasetModel.status,
+            DatasetModel.manifest_source_session_id,
+            DatasetModel.manifest_collection_snapshots,
+            DatasetModel.created_at,
+            DatasetModel.updated_at,
+            func.coalesce(
+                func.json_array_length(DatasetModel.manifest_files),
+                0,
+            ).label("file_count"),
+            func.coalesce(
+                func.json_array_length(
+                    DatasetModel.manifest_external_artifacts
+                ),
+                0,
+            ).label("external_artifact_count"),
+        )
+        count_stmt = select(DatasetModel.dataset_id)
+        filters = []
+        if dataset_id is not None:
+            filters.append(DatasetModel.dataset_id == str(dataset_id))
+        if project_id is not None:
+            filters.append(DatasetModel.project_id == str(project_id))
+        if project_ids is not None:
+            filters.append(
+                DatasetModel.project_id.in_(uuid_values(project_ids))
+            )
+        if status is not None:
+            filters.append(DatasetModel.status == status)
+        if created_by is not None:
+            filters.append(DatasetModel.created_by_user_id == created_by)
+        if since is not None:
+            filters.append(DatasetModel.created_at >= since)
+        if until is not None:
+            filters.append(DatasetModel.created_at < until)
+        if filters:
+            stmt = stmt.where(*filters)
+            count_stmt = count_stmt.where(*filters)
+        if recent_first:
+            stmt = stmt.order_by(
+                DatasetModel.created_at.desc(),
+                DatasetModel.dataset_id.desc(),
+            )
+        else:
+            stmt = stmt.order_by(
+                DatasetModel.created_at,
+                DatasetModel.dataset_id,
+            )
+        total = count_from_statement(self._session, count_stmt)
+        rows = list(
+            self._session.execute(
+                apply_pagination(stmt, limit=limit, offset=offset)
+            )
+        )
+        link_map = self.link_map([row.dataset_id for row in rows])
+        summaries: list[DatasetSummary] = []
+        for row in rows:
+            collection_snapshots = [
+                DatasetCollectionSnapshotReference.model_validate(item)
+                for item in (row.manifest_collection_snapshots or [])
+            ]
+            resolved_question_links = [
+                dataset_question_link_from_model(link)
+                for link in link_map.get(str(row.dataset_id), [])
+            ]
+            resolved_question_links.sort(
+                key=lambda link: (
+                    link.role.value != "primary",
+                    str(link.question_id),
+                )
+            )
+            question_links = [
+                link.model_dump(mode="json")
+                for link in resolved_question_links
+            ]
+            summaries.append(
+                DatasetSummary(
+                    dataset_id=row.dataset_id,
+                    project_id=row.project_id,
+                    commit_hash=row.commit_hash,
+                    primary_question_id=row.primary_question_id,
+                    question_links=question_links,
+                    status=row.status.value,
+                    source_session_id=row.manifest_source_session_id,
+                    file_count=int(row.file_count or 0),
+                    external_artifact_count=int(
+                        row.external_artifact_count or 0
+                    ),
+                    collection_count=len(collection_snapshots),
+                    collection_member_count=sum(
+                        snapshot.member_count
+                        for snapshot in collection_snapshots
+                    ),
+                    collection_total_size_bytes=sum(
+                        snapshot.total_size_bytes
+                        for snapshot in collection_snapshots
+                    ),
+                    collection_snapshots=collection_snapshots,
+                    created_at=row.created_at,
+                    updated_at=row.updated_at,
+                )
+            )
+        return summaries, total
 
     def query_files(
         self,

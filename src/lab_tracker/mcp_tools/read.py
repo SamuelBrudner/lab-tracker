@@ -92,8 +92,8 @@ def lab_tracker_readiness() -> JsonObject:
 def lab_tracker_describe_schema(entity_type: str | None = None) -> JsonObject:
     """Describe fields/enums before create_* calls; use after context lookup.
 
-    entity_type accepts: project, question, note, session, dataset, analysis, claim,
-    visualization, goal. Omit it to describe all entity types.
+    entity_type accepts: project, question, experiment, note, session, dataset,
+    analysis, claim, visualization, goal. Omit it to describe all entity types.
     """
     return _read_tool(
         "lab_tracker_describe_schema",
@@ -254,6 +254,88 @@ def lab_tracker_list_sessions(
         hint=next_action(
             "lab_tracker_list_datasets",
             "After sessions, inspect datasets or load decision context for the task.",
+        ),
+    )
+
+
+def lab_tracker_list_experiments(
+    project_id: str | None = None,
+    primary_question_id: str | None = None,
+    status: str | None = None,
+    search: str | None = None,
+    session_id: str | None = None,
+    dataset_id: str | None = None,
+    limit: int = 50,
+    offset: int = 0,
+) -> JsonObject:
+    """List Experiments and filter by Question, Session, Dataset, status, or text."""
+    return _read_tool(
+        "lab_tracker_list_experiments",
+        lambda client: client.list_experiments(
+            project_id=project_id,
+            primary_question_id=primary_question_id,
+            status=status,
+            search=search,
+            session_id=session_id,
+            dataset_id=dataset_id,
+            limit=limit,
+            offset=offset,
+        ),
+        hint=next_action(
+            "lab_tracker_get_experiment",
+            "Inspect one Experiment before using its memberships as context.",
+        ),
+    )
+
+
+def lab_tracker_get_experiment(experiment_id: str) -> JsonObject:
+    """Get one Experiment by ID, including lifecycle and primary Question."""
+    return _read_tool(
+        "lab_tracker_get_experiment",
+        lambda client: client.get_experiment(experiment_id),
+        hint=next_action(
+            "lab_tracker_list_experiment_sessions",
+            "Read the Experiment's Session memberships next when needed.",
+        ),
+    )
+
+
+def lab_tracker_list_experiment_sessions(
+    experiment_id: str,
+    limit: int = 50,
+    offset: int = 0,
+) -> JsonObject:
+    """List paginated Session memberships for one Experiment."""
+    return _read_tool(
+        "lab_tracker_list_experiment_sessions",
+        lambda client: client.list_experiment_sessions(
+            experiment_id,
+            limit=limit,
+            offset=offset,
+        ),
+        hint=next_action(
+            "lab_tracker_list_experiment_datasets",
+            "Read the Experiment's Dataset memberships for the evidence view.",
+        ),
+    )
+
+
+def lab_tracker_list_experiment_datasets(
+    experiment_id: str,
+    limit: int = 50,
+    offset: int = 0,
+) -> JsonObject:
+    """List paginated Dataset memberships for one Experiment."""
+    return _read_tool(
+        "lab_tracker_list_experiment_datasets",
+        lambda client: client.list_experiment_datasets(
+            experiment_id,
+            limit=limit,
+            offset=offset,
+        ),
+        hint=next_action(
+            "lab_tracker_get_decision_context",
+            "Load bounded research context before interpreting the Experiment.",
         ),
     )
 
@@ -565,6 +647,7 @@ def lab_tracker_get_decision_context(
     query: str,
     project_id: str | None = None,
     question_id: str | None = None,
+    experiment_id: str | None = None,
     dataset_id: str | None = None,
     analysis_id: str | None = None,
     claim_id: str | None = None,
@@ -589,6 +672,7 @@ def lab_tracker_get_decision_context(
             query=query,
             project_id=project_id,
             question_id=question_id,
+            experiment_id=experiment_id,
             dataset_id=dataset_id,
             analysis_id=analysis_id,
             claim_id=claim_id,
@@ -631,6 +715,10 @@ READ_TOOLS = (
     lab_tracker_list_notes,
     lab_tracker_search,
     lab_tracker_list_sessions,
+    lab_tracker_list_experiments,
+    lab_tracker_get_experiment,
+    lab_tracker_list_experiment_sessions,
+    lab_tracker_list_experiment_datasets,
     lab_tracker_list_datasets,
     lab_tracker_list_analyses,
     lab_tracker_list_claims,

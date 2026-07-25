@@ -5,6 +5,12 @@ from uuid import UUID, uuid4
 
 import pytest
 
+from lab_tracker.collection_manifest import canonicalize_collection_manifest
+from lab_tracker.collection_models import (
+    AcquisitionCollectionManifest,
+    DatasetCollectionSnapshotReference,
+)
+from lab_tracker.errors import ValidationError
 from lab_tracker.models import (
     Analysis,
     AnalysisStatus,
@@ -19,6 +25,7 @@ from lab_tracker.models import (
     EntityOrigin,
     EntityRef,
     EntityType,
+    Experiment,
     ExplorationNode,
     ExplorationNodeStatus,
     ExplorationNodeType,
@@ -34,6 +41,8 @@ from lab_tracker.models import (
     QuestionStatus,
     QuestionType,
     RecordExportRecords,
+    Session,
+    SessionType,
     SupervisionEdge,
     Visualization,
     VisualizationAsset,
@@ -43,6 +52,7 @@ from lab_tracker.provenance import (
     build_analysis_provenance_document,
     build_ara_artifact_document,
     build_dataset_provenance_document,
+    build_experiment_provenance_document,
     build_record_export_provenance_document,
 )
 from lab_tracker.provenance_ingestion import (
@@ -1083,3 +1093,185 @@ def test_analysis_provenance_attributes_supported_entities_to_people():
         "supervisionStartedAt": "2026-01-01T00:00:00+00:00",
     }
     assert _node_type_includes(_node_by_id(document, supervisor_iri), "prov:Person")
+
+def test_dataset_collection_provenance_is_compact_by_default_and_expands_deterministically():
+    dataset_id = uuid4()
+    question_id = uuid4()
+    snapshot_id = uuid4()
+    collection_id = uuid4()
+    members = [
+        {
+            "path": "trial-0002/data.bin",
+            "checksum": "b" * 64,
+            "size_bytes": 22,
+        },
+        {
+            "path": "trial-0001/data.bin",
+            "checksum": "a" * 64,
+            "size_bytes": 11,
+        },
+    ]
+    canonical = canonicalize_collection_manifest(
+        schema_version=1,
+        members=members,
+    )
+    snapshot = DatasetCollectionSnapshotReference(
+        snapshot_id=snapshot_id,
+        collection_id=collection_id,
+        collection_key="raw",
+        manifest_hash=canonical.manifest_hash,
+        member_count=canonical.member_count,
+        total_size_bytes=canonical.total_size_bytes,
+        source_provider="watch",
+        source_uri="file:///rig/run-7",
+        observed_at=datetime(2026, 7, 24, 12, tzinfo=timezone.utc),
+    )
+    dataset = Dataset(
+        dataset_id=dataset_id,
+        project_id=uuid4(),
+        commit_hash="collection-commit",
+        primary_question_id=question_id,
+        question_links=[],
+        commit_manifest=DatasetCommitManifest(
+            collection_snapshots=[snapshot],
+        ),
+        status=DatasetStatus.COMMITTED,
+    )
+
+    compact = build_dataset_provenance_document(
+        "http://example.test",
+        dataset,
+    )
+    snapshot_iri = f"http://example.test/collection-snapshots/{snapshot_id}"
+    commit_iri = (
+        f"http://example.test/datasets/{dataset_id}/provenance/commit"
+    )
+    compact_snapshot = _node_by_id(compact, snapshot_iri)
+    compact_commit = _node_by_id(compact, commit_iri)
+    assert compact_commit["used"] == [{"@id": snapshot_iri}]
+    assert _node_type_includes(compact_snapshot, "prov:Collection")
+    assert compact_snapshot["manifestHash"] == canonical.manifest_hash
+    assert compact_snapshot["memberCount"] == 2
+    assert compact_snapshot["totalSizeBytes"] == 33
+    assert "hadMember" not in compact_snapshot
+    assert not any(
+        "/members/" in str(node.get("@id", ""))
+        for node in compact["@graph"]
+        if isinstance(node, dict)
+    )
+
+    expanded = build_dataset_provenance_document(
+        "http://example.test",
+        dataset,
+        expand_collection_members=True,
+        collection_manifests={
+            snapshot_id: AcquisitionCollectionManifest.model_validate(
+                canonical.as_dict()
+            )
+        },
+    )
+    expanded_snapshot = _node_by_id(expanded, snapshot_iri)
+    expected_member_iris = [
+        f"{snapshot_iri}/members/trial-0001%2Fdata.bin",
+        f"{snapshot_iri}/members/trial-0002%2Fdata.bin",
+    ]
+    assert expanded_snapshot["hadMember"] == [
+        {"@id": member_iri} for member_iri in expected_member_iris
+    ]
+    first_member = _node_by_id(expanded, expected_member_iris[0])
+    assert first_member == {
+        "@id": expected_member_iris[0],
+        "@type": "prov:Entity",
+        "filePath": "trial-0001/data.bin",
+        "checksum": "a" * 64,
+        "sizeBytes": 11,
+    }
+
+
+def test_collection_provenance_expansion_rejects_more_than_global_member_bound():
+    refs = [
+        DatasetCollectionSnapshotReference(
+            snapshot_id=uuid4(),
+            collection_id=uuid4(),
+            collection_key=key,
+            manifest_hash=checksum,
+            member_count=5_001,
+            total_size_bytes=5_001,
+            observed_at=datetime(2026, 7, 24, tzinfo=timezone.utc),
+        )
+        for key, checksum in (("raw", "a" * 64), ("aux", "b" * 64))
+    ]
+    dataset = Dataset(
+        dataset_id=uuid4(),
+        project_id=uuid4(),
+        commit_hash="too-many-members",
+        primary_question_id=uuid4(),
+        question_links=[],
+        commit_manifest=DatasetCommitManifest(collection_snapshots=refs),
+        status=DatasetStatus.COMMITTED,
+    )
+
+    with pytest.raises(
+        ValidationError,
+        match="limited to 10000 total members",
+    ):
+        build_dataset_provenance_document(
+            "http://example.test",
+            dataset,
+            expand_collection_members=True,
+            collection_manifests={},
+        )
+
+
+def test_experiment_provenance_renders_compact_bidirectional_memberships():
+    project_id = uuid4()
+    question_id = uuid4()
+    experiment = Experiment(
+        experiment_id=uuid4(),
+        project_id=project_id,
+        name="Odor panel run",
+        description="One scientific unit spanning many acquisition files.",
+        primary_question_id=question_id,
+    )
+    session = Session(
+        session_id=uuid4(),
+        project_id=project_id,
+        session_type=SessionType.OPERATIONAL,
+    )
+    dataset = Dataset(
+        dataset_id=uuid4(),
+        project_id=project_id,
+        commit_hash="experiment-dataset",
+        primary_question_id=question_id,
+        question_links=[],
+        commit_manifest=DatasetCommitManifest(),
+    )
+
+    document = build_experiment_provenance_document(
+        "http://example.test",
+        experiment,
+        sessions=[session],
+        datasets=[dataset],
+    )
+
+    experiment_iri = (
+        f"http://example.test/experiments/{experiment.experiment_id}"
+    )
+    experiment_node = _node_by_id(document, experiment_iri)
+    session_node = _node_by_id(
+        document,
+        f"http://example.test/sessions/{session.session_id}",
+    )
+    dataset_node = _node_by_id(
+        document,
+        f"http://example.test/datasets/{dataset.dataset_id}",
+    )
+    assert _node_type_includes(experiment_node, "prov:Activity")
+    assert _node_type_includes(experiment_node, "lab:Experiment")
+    assert experiment_node["primaryQuestion"] == {
+        "@id": f"http://example.test/questions/{question_id}"
+    }
+    assert experiment_node["hasSession"] == [{"@id": session_node["@id"]}]
+    assert experiment_node["hasDataset"] == [{"@id": dataset_node["@id"]}]
+    assert session_node["partOfExperiment"] == {"@id": experiment_iri}
+    assert dataset_node["partOfExperiment"] == {"@id": experiment_iri}

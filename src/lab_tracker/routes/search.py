@@ -45,6 +45,7 @@ def build_search_router(api: LabTrackerAPI) -> APIRouter:
             meta={
                 "questions_count": len(results.questions),
                 "notes_count": len(results.notes),
+                "experiments_count": len(results.experiments),
             },
         )
 

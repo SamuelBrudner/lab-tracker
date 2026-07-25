@@ -1,12 +1,16 @@
 from __future__ import annotations
 
+import json
+from importlib import import_module
 from pathlib import Path
 from uuid import uuid4
 
 from alembic import command
 from alembic.config import Config
+from alembic.migration import MigrationContext
+from alembic.operations import Operations
 from alembic.script import ScriptDirectory
-from sqlalchemy import create_engine, inspect, text
+from sqlalchemy import BigInteger, create_engine, inspect, text
 
 from lab_tracker.api import LabTrackerAPI
 from lab_tracker.auth import AuthContext, Role
@@ -1369,6 +1373,352 @@ def _assert_fk(
         and foreign_key["referred_table"] == referred_table
         for foreign_key in foreign_keys
     )
+
+
+def test_experiment_collection_head_schema_is_compact_and_relational(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    database_url = f"sqlite+pysqlite:///{tmp_path / 'collection-schema.db'}"
+    _upgrade_head(database_url, monkeypatch)
+    engine = create_engine(
+        database_url,
+        future=True,
+        connect_args={"check_same_thread": False},
+    )
+    inspector = inspect(engine)
+    table_names = set(inspector.get_table_names())
+
+    assert {
+        "experiments",
+        "experiment_sessions",
+        "experiment_datasets",
+        "acquisition_collections",
+        "acquisition_collection_snapshots",
+        "acquisition_collection_manifests",
+        "acquisition_collection_captures",
+        "dataset_collection_snapshots",
+    }.issubset(table_names)
+    assert "acquisition_collection_members" not in table_names
+    assert "manifest_collection_snapshots" in {
+        column["name"] for column in inspector.get_columns("datasets")
+    }
+    _assert_created_by_user_fk(inspector, "experiments")
+    _assert_origin_backlink_columns(inspector, "experiments")
+    _assert_unique_constraint(
+        inspector,
+        "acquisition_collections",
+        "uq_acquisition_collections_session_key",
+        {"session_id", "collection_key"},
+    )
+    _assert_unique_constraint(
+        inspector,
+        "acquisition_collection_snapshots",
+        "uq_collection_snapshots_collection_manifest",
+        {"collection_id", "manifest_hash"},
+    )
+    _assert_unique_constraint(
+        inspector,
+        "acquisition_collection_captures",
+        "uq_collection_captures_collection_client_id",
+        {"collection_id", "client_capture_id"},
+    )
+    total_size_column = next(
+        column
+        for column in inspector.get_columns("acquisition_collection_snapshots")
+        if column["name"] == "total_size_bytes"
+    )
+    assert isinstance(total_size_column["type"], BigInteger)
+    _assert_fk(
+        inspector,
+        "dataset_collection_snapshots",
+        column="dataset_id",
+        referred_table="datasets",
+    )
+    _assert_fk(
+        inspector,
+        "dataset_collection_snapshots",
+        column="snapshot_id",
+        referred_table="acquisition_collection_snapshots",
+    )
+    engine.dispose()
+
+
+def test_experiment_collection_migrations_preserve_legacy_dataset_round_trip(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    database_url = (
+        f"sqlite+pysqlite:///{tmp_path / 'experiment-collection-roundtrip.db'}"
+    )
+    config = _alembic_config()
+    _set_database_url(monkeypatch, database_url)
+    command.upgrade(config, "0056_claim_confidence_bounds")
+
+    project_id = str(uuid4())
+    question_id = str(uuid4())
+    dataset_id = str(uuid4())
+    engine = create_engine(
+        database_url,
+        future=True,
+        connect_args={"check_same_thread": False},
+    )
+    with engine.begin() as connection:
+        connection.execute(
+            text(
+                "INSERT INTO projects "
+                "(project_id, name, description, status, created_at, updated_at) "
+                "VALUES (:project_id, 'Legacy acquisition', '', 'active', "
+                "CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
+            ),
+            {"project_id": project_id},
+        )
+        connection.execute(
+            text(
+                "INSERT INTO questions "
+                "(question_id, project_id, text, question_type, status, origin, "
+                "created_at, updated_at) VALUES "
+                "(:question_id, :project_id, 'Legacy question', "
+                "'descriptive', 'active', 'user', CURRENT_TIMESTAMP, "
+                "CURRENT_TIMESTAMP)"
+            ),
+            {
+                "question_id": question_id,
+                "project_id": project_id,
+            },
+        )
+        connection.execute(
+            text(
+                "INSERT INTO datasets "
+                "(dataset_id, project_id, commit_hash, primary_question_id, "
+                "manifest_files, manifest_external_artifacts, "
+                "manifest_metadata, manifest_nwb_metadata, "
+                "manifest_bids_metadata, manifest_note_ids, status, origin, "
+                "created_at, updated_at) VALUES "
+                "(:dataset_id, :project_id, 'legacy-commit-hash', "
+                ":question_id, '[]', '[]', '{}', '{}', '{}', '[]', "
+                "'staged', 'user', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
+            ),
+            {
+                "dataset_id": dataset_id,
+                "project_id": project_id,
+                "question_id": question_id,
+            },
+        )
+        connection.execute(
+            text(
+                "INSERT INTO dataset_question_links "
+                "(dataset_id, question_id, role, outcome_status) VALUES "
+                "(:dataset_id, :question_id, 'primary', 'unknown')"
+            ),
+            {
+                "dataset_id": dataset_id,
+                "question_id": question_id,
+            },
+        )
+    engine.dispose()
+
+    command.upgrade(config, "head")
+    engine = create_engine(
+        database_url,
+        future=True,
+        connect_args={"check_same_thread": False},
+    )
+    inspector = inspect(engine)
+    assert {
+        "experiments",
+        "experiment_sessions",
+        "experiment_datasets",
+        "acquisition_collections",
+        "acquisition_collection_snapshots",
+        "acquisition_collection_manifests",
+        "acquisition_collection_captures",
+        "dataset_collection_snapshots",
+    }.issubset(set(inspector.get_table_names()))
+    assert "manifest_collection_snapshots" in {
+        column["name"] for column in inspector.get_columns("datasets")
+    }
+    with engine.connect() as connection:
+        row = connection.execute(
+            text(
+                "SELECT commit_hash, "
+                "json_array_length(manifest_collection_snapshots) "
+                "FROM datasets WHERE dataset_id = :dataset_id"
+            ),
+            {"dataset_id": dataset_id},
+        ).one()
+    assert row == ("legacy-commit-hash", 0)
+    engine.dispose()
+
+    command.downgrade(config, "0056_claim_confidence_bounds")
+    engine = create_engine(
+        database_url,
+        future=True,
+        connect_args={"check_same_thread": False},
+    )
+    inspector = inspect(engine)
+    assert "experiments" not in inspector.get_table_names()
+    assert "acquisition_collections" not in inspector.get_table_names()
+    assert "manifest_collection_snapshots" not in {
+        column["name"] for column in inspector.get_columns("datasets")
+    }
+    with engine.connect() as connection:
+        commit_hash = connection.execute(
+            text(
+                "SELECT commit_hash FROM datasets "
+                "WHERE dataset_id = :dataset_id"
+            ),
+            {"dataset_id": dataset_id},
+        ).scalar_one()
+    assert commit_hash == "legacy-commit-hash"
+    engine.dispose()
+
+
+def test_dataset_collection_snapshot_link_backfill_materializes_integrity_edge(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    database_url = (
+        f"sqlite+pysqlite:///{tmp_path / 'collection-reference-backfill.db'}"
+    )
+    _upgrade_head(database_url, monkeypatch)
+    project_id = str(uuid4())
+    question_id = str(uuid4())
+    session_id = str(uuid4())
+    collection_id = str(uuid4())
+    snapshot_id = str(uuid4())
+    dataset_id = str(uuid4())
+    manifest_hash = "a" * 64
+    engine = create_engine(
+        database_url,
+        future=True,
+        connect_args={"check_same_thread": False},
+    )
+    with engine.begin() as connection:
+        connection.execute(
+            text(
+                "INSERT INTO projects "
+                "(project_id, name, description, status, created_at, updated_at) "
+                "VALUES (:project_id, 'Backfill project', '', 'active', "
+                "CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
+            ),
+            {"project_id": project_id},
+        )
+        connection.execute(
+            text(
+                "INSERT INTO questions "
+                "(question_id, project_id, text, question_type, status, origin, "
+                "created_at, updated_at) VALUES "
+                "(:question_id, :project_id, 'Backfill question', "
+                "'descriptive', 'active', 'user', CURRENT_TIMESTAMP, "
+                "CURRENT_TIMESTAMP)"
+            ),
+            {
+                "question_id": question_id,
+                "project_id": project_id,
+            },
+        )
+        connection.execute(
+            text(
+                "INSERT INTO sessions "
+                "(session_id, project_id, session_type, status, started_at, "
+                "origin, updated_at) VALUES "
+                "(:session_id, :project_id, 'operational', 'active', "
+                "CURRENT_TIMESTAMP, 'user', CURRENT_TIMESTAMP)"
+            ),
+            {
+                "session_id": session_id,
+                "project_id": project_id,
+            },
+        )
+        connection.execute(
+            text(
+                "INSERT INTO acquisition_collections "
+                "(collection_id, session_id, collection_key, "
+                "current_snapshot_id, current_observed_at, created_at, "
+                "updated_at) VALUES "
+                "(:collection_id, :session_id, 'trials', :snapshot_id, "
+                "CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
+            ),
+            {
+                "collection_id": collection_id,
+                "session_id": session_id,
+                "snapshot_id": snapshot_id,
+            },
+        )
+        connection.execute(
+            text(
+                "INSERT INTO acquisition_collection_snapshots "
+                "(snapshot_id, collection_id, manifest_hash, member_count, "
+                "total_size_bytes, complete, observed_at, client_capture_id, "
+                "created_at, updated_at) VALUES "
+                "(:snapshot_id, :collection_id, :manifest_hash, 1, 23, 1, "
+                "CURRENT_TIMESTAMP, 'backfill-capture', CURRENT_TIMESTAMP, "
+                "CURRENT_TIMESTAMP)"
+            ),
+            {
+                "snapshot_id": snapshot_id,
+                "collection_id": collection_id,
+                "manifest_hash": manifest_hash,
+            },
+        )
+        connection.execute(
+            text(
+                "INSERT INTO datasets "
+                "(dataset_id, project_id, commit_hash, primary_question_id, "
+                "manifest_files, manifest_external_artifacts, "
+                "manifest_collection_snapshots, manifest_metadata, "
+                "manifest_nwb_metadata, manifest_bids_metadata, "
+                "manifest_note_ids, status, origin, created_at, updated_at) "
+                "VALUES (:dataset_id, :project_id, 'collection-commit', "
+                ":question_id, '[]', '[]', :collection_refs, '{}', '{}', "
+                "'{}', '[]', 'committed', 'user', CURRENT_TIMESTAMP, "
+                "CURRENT_TIMESTAMP)"
+            ),
+            {
+                "dataset_id": dataset_id,
+                "project_id": project_id,
+                "question_id": question_id,
+                "collection_refs": json.dumps(
+                    [
+                        {
+                            "snapshot_id": snapshot_id,
+                            "collection_id": collection_id,
+                            "collection_key": "trials",
+                            "manifest_hash": manifest_hash,
+                            "member_count": 1,
+                            "total_size_bytes": 23,
+                            "observed_at": "2026-07-24T12:00:00Z",
+                        }
+                    ]
+                ),
+            },
+        )
+
+        migration = import_module(
+            "lab_tracker.alembic.versions."
+            "0059_dataset_collection_snapshot_links"
+        )
+        context = MigrationContext.configure(connection)
+        with Operations.context(context):
+            migration._backfill_dataset_snapshot_links()
+
+    inspector = inspect(engine)
+    assert {
+        foreign_key["referred_table"]
+        for foreign_key in inspector.get_foreign_keys(
+            "dataset_collection_snapshots"
+        )
+    } == {"datasets", "acquisition_collection_snapshots"}
+    with engine.connect() as connection:
+        link = connection.execute(
+            text(
+                "SELECT dataset_id, snapshot_id "
+                "FROM dataset_collection_snapshots"
+            )
+        ).one()
+    assert link == (dataset_id, snapshot_id)
+    engine.dispose()
 
 
 def test_migrated_database_supports_api_round_trip(monkeypatch, tmp_path):

@@ -28,6 +28,8 @@ from lab_tracker.models import (
     DataStore,
     EntityRef,
     EntityType,
+    Experiment,
+    ExperimentStatus,
     ExplorationNode,
     ExplorationNodeStatus,
     ExplorationNodeType,
@@ -453,6 +455,21 @@ class QuestionRefactorResult(BaseModel):
     refactor: QuestionRefactor
 
 
+class ExperimentCreate(RequestModel):
+    project_id: UUID
+    name: NonBlankStr
+    primary_question_id: UUID
+    description: str | None = None
+
+
+class ExperimentUpdate(PatchRequestModel):
+    non_nullable_fields = frozenset({"name", "status"})
+
+    name: NonBlankStr | SkipJsonSchema[None] = None
+    description: str | None = None
+    status: ExperimentStatus | SkipJsonSchema[None] = None
+
+
 class DatasetCreate(RequestModel):
     project_id: UUID
     commit_manifest: DatasetCommitManifestInput | None = None
@@ -623,6 +640,7 @@ class AssistantDecisionContextRequest(RequestModel):
     query: NonBlankStr
     project_id: UUID | None = None
     question_id: UUID | None = None
+    experiment_id: UUID | None = None
     dataset_id: UUID | None = None
     analysis_id: UUID | None = None
     claim_id: UUID | None = None
@@ -1204,6 +1222,7 @@ class ProjectGraphRead(BaseModel):
 class SearchResults(BaseModel):
     questions: list[Question] = Field(default_factory=list)
     notes: list[Note] = Field(default_factory=list)
+    experiments: list[Experiment] = Field(default_factory=list)
 
 
 class PortfolioProjectOwner(BaseModel):

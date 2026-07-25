@@ -58,6 +58,40 @@ class AuthContext:
     role: Role
     principal_type: PrincipalType = PrincipalType.USER
     device_token_id: UUID | None = None
+    principal_instance_id: UUID | None = None
+    principal_label: str | None = None
+
+    def __post_init__(self) -> None:
+        """Keep legacy device identity aligned with generic provenance fields."""
+
+        if (
+            self.device_token_id is not None
+            and self.principal_instance_id is not None
+            and self.device_token_id != self.principal_instance_id
+        ):
+            raise ValueError(
+                "device_token_id and principal_instance_id must match."
+            )
+        if self.device_token_id is not None:
+            object.__setattr__(
+                self,
+                "principal_instance_id",
+                self.device_token_id,
+            )
+        elif (
+            self.principal_type == PrincipalType.DEVICE
+            and self.principal_instance_id is not None
+        ):
+            object.__setattr__(
+                self,
+                "device_token_id",
+                self.principal_instance_id,
+            )
+        elif (
+            self.principal_type == PrincipalType.USER
+            and self.principal_instance_id is None
+        ):
+            object.__setattr__(self, "principal_instance_id", self.user_id)
 
     @property
     def is_device(self) -> bool:
@@ -636,6 +670,13 @@ def device_principal_can_access(method: str, path: str) -> bool:
     if path in {"/notes", "/notes/upload-file", "/notes/quick-capture"}:
         return True
     segments = [segment for segment in path.split("/") if segment]
+    if (
+        len(segments) == 5
+        and segments[0] == "sessions"
+        and segments[2] == "collections"
+        and segments[4] == "snapshots"
+    ):
+        return True
     return len(segments) == 3 and segments[0] == "notes" and segments[2] == "transcript"
 
 

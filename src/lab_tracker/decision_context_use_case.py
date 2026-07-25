@@ -37,6 +37,7 @@ def build_decision_context(
     query: str,
     project_id: str | None = None,
     question_id: str | None = None,
+    experiment_id: str | None = None,
     dataset_id: str | None = None,
     analysis_id: str | None = None,
     claim_id: str | None = None,
@@ -76,6 +77,7 @@ def build_decision_context(
 
     anchor_entities: dict[str, list[JsonObject]] = {
         "questions": [],
+        "experiments": [],
         "datasets": [],
         "analyses": [],
         "claims": [],
@@ -93,6 +95,23 @@ def build_decision_context(
             )
         anchor_entities["questions"].append(question)
         anchor_project_ids.add(str(question["project_id"]))
+
+    if experiment_id:
+        experiment = reader.get_experiment(str(experiment_id))
+        if experiment is None or not _matches_project_anchor(
+            experiment,
+            resolved_project_id,
+        ):
+            return decision_error(
+                "anchor_not_found",
+                f"Experiment {experiment_id!r} was not found.",
+                anchor={
+                    "entity_type": "experiment",
+                    "entity_id": str(experiment_id),
+                },
+            )
+        anchor_entities["experiments"].append(experiment)
+        anchor_project_ids.add(str(experiment["project_id"]))
 
     if dataset_id:
         dataset = reader.get_dataset(str(dataset_id))
@@ -229,6 +248,11 @@ def build_decision_context(
         limit=resolved_limit,
         recent_first=True,
     )
+    experiments_payload = reader.list_experiments(
+        project_id=resolved_project_id,
+        limit=resolved_limit,
+        recent_first=True,
+    )
     datasets_payload = reader.list_datasets(
         project_id=resolved_project_id,
         created_by=created_by,
@@ -278,6 +302,12 @@ def build_decision_context(
         "session_id",
         (envelope_items(sessions_payload), "recent_activity"),
     )
+    experiments = merge_entities(
+        "experiment_id",
+        (anchor_entities["experiments"], "anchor"),
+        (search_items(search_payload, "experiments"), "search_match"),
+        (envelope_items(experiments_payload), "recent_activity"),
+    )
     datasets = merge_entities(
         "dataset_id",
         (anchor_entities["datasets"], "anchor"),
@@ -302,6 +332,9 @@ def build_decision_context(
     anchors = [
         entity_ref("question", item, "question_id")
         for item in anchor_entities["questions"]
+    ] + [
+        entity_ref("experiment", item, "experiment_id")
+        for item in anchor_entities["experiments"]
     ] + [
         entity_ref("dataset", item, "dataset_id")
         for item in anchor_entities["datasets"]
@@ -331,6 +364,7 @@ def build_decision_context(
             },
             "context_summary": (
                 f"Found {len(questions)} questions, {len(notes)} notes, "
+                f"{len(experiments)} experiments, "
                 f"{len(datasets)} datasets, {len(analyses)} analyses, "
                 f"{len(claims)} claims, and {len(visualizations)} visualizations "
                 f"for {cleaned_task_kind}."
@@ -343,6 +377,7 @@ def build_decision_context(
                 analyses,
                 claims,
                 visualizations,
+                experiments=experiments,
             ),
             "write_front_door": write_front_door(
                 task_kind=cleaned_task_kind,
@@ -350,6 +385,7 @@ def build_decision_context(
                 anchors=anchors,
                 questions=questions,
                 sessions=sessions,
+                experiments=experiments,
                 datasets=datasets,
                 analyses=analyses,
                 claims=claims,
@@ -358,6 +394,7 @@ def build_decision_context(
             "questions": questions,
             "notes": notes,
             "sessions": sessions,
+            "experiments": experiments,
             "datasets": datasets,
             "analyses": analyses,
             "claims": claims,
@@ -376,6 +413,16 @@ def build_decision_context(
                         None,
                     ),
                     (
+                        "search.experiments",
+                        _search_truncation_payload(
+                            search_payload,
+                            "experiments",
+                            "experiments_count",
+                            resolved_limit,
+                        ),
+                        None,
+                    ),
+                    (
                         "search.notes",
                         _search_truncation_payload(
                             search_payload,
@@ -388,6 +435,7 @@ def build_decision_context(
                     ("questions", questions_payload, None),
                     ("notes", notes_payload, None),
                     ("sessions", sessions_payload, None),
+                    ("experiments", experiments_payload, None),
                     ("datasets", datasets_payload, None),
                     ("analyses", analyses_payload, None),
                     ("claims", claims_payload, None),

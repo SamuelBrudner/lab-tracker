@@ -23,12 +23,14 @@ from lab_tracker.services.shared import actor_user_fk, actor_user_id, ensure_non
 
 _TARGET_TYPES = {
     EntityType.QUESTION,
+    EntityType.EXPERIMENT,
     EntityType.DATASET,
     EntityType.ANALYSIS,
     EntityType.CLAIM,
 }
 _EVIDENCE_TYPES = {
     EntityType.QUESTION,
+    EntityType.EXPERIMENT,
     EntityType.DATASET,
     EntityType.NOTE,
     EntityType.SESSION,
@@ -473,6 +475,8 @@ class ExplorationService(BaseService):
     def _entity_project_id(self, ref: EntityRef) -> UUID:
         if ref.entity_type == EntityType.QUESTION:
             entity = self.repository.questions.get(ref.entity_id)
+        elif ref.entity_type == EntityType.EXPERIMENT:
+            entity = self.repository.experiments.get(ref.entity_id)
         elif ref.entity_type == EntityType.DATASET:
             entity = self.repository.datasets.get(ref.entity_id)
         elif ref.entity_type == EntityType.NOTE:

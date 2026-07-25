@@ -56,7 +56,7 @@ _MUTATED_MODELS = (
 )
 
 _EVIDENCE_BUNDLE_REVISION = "0055_evidence_bundles"
-_CURRENT_HEAD_REVISION = "0056_claim_confidence_bounds"
+_CURRENT_HEAD_REVISION = "0059_dataset_collection_snapshot_links"
 _PRINCIPAL_CAPTURE_KEY_REVISION = "0054_project_capture_key_principal_scope"
 
 

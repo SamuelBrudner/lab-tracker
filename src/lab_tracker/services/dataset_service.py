@@ -7,6 +7,10 @@ from typing import TYPE_CHECKING
 from uuid import UUID, uuid4
 
 from lab_tracker.auth import AuthContext
+from lab_tracker.collection_models import (
+    DatasetCollectionSnapshotReference,
+    snapshot_with_capture_observation,
+)
 from lab_tracker.errors import NotFoundError, OpaqueTargetNotFoundError, ValidationError
 from lab_tracker.models import (
     Dataset,
@@ -149,15 +153,24 @@ class DatasetService(BaseService):
         resolved_manifest = build_commit_manifest(
             commit_manifest,
             question_links,
+            collection_snapshots=self._resolve_collection_snapshots(
+                _collection_snapshot_ids(commit_manifest),
+                project_id=project_id,
+                source_session_id=_manifest_source_session_id(commit_manifest),
+                require_complete=commit_requested,
+            ),
         )
         self.validate_source_session(resolved_manifest.source_session_id, project_id)
         if (
             status == DatasetStatus.COMMITTED
             and not resolved_manifest.files
             and not resolved_manifest.external_artifacts
+            and not resolved_manifest.collection_snapshots
         ):
             raise ValidationError(
-                "At least one file or external artifact is required to commit a dataset."
+                "At least one file or external artifact is required to commit "
+                "a dataset. A complete collection snapshot also satisfies "
+                "this requirement."
             )
         resolved_commit_hash = compute_commit_hash(resolved_manifest)
         validate_commit_hash(commit_hash, resolved_commit_hash)
@@ -323,6 +336,21 @@ class DatasetService(BaseService):
                 question = self.questions.get_question(link.question_id)
                 if question.project_id != dataset.project_id:
                     raise ValidationError("Question links must belong to the same project.")
+            parent_experiments, _ = self.repository.query_experiments(
+                dataset_id=dataset.dataset_id,
+                limit=None,
+                offset=0,
+            )
+            missing_experiments = [
+                experiment.name
+                for experiment in parent_experiments
+                if not any(link.question_id == experiment.primary_question_id for link in links)
+            ]
+            if missing_experiments:
+                names = ", ".join(sorted(missing_experiments))
+                raise ValidationError(
+                    f"Dataset must retain every parent Experiment question: {names}"
+                )
             dataset.question_links = links
             dataset.primary_question_id = primary_links[0].question_id
 
@@ -362,6 +390,7 @@ class DatasetService(BaseService):
                 base_manifest = DatasetCommitManifestInput(
                     files=files,
                     external_artifacts=base_manifest.external_artifacts,
+                    collection_snapshot_ids=(base_manifest.collection_snapshot_ids),
                     metadata=base_manifest.metadata,
                     nwb_metadata=base_manifest.nwb_metadata,
                     bids_metadata=base_manifest.bids_metadata,
@@ -372,15 +401,24 @@ class DatasetService(BaseService):
             resolved_manifest = build_commit_manifest(
                 base_manifest,
                 dataset.question_links,
+                collection_snapshots=self._resolve_collection_snapshots(
+                    base_manifest.collection_snapshot_ids,
+                    project_id=dataset.project_id,
+                    source_session_id=base_manifest.source_session_id,
+                    require_complete=commit_requested,
+                ),
             )
             self.validate_source_session(resolved_manifest.source_session_id, dataset.project_id)
             if (
                 commit_requested
                 and not resolved_manifest.files
                 and not resolved_manifest.external_artifacts
+                and not resolved_manifest.collection_snapshots
             ):
                 raise ValidationError(
-                    "At least one file or external artifact is required to commit a dataset."
+                    "At least one file or external artifact is required to "
+                    "commit a dataset. A complete collection snapshot also "
+                    "satisfies this requirement."
                 )
             resolved_commit_hash = compute_commit_hash(resolved_manifest)
             validate_commit_hash(
@@ -430,6 +468,13 @@ class DatasetService(BaseService):
             raise ValidationError(
                 "Only staged, unreferenced datasets can be deleted; archive committed datasets."
             )
+        experiments, _ = self.repository.query_experiments(
+            dataset_id=dataset.dataset_id,
+            limit=None,
+            offset=0,
+        )
+        if experiments:
+            raise ValidationError("Dataset cannot be deleted while Experiments reference it.")
         claims = self.query_from_repository(
             loader=lambda repository: repository.query_claims(
                 dataset_id=dataset.dataset_id,
@@ -458,3 +503,89 @@ class DatasetService(BaseService):
             raise ValidationError("Source session must belong to the same project.")
         if session.session_type != SessionType.OPERATIONAL:
             raise ValidationError("Only operational sessions can be promoted to datasets.")
+
+    def _resolve_collection_snapshots(
+        self,
+        snapshot_ids: Iterable[UUID],
+        *,
+        project_id: UUID,
+        source_session_id: UUID | None,
+        require_complete: bool,
+    ) -> list[DatasetCollectionSnapshotReference]:
+        resolved: list[DatasetCollectionSnapshotReference] = []
+        incomplete_keys: list[str] = []
+        for snapshot_id in unique_ids(snapshot_ids):
+            snapshot = self.repository.acquisition_collections.get_snapshot(snapshot_id)
+            if snapshot is None:
+                raise ValidationError(f"Collection snapshot does not exist: {snapshot_id}")
+            collection = self.repository.acquisition_collections.get(snapshot.collection_id)
+            if collection is None:
+                raise ValidationError(f"Collection does not exist for snapshot: {snapshot_id}")
+            session = self.sessions.get_session(collection.session_id)
+            if session.project_id != project_id:
+                raise ValidationError(
+                    "Collection snapshots must belong to the same project as the Dataset."
+                )
+            if source_session_id is not None and collection.session_id != source_session_id:
+                raise ValidationError(
+                    "Collection snapshots must belong to the Dataset source Session."
+                )
+            if require_complete and not snapshot.complete:
+                incomplete_keys.append(collection.collection_key)
+            capture = None
+            if (
+                collection.current_snapshot_id == snapshot.snapshot_id
+                and collection.current_capture_id is not None
+            ):
+                capture = self.repository.acquisition_collections.get_capture_by_id(
+                    collection.current_capture_id
+                )
+            if capture is None:
+                capture = self.repository.acquisition_collections.get_latest_capture_for_snapshot(
+                    snapshot.snapshot_id
+                )
+            observed_snapshot = snapshot_with_capture_observation(
+                snapshot,
+                capture,
+            )
+            resolved.append(
+                DatasetCollectionSnapshotReference(
+                    snapshot_id=snapshot.snapshot_id,
+                    collection_id=collection.collection_id,
+                    collection_key=collection.collection_key,
+                    manifest_hash=snapshot.manifest_hash,
+                    member_count=snapshot.member_count,
+                    total_size_bytes=snapshot.total_size_bytes,
+                    source_provider=observed_snapshot.source_provider,
+                    source_uri=observed_snapshot.source_uri,
+                    observed_at=observed_snapshot.observed_at,
+                    client_capture_id=observed_snapshot.client_capture_id,
+                    complete=observed_snapshot.complete,
+                    capture_actor_user_id=(observed_snapshot.capture_actor_user_id),
+                    capture_principal_type=(observed_snapshot.capture_principal_type),
+                    capture_principal_instance_id=(observed_snapshot.capture_principal_instance_id),
+                    capture_principal_label=(observed_snapshot.capture_principal_label),
+                )
+            )
+        if incomplete_keys:
+            names = ", ".join(sorted(set(incomplete_keys)))
+            raise ValidationError(
+                f"Collection snapshots must be complete before Dataset commit: {names}"
+            )
+        return resolved
+
+
+def _collection_snapshot_ids(
+    manifest: DatasetCommitManifestInput | DatasetCommitManifest | None,
+) -> list[UUID]:
+    if manifest is None:
+        return []
+    if isinstance(manifest, DatasetCommitManifest):
+        return [snapshot.snapshot_id for snapshot in manifest.collection_snapshots]
+    return list(manifest.collection_snapshot_ids)
+
+
+def _manifest_source_session_id(
+    manifest: DatasetCommitManifestInput | DatasetCommitManifest | None,
+) -> UUID | None:
+    return None if manifest is None else manifest.source_session_id

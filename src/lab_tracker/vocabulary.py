@@ -567,6 +567,93 @@ TERMS: tuple[Term, ...] = (
         "Free-form metadata captured about the external artifact.",
         is_json=True,
     ),
+    # --- Experiments and acquisition collections ---
+    Term(
+        "collection",
+        "lab:collection",
+        "The logical acquisition collection that owns this immutable snapshot.",
+        is_id=True,
+    ),
+    Term(
+        "collectionKey",
+        "lab:collectionKey",
+        "Watch-configured immutable key identifying an acquisition collection.",
+    ),
+    Term(
+        "hadMember",
+        "prov:hadMember",
+        "A member entity contained by a PROV collection.",
+        is_id=True,
+    ),
+    Term(
+        "manifestHash",
+        "lab:manifestHash",
+        "SHA-256 identity of a canonical acquisition collection manifest.",
+    ),
+    Term(
+        "memberCount",
+        "lab:memberCount",
+        "Number of files represented by a collection snapshot.",
+    ),
+    Term(
+        "observedAt",
+        "lab:observedAt",
+        "When the acquisition collection was observed, ISO 8601.",
+    ),
+    Term(
+        "sourceProvider",
+        "lab:sourceProvider",
+        "Acquisition system or provider that reported the collection.",
+    ),
+    Term(
+        "sourceUri",
+        "lab:sourceUri",
+        "Location of the collection in its acquisition system.",
+        is_id=True,
+    ),
+    Term(
+        "totalSizeBytes",
+        "lab:totalSizeBytes",
+        "Sum of member sizes represented by a collection snapshot.",
+    ),
+    Term(
+        "archivedAt",
+        "lab:archivedAt",
+        "When an Experiment became immutable and archived, ISO 8601.",
+    ),
+    Term(
+        "closedAt",
+        "lab:closedAt",
+        "When an Experiment stopped accepting Session memberships, ISO 8601.",
+    ),
+    Term(
+        "description",
+        "lab:description",
+        "Human-readable description of an Experiment.",
+    ),
+    Term(
+        "hasDataset",
+        "lab:hasDataset",
+        "A Dataset grouped by an Experiment.",
+        is_id=True,
+    ),
+    Term(
+        "hasSession",
+        "lab:hasSession",
+        "A Session grouped by an Experiment.",
+        is_id=True,
+    ),
+    Term(
+        "name",
+        "lab:name",
+        "Human-readable Experiment name.",
+    ),
+    Term(
+        "partOfExperiment",
+        "lab:partOfExperiment",
+        "The Experiment that groups this Session or Dataset.",
+        is_id=True,
+    ),
     # --- ARA artifacts: layered question/goal exports ---
     Term(
         "scope",

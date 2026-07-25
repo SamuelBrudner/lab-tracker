@@ -21,6 +21,7 @@ from lab_tracker.models import (
     AnalysisStatus,
     ClaimStatus,
     DatasetStatus,
+    ExperimentStatus,
     GoalLinkStatus,
     GoalStatus,
     GoalType,
@@ -48,6 +49,8 @@ QUESTION_STATUS_VALUES = tuple(status.value for status in QuestionStatus)
 QUESTION_STATUS_TEXT = ", ".join(QUESTION_STATUS_VALUES)
 DATASET_STATUS_VALUES = tuple(status.value for status in DatasetStatus)
 DATASET_STATUS_TEXT = ", ".join(DATASET_STATUS_VALUES)
+EXPERIMENT_STATUS_VALUES = tuple(status.value for status in ExperimentStatus)
+EXPERIMENT_STATUS_TEXT = ", ".join(EXPERIMENT_STATUS_VALUES)
 ANALYSIS_STATUS_VALUES = tuple(status.value for status in AnalysisStatus)
 ANALYSIS_STATUS_TEXT = ", ".join(ANALYSIS_STATUS_VALUES)
 CLAIM_STATUS_VALUES = tuple(status.value for status in ClaimStatus)
@@ -333,6 +336,62 @@ class LabTrackerAPIClient:
             },
         )
 
+    def list_experiments(
+        self,
+        *,
+        project_id: str | None = None,
+        primary_question_id: str | None = None,
+        status: str | None = None,
+        search: str | None = None,
+        session_id: str | None = None,
+        dataset_id: str | None = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> JsonObject:
+        return self._request(
+            "GET",
+            "/experiments",
+            params={
+                "project_id": project_id,
+                "primary_question_id": primary_question_id,
+                "status": _validate_experiment_status(status),
+                "search": search,
+                "session_id": session_id,
+                "dataset_id": dataset_id,
+                "limit": limit,
+                "offset": offset,
+            },
+        )
+
+    def get_experiment(self, experiment_id: str) -> JsonObject:
+        return self._request("GET", f"/experiments/{experiment_id}")
+
+    def list_experiment_sessions(
+        self,
+        experiment_id: str,
+        *,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> JsonObject:
+        return self._request(
+            "GET",
+            f"/experiments/{experiment_id}/sessions",
+            params={"limit": limit, "offset": offset},
+        )
+
+    def list_experiment_datasets(
+        self,
+        experiment_id: str,
+        *,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> JsonObject:
+        return self._request(
+            "GET",
+            f"/experiments/{experiment_id}/datasets",
+            params={"limit": limit, "offset": offset},
+        )
+
     def list_datasets(
         self,
         *,
@@ -524,6 +583,7 @@ class LabTrackerAPIClient:
         query: str,
         project_id: str | None = None,
         question_id: str | None = None,
+        experiment_id: str | None = None,
         dataset_id: str | None = None,
         analysis_id: str | None = None,
         claim_id: str | None = None,
@@ -539,6 +599,7 @@ class LabTrackerAPIClient:
                     "query": query,
                     "project_id": project_id,
                     "question_id": question_id,
+                    "experiment_id": experiment_id,
                     "dataset_id": dataset_id,
                     "analysis_id": analysis_id,
                     "claim_id": claim_id,
@@ -615,6 +676,43 @@ class LabTrackerAPIClient:
                 "hypothesis": hypothesis,
                 "status": status,
                 "parent_question_ids": parent_question_ids,
+            },
+        )
+
+    def create_experiment(
+        self,
+        *,
+        project_id: str,
+        name: str,
+        primary_question_id: str,
+        description: str | None = None,
+    ) -> JsonObject:
+        return self._request(
+            "POST",
+            "/experiments",
+            json_payload={
+                "project_id": project_id,
+                "name": name,
+                "primary_question_id": primary_question_id,
+                "description": description,
+            },
+        )
+
+    def update_experiment(
+        self,
+        *,
+        experiment_id: str,
+        name: str | None = None,
+        description: str | None = None,
+        status: str | None = None,
+    ) -> JsonObject:
+        return self._request(
+            "PATCH",
+            f"/experiments/{experiment_id}",
+            json_payload={
+                "name": name,
+                "description": description,
+                "status": _validate_experiment_status(status),
             },
         )
 
@@ -1120,6 +1218,15 @@ def _validate_dataset_status(status: str | None) -> str | None:
         label="dataset status",
         allowed_values=DATASET_STATUS_VALUES,
         allowed_text=DATASET_STATUS_TEXT,
+    )
+
+
+def _validate_experiment_status(status: str | None) -> str | None:
+    return _validate_status(
+        status,
+        label="experiment status",
+        allowed_values=EXPERIMENT_STATUS_VALUES,
+        allowed_text=EXPERIMENT_STATUS_TEXT,
     )
 
 

@@ -3,13 +3,24 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
 from urllib.parse import quote
 from uuid import UUID
 
+from lab_tracker.collection_manifest import (
+    MAX_COLLECTION_MEMBERS,
+    canonicalize_collection_manifest,
+)
+from lab_tracker.collection_models import (
+    AcquisitionCollectionManifest,
+    AcquisitionCollectionMember,
+    DatasetCollectionSnapshotReference,
+)
 from lab_tracker.db_types import ensure_uuid
+from lab_tracker.errors import ValidationError
 from lab_tracker.models import (
     Analysis,
     Claim,
@@ -21,6 +32,7 @@ from lab_tracker.models import (
     EntityRef,
     EntityType,
     EntityVersion,
+    Experiment,
     ExplorationNode,
     ExternalArtifactKind,
     ExternalArtifactReference,
@@ -63,7 +75,15 @@ def _terms_iri(base_url: str) -> str:
     return f"{normalized}/terms#"
 
 
-def _context(base_url: str) -> dict[str, object]:
+def _context(
+    base_url: str,
+    *,
+    acquisition_collections: bool = False,
+    experiments: bool = False,
+) -> dict[str, object]:
+    # The vocabulary registry owns the full JSON-LD context; the keyword
+    # flags document which optional graph families the caller may emit.
+    del acquisition_collections, experiments
     return build_context(base_url)
 
 
@@ -168,6 +188,7 @@ def _entity_origin_value(entity: object) -> EntityOrigin:
 # entity's summary-node @id.
 _ORIGIN_ENTITY_RESOURCES = {
     "Dataset": ("dataset_id", "datasets"),
+    "Experiment": ("experiment_id", "experiments"),
     "Analysis": ("analysis_id", "analyses"),
     "Claim": ("claim_id", "claims"),
     "Visualization": ("viz_id", "visualizations"),
@@ -354,6 +375,168 @@ def _file_entity_id(base_url: str, dataset: Dataset, file: DatasetFile) -> str:
     )
 
 
+MAX_PROVENANCE_COLLECTION_MEMBERS = MAX_COLLECTION_MEMBERS
+
+
+def _collection_snapshot_iri(
+    base_url: str,
+    snapshot: DatasetCollectionSnapshotReference,
+) -> str:
+    return _resource_iri(
+        base_url,
+        "collection-snapshots",
+        snapshot.snapshot_id,
+    )
+
+
+def _collection_member_iri(
+    base_url: str,
+    snapshot: DatasetCollectionSnapshotReference,
+    member: AcquisitionCollectionMember,
+) -> str:
+    return _synthetic_child_iri(
+        _collection_snapshot_iri(base_url, snapshot),
+        "members",
+        member.path,
+    )
+
+
+def _sorted_collection_snapshots(
+    snapshots: list[DatasetCollectionSnapshotReference],
+) -> list[DatasetCollectionSnapshotReference]:
+    return sorted(
+        snapshots,
+        key=lambda snapshot: (
+            snapshot.collection_key,
+            snapshot.manifest_hash,
+            str(snapshot.snapshot_id),
+        ),
+    )
+
+
+def _unique_collection_snapshots(
+    datasets: list[Dataset],
+) -> list[DatasetCollectionSnapshotReference]:
+    by_snapshot_id: dict[UUID, DatasetCollectionSnapshotReference] = {}
+    for dataset in datasets:
+        for snapshot in dataset.commit_manifest.collection_snapshots:
+            existing = by_snapshot_id.setdefault(snapshot.snapshot_id, snapshot)
+            if (
+                existing.manifest_hash != snapshot.manifest_hash
+                or existing.collection_id != snapshot.collection_id
+                or existing.collection_key != snapshot.collection_key
+                or existing.member_count != snapshot.member_count
+                or existing.total_size_bytes != snapshot.total_size_bytes
+            ):
+                raise ValidationError(
+                    "A collection snapshot ID has conflicting committed provenance."
+                )
+    return sorted(by_snapshot_id.values(), key=lambda value: str(value.snapshot_id))
+
+
+def validate_collection_member_expansion(
+    datasets: list[Dataset],
+) -> list[DatasetCollectionSnapshotReference]:
+    """Validate the global expansion bound and return unique snapshot refs.
+
+    The bound is intentionally calculated across unique snapshots, not Dataset
+    references, so a shared immutable snapshot is expanded once in merged
+    analysis/claim graphs.
+    """
+
+    snapshots = _unique_collection_snapshots(datasets)
+    total_members = sum(snapshot.member_count for snapshot in snapshots)
+    if total_members > MAX_PROVENANCE_COLLECTION_MEMBERS:
+        raise ValidationError(
+            "Collection provenance expansion is limited to "
+            f"{MAX_PROVENANCE_COLLECTION_MEMBERS} total members; "
+            f"this export would expand {total_members}."
+        )
+    return snapshots
+
+
+def _verified_collection_manifest(
+    snapshot: DatasetCollectionSnapshotReference,
+    manifests: Mapping[UUID, AcquisitionCollectionManifest] | None,
+) -> AcquisitionCollectionManifest:
+    if manifests is None or snapshot.snapshot_id not in manifests:
+        raise ValidationError(
+            "Collection member expansion requires the managed manifest for "
+            f"snapshot {snapshot.snapshot_id}."
+        )
+    manifest = AcquisitionCollectionManifest.model_validate(
+        manifests[snapshot.snapshot_id]
+    )
+    canonical = canonicalize_collection_manifest(
+        schema_version=manifest.schema_version,
+        members=manifest.members,
+    )
+    if (
+        canonical.manifest_hash != snapshot.manifest_hash
+        or canonical.member_count != snapshot.member_count
+        or canonical.total_size_bytes != snapshot.total_size_bytes
+    ):
+        raise ValidationError(
+            "Managed collection manifest does not match the committed "
+            f"snapshot reference {snapshot.snapshot_id}."
+        )
+    return AcquisitionCollectionManifest.model_validate(canonical.as_dict())
+
+
+def _collection_snapshot_nodes(
+    base_url: str,
+    snapshot: DatasetCollectionSnapshotReference,
+    *,
+    expand_members: bool,
+    manifests: Mapping[UUID, AcquisitionCollectionManifest] | None,
+) -> list[dict[str, object]]:
+    snapshot_iri = _collection_snapshot_iri(base_url, snapshot)
+    node: dict[str, object] = {
+        "@id": snapshot_iri,
+        "@type": [
+            "prov:Entity",
+            "prov:Collection",
+            "lab:AcquisitionCollectionSnapshot",
+        ],
+        "collection": {
+            "@id": _resource_iri(
+                base_url,
+                "collections",
+                snapshot.collection_id,
+            )
+        },
+        "collectionKey": snapshot.collection_key,
+        "manifestHash": snapshot.manifest_hash,
+        "memberCount": snapshot.member_count,
+        "totalSizeBytes": snapshot.total_size_bytes,
+        "observedAt": _isoformat(snapshot.observed_at),
+    }
+    if snapshot.source_provider is not None:
+        node["sourceProvider"] = snapshot.source_provider
+    if snapshot.source_uri is not None:
+        node["sourceUri"] = snapshot.source_uri
+    if not expand_members:
+        return [node]
+
+    manifest = _verified_collection_manifest(snapshot, manifests)
+    members = sorted(manifest.members, key=lambda member: member.path)
+    node["hadMember"] = [
+        {"@id": _collection_member_iri(base_url, snapshot, member)}
+        for member in members
+    ]
+    member_nodes = [
+        {
+            "@id": _collection_member_iri(base_url, snapshot, member),
+            "@type": "prov:Entity",
+            "filePath": member.path,
+            "checksum": member.checksum,
+            "sizeBytes": member.size_bytes,
+        }
+        for member in members
+    ]
+    return [node, *member_nodes]
+
+
 def _question_link_id(base_url: str, dataset: Dataset, question_id: object) -> str:
     return _synthetic_child_iri(
         _resource_iri(base_url, "datasets", dataset.dataset_id),
@@ -434,6 +617,12 @@ def build_dataset_provenance_document(
     dataset: Dataset,
     *,
     supervision_edges: list[SupervisionEdge] | None = None,
+    expand_collection_members: bool = False,
+    collection_manifests: Mapping[
+        UUID,
+        AcquisitionCollectionManifest,
+    ]
+    | None = None,
 ) -> dict[str, object]:
     dataset_iri = _resource_iri(base_url, "datasets", dataset.dataset_id)
     commit_activity_iri = _synthetic_child_iri(dataset_iri, "provenance", "commit")
@@ -441,6 +630,11 @@ def build_dataset_provenance_document(
     question_links = _sorted_question_links(dataset.commit_manifest.question_links)
     notes = sorted(dataset.commit_manifest.note_ids, key=str)
     external_artifacts = _manifest_external_artifacts(dataset.commit_manifest)
+    collection_snapshots = _sorted_collection_snapshots(
+        dataset.commit_manifest.collection_snapshots
+    )
+    if expand_collection_members:
+        validate_collection_member_expansion([dataset])
     people: dict[str, dict[str, object]] = {}
     supervision_edges = supervision_edges or []
     graph: list[dict[str, object]] = []
@@ -478,7 +672,15 @@ def build_dataset_provenance_document(
         for artifact in external_artifacts
         if artifact.kind == ExternalArtifactKind.ENTITY
     ]
-    used_entities = [*used_files, *used_external_entities]
+    used_collections = [
+        {"@id": _collection_snapshot_iri(base_url, snapshot)}
+        for snapshot in collection_snapshots
+    ]
+    used_entities = [
+        *used_files,
+        *used_external_entities,
+        *used_collections,
+    ]
     if used_entities:
         commit_node["used"] = used_entities
 
@@ -520,10 +722,25 @@ def build_dataset_provenance_document(
     graph.extend(_origin_provenance_nodes(base_url, dataset))
     graph.extend(_dataset_file_node(base_url, dataset, file) for file in files)
     graph.extend(_external_artifact_node(artifact) for artifact in external_artifacts)
+    for snapshot in collection_snapshots:
+        graph.extend(
+            _collection_snapshot_nodes(
+                base_url,
+                snapshot,
+                expand_members=expand_collection_members,
+                manifests=collection_manifests,
+            )
+        )
     graph.extend(_dataset_question_link_node(base_url, dataset, link) for link in question_links)
     graph.extend(people[user_id] for user_id in sorted(people))
 
-    return {"@context": _context(base_url), "@graph": graph}
+    return {
+        "@context": _context(
+            base_url,
+            acquisition_collections=bool(collection_snapshots),
+        ),
+        "@graph": graph,
+    }
 
 
 def _dataset_summary_node(base_url: str, dataset: Dataset) -> dict[str, object]:
@@ -580,9 +797,17 @@ def build_claim_provenance_document(
     visualizations: list[Visualization],
     claim_edges: list[ClaimEdge] | None = None,
     supervision_edges: list[SupervisionEdge] | None = None,
+    expand_collection_members: bool = False,
+    collection_manifests: Mapping[
+        UUID,
+        AcquisitionCollectionManifest,
+    ]
+    | None = None,
 ) -> dict[str, object]:
     supervision_edges = supervision_edges or []
     claim_edges = claim_edges or []
+    if expand_collection_members:
+        validate_collection_member_expansion(datasets)
     people: dict[str, dict[str, object]] = {}
     merged: dict[str, dict[str, Any]] = {}
     datasets_by_id = {dataset.dataset_id: dataset for dataset in datasets}
@@ -610,6 +835,8 @@ def build_claim_provenance_document(
             base_url,
             dataset,
             supervision_edges=supervision_edges,
+            expand_collection_members=expand_collection_members,
+            collection_manifests=collection_manifests,
         )
         graph = document.get("@graph", [])
         if isinstance(graph, list):
@@ -681,7 +908,16 @@ def build_claim_provenance_document(
         person = people[user_id]
         merged[str(person["@id"])] = person
 
-    return {"@context": _context(base_url), "@graph": list(merged.values())}
+    return {
+        "@context": _context(
+            base_url,
+            acquisition_collections=any(
+                dataset.commit_manifest.collection_snapshots
+                for dataset in datasets
+            ),
+        ),
+        "@graph": list(merged.values()),
+    }
 
 
 def _analysis_agent_node(base_url: str, executed_by: str) -> dict[str, object]:
@@ -887,10 +1123,23 @@ def build_analysis_provenance_document(
     visualizations: list[Visualization],
     claim_edges: list[ClaimEdge] | None = None,
     supervision_edges: list[SupervisionEdge] | None = None,
+    expand_collection_members: bool = False,
+    collection_manifests: Mapping[
+        UUID,
+        AcquisitionCollectionManifest,
+    ]
+    | None = None,
 ) -> dict[str, object]:
     analysis_iri = _resource_iri(base_url, "analyses", analysis.analysis_id)
     supervision_edges = supervision_edges or []
     claim_edges = claim_edges or []
+    collection_datasets = [
+        dataset
+        for dataset in datasets
+        if dataset.commit_manifest.collection_snapshots
+    ]
+    if expand_collection_members:
+        validate_collection_member_expansion(collection_datasets)
     people: dict[str, dict[str, object]] = {}
     analysis_actor_user_id = _creator_user_id(
         analysis.executed_by_user_id,
@@ -1032,7 +1281,44 @@ def build_analysis_provenance_document(
         graph.extend(_origin_provenance_nodes(base_url, visualization))
     graph.extend(people[user_id] for user_id in sorted(people))
 
-    return {"@context": _context(base_url), "@graph": graph}
+    if collection_datasets:
+        merged_graph: dict[str, dict[str, Any]] = {}
+        _merge_graph_nodes(merged_graph, graph)
+        for dataset in collection_datasets:
+            document = build_dataset_provenance_document(
+                base_url,
+                dataset,
+                supervision_edges=supervision_edges,
+                expand_collection_members=expand_collection_members,
+                collection_manifests=collection_manifests,
+            )
+            dataset_iri = _resource_iri(
+                base_url,
+                "datasets",
+                dataset.dataset_id,
+            )
+            document_graph = document.get("@graph", [])
+            if not isinstance(document_graph, list):
+                continue
+            for node in document_graph:
+                if not isinstance(node, dict):
+                    continue
+                node_id = node.get("@id")
+                if not isinstance(node_id, str):
+                    continue
+                if node_id == dataset_iri and node_id in merged_graph:
+                    merged_graph[node_id].update(node)
+                else:
+                    merged_graph.setdefault(node_id, dict(node))
+        graph = list(merged_graph.values())
+
+    return {
+        "@context": _context(
+            base_url,
+            acquisition_collections=bool(collection_datasets),
+        ),
+        "@graph": graph,
+    }
 
 
 def _merge_graph_nodes(
@@ -1183,6 +1469,119 @@ def _session_node(
     return node
 
 
+def _experiment_node(
+    base_url: str,
+    experiment: Experiment,
+    *,
+    sessions: list[Session],
+    datasets: list[Dataset],
+    people: dict[str, dict[str, object]],
+    supervision_edges: list[SupervisionEdge],
+) -> dict[str, object]:
+    node: dict[str, object] = {
+        "@id": _resource_iri(
+            base_url,
+            "experiments",
+            experiment.experiment_id,
+        ),
+        "@type": ["prov:Activity", "lab:Experiment"],
+        "name": experiment.name,
+        "status": experiment.status.value,
+        "primaryQuestion": {
+            "@id": _resource_iri(
+                base_url,
+                "questions",
+                experiment.primary_question_id,
+            )
+        },
+        "createdAt": _isoformat(experiment.created_at),
+        "updatedAt": _isoformat(experiment.updated_at),
+    }
+    if experiment.description:
+        node["description"] = experiment.description
+    if experiment.closed_at is not None:
+        node["closedAt"] = _isoformat(experiment.closed_at)
+    if experiment.archived_at is not None:
+        node["archivedAt"] = _isoformat(experiment.archived_at)
+    if sessions:
+        node["hasSession"] = [
+            {"@id": _resource_iri(base_url, "sessions", session.session_id)}
+            for session in sorted(sessions, key=lambda value: str(value.session_id))
+        ]
+    if datasets:
+        node["hasDataset"] = [
+            {"@id": _resource_iri(base_url, "datasets", dataset.dataset_id)}
+            for dataset in sorted(datasets, key=lambda value: str(value.dataset_id))
+        ]
+    _apply_origin_provenance(base_url, node, experiment)
+    creator_user_id = _creator_user_id(
+        experiment.created_by_user_id,
+        experiment.created_by,
+    )
+    if creator_user_id is not None:
+        node["prov:wasAssociatedWith"] = {
+            "@id": _agent_iri(base_url, creator_user_id)
+        }
+        _add_person_with_supervision(
+            people,
+            base_url,
+            creator_user_id,
+            activity_time=experiment.created_at,
+            supervision_edges=supervision_edges,
+        )
+    return node
+
+
+def build_experiment_provenance_document(
+    base_url: str,
+    experiment: Experiment,
+    *,
+    sessions: list[Session],
+    datasets: list[Dataset],
+    supervision_edges: list[SupervisionEdge] | None = None,
+) -> dict[str, object]:
+    """Build compact Experiment provenance and explicit membership edges."""
+
+    resolved_supervision_edges = supervision_edges or []
+    people: dict[str, dict[str, object]] = {}
+    experiment_iri = _resource_iri(
+        base_url,
+        "experiments",
+        experiment.experiment_id,
+    )
+    graph: list[dict[str, object]] = [
+        _experiment_node(
+            base_url,
+            experiment,
+            sessions=sessions,
+            datasets=datasets,
+            people=people,
+            supervision_edges=resolved_supervision_edges,
+        )
+    ]
+    graph.extend(_origin_provenance_nodes(base_url, experiment))
+    for session in sorted(sessions, key=lambda value: str(value.session_id)):
+        session_node = _session_node(
+            base_url,
+            session,
+            people=people,
+            supervision_edges=resolved_supervision_edges,
+        )
+        session_node["partOfExperiment"] = {"@id": experiment_iri}
+        graph.append(session_node)
+        graph.extend(_origin_provenance_nodes(base_url, session))
+    for dataset in sorted(datasets, key=lambda value: str(value.dataset_id)):
+        dataset_node = _dataset_summary_node(base_url, dataset)
+        dataset_node["partOfExperiment"] = {"@id": experiment_iri}
+        graph.append(dataset_node)
+        graph.extend(_origin_provenance_nodes(base_url, dataset))
+    graph.extend(people[user_id] for user_id in sorted(people))
+    return {
+        "@context": _context(base_url, experiments=True),
+        "@graph": graph,
+    }
+
+
 _ENTITY_RESOURCE_NAMES = {
     "analysis": "analyses",
     "claim": "claims",
@@ -1258,7 +1657,13 @@ def build_ara_artifact_document(
         records=records,
     )
     return {
-        "@context": _context(base_url),
+        "@context": _context(
+            base_url,
+            acquisition_collections=any(
+                dataset.commit_manifest.collection_snapshots
+                for dataset in records.datasets
+            ),
+        ),
         "@id": artifact_iri,
         "@type": "lab:AraArtifact",
         "scope": _scope_ref(base_url, scope_type, scope_id),
@@ -1306,7 +1711,13 @@ def _build_ara_layer_document(
     supervision_edges: list[SupervisionEdge],
 ) -> dict[str, object]:
     return {
-        "@context": _context(base_url),
+        "@context": _context(
+            base_url,
+            acquisition_collections=any(
+                dataset.commit_manifest.collection_snapshots
+                for dataset in records.datasets
+            ),
+        ),
         "@id": _ara_layer_iri(base_url, scope_type, scope_id, layer_name),
         "@type": ["prov:Bundle", "lab:AraLayer"],
         "layer": layer_name,
@@ -1940,4 +2351,13 @@ def build_record_export_provenance_document(
         person = people[user_id]
         merged[str(person["@id"])] = person
 
-    return {"@context": _context(base_url), "@graph": list(merged.values())}
+    return {
+        "@context": _context(
+            base_url,
+            acquisition_collections=any(
+                dataset.commit_manifest.collection_snapshots
+                for dataset in records.datasets
+            ),
+        ),
+        "@graph": list(merged.values()),
+    }

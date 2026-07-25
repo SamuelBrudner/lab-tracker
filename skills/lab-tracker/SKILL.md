@@ -126,6 +126,10 @@ Read tools:
 - `lab_tracker_list_notes`: List notes for known scope; use decision context first for research choices.
 - `lab_tracker_search`: Search questions and notes when the project or anchor IDs are not known.
 - `lab_tracker_list_sessions`: List acquisition/experiment sessions for a known project scope.
+- `lab_tracker_list_experiments`: List Experiments and filter by Question, Session, Dataset, status, or text.
+- `lab_tracker_get_experiment`: Get one Experiment by ID, including lifecycle and primary Question.
+- `lab_tracker_list_experiment_sessions`: List paginated Session memberships for one Experiment.
+- `lab_tracker_list_experiment_datasets`: List paginated Dataset memberships for one Experiment.
 - `lab_tracker_list_datasets`: List datasets; create-order is dataset -> analysis -> claim -> visualization.
 - `lab_tracker_list_analyses`: List analyses; use after datasets and before claims/visualizations.
 - `lab_tracker_list_claims`: List claims for known evidence; claims come after datasets and analyses.
@@ -147,6 +151,8 @@ Read tools:
 Write tools:
 - `lab_tracker_create_project`: Create a project only when the user explicitly asks for a new scope.
 - `lab_tracker_create_question`: Create a question after project/goal scope is known.
+- `lab_tracker_create_experiment`: Create a lightweight Experiment grouping only when the user explicitly asks.
+- `lab_tracker_update_experiment`: Update or advance an Experiment lifecycle only when the user explicitly asks.
 - `lab_tracker_refactor_question`: Supersede a question with a replacement and optional child/note moves.
 - `lab_tracker_create_note`: Create a text note when the user asks to record source context.
 - `lab_tracker_create_dataset`: Create a dataset before analyses, claims, and visualizations.
@@ -362,6 +368,7 @@ List/search endpoints use `limit` between 1 and 200 and `offset` of 0 or greater
 - `claim_id` (optional): string(uuid) | null
 - `created_by` (optional): string(uuid) | null
 - `dataset_id` (optional): string(uuid) | null
+- `experiment_id` (optional): string(uuid) | null
 - `limit` (optional): integer; minimum 1.0, maximum 100.0, default 20
 - `project_id` (optional): string(uuid) | null
 - `query` (required): string; min length 1
@@ -396,7 +403,7 @@ List/search endpoints use `limit` between 1 and 200 and `offset` of 0 or greater
 - `created_by` (optional): string | null
 - `since` (optional): string(date-time) | null
 - `until` (optional): string(date-time) | null
-- `target_entity_type` (optional): EntityType enum: project, question, dataset, note, session, analysis, claim, visualization, goal | null
+- `target_entity_type` (optional): EntityType enum: project, question, experiment, dataset, note, session, analysis, claim, visualization, goal | null
 - `target_entity_id` (optional): string(uuid) | null
 - `limit` (optional): integer; default 50; maximum 200 from shared route validation
 - `offset` (optional): integer; default 0; minimum 0 from shared route validation

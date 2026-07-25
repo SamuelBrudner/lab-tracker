@@ -14,6 +14,7 @@ from lab_tracker.models import (
     Dataset,
     EntityRef,
     EntityType,
+    Experiment,
     Goal,
     GraphDraftMode,
     Note,
@@ -27,6 +28,7 @@ from lab_tracker.models import (
 from lab_tracker.services.analysis_service import AnalysisService
 from lab_tracker.services.claim_service import ClaimService
 from lab_tracker.services.dataset_service import DatasetService
+from lab_tracker.services.experiment_service import ExperimentService
 from lab_tracker.services.goal_service import GoalService
 from lab_tracker.services.note_service import NoteService
 from lab_tracker.services.project_service import ProjectService
@@ -36,7 +38,16 @@ from lab_tracker.services.shared import is_meeting_note
 from lab_tracker.services.visualization_service import VisualizationService
 
 EntityResult = (
-    Project | Question | Note | Session | Dataset | Analysis | Claim | Visualization | Goal
+    Project
+    | Question
+    | Experiment
+    | Note
+    | Session
+    | Dataset
+    | Analysis
+    | Claim
+    | Visualization
+    | Goal
 )
 _RECENT_CONTEXT_LIMIT = 10
 _QUESTION_CONTEXT_LIMIT = 50
@@ -52,6 +63,7 @@ class GraphContextBuilder:
         notes: NoteService,
         sessions: SessionService,
         datasets: DatasetService,
+        experiments: ExperimentService | None = None,
         analyses: AnalysisService,
         claims: ClaimService,
         visualizations: VisualizationService,
@@ -62,6 +74,7 @@ class GraphContextBuilder:
         self.notes = notes
         self.sessions = sessions
         self.datasets = datasets
+        self.experiments = experiments
         self.analyses = analyses
         self.claims = claims
         self.visualizations = visualizations
@@ -110,6 +123,7 @@ class GraphContextBuilder:
             recent_notes = self._recent_notes_excluding(project_id, batch_ids_in_project)
             recent_sessions = self._recent_sessions(project_id)
             sessions_by_project[project_id] = recent_sessions
+            recent_experiments = self._recent_experiments(project_id)
             recent_datasets = self._recent_datasets(project_id)
             recent_analyses = self._recent_analyses(project_id)
             recent_claims = self._recent_claims(project_id)
@@ -125,6 +139,9 @@ class GraphContextBuilder:
                         _compact_question(item) for item in active_or_staged
                     ],
                     "recent_sessions": [_compact_session(item) for item in recent_sessions],
+                    "recent_experiments": [
+                        _compact_experiment(item) for item in recent_experiments
+                    ],
                     "recent_datasets": [_compact_dataset(item) for item in recent_datasets],
                     "recent_notes": [_compact_note(item) for item in recent_notes],
                     "recent_analyses": [_compact_analysis(item) for item in recent_analyses],
@@ -138,6 +155,7 @@ class GraphContextBuilder:
                         questions=active_or_staged,
                         superseded_questions=superseded,
                         sessions=recent_sessions,
+                        experiments=recent_experiments,
                         datasets=recent_datasets,
                         analyses=recent_analyses,
                         claims=recent_claims,
@@ -279,6 +297,7 @@ class GraphContextBuilder:
         questions, superseded_questions = self._question_context(note.project_id)
         recent_notes = self._recent_notes_excluding(note.project_id, {note.note_id})
         recent_sessions = self._recent_sessions(note.project_id)
+        recent_experiments = self._recent_experiments(note.project_id)
         recent_datasets = self._recent_datasets(note.project_id)
         recent_analyses = self._recent_analyses(note.project_id)
         recent_claims = self._recent_claims(note.project_id)
@@ -300,6 +319,9 @@ class GraphContextBuilder:
             },
             "active_or_staged_questions": [_compact_question(item) for item in questions],
             "recent_sessions": [_compact_session(item) for item in recent_sessions],
+            "recent_experiments": [
+                _compact_experiment(item) for item in recent_experiments
+            ],
             "recent_datasets": [_compact_dataset(item) for item in recent_datasets],
             "recent_notes": [_compact_note(item) for item in recent_notes],
             "recent_analyses": [_compact_analysis(item) for item in recent_analyses],
@@ -313,6 +335,7 @@ class GraphContextBuilder:
                 questions=questions,
                 superseded_questions=superseded_questions,
                 sessions=recent_sessions,
+                experiments=recent_experiments,
                 datasets=recent_datasets,
                 analyses=recent_analyses,
                 claims=recent_claims,
@@ -376,6 +399,9 @@ class GraphContextBuilder:
         getters = {
             EntityType.PROJECT: self.projects.get_project,
             EntityType.QUESTION: self.questions.get_question,
+            EntityType.EXPERIMENT: (
+                self.experiments.get_experiment if self.experiments is not None else None
+            ),
             EntityType.NOTE: self.notes.get_note,
             EntityType.SESSION: self.sessions.get_session,
             EntityType.DATASET: self.datasets.get_dataset,
@@ -458,6 +484,17 @@ class GraphContextBuilder:
         )
         return recent_sessions
 
+    def _recent_experiments(self, project_id: UUID) -> list[Experiment]:
+        if self.experiments is None:
+            return []
+        recent_experiments, _ = self.experiments.repository.query_experiments(
+            project_id=project_id,
+            limit=_RECENT_CONTEXT_LIMIT,
+            offset=0,
+            recent_first=True,
+        )
+        return recent_experiments
+
     def _recent_datasets(self, project_id: UUID) -> list[Dataset]:
         recent_datasets, _ = self.datasets.repository.query_datasets(
             project_id=project_id,
@@ -526,6 +563,9 @@ def _graph_context_summary(context_packet: dict[str, Any]) -> dict[str, Any]:
                 context_packet.get("active_or_staged_questions") or []
             ),
             "recent_sessions": len(context_packet.get("recent_sessions") or []),
+            "recent_experiments": len(
+                context_packet.get("recent_experiments") or []
+            ),
             "recent_datasets": len(context_packet.get("recent_datasets") or []),
             "recent_notes": len(context_packet.get("recent_notes") or []),
             "recent_analyses": len(context_packet.get("recent_analyses") or []),
@@ -584,6 +624,9 @@ def _graph_batch_context_summary(packet: dict[str, Any]) -> dict[str, Any]:
             ),
             "recent_notes": sum(len(p.get("recent_notes") or []) for p in projects),
             "recent_sessions": sum(len(p.get("recent_sessions") or []) for p in projects),
+            "recent_experiments": sum(
+                len(p.get("recent_experiments") or []) for p in projects
+            ),
             "recent_datasets": sum(len(p.get("recent_datasets") or []) for p in projects),
             "recent_analyses": sum(len(p.get("recent_analyses") or []) for p in projects),
             "recent_claims": sum(len(p.get("recent_claims") or []) for p in projects),
@@ -788,6 +831,20 @@ def _compact_session(session: Session) -> dict[str, Any]:
     return payload
 
 
+def _compact_experiment(experiment: Experiment) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "id": str(experiment.experiment_id),
+        "label": experiment.name,
+        "description": experiment.description,
+        "status": experiment.status.value,
+        "primary_question_id": str(experiment.primary_question_id),
+        "created_at": experiment.created_at.isoformat(),
+        "updated_at": experiment.updated_at.isoformat(),
+    }
+    _add_origin_context(payload, experiment)
+    return payload
+
+
 def _compact_dataset(dataset: Dataset) -> dict[str, Any]:
     payload: dict[str, Any] = {
         "id": str(dataset.dataset_id),
@@ -891,6 +948,7 @@ def _known_aliases(
     questions: list[Question],
     superseded_questions: list[Question],
     sessions: list[Session],
+    experiments: list[Experiment],
     datasets: list[Dataset],
     analyses: list[Analysis],
     claims: list[Claim],
@@ -933,6 +991,14 @@ def _known_aliases(
             ],
         }
         for item in sessions
+    )
+    aliases.extend(
+        {
+            "entity_type": EntityType.EXPERIMENT.value,
+            "entity_id": str(item.experiment_id),
+            "aliases": [item.name],
+        }
+        for item in experiments
     )
     aliases.extend(
         {
@@ -982,6 +1048,8 @@ def _entity_label(entity_type: EntityType, entity: EntityResult) -> str:
         return entity.name
     if entity_type == EntityType.QUESTION:
         return entity.text
+    if entity_type == EntityType.EXPERIMENT:
+        return entity.name
     if entity_type == EntityType.NOTE:
         return entity.transcribed_text or entity.raw_content or "(binary note)"
     if entity_type == EntityType.SESSION:
@@ -1004,6 +1072,8 @@ def entity_id(entity_type: EntityType, entity: EntityResult) -> UUID:
         return entity.project_id
     if entity_type == EntityType.QUESTION:
         return entity.question_id
+    if entity_type == EntityType.EXPERIMENT:
+        return entity.experiment_id
     if entity_type == EntityType.NOTE:
         return entity.note_id
     if entity_type == EntityType.SESSION:

@@ -20,6 +20,7 @@ from lab_tracker.db_models import ClaimModel
 
 _REVISION = "0056_claim_confidence_bounds"
 _PREVIOUS_REVISION = "0055_evidence_bundles"
+_HEAD_REVISION = "0059_dataset_collection_snapshot_links"
 _CONSTRAINT_NAME = "ck_claims_confidence_range"
 
 
@@ -236,9 +237,15 @@ def test_claim_model_declares_named_confidence_check() -> None:
     }
 
 
-def test_0056_is_the_single_alembic_head() -> None:
+def test_0056_remains_in_the_single_alembic_head_lineage() -> None:
     script = ScriptDirectory.from_config(_alembic_config())
-    assert script.get_heads() == [_REVISION]
+    assert script.get_heads() == [_HEAD_REVISION]
+    confidence_revision = script.get_revision(_REVISION)
+    assert confidence_revision is not None
+    assert confidence_revision.down_revision == _PREVIOUS_REVISION
+    assert _REVISION in {
+        revision.revision for revision in script.walk_revisions()
+    }
 
 
 def test_0056_sqlite_cycle_preserves_claim_schema_rows_and_child_links(

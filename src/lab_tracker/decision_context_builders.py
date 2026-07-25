@@ -26,6 +26,8 @@ def entity_label(entity_type: str, entity: JsonObject) -> str:
         return str(entity.get("name") or entity.get("project_id") or "")
     if entity_type == "question":
         return str(entity.get("text") or entity.get("question_id") or "")
+    if entity_type == "experiment":
+        return str(entity.get("name") or entity.get("experiment_id") or "")
     if entity_type == "note":
         text = str(
             entity.get("transcribed_text")
@@ -131,7 +133,10 @@ def task_guidance(
     analyses: list[JsonObject],
     claims: list[JsonObject],
     visualizations: list[JsonObject],
+    *,
+    experiments: list[JsonObject] | None = None,
 ) -> JsonObject:
+    experiments = experiments or []
     focus = [entity_label("question", item) for item in questions[:3]] or [query]
     caveats: list[str] = []
     missing_evidence: list[str] = []
@@ -164,6 +169,9 @@ def task_guidance(
         ] + [entity_ref("claim", item, "claim_id") for item in claims[:5]]
     elif task_kind == "experiment_plan":
         candidate_outputs = [
+            entity_ref("experiment", item, "experiment_id")
+            for item in experiments[:5]
+        ] + [
             entity_ref("question", item, "question_id") for item in questions[:5]
         ]
     elif task_kind == "research_writing":
@@ -209,8 +217,10 @@ def write_front_door(
     analyses: list[JsonObject],
     claims: list[JsonObject],
     visualizations: list[JsonObject],
+    experiments: list[JsonObject] | None = None,
 ) -> JsonObject:
     """Build write-oriented affordances for follow-on MCP create calls."""
+    experiments = experiments or []
     return {
         "call_first_for": (
             "Call lab_tracker_get_decision_context before research-facing "
@@ -228,6 +238,10 @@ def write_front_door(
             ],
             "sessions": [
                 entity_ref("session", item, "session_id") for item in sessions[:10]
+            ],
+            "experiments": [
+                entity_ref("experiment", item, "experiment_id")
+                for item in experiments[:10]
             ],
             "datasets": [
                 entity_ref("dataset", item, "dataset_id") for item in datasets[:10]

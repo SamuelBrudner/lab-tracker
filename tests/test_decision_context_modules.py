@@ -63,6 +63,13 @@ class FakeDecisionContextReader:
         "commit_hash": "dataset-commit",
         "status": "committed",
     }
+    experiment = {
+        "experiment_id": "experiment-1",
+        "project_id": "project-1",
+        "name": "Baseline control experiment",
+        "primary_question_id": "question-1",
+        "status": "active",
+    }
     analysis = {
         "analysis_id": "analysis-1",
         "project_id": "project-1",
@@ -103,6 +110,11 @@ class FakeDecisionContextReader:
     def get_dataset(self, dataset_id: str) -> JsonObject | None:
         return self.dataset if dataset_id == self.dataset["dataset_id"] else None
 
+    def get_experiment(self, experiment_id: str) -> JsonObject | None:
+        if experiment_id == self.experiment["experiment_id"]:
+            return self.experiment
+        return None
+
     def get_analysis(self, analysis_id: str) -> JsonObject | None:
         return self.analysis if analysis_id == self.analysis["analysis_id"] else None
 
@@ -125,12 +137,24 @@ class FakeDecisionContextReader:
     ) -> JsonObject:
         if project_id != "project-1":
             return {
-                "data": {"questions": [], "notes": []},
-                "meta": {"questions_count": 0, "notes_count": 0},
+                "data": {"questions": [], "experiments": [], "notes": []},
+                "meta": {
+                    "questions_count": 0,
+                    "experiments_count": 0,
+                    "notes_count": 0,
+                },
             }
         return {
-            "data": {"questions": [self.question], "notes": [self.note]},
-            "meta": {"questions_count": 1, "notes_count": 1},
+            "data": {
+                "questions": [self.question],
+                "experiments": [self.experiment],
+                "notes": [self.note],
+            },
+            "meta": {
+                "questions_count": 1,
+                "experiments_count": 1,
+                "notes_count": 1,
+            },
         }
 
     def project_ids_with_search_matches(self, query: str, *, limit: int = 50) -> set[str]:
@@ -181,6 +205,19 @@ class FakeDecisionContextReader:
         recent_first: bool = False,
     ) -> JsonObject:
         return _envelope([], limit=limit, offset=offset)
+
+    def list_experiments(
+        self,
+        *,
+        project_id: str | None = None,
+        status: str | None = None,
+        primary_question_id: str | None = None,
+        search: str | None = None,
+        limit: int = 50,
+        offset: int = 0,
+        recent_first: bool = False,
+    ) -> JsonObject:
+        return _envelope([self.experiment], limit=limit, offset=offset)
 
     def list_datasets(
         self,
@@ -318,10 +355,14 @@ def test_build_decision_context_orchestrates_reader_selection_and_builders() -> 
         "status": "active",
     }
     assert data["context_summary"] == (
-        "Found 1 questions, 1 notes, 1 datasets, 1 analyses, "
+        "Found 1 questions, 1 notes, 1 experiments, 1 datasets, 1 analyses, "
         "1 claims, and 1 visualizations for research_writing."
     )
     assert data["questions"][0]["relevance_reasons"] == [
+        "search_match",
+        "recent_activity",
+    ]
+    assert data["experiments"][0]["relevance_reasons"] == [
         "search_match",
         "recent_activity",
     ]

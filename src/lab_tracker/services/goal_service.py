@@ -48,6 +48,7 @@ if TYPE_CHECKING:
 GOAL_LINK_TARGET_TYPES = {
     EntityType.PROJECT,
     EntityType.QUESTION,
+    EntityType.EXPERIMENT,
     EntityType.NOTE,
     EntityType.SESSION,
     EntityType.DATASET,
@@ -458,6 +459,7 @@ class GoalService(BaseService):
             return target.entity_id
         entity_getters = {
             EntityType.QUESTION: self.questions.get_question,
+            EntityType.EXPERIMENT: self._get_experiment_target,
             EntityType.NOTE: self.notes.get_note,
             EntityType.SESSION: self.sessions.get_session,
             EntityType.DATASET: self.datasets.get_dataset,
@@ -475,6 +477,12 @@ class GoalService(BaseService):
         if project_id is not None and target_project_id != project_id:
             raise ValidationError("Goal link target must belong to the same project.")
         return target_project_id
+
+    def _get_experiment_target(self, experiment_id: UUID):
+        experiment = self.repository.experiments.get(experiment_id)
+        if experiment is None:
+            raise ValidationError("Experiment goal link target does not exist.")
+        return experiment
 
     def _target_project_id(self, target: EntityRef) -> UUID:
         return self._ensure_target_exists(target, None)

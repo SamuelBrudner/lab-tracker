@@ -26,6 +26,9 @@ class DecisionContextReader(Protocol):
     def get_question(self, question_id: str) -> JsonObject | None:
         ...
 
+    def get_experiment(self, experiment_id: str) -> JsonObject | None:
+        ...
+
     def get_dataset(self, dataset_id: str) -> JsonObject | None:
         ...
 
@@ -93,6 +96,19 @@ class DecisionContextReader(Protocol):
         created_by: str | None = None,
         since: datetime | None = None,
         until: datetime | None = None,
+        limit: int = 50,
+        offset: int = 0,
+        recent_first: bool = False,
+    ) -> JsonObject:
+        ...
+
+    def list_experiments(
+        self,
+        *,
+        project_id: str | None = None,
+        status: str | None = None,
+        primary_question_id: str | None = None,
+        search: str | None = None,
         limit: int = 50,
         offset: int = 0,
         recent_first: bool = False,

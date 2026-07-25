@@ -23,6 +23,7 @@
       "@id": "lab:answersQuestion",
       "@type": "@id"
     },
+    "archivedAt": "lab:archivedAt",
     "bidsMetadata": {
       "@id": "lab:bidsMetadata",
       "@type": "@json"
@@ -51,7 +52,13 @@
       "@type": "@id"
     },
     "claimRelationType": "lab:claimRelationType",
+    "closedAt": "lab:closedAt",
     "codeVersion": "lab:codeVersion",
+    "collection": {
+      "@id": "lab:collection",
+      "@type": "@id"
+    },
+    "collectionKey": "lab:collectionKey",
     "commitHash": "lab:commitHash",
     "confidence": "lab:confidence",
     "contentSize": "schema:contentSize",
@@ -65,6 +72,7 @@
       "@type": "@id"
     },
     "dcterms": "http://purl.org/dc/terms/",
+    "description": "lab:description",
     "encodingFormat": "schema:encodingFormat",
     "endedAt": "prov:endedAtTime",
     "entityId": "lab:entityId",
@@ -107,6 +115,18 @@
       "@id": "lab:groundingDataset",
       "@type": "@id"
     },
+    "hadMember": {
+      "@id": "prov:hadMember",
+      "@type": "@id"
+    },
+    "hasDataset": {
+      "@id": "lab:hasDataset",
+      "@type": "@id"
+    },
+    "hasSession": {
+      "@id": "lab:hasSession",
+      "@type": "@id"
+    },
     "hypothesis": "lab:hypothesis",
     "invalidates": {
       "@id": "lab:invalidates",
@@ -119,11 +139,14 @@
       "@type": "@json"
     },
     "lesson": "lab:lesson",
+    "manifestHash": "lab:manifestHash",
+    "memberCount": "lab:memberCount",
     "metadata": {
       "@id": "lab:metadata",
       "@type": "@json"
     },
     "methodHash": "lab:methodHash",
+    "name": "lab:name",
     "note": {
       "@id": "lab:note",
       "@type": "@id"
@@ -132,8 +155,13 @@
       "@id": "lab:nwbMetadata",
       "@type": "@json"
     },
+    "observedAt": "lab:observedAt",
     "origin": "lab:origin",
     "outcomeStatus": "lab:outcomeStatus",
+    "partOfExperiment": {
+      "@id": "lab:partOfExperiment",
+      "@type": "@id"
+    },
     "primaryQuestion": {
       "@id": "lab:primaryQuestion",
       "@type": "@id"
@@ -164,8 +192,13 @@
     "sessionType": "lab:sessionType",
     "sha256": "lab:checksum",
     "sizeBytes": "schema:contentSize",
+    "sourceProvider": "lab:sourceProvider",
     "sourceSession": {
       "@id": "lab:sourceSession",
+      "@type": "@id"
+    },
+    "sourceUri": {
+      "@id": "lab:sourceUri",
       "@type": "@id"
     },
     "startedAt": "prov:startedAtTime",
@@ -188,6 +221,7 @@
     "terminalReason": "lab:terminalReason",
     "text": "lab:text",
     "toolingContext": "lab:toolingContext",
+    "totalSizeBytes": "lab:totalSizeBytes",
     "transcribedText": "lab:transcribedText",
     "trigger": "lab:trigger",
     "updatedAt": "dcterms:modified",

@@ -345,8 +345,26 @@ export interface components {
       "terminal_reason"?: (string | null);
       "updated_at"?: string;
     };
+    "DatasetCollectionSnapshotReference": {
+      "capture_actor_user_id"?: (string | null);
+      "capture_principal_instance_id"?: (string | null);
+      "capture_principal_label"?: (string | null);
+      "capture_principal_type"?: (string | null);
+      "client_capture_id"?: (string | null);
+      "collection_id": string;
+      "collection_key": string;
+      "complete"?: (boolean | null);
+      "manifest_hash": string;
+      "member_count": number;
+      "observed_at": string;
+      "snapshot_id": string;
+      "source_provider"?: (string | null);
+      "source_uri"?: (string | null);
+      "total_size_bytes": number;
+    };
     "DatasetCommitManifest": {
       "bids_metadata"?: Record<string, string>;
+      "collection_snapshots"?: Array<components["schemas"]["DatasetCollectionSnapshotReference"]>;
       "external_artifacts"?: Array<components["schemas"]["ExternalArtifactReference"]>;
       "files"?: Array<components["schemas"]["DatasetFile"]>;
       "metadata"?: Record<string, string>;
@@ -387,7 +405,7 @@ export interface components {
       "entity_id": string;
       "entity_type": components["schemas"]["EntityType"];
     };
-    "EntityType": "project" | "question" | "dataset" | "note" | "session" | "analysis" | "claim" | "visualization" | "goal";
+    "EntityType": "project" | "question" | "experiment" | "dataset" | "note" | "session" | "analysis" | "claim" | "visualization" | "goal";
     "Envelope_AuthBootstrapStatus_": {
       "data": components["schemas"]["AuthBootstrapStatus"];
       "meta"?: (Record<string, unknown> | null);

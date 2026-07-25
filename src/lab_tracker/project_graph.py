@@ -12,6 +12,7 @@ from lab_tracker.models import (
     ClaimEdge,
     Dataset,
     EntityType,
+    Experiment,
     ExplorationNode,
     ExternalArtifactReference,
     Goal,
@@ -32,15 +33,16 @@ from lab_tracker.schemas import (
 _VIEW_VALUES = {"evidence", "questions", "full"}
 _NODE_TYPE_ORDER = {
     "question": 0,
-    "session": 1,
-    "note": 2,
-    "dataset": 3,
-    "analysis": 4,
-    "claim": 5,
-    "exploration_node": 6,
-    "external_artifact": 7,
-    "visualization": 8,
-    "goal": 9,
+    "experiment": 1,
+    "session": 2,
+    "note": 3,
+    "dataset": 4,
+    "analysis": 5,
+    "claim": 6,
+    "exploration_node": 7,
+    "external_artifact": 8,
+    "visualization": 9,
+    "goal": 10,
 }
 _QUESTION_LINK_ROLE_ORDER = {"primary": 0, "secondary": 1}
 _GRAPH_LABEL_LIMIT = 180
@@ -49,6 +51,37 @@ EntityT = TypeVar("EntityT")
 
 class ProjectGraphRepository(Protocol):
     """Read capabilities needed to project one project's graph."""
+
+    def query_experiments(
+        self,
+        *,
+        project_id: UUID | None = None,
+        project_ids: set[UUID] | None = None,
+        primary_question_id: UUID | None = None,
+        status: str | None = None,
+        search: str | None = None,
+        session_id: UUID | None = None,
+        dataset_id: UUID | None = None,
+        limit: int | None = None,
+        offset: int = 0,
+        recent_first: bool = False,
+    ) -> tuple[list[Experiment], int]: ...
+
+    def query_experiment_sessions(
+        self,
+        *,
+        experiment_id: UUID,
+        limit: int | None = None,
+        offset: int = 0,
+    ) -> tuple[list[Session], int]: ...
+
+    def query_experiment_datasets(
+        self,
+        *,
+        experiment_id: UUID,
+        limit: int | None = None,
+        offset: int = 0,
+    ) -> tuple[list[Dataset], int]: ...
 
     def query_questions(
         self,
@@ -141,6 +174,9 @@ def build_project_graph(
 
     view_value = _normalize_view(view)
     questions, _ = repository.query_questions(project_id=project_id, limit=None, offset=0)
+    experiments: list[Experiment] = []
+    experiment_session_ids: dict[UUID, list[UUID]] = {}
+    experiment_dataset_ids: dict[UUID, list[UUID]] = {}
     datasets: list[Dataset] = []
     analyses: list[Analysis] = []
     claims: list[Claim] = []
@@ -151,6 +187,29 @@ def build_project_graph(
     notes: list[Note] = []
     sessions: list[Session] = []
     if view_value in {"evidence", "full"}:
+        experiments, _ = repository.query_experiments(
+            project_id=project_id,
+            limit=None,
+            offset=0,
+        )
+        for experiment in experiments:
+            member_datasets, _ = repository.query_experiment_datasets(
+                experiment_id=experiment.experiment_id,
+                limit=None,
+                offset=0,
+            )
+            experiment_dataset_ids[experiment.experiment_id] = [
+                dataset.dataset_id for dataset in member_datasets
+            ]
+            if view_value == "full":
+                member_sessions, _ = repository.query_experiment_sessions(
+                    experiment_id=experiment.experiment_id,
+                    limit=None,
+                    offset=0,
+                )
+                experiment_session_ids[experiment.experiment_id] = [
+                    session.session_id for session in member_sessions
+                ]
         datasets, _ = repository.query_datasets(project_id=project_id, limit=None, offset=0)
         analyses, _ = repository.query_analyses(project_id=project_id, limit=None, offset=0)
         claims, _ = repository.query_claims(project_id=project_id, limit=None, offset=0)
@@ -179,6 +238,12 @@ def build_project_graph(
         builder.add_node(_question_node(question))
 
     if view_value in {"evidence", "full"}:
+        for experiment in _sort_entities(
+            experiments,
+            "experiment_id",
+            _experiment_label,
+        ):
+            builder.add_node(_experiment_node(experiment))
         for session in _sort_entities(sessions, "session_id", _session_label):
             builder.add_node(_session_node(session))
         for note in _sort_entities(notes, "note_id", _note_label):
@@ -209,6 +274,12 @@ def build_project_graph(
             exploration_nodes,
             visualizations,
             goals,
+        )
+        _add_experiment_edges(
+            builder,
+            experiments,
+            experiment_session_ids=experiment_session_ids,
+            experiment_dataset_ids=experiment_dataset_ids,
         )
     if view_value == "full":
         _add_full_edges(builder, notes, sessions, datasets)
@@ -352,6 +423,10 @@ def _dataset_label(dataset: Dataset) -> str:
     return f"Dataset {dataset.commit_hash or _short_id(dataset.dataset_id)}"
 
 
+def _experiment_label(experiment: Experiment) -> str:
+    return _truncate_graph_label(experiment.name)
+
+
 def _analysis_label(analysis: Analysis) -> str:
     return f"Analysis {analysis.code_version or _short_id(analysis.analysis_id)}"
 
@@ -411,6 +486,21 @@ def _dataset_node(dataset: Dataset) -> ProjectGraphNode:
         detail=dataset.commit_hash,
         status=_enum_value(dataset.status),
         route=f"/app/datasets/{dataset.dataset_id}",
+    )
+
+
+def _experiment_node(experiment: Experiment) -> ProjectGraphNode:
+    return ProjectGraphNode(
+        id=_entity_node_id("experiment", experiment.experiment_id),
+        entity_type="experiment",
+        entity_id=str(experiment.experiment_id),
+        label=_experiment_label(experiment),
+        detail=experiment.description or None,
+        status=_enum_value(experiment.status),
+        route=f"/app/experiments/{experiment.experiment_id}",
+        metadata={
+            "primary_question_id": str(experiment.primary_question_id),
+        },
     )
 
 
@@ -704,6 +794,50 @@ def _add_full_edges(
             "source session",
             "dataset_source_session",
         )
+
+
+def _add_experiment_edges(
+    builder: _ProjectGraphBuilder,
+    experiments: list[Experiment],
+    *,
+    experiment_session_ids: dict[UUID, list[UUID]],
+    experiment_dataset_ids: dict[UUID, list[UUID]],
+) -> None:
+    for experiment in _sort_entities(
+        experiments,
+        "experiment_id",
+        _experiment_label,
+    ):
+        experiment_id = _entity_node_id(
+            "experiment",
+            experiment.experiment_id,
+        )
+        builder.add_edge(
+            _entity_node_id("question", experiment.primary_question_id),
+            experiment_id,
+            "primary question",
+            "experiment_question_primary",
+        )
+        for session_id in sorted(
+            experiment_session_ids.get(experiment.experiment_id, []),
+            key=str,
+        ):
+            builder.add_edge(
+                experiment_id,
+                _entity_node_id("session", session_id),
+                "session member",
+                "experiment_session",
+            )
+        for dataset_id in sorted(
+            experiment_dataset_ids.get(experiment.experiment_id, []),
+            key=str,
+        ):
+            builder.add_edge(
+                experiment_id,
+                _entity_node_id("dataset", dataset_id),
+                "dataset member",
+                "experiment_dataset",
+            )
 
 
 def _add_exploration_edges(

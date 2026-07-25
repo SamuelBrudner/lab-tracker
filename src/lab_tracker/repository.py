@@ -8,6 +8,13 @@ from datetime import datetime
 from typing import Generic, Protocol, TypeVar
 from uuid import UUID
 
+from lab_tracker.collection_models import (
+    AcquisitionCollection,
+    AcquisitionCollectionCapture,
+    AcquisitionCollectionSnapshot,
+    AcquisitionCollectionSummary,
+    DatasetSummary,
+)
 from lab_tracker.models import (
     AcquisitionOutput,
     Analysis,
@@ -18,6 +25,7 @@ from lab_tracker.models import (
     DataStore,
     EntityVersion,
     EvidenceBundleRecord,
+    Experiment,
     ExplorationNode,
     Goal,
     GoalLink,
@@ -63,6 +71,101 @@ class EntityRepository(Protocol, Generic[EntityT]):
 
     def delete(self, entity_id: UUID) -> EntityT | None:
         """Delete one entity by ID and return the removed value."""
+
+
+class AcquisitionCollectionRepository(Protocol):
+    """Persistence contract that keeps manifest JSON behind explicit reads."""
+
+    def get(
+        self,
+        collection_id: UUID,
+    ) -> AcquisitionCollection | None: ...
+
+    def get_by_session_key(
+        self,
+        *,
+        session_id: UUID,
+        collection_key: str,
+        for_update: bool = False,
+    ) -> AcquisitionCollection | None: ...
+
+    def get_or_create(
+        self,
+        collection: AcquisitionCollection,
+    ) -> AcquisitionCollection: ...
+
+    def query(
+        self,
+        *,
+        session_id: UUID | None = None,
+        limit: int | None = None,
+        offset: int = 0,
+    ) -> tuple[list[AcquisitionCollectionSummary], int]: ...
+
+    def save(self, collection: AcquisitionCollection) -> None: ...
+
+    def get_snapshot(
+        self,
+        snapshot_id: UUID | None,
+    ) -> AcquisitionCollectionSnapshot | None: ...
+
+    def get_snapshot_by_hash(
+        self,
+        *,
+        collection_id: UUID,
+        manifest_hash: str,
+    ) -> AcquisitionCollectionSnapshot | None: ...
+
+    def query_snapshots(
+        self,
+        *,
+        collection_id: UUID,
+        limit: int | None = None,
+        offset: int = 0,
+    ) -> tuple[list[AcquisitionCollectionSnapshot], int]: ...
+
+    def save_snapshot(
+        self,
+        snapshot: AcquisitionCollectionSnapshot,
+    ) -> None: ...
+
+    def get_manifest(self, snapshot_id: UUID) -> dict[str, object] | None: ...
+
+    def save_manifest(
+        self,
+        *,
+        snapshot_id: UUID,
+        schema_version: int,
+        manifest_json: dict[str, object],
+        canonical_size_bytes: int,
+    ) -> None: ...
+
+    def get_capture(
+        self,
+        *,
+        collection_id: UUID,
+        client_capture_id: str,
+    ) -> AcquisitionCollectionCapture | None: ...
+
+    def get_capture_by_id(
+        self,
+        capture_id: UUID,
+    ) -> AcquisitionCollectionCapture | None: ...
+
+    def get_latest_capture_for_snapshot(
+        self,
+        snapshot_id: UUID,
+    ) -> AcquisitionCollectionCapture | None: ...
+
+    def save_capture(
+        self,
+        capture: AcquisitionCollectionCapture,
+    ) -> None: ...
+
+    def dataset_ids_referencing_session(
+        self,
+        session_id: UUID,
+    ) -> list[UUID]: ...
 
 
 class EvidenceBundleRepository(Protocol):
@@ -135,6 +238,9 @@ class LabTrackerRepository(Protocol):
     def question_refactors(self) -> EntityRepository[QuestionRefactor]: ...
 
     @property
+    def experiments(self) -> EntityRepository[Experiment]: ...
+
+    @property
     def datasets(self) -> EntityRepository[Dataset]: ...
 
     @property
@@ -145,6 +251,9 @@ class LabTrackerRepository(Protocol):
 
     @property
     def acquisition_outputs(self) -> EntityRepository[AcquisitionOutput]: ...
+
+    @property
+    def acquisition_collections(self) -> AcquisitionCollectionRepository: ...
 
     @property
     def analyses(self) -> EntityRepository[Analysis]: ...
@@ -196,6 +305,12 @@ class LabTrackerRepository(Protocol):
 
     def lock_project_question_dag(self, project_id: UUID) -> None:
         """Serialize question-DAG validation and mutation for one project."""
+
+    def lock_session_acquisition_state(self, session_id: UUID) -> None:
+        """Serialize collection, promotion, and Experiment-link state for a Session."""
+
+    def lock_experiment_updates(self, experiment_ids: Iterable[UUID]) -> None:
+        """Serialize lifecycle and membership mutations for Experiments."""
 
     def lock_project_deletion_guard(self, project_id: UUID) -> None:
         """Keep a project alive while a graph command locks its child rows."""
@@ -377,6 +492,94 @@ class LabTrackerRepository(Protocol):
     ) -> tuple[list[QuestionRefactor], int]:
         """Query refactor history where the question is source or replacement."""
 
+    def query_experiments(
+        self,
+        *,
+        project_id: UUID | None = None,
+        project_ids: set[UUID] | None = None,
+        primary_question_id: UUID | None = None,
+        status: str | None = None,
+        search: str | None = None,
+        session_id: UUID | None = None,
+        dataset_id: UUID | None = None,
+        limit: int | None = None,
+        offset: int = 0,
+        recent_first: bool = False,
+    ) -> tuple[list[Experiment], int]:
+        """Query Experiments, optionally through membership edges."""
+
+    def experiment_has_session(
+        self,
+        *,
+        experiment_id: UUID,
+        session_id: UUID,
+    ) -> bool:
+        """Return whether a Session is already an Experiment member."""
+
+    def add_experiment_session(
+        self,
+        *,
+        experiment_id: UUID,
+        session_id: UUID,
+        created_by: str | None,
+        created_by_user_id: UUID | None,
+        created_at: datetime,
+    ) -> bool:
+        """Add an Experiment-Session membership."""
+
+    def remove_experiment_session(
+        self,
+        *,
+        experiment_id: UUID,
+        session_id: UUID,
+    ) -> bool:
+        """Remove an Experiment-Session membership."""
+
+    def query_experiment_sessions(
+        self,
+        *,
+        experiment_id: UUID,
+        limit: int | None = None,
+        offset: int = 0,
+    ) -> tuple[list[Session], int]:
+        """Query the Sessions belonging to one Experiment."""
+
+    def experiment_has_dataset(
+        self,
+        *,
+        experiment_id: UUID,
+        dataset_id: UUID,
+    ) -> bool:
+        """Return whether a Dataset is already an Experiment member."""
+
+    def add_experiment_dataset(
+        self,
+        *,
+        experiment_id: UUID,
+        dataset_id: UUID,
+        created_by: str | None,
+        created_by_user_id: UUID | None,
+        created_at: datetime,
+    ) -> bool:
+        """Add an Experiment-Dataset membership."""
+
+    def remove_experiment_dataset(
+        self,
+        *,
+        experiment_id: UUID,
+        dataset_id: UUID,
+    ) -> bool:
+        """Remove an Experiment-Dataset membership."""
+
+    def query_experiment_datasets(
+        self,
+        *,
+        experiment_id: UUID,
+        limit: int | None = None,
+        offset: int = 0,
+    ) -> tuple[list[Dataset], int]:
+        """Query the Datasets belonging to one Experiment."""
+
     def query_datasets(
         self,
         *,
@@ -391,6 +594,22 @@ class LabTrackerRepository(Protocol):
         recent_first: bool = False,
     ) -> tuple[list[Dataset], int]:
         """Query datasets with filters and pagination."""
+
+    def query_dataset_summaries(
+        self,
+        *,
+        dataset_id: UUID | None = None,
+        project_id: UUID | None = None,
+        project_ids: set[UUID] | None = None,
+        status: str | None = None,
+        created_by: str | None = None,
+        since: datetime | None = None,
+        until: datetime | None = None,
+        limit: int | None = None,
+        offset: int = 0,
+        recent_first: bool = False,
+    ) -> tuple[list[DatasetSummary], int]:
+        """Query compact Dataset list rows without loading full manifests."""
 
     def query_notes(
         self,

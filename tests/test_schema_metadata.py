@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import pytest
 
+from lab_tracker.collection_manifest import ACQUISITION_COLLECTION_CAPABILITY
 from lab_tracker.decision_context_constants import TASK_KIND_VALUES
 from lab_tracker.errors import ValidationError
 from lab_tracker.models import (
@@ -22,6 +23,7 @@ from lab_tracker.schema_metadata import build_schema_description
 def test_schema_description_exposes_required_fields_and_enum_values() -> None:
     payload = build_schema_description()
 
+    assert payload["capabilities"] == [ACQUISITION_COLLECTION_CAPABILITY]
     question = payload["entities"]["question"]
     assert question["create"]["required_fields"] == [
         "project_id",

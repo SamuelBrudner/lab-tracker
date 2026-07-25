@@ -11,6 +11,7 @@ from typing import Protocol, TypeVar
 from uuid import UUID
 
 from lab_tracker.auth import LOCAL_AUTH_USER_ID, AuthContext, Role
+from lab_tracker.collection_models import DatasetCollectionSnapshotReference
 from lab_tracker.errors import NotFoundError, ValidationError
 from lab_tracker.models import (
     AcquisitionOutput,
@@ -518,6 +519,7 @@ def _merge_acquisition_outputs(
     return DatasetCommitManifestInput(
         files=merged_files,
         external_artifacts=manifest_input.external_artifacts,
+        collection_snapshot_ids=manifest_input.collection_snapshot_ids,
         metadata=manifest_input.metadata,
         nwb_metadata=manifest_input.nwb_metadata,
         bids_metadata=manifest_input.bids_metadata,
@@ -594,6 +596,10 @@ def _manifest_input_from_commit(manifest: DatasetCommitManifest) -> DatasetCommi
     return DatasetCommitManifestInput(
         files=list(manifest.files),
         external_artifacts=list(manifest.external_artifacts),
+        collection_snapshot_ids=[
+            snapshot.snapshot_id
+            for snapshot in manifest.collection_snapshots
+        ],
         metadata=dict(manifest.metadata),
         nwb_metadata=dict(manifest.nwb_metadata),
         bids_metadata=dict(manifest.bids_metadata),
@@ -622,6 +628,7 @@ def _manifest_input_with_source(
     return DatasetCommitManifestInput(
         files=manifest_input.files,
         external_artifacts=manifest_input.external_artifacts,
+        collection_snapshot_ids=manifest_input.collection_snapshot_ids,
         metadata=manifest_input.metadata,
         nwb_metadata=manifest_input.nwb_metadata,
         bids_metadata=manifest_input.bids_metadata,
@@ -633,8 +640,16 @@ def _manifest_input_with_source(
 def build_commit_manifest(
     manifest: DatasetCommitManifestInput | DatasetCommitManifest | None,
     question_links: list[QuestionLink],
+    *,
+    collection_snapshots: Iterable[
+        DatasetCollectionSnapshotReference
+    ] | None = None,
 ) -> DatasetCommitManifest:
+    existing_collection_snapshots: list[
+        DatasetCollectionSnapshotReference
+    ] = []
     if isinstance(manifest, DatasetCommitManifest):
+        existing_collection_snapshots = list(manifest.collection_snapshots)
         manifest_input = _manifest_input_from_commit(manifest)
     else:
         manifest_input = manifest or DatasetCommitManifestInput()
@@ -649,9 +664,15 @@ def build_commit_manifest(
         explicit_external_artifacts,
         legacy_external_artifacts,
     )
+    resolved_collection_snapshots = _normalize_collection_snapshots(
+        existing_collection_snapshots
+        if collection_snapshots is None
+        else collection_snapshots
+    )
     return DatasetCommitManifest(
         files=_normalize_dataset_files(manifest_input.files),
         external_artifacts=external_artifacts,
+        collection_snapshots=resolved_collection_snapshots,
         metadata=base_metadata,
         nwb_metadata=nwb_metadata,
         bids_metadata=bids_metadata,
@@ -715,7 +736,52 @@ def dataset_manifest_payload(manifest: DatasetCommitManifest) -> dict[str, objec
     )
     if external_artifacts and external_artifacts != legacy_external_artifacts:
         payload["external_artifacts"] = external_artifacts
+    if manifest.collection_snapshots:
+        payload["collection_snapshots"] = sorted(
+            (
+                {
+                    "collection_key": snapshot.collection_key,
+                    "manifest_hash": snapshot.manifest_hash,
+                }
+                for snapshot in manifest.collection_snapshots
+            ),
+            key=lambda item: (
+                item["collection_key"],
+                item["manifest_hash"],
+            ),
+        )
     return payload
+
+
+def _normalize_collection_snapshots(
+    snapshots: Iterable[DatasetCollectionSnapshotReference],
+) -> list[DatasetCollectionSnapshotReference]:
+    normalized: list[DatasetCollectionSnapshotReference] = []
+    seen_snapshot_ids: set[UUID] = set()
+    seen_collection_ids: set[UUID] = set()
+    for raw_snapshot in snapshots:
+        snapshot = DatasetCollectionSnapshotReference.model_validate(
+            raw_snapshot
+        )
+        if snapshot.snapshot_id in seen_snapshot_ids:
+            raise ValidationError(
+                "Duplicate collection snapshot in commit manifest."
+            )
+        if snapshot.collection_id in seen_collection_ids:
+            raise ValidationError(
+                "Duplicate logical collection in commit manifest."
+            )
+        seen_snapshot_ids.add(snapshot.snapshot_id)
+        seen_collection_ids.add(snapshot.collection_id)
+        normalized.append(snapshot)
+    return sorted(
+        normalized,
+        key=lambda snapshot: (
+            snapshot.collection_key,
+            snapshot.manifest_hash,
+            str(snapshot.snapshot_id),
+        ),
+    )
 
 
 def _external_artifacts_payload(

@@ -19,6 +19,7 @@ from lab_tracker.auth import (
     DeviceAuthService,
     Role,
     _as_utc,
+    device_principal_can_access,
     utc_now,
 )
 from lab_tracker.db_models import DeviceEnrollmentModel, DeviceTokenModel, UserModel
@@ -280,6 +281,25 @@ def test_verify_device_token_rejects_revoked_unknown_and_malformed(session_facto
 
     service.revoke_device(uuid_from(user_id), issued.device_token.device_token_id)
     assert service.verify_device_token(issued.secret) is None
+
+
+def test_device_policy_allows_collection_snapshot_posts_without_other_session_writes() -> None:
+    snapshot_path = "/sessions/session-1/collections/trials/snapshots"
+
+    assert device_principal_can_access("POST", snapshot_path) is True
+    assert device_principal_can_access("GET", snapshot_path) is True
+    assert device_principal_can_access(
+        "PATCH",
+        "/sessions/session-1",
+    ) is False
+    assert device_principal_can_access(
+        "POST",
+        "/sessions/session-1/collections/trials",
+    ) is False
+    assert device_principal_can_access(
+        "POST",
+        "/sessions/session-1/collections/trials/snapshots/extra",
+    ) is False
 
 
 def uuid_from(value):

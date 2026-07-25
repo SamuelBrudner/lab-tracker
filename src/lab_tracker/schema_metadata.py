@@ -8,6 +8,7 @@ from typing import Any
 
 from pydantic import BaseModel
 
+from lab_tracker.collection_manifest import ACQUISITION_COLLECTION_CAPABILITY
 from lab_tracker.decision_context_constants import TASK_KIND_VALUES
 from lab_tracker.errors import ValidationError
 from lab_tracker.models import (
@@ -15,6 +16,7 @@ from lab_tracker.models import (
     ClaimStatus,
     DatasetStatus,
     EntityType,
+    ExperimentStatus,
     ExplorationNodeStatus,
     ExplorationNodeType,
     GoalLinkStatus,
@@ -38,6 +40,8 @@ from lab_tracker.schemas import (
     ClaimUpdate,
     DatasetCreate,
     DatasetUpdate,
+    ExperimentCreate,
+    ExperimentUpdate,
     ExplorationNodeCreate,
     ExplorationNodeUpdate,
     GoalCreate,
@@ -54,6 +58,7 @@ from lab_tracker.schemas import (
     VisualizationCreate,
     VisualizationUpdate,
 )
+from lab_tracker.services.experiment_service import EXPERIMENT_STATUS_TRANSITIONS
 from lab_tracker.services.shared import (
     _ANALYSIS_STATUS_TRANSITIONS,
     _CLAIM_STATUS_TRANSITIONS,
@@ -72,6 +77,7 @@ ENTITY_TYPE_ORDER = (
     "question",
     "note",
     "session",
+    "experiment",
     "dataset",
     "analysis",
     "claim",
@@ -88,6 +94,7 @@ def build_schema_description(*, entity_type: str | None = None) -> JsonObject:
     if normalized_entity_type is not None:
         entities = {normalized_entity_type: entities[normalized_entity_type]}
     return {
+        "capabilities": [ACQUISITION_COLLECTION_CAPABILITY],
         "assistant": {
             "decision_context": {
                 "request_schema": _schema_metadata(AssistantDecisionContextRequest),
@@ -140,6 +147,14 @@ def _entity_descriptions() -> dict[str, JsonObject]:
             field_enums={"session_type": SessionType, "status": SessionStatus},
             natural_key=[],
             status_lifecycle=_SESSION_STATUS_TRANSITIONS,
+        ),
+        "experiment": _entity_metadata(
+            create_schema=ExperimentCreate,
+            update_schema=ExperimentUpdate,
+            status_enum=ExperimentStatus,
+            field_enums={"status": ExperimentStatus},
+            natural_key=[],
+            status_lifecycle=EXPERIMENT_STATUS_TRANSITIONS,
         ),
         "dataset": _entity_metadata(
             create_schema=DatasetCreate,

@@ -688,6 +688,7 @@ class NoteService(BaseService):
         entity_getters = {
             EntityType.PROJECT: self.projects.get_project,
             EntityType.QUESTION: self.questions.get_question,
+            EntityType.EXPERIMENT: self._get_experiment_target,
             EntityType.DATASET: self.datasets.get_dataset,
             EntityType.NOTE: self.get_note,
             EntityType.SESSION: self.sessions.get_session,
@@ -708,6 +709,12 @@ class NoteService(BaseService):
             return
         if hasattr(entity, "project_id") and entity.project_id != project_id:
             raise ValidationError("Target must belong to the same project.")
+
+    def _get_experiment_target(self, experiment_id: UUID):
+        experiment = self.repository.experiments.get(experiment_id)
+        if experiment is None:
+            raise NotFoundError("Experiment does not exist.")
+        return experiment
 
 
 def _transcript_text(transcript: Any) -> str:

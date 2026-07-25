@@ -21,6 +21,7 @@ from lab_tracker.auth import (
     extract_bearer_token,
     service_principal_can_access,
 )
+from lab_tracker.collection_manifest import MAX_COLLECTION_MANIFEST_BYTES
 from lab_tracker.errors import AuthError, RateLimitError
 from lab_tracker.schemas import ErrorEnvelope, ErrorInfo
 from lab_tracker.sqlalchemy_repository import SQLAlchemyLabTrackerRepository
@@ -88,6 +89,57 @@ def _rate_limited_response(message: str) -> JSONResponse:
     return JSONResponse(status_code=429, content=payload.model_dump())
 
 
+def _payload_too_large_response(message: str) -> JSONResponse:
+    payload = ErrorEnvelope(
+        error=ErrorInfo(code="payload_too_large", message=message)
+    )
+    return JSONResponse(status_code=413, content=payload.model_dump())
+
+
+def _is_collection_snapshot_capture(request: Request) -> bool:
+    parts = request.url.path.split("/")
+    return (
+        request.method == "POST"
+        and len(parts) == 6
+        and parts[1] == "sessions"
+        and parts[3] == "collections"
+        and parts[5] == "snapshots"
+    )
+
+
+def configure_collection_request_size_middleware(app: FastAPI) -> None:
+    """Reject oversized collection captures before body-model validation."""
+
+    @app.middleware("http")
+    async def collection_request_size_middleware(
+        request: Request,
+        call_next,
+    ):
+        if not _is_collection_snapshot_capture(request):
+            return await call_next(request)
+
+        message = "Collection snapshot requests may not exceed 16 MiB."
+        content_length = request.headers.get("content-length")
+        if (
+            content_length is not None
+            and content_length.isdigit()
+            and int(content_length) > MAX_COLLECTION_MANIFEST_BYTES
+        ):
+            return _payload_too_large_response(message)
+
+        chunks: list[bytes] = []
+        body_size = 0
+        async for chunk in request.stream():
+            body_size += len(chunk)
+            if body_size > MAX_COLLECTION_MANIFEST_BYTES:
+                return _payload_too_large_response(message)
+            chunks.append(chunk)
+        # Function middleware gives downstream validation a cached receive
+        # adapter. Seed its body cache after the bounded streaming read.
+        request._body = b"".join(chunks)
+        return await call_next(request)
+
+
 def local_auth_context() -> AuthContext:
     return AuthContext(user_id=LOCAL_AUTH_USER_ID, role=Role.ADMIN)
 
@@ -150,6 +202,8 @@ def configure_auth_middleware(app: FastAPI) -> None:
                     role=user.role,
                     principal_type=PrincipalType.DEVICE,
                     device_token_id=principal.device_token_id,
+                    principal_instance_id=principal.device_token_id,
+                    principal_label=principal.label,
                 )
             elif token.startswith(LPAT_TOKEN_PREFIX):
                 pat_rate_key = _pat_rate_key(request, token)
@@ -182,6 +236,8 @@ def configure_auth_middleware(app: FastAPI) -> None:
                     user_id=principal.user_id,
                     role=principal.role,
                     principal_type=PrincipalType.SERVICE,
+                    principal_instance_id=principal.token_id,
+                    principal_label=principal.label,
                 )
             else:
                 claims = await run_in_threadpool(

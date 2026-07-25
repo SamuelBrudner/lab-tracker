@@ -97,6 +97,84 @@ def _create_committed_dataset_with_provenance(
     return project_id, dataset_id, primary_question_id, secondary_question_id, note_id
 
 
+def _create_committed_collection_dataset(
+    client: TestClient,
+    headers: dict[str, str],
+) -> tuple[str, str, str, str, str]:
+    project_id = client.post(
+        "/projects",
+        json={"name": "Collection provenance project"},
+        headers=headers,
+    ).json()["data"]["project_id"]
+    question_id = client.post(
+        "/questions",
+        json={
+            "project_id": project_id,
+            "text": "Does the collection preserve acquisition lineage?",
+            "question_type": "descriptive",
+            "status": "active",
+        },
+        headers=headers,
+    ).json()["data"]["question_id"]
+    session_id = client.post(
+        "/sessions",
+        json={
+            "project_id": project_id,
+            "session_type": "operational",
+        },
+        headers=headers,
+    ).json()["data"]["session_id"]
+    capture = client.post(
+        f"/sessions/{session_id}/collections/raw/snapshots",
+        json={
+            "client_capture_id": f"prov-{uuid4().hex}",
+            "observed_at": "2026-07-24T12:00:00Z",
+            "source_provider": "watch",
+            "source_uri": "file:///rig/run-7",
+            "complete": True,
+            "manifest": {
+                "schema_version": 1,
+                "members": [
+                    {
+                        "path": "trial-0002/data.bin",
+                        "checksum": "b" * 64,
+                        "size_bytes": 22,
+                    },
+                    {
+                        "path": "trial-0001/data.bin",
+                        "checksum": "a" * 64,
+                        "size_bytes": 11,
+                    },
+                ],
+            },
+        },
+        headers=headers,
+    )
+    assert capture.status_code == 201, capture.text
+    snapshot_id = capture.json()["data"]["snapshot_id"]
+    dataset = client.post(
+        "/datasets",
+        json={
+            "project_id": project_id,
+            "primary_question_id": question_id,
+            "status": "committed",
+            "commit_manifest": {
+                "collection_snapshot_ids": [snapshot_id],
+                "source_session_id": session_id,
+            },
+        },
+        headers=headers,
+    )
+    assert dataset.status_code == 201, dataset.text
+    return (
+        project_id,
+        question_id,
+        session_id,
+        dataset.json()["data"]["dataset_id"],
+        snapshot_id,
+    )
+
+
 def test_dataset_provenance_route_exports_json_ld_graph(
     client: TestClient,
     admin_auth_headers: dict[str, str],
@@ -188,6 +266,7 @@ def test_dataset_provenance_route_exports_json_ld_graph(
         "supervisionStartedAt": "2020-01-01T00:00:00+00:00",
     }
     assert _node_type_includes(supervisor_node, "prov:Person")
+
 
 
 def test_dataset_route_accepts_external_artifact_manifest_without_files(
@@ -394,6 +473,130 @@ def test_claim_provenance_route_exports_full_ancestry(
     assert analysis_node["environmentHash"] == "env-claim"
     assert dataset_node["commitHash"]
     assert question_node["text"] == "Does provenance export preserve the dataset graph?"
+
+
+def test_collection_provenance_routes_are_compact_by_default_and_expand_on_request(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+) -> None:
+    project_id, _, _, dataset_id, snapshot_id = (
+        _create_committed_collection_dataset(
+            client,
+            admin_auth_headers,
+        )
+    )
+    snapshot_iri = f"http://testserver/collection-snapshots/{snapshot_id}"
+
+    compact = client.get(
+        f"/datasets/{dataset_id}/provenance",
+        headers=admin_auth_headers,
+    )
+    assert compact.status_code == 200, compact.text
+    compact_payload = compact.json()
+    compact_snapshot = _node_by_id(compact_payload, snapshot_iri)
+    assert _node_type_includes(compact_snapshot, "prov:Collection")
+    assert compact_snapshot["memberCount"] == 2
+    assert "hadMember" not in compact_snapshot
+    assert not any(
+        "/members/" in str(node.get("@id", ""))
+        for node in compact_payload["@graph"]
+        if isinstance(node, dict)
+    )
+
+    expanded = client.get(
+        f"/datasets/{dataset_id}/provenance",
+        params={"expand_collection_members": "true"},
+        headers=admin_auth_headers,
+    )
+    assert expanded.status_code == 200, expanded.text
+    expanded_snapshot = _node_by_id(expanded.json(), snapshot_iri)
+    assert expanded_snapshot["hadMember"] == [
+        {"@id": f"{snapshot_iri}/members/trial-0001%2Fdata.bin"},
+        {"@id": f"{snapshot_iri}/members/trial-0002%2Fdata.bin"},
+    ]
+
+    claim = client.post(
+        "/claims",
+        json={
+            "project_id": project_id,
+            "statement": "Collection ancestry remains available to claims.",
+            "confidence": 80,
+            "status": "supported",
+            "supported_by_dataset_ids": [dataset_id],
+        },
+        headers=admin_auth_headers,
+    )
+    assert claim.status_code == 201, claim.text
+    claim_id = claim.json()["data"]["claim_id"]
+    claim_provenance = client.get(
+        f"/claims/{claim_id}/provenance",
+        params={"expand_collection_members": "true"},
+        headers=admin_auth_headers,
+    )
+    assert claim_provenance.status_code == 200, claim_provenance.text
+    claim_snapshot = _node_by_id(claim_provenance.json(), snapshot_iri)
+    assert len(claim_snapshot["hadMember"]) == 2
+
+
+def test_experiment_provenance_route_exports_membership_edges(
+    client: TestClient,
+    admin_auth_headers: dict[str, str],
+) -> None:
+    project_id, question_id, session_id, dataset_id, _ = (
+        _create_committed_collection_dataset(
+            client,
+            admin_auth_headers,
+        )
+    )
+    experiment = client.post(
+        "/experiments",
+        json={
+            "project_id": project_id,
+            "name": "Experiment provenance",
+            "description": "One Experiment groups the acquisition work.",
+            "primary_question_id": question_id,
+        },
+        headers=admin_auth_headers,
+    )
+    assert experiment.status_code == 201, experiment.text
+    experiment_id = experiment.json()["data"]["experiment_id"]
+    assert (
+        client.put(
+            f"/experiments/{experiment_id}/sessions/{session_id}",
+            headers=admin_auth_headers,
+        ).status_code
+        == 200
+    )
+    assert (
+        client.put(
+            f"/experiments/{experiment_id}/datasets/{dataset_id}",
+            headers=admin_auth_headers,
+        ).status_code
+        == 200
+    )
+
+    response = client.get(
+        f"/experiments/{experiment_id}/provenance",
+        headers=admin_auth_headers,
+    )
+    assert response.status_code == 200, response.text
+    payload = response.json()
+    experiment_iri = f"http://testserver/experiments/{experiment_id}"
+    experiment_node = _node_by_id(payload, experiment_iri)
+    session_node = _node_by_id(
+        payload,
+        f"http://testserver/sessions/{session_id}",
+    )
+    dataset_node = _node_by_id(
+        payload,
+        f"http://testserver/datasets/{dataset_id}",
+    )
+    assert _node_type_includes(experiment_node, "prov:Activity")
+    assert _node_type_includes(experiment_node, "lab:Experiment")
+    assert experiment_node["hasSession"] == [{"@id": session_node["@id"]}]
+    assert experiment_node["hasDataset"] == [{"@id": dataset_node["@id"]}]
+    assert session_node["partOfExperiment"] == {"@id": experiment_iri}
+    assert dataset_node["partOfExperiment"] == {"@id": experiment_iri}
 
 
 def test_provenance_routes_require_authentication(client: TestClient):

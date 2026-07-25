@@ -7,6 +7,7 @@ from collections.abc import Iterable
 from datetime import datetime, timezone
 from uuid import UUID
 
+from lab_tracker.collection_models import DatasetCollectionSnapshotReference
 from lab_tracker.db_models import (
     AcquisitionOutputModel,
     AnalysisDatasetModel,
@@ -21,6 +22,7 @@ from lab_tracker.db_models import (
     DataStoreModel,
     EntityVersionModel,
     EvidenceBundleModel,
+    ExperimentModel,
     ExplorationNodeEdgeModel,
     ExplorationNodeModel,
     GoalLinkModel,
@@ -49,6 +51,7 @@ from lab_tracker.models import (
     EntityRef,
     EntityVersion,
     EvidenceBundleRecord,
+    Experiment,
     ExplorationNode,
     ExternalArtifactReference,
     Goal,
@@ -168,6 +171,26 @@ def _external_artifacts_from_json(
     if not raw_artifacts:
         return []
     return [ExternalArtifactReference.model_validate(item) for item in raw_artifacts]
+
+
+def _collection_snapshots_to_json(
+    snapshots: Iterable[DatasetCollectionSnapshotReference],
+) -> list[dict[str, object]]:
+    return [
+        snapshot.model_dump(mode="json", exclude_none=True)
+        for snapshot in snapshots
+    ]
+
+
+def _collection_snapshots_from_json(
+    raw_snapshots: Iterable[object] | None,
+) -> list[DatasetCollectionSnapshotReference]:
+    if not raw_snapshots:
+        return []
+    return [
+        DatasetCollectionSnapshotReference.model_validate(item)
+        for item in raw_snapshots
+    ]
 
 
 def _legacy_external_artifacts_from_metadata(
@@ -386,6 +409,62 @@ def apply_question_refactor_to_model(
     row.created_at = refactor.created_at
 
 
+def experiment_to_model(experiment: Experiment) -> ExperimentModel:
+    return ExperimentModel(
+        experiment_id=experiment.experiment_id,
+        project_id=experiment.project_id,
+        name=experiment.name,
+        description=experiment.description,
+        primary_question_id=experiment.primary_question_id,
+        status=experiment.status.value,
+        closed_at=experiment.closed_at,
+        archived_at=experiment.archived_at,
+        created_by=experiment.created_by,
+        created_by_user_id=experiment.created_by_user_id,
+        **_origin_model_kwargs(experiment),
+        created_at=experiment.created_at,
+        updated_at=experiment.updated_at,
+    )
+
+
+def experiment_from_model(row: ExperimentModel) -> Experiment:
+    return Experiment(
+        experiment_id=row.experiment_id,
+        project_id=row.project_id,
+        name=row.name,
+        description=row.description,
+        primary_question_id=row.primary_question_id,
+        status=row.status,
+        closed_at=_as_utc_optional(row.closed_at),
+        archived_at=_as_utc_optional(row.archived_at),
+        created_by=row.created_by,
+        created_by_user_id=(
+            row.created_by_user_id if row.created_by_user_id else None
+        ),
+        **_origin_domain_kwargs(row),
+        created_at=row.created_at,
+        updated_at=row.updated_at,
+    )
+
+
+def apply_experiment_to_model(
+    row: ExperimentModel,
+    experiment: Experiment,
+) -> None:
+    row.project_id = experiment.project_id
+    row.name = experiment.name
+    row.description = experiment.description
+    row.primary_question_id = experiment.primary_question_id
+    row.status = experiment.status.value
+    row.closed_at = experiment.closed_at
+    row.archived_at = experiment.archived_at
+    row.created_by = experiment.created_by
+    row.created_by_user_id = experiment.created_by_user_id
+    _apply_origin_to_model(row, experiment)
+    row.created_at = experiment.created_at
+    row.updated_at = experiment.updated_at
+
+
 def dataset_to_model(dataset: Dataset) -> DatasetModel:
     manifest = dataset.commit_manifest
     return DatasetModel(
@@ -395,6 +474,9 @@ def dataset_to_model(dataset: Dataset) -> DatasetModel:
         primary_question_id=dataset.primary_question_id,
         manifest_files=_dataset_files_to_json(manifest.files),
         manifest_external_artifacts=_external_artifacts_to_json(manifest.external_artifacts),
+        manifest_collection_snapshots=_collection_snapshots_to_json(
+            manifest.collection_snapshots
+        ),
         manifest_metadata=dict(manifest.metadata),
         manifest_nwb_metadata=dict(manifest.nwb_metadata),
         manifest_bids_metadata=dict(manifest.bids_metadata),
@@ -441,6 +523,9 @@ def dataset_from_model(
     manifest = DatasetCommitManifest(
         files=_dataset_files_from_json(getattr(row, "manifest_files", None)),
         external_artifacts=external_artifacts,
+        collection_snapshots=_collection_snapshots_from_json(
+            getattr(row, "manifest_collection_snapshots", None)
+        ),
         metadata=metadata,
         nwb_metadata=dict(getattr(row, "manifest_nwb_metadata", {}) or {}),
         bids_metadata=dict(getattr(row, "manifest_bids_metadata", {}) or {}),
@@ -496,6 +581,9 @@ def apply_dataset_to_model(row: DatasetModel, dataset: Dataset) -> None:
     row.primary_question_id = dataset.primary_question_id
     row.manifest_files = _dataset_files_to_json(manifest.files)
     row.manifest_external_artifacts = _external_artifacts_to_json(manifest.external_artifacts)
+    row.manifest_collection_snapshots = _collection_snapshots_to_json(
+        manifest.collection_snapshots
+    )
     row.manifest_metadata = dict(manifest.metadata)
     row.manifest_nwb_metadata = dict(manifest.nwb_metadata)
     row.manifest_bids_metadata = dict(manifest.bids_metadata)

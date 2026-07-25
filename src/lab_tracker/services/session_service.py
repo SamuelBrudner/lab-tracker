@@ -17,6 +17,7 @@ from lab_tracker.models import (
     DatasetStatus,
     EntityOrigin,
     EntityType,
+    ExperimentStatus,
     QuestionStatus,
     Session,
     SessionStatus,
@@ -42,6 +43,7 @@ from lab_tracker.services.shared import (
 
 if TYPE_CHECKING:
     from lab_tracker.services.dataset_service import DatasetService
+    from lab_tracker.services.experiment_service import ExperimentService
 
 
 class SessionService(BaseService):
@@ -52,17 +54,25 @@ class SessionService(BaseService):
         projects: ProjectService,
         questions: QuestionService,
         datasets_provider: Callable[[], DatasetService],
+        experiments_provider: Callable[[], ExperimentService] | None = None,
         authorization: ProjectAuthorizationPolicy,
     ) -> None:
         super().__init__(context)
         self.projects = projects
         self.questions = questions
         self._datasets_provider = datasets_provider
+        self._experiments_provider = experiments_provider
         self.authorization = authorization
 
     @property
     def datasets(self) -> DatasetService:
         return self._datasets_provider()
+
+    @property
+    def experiments(self) -> ExperimentService | None:
+        if self._experiments_provider is None:
+            return None
+        return self._experiments_provider()
 
     def _find_existing_acquisition_output(
         self,
@@ -238,6 +248,25 @@ class SessionService(BaseService):
         return session
 
     def _ensure_session_can_be_deleted(self, session: Session) -> None:
+        experiments, _ = self.repository.query_experiments(
+            session_id=session.session_id,
+            limit=None,
+            offset=0,
+        )
+        if experiments:
+            raise ValidationError(
+                "Session cannot be deleted while Experiments reference it."
+            )
+        collection_dataset_ids = (
+            self.repository.acquisition_collections.dataset_ids_referencing_session(
+                session.session_id
+            )
+        )
+        if collection_dataset_ids:
+            raise ValidationError(
+                "Session cannot be deleted while Datasets reference collection "
+                "snapshots captured in it."
+            )
         datasets = self.query_from_repository(
             loader=lambda repository: repository.query_datasets(
                 project_id=session.project_id,
@@ -343,6 +372,22 @@ class SessionService(BaseService):
             raise ValidationError("Primary question must belong to the same project.")
         if question.status != QuestionStatus.ACTIVE:
             raise ValidationError("Primary question must be active for scientific sessions.")
+        linked_experiments, _ = self.repository.query_experiments(
+            session_id=session.session_id,
+            limit=None,
+            offset=0,
+        )
+        mismatched_experiments = [
+            experiment.name
+            for experiment in linked_experiments
+            if experiment.primary_question_id != primary_question_id
+        ]
+        if mismatched_experiments:
+            names = ", ".join(sorted(mismatched_experiments))
+            raise ValidationError(
+                "Operational Session cannot become scientific because its "
+                f"Experiment questions do not match: {names}"
+            )
         session.session_type = SessionType.SCIENTIFIC
         session.primary_question_id = primary_question_id
         session.updated_at = utc_now()
@@ -362,18 +407,189 @@ class SessionService(BaseService):
     ) -> Dataset:
         session = self.get_session(session_id)
         self.authorization.require_contributor(session.project_id, actor=actor)
+        with self.application_transaction():
+            # Session acquisition state is the outermost lock scope. Dataset
+            # creation and inherited Experiment memberships stay inside this
+            # transaction, after a post-lock re-read of all source state.
+            self.repository.lock_session_acquisition_state(session_id)
+            linked_experiments, _ = self.repository.query_experiments(
+                session_id=session_id,
+                limit=None,
+                offset=0,
+            )
+            self.repository.lock_experiment_updates(
+                experiment.experiment_id
+                for experiment in linked_experiments
+            )
+            return self._promote_operational_session_to_dataset_locked(
+                session_id,
+                primary_question_id,
+                secondary_question_ids=secondary_question_ids,
+                status=status,
+                commit_manifest=commit_manifest,
+                actor=actor,
+            )
+
+    def _promote_operational_session_to_dataset_locked(
+        self,
+        session_id: UUID,
+        primary_question_id: UUID,
+        *,
+        secondary_question_ids: Iterable[UUID] | None,
+        status: DatasetStatus,
+        commit_manifest: DatasetCommitManifestInput | DatasetCommitManifest | None,
+        actor: AuthContext | None,
+    ) -> Dataset:
+        """Promote after re-reading under Session and linked Experiment locks."""
+
+        session = self.get_session(session_id)
+        self.authorization.require_contributor(session.project_id, actor=actor)
         if session.session_type != SessionType.OPERATIONAL:
             raise ValidationError("Only operational sessions can be promoted to datasets.")
         if session.status != SessionStatus.ACTIVE:
             raise ValidationError("Only active operational sessions can be promoted.")
+        linked_experiments, _ = self.repository.query_experiments(
+            session_id=session.session_id,
+            limit=None,
+            offset=0,
+        )
+        archived_experiment_names = sorted(
+            experiment.name
+            for experiment in linked_experiments
+            if experiment.status == ExperimentStatus.ARCHIVED
+        )
+        if archived_experiment_names:
+            raise ValidationError(
+                "Cannot promote a Session linked to archived Experiments: "
+                + ", ".join(archived_experiment_names)
+            )
+        merged_secondary_question_ids = list(secondary_question_ids or [])
+        for experiment in linked_experiments:
+            if (
+                experiment.primary_question_id != primary_question_id
+                and experiment.primary_question_id
+                not in merged_secondary_question_ids
+            ):
+                merged_secondary_question_ids.append(
+                    experiment.primary_question_id
+                )
+        collection_snapshot_ids, collection_members = (
+            self._current_collection_snapshot_state(session.session_id)
+        )
         outputs = self.list_acquisition_outputs(session_id=session.session_id)
         merged_manifest = _merge_acquisition_outputs(commit_manifest, outputs)
         manifest_with_session = _manifest_input_with_source(merged_manifest, session.session_id)
-        return self.datasets.create_dataset(
+        manifest_with_collections = _manifest_with_collection_snapshots(
+            manifest_with_session,
+            collection_snapshot_ids,
+        )
+        reconciled_manifest = _reconcile_manifest_files_with_collections(
+            manifest_with_collections,
+            collection_members,
+        )
+        dataset = self.datasets.create_dataset(
             project_id=session.project_id,
             primary_question_id=primary_question_id,
-            secondary_question_ids=secondary_question_ids,
+            secondary_question_ids=merged_secondary_question_ids,
             status=status,
-            commit_manifest=manifest_with_session,
+            commit_manifest=reconciled_manifest,
             actor=actor,
         )
+        if self.experiments is not None:
+            for experiment in linked_experiments:
+                self.experiments._add_dataset_locked(  # noqa: SLF001
+                    experiment.experiment_id,
+                    dataset.dataset_id,
+                    actor=actor,
+                )
+        return dataset
+
+    def _current_collection_snapshot_state(
+        self,
+        session_id: UUID,
+    ) -> tuple[list[UUID], dict[str, set[str]]]:
+        collections, _ = self.repository.acquisition_collections.query(
+            session_id=session_id,
+            limit=None,
+            offset=0,
+        )
+        snapshot_ids: list[UUID] = []
+        member_checksums: dict[str, set[str]] = {}
+        unsealed: list[str] = []
+        for collection in collections:
+            snapshot = collection.current_snapshot
+            if snapshot is None:
+                unsealed.append(collection.collection_key)
+                continue
+            if not snapshot.complete:
+                unsealed.append(collection.collection_key)
+                continue
+            snapshot_ids.append(snapshot.snapshot_id)
+            payload = self.repository.acquisition_collections.get_manifest(
+                snapshot.snapshot_id
+            )
+            if payload is None:
+                raise ValidationError(
+                    "Current collection manifest is missing: "
+                    f"{collection.collection_key}"
+                )
+            for member in payload.get("members", []):
+                if not isinstance(member, dict):
+                    raise ValidationError(
+                        "Current collection manifest is malformed: "
+                        f"{collection.collection_key}"
+                    )
+                path = str(member.get("path", ""))
+                checksum = str(member.get("checksum", ""))
+                member_checksums.setdefault(path, set()).add(checksum)
+        if unsealed:
+            names = ", ".join(sorted(unsealed))
+            raise ValidationError(
+                "Current acquisition collections must be complete before "
+                f"Dataset promotion: {names}"
+            )
+        return snapshot_ids, member_checksums
+
+
+def _manifest_with_collection_snapshots(
+    manifest: DatasetCommitManifestInput,
+    snapshot_ids: list[UUID],
+) -> DatasetCommitManifestInput:
+    return DatasetCommitManifestInput(
+        files=manifest.files,
+        external_artifacts=manifest.external_artifacts,
+        collection_snapshot_ids=snapshot_ids,
+        metadata=manifest.metadata,
+        nwb_metadata=manifest.nwb_metadata,
+        bids_metadata=manifest.bids_metadata,
+        note_ids=manifest.note_ids,
+        source_session_id=manifest.source_session_id,
+    )
+
+
+def _reconcile_manifest_files_with_collections(
+    manifest: DatasetCommitManifestInput,
+    collection_members: dict[str, set[str]],
+) -> DatasetCommitManifestInput:
+    files = []
+    for file in manifest.files:
+        checksums = collection_members.get(file.path.strip())
+        if checksums is None:
+            files.append(file)
+            continue
+        if checksums == {file.checksum.strip()}:
+            continue
+        raise ValidationError(
+            "Acquisition collection checksum conflict for file path: "
+            f"{file.path.strip()}"
+        )
+    return DatasetCommitManifestInput(
+        files=files,
+        external_artifacts=manifest.external_artifacts,
+        collection_snapshot_ids=manifest.collection_snapshot_ids,
+        metadata=manifest.metadata,
+        nwb_metadata=manifest.nwb_metadata,
+        bids_metadata=manifest.bids_metadata,
+        note_ids=manifest.note_ids,
+        source_session_id=manifest.source_session_id,
+    )

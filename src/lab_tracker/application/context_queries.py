@@ -19,6 +19,7 @@ from lab_tracker.artifact_resolution import (
     unresolved,
 )
 from lab_tracker.auth import AuthContext
+from lab_tracker.collection_models import AcquisitionCollectionManifest
 from lab_tracker.decision_context import JsonObject, build_decision_context
 from lab_tracker.decision_context_query import (
     DecisionContextRepository,
@@ -32,12 +33,14 @@ from lab_tracker.models import (
     Dataset,
     DataStore,
     EntityType,
+    Experiment,
     ExplorationNode,
     ExternalArtifactReference,
     Goal,
     Project,
     ProjectStatus,
     Question,
+    Session,
     SupervisionEdge,
     UsageEventResourceType,
     UsageEventVerb,
@@ -48,6 +51,8 @@ from lab_tracker.provenance import (
     build_analysis_provenance_document,
     build_claim_provenance_document,
     build_dataset_provenance_document,
+    build_experiment_provenance_document,
+    validate_collection_member_expansion,
 )
 from lab_tracker.schemas import (
     AssistantDecisionContextRequest,
@@ -95,6 +100,15 @@ class ContextAccess(Protocol):
         *,
         actor: AuthContext | None,
     ) -> Dataset: ...
+
+    def get_experiment(self, experiment_id: UUID) -> Experiment: ...
+
+    def get_collection_manifest(
+        self,
+        snapshot_id: UUID,
+        *,
+        actor: AuthContext | None,
+    ) -> AcquisitionCollectionManifest: ...
 
     def get_analysis(self, analysis_id: UUID) -> Analysis: ...
 
@@ -180,6 +194,22 @@ class ContextRepository(DecisionContextRepository, Protocol):
         recent_first: bool = False,
     ) -> tuple[list[ExplorationNode], int]: ...
 
+    def query_experiment_sessions(
+        self,
+        *,
+        experiment_id: UUID,
+        limit: int | None = None,
+        offset: int = 0,
+    ) -> tuple[list[Session], int]: ...
+
+    def query_experiment_datasets(
+        self,
+        *,
+        experiment_id: UUID,
+        limit: int | None = None,
+        offset: int = 0,
+    ) -> tuple[list[Dataset], int]: ...
+
 
 @dataclass(frozen=True)
 class ContextQueries:
@@ -212,6 +242,9 @@ class ContextQueries:
             query=payload.query,
             project_id=str(resolved_project_id) if resolved_project_id else None,
             question_id=str(payload.question_id) if payload.question_id else None,
+            experiment_id=(
+                str(payload.experiment_id) if payload.experiment_id else None
+            ),
             dataset_id=str(payload.dataset_id) if payload.dataset_id else None,
             analysis_id=str(payload.analysis_id) if payload.analysis_id else None,
             claim_id=str(payload.claim_id) if payload.claim_id else None,
@@ -257,6 +290,7 @@ class ContextQueries:
         *,
         actor: AuthContext,
         base_url: str,
+        expand_collection_members: bool = False,
     ) -> dict[str, object]:
         dataset = self.api.get_dataset_for_read(dataset_id, actor=actor)
         supervision_edges, _ = self.repository.query_supervision_edges(
@@ -267,6 +301,12 @@ class ContextQueries:
             base_url,
             dataset,
             supervision_edges=supervision_edges,
+            expand_collection_members=expand_collection_members,
+            collection_manifests=self._collection_manifests(
+                [dataset],
+                actor=actor,
+                expand=expand_collection_members,
+            ),
         )
 
     def analysis_provenance(
@@ -275,6 +315,7 @@ class ContextQueries:
         *,
         actor: AuthContext,
         base_url: str,
+        expand_collection_members: bool = False,
     ) -> dict[str, object]:
         analysis = self.api.get_analysis_for_read(analysis_id, actor=actor)
         datasets = [
@@ -309,6 +350,12 @@ class ContextQueries:
             visualizations=visualizations,
             claim_edges=claim_edges,
             supervision_edges=supervision_edges,
+            expand_collection_members=expand_collection_members,
+            collection_manifests=self._collection_manifests(
+                datasets,
+                actor=actor,
+                expand=expand_collection_members,
+            ),
         )
 
     def claim_provenance(
@@ -317,6 +364,7 @@ class ContextQueries:
         *,
         actor: AuthContext,
         base_url: str,
+        expand_collection_members: bool = False,
     ) -> dict[str, object]:
         claim = self.api.get_claim_for_read(claim_id, actor=actor)
         analyses = [
@@ -363,7 +411,62 @@ class ContextQueries:
             visualizations=visualizations,
             claim_edges=claim_edges,
             supervision_edges=supervision_edges,
+            expand_collection_members=expand_collection_members,
+            collection_manifests=self._collection_manifests(
+                datasets,
+                actor=actor,
+                expand=expand_collection_members,
+            ),
         )
+
+    def experiment_provenance(
+        self,
+        experiment_id: UUID,
+        *,
+        actor: AuthContext,
+        base_url: str,
+    ) -> dict[str, object]:
+        experiment = self.api.get_experiment(experiment_id)
+        self.api.require_project_read(experiment.project_id, actor=actor)
+        sessions, _ = self.repository.query_experiment_sessions(
+            experiment_id=experiment_id,
+            limit=None,
+            offset=0,
+        )
+        datasets, _ = self.repository.query_experiment_datasets(
+            experiment_id=experiment_id,
+            limit=None,
+            offset=0,
+        )
+        supervision_edges, _ = self.repository.query_supervision_edges(
+            limit=None,
+            offset=0,
+        )
+        return build_experiment_provenance_document(
+            base_url,
+            experiment,
+            sessions=sessions,
+            datasets=datasets,
+            supervision_edges=supervision_edges,
+        )
+
+    def _collection_manifests(
+        self,
+        datasets: list[Dataset],
+        *,
+        actor: AuthContext,
+        expand: bool,
+    ) -> dict[UUID, AcquisitionCollectionManifest] | None:
+        if not expand:
+            return None
+        snapshots = validate_collection_member_expansion(datasets)
+        return {
+            snapshot.snapshot_id: self.api.get_collection_manifest(
+                snapshot.snapshot_id,
+                actor=actor,
+            )
+            for snapshot in snapshots
+        }
 
     def search(
         self,
@@ -378,12 +481,17 @@ class ContextQueries:
     ) -> SearchResults:
         include_set = {
             item.strip().casefold()
-            for item in (include.split(",") if include else ["questions", "notes"])
+            for item in (
+                include.split(",")
+                if include
+                else ["questions", "notes", "experiments"]
+            )
             if item.strip()
         }
         project_ids: set[UUID] | None
         linked_question_ids: set[UUID] | None = None
         linked_note_ids: set[UUID] | None = None
+        linked_experiment_ids: set[UUID] | None = None
         if goal_id is not None:
             goal = self.api.get_goal(goal_id)
             goal_project_ids = self.api.require_goal_read(goal, actor=actor)
@@ -406,6 +514,11 @@ class ContextQueries:
                 link.target.entity_id
                 for link in goal.links
                 if link.target.entity_type == EntityType.NOTE
+            }
+            linked_experiment_ids = {
+                link.target.entity_id
+                for link in goal.links
+                if link.target.entity_type == EntityType.EXPERIMENT
             }
         elif project_id is not None:
             self.api.require_project_read(project_id, actor=actor)
@@ -436,14 +549,35 @@ class ContextQueries:
             if not include_set or "notes" in include_set
             else []
         )
+        experiments = (
+            self.repository.query_experiments(
+                project_id=None,
+                project_ids=project_ids,
+                search=query,
+                limit=None if linked_experiment_ids is not None else limit,
+                offset=0 if linked_experiment_ids is not None else offset,
+            )[0]
+            if not include_set or "experiments" in include_set
+            else []
+        )
+        if linked_experiment_ids is not None:
+            experiments = [
+                item
+                for item in experiments
+                if item.experiment_id in linked_experiment_ids
+            ][offset : offset + limit]
         self.api.record_usage_event(
             verb=UsageEventVerb.SEARCH,
             resource_type=UsageEventResourceType.SEARCH,
             project_id=_single_project_id(project_ids),
             actor=actor,
-            result_count=len(questions) + len(notes),
+            result_count=len(questions) + len(notes) + len(experiments),
         )
-        return SearchResults(questions=questions, notes=notes)
+        return SearchResults(
+            questions=questions,
+            notes=notes,
+            experiments=experiments,
+        )
 
     def resolve_external_artifact(
         self,

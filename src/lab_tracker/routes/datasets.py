@@ -10,7 +10,8 @@ from starlette import status as http_status
 from starlette.requests import Request
 
 from lab_tracker.api import LabTrackerAPI
-from lab_tracker.models import Dataset, DatasetStatus, UsageEventResourceType
+from lab_tracker.collection_models import DatasetSummary
+from lab_tracker.models import Dataset, DatasetFile, DatasetStatus, UsageEventResourceType
 from lab_tracker.patching import provided_fields
 from lab_tracker.schemas import DatasetCreate, DatasetUpdate, Envelope, ListEnvelope
 
@@ -79,6 +80,66 @@ def build_datasets_router(api: LabTrackerAPI) -> APIRouter:
             limit=limit,
             offset=offset,
             total=page.total,
+        )
+
+    @router.get(
+        "/datasets/summaries",
+        response_model=ListEnvelope[DatasetSummary],
+    )
+    def list_dataset_summaries(
+        request: Request,
+        dataset_id: UUID | None = None,
+        project_id: UUID | None = None,
+        status: DatasetStatus | None = None,
+        created_by: CreatedByFilter = None,
+        since: datetime | None = None,
+        until: datetime | None = None,
+        limit: int = 50,
+        offset: int = 0,
+    ):
+        validate_pagination(limit, offset)
+        page = handlers_from_request(request).catalogs.list_dataset_summaries(
+            actor=actor_from_request(request),
+            dataset_id=dataset_id,
+            project_id=project_id,
+            status=status.value if status is not None else None,
+            created_by=created_by,
+            since=since,
+            until=until,
+            limit=limit,
+            offset=offset,
+        )
+        return list_response(
+            page.items,
+            limit=limit,
+            offset=offset,
+            total=page.total,
+        )
+
+    @router.get(
+        "/datasets/{dataset_id}/manifest-files",
+        response_model=ListEnvelope[DatasetFile],
+    )
+    def list_dataset_manifest_files(
+        dataset_id: UUID,
+        request: Request,
+        limit: int = 50,
+        offset: int = 0,
+    ):
+        validate_pagination(limit, offset)
+        dataset = api_from_request(request, api).get_dataset_for_read(
+            dataset_id,
+            actor=actor_from_request(request),
+        )
+        files = sorted(
+            dataset.commit_manifest.files,
+            key=lambda item: (item.path, item.checksum),
+        )
+        return list_response(
+            files[offset : offset + limit],
+            limit=limit,
+            offset=offset,
+            total=len(files),
         )
 
     @router.get("/datasets/{dataset_id}", response_model=Envelope[Dataset])

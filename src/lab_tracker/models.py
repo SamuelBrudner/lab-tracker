@@ -21,6 +21,8 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, computed_field, field_validator, model_validator
 
+from lab_tracker.collection_models import DatasetCollectionSnapshotReference
+
 NoteMetadataScalar = str | bool | int | float
 ClaimConfidence = Annotated[
     float,
@@ -157,6 +159,7 @@ class UsageEventResourceType(str, Enum):
     PROJECT_MEMBERSHIP = "project_membership"
     QUESTION = "question"
     QUESTION_REFACTOR = "question_refactor"
+    EXPERIMENT = "experiment"
     NOTE = "note"
     SESSION = "session"
     DATASET = "dataset"
@@ -197,6 +200,12 @@ class SessionStatus(str, Enum):
 class SessionType(str, Enum):
     SCIENTIFIC = "scientific"
     OPERATIONAL = "operational"
+
+
+class ExperimentStatus(str, Enum):
+    ACTIVE = "active"
+    CLOSED = "closed"
+    ARCHIVED = "archived"
 
 
 class AnalysisStatus(str, Enum):
@@ -336,6 +345,7 @@ class OutcomeStatus(str, Enum):
 class EntityType(str, Enum):
     PROJECT = "project"
     QUESTION = "question"
+    EXPERIMENT = "experiment"
     DATASET = "dataset"
     NOTE = "note"
     SESSION = "session"
@@ -548,6 +558,7 @@ class ExternalArtifactReference(_DomainModel):
 class DatasetCommitManifestInput(_DomainModel):
     files: list[DatasetFile] = Field(default_factory=list)
     external_artifacts: list[ExternalArtifactReference] = Field(default_factory=list)
+    collection_snapshot_ids: list[UUID] = Field(default_factory=list)
     metadata: dict[str, str] = Field(default_factory=dict)
     nwb_metadata: dict[str, str] = Field(default_factory=dict)
     bids_metadata: dict[str, str] = Field(default_factory=dict)
@@ -558,6 +569,9 @@ class DatasetCommitManifestInput(_DomainModel):
 class DatasetCommitManifest(_DomainModel):
     files: list[DatasetFile] = Field(default_factory=list)
     external_artifacts: list[ExternalArtifactReference] = Field(default_factory=list)
+    collection_snapshots: list[DatasetCollectionSnapshotReference] = Field(
+        default_factory=list
+    )
     metadata: dict[str, str] = Field(default_factory=dict)
     nwb_metadata: dict[str, str] = Field(default_factory=dict)
     bids_metadata: dict[str, str] = Field(default_factory=dict)
@@ -814,6 +828,26 @@ class QuestionRefactor(_DomainModel):
     created_at: datetime = Field(default_factory=utc_now)
     created_by: str | None = None
     created_by_user_id: UUID | None = None
+
+
+class Experiment(_DomainModel):
+    experiment_id: UUID
+    project_id: UUID
+    name: str
+    description: str = ""
+    primary_question_id: UUID
+    status: ExperimentStatus = ExperimentStatus.ACTIVE
+    closed_at: datetime | None = None
+    archived_at: datetime | None = None
+    created_at: datetime = Field(default_factory=utc_now)
+    created_by: str | None = None
+    created_by_user_id: UUID | None = None
+    origin: EntityOrigin = EntityOrigin.USER
+    change_set_id: UUID | None = None
+    origin_provider: str | None = None
+    origin_model: str | None = None
+    origin_prompt_version: str | None = None
+    updated_at: datetime = Field(default_factory=utc_now)
 
 
 class Dataset(_DomainModel):

@@ -55,6 +55,7 @@ def _write_tool_annotations(tool: Any) -> ToolAnnotations:
         destructiveHint=name
         in {
             "lab_tracker_refactor_question",
+            "lab_tracker_update_experiment",
             "lab_tracker_update_goal",
         },
         openWorldHint=True,
@@ -103,6 +104,50 @@ def lab_tracker_create_question(
         hint=next_action(
             "lab_tracker_link_node_to_goal",
             "Link important questions to the goal they advance.",
+        ),
+    )
+
+
+def lab_tracker_create_experiment(
+    project_id: str,
+    name: str,
+    primary_question_id: str,
+    description: str | None = None,
+) -> JsonObject:
+    """Create a lightweight Experiment grouping only when the user explicitly asks."""
+    return _write_tool(
+        "lab_tracker_create_experiment",
+        lambda client: client.create_experiment(
+            project_id=project_id,
+            name=name,
+            primary_question_id=primary_question_id,
+            description=description,
+        ),
+        hint=next_action(
+            "lab_tracker_get_experiment",
+            "Read the created Experiment before linking Sessions or Datasets.",
+        ),
+    )
+
+
+def lab_tracker_update_experiment(
+    experiment_id: str,
+    name: str | None = None,
+    description: str | None = None,
+    status: str | None = None,
+) -> JsonObject:
+    """Update or advance an Experiment lifecycle only when the user explicitly asks."""
+    return _write_tool(
+        "lab_tracker_update_experiment",
+        lambda client: client.update_experiment(
+            experiment_id=experiment_id,
+            name=name,
+            description=description,
+            status=status,
+        ),
+        hint=next_action(
+            "lab_tracker_get_experiment",
+            "Read back the Experiment and its lifecycle state.",
         ),
     )
 
@@ -516,6 +561,8 @@ def lab_tracker_record_evidence_bundle(
 WRITE_TOOLS = (
     lab_tracker_create_project,
     lab_tracker_create_question,
+    lab_tracker_create_experiment,
+    lab_tracker_update_experiment,
     lab_tracker_refactor_question,
     lab_tracker_create_note,
     lab_tracker_create_dataset,

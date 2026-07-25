@@ -28,11 +28,14 @@ def dataset_provenance_payload(
     request: Request,
     api: LabTrackerAPI,
     dataset_id: UUID,
+    *,
+    expand_collection_members: bool = False,
 ) -> dict[str, object]:
     return handlers_from_request(request).context.dataset_provenance(
         dataset_id,
         actor=actor_from_request(request),
         base_url=provenance_base_url(request),
+        expand_collection_members=expand_collection_members,
     )
 
 
@@ -40,11 +43,14 @@ def analysis_provenance_payload(
     request: Request,
     api: LabTrackerAPI,
     analysis_id: UUID,
+    *,
+    expand_collection_members: bool = False,
 ) -> dict[str, object]:
     return handlers_from_request(request).context.analysis_provenance(
         analysis_id,
         actor=actor_from_request(request),
         base_url=provenance_base_url(request),
+        expand_collection_members=expand_collection_members,
     )
 
 
@@ -52,9 +58,23 @@ def claim_provenance_payload(
     request: Request,
     api: LabTrackerAPI,
     claim_id: UUID,
+    *,
+    expand_collection_members: bool = False,
 ) -> dict[str, object]:
     return handlers_from_request(request).context.claim_provenance(
         claim_id,
+        actor=actor_from_request(request),
+        base_url=provenance_base_url(request),
+        expand_collection_members=expand_collection_members,
+    )
+
+def experiment_provenance_payload(
+    request: Request,
+    api: LabTrackerAPI,
+    experiment_id: UUID,
+) -> dict[str, object]:
+    return handlers_from_request(request).context.experiment_provenance(
+        experiment_id,
         actor=actor_from_request(request),
         base_url=provenance_base_url(request),
     )
@@ -71,15 +91,54 @@ def build_provenance_router(api: LabTrackerAPI) -> APIRouter:
     router = APIRouter()
 
     @router.get("/datasets/{dataset_id}/provenance")
-    def get_dataset_provenance(dataset_id: UUID, request: Request):
-        return jsonld_response(dataset_provenance_payload(request, api, dataset_id))
+    def get_dataset_provenance(
+        dataset_id: UUID,
+        request: Request,
+        expand_collection_members: bool = False,
+    ):
+        return jsonld_response(
+            dataset_provenance_payload(
+                request,
+                api,
+                dataset_id,
+                expand_collection_members=expand_collection_members,
+            )
+        )
 
     @router.get("/analyses/{analysis_id}/provenance")
-    def get_analysis_provenance(analysis_id: UUID, request: Request):
-        return jsonld_response(analysis_provenance_payload(request, api, analysis_id))
+    def get_analysis_provenance(
+        analysis_id: UUID,
+        request: Request,
+        expand_collection_members: bool = False,
+    ):
+        return jsonld_response(
+            analysis_provenance_payload(
+                request,
+                api,
+                analysis_id,
+                expand_collection_members=expand_collection_members,
+            )
+        )
 
     @router.get("/claims/{claim_id}/provenance")
-    def get_claim_provenance(claim_id: UUID, request: Request):
-        return jsonld_response(claim_provenance_payload(request, api, claim_id))
+    def get_claim_provenance(
+        claim_id: UUID,
+        request: Request,
+        expand_collection_members: bool = False,
+    ):
+        return jsonld_response(
+            claim_provenance_payload(
+                request,
+                api,
+                claim_id,
+                expand_collection_members=expand_collection_members,
+            )
+        )
+
+    @router.get("/experiments/{experiment_id}/provenance")
+    def get_experiment_provenance(experiment_id: UUID, request: Request):
+        return jsonld_response(
+            experiment_provenance_payload(request, api, experiment_id)
+        )
 
     return router

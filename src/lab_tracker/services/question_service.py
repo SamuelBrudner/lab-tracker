@@ -739,6 +739,16 @@ class QuestionService(BaseService):
         return question
 
     def _ensure_question_not_referenced(self, question: Question) -> None:
+        experiments, _ = self.repository.query_experiments(
+            primary_question_id=question.question_id,
+            limit=None,
+            offset=0,
+        )
+        if experiments:
+            raise ValidationError(
+                "Question cannot be deleted while Experiments use it as their "
+                "primary question."
+            )
         datasets = self.query_from_repository(
             loader=lambda repository: repository.query_datasets(
                 project_id=question.project_id,

@@ -12,6 +12,7 @@ from lab_tracker.models import (
     Analysis,
     Claim,
     Dataset,
+    Experiment,
     Note,
     Project,
     Question,
@@ -46,6 +47,9 @@ class DecisionContextRepository(Protocol):
 
     @property
     def questions(self) -> DecisionContextEntityReader[Question]: ...
+
+    @property
+    def experiments(self) -> DecisionContextEntityReader[Experiment]: ...
 
     @property
     def datasets(self) -> DecisionContextEntityReader[Dataset]: ...
@@ -109,6 +113,21 @@ class DecisionContextRepository(Protocol):
         offset: int = 0,
         recent_first: bool = False,
     ) -> tuple[list[Note], int]: ...
+
+    def query_experiments(
+        self,
+        *,
+        project_id: UUID | None = None,
+        project_ids: set[UUID] | None = None,
+        primary_question_id: UUID | None = None,
+        status: str | None = None,
+        search: str | None = None,
+        session_id: UUID | None = None,
+        dataset_id: UUID | None = None,
+        limit: int | None = None,
+        offset: int = 0,
+        recent_first: bool = False,
+    ) -> tuple[list[Experiment], int]: ...
 
     def project_ids_with_search_matches(
         self,
@@ -247,6 +266,10 @@ class RepositoryDecisionContextReader:
         question = self._repository.questions.get(UUID(str(question_id)))
         return self._project_entity_to_json(question)
 
+    def get_experiment(self, experiment_id: str) -> JsonObject | None:
+        experiment = self._repository.experiments.get(UUID(str(experiment_id)))
+        return self._project_entity_to_json(experiment)
+
     def get_dataset(self, dataset_id: str) -> JsonObject | None:
         dataset = self._repository.datasets.get(UUID(str(dataset_id)))
         return self._project_entity_to_json(dataset)
@@ -352,13 +375,21 @@ class RepositoryDecisionContextReader:
     ) -> JsonObject:
         include_set = {
             item.strip().casefold()
-            for item in (include.split(",") if include else ["questions", "notes"])
+            for item in (
+                include.split(",")
+                if include
+                else ["questions", "notes", "experiments"]
+            )
             if item.strip()
         }
         if project_id is not None and not self._project_allowed(project_id):
             return {
-                "data": {"questions": [], "notes": []},
-                "meta": {"questions_count": 0, "notes_count": 0},
+                "data": {"questions": [], "notes": [], "experiments": []},
+                "meta": {
+                    "questions_count": 0,
+                    "notes_count": 0,
+                    "experiments_count": 0,
+                },
             }
         project_ids = (
             {UUID(str(project_id))}
@@ -387,12 +418,28 @@ class RepositoryDecisionContextReader:
             )
         else:
             notes, notes_total = [], 0
+        if not include_set or "experiments" in include_set:
+            experiments, experiments_total = self._repository.query_experiments(
+                project_id=None,
+                project_ids=project_ids,
+                search=query,
+                limit=limit,
+                offset=offset,
+                recent_first=True,
+            )
+        else:
+            experiments, experiments_total = [], 0
         return {
             "data": {
                 "questions": [_entity_to_json(item) for item in questions],
                 "notes": [_entity_to_json(item) for item in notes],
+                "experiments": [_entity_to_json(item) for item in experiments],
             },
-            "meta": {"questions_count": questions_total, "notes_count": notes_total},
+            "meta": {
+                "questions_count": questions_total,
+                "notes_count": notes_total,
+                "experiments_count": experiments_total,
+            },
         }
 
     def project_ids_with_search_matches(self, query: str, *, limit: int = 50) -> set[str]:
@@ -426,6 +473,31 @@ class RepositoryDecisionContextReader:
             created_by=created_by,
             since=since,
             until=until,
+            limit=limit,
+            offset=offset,
+            recent_first=recent_first,
+        )
+        return _list_payload(items, total, limit, offset)
+
+    def list_experiments(
+        self,
+        *,
+        project_id: str | None = None,
+        status: str | None = None,
+        primary_question_id: str | None = None,
+        search: str | None = None,
+        limit: int = 50,
+        offset: int = 0,
+        recent_first: bool = False,
+    ) -> JsonObject:
+        if project_id is not None and not self._project_allowed(project_id):
+            return _list_payload([], 0, limit, offset)
+        items, total = self._repository.query_experiments(
+            project_id=_uuid_or_none(project_id),
+            project_ids=self._project_filter(project_id),
+            status=status,
+            primary_question_id=_uuid_or_none(primary_question_id),
+            search=search,
             limit=limit,
             offset=offset,
             recent_first=recent_first,

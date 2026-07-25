@@ -1244,7 +1244,11 @@ def test_project_only_spanning_goal_search_pushes_empty_link_filters_and_page_to
     )
 
     assert response.status_code == 200
-    assert response.json()["data"] == {"questions": [], "notes": []}
+    assert response.json()["data"] == {
+        "questions": [],
+        "notes": [],
+        "experiments": [],
+    }
     assert len(question_calls) == len(note_calls) == 1
     assert question_calls[0]["question_ids"] == set()
     assert note_calls[0]["note_ids"] == set()

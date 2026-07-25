@@ -8,10 +8,16 @@ from uuid import uuid4
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import func, insert, select
+from sqlalchemy import delete, func, insert, select
 from sqlalchemy.exc import IntegrityError
 
 from lab_tracker import dolt_mirror
+from lab_tracker.collection_db_models import (
+    AcquisitionCollectionModel,
+    AcquisitionCollectionSnapshotModel,
+    DatasetCollectionSnapshotLinkModel,
+)
+from lab_tracker.collection_models import AcquisitionCollection
 from lab_tracker.db_models import (
     AnalysisDatasetModel,
     AnalysisModel,
@@ -20,6 +26,7 @@ from lab_tracker.db_models import (
     ClaimModel,
     ClaimQuestionModel,
     DatasetModel,
+    ExperimentModel,
     GraphDraftBatchSettingsModel,
     NoteModel,
     NoteTargetModel,
@@ -32,6 +39,9 @@ from lab_tracker.db_models import (
 from lab_tracker.services.note_service import NoteService
 from lab_tracker.services.project_service import ProjectService
 from lab_tracker.services.question_service import QuestionService
+from lab_tracker.sqlalchemy_repository_parts.collections import (
+    SQLAlchemyAcquisitionCollectionRepository,
+)
 
 pytestmark = pytest.mark.postgres
 
@@ -470,3 +480,212 @@ def test_postgres_json_and_boolean_round_trip(
     ]
     assert settings.enabled is True
     assert settings_count == 1
+
+
+def test_postgres_experiment_and_collection_persistence_protects_snapshot_lineage(
+    postgres_client: TestClient,
+    postgres_admin_auth_headers: dict[str, str],
+) -> None:
+    member_size_bytes = 2**31 + 23
+    project_response = postgres_client.post(
+        "/projects",
+        json={"name": "Postgres collection integrity"},
+        headers=postgres_admin_auth_headers,
+    )
+    assert project_response.status_code == 201
+    project_id = project_response.json()["data"]["project_id"]
+    question_response = postgres_client.post(
+        "/questions",
+        json={
+            "project_id": project_id,
+            "text": "Does PostgreSQL retain compact collection provenance?",
+            "question_type": "descriptive",
+            "status": "active",
+        },
+        headers=postgres_admin_auth_headers,
+    )
+    assert question_response.status_code == 201
+    question_id = question_response.json()["data"]["question_id"]
+    session_response = postgres_client.post(
+        "/sessions",
+        json={
+            "project_id": project_id,
+            "session_type": "operational",
+        },
+        headers=postgres_admin_auth_headers,
+    )
+    assert session_response.status_code == 201
+    session_id = session_response.json()["data"]["session_id"]
+    experiment_response = postgres_client.post(
+        "/experiments",
+        json={
+            "project_id": project_id,
+            "name": "Postgres Experiment",
+            "primary_question_id": question_id,
+        },
+        headers=postgres_admin_auth_headers,
+    )
+    assert experiment_response.status_code == 201
+    experiment_id = experiment_response.json()["data"]["experiment_id"]
+
+    capture_response = postgres_client.post(
+        f"/sessions/{session_id}/collections/trials/snapshots",
+        json={
+            "client_capture_id": "postgres-capture",
+            "observed_at": "2026-07-24T12:00:00Z",
+            "complete": True,
+            "manifest": {
+                "schema_version": 1,
+                "members": [
+                    {
+                        "path": "trial-0001/data.bin",
+                        "checksum": "a" * 64,
+                        "size_bytes": member_size_bytes,
+                    }
+                ],
+            },
+        },
+        headers=postgres_admin_auth_headers,
+    )
+    assert capture_response.status_code == 201
+    captured_snapshot = capture_response.json()["data"]
+    snapshot_id = captured_snapshot["snapshot_id"]
+    assert captured_snapshot["total_size_bytes"] == member_size_bytes
+    dataset_response = postgres_client.post(
+        "/datasets",
+        json={
+            "project_id": project_id,
+            "primary_question_id": question_id,
+            "status": "committed",
+            "commit_manifest": {
+                "collection_snapshot_ids": [snapshot_id],
+            },
+        },
+        headers=postgres_admin_auth_headers,
+    )
+    assert dataset_response.status_code == 201
+    dataset = dataset_response.json()["data"]
+    dataset_id = dataset["dataset_id"]
+    assert dataset["commit_manifest"]["source_session_id"] is None
+    summary_response = postgres_client.get(
+        "/datasets/summaries",
+        params={"dataset_id": dataset_id},
+        headers=postgres_admin_auth_headers,
+    )
+    assert summary_response.status_code == 200
+    summary = summary_response.json()["data"][0]
+    assert summary["collection_member_count"] == 1
+    assert summary["collection_total_size_bytes"] == member_size_bytes
+    membership_response = postgres_client.put(
+        f"/experiments/{experiment_id}/datasets/{dataset_id}",
+        headers=postgres_admin_auth_headers,
+    )
+    assert membership_response.status_code == 200
+
+    experiment_datasets = postgres_client.get(
+        f"/experiments/{experiment_id}/datasets",
+        headers=postgres_admin_auth_headers,
+    )
+    assert experiment_datasets.status_code == 200
+    assert [
+        item["dataset_id"]
+        for item in experiment_datasets.json()["data"]
+    ] == [dataset_id]
+    with postgres_client.app.state.db_session_factory() as session:
+        assert session.get(ExperimentModel, experiment_id) is not None
+        assert (
+            session.get(
+                DatasetCollectionSnapshotLinkModel,
+                (dataset_id, snapshot_id),
+            )
+            is not None
+        )
+        assert (
+            session.get(AcquisitionCollectionSnapshotModel, snapshot_id)
+            is not None
+        )
+
+    refused = postgres_client.delete(
+        f"/sessions/{session_id}",
+        headers=postgres_admin_auth_headers,
+    )
+    assert refused.status_code == 422
+    assert (
+        "Datasets reference collection snapshots"
+        in refused.json()["error"]["message"]
+    )
+
+    with postgres_client.app.state.db_session_factory() as session:
+        with pytest.raises(IntegrityError):
+            session.execute(
+                delete(SessionModel).where(
+                    SessionModel.session_id == session_id
+                )
+            )
+            session.commit()
+        session.rollback()
+    with postgres_client.app.state.db_session_factory() as session:
+        assert session.get(SessionModel, session_id) is not None
+        assert (
+            session.get(AcquisitionCollectionSnapshotModel, snapshot_id)
+            is not None
+        )
+
+
+def test_postgres_concurrent_first_collection_create_is_idempotent(
+    postgres_client: TestClient,
+    postgres_admin_auth_headers: dict[str, str],
+) -> None:
+    project_response = postgres_client.post(
+        "/projects",
+        json={"name": "Concurrent collection identity"},
+        headers=postgres_admin_auth_headers,
+    )
+    assert project_response.status_code == 201
+    session_response = postgres_client.post(
+        "/sessions",
+        json={
+            "project_id": project_response.json()["data"]["project_id"],
+            "session_type": "operational",
+        },
+        headers=postgres_admin_auth_headers,
+    )
+    assert session_response.status_code == 201
+    session_id = session_response.json()["data"]["session_id"]
+    ready = Barrier(2)
+
+    def get_or_create_collection() -> str:
+        with postgres_client.app.state.db_session_factory() as db_session:
+            repository = SQLAlchemyAcquisitionCollectionRepository(db_session)
+            ready.wait(timeout=10)
+            collection = repository.get_or_create(
+                AcquisitionCollection(
+                    collection_id=uuid4(),
+                    session_id=session_id,
+                    collection_key="trials",
+                )
+            )
+            db_session.commit()
+            return str(collection.collection_id)
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        collection_ids = list(
+            executor.map(
+                lambda _index: get_or_create_collection(),
+                range(2),
+            )
+        )
+
+    assert len(set(collection_ids)) == 1
+    with postgres_client.app.state.db_session_factory() as db_session:
+        assert (
+            db_session.scalar(
+                select(func.count())
+                .select_from(AcquisitionCollectionModel)
+                .where(
+                    AcquisitionCollectionModel.session_id == session_id,
+                    AcquisitionCollectionModel.collection_key == "trials",
+                )
+            )
+            == 1
+        )
