@@ -203,11 +203,12 @@ def _is_link_or_reparse_point(path: str) -> bool:
 
 
 class LocalPathPolicy:
-    """Authorize native local paths against optional canonical allowed roots.
+    """Prepare native local paths against optional canonical allowed roots.
 
     ``None`` preserves the resolver's explicit unscoped mode.  An empty
     sequence is deny-all and rejects candidates without touching their
-    filesystem locations.
+    filesystem locations.  A returned canonical path is a preliminary plan;
+    byte readers must still bind final authorization to the opened descriptor.
     """
 
     def __init__(self, allowed_roots: Sequence[str | Path] | None = None) -> None:
@@ -270,7 +271,11 @@ class LocalPathPolicy:
         return self.authorize_path(path)
 
     def authorize_path(self, path: str | os.PathLike[str]) -> str | None:
-        """Canonicalize and authorize a native absolute candidate path."""
+        """Return a canonical in-policy path plan, or ``None``.
+
+        This method does not grant a reopenable capability.  Consumers that
+        read bytes must validate and retain the exact opened descriptor.
+        """
 
         if self._canonical_roots == ():
             return None

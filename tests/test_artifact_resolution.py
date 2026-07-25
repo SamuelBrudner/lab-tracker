@@ -2,7 +2,9 @@ import hashlib
 import os
 import shutil
 import subprocess
+from contextlib import contextmanager
 from datetime import datetime, timezone
+from io import BytesIO
 from pathlib import Path
 from types import SimpleNamespace
 from uuid import uuid4
@@ -16,6 +18,7 @@ from http_security_fakes import (
     FakeSafeHttpClient,
 )
 
+import lab_tracker.local_file_access as local_file_access
 from lab_tracker.artifact_resolution import (
     DEFAULT_MAX_BYTES,
     ArtifactResolver,
@@ -39,6 +42,12 @@ from lab_tracker.artifact_resolution import (
     store_relative_reference,
 )
 from lab_tracker.git_remote_policy import GitRemotePolicy
+from lab_tracker.local_file_access import (
+    LocalOpenFailure,
+    LocalOpenFailureReason,
+    OpenedLocalFile,
+)
+from lab_tracker.local_path_policy import LocalPathPolicy
 from lab_tracker.models import DataStore, ExternalArtifactReference, StoreKind
 from lab_tracker.outbound_http import (
     ApprovedSocketAddress,
@@ -250,7 +259,7 @@ def test_local_resolver_respects_allowed_roots(tmp_path):
     result = resolver.resolve(_local_ref(outside, _sha256(b"should not be readable")))
 
     assert result.status is ResolutionStatus.UNRESOLVED
-    assert "allowed" in (result.detail or "").lower()
+    assert "authorized" in (result.detail or "").lower()
     assert result.content is None
 
 
@@ -265,6 +274,128 @@ def test_local_resolver_allows_paths_within_roots(tmp_path):
     )
 
     assert result.status is ResolutionStatus.VERIFIED
+
+
+def test_local_resolver_hashes_opened_stream_without_reopening_path(tmp_path):
+    recorded = b"descriptor-owned recorded bytes"
+    replacement = b"replacement pathname bytes"
+    path = _write(tmp_path, "artifact.bin", recorded)
+
+    class SwappingReader:
+        @contextmanager
+        def open_regular_file(self, requested_path):
+            assert os.fspath(requested_path) == str(path)
+            stream = BytesIO(recorded)
+            path.write_bytes(replacement)
+            try:
+                yield OpenedLocalFile(
+                    stream=stream,
+                    display_path=str(path),
+                    size_hint_bytes=len(recorded),
+                )
+            finally:
+                stream.close()
+
+    result = LocalFilesystemResolver(
+        file_reader_factory=lambda _policy: SwappingReader()
+    ).resolve(
+        _local_ref(path, _sha256(recorded))
+    )
+
+    assert path.read_bytes() == replacement
+    assert result.status is ResolutionStatus.VERIFIED
+    assert result.content == recorded
+
+
+def test_local_resolver_operational_read_failure_is_static(tmp_path):
+    path = tmp_path / "sensitive-name.bin"
+
+    class FailingStream(BytesIO):
+        def read(self, _size=-1):
+            raise OSError(f"cannot read secret host path {path}")
+
+    class FailingReader:
+        @contextmanager
+        def open_regular_file(self, _requested_path):
+            stream = FailingStream()
+            try:
+                yield OpenedLocalFile(
+                    stream=stream,
+                    display_path=str(path),
+                    size_hint_bytes=1,
+                )
+            finally:
+                stream.close()
+
+    result = LocalFilesystemResolver(
+        file_reader_factory=lambda _policy: FailingReader()
+    ).resolve(
+        _local_ref(path, _sha256(b"x"))
+    )
+
+    assert result.status is ResolutionStatus.UNRESOLVED
+    assert result.detail == "Failed to read local artifact."
+    assert str(path) not in (result.detail or "")
+
+
+@pytest.mark.parametrize(
+    "reason",
+    [LocalOpenFailureReason.DENIED, LocalOpenFailureReason.IO_ERROR],
+)
+def test_local_resolver_only_recovers_after_missing(reason, tmp_path, monkeypatch):
+    path = tmp_path / "artifact.bin"
+
+    class FailingReader:
+        @contextmanager
+        def open_regular_file(self, _requested_path):
+            yield LocalOpenFailure(reason)
+
+    resolver = LocalFilesystemResolver(
+        allowed_roots=[tmp_path],
+        recovery=RecoveryPolicy(enabled=True),
+        file_reader_factory=lambda _policy: FailingReader(),
+    )
+
+    def unexpected_recovery(*_args, **_kwargs):
+        raise AssertionError("non-missing failure started recovery")
+
+    monkeypatch.setattr(resolver, "_recover_by_hash", unexpected_recovery)
+
+    result = resolver.resolve(_local_ref(path, _sha256(b"x")))
+
+    assert result.status is ResolutionStatus.UNRESOLVED
+
+
+def test_local_resolver_denied_detail_covers_in_root_unsupported_target(tmp_path):
+    path = tmp_path / "directory"
+    path.mkdir()
+
+    result = LocalFilesystemResolver(allowed_roots=[tmp_path]).resolve(
+        _local_ref(path, _sha256(b"x"))
+    )
+
+    assert result.status is ResolutionStatus.UNRESOLVED
+    assert result.detail == (
+        "Local artifact is not an authorized readable regular file."
+    )
+
+
+def test_local_resolver_policy_cannot_be_bypassed_by_reader_miscomposition(tmp_path):
+    allowed = tmp_path / "allowed"
+    allowed.mkdir()
+    outside = _write(tmp_path, "outside.bin", b"secret")
+
+    resolver = LocalFilesystemResolver(
+        allowed_roots=[allowed],
+        file_reader_factory=lambda _policy: local_file_access.HandleBoundLocalFileAccess(
+            LocalPathPolicy()
+        ),
+    )
+
+    result = resolver.resolve(_local_ref(outside, _sha256(b"secret")))
+
+    assert result.status is ResolutionStatus.UNRESOLVED
+    assert result.content is None
 
 
 def test_local_resolver_truncates_payload_but_still_verifies(tmp_path):
@@ -1780,6 +1911,52 @@ def test_recovery_finds_renamed_file_by_hash(tmp_path):
     assert result.content == data
 
 
+def test_recovery_starts_after_missing_reader_context_has_closed(tmp_path):
+    root = tmp_path / "store"
+    root.mkdir()
+    data = b"non-reentrant reader recovery"
+    candidate = root / "moved.bin"
+    candidate.write_bytes(data)
+    missing = root / "gone.bin"
+
+    class NonReentrantReader:
+        def __init__(self) -> None:
+            self.active = False
+
+        @contextmanager
+        def open_regular_file(self, requested_path):
+            assert self.active is False
+            self.active = True
+            requested = os.fspath(requested_path)
+            stream = BytesIO(data)
+            try:
+                if requested == str(missing):
+                    yield LocalOpenFailure(LocalOpenFailureReason.MISSING)
+                else:
+                    assert requested == str(candidate)
+                    yield OpenedLocalFile(
+                        stream=stream,
+                        display_path=requested,
+                        size_hint_bytes=len(data),
+                    )
+            finally:
+                stream.close()
+                self.active = False
+
+    reader = NonReentrantReader()
+    resolver = LocalFilesystemResolver(
+        allowed_roots=[root],
+        recovery=RecoveryPolicy(enabled=True),
+        file_reader_factory=lambda _policy: reader,
+    )
+
+    result = resolver.resolve(_local_ref(missing, _sha256(data)))
+
+    assert result.status is ResolutionStatus.VERIFIED
+    assert result.content == data
+    assert reader.active is False
+
+
 def test_recovery_disabled_by_default_stays_unresolved(tmp_path):
     root = tmp_path / "store"
     root.mkdir()
@@ -1916,6 +2093,67 @@ def test_windows_recovery_never_descends_through_junction_escape(tmp_path):
     assert result.content is None
 
 
+@pytest.mark.skipif(os.name != "nt", reason="requires Windows directory junctions")
+def test_windows_recovery_parent_swap_never_hashes_outside_target(
+    tmp_path, monkeypatch
+):
+    root = tmp_path / "store"
+    parent = root / "victim-parent"
+    parent.mkdir(parents=True)
+    candidate = parent / "moved.bin"
+    candidate.write_bytes(b"scan-visible inside decoy")
+    moved_parent = root / "original-parent"
+    outside_parent = tmp_path / "outside-parent"
+    outside_parent.mkdir()
+    outside = outside_parent / candidate.name
+    outside_data = b"matching outside bytes"
+    outside.write_bytes(outside_data)
+    missing = root / "gone.bin"
+    resolver = LocalFilesystemResolver(
+        allowed_roots=[root],
+        recovery=RecoveryPolicy(enabled=True),
+    )
+    real_open = local_file_access._open_windows_descriptor
+    swapped = False
+
+    def swap_candidate_parent(planned_path):
+        nonlocal swapped
+        if not swapped and os.path.basename(planned_path) == candidate.name:
+            parent.rename(moved_parent)
+            completed = subprocess.run(
+                [
+                    "cmd.exe",
+                    "/d",
+                    "/c",
+                    "mklink",
+                    "/J",
+                    str(parent),
+                    str(outside_parent),
+                ],
+                capture_output=True,
+                check=False,
+                text=True,
+            )
+            assert completed.returncode == 0, (
+                f"mklink /J failed: stdout={completed.stdout!r} "
+                f"stderr={completed.stderr!r}"
+            )
+            swapped = True
+        return real_open(planned_path)
+
+    monkeypatch.setattr(
+        local_file_access,
+        "_open_windows_descriptor",
+        swap_candidate_parent,
+    )
+
+    result = resolver.resolve(_local_ref(missing, _sha256(outside_data)))
+
+    assert swapped is True
+    assert result.status is ResolutionStatus.UNRESOLVED
+    assert result.content is None
+
+
 def test_recovery_respects_byte_budget(tmp_path):
     root = tmp_path / "store"
     root.mkdir()
@@ -1930,6 +2168,145 @@ def test_recovery_respects_byte_budget(tmp_path):
     result = resolver.resolve(_local_ref(missing, _sha256(data)))
 
     assert result.status is ResolutionStatus.UNRESOLVED
+
+
+def test_recovery_enforces_remaining_budget_when_open_file_grows(
+    tmp_path, monkeypatch
+):
+    root = tmp_path / "store"
+    root.mkdir()
+    candidate = root / "moved.bin"
+    candidate.write_bytes(b"scan-visible placeholder")
+    missing = root / "gone.bin"
+    grown = b"g" * 64
+
+    class GrowingReader:
+        @contextmanager
+        def open_regular_file(self, requested_path):
+            requested = os.fspath(requested_path)
+            if requested == str(missing):
+                yield LocalOpenFailure(LocalOpenFailureReason.MISSING)
+                return
+            assert requested == str(candidate)
+            stream = BytesIO(grown)
+            try:
+                yield OpenedLocalFile(
+                    stream=stream,
+                    display_path=str(candidate),
+                    size_hint_bytes=1,
+                )
+            finally:
+                stream.close()
+
+    def unexpected_pathname_size(_path):
+        raise AssertionError("recovery used a pathname size preflight")
+
+    monkeypatch.setattr(
+        "lab_tracker.artifact_resolution.os.path.getsize",
+        unexpected_pathname_size,
+    )
+    resolver = LocalFilesystemResolver(
+        allowed_roots=[root],
+        recovery=RecoveryPolicy(enabled=True, max_bytes=8),
+        file_reader_factory=lambda _policy: GrowingReader(),
+    )
+
+    result = resolver.resolve(_local_ref(missing, _sha256(grown)))
+
+    assert result.status is ResolutionStatus.UNRESOLVED
+    assert result.content is None
+
+
+def test_recovery_debits_partial_reads_that_end_in_io_failure(tmp_path):
+    root = tmp_path / "store"
+    root.mkdir()
+    first = root / "first.bin"
+    second = root / "second.bin"
+    first.touch()
+    second.touch()
+    missing = root / "gone.bin"
+    opened_candidates: list[str] = []
+
+    class PartialFailureStream(BytesIO):
+        def __init__(self) -> None:
+            super().__init__(b"x" * 8)
+            self._completed_read = False
+
+        def read(self, size=-1):
+            if self._completed_read:
+                raise OSError("candidate failed after a partial read")
+            self._completed_read = True
+            return super().read(size)
+
+    class PartialFailureReader:
+        @contextmanager
+        def open_regular_file(self, requested_path):
+            requested = os.fspath(requested_path)
+            if requested == str(missing):
+                yield LocalOpenFailure(LocalOpenFailureReason.MISSING)
+                return
+            opened_candidates.append(requested)
+            stream = PartialFailureStream()
+            try:
+                yield OpenedLocalFile(
+                    stream=stream,
+                    display_path=requested,
+                    size_hint_bytes=0,
+                )
+            finally:
+                stream.close()
+
+    resolver = LocalFilesystemResolver(
+        allowed_roots=[root],
+        recovery=RecoveryPolicy(enabled=True, max_files=2, max_bytes=8),
+        file_reader_factory=lambda _policy: PartialFailureReader(),
+    )
+
+    result = resolver.resolve(_local_ref(missing, _sha256(b"not present")))
+
+    assert result.status is ResolutionStatus.UNRESOLVED
+    assert opened_candidates == [str(first)]
+
+
+def test_recovery_hashes_opened_stream_without_reopening_candidate(tmp_path):
+    root = tmp_path / "store"
+    root.mkdir()
+    recorded = b"recorded recovery bytes"
+    replacement = b"replacement candidate bytes"
+    candidate = root / "moved.bin"
+    candidate.write_bytes(recorded)
+    missing = root / "gone.bin"
+
+    class SwappingRecoveryReader:
+        @contextmanager
+        def open_regular_file(self, requested_path):
+            requested = os.fspath(requested_path)
+            if requested == str(missing):
+                yield LocalOpenFailure(LocalOpenFailureReason.MISSING)
+                return
+            assert requested == str(candidate)
+            stream = BytesIO(recorded)
+            candidate.write_bytes(replacement)
+            try:
+                yield OpenedLocalFile(
+                    stream=stream,
+                    display_path=str(candidate),
+                    size_hint_bytes=len(recorded),
+                )
+            finally:
+                stream.close()
+
+    resolver = LocalFilesystemResolver(
+        allowed_roots=[root],
+        recovery=RecoveryPolicy(enabled=True),
+        file_reader_factory=lambda _policy: SwappingRecoveryReader(),
+    )
+
+    result = resolver.resolve(_local_ref(missing, _sha256(recorded)))
+
+    assert candidate.read_bytes() == replacement
+    assert result.status is ResolutionStatus.VERIFIED
+    assert result.content == recorded
 
 
 def test_recovery_respects_file_budget(tmp_path):
