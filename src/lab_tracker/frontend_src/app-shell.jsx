@@ -5,6 +5,7 @@ import { Dashboard } from "./features/dashboard-projects.jsx";
 import { BatchReviewPage, PendingBatchBanner } from "./features/batches.jsx";
 import { DevicesPage } from "./features/devices.jsx";
 import { EnrollPage } from "./features/enroll.jsx";
+import { ExperimentDetailCard } from "./features/experiments/index.js";
 import { GraphDraftDetailCard } from "./features/graph-drafts.jsx";
 import { GoalDetailCard } from "./features/goals/GoalDetailCard.jsx";
 import { ProjectGraphExplorer } from "./features/project-graph.jsx";
@@ -516,6 +517,18 @@ function App() {
               canWrite={canContributeToProject}
               onCloseSession={sessionActions.handleCloseSession}
               onPromoteSession={sessionActions.handlePromoteSession}
+            />
+          ) : null}
+
+          {route.kind === "experiment" ? (
+            <ExperimentDetailCard
+              token={auth.token}
+              experimentId={route.experimentId}
+              user={auth.user}
+              projects={workspaceData.projects}
+              navigate={navigate}
+              onSetActiveProject={workspaceData.setSelectedProjectId}
+              canWrite={canContributeToProject}
             />
           ) : null}
 

@@ -60,7 +60,7 @@ describe("useProjectWorkspaceData last-used project persistence", () => {
       },
       {
         method: "GET",
-        match: new RegExp(`/datasets\\?project_id=${PROJECT_B.project_id}`),
+        match: new RegExp(`/datasets/summaries\\?project_id=${PROJECT_B.project_id}`),
         response: emptyCountResponse(),
       },
       {
@@ -94,7 +94,7 @@ describe("useProjectWorkspaceData last-used project persistence", () => {
       },
       {
         method: "GET",
-        match: new RegExp(`/datasets\\?project_id=${PROJECT_A.project_id}`),
+        match: new RegExp(`/datasets/summaries\\?project_id=${PROJECT_A.project_id}`),
         response: emptyCountResponse(),
       },
       {
@@ -121,7 +121,7 @@ describe("useProjectWorkspaceData last-used project persistence", () => {
       },
       {
         method: "GET",
-        match: /\/(questions|datasets|notes)\?project_id=/,
+        match: /\/(questions|notes)\?project_id=|\/datasets\/summaries\?project_id=/,
         response: emptyCountResponse(),
       },
     ]);

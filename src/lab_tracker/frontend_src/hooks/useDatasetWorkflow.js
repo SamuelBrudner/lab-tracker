@@ -1,8 +1,9 @@
 import * as React from "react";
 
-import { apiRequest, fetchAllPages } from "../shared/api.js";
+import { apiListRequest, apiRequest, buildApiPath } from "../shared/api.js";
 
 const { useCallback, useEffect, useState } = React;
+const DATASET_FILE_PAGE_SIZE = 100;
 
 function useDatasetWorkflow({
   token,
@@ -19,7 +20,7 @@ function useDatasetWorkflow({
   const [datasetFilesById, setDatasetFilesById] = useState({});
 
   const loadDatasetFiles = useCallback(
-    async (datasetId, { force = false } = {}) => {
+    async (datasetId, { force = false, offset = 0 } = {}) => {
       if (!datasetId) {
         return null;
       }
@@ -29,7 +30,8 @@ function useDatasetWorkflow({
         currentState &&
         currentState.loaded &&
         !currentState.loading &&
-        !currentState.error
+        !currentState.error &&
+        Number(currentState.meta?.offset || 0) === offset
       ) {
         return currentState.items;
       }
@@ -41,12 +43,23 @@ function useDatasetWorkflow({
           items: current[datasetId]?.items || [],
           loaded: current[datasetId]?.loaded || false,
           loading: true,
+          meta: current[datasetId]?.meta || {
+            limit: DATASET_FILE_PAGE_SIZE,
+            offset: 0,
+            total: 0,
+          },
         },
       }));
 
       try {
-        const items = await fetchAllPages(`/datasets/${datasetId}/files`, { token });
-        const normalized = Array.isArray(items) ? items : [];
+        const page = await apiListRequest(
+          buildApiPath(`/datasets/${datasetId}/files`, {
+            limit: DATASET_FILE_PAGE_SIZE,
+            offset,
+          }),
+          { token }
+        );
+        const normalized = Array.isArray(page.data) ? page.data : [];
         setDatasetFilesById((current) => ({
           ...current,
           [datasetId]: {
@@ -54,6 +67,7 @@ function useDatasetWorkflow({
             items: normalized,
             loaded: true,
             loading: false,
+            meta: page.meta,
           },
         }));
         return normalized;
@@ -65,6 +79,11 @@ function useDatasetWorkflow({
             items: current[datasetId]?.items || [],
             loaded: true,
             loading: false,
+            meta: current[datasetId]?.meta || {
+              limit: DATASET_FILE_PAGE_SIZE,
+              offset: 0,
+              total: 0,
+            },
           },
         }));
         return null;

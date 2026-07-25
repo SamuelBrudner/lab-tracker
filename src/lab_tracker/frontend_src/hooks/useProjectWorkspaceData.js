@@ -77,7 +77,9 @@ function useProjectWorkspaceData({
       projectDataRequestRef.current = requestId;
       const [nextQuestions, nextDatasets, notePage] = await Promise.all([
         fetchAllPages(buildApiPath("/questions", { project_id: projectId }), { token }),
-        fetchAllPages(buildApiPath("/datasets", { project_id: projectId }), { token }),
+        fetchAllPages(buildApiPath("/datasets/summaries", { project_id: projectId }), {
+          token,
+        }),
         apiListRequest(buildApiPath("/notes", { project_id: projectId, limit: 1, offset: 0 }), {
           token,
         }),
@@ -109,9 +111,14 @@ function useProjectWorkspaceData({
         apiListRequest(buildApiPath("/questions", { project_id: projectId, limit: 1, offset: 0 }), {
           token,
         }),
-        apiListRequest(buildApiPath("/datasets", { project_id: projectId, limit: 1, offset: 0 }), {
-          token,
-        }),
+        apiListRequest(
+          buildApiPath("/datasets/summaries", {
+            project_id: projectId,
+            limit: 1,
+            offset: 0,
+          }),
+          { token }
+        ),
         apiListRequest(buildApiPath("/notes", { project_id: projectId, limit: 1, offset: 0 }), {
           token,
         }),

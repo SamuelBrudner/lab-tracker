@@ -110,7 +110,7 @@ function AppHeader({ activeKind, authEnabled, navigate, user, onLogout }) {
         <div>
           <h1>Lab Tracker</h1>
           <p className="subtle">
-            Projects, questions, notes, sessions, datasets, and analysis records.
+            Projects, questions, Experiments, notes, Sessions, Datasets, and analysis records.
           </p>
         </div>
         <div className="inline">

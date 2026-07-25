@@ -15,6 +15,12 @@ research record:
   projects, with each project belonging to at most one group through
   `projects.group_id`.
 - Projects as the durable unit of research work.
+- Lightweight Experiments as the scientific work grouping between a Question
+  and the Sessions/Datasets that address it. An Experiment has one immutable
+  primary Question, forward-only `active` → `closed` → `archived` lifecycle,
+  and independent many-to-many Session and Dataset memberships. It does not
+  model trials, protocols, conditions, samples, wells, instruments, inventory,
+  or metrics.
 - Group owners inheriting owner access on child projects for PI oversight,
   while group viewers and contributors inherit no child-project access unless
   the explicit `group_read_all` flag is enabled for that group; when enabled,
@@ -38,6 +44,15 @@ research record:
   or retained acquisition-session outputs. Large outputs can remain external
   pointers, acquisition outputs still belong to sessions, and graph meaning
   remains human-gated through normal review.
+- Opt-in high-cardinality acquisition collection capture through the same
+  offline-first `lt watch` outbox: one folder of up to 10,000 files becomes one
+  Session-scoped collection snapshot request and one immutable managed manifest,
+  rather than one request or graph node per member. Raw bytes remain in the
+  acquisition system. Servers advertise `acquisition_collections_v1`; an
+  unsupported server leaves the event queued with upgrade guidance and the
+  client never falls back to per-file writes. Existing watches and acquisition
+  outputs are not backfilled. See
+  [acquisition-collections.md](acquisition-collections.md).
 - Consumer-side HPC analysis capture through the `lt hpc` CLI as an
   offline-first staged-note workflow: Slurm/HPC submit, begin, finish, and
   watch-folder manifest events write durable local outbox records that sync
@@ -89,12 +104,21 @@ research record:
   [agent-setup.md](agent-setup.md).
 - Project graph views and exports for inspecting the retained question,
   evidence, goal, analysis, claim, dataset, session, and visualization graph.
-- Sessions and acquisition outputs, including closing sessions and promoting
-  eligible sessions into datasets.
+- Sessions, acquisition outputs, and acquisition collections, including closing
+  sessions and promoting eligible sessions into datasets. Collection manifests
+  keep member paths, SHA-256 checksums, and sizes in a separate managed JSON
+  value; summary, graph, and default provenance reads stay compact, while member
+  paging/search and full-manifest download are explicit.
 - Dataset staging and direct commit with provenance/manifest capture, without
   an approval gate. The direct-commit path for people and the human-gated review
   path for AI proposals are deliberately asymmetric; see
   [review-and-commit-model.md](review-and-commit-model.md).
+- Compact collection-snapshot references in Dataset commits. Automatic Session
+  promotion requires current collections to be complete, reconciles legacy
+  acquisition-output overlap deterministically, carries all parent Experiment
+  Questions, and inherits Session–Experiment memberships. Collection references
+  extend Dataset identity only by sorted collection key and manifest hash;
+  manifests without collections retain their historical hashes.
 - Analysis, claim, and visualization records as explicit user-driven flows,
   including managed file storage for visualization assets.
 - Exploration nodes for the divergent research trajectory — `decision`,
