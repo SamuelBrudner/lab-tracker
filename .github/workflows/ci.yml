@@ -42,6 +42,20 @@ jobs:
       - name: Test
         run: uv run pytest -q
 
+  python-minimum:
+    name: Python 3.10 compatibility
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.10"
+      - uses: astral-sh/setup-uv@v7
+      - name: Install frozen Python dependencies
+        run: uv sync --frozen --extra test
+      - name: Test declared minimum Python
+        run: uv run pytest -q
+
   e2e:
     # Browser E2E in its own job so a browser download or a service-worker
     # timing flake never gates the fast unit/lint lane.

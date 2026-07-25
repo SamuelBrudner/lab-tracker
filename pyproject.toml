@@ -52,6 +52,7 @@ test = [
   "pytest-cov",
   "pytest-xdist",
   "pyld",
+  "tomli; python_version < '3.11'",
 ]
 lint = [
   "mypy>=1.15,<2",
