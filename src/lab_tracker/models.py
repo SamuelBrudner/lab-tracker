@@ -21,6 +21,11 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, computed_field, field_validator, model_validator
 
+from lab_tracker.local_store_locator import (
+    LocalStoreLocator,
+    canonical_local_store_uri,
+)
+
 NoteMetadataScalar = str | bool | int | float
 ClaimConfidence = Annotated[
     float,
@@ -536,11 +541,12 @@ class ExternalArtifactReference(_DomainModel):
         source_system: str = "store",
         metadata: Mapping[str, Any] | None = None,
     ) -> ExternalArtifactReference:
-        """Build a store-relative reference from explicit fields.
+        """Build a generic store-relative reference from explicit fields.
 
         The ``store://<store_name>/<locator>`` URI is derived for display and
         back-compatibility, while the structured ``store_name``/``locator`` fields
-        are what resolution reads — no URI string parsing required.
+        are what resolution reads. Store-kind-specific validation belongs at the
+        materialization boundary, where the registered store kind is known.
         """
 
         clean_locator = locator.strip().lstrip("/")
@@ -551,6 +557,36 @@ class ExternalArtifactReference(_DomainModel):
             content_hash=content_hash,
             store_name=store_name,
             locator=clean_locator,
+            metadata=dict(metadata or {}),
+        )
+
+    @classmethod
+    def for_local_store(
+        cls,
+        *,
+        store_name: str,
+        locator: str,
+        content_hash: str,
+        kind: ExternalArtifactKind = ExternalArtifactKind.ENTITY,
+        metadata: Mapping[str, Any] | None = None,
+    ) -> ExternalArtifactReference:
+        """Build a canonical reference for a registered local filesystem store."""
+
+        parsed_locator = LocalStoreLocator.parse_decoded(locator)
+        canonical_uri = (
+            canonical_local_store_uri(store_name, parsed_locator)
+            if parsed_locator is not None
+            else None
+        )
+        if parsed_locator is None or canonical_uri is None:
+            raise ValueError("Invalid local-store name or locator.")
+        return cls(
+            kind=kind,
+            source_system="store",
+            uri=canonical_uri,
+            content_hash=content_hash,
+            store_name=store_name,
+            locator=parsed_locator.path,
             metadata=dict(metadata or {}),
         )
 

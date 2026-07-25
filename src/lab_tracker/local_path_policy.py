@@ -78,12 +78,34 @@ def _is_supported_absolute_path(path: str) -> bool:
     ):
         return False
     components = re.split(r"[\\/]", tail)
-    return not any(_is_reserved_windows_component(name) for name in components if name)
+    return not any(is_reserved_windows_component(name) for name in components if name)
 
 
-def _is_reserved_windows_component(name: str) -> bool:
-    """Python 3.10-compatible equivalent of modern ``ntpath.isreserved``."""
+def is_supported_absolute_local_root(root: str | os.PathLike[str]) -> bool:
+    """Return whether ``root`` is a raw, native, absolute local path.
 
+    This predicate is deliberately lexical and side-effect free.  In particular,
+    it does not expand ``~``, make relative paths absolute, canonicalize links, or
+    probe the filesystem.  Callers can therefore reject untrusted registered
+    roots before any host-path operation occurs.
+    """
+
+    try:
+        raw_root = os.fspath(root)
+    except TypeError:
+        return False
+    return isinstance(raw_root, str) and _is_supported_absolute_path(raw_root)
+
+
+def is_reserved_windows_component(name: str) -> bool:
+    """Return whether one component has reserved Windows filesystem syntax.
+
+    This is deliberately platform-independent so logical local-store locators
+    and native Windows paths share one portable definition.
+    """
+
+    if not name:
+        return False
     if name[-1:] in (".", " ") and name not in (".", ".."):
         return True
     if any(character in _WINDOWS_RESERVED_CHARACTERS for character in name):
@@ -259,6 +281,75 @@ class LocalPathPolicy:
         """Unique broadest canonical roots suitable for recovery walking."""
 
         return self._canonical_roots
+
+    def restricted_to_absolute_root(
+        self, root: str | os.PathLike[str]
+    ) -> LocalPathPolicy | None:
+        """Return this authority narrowed to one complete registered-store root.
+
+        An unscoped operator policy delegates exactly the store root.  An
+        explicit deny-all policy delegates nothing.  A configured policy only
+        delegates when the *whole* canonical store root is beneath one operator
+        root; a narrower operator grant never partially authorizes a broader
+        registered store.
+        """
+
+        if not is_supported_absolute_local_root(root):
+            return None
+        if self._canonical_roots == ():
+            return None
+        try:
+            lexical_root = os.path.normpath(os.fspath(root))
+        except (OSError, TypeError, ValueError):
+            return None
+        if self._canonical_roots is not None:
+            precheck_roots = (
+                *(self._lexical_roots or ()),
+                *self._canonical_roots,
+            )
+            if not any(
+                _is_contained(lexical_root, operator_root, canonical=False)
+                for operator_root in precheck_roots
+            ):
+                return None
+        try:
+            canonical_root = os.path.realpath(lexical_root)
+        except (OSError, ValueError):
+            return None
+        if not is_supported_absolute_local_root(canonical_root):
+            return None
+        if self._canonical_roots is not None and not any(
+            _is_contained(canonical_root, operator_root, canonical=True)
+            for operator_root in self._canonical_roots
+        ):
+            return None
+        # Build from the canonical spelling so both preliminary lexical
+        # authorization and exact-handle authorization share one authority.
+        try:
+            restricted = LocalPathPolicy([canonical_root])
+        except ValueError:
+            # Canonicalization can fail or the root can retarget between the
+            # first check and construction of the exact restricted policy.
+            return None
+        restricted_roots = restricted.canonical_roots
+        if not restricted_roots or len(restricted_roots) != 1:
+            return None
+        if not (
+            _is_contained(restricted_roots[0], canonical_root, canonical=True)
+            and _is_contained(canonical_root, restricted_roots[0], canonical=True)
+        ):
+            # The registered root retargeted between canonicalizations. Even if
+            # both locations sit below one broad operator root, they are
+            # different store authorities.
+            return None
+        if self._canonical_roots is not None and not any(
+            _is_contained(restricted_roots[0], operator_root, canonical=True)
+            for operator_root in self._canonical_roots
+        ):
+            # The root changed while it was canonicalized. Never let that race
+            # turn a narrower operator authority into an outside store grant.
+            return None
+        return restricted
 
     def authorize_uri(self, uri: str) -> str | None:
         """Return one canonical authorized path, or ``None`` without raising."""

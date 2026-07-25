@@ -13,8 +13,10 @@ from sqlalchemy.orm import Session as OrmSession
 
 from lab_tracker.artifact_resolution import (
     DEFAULT_MAX_BYTES,
+    LocalStoreResolutionTarget,
     ResolvedArtifact,
     ResolverRegistry,
+    local_store_resolution_target,
     registry_from_env,
     store_relative_reference,
     unresolved,
@@ -26,6 +28,10 @@ from lab_tracker.decision_context_query import (
     RepositoryDecisionContextReader,
 )
 from lab_tracker.errors import NotFoundError, ValidationError
+from lab_tracker.local_store_locator import (
+    LocalStoreLocator,
+    canonical_local_store_uri,
+)
 from lab_tracker.models import (
     Analysis,
     Claim,
@@ -39,6 +45,7 @@ from lab_tracker.models import (
     Project,
     ProjectStatus,
     Question,
+    StoreKind,
     SupervisionEdge,
     UsageEventResourceType,
     UsageEventVerb,
@@ -74,7 +81,7 @@ class PreparedExternalArtifactResolution:
     entity_type: ExternalArtifactEntityType
     entity_id: UUID
     artifact_index: int
-    target: ExternalArtifactReference | ResolvedArtifact
+    target: ExternalArtifactReference | LocalStoreResolutionTarget | ResolvedArtifact
     max_bytes: int
     byte_range: tuple[int, int] | None
 
@@ -520,11 +527,18 @@ class ContextQueries:
             result = prepared.target
         else:
             registry = self.resolver_registry or registry_from_env()
-            result = registry.resolve(
-                prepared.target,
-                max_bytes=prepared.max_bytes,
-                byte_range=prepared.byte_range,
-            )
+            if isinstance(prepared.target, LocalStoreResolutionTarget):
+                result = registry.resolve_local_store(
+                    prepared.target,
+                    max_bytes=prepared.max_bytes,
+                    byte_range=prepared.byte_range,
+                )
+            else:
+                result = registry.resolve(
+                    prepared.target,
+                    max_bytes=prepared.max_bytes,
+                    byte_range=prepared.byte_range,
+                )
         body = result.to_json_dict()
         body["entity_type"] = prepared.entity_type
         body["entity_id"] = str(prepared.entity_id)
@@ -584,31 +598,30 @@ class ContextQueries:
         self,
         reference: ExternalArtifactReference,
         project_id: UUID,
-    ) -> ExternalArtifactReference | ResolvedArtifact:
+    ) -> ExternalArtifactReference | LocalStoreResolutionTarget | ResolvedArtifact:
         if reference.store_name is not None and reference.locator is not None:
             return self._resolve_store(
                 reference,
                 project_id,
                 reference.store_name,
                 reference.locator,
+                locator_is_uri_path=False,
             )
-        try:
-            parsed = urlsplit(reference.uri)
-        except ValueError:
+        parsed_store = _parse_store_reference_uri(reference.uri)
+        if parsed_store is None:
+            if (
+                reference.source_system.lower() == "store"
+                or _looks_like_store_uri(reference.uri)
+            ):
+                return _invalid_store_reference(reference)
             return reference
-        if parsed.scheme.lower() != "store":
-            return reference
-        name = parsed.netloc
-        if not name:
-            return unresolved(
-                reference,
-                detail="Store locator is missing a store name.",
-            )
+        name, locator = parsed_store
         return self._resolve_store(
             reference,
             project_id,
             name,
-            parsed.path.lstrip("/"),
+            locator,
+            locator_is_uri_path=True,
         )
 
     def _resolve_store(
@@ -616,24 +629,52 @@ class ContextQueries:
         reference: ExternalArtifactReference,
         project_id: UUID,
         name: str,
-        path: str,
-    ) -> ExternalArtifactReference | ResolvedArtifact:
+        locator: str,
+        *,
+        locator_is_uri_path: bool,
+    ) -> ExternalArtifactReference | LocalStoreResolutionTarget | ResolvedArtifact:
         store = self.repository.data_stores.get_by_name(project_id, name)
         if store is None:
-            return unresolved(
-                reference,
-                detail=f"No data store named '{name}' in this project.",
+            return _unavailable_store_reference(reference)
+
+        concrete: ExternalArtifactReference | LocalStoreResolutionTarget | None
+        if store.kind is StoreKind.LOCAL_FS:
+            parsed_locator = (
+                LocalStoreLocator.parse_uri_path(locator)
+                if locator_is_uri_path
+                else LocalStoreLocator.parse_decoded(locator)
             )
-        concrete = store_relative_reference(
-            store,
-            path=path,
-            content_hash=reference.content_hash,
-        )
+            canonical_uri = (
+                canonical_local_store_uri(name, parsed_locator)
+                if parsed_locator is not None
+                else None
+            )
+            if (
+                parsed_locator is None
+                or canonical_uri != reference.uri
+            ):
+                return _invalid_store_reference(reference)
+            logical_reference = reference.model_copy(
+                update={
+                    "source_system": "store",
+                    "store_name": name,
+                    "locator": parsed_locator.path,
+                },
+                deep=True,
+            )
+            concrete = local_store_resolution_target(
+                store,
+                locator=parsed_locator,
+                logical_reference=logical_reference,
+            )
+        else:
+            concrete = store_relative_reference(
+                store,
+                path=locator,
+                content_hash=reference.content_hash,
+            )
         if concrete is None:
-            return unresolved(
-                reference,
-                detail=f"Store kind '{store.kind.value}' is not resolvable yet.",
-            )
+            return _unavailable_store_reference(reference)
         return concrete
 
 
@@ -652,3 +693,46 @@ def _single_project_id(project_ids: set[UUID] | None) -> UUID | None:
     if project_ids is None or len(project_ids) != 1:
         return None
     return next(iter(project_ids))
+
+
+def _parse_store_reference_uri(uri: str) -> tuple[str, str] | None:
+    """Retain legacy non-local URI parsing until kind-specific hardening lands."""
+
+    try:
+        parsed = urlsplit(uri)
+    except ValueError:
+        return None
+    if parsed.scheme.lower() != "store" or not parsed.netloc:
+        return None
+    return parsed.netloc, parsed.path.lstrip("/")
+
+
+def _looks_like_store_uri(uri: str) -> bool:
+    """Classify malformed store-shaped input without reflecting its contents."""
+
+    return isinstance(uri, str) and uri.lstrip().lower().startswith("store:")
+
+
+def _safe_store_reference(reference: ExternalArtifactReference) -> ExternalArtifactReference:
+    """Keep store failures static without reflecting a locator or registered root."""
+
+    return ExternalArtifactReference(
+        kind=reference.kind,
+        source_system="store",
+        uri="store://[redacted]",
+        content_hash=reference.content_hash,
+    )
+
+
+def _invalid_store_reference(reference: ExternalArtifactReference) -> ResolvedArtifact:
+    return unresolved(
+        _safe_store_reference(reference),
+        detail="Store artifact reference is invalid.",
+    )
+
+
+def _unavailable_store_reference(reference: ExternalArtifactReference) -> ResolvedArtifact:
+    return unresolved(
+        _safe_store_reference(reference),
+        detail="Store artifact could not be resolved.",
+    )

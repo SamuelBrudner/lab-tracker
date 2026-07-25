@@ -60,7 +60,15 @@ from lab_tracker.local_file_access import (
     LocalOpenFailure,
     LocalOpenFailureReason,
 )
-from lab_tracker.local_path_policy import LocalPathPolicy, native_local_path_from_uri
+from lab_tracker.local_path_policy import (
+    LocalPathPolicy,
+    is_supported_absolute_local_root,
+    native_local_path_from_uri,
+)
+from lab_tracker.local_store_locator import (
+    LocalStoreLocator,
+    canonical_local_store_uri,
+)
 from lab_tracker.models import DataStore, ExternalArtifactReference, StoreKind
 from lab_tracker.outbound_http import (
     DEFAULT_OUTBOUND_HTTP_DEADLINE_SECONDS,
@@ -288,6 +296,68 @@ class ArtifactResolver(ABC):
         """Fetch a bounded view of ``ref`` and verify its content hash."""
 
 
+_LOCAL_STORE_TARGET_FACTORY_TOKEN = object()
+
+
+@dataclass(frozen=True, slots=True, init=False)
+class LocalStoreResolutionTarget:
+    """Detached authority for resolving one logical local-store artifact.
+
+    ``logical_reference`` is the user-facing identity retained in every result.
+    ``store_root`` is the trusted, raw root read from the registered store, and
+    ``locator`` has already passed the portable store-locator grammar.  No
+    concrete host path is persisted in this target.
+    """
+
+    logical_reference: ExternalArtifactReference
+    store_root: str
+    locator: LocalStoreLocator
+
+    def __init__(
+        self,
+        logical_reference: ExternalArtifactReference,
+        store_root: str,
+        locator: LocalStoreLocator,
+        *,
+        _factory_token: object,
+    ) -> None:
+        if _factory_token is not _LOCAL_STORE_TARGET_FACTORY_TOKEN:
+            raise TypeError(
+                "LocalStoreResolutionTarget must be built by its validated factory."
+            )
+        store_name = logical_reference.store_name
+        canonical_uri = (
+            canonical_local_store_uri(store_name, locator)
+            if store_name is not None
+            else None
+        )
+        if (
+            not is_supported_absolute_local_root(store_root)
+            or logical_reference.source_system != "store"
+            or logical_reference.locator != locator.path
+            or canonical_uri is None
+            or logical_reference.uri != canonical_uri
+        ):
+            raise ValueError("Local store resolution target is inconsistent.")
+        object.__setattr__(self, "logical_reference", logical_reference)
+        object.__setattr__(self, "store_root", store_root)
+        object.__setattr__(self, "locator", locator)
+
+
+class ScopedLocalStoreResolver(ABC):
+    """Narrow capability for resolving beneath a registered local-store root."""
+
+    @abstractmethod
+    def resolve_within_root(
+        self,
+        target: LocalStoreResolutionTarget,
+        *,
+        max_bytes: int = DEFAULT_MAX_BYTES,
+        byte_range: tuple[int, int] | None = None,
+    ) -> ResolvedArtifact:
+        """Resolve ``target`` without broadening its registered-store authority."""
+
+
 class ResolverRegistry:
     """Dispatches a reference to the first resolver that can handle it."""
 
@@ -310,6 +380,27 @@ class ResolverRegistry:
         return _unresolved(
             ref,
             detail=f"No resolver registered for source_system '{ref.source_system}'.",
+        )
+
+    def resolve_local_store(
+        self,
+        target: LocalStoreResolutionTarget,
+        *,
+        max_bytes: int = DEFAULT_MAX_BYTES,
+        byte_range: tuple[int, int] | None = None,
+    ) -> ResolvedArtifact:
+        """Dispatch only to a resolver that honors registered-store scoping."""
+
+        for resolver in self._resolvers:
+            if isinstance(resolver, ScopedLocalStoreResolver):
+                return resolver.resolve_within_root(
+                    target,
+                    max_bytes=max_bytes,
+                    byte_range=byte_range,
+                )
+        return _unresolved(
+            target.logical_reference,
+            detail="No scoped local-store resolver is registered.",
         )
 
 
@@ -350,26 +441,59 @@ def _join_store_path(root: str, path: str) -> str:
     return f"{root.rstrip('/')}/{path.lstrip('/')}" if path else root
 
 
+def local_store_resolution_target(
+    store: DataStore,
+    *,
+    locator: LocalStoreLocator,
+    logical_reference: ExternalArtifactReference,
+) -> LocalStoreResolutionTarget | None:
+    """Build one internally consistent, store-scoped local resolution target."""
+
+    if (
+        store.kind is not StoreKind.LOCAL_FS
+        or logical_reference.store_name != store.name
+    ):
+        return None
+    try:
+        return LocalStoreResolutionTarget(
+            logical_reference=logical_reference,
+            store_root=store.root,
+            locator=locator,
+            _factory_token=_LOCAL_STORE_TARGET_FACTORY_TOKEN,
+        )
+    except ValueError:
+        return None
+
+
 def store_relative_reference(
     store: DataStore, *, path: str, content_hash: str
-) -> ExternalArtifactReference | None:
-    """Translate a ``store://<name>/<path>`` locator into a concrete reference.
+) -> ExternalArtifactReference | LocalStoreResolutionTarget | None:
+    """Translate one legacy store-relative path into a resolvable target.
 
-    Returns a reference one of the registered adapters can resolve, or ``None``
-    when the store kind is not resolvable yet (``object_table``/``database`` need
-    the deferred snapshot/query adapters) or the locator is malformed (a git
-    locator needs a ``@<commit>`` pin). Credentials are never embedded — the
-    rclone remote name comes from the store's ``credential_ref``, and git uses
-    its own host-side credential helper keyed by the remote URL (``store.root``).
+    Non-local adapters retain their established path semantics. A local store
+    is the sole kind that applies the portable local-locator grammar and yields
+    a scoped target instead of a host ``file:`` URI.
     """
 
-    joined = _join_store_path(store.root, path)
     if store.kind is StoreKind.LOCAL_FS:
-        return ExternalArtifactReference(
-            source_system="local",
-            uri=Path(joined).as_uri(),
-            content_hash=content_hash,
+        locator = LocalStoreLocator.parse_decoded(path)
+        if locator is None:
+            return None
+        try:
+            logical_reference = ExternalArtifactReference.for_local_store(
+                store_name=store.name,
+                locator=locator.path,
+                content_hash=content_hash,
+            )
+        except ValueError:
+            return None
+        return local_store_resolution_target(
+            store,
+            locator=locator,
+            logical_reference=logical_reference,
         )
+
+    joined = _join_store_path(store.root, path)
     if store.kind is StoreKind.HTTP:
         base = store.endpoint or store.root
         uri = f"{base.rstrip('/')}/{path.lstrip('/')}" if path else base
@@ -443,7 +567,12 @@ def check_store_health(
 
     kind = store.kind
     if kind is StoreKind.LOCAL_FS:
-        root = os.path.realpath(Path(store.root).expanduser())
+        if not is_supported_absolute_local_root(store.root):
+            return StoreHealth(
+                StoreHealthStatus.UNREACHABLE,
+                "Local store root is invalid.",
+            )
+        root = os.path.realpath(store.root)
         if os.path.isdir(root):
             return StoreHealth(StoreHealthStatus.HEALTHY)
         return StoreHealth(
@@ -575,7 +704,16 @@ def _normalize_byte_range(byte_range: tuple[int, int] | None) -> tuple[int, int]
     return start, end
 
 
-class LocalFilesystemResolver(ArtifactResolver):
+@dataclass(frozen=True)
+class _LocalResolutionScope:
+    """One immutable policy/reader/recovery authority used for a whole resolve."""
+
+    path_policy: LocalPathPolicy
+    file_reader: LocalFileReader
+    recovery_roots: tuple[str, ...] | None
+
+
+class LocalFilesystemResolver(ArtifactResolver, ScopedLocalStoreResolver):
     """Resolves artifacts stored on this host's filesystem.
 
     Handles ``source_system`` of ``local``/``local_fs``/``file`` and ``file://``
@@ -600,15 +738,21 @@ class LocalFilesystemResolver(ArtifactResolver):
         recovery: RecoveryPolicy | None = None,
         file_reader_factory: Callable[[LocalPathPolicy], LocalFileReader] | None = None,
     ) -> None:
-        self._path_policy = LocalPathPolicy(allowed_roots)
-        reader_factory = (
+        self._operator_policy = LocalPathPolicy(allowed_roots)
+        self._file_reader_factory = (
             HandleBoundLocalFileAccess
             if file_reader_factory is None
             else file_reader_factory
         )
-        self._file_reader = reader_factory(self._path_policy)
-        self._recovery_roots = self._path_policy.canonical_roots
+        self._scope = self._make_scope(self._operator_policy)
         self._recovery = recovery or RecoveryPolicy()
+
+    def _make_scope(self, path_policy: LocalPathPolicy) -> _LocalResolutionScope:
+        return _LocalResolutionScope(
+            path_policy=path_policy,
+            file_reader=self._file_reader_factory(path_policy),
+            recovery_roots=path_policy.canonical_roots,
+        )
 
     def can_resolve(self, ref: ExternalArtifactReference) -> bool:
         if ref.source_system.strip().lower() in _LOCAL_SOURCE_SYSTEMS:
@@ -640,16 +784,98 @@ class LocalFilesystemResolver(ArtifactResolver):
                 ref,
                 detail="Reference URI is not a local filesystem path.",
             )
-        planned_path = self._path_policy.authorize_path(local_path)
+        planned_path = self._scope.path_policy.authorize_path(local_path)
         if planned_path is None:
             return _unresolved(
                 ref,
                 detail="Local artifact is not an authorized readable regular file.",
             )
+        return self._resolve_planned_path(
+            ref,
+            scope=self._scope,
+            planned_path=planned_path,
+            max_bytes=max_bytes,
+            window=window,
+            mime_path=None,
+            recovery_name=os.path.basename(planned_path) or None,
+            opaque_store_detail=False,
+        )
 
+    def resolve_within_root(
+        self,
+        target: LocalStoreResolutionTarget,
+        *,
+        max_bytes: int = DEFAULT_MAX_BYTES,
+        byte_range: tuple[int, int] | None = None,
+    ) -> ResolvedArtifact:
+        """Resolve a logical locator through one store-restricted handle scope."""
+
+        ref = target.logical_reference
+        try:
+            window = _normalize_byte_range(byte_range)
+        except ValueError as exc:
+            return _unresolved(ref, detail=str(exc))
+        if not is_verifiable_hash(ref.content_hash):
+            algorithm, _ = parse_content_hash(ref.content_hash)
+            return _unresolved(
+                ref,
+                detail=f"Cannot verify content hash with algorithm '{algorithm}'.",
+            )
+
+        store_policy = self._operator_policy.restricted_to_absolute_root(
+            target.store_root
+        )
+        if store_policy is None:
+            return _unresolved(
+                ref,
+                detail="Local store artifact is not authorized.",
+            )
+        scope = self._make_scope(store_policy)
+        if not scope.recovery_roots:
+            return _unresolved(
+                ref,
+                detail="Local store artifact is not authorized.",
+            )
+
+        # LocalStoreLocator components are validated before this detached target
+        # is created. Join those components directly beneath the canonical store
+        # authority; never reinterpret a user-controlled native path.
+        candidate = os.path.join(
+            scope.recovery_roots[0],
+            *target.locator.components,
+        )
+        planned_path = scope.path_policy.authorize_path(candidate)
+        if planned_path is None:
+            return _unresolved(
+                ref,
+                detail="Local store artifact is not authorized.",
+            )
+        return self._resolve_planned_path(
+            ref,
+            scope=scope,
+            planned_path=planned_path,
+            max_bytes=max_bytes,
+            window=window,
+            mime_path=target.locator.path,
+            recovery_name=target.locator.components[-1],
+            opaque_store_detail=True,
+        )
+
+    def _resolve_planned_path(
+        self,
+        ref: ExternalArtifactReference,
+        *,
+        scope: _LocalResolutionScope,
+        planned_path: str,
+        max_bytes: int,
+        window: tuple[int, int] | None,
+        mime_path: str | None,
+        recovery_name: str | None,
+        opaque_store_detail: bool,
+    ) -> ResolvedArtifact:
         algorithm, _ = parse_content_hash(ref.content_hash)
         failure: LocalOpenFailure | None = None
-        with self._file_reader.open_regular_file(planned_path) as opened:
+        with scope.file_reader.open_regular_file(planned_path) as opened:
             if isinstance(opened, LocalOpenFailure):
                 failure = opened
             else:
@@ -663,7 +889,9 @@ class LocalFilesystemResolver(ArtifactResolver):
                 except OSError:
                     return _unresolved(ref, detail="Failed to read local artifact.")
 
-                content_type, _ = mimetypes.guess_type(opened.display_path)
+                content_type, _ = mimetypes.guess_type(
+                    opened.display_path if mime_path is None else mime_path
+                )
                 return _build_resolved(
                     ref,
                     observed=observed,
@@ -679,6 +907,9 @@ class LocalFilesystemResolver(ArtifactResolver):
                 max_bytes=max_bytes,
                 window=window,
                 missing_path=planned_path,
+                scope=scope,
+                target_name=recovery_name,
+                opaque_store_detail=opaque_store_detail,
             )
             if recovered is not None:
                 return recovered
@@ -697,6 +928,9 @@ class LocalFilesystemResolver(ArtifactResolver):
         max_bytes: int,
         window: tuple[int, int] | None,
         missing_path: str,
+        scope: _LocalResolutionScope | None = None,
+        target_name: str | None = None,
+        opaque_store_detail: bool = False,
     ) -> ResolvedArtifact | None:
         """Search the allowed roots for a file whose content matches ``ref``.
 
@@ -707,11 +941,13 @@ class LocalFilesystemResolver(ArtifactResolver):
         missing, so a match is exactly as trustworthy as one found at the URI.
         """
 
-        if not self._recovery.enabled or not self._recovery_roots:
+        active_scope = self._scope if scope is None else scope
+        if not self._recovery.enabled or not active_scope.recovery_roots:
             return None
 
         algorithm, expected_digest = parse_content_hash(ref.content_hash)
-        target_name = os.path.basename(missing_path) or None
+        if target_name is None:
+            target_name = os.path.basename(missing_path) or None
 
         considered = 0
         byte_budget = _CumulativeByteBudget(self._recovery.max_bytes)
@@ -719,17 +955,23 @@ class LocalFilesystemResolver(ArtifactResolver):
         # cheaply; skip the name-first pass when we have no basename to match.
         passes = (True, False) if target_name is not None else (False,)
         for prefer_name in passes:
-            for candidate in self._iter_candidate_files(target_name, prefer_name):
+            for candidate in self._iter_candidate_files(
+                target_name,
+                prefer_name,
+                scope=active_scope,
+            ):
                 considered += 1
                 if considered > self._recovery.max_files:
                     return None
                 remaining_bytes = byte_budget.remaining
                 if remaining_bytes <= 0:
                     return None
-                planned_candidate = self._path_policy.authorize_path(candidate)
+                planned_candidate = active_scope.path_policy.authorize_path(candidate)
                 if planned_candidate is None:
                     continue
-                with self._file_reader.open_regular_file(planned_candidate) as opened:
+                with active_scope.file_reader.open_regular_file(
+                    planned_candidate
+                ) as opened:
                     if isinstance(opened, LocalOpenFailure):
                         continue
                     if opened.size_hint_bytes > remaining_bytes:
@@ -765,14 +1007,21 @@ class LocalFilesystemResolver(ArtifactResolver):
                     return replace(
                         resolved,
                         detail=(
-                            f"Recovered from {opened.display_path} "
+                            "Recovered within registered local store "
+                            "(differs from reference locator)."
+                            if opaque_store_detail
+                            else f"Recovered from {opened.display_path} "
                             "(differs from reference URI)."
                         ),
                     )
         return None
 
     def _iter_candidate_files(
-        self, target_name: str | None, prefer_name: bool
+        self,
+        target_name: str | None,
+        prefer_name: bool,
+        *,
+        scope: _LocalResolutionScope | None = None,
     ) -> Iterator[str]:
         """Yield files under the allowed roots for one recovery pass.
 
@@ -781,11 +1030,12 @@ class LocalFilesystemResolver(ArtifactResolver):
         False yields the remainder. Symlinks are not followed during the walk.
         """
 
-        for root in self._recovery_roots or ():
+        active_scope = self._scope if scope is None else scope
+        for root in active_scope.recovery_roots or ():
             for dirpath, directories, files in os.walk(
                 root, topdown=True, followlinks=False
             ):
-                self._path_policy.prune_walk_directories(dirpath, directories)
+                active_scope.path_policy.prune_walk_directories(dirpath, directories)
                 for name in files:
                     is_match = target_name is not None and name == target_name
                     if prefer_name != is_match:

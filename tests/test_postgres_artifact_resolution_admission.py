@@ -17,10 +17,10 @@ from sqlalchemy.pool import QueuePool
 from lab_tracker.artifact_resolution import (
     DEFAULT_MAX_BYTES,
     LocalFilesystemResolver,
+    LocalStoreResolutionTarget,
     ResolvedArtifact,
     ResolverRegistry,
 )
-from lab_tracker.models import ExternalArtifactReference
 
 pytestmark = pytest.mark.postgres
 
@@ -41,29 +41,36 @@ class _BlockingLocalResolver(LocalFilesystemResolver):
         release: Event,
     ) -> None:
         super().__init__(allowed_roots=[allowed_root])
+        self._allowed_root = allowed_root
         self._expected_uri = expected_uri
         self._first_connection_released = first_connection_released
         self._first_session_closed = first_session_closed
         self._entered = entered
         self._release = release
 
-    def resolve(
+    def resolve_within_root(
         self,
-        ref: ExternalArtifactReference,
+        target: LocalStoreResolutionTarget,
         *,
         max_bytes: int = DEFAULT_MAX_BYTES,
         byte_range: tuple[int, int] | None = None,
     ) -> ResolvedArtifact:
         # The store lookup and materialization must finish before the request
         # releases its database scope and reaches any external resolver.
-        assert ref.source_system == "local"
-        assert ref.uri == self._expected_uri
+        assert target.logical_reference.source_system == "store"
+        assert target.logical_reference.uri == self._expected_uri
+        assert target.store_root == str(self._allowed_root)
+        assert target.locator.path == "exp/artifact.bin"
         assert self._first_connection_released.is_set()
         assert self._first_session_closed.is_set()
         self._entered.set()
         if not self._release.wait(timeout=10):
             raise AssertionError("Timed out waiting to release the test resolver.")
-        return super().resolve(ref, max_bytes=max_bytes, byte_range=byte_range)
+        return super().resolve_within_root(
+            target,
+            max_bytes=max_bytes,
+            byte_range=byte_range,
+        )
 
 
 def test_postgres_store_resolution_releases_one_slot_pool_before_external_io(
@@ -135,7 +142,7 @@ def test_postgres_store_resolution_releases_one_slot_pool_before_external_io(
         [
             _BlockingLocalResolver(
                 allowed_root=tmp_path,
-                expected_uri=artifact.as_uri(),
+                expected_uri="store://lab-fs/exp/artifact.bin",
                 first_connection_released=first_connection_released,
                 first_session_closed=first_session_closed,
                 entered=resolver_entered,
@@ -244,7 +251,7 @@ def test_postgres_store_resolution_releases_one_slot_pool_before_external_io(
     assert resolve_response.status_code == 200, resolve_response.text
     body = resolve_response.json()["data"]
     assert body["status"] == "verified"
-    assert body["uri"] == artifact.as_uri()
+    assert body["uri"] == "store://lab-fs/exp/artifact.bin"
     assert base64.b64decode(body["content_base64"]) == data
     assert first_connection_released.is_set()
     assert first_session_closed.is_set()

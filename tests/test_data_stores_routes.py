@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import os
 from pathlib import Path
 from uuid import uuid4
 
+import pytest
 from starlette.testclient import TestClient
 
 from lab_tracker.artifact_resolution import LocalFilesystemResolver, ResolverRegistry
@@ -263,6 +265,167 @@ def test_create_data_store_requires_exactly_one_scope(client, admin_auth_headers
         headers=admin_auth_headers,
     )
     assert both.status_code == 422
+
+
+def test_create_local_fs_store_rejects_non_absolute_roots_before_persistence(
+    client,
+    admin_auth_headers,
+):
+    project_id = _create_project(client, admin_auth_headers, "Invalid local roots")
+    invalid_roots = (
+        "relative/path",
+        "../sibling",
+        "~/expanded-by-host",
+        "C:drive-relative",
+        r"\\server\share",
+        r"\\?\C:\device-path",
+        " /whitespace-repaired-root ",
+    )
+
+    for index, root in enumerate(invalid_roots):
+        name = f"invalid-local-{index}"
+        response = client.post(
+            "/data-stores",
+            json=_store_payload(
+                project_id,
+                name=name,
+                kind="local_fs",
+                root=root,
+                is_default=False,
+            ),
+            headers=admin_auth_headers,
+        )
+
+        assert response.status_code == 422, response.text
+        assert response.json()["error"]["message"] == (
+            "Local filesystem store root must be a supported absolute local path."
+        )
+
+    listed = client.get(
+        "/data-stores",
+        params={"project_id": project_id},
+        headers=admin_auth_headers,
+    )
+    assert listed.status_code == 200, listed.text
+    assert listed.json()["data"] == []
+
+
+@pytest.mark.parametrize(
+    "name",
+    (
+        "has space",
+        "-leading",
+        ".leading",
+        "_leading",
+        "unicode-é",
+        "a" * 64,
+        " valid",
+        "valid ",
+    ),
+)
+def test_create_data_store_rejects_noncanonical_names_without_persistence(
+    client,
+    admin_auth_headers,
+    tmp_path,
+    name,
+):
+    project_id = _create_project(client, admin_auth_headers, f"Invalid store {name!r}")
+
+    response = client.post(
+        "/data-stores",
+        json=_store_payload(
+            project_id,
+            name=name,
+            kind="local_fs",
+            root=str(tmp_path),
+            is_default=False,
+        ),
+        headers=admin_auth_headers,
+    )
+
+    assert response.status_code == 422, response.text
+    assert response.json()["error"]["message"].startswith(
+        "Local filesystem store name must use 1-63 ASCII"
+    )
+    listed = client.get(
+        "/data-stores",
+        params={"project_id": project_id},
+        headers=admin_auth_headers,
+    )
+    assert listed.status_code == 200, listed.text
+    assert listed.json()["data"] == []
+
+
+def test_local_root_validation_does_not_change_other_store_kinds(
+    client,
+    admin_auth_headers,
+):
+    project_id = _create_project(client, admin_auth_headers, "Remote root semantics")
+
+    response = client.post(
+        "/data-stores",
+        json=_store_payload(
+            project_id,
+            name=" legacy remote ",
+            kind="onedrive",
+            root="experiments/current",
+            is_default=False,
+        ),
+        headers=admin_auth_headers,
+    )
+
+    assert response.status_code == 201, response.text
+    assert response.json()["data"]["name"] == "legacy remote"
+    assert response.json()["data"]["root"] == "experiments/current"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Windows aliases trailing root spaces")
+def test_local_root_is_persisted_exactly_without_whitespace_repair(
+    client,
+    admin_auth_headers,
+    tmp_path,
+):
+    root = tmp_path / "store with trailing space "
+    root.mkdir()
+    exact_data = b"bytes from the exact registered root"
+    (root / "artifact.bin").write_bytes(exact_data)
+    repaired_root = Path(str(root).rstrip())
+    repaired_root.mkdir()
+    (repaired_root / "artifact.bin").write_bytes(b"wrong trimmed-root bytes")
+    _install_local_registry(client, tmp_path)
+    project_id = _create_project(client, admin_auth_headers, "Exact local root")
+
+    response = client.post(
+        "/data-stores",
+        json=_store_payload(
+            project_id,
+            name="exact-local-root",
+            kind="local_fs",
+            root=str(root),
+            is_default=False,
+        ),
+        headers=admin_auth_headers,
+    )
+
+    assert response.status_code == 201, response.text
+    assert response.json()["data"]["root"] == str(root)
+    dataset_id = _create_dataset_with_artifact(
+        client,
+        admin_auth_headers,
+        project_id=project_id,
+        uri="store://exact-local-root/artifact.bin",
+        content_hash=_sha256(exact_data),
+    )
+
+    resolved = client.post(
+        "/external-artifacts/resolve",
+        json={"entity_type": "dataset", "entity_id": dataset_id},
+        headers=admin_auth_headers,
+    )
+
+    assert resolved.status_code == 200, resolved.text
+    assert resolved.json()["data"]["status"] == "verified"
+    assert base64.b64decode(resolved.json()["data"]["content_base64"]) == exact_data
 
 
 def test_create_data_store_requires_contributor(client, scoped_project_member):
