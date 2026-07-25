@@ -13,6 +13,7 @@ command can exceed its execution deadline only by that documented bound.
 
 from __future__ import annotations
 
+import errno
 import math
 import os
 import signal
@@ -23,6 +24,7 @@ import time
 from collections.abc import Callable, Mapping, Sequence
 from contextlib import suppress
 from dataclasses import dataclass, field
+from enum import Enum, auto
 from os import PathLike
 from typing import IO, Protocol
 
@@ -199,6 +201,15 @@ class _ProcessLifecycle(Protocol):
     def close_containment(self) -> None: ...
 
 
+class _ProcessGroupResult(Enum):
+    """Redacted result of one bounded POSIX process-group operation."""
+
+    OK = auto()
+    MISSING = auto()
+    DENIED = auto()
+    FAILED = auto()
+
+
 class _PosixProcessLifecycle:
     """Idempotent, race-safe ownership of a POSIX process group and pipes."""
 
@@ -212,61 +223,126 @@ class _PosixProcessLifecycle:
         self.process = process
         self._terminate_grace_seconds = terminate_grace_seconds
         self._kill_grace_seconds = kill_grace_seconds
-        self._lock = threading.Lock()
+        self._stop_lock = threading.Lock()
+        self._pipes_lock = threading.Lock()
         self._stopped = False
+        self._stop_failed = False
         self._pipes_closed = False
 
     def finish(self, *, cleanup_expires_at: float) -> None:
         """Kill any descendants left after the successfully reaped leader."""
 
-        if _process_group_exists(self.process.pid):
-            self.stop(cleanup_expires_at=cleanup_expires_at)
+        self.stop(cleanup_expires_at=cleanup_expires_at)
 
     def stop(self, *, cleanup_expires_at: float) -> None:
         """Terminate, kill, and reap the full POSIX process group once."""
 
-        with self._lock:
+        with self._stop_lock:
             if self._stopped:
                 return
+            if self._stop_failed:
+                # A late child exit can still be reaped safely.  Never touch
+                # the numeric process-group ID again after terminal failure.
+                _poll_reaped_process(self.process)
+                raise ProcessCleanupError(_GENERIC_CLEANUP_DETAIL)
+
+            if os.name != "posix":
+                raise ProcessUnsupportedPlatformError(_GENERIC_PLATFORM_DETAIL)
+
+            try:
+                self._stop_once(cleanup_expires_at=cleanup_expires_at)
+            except BaseException:
+                # Never retry after partial cleanup.  Once the leader is
+                # reaped, its numeric process-group ID can be reused.
+                self._stop_failed = True
+                raise
             self._stopped = True
 
-        if os.name != "posix":
-            raise ProcessUnsupportedPlatformError(_GENERIC_PLATFORM_DETAIL)
+    def _stop_once(self, *, cleanup_expires_at: float) -> None:
+        """Establish the terminal invariants under one absolute cleanup bound."""
 
-        # The leader may already have exited while a descendant still owns a
-        # pipe.  Always target the group created by start_new_session.
-        _signal_process_group(self.process.pid, signal.SIGTERM)
+        # Signal before polling the leader.  An unreaped leader keeps its PID
+        # reserved and narrows the unavoidable POSIX process-group reuse race.
+        term_result = _signal_process_group(
+            self.process.pid,
+            signal.SIGTERM,
+            expires_at=cleanup_expires_at,
+        )
+        group_missing = term_result is _ProcessGroupResult.MISSING
+        can_signal_group = term_result is _ProcessGroupResult.OK
         terminate_expires_at = min(
             cleanup_expires_at,
             time.monotonic() + self._terminate_grace_seconds,
         )
-        _wait_for_process_group_exit(
-            self.process.pid,
-            expires_at=terminate_expires_at,
-            process=self.process,
-        )
-        if _process_group_exists(self.process.pid):
-            _signal_process_group(self.process.pid, _POSIX_SIGKILL)
+        if not group_missing:
+            group_result, leader_reaped_during_wait = _wait_for_process_group_exit(
+                self.process.pid,
+                expires_at=terminate_expires_at,
+                process=self.process,
+            )
+            group_missing = group_result is _ProcessGroupResult.MISSING
+            if leader_reaped_during_wait:
+                can_signal_group = False
+            elif (
+                not can_signal_group
+                and group_result is _ProcessGroupResult.OK
+                and self.process.returncode is None
+            ):
+                # A live, unreaped leader keeps this observed PGID reserved.
+                can_signal_group = True
 
+        if not group_missing and can_signal_group:
+            kill_result = _signal_process_group(
+                self.process.pid,
+                _POSIX_SIGKILL,
+                expires_at=cleanup_expires_at,
+            )
+            group_missing = kill_result is _ProcessGroupResult.MISSING
+            if kill_result is _ProcessGroupResult.DENIED:
+                can_signal_group = False
+
+        leader_reaped = False
+        reap_failed = False
         try:
             self.process.wait(timeout=_remaining_cleanup(cleanup_expires_at))
+            leader_reaped = True
         except subprocess.TimeoutExpired:
-            _signal_process_group(self.process.pid, _POSIX_SIGKILL)
-            raise ProcessCleanupError(_GENERIC_CLEANUP_DETAIL) from None
+            reap_failed = True
+            if not group_missing and can_signal_group:
+                kill_result = _signal_process_group(
+                    self.process.pid,
+                    _POSIX_SIGKILL,
+                    expires_at=cleanup_expires_at,
+                )
+                group_missing = kill_result is _ProcessGroupResult.MISSING
+            leader_reaped = _poll_reaped_process(self.process)
         except (OSError, subprocess.SubprocessError):
-            raise ProcessCleanupError(_GENERIC_CLEANUP_DETAIL) from None
-        _wait_for_process_group_exit(
-            self.process.pid,
-            expires_at=cleanup_expires_at,
-            process=self.process,
-        )
-        if _process_group_exists(self.process.pid):
+            reap_failed = True
+            leader_reaped = _poll_reaped_process(self.process)
+
+        if not group_missing:
+            final_group_result, _leader_reaped_during_wait = (
+                _wait_for_process_group_exit(
+                    self.process.pid,
+                    expires_at=cleanup_expires_at,
+                    process=self.process,
+                )
+            )
+            group_missing = final_group_result is _ProcessGroupResult.MISSING
+
+        if not leader_reaped:
+            # One final non-blocking reap avoids leaking a child that exited
+            # at the cleanup deadline.  Bound exhaustion still remains an
+            # observable cleanup failure.
+            leader_reaped = _poll_reaped_process(self.process)
+
+        if reap_failed or not leader_reaped or not group_missing:
             raise ProcessCleanupError(_GENERIC_CLEANUP_DETAIL)
 
     def close_pipes(self) -> None:
         """Close both owned pipe objects once, suppressing redacted cleanup noise."""
 
-        with self._lock:
+        with self._pipes_lock:
             if self._pipes_closed:
                 return
             self._pipes_closed = True
@@ -699,25 +775,34 @@ def _validate_command(command: Sequence[str]) -> None:
         )
 
 
-def _signal_process_group(process_group_id: int, signum: int) -> None:
-    try:
-        _kill_process_group(process_group_id, signum)
-    except ProcessLookupError:
-        return
-    except OSError:
-        raise ProcessCleanupError(_GENERIC_CLEANUP_DETAIL) from None
+def _signal_process_group(
+    process_group_id: int,
+    signum: int,
+    *,
+    expires_at: float,
+) -> _ProcessGroupResult:
+    while True:
+        try:
+            _kill_process_group(process_group_id, signum)
+        except OSError as error:
+            if error.errno == errno.EINTR:
+                if _remaining_cleanup(expires_at) <= 0:
+                    return _ProcessGroupResult.FAILED
+                continue
+            if error.errno == errno.ESRCH:
+                return _ProcessGroupResult.MISSING
+            if error.errno == errno.EPERM:
+                return _ProcessGroupResult.DENIED
+            return _ProcessGroupResult.FAILED
+        return _ProcessGroupResult.OK
 
 
-def _process_group_exists(process_group_id: int) -> bool:
-    try:
-        _kill_process_group(process_group_id, 0)
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True
-    except OSError:
-        return True
-    return True
+def _process_group_state(
+    process_group_id: int,
+    *,
+    expires_at: float,
+) -> _ProcessGroupResult:
+    return _signal_process_group(process_group_id, 0, expires_at=expires_at)
 
 
 def _wait_for_process_group_exit(
@@ -725,18 +810,43 @@ def _wait_for_process_group_exit(
     *,
     expires_at: float,
     process: subprocess.Popen[bytes],
-) -> None:
+) -> tuple[_ProcessGroupResult, bool]:
     while True:
-        try:
-            process.poll()
-        except (OSError, subprocess.SubprocessError):
-            raise ProcessCleanupError(_GENERIC_CLEANUP_DETAIL) from None
-        if not _process_group_exists(process_group_id):
-            return
+        group_result = _process_group_state(
+            process_group_id,
+            expires_at=expires_at,
+        )
+        if group_result in {
+            _ProcessGroupResult.MISSING,
+            _ProcessGroupResult.FAILED,
+        }:
+            return group_result, False
+        if (
+            group_result is _ProcessGroupResult.DENIED
+            and process.returncode is None
+            and _poll_reaped_process(process)
+        ):
+            # Darwin reports EPERM for a process group containing only an
+            # unreaped zombie.  Reap once, then require an authoritative
+            # missing-group result before treating cleanup as complete.
+            return (
+                _process_group_state(
+                    process_group_id,
+                    expires_at=expires_at,
+                ),
+                True,
+            )
         remaining = expires_at - time.monotonic()
         if remaining <= 0:
-            return
+            return group_result, False
         threading.Event().wait(min(_POLL_INTERVAL_SECONDS, remaining))
+
+
+def _poll_reaped_process(process: subprocess.Popen[bytes]) -> bool:
+    try:
+        return process.poll() is not None
+    except (OSError, subprocess.SubprocessError):
+        return False
 
 
 def _remaining_cleanup(expires_at: float) -> float:

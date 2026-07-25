@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import ctypes
+import errno
 import gc
 import os
+import signal
 import subprocess
 import sys
 import threading
@@ -35,6 +37,43 @@ class FakeClock:
         return self.value
 
 
+class FakePosixProcess:
+    pid = 42_137
+    stdout = None
+    stderr = None
+
+    def __init__(
+        self,
+        *,
+        poll_results: list[int | None | BaseException] | None = None,
+        wait_result: int = 0,
+        wait_error: BaseException | None = None,
+    ) -> None:
+        self.returncode: int | None = None
+        self.poll_results = list(poll_results or [])
+        self.wait_result = wait_result
+        self.wait_error = wait_error
+        self.poll_calls = 0
+        self.wait_timeouts: list[float | None] = []
+
+    def poll(self) -> int | None:
+        self.poll_calls += 1
+        outcome: int | None | BaseException
+        outcome = self.poll_results.pop(0) if self.poll_results else self.returncode
+        if isinstance(outcome, BaseException):
+            raise outcome
+        if outcome is not None:
+            self.returncode = outcome
+        return outcome
+
+    def wait(self, timeout: float | None = None) -> int:
+        self.wait_timeouts.append(timeout)
+        if self.wait_error is not None:
+            raise self.wait_error
+        self.returncode = self.wait_result
+        return self.wait_result
+
+
 def _python(source: str) -> tuple[str, ...]:
     return (sys.executable, "-c", source)
 
@@ -57,6 +96,39 @@ def _run(
         stdout_limit_bytes=stdout_limit,
         stderr_limit_bytes=stderr_limit,
         stdout_consumer=consumer,
+    )
+
+
+def _install_process_group_outcomes(
+    monkeypatch: pytest.MonkeyPatch,
+    outcomes: list[BaseException | None],
+) -> list[int]:
+    pending = list(outcomes)
+    calls: list[int] = []
+
+    def fake_kill_process_group(_process_group_id: int, signum: int) -> None:
+        calls.append(signum)
+        if not pending:
+            raise AssertionError("unexpected process-group operation")
+        outcome = pending.pop(0)
+        if outcome is not None:
+            raise outcome
+
+    monkeypatch.setattr(
+        bounded_subprocess,
+        "_kill_process_group",
+        fake_kill_process_group,
+    )
+    return calls
+
+
+def _posix_lifecycle(
+    process: FakePosixProcess,
+) -> bounded_subprocess._PosixProcessLifecycle:
+    return bounded_subprocess._PosixProcessLifecycle(  # type: ignore[arg-type]
+        process,
+        terminate_grace_seconds=0.0,
+        kill_grace_seconds=0.0,
     )
 
 
@@ -333,6 +405,239 @@ def test_cwd_and_explicit_environment_are_forwarded(tmp_path: Path) -> None:
     )
 
     assert result.stdout == f"{tmp_path.name}:present".encode()
+
+
+@pytest.mark.skipif(os.name != "posix", reason="requires POSIX process groups")
+@pytest.mark.parametrize(
+    ("outcomes", "expected_signals"),
+    [
+        (
+            [
+                ProcessLookupError(errno.ESRCH, "missing before TERM"),
+            ],
+            [signal.SIGTERM],
+        ),
+        (
+            [
+                None,
+                ProcessLookupError(errno.ESRCH, "missing after TERM"),
+            ],
+            [signal.SIGTERM, 0],
+        ),
+        (
+            [
+                PermissionError(errno.EPERM, "Darwin zombie group"),
+                PermissionError(errno.EPERM, "zombie before leader reap"),
+                ProcessLookupError(errno.ESRCH, "missing after zombie reap"),
+            ],
+            [signal.SIGTERM, 0, 0],
+        ),
+        (
+            [
+                None,
+                None,
+                ProcessLookupError(errno.ESRCH, "missing before reap"),
+            ],
+            [signal.SIGTERM, 0, bounded_subprocess._POSIX_SIGKILL],
+        ),
+        (
+            [
+                OSError(errno.EIO, "transient signal error"),
+                ProcessLookupError(errno.ESRCH, "missing during verification"),
+            ],
+            [signal.SIGTERM, 0],
+        ),
+    ],
+    ids=[
+        "missing-before-term",
+        "missing-between-term-and-probe",
+        "darwin-singleton-zombie",
+        "missing-before-leader-reap",
+        "transient-error-then-missing",
+    ],
+)
+def test_posix_cleanup_reaps_leader_across_group_disappearance_races(
+    monkeypatch: pytest.MonkeyPatch,
+    outcomes: list[BaseException | None],
+    expected_signals: list[int],
+) -> None:
+    process = FakePosixProcess(poll_results=[0, 0])
+    calls = _install_process_group_outcomes(monkeypatch, outcomes)
+    lifecycle = _posix_lifecycle(process)
+
+    lifecycle.stop(cleanup_expires_at=time.monotonic())
+    lifecycle.stop(cleanup_expires_at=time.monotonic())
+
+    assert calls == expected_signals
+    assert len(process.wait_timeouts) == 1
+    assert process.returncode == 0
+
+
+@pytest.mark.skipif(os.name != "posix", reason="requires POSIX process groups")
+@pytest.mark.parametrize(
+    ("scenario", "wait_error"),
+    [
+        ("persistent-denial", None),
+        ("surviving-descendants", None),
+        (
+            "wait-timeout",
+            subprocess.TimeoutExpired(("redacted",), timeout=0),
+        ),
+        ("wait-os-error", OSError(errno.ECHILD, "private wait detail")),
+    ],
+)
+def test_posix_cleanup_failures_are_terminal_and_redacted(
+    monkeypatch: pytest.MonkeyPatch,
+    scenario: str,
+    wait_error: BaseException | None,
+) -> None:
+    def missing(detail: str) -> ProcessLookupError:
+        return ProcessLookupError(errno.ESRCH, detail)
+
+    if scenario == "persistent-denial":
+        outcomes: list[BaseException | None] = [
+            PermissionError(errno.EPERM, "denied TERM"),
+            PermissionError(errno.EPERM, "denied probe"),
+            PermissionError(errno.EPERM, "denied KILL"),
+            PermissionError(errno.EPERM, "denied final probe"),
+        ]
+        poll_results = [0, 0]
+    elif scenario == "surviving-descendants":
+        outcomes = [None, None, None, None]
+        poll_results = [0, 0]
+    elif scenario == "wait-timeout":
+        outcomes = [missing("gone before TERM")]
+        poll_results = [None, None, None, None]
+    else:
+        outcomes = [missing("gone before TERM")]
+        poll_results = [0, 0, 0]
+
+    process = FakePosixProcess(
+        poll_results=poll_results,
+        wait_error=wait_error,
+    )
+    calls = _install_process_group_outcomes(monkeypatch, outcomes)
+    lifecycle = _posix_lifecycle(process)
+
+    with pytest.raises(ProcessCleanupError) as first:
+        lifecycle.stop(cleanup_expires_at=time.monotonic())
+    calls_after_failure = list(calls)
+    waits_after_failure = list(process.wait_timeouts)
+    polls_after_failure = process.poll_calls
+    with pytest.raises(ProcessCleanupError) as second:
+        lifecycle.stop(cleanup_expires_at=time.monotonic() + 60)
+
+    assert str(first.value) == "Subprocess cleanup failed."
+    assert str(second.value) == "Subprocess cleanup failed."
+    assert calls == calls_after_failure
+    assert process.wait_timeouts == waits_after_failure
+    assert process.poll_calls == polls_after_failure + 1
+    assert "private" not in str(first.value)
+
+
+def test_process_group_signal_retries_eintr_only_within_cleanup_bound(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = _install_process_group_outcomes(
+        monkeypatch,
+        [InterruptedError(errno.EINTR, "interrupted"), None],
+    )
+
+    result = bounded_subprocess._signal_process_group(
+        FakePosixProcess.pid,
+        signal.SIGTERM,
+        expires_at=time.monotonic() + 1,
+    )
+
+    assert result is bounded_subprocess._ProcessGroupResult.OK
+    assert calls == [signal.SIGTERM, signal.SIGTERM]
+
+
+def test_process_group_signal_stops_eintr_retries_at_cleanup_bound(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = _install_process_group_outcomes(
+        monkeypatch,
+        [
+            InterruptedError(errno.EINTR, "first interruption"),
+            InterruptedError(errno.EINTR, "second interruption"),
+        ],
+    )
+    clock_values = iter([100.0, 101.0])
+    monkeypatch.setattr(
+        bounded_subprocess.time,
+        "monotonic",
+        lambda: next(clock_values),
+    )
+
+    result = bounded_subprocess._signal_process_group(
+        FakePosixProcess.pid,
+        signal.SIGTERM,
+        expires_at=100.5,
+    )
+
+    assert result is bounded_subprocess._ProcessGroupResult.FAILED
+    assert calls == [signal.SIGTERM, signal.SIGTERM]
+
+
+@pytest.mark.skipif(os.name != "posix", reason="requires POSIX process groups")
+@pytest.mark.parametrize(
+    "failure_type",
+    [
+        ProcessOutputLimitExceeded,
+        ProcessDeadlineExceeded,
+        ProcessConsumerError,
+    ],
+)
+def test_darwin_zombie_cleanup_preserves_primary_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    failure_type: type[ProcessExecutionError],
+) -> None:
+    process = FakePosixProcess(poll_results=[0, 0])
+    calls = _install_process_group_outcomes(
+        monkeypatch,
+        [
+            PermissionError(errno.EPERM, "Darwin zombie group"),
+            PermissionError(errno.EPERM, "zombie before leader reap"),
+            ProcessLookupError(errno.ESRCH, "missing after zombie reap"),
+        ],
+    )
+    lifecycle = _posix_lifecycle(process)
+    executor = BoundedSubprocessExecutor()
+    primary = failure_type("primary failure")
+
+    with pytest.raises(failure_type) as raised:
+        try:
+            raise primary
+        except ProcessExecutionError as caught:
+            executor._cleanup_failure(lifecycle, threads=(), primary=caught)
+            raise
+
+    assert raised.value is primary
+    assert calls == [signal.SIGTERM, 0, 0]
+    assert len(process.wait_timeouts) == 1
+
+
+@pytest.mark.skipif(os.name != "posix", reason="requires POSIX process groups")
+def test_posix_cleanup_control_flow_failure_is_terminal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    process = FakePosixProcess(poll_results=[0])
+    lifecycle = _posix_lifecycle(process)
+
+    def interrupt_cleanup(*, cleanup_expires_at: float) -> None:
+        assert cleanup_expires_at > 0
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(lifecycle, "_stop_once", interrupt_cleanup)
+
+    with pytest.raises(KeyboardInterrupt):
+        lifecycle.stop(cleanup_expires_at=time.monotonic() + 1)
+    with pytest.raises(ProcessCleanupError) as raised:
+        lifecycle.stop(cleanup_expires_at=time.monotonic() + 60)
+
+    assert str(raised.value) == "Subprocess cleanup failed."
+    assert process.poll_calls == 1
 
 
 def test_deadline_kills_and_reaps_contained_descendants() -> None:
