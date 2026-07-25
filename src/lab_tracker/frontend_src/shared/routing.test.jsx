@@ -11,6 +11,11 @@ describe("app routing", () => {
     expect(parseAppRoute("/lab-tracker/app/agents")).toEqual({ kind: "agents" });
   });
 
+  it("parses the guided setup route at root and under a deployment prefix", () => {
+    expect(parseAppRoute("/app/setup")).toEqual({ kind: "setup" });
+    expect(parseAppRoute("/lab-tracker/app/setup")).toEqual({ kind: "setup" });
+  });
+
   it("parses app routes under a GitHub Pages project prefix", () => {
     expect(parseAppRoute("/lab-tracker/app/graph")).toEqual({ kind: "graph" });
     expect(parseAppRoute(`/lab-tracker/app/questions/${QUESTION_ID}`)).toEqual({

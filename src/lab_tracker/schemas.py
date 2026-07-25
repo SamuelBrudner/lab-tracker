@@ -183,6 +183,13 @@ class AuthBootstrapStatus(BaseModel):
     bootstrap_token_warning: str | None = None
 
 
+class AuthSetupReadiness(BaseModel):
+    scheduler_enabled: bool
+    background_worker_enabled: bool
+    provider: str
+    provider_credential_configured: bool
+
+
 class AuthTokenRead(BaseModel):
     access_token: str
     token_type: str = "bearer"
@@ -596,7 +603,14 @@ class GraphDraftListFilters(BaseModel):
 
 class GraphDraftBatchSettingsUpdate(PatchRequestModel):
     non_nullable_fields = frozenset(
-        {"enabled", "cadence_minutes", "run_at_local_time", "timezone_name", "user_id"}
+        {
+            "enabled",
+            "cadence_minutes",
+            "run_at_local_time",
+            "timezone_name",
+            "user_id",
+            "email_notifications_enabled",
+        }
     )
 
     enabled: bool | SkipJsonSchema[None] = None
@@ -604,6 +618,8 @@ class GraphDraftBatchSettingsUpdate(PatchRequestModel):
     run_at_local_time: str | SkipJsonSchema[None] = None
     timezone_name: str | SkipJsonSchema[None] = None
     user_id: UUID | SkipJsonSchema[None] = None
+    email_notifications_enabled: bool | SkipJsonSchema[None] = None
+    notification_email: str | None = Field(default=None, max_length=254)
 
 
 class GraphDraftBatchRunRequest(RequestModel):
@@ -616,6 +632,11 @@ class GraphDraftBatchRunRequest(RequestModel):
 class GraphDraftBatchRunFilters(BaseModel):
     project_id: UUID | None = None
     status: GraphDraftBatchRunStatus | None = None
+
+
+class ReviewEmailTestRequest(RequestModel):
+    destination_email: str = Field(min_length=3, max_length=254)
+    recipient_user_id: UUID | None = None
 
 
 class AssistantDecisionContextRequest(RequestModel):

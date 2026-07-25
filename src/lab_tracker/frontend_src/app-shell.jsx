@@ -12,6 +12,7 @@ import { VisualizationDetailCard } from "./features/analysis/VisualizationDetail
 import { DatasetDetailCard } from "./features/datasets/index.js";
 import { MobileCaptureCard } from "./features/mobile-capture.jsx";
 import { NoteDetailCard } from "./features/notes.jsx";
+import { OnboardingPage } from "./features/onboarding.jsx";
 import { QuestionDetailCard } from "./features/questions/QuestionDetailCard.jsx";
 import { SessionDetailCard } from "./features/sessions/index.js";
 import { UsersPage } from "./features/users.jsx";
@@ -385,12 +386,30 @@ function App() {
                 role: selectedProjectRole,
               }}
             />
-          ) : route.kind === "graph" || isFocusedReviewRoute ? null : (
+          ) : route.kind === "graph" ||
+            isFocusedReviewRoute ||
+            route.kind === "setup" ? null : (
             // The graph explorer has its own project picker and fills the
             // viewport; stacking the Dashboard card (second picker, New
             // Project + member forms) next to it just buries the canvas.
             <Dashboard {...dashboardProps} />
           )}
+
+          {route.kind === "setup" ? (
+            <OnboardingPage
+              token={auth.token}
+              user={auth.user}
+              projects={workspaceData.projects}
+              selectedProjectId={workspaceData.selectedProjectId}
+              setSelectedProjectId={workspaceData.setSelectedProjectId}
+              refreshProjects={workspaceData.refreshProjects}
+              canWrite={auth.canWrite}
+              canManageSchedule={canContributeToProject}
+              navigate={navigate}
+              setBusy={setBusy}
+              setFlash={setFlash}
+            />
+          ) : null}
 
           {route.kind === "devices" ? (
             <DevicesPage

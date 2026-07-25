@@ -61,6 +61,7 @@ from lab_tracker.services import (
     PublicationReadinessService,
     QuestionService,
     RecordExportService,
+    ReviewEmailService,
     ServiceContext,
     SessionService,
     SupervisionService,
@@ -259,6 +260,10 @@ class LabTrackerAPI(
             context,
             authorization=self.project_authorization,
         )
+        self.review_emails: ReviewEmailService = ReviewEmailService(
+            context,
+            max_attempts=self._settings.review_email_max_attempts,
+        )
         graph_draft_generation = GraphDraftGenerationCoordinator(
             context,
             records=graph_draft_records,
@@ -266,6 +271,7 @@ class LabTrackerAPI(
             authorization=self.project_authorization,
             context_builder=graph_context_builder,
             patch_validator=graph_patch_validator,
+            review_email_outbox=self.review_emails,
         )
         graph_draft_review = GraphDraftReviewCoordinator(
             context,

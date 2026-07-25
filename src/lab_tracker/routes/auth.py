@@ -29,6 +29,7 @@ from lab_tracker.schemas import (
     AuthInvitationRead,
     AuthLoginRequest,
     AuthRegisterRequest,
+    AuthSetupReadiness,
     AuthTokenRead,
     AuthUserRead,
     AuthUserUpdate,
@@ -242,7 +243,49 @@ def build_auth_router(
             raise AuthError("Authentication required.")
         return Envelope(data=auth_user_read(user), meta={"auth_enabled": True})
 
+    @router.get(
+        "/auth/setup-readiness",
+        response_model=Envelope[AuthSetupReadiness],
+    )
+    def auth_setup_readiness(request: Request):
+        actor_from_request(request)
+        settings = request.app.state.settings
+        provider, credential_configured = _graph_draft_provider_readiness(settings)
+        scheduler_enabled = bool(settings.graph_draft_scheduler_enabled)
+        return Envelope(
+            data=AuthSetupReadiness(
+                scheduler_enabled=scheduler_enabled,
+                background_worker_enabled=bool(
+                    settings.graph_draft_background_enabled or scheduler_enabled
+                ),
+                provider=provider,
+                provider_credential_configured=credential_configured,
+            )
+        )
+
     return router
+
+
+def _graph_draft_provider_readiness(settings) -> tuple[str, bool]:
+    provider = (settings.graph_draft_provider or "openai").strip().lower()
+    provider_aliases = {
+        "claude": "anthropic",
+        "gemini": "google",
+        "agentic-openai": "agentic",
+        "agentic_openai": "agentic",
+    }
+    provider = provider_aliases.get(provider, provider)
+    credential_fields = {
+        "openai": "openai_api_key",
+        "anthropic": "anthropic_api_key",
+        "google": "google_api_key",
+        "agentic": "openai_api_key",
+    }
+    credential_field = credential_fields.get(provider)
+    if credential_field is None:
+        return provider, False
+    credential = getattr(settings, credential_field, "")
+    return provider, bool(str(credential or "").strip())
 
 
 def _ensure_admin(request: Request) -> None:
@@ -401,6 +444,8 @@ def _mailto_invitation_url(
         "You have been invited to Lab Tracker.\n\n"
         f"Open this link to create your password and sign in as {role.value}:\n"
         f"{invite_url}\n\n"
+        "After sign-in, a guided setup will help you choose a project, set your "
+        "daily review time, and connect Lab Tracker to your coding agent.\n\n"
         f"This invitation expires at {expires_at.isoformat()}."
     )
     return f"mailto:{quote(email)}?{urlencode({'subject': subject, 'body': body})}"

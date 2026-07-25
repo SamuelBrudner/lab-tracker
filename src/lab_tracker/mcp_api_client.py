@@ -28,6 +28,7 @@ from lab_tracker.models import (
     NoteStatus,
     QuestionStatus,
 )
+from lab_tracker_client.client import load_connection_profile
 from lab_tracker_client.transport import (
     MAX_UPLOAD_BYTES,
     HttpTransport,
@@ -117,11 +118,31 @@ class MCPSettings:
 
     @classmethod
     def from_env(cls) -> MCPSettings:
+        """Build MCP settings with environment-first profile fallback.
+
+        ``lt setup connect --save-token`` persists a base URL and LPAT in the
+        machine connection profile. MCP hosts often launch without a shell, so
+        use that profile for values absent from their environment. Never carry
+        a profile token to an explicitly different server or combine it with
+        explicit username/password login.
+        """
+
+        profile = load_connection_profile()
+        env_base_url = os.getenv("LAB_TRACKER_MCP_BASE_URL")
+        env_username = os.getenv("LAB_TRACKER_MCP_USERNAME")
+        profile_base_url = profile.get("base_url") or DEFAULT_BASE_URL
+        profile_token = profile.get("access_token")
+        if env_username or (
+            env_base_url and env_base_url.rstrip("/") != profile_base_url.rstrip("/")
+        ):
+            profile_token = None
         return cls(
-            base_url=os.getenv("LAB_TRACKER_MCP_BASE_URL", DEFAULT_BASE_URL).rstrip("/"),
-            username=os.getenv("LAB_TRACKER_MCP_USERNAME"),
+            base_url=(env_base_url or profile_base_url).rstrip("/"),
+            username=env_username,
             password=os.getenv("LAB_TRACKER_MCP_PASSWORD"),
-            api_key=os.getenv("LAB_TRACKER_MCP_API_KEY") or os.getenv("LAB_TRACKER_MCP_TOKEN"),
+            api_key=os.getenv("LAB_TRACKER_MCP_API_KEY")
+            or os.getenv("LAB_TRACKER_MCP_TOKEN")
+            or profile_token,
             timeout_seconds=float(
                 os.getenv("LAB_TRACKER_MCP_TIMEOUT_SECONDS", str(DEFAULT_TIMEOUT_SECONDS))
             ),

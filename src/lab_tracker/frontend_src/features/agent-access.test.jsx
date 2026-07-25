@@ -129,11 +129,37 @@ describe("AgentAccessPage", () => {
       .join("\n");
     expect(commandText).toContain(`lt setup connect --base-url ${origin} --save-token --yes`);
     expect(commandText).toContain("LAB_TRACKER_ACCESS_TOKEN = 'lpat_test-secret'");
+    expect(commandText).toContain("Remove-Item Env:LAB_TRACKER_ACCESS_TOKEN");
+    expect(commandText).toContain("unset LAB_TRACKER_ACCESS_TOKEN");
+    expect(commandText).not.toContain("LAB_TRACKER_MCP_API_KEY");
+    expect(commandText).toContain("lt setup init --install-skills --dry-run");
+    expect(commandText).toContain("lt setup init --install-skills --yes");
     expect(commandText).toContain(
-      "$env:LAB_TRACKER_MCP_API_KEY = $env:LAB_TRACKER_ACCESS_TOKEN"
+      'lt project bind --name "My project" --dry-run'
     );
-    expect(commandText).toContain('export LAB_TRACKER_MCP_API_KEY="$LAB_TRACKER_ACCESS_TOKEN"');
-    expect(commandText).toContain("lt setup init --yes");
+    expect(commandText).toContain("lt setup status");
+    expect(commandText).toContain("codex mcp add lab-tracker -- lt-mcp");
+    expect(commandText).toContain("codex mcp list");
+    const applyingBlocks = Array.from(commandBlocks).filter(
+      (node) =>
+        node.textContent.includes("lt setup init") ||
+        node.textContent.includes("lt project bind") ||
+        node.textContent.includes("codex mcp")
+    );
+    expect(applyingBlocks.every((node) => !node.textContent.includes("\n"))).toBe(true);
+    expect(document.body.textContent).toContain(
+      "uv tool install --upgrade git+https://github.com/SamuelBrudner/lab-tracker"
+    );
+    expect(document.body.textContent).toContain(
+      "Both the lt CLI and lt-mcp read that profile"
+    );
+    expect(document.body.textContent).toContain("Claude and Codex user skill homes");
+    expect(document.body.textContent).toContain(
+      "Codex requires the explicit one-time registration above"
+    );
+    expect(document.body.textContent).toContain(
+      "shared by its app, CLI, and IDE extension"
+    );
     // Read-only tokens cannot create projects, so the repo block must not
     // suggest --create.
     expect(commandText).not.toContain("--create");
@@ -324,6 +350,18 @@ describe("AgentAccessPage", () => {
       `lt setup connect --base-url ${window.location.origin} --yes`
     );
     expect(commandText).not.toContain("LAB_TRACKER_ACCESS_TOKEN");
+    expect(commandText).toContain("lt setup init --install-skills --dry-run");
+    expect(commandText).toContain("lt setup init --install-skills --yes");
+    expect(commandText).toContain("lt setup status");
+    expect(commandText).toContain("codex mcp add lab-tracker -- lt-mcp");
+    expect(commandText).toContain("codex mcp list");
+    expect(document.body.textContent).toContain(
+      "uv tool install --upgrade git+https://github.com/SamuelBrudner/lab-tracker"
+    );
+    expect(document.body.textContent).toContain("Claude and Codex user skill homes");
+    expect(document.body.textContent).toContain(
+      "Codex requires the explicit one-time registration above"
+    );
     expect(screen.queryByRole("button", { name: "Create agent token" })).toBeNull();
   });
 });

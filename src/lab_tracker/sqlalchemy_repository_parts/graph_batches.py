@@ -6,13 +6,14 @@ from datetime import datetime
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import select, update
+from sqlalchemy import and_, or_, select, update
 from sqlalchemy.orm import Session as OrmSession
 
 from lab_tracker.db_models import (
     GraphChangeSetModel,
     GraphDraftBatchRunModel,
     GraphDraftBatchSettingsModel,
+    ReviewEmailOutboxModel,
 )
 from lab_tracker.db_types import ensure_uuid
 from lab_tracker.models import (
@@ -20,8 +21,10 @@ from lab_tracker.models import (
     GraphDraftBatchRunStatus,
     GraphDraftBatchSettings,
     GraphDraftBatchTrigger,
+    ReviewEmailDelivery,
+    ReviewEmailDeliveryStatus,
 )
-from lab_tracker.repository import EntityRepository
+from lab_tracker.repository import EntityRepository, ReviewEmailOutboxRepository
 from lab_tracker.sqlalchemy_mapper_parts.common import as_utc
 
 from .common import apply_pagination, count_from_statement
@@ -53,6 +56,9 @@ def settings_to_model(settings: GraphDraftBatchSettings) -> GraphDraftBatchSetti
         run_at_local_time=settings.run_at_local_time,
         timezone_name=settings.timezone_name,
         next_run_at=settings.next_run_at,
+        email_notifications_enabled=settings.email_notifications_enabled,
+        notification_email=settings.notification_email,
+        notification_email_confirmed_at=settings.notification_email_confirmed_at,
         created_at=settings.created_at,
         updated_at=settings.updated_at,
         updated_by=settings.updated_by,
@@ -70,6 +76,9 @@ def apply_settings_to_model(
     row.run_at_local_time = settings.run_at_local_time
     row.timezone_name = settings.timezone_name
     row.next_run_at = settings.next_run_at
+    row.email_notifications_enabled = settings.email_notifications_enabled
+    row.notification_email = settings.notification_email
+    row.notification_email_confirmed_at = settings.notification_email_confirmed_at
     row.created_at = settings.created_at
     row.updated_at = settings.updated_at
     row.updated_by = settings.updated_by
@@ -85,6 +94,11 @@ def settings_from_model(row: GraphDraftBatchSettingsModel) -> GraphDraftBatchSet
         run_at_local_time=row.run_at_local_time,
         timezone_name=row.timezone_name,
         next_run_at=_as_utc_optional(row.next_run_at),
+        # SQLAlchemy column defaults are applied on flush; direct model
+        # construction in mapper callers can still expose ``None`` here.
+        email_notifications_enabled=bool(row.email_notifications_enabled),
+        notification_email=row.notification_email,
+        notification_email_confirmed_at=_as_utc_optional(row.notification_email_confirmed_at),
         created_at=as_utc(row.created_at),
         updated_at=as_utc(row.updated_at),
         updated_by=row.updated_by,
@@ -165,6 +179,72 @@ def run_from_model(row: GraphDraftBatchRunModel) -> GraphDraftBatchRun:
         created_by_user_id=_uuid(row.created_by_user_id),
         review_assignee=row.review_assignee,
         review_assignee_user_id=_uuid(row.review_assignee_user_id),
+    )
+
+
+def email_delivery_to_model(delivery: ReviewEmailDelivery) -> ReviewEmailOutboxModel:
+    return ReviewEmailOutboxModel(
+        delivery_id=str(delivery.delivery_id),
+        change_set_id=_uuid_str(delivery.change_set_id),
+        recipient_user_id=_uuid_str(delivery.recipient_user_id),
+        event_type=delivery.event_type,
+        destination_email=delivery.destination_email,
+        idempotency_key=delivery.idempotency_key,
+        status=delivery.status,
+        attempt_count=delivery.attempt_count,
+        next_attempt_at=delivery.next_attempt_at,
+        claim_token=_uuid_str(delivery.claim_token),
+        claimed_at=delivery.claimed_at,
+        lease_expires_at=delivery.lease_expires_at,
+        provider_message_id=delivery.provider_message_id,
+        last_error=delivery.last_error,
+        created_at=delivery.created_at,
+        updated_at=delivery.updated_at,
+        accepted_at=delivery.accepted_at,
+    )
+
+
+def apply_email_delivery_to_model(
+    row: ReviewEmailOutboxModel,
+    delivery: ReviewEmailDelivery,
+) -> None:
+    row.change_set_id = delivery.change_set_id
+    row.recipient_user_id = delivery.recipient_user_id
+    row.event_type = delivery.event_type
+    row.destination_email = delivery.destination_email
+    row.idempotency_key = delivery.idempotency_key
+    row.status = delivery.status
+    row.attempt_count = delivery.attempt_count
+    row.next_attempt_at = delivery.next_attempt_at
+    row.claim_token = delivery.claim_token
+    row.claimed_at = delivery.claimed_at
+    row.lease_expires_at = delivery.lease_expires_at
+    row.provider_message_id = delivery.provider_message_id
+    row.last_error = delivery.last_error
+    row.created_at = delivery.created_at
+    row.updated_at = delivery.updated_at
+    row.accepted_at = delivery.accepted_at
+
+
+def email_delivery_from_model(row: ReviewEmailOutboxModel) -> ReviewEmailDelivery:
+    return ReviewEmailDelivery(
+        delivery_id=ensure_uuid(row.delivery_id),
+        change_set_id=_uuid(row.change_set_id),
+        recipient_user_id=_uuid(row.recipient_user_id),
+        event_type=row.event_type,
+        destination_email=row.destination_email,
+        idempotency_key=row.idempotency_key,
+        status=ReviewEmailDeliveryStatus(row.status),
+        attempt_count=row.attempt_count,
+        next_attempt_at=_as_utc_optional(row.next_attempt_at),
+        claim_token=_uuid(row.claim_token),
+        claimed_at=_as_utc_optional(row.claimed_at),
+        lease_expires_at=_as_utc_optional(row.lease_expires_at),
+        provider_message_id=row.provider_message_id,
+        last_error=row.last_error,
+        created_at=as_utc(row.created_at),
+        updated_at=as_utc(row.updated_at),
+        accepted_at=_as_utc_optional(row.accepted_at),
     )
 
 
@@ -279,6 +359,118 @@ class SQLAlchemyGraphDraftBatchSettingsRepository(
         if row is not None:
             self._session.delete(row)
         return entity
+
+
+class SQLAlchemyReviewEmailOutboxRepository(ReviewEmailOutboxRepository):
+    """SQLAlchemy-backed durable queue for review-email deliveries."""
+
+    def __init__(self, session: OrmSession) -> None:
+        self._session = session
+
+    def get(self, entity_id: UUID) -> ReviewEmailDelivery | None:
+        self._session.flush()
+        row = self._session.get(ReviewEmailOutboxModel, str(entity_id))
+        return email_delivery_from_model(row) if row is not None else None
+
+    def list(self) -> list[ReviewEmailDelivery]:
+        self._session.flush()
+        rows = list(
+            self._session.scalars(
+                select(ReviewEmailOutboxModel).order_by(
+                    ReviewEmailOutboxModel.created_at,
+                    ReviewEmailOutboxModel.delivery_id,
+                )
+            )
+        )
+        return [email_delivery_from_model(row) for row in rows]
+
+    def save(self, entity: ReviewEmailDelivery) -> None:
+        self._session.flush()
+        row = self._session.get(ReviewEmailOutboxModel, str(entity.delivery_id))
+        if row is None:
+            self._session.add(email_delivery_to_model(entity))
+        else:
+            apply_email_delivery_to_model(row, entity)
+
+    def get_by_idempotency_key(
+        self,
+        idempotency_key: str,
+    ) -> ReviewEmailDelivery | None:
+        self._session.flush()
+        row = self._session.scalar(
+            select(ReviewEmailOutboxModel).where(
+                ReviewEmailOutboxModel.idempotency_key == idempotency_key
+            )
+        )
+        return email_delivery_from_model(row) if row is not None else None
+
+    def claim_next(
+        self,
+        *,
+        now: datetime,
+        lease_until: datetime,
+        claim_token: UUID,
+    ) -> ReviewEmailDelivery | None:
+        """Lease one due delivery without allowing two workers to own it."""
+
+        if lease_until <= now:
+            raise ValueError("lease_until must be later than now.")
+
+        self._session.flush()
+        due_unclaimed = and_(
+            ReviewEmailOutboxModel.status.in_(
+                [
+                    ReviewEmailDeliveryStatus.PENDING,
+                    ReviewEmailDeliveryStatus.RETRYABLE,
+                ]
+            ),
+            ReviewEmailOutboxModel.next_attempt_at <= now,
+        )
+        stale_claim = and_(
+            ReviewEmailOutboxModel.status == ReviewEmailDeliveryStatus.SENDING,
+            ReviewEmailOutboxModel.lease_expires_at.is_not(None),
+            ReviewEmailOutboxModel.lease_expires_at <= now,
+        )
+        eligible = or_(due_unclaimed, stale_claim)
+        candidate_stmt = (
+            select(ReviewEmailOutboxModel)
+            .where(eligible)
+            .order_by(
+                ReviewEmailOutboxModel.next_attempt_at,
+                ReviewEmailOutboxModel.created_at,
+                ReviewEmailOutboxModel.delivery_id,
+            )
+            .limit(1)
+        )
+        if self._session.get_bind().dialect.name == "postgresql":
+            candidate_stmt = candidate_stmt.with_for_update(skip_locked=True)
+        row = self._session.scalar(candidate_stmt)
+        if row is None:
+            return None
+
+        # The conditional update keeps the SQLite path safe when another
+        # transaction selected the same row before either writer acquired the
+        # database write lock. PostgreSQL additionally holds a SKIP LOCKED row
+        # lock from the selection above.
+        result = self._session.execute(
+            update(ReviewEmailOutboxModel)
+            .where(ReviewEmailOutboxModel.delivery_id == row.delivery_id)
+            .where(eligible)
+            .values(
+                status=ReviewEmailDeliveryStatus.SENDING,
+                attempt_count=ReviewEmailOutboxModel.attempt_count + 1,
+                claim_token=claim_token,
+                claimed_at=now,
+                lease_expires_at=lease_until,
+                provider_message_id=None,
+                updated_at=now,
+            )
+            .execution_options(synchronize_session=False)
+        )
+        if result.rowcount != 1:
+            return None
+        self._session.refresh(row)
+        return email_delivery_from_model(row)
 
 
 class SQLAlchemyGraphDraftBatchRunRepository(EntityRepository[GraphDraftBatchRun]):

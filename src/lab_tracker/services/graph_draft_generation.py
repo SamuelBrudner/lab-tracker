@@ -110,6 +110,13 @@ class GenerationPatchValidator(Protocol):
     ) -> list[GraphChangeOperation]: ...
 
 
+class ReviewEmailEnqueuer(Protocol):
+    def enqueue_ready_review(
+        self,
+        change_set: GraphChangeSet,
+    ) -> object | None: ...
+
+
 class DraftFromNoteCallable(Protocol):
     def __call__(
         self,
@@ -159,6 +166,7 @@ class GraphDraftGenerationCoordinator(BaseService):
         authorization: GenerationAuthorization,
         context_builder: GenerationContextBuilder,
         patch_validator: GenerationPatchValidator,
+        review_email_outbox: ReviewEmailEnqueuer | None = None,
     ) -> None:
         super().__init__(context)
         self.records = records
@@ -166,6 +174,7 @@ class GraphDraftGenerationCoordinator(BaseService):
         self.authorization = authorization
         self.context_builder = context_builder
         self.patch_validator = patch_validator
+        self.review_email_outbox = review_email_outbox
 
     @property
     def user_reader(self) -> UserExistenceReader:
@@ -462,7 +471,10 @@ class GraphDraftGenerationCoordinator(BaseService):
         change_set.status = GraphChangeSetStatus.READY
         change_set.error_metadata = {}
         change_set.updated_at = utc_now()
-        self.records.save_graph_change_set(change_set)
+        with self.application_transaction():
+            self.records.save_graph_change_set(change_set)
+            if self.review_email_outbox is not None:
+                self.review_email_outbox.enqueue_ready_review(change_set)
         return change_set
 
     @staticmethod

@@ -229,17 +229,45 @@ def _record_enrolled_repo(root: Path, action: str) -> None:
         record_repo(root, action)
 
 
-def _skills_home() -> Path:
+def _skills_homes() -> tuple[tuple[str, Path], ...]:
+    """Return the skill homes targeted by ``--install-skills``.
+
+    The explicit environment override predates Codex support and remains a
+    single-target escape hatch for custom installs and isolated tests. Without
+    it, install the generated setup skill for both supported agent homes.
+    """
+
     override = os.getenv("LAB_TRACKER_SKILLS_HOME")
-    return Path(override).expanduser() if override else Path.home() / ".claude" / "skills"
+    if override:
+        return (("custom", Path(override).expanduser()),)
+    home = Path.home()
+    return (
+        ("claude", home / ".claude" / "skills"),
+        ("codex", home / ".agents" / "skills"),
+    )
+
+
+def _skills_home() -> Path:
+    """Return the legacy primary skill home (Claude, or the override)."""
+
+    return _skills_homes()[0][1]
+
+
+def _setup_skill_targets() -> tuple[tuple[str, Path], ...]:
+    return tuple(
+        (name, home / "lab-tracker-setup" / "SKILL.md")
+        for name, home in _skills_homes()
+    )
 
 
 def _setup_skill_path() -> Path:
-    return _skills_home() / "lab-tracker-setup" / "SKILL.md"
+    """Return the legacy primary setup-skill path."""
+
+    return _setup_skill_targets()[0][1]
 
 
 def _install_setup_skill(*, result: InitResult, dry_run: bool = False) -> None:
-    """Render the packaged setup skill into the agent skills home.
+    """Render the packaged setup skill into each configured agent skill home.
 
     A real file copy (no symlinks — Windows), LF-only because the trailing
     sha line pins the exact bytes, fully generated from package text so
@@ -254,8 +282,25 @@ def _install_setup_skill(*, result: InitResult, dry_run: bool = False) -> None:
         skill_content_without_version_line,
     )
 
-    path = _setup_skill_path()
     content = setup_skill_markdown()
+    for _name, path in _setup_skill_targets():
+        _install_setup_skill_at_path(
+            path,
+            content=content,
+            skill_content_without_version_line=skill_content_without_version_line,
+            result=result,
+            dry_run=dry_run,
+        )
+
+
+def _install_setup_skill_at_path(
+    path: Path,
+    *,
+    content: str,
+    skill_content_without_version_line: Callable[[str], str],
+    result: InitResult,
+    dry_run: bool,
+) -> None:
     if not path.exists():
         if dry_run:
             _record_dry_run_change(path, "", content, result)
@@ -286,7 +331,16 @@ def _install_setup_skill(*, result: InitResult, dry_run: bool = False) -> None:
 
 
 def _uninstall_setup_skill(*, result: InitResult, dry_run: bool = False) -> None:
-    path = _setup_skill_path()
+    for _name, path in _setup_skill_targets():
+        _uninstall_setup_skill_at_path(path, result=result, dry_run=dry_run)
+
+
+def _uninstall_setup_skill_at_path(
+    path: Path,
+    *,
+    result: InitResult,
+    dry_run: bool,
+) -> None:
     backup = path.with_name(path.name + _UPDATE_BACKUP_SUFFIX)
     if not path.exists() and not backup.exists():
         result.skipped.append(path)
@@ -607,8 +661,8 @@ def main(argv: list[str] | None = None) -> None:
         "--install-skills",
         action="store_true",
         help=(
-            "Also render the lab-tracker-setup skill into ~/.claude/skills "
-            "(with --uninstall: remove it)."
+            "Also render the lab-tracker-setup skill into the Claude and Codex "
+            "skill homes (with --uninstall: remove it)."
         ),
     )
     update_parser = subcommands.add_parser(
@@ -636,7 +690,7 @@ def main(argv: list[str] | None = None) -> None:
     update_parser.add_argument(
         "--install-skills",
         action="store_true",
-        help="Also refresh the lab-tracker-setup skill in ~/.claude/skills.",
+        help="Also refresh the lab-tracker-setup skill in the Claude and Codex homes.",
     )
     serve_parser = subcommands.add_parser(
         "serve",

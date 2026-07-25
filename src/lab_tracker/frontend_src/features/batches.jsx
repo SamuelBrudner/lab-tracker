@@ -2,14 +2,9 @@ import * as React from "react";
 
 import { apiListRequest, apiRequest, buildApiPath } from "../shared/api.js";
 import { formatDate } from "../shared/formatters.js";
+import { DailyReviewScheduleForm } from "./daily-review-schedule.jsx";
 
 const { useCallback, useEffect, useMemo, useState } = React;
-
-const BATCH_CADENCE_OPTIONS = [
-  { label: "Daily", value: "1440" },
-  { label: "Every 12 hours", value: "720" },
-  { label: "Weekly", value: "10080" },
-];
 
 function batchNoteCount(batch) {
   return batch?.source_note_count || batch?.source_note_ids?.length || 1;
@@ -92,12 +87,7 @@ function BatchReviewPage({
 }) {
   const [batches, setBatches] = useState([]);
   const [runs, setRuns] = useState([]);
-  const [settings, setSettings] = useState(null);
   const [loading, setLoading] = useState(false);
-  const [enabled, setEnabled] = useState(true);
-  const [cadenceMinutes, setCadenceMinutes] = useState("1440");
-  const [runAtLocalTime, setRunAtLocalTime] = useState("18:00");
-  const [timezoneName, setTimezoneName] = useState("America/New_York");
 
   const activeProject = useMemo(
     () => projects.find((project) => project.project_id === selectedProjectId) || null,
@@ -128,64 +118,9 @@ function BatchReviewPage({
     }
   }, [selectedProjectId, setFlash, token]);
 
-  const loadSettings = useCallback(async () => {
-    if (!selectedProjectId) {
-      setSettings(null);
-      return;
-    }
-    try {
-      const nextSettings = await apiRequest(
-        `/projects/${selectedProjectId}/graph-draft-batch-settings`,
-        { token }
-      );
-      setSettings(nextSettings);
-      setEnabled(Boolean(nextSettings.enabled));
-      setCadenceMinutes(String(nextSettings.cadence_minutes || 1440));
-      setRunAtLocalTime(nextSettings.run_at_local_time || "18:00");
-      setTimezoneName(nextSettings.timezone_name || "America/New_York");
-    } catch (err) {
-      setSettings(null);
-      setFlash("", err.message || "Failed to load batch cadence settings.");
-    }
-  }, [selectedProjectId, setFlash, token]);
-
   useEffect(() => {
     loadBatches();
   }, [loadBatches]);
-
-  useEffect(() => {
-    loadSettings();
-  }, [loadSettings]);
-
-  async function saveSettings(event) {
-    event.preventDefault();
-    if (!selectedProjectId || !canManageGraph) {
-      return;
-    }
-    setBusy(true);
-    setFlash("", "");
-    try {
-      const nextSettings = await apiRequest(
-        `/projects/${selectedProjectId}/graph-draft-batch-settings`,
-        {
-          body: {
-            cadence_minutes: Number(cadenceMinutes),
-            enabled,
-            run_at_local_time: runAtLocalTime,
-            timezone_name: timezoneName,
-          },
-          method: "PATCH",
-          token,
-        }
-      );
-      setSettings(nextSettings);
-      setFlash("Daily review schedule updated.");
-    } catch (err) {
-      setFlash("", err.message || "Failed to update batch cadence.");
-    } finally {
-      setBusy(false);
-    }
-  }
 
   async function runNow() {
     if (!selectedProjectId || !canManageGraph) {
@@ -267,89 +202,14 @@ function BatchReviewPage({
             <h3>Cadence</h3>
             {activeProject ? <span className="pill">{activeProject.name}</span> : null}
           </div>
-          <form className="form" onSubmit={saveSettings}>
-            <label className="inline toggle-row">
-              <input
-                type="checkbox"
-                checked={enabled}
-                disabled={!canManageGraph || !selectedProjectId}
-                onChange={(event) => setEnabled(event.target.checked)}
-              />
-              Enabled
-            </label>
-            <label>
-              Cadence
-              <select
-                value={cadenceMinutes}
-                disabled={!canManageGraph || !selectedProjectId}
-                onChange={(event) => setCadenceMinutes(event.target.value)}
-              >
-                {BATCH_CADENCE_OPTIONS.map((option) => (
-                  <option key={option.value} value={option.value}>
-                    {option.label}
-                  </option>
-                ))}
-              </select>
-            </label>
-            <label>
-              Local run time
-              <input
-                type="time"
-                value={runAtLocalTime}
-                disabled={!canManageGraph || !selectedProjectId}
-                onChange={(event) => setRunAtLocalTime(event.target.value)}
-              />
-            </label>
-            <div className="inline">
-              <button
-                type="button"
-                className="btn-secondary"
-                aria-pressed={runAtLocalTime === "18:00"}
-                disabled={!canManageGraph || !selectedProjectId}
-                onClick={() => setRunAtLocalTime("18:00")}
-              >
-                Evening (6:00 PM)
-              </button>
-              <button
-                type="button"
-                className="btn-secondary"
-                aria-pressed={runAtLocalTime === "06:00"}
-                disabled={!canManageGraph || !selectedProjectId}
-                onClick={() => setRunAtLocalTime("06:00")}
-              >
-                Morning (6:00 AM)
-              </button>
-            </div>
-            <p className="subtle">
-              The server poller checks for due projects; this setting decides when this
-              project becomes due. Most labs pick evening to confirm the day&apos;s captures
-              while the work is fresh, but mornings work too.
-            </p>
-            <label>
-              Time zone
-              <input
-                value={timezoneName}
-                disabled={!canManageGraph || !selectedProjectId}
-                onChange={(event) => setTimezoneName(event.target.value)}
-              />
-            </label>
-            {settings?.next_run_at ? (
-              <p className="subtle">Next run: {formatDate(settings.next_run_at)}</p>
-            ) : null}
-            <div className="inline">
-              <button className="btn-primary" disabled={!canManageGraph || !selectedProjectId}>
-                Save cadence
-              </button>
-              <button
-                type="button"
-                className="btn-secondary"
-                disabled={!canManageGraph || !selectedProjectId}
-                onClick={runNow}
-              >
-                Run now
-              </button>
-            </div>
-          </form>
+          <DailyReviewScheduleForm
+            token={token}
+            projectId={selectedProjectId}
+            canManage={canManageGraph}
+            setBusy={setBusy}
+            setFlash={setFlash}
+            onRunNow={runNow}
+          />
 
           <div className="stack">
             <h3>Recent Runs</h3>

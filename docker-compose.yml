@@ -1,11 +1,14 @@
 services:
   app:
+    image: lab-tracker-app
     build:
       context: .
       dockerfile: Dockerfile
     depends_on:
       postgres:
         condition: service_healthy
+    env_file:
+      - ./deployments/shared-provider/.env
     environment:
       LAB_TRACKER_APP_NAME: ${LAB_TRACKER_APP_NAME:-lab-tracker}
       LAB_TRACKER_ENVIRONMENT: ${LAB_TRACKER_ENVIRONMENT:-production}
@@ -16,6 +19,16 @@ services:
       LAB_TRACKER_AUTH_SECRET_KEY: ${LAB_TRACKER_AUTH_SECRET_KEY:-}
       LAB_TRACKER_AUTH_TOKEN_TTL_MINUTES: ${LAB_TRACKER_AUTH_TOKEN_TTL_MINUTES:-720}
       LAB_TRACKER_BOOTSTRAP_ADMIN_TOKEN: ${LAB_TRACKER_BOOTSTRAP_ADMIN_TOKEN:-}
+      LAB_TRACKER_PUBLIC_BASE_URL: https://lab-tracker.tail79f9d8.ts.net
+      LAB_TRACKER_GRAPH_DRAFT_PROVIDER: openai
+      LAB_TRACKER_GRAPH_DRAFT_BACKGROUND_ENABLED: "true"
+      LAB_TRACKER_GRAPH_DRAFT_SCHEDULER_ENABLED: "true"
+      LAB_TRACKER_OPENAI_MODEL: gpt-5.6-sol
+      LAB_TRACKER_OPENAI_REASONING_EFFORT: max
+      LAB_TRACKER_OPENAI_REASONING_MODE: pro
+      LAB_TRACKER_OPENAI_TIMEOUT_SECONDS: "5400"
+      LAB_TRACKER_REVIEW_EMAIL_ENABLED: "true"
+      LAB_TRACKER_REVIEW_EMAIL_TRANSPORT: external
     ports:
       - "8000:8000"
     volumes:
@@ -52,6 +65,35 @@ services:
     ports:
       - "127.0.0.1:${LAB_TRACKER_MCP_HOST_PORT:-9000}:${LAB_TRACKER_MCP_PORT:-8000}"
     restart: unless-stopped
+
+  # One-shot control plane for a mailbox-owned automation. This profile is off
+  # by default and receives neither mailbox nor model-provider credentials.
+  review-email-control:
+    image: lab-tracker-app
+    profiles:
+      - review-email-external
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      LAB_TRACKER_ENVIRONMENT: production
+      LAB_TRACKER_DATABASE_URL: ${LAB_TRACKER_DATABASE_URL:-postgresql+psycopg://lab_tracker:lab_tracker@postgres:5432/lab_tracker}
+      LAB_TRACKER_AUTH_SECRET_KEY_FILE: /app/data/runtime-env/auth-secret-key
+      LAB_TRACKER_PUBLIC_BASE_URL: https://lab-tracker.tail79f9d8.ts.net
+      LAB_TRACKER_REVIEW_EMAIL_ENABLED: "true"
+      LAB_TRACKER_REVIEW_EMAIL_TRANSPORT: external
+      LAB_TRACKER_REVIEW_EMAIL_CLAIM_LEASE_SECONDS: ${LAB_TRACKER_REVIEW_EMAIL_CLAIM_LEASE_SECONDS:-300}
+      LAB_TRACKER_REVIEW_EMAIL_MAX_ATTEMPTS: ${LAB_TRACKER_REVIEW_EMAIL_MAX_ATTEMPTS:-8}
+      LAB_TRACKER_REVIEW_EMAIL_LINK_TTL_MINUTES: ${LAB_TRACKER_REVIEW_EMAIL_LINK_TTL_MINUTES:-1440}
+    entrypoint:
+      - python
+      - -m
+      - lab_tracker.review_email_external_worker
+    command:
+      - --help
+    volumes:
+      - app_data:/app/data:ro
+    restart: "no"
 
   postgres:
     image: postgres:16-alpine
