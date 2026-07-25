@@ -103,7 +103,7 @@ jobs:
         run: uv run pytest -q -m postgres
 
   windows-containment:
-    name: Windows containment
+    name: Windows containment and local artifacts
     runs-on: windows-latest
     timeout-minutes: 30
     steps:
@@ -123,3 +123,13 @@ jobs:
           uv run pytest -q
           tests/test_bounded_subprocess.py
           tests/test_windows_job.py
+      # This focused gate runs complete artifact modules. The full Windows
+      # pytest suite remains owned by lab-tracker-n5kp.56.6.
+      - name: Test Windows local-artifact resolution
+        run: >-
+          uv run pytest -q
+          tests/test_local_path_policy.py
+          tests/test_artifact_resolution.py
+          tests/test_external_artifacts_routes.py
+          tests/test_data_stores_routes.py
+          tests/test_evidence_artifact_read_opacity.py

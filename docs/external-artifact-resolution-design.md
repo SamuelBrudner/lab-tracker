@@ -343,6 +343,44 @@ than silently feeding the agent the wrong file. This is the resolver-side
 complement to the cross-machine consolidation described in
 [`lab-experiment-documentation.md`](lab-experiment-documentation.md).
 
+### Native local-path authorization
+
+A `file:` URI is converted to a native path before any containment decision.
+This matters on Windows: the path component of `file:///C:/Users/...` is
+`/C:/Users/...`, which is not itself the native absolute path produced by
+`Path.as_uri()`. The URI path is decoded exactly once through the platform's
+URL-to-path conversion, so a supported locator produced by `Path.as_uri()`
+round-trips to the same native absolute path. The decoder accepts an empty
+authority and `localhost` as the sole local authority (ASCII
+case-insensitive); UNC/network-share URI forms and every other authority are
+denied. Plain native **absolute** paths bypass URI decoding but pass through the
+same authorization policy; relative path locators are rejected.
+
+The candidate and each configured `allowed_root` are canonicalized with native
+filesystem semantics before comparison. Authorization uses component-aware
+containment (`os.path.commonpath` on POSIX and exact canonical components on
+Windows), not textual prefix matching, so a sibling whose name merely begins
+with an allowed root is denied. Windows drive letters are normalized while
+component case remains exact for case-sensitive NTFS directories; cross-drive
+comparisons fail closed. Canonicalization rejects static POSIX symlink and
+Windows-junction targets outside the configured roots.
+
+Recovery applies the same policy to traversal itself as well as to candidate
+files. Every symlink/reparse-point directory is pruned before recursive descent,
+and ordinary directory candidates whose canonical targets leave the root are
+also removed. The current recovery budget counts candidate files and hashed
+bytes; `lab-tracker-n5kp.61` separately owns pre-follow reparse inspection plus
+explicit directory-count and wall-clock budgets, so this slice does not
+overstate traversal availability.
+
+These path-name checks do not make the later open handle-bound. A local attacker
+who can mutate the traversed filesystem could replace a checked path between
+authorization and open. The separately tracked P1 hardening follow-up
+`lab-tracker-n5kp.59` owns descriptor/handle-relative opening and post-open
+identity verification across POSIX and Windows; this slice fixes cross-platform
+URI decoding and canonical-path containment without overstating that remaining
+TOCTOU boundary.
+
 ## Recovering moved/renamed local artifacts
 
 The `content_hash` is not only the integrity gate — it is a location-independent
@@ -354,21 +392,23 @@ reference, and returns that file `VERIFIED`. The recovery detail records the pat
 it was found at; the stored `uri` is **not** rewritten (recovery is read-only —
 auto-repairing the pointer is deferred).
 
-This never widens the trust or security surface:
+Within the canonical-path threat model, recovery preserves these boundaries:
 
 - **Integrity is unchanged.** A recovered file is verified by the same
   re-hash-and-compare as any other resolve, so it is exactly as trustworthy as
   one found at the `uri`; a same-named decoy with different bytes does not match.
-- **Never reads outside the allowed roots.** The scan walks only `allowed_roots`
-  and re-checks path containment (after symlink resolution) per candidate, so it
-  cannot become an oracle for probing arbitrary host files by hash.
-- **Opt-in and bounded.** Recovery is off unless
+- **Canonical path confinement.** The scan starts from canonical
+  `allowed_roots`, prunes linked/reparse directories, and re-checks canonical
+  containment per candidate. A separately tracked handle-bound fix
+  (`lab-tracker-n5kp.59`) closes the remaining concurrent path-replacement race.
+- **Opt-in and file/byte-bounded.** Recovery is off unless
   `LAB_TRACKER_RESOLVER_RECOVERY` is truthy *and* roots are configured. A
   `RecoveryPolicy` budget (`max_files`, `max_bytes`, overridable via
   `LAB_TRACKER_RESOLVER_RECOVERY_MAX_FILES` / `_MAX_BYTES`) caps the scan;
   candidates that share the original basename are tried first so the common case
   (a rename that kept the filename, or a moved parent directory) is cheap. When
-  nothing matches within budget the result is `UNRESOLVED` — identical to today.
+  nothing matches within budget the result is `UNRESOLVED`; directory/time
+  bounds are tracked by `lab-tracker-n5kp.61`.
 
 ## Read-surface integration
 
@@ -451,12 +491,16 @@ Shipped (`src/lab_tracker/artifact_resolution.py`, tested in
   protocol, and a `ResolverRegistry` that dispatches to the first capable
   adapter and falls back to `UNRESOLVED`.
 - ✅ `LocalFilesystemResolver` — `file://` and `local`/`local_fs` sources, with
-  `allowed_roots` path-containment so resolution cannot read arbitrary host files.
+  native `file:` URI conversion, an empty/`localhost`-only authority policy,
+  and canonical `allowed_roots` containment. Component-aware comparison uses
+  `commonpath` on POSIX and exact canonical components on Windows to deny
+  sibling-prefix, case-sensitive-sibling, and cross-drive escapes; static
+  symlink and Windows-junction targets outside the roots are rejected.
 - ✅ Content-hash recovery of moved/renamed local artifacts — opt-in
-  (`LAB_TRACKER_RESOLVER_RECOVERY`), bounded by a `RecoveryPolicy`, scans only
-  `allowed_roots`, basename-first; a missing file whose bytes still exist under a
-  root resolves `VERIFIED` instead of `UNRESOLVED` (read-only; the `uri` is not
-  rewritten).
+  (`LAB_TRACKER_RESOLVER_RECOVERY`), file/byte-bounded by a `RecoveryPolicy`,
+  scans only `allowed_roots`, prunes symlink/junction escapes, and searches
+  basename-first; a missing file whose bytes still exist under a root resolves
+  `VERIFIED` instead of `UNRESOLVED` (read-only; the `uri` is not rewritten).
 - ✅ `HttpResolver` — `http(s)`, full-body verify with a `max_fetch_bytes` cap
   (oversized → `UNRESOLVED`, never uncertified bytes), plus a shared outbound
   destination policy that validates every IPv4/IPv6 answer, pins the vetted

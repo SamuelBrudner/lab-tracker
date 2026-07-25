@@ -1223,12 +1223,13 @@ def _data_store(kind: StoreKind, root: str, **overrides) -> DataStore:
     return DataStore(**fields)
 
 
-def test_store_relative_reference_local_builds_file_uri():
-    store = _data_store(StoreKind.LOCAL_FS, "/data/store")
+def test_store_relative_reference_local_builds_native_file_uri(tmp_path):
+    root = tmp_path / "data store"
+    store = _data_store(StoreKind.LOCAL_FS, str(root))
     ref = store_relative_reference(store, path="exp/001/x.txt", content_hash=_sha256(b"x"))
     assert ref is not None
     assert ref.source_system == "local"
-    assert ref.uri == Path("/data/store/exp/001/x.txt").as_uri()
+    assert ref.uri == (root / "exp" / "001" / "x.txt").as_uri()
 
 
 def test_store_relative_reference_rclone_uses_credential_ref_as_remote():
@@ -1822,6 +1823,29 @@ def test_recovery_never_reads_outside_allowed_roots(tmp_path):
     assert result.status is ResolutionStatus.UNRESOLVED
 
 
+def test_recovery_prunes_symlinked_directories_outside_allowed_roots(tmp_path):
+    root = tmp_path / "store"
+    root.mkdir()
+    outside = tmp_path / "private"
+    outside.mkdir()
+    data = b"matching bytes outside the recovery boundary"
+    _write(outside, "moved.bin", data)
+    link = root / "linked-private"
+    try:
+        link.symlink_to(outside, target_is_directory=True)
+    except (NotImplementedError, OSError) as exc:
+        pytest.skip(f"directory symlinks are unavailable: {exc}")
+    missing = root / "gone.bin"
+    resolver = LocalFilesystemResolver(
+        allowed_roots=[root], recovery=RecoveryPolicy(enabled=True)
+    )
+
+    result = resolver.resolve(_local_ref(missing, _sha256(data)))
+
+    assert result.status is ResolutionStatus.UNRESOLVED
+    assert result.content is None
+
+
 def test_recovery_does_not_falsely_match_same_name_different_bytes(tmp_path):
     root = tmp_path / "store"
     root.mkdir()
@@ -1834,6 +1858,62 @@ def test_recovery_does_not_falsely_match_same_name_different_bytes(tmp_path):
     result = resolver.resolve(_local_ref(missing, _sha256(b"the real content")))
 
     assert result.status is ResolutionStatus.UNRESOLVED
+
+
+def test_recovery_deduplicates_canonical_root_aliases(tmp_path):
+    root = tmp_path / "store"
+    root.mkdir()
+    alias = tmp_path / "store-alias"
+    try:
+        alias.symlink_to(root, target_is_directory=True)
+    except (NotImplementedError, OSError) as exc:
+        pytest.skip(f"directory symlinks are unavailable: {exc}")
+    target_root = tmp_path / "second-store"
+    target_root.mkdir()
+    (root / "result.csv").write_bytes(b"same-name decoy")
+    data = b"matching result in the later root"
+    (target_root / "result.csv").write_bytes(data)
+    missing = root / "missing" / "result.csv"
+    resolver = LocalFilesystemResolver(
+        allowed_roots=[alias, root, target_root],
+        recovery=RecoveryPolicy(enabled=True, max_files=2),
+    )
+
+    result = resolver.resolve(_local_ref(missing, _sha256(data)))
+
+    assert result.status is ResolutionStatus.VERIFIED
+    assert result.content == data
+
+
+@pytest.mark.skipif(os.name != "nt", reason="requires Windows directory junctions")
+def test_windows_recovery_never_descends_through_junction_escape(tmp_path):
+    root = tmp_path / "store"
+    root.mkdir()
+    outside = tmp_path / "private"
+    outside.mkdir()
+    data = b"matching bytes outside the recovery boundary"
+    outside_file = _write(outside, "moved.bin", data)
+    junction = root / "mounted-private"
+    completed = subprocess.run(
+        ["cmd.exe", "/d", "/c", "mklink", "/J", str(junction), str(outside)],
+        capture_output=True,
+        check=False,
+        text=True,
+    )
+    assert completed.returncode == 0, (
+        f"mklink /J failed: stdout={completed.stdout!r} stderr={completed.stderr!r}"
+    )
+    missing = root / "gone.bin"
+    resolver = LocalFilesystemResolver(
+        allowed_roots=[root], recovery=RecoveryPolicy(enabled=True)
+    )
+
+    candidates = list(resolver._iter_candidate_files(outside_file.name, True))
+    result = resolver.resolve(_local_ref(missing, _sha256(data)))
+
+    assert candidates == []
+    assert result.status is ResolutionStatus.UNRESOLVED
+    assert result.content is None
 
 
 def test_recovery_respects_byte_budget(tmp_path):
