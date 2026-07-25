@@ -72,7 +72,9 @@ def test_release_script_requires_a_clean_revision_and_verifies_live_health() -> 
     assert "rollback_needed=1" in script
     assert "restoring the previous app image" in script
     assert "up -d --no-deps app" in script
-    assert "python -m lab_tracker.deployment_probe" in script
+    assert 'auth_secret_file="${LAB_TRACKER_AUTH_SECRET_KEY_FILE:-' in script
+    assert 'LAB_TRACKER_AUTH_SECRET_KEY="$(cat "${auth_secret_file}")"' in script
+    assert 'exec python -m lab_tracker.deployment_probe "$@"' in script
     assert "--require-provider-credential" in script
     assert 'verify_health_identity "http://127.0.0.1:8100/health"' in script
     assert 'verify_health_identity "${public_health_url}"' in script

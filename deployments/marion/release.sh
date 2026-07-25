@@ -209,7 +209,13 @@ if [ -n "${previous_auth_secret_digest}" ]; then
 fi
 
 docker exec "${container_id}" \
-  python -m lab_tracker.deployment_probe \
+  sh -eu -c '
+    auth_secret_file="${LAB_TRACKER_AUTH_SECRET_KEY_FILE:-/app/data/runtime-env/auth-secret-key}"
+    test -s "${auth_secret_file}"
+    LAB_TRACKER_AUTH_SECRET_KEY="$(cat "${auth_secret_file}")"
+    export LAB_TRACKER_AUTH_SECRET_KEY
+    exec python -m lab_tracker.deployment_probe "$@"
+  ' sh \
     --expected-app-name marion-lab-tracker \
     --expected-environment production \
     --expected-source-revision "${revision}" \
