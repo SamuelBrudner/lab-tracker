@@ -9,7 +9,9 @@ import pytest
 
 from lab_tracker.application.context_queries import ContextQueries
 from lab_tracker.artifact_resolution import (
+    HttpStoreResolutionTarget,
     LocalStoreResolutionTarget,
+    PreparedArtifactResolutionTarget,
     ResolutionStatus,
     ResolvedArtifact,
 )
@@ -55,6 +57,18 @@ class _DataStoreLookup:
         return self.store
 
 
+class _ExactDataStoreLookup:
+    def __init__(self, *stores: DataStore) -> None:
+        self.stores = {store.name: store for store in stores}
+        self.calls: list[str] = []
+        self.names: list[str] = []
+
+    def get_by_name(self, _project_id: UUID, name: str):
+        self.calls.append("store")
+        self.names.append(name)
+        return self.stores.get(name)
+
+
 class _ContextRepository:
     def __init__(self, lookup: _DataStoreLookup) -> None:
         self.data_stores = lookup
@@ -69,47 +83,39 @@ class _ResolverRegistry:
     ) -> None:
         self.calls = calls
         self.error = error
+        self.prepared_targets: list[PreparedArtifactResolutionTarget] = []
+        self.parameters: list[tuple[int, tuple[int, int] | None]] = []
+        self.precomputed_targets: list[ResolvedArtifact] = []
         self.references: list[ExternalArtifactReference] = []
         self.local_targets: list[LocalStoreResolutionTarget] = []
+        self.http_targets: list[HttpStoreResolutionTarget] = []
 
-    def resolve(
+    def resolve_prepared(
         self,
-        reference: ExternalArtifactReference,
+        target: PreparedArtifactResolutionTarget,
         *,
         max_bytes: int,
         byte_range: tuple[int, int] | None,
     ) -> ResolvedArtifact:
-        self.calls.append("resolve")
-        self.references.append(reference)
-        assert max_bytes == 64
-        assert byte_range == (1, 3)
+        self.calls.append("resolve-prepared")
+        self.prepared_targets.append(target)
+        self.parameters.append((max_bytes, byte_range))
+        if isinstance(target, ResolvedArtifact):
+            self.precomputed_targets.append(target)
+            return target
+        if isinstance(target, ExternalArtifactReference):
+            self.references.append(target)
+            reference = target
+        elif isinstance(target, LocalStoreResolutionTarget):
+            self.local_targets.append(target)
+            reference = target.logical_reference
+        elif isinstance(target, HttpStoreResolutionTarget):
+            self.http_targets.append(target)
+            reference = target.logical_reference
+        else:
+            raise AssertionError("unsupported prepared target reached test registry")
         if self.error is not None:
             raise self.error
-        content = b"ok"
-        return ResolvedArtifact(
-            status=ResolutionStatus.VERIFIED,
-            source_system=reference.source_system,
-            uri=reference.uri,
-            expected_hash=reference.content_hash,
-            observed_hash=reference.content_hash,
-            content=content,
-            fetched_at=datetime.now(timezone.utc),
-        )
-
-    def resolve_local_store(
-        self,
-        target: LocalStoreResolutionTarget,
-        *,
-        max_bytes: int,
-        byte_range: tuple[int, int] | None,
-    ) -> ResolvedArtifact:
-        self.calls.append("resolve-local-store")
-        self.local_targets.append(target)
-        assert max_bytes == 64
-        assert byte_range == (1, 3)
-        if self.error is not None:
-            raise self.error
-        reference = target.logical_reference
         return ResolvedArtifact(
             status=ResolutionStatus.VERIFIED,
             source_system=reference.source_system,
@@ -160,7 +166,9 @@ def test_prepared_resolution_releases_before_resolving_detached_reference():
 
     assert api.calls == ["authorized:reader"]
     assert lookup.calls == []
-    assert calls == ["release", "resolve"]
+    assert calls == ["release", "resolve-prepared"]
+    assert registry.prepared_targets == [prepared.target]
+    assert registry.parameters == [(64, (1, 3))]
     assert registry.references[0].metadata == {"nested": {"value": "prepared"}}
     assert result["entity_type"] == "dataset"
     assert result["entity_id"] == str(dataset_id)
@@ -239,8 +247,12 @@ def test_prepared_resolution_releases_before_returning_materialized_unresolved_r
     result = queries.resolve_prepared_external_artifact(prepared)
 
     assert lookup.calls == ["store"]
-    assert calls == ["release"]
+    assert calls == ["release", "resolve-prepared"]
+    assert len(registry.precomputed_targets) == 1
+    assert registry.precomputed_targets[0] is prepared.target
     assert registry.references == []
+    assert registry.local_targets == []
+    assert registry.http_targets == []
     assert result["status"] == "unresolved"
     assert result["content_base64"] is None
 
@@ -299,7 +311,9 @@ def test_prepared_local_store_resolution_is_frozen_and_uses_scoped_dispatch(
     assert api.calls == ["authorized:reader"]
     assert lookup.calls == ["store"]
     assert lookup.names == ["lab-fs"]
-    assert calls == ["release", "resolve-local-store"]
+    assert calls == ["release", "resolve-prepared"]
+    assert registry.prepared_targets == [prepared.target]
+    assert registry.parameters == [(64, (1, 3))]
     assert registry.references == []
     assert len(registry.local_targets) == 1
     assert registry.local_targets[0].logical_reference.metadata == {
@@ -308,6 +322,543 @@ def test_prepared_local_store_resolution_is_frozen_and_uses_scoped_dispatch(
     assert result["status"] == "verified"
     assert result["uri"] == "store://lab-fs/nested/artifact.txt"
     assert result["content_base64"] == "b2s="
+
+
+def test_prepared_http_store_resolution_is_frozen_and_uses_scoped_dispatch():
+    project_id = uuid4()
+    dataset_id = uuid4()
+    source_reference = ExternalArtifactReference.for_store(
+        store_name="web",
+        locator="nested/artifact.txt",
+        content_hash=_sha256(b"ok"),
+        source_system="legacy-http",
+        metadata={"nested": {"value": "prepared"}},
+    )
+    store = DataStore(
+        store_id=uuid4(),
+        project_id=project_id,
+        name="web",
+        kind=StoreKind.HTTP,
+        root="https://root.example/ignored",
+        endpoint="https://files.example/base",
+    )
+    api = _ContextApi(project_id=project_id, reference=source_reference)
+    lookup = _DataStoreLookup(store)
+    calls: list[str] = []
+    registry = _ResolverRegistry(calls)
+    queries = ContextQueries(
+        api=api,
+        repository=_ContextRepository(lookup),
+        session=object(),
+        release_read_scope=lambda: calls.append("release"),
+        resolver_registry=registry,
+    )
+
+    prepared = queries.prepare_external_artifact_resolution(
+        actor=AuthContext(user_id="reader", role=Role.VIEWER),
+        entity_type="dataset",
+        entity_id=dataset_id,
+        artifact_index=0,
+        content_hash=None,
+        max_bytes=64,
+        byte_start=1,
+        byte_end=3,
+    )
+    source_reference.metadata["nested"]["value"] = "mutated"
+    store.endpoint = "https://mutated.example/outside"
+    api.raise_on_read = True
+
+    assert isinstance(prepared.target, HttpStoreResolutionTarget)
+    assert prepared.target.registered_prefix.canonical_url == (
+        "https://files.example/base/"
+    )
+    assert prepared.target.locator.path == "nested/artifact.txt"
+    assert prepared.target.logical_reference.source_system == "store"
+
+    result = queries.resolve_prepared_external_artifact(prepared)
+
+    assert api.calls == ["authorized:reader"]
+    assert lookup.calls == ["store"]
+    assert lookup.names == ["web"]
+    assert calls == ["release", "resolve-prepared"]
+    assert registry.prepared_targets == [prepared.target]
+    assert registry.parameters == [(64, (1, 3))]
+    assert registry.references == []
+    assert registry.local_targets == []
+    assert len(registry.http_targets) == 1
+    assert registry.http_targets[0].logical_reference.metadata == {
+        "nested": {"value": "prepared"}
+    }
+    assert result["status"] == "verified"
+    assert result["uri"] == "store://web/nested/artifact.txt"
+    assert result["content_base64"] == "b2s="
+
+
+def test_structured_and_uri_http_store_references_prepare_equal_targets():
+    project_id = uuid4()
+    store_name = "user@web store:one"
+    logical_uri = "store://user%40web%20store%3Aone/caf%C3%A9/file%20name.bin"
+    store = DataStore(
+        store_id=uuid4(),
+        project_id=project_id,
+        name=store_name,
+        kind=StoreKind.HTTP,
+        root="https://files.example/base",
+    )
+    structured = ExternalArtifactReference.for_http_store(
+        store_name=store_name,
+        locator="café/file name.bin",
+        content_hash=_sha256(b"ok"),
+    )
+    uri_only = ExternalArtifactReference(
+        source_system="legacy-http",
+        uri=logical_uri,
+        content_hash=_sha256(b"ok"),
+    )
+
+    def prepare(reference: ExternalArtifactReference) -> HttpStoreResolutionTarget:
+        queries = ContextQueries(
+            api=_ContextApi(project_id=project_id, reference=reference),
+            repository=_ContextRepository(_DataStoreLookup(store)),
+            session=object(),
+            release_read_scope=lambda: None,
+        )
+        prepared = queries.prepare_external_artifact_resolution(
+            actor=AuthContext(user_id="reader", role=Role.VIEWER),
+            entity_type="dataset",
+            entity_id=uuid4(),
+            artifact_index=0,
+            content_hash=None,
+            max_bytes=None,
+            byte_start=None,
+            byte_end=None,
+        )
+        assert isinstance(prepared.target, HttpStoreResolutionTarget)
+        return prepared.target
+
+    structured_target = prepare(structured)
+    uri_target = prepare(uri_only)
+
+    assert structured_target == uri_target
+    assert structured_target.logical_reference.source_system == "store"
+    assert structured_target.logical_reference.store_name == store_name
+    assert structured_target.logical_reference.uri == logical_uri
+    assert structured_target.locator.components == ("café", "file name.bin")
+    assert structured_target.logical_reference.locator == "café/file name.bin"
+
+
+def test_uri_http_store_reference_preserves_unique_legacy_literal_percent_name():
+    project_id = uuid4()
+    store = DataStore(
+        store_id=uuid4(),
+        project_id=project_id,
+        name="legacy%20remote",
+        kind=StoreKind.HTTP,
+        root="https://files.example/base",
+    )
+    lookup = _ExactDataStoreLookup(store)
+    reference = ExternalArtifactReference(
+        source_system="legacy-http",
+        uri="store://legacy%20remote/nested/artifact.bin",
+        content_hash=_sha256(b"ok"),
+    )
+    queries = ContextQueries(
+        api=_ContextApi(project_id=project_id, reference=reference),
+        repository=_ContextRepository(lookup),
+        session=object(),
+        release_read_scope=lambda: None,
+    )
+
+    prepared = queries.prepare_external_artifact_resolution(
+        actor=AuthContext(user_id="reader", role=Role.VIEWER),
+        entity_type="dataset",
+        entity_id=uuid4(),
+        artifact_index=0,
+        content_hash=None,
+        max_bytes=None,
+        byte_start=None,
+        byte_end=None,
+    )
+
+    assert isinstance(prepared.target, HttpStoreResolutionTarget)
+    assert lookup.names == ["legacy remote", "legacy%20remote"]
+    assert prepared.target.logical_reference.store_name == "legacy%20remote"
+    assert prepared.target.logical_reference.uri == (
+        "store://legacy%2520remote/nested/artifact.bin"
+    )
+
+
+def test_ambiguous_encoded_and_legacy_http_store_names_fail_closed():
+    project_id = uuid4()
+    decoded_store = DataStore(
+        store_id=uuid4(),
+        project_id=project_id,
+        name="legacy remote",
+        kind=StoreKind.HTTP,
+        root="https://files.example/decoded",
+    )
+    literal_store = DataStore(
+        store_id=uuid4(),
+        project_id=project_id,
+        name="legacy%20remote",
+        kind=StoreKind.HTTP,
+        root="https://files.example/literal",
+    )
+    lookup = _ExactDataStoreLookup(decoded_store, literal_store)
+    reference = ExternalArtifactReference(
+        source_system="legacy-http",
+        uri="store://legacy%20remote/nested/artifact.bin",
+        content_hash=_sha256(b"ok"),
+    )
+    queries = ContextQueries(
+        api=_ContextApi(project_id=project_id, reference=reference),
+        repository=_ContextRepository(lookup),
+        session=object(),
+        release_read_scope=lambda: None,
+    )
+
+    prepared = queries.prepare_external_artifact_resolution(
+        actor=AuthContext(user_id="reader", role=Role.VIEWER),
+        entity_type="dataset",
+        entity_id=uuid4(),
+        artifact_index=0,
+        content_hash=None,
+        max_bytes=None,
+        byte_start=None,
+        byte_end=None,
+    )
+
+    assert isinstance(prepared.target, ResolvedArtifact)
+    assert lookup.names == ["legacy remote", "legacy%20remote"]
+    assert prepared.target.status is ResolutionStatus.UNRESOLVED
+    assert prepared.target.uri == "store://[redacted]"
+
+
+@pytest.mark.parametrize(
+    ("locator", "canonical_uri"),
+    (
+        (
+            "nested/file name.bin",
+            "store://web/nested/file%20name.bin",
+        ),
+        (
+            "Müller/測定.bin",
+            "store://web/M%C3%BCller/%E6%B8%AC%E5%AE%9A.bin",
+        ),
+        (
+            "nested/a+b.bin",
+            "store://web/nested/a%2Bb.bin",
+        ),
+        (
+            "nested/result (final).bin",
+            "store://web/nested/result%20%28final%29.bin",
+        ),
+    ),
+)
+def test_legacy_for_store_http_reference_is_canonicalized_during_preparation(
+    locator: str,
+    canonical_uri: str,
+) -> None:
+    project_id = uuid4()
+    reference = ExternalArtifactReference.for_store(
+        store_name="web",
+        locator=locator,
+        content_hash=_sha256(b"ok"),
+        source_system="legacy-http",
+    )
+    assert reference.uri == f"store://web/{locator}"
+    store = DataStore(
+        store_id=uuid4(),
+        project_id=project_id,
+        name="web",
+        kind=StoreKind.HTTP,
+        root="https://files.example/base",
+    )
+    queries = ContextQueries(
+        api=_ContextApi(project_id=project_id, reference=reference),
+        repository=_ContextRepository(_DataStoreLookup(store)),
+        session=object(),
+        release_read_scope=lambda: None,
+    )
+
+    prepared = queries.prepare_external_artifact_resolution(
+        actor=AuthContext(user_id="reader", role=Role.VIEWER),
+        entity_type="dataset",
+        entity_id=uuid4(),
+        artifact_index=0,
+        content_hash=None,
+        max_bytes=None,
+        byte_start=None,
+        byte_end=None,
+    )
+
+    assert isinstance(prepared.target, HttpStoreResolutionTarget)
+    assert prepared.target.locator.path == locator
+    assert prepared.target.logical_reference.source_system == "store"
+    assert prepared.target.logical_reference.uri == canonical_uri
+
+
+@pytest.mark.parametrize("uri_only", (False, True))
+def test_http_store_legacy_compatibility_does_not_accept_mismatched_identity(
+    uri_only: bool,
+) -> None:
+    project_id = uuid4()
+    legacy = ExternalArtifactReference.for_store(
+        store_name="web",
+        locator="nested/file name.bin",
+        content_hash=_sha256(b"ok"),
+    )
+    reference = (
+        ExternalArtifactReference(
+            source_system="store",
+            uri=legacy.uri,
+            content_hash=legacy.content_hash,
+        )
+        if uri_only
+        else legacy.model_copy(
+            update={"uri": "store://web/nested/different name.bin"}
+        )
+    )
+    store = DataStore(
+        store_id=uuid4(),
+        project_id=project_id,
+        name="web",
+        kind=StoreKind.HTTP,
+        root="https://files.example/base",
+    )
+    queries = ContextQueries(
+        api=_ContextApi(project_id=project_id, reference=reference),
+        repository=_ContextRepository(_DataStoreLookup(store)),
+        session=object(),
+        release_read_scope=lambda: None,
+    )
+
+    prepared = queries.prepare_external_artifact_resolution(
+        actor=AuthContext(user_id="reader", role=Role.VIEWER),
+        entity_type="dataset",
+        entity_id=uuid4(),
+        artifact_index=0,
+        content_hash=None,
+        max_bytes=None,
+        byte_start=None,
+        byte_end=None,
+    )
+
+    assert isinstance(prepared.target, ResolvedArtifact)
+    assert prepared.target.status is ResolutionStatus.UNRESOLVED
+    assert prepared.target.uri == "store://[redacted]"
+    assert prepared.target.detail == "Store artifact reference is invalid."
+
+
+@pytest.mark.parametrize(
+    "store_name",
+    (
+        "[not-ip]",
+        "web：name",
+        "web／name",
+    ),
+)
+def test_non_round_trippable_http_store_names_fail_in_both_reference_forms(
+    store_name: str,
+) -> None:
+    project_id = uuid4()
+    logical_uri = f"store://{store_name}/nested/artifact.bin"
+    store = DataStore(
+        store_id=uuid4(),
+        project_id=project_id,
+        name=store_name,
+        kind=StoreKind.HTTP,
+        root="https://files.example/base",
+    )
+    references = (
+        ExternalArtifactReference(
+            source_system="store",
+            uri=logical_uri,
+            content_hash=_sha256(b"ok"),
+            store_name=store_name,
+            locator="nested/artifact.bin",
+        ),
+        ExternalArtifactReference(
+            source_system="store",
+            uri=logical_uri,
+            content_hash=_sha256(b"ok"),
+        ),
+    )
+    outcomes: list[tuple[ResolutionStatus, str, str | None]] = []
+
+    for reference in references:
+        queries = ContextQueries(
+            api=_ContextApi(project_id=project_id, reference=reference),
+            repository=_ContextRepository(_DataStoreLookup(store)),
+            session=object(),
+            release_read_scope=lambda: None,
+        )
+        prepared = queries.prepare_external_artifact_resolution(
+            actor=AuthContext(user_id="reader", role=Role.VIEWER),
+            entity_type="dataset",
+            entity_id=uuid4(),
+            artifact_index=0,
+            content_hash=None,
+            max_bytes=None,
+            byte_start=None,
+            byte_end=None,
+        )
+
+        assert isinstance(prepared.target, ResolvedArtifact)
+        outcomes.append(
+            (
+                prepared.target.status,
+                prepared.target.uri,
+                prepared.target.detail,
+            )
+        )
+
+    assert outcomes == [
+        (
+            ResolutionStatus.UNRESOLVED,
+            "store://[redacted]",
+            "Store artifact reference is invalid.",
+        ),
+        (
+            ResolutionStatus.UNRESOLVED,
+            "store://[redacted]",
+            "Store artifact reference is invalid.",
+        ),
+    ]
+
+
+def test_precomputed_failure_does_not_construct_default_resolver_registry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project_id = uuid4()
+    reference = ExternalArtifactReference(
+        source_system="store",
+        uri="store://missing/artifact.bin",
+        content_hash=_sha256(b"secret"),
+    )
+    calls: list[str] = []
+    queries = ContextQueries(
+        api=_ContextApi(project_id=project_id, reference=reference),
+        repository=_ContextRepository(_DataStoreLookup()),
+        session=object(),
+        release_read_scope=lambda: calls.append("release"),
+    )
+    prepared = queries.prepare_external_artifact_resolution(
+        actor=AuthContext(user_id="reader", role=Role.VIEWER),
+        entity_type="dataset",
+        entity_id=uuid4(),
+        artifact_index=0,
+        content_hash=None,
+        max_bytes=None,
+        byte_start=None,
+        byte_end=None,
+    )
+    assert isinstance(prepared.target, ResolvedArtifact)
+
+    def unexpected_registry_factory():
+        calls.append("registry-from-env")
+        raise AssertionError("static resolution loaded resolver configuration")
+
+    monkeypatch.setattr(
+        "lab_tracker.artifact_resolution.registry_from_env",
+        unexpected_registry_factory,
+    )
+
+    result = queries.resolve_prepared_external_artifact(prepared)
+
+    assert calls == ["release"]
+    assert result["status"] == "unresolved"
+    assert result["uri"] == "store://[redacted]"
+    assert result["detail"] == "Store artifact could not be resolved."
+
+
+@pytest.mark.parametrize(
+    ("root", "uri", "store_name", "locator", "expected_detail"),
+    (
+        (
+            "https://user:secret@files.example/base",
+            "store://web/artifact.bin",
+            "web",
+            "artifact.bin",
+            "Store artifact could not be resolved.",
+        ),
+        (
+            "https://files.example/base?token=secret",
+            "store://web/artifact.bin",
+            "web",
+            "artifact.bin",
+            "Store artifact could not be resolved.",
+        ),
+        (
+            "https://files.example/base",
+            "store://web/%2e%2e/secret.bin",
+            None,
+            None,
+            "Store artifact reference is invalid.",
+        ),
+        (
+            "https://files.example/base",
+            "store://web/nested%5Csecret.bin",
+            None,
+            None,
+            "Store artifact reference is invalid.",
+        ),
+    ),
+)
+def test_invalid_http_store_definition_or_locator_never_reaches_resolver_io(
+    root: str,
+    uri: str,
+    store_name: str | None,
+    locator: str | None,
+    expected_detail: str,
+):
+    project_id = uuid4()
+    reference = ExternalArtifactReference(
+        source_system="store",
+        uri=uri,
+        content_hash=_sha256(b"secret"),
+        store_name=store_name,
+        locator=locator,
+    )
+    store = DataStore(
+        store_id=uuid4(),
+        project_id=project_id,
+        name="web",
+        kind=StoreKind.HTTP,
+        root=root,
+    )
+    calls: list[str] = []
+    registry = _ResolverRegistry(calls)
+    queries = ContextQueries(
+        api=_ContextApi(project_id=project_id, reference=reference),
+        repository=_ContextRepository(_DataStoreLookup(store)),
+        session=object(),
+        release_read_scope=lambda: calls.append("release"),
+        resolver_registry=registry,
+    )
+
+    prepared = queries.prepare_external_artifact_resolution(
+        actor=AuthContext(user_id="reader", role=Role.VIEWER),
+        entity_type="dataset",
+        entity_id=uuid4(),
+        artifact_index=0,
+        content_hash=None,
+        max_bytes=None,
+        byte_start=None,
+        byte_end=None,
+    )
+    result = queries.resolve_prepared_external_artifact(prepared)
+
+    assert calls == ["release", "resolve-prepared"]
+    assert len(registry.precomputed_targets) == 1
+    assert registry.precomputed_targets[0] is prepared.target
+    assert registry.references == []
+    assert registry.local_targets == []
+    assert registry.http_targets == []
+    assert result["status"] == "unresolved"
+    assert result["uri"] == "store://[redacted]"
+    assert result["detail"] == expected_detail
+    assert "secret" not in str(result)
 
 
 def test_preexisting_raw_at_git_pin_keeps_one_canonical_store_identity():
@@ -484,7 +1035,9 @@ def test_same_backend_punctuation_is_invalid_for_local_store(tmp_path):
     assert lookup.names == ["lab-fs"]
     assert registry.references == []
     assert registry.local_targets == []
-    assert calls == ["release"]
+    assert calls == ["release", "resolve-prepared"]
+    assert len(registry.precomputed_targets) == 1
+    assert registry.precomputed_targets[0] is prepared.target
     assert result["status"] == "unresolved"
     assert result["uri"] == "store://[redacted]"
     assert result["detail"] == "Store artifact reference is invalid."
@@ -533,17 +1086,87 @@ def test_legacy_local_source_system_is_canonicalized_on_detached_target(tmp_path
 
 
 @pytest.mark.parametrize(
-    ("source_system", "uri", "store_name", "locator", "expected_store_lookups"),
+    (
+        "source_system",
+        "uri",
+        "store_name",
+        "locator",
+        "expected_store_lookups",
+        "expected_detail",
+    ),
     [
-        ("store", "store://wrong/path.txt", "lab-fs", "path.txt", 1),
-        ("store", "store://lab-fs//secret.txt", None, None, 1),
-        ("store", "store://lab-fs/path.txt?download=1", None, None, 1),
-        ("store", "store://lab-fs/path.txt#fragment", None, None, 1),
-        ("store", "store://user@lab-fs/path.txt", None, None, 1),
-        ("store", "store://lab-fs/%2e%2e/secret.txt", None, None, 1),
-        ("store", "store://lab-fs/%70ath.txt", None, None, 1),
-        ("local", "store://[secret", None, None, 0),
-        ("local", " STORE://[secret", None, None, 0),
+        (
+            "store",
+            "store://wrong/path.txt",
+            "lab-fs",
+            "path.txt",
+            1,
+            "Store artifact reference is invalid.",
+        ),
+        (
+            "store",
+            "store://lab-fs//secret.txt",
+            None,
+            None,
+            1,
+            "Store artifact reference is invalid.",
+        ),
+        (
+            "store",
+            "store://lab-fs/path.txt?download=1",
+            None,
+            None,
+            1,
+            "Store artifact reference is invalid.",
+        ),
+        (
+            "store",
+            "store://lab-fs/path.txt#fragment",
+            None,
+            None,
+            1,
+            "Store artifact reference is invalid.",
+        ),
+        (
+            "store",
+            "store://user@lab-fs/path.txt",
+            None,
+            None,
+            1,
+            "Store artifact could not be resolved.",
+        ),
+        (
+            "store",
+            "store://lab-fs/%2e%2e/secret.txt",
+            None,
+            None,
+            1,
+            "Store artifact reference is invalid.",
+        ),
+        (
+            "store",
+            "store://lab-fs/%70ath.txt",
+            None,
+            None,
+            1,
+            "Store artifact reference is invalid.",
+        ),
+        (
+            "local",
+            "store://[secret",
+            None,
+            None,
+            0,
+            "Store artifact reference is invalid.",
+        ),
+        (
+            "local",
+            " STORE://[secret",
+            None,
+            None,
+            0,
+            "Store artifact reference is invalid.",
+        ),
     ],
 )
 def test_invalid_store_identity_fails_closed_before_resolver_work(
@@ -552,6 +1175,7 @@ def test_invalid_store_identity_fails_closed_before_resolver_work(
     store_name,
     locator,
     expected_store_lookups,
+    expected_detail,
     tmp_path,
 ):
     project_id = uuid4()
@@ -595,12 +1219,14 @@ def test_invalid_store_identity_fails_closed_before_resolver_work(
     result = queries.resolve_prepared_external_artifact(prepared)
 
     assert lookup.calls == ["store"] * expected_store_lookups
-    assert calls == ["release"]
+    assert calls == ["release", "resolve-prepared"]
+    assert len(registry.precomputed_targets) == 1
+    assert registry.precomputed_targets[0] is prepared.target
     assert registry.references == []
     assert registry.local_targets == []
     assert result["status"] == "unresolved"
     assert result["uri"] == "store://[redacted]"
-    assert result["detail"] == "Store artifact reference is invalid."
+    assert result["detail"] == expected_detail
     assert result["content_base64"] is None
     assert "secret.txt" not in str(result)
 
@@ -676,5 +1302,6 @@ def test_prepared_resolution_releases_before_resolver_base_exception():
         queries.resolve_prepared_external_artifact(prepared)
 
     assert api.calls == ["authorized:reader"]
-    assert calls == ["release", "resolve"]
+    assert calls == ["release", "resolve-prepared"]
+    assert registry.parameters == [(64, (1, 3))]
     assert len(registry.references) == 1

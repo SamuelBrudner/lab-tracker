@@ -23,7 +23,9 @@ from pydantic import BaseModel, ConfigDict, Field, computed_field, field_validat
 
 from lab_tracker.local_store_locator import (
     LocalStoreLocator,
+    PortableStorePath,
     canonical_local_store_uri,
+    canonical_store_uri,
 )
 
 NoteMetadataScalar = str | bool | int | float
@@ -580,6 +582,36 @@ class ExternalArtifactReference(_DomainModel):
         )
         if parsed_locator is None or canonical_uri is None:
             raise ValueError("Invalid local-store name or locator.")
+        return cls(
+            kind=kind,
+            source_system="store",
+            uri=canonical_uri,
+            content_hash=content_hash,
+            store_name=store_name,
+            locator=parsed_locator.path,
+            metadata=dict(metadata or {}),
+        )
+
+    @classmethod
+    def for_http_store(
+        cls,
+        *,
+        store_name: str,
+        locator: str,
+        content_hash: str,
+        kind: ExternalArtifactKind = ExternalArtifactKind.ENTITY,
+        metadata: Mapping[str, Any] | None = None,
+    ) -> ExternalArtifactReference:
+        """Build a canonical reference for a registered HTTP store."""
+
+        parsed_locator = PortableStorePath.parse_decoded(locator)
+        canonical_uri = (
+            canonical_store_uri(store_name, parsed_locator)
+            if parsed_locator is not None
+            else None
+        )
+        if parsed_locator is None or canonical_uri is None:
+            raise ValueError("Invalid HTTP-store name or locator.")
         return cls(
             kind=kind,
             source_system="store",

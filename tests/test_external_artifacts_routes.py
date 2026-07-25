@@ -16,6 +16,7 @@ from sqlalchemy.pool import QueuePool
 from starlette.testclient import TestClient
 
 from lab_tracker.artifact_resolution import (
+    ArtifactResolver,
     HttpResolver,
     LocalFilesystemResolver,
     RcloneCompleted,
@@ -43,7 +44,10 @@ def _create_dataset_with_artifact(
     uri: str,
     content_hash: str,
     source_system: str = "local",
+    store_name: str | None = None,
+    locator: str | None = None,
 ) -> str:
+    assert (store_name is None) == (locator is None)
     question_id = client.post(
         "/questions",
         json={
@@ -66,6 +70,14 @@ def _create_dataset_with_artifact(
                         "source_system": source_system,
                         "uri": uri,
                         "content_hash": content_hash,
+                        **(
+                            {
+                                "store_name": store_name,
+                                "locator": locator,
+                            }
+                            if store_name is not None and locator is not None
+                            else {}
+                        ),
                     }
                 ]
             },
@@ -464,6 +476,74 @@ def test_resolve_endpoint_returns_verified_content(client, admin_auth_headers, t
     assert body["entity_type"] == "dataset"
 
 
+def test_resolve_endpoint_uses_registered_http_store_prefix_and_logical_identity(
+    client,
+    admin_auth_headers,
+):
+    data = b"registered HTTP bytes"
+    address_resolver = FakeAddressResolver(
+        {"store.example": ["93.184.216.34"]}
+    )
+    http_client = FakeSafeHttpClient(
+        (FakeHttpResponse(chunks=(data,)),)
+    )
+    client.app.state.resolver_registry = ResolverRegistry(
+        [
+            HttpResolver(
+                policy=OutboundHttpPolicy(address_resolver=address_resolver),
+                client=http_client,
+            )
+        ]
+    )
+    project_id = client.post(
+        "/projects",
+        json={"name": "Registered HTTP resolve project"},
+        headers=admin_auth_headers,
+    ).json()["data"]["project_id"]
+    store_response = client.post(
+        "/data-stores",
+        json={
+            "project_id": project_id,
+            "name": "web",
+            "kind": "http",
+            "root": "https://store.example/base",
+        },
+        headers=admin_auth_headers,
+    )
+    assert store_response.status_code == 201, store_response.text
+    dataset_id = _create_dataset_with_artifact(
+        client,
+        admin_auth_headers,
+        project_id=project_id,
+        source_system="legacy-http",
+        uri="store://web/nested/artifact.bin",
+        store_name="web",
+        locator="nested/artifact.bin",
+        content_hash=_sha256(data),
+    )
+
+    response = client.post(
+        "/external-artifacts/resolve",
+        json={
+            "entity_type": "dataset",
+            "entity_id": dataset_id,
+            "artifact_index": 0,
+        },
+        headers=admin_auth_headers,
+    )
+
+    assert response.status_code == 200, response.text
+    body = response.json()["data"]
+    assert body["status"] == "verified"
+    assert body["source_system"] == "store"
+    assert body["uri"] == "store://web/nested/artifact.bin"
+    assert base64.b64decode(body["content_base64"]) == data
+    assert address_resolver.calls == [("store.example", 443)]
+    assert http_client.calls[0][1].absolute_url == (
+        "https://store.example/base/nested/artifact.bin"
+    )
+
+
 def test_resolve_endpoint_reports_drift(client, admin_auth_headers, tmp_path):
     recorded_hash = _sha256(b"what was recorded at capture")
     artifact = tmp_path / "result.txt"
@@ -852,9 +932,16 @@ def test_malformed_store_uri_matrix_never_reaches_resolver(
         kind="local_fs",
         root=str(tmp_path),
     )
-    # An invalid reference must materialize to a static result. This object has
-    # no resolver methods, so any dispatch attempt makes the regression fail.
-    client.app.state.resolver_registry = object()
+    # An invalid reference must materialize to a static result. It still crosses
+    # the registry boundary, but must return without touching any resolver.
+    class UnexpectedResolver(ArtifactResolver):
+        def can_resolve(self, ref):
+            raise AssertionError("precomputed failure reached resolver selection")
+
+        def resolve(self, ref, *, max_bytes, byte_range):
+            raise AssertionError("precomputed failure reached resolver I/O")
+
+    client.app.state.resolver_registry = ResolverRegistry([UnexpectedResolver()])
     malformed_cases = (
         ("store://lab-fs//absolute-alias.txt", "Store artifact reference is invalid."),
         ("store://lab-fs/../sibling.txt", "Store artifact reference is invalid."),

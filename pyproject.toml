@@ -138,6 +138,7 @@ files = [
   "src/lab_tracker/project_graph.py",
   "src/lab_tracker/provider_error_redaction.py",
   "src/lab_tracker/outbound_http.py",
+  "src/lab_tracker/artifact_resolution.py",
   "src/lab_tracker/git_remote_policy.py",
   "src/lab_tracker/local_store_locator.py",
   "src/lab_tracker/local_path_policy.py",

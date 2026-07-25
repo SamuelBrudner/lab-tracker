@@ -6,10 +6,19 @@ import pytest
 
 from lab_tracker.local_store_locator import (
     LocalStoreLocator,
+    PortableStorePath,
     canonical_local_store_uri,
+    canonical_store_authority,
+    canonical_store_uri,
+    is_valid_store_name,
+    parse_canonical_store_authority,
     parse_local_store_uri,
 )
-from lab_tracker.models import ExternalArtifactReference
+from lab_tracker.models import (
+    ExternalArtifactKind,
+    ExternalArtifactReference,
+    external_artifact_uri_validation_error,
+)
 
 
 @pytest.mark.parametrize(
@@ -57,6 +66,18 @@ def test_store_locator_is_frozen_and_requires_tuple_components():
         LocalStoreLocator(["not", "a", "tuple"])  # type: ignore[arg-type]
 
 
+def test_local_store_locator_is_the_portable_store_path_compatibility_alias():
+    assert LocalStoreLocator is PortableStorePath
+
+    decoded = PortableStorePath.parse_decoded("nested/file name.txt")
+    encoded = LocalStoreLocator.parse_uri_path("nested/file%20name.txt")
+
+    assert decoded == encoded == PortableStorePath(("nested", "file name.txt"))
+    assert isinstance(decoded, LocalStoreLocator)
+    assert decoded.path == "nested/file name.txt"
+    assert decoded.uri_path == "nested/file%20name.txt"
+
+
 @pytest.mark.parametrize(
     "decoded",
     [
@@ -87,6 +108,14 @@ def test_store_locator_is_frozen_and_requires_tuple_components():
         "trailing ",
         "nested/trailing.",
         "nested/trailing ",
+        "..／secret.bin",
+        "．．/secret.bin",
+        "nested＼secret.bin",
+        "nested/％2e％2e/secret.bin",
+        "name：stream",
+        "query？mark",
+        "hash＃mark",
+        "trailing．",
         "\ud800",
     ],
 )
@@ -170,6 +199,10 @@ def test_parse_decoded_allows_non_device_and_hidden_names(allowed: str):
         "encoded%25percent",
         "double%252Fencoded",
         "double%252e%252eencoded",
+        "..%EF%BC%8Fsecret.bin",
+        "%EF%BC%8E%EF%BC%8E/secret.bin",
+        "nested%EF%BC%BCsecret.bin",
+        "%EF%BC%852e%EF%BC%852e/secret.bin",
         "/leading",
         "trailing/",
         "two//segments",
@@ -214,6 +247,113 @@ def test_canonical_uri_path_limit_rejects_more_than_4096_bytes():
 def test_canonical_uri_path_limit_counts_percent_encoded_bytes():
     assert LocalStoreLocator.parse_decoded("/".join(["é" * 127] * 5)) is not None
     assert LocalStoreLocator.parse_decoded("/".join(["é" * 127] * 6)) is None
+
+
+@pytest.mark.parametrize(
+    ("store_name", "authority"),
+    [
+        ("legacy remote", "legacy%20remote"),
+        ("user@analysis-repo", "user%40analysis-repo"),
+        ("rclone:analysis", "rclone%3Aanalysis"),
+        (
+            "space @ colon: together",
+            "space%20%40%20colon%3A%20together",
+        ),
+    ],
+)
+def test_canonical_store_uri_encodes_legacy_remote_store_names(
+    store_name: str,
+    authority: str,
+):
+    locator = PortableStorePath(("nested", "file name.txt"))
+
+    assert canonical_store_authority(store_name) == authority
+    assert parse_canonical_store_authority(authority) == store_name
+    assert canonical_store_uri(store_name, locator) == (
+        f"store://{authority}/nested/file%20name.txt"
+    )
+
+
+@pytest.mark.parametrize(
+    "store_name",
+    [
+        "legacy remote",
+        "user@analysis-repo",
+        "rclone:analysis",
+        "space @ colon: together",
+    ],
+)
+def test_generic_store_name_accepts_exact_legacy_authorities(
+    store_name: str,
+) -> None:
+    assert is_valid_store_name(store_name)
+
+
+@pytest.mark.parametrize(
+    "authority",
+    [
+        "legacy%2fremote",
+        "legacy%ZZremote",
+        "legacy%remote",
+        "user@analysis-repo",
+        "%FF",
+    ],
+)
+def test_canonical_store_authority_parser_rejects_noncanonical_forms(
+    authority: str,
+) -> None:
+    assert parse_canonical_store_authority(authority) is None
+
+
+def test_canonical_store_authority_distinguishes_spaces_and_literal_escapes():
+    assert canonical_store_authority("legacy remote") == "legacy%20remote"
+    assert canonical_store_authority("legacy%20remote") == "legacy%2520remote"
+
+
+@pytest.mark.parametrize(
+    "store_name",
+    [
+        "[not-ip]",
+        "web：name",
+        "web／name",
+        "web＠name",
+        "\ud800",
+    ],
+)
+def test_generic_store_name_rejects_non_round_trippable_authorities(
+    store_name: str,
+) -> None:
+    locator = PortableStorePath(("artifact.txt",))
+
+    assert not is_valid_store_name(store_name)
+    assert canonical_store_uri(store_name, locator) is None
+
+
+@pytest.mark.parametrize(
+    "store_name",
+    [
+        "",
+        " ",
+        "has/slash",
+        r"has\backslash",
+        "has?query",
+        "has#fragment",
+        "nul\x00byte",
+        "line\nbreak",
+        "delete\x7fcontrol",
+        "c1\x85control",
+    ],
+)
+def test_canonical_store_uri_rejects_ambiguous_remote_store_names(
+    store_name: str,
+):
+    locator = PortableStorePath(("artifact.txt",))
+
+    assert canonical_store_uri(store_name, locator) is None
+
+
+def test_canonical_store_uri_requires_a_portable_store_path():
+    assert canonical_store_uri("remote", "artifact.txt") is None  # type: ignore[arg-type]
 
 
 @pytest.mark.parametrize(
@@ -311,6 +451,52 @@ def test_external_artifact_reference_for_local_store_uses_canonical_fields():
     assert reference.locator == "Müller/file name/a.txt"
     assert reference.uri == "store://lab-store/M%C3%BCller/file%20name/a.txt"
     assert reference.source_system == "store"
+
+
+def test_external_artifact_reference_for_http_store_uses_canonical_fields():
+    metadata = {"nested": {"label": "prepared"}}
+
+    reference = ExternalArtifactReference.for_http_store(
+        store_name="user@web store:one",
+        locator="café/a+b/result (final).txt",
+        content_hash="sha256:abc",
+        kind=ExternalArtifactKind.ACTIVITY,
+        metadata=metadata,
+    )
+
+    assert reference.store_name == "user@web store:one"
+    assert reference.locator == "café/a+b/result (final).txt"
+    assert reference.uri == (
+        "store://user%40web%20store%3Aone/"
+        "caf%C3%A9/a%2Bb/result%20%28final%29.txt"
+    )
+    assert external_artifact_uri_validation_error(reference.uri) is None
+    assert reference.source_system == "store"
+    assert reference.kind is ExternalArtifactKind.ACTIVITY
+    assert reference.metadata == metadata
+
+
+@pytest.mark.parametrize(
+    ("store_name", "locator"),
+    [
+        ("[not-ip]", "path"),
+        ("valid", "/absolute"),
+        ("valid", "../escape"),
+        ("valid", "already%20encoded"),
+        ("valid", r"windows\path"),
+        ("valid", "CON.txt"),
+    ],
+)
+def test_external_artifact_reference_for_http_store_rejects_invalid_inputs(
+    store_name: str,
+    locator: str,
+):
+    with pytest.raises(ValueError, match="Invalid HTTP-store"):
+        ExternalArtifactReference.for_http_store(
+            store_name=store_name,
+            locator=locator,
+            content_hash="sha256:abc",
+        )
 
 
 @pytest.mark.parametrize(

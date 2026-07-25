@@ -279,9 +279,10 @@ Shipped:
 - ✅ `store://<name>/<path>` resolution: the resolve endpoint authorizes and
   looks up the store before releasing its database scope. `local_fs` becomes a
   typed target that retains the logical URI, validated relative components, and
-  trusted registered root through the eventual handle-bound read; HTTP and the
-  rclone kinds currently materialize adapter references. Credentials are never
-  embedded.
+  trusted registered root through the eventual handle-bound read. HTTP becomes
+  a typed target that retains the same portable relative components and its
+  canonical registered origin/path prefix through every redirect. The rclone
+  kinds currently materialize adapter references. Credentials are never embedded.
 - ✅ Explicit health check: `check_store_health` probes reachability
   (directory stat for `local_fs`, HTTP `HEAD` for `http`, `rclone lsf` for the
   cloud/remote kinds; `object_table`/`database` report `unsupported`), exposed at
@@ -294,22 +295,31 @@ Shipped:
   returns its effective (own + inherited) set.
 - ✅ Structured field form: `ExternalArtifactReference` carries optional
   `store_name` + `locator` (paired) with a `for_store(...)` constructor, so a
-  store-relative artifact has an explicit representation. For `local_fs`,
-  resolution accepts the fields only when they agree with the canonical logical
-  `store://` identity; `for_local_store(...)` constructs that portable form.
-  Non-local fields retain their legacy precedence over a display URI until the
-  adapter-specific prefix-confinement slice. The field is the store *name* (not
-  a UUID), matching name-based resolution.
+  store-relative artifact has an explicit representation. For `local_fs` and
+  HTTP, resolution accepts the fields only when they agree with the canonical
+  logical `store://` identity; `for_local_store(...)` and
+  `for_http_store(...)` construct their canonical forms, and both kinds share
+  one immutable portable-path grammar. The generic `for_store(...)` constructor's
+  deterministic legacy display URI remains accepted for structured HTTP
+  references and is canonicalized during preparation. Rclone and Git fields
+  retain their legacy precedence over a display URI until their adapter-specific
+  prefix-confinement slices. The field is the store *name* (not a UUID), matching
+  name-based resolution.
 - ✅ Local-store confinement: a `local_fs` root must be a native absolute local
   path. Its effective read authority is conjunctive with the operator's global
   local-root policy, and the exact reader plus recovery walk are scoped to the
   registered store root. A broader global root therefore cannot make sibling
   files addressable through that store.
+- ✅ Registered HTTP prefix confinement: a pure value validates the canonical
+  HTTP origin and portable path components without DNS. A frozen, factory-only
+  target crosses the database-scope boundary, and the resolver checks the
+  initial URL and every raw redirect before the next DNS or socket operation.
+  Direct HTTP references retain their existing, broader redirect semantics.
 
 Deferred:
 
-- ⏭️ The same strict prefix-preserving locator composition for HTTP, rclone,
-  and Git stores is tracked separately; those adapters must not rely on backend
+- ⏭️ The same strict prefix-preserving locator composition for rclone and Git
+  stores is tracked separately; those adapters must not rely on backend
   normalization.
 - ⏭️ The capabilities the storeless adapters cannot provide: `versioned_snapshot`
   reads (S3 `versionId`, Iceberg/Delta) and the `database` (`query → rows`)
@@ -318,10 +328,10 @@ Deferred:
 
 ## Next slices
 
-The remaining work is adapter-specific: confine HTTP, rclone, and Git locators
-to their registered prefixes; bind store registration to operator-approved
-authority grants; enforce declared capabilities during resolution; and add the
-deferred snapshot/query adapters. Health remains an explicit operator action at
+The remaining work is adapter-specific: confine rclone and Git locators to their
+registered prefixes; bind store registration to operator-approved authority
+grants; enforce declared capabilities during resolution; and add the deferred
+snapshot/query adapters. Health remains an explicit operator action at
 `GET /data-stores/{id}/health`, not a side effect of registration.
 
 ## See also
