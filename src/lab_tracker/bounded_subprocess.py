@@ -3,12 +3,12 @@
 The executor in this module is deliberately narrower than ``subprocess.run``:
 one absolute monotonic deadline covers process execution and concurrent pipe
 drainage, stdout and stderr have independent hard caps, and failure cleanup
-targets the whole POSIX process group.  Raw stderr and command arguments never
-cross the boundary.
+targets the whole POSIX process group or private Windows Job Object.  Raw
+stderr and command arguments never cross the boundary.
 
-The execution deadline does not include process-group cleanup.  Cleanup has its
-own small, fixed upper bound (terminate grace plus kill/reap grace), so a command
-can exceed its execution deadline only by that documented bound.
+The execution deadline does not include containment cleanup.  Cleanup has its
+own small, fixed upper bound (terminate grace plus kill/reap grace), so a
+command can exceed its execution deadline only by that documented bound.
 """
 
 from __future__ import annotations
@@ -24,6 +24,16 @@ from contextlib import suppress
 from dataclasses import dataclass, field
 from os import PathLike
 from typing import IO, Protocol
+
+from lab_tracker._windows_job import (
+    PopenFactory,
+    WindowsJobApi,
+    WindowsJobCleanupError,
+    WindowsJobLifecycle,
+    WindowsJobOperationError,
+    WindowsJobUnavailableError,
+    spawn_suspended_in_job,
+)
 
 DEFAULT_PROCESS_DEADLINE_SECONDS = 30.0
 MAX_PROCESS_DEADLINE_SECONDS = 86_400.0
@@ -164,8 +174,22 @@ class _FailureState:
             return self._failure
 
 
-class _ProcessLifecycle:
-    """Idempotent, race-safe ownership of process termination and pipes."""
+class _ProcessLifecycle(Protocol):
+    """Platform-specific ownership of process containment and pipes."""
+
+    process: subprocess.Popen[bytes]
+
+    def finish(self, *, cleanup_expires_at: float) -> None: ...
+
+    def stop(self, *, cleanup_expires_at: float) -> None: ...
+
+    def close_pipes(self) -> None: ...
+
+    def close_containment(self) -> None: ...
+
+
+class _PosixProcessLifecycle:
+    """Idempotent, race-safe ownership of a POSIX process group and pipes."""
 
     def __init__(
         self,
@@ -174,12 +198,18 @@ class _ProcessLifecycle:
         terminate_grace_seconds: float,
         kill_grace_seconds: float,
     ) -> None:
-        self._process = process
+        self.process = process
         self._terminate_grace_seconds = terminate_grace_seconds
         self._kill_grace_seconds = kill_grace_seconds
         self._lock = threading.Lock()
         self._stopped = False
         self._pipes_closed = False
+
+    def finish(self, *, cleanup_expires_at: float) -> None:
+        """Kill any descendants left after the successfully reaped leader."""
+
+        if _process_group_exists(self.process.pid):
+            self.stop(cleanup_expires_at=cleanup_expires_at)
 
     def stop(self, *, cleanup_expires_at: float) -> None:
         """Terminate, kill, and reap the full POSIX process group once."""
@@ -194,32 +224,32 @@ class _ProcessLifecycle:
 
         # The leader may already have exited while a descendant still owns a
         # pipe.  Always target the group created by start_new_session.
-        _signal_process_group(self._process.pid, signal.SIGTERM)
+        _signal_process_group(self.process.pid, signal.SIGTERM)
         terminate_expires_at = min(
             cleanup_expires_at,
             time.monotonic() + self._terminate_grace_seconds,
         )
         _wait_for_process_group_exit(
-            self._process.pid,
+            self.process.pid,
             expires_at=terminate_expires_at,
-            process=self._process,
+            process=self.process,
         )
-        if _process_group_exists(self._process.pid):
-            _signal_process_group(self._process.pid, signal.SIGKILL)
+        if _process_group_exists(self.process.pid):
+            _signal_process_group(self.process.pid, signal.SIGKILL)
 
         try:
-            self._process.wait(timeout=_remaining_cleanup(cleanup_expires_at))
+            self.process.wait(timeout=_remaining_cleanup(cleanup_expires_at))
         except subprocess.TimeoutExpired:
-            _signal_process_group(self._process.pid, signal.SIGKILL)
+            _signal_process_group(self.process.pid, signal.SIGKILL)
             raise ProcessCleanupError(_GENERIC_CLEANUP_DETAIL) from None
         except (OSError, subprocess.SubprocessError):
             raise ProcessCleanupError(_GENERIC_CLEANUP_DETAIL) from None
         _wait_for_process_group_exit(
-            self._process.pid,
+            self.process.pid,
             expires_at=cleanup_expires_at,
-            process=self._process,
+            process=self.process,
         )
-        if _process_group_exists(self._process.pid):
+        if _process_group_exists(self.process.pid):
             raise ProcessCleanupError(_GENERIC_CLEANUP_DETAIL)
 
     def close_pipes(self) -> None:
@@ -229,20 +259,46 @@ class _ProcessLifecycle:
             if self._pipes_closed:
                 return
             self._pipes_closed = True
-        for pipe in (self._process.stdout, self._process.stderr):
+        for pipe in (self.process.stdout, self.process.stderr):
             if pipe is not None:
                 with suppress(OSError):
                     pipe.close()
 
+    def close_containment(self) -> None:
+        """POSIX process groups do not own a separate containment handle."""
+
+
+class _WindowsProcessLifecycle:
+    """Translate private Windows lifecycle failures to the public boundary."""
+
+    def __init__(self, lifecycle: WindowsJobLifecycle) -> None:
+        self._lifecycle = lifecycle
+        self.process = lifecycle.process
+
+    def finish(self, *, cleanup_expires_at: float) -> None:
+        try:
+            self._lifecycle.finish(cleanup_expires_at=cleanup_expires_at)
+        except WindowsJobCleanupError:
+            raise ProcessCleanupError(_GENERIC_CLEANUP_DETAIL) from None
+
+    def stop(self, *, cleanup_expires_at: float) -> None:
+        try:
+            self._lifecycle.stop(cleanup_expires_at=cleanup_expires_at)
+        except WindowsJobCleanupError:
+            raise ProcessCleanupError(_GENERIC_CLEANUP_DETAIL) from None
+
+    def close_pipes(self) -> None:
+        self._lifecycle.close_pipes()
+
+    def close_containment(self) -> None:
+        try:
+            self._lifecycle.close_containment()
+        except WindowsJobCleanupError:
+            raise ProcessCleanupError(_GENERIC_CLEANUP_DETAIL) from None
+
 
 class BoundedSubprocessExecutor:
-    """Execute commands with bounded time, memory, and POSIX descendants.
-
-    Non-POSIX platforms fail closed before spawning.  Python's Windows process
-    group flag does not provide kill-on-close descendant containment; a future
-    Windows implementation must use a Job Object rather than pretending that
-    terminating only the group leader is sufficient.
-    """
+    """Execute commands with bounded time, memory, and descendant containment."""
 
     def __init__(
         self,
@@ -250,6 +306,9 @@ class BoundedSubprocessExecutor:
         chunk_size: int = _DEFAULT_CHUNK_SIZE,
         terminate_grace_seconds: float = _DEFAULT_TERMINATE_GRACE_SECONDS,
         kill_grace_seconds: float = _DEFAULT_KILL_GRACE_SECONDS,
+        _platform_name: str | None = None,
+        _windows_api: WindowsJobApi | None = None,
+        _popen_factory: PopenFactory | None = None,
     ) -> None:
         _validate_positive_int(chunk_size, name="Process pipe chunk size")
         _validate_cleanup_duration(
@@ -259,6 +318,9 @@ class BoundedSubprocessExecutor:
         self._chunk_size = chunk_size
         self._terminate_grace_seconds = terminate_grace_seconds
         self._kill_grace_seconds = kill_grace_seconds
+        self._platform_name = _platform_name
+        self._windows_api = _windows_api
+        self._popen_factory = _popen_factory
 
     @property
     def maximum_cleanup_seconds(self) -> float:
@@ -285,66 +347,77 @@ class BoundedSubprocessExecutor:
         _validate_command(command)
         _validate_nonnegative_int(stdout_limit_bytes, name="stdout byte limit")
         _validate_nonnegative_int(stderr_limit_bytes, name="stderr byte limit")
-        if os.name != "posix":
+        platform_name = (
+            self._platform_name if self._platform_name is not None else os.name
+        )
+        if platform_name not in {"posix", "nt"}:
             raise ProcessUnsupportedPlatformError(_GENERIC_PLATFORM_DETAIL)
         deadline.check()
 
         try:
-            process = subprocess.Popen(  # noqa: S603 - never invokes a shell
-                list(command),
-                shell=False,
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                close_fds=True,
+            lifecycle = self._spawn_lifecycle(
+                command,
+                platform_name=platform_name,
+                deadline=deadline,
                 cwd=cwd,
-                env=None if env is None else dict(env),
-                start_new_session=True,
+                env=env,
             )
+        except ProcessExecutionError:
+            raise
+        except WindowsJobUnavailableError:
+            raise ProcessUnsupportedPlatformError(_GENERIC_PLATFORM_DETAIL) from None
+        except WindowsJobCleanupError:
+            raise ProcessCleanupError(_GENERIC_CLEANUP_DETAIL) from None
+        except WindowsJobOperationError:
+            raise ProcessExecutionError(_GENERIC_EXECUTION_DETAIL) from None
         except (OSError, ValueError, subprocess.SubprocessError):
             raise ProcessExecutionError(_GENERIC_EXECUTION_DETAIL) from None
+        except Exception:
+            # Popen audit hooks may reject a launch with arbitrary exception
+            # types and sensitive details.  Cleanup has already run inside the
+            # Windows spawn helper when applicable.
+            raise ProcessExecutionError(_GENERIC_EXECUTION_DETAIL) from None
+        except KeyboardInterrupt:
+            # Preserve user-interrupt control flow without retaining a message
+            # supplied by an audit hook that can contain launch secrets.
+            raise KeyboardInterrupt from None
+        except BaseException:
+            # Audit hooks can also raise SystemExit, GeneratorExit, or a custom
+            # BaseException containing the executable, argv, or environment.
+            raise ProcessExecutionError(_GENERIC_EXECUTION_DETAIL) from None
 
-        lifecycle = _ProcessLifecycle(
-            process,
-            terminate_grace_seconds=self._terminate_grace_seconds,
-            kill_grace_seconds=self._kill_grace_seconds,
-        )
+        process = lifecycle.process
         stdout_pipe = process.stdout
         stderr_pipe = process.stderr
-        if stdout_pipe is None or stderr_pipe is None:
-            lifecycle.stop(
-                cleanup_expires_at=time.monotonic() + self.maximum_cleanup_seconds
-            )
-            lifecycle.close_pipes()
-            raise ProcessExecutionError(_GENERIC_EXECUTION_DETAIL)
-
-        stdout_state = _PipeState(
-            limit=stdout_limit_bytes,
-            consumer=stdout_consumer,
-        )
-        stderr_state = _PipeState(
-            limit=stderr_limit_bytes,
-            consumer=_discard_output,
-        )
-        failure = _FailureState()
-        threads = (
-            self._reader_thread(
-                name="lab-tracker-process-stdout",
-                pipe=stdout_pipe,
-                state=stdout_state,
-                deadline=deadline,
-                failure=failure,
-            ),
-            self._reader_thread(
-                name="lab-tracker-process-stderr",
-                pipe=stderr_pipe,
-                state=stderr_state,
-                deadline=deadline,
-                failure=failure,
-            ),
-        )
-
+        threads: tuple[threading.Thread, ...] = ()
         try:
+            if stdout_pipe is None or stderr_pipe is None:
+                raise ProcessExecutionError(_GENERIC_EXECUTION_DETAIL)
+            stdout_state = _PipeState(
+                limit=stdout_limit_bytes,
+                consumer=stdout_consumer,
+            )
+            stderr_state = _PipeState(
+                limit=stderr_limit_bytes,
+                consumer=_discard_output,
+            )
+            failure = _FailureState()
+            threads = (
+                self._reader_thread(
+                    name="lab-tracker-process-stdout",
+                    pipe=stdout_pipe,
+                    state=stdout_state,
+                    deadline=deadline,
+                    failure=failure,
+                ),
+                self._reader_thread(
+                    name="lab-tracker-process-stderr",
+                    pipe=stderr_pipe,
+                    state=stderr_state,
+                    deadline=deadline,
+                    failure=failure,
+                ),
+            )
             for thread in threads:
                 thread.start()
             returncode = self._wait_for_completion(
@@ -355,12 +428,9 @@ class BoundedSubprocessExecutor:
             )
             for thread in threads:
                 thread.join()
-            if _process_group_exists(process.pid):
-                cleanup_expires_at = (
-                    time.monotonic() + self.maximum_cleanup_seconds
-                )
-                lifecycle.stop(cleanup_expires_at=cleanup_expires_at)
             deadline.check()
+            cleanup_expires_at = time.monotonic() + self.maximum_cleanup_seconds
+            lifecycle.finish(cleanup_expires_at=cleanup_expires_at)
         except ProcessExecutionError as primary:
             self._cleanup_failure(lifecycle, threads=threads, primary=primary)
             raise
@@ -372,23 +442,78 @@ class BoundedSubprocessExecutor:
                 primary=generic_failure,
             )
             raise generic_failure from None
-        except BaseException:
-            # KeyboardInterrupt and other control-flow exceptions must not leave
-            # an external command or its descendants behind.
+        except KeyboardInterrupt:
+            # A user interrupt keeps its control-flow semantics after cleanup.
             self._cleanup_failure(
                 lifecycle,
                 threads=threads,
                 primary=ProcessExecutionError(_GENERIC_EXECUTION_DETAIL),
             )
-            raise
+            raise KeyboardInterrupt from None
+        except BaseException:
+            # Other control-flow exceptions can originate in audit hooks and
+            # include sensitive launch details, so clean up and redact them.
+            generic_failure = ProcessExecutionError(_GENERIC_EXECUTION_DETAIL)
+            self._cleanup_failure(
+                lifecycle,
+                threads=threads,
+                primary=generic_failure,
+            )
+            raise generic_failure from None
         finally:
             lifecycle.close_pipes()
+            lifecycle.close_containment()
 
         return ProcessResult(
             returncode=returncode,
             stdout=bytes(stdout_state.captured),
             stdout_bytes=stdout_state.count,
             stderr_bytes=stderr_state.count,
+        )
+
+    def _spawn_lifecycle(
+        self,
+        command: Sequence[str],
+        *,
+        platform_name: str,
+        deadline: ProcessDeadline,
+        cwd: str | PathLike[str] | None,
+        env: Mapping[str, str] | None,
+    ) -> _ProcessLifecycle:
+        if platform_name == "nt":
+            return _WindowsProcessLifecycle(
+                spawn_suspended_in_job(
+                    command,
+                    cwd=cwd,
+                    env=env,
+                    deadline_check=deadline.check,
+                    cleanup_timeout_seconds=self.maximum_cleanup_seconds,
+                    api=self._windows_api,
+                    popen_factory=self._popen_factory,
+                )
+            )
+        if platform_name != "posix":
+            raise ProcessUnsupportedPlatformError(_GENERIC_PLATFORM_DETAIL)
+        factory = (
+            self._popen_factory
+            if self._popen_factory is not None
+            else subprocess.Popen
+        )
+        process = factory(  # noqa: S603 - never invokes a shell
+            list(command),
+            shell=False,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            close_fds=True,
+            cwd=cwd,
+            env=None if env is None else dict(env),
+            start_new_session=True,
+        )
+        return _PosixProcessLifecycle(
+            process,
+            terminate_grace_seconds=self._terminate_grace_seconds,
+            kill_grace_seconds=self._kill_grace_seconds,
         )
 
     def _reader_thread(
@@ -493,14 +618,22 @@ class BoundedSubprocessExecutor:
         primary: ProcessExecutionError,
     ) -> None:
         cleanup_expires_at = time.monotonic() + self.maximum_cleanup_seconds
+        cleanup_error: ProcessExecutionError | None = None
         try:
             lifecycle.stop(cleanup_expires_at=cleanup_expires_at)
-        except ProcessExecutionError as cleanup_error:
-            lifecycle.close_pipes()
-            self._join_readers(threads, cleanup_expires_at=cleanup_expires_at)
-            raise cleanup_error from primary
+        except ProcessExecutionError as error:
+            cleanup_error = error
         lifecycle.close_pipes()
-        self._join_readers(threads, cleanup_expires_at=cleanup_expires_at)
+        try:
+            self._join_readers(threads, cleanup_expires_at=cleanup_expires_at)
+        except ProcessCleanupError as error:
+            cleanup_error = error
+        try:
+            lifecycle.close_containment()
+        except ProcessCleanupError as error:
+            cleanup_error = error
+        if cleanup_error is not None:
+            raise cleanup_error from primary
 
     def _join_readers(
         self,

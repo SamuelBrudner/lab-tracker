@@ -101,3 +101,26 @@ jobs:
         env:
           LAB_TRACKER_POSTGRES_TEST_DATABASE_URL: postgresql+psycopg://postgres:postgres@127.0.0.1:5432/postgres
         run: uv run pytest -q -m postgres
+
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+      - uses: astral-sh/setup-uv@v7
+      - name: Install frozen Python dependencies
+        run: uv sync --frozen --extra test --extra lint
+      - name: Lint
+        run: uv run ruff check .
+      - name: Typecheck Python architecture contracts
+        run: uv run mypy
+      - name: Test bounded subprocess containment
+        run: >-
+          uv run pytest -q
+          tests/test_bounded_subprocess.py
+          tests/test_windows_job.py
+      - name: Test
+        run: uv run pytest -q
