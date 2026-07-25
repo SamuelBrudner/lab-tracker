@@ -593,7 +593,7 @@ def _remaining(expires_at: float) -> float:
 def _windows_last_error() -> int:
     get_last_error = cast(
         Callable[[], int],
-        ctypes.get_last_error,  # type: ignore[attr-defined]
+        getattr(ctypes, "get_last_error"),  # noqa: B009
     )
     return get_last_error()
 
@@ -601,7 +601,7 @@ def _windows_last_error() -> int:
 def _set_windows_last_error(value: int) -> None:
     set_last_error = cast(
         Callable[[int], int],
-        ctypes.set_last_error,  # type: ignore[attr-defined]
+        getattr(ctypes, "set_last_error"),  # noqa: B009
     )
     set_last_error(value)
 

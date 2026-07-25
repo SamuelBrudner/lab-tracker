@@ -17,6 +17,7 @@ import math
 import os
 import signal
 import subprocess
+import sys
 import threading
 import time
 from collections.abc import Callable, Mapping, Sequence
@@ -55,6 +56,16 @@ _GENERIC_PLATFORM_DETAIL = "Subprocess execution is unavailable on this platform
 
 Clock = Callable[[], float]
 StdoutConsumer = Callable[[bytes], None]
+
+if sys.platform == "win32":
+    _POSIX_SIGKILL = 9
+
+    def _kill_process_group(process_group_id: int, signum: int) -> None:
+        raise OSError("POSIX process groups are unavailable.")
+
+else:
+    _POSIX_SIGKILL = signal.SIGKILL
+    _kill_process_group = os.killpg
 
 
 class ProcessExecutionError(RuntimeError):
@@ -235,12 +246,12 @@ class _PosixProcessLifecycle:
             process=self.process,
         )
         if _process_group_exists(self.process.pid):
-            _signal_process_group(self.process.pid, signal.SIGKILL)
+            _signal_process_group(self.process.pid, _POSIX_SIGKILL)
 
         try:
             self.process.wait(timeout=_remaining_cleanup(cleanup_expires_at))
         except subprocess.TimeoutExpired:
-            _signal_process_group(self.process.pid, signal.SIGKILL)
+            _signal_process_group(self.process.pid, _POSIX_SIGKILL)
             raise ProcessCleanupError(_GENERIC_CLEANUP_DETAIL) from None
         except (OSError, subprocess.SubprocessError):
             raise ProcessCleanupError(_GENERIC_CLEANUP_DETAIL) from None
@@ -690,7 +701,7 @@ def _validate_command(command: Sequence[str]) -> None:
 
 def _signal_process_group(process_group_id: int, signum: int) -> None:
     try:
-        os.killpg(process_group_id, signum)
+        _kill_process_group(process_group_id, signum)
     except ProcessLookupError:
         return
     except OSError:
@@ -699,7 +710,7 @@ def _signal_process_group(process_group_id: int, signum: int) -> None:
 
 def _process_group_exists(process_group_id: int) -> bool:
     try:
-        os.killpg(process_group_id, 0)
+        _kill_process_group(process_group_id, 0)
     except ProcessLookupError:
         return False
     except PermissionError:
