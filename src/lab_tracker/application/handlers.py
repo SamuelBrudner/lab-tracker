@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Protocol
 
@@ -66,6 +67,7 @@ class RequestHandlers:
         raw_note_storage: DeleteStorage,
         settings: Settings,
         resolver_registry: ResolverRegistry | None,
+        release_read_scope: Callable[[], None],
     ) -> RequestHandlers:
         """Bind every handler to the middleware's existing request resources."""
 
@@ -75,6 +77,7 @@ class RequestHandlers:
                 api=api,
                 repository=repository,
                 session=session,
+                release_read_scope=release_read_scope,
                 resolver_registry=resolver_registry,
             ),
             dataset_files=DatasetFileCommands(

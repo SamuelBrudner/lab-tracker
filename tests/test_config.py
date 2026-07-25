@@ -23,6 +23,10 @@ from lab_tracker.artifact_resolution import (
     ResolverRegistry,
     outbound_http_policy_from_config,
 )
+from lab_tracker.artifact_resolution_admission import (
+    DEFAULT_ARTIFACT_RESOLUTION_GLOBAL_IN_FLIGHT_LIMIT,
+    DEFAULT_ARTIFACT_RESOLUTION_PER_ACTOR_IN_FLIGHT_LIMIT,
+)
 from lab_tracker.config import DEFAULT_AUTH_SECRET_KEY, Settings
 
 
@@ -34,6 +38,14 @@ def _clear_auth_env(monkeypatch) -> None:
     monkeypatch.delenv("LAB_TRACKER_AUTH_SECRET_KEY", raising=False)
     monkeypatch.delenv("LAB_TRACKER_ENVIRONMENT", raising=False)
     monkeypatch.delenv("LAB_TRACKER_AUTH_ENABLED", raising=False)
+    monkeypatch.delenv(
+        "LAB_TRACKER_ARTIFACT_RESOLUTION_GLOBAL_IN_FLIGHT_LIMIT",
+        raising=False,
+    )
+    monkeypatch.delenv(
+        "LAB_TRACKER_ARTIFACT_RESOLUTION_PER_ACTOR_IN_FLIGHT_LIMIT",
+        raising=False,
+    )
 
 
 def test_local_environment_allows_default_auth_secret(monkeypatch):
@@ -173,6 +185,46 @@ def test_resolver_subprocess_deadline_cannot_exceed_one_day(monkeypatch):
         _settings_from_environment()
 
 
+def test_artifact_resolution_admission_limits_default_to_bounded_capacity(monkeypatch):
+    _clear_auth_env(monkeypatch)
+
+    settings = _settings_from_environment()
+
+    assert (
+        settings.artifact_resolution_global_in_flight_limit
+        == DEFAULT_ARTIFACT_RESOLUTION_GLOBAL_IN_FLIGHT_LIMIT
+    )
+    assert (
+        settings.artifact_resolution_per_actor_in_flight_limit
+        == DEFAULT_ARTIFACT_RESOLUTION_PER_ACTOR_IN_FLIGHT_LIMIT
+    )
+
+
+@pytest.mark.parametrize(
+    ("variable", "value"),
+    [
+        ("LAB_TRACKER_ARTIFACT_RESOLUTION_GLOBAL_IN_FLIGHT_LIMIT", "0"),
+        ("LAB_TRACKER_ARTIFACT_RESOLUTION_GLOBAL_IN_FLIGHT_LIMIT", "33"),
+        ("LAB_TRACKER_ARTIFACT_RESOLUTION_PER_ACTOR_IN_FLIGHT_LIMIT", "0"),
+    ],
+)
+def test_artifact_resolution_admission_limits_are_validated(monkeypatch, variable, value):
+    _clear_auth_env(monkeypatch)
+    monkeypatch.setenv(variable, value)
+
+    with pytest.raises(ValidationError, match="ARTIFACT_RESOLUTION"):
+        _settings_from_environment()
+
+
+def test_artifact_resolution_actor_limit_cannot_exceed_global_limit(monkeypatch):
+    _clear_auth_env(monkeypatch)
+    monkeypatch.setenv("LAB_TRACKER_ARTIFACT_RESOLUTION_GLOBAL_IN_FLIGHT_LIMIT", "2")
+    monkeypatch.setenv("LAB_TRACKER_ARTIFACT_RESOLUTION_PER_ACTOR_IN_FLIGHT_LIMIT", "3")
+
+    with pytest.raises(ValidationError, match="PER_ACTOR_IN_FLIGHT_LIMIT"):
+        _settings_from_environment()
+
+
 @pytest.mark.parametrize(
     ("variable", "field"),
     [
@@ -267,6 +319,8 @@ def test_runtime_installs_one_validated_policy_graph_and_registry(monkeypatch):
         resolver_http_allowed_networks="10.20.0.0/16",
         resolver_http_deadline_seconds=12.5,
         resolver_subprocess_deadline_seconds=7.25,
+        artifact_resolution_global_in_flight_limit=5,
+        artifact_resolution_per_actor_in_flight_limit=3,
         git_allowed_remotes="https://settings.example/lab",
     )
     runtime = build_app_runtime(settings)
@@ -278,6 +332,12 @@ def test_runtime_installs_one_validated_policy_graph_and_registry(monkeypatch):
         assert app.state.outbound_http_policy is runtime.outbound_http_policy
         assert app.state.git_remote_policy is runtime.git_remote_policy
         assert app.state.resolver_registry is resolver_registry
+        assert (
+            app.state.artifact_resolution_admission
+            is runtime.artifact_resolution_admission
+        )
+        assert runtime.artifact_resolution_admission.global_in_flight_limit == 5
+        assert runtime.artifact_resolution_admission.per_actor_in_flight_limit == 3
         assert app.state.git_health_workdir is runtime.git_health_workdir
         assert app.state.store_health_checker is runtime.store_health_checker
         assert app.state.cleanup_git_health_workdir.__self__ is runtime

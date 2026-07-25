@@ -12,7 +12,7 @@ Design: ``docs/external-artifact-resolution-design.md``.
 
 from __future__ import annotations
 
-from typing import Literal
+from typing import Any, Literal
 from uuid import UUID
 
 from fastapi import APIRouter
@@ -41,8 +41,11 @@ def build_external_artifacts_router(api: LabTrackerAPI) -> APIRouter:
     router = APIRouter()
 
     @router.post("/external-artifacts/resolve")
-    def resolve_external_artifact(payload: ResolveExternalArtifactRequest, request: Request):
-        result = handlers_from_request(request).context.resolve_external_artifact(
+    def resolve_external_artifact(
+        payload: ResolveExternalArtifactRequest, request: Request
+    ) -> Envelope[dict[str, Any]]:
+        context = handlers_from_request(request).context
+        prepared = context.prepare_external_artifact_resolution(
             actor=actor_from_request(request),
             entity_type=payload.entity_type,
             entity_id=payload.entity_id,
@@ -52,6 +55,7 @@ def build_external_artifacts_router(api: LabTrackerAPI) -> APIRouter:
             byte_start=payload.byte_start,
             byte_end=payload.byte_end,
         )
+        result = context.resolve_prepared_external_artifact(prepared)
         return Envelope(data=result)
 
     return router

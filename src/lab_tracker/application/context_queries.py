@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any, Literal, Protocol
 from urllib.parse import urlsplit
@@ -60,6 +61,22 @@ from lab_tracker.schemas import (
 from .types import Page
 
 ExternalArtifactEntityType = Literal["analysis", "claim", "dataset"]
+
+
+@dataclass(frozen=True)
+class PreparedExternalArtifactResolution:
+    """A database-free external-artifact resolution plan.
+
+    Preparation authorizes and materializes the target while the request scope is
+    open. Resolution then releases that scope before invoking an external resolver.
+    """
+
+    entity_type: ExternalArtifactEntityType
+    entity_id: UUID
+    artifact_index: int
+    target: ExternalArtifactReference | ResolvedArtifact
+    max_bytes: int
+    byte_range: tuple[int, int] | None
 
 
 class ContextDataStoreLookup(Protocol):
@@ -188,6 +205,7 @@ class ContextQueries:
     api: ContextAccess
     repository: ContextRepository
     session: OrmSession
+    release_read_scope: Callable[[], None]
     resolver_registry: ResolverRegistry | None = None
 
     def decision_context(
@@ -445,7 +463,7 @@ class ContextQueries:
         )
         return SearchResults(questions=questions, notes=notes)
 
-    def resolve_external_artifact(
+    def prepare_external_artifact_resolution(
         self,
         *,
         actor: AuthContext,
@@ -456,13 +474,15 @@ class ContextQueries:
         max_bytes: int | None,
         byte_start: int | None,
         byte_end: int | None,
-    ) -> dict[str, Any]:
+    ) -> PreparedExternalArtifactResolution:
         byte_range: tuple[int, int] | None = None
         if byte_start is not None or byte_end is not None:
             if byte_start is None or byte_end is None:
                 raise ValidationError(
                     "byte_start and byte_end must be provided together."
                 )
+            if byte_end < byte_start:
+                raise ValidationError("byte_end must be greater than or equal to byte_start.")
             byte_range = (byte_start, byte_end)
 
         reference, project_id = self._locate_external_reference(
@@ -473,20 +493,42 @@ class ContextQueries:
             content_hash=content_hash,
         )
 
-        materialized = self._materialize_reference(reference, project_id)
-        if isinstance(materialized, ResolvedArtifact):
-            result = materialized
+        detached_reference = reference.model_copy(deep=True)
+        materialized = self._materialize_reference(detached_reference, project_id)
+        target = (
+            materialized.model_copy(deep=True)
+            if isinstance(materialized, ExternalArtifactReference)
+            else materialized
+        )
+        return PreparedExternalArtifactResolution(
+            entity_type=entity_type,
+            entity_id=entity_id,
+            artifact_index=artifact_index,
+            target=target,
+            max_bytes=max_bytes or DEFAULT_MAX_BYTES,
+            byte_range=byte_range,
+        )
+
+    def resolve_prepared_external_artifact(
+        self,
+        prepared: PreparedExternalArtifactResolution,
+    ) -> dict[str, Any]:
+        """Release SQLAlchemy resources, then resolve a detached target only."""
+
+        self.release_read_scope()
+        if isinstance(prepared.target, ResolvedArtifact):
+            result = prepared.target
         else:
             registry = self.resolver_registry or registry_from_env()
             result = registry.resolve(
-                materialized,
-                max_bytes=max_bytes or DEFAULT_MAX_BYTES,
-                byte_range=byte_range,
+                prepared.target,
+                max_bytes=prepared.max_bytes,
+                byte_range=prepared.byte_range,
             )
         body = result.to_json_dict()
-        body["entity_type"] = entity_type
-        body["entity_id"] = str(entity_id)
-        body["artifact_index"] = artifact_index
+        body["entity_type"] = prepared.entity_type
+        body["entity_id"] = str(prepared.entity_id)
+        body["artifact_index"] = prepared.artifact_index
         body["content_base64"] = (
             base64.b64encode(result.content).decode("ascii")
             if result.is_verified and result.content is not None

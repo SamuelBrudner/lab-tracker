@@ -187,6 +187,39 @@ read-only, the owning entity's opaque authorization boundary still runs first,
 the whole response still passes the content-hash integrity gate, and the fetch
 and returned payload remain bounded.
 
+## Admission and database-scope boundary
+
+Resolution is a potentially slow operation even when each resolver has its own
+deadline. The HTTP composition is therefore security headers, authentication,
+external-artifact admission, the short request database scope, and the route.
+Authentication may use its authoritative store; admission never changes the
+existing unauthenticated or forbidden response semantics.
+
+After authentication, `POST /external-artifacts/resolve` obtains a
+process-local, no-wait lease before an ordinary request session or repository
+is constructed. The lease has both a global counter and a counter keyed by
+`actor.user_id`. Either exhausted counter produces the same fixed generic
+`429` response and `Retry-After` header, without a project, entity, counter, or
+resolver detail. A rejected request cannot reach entity lookup, repository
+construction, resolver dispatch, network, or subprocess work.
+
+An accepted request first completes opaque entity authorization and all
+database-backed preparation, including `store://` materialization. It detaches
+the immutable resolution inputs and releases its read scope (rollback/close)
+before calling a resolver, so the request's SQLAlchemy connection is returned
+to the pool while HTTP, local, rclone, or Git I/O is in progress. The release
+is idempotent and the admission lease is released exactly once on normal
+completion, resolver failure or timeout, cancellation, disconnect, and other
+`BaseException` paths.
+
+The default global/per-actor limits are `8` and `2`, respectively. Both must be
+positive integers, the global value is capped at `32` (below the standard
+shared AnyIO worker capacity of 40), and the per-actor value cannot exceed the
+configured global value. Counters exist only within one process, so the limits
+multiply across Uvicorn workers and replicas. The supported deployment uses
+one Uvicorn worker per service process; this mechanism is not a cluster-wide
+admission system.
+
 ## Bounded rclone and Git subprocesses
 
 Rclone and Git resolution use optional host binaries, but a persisted artifact
@@ -452,8 +485,13 @@ Shipped (`src/lab_tracker/artifact_resolution.py`, tested in
   shared `_hash_and_collect` helper.
 - ✅ `POST /external-artifacts/resolve` — resolve-by-entity, gated by the owning
   dataset, analysis, or claim's opaque read boundary before artifact selection,
-  hash comparison, materialization, or resolver work; returns the envelope plus
-  base64 content. Registry comes from `request.app.state.resolver_registry` or
+  hash comparison, materialization, or resolver work; authenticated requests
+  are then admitted under process-local global and per-actor no-wait limits.
+  Saturated requests return the same generic `429` plus `Retry-After` without
+  constructing the ordinary request session. Accepted calls complete all
+  database-backed preparation and release their read scope before resolver I/O;
+  returns the envelope plus base64 content. Registry comes from
+  `request.app.state.resolver_registry` or
   `registry_from_env()`; `LAB_TRACKER_RESOLVER_ALLOWED_ROOTS` gates local roots
   (unset → local artifacts resolve `UNRESOLVED`), HTTP(S) is constrained by the
   outbound destination policy, and rclone is constrained by its configured

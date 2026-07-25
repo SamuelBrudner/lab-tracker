@@ -8,6 +8,11 @@ from typing import Literal
 from pydantic import field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from lab_tracker.artifact_resolution_admission import (
+    DEFAULT_ARTIFACT_RESOLUTION_GLOBAL_IN_FLIGHT_LIMIT,
+    DEFAULT_ARTIFACT_RESOLUTION_PER_ACTOR_IN_FLIGHT_LIMIT,
+    MAX_ARTIFACT_RESOLUTION_GLOBAL_IN_FLIGHT_LIMIT,
+)
 from lab_tracker.bounded_subprocess import MAX_PROCESS_DEADLINE_SECONDS
 from lab_tracker.outbound_http import MAX_OUTBOUND_HTTP_DEADLINE_SECONDS
 
@@ -45,6 +50,12 @@ class Settings(BaseSettings):
     resolver_http_allowed_networks: str = ""
     resolver_http_deadline_seconds: float = 30.0
     resolver_subprocess_deadline_seconds: float = 30.0
+    artifact_resolution_global_in_flight_limit: int = (
+        DEFAULT_ARTIFACT_RESOLUTION_GLOBAL_IN_FLIGHT_LIMIT
+    )
+    artifact_resolution_per_actor_in_flight_limit: int = (
+        DEFAULT_ARTIFACT_RESOLUTION_PER_ACTOR_IN_FLIGHT_LIMIT
+    )
     git_allowed_remotes: str = ""
     graph_draft_provider: str = "openai"
     graph_draft_background_enabled: bool = False
@@ -129,6 +140,31 @@ class Settings(BaseSettings):
         if self.auth_rate_limit_window_seconds < 1:
             raise ValueError(
                 "LAB_TRACKER_AUTH_RATE_LIMIT_WINDOW_SECONDS must be at least 1."
+            )
+        if self.artifact_resolution_global_in_flight_limit < 1:
+            raise ValueError(
+                "LAB_TRACKER_ARTIFACT_RESOLUTION_GLOBAL_IN_FLIGHT_LIMIT must be at least 1."
+            )
+        if (
+            self.artifact_resolution_global_in_flight_limit
+            > MAX_ARTIFACT_RESOLUTION_GLOBAL_IN_FLIGHT_LIMIT
+        ):
+            raise ValueError(
+                "LAB_TRACKER_ARTIFACT_RESOLUTION_GLOBAL_IN_FLIGHT_LIMIT must be no "
+                f"greater than {MAX_ARTIFACT_RESOLUTION_GLOBAL_IN_FLIGHT_LIMIT}."
+            )
+        if self.artifact_resolution_per_actor_in_flight_limit < 1:
+            raise ValueError(
+                "LAB_TRACKER_ARTIFACT_RESOLUTION_PER_ACTOR_IN_FLIGHT_LIMIT must be "
+                "at least 1."
+            )
+        if (
+            self.artifact_resolution_per_actor_in_flight_limit
+            > self.artifact_resolution_global_in_flight_limit
+        ):
+            raise ValueError(
+                "LAB_TRACKER_ARTIFACT_RESOLUTION_PER_ACTOR_IN_FLIGHT_LIMIT must be "
+                "no greater than LAB_TRACKER_ARTIFACT_RESOLUTION_GLOBAL_IN_FLIGHT_LIMIT."
             )
         if self.graph_draft_worker_poll_seconds <= 0:
             raise ValueError(

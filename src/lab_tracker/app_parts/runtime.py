@@ -28,6 +28,7 @@ from lab_tracker.artifact_resolution import (
     outbound_http_policy_from_config,
     registry_from_env,
 )
+from lab_tracker.artifact_resolution_admission import ArtifactResolutionAdmission
 from lab_tracker.auth import (
     AuthService,
     DeviceAuthService,
@@ -112,6 +113,7 @@ class AppRuntime:
     outbound_http_policy: OutboundHttpPolicy
     git_remote_policy: GitRemotePolicy
     resolver_registry: ResolverRegistry
+    artifact_resolution_admission: ArtifactResolutionAdmission
     git_health_workdir: Path
     store_health_checker: StoreHealthChecker
     _git_health_workdir_owner: _OwnedGitHealthWorkdir = field(
@@ -208,6 +210,10 @@ def _build_app_runtime(
         max_attempts=settings.auth_rate_limit_attempts,
         window_seconds=settings.auth_rate_limit_window_seconds,
     )
+    artifact_resolution_admission = ArtifactResolutionAdmission(
+        global_in_flight_limit=settings.artifact_resolution_global_in_flight_limit,
+        per_actor_in_flight_limit=settings.artifact_resolution_per_actor_in_flight_limit,
+    )
     store_health_checker = StoreHealthChecker(
         git_remote_policy=git_remote_policy,
         git_health_workdir=git_health_workdir,
@@ -231,6 +237,7 @@ def _build_app_runtime(
         outbound_http_policy=outbound_http_policy,
         git_remote_policy=git_remote_policy,
         resolver_registry=resolver_registry,
+        artifact_resolution_admission=artifact_resolution_admission,
         git_health_workdir=git_health_workdir,
         store_health_checker=store_health_checker,
         _git_health_workdir_owner=git_health_workdir_owner,
@@ -386,6 +393,7 @@ def configure_app_state(app: FastAPI, runtime: AppRuntime) -> None:
     app.state.outbound_http_policy = runtime.outbound_http_policy
     app.state.git_remote_policy = runtime.git_remote_policy
     app.state.resolver_registry = runtime.resolver_registry
+    app.state.artifact_resolution_admission = runtime.artifact_resolution_admission
     app.state.git_health_workdir = runtime.git_health_workdir
     app.state.store_health_checker = runtime.store_health_checker
     app.state.cleanup_git_health_workdir = runtime.cleanup_git_health_workdir
