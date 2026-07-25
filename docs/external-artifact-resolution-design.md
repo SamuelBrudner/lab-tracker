@@ -604,6 +604,17 @@ Shipped (`src/lab_tracker/artifact_resolution.py`, tested in
   independently capped, while the object stream is subject to the actual-byte
   fetch limit. Structural remote policy and cache disk containment remain
   separate hardening work.
+- ✅ Registered Git stores use a separate nominally dispatched target.
+  `PinnedGitPath` combines a strict portable repository path with a full
+  lowercase nonzero SHA-1 or SHA-256 object ID; mutable refs, abbreviations,
+  revspecs, traversal, and platform-specific path aliases fail before cache or
+  process work. Preparation retains a neutral structurally parsed remote and
+  logical `store://` identity. The scoped resolver reauthorizes that address,
+  uses object-format-separated cache namespaces, and explicitly runs
+  `git init --object-format=sha1|sha256` before the existing exact-URL preflight,
+  fetch, size, stream, and hash lifecycle. Ordinary direct `git+` references
+  retain their established parsing and cache behavior pending separate generic
+  Git hardening.
 - ✅ Content hash is the integrity gate across all adapters (the whole object is
   hashed; `max_bytes`/`byte_range` bound only the returned payload), via the
   shared `_hash_and_collect` helper.

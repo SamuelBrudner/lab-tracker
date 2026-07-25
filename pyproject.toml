@@ -140,6 +140,7 @@ files = [
   "src/lab_tracker/outbound_http.py",
   "src/lab_tracker/artifact_resolution.py",
   "src/lab_tracker/git_remote_policy.py",
+  "src/lab_tracker/git_store_locator.py",
   "src/lab_tracker/local_store_locator.py",
   "src/lab_tracker/rclone_store_locator.py",
   "src/lab_tracker/local_path_policy.py",

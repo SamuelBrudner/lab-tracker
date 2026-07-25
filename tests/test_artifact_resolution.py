@@ -25,6 +25,7 @@ from lab_tracker.artifact_resolution import (
     ArtifactResolver,
     GitCompleted,
     GitResolver,
+    GitStoreResolutionTarget,
     HttpResolver,
     HttpStoreResolutionTarget,
     LocalFilesystemResolver,
@@ -36,12 +37,14 @@ from lab_tracker.artifact_resolution import (
     ResolutionStatus,
     ResolvedArtifact,
     ResolverRegistry,
+    ScopedGitStoreResolver,
     ScopedHttpStoreResolver,
     ScopedLocalStoreResolver,
     ScopedRcloneStoreResolver,
     StoreHealthStatus,
     check_store_health,
     default_registry,
+    git_store_resolution_target,
     http_store_resolution_target,
     is_verifiable_hash,
     local_store_resolution_target,
@@ -51,7 +54,11 @@ from lab_tracker.artifact_resolution import (
     registry_from_env,
     store_relative_reference,
 )
-from lab_tracker.git_remote_policy import GitRemotePolicy
+from lab_tracker.git_remote_policy import (
+    GitRemotePolicy,
+    parse_git_remote_address,
+)
+from lab_tracker.git_store_locator import PinnedGitPath
 from lab_tracker.local_file_access import (
     LocalOpenFailure,
     LocalOpenFailureReason,
@@ -1568,6 +1575,24 @@ def _rclone_store_target(
     return target
 
 
+def _git_store_target(
+    *,
+    remote: str = _GIT_REMOTE,
+    repository_path: str = "analysis/run.py",
+    object_id: str = "a" * 40,
+    content_hash: str | None = None,
+    name: str = "repo",
+) -> GitStoreResolutionTarget:
+    store = _data_store(StoreKind.GIT, remote, name=name)
+    target = store_relative_reference(
+        store,
+        path=f"{repository_path}@{object_id}",
+        content_hash=content_hash or _sha256(b"artifact"),
+    )
+    assert isinstance(target, GitStoreResolutionTarget)
+    return target
+
+
 def _local_store_target(
     store: DataStore,
     locator_path: str,
@@ -1996,17 +2021,42 @@ def test_store_relative_reference_unsupported_kind_returns_none():
     assert store_relative_reference(store, path="q", content_hash=_sha256(b"x")) is None
 
 
-def test_store_relative_reference_git_builds_commit_pin():
+def test_store_relative_reference_git_builds_scoped_logical_target():
     store = _data_store(
         StoreKind.GIT, "https://example.com/org/repo.git", name="repo"
     )
     commit = "a" * 40
-    ref = store_relative_reference(
+    target = store_relative_reference(
         store, path=f"analysis/run.py@{commit}", content_hash=_sha256(b"x")
     )
-    assert ref is not None
-    assert ref.source_system == "git"
-    assert ref.uri == f"git+https://example.com/org/repo.git#{commit}:analysis/run.py"
+
+    assert isinstance(target, GitStoreResolutionTarget)
+    assert target.remote.subprocess_value == _GIT_REMOTE
+    assert target.pin.path.components == ("analysis", "run.py")
+    assert target.pin.object_id.value == commit
+    assert target.pin.object_id.object_format == "sha1"
+    assert target.logical_reference.source_system == "store"
+    assert target.logical_reference.store_name == "repo"
+    assert target.logical_reference.locator == f"analysis/run.py@{commit}"
+    assert target.logical_reference.uri == f"store://repo/analysis/run.py@{commit}"
+
+
+def test_store_relative_reference_git_retains_internal_at_and_sha256_pin():
+    object_id = "b" * 64
+
+    target = store_relative_reference(
+        _data_store(StoreKind.GIT, _GIT_REMOTE, name="repo"),
+        path=f"analysis/model@v2.py@{object_id}",
+        content_hash=_sha256(b"x"),
+    )
+
+    assert isinstance(target, GitStoreResolutionTarget)
+    assert target.pin.path.path == "analysis/model@v2.py"
+    assert target.pin.object_id.value == object_id
+    assert target.pin.object_id.object_format == "sha256"
+    assert target.logical_reference.uri == (
+        f"store://repo/analysis/model@v2.py@{object_id}"
+    )
 
 
 def test_store_relative_reference_git_without_commit_returns_none():
@@ -2019,8 +2069,133 @@ def test_store_relative_reference_git_without_commit_returns_none():
     )
 
 
+@pytest.mark.parametrize(
+    ("root", "locator"),
+    (
+        ("https://user:secret@example.com/repo.git", f"analysis/run.py@{'a' * 40}"),
+        ("../local-repo.git", f"analysis/run.py@{'a' * 40}"),
+        (_GIT_REMOTE, "analysis/run.py@HEAD"),
+        (_GIT_REMOTE, f"analysis/run.py@{'A' * 40}"),
+        (_GIT_REMOTE, f"analysis/run.py@{'0' * 40}"),
+        (_GIT_REMOTE, "analysis/run.py@abcdef1"),
+        (_GIT_REMOTE, f"/analysis/run.py@{'a' * 40}"),
+        (_GIT_REMOTE, f"analysis/../secret.py@{'a' * 40}"),
+        (_GIT_REMOTE, f"analysis/run:1.py@{'a' * 40}"),
+        (_GIT_REMOTE, f"analysis\\run.py@{'a' * 40}"),
+        (_GIT_REMOTE, f"analysis/%72un.py@{'a' * 40}"),
+    ),
+    ids=(
+        "credentialed-remote",
+        "local-remote",
+        "symbolic-ref",
+        "uppercase-object-id",
+        "zero-object-id",
+        "abbreviated-object-id",
+        "absolute-path",
+        "traversal",
+        "windows-ads",
+        "backslash",
+        "encoded-path-alias",
+    ),
+)
+def test_store_relative_reference_rejects_invalid_git_target_without_host_io(
+    root,
+    locator,
+    monkeypatch,
+):
+    def unexpected_cache_creation(*_args, **_kwargs):
+        raise AssertionError("invalid registered Git target touched the cache")
+
+    monkeypatch.setattr(artifact_resolution.os, "makedirs", unexpected_cache_creation)
+
+    target = store_relative_reference(
+        _data_store(StoreKind.GIT, root, name="repo"),
+        path=locator,
+        content_hash=_sha256(b"x"),
+    )
+
+    assert target is None
+
+
+def test_git_store_target_factory_rejects_mismatched_logical_identity():
+    store = _data_store(StoreKind.GIT, _GIT_REMOTE, name="repo")
+    pin = PinnedGitPath.parse_decoded(f"analysis/run.py@{'a' * 40}")
+    other_pin = PinnedGitPath.parse_decoded(f"analysis/other.py@{'a' * 40}")
+    assert pin is not None
+    assert other_pin is not None
+    reference = ExternalArtifactReference.for_git_store(
+        store_name=store.name,
+        repository_path=pin.path.path,
+        object_id=pin.object_id.value,
+        content_hash=_sha256(b"x"),
+    )
+
+    assert (
+        git_store_resolution_target(
+            store,
+            pin=pin,
+            logical_reference=reference.model_copy(
+                update={
+                    "store_name": "other",
+                    "uri": f"store://other/{pin.uri_path}",
+                }
+            ),
+        )
+        is None
+    )
+    assert (
+        git_store_resolution_target(
+            store,
+            pin=other_pin,
+            logical_reference=reference,
+        )
+        is None
+    )
+    assert (
+        git_store_resolution_target(
+            store,
+            pin=pin,
+            logical_reference=reference.model_copy(
+                update={"uri": f"store://repo/{other_pin.uri_path}"}
+            ),
+        )
+        is None
+    )
+    assert (
+        git_store_resolution_target(
+            store,
+            pin=pin,
+            logical_reference=reference.model_copy(
+                update={"locator": other_pin.locator}
+            ),
+        )
+        is None
+    )
+
+
+def test_git_store_target_cannot_bypass_validated_factory():
+    pin = PinnedGitPath.parse_decoded(f"analysis/run.py@{'a' * 40}")
+    remote = parse_git_remote_address(_GIT_REMOTE)
+    assert pin is not None
+    assert remote is not None
+    reference = ExternalArtifactReference.for_git_store(
+        store_name="repo",
+        repository_path=pin.path.path,
+        object_id=pin.object_id.value,
+        content_hash=_sha256(b"x"),
+    )
+
+    with pytest.raises(TypeError, match="validated factory"):
+        GitStoreResolutionTarget(
+            logical_reference=reference,
+            remote=remote,
+            pin=pin,
+            _factory_token=object(),
+        )
+
+
 def test_store_relative_reference_git_resolves_end_to_end(tmp_path):
-    # The locator produced from a git store must be consumable by GitResolver.
+    # The typed target must reach GitResolver without becoming a generic git+ URI.
     data = b"pinned analysis code"
     store = _data_store(
         StoreKind.GIT, "https://example.com/org/repo.git", name="repo"
@@ -2034,10 +2209,11 @@ def test_store_relative_reference_git_resolves_end_to_end(tmp_path):
         [_git_resolver(runner=_fake_git_runner(blob=data), cache_root=tmp_path)]
     )
 
-    result = registry.resolve(ref)
+    result = registry.resolve_prepared(ref)
 
     assert result.status is ResolutionStatus.VERIFIED
     assert result.content == data
+    assert result.uri == f"store://repo/src/model.py@{commit}"
 
 
 # --- check_store_health ---------------------------------------------------
@@ -2393,6 +2569,7 @@ class _RecordingPreparedResolver(
     ScopedLocalStoreResolver,
     ScopedHttpStoreResolver,
     ScopedRcloneStoreResolver,
+    ScopedGitStoreResolver,
 ):
     def __init__(self) -> None:
         self.can_resolve_references: list[ExternalArtifactReference] = []
@@ -2447,6 +2624,16 @@ class _RecordingPreparedResolver(
         byte_range: tuple[int, int] | None = None,
     ) -> ResolvedArtifact:
         self.calls.append(("rclone", target, max_bytes, byte_range))
+        return self._result(target.logical_reference)
+
+    def resolve_within_git_store(
+        self,
+        target: GitStoreResolutionTarget,
+        *,
+        max_bytes: int = DEFAULT_MAX_BYTES,
+        byte_range: tuple[int, int] | None = None,
+    ) -> ResolvedArtifact:
+        self.calls.append(("git", target, max_bytes, byte_range))
         return self._result(target.logical_reference)
 
     @staticmethod
@@ -2553,6 +2740,21 @@ def test_registry_dispatches_prepared_rclone_target_to_scoped_resolver():
     assert resolver.calls == [("rclone", target, 17, (2, 5))]
 
 
+def test_registry_dispatches_prepared_git_target_to_scoped_resolver():
+    target = _git_store_target()
+    resolver = _RecordingPreparedResolver()
+
+    result = ResolverRegistry([resolver]).resolve_prepared(
+        target,
+        max_bytes=17,
+        byte_range=(2, 5),
+    )
+
+    assert result.uri == target.logical_reference.uri
+    assert resolver.can_resolve_references == []
+    assert resolver.calls == [("git", target, 17, (2, 5))]
+
+
 def test_registry_does_not_fall_back_to_generic_rclone_for_registered_target():
     target = _rclone_store_target()
 
@@ -2568,6 +2770,23 @@ def test_registry_does_not_fall_back_to_generic_rclone_for_registered_target():
     assert result.status is ResolutionStatus.UNRESOLVED
     assert result.uri == target.logical_reference.uri
     assert result.detail == "No scoped rclone-store resolver is registered."
+
+
+def test_registry_does_not_fall_back_to_generic_git_for_registered_target():
+    target = _git_store_target()
+
+    class OrdinaryOnlyResolver(ArtifactResolver):
+        def can_resolve(self, _ref):
+            raise AssertionError("registered target reached generic dispatch")
+
+        def resolve(self, _ref, *, max_bytes=DEFAULT_MAX_BYTES, byte_range=None):
+            raise AssertionError("registered target reached generic dispatch")
+
+    result = ResolverRegistry([OrdinaryOnlyResolver()]).resolve_prepared(target)
+
+    assert result.status is ResolutionStatus.UNRESOLVED
+    assert result.uri == target.logical_reference.uri
+    assert result.detail == "No scoped Git-store resolver is registered."
 
 
 def test_registry_rejects_unsupported_prepared_runtime_type_without_reflection():
@@ -3850,6 +4069,220 @@ def _fake_git_runner(
 
     runner.calls = calls
     return runner
+
+
+def test_scoped_git_resolver_uses_exact_object_format_and_separate_caches(
+    tmp_path,
+):
+    sha1_data = b"sha1 registered artifact"
+    sha256_data = b"sha256 registered artifact"
+    sha1_id = "a" * 40
+    sha256_id = "b" * 64
+    executor = _FakeProcessExecutor(
+        [
+            (0, (), b""),
+            (0, (), b""),
+            (0, (f"{len(sha1_data)}\n".encode(),), b""),
+            (0, (sha1_data,), b""),
+            (0, (), b""),
+            (0, (), b""),
+            (0, (f"{len(sha256_data)}\n".encode(),), b""),
+            (0, (sha256_data,), b""),
+        ]
+    )
+    resolver = _git_resolver(executor=executor, cache_root=tmp_path)
+    sha1_target = _git_store_target(
+        object_id=sha1_id,
+        content_hash=_sha256(sha1_data),
+    )
+    sha256_target = _git_store_target(
+        object_id=sha256_id,
+        content_hash=_sha256(sha256_data),
+    )
+
+    sha1_result = resolver.resolve_within_git_store(
+        sha1_target,
+        byte_range=(2, 9),
+    )
+    sha256_result = resolver.resolve_within_git_store(sha256_target)
+
+    assert sha1_result.status is ResolutionStatus.VERIFIED
+    assert sha1_result.content == sha1_data[2:9]
+    assert sha1_result.uri == sha1_target.logical_reference.uri
+    assert sha256_result.status is ResolutionStatus.VERIFIED
+    assert sha256_result.content == sha256_data
+    assert sha256_result.uri == sha256_target.logical_reference.uri
+
+    sha1_calls = executor.calls[:5]
+    sha256_calls = executor.calls[5:]
+    sha1_init = next(call for call in sha1_calls if "init" in call["command"])
+    sha256_init = next(call for call in sha256_calls if "init" in call["command"])
+    assert sha1_init["command"][-3:] == [
+        "init",
+        "-q",
+        "--object-format=sha1",
+    ]
+    assert sha256_init["command"][-3:] == [
+        "init",
+        "-q",
+        "--object-format=sha256",
+    ]
+    assert next(
+        call["command"] for call in sha1_calls if "fetch" in call["command"]
+    )[-3:] == ["--", _GIT_REMOTE, sha1_id]
+    assert next(
+        call["command"] for call in sha256_calls if "fetch" in call["command"]
+    )[-3:] == ["--", _GIT_REMOTE, sha256_id]
+
+    def expected_cache(object_format: str) -> str:
+        identity = f"{object_format}\0{_GIT_REMOTE}"
+        digest = hashlib.sha256(identity.encode()).hexdigest()[:16]
+        return os.fspath(tmp_path / f"{object_format}-{digest}")
+
+    sha1_cwd = expected_cache("sha1")
+    sha256_cwd = expected_cache("sha256")
+    assert sha1_cwd != sha256_cwd
+    assert {call["cwd"] for call in sha1_calls} == {sha1_cwd}
+    assert {call["cwd"] for call in sha256_calls} == {sha256_cwd}
+    assert Path(sha1_cwd).is_dir()
+    assert Path(sha256_cwd).is_dir()
+    assert len({id(call["deadline"]) for call in sha1_calls}) == 1
+    assert len({id(call["deadline"]) for call in sha256_calls}) == 1
+    assert sha1_calls[0]["deadline"] is not sha256_calls[0]["deadline"]
+
+
+def test_scoped_git_resolver_reports_drift_with_logical_identity(tmp_path):
+    target = _git_store_target(content_hash=_sha256(b"recorded"))
+    resolver = _git_resolver(
+        runner=_fake_git_runner(blob=b"actual"),
+        cache_root=tmp_path,
+    )
+
+    result = resolver.resolve_within_git_store(target)
+
+    assert result.status is ResolutionStatus.DRIFTED
+    assert result.uri == target.logical_reference.uri
+    assert result.observed_hash == _sha256(b"actual")
+    assert result.content is None
+    assert _GIT_REMOTE not in str(result.to_json_dict())
+
+
+def test_scoped_git_resolver_uses_one_total_deadline(tmp_path):
+    clock = FakeClock()
+
+    def consume_budget(_index, _deadline):
+        clock.advance(0.3)
+
+    executor = _FakeProcessExecutor(
+        [
+            (0, (), b""),
+            (0, (), b""),
+            (0, (b"1\n",), b""),
+            (0, (b"x",), b""),
+        ],
+        on_run=consume_budget,
+    )
+    target = _git_store_target(content_hash=_sha256(b"x"))
+    result = _git_resolver(
+        executor=executor,
+        cache_root=tmp_path,
+        deadline_seconds=1.0,
+        clock=clock,
+    ).resolve_within_git_store(target)
+
+    assert result.status is ResolutionStatus.UNRESOLVED
+    assert result.uri == target.logical_reference.uri
+    assert result.detail == "Git artifact resolution failed."
+    assert len(executor.calls) == 4
+    assert len({id(call["deadline"]) for call in executor.calls}) == 1
+
+
+def test_scoped_git_resolver_never_parses_a_generic_git_locator(
+    tmp_path,
+    monkeypatch,
+):
+    data = b"typed target"
+    target = _git_store_target(content_hash=_sha256(data))
+
+    def unexpected_generic_parse(_uri):
+        raise AssertionError("registered target reached generic Git URI parsing")
+
+    monkeypatch.setattr(
+        artifact_resolution,
+        "_parse_git_locator",
+        unexpected_generic_parse,
+    )
+
+    result = _git_resolver(
+        runner=_fake_git_runner(blob=data),
+        cache_root=tmp_path,
+    ).resolve_within_git_store(target)
+
+    assert result.status is ResolutionStatus.VERIFIED
+    assert result.content == data
+    assert result.uri == target.logical_reference.uri
+
+
+def test_scoped_git_policy_denial_precedes_executor_and_cache_construction(
+    tmp_path,
+    monkeypatch,
+):
+    target = _git_store_target(content_hash=_sha256(b"x"))
+    cache_root = tmp_path / "must-not-exist"
+
+    def unexpected_executor():
+        raise AssertionError("policy denial constructed a process executor")
+
+    def unexpected_cache_creation(*_args, **_kwargs):
+        raise AssertionError("policy denial touched the Git cache")
+
+    monkeypatch.setattr(
+        artifact_resolution,
+        "BoundedSubprocessExecutor",
+        unexpected_executor,
+    )
+    monkeypatch.setattr(artifact_resolution.os, "makedirs", unexpected_cache_creation)
+    resolver = GitResolver(
+        cache_root=cache_root,
+        remote_policy=_git_policy("https://allowed.example/"),
+    )
+
+    result = resolver.resolve_within_git_store(target)
+
+    assert result.status is ResolutionStatus.UNRESOLVED
+    assert result.uri == target.logical_reference.uri
+    assert result.detail == "Remote is not in the git resolver allowlist."
+    assert not cache_root.exists()
+
+
+def test_direct_generic_head_retains_legacy_init_and_cache_identity(tmp_path):
+    data = b"legacy mutable direct reference"
+    executor = _FakeProcessExecutor(
+        [
+            (0, (), b""),
+            (0, (), b""),
+            (0, (f"{len(data)}\n".encode(),), b""),
+            (0, (data,), b""),
+        ]
+    )
+
+    result = _git_resolver(executor=executor, cache_root=tmp_path).resolve(
+        _git_ref(_sha256(data), commit="HEAD")
+    )
+
+    assert result.status is ResolutionStatus.VERIFIED
+    init = next(call for call in executor.calls if "init" in call["command"])
+    assert init["command"][-2:] == ["init", "-q"]
+    assert not any(
+        argument.startswith("--object-format=")
+        for argument in init["command"]
+    )
+    fetch = next(call for call in executor.calls if "fetch" in call["command"])
+    assert fetch["command"][-3:] == ["--", _GIT_REMOTE, "HEAD"]
+    legacy_digest = hashlib.sha256(_GIT_REMOTE.encode()).hexdigest()[:16]
+    legacy_cache = os.fspath(tmp_path / legacy_digest)
+    assert {call["cwd"] for call in executor.calls} == {legacy_cache}
+    assert Path(legacy_cache).is_dir()
 
 
 def test_git_resolver_verifies_blob(tmp_path):

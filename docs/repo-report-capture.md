@@ -114,8 +114,11 @@ fields (pure helpers; nothing auto-commits):
 - `repo_environment_hash` → `Analysis.environment_hash`.
 
 To pin a specific *code file* verifiably, register the repository as a `git`
-data store and use a `path@commit` locator (`repo_bridge.git_code_pin`); the
-GitResolver fetches the blob read-only and verifies its hash. Resolution is
+data store and use `repo_bridge.git_code_pin` to construct a portable repository
+path plus a full lowercase, nonzero SHA-1 or SHA-256 object ID. Mutable refs,
+abbreviations, revspecs, traversal, and platform-specific path aliases are
+rejected rather than normalized. The GitResolver fetches the blob read-only and
+verifies its hash while retaining the logical `store://` identity. Resolution is
 gated by the strict structural `LAB_TRACKER_GIT_ALLOWED_REMOTES` policy
 (deny-by-default), a protocol allowlist, a size cap, and a bounded fetch cache.
 Grants match the scheme, normalized host, effective port, SSH user, URL/SCP path

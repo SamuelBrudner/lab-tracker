@@ -21,6 +21,11 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, computed_field, field_validator, model_validator
 
+from lab_tracker.git_store_locator import (
+    GitObjectId,
+    PinnedGitPath,
+    canonical_git_store_uri,
+)
 from lab_tracker.local_store_locator import (
     LocalStoreLocator,
     PortableStorePath,
@@ -619,6 +624,37 @@ class ExternalArtifactReference(_DomainModel):
             content_hash=content_hash,
             store_name=store_name,
             locator=parsed_locator.path,
+            metadata=dict(metadata or {}),
+        )
+
+    @classmethod
+    def for_git_store(
+        cls,
+        *,
+        store_name: str,
+        repository_path: str,
+        object_id: str,
+        content_hash: str,
+        kind: ExternalArtifactKind = ExternalArtifactKind.ENTITY,
+        metadata: Mapping[str, Any] | None = None,
+    ) -> ExternalArtifactReference:
+        """Build a canonical immutable pin for a registered Git store."""
+
+        parsed_path = PortableStorePath.parse_decoded(repository_path)
+        parsed_object_id = GitObjectId.parse(object_id)
+        if parsed_path is None or parsed_object_id is None:
+            raise ValueError("Invalid Git-store name, path, or object ID.")
+        pin = PinnedGitPath(path=parsed_path, object_id=parsed_object_id)
+        canonical_uri = canonical_git_store_uri(store_name, pin)
+        if canonical_uri is None:
+            raise ValueError("Invalid Git-store name, path, or object ID.")
+        return cls(
+            kind=kind,
+            source_system="store",
+            uri=canonical_uri,
+            content_hash=content_hash,
+            store_name=store_name,
+            locator=pin.locator,
             metadata=dict(metadata or {}),
         )
 
