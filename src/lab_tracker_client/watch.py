@@ -9,9 +9,17 @@ import uuid
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
+from lab_tracker.collection_manifest import (
+    ACQUISITION_COLLECTION_CAPABILITY,
+    COLLECTION_MANIFEST_SCHEMA_VERSION,
+    MAX_COLLECTION_MANIFEST_BYTES,
+    canonicalize_collection_key,
+    canonicalize_collection_manifest,
+)
+from lab_tracker.errors import ValidationError
 from lab_tracker.file_watch import (
     FileFingerprint,
 )
@@ -39,6 +47,7 @@ from lab_tracker_client.client import (
     CAPTURE_HOST_METADATA_KEYS,
     EvidenceNoteIndex,
     LabTracker,
+    LTAPIError,
     LTRecord,
     LTValidationError,
     build_evidence_metadata,
@@ -53,7 +62,14 @@ DEFAULT_MANIFEST_PATTERN = "lab-tracker-evidence.json"
 WATCH_EVIDENCE_ADAPTER = "lt-watch"
 SINK_STAGED_NOTE = "staged-note"
 SINK_ACQUISITION_OUTPUT = "acquisition-output"
-ALLOWED_SINKS = {SINK_STAGED_NOTE, SINK_ACQUISITION_OUTPUT}
+SINK_ACQUISITION_COLLECTION = "acquisition-collection"
+ALLOWED_SINKS = {
+    SINK_STAGED_NOTE,
+    SINK_ACQUISITION_OUTPUT,
+    SINK_ACQUISITION_COLLECTION,
+}
+COLLECTION_MANIFEST_VERSION = COLLECTION_MANIFEST_SCHEMA_VERSION
+MAX_COLLECTION_REQUEST_BYTES = MAX_COLLECTION_MANIFEST_BYTES
 MODE_MANIFEST = "manifest"
 MODE_FILES = "files"
 ALLOWED_MODES = {MODE_MANIFEST, MODE_FILES}
@@ -122,6 +138,8 @@ class WatchSyncResult:
     sink: str
     note_id: str | None = None
     output_id: str | None = None
+    collection_id: str | None = None
+    snapshot_id: str | None = None
     change_set_id: str | None = None
     reason: str = ""
     error: str = ""
@@ -138,6 +156,10 @@ class WatchSyncResult:
             payload["note_id"] = self.note_id
         if self.output_id:
             payload["output_id"] = self.output_id
+        if self.collection_id:
+            payload["collection_id"] = self.collection_id
+        if self.snapshot_id:
+            payload["snapshot_id"] = self.snapshot_id
         if self.change_set_id:
             payload["change_set_id"] = self.change_set_id
         if self.reason:
@@ -200,6 +222,7 @@ def add_watch(
     question_id: str | None = None,
     session_id: str | None = None,
     tags: Sequence[str] | None = None,
+    complete: bool = False,
     config_path: str | Path | None = None,
     dry_run: bool = False,
 ) -> JsonObject:
@@ -236,9 +259,21 @@ def add_watch(
         entry["session_id"] = session_id
     if tags:
         entry["tags"] = _string_list(tags)
+    if complete:
+        entry["complete"] = True
     entry = _watch_config_payload(entry)
-    if entry["sink"] == SINK_ACQUISITION_OUTPUT and not entry.get("session_id"):
-        raise LTValidationError("acquisition-output watches require --session.")
+    if entry["sink"] in {
+        SINK_ACQUISITION_OUTPUT,
+        SINK_ACQUISITION_COLLECTION,
+    } and not entry.get("session_id"):
+        raise LTValidationError(f"{entry['sink']} watches require --session.")
+    if entry["sink"] == SINK_ACQUISITION_COLLECTION:
+        if not entry.get("name"):
+            raise LTValidationError(
+                "acquisition-collection watches require --name as the collection key."
+            )
+        if entry["mode"] != MODE_FILES:
+            raise LTValidationError("acquisition-collection watches require --mode files.")
     action = "unchanged" if entry in config.watches else "added"
     if action == "added":
         config.watches.append(entry)
@@ -435,6 +470,88 @@ def event_from_file(
     )
 
 
+def event_from_collection(
+    config: WatchConfig,
+    observations: Sequence[FileObservation],
+    *,
+    root: str | Path,
+    collection_key: str,
+    session_id: str,
+    complete: bool = False,
+    project_id: str | None = None,
+    source_provider: str = "local-folder",
+    source_uri: str | None = None,
+    adapter: str = "lt-watch-acquisition-collection",
+    include_patterns: Sequence[str] | None = None,
+    exclude_patterns: Sequence[str] | None = None,
+    selection_limited: bool = False,
+) -> JsonObject:
+    """Build one durable event for a folder-sized acquisition collection."""
+
+    resolved_root = Path(root).expanduser().resolve()
+    resolved_collection_key = _collection_key(collection_key)
+    resolved_session_id = _non_empty(session_id, "session_id")
+    members = [
+        {
+            "path": observation.relative_path,
+            "checksum": observation.content_hash,
+            "size_bytes": observation.size_bytes,
+        }
+        for observation in observations
+    ]
+    try:
+        canonical_manifest = canonicalize_collection_manifest(
+            schema_version=COLLECTION_MANIFEST_VERSION,
+            members=members,
+        )
+    except ValidationError as exc:
+        raise LTValidationError(str(exc)) from exc
+    manifest = canonical_manifest.as_dict()
+    manifest_hash = canonical_manifest.manifest_hash
+    sealed_label = "complete" if complete else "incomplete"
+    observation_nonce = uuid.uuid4().hex
+    capture_identity = (
+        f"{resolved_session_id}:{resolved_collection_key}:{manifest_hash}:"
+        f"{sealed_label}:{observation_nonce}"
+    )
+    collection_scope = hashlib.sha256(
+        f"{resolved_session_id}:{resolved_collection_key}".encode()
+    ).hexdigest()[:12]
+    root_uri = resolved_root.as_uri()
+    event = make_event(
+        capture_id=_client_capture_id(capture_identity),
+        event_id=(
+            f"collection-{collection_scope}-{manifest_hash[:16]}-"
+            f"{sealed_label}-{observation_nonce[:12]}"
+        ),
+        capture_kind="acquisition_collection",
+        adapter=adapter,
+        sink=SINK_ACQUISITION_COLLECTION,
+        source={
+            "provider": _non_empty(source_provider, "source_provider"),
+            "uri": source_uri or root_uri,
+            "external_id": f"{root_uri}::{resolved_collection_key}",
+            "root": str(resolved_root),
+            "root_uri": root_uri,
+            "manifest_hash": manifest_hash,
+            "include_patterns": _string_list(include_patterns),
+            "exclude_patterns": _string_list(exclude_patterns),
+            "selection_limited": bool(selection_limited),
+        },
+        context={
+            "project_id": _optional_str(project_id or config.project_id),
+            "session_id": resolved_session_id,
+        },
+        payload={
+            "collection_key": resolved_collection_key,
+            "complete": bool(complete),
+            "manifest": manifest,
+        },
+    )
+    _validate_collection_request_size(event)
+    return event
+
+
 def event_from_manifest(
     config: WatchConfig,
     manifest_path: str | Path,
@@ -565,6 +682,8 @@ def validate_event(payload: Mapping[str, Any]) -> JsonObject:
     event["metrics"] = _json_mapping(event.get("metrics") or {})
     event["log_excerpt"] = str(event.get("log_excerpt") or "")
     event["payload"] = _json_mapping(event.get("payload") or {})
+    if event["sink"] == SINK_ACQUISITION_COLLECTION:
+        event["payload"] = _validate_collection_payload(event["payload"])
     event["host"] = _json_mapping(event.get("host") or {})
     sync = event.get("sync") if isinstance(event.get("sync"), Mapping) else {}
     event["sync"] = {
@@ -639,6 +758,9 @@ def outbox_status(outbox: str | Path) -> JsonObject:
                 "sync_status": status,
                 "note_id": event.get("sync", {}).get("note_id"),
                 "output_id": event.get("sync", {}).get("output_id"),
+                "collection_key": event["payload"].get("collection_key"),
+                "snapshot_id": event.get("sync", {}).get("snapshot_id"),
+                "collection_id": event.get("sync", {}).get("collection_id"),
                 "change_set_id": event.get("sync", {}).get("change_set_id"),
                 "last_error": event.get("sync", {}).get("last_error"),
             }
@@ -668,11 +790,15 @@ def scan_watch(
     dataset_ids: Sequence[str] | None = None,
     tags: Sequence[str] | None = None,
     session_id: str | None = None,
+    collection_key: str | None = None,
+    complete: bool = False,
     source_provider: str | None = None,
     adapter: str | None = None,
     dry_run: bool = False,
+    verified_event_ids: set[str] | None = None,
 ) -> JsonObject:
     resolved_mode = _mode(mode)
+    resolved_sink = _sink(sink)
     resolved_root = Path(root).expanduser().resolve()
     if not resolved_root.exists():
         raise LTValidationError(f"watch root is not an existing path: {resolved_root}")
@@ -690,6 +816,69 @@ def scan_watch(
     matched_count = len(matched)
     if limit is not None:
         matched = matched[: max(0, limit)]
+    if resolved_sink == SINK_ACQUISITION_COLLECTION:
+        if resolved_mode != MODE_FILES:
+            raise LTValidationError("acquisition-collection scans require --mode files.")
+        if not resolved_root.is_dir():
+            raise LTValidationError("acquisition-collection scan roots must be directories.")
+        if not session_id:
+            raise LTValidationError("acquisition-collection scans require --session.")
+        if not collection_key:
+            raise LTValidationError("acquisition-collection scans require --collection.")
+        if complete and len(matched) != matched_count:
+            raise LTValidationError(
+                "a --complete acquisition collection cannot be truncated by --limit."
+            )
+        try:
+            observations = [observe_file(path, root=resolved_root) for path in matched]
+            event = event_from_collection(
+                config,
+                observations,
+                root=resolved_root,
+                collection_key=collection_key,
+                session_id=session_id,
+                complete=complete,
+                project_id=project_id,
+                source_provider=source_provider or "local-folder",
+                source_uri=resolved_root.as_uri(),
+                adapter=adapter or "lt-watch-acquisition-collection",
+                include_patterns=include_patterns,
+                exclude_patterns=exclude_patterns,
+                selection_limited=len(matched) != matched_count,
+            )
+            target_path = event_path(event, config.outbox_path())
+            already_present = target_path.exists()
+            if not dry_run:
+                target_path = write_event(event, config.outbox_path())
+                if verified_event_ids is not None:
+                    verified_event_ids.add(str(event["event_id"]))
+            imported = [
+                {
+                    "source": str(resolved_root),
+                    "event_path": str(target_path),
+                    "event_id": event["event_id"],
+                    "capture_id": event["capture_id"],
+                    "sink": event["sink"],
+                    "collection_key": collection_key,
+                    "member_count": len(observations),
+                    "already_present": already_present,
+                }
+            ]
+            errors: list[JsonObject] = []
+        except Exception as exc:  # noqa: BLE001 - keep the collection atomic.
+            imported = []
+            errors = [{"source": str(resolved_root), "error": str(exc)}]
+        return {
+            "command": "watch-scan",
+            "mode": resolved_mode,
+            "root": str(resolved_root),
+            "sink": resolved_sink,
+            "dry_run": dry_run,
+            "matched": matched_count,
+            "processed": len(matched),
+            "imported": imported,
+            "errors": errors,
+        }
     imported: list[JsonObject] = []
     errors: list[JsonObject] = []
     for path in matched:
@@ -698,7 +887,7 @@ def scan_watch(
                 event = event_from_manifest(
                     config,
                     path,
-                    sink=sink,
+                    sink=resolved_sink,
                     project_id=project_id,
                     question_id=question_id,
                     dataset_ids=dataset_ids,
@@ -710,7 +899,7 @@ def scan_watch(
                     config,
                     path,
                     root=resolved_root,
-                    sink=sink,
+                    sink=resolved_sink,
                     project_id=project_id,
                     question_id=question_id,
                     dataset_ids=dataset_ids,
@@ -720,7 +909,7 @@ def scan_watch(
                     adapter=adapter
                     or (
                         "lt-watch-acquisition"
-                        if sink == SINK_ACQUISITION_OUTPUT
+                        if resolved_sink == SINK_ACQUISITION_OUTPUT
                         else "lt-watch-files"
                     ),
                 )
@@ -744,7 +933,7 @@ def scan_watch(
         "command": "watch-scan",
         "mode": resolved_mode,
         "root": str(resolved_root),
-        "sink": sink,
+        "sink": resolved_sink,
         "dry_run": dry_run,
         "matched": matched_count,
         "processed": len(matched),
@@ -758,6 +947,7 @@ def scan_configured(
     *,
     dry_run: bool = False,
     limit: int | None = None,
+    verified_event_ids: set[str] | None = None,
 ) -> JsonObject:
     summaries = []
     errors = []
@@ -777,9 +967,12 @@ def scan_configured(
                 dataset_ids=_string_list(watch.get("dataset_ids")),
                 tags=_string_list(watch.get("tags")),
                 session_id=_optional_str(watch.get("session_id")),
+                collection_key=_optional_str(watch.get("name")),
+                complete=bool(watch.get("complete", False)),
                 source_provider=_optional_str(watch.get("source_provider")),
                 adapter=_optional_str(watch.get("adapter")),
                 dry_run=dry_run,
+                verified_event_ids=verified_event_ids,
             )
             summary["name"] = watch.get("name")
             summaries.append(summary)
@@ -801,9 +994,12 @@ def sync_outbox(
     dry_run: bool = False,
     request_draft: bool = False,
     limit: int | None = None,
+    preverified_event_ids: set[str] | None = None,
 ) -> JsonObject:
     outbox = config.outbox_path()
     note_indexes: dict[str, EvidenceNoteIndex] = {}
+    capability_cache: dict[str, bool] = {}
+    preverified = preverified_event_ids or set()
 
     def _is_actionable(event: JsonObject) -> bool:
         sync = event.get("sync", {})
@@ -824,6 +1020,8 @@ def sync_outbox(
             note_indexes=note_indexes,
             dry_run=dry_run,
             request_draft=request_draft,
+            preverified=event["event_id"] in preverified,
+            capability_cache=capability_cache,
         ).to_dict()
 
     def _skipped(path: Path, event: JsonObject) -> JsonObject:
@@ -836,6 +1034,8 @@ def sync_outbox(
             sink=event["sink"],
             note_id=_optional_str(sync.get("note_id")),
             output_id=_optional_str(sync.get("output_id")),
+            collection_id=_optional_str(sync.get("collection_id")),
+            snapshot_id=_optional_str(sync.get("snapshot_id")),
             change_set_id=_optional_str(sync.get("change_set_id")),
             reason="already_synced",
         ).to_dict()
@@ -950,8 +1150,12 @@ def _sync_event(
     note_indexes: dict[str, EvidenceNoteIndex],
     dry_run: bool,
     request_draft: bool,
+    preverified: bool,
+    capability_cache: dict[str, bool],
 ) -> WatchSyncResult:
-    stale_reason = _stale_reason(event)
+    if event["sink"] == SINK_ACQUISITION_COLLECTION and not dry_run:
+        _require_collection_capability(client, capability_cache)
+    stale_reason = "" if preverified else _stale_reason(event)
     if stale_reason:
         if not dry_run:
             _record_sync_failure(path, event, stale_reason, dry_run=False, status="stale")
@@ -974,6 +1178,13 @@ def _sync_event(
         )
     if event["sink"] == SINK_ACQUISITION_OUTPUT:
         return _sync_acquisition_output(client, path=path, event=event, dry_run=dry_run)
+    if event["sink"] == SINK_ACQUISITION_COLLECTION:
+        return _sync_acquisition_collection(
+            client,
+            path=path,
+            event=event,
+            dry_run=dry_run,
+        )
     raise LTValidationError(f"Unsupported watch sink: {event['sink']}")
 
 
@@ -1163,12 +1374,134 @@ def _sync_acquisition_output(
     )
 
 
+def _require_collection_capability(
+    client: LabTracker,
+    capability_cache: dict[str, bool],
+) -> None:
+    supported = capability_cache.get(ACQUISITION_COLLECTION_CAPABILITY)
+    if supported is None:
+        try:
+            supported = client.supports_capability(ACQUISITION_COLLECTION_CAPABILITY)
+        except Exception as exc:
+            raise LTAPIError(
+                "Could not verify acquisition collection support from "
+                "/schema/describe. The event remains queued; verify server "
+                "connectivity and authentication, then upgrade Lab Tracker if "
+                f"needed. No per-file fallback was attempted. ({exc})"
+            ) from exc
+        capability_cache[ACQUISITION_COLLECTION_CAPABILITY] = supported
+    if not supported:
+        raise LTAPIError(
+            "This Lab Tracker server does not advertise "
+            "acquisition_collections_v1. Upgrade the server, then retry "
+            "'lt watch sync'. The collection event remains queued and no "
+            "per-file fallback was attempted."
+        )
+
+
+def _sync_acquisition_collection(
+    client: LabTracker,
+    *,
+    path: Path,
+    event: JsonObject,
+    dry_run: bool,
+) -> WatchSyncResult:
+    session_id = _non_empty(
+        _optional_str(event["context"].get("session_id")) or "",
+        "session_id",
+    )
+    payload = _validate_collection_payload(event["payload"])
+    collection_key = str(payload["collection_key"])
+    if dry_run:
+        return WatchSyncResult(
+            action="skipped",
+            path=str(path),
+            event_id=event["event_id"],
+            capture_id=event["capture_id"],
+            sink=event["sink"],
+            reason="dry_run",
+        )
+    request_payload = _collection_snapshot_request(event)
+    _validate_collection_request_size(event)
+    snapshot = client.create_acquisition_collection_snapshot(
+        session_id,
+        collection_key,
+        **request_payload,
+    )
+    snapshot_id = _optional_str(
+        snapshot.get("snapshot_id") or snapshot.get("collection_snapshot_id")
+    )
+    if snapshot_id is None:
+        raise LTAPIError(
+            "Collection snapshot response did not include snapshot_id or "
+            "collection_snapshot_id."
+        )
+    collection_id = _optional_str(snapshot.get("collection_id"))
+    _record_sync_success(
+        path,
+        event,
+        note_id=None,
+        output_id=None,
+        collection_id=collection_id,
+        snapshot_id=snapshot_id,
+        change_set_id=None,
+        draft_error="",
+    )
+    return WatchSyncResult(
+        action="snapshotted",
+        path=str(path),
+        event_id=event["event_id"],
+        capture_id=event["capture_id"],
+        sink=event["sink"],
+        collection_id=collection_id,
+        snapshot_id=snapshot_id,
+    )
+
+
+def _collection_snapshot_request(event: Mapping[str, Any]) -> JsonObject:
+    payload = _validate_collection_payload(_json_mapping(event.get("payload") or {}))
+    source = _json_mapping(event.get("source") or {})
+    request_payload: JsonObject = {
+        "client_capture_id": _non_empty(
+            str(event.get("capture_id") or ""),
+            "client_capture_id",
+        ),
+        "observed_at": _non_empty(
+            str(event.get("observed_at") or ""),
+            "observed_at",
+        ),
+        "complete": bool(payload["complete"]),
+        "manifest": payload["manifest"],
+    }
+    if source.get("provider") is not None:
+        request_payload["source_provider"] = str(source["provider"])
+    if source.get("uri") is not None:
+        request_payload["source_uri"] = str(source["uri"])
+    return request_payload
+
+
+def _validate_collection_request_size(event: Mapping[str, Any]) -> None:
+    request_payload = _collection_snapshot_request(event)
+    encoded = json.dumps(
+        request_payload,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    if len(encoded) > MAX_COLLECTION_REQUEST_BYTES:
+        raise LTValidationError(
+            "acquisition collection snapshot request exceeds the 16 MiB limit."
+        )
+
+
 def _record_sync_success(
     path: Path,
     event: JsonObject,
     *,
     note_id: str | None,
     output_id: str | None,
+    collection_id: str | None = None,
+    snapshot_id: str | None = None,
     change_set_id: str | None,
     draft_error: str,
 ) -> None:
@@ -1184,6 +1517,10 @@ def _record_sync_success(
         sync["note_id"] = note_id
     if output_id:
         sync["output_id"] = output_id
+    if collection_id:
+        sync["collection_id"] = collection_id
+    if snapshot_id:
+        sync["snapshot_id"] = snapshot_id
     if change_set_id:
         sync["change_set_id"] = change_set_id
     if draft_error:
@@ -1218,6 +1555,8 @@ def _record_sync_failure(
 
 
 def _stale_reason(event: Mapping[str, Any]) -> str:
+    if event.get("sink") == SINK_ACQUISITION_COLLECTION:
+        return _collection_stale_reason(event)
     source = _json_mapping(event.get("source") or {})
     path = _optional_str(source.get("path"))
     if path:
@@ -1238,6 +1577,65 @@ def _stale_reason(event: Mapping[str, Any]) -> str:
         if file_sha256(manifest) != source.get("manifest_content_hash"):
             return f"watch manifest changed since scan: {manifest}"
     return ""
+
+
+def _collection_stale_reason(event: Mapping[str, Any]) -> str:
+    source = _json_mapping(event.get("source") or {})
+    root_text = _optional_str(source.get("root"))
+    if root_text is None:
+        return "acquisition collection event is missing its local source root"
+    root = Path(root_text).expanduser().resolve()
+    payload = _validate_collection_payload(_json_mapping(event.get("payload") or {}))
+    mismatches: list[str] = []
+    for member in payload["manifest"]["members"]:
+        relative_path = str(member["path"])
+        pure_path = PurePosixPath(relative_path)
+        member_path = root.joinpath(*pure_path.parts).resolve()
+        try:
+            member_path.relative_to(root)
+        except ValueError:
+            mismatches.append(f"{relative_path} escapes the watched root")
+            continue
+        fingerprint = stable_file_fingerprint(member_path)
+        if fingerprint is None:
+            mismatches.append(f"{relative_path} is missing or still changing")
+            continue
+        if (
+            fingerprint.checksum != member["checksum"]
+            or fingerprint.size_bytes != member["size_bytes"]
+        ):
+            mismatches.append(f"{relative_path} changed")
+    if not bool(source.get("selection_limited", False)):
+        expected_paths = {
+            str(member["path"])
+            for member in payload["manifest"]["members"]
+        }
+        try:
+            current_paths = {
+                _relative_posix(path, root)
+                for path in discover_files(
+                    root,
+                    include_patterns=_string_list(source.get("include_patterns"))
+                    or None,
+                    exclude_patterns=_string_list(source.get("exclude_patterns"))
+                    or None,
+                )
+            }
+        except Exception as exc:  # noqa: BLE001 - report source drift as staleness.
+            mismatches.append(f"could not rescan the watched root ({exc})")
+        else:
+            added = current_paths - expected_paths
+            removed = expected_paths - current_paths
+            if added or removed:
+                mismatches.append(
+                    f"member set changed (added {len(added)}, removed {len(removed)})"
+                )
+    if not mismatches:
+        return ""
+    suffix = ""
+    if len(mismatches) > 1:
+        suffix = f" (and {len(mismatches) - 1} other member(s))"
+    return f"acquisition collection changed since scan: {mismatches[0]}{suffix}"
 
 
 def _event_metadata(event: Mapping[str, Any]) -> dict[str, NoteMetadataScalar]:
@@ -1308,7 +1706,69 @@ def _watch_config_payload(watch: Mapping[str, Any]) -> JsonObject:
     payload["mode"] = _mode(str(payload.get("mode") or MODE_FILES))
     payload["sink"] = _sink(str(payload.get("sink") or SINK_STAGED_NOTE))
     payload["root"] = _non_empty(str(payload.get("root") or ""), "root")
+    if "complete" in payload and not isinstance(payload["complete"], bool):
+        raise LTValidationError("watch complete must be a boolean.")
+    if payload["sink"] == SINK_ACQUISITION_COLLECTION:
+        if not _optional_str(payload.get("name")):
+            raise LTValidationError(
+                "acquisition-collection watches require name as the collection key."
+            )
+        payload["name"] = _collection_key(str(payload.get("name") or ""))
+        if payload["mode"] != MODE_FILES:
+            raise LTValidationError("acquisition-collection watches require mode files.")
+        if not _optional_str(payload.get("session_id")):
+            raise LTValidationError(
+                "acquisition-collection watches require session_id."
+            )
     return payload
+
+
+def _validate_collection_payload(payload: Mapping[str, Any]) -> JsonObject:
+    collection_key = _collection_key(str(payload.get("collection_key") or ""))
+    complete = payload.get("complete", False)
+    if not isinstance(complete, bool):
+        raise LTValidationError("acquisition collection complete must be a boolean.")
+    manifest_value = payload.get("manifest")
+    if not isinstance(manifest_value, Mapping):
+        raise LTValidationError(
+            "acquisition collection manifest must be a JSON object."
+        )
+    schema_version = manifest_value.get("schema_version")
+    if (
+        isinstance(schema_version, bool)
+        or not isinstance(schema_version, int)
+        or schema_version != COLLECTION_MANIFEST_VERSION
+    ):
+        raise LTValidationError(
+            "acquisition collection schema_version must be "
+            f"{COLLECTION_MANIFEST_VERSION}."
+        )
+    members_value = manifest_value.get("members")
+    if not isinstance(members_value, Sequence) or isinstance(
+        members_value,
+        (str, bytes),
+    ):
+        raise LTValidationError("acquisition collection members must be a list.")
+    try:
+        canonical_manifest = canonicalize_collection_manifest(
+            schema_version=schema_version,
+            members=members_value,
+        )
+    except ValidationError as exc:
+        raise LTValidationError(str(exc)) from exc
+    return {
+        **_json_mapping(payload),
+        "collection_key": collection_key,
+        "complete": complete,
+        "manifest": canonical_manifest.as_dict(),
+    }
+
+
+def _collection_key(value: str) -> str:
+    try:
+        return canonicalize_collection_key(value)
+    except ValidationError as exc:
+        raise LTValidationError(str(exc)) from exc
 
 
 def _mode(mode: str) -> str:

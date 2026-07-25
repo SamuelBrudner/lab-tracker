@@ -636,10 +636,24 @@ def _add_watch_parsers(subcommands: argparse._SubParsersAction) -> None:
         default=[],
         help="Glob for relative paths to exclude. Repeatable.",
     )
-    add_parser.add_argument("--name", help="Optional label for this watch entry.")
+    add_parser.add_argument(
+        "--name",
+        help=(
+            "Watch label. Required as the collection key for "
+            "acquisition-collection."
+        ),
+    )
     add_parser.add_argument("--project", help="Project UUID override for this watch.")
     add_parser.add_argument("--question", help="Candidate question UUID recorded in metadata.")
-    add_parser.add_argument("--session", help="Session UUID for the acquisition-output sink.")
+    add_parser.add_argument(
+        "--session",
+        help="Session UUID for acquisition-output or acquisition-collection.",
+    )
+    add_parser.add_argument(
+        "--complete",
+        action="store_true",
+        help="Seal acquisition-collection snapshots from this watch.",
+    )
     add_parser.add_argument("--tag", action="append", default=[], help="Tag. Repeatable.")
     add_parser.add_argument("--config", help="Config path. Defaults to discovered config.")
     add_parser.add_argument(
@@ -710,7 +724,19 @@ def _add_watch_parsers(subcommands: argparse._SubParsersAction) -> None:
         help="Candidate dataset UUID.",
     )
     scan_parser.add_argument("--tag", action="append", default=[], help="Tag. Repeatable.")
-    scan_parser.add_argument("--session", help="Session UUID for acquisition-output sink.")
+    scan_parser.add_argument(
+        "--session",
+        help="Session UUID for acquisition-output or acquisition-collection.",
+    )
+    scan_parser.add_argument(
+        "--collection",
+        help="Collection key required for a direct acquisition-collection scan.",
+    )
+    scan_parser.add_argument(
+        "--complete",
+        action="store_true",
+        help="Mark the acquisition-collection snapshot complete and sealable.",
+    )
     scan_parser.add_argument(
         "--provider",
         help="Evidence source provider for files mode. Defaults to local-folder.",
@@ -1166,6 +1192,8 @@ def _cmd_watch_scan(args: argparse.Namespace) -> Any:
         dataset_ids=args.dataset,
         tags=args.tag,
         session_id=args.session,
+        collection_key=args.collection,
+        complete=args.complete,
         source_provider=args.provider,
         adapter=args.adapter,
         dry_run=args.dry_run,
@@ -1184,6 +1212,7 @@ def _cmd_watch_add(args: argparse.Namespace) -> Any:
         question_id=args.question,
         session_id=args.session,
         tags=args.tag or None,
+        complete=args.complete,
         config_path=args.config,
         dry_run=args.dry_run,
     )
@@ -1396,12 +1425,18 @@ def _cmd_hooks_status(args: argparse.Namespace) -> Any:
 
 def _cmd_watch_run(client: LabTracker, args: argparse.Namespace) -> Any:
     config = watch_capture.load_config(config_path=args.config)
-    scan = watch_capture.scan_configured(config, limit=args.limit)
+    verified_event_ids: set[str] = set()
+    scan = watch_capture.scan_configured(
+        config,
+        limit=args.limit,
+        verified_event_ids=verified_event_ids,
+    )
     sync = watch_capture.sync_outbox(
         client,
         config,
         request_draft=args.request_draft,
         limit=args.limit,
+        preverified_event_ids=verified_event_ids,
     )
     return {
         "command": "watch-run",
