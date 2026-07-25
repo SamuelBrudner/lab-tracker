@@ -41,7 +41,7 @@ from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
-from typing import BinaryIO
+from typing import BinaryIO, Protocol, TypeAlias
 from urllib.parse import unquote, urljoin, urlsplit
 
 from lab_tracker.bounded_subprocess import (
@@ -67,7 +67,9 @@ from lab_tracker.local_path_policy import (
 )
 from lab_tracker.local_store_locator import (
     LocalStoreLocator,
+    PortableStorePath,
     canonical_local_store_uri,
+    canonical_store_uri,
 )
 from lab_tracker.models import DataStore, ExternalArtifactReference, StoreKind
 from lab_tracker.outbound_http import (
@@ -78,6 +80,7 @@ from lab_tracker.outbound_http import (
     OutboundHttpPolicy,
     OutboundHttpPolicyError,
     OutboundHttpTransportError,
+    RegisteredHttpPrefix,
     SafeHttpClient,
 )
 
@@ -297,6 +300,7 @@ class ArtifactResolver(ABC):
 
 
 _LOCAL_STORE_TARGET_FACTORY_TOKEN = object()
+_HTTP_STORE_TARGET_FACTORY_TOKEN = object()
 
 
 @dataclass(frozen=True, slots=True, init=False)
@@ -358,6 +362,74 @@ class ScopedLocalStoreResolver(ABC):
         """Resolve ``target`` without broadening its registered-store authority."""
 
 
+@dataclass(frozen=True, slots=True, init=False)
+class HttpStoreResolutionTarget:
+    """Detached authority for one artifact beneath a registered HTTP prefix.
+
+    The concrete HTTP prefix is kept separate from the logical ``store://``
+    identity. The portable locator is composed only through
+    :class:`RegisteredHttpPrefix`, both here and at resolution time.
+    """
+
+    logical_reference: ExternalArtifactReference
+    registered_prefix: RegisteredHttpPrefix
+    locator: PortableStorePath
+
+    def __init__(
+        self,
+        logical_reference: ExternalArtifactReference,
+        registered_prefix: RegisteredHttpPrefix,
+        locator: PortableStorePath,
+        *,
+        _factory_token: object,
+    ) -> None:
+        if _factory_token is not _HTTP_STORE_TARGET_FACTORY_TOKEN:
+            raise TypeError(
+                "HttpStoreResolutionTarget must be built by its validated factory."
+            )
+        store_name = logical_reference.store_name
+        canonical_uri = (
+            canonical_store_uri(store_name, locator)
+            if store_name is not None
+            else None
+        )
+        initial_url = registered_prefix.compose(locator)
+        if (
+            logical_reference.source_system != "store"
+            or logical_reference.locator != locator.path
+            or canonical_uri is None
+            or logical_reference.uri != canonical_uri
+            or initial_url is None
+            or not registered_prefix.contains(initial_url)
+        ):
+            raise ValueError("HTTP store resolution target is inconsistent.")
+        object.__setattr__(self, "logical_reference", logical_reference)
+        object.__setattr__(self, "registered_prefix", registered_prefix)
+        object.__setattr__(self, "locator", locator)
+
+
+class ScopedHttpStoreResolver(ABC):
+    """Narrow capability for resolving beneath a registered HTTP prefix."""
+
+    @abstractmethod
+    def resolve_within_http_store(
+        self,
+        target: HttpStoreResolutionTarget,
+        *,
+        max_bytes: int = DEFAULT_MAX_BYTES,
+        byte_range: tuple[int, int] | None = None,
+    ) -> ResolvedArtifact:
+        """Resolve ``target`` while retaining its registered-prefix boundary."""
+
+
+PreparedArtifactResolutionTarget: TypeAlias = (
+    ExternalArtifactReference
+    | LocalStoreResolutionTarget
+    | HttpStoreResolutionTarget
+    | ResolvedArtifact
+)
+
+
 class ResolverRegistry:
     """Dispatches a reference to the first resolver that can handle it."""
 
@@ -366,6 +438,45 @@ class ResolverRegistry:
 
     def register(self, resolver: ArtifactResolver) -> None:
         self._resolvers.append(resolver)
+
+    def resolve_prepared(
+        self,
+        target: PreparedArtifactResolutionTarget,
+        *,
+        max_bytes: int = DEFAULT_MAX_BYTES,
+        byte_range: tuple[int, int] | None = None,
+    ) -> ResolvedArtifact:
+        """Resolve an application-prepared target through its narrow capability."""
+
+        runtime_target: object = target
+        if isinstance(runtime_target, ResolvedArtifact):
+            return runtime_target
+        if isinstance(runtime_target, LocalStoreResolutionTarget):
+            return self.resolve_local_store(
+                runtime_target,
+                max_bytes=max_bytes,
+                byte_range=byte_range,
+            )
+        if isinstance(runtime_target, HttpStoreResolutionTarget):
+            return self.resolve_http_store(
+                runtime_target,
+                max_bytes=max_bytes,
+                byte_range=byte_range,
+            )
+        if isinstance(runtime_target, ExternalArtifactReference):
+            return self.resolve(
+                runtime_target,
+                max_bytes=max_bytes,
+                byte_range=byte_range,
+            )
+        return ResolvedArtifact(
+            status=ResolutionStatus.UNRESOLVED,
+            source_system="prepared",
+            uri="prepared://[redacted]",
+            expected_hash="unavailable",
+            fetched_at=_now(),
+            detail="Prepared artifact resolution target is unsupported.",
+        )
 
     def resolve(
         self,
@@ -402,6 +513,47 @@ class ResolverRegistry:
             target.logical_reference,
             detail="No scoped local-store resolver is registered.",
         )
+
+    def resolve_http_store(
+        self,
+        target: HttpStoreResolutionTarget,
+        *,
+        max_bytes: int = DEFAULT_MAX_BYTES,
+        byte_range: tuple[int, int] | None = None,
+    ) -> ResolvedArtifact:
+        """Dispatch only to a resolver that honors registered HTTP scoping."""
+
+        for resolver in self._resolvers:
+            if isinstance(resolver, ScopedHttpStoreResolver):
+                return resolver.resolve_within_http_store(
+                    target,
+                    max_bytes=max_bytes,
+                    byte_range=byte_range,
+                )
+        return _unresolved(
+            target.logical_reference,
+            detail="No scoped HTTP-store resolver is registered.",
+        )
+
+
+def resolver_registry_for_prepared_target(
+    target: PreparedArtifactResolutionTarget,
+    *,
+    configured: ResolverRegistry | None,
+) -> ResolverRegistry:
+    """Select a registry without loading adapter config for a static result.
+
+    An injected registry remains authoritative, including for precomputed
+    results, so composition roots and tests retain one observable boundary.
+    Without an injection, a precomputed result needs no adapters and must not be
+    replaced by an unrelated resolver-configuration failure.
+    """
+
+    if configured is not None:
+        return configured
+    if isinstance(target, ResolvedArtifact):
+        return ResolverRegistry()
+    return registry_from_env()
 
 
 def _unresolved(ref: ExternalArtifactReference, *, detail: str) -> ResolvedArtifact:
@@ -465,14 +617,46 @@ def local_store_resolution_target(
         return None
 
 
+def http_store_resolution_target(
+    store: DataStore,
+    *,
+    locator: PortableStorePath,
+    logical_reference: ExternalArtifactReference,
+) -> HttpStoreResolutionTarget | None:
+    """Build one internally consistent, prefix-scoped HTTP resolution target."""
+
+    if (
+        store.kind is not StoreKind.HTTP
+        or logical_reference.store_name != store.name
+    ):
+        return None
+    registered_base = store.endpoint if store.endpoint is not None else store.root
+    registered_prefix = RegisteredHttpPrefix.parse(registered_base)
+    if registered_prefix is None:
+        return None
+    try:
+        return HttpStoreResolutionTarget(
+            logical_reference=logical_reference,
+            registered_prefix=registered_prefix,
+            locator=locator,
+            _factory_token=_HTTP_STORE_TARGET_FACTORY_TOKEN,
+        )
+    except ValueError:
+        return None
+
+
 def store_relative_reference(
     store: DataStore, *, path: str, content_hash: str
-) -> ExternalArtifactReference | LocalStoreResolutionTarget | None:
+) -> (
+    ExternalArtifactReference
+    | LocalStoreResolutionTarget
+    | HttpStoreResolutionTarget
+    | None
+):
     """Translate one legacy store-relative path into a resolvable target.
 
-    Non-local adapters retain their established path semantics. A local store
-    is the sole kind that applies the portable local-locator grammar and yields
-    a scoped target instead of a host ``file:`` URI.
+    Registered local and HTTP stores apply the same portable path grammar and
+    yield scoped targets. Other adapters retain their established semantics.
     """
 
     if store.kind is StoreKind.LOCAL_FS:
@@ -493,13 +677,29 @@ def store_relative_reference(
             logical_reference=logical_reference,
         )
 
-    joined = _join_store_path(store.root, path)
     if store.kind is StoreKind.HTTP:
-        base = store.endpoint or store.root
-        uri = f"{base.rstrip('/')}/{path.lstrip('/')}" if path else base
-        return ExternalArtifactReference(
-            source_system="http", uri=uri, content_hash=content_hash
+        locator = PortableStorePath.parse_decoded(path)
+        canonical_uri = (
+            canonical_store_uri(store.name, locator)
+            if locator is not None
+            else None
         )
+        if locator is None or canonical_uri is None:
+            return None
+        logical_reference = ExternalArtifactReference(
+            source_system="store",
+            uri=canonical_uri,
+            content_hash=content_hash,
+            store_name=store.name,
+            locator=locator.path,
+        )
+        return http_store_resolution_target(
+            store,
+            locator=locator,
+            logical_reference=logical_reference,
+        )
+
+    joined = _join_store_path(store.root, path)
     if store.kind in _RCLONE_STORE_KINDS:
         remote = store.credential_ref or store.name
         return ExternalArtifactReference(
@@ -542,6 +742,16 @@ class StoreHealth:
         return {"status": self.status.value, "detail": self.detail}
 
 
+class _StoreHealthHttpResponse(Protocol):
+    status_code: int
+
+
+class _StoreHealthHttpClient(Protocol):
+    def head(self, url: str) -> _StoreHealthHttpResponse: ...
+
+    def close(self) -> None: ...
+
+
 def check_store_health(
     store: DataStore,
     *,
@@ -554,7 +764,7 @@ def check_store_health(
     git_allow_protocol: str | None = DEFAULT_GIT_ALLOW_PROTOCOL,
     git_deadline_seconds: float = DEFAULT_SUBPROCESS_DEADLINE_SECONDS,
     git_clock: Callable[[], float] = time.monotonic,
-    http_client: object | None = None,
+    http_client: _StoreHealthHttpClient | None = None,
     http_timeout: float = 10.0,
 ) -> StoreHealth:
     """Probe whether a registered store is reachable from this host.
@@ -587,12 +797,15 @@ def check_store_health(
         remote = store.credential_ref or store.name
         target = f"{remote}:{store.root.lstrip('/')}"
         try:
-            completed = runner(["lsf", "--max-depth", "1", target])
+            rclone_completed = runner(["lsf", "--max-depth", "1", target])
         except OSError as exc:
             return StoreHealth(StoreHealthStatus.UNREACHABLE, f"rclone is unavailable: {exc}")
-        if completed.returncode == 0:
+        if rclone_completed.returncode == 0:
             return StoreHealth(StoreHealthStatus.HEALTHY)
-        return StoreHealth(StoreHealthStatus.UNREACHABLE, _rclone_error_detail(completed))
+        return StoreHealth(
+            StoreHealthStatus.UNREACHABLE,
+            _rclone_error_detail(rclone_completed),
+        )
 
     if kind is StoreKind.GIT:
         policy = (
@@ -640,7 +853,7 @@ def check_store_health(
                     StoreHealthStatus.UNREACHABLE,
                     _GIT_HEALTH_FAILURE_DETAIL,
                 )
-            completed = _run_git_command(
+            git_completed = _run_git_command(
                 runner=git_runner,
                 executor=executor,
                 binary=git_binary,
@@ -657,7 +870,7 @@ def check_store_health(
                 StoreHealthStatus.UNREACHABLE,
                 _GIT_HEALTH_FAILURE_DETAIL,
             )
-        if completed.returncode == 0:
+        if git_completed.returncode == 0:
             return StoreHealth(StoreHealthStatus.HEALTHY)
         return StoreHealth(
             StoreHealthStatus.UNREACHABLE,
@@ -671,13 +884,18 @@ def check_store_health(
 
 
 def _check_http_store_health(
-    store: DataStore, *, http_client: object | None, timeout: float
+    store: DataStore,
+    *,
+    http_client: _StoreHealthHttpClient | None,
+    timeout: float,
 ) -> StoreHealth:
     import httpx
 
     base = store.endpoint or store.root
     owns_client = http_client is None
-    client = http_client or httpx.Client(timeout=timeout)
+    client: _StoreHealthHttpClient = (
+        http_client if http_client is not None else httpx.Client(timeout=timeout)
+    )
     try:
         response = client.head(base)
     except httpx.HTTPError as exc:
@@ -1043,7 +1261,21 @@ class LocalFilesystemResolver(ArtifactResolver, ScopedLocalStoreResolver):
                     yield os.path.join(dirpath, name)
 
 
-class HttpResolver(ArtifactResolver):
+def _resolve_direct_http_redirect(current_url: str, location: str) -> str | None:
+    """Retain direct-reference redirect semantics outside registered stores."""
+
+    try:
+        next_url = urljoin(current_url, location)
+        current_scheme = urlsplit(current_url).scheme.lower()
+        next_scheme = urlsplit(next_url).scheme.lower()
+    except ValueError:
+        return None
+    if current_scheme == "https" and next_scheme == "http":
+        return None
+    return next_url
+
+
+class HttpResolver(ArtifactResolver, ScopedHttpStoreResolver):
     """Resolves artifacts addressed by ``http(s)`` URLs.
 
     Streams the full body through the hasher to verify it, capping the fetch at
@@ -1102,6 +1334,49 @@ class HttpResolver(ArtifactResolver):
         max_bytes: int = DEFAULT_MAX_BYTES,
         byte_range: tuple[int, int] | None = None,
     ) -> ResolvedArtifact:
+        return self._resolve_http_url(
+            ref,
+            initial_url=ref.uri,
+            redirect_resolver=_resolve_direct_http_redirect,
+            max_bytes=max_bytes,
+            byte_range=byte_range,
+        )
+
+    def resolve_within_http_store(
+        self,
+        target: HttpStoreResolutionTarget,
+        *,
+        max_bytes: int = DEFAULT_MAX_BYTES,
+        byte_range: tuple[int, int] | None = None,
+    ) -> ResolvedArtifact:
+        """Resolve through a registered prefix without exposing its concrete URL."""
+
+        initial_url = target.registered_prefix.compose(target.locator)
+        if (
+            initial_url is None
+            or not target.registered_prefix.contains(initial_url)
+        ):
+            return _unresolved(
+                target.logical_reference,
+                detail="HTTP artifact fetch failed or was denied.",
+            )
+        return self._resolve_http_url(
+            target.logical_reference,
+            initial_url=initial_url,
+            redirect_resolver=target.registered_prefix.resolve_redirect,
+            max_bytes=max_bytes,
+            byte_range=byte_range,
+        )
+
+    def _resolve_http_url(
+        self,
+        ref: ExternalArtifactReference,
+        *,
+        initial_url: str,
+        redirect_resolver: Callable[[str, str], str | None],
+        max_bytes: int,
+        byte_range: tuple[int, int] | None,
+    ) -> ResolvedArtifact:
         try:
             window = _normalize_byte_range(byte_range)
         except ValueError as exc:
@@ -1119,7 +1394,7 @@ class HttpResolver(ArtifactResolver):
             self._deadline_seconds,
             clock=self._clock,
         )
-        current_url = ref.uri
+        current_url = initial_url
         seen_targets: set[str] = set()
         for redirect_count in range(self._max_redirects + 1):
             try:
@@ -1145,15 +1420,11 @@ class HttpResolver(ArtifactResolver):
                             return _unresolved(
                                 ref, detail="HTTP redirect limit was exceeded."
                             )
-                        try:
-                            next_url = urljoin(target.absolute_url, location)
-                            next_scheme = urlsplit(next_url).scheme.lower()
-                        except ValueError:
-                            return _unresolved(
-                                ref,
-                                detail="HTTP artifact fetch failed or was denied.",
-                            )
-                        if target.scheme == "https" and next_scheme == "http":
+                        next_url = redirect_resolver(
+                            target.absolute_url,
+                            location,
+                        )
+                        if next_url is None:
                             return _unresolved(
                                 ref,
                                 detail="HTTP artifact fetch failed or was denied.",
@@ -1443,21 +1714,25 @@ class RcloneResolver(ArtifactResolver):
             # This compatibility seam is for trusted, synchronous test runners.
             # Production always uses the preemptible bounded executor.
             deadline.check()
-            completed = self._runner(args)
+            legacy_completed = self._runner(args)
             deadline.check()
             if (
-                len(completed.stdout) > stdout_limit_bytes
-                or len(completed.stderr) > _PROCESS_STDERR_LIMIT_BYTES
+                len(legacy_completed.stdout) > stdout_limit_bytes
+                or len(legacy_completed.stderr) > _PROCESS_STDERR_LIMIT_BYTES
             ):
                 raise _LegacyProcessOutputExceeded
-            stdout = completed.stdout
+            stdout = legacy_completed.stdout
             if stdout_consumer is not None:
                 stdout_consumer(stdout)
                 deadline.check()
                 stdout = b""
-            return RcloneCompleted(completed.returncode, stdout, completed.stderr)
+            return RcloneCompleted(
+                legacy_completed.returncode,
+                stdout,
+                legacy_completed.stderr,
+            )
 
-        completed = self._executor.run(
+        process_result = self._executor.run(
             [self._binary, *args],
             deadline=deadline,
             stdout_limit_bytes=stdout_limit_bytes,
@@ -1465,8 +1740,8 @@ class RcloneResolver(ArtifactResolver):
             stdout_consumer=stdout_consumer,
         )
         return RcloneCompleted(
-            completed.returncode,
-            completed.stdout,
+            process_result.returncode,
+            process_result.stdout,
             b"",
         )
 
@@ -1570,21 +1845,25 @@ def _run_git_command(
         # The callable seam is retained for deterministic tests and trusted callers.
         # Encoding the cwd in argv keeps its command interpretation identical.
         deadline.check()
-        completed = runner([*config_args, "-C", cwd, *args])
+        legacy_completed = runner([*config_args, "-C", cwd, *args])
         deadline.check()
         if (
-            len(completed.stdout) > stdout_limit_bytes
-            or len(completed.stderr) > _PROCESS_STDERR_LIMIT_BYTES
+            len(legacy_completed.stdout) > stdout_limit_bytes
+            or len(legacy_completed.stderr) > _PROCESS_STDERR_LIMIT_BYTES
         ):
             raise _LegacyProcessOutputExceeded
-        stdout = completed.stdout
+        stdout = legacy_completed.stdout
         if stdout_consumer is not None:
             stdout_consumer(stdout)
             deadline.check()
             stdout = b""
-        return GitCompleted(completed.returncode, stdout, completed.stderr)
+        return GitCompleted(
+            legacy_completed.returncode,
+            stdout,
+            legacy_completed.stderr,
+        )
 
-    completed = executor.run(
+    process_result = executor.run(
         [binary, *config_args, *args],
         cwd=cwd,
         deadline=deadline,
@@ -1594,8 +1873,8 @@ def _run_git_command(
         env=env,
     )
     return GitCompleted(
-        completed.returncode,
-        completed.stdout,
+        process_result.returncode,
+        process_result.stdout,
         b"",
     )
 

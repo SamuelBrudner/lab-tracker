@@ -13,11 +13,12 @@ from sqlalchemy.orm import Session as OrmSession
 
 from lab_tracker.artifact_resolution import (
     DEFAULT_MAX_BYTES,
-    LocalStoreResolutionTarget,
+    PreparedArtifactResolutionTarget,
     ResolvedArtifact,
     ResolverRegistry,
+    http_store_resolution_target,
     local_store_resolution_target,
-    registry_from_env,
+    resolver_registry_for_prepared_target,
     store_relative_reference,
     unresolved,
 )
@@ -30,7 +31,11 @@ from lab_tracker.decision_context_query import (
 from lab_tracker.errors import NotFoundError, ValidationError
 from lab_tracker.local_store_locator import (
     LocalStoreLocator,
+    PortableStorePath,
     canonical_local_store_uri,
+    canonical_store_uri,
+    is_valid_store_name,
+    parse_canonical_store_authority,
 )
 from lab_tracker.models import (
     Analysis,
@@ -81,7 +86,7 @@ class PreparedExternalArtifactResolution:
     entity_type: ExternalArtifactEntityType
     entity_id: UUID
     artifact_index: int
-    target: ExternalArtifactReference | LocalStoreResolutionTarget | ResolvedArtifact
+    target: PreparedArtifactResolutionTarget
     max_bytes: int
     byte_range: tuple[int, int] | None
 
@@ -523,22 +528,15 @@ class ContextQueries:
         """Release SQLAlchemy resources, then resolve a detached target only."""
 
         self.release_read_scope()
-        if isinstance(prepared.target, ResolvedArtifact):
-            result = prepared.target
-        else:
-            registry = self.resolver_registry or registry_from_env()
-            if isinstance(prepared.target, LocalStoreResolutionTarget):
-                result = registry.resolve_local_store(
-                    prepared.target,
-                    max_bytes=prepared.max_bytes,
-                    byte_range=prepared.byte_range,
-                )
-            else:
-                result = registry.resolve(
-                    prepared.target,
-                    max_bytes=prepared.max_bytes,
-                    byte_range=prepared.byte_range,
-                )
+        registry = resolver_registry_for_prepared_target(
+            prepared.target,
+            configured=self.resolver_registry,
+        )
+        result = registry.resolve_prepared(
+            prepared.target,
+            max_bytes=prepared.max_bytes,
+            byte_range=prepared.byte_range,
+        )
         body = result.to_json_dict()
         body["entity_type"] = prepared.entity_type
         body["entity_id"] = str(prepared.entity_id)
@@ -598,12 +596,12 @@ class ContextQueries:
         self,
         reference: ExternalArtifactReference,
         project_id: UUID,
-    ) -> ExternalArtifactReference | LocalStoreResolutionTarget | ResolvedArtifact:
+    ) -> PreparedArtifactResolutionTarget:
         if reference.store_name is not None and reference.locator is not None:
             return self._resolve_store(
                 reference,
                 project_id,
-                reference.store_name,
+                (reference.store_name,),
                 reference.locator,
                 locator_is_uri_path=False,
             )
@@ -615,12 +613,11 @@ class ContextQueries:
             ):
                 return _invalid_store_reference(reference)
             return reference
-        name, locator = parsed_store
         return self._resolve_store(
             reference,
             project_id,
-            name,
-            locator,
+            parsed_store.name_candidates,
+            parsed_store.locator,
             locator_is_uri_path=True,
         )
 
@@ -628,16 +625,26 @@ class ContextQueries:
         self,
         reference: ExternalArtifactReference,
         project_id: UUID,
-        name: str,
+        name_candidates: tuple[str, ...],
         locator: str,
         *,
         locator_is_uri_path: bool,
-    ) -> ExternalArtifactReference | LocalStoreResolutionTarget | ResolvedArtifact:
-        store = self.repository.data_stores.get_by_name(project_id, name)
-        if store is None:
+    ) -> PreparedArtifactResolutionTarget:
+        matches: dict[UUID, tuple[str, DataStore]] = {}
+        for candidate in dict.fromkeys(name_candidates):
+            candidate_store = self.repository.data_stores.get_by_name(
+                project_id, candidate
+            )
+            if candidate_store is None or candidate_store.name != candidate:
+                continue
+            matches[candidate_store.store_id] = (candidate, candidate_store)
+        if not matches:
             return _unavailable_store_reference(reference)
+        if len(matches) != 1:
+            return _invalid_store_reference(reference)
+        name, store = next(iter(matches.values()))
 
-        concrete: ExternalArtifactReference | LocalStoreResolutionTarget | None
+        concrete: PreparedArtifactResolutionTarget | None
         if store.kind is StoreKind.LOCAL_FS:
             parsed_locator = (
                 LocalStoreLocator.parse_uri_path(locator)
@@ -663,6 +670,41 @@ class ContextQueries:
                 deep=True,
             )
             concrete = local_store_resolution_target(
+                store,
+                locator=parsed_locator,
+                logical_reference=logical_reference,
+            )
+        elif store.kind is StoreKind.HTTP:
+            parsed_locator = (
+                PortableStorePath.parse_uri_path(locator)
+                if locator_is_uri_path
+                else PortableStorePath.parse_decoded(locator)
+            )
+            canonical_uri = (
+                canonical_store_uri(name, parsed_locator)
+                if parsed_locator is not None
+                else None
+            )
+            if parsed_locator is None or canonical_uri is None:
+                return _invalid_store_reference(reference)
+            accepted_uris = {
+                canonical_uri,
+                f"store://{name}/{parsed_locator.uri_path}",
+            }
+            if not locator_is_uri_path:
+                accepted_uris.add(f"store://{name}/{parsed_locator.path}")
+            if reference.uri not in accepted_uris:
+                return _invalid_store_reference(reference)
+            logical_reference = reference.model_copy(
+                update={
+                    "source_system": "store",
+                    "uri": canonical_uri,
+                    "store_name": name,
+                    "locator": parsed_locator.path,
+                },
+                deep=True,
+            )
+            concrete = http_store_resolution_target(
                 store,
                 locator=parsed_locator,
                 logical_reference=logical_reference,
@@ -695,7 +737,13 @@ def _single_project_id(project_ids: set[UUID] | None) -> UUID | None:
     return next(iter(project_ids))
 
 
-def _parse_store_reference_uri(uri: str) -> tuple[str, str] | None:
+@dataclass(frozen=True, slots=True)
+class _ParsedStoreReferenceUri:
+    name_candidates: tuple[str, ...]
+    locator: str
+
+
+def _parse_store_reference_uri(uri: str) -> _ParsedStoreReferenceUri | None:
     """Retain legacy non-local URI parsing until kind-specific hardening lands."""
 
     try:
@@ -704,7 +752,23 @@ def _parse_store_reference_uri(uri: str) -> tuple[str, str] | None:
         return None
     if parsed.scheme.lower() != "store" or not parsed.netloc:
         return None
-    return parsed.netloc, parsed.path.lstrip("/")
+    canonical_name = parse_canonical_store_authority(parsed.netloc)
+    name_candidates = tuple(
+        dict.fromkeys(
+            candidate
+            for candidate in (
+                canonical_name,
+                parsed.netloc if is_valid_store_name(parsed.netloc) else None,
+            )
+            if candidate is not None
+        )
+    )
+    if not name_candidates:
+        return None
+    return _ParsedStoreReferenceUri(
+        name_candidates=name_candidates,
+        locator=parsed.path.lstrip("/"),
+    )
 
 
 def _looks_like_store_uri(uri: str) -> bool:

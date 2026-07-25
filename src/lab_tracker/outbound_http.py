@@ -17,15 +17,18 @@ import math
 import socket
 import ssl
 import time
+import unicodedata
 from collections.abc import Awaitable, Callable, Iterable, Iterator, Sequence
 from contextlib import suppress
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Protocol, cast
-from urllib.parse import SplitResult, quote, urlsplit
+from urllib.parse import SplitResult, quote, urljoin, urlsplit
 
 import dns.asyncresolver
 import dns.exception
+
+from lab_tracker.local_store_locator import PortableStorePath
 
 _HTTP_SCHEMES = frozenset({"http", "https"})
 _DEFAULT_PORTS = {"http": 80, "https": 443}
@@ -174,6 +177,109 @@ class ApprovedHttpTarget:
         if self.port == _DEFAULT_PORTS[self.scheme]:
             return host
         return f"{host}:{self.port}"
+
+
+@dataclass(frozen=True, slots=True)
+class RegisteredHttpPrefix:
+    """One canonical HTTP directory prefix for a registered artifact store.
+
+    ``origin`` is the normalized scheme/host/effective-port tuple.
+    ``path_components`` are decoded exactly once and compared structurally.
+    ``canonical_url`` is directory-form and always ends in exactly one slash.
+    """
+
+    origin: str
+    path_components: tuple[str, ...]
+
+    def __post_init__(self) -> None:
+        if _canonical_registered_http_prefix_url(
+            self.origin,
+            self.path_components,
+        ) is None:
+            raise ValueError("Registered HTTP prefix is invalid.")
+
+    @property
+    def canonical_url(self) -> str:
+        """Return the derived canonical directory-form URL."""
+
+        canonical_url = _canonical_registered_http_prefix_url(
+            self.origin,
+            self.path_components,
+        )
+        if canonical_url is None:  # pragma: no cover - guarded by frozen construction
+            raise RuntimeError("Registered HTTP prefix invariant was violated.")
+        return canonical_url
+
+    @classmethod
+    def parse(cls, value: str) -> RegisteredHttpPrefix | None:
+        """Parse a registered base URL without DNS or network access."""
+
+        parsed = _parse_registered_http_absolute_url(value)
+        if parsed is None:
+            return None
+        try:
+            return cls(
+                origin=parsed.origin,
+                path_components=parsed.path_components,
+            )
+        except ValueError:
+            return None
+
+    def compose(self, locator: PortableStorePath) -> str | None:
+        """Compose a portable locator beneath this prefix exactly once."""
+
+        if not isinstance(locator, PortableStorePath):
+            return None
+        combined_components = self.path_components + locator.components
+        combined_path = _canonical_registered_http_path(
+            combined_components,
+            trailing_slash=False,
+        )
+        if combined_path is None:
+            return None
+        candidate = f"{self.origin}{combined_path}"
+        if len(candidate) > _MAX_URL_LENGTH or not self.contains(candidate):
+            return None
+        return candidate
+
+    def contains(self, url: str) -> bool:
+        """Return whether an absolute URL is structurally inside this prefix."""
+
+        parsed = _parse_registered_http_absolute_url(url)
+        if parsed is None or parsed.origin != self.origin:
+            return False
+        prefix_length = len(self.path_components)
+        return parsed.path_components[:prefix_length] == self.path_components
+
+    def resolve_redirect(self, current_url: str, location: str) -> str | None:
+        """Resolve one safe redirect that remains inside this prefix.
+
+        The raw ``Location`` is validated before relative resolution so
+        ``urljoin`` never receives dot segments, encoded separators, or other
+        path-normalization ambiguities.
+        """
+
+        current = _parse_registered_http_absolute_url(current_url)
+        if (
+            current is None
+            or not self.contains(current.canonical_url)
+            or not _raw_registered_redirect_is_safe(location)
+        ):
+            return None
+
+        try:
+            raw_location = urlsplit(location)
+            joined = (
+                location
+                if raw_location.scheme
+                else urljoin(current.canonical_url, location)
+            )
+        except (TypeError, UnicodeError, ValueError):
+            return None
+        candidate = _parse_registered_http_absolute_url(joined)
+        if candidate is None or not self.contains(candidate.canonical_url):
+            return None
+        return candidate.canonical_url
 
 
 class AddressResolver(Protocol):
@@ -791,6 +897,184 @@ def _parse_http_url(url: str) -> _ParsedHttpUrl:
         request_target=request_target,
         absolute_url=absolute_url,
         origin=origin,
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class _ParsedRegisteredHttpUrl:
+    origin: str
+    path_components: tuple[str, ...]
+    has_trailing_slash: bool
+
+    @property
+    def canonical_url(self) -> str:
+        canonical_url = _canonical_registered_http_url(
+            self.origin,
+            self.path_components,
+            trailing_slash=self.has_trailing_slash,
+        )
+        if canonical_url is None:  # pragma: no cover - private parser establishes this
+            raise RuntimeError("Parsed registered HTTP URL invariant was violated.")
+        return canonical_url
+
+
+def _parse_registered_http_absolute_url(
+    value: object,
+) -> _ParsedRegisteredHttpUrl | None:
+    if not _registered_http_text_is_safe(value) or not isinstance(value, str):
+        return None
+    if "?" in value or "#" in value:
+        return None
+    try:
+        split = urlsplit(value)
+        parsed = _parse_http_url(value)
+    except (OutboundHttpPolicyError, UnicodeError, ValueError):
+        return None
+    if split.query or split.fragment:
+        return None
+
+    parsed_path = _parse_registered_http_path(split.path, absolute=True)
+    if parsed_path is None:
+        return None
+    path_components, has_trailing_slash = parsed_path
+    canonical_url = _canonical_registered_http_url(
+        parsed.origin,
+        path_components,
+        trailing_slash=has_trailing_slash,
+    )
+    if canonical_url is None:
+        return None
+    return _ParsedRegisteredHttpUrl(
+        origin=parsed.origin,
+        path_components=path_components,
+        has_trailing_slash=has_trailing_slash,
+    )
+
+
+def _canonical_registered_http_prefix_url(
+    origin: object,
+    path_components: object,
+) -> str | None:
+    if not isinstance(origin, str) or not isinstance(path_components, tuple):
+        return None
+    try:
+        parsed_origin = _parse_http_url(origin)
+    except OutboundHttpPolicyError:
+        return None
+    if parsed_origin.origin != origin or parsed_origin.absolute_url != f"{origin}/":
+        return None
+    return _canonical_registered_http_url(
+        origin,
+        path_components,
+        trailing_slash=True,
+    )
+
+
+def _canonical_registered_http_url(
+    origin: str,
+    path_components: tuple[str, ...],
+    *,
+    trailing_slash: bool,
+) -> str | None:
+    canonical_path = _canonical_registered_http_path(
+        path_components,
+        trailing_slash=trailing_slash,
+    )
+    if canonical_path is None:
+        return None
+    canonical_url = f"{origin}{canonical_path}"
+    return canonical_url if len(canonical_url) <= _MAX_URL_LENGTH else None
+
+
+def _canonical_registered_http_path(
+    components: tuple[str, ...],
+    *,
+    trailing_slash: bool,
+) -> str | None:
+    if not isinstance(components, tuple):
+        return None
+    if not components:
+        return "/"
+    try:
+        portable_path = PortableStorePath(components)
+    except (TypeError, ValueError):
+        return None
+    if any(
+        ";" in unicodedata.normalize("NFKC", component)
+        for component in portable_path.components
+    ):
+        return None
+    suffix = "/" if trailing_slash else ""
+    return f"/{portable_path.uri_path}{suffix}"
+
+
+def _parse_registered_http_path(
+    raw_path: str,
+    *,
+    absolute: bool,
+) -> tuple[tuple[str, ...], bool] | None:
+    if not isinstance(raw_path, str) or (
+        raw_path and not _registered_http_text_is_safe(raw_path)
+    ):
+        return None
+    if "//" in raw_path:
+        return None
+    if absolute:
+        if raw_path and not raw_path.startswith("/"):
+            return None
+        path = raw_path[1:] if raw_path.startswith("/") else ""
+    else:
+        path = raw_path[1:] if raw_path.startswith("/") else raw_path
+
+    has_trailing_slash = not path or path.endswith("/")
+    if path.endswith("/"):
+        path = path[:-1]
+    if not path:
+        return (), has_trailing_slash
+
+    portable_path = PortableStorePath.parse_uri_path(path)
+    if portable_path is None:
+        return None
+    canonical_path = _canonical_registered_http_path(
+        portable_path.components,
+        trailing_slash=False,
+    )
+    if canonical_path != f"/{path}":
+        return None
+    return portable_path.components, has_trailing_slash
+
+
+def _raw_registered_redirect_is_safe(location: object) -> bool:
+    if (
+        not _registered_http_text_is_safe(location)
+        or not isinstance(location, str)
+        or not location
+        or "?" in location
+        or "#" in location
+        or location.startswith("//")
+    ):
+        return False
+    try:
+        split = urlsplit(location)
+    except (UnicodeError, ValueError):
+        return False
+    if split.query or split.fragment:
+        return False
+    if split.scheme:
+        return _parse_registered_http_absolute_url(location) is not None
+    if split.netloc:
+        return False
+    return _parse_registered_http_path(split.path, absolute=False) is not None
+
+
+def _registered_http_text_is_safe(value: object) -> bool:
+    return (
+        isinstance(value, str)
+        and bool(value)
+        and len(value) <= _MAX_URL_LENGTH
+        and "\\" not in value
+        and ";" not in value
+        and not any(unicodedata.category(character) == "Cc" for character in value)
     )
 
 

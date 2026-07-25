@@ -26,6 +26,7 @@ from lab_tracker.artifact_resolution import (
     GitCompleted,
     GitResolver,
     HttpResolver,
+    HttpStoreResolutionTarget,
     LocalFilesystemResolver,
     LocalStoreResolutionTarget,
     RcloneCompleted,
@@ -34,9 +35,12 @@ from lab_tracker.artifact_resolution import (
     ResolutionStatus,
     ResolvedArtifact,
     ResolverRegistry,
+    ScopedHttpStoreResolver,
+    ScopedLocalStoreResolver,
     StoreHealthStatus,
     check_store_health,
     default_registry,
+    http_store_resolution_target,
     is_verifiable_hash,
     local_store_resolution_target,
     outbound_http_policy_from_env,
@@ -51,12 +55,13 @@ from lab_tracker.local_file_access import (
     OpenedLocalFile,
 )
 from lab_tracker.local_path_policy import LocalPathPolicy
-from lab_tracker.local_store_locator import LocalStoreLocator
+from lab_tracker.local_store_locator import LocalStoreLocator, PortableStorePath
 from lab_tracker.models import DataStore, ExternalArtifactReference, StoreKind
 from lab_tracker.outbound_http import (
     ApprovedSocketAddress,
     OutboundHttpPolicy,
     OutboundHttpTransportError,
+    RegisteredHttpPrefix,
 )
 
 
@@ -507,6 +512,29 @@ def _http_ref(
     )
 
 
+def _registered_http_target(
+    *,
+    base: str = "https://store.example/base",
+    locator: str = "nested/artifact.bin",
+    content_hash: str | None = None,
+    name: str = "web",
+) -> HttpStoreResolutionTarget:
+    store = DataStore(
+        store_id=uuid4(),
+        project_id=uuid4(),
+        name=name,
+        kind=StoreKind.HTTP,
+        root=base,
+    )
+    target = store_relative_reference(
+        store,
+        path=locator,
+        content_hash=content_hash or _sha256(b"artifact"),
+    )
+    assert isinstance(target, HttpStoreResolutionTarget)
+    return target
+
+
 def _safe_http_resolver(
     *outcomes: FakeHttpResponse | BaseException,
     dns: FakeAddressResolver | None = None,
@@ -550,6 +578,92 @@ def test_http_resolver_verifies_matching_body():
     assert client.calls[0][1].addresses == (
         ApprovedSocketAddress.from_ip(_PUBLIC_HTTP_IP, 443),
     )
+
+
+def test_registered_http_store_resolves_beneath_prefix_with_logical_identity():
+    body = b"registered HTTP artifact"
+    resolver, client, dns = _safe_http_resolver(
+        FakeHttpResponse(
+            headers={"content-type": "application/octet-stream"},
+            chunks=(body,),
+        )
+    )
+    target = _registered_http_target(
+        locator="nested/file name.bin",
+        content_hash=_sha256(body),
+    )
+
+    result = ResolverRegistry([resolver]).resolve_http_store(target)
+
+    assert result.status is ResolutionStatus.VERIFIED
+    assert result.content == body
+    assert result.source_system == "store"
+    assert result.uri == "store://web/nested/file%20name.bin"
+    assert result.to_json_dict()["uri"] == result.uri
+    assert dns.calls == [("store.example", 443)]
+    assert client.calls[0][1].absolute_url == (
+        "https://store.example/base/nested/file%20name.bin"
+    )
+
+
+def test_registered_http_store_allows_same_prefix_redirect_and_keeps_identity():
+    body = b"moved within registered HTTP prefix"
+    resolver, client, dns = _safe_http_resolver(
+        FakeHttpResponse(
+            status_code=302,
+            headers={"location": "/base/archive/final.bin"},
+        ),
+        FakeHttpResponse(chunks=(body,)),
+    )
+    target = _registered_http_target(content_hash=_sha256(body))
+
+    result = ResolverRegistry([resolver]).resolve_http_store(target)
+
+    assert result.status is ResolutionStatus.VERIFIED
+    assert result.uri == "store://web/nested/artifact.bin"
+    assert result.content == body
+    assert dns.calls == [
+        ("store.example", 443),
+        ("store.example", 443),
+    ]
+    assert [call[1].absolute_url for call in client.calls] == [
+        "https://store.example/base/nested/artifact.bin",
+        "https://store.example/base/archive/final.bin",
+    ]
+
+
+@pytest.mark.parametrize(
+    "location",
+    (
+        "/baseevil/secret.bin",
+        "/base/../secret.bin",
+        "/base/%2e%2e/secret.bin",
+        "/base/..%EF%BC%8Fsecret.bin",
+        "/base/%EF%BC%8E%EF%BC%8E/secret.bin",
+        "/base/%EF%BC%852e%EF%BC%852e/secret.bin",
+        "https://archive.example/base/secret.bin",
+        "/base/nested\\..\\secret.bin",
+        "/base/nested;parameter/secret.bin",
+        "/base/nested%EF%BC%9Bparameter/secret.bin",
+        "?token=secret",
+        "#fragment",
+    ),
+)
+def test_registered_http_store_rejects_redirect_escape_before_second_hop_io(
+    location: str,
+):
+    resolver, client, dns = _safe_http_resolver(
+        FakeHttpResponse(status_code=302, headers={"location": location})
+    )
+    target = _registered_http_target()
+
+    result = ResolverRegistry([resolver]).resolve_http_store(target)
+
+    assert result.status is ResolutionStatus.UNRESOLVED
+    assert result.uri == "store://web/nested/artifact.bin"
+    assert result.detail == "HTTP artifact fetch failed or was denied."
+    assert dns.calls == [("store.example", 443)]
+    assert len(client.calls) == 1
 
 
 def test_http_resolver_reports_drift_on_mismatch():
@@ -1540,12 +1654,160 @@ def test_store_relative_reference_rclone_uses_credential_ref_as_remote():
     assert ref.uri == "rclone://lab-onedrive/experiments/001/x.fcs"
 
 
-def test_store_relative_reference_http_joins_endpoint_or_root():
+def test_store_relative_reference_http_builds_scoped_logical_target():
     store = _data_store(StoreKind.HTTP, "https://files.example/base", name="web")
-    ref = store_relative_reference(store, path="x.bin", content_hash=_sha256(b"x"))
-    assert ref is not None
-    assert ref.source_system == "http"
-    assert ref.uri == "https://files.example/base/x.bin"
+    target = store_relative_reference(
+        store,
+        path="nested/x.bin",
+        content_hash=_sha256(b"x"),
+    )
+
+    assert isinstance(target, HttpStoreResolutionTarget)
+    assert target.locator.components == ("nested", "x.bin")
+    assert target.registered_prefix.canonical_url == "https://files.example/base/"
+    assert target.logical_reference.source_system == "store"
+    assert target.logical_reference.uri == "store://web/nested/x.bin"
+    assert target.logical_reference.store_name == "web"
+    assert target.logical_reference.locator == "nested/x.bin"
+
+
+def test_http_store_target_factory_uses_endpoint_before_root():
+    store = _data_store(
+        StoreKind.HTTP,
+        "https://root.example/ignored",
+        endpoint="https://files.example/base",
+        name="web",
+    )
+    target = store_relative_reference(
+        store,
+        path="x.bin",
+        content_hash=_sha256(b"x"),
+    )
+
+    assert isinstance(target, HttpStoreResolutionTarget)
+    assert target.registered_prefix.canonical_url == "https://files.example/base/"
+
+    store.endpoint = "https://files.example/base?invalid=secret"
+    assert (
+        store_relative_reference(
+            store,
+            path="x.bin",
+            content_hash=_sha256(b"x"),
+        )
+        is None
+    )
+
+    store.endpoint = ""
+    assert (
+        store_relative_reference(
+            store,
+            path="x.bin",
+            content_hash=_sha256(b"x"),
+        )
+        is None
+    )
+
+
+def test_http_store_target_factory_rejects_mismatched_logical_identity():
+    store = _data_store(
+        StoreKind.HTTP,
+        "https://files.example/base",
+        name="web",
+    )
+    locator = PortableStorePath.parse_decoded("nested/x.bin")
+    assert locator is not None
+    reference = ExternalArtifactReference.for_store(
+        store_name="web",
+        locator=locator.path,
+        content_hash=_sha256(b"x"),
+    )
+
+    assert (
+        http_store_resolution_target(
+            store,
+            locator=locator,
+            logical_reference=reference.model_copy(
+                update={
+                    "store_name": "other",
+                    "uri": "store://other/nested/x.bin",
+                }
+            ),
+        )
+        is None
+    )
+    assert (
+        http_store_resolution_target(
+            store,
+            locator=PortableStorePath(("other.bin",)),
+            logical_reference=reference,
+        )
+        is None
+    )
+    assert (
+        http_store_resolution_target(
+            store,
+            locator=locator,
+            logical_reference=reference.model_copy(
+                update={"uri": "store://web/other.bin"}
+            ),
+        )
+        is None
+    )
+
+
+def test_http_store_target_cannot_be_constructed_without_validated_factory():
+    locator = PortableStorePath(("artifact.bin",))
+    prefix = RegisteredHttpPrefix.parse("https://files.example/base")
+    assert prefix is not None
+    reference = ExternalArtifactReference.for_store(
+        store_name="web",
+        locator=locator.path,
+        content_hash=_sha256(b"x"),
+    )
+
+    with pytest.raises(TypeError, match="validated factory"):
+        HttpStoreResolutionTarget(
+            logical_reference=reference,
+            registered_prefix=prefix,
+            locator=locator,
+            _factory_token=object(),
+        )
+
+
+@pytest.mark.parametrize(
+    ("base", "locator"),
+    (
+        ("https://files.example/base?token=secret", "artifact.bin"),
+        ("https://user:secret@files.example/base", "artifact.bin"),
+        ("https://files.example/base", "../secret.bin"),
+        ("https://files.example/base", "nested/%2e%2e/secret.bin"),
+        ("https://files.example/base", "nested\\secret.bin"),
+    ),
+)
+def test_invalid_http_store_materialization_returns_none_without_network_io(
+    base: str,
+    locator: str,
+    monkeypatch,
+):
+    store = _data_store(StoreKind.HTTP, base, name="web")
+
+    def unexpected_network_operation(*_args, **_kwargs):
+        raise AssertionError("invalid HTTP store materialization performed network I/O")
+
+    monkeypatch.setattr(
+        artifact_resolution.OutboundHttpPolicy,
+        "authorize",
+        unexpected_network_operation,
+    )
+
+    assert (
+        store_relative_reference(
+            store,
+            path=locator,
+            content_hash=_sha256(b"x"),
+        )
+        is None
+    )
 
 
 def test_store_relative_reference_unsupported_kind_returns_none():
@@ -1945,6 +2207,170 @@ def test_check_store_health_git_does_not_inherit_parent_repository_config(
 # --- ResolverRegistry -----------------------------------------------------
 
 
+class _RecordingPreparedResolver(
+    ArtifactResolver,
+    ScopedLocalStoreResolver,
+    ScopedHttpStoreResolver,
+):
+    def __init__(self) -> None:
+        self.can_resolve_references: list[ExternalArtifactReference] = []
+        self.calls: list[
+            tuple[
+                str,
+                object,
+                int,
+                tuple[int, int] | None,
+            ]
+        ] = []
+
+    def can_resolve(self, ref: ExternalArtifactReference) -> bool:
+        self.can_resolve_references.append(ref)
+        return True
+
+    def resolve(
+        self,
+        ref: ExternalArtifactReference,
+        *,
+        max_bytes: int = DEFAULT_MAX_BYTES,
+        byte_range: tuple[int, int] | None = None,
+    ) -> ResolvedArtifact:
+        self.calls.append(("ordinary", ref, max_bytes, byte_range))
+        return self._result(ref)
+
+    def resolve_within_root(
+        self,
+        target: LocalStoreResolutionTarget,
+        *,
+        max_bytes: int = DEFAULT_MAX_BYTES,
+        byte_range: tuple[int, int] | None = None,
+    ) -> ResolvedArtifact:
+        self.calls.append(("local", target, max_bytes, byte_range))
+        return self._result(target.logical_reference)
+
+    def resolve_within_http_store(
+        self,
+        target: HttpStoreResolutionTarget,
+        *,
+        max_bytes: int = DEFAULT_MAX_BYTES,
+        byte_range: tuple[int, int] | None = None,
+    ) -> ResolvedArtifact:
+        self.calls.append(("http", target, max_bytes, byte_range))
+        return self._result(target.logical_reference)
+
+    @staticmethod
+    def _result(ref: ExternalArtifactReference) -> ResolvedArtifact:
+        return ResolvedArtifact(
+            status=ResolutionStatus.UNRESOLVED,
+            source_system=ref.source_system,
+            uri=ref.uri,
+            expected_hash=ref.content_hash,
+            fetched_at=datetime.now(timezone.utc),
+            detail="recorded",
+        )
+
+
+def test_registry_returns_precomputed_prepared_result_without_resolver_work():
+    resolver = _RecordingPreparedResolver()
+    precomputed = ResolvedArtifact(
+        status=ResolutionStatus.UNRESOLVED,
+        source_system="store",
+        uri="store://[redacted]",
+        expected_hash=_sha256(b"artifact"),
+        fetched_at=datetime.now(timezone.utc),
+        detail="already resolved",
+    )
+
+    result = ResolverRegistry([resolver]).resolve_prepared(
+        precomputed,
+        max_bytes=17,
+        byte_range=(2, 5),
+    )
+
+    assert result is precomputed
+    assert resolver.can_resolve_references == []
+    assert resolver.calls == []
+
+
+def test_registry_dispatches_prepared_external_reference_to_ordinary_resolver():
+    resolver = _RecordingPreparedResolver()
+    reference = ExternalArtifactReference(
+        source_system="test",
+        uri="test://artifact",
+        content_hash=_sha256(b"artifact"),
+    )
+
+    result = ResolverRegistry([resolver]).resolve_prepared(
+        reference,
+        max_bytes=17,
+        byte_range=(2, 5),
+    )
+
+    assert result.uri == reference.uri
+    assert resolver.can_resolve_references == [reference]
+    assert resolver.calls == [("ordinary", reference, 17, (2, 5))]
+
+
+def test_registry_dispatches_prepared_local_target_to_scoped_resolver(tmp_path):
+    store_root = tmp_path / "store"
+    store_root.mkdir()
+    target = _local_store_target(
+        _data_store(StoreKind.LOCAL_FS, str(store_root)),
+        "artifact.bin",
+        _sha256(b"artifact"),
+    )
+    resolver = _RecordingPreparedResolver()
+
+    result = ResolverRegistry([resolver]).resolve_prepared(
+        target,
+        max_bytes=17,
+        byte_range=(2, 5),
+    )
+
+    assert result.uri == target.logical_reference.uri
+    assert resolver.can_resolve_references == []
+    assert resolver.calls == [("local", target, 17, (2, 5))]
+
+
+def test_registry_dispatches_prepared_http_target_to_scoped_resolver():
+    target = _registered_http_target()
+    resolver = _RecordingPreparedResolver()
+
+    result = ResolverRegistry([resolver]).resolve_prepared(
+        target,
+        max_bytes=17,
+        byte_range=(2, 5),
+    )
+
+    assert result.uri == target.logical_reference.uri
+    assert resolver.can_resolve_references == []
+    assert resolver.calls == [("http", target, 17, (2, 5))]
+
+
+def test_registry_rejects_unsupported_prepared_runtime_type_without_reflection():
+    class SensitiveTarget:
+        def __str__(self) -> str:
+            raise AssertionError("unsupported target was stringified")
+
+        def __repr__(self) -> str:
+            raise AssertionError("unsupported target was represented")
+
+    resolver = _RecordingPreparedResolver()
+
+    result = ResolverRegistry([resolver]).resolve_prepared(
+        SensitiveTarget(),  # type: ignore[arg-type]
+    )
+
+    assert result.status is ResolutionStatus.UNRESOLVED
+    assert result.source_system == "prepared"
+    assert result.uri == "prepared://[redacted]"
+    assert result.expected_hash == "unavailable"
+    assert result.observed_hash is None
+    assert result.content is None
+    assert result.detail == "Prepared artifact resolution target is unsupported."
+    assert resolver.can_resolve_references == []
+    assert resolver.calls == []
+
+
 def test_registry_dispatches_to_matching_resolver(tmp_path):
     data = b"hello"
     path = _write(tmp_path, "a.txt", data)
@@ -1991,11 +2417,28 @@ def test_registry_never_falls_back_to_ordinary_resolve_for_local_store(tmp_path)
         def resolve(self, ref, *, max_bytes=DEFAULT_MAX_BYTES, byte_range=None):
             raise AssertionError("scoped dispatch fell back to ordinary resolution")
 
-    result = ResolverRegistry([OrdinaryOnlyResolver()]).resolve_local_store(target)
+    result = ResolverRegistry([OrdinaryOnlyResolver()]).resolve_prepared(target)
 
     assert result.status is ResolutionStatus.UNRESOLVED
     assert result.uri == target.logical_reference.uri
     assert result.detail == "No scoped local-store resolver is registered."
+
+
+def test_registry_never_falls_back_to_ordinary_resolve_for_http_store():
+    target = _registered_http_target()
+
+    class OrdinaryOnlyResolver(ArtifactResolver):
+        def can_resolve(self, ref):
+            return True
+
+        def resolve(self, ref, *, max_bytes=DEFAULT_MAX_BYTES, byte_range=None):
+            raise AssertionError("scoped dispatch fell back to ordinary resolution")
+
+    result = ResolverRegistry([OrdinaryOnlyResolver()]).resolve_prepared(target)
+
+    assert result.status is ResolutionStatus.UNRESOLVED
+    assert result.uri == target.logical_reference.uri
+    assert result.detail == "No scoped HTTP-store resolver is registered."
 
 
 def test_local_store_scope_rejects_static_link_escape_but_allows_safe_link(

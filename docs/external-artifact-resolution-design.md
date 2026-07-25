@@ -571,6 +571,13 @@ Shipped (`src/lab_tracker/artifact_resolution.py`, tested in
   each bounded redirect hop. Public destinations must resolve entirely to
   globally routable addresses; internal exceptions require the exact-authority
   and CIDR settings described above.
+- ✅ Registered HTTP stores use a separate, nominally dispatched typed target.
+  Its base URL and locator are parsed into canonical origin/path components
+  before DNS, composed exactly once, and checked against the registered prefix
+  before every redirect hop. Invalid legacy definitions and escaping redirects
+  fail with the opaque store result before the next network operation, while
+  successful results retain their logical `store://` identity. Ordinary direct
+  HTTP references keep their existing redirect behavior.
 - ✅ `RcloneResolver` — `rclone://<remote>/<path>`, the locked-in unifier for
   S3 / SFTP / Dropbox / Google Drive / Box / OneDrive; stats then fetches, and
   degrades to `UNRESOLVED` when the binary is absent. Gated by an operator
