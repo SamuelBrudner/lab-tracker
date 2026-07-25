@@ -45,6 +45,7 @@ class Settings(BaseSettings):
     resolver_http_allowed_networks: str = ""
     resolver_http_deadline_seconds: float = 30.0
     resolver_subprocess_deadline_seconds: float = 30.0
+    git_allowed_remotes: str = ""
     graph_draft_provider: str = "openai"
     graph_draft_background_enabled: bool = False
     graph_draft_scheduler_enabled: bool = False

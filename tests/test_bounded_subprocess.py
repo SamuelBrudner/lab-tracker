@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import ctypes
+import gc
 import os
 import subprocess
 import sys
@@ -14,6 +16,7 @@ from lab_tracker import bounded_subprocess
 from lab_tracker.bounded_subprocess import (
     MAX_PROCESS_DEADLINE_SECONDS,
     BoundedSubprocessExecutor,
+    ProcessCleanupError,
     ProcessConsumerError,
     ProcessDeadline,
     ProcessDeadlineExceeded,
@@ -22,17 +25,6 @@ from lab_tracker.bounded_subprocess import (
     ProcessOutputLimitExceeded,
     ProcessUnsupportedPlatformError,
 )
-
-
-@pytest.fixture(autouse=True)
-def _require_posix_except_for_fail_closed_test(request: pytest.FixtureRequest) -> None:
-    if (
-        os.name != "posix"
-        and request.node.name != "test_non_posix_fails_closed_before_spawn"
-    ):
-        pytest.skip(
-            "The security boundary intentionally fails closed without POSIX groups."
-        )
 
 
 class FakeClock:
@@ -248,8 +240,20 @@ def test_spawn_failure_redacts_command_and_os_detail() -> None:
     assert secret not in str(raised.value)
 
 
+@pytest.mark.parametrize(
+    ("failure_type", "expected_type", "expected_detail"),
+    [
+        (RuntimeError, ProcessExecutionError, "Subprocess execution failed."),
+        (SystemExit, ProcessExecutionError, "Subprocess execution failed."),
+        (KeyboardInterrupt, KeyboardInterrupt, ""),
+    ],
+    ids=["ordinary-exception", "control-flow-exception", "keyboard-interrupt"],
+)
 def test_reader_start_failure_cleans_child_and_is_redacted(
     monkeypatch: pytest.MonkeyPatch,
+    failure_type: type[BaseException],
+    expected_type: type[BaseException],
+    expected_detail: str,
 ) -> None:
     secret = "thread-resource-secret"
     spawned: dict[str, subprocess.Popen[bytes]] = {}
@@ -261,15 +265,15 @@ def test_reader_start_failure_cleans_child_and_is_redacted(
         return process
 
     def fail_start(_thread: threading.Thread) -> None:
-        raise RuntimeError(secret)
+        raise failure_type(secret)
 
     monkeypatch.setattr(bounded_subprocess.subprocess, "Popen", recording_popen)
     monkeypatch.setattr(threading.Thread, "start", fail_start)
 
-    with pytest.raises(ProcessExecutionError) as raised:
+    with pytest.raises(expected_type) as raised:
         _run("import time; time.sleep(60)")
 
-    assert str(raised.value) == "Subprocess execution failed."
+    assert str(raised.value) == expected_detail
     assert secret not in str(raised.value)
     assert spawned["process"].poll() is not None
 
@@ -292,7 +296,7 @@ def test_expired_deadline_does_not_spawn(monkeypatch: pytest.MonkeyPatch) -> Non
         )
 
 
-def test_popen_uses_noninteractive_closed_descriptor_process_group_flags(
+def test_popen_uses_noninteractive_closed_descriptor_flags(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     real_popen = subprocess.Popen
@@ -311,7 +315,8 @@ def test_popen_uses_noninteractive_closed_descriptor_process_group_flags(
     assert observed["stdout"] is subprocess.PIPE
     assert observed["stderr"] is subprocess.PIPE
     assert observed["close_fds"] is True
-    assert observed["start_new_session"] is True
+    if os.name == "posix":
+        assert observed["start_new_session"] is True
 
 
 def test_cwd_and_explicit_environment_are_forwarded(tmp_path: Path) -> None:
@@ -330,7 +335,7 @@ def test_cwd_and_explicit_environment_are_forwarded(tmp_path: Path) -> None:
     assert result.stdout == f"{tmp_path.name}:present".encode()
 
 
-def test_deadline_kills_and_reaps_process_group() -> None:
+def test_deadline_kills_and_reaps_contained_descendants() -> None:
     descendant_pid = bytearray()
     source = """
 import signal
@@ -353,14 +358,14 @@ time.sleep(60)
         _run(
             source,
             consumer=descendant_pid.extend,
-            deadline=ProcessDeadline.after(0.25),
+            deadline=ProcessDeadline.after(1.0 if os.name == "nt" else 0.25),
         )
 
     pid = int(descendant_pid.strip())
-    _assert_pid_disappears(pid)
+    _assert_pid_terminated(pid)
 
 
-def test_leader_exit_with_inherited_pipe_is_still_bounded_by_group_deadline() -> None:
+def test_leader_exit_with_inherited_pipe_is_still_bounded_by_deadline() -> None:
     descendant_pid = bytearray()
     source = """
 import subprocess
@@ -374,11 +379,11 @@ print(child.pid, flush=True)
         _run(
             source,
             consumer=descendant_pid.extend,
-            deadline=ProcessDeadline.after(0.25),
+            deadline=ProcessDeadline.after(1.0 if os.name == "nt" else 0.25),
         )
 
     pid = int(descendant_pid.strip())
-    _assert_pid_disappears(pid)
+    _assert_pid_terminated(pid)
 
 
 def test_successful_leader_exit_still_cleans_descendant_with_closed_pipes() -> None:
@@ -399,7 +404,7 @@ print(child.pid, flush=True)
 
     assert result.returncode == 0
     pid = int(result.stdout.strip())
-    _assert_pid_disappears(pid)
+    _assert_pid_terminated(pid)
 
 
 def test_cleanup_uses_one_advertised_absolute_bound() -> None:
@@ -407,7 +412,7 @@ def test_cleanup_uses_one_advertised_absolute_bound() -> None:
         terminate_grace_seconds=0.05,
         kill_grace_seconds=0.10,
     )
-    execution_seconds = 0.10
+    execution_seconds = 1.0 if os.name == "nt" else 0.10
     started = time.monotonic()
 
     with pytest.raises(ProcessDeadlineExceeded):
@@ -428,15 +433,70 @@ def test_cleanup_uses_one_advertised_absolute_bound() -> None:
     assert elapsed < execution_seconds + executor.maximum_cleanup_seconds + 0.50
 
 
-def test_non_posix_fails_closed_before_spawn(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(bounded_subprocess.os, "name", "nt")
+def test_successful_containment_cleanup_is_outside_execution_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock = FakeClock()
+    deadline = ProcessDeadline.after(1.0, clock=clock)
+    process = subprocess.Popen(  # noqa: S603 - fixed Python test command
+        _python("print('ok', end='')"),
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        close_fds=True,
+    )
 
+    class AdvancingCleanupLifecycle:
+        def __init__(self) -> None:
+            self.process = process
+
+        def finish(self, *, cleanup_expires_at: float) -> None:
+            assert cleanup_expires_at > time.monotonic()
+            clock.value = deadline.expires_at + 10.0
+
+        def stop(self, *, cleanup_expires_at: float) -> None:
+            assert cleanup_expires_at > time.monotonic()
+            if process.poll() is None:
+                process.kill()
+            process.wait()
+
+        def close_pipes(self) -> None:
+            for pipe in (process.stdout, process.stderr):
+                if pipe is not None:
+                    pipe.close()
+
+        def close_containment(self) -> None:
+            pass
+
+    executor = BoundedSubprocessExecutor()
+    lifecycle = AdvancingCleanupLifecycle()
+    monkeypatch.setattr(
+        executor,
+        "_spawn_lifecycle",
+        lambda *_args, **_kwargs: lifecycle,
+    )
+
+    result = executor.run(
+        ("ignored",),
+        deadline=deadline,
+        stdout_limit_bytes=10,
+        stderr_limit_bytes=10,
+    )
+
+    assert result.returncode == 0
+    assert result.stdout == b"ok"
+    assert deadline.remaining() == 0.0
+
+
+def test_unknown_platform_fails_closed_before_spawn(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     def unexpected_spawn(*_args: object, **_kwargs: object) -> None:
         raise AssertionError("spawn must not be called")
 
     monkeypatch.setattr(bounded_subprocess.subprocess, "Popen", unexpected_spawn)
     with pytest.raises(ProcessUnsupportedPlatformError) as raised:
-        BoundedSubprocessExecutor().run(
+        BoundedSubprocessExecutor(_platform_name="unsupported").run(
             ("redacted",),
             deadline=_deadline(),
             stdout_limit_bytes=1,
@@ -491,12 +551,225 @@ def test_reader_threads_are_named_non_daemon_and_joined() -> None:
     assert leaked == []
 
 
-def _assert_pid_disappears(pid: int) -> None:
+@pytest.mark.skipif(os.name != "nt", reason="requires real Windows Job Objects")
+def test_windows_failure_before_assignment_never_executes_child(
+    tmp_path: Path,
+) -> None:
+    from lab_tracker._windows_job import (
+        CtypesWindowsJobApi,
+        WindowsJobOperationError,
+    )
+
+    marker = tmp_path / "must-not-run"
+
+    class RejectBeforeAssignment:
+        def __init__(self) -> None:
+            self._delegate = CtypesWindowsJobApi()
+
+        def create_kill_on_close_job(self) -> int:
+            return self._delegate.create_kill_on_close_job()
+
+        def open_process_for_assignment(self, _pid: int) -> int:
+            raise WindowsJobOperationError(
+                "private assignment failure must be redacted"
+            )
+
+        def close_handle(self, handle: int) -> None:
+            self._delegate.close_handle(handle)
+
+    with pytest.raises(ProcessExecutionError) as raised:
+        BoundedSubprocessExecutor(
+            _windows_api=RejectBeforeAssignment(),  # type: ignore[arg-type]
+        ).run(
+            _python(
+                "from pathlib import Path; "
+                f"Path({str(marker)!r}).write_text('executed')"
+            ),
+            deadline=_deadline(),
+            stdout_limit_bytes=1,
+            stderr_limit_bytes=1,
+        )
+
+    assert str(raised.value) == "Subprocess execution failed."
+    assert "private assignment failure" not in str(raised.value)
+    assert not marker.exists()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="requires real Windows handles")
+def test_windows_executor_does_not_leak_process_job_or_pipe_handles() -> None:
+    before = _windows_handle_count()
+    source = """
+import subprocess
+import sys
+
+child = subprocess.Popen(
+    [sys.executable, "-c", "import time; time.sleep(60)"],
+    stdin=subprocess.DEVNULL,
+    stdout=subprocess.DEVNULL,
+    stderr=subprocess.DEVNULL,
+)
+print(child.pid, flush=True)
+"""
+
+    for _ in range(6):
+        result = _run(source)
+        _assert_pid_terminated(int(result.stdout.strip()))
+    gc.collect()
+
+    assert _windows_handle_count() <= before + 2
+
+
+@pytest.mark.skipif(os.name != "nt", reason="requires real Windows Job Objects")
+@pytest.mark.parametrize(
+    ("failure_mode", "expected_error"),
+    [
+        ("stdout", ProcessOutputLimitExceeded),
+        ("stderr", ProcessOutputLimitExceeded),
+        ("consumer", ProcessConsumerError),
+    ],
+)
+def test_windows_failure_kills_descendant_tree(
+    tmp_path: Path,
+    failure_mode: str,
+    expected_error: type[ProcessExecutionError],
+) -> None:
+    child_pid_path = tmp_path / f"{failure_mode}-child-pid"
+    source = f"""
+import pathlib
+import subprocess
+import sys
+import time
+
+child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+pathlib.Path({str(child_pid_path)!r}).write_text(str(child.pid))
+if {failure_mode!r} == "stdout":
+    sys.stdout.buffer.write(b"x" * 4097)
+    sys.stdout.buffer.flush()
+elif {failure_mode!r} == "stderr":
+    sys.stderr.buffer.write(b"x" * 4097)
+    sys.stderr.buffer.flush()
+else:
+    print("consumer-trigger", flush=True)
+time.sleep(60)
+"""
+
+    def fail_consumer(_chunk: bytes) -> None:
+        raise RuntimeError("consumer-private-detail")
+
+    with pytest.raises(expected_error):
+        _run(
+            source,
+            stdout_limit=4096,
+            stderr_limit=4096,
+            consumer=fail_consumer if failure_mode == "consumer" else None,
+        )
+
+    child_pid = int(child_pid_path.read_text())
+    _assert_pid_terminated(child_pid)
+
+
+@pytest.mark.skipif(os.name != "nt", reason="requires real Windows Job Objects")
+def test_windows_job_close_is_tree_wide_backstop_when_terminate_fails() -> None:
+    from lab_tracker._windows_job import (
+        CtypesWindowsJobApi,
+        WindowsJobCleanupError,
+    )
+
+    descendant_pid = bytearray()
+
+    class FailExplicitTermination:
+        def __init__(self) -> None:
+            self._delegate = CtypesWindowsJobApi()
+
+        def __getattr__(self, name: str) -> object:
+            return getattr(self._delegate, name)
+
+        def terminate_job(self, _job_handle: int) -> None:
+            raise WindowsJobCleanupError(
+                "private termination failure must be redacted"
+            )
+
+    def capture_then_fail(chunk: bytes) -> None:
+        descendant_pid.extend(chunk)
+        raise RuntimeError("consumer-private-detail")
+
+    source = """
+import subprocess
+import sys
+import time
+
+child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+print(child.pid, flush=True)
+time.sleep(60)
+"""
+    with pytest.raises(ProcessCleanupError) as raised:
+        BoundedSubprocessExecutor(
+            _windows_api=FailExplicitTermination(),  # type: ignore[arg-type]
+        ).run(
+            _python(source),
+            deadline=_deadline(),
+            stdout_limit_bytes=100,
+            stderr_limit_bytes=100,
+            stdout_consumer=capture_then_fail,
+        )
+
+    assert str(raised.value) == "Subprocess cleanup failed."
+    assert "private termination failure" not in str(raised.value)
+    _assert_pid_terminated(int(descendant_pid.strip()))
+
+
+def _assert_pid_terminated(pid: int) -> None:
     deadline = time.monotonic() + 2.0
     while time.monotonic() < deadline:
-        try:
-            os.kill(pid, 0)
-        except ProcessLookupError:
+        if not _pid_is_running(pid):
             return
         time.sleep(0.01)
-    pytest.fail(f"child process {pid} was not reaped")
+    pytest.fail(f"child process {pid} was not terminated")
+
+
+def _pid_is_running(pid: int) -> bool:
+    if os.name == "nt":
+        return _windows_pid_is_running(pid)
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    return True
+
+
+def _windows_pid_is_running(pid: int) -> bool:
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)  # type: ignore[attr-defined]
+    kernel32.OpenProcess.argtypes = [
+        ctypes.c_uint32,
+        ctypes.c_int32,
+        ctypes.c_uint32,
+    ]
+    kernel32.OpenProcess.restype = ctypes.c_void_p
+    kernel32.WaitForSingleObject.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
+    kernel32.WaitForSingleObject.restype = ctypes.c_uint32
+    kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
+    kernel32.CloseHandle.restype = ctypes.c_int32
+    process_handle = kernel32.OpenProcess(0x00100000, 0, pid)
+    if not process_handle:
+        return False
+    try:
+        return kernel32.WaitForSingleObject(process_handle, 0) == 0x00000102
+    finally:
+        kernel32.CloseHandle(process_handle)
+
+
+def _windows_handle_count() -> int:
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)  # type: ignore[attr-defined]
+    kernel32.GetCurrentProcess.argtypes = []
+    kernel32.GetCurrentProcess.restype = ctypes.c_void_p
+    kernel32.GetProcessHandleCount.argtypes = [
+        ctypes.c_void_p,
+        ctypes.POINTER(ctypes.c_uint32),
+    ]
+    kernel32.GetProcessHandleCount.restype = ctypes.c_int32
+    count = ctypes.c_uint32()
+    assert kernel32.GetProcessHandleCount(
+        kernel32.GetCurrentProcess(),
+        ctypes.byref(count),
+    )
+    return int(count.value)

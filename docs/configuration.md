@@ -141,6 +141,60 @@ Progress or moving between subprocesses does not reset it.
   must be finite, greater than zero, and no greater than `86400` seconds (one
   day); invalid values fail application startup. This setting is independent of
   `LAB_TRACKER_RESOLVER_HTTP_DEADLINE_SECONDS`.
+- `LAB_TRACKER_GIT_ALLOWED_REMOTES`: strict comma-separated structural grants
+  for server-side Git resolution and Git store-health probes. The unset or empty
+  value denies every Git remote. Entries are not whitespace-trimmed; an empty,
+  malformed, or semantically duplicate normalized entry fails startup without
+  echoing the configured value.
+
+Each Git grant must use one of these forms:
+
+- `https://host[:port][/path]`
+- `ssh://[user@]host[:port][/path]`
+- `git://host[:port][/path]`
+- `[user@]host:path` or `[user@]host:/path` (SCP-relative and SCP-absolute
+  syntax are distinct)
+
+There are no wildcard or textual-prefix grants. Hostnames are case-normalized
+and strictly IDNA-canonicalized, IP literals and default ports are canonicalized,
+and a candidate must match the grant's scheme, canonical host, effective port,
+SSH user, and path style exactly. Terminal-dot hostnames are rejected rather
+than rewritten. A configured path is a case-sensitive prefix of whole path
+segments, so a grant for `/lab` permits `/lab/repository.git` but not
+`/laboratory/repository.git`. URL roots are valid grants. Non-root path segments
+use conservative ASCII letters, digits, and `._~+@-`; empty, repeated, trailing,
+dot, leading-dash, or other segments fail closed. Local and drive paths,
+remote-helper forms, unsupported schemes, embedded credentials, query or
+fragment components, percent escapes, and malformed paths or authorities are
+also rejected. Credentials belong in operator-controlled Git credential helpers
+or SSH facilities, never in this setting or a persisted store root.
+
+The policy is parsed once from `Settings` at startup. One immutable policy
+instance is shared by the resolver registry and the store-health checker; those
+components do not independently reread the process environment. Store-health
+Git commands run from an app-owned empty, non-repository directory, so an
+ambient checkout's repository-local Git configuration cannot affect them. The
+Git command environment clears inherited repository/object/work-tree selectors
+and sets the operation directory's parent as Git's discovery ceiling, preventing
+that parent or anything above it from supplying repository-local configuration.
+
+Authorization occurs before process creation. Git's effective remote is then
+preflighted with the same bounded command environment. Apart from its required
+terminal line ending, `git ls-remote --get-url` output must be byte-for-byte
+equal to the reconstructed canonical remote before a query or fetch proceeds;
+merely parsing to an equivalent structure is not enough. HTTP redirects are
+disabled both generically and for the approved URL. An operator grant therefore
+never implicitly approves a rewritten or redirected URL.
+
+The structural policy is an application boundary, not a network sandbox around
+Git. Git's system/global configuration remains available for credential
+helpers, HTTP proxy and TLS configuration, and SSH uses the host's agent, keys,
+and OpenSSH configuration. OpenSSH `HostName`, `ProxyJump`, and `ProxyCommand`,
+and Git/HTTP proxy settings can route an approved logical endpoint through
+other machines. Treat all of those facilities as trusted, immutable
+operator-controlled configuration; users who can modify them can change where
+Git connects or disclose Git credentials. Do not mount user-writable Git,
+credential-helper, proxy, or OpenSSH configuration into the service.
 
 Subprocess metadata output and stderr have independent fixed memory caps. Actual
 artifact bytes are streamed and checked against the resolver's existing
@@ -152,14 +206,13 @@ an uncooperative process is terminated, then killed and reaped within a separate
 fixed cleanup grace. A failed call can therefore exceed the configured
 execution deadline only by that bounded cleanup grace.
 
-Git URLs with embedded HTTP/Git userinfo, a URL password, or a query string are
-refused before process creation; configure credentials through host-side Git or
-SSH facilities.
-
-The bounded rclone/Git process boundary currently requires POSIX process-group
-containment. On Windows these two optional resolvers fail closed as
-`UNRESOLVED`; local and HTTP artifact resolution remain available. Native
-Windows process-tree containment requires a Job Object implementation.
+The bounded rclone/Git process boundary contains complete descendant trees on
+both supported process platforms. POSIX hosts use a dedicated process group.
+Windows hosts create an unnamed, non-inheritable Job Object configured with
+`JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`, start the leader suspended, assign and
+verify it in the Job Object, and only then resume its primary thread. If secure
+containment cannot be established, the child never executes and resolution
+fails closed as `UNRESOLVED`.
 
 The deadline and process-output caps bound one resolution, but they do not bound
 Git cache growth or concurrent cache mutation. Git fetch disk and cache

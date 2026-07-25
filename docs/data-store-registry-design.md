@@ -202,9 +202,11 @@ Unix-only:
   (`%APPDATA%\rclone\rclone.conf`) work the same across Windows, macOS, and
   Linux. This is the reason to prefer it over **`rsync`, which is *not* native on
   Windows** (it needs WSL/Cygwin/cwRsync). The design uses rclone, never rsync.
-  Lab Tracker's bounded rclone/Git process owner currently requires POSIX
-  process groups, however, so these optional resolvers temporarily fail closed
-  on Windows pending equivalent Job Object containment.
+  Lab Tracker's bounded rclone/Git process owner contains descendants with a
+  dedicated process group on POSIX and a kill-on-close Job Object on Windows.
+  The Windows leader remains suspended until Job Object assignment has been
+  verified, so inability to establish secure containment fails closed before
+  artifact resolver code executes.
 - **The common Windows case needs no rclone at all.** OneDrive on a Windows
   workstation is normally a *synced local folder*, so it resolves through the
   plain `local_fs` adapter with zero credentials. rclone is only the fallback

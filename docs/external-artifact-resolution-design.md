@@ -221,9 +221,71 @@ strings; those forms are refused before process creation. SSH routing usernames
 remain valid, while authentication material must come from host-side Git or SSH
 configuration.
 
-This bounded host-process implementation currently uses POSIX process groups.
-On Windows, rclone/Git resolution fails closed as `UNRESOLVED` until equivalent
-Job Object containment is available; local and HTTP resolvers are unaffected.
+### Structural Git remote authorization
+
+Git resolution and Git store-health probes share one immutable
+`GitRemotePolicy`, parsed once from `LAB_TRACKER_GIT_ALLOWED_REMOTES` during
+application composition. An unset or empty setting creates a deny-all policy.
+The configuration is a strict comma-separated list: entries are not trimmed,
+and empty, malformed, or semantically duplicate normalized grants abort startup
+with a redacted index/category diagnostic.
+
+The accepted grant and candidate forms are deliberately narrower than Git's
+full URL grammar:
+
+- `https://host[:port][/path]`
+- `ssh://[user@]host[:port][/path]`
+- `git://host[:port][/path]`
+- `[user@]host:path` and `[user@]host:/path`
+
+The last two forms retain distinct SCP-relative and SCP-absolute semantics.
+Parsing case-normalizes and strictly IDNA-canonicalizes DNS names, canonicalizes
+numeric IPs and default ports, and then reconstructs the only value that may
+enter the Git argument vector. Terminal-dot DNS names are rejected rather than
+collapsed into search-eligible names.
+Authorization requires an exact scheme, canonical host, effective port, SSH
+user, and path style; the grant path must be a case-sensitive, whole-segment
+prefix of the candidate path. There are no wildcards or raw string-prefix
+matches. Local/drive paths, remote helpers, unsupported or authority-less
+schemes, credentials outside an SSH routing username, queries/fragments,
+percent escapes, whitespace/control characters, backslashes, malformed paths,
+and malformed authorities fail closed before a child can start. Non-root path
+segments are restricted to conservative ASCII letters, digits, and `._~+@-`,
+with empty, repeated, trailing, dot, and leading-dash segments rejected.
+
+Git itself can transform a remote through configuration. Before any network
+query or fetch, the implementation runs a bounded `git ls-remote --get-url`
+preflight using the same environment and app-owned working-directory boundary
+as the subsequent command. Apart from the required terminal line ending, its
+output must be byte-for-byte equal to the reconstructed canonical remote;
+structural equivalence alone does not pass. Git HTTP redirects are disabled
+both generically and for the approved URL, so neither a rewrite nor a redirect
+inherits authorization.
+
+The policy authorizes the logical Git endpoint; it does not independently
+constrain every socket opened by Git or SSH. System/global Git configuration is
+intentionally retained for credential helpers, HTTP proxy/TLS settings, and SSH
+authentication. The SSH agent, keys, and OpenSSH configuration—including
+`HostName`, `ProxyJump`, and `ProxyCommand`—and Git/HTTP proxy configuration are
+therefore trusted operator state. They can route an approved endpoint through a
+different host and must not be writable by an untrusted application user.
+Credentials remain outside persisted locators and policy strings. Health probes
+additionally run from an app-owned empty non-repository directory, preventing
+repository-local configuration from being inherited from the service's launch
+checkout. Each Git command also clears inherited repository/object/work-tree
+selectors and sets the app-owned operation directory's parent as the
+repository-discovery ceiling, so that parent and its ancestors cannot supply
+repository-local configuration.
+
+The bounded host-process implementation contains complete descendant trees on
+each supported process platform. POSIX hosts use a dedicated process group.
+Windows hosts create an unnamed, non-inheritable Job Object with
+`JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`, start the leader suspended, assign and
+verify it in the Job Object, and resume its primary thread only after verified
+containment. Failure before verified assignment cannot execute artifact
+resolver code. Deadline, output-overflow, consumer-failure, and cleanup paths
+terminate the whole Job Object; closing its handle is the final kill-on-close
+backstop.
 
 ## The host-local locator problem
 

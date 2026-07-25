@@ -304,6 +304,44 @@ def test_data_store_health_local_fs_missing_root(client, admin_auth_headers, tmp
     assert body["kind"] == "local_fs"
 
 
+def test_git_store_health_uses_installed_policy_without_leaking_credentials(
+    client,
+    admin_auth_headers,
+):
+    project_id = _create_project(client, admin_auth_headers, "Git health project")
+    secret = "git-health-secret-must-not-leak"
+    store_id = client.post(
+        "/data-stores",
+        json=_store_payload(
+            project_id,
+            name="analysis-repository",
+            kind="git",
+            root=f"https://operator:{secret}@git.example/lab/repository.git",
+            credential_ref=None,
+        ),
+        headers=admin_auth_headers,
+    ).json()["data"]["store_id"]
+
+    checker = client.app.state.store_health_checker
+    workdir = client.app.state.git_health_workdir
+    assert checker.git_remote_policy is client.app.state.git_remote_policy
+    assert checker.git_health_workdir is workdir
+    assert workdir.is_dir()
+    assert list(workdir.iterdir()) == []
+    assert not (workdir / ".git").exists()
+
+    response = client.get(
+        f"/data-stores/{store_id}/health",
+        headers=admin_auth_headers,
+    )
+
+    assert response.status_code == 200
+    assert response.json()["data"]["status"] == "unreachable"
+    assert secret not in response.text
+    assert list(workdir.iterdir()) == []
+    assert not (workdir / ".git").exists()
+
+
 def test_data_store_health_denied_for_unauthorized_project(
     client, scoped_project_member, admin_auth_headers, tmp_path
 ):
