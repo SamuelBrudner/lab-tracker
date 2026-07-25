@@ -114,7 +114,7 @@ def register_error_handlers(app: FastAPI) -> None:
             request,
             status_code=http_status.HTTP_422_UNPROCESSABLE_CONTENT,
             code="request_validation_error",
-            exc=exc,
+            detail=_request_validation_log_detail(exc.errors()),
         )
         return error_response(
             http_status.HTTP_422_UNPROCESSABLE_CONTENT,
@@ -144,15 +144,17 @@ def _log_handled_error(
     *,
     status_code: int,
     code: str,
-    exc: Exception,
+    exc: Exception | None = None,
+    detail: str | None = None,
 ) -> None:
+    safe_detail = detail if detail is not None else str(exc or "")
     _logger.warning(
         "Handled HTTP error: method=%s path=%s status_code=%s code=%s detail=%s",
         request.method,
         request.url.path,
         status_code,
         code,
-        exc,
+        safe_detail,
     )
 
 
@@ -174,3 +176,19 @@ def issues_from_validation_errors(errors: list[dict[str, Any]]) -> list[ErrorIss
         field = ".".join(loc_parts) if loc_parts else None
         issues.append(ErrorIssue(field=field, message=error.get("msg", "Invalid value")))
     return issues
+
+
+def _request_validation_log_detail(errors: list[dict[str, Any]]) -> str:
+    """Summarize validation shape without logging request-body input values."""
+
+    fields: set[str] = set()
+    error_types: set[str] = set()
+    for error in errors:
+        loc_parts = [str(part) for part in error.get("loc", []) if part != "body"]
+        fields.add(".".join(loc_parts) if loc_parts else "<body>")
+        error_types.add(str(error.get("type") or "unknown"))
+    return (
+        f"validation_errors={len(errors)} "
+        f"fields={','.join(sorted(fields))} "
+        f"types={','.join(sorted(error_types))}"
+    )

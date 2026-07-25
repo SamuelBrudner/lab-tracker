@@ -13,9 +13,11 @@ from collections.abc import Iterable
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from enum import Enum
+from threading import RLock
 from uuid import UUID, uuid4
 
 from sqlalchemy import select, update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
 
 from lab_tracker.db_models import (
@@ -33,6 +35,7 @@ LOCAL_AUTH_USER_ID = ensure_uuid("00000000-0000-4000-8000-000000000001")
 LOCAL_AUTH_USERNAME = "local-tester"
 LOCAL_AUTH_PASSWORD_HASH = "local-auth-disabled"
 MIN_PASSWORD_LENGTH = 6
+MIN_INVITED_PASSWORD_LENGTH = 12
 
 
 def utc_now() -> datetime:
@@ -142,27 +145,39 @@ class PasswordHasher:
         return hmac.compare_digest(computed, expected)
 
 
+def _validate_invited_password(password: str, password_confirmation: str) -> None:
+    if password != password_confirmation:
+        raise ValidationError("Password confirmation does not match.")
+    if len(password) < MIN_INVITED_PASSWORD_LENGTH:
+        raise ValidationError(
+            "Invited-account passwords must be at least "
+            f"{MIN_INVITED_PASSWORD_LENGTH} characters long."
+        )
+
+
 class AuthService:
     """Authentication user store with optional SQLAlchemy persistence."""
 
     def __init__(self, session_factory: sessionmaker[Session] | None = None) -> None:
         self._session_factory = session_factory
         self._users_by_username: dict[str, User] = {}
+        self._memory_lock = RLock()
 
     def register_user(self, username: str, password: str, role: Role) -> User:
         normalized = self._normalize_username(username)
         password_hash = PasswordHasher.hash_password(password)
         if self._session_factory is None:
-            if normalized in self._users_by_username:
-                raise ConflictError("Username already exists.")
-            user = User(
-                user_id=uuid4(),
-                username=normalized,
-                password_hash=password_hash,
-                role=role,
-            )
-            self._users_by_username[normalized] = user
-            return user
+            with self._memory_lock:
+                if normalized in self._users_by_username:
+                    raise ConflictError("Username already exists.")
+                user = User(
+                    user_id=uuid4(),
+                    username=normalized,
+                    password_hash=password_hash,
+                    role=role,
+                )
+                self._users_by_username[normalized] = user
+                return user
 
         with self._session_factory() as session:
             existing = session.scalar(select(UserModel).where(UserModel.username == normalized))
@@ -178,6 +193,106 @@ class AuthService:
             session.add(user_row)
             session.commit()
             return _user_from_model(user_row)
+
+    def register_invited_user(
+        self,
+        *,
+        invitation_token_service: InvitationTokenService,
+        invite_token: str,
+        username: str,
+        password: str,
+        password_confirmation: str,
+    ) -> User:
+        """Atomically create one user and consume the invitation authorizing it."""
+
+        _ensure_non_empty(invite_token, "invite_token")
+        if not invite_token.startswith(INVITATION_TOKEN_PREFIX):
+            raise AuthError("Unrecognized invitation token.")
+        normalized = invitation_token_service.normalize_email(username)
+        _validate_invited_password(password, password_confirmation)
+        token_hash = _hash_token(invite_token)
+
+        if self._session_factory is None:
+            if invitation_token_service._session_factory is not None:
+                raise ValidationError("Authentication services must share one persistence mode.")
+            with invitation_token_service._memory_lock:
+                preflight_row = invitation_token_service._memory_invitations_by_hash.get(token_hash)
+                if preflight_row is None:
+                    raise AuthError("Invitation token is invalid.")
+                preflight_invitation = _invitation_from_model(preflight_row)
+                invitation_token_service._ensure_invitation_pending(preflight_invitation)
+                preflight_email = invitation_token_service.normalize_email(
+                    preflight_invitation.email
+                )
+                if normalized != preflight_email:
+                    raise AuthError("Invitation token does not match this email address.")
+            password_hash = PasswordHasher.hash_password(password)
+            with invitation_token_service._memory_lock, self._memory_lock:
+                row = invitation_token_service._memory_invitations_by_hash.get(token_hash)
+                if row is None:
+                    raise AuthError("Invitation token is invalid.")
+                invitation = _invitation_from_model(row)
+                invitation_token_service._ensure_invitation_pending(invitation)
+                invited_email = invitation_token_service.normalize_email(invitation.email)
+                if normalized != invited_email:
+                    raise AuthError("Invitation token does not match this email address.")
+                if invited_email in self._users_by_username:
+                    raise ConflictError("Invitation has already been used.")
+                user = User(
+                    user_id=uuid4(),
+                    username=invited_email,
+                    password_hash=password_hash,
+                    role=invitation.role,
+                )
+                self._users_by_username[invited_email] = user
+                row.consumed_at = utc_now()
+                row.consumed_by_user_id = str(user.user_id)
+                return user
+
+        if invitation_token_service._session_factory is not self._session_factory:
+            raise ValidationError(
+                "Authentication services must share one database session factory."
+            )
+
+        with self._session_factory() as lookup_session:
+            invitation_row = lookup_session.scalar(
+                select(InvitationModel).where(InvitationModel.token_hash == token_hash)
+            )
+            if invitation_row is None:
+                raise AuthError("Invitation token is invalid.")
+            invitation = _invitation_from_model(invitation_row)
+        invitation_token_service._ensure_invitation_pending(invitation)
+        invited_email = invitation_token_service.normalize_email(invitation.email)
+        if normalized != invited_email:
+            raise AuthError("Invitation token does not match this email address.")
+
+        password_hash = PasswordHasher.hash_password(password)
+        accepted_at = utc_now()
+        user_id = uuid4()
+        try:
+            with self._session_factory() as session, session.begin():
+                user_row = UserModel(
+                    user_id=str(user_id),
+                    username=invited_email,
+                    password_hash=password_hash,
+                    role=invitation.role.value,
+                    created_at=accepted_at,
+                )
+                session.add(user_row)
+                session.flush()
+                claimed = invitation_token_service._claim_persistent_invitation(
+                    session,
+                    invitation_id=invitation.invitation_id,
+                    token_hash=token_hash,
+                    consumed_by_user_id=user_id,
+                    consumed_at=accepted_at,
+                )
+                if not claimed:
+                    raise AuthError("Invitation is no longer available.")
+                user = _user_from_model(user_row)
+        except IntegrityError as exc:
+            raise ConflictError("Invitation has already been used.") from exc
+        return user
 
     def authenticate(self, username: str, password: str) -> User:
         normalized = self._normalize_username(username)
@@ -444,6 +559,7 @@ class InvitationTokenService:
         self._ttl_hours = ttl_hours
         self._session_factory = session_factory
         self._memory_invitations_by_hash: dict[str, InvitationModel] = {}
+        self._memory_lock = RLock()
 
     def issue_invitation(self, *, email: str, role: Role) -> IssuedInvitation:
         issued_at = utc_now()
@@ -460,7 +576,8 @@ class InvitationTokenService:
             created_at=issued_at,
         )
         if self._session_factory is None:
-            self._memory_invitations_by_hash[token_hash] = row
+            with self._memory_lock:
+                self._memory_invitations_by_hash[token_hash] = row
             return IssuedInvitation(invitation=_invitation_from_model(row), token=token)
 
         with self._session_factory() as session:
@@ -489,14 +606,15 @@ class InvitationTokenService:
         _ensure_non_empty(token, "invite_token")
         token_hash = _hash_token(token)
         if self._session_factory is None:
-            row = self._memory_invitations_by_hash.get(token_hash)
-            if row is None:
-                raise AuthError("Invitation token is invalid.")
-            invitation = _invitation_from_model(row)
-            self._ensure_invitation_pending(invitation)
-            row.consumed_at = utc_now()
-            row.consumed_by_user_id = str(consumed_by_user_id)
-            return _invitation_from_model(row)
+            with self._memory_lock:
+                row = self._memory_invitations_by_hash.get(token_hash)
+                if row is None:
+                    raise AuthError("Invitation token is invalid.")
+                invitation = _invitation_from_model(row)
+                self._ensure_invitation_pending(invitation)
+                row.consumed_at = utc_now()
+                row.consumed_by_user_id = str(consumed_by_user_id)
+                return _invitation_from_model(row)
 
         with self._session_factory() as session:
             row = session.scalar(
@@ -506,19 +624,58 @@ class InvitationTokenService:
                 raise AuthError("Invitation token is invalid.")
             invitation = _invitation_from_model(row)
             self._ensure_invitation_pending(invitation)
-            row.consumed_at = utc_now()
-            row.consumed_by_user_id = str(consumed_by_user_id)
+            consumed_at = utc_now()
+            if not self._claim_persistent_invitation(
+                session,
+                invitation_id=invitation.invitation_id,
+                token_hash=token_hash,
+                consumed_by_user_id=consumed_by_user_id,
+                consumed_at=consumed_at,
+            ):
+                session.rollback()
+                raise AuthError("Invitation is no longer available.")
             session.commit()
-            session.refresh(row)
-            return _invitation_from_model(row)
+            consumed_row = session.get(InvitationModel, str(invitation.invitation_id))
+            if consumed_row is None:  # pragma: no cover - protected by the primary key
+                raise AuthError("Invitation token is invalid.")
+            return _invitation_from_model(consumed_row)
+
+    @staticmethod
+    def _claim_persistent_invitation(
+        session: Session,
+        *,
+        invitation_id: UUID,
+        token_hash: str,
+        consumed_by_user_id: UUID,
+        consumed_at: datetime,
+    ) -> bool:
+        result = session.execute(
+            update(InvitationModel)
+            .where(
+                InvitationModel.invitation_id == str(invitation_id),
+                InvitationModel.token_hash == token_hash,
+                InvitationModel.consumed_at.is_(None),
+                InvitationModel.revoked_at.is_(None),
+                InvitationModel.expires_at > consumed_at,
+            )
+            .values(
+                consumed_at=consumed_at,
+                consumed_by_user_id=str(consumed_by_user_id),
+            )
+        )
+        return result.rowcount == 1
 
     def list_invitations(self) -> list[Invitation]:
         if self._session_factory is None:
-            return sorted(
-                (_invitation_from_model(row) for row in self._memory_invitations_by_hash.values()),
-                key=lambda invitation: invitation.created_at,
-                reverse=True,
-            )
+            with self._memory_lock:
+                return sorted(
+                    (
+                        _invitation_from_model(row)
+                        for row in self._memory_invitations_by_hash.values()
+                    ),
+                    key=lambda invitation: invitation.created_at,
+                    reverse=True,
+                )
         with self._session_factory() as session:
             rows = list(
                 session.scalars(
@@ -529,25 +686,36 @@ class InvitationTokenService:
 
     def revoke_invitation(self, invitation_id: UUID) -> Invitation:
         if self._session_factory is None:
-            for row in self._memory_invitations_by_hash.values():
-                if str(row.invitation_id) == str(invitation_id):
-                    if row.consumed_at is not None:
-                        raise ValidationError("Consumed invitations cannot be revoked.")
-                    if row.revoked_at is None:
-                        row.revoked_at = utc_now()
-                    return _invitation_from_model(row)
-            raise NotFoundError("Invitation does not exist.")
+            with self._memory_lock:
+                for row in self._memory_invitations_by_hash.values():
+                    if str(row.invitation_id) == str(invitation_id):
+                        if row.consumed_at is not None:
+                            raise ValidationError("Consumed invitations cannot be revoked.")
+                        if row.revoked_at is None:
+                            row.revoked_at = utc_now()
+                        return _invitation_from_model(row)
+                raise NotFoundError("Invitation does not exist.")
 
         with self._session_factory() as session:
+            revoked_at = utc_now()
+            result = session.execute(
+                update(InvitationModel)
+                .where(
+                    InvitationModel.invitation_id == str(invitation_id),
+                    InvitationModel.consumed_at.is_(None),
+                    InvitationModel.revoked_at.is_(None),
+                )
+                .values(revoked_at=revoked_at)
+            )
+            if result.rowcount == 1:
+                session.commit()
+            else:
+                session.rollback()
             row = session.get(InvitationModel, str(invitation_id))
             if row is None:
                 raise NotFoundError("Invitation does not exist.")
             if row.consumed_at is not None:
                 raise ValidationError("Consumed invitations cannot be revoked.")
-            if row.revoked_at is None:
-                row.revoked_at = utc_now()
-                session.commit()
-                session.refresh(row)
             return _invitation_from_model(row)
 
     def _invitation_for_token(self, token: str) -> Invitation:
@@ -555,10 +723,11 @@ class InvitationTokenService:
             raise AuthError("Unrecognized invitation token.")
         token_hash = _hash_token(token)
         if self._session_factory is None:
-            row = self._memory_invitations_by_hash.get(token_hash)
-            if row is None:
-                raise AuthError("Invitation token is invalid.")
-            return _invitation_from_model(row)
+            with self._memory_lock:
+                row = self._memory_invitations_by_hash.get(token_hash)
+                if row is None:
+                    raise AuthError("Invitation token is invalid.")
+                return _invitation_from_model(row)
 
         with self._session_factory() as session:
             row = session.scalar(

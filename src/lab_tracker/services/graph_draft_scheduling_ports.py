@@ -160,4 +160,5 @@ class SchedulingRepository(Protocol):
         self,
         *,
         claimed_at: datetime,
+        stale_before: datetime,
     ) -> GraphDraftBatchRun | None: ...

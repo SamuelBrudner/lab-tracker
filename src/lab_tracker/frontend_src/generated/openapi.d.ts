@@ -377,6 +377,7 @@ export interface components {
       "provider": string;
       "provider_credential_configured": boolean;
       "scheduler_enabled": boolean;
+      "source_revision": string;
     };
     "AuthTokenRead": {
       "access_token": string;
@@ -564,7 +565,9 @@ export interface components {
       "created_by_user_id"?: (string | null);
       "created_by_username"?: (string | null);
       "draft_mode"?: components["schemas"]["GraphDraftMode"];
+      "draft_purpose": components["schemas"]["GraphDraftPurpose"];
       "error_metadata"?: Record<string, unknown>;
+      "generation_lease_expires_at": (string | null);
       "meeting_note_count": number;
       "model": string;
       "operation_count"?: number;
@@ -581,6 +584,7 @@ export interface components {
       "reviewed_by_username"?: (string | null);
       "source_checksum"?: (string | null);
       "source_content_type"?: (string | null);
+      "source_context_truncated": boolean;
       "source_filename"?: (string | null);
       "source_note_count": number;
       "source_note_id": string;
@@ -603,6 +607,7 @@ export interface components {
       "notification_email"?: (string | null);
       "notification_email_confirmed_at"?: (string | null);
       "project_id": string;
+      "review_email_available"?: boolean;
       "run_at_local_time"?: string;
       "settings_id": string;
       "timezone_name"?: string;
@@ -611,6 +616,7 @@ export interface components {
       "user_id"?: (string | null);
     };
     "GraphDraftMode": "graph_context" | "image_only" | "graph_batch";
+    "GraphDraftPurpose": "general" | "starter_questions";
     "GraphDraftSemanticType": "create_entity" | "update_entity" | "create_note" | "link_note_to_question" | "link_note_to_session" | "link_note_to_dataset" | "link_note_to_analysis" | "suggest_new_question" | "suggest_new_dataset" | "suggest_new_goal" | "link_node_to_goal" | "update_goal" | "suggest_followup" | "request_clarification";
     "ListEnvelope_AuthInvitationRead_": {
       "data": Array<components["schemas"]["AuthInvitationRead"]>;

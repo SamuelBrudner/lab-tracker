@@ -49,6 +49,13 @@ if TYPE_CHECKING:
 
 _logger = logging.getLogger(__name__)
 
+_SERVER_ENRICHED_CAPTURE_METADATA_KEYS = frozenset(
+    {
+        "manual_graph_draft_purpose",
+        "scheduled_graph_draft_policy",
+    }
+)
+
 
 def _canonical_raw_asset(asset: NoteRawAsset | None) -> tuple[str, str, int, str] | None:
     if asset is None:
@@ -426,12 +433,21 @@ class NoteService(BaseService):
         client_capture_id: str,
         cause: Exception | None = None,
     ) -> None:
+        supplied_metadata = _canonical_capture_metadata(metadata)
+        stored_metadata = _canonical_capture_metadata(existing.metadata)
+        # A later server workflow may enrich an idempotently created note
+        # without changing the capture the client originally submitted.
+        # Replays may omit those server-owned additions, but an explicitly
+        # supplied value must still match so conflicting callers fail closed.
+        for key in _SERVER_ENRICHED_CAPTURE_METADATA_KEYS:
+            if key not in supplied_metadata:
+                stored_metadata.pop(key, None)
         supplied = {
             "raw_content": raw_content,
             "raw_asset": _canonical_raw_asset(raw_asset),
             "transcribed_text": transcribed_text,
             "targets": _canonical_targets(targets),
-            "metadata": _canonical_capture_metadata(metadata),
+            "metadata": supplied_metadata,
             "status": status,
             "origin": origin,
             "change_set_id": change_set_id,
@@ -444,7 +460,7 @@ class NoteService(BaseService):
             "raw_asset": _canonical_raw_asset(existing.raw_asset),
             "transcribed_text": existing.transcribed_text,
             "targets": _canonical_targets(existing.targets),
-            "metadata": _canonical_capture_metadata(existing.metadata),
+            "metadata": stored_metadata,
             "status": existing.status,
             "origin": existing.origin,
             "change_set_id": existing.change_set_id,

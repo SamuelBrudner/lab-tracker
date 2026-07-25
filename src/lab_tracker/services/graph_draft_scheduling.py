@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import TypeVar
 from uuid import UUID, uuid4
 
@@ -42,6 +42,7 @@ from lab_tracker.services.shared import actor_user_fk, actor_user_id
 
 logger = logging.getLogger(__name__)
 SettingValueT = TypeVar("SettingValueT")
+DEFAULT_BATCH_RUN_LEASE_SECONDS = 10 * 60
 
 
 def _validated_setting_patch(
@@ -68,6 +69,7 @@ class BatchSchedulingCoordinator(BaseService):
         notes: SchedulingNotes,
         authorization: SchedulingAuthorization,
         provenance_links: SchedulingProvenanceLinks | None = None,
+        review_email_available: bool = False,
     ) -> None:
         super().__init__(context)
         self.records = records
@@ -76,6 +78,7 @@ class BatchSchedulingCoordinator(BaseService):
         self.notes = notes
         self.authorization = authorization
         self.provenance_links = provenance_links
+        self.review_email_available = bool(review_email_available)
 
     @property
     def scheduling_repository(self) -> SchedulingRepository:
@@ -100,14 +103,17 @@ class BatchSchedulingCoordinator(BaseService):
             user_id=user_id,
         )
         if settings is not None:
+            settings.review_email_available = self.review_email_available
             return settings
         default = self.scheduling_repository.get_graph_draft_batch_settings_by_project(project_id)
-        return batch_policy.default_batch_settings(
+        settings = batch_policy.default_batch_settings(
             project_id=project_id,
             user_id=user_id,
             actor=actor,
             inherit_from=default,
         )
+        settings.review_email_available = self.review_email_available
+        return settings
 
     def update_graph_draft_batch_settings(
         self,
@@ -161,6 +167,7 @@ class BatchSchedulingCoordinator(BaseService):
                 actor=actor,
                 inherit_from=default,
             )
+        settings.review_email_available = self.review_email_available
         before = settings.model_copy(deep=True)
         if is_provided(enabled):
             settings.enabled = enabled
@@ -186,6 +193,10 @@ class BatchSchedulingCoordinator(BaseService):
                     utc_now() if cleaned_email is not None else None
                 )
         if is_provided(email_notifications_enabled):
+            if email_notifications_enabled and not self.review_email_available:
+                raise ValidationError(
+                    "Review email delivery is not enabled on this Lab Tracker host."
+                )
             settings.email_notifications_enabled = email_notifications_enabled
         if settings.email_notifications_enabled:
             if settings.user_id is None:
@@ -468,10 +479,17 @@ class BatchSchedulingCoordinator(BaseService):
                 if callable(close):
                     close()
 
-    def claim_next_graph_draft_batch_run(self) -> GraphDraftBatchRun | None:
+    def claim_next_graph_draft_batch_run(
+        self,
+        *,
+        lease_seconds: int = DEFAULT_BATCH_RUN_LEASE_SECONDS,
+    ) -> GraphDraftBatchRun | None:
+        claimed_at = utc_now()
         with self.unit_of_work():
             return self.scheduling_repository.claim_next_pending_graph_draft_batch_run(
-                claimed_at=utc_now(),
+                claimed_at=claimed_at,
+                stale_before=claimed_at
+                - timedelta(seconds=max(1, lease_seconds)),
             )
 
     def execute_graph_draft_batch_run(
@@ -772,6 +790,7 @@ class BatchSchedulingCoordinator(BaseService):
             note
             for note in self.notes.list_notes(project_id=settings.project_id)
             if note.status == NoteStatus.STAGED
+            and batch_policy.note_is_scheduled_draft_eligible(note)
         ]
         if settings.user_id is not None:
             reviewer = batch_policy.BatchReviewer(

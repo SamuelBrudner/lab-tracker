@@ -57,6 +57,28 @@ def test_readiness_endpoint(monkeypatch, tmp_path):
     assert any(check["name"] == "file_storage" for check in checks)
 
 
+def test_health_identifies_the_exact_deployment_without_secrets(monkeypatch, tmp_path):
+    _bootstrap_database(monkeypatch, tmp_path, "health-identity.db")
+    monkeypatch.setenv("LAB_TRACKER_APP_NAME", "marion-lab-tracker")
+    monkeypatch.setenv("LAB_TRACKER_ENVIRONMENT", "local")
+    monkeypatch.setenv(
+        "LAB_TRACKER_SOURCE_REVISION",
+        "0123456789abcdef0123456789abcdef01234567",
+    )
+
+    with TestClient(create_app()) as client:
+        response = client.get("/health")
+
+    assert response.status_code == 200
+    assert response.json()["app"] == {
+        "name": "marion-lab-tracker",
+        "environment": "local",
+        "source_revision": "0123456789abcdef0123456789abcdef01234567",
+    }
+    assert "database_url" not in response.text
+    assert "api_key" not in response.text
+
+
 def test_metrics_endpoint(monkeypatch, tmp_path):
     db_path = tmp_path / "metrics.db"
     database_url = f"sqlite+pysqlite:///{db_path}"

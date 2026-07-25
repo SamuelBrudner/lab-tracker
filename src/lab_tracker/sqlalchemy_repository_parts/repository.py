@@ -1281,5 +1281,9 @@ class SQLAlchemyLabTrackerRepository:
         self,
         *,
         claimed_at: datetime,
+        stale_before: datetime,
     ) -> GraphDraftBatchRun | None:
-        return self.graph_draft_batch_runs.claim_next_pending(claimed_at=claimed_at)
+        return self.graph_draft_batch_runs.claim_next_pending(
+            claimed_at=claimed_at,
+            stale_before=stale_before,
+        )

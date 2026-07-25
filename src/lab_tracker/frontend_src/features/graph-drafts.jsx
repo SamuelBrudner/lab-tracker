@@ -104,6 +104,14 @@ function GraphDraftDetailCard({
                 ))}
             </div>
           ) : null}
+          {changeSet.source_context_truncated ? (
+            <div className="flash error" role="alert">
+              <strong>Only part of the source context reached the drafting provider.</strong>{" "}
+              Compare every proposal with the original source before accepting it.
+              For starter questions, return to Setup and submit shorter or split
+              context to generate a complete replacement draft.
+            </div>
+          ) : null}
           <p className="review-lead subtle">
             {changeSet.source_note_count || (changeSet.source_note_ids || []).length || 1}{" "}
             {(changeSet.source_note_count || (changeSet.source_note_ids || []).length || 1) === 1

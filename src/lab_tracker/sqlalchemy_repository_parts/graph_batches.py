@@ -594,24 +594,46 @@ class SQLAlchemyGraphDraftBatchRunRepository(EntityRepository[GraphDraftBatchRun
         self,
         *,
         claimed_at: datetime,
+        stale_before: datetime,
     ) -> GraphDraftBatchRun | None:
         self._session.flush()
-        row = self._session.scalar(
+        pending = (
+            GraphDraftBatchRunModel.status
+            == GraphDraftBatchRunStatus.PENDING.value
+        )
+        stale_running = and_(
+            GraphDraftBatchRunModel.status
+            == GraphDraftBatchRunStatus.RUNNING.value,
+            GraphDraftBatchRunModel.updated_at <= stale_before,
+        )
+        eligible = or_(pending, stale_running)
+        candidate_stmt = (
             select(GraphDraftBatchRunModel)
-            .where(GraphDraftBatchRunModel.status == GraphDraftBatchRunStatus.PENDING.value)
+            .where(eligible)
             .order_by(GraphDraftBatchRunModel.created_at, GraphDraftBatchRunModel.run_id)
             .limit(1)
         )
+        if self._session.get_bind().dialect.name == "postgresql":
+            candidate_stmt = candidate_stmt.with_for_update(skip_locked=True)
+        row = self._session.scalar(candidate_stmt)
         if row is None:
             return None
+        error_metadata = _dict(row.error_metadata)
+        if row.status == GraphDraftBatchRunStatus.RUNNING.value:
+            error_metadata["lease_recovery_count"] = (
+                int(error_metadata.get("lease_recovery_count") or 0) + 1
+            )
+            error_metadata["lease_recovered_at"] = claimed_at.isoformat()
         result = self._session.execute(
             update(GraphDraftBatchRunModel)
             .where(GraphDraftBatchRunModel.run_id == row.run_id)
-            .where(GraphDraftBatchRunModel.status == GraphDraftBatchRunStatus.PENDING.value)
+            .where(eligible)
             .values(
                 status=GraphDraftBatchRunStatus.RUNNING.value,
                 started_at=claimed_at,
                 updated_at=claimed_at,
+                finished_at=None,
+                error_metadata=error_metadata,
             )
             .execution_options(synchronize_session=False)
         )

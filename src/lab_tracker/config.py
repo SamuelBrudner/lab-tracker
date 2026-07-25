@@ -30,6 +30,7 @@ INSECURE_AUTH_SECRET_KEYS = {
 class Settings(BaseSettings):
     app_name: str = "lab-tracker"
     environment: str = "local"
+    source_revision: str = "unknown"
     log_level: str = "INFO"
     database_url: str = "sqlite+pysqlite:///./lab_tracker.db"
     backup_path: str = "~/.lab-tracker/backups"
@@ -115,6 +116,11 @@ class Settings(BaseSettings):
         if cleaned.startswith("postgresql://"):
             return f"postgresql+psycopg://{cleaned.removeprefix('postgresql://')}"
         return cleaned
+
+    @field_validator("source_revision")
+    @classmethod
+    def _normalize_source_revision(cls, value: str) -> str:
+        return str(value or "").strip().lower() or "unknown"
 
     @field_validator("resolver_http_deadline_seconds")
     @classmethod

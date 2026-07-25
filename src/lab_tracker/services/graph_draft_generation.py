@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import time
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any, Protocol
 from uuid import UUID, uuid4
 
@@ -24,7 +24,9 @@ from lab_tracker.models import (
     GraphChangeSet,
     GraphChangeSetStatus,
     GraphDraftMode,
+    GraphDraftPurpose,
     Note,
+    NoteMetadataScalar,
     NoteRawAsset,
     NoteStatus,
     utc_now,
@@ -32,6 +34,32 @@ from lab_tracker.models import (
 from lab_tracker.provider_error_redaction import provider_error_message
 from lab_tracker.services import graph_draft_batch_policy as batch_policy
 from lab_tracker.services.base import BaseService, ServiceContext
+from lab_tracker.services.graph_draft_generation_policy import (
+    DEFAULT_GENERATION_LEASE_SECONDS,
+    NOTE_DRAFT_IDEMPOTENCY_VERSION,
+    STARTER_QUESTIONS_PROMPT_VERSION,
+)
+from lab_tracker.services.graph_draft_generation_policy import (
+    enforce_starter_question_contract as _enforce_starter_question_contract,
+)
+from lab_tracker.services.graph_draft_generation_policy import (
+    ensure_matching_note_draft_request as _ensure_matching_note_draft_request,
+)
+from lab_tracker.services.graph_draft_generation_policy import (
+    finish_generation_lease as _finish_generation_lease,
+)
+from lab_tracker.services.graph_draft_generation_policy import (
+    note_draft_batch_key as _note_draft_batch_key,
+)
+from lab_tracker.services.graph_draft_generation_policy import (
+    note_draft_request_fingerprint as _note_draft_request_fingerprint,
+)
+from lab_tracker.services.graph_draft_generation_policy import (
+    resolved_note_idempotency_key as _resolved_note_idempotency_key,
+)
+from lab_tracker.services.graph_draft_generation_policy import (
+    starter_question_contract as _starter_question_contract,
+)
 from lab_tracker.services.graph_draft_validation import string_list
 from lab_tracker.services.shared import UserExistenceReader, actor_user_fk, actor_user_id
 
@@ -48,11 +76,27 @@ class GenerationRecords(Protocol):
         batch_key: str | None = None,
     ) -> list[GraphChangeSet]: ...
 
+    def claim_graph_change_set_for_generation(
+        self,
+        candidate: GraphChangeSet,
+        *,
+        claimed_at: datetime,
+        stale_before: datetime,
+    ) -> tuple[GraphChangeSet, bool]: ...
+
 
 class GenerationNotes(Protocol):
     def get_note(self, note_id: UUID) -> Note: ...
 
     def download_note_raw(self, note_id: UUID) -> tuple[NoteRawAsset, bytes]: ...
+
+    def update_note(
+        self,
+        note_id: UUID,
+        *,
+        metadata: dict[str, NoteMetadataScalar],
+        actor: AuthContext | None = None,
+    ) -> Note: ...
 
 
 class GenerationAuthorization(Protocol):
@@ -182,18 +226,61 @@ class GraphDraftGenerationCoordinator(BaseService):
 
         return self._context.active_repository()
 
+    def _mark_starter_source_cadence_excluded(
+        self,
+        note: Note,
+        *,
+        actor: AuthContext | None,
+    ) -> Note:
+        metadata: dict[str, NoteMetadataScalar] = dict(note.metadata)
+        if (
+            metadata.get(batch_policy.SCHEDULED_DRAFT_POLICY_METADATA_KEY)
+            == batch_policy.SCHEDULED_DRAFT_POLICY_EXCLUDE
+        ):
+            return note
+        metadata[batch_policy.SCHEDULED_DRAFT_POLICY_METADATA_KEY] = (
+            batch_policy.SCHEDULED_DRAFT_POLICY_EXCLUDE
+        )
+        metadata["manual_graph_draft_purpose"] = (
+            GraphDraftPurpose.STARTER_QUESTIONS.value
+        )
+        return self.notes.update_note(
+            note.note_id,
+            metadata=metadata,
+            actor=actor,
+        )
+
     def create_graph_draft_from_note(
         self,
         note_id: UUID,
         *,
         draft_client: GraphDraftClient,
         mode: GraphDraftMode = GraphDraftMode.GRAPH_CONTEXT,
+        purpose: GraphDraftPurpose = GraphDraftPurpose.GENERAL,
+        idempotency_key: str | None = None,
+        external_provider_acknowledged: bool = False,
         user_hint: str | None = None,
         actor: AuthContext | None = None,
+        generation_lease_seconds: int = DEFAULT_GENERATION_LEASE_SECONDS,
     ) -> GraphChangeSet:
-        prepared = self.context_builder.prepare_note_sources_for_graph_draft(note_id, mode=mode)
-        note = prepared["source_note"]
+        note = self.notes.get_note(note_id)
         self.authorization.require_contributor(note.project_id, actor=actor)
+        if purpose == GraphDraftPurpose.STARTER_QUESTIONS:
+            if mode != GraphDraftMode.GRAPH_CONTEXT:
+                raise ValidationError(
+                    "Starter-question drafting requires graph_context mode."
+                )
+            if not external_provider_acknowledged:
+                raise ValidationError(
+                    "Confirm that the starter context may be sent to the configured "
+                    "external drafting provider."
+                )
+            note = self._mark_starter_source_cadence_excluded(note, actor=actor)
+        prepared = self.context_builder.prepare_note_sources_for_graph_draft(
+            note.note_id,
+            mode=mode,
+        )
+        note = prepared["source_note"]
         raw_asset = prepared["primary_raw_asset"]
         cleaned_hint = user_hint.strip() if user_hint else None
         if mode == GraphDraftMode.GRAPH_CONTEXT:
@@ -211,7 +298,41 @@ class GraphDraftGenerationCoordinator(BaseService):
             )
         else:
             raise ValidationError("Unsupported graph draft mode.")
-        change_set = GraphChangeSet(
+        context_packet["draft_purpose"] = purpose.value
+        context_packet["external_provider_acknowledged"] = bool(
+            external_provider_acknowledged
+        )
+        if purpose == GraphDraftPurpose.STARTER_QUESTIONS:
+            context_packet["draft_contract"] = _starter_question_contract()
+        resolved_idempotency_key = _resolved_note_idempotency_key(
+            purpose=purpose,
+            idempotency_key=idempotency_key,
+        )
+        request_fingerprint = _note_draft_request_fingerprint(
+            note_id=note.note_id,
+            mode=mode,
+            purpose=purpose,
+            user_hint=cleaned_hint,
+        )
+        batch_key = _note_draft_batch_key(
+            note_id=note.note_id,
+            mode=mode,
+            purpose=purpose,
+            idempotency_key=resolved_idempotency_key,
+        )
+        if resolved_idempotency_key is not None:
+            context_packet["idempotency"] = {
+                "scope": "note_graph_draft",
+                "version": NOTE_DRAFT_IDEMPOTENCY_VERSION,
+                "key_sha256": _text_checksum(resolved_idempotency_key),
+                "request_fingerprint": request_fingerprint,
+            }
+        claimed_at = utc_now()
+        context_packet["generation_attempt"] = 1
+        context_packet["generation_lease_expires_at"] = (
+            claimed_at + timedelta(seconds=max(1, generation_lease_seconds))
+        ).isoformat()
+        candidate = GraphChangeSet(
             change_set_id=uuid4(),
             project_id=note.project_id,
             source_note_id=note.note_id,
@@ -219,19 +340,43 @@ class GraphDraftGenerationCoordinator(BaseService):
             source_checksum=raw_asset.checksum if raw_asset is not None else None,
             source_content_type=raw_asset.content_type if raw_asset is not None else None,
             source_filename=raw_asset.filename if raw_asset is not None else None,
+            batch_key=batch_key,
             provider=getattr(draft_client, "provider", PROVIDER),
             model=getattr(draft_client, "model", "unknown"),
-            prompt_version=PROMPT_VERSION,
+            prompt_version=(
+                STARTER_QUESTIONS_PROMPT_VERSION
+                if purpose == GraphDraftPurpose.STARTER_QUESTIONS
+                else PROMPT_VERSION
+            ),
             draft_mode=mode,
             context_packet=context_packet,
             created_by=actor_user_id(actor),
             created_by_user_id=actor_user_fk(actor, self.user_reader),
+            updated_at=claimed_at,
         )
-        self.records.save_graph_change_set(change_set)
+        if batch_key is not None:
+            existing = self.records.list_graph_change_sets(batch_key=batch_key)
+            if existing:
+                _ensure_matching_note_draft_request(
+                    existing[0],
+                    request_fingerprint=request_fingerprint,
+                )
+        change_set, claimed = self.records.claim_graph_change_set_for_generation(
+            candidate,
+            claimed_at=claimed_at,
+            stale_before=claimed_at
+            - timedelta(seconds=max(1, generation_lease_seconds)),
+        )
+        if not claimed:
+            _ensure_matching_note_draft_request(
+                change_set,
+                request_fingerprint=request_fingerprint,
+            )
+            return change_set
         try:
             graph_patch = self._draft_graph_patch(
                 draft_client,
-                graph_context=context_packet,
+                graph_context=change_set.context_packet,
                 user_hint=cleaned_hint,
                 draft_mode=mode,
                 source_artifacts=prepared["source_artifacts"],
@@ -243,6 +388,8 @@ class GraphDraftGenerationCoordinator(BaseService):
                 change_set,
                 graph_patch,
             )
+            if purpose == GraphDraftPurpose.STARTER_QUESTIONS:
+                _enforce_starter_question_contract(change_set)
             change_set.summary = str(graph_patch.get("summary") or "")
             change_set.uncertain_fields = string_list(graph_patch.get("uncertain_fields"))
             change_set.clarification_requests = string_list(
@@ -257,6 +404,8 @@ class GraphDraftGenerationCoordinator(BaseService):
             }
         finally:
             change_set.updated_at = utc_now()
+            if change_set.status != GraphChangeSetStatus.DRAFTING:
+                _finish_generation_lease(change_set)
             self.records.save_graph_change_set(change_set)
         return change_set
 
@@ -337,6 +486,7 @@ class GraphDraftGenerationCoordinator(BaseService):
         review_assignee_user_id: UUID | None = None,
         max_attempts: int = DEFAULT_BATCH_RETRY_ATTEMPTS,
         retry_backoff_seconds: float = 0.0,
+        generation_lease_seconds: int = DEFAULT_GENERATION_LEASE_SECONDS,
     ) -> GraphChangeSet:
         batch_notes = sorted(notes, key=lambda item: (item.created_at, str(item.note_id)))
         if not batch_notes:
@@ -363,17 +513,6 @@ class GraphDraftGenerationCoordinator(BaseService):
                 review_assignee=review_assignee,
                 review_assignee_user_id=review_assignee_user_id,
             )
-        existing = self.records.list_graph_change_sets(
-            draft_mode=GraphDraftMode.GRAPH_BATCH,
-            batch_key=batch_key,
-        )
-        active_existing = [
-            change_set
-            for change_set in existing
-            if change_set.status in batch_policy.ACTIVE_BATCH_CHANGE_SET_STATUSES
-        ]
-        if active_existing:
-            return active_existing[0]
         self._ensure_draft_client_allowed_here(draft_client, actor=actor)
         context_packet = self.context_builder.build_batch_graph_context(
             batch_notes,
@@ -383,7 +522,13 @@ class GraphDraftGenerationCoordinator(BaseService):
         )
         if cleaned_hint:
             context_packet["user_hint"] = cleaned_hint
-        change_set = GraphChangeSet(
+        claimed_at = utc_now()
+        context_packet["draft_purpose"] = GraphDraftPurpose.GENERAL.value
+        context_packet["generation_attempt"] = 1
+        context_packet["generation_lease_expires_at"] = (
+            claimed_at + timedelta(seconds=max(1, generation_lease_seconds))
+        ).isoformat()
+        candidate = GraphChangeSet(
             change_set_id=uuid4(),
             project_id=project_id,
             source_note_id=primary_note.note_id,
@@ -405,8 +550,17 @@ class GraphDraftGenerationCoordinator(BaseService):
             created_by_user_id=actor_user_fk(actor, self.user_reader),
             review_assignee=review_assignee,
             review_assignee_user_id=review_assignee_user_id,
+            updated_at=claimed_at,
         )
-        self.records.save_graph_change_set(change_set)
+        change_set, claimed = self.records.claim_graph_change_set_for_generation(
+            candidate,
+            claimed_at=claimed_at,
+            stale_before=claimed_at
+            - timedelta(seconds=max(1, generation_lease_seconds)),
+        )
+        if not claimed:
+            return change_set
+        context_packet = change_set.context_packet
 
         attempts = max(1, max_attempts)
         last_error: GraphDraftingError | None = None
@@ -428,6 +582,7 @@ class GraphDraftGenerationCoordinator(BaseService):
                         "input_snapshot": _batch_input_snapshot(context_packet),
                     }
                     change_set.updated_at = utc_now()
+                    _finish_generation_lease(change_set)
                     self.records.save_graph_change_set(change_set)
                     return change_set
                 if retry_backoff_seconds > 0:
@@ -446,6 +601,7 @@ class GraphDraftGenerationCoordinator(BaseService):
                 "input_snapshot": _batch_input_snapshot(context_packet),
             }
             change_set.updated_at = utc_now()
+            _finish_generation_lease(change_set)
             self.records.save_graph_change_set(change_set)
             return change_set
 
@@ -461,6 +617,7 @@ class GraphDraftGenerationCoordinator(BaseService):
                 "input_snapshot": _batch_input_snapshot(context_packet),
             }
             change_set.updated_at = utc_now()
+            _finish_generation_lease(change_set)
             self.records.save_graph_change_set(change_set)
             return change_set
 
@@ -471,6 +628,7 @@ class GraphDraftGenerationCoordinator(BaseService):
         change_set.status = GraphChangeSetStatus.READY
         change_set.error_metadata = {}
         change_set.updated_at = utc_now()
+        _finish_generation_lease(change_set)
         with self.application_transaction():
             self.records.save_graph_change_set(change_set)
             if self.review_email_outbox is not None:
@@ -537,6 +695,13 @@ class GraphDraftGenerationCoordinator(BaseService):
         else:
             raise ValidationError("Unsupported graph draft mode.")
         context_packet["source_artifacts"] = captured_source_artifacts
+        purpose = change_set.draft_purpose
+        context_packet["draft_purpose"] = purpose.value
+        if purpose == GraphDraftPurpose.STARTER_QUESTIONS:
+            context_packet["external_provider_acknowledged"] = bool(
+                prior_context.get("external_provider_acknowledged")
+            )
+            context_packet["draft_contract"] = _starter_question_contract()
         graph_patch = self._draft_graph_patch(
             draft_client,
             graph_context=context_packet,
@@ -549,6 +714,10 @@ class GraphDraftGenerationCoordinator(BaseService):
         )
         self.patch_validator.validate_top_level(graph_patch)
         operations = self.patch_validator.operations_from_graph_patch(change_set, graph_patch)
+        if purpose == GraphDraftPurpose.STARTER_QUESTIONS:
+            validation_target = change_set.model_copy(deep=True)
+            validation_target.operations = operations
+            _enforce_starter_question_contract(validation_target)
         return GeneratedDraftProposal(
             context_packet=context_packet,
             operations=operations,

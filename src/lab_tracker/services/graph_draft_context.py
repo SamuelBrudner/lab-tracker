@@ -41,6 +41,8 @@ EntityResult = (
 _RECENT_CONTEXT_LIMIT = 10
 _QUESTION_CONTEXT_LIMIT = 50
 _CAPTURE_BUNDLE_LIMIT = 6
+SOURCE_ARTIFACT_TEXT_LIMIT_CHARS = 64_000
+_SOURCE_ARTIFACT_PREVIEW_CHARS = 1_000
 
 
 class GraphContextBuilder:
@@ -510,6 +512,13 @@ def _graph_context_summary(context_packet: dict[str, Any]) -> dict[str, Any]:
         if artifact_type == "audio" and not str(artifact.get("transcript_text") or "").strip():
             note_id = artifact.get("note_id") or artifact.get("artifact_id") or "unknown"
             warnings.append(f"audio source {note_id} is missing an editable transcript")
+        if artifact.get("raw_content_truncated") or artifact.get(
+            "transcript_text_truncated"
+        ):
+            note_id = artifact.get("note_id") or "unknown"
+            warnings.append(
+                f"source note {note_id} exceeded the bounded provider-context limit"
+            )
     if not source_artifacts:
         warnings.append("no source artifacts were included")
     if not any(artifact.get("type") == "image" for artifact in source_artifacts):
@@ -562,6 +571,13 @@ def _graph_batch_context_summary(packet: dict[str, Any]) -> dict[str, Any]:
         if artifact_type == "audio" and not str(artifact.get("transcript_text") or "").strip():
             note_id = artifact.get("note_id") or "unknown"
             warnings.append(f"audio source {note_id} is missing an editable transcript")
+        if artifact.get("raw_content_truncated") or artifact.get(
+            "transcript_text_truncated"
+        ):
+            note_id = artifact.get("note_id") or "unknown"
+            warnings.append(
+                f"source note {note_id} exceeded the bounded provider-context limit"
+            )
     if not source_artifacts:
         warnings.append("no source artifacts were included")
     truncated = int(packet.get("truncated_note_count") or 0)
@@ -749,12 +765,36 @@ def _source_artifact_packet(note: Note) -> dict[str, Any]:
         payload["size_bytes"] = note.raw_asset.size_bytes
         payload["checksum"] = note.raw_asset.checksum
     if note.transcribed_text:
+        transcript_text, transcript_truncated = _bounded_source_text(
+            note.transcribed_text
+        )
         payload["transcript_id"] = f"transcript:{note.note_id}"
-        payload["transcript_text"] = note.transcribed_text
+        payload["transcript_text"] = transcript_text
+        payload["transcript_text_char_count"] = len(note.transcribed_text)
+        payload["transcript_text_truncated"] = transcript_truncated
+        payload["transcript_text_limit_chars"] = SOURCE_ARTIFACT_TEXT_LIMIT_CHARS
         payload["transcript_is_derived"] = True
     if note.raw_content:
-        payload["raw_content_preview"] = note.raw_content[:1000]
+        raw_content_text, raw_content_truncated = _bounded_source_text(
+            note.raw_content
+        )
+        # Keep the historical preview for older provider adapters while giving
+        # the model the full bounded text and an explicit completeness signal.
+        payload["raw_content_preview"] = raw_content_text[
+            :_SOURCE_ARTIFACT_PREVIEW_CHARS
+        ]
+        payload["raw_content_text"] = raw_content_text
+        payload["raw_content_char_count"] = len(note.raw_content)
+        payload["raw_content_truncated"] = raw_content_truncated
+        payload["raw_content_limit_chars"] = SOURCE_ARTIFACT_TEXT_LIMIT_CHARS
     return payload
+
+
+def _bounded_source_text(value: str) -> tuple[str, bool]:
+    return (
+        value[:SOURCE_ARTIFACT_TEXT_LIMIT_CHARS],
+        len(value) > SOURCE_ARTIFACT_TEXT_LIMIT_CHARS,
+    )
 
 
 def _compact_question(question: Question) -> dict[str, Any]:

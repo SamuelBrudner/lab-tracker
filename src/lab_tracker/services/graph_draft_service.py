@@ -19,6 +19,7 @@ from lab_tracker.models import (
     GraphDraftBatchSettings,
     GraphDraftBatchTrigger,
     GraphDraftMode,
+    GraphDraftPurpose,
     Note,
 )
 from lab_tracker.patching import NOT_PROVIDED, PatchValue
@@ -62,6 +63,9 @@ class GraphDraftService:
         *,
         draft_client: GraphDraftClient,
         mode: GraphDraftMode = GraphDraftMode.GRAPH_CONTEXT,
+        purpose: GraphDraftPurpose = GraphDraftPurpose.GENERAL,
+        idempotency_key: str | None = None,
+        external_provider_acknowledged: bool = False,
         user_hint: str | None = None,
         actor: AuthContext | None = None,
     ) -> GraphChangeSet:
@@ -69,6 +73,9 @@ class GraphDraftService:
             note_id,
             draft_client=draft_client,
             mode=mode,
+            purpose=purpose,
+            idempotency_key=idempotency_key,
+            external_provider_acknowledged=external_provider_acknowledged,
             user_hint=user_hint,
             actor=actor,
         )
@@ -122,10 +129,7 @@ class GraphDraftService:
         *,
         actor: AuthContext | None = None,
     ) -> GraphChangeSet:
-        return self.records.get_graph_change_set_for_read(
-            change_set_id,
-            actor=actor,
-        )
+        return self.records.get_graph_change_set_for_read(change_set_id, actor=actor)
 
     def list_graph_change_sets(
         self,
@@ -175,10 +179,7 @@ class GraphDraftService:
         project_id: UUID | None = None,
         status: GraphChangeSetStatus | None = None,
     ) -> list[GraphChangeSet]:
-        return self.records.list_batch_graph_drafts(
-            project_id=project_id,
-            status=status,
-        )
+        return self.records.list_batch_graph_drafts(project_id=project_id, status=status)
 
     def update_graph_change_operation(
         self,

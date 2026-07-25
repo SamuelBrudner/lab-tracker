@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 from collections.abc import Iterable
+from datetime import datetime
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import func, select, update
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.orm import Session as OrmSession
 
 from lab_tracker.db_models import GraphChangeOperationModel, GraphChangeSetModel, UserModel
@@ -375,6 +376,92 @@ class SQLAlchemyGraphChangeSetRepository(EntityRepository[GraphChangeSet]):
             entity_id,
             [operation_to_model(operation) for operation in entity.operations],
         )
+
+    def claim_for_generation(
+        self,
+        candidate: GraphChangeSet,
+        *,
+        claimed_at: datetime,
+        stale_before: datetime,
+    ) -> tuple[GraphChangeSet, bool]:
+        """Create or reclaim a keyed provider-generation lease."""
+
+        if candidate.batch_key is None:
+            self.save(candidate)
+            return candidate, True
+
+        self._session.flush()
+        stmt = select(GraphChangeSetModel).where(
+            GraphChangeSetModel.batch_key == candidate.batch_key
+        )
+        if self._session.get_bind().dialect.name == "postgresql":
+            stmt = stmt.with_for_update()
+        row = self._session.scalar(stmt)
+        if row is None:
+            self._session.add(change_set_to_model(candidate))
+            self._session.flush()
+            return self.get(candidate.change_set_id) or candidate, True
+
+        previous_context = _dict(row.context_packet)
+        previous_idempotency = previous_context.get("idempotency")
+        candidate_idempotency = candidate.context_packet.get("idempotency")
+        previous_fingerprint = (
+            previous_idempotency.get("request_fingerprint")
+            if isinstance(previous_idempotency, dict)
+            else None
+        )
+        candidate_fingerprint = (
+            candidate_idempotency.get("request_fingerprint")
+            if isinstance(candidate_idempotency, dict)
+            else None
+        )
+        if (
+            previous_fingerprint is not None
+            and candidate_fingerprint is not None
+            and previous_fingerprint != candidate_fingerprint
+        ):
+            raise ValidationError(
+                "idempotency_key was already used with conflicting graph-draft fields."
+            )
+
+        row_updated_at = as_utc(row.updated_at)
+        lease_expires_at = previous_context.get("generation_lease_expires_at")
+        lease_expired = False
+        if isinstance(lease_expires_at, str) and lease_expires_at.strip():
+            try:
+                lease_expired = as_utc(
+                    datetime.fromisoformat(lease_expires_at.replace("Z", "+00:00"))
+                ) <= as_utc(claimed_at)
+            except ValueError:
+                lease_expired = False
+        reclaimable = row.status == GraphChangeSetStatus.FAILED.value or (
+            row.status == GraphChangeSetStatus.DRAFTING.value
+            and (
+                row_updated_at <= as_utc(stale_before)
+                or lease_expired
+            )
+        )
+        if not reclaimable:
+            return self._from_rows([row])[0], False
+
+        candidate.change_set_id = ensure_uuid(row.change_set_id)
+        candidate.created_at = as_utc(row.created_at)
+        candidate.created_by = row.created_by
+        candidate.created_by_user_id = _uuid(row.created_by_user_id)
+        candidate.updated_at = as_utc(claimed_at)
+        candidate.context_packet["generation_attempt"] = (
+            int(previous_context.get("generation_attempt") or 1) + 1
+        )
+        candidate.context_packet["generation_recovered"] = True
+        apply_change_set_to_model(row, candidate)
+        self._session.execute(
+            delete(GraphChangeOperationModel).where(
+                GraphChangeOperationModel.change_set_id == row.change_set_id
+            )
+        )
+        self._session.flush()
+        self._session.refresh(row)
+        return self._from_rows([row])[0], True
 
     def claim_for_commit(self, entity_id: UUID) -> GraphChangeSet | None:
         self._session.flush()

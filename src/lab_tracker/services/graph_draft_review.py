@@ -21,12 +21,16 @@ from lab_tracker.models import (
     GraphChangeOperationStatus,
     GraphChangeSet,
     GraphChangeSetStatus,
+    GraphDraftPurpose,
     utc_now,
 )
 from lab_tracker.patching import NOT_PROVIDED, PatchValue, is_provided
 from lab_tracker.provider_error_redaction import provider_error_message
 from lab_tracker.services.base import BaseService, ServiceContext
 from lab_tracker.services.graph_draft_generation import GeneratedDraftProposal
+from lab_tracker.services.graph_draft_generation_policy import (
+    STARTER_QUESTIONS_PROMPT_VERSION,
+)
 from lab_tracker.services.shared import UserExistenceReader, actor_user_fk, actor_user_id
 
 _REVISION_ATTACHMENT_EVIDENCE_MESSAGE = (
@@ -355,6 +359,7 @@ class GraphDraftReviewCoordinator(BaseService):
             cleaned,
             attachment_labels=attachment_labels,
         )
+        draft_purpose = change_set.draft_purpose
         prior_context = change_set.context_packet
         try:
             proposal = self.generation.propose_note_revision(
@@ -408,7 +413,11 @@ class GraphDraftReviewCoordinator(BaseService):
             change_set.context_packet["review_attachment_evidence"] = review_attachment_evidence
         change_set.provider = getattr(draft_client, "provider", PROVIDER)
         change_set.model = getattr(draft_client, "model", "unknown")
-        change_set.prompt_version = PROMPT_VERSION
+        change_set.prompt_version = (
+            STARTER_QUESTIONS_PROMPT_VERSION
+            if draft_purpose == GraphDraftPurpose.STARTER_QUESTIONS
+            else PROMPT_VERSION
+        )
         change_set.status = GraphChangeSetStatus.READY
         change_set.error_metadata = {}
         change_set.updated_at = utc_now()

@@ -40,6 +40,7 @@ def create_app() -> FastAPI:
         file_storage_path=settings.file_storage_path,
         environment=settings.environment,
         app_name=settings.app_name,
+        source_revision=settings.source_revision,
     )
     configure_frontend_routes(app)
     register_routes(

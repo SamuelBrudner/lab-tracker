@@ -175,6 +175,136 @@ def test_zero_limit_allows_empty_output_and_rejects_first_byte() -> None:
         _run("print('x', end='')", stdout_limit=0)
 
 
+def test_process_group_signal_reaps_fast_exit_before_retry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    attempts = 0
+
+    def zombie_then_vanished(_process_group_id: int, _signum: int) -> None:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise PermissionError("unreaped zombie")
+        raise ProcessLookupError("reaped")
+
+    class ExitedProcess:
+        def __init__(self) -> None:
+            self.polls = 0
+
+        def poll(self) -> int:
+            self.polls += 1
+            return 0
+
+    process = ExitedProcess()
+    monkeypatch.setattr(
+        bounded_subprocess,
+        "_kill_process_group",
+        zombie_then_vanished,
+    )
+
+    bounded_subprocess._signal_process_group(123, 15, process=process)  # type: ignore[arg-type]
+
+    assert attempts == 2
+    assert process.polls == 1
+
+
+def test_process_group_signal_falls_back_to_owned_leader(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def always_denied(_process_group_id: int, _signum: int) -> None:
+        raise PermissionError("private cleanup detail")
+
+    class RunningProcess:
+        def __init__(self) -> None:
+            self.signals: list[int] = []
+
+        def poll(self) -> None:
+            return None
+
+        def send_signal(self, signum: int) -> None:
+            self.signals.append(signum)
+
+    process = RunningProcess()
+    monkeypatch.setattr(
+        bounded_subprocess,
+        "_kill_process_group",
+        always_denied,
+    )
+
+    bounded_subprocess._signal_process_group(123, 15, process=process)  # type: ignore[arg-type]
+
+    assert process.signals == [15]
+
+
+def test_process_group_signal_preserves_leader_permission_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def always_denied(_process_group_id: int, _signum: int) -> None:
+        raise PermissionError("private group detail")
+
+    class DeniedProcess:
+        def poll(self) -> None:
+            return None
+
+        def send_signal(self, _signum: int) -> None:
+            raise PermissionError("private leader detail")
+
+    monkeypatch.setattr(
+        bounded_subprocess,
+        "_kill_process_group",
+        always_denied,
+    )
+
+    with pytest.raises(ProcessCleanupError) as raised:
+        bounded_subprocess._signal_process_group(123, 15, process=DeniedProcess())  # type: ignore[arg-type]
+
+    assert str(raised.value) == "Subprocess cleanup failed."
+    assert "private group detail" not in str(raised.value)
+    assert "private leader detail" not in str(raised.value)
+
+
+def test_process_lifecycle_fails_when_group_survives_leader_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def group_signal_denied(_process_group_id: int, _signum: int) -> None:
+        raise PermissionError("private group detail")
+
+    class ExitedLeaderWithLiveDescendant:
+        pid = 123
+        stdout = None
+        stderr = None
+
+        def __init__(self) -> None:
+            self.signals: list[int] = []
+
+        def poll(self) -> int:
+            return 0
+
+        def send_signal(self, signum: int) -> None:
+            self.signals.append(signum)
+
+        def wait(self, *, timeout: float) -> int:
+            del timeout
+            return 0
+
+    process = ExitedLeaderWithLiveDescendant()
+    monkeypatch.setattr(
+        bounded_subprocess,
+        "_kill_process_group",
+        group_signal_denied,
+    )
+    lifecycle = bounded_subprocess._PosixProcessLifecycle(  # type: ignore[arg-type]
+        process,
+        terminate_grace_seconds=0,
+        kill_grace_seconds=0,
+    )
+
+    with pytest.raises(ProcessCleanupError):
+        lifecycle.stop(cleanup_expires_at=time.monotonic())
+
+    assert process.signals == [15, bounded_subprocess._POSIX_SIGKILL]
+
+
 def test_concurrent_readers_prevent_cross_pipe_deadlock() -> None:
     size = 1024 * 1024
     result = _run(

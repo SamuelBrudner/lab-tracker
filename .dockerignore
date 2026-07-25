@@ -10,3 +10,6 @@ __pycache__
 .coverage
 .coverage.*
 htmlcov
+/backups
+/deployments/marion/.env
+/deployments/shared-provider/.env

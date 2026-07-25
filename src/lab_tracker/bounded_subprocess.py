@@ -235,7 +235,11 @@ class _PosixProcessLifecycle:
 
         # The leader may already have exited while a descendant still owns a
         # pipe.  Always target the group created by start_new_session.
-        _signal_process_group(self.process.pid, signal.SIGTERM)
+        _signal_process_group(
+            self.process.pid,
+            signal.SIGTERM,
+            process=self.process,
+        )
         terminate_expires_at = min(
             cleanup_expires_at,
             time.monotonic() + self._terminate_grace_seconds,
@@ -246,12 +250,20 @@ class _PosixProcessLifecycle:
             process=self.process,
         )
         if _process_group_exists(self.process.pid):
-            _signal_process_group(self.process.pid, _POSIX_SIGKILL)
+            _signal_process_group(
+                self.process.pid,
+                _POSIX_SIGKILL,
+                process=self.process,
+            )
 
         try:
             self.process.wait(timeout=_remaining_cleanup(cleanup_expires_at))
         except subprocess.TimeoutExpired:
-            _signal_process_group(self.process.pid, _POSIX_SIGKILL)
+            _signal_process_group(
+                self.process.pid,
+                _POSIX_SIGKILL,
+                process=self.process,
+            )
             raise ProcessCleanupError(_GENERIC_CLEANUP_DETAIL) from None
         except (OSError, subprocess.SubprocessError):
             raise ProcessCleanupError(_GENERIC_CLEANUP_DETAIL) from None
@@ -699,11 +711,40 @@ def _validate_command(command: Sequence[str]) -> None:
         )
 
 
-def _signal_process_group(process_group_id: int, signum: int) -> None:
+def _signal_process_group(
+    process_group_id: int,
+    signum: int,
+    *,
+    process: subprocess.Popen[bytes],
+) -> None:
     try:
         _kill_process_group(process_group_id, signum)
     except ProcessLookupError:
         return
+    except PermissionError:
+        # macOS can report EPERM while the only group member is an unreaped
+        # zombie.  Poll once to reap the leader, then retry to distinguish that
+        # harmless race from a live group.  Some sandboxed macOS runners also
+        # reject group signaling transiently; in that case, signal the owned
+        # leader directly.  The lifecycle's final group-existence check still
+        # fails cleanup if any descendant survives.
+        try:
+            process.poll()
+        except (OSError, subprocess.SubprocessError):
+            raise ProcessCleanupError(_GENERIC_CLEANUP_DETAIL) from None
+        try:
+            _kill_process_group(process_group_id, signum)
+        except ProcessLookupError:
+            return
+        except PermissionError:
+            try:
+                process.send_signal(signum)
+            except ProcessLookupError:
+                return
+            except (OSError, subprocess.SubprocessError):
+                raise ProcessCleanupError(_GENERIC_CLEANUP_DETAIL) from None
+        except OSError:
+            raise ProcessCleanupError(_GENERIC_CLEANUP_DETAIL) from None
     except OSError:
         raise ProcessCleanupError(_GENERIC_CLEANUP_DETAIL) from None
 

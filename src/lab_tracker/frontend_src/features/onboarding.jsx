@@ -2,12 +2,15 @@ import * as React from "react";
 
 import { apiRequest } from "../shared/api.js";
 import { auth as authGateway } from "../shared/gateways/index.js";
+import { matchingClientSetup } from "./client-setup.js";
 import { DailyReviewScheduleForm } from "./daily-review-schedule.jsx";
+import { starterContextKeys } from "./onboarding-context.js";
 
 const { useEffect, useMemo, useState } = React;
-
-const INSTALL_COMMAND =
-  "uv tool install --upgrade git+https://github.com/SamuelBrudner/lab-tracker";
+const STARTER_CONTEXT_PREFIX = "Onboarding research context\n\n";
+const STARTER_CONTEXT_PROVIDER_LIMIT_CHARS = 64_000;
+const STARTER_CONTEXT_MAX_CHARS =
+  STARTER_CONTEXT_PROVIDER_LIMIT_CHARS - STARTER_CONTEXT_PREFIX.length;
 
 function SetupCommand({ command, label, setFlash }) {
   async function copyCommand() {
@@ -94,6 +97,10 @@ function OnboardingPage({
   const [projectName, setProjectName] = useState("");
   const [projectDescription, setProjectDescription] = useState("");
   const [creatingProject, setCreatingProject] = useState(false);
+  const [researchContext, setResearchContext] = useState("");
+  const [externalProviderAcknowledged, setExternalProviderAcknowledged] =
+    useState(false);
+  const [seedingQuestions, setSeedingQuestions] = useState(false);
   const [scheduleSaved, setScheduleSaved] = useState(false);
   const [readiness, setReadiness] = useState(null);
   const [readinessError, setReadinessError] = useState("");
@@ -101,6 +108,10 @@ function OnboardingPage({
   const activeProject = useMemo(
     () => projects.find((project) => project.project_id === selectedProjectId) || null,
     [projects, selectedProjectId]
+  );
+  const clientSetup = useMemo(
+    () => matchingClientSetup(readiness?.source_revision),
+    [readiness?.source_revision]
   );
 
   useEffect(() => {
@@ -123,6 +134,10 @@ function OnboardingPage({
       canceled = true;
     };
   }, [token]);
+
+  useEffect(() => {
+    setExternalProviderAcknowledged(false);
+  }, [selectedProjectId]);
 
   async function createProject(event) {
     event.preventDefault();
@@ -160,28 +175,133 @@ function OnboardingPage({
     }
   }
 
-  const repoSetupCommands = [
-    {
-      command: "lt setup init --install-skills --dry-run",
-      label: "1. Preview repository and skill setup",
-    },
-    {
-      command: "lt setup init --install-skills --yes",
-      label: "2. Apply after reviewing the preview",
-    },
-    {
-      command: 'lt project bind --name "YOUR PROJECT NAME" --dry-run',
-      label: "3. Preview the project binding",
-    },
-    {
-      command: 'lt project bind --name "YOUR PROJECT NAME" --yes',
-      label: "4. Bind after reviewing the preview",
-    },
-    {
-      command: "lt setup status",
-      label: "5. Verify setup",
-    },
-  ];
+  async function seedStarterQuestions(event) {
+    event.preventDefault();
+    if (!activeProject || !canWrite) {
+      return;
+    }
+    const context = researchContext.trim();
+    if (!context) {
+      setFlash("", "Paste a grant abstract, aims, or project brief first.");
+      return;
+    }
+    if (context.length > STARTER_CONTEXT_MAX_CHARS) {
+      setFlash(
+        "",
+        `This context is ${context.length.toLocaleString()} characters; the maximum for a complete starter-question draft is ${STARTER_CONTEXT_MAX_CHARS.toLocaleString()}. Shorten or split it before continuing.`
+      );
+      return;
+    }
+    if (!externalProviderAcknowledged) {
+      setFlash(
+        "",
+        "Confirm that this context may be sent to the operator’s configured external AI provider."
+      );
+      return;
+    }
+
+    setSeedingQuestions(true);
+    setBusy(true);
+    setFlash("", "");
+    try {
+      const keys = await starterContextKeys({
+        context,
+        projectId: activeProject.project_id,
+        userId: user?.user_id || "",
+      });
+      const note = await apiRequest("/notes", {
+        body: {
+          client_capture_id: keys.clientCaptureId,
+          metadata: {
+            context_type: "onboarding_grant_or_project_brief",
+            source: "guided_setup",
+          },
+          project_id: activeProject.project_id,
+          raw_content: `${STARTER_CONTEXT_PREFIX}${context}`,
+          status: "staged",
+        },
+        method: "POST",
+        token,
+      });
+      const draft = await apiRequest(`/notes/${note.note_id}/graph-drafts`, {
+        body: {
+          external_provider_acknowledged: true,
+          idempotency_key: keys.idempotencyKey,
+          mode: "graph_context",
+          purpose: "starter_questions",
+          user_hint:
+            "Use this onboarding context to propose a small, reviewable starting set of research questions. Preserve uncertainty, do not invent grant details, and do not create committed records.",
+        },
+        method: "POST",
+        token,
+      });
+
+      if (draft?.source_context_truncated) {
+        setFlash(
+          "",
+          "Research context was saved, but the provider received only part of it. Shorten or split the text and try again before reviewing these starter questions."
+        );
+      } else if (draft?.status === "ready" && draft.change_set_id) {
+        setResearchContext("");
+        setExternalProviderAcknowledged(false);
+        setFlash("Starter questions are ready for review.");
+        navigate(`/app/graph-drafts/${draft.change_set_id}`);
+      } else if (draft?.status === "failed") {
+        setFlash(
+          "",
+          "Research context was saved, but starter-question drafting failed. The text remains here so you can retry."
+        );
+      } else {
+        setFlash(
+          "Research context saved. Starter questions are queued and still being prepared."
+        );
+      }
+    } catch (err) {
+      setFlash(
+        "",
+        err.message ||
+          "Failed to draft starter questions. The context remains here so you can retry."
+      );
+    } finally {
+      setSeedingQuestions(false);
+      setBusy(false);
+    }
+  }
+
+  const repoSetupCommands = activeProject
+    ? [
+        {
+          command: "lt setup init --install-skills --dry-run",
+          label: "1. Preview repository and skill setup",
+        },
+        {
+          command: "lt setup init --install-skills --yes",
+          label: "2. Apply after reviewing the preview",
+        },
+        {
+          command:
+            `lt project bind --project-id ${activeProject.project_id} --dry-run`,
+          label: `3. Preview binding to ${activeProject.name}`,
+        },
+        {
+          command: `lt project bind --project-id ${activeProject.project_id} --yes`,
+          label: `4. Bind to ${activeProject.name}`,
+        },
+        {
+          command:
+            `lt hooks install --project ${activeProject.project_id} --dry-run`,
+          label: "5. Preview commit capture hook",
+        },
+        {
+          command: `lt hooks install --project ${activeProject.project_id} --yes`,
+          label: "6. Install commit capture hook",
+        },
+        {
+          command: "lt setup status",
+          label: "7. Verify repository setup",
+        },
+      ]
+    : [];
 
   return (
     <article className="card span-12 setup-page">
@@ -302,20 +422,118 @@ function OnboardingPage({
           <div className="item-head">
             <div>
               <p className="eyebrow">Step 3</p>
+              <h3>Seed your first questions with real context</h3>
+            </div>
+            <span className="pill">Review before commit</span>
+          </div>
+          <p className="subtle">
+            Paste a grant abstract, specific aims, project brief, or other
+            starting context. Lab Tracker saves it as a staged note and asks the
+            operator’s configured external AI provider to propose a small starter
+            set of questions. You review every proposal before anything enters
+            the research graph.
+          </p>
+          {activeProject && canWrite ? (
+            <form className="form" onSubmit={seedStarterQuestions}>
+              <label>
+                Grant, aims, or project context
+                <textarea
+                  value={researchContext}
+                  onChange={(event) => setResearchContext(event.target.value)}
+                  placeholder="Paste an abstract, aims, project brief, or key questions here…"
+                />
+              </label>
+              <p
+                className={
+                  researchContext.trim().length > STARTER_CONTEXT_MAX_CHARS
+                    ? "warn"
+                    : "subtle"
+                }
+              >
+                {researchContext.trim().length.toLocaleString()} /{" "}
+                {STARTER_CONTEXT_MAX_CHARS.toLocaleString()} characters available
+                for complete provider context
+              </p>
+              <label className="inline toggle-row">
+                <input
+                  type="checkbox"
+                  checked={externalProviderAcknowledged}
+                  onChange={(event) =>
+                    setExternalProviderAcknowledged(event.target.checked)
+                  }
+                />
+                Allow this context to be sent to the Lab Tracker operator’s
+                configured external AI provider to draft starter questions
+              </label>
+              <p className="subtle">
+                Lab Tracker uses the host operator’s provider credential. You do
+                not need a local provider account or API key.
+              </p>
+              <button
+                type="submit"
+                className="btn-primary"
+                disabled={seedingQuestions}
+              >
+                {seedingQuestions
+                  ? "Drafting starter questions…"
+                  : "Propose starter questions"}
+              </button>
+            </form>
+          ) : activeProject ? (
+            <p className="warn">
+              Your project role cannot add context. Ask a project owner or
+              administrator.
+            </p>
+          ) : (
+            <p className="subtle">Choose or create a project first.</p>
+          )}
+        </li>
+
+        <li className="card-inset setup-step">
+          <div className="item-head">
+            <div>
+              <p className="eyebrow">Step 4</p>
               <h3>Connect your coding agent</h3>
             </div>
             <span className="pill">On your computer</span>
           </div>
           <p>
-            Install the current client, then open <strong>Agents</strong> here to create
-            a personal token. The one-time connection command saves one local profile
-            used by both <code>lt</code> and <code>lt-mcp</code>.
+            Install the client revision that matches this server, then open{" "}
+            <strong>Agents</strong> here to create a personal token. The one-time
+            connection command saves one local profile used by both <code>lt</code>{" "}
+            and <code>lt-mcp</code>.
           </p>
-          <SetupCommand
-            label="Install or upgrade Lab Tracker"
-            command={INSTALL_COMMAND}
-            setFlash={setFlash}
-          />
+          {clientSetup ? (
+            <>
+              <SetupCommand
+                label={`Install matching lt and lt-mcp (${clientSetup.revision.slice(0, 12)})`}
+                command={clientSetup.toolInstallCommand}
+                setFlash={setFlash}
+              />
+              <p className="subtle">
+                This exact Git revision matches the running server. It does not track
+                a moving branch. If <code>uv --version</code> is unavailable, install{" "}
+                <a href="https://docs.astral.sh/uv/getting-started/installation/">
+                  uv from its official installation guide
+                </a>{" "}
+                first.
+              </p>
+            </>
+          ) : readiness ? (
+            <p className="warn">
+              Matching client installation is unavailable because this deployment
+              does not report a full immutable source revision. Do not install from
+              GitHub <code>main</code>; ask the Lab Tracker operator to deploy with
+              revision metadata.
+            </p>
+          ) : (
+            <p className="subtle">Waiting for this server’s client revision…</p>
+          )}
+          <p className="subtle">
+            Server-side AI drafting uses the Lab Tracker operator’s configured
+            provider credential. You do not need to enter an OpenAI key locally for
+            Lab Tracker.
+          </p>
           <button type="button" className="btn-primary" onClick={() => navigate("/app/agents")}>
             Create an agent token
           </button>
@@ -324,55 +542,100 @@ function OnboardingPage({
         <li className="card-inset setup-step">
           <div className="item-head">
             <div>
-              <p className="eyebrow">Step 4</p>
-              <h3>Install the skill and bind your repository</h3>
+              <p className="eyebrow">Step 5</p>
+              <h3>Install Python support, skills, and commit capture</h3>
             </div>
             <span className="pill">Review before apply</span>
           </div>
           <p className="subtle">
-            Run these inside each analysis repository. Inspect each dry run before its
-            matching <code>--yes</code> command. Replace{" "}
-            <code>YOUR PROJECT NAME</code> with the project selected above.
+            Run these inside each analysis repository. First add the same pinned
+            package to the project’s Python environment so figure capture can import{" "}
+            <code>lab_tracker_client</code>. Then inspect each dry run before its
+            matching <code>--yes</code> command. The commands bind the exact project
+            selected above—there is no placeholder to replace.
           </p>
-          {repoSetupCommands.map((item) => (
-            <SetupCommand
-              key={item.command}
-              label={item.label}
-              command={item.command}
-              setFlash={setFlash}
-            />
-          ))}
-          <p className="subtle">
-            The skill installer covers Claude and Codex user skill homes. Codex usually
-            detects skill changes automatically; use <code>/skills</code> to verify and
-            restart Codex if the skill does not appear.
-          </p>
+          {clientSetup ? (
+            <>
+              <SetupCommand
+                label="Add matching Lab Tracker dependency to this Python project"
+                command={clientSetup.projectInstallCommand}
+                setFlash={setFlash}
+              />
+              <SetupCommand
+                label="Verify lab_tracker_client imports in the project environment"
+                command={clientSetup.projectImportCommand}
+                setFlash={setFlash}
+              />
+              <SetupCommand
+                label="Verify the project package matches this server"
+                command={clientSetup.verifyClientCommand}
+                setFlash={setFlash}
+              />
+              {repoSetupCommands.map((item) => (
+                <SetupCommand
+                  key={item.command}
+                  label={item.label}
+                  command={item.command}
+                  setFlash={setFlash}
+                />
+              ))}
+              <p className="subtle">
+                The skill installer covers Claude and Codex user skill homes.
+                Codex usually detects skill changes automatically; use{" "}
+                <code>/skills</code> to verify and restart Codex if the skill
+                does not appear. Commit capture needs the{" "}
+                <strong>Read + stage evidence</strong> token recommended on the
+                Agents page; a read-only token cannot sync staged notes.
+              </p>
+            </>
+          ) : (
+            <p className="warn">
+              Local repository commands are withheld until this deployment
+              reports a valid immutable source revision.
+            </p>
+          )}
         </li>
 
         <li className="card-inset setup-step">
           <div className="item-head">
             <div>
-              <p className="eyebrow">Step 5</p>
+              <p className="eyebrow">Step 6</p>
               <h3>Register and verify MCP in Codex</h3>
             </div>
             <span className="pill">Run once</span>
           </div>
           <p className="subtle">
-            Repository scaffolding also writes MCP files for supported clients. Current
-            Codex clients share MCP configuration through <code>config.toml</code>, so
-            register the local <code>lt-mcp</code> server once, confirm it is listed,
-            then restart the Codex app, CLI, or IDE extension.
+            Repository scaffolding also writes MCP files for supported clients.
+            Current Codex clients share MCP configuration through{" "}
+            <code>config.toml</code>, so register the local <code>lt-mcp</code>{" "}
+            server once. Then launch the executable through the setup verifier: it
+            performs an MCP initialize exchange, calls health, and makes an
+            authenticated project read using the saved profile.
           </p>
-          <SetupCommand
-            label="1. Register Lab Tracker MCP for Codex"
-            command="codex mcp add lab-tracker -- lt-mcp"
-            setFlash={setFlash}
-          />
-          <SetupCommand
-            label="2. Confirm it is configured"
-            command="codex mcp list"
-            setFlash={setFlash}
-          />
+          {clientSetup ? (
+            <>
+              <SetupCommand
+                label="1. Register Lab Tracker MCP for Codex"
+                command="codex mcp add lab-tracker -- lt-mcp"
+                setFlash={setFlash}
+              />
+              <SetupCommand
+                label="2. Launch MCP and verify health, auth, and client revision"
+                command={clientSetup.verifyMcpCommand}
+                setFlash={setFlash}
+              />
+              <SetupCommand
+                label="3. Confirm Codex registration"
+                command="codex mcp list"
+                setFlash={setFlash}
+              />
+            </>
+          ) : (
+            <p className="warn">
+              MCP verification is blocked until the server reports its immutable
+              source revision.
+            </p>
+          )}
           <p className="subtle">
             In Codex, <code>/mcp</code> shows connected servers. If your organization
             manages MCP policy, an administrator may need to allow this server.
@@ -408,4 +671,9 @@ function OnboardingPage({
   );
 }
 
-export { INSTALL_COMMAND, OnboardingPage, ReadinessStatus, SetupCommand };
+export {
+  OnboardingPage,
+  ReadinessStatus,
+  STARTER_CONTEXT_MAX_CHARS,
+  SetupCommand,
+};

@@ -94,6 +94,19 @@ class GraphChangeSetRepository(EntityRepository[GraphChangeSet], Protocol):
     def project_id_for(self, change_set_id: UUID) -> UUID | None:
         """Resolve a draft's project without materializing its operations."""
 
+    def claim_for_generation(
+        self,
+        candidate: GraphChangeSet,
+        *,
+        claimed_at: datetime,
+        stale_before: datetime,
+    ) -> tuple[GraphChangeSet, bool]:
+        """Create or reclaim one keyed draft generation lease.
+
+        Returns ``(change_set, claimed)``. A ready/reviewed draft or a fresh
+        in-flight lease is returned without granting a second provider call.
+        """
+
 
 class ReviewEmailOutboxRepository(Protocol):
     """Persistence contract for durable review-email delivery."""
@@ -704,8 +717,9 @@ class LabTrackerRepository(Protocol):
         self,
         *,
         claimed_at: datetime,
+        stale_before: datetime,
     ) -> GraphDraftBatchRun | None:
-        """Atomically claim the oldest pending graph draft batch run."""
+        """Atomically claim the oldest pending or stale running batch run."""
 
     def list_dataset_files(self, dataset_id: UUID) -> list[DatasetFile]:
         """Return all files attached to a dataset."""

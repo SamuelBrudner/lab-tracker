@@ -1,0 +1,62 @@
+name: lab-tracker-marion
+
+services:
+  app:
+    image: ${MARION_IMAGE:?Set MARION_IMAGE to a reviewed immutable tag}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    env_file:
+      - ../shared-provider/.env
+    environment:
+      LAB_TRACKER_APP_NAME: marion-lab-tracker
+      LAB_TRACKER_ENVIRONMENT: production
+      LAB_TRACKER_DATABASE_URL: postgresql+psycopg://lab_tracker:${MARION_POSTGRES_PASSWORD}@postgres:5432/lab_tracker
+      LAB_TRACKER_FILE_STORAGE_PATH: /app/data/file_storage
+      LAB_TRACKER_NOTE_STORAGE_PATH: /app/data/note_storage
+      LAB_TRACKER_PUBLIC_BASE_URL: https://lab-tracker.tail79f9d8.ts.net:8443
+      LAB_TRACKER_AUTH_PUBLIC_VIEWER_REGISTRATION_ENABLED: "false"
+      LAB_TRACKER_BOOTSTRAP_ADMIN_TOKEN_DISCLOSURE: never
+      LAB_TRACKER_GRAPH_DRAFT_PROVIDER: openai
+      LAB_TRACKER_OPENAI_MODEL: gpt-5.6-sol
+      LAB_TRACKER_OPENAI_REASONING_EFFORT: max
+      LAB_TRACKER_OPENAI_REASONING_MODE: pro
+      LAB_TRACKER_OPENAI_TIMEOUT_SECONDS: "5400"
+      LAB_TRACKER_GRAPH_DRAFT_SCHEDULER_ENABLED: "true"
+    ports:
+      - "127.0.0.1:8100:8000"
+    volumes:
+      - app_data:/app/data
+    restart: unless-stopped
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - import urllib.request; urllib.request.urlopen("http://127.0.0.1:8000/health", timeout=3)
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: lab_tracker
+      POSTGRES_USER: lab_tracker
+      POSTGRES_PASSWORD: ${MARION_POSTGRES_PASSWORD}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    restart: unless-stopped
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - pg_isready -U lab_tracker -d lab_tracker
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+volumes:
+  app_data:
+  postgres_data:

@@ -182,6 +182,30 @@ describe("GraphDraftDetailCard route identity", () => {
   });
 });
 
+describe("GraphDraftDetailCard source completeness", () => {
+  it("shows a prominent warning when provider context was truncated", async () => {
+    renderDraft(
+      draftFixture({
+        source_context_truncated: true,
+        context_packet: {
+          context_summary: {
+            warnings: [
+              "source note 11111111-1111-4111-8111-111111111111 exceeded the bounded provider-context limit",
+            ],
+          },
+        },
+      })
+    );
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "Only part of the source context reached the drafting provider."
+    );
+    expect(screen.getByRole("alert")).toHaveTextContent(
+      "Compare every proposal with the original source"
+    );
+  });
+});
+
 describe("GraphDraftDetailCard accept all", () => {
   it("accepts all proposals via the atomic server endpoint and reports what remained", async () => {
     const draft = draftFixture();

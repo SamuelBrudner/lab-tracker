@@ -42,6 +42,7 @@ from lab_tracker.models import (
     GraphChangeSetStatus,
     GraphDraftBatchRunStatus,
     GraphDraftMode,
+    GraphDraftPurpose,
     GroupMembership,
     Note,
     NoteArchiveReason,
@@ -79,6 +80,11 @@ def _non_blank_string(value: str) -> str:
 
 
 NonBlankStr = Annotated[str, Field(min_length=1), AfterValidator(_non_blank_string)]
+IdempotencyKey = Annotated[
+    str,
+    Field(min_length=1, max_length=200),
+    AfterValidator(_non_blank_string),
+]
 
 
 def _unique_uuid_list(value: list[UUID] | None) -> list[UUID] | None:
@@ -188,6 +194,7 @@ class AuthSetupReadiness(BaseModel):
     background_worker_enabled: bool
     provider: str
     provider_credential_configured: bool
+    source_revision: str
 
 
 class AuthTokenRead(BaseModel):
@@ -226,9 +233,20 @@ class PersonalAccessTokenIssuedRead(PersonalAccessTokenRead):
 class AuthRegisterRequest(RequestModel):
     username: NonBlankStr
     password: NonBlankStr
+    password_confirmation: NonBlankStr | None = None
     role: Role = Role.VIEWER
     bootstrap_token: NonBlankStr | None = None
     invite_token: NonBlankStr | None = None
+
+    @model_validator(mode="after")
+    def _validate_invitation_password_confirmation(self) -> AuthRegisterRequest:
+        if self.invite_token is None:
+            return self
+        if self.password_confirmation is None:
+            raise ValueError("Password confirmation is required for invited accounts.")
+        if self.password != self.password_confirmation:
+            raise ValueError("Password confirmation does not match.")
+        return self
 
 
 class AuthUserUpdate(PatchRequestModel):
@@ -540,6 +558,9 @@ class GraphDraftOperationUpdate(PatchRequestModel):
 
 class GraphDraftCreateRequest(RequestModel):
     mode: GraphDraftMode = GraphDraftMode.GRAPH_CONTEXT
+    purpose: GraphDraftPurpose = GraphDraftPurpose.GENERAL
+    idempotency_key: IdempotencyKey | None = None
+    external_provider_acknowledged: bool = False
     user_hint: NonBlankStr | None = None
 
 

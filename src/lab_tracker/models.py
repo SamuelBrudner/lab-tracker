@@ -397,6 +397,13 @@ class GraphDraftMode(str, Enum):
     GRAPH_BATCH = "graph_batch"
 
 
+class GraphDraftPurpose(str, Enum):
+    """Server-enforced intent for a note-scoped graph draft."""
+
+    GENERAL = "general"
+    STARTER_QUESTIONS = "starter_questions"
+
+
 class GraphDraftBatchRunStatus(str, Enum):
     PENDING = "pending"
     RUNNING = "running"
@@ -659,6 +666,45 @@ class GraphChangeSet(_DomainModel):
 
     @computed_field
     @property
+    def draft_purpose(self) -> GraphDraftPurpose:
+        value = self.context_packet.get("draft_purpose") if self.context_packet else None
+        try:
+            return GraphDraftPurpose(str(value or GraphDraftPurpose.GENERAL.value))
+        except ValueError:
+            return GraphDraftPurpose.GENERAL
+
+    @computed_field
+    @property
+    def generation_lease_expires_at(self) -> datetime | None:
+        value = (
+            self.context_packet.get("generation_lease_expires_at")
+            if self.context_packet
+            else None
+        )
+        if not isinstance(value, str) or not value.strip():
+            return None
+        try:
+            return datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+
+    @computed_field
+    @property
+    def source_context_truncated(self) -> bool:
+        artifacts = (
+            self.context_packet.get("source_artifacts", [])
+            if self.context_packet
+            else []
+        )
+        return any(
+            bool(item.get("raw_content_truncated"))
+            or bool(item.get("transcript_text_truncated"))
+            for item in artifacts
+            if isinstance(item, dict)
+        )
+
+    @computed_field
+    @property
     def meeting_note_count(self) -> int:
         """Number of meeting-tagged notes in this draft's batch context.
 
@@ -684,6 +730,7 @@ class GraphDraftBatchSettings(_DomainModel):
     timezone_name: str = "America/New_York"
     next_run_at: datetime | None = None
     email_notifications_enabled: bool = False
+    review_email_available: bool = False
     notification_email: str | None = None
     notification_email_confirmed_at: datetime | None = None
     created_at: datetime = Field(default_factory=utc_now)

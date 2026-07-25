@@ -31,6 +31,10 @@ BATCH_NOTE_LIMIT = 100
 DEFAULT_BATCH_CADENCE_MINUTES = 24 * 60
 DEFAULT_BATCH_RUN_TIME = "18:00"
 DEFAULT_BATCH_TIMEZONE = "America/New_York"
+SCHEDULED_DRAFT_POLICY_METADATA_KEY = "scheduled_graph_draft_policy"
+SCHEDULED_DRAFT_POLICY_EXCLUDE = "exclude"
+STARTER_CONTEXT_SOURCE = "guided_setup"
+STARTER_CONTEXT_TYPE = "onboarding_grant_or_project_brief"
 ACTIVE_BATCH_CHANGE_SET_STATUSES = {
     GraphChangeSetStatus.DRAFTING,
     GraphChangeSetStatus.READY,
@@ -158,6 +162,7 @@ def staged_notes_in_window(
             note
             for note in notes
             if note.status == NoteStatus.STAGED
+            and note_is_scheduled_draft_eligible(note)
             and note.note_id not in excluded
             and note_matches_reviewer(note, reviewer)
             and (
@@ -168,6 +173,23 @@ def staged_notes_in_window(
             and as_utc(note.created_at) <= end
         ],
         key=lambda item: (item.created_at, str(item.note_id)),
+    )
+
+
+def note_is_scheduled_draft_eligible(note: Note) -> bool:
+    """Keep manually handled starter context out of recurring batch drafts."""
+
+    metadata = note.metadata or {}
+    if (
+        metadata.get(SCHEDULED_DRAFT_POLICY_METADATA_KEY)
+        == SCHEDULED_DRAFT_POLICY_EXCLUDE
+    ):
+        return False
+    # Backward-compatible protection for setup notes created before the
+    # explicit cadence marker was introduced.
+    return not (
+        metadata.get("source") == STARTER_CONTEXT_SOURCE
+        and metadata.get("context_type") == STARTER_CONTEXT_TYPE
     )
 
 

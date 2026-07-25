@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Protocol
 from uuid import UUID
+
+from sqlalchemy.exc import IntegrityError
 
 from lab_tracker.auth import AuthContext
 from lab_tracker.errors import NotFoundError, OpaqueTargetNotFoundError
@@ -44,6 +47,47 @@ class GraphDraftRecords(BaseService):
         change_set.operation_count = len(change_set.operations)
         with self.unit_of_work() as repository:
             repository.graph_change_sets.save(change_set)
+
+    def claim_graph_change_set_for_generation(
+        self,
+        candidate: GraphChangeSet,
+        *,
+        claimed_at: datetime,
+        stale_before: datetime,
+    ) -> tuple[GraphChangeSet, bool]:
+        """Atomically create/reclaim a keyed generation attempt."""
+
+        candidate.operation_count = len(candidate.operations)
+        try:
+            with self.recoverable_unit_of_work() as repository:
+                result = repository.graph_change_sets.claim_for_generation(
+                    candidate,
+                    claimed_at=claimed_at,
+                    stale_before=stale_before,
+                )
+        except IntegrityError:
+            if candidate.batch_key is None:
+                raise
+            change_sets = self.list_graph_change_sets(batch_key=candidate.batch_key)
+            if not change_sets:
+                raise
+            return change_sets[0], False
+        change_set, claimed = result
+        if (
+            claimed
+            and candidate.batch_key is not None
+            and self._context.is_request_managed()
+        ):
+            # Provider I/O happens after this point and may outlive the HTTP
+            # request or process. Persist the keyed lease now so a crash leaves
+            # one reclaimable identity instead of rolling the claim back with
+            # the request. The session remains usable for the final state write.
+            try:
+                self.repository.commit()
+            except BaseException:
+                self.repository.rollback()
+                raise
+        return change_set, claimed
 
     def get_graph_draft_batch_run(self, run_id: UUID) -> GraphDraftBatchRun:
         run = self.repository.graph_draft_batch_runs.get(run_id)

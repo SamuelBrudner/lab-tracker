@@ -353,7 +353,10 @@ List/search endpoints use `limit` between 1 and 200 and `offset` of 0 or greater
 
 #### Graph Drafts: `GraphDraftCreateRequest`
 - Required: none
+- `external_provider_acknowledged` (optional): boolean; default False
+- `idempotency_key` (optional): string; min length 1, max length 200 | null
 - `mode` (optional): GraphDraftMode enum: graph_context, image_only, graph_batch
+- `purpose` (optional): GraphDraftPurpose enum: general, starter_questions
 - `user_hint` (optional): string; min length 1 | null
 
 #### Decision Context: `AssistantDecisionContextRequest`

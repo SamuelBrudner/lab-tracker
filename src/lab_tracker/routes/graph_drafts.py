@@ -62,6 +62,11 @@ def build_graph_drafts_router(api: LabTrackerAPI) -> APIRouter:
                 note_id,
                 draft_client=draft_client,
                 mode=draft_payload.mode,
+                purpose=draft_payload.purpose,
+                idempotency_key=draft_payload.idempotency_key,
+                external_provider_acknowledged=(
+                    draft_payload.external_provider_acknowledged
+                ),
                 user_hint=draft_payload.user_hint,
                 actor=actor,
             )
