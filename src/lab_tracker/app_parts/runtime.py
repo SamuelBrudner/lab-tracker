@@ -73,6 +73,7 @@ def build_app_runtime(settings: Settings) -> AppRuntime:
     resolver_registry = registry_from_env(
         http_policy=outbound_http_policy,
         http_deadline_seconds=settings.resolver_http_deadline_seconds,
+        subprocess_deadline_seconds=settings.resolver_subprocess_deadline_seconds,
     )
     engine = get_engine(settings)
     session_factory = get_session_factory(engine=engine)

@@ -18,6 +18,8 @@ from starlette.testclient import TestClient
 from lab_tracker.artifact_resolution import (
     HttpResolver,
     LocalFilesystemResolver,
+    RcloneCompleted,
+    RcloneResolver,
     ResolverRegistry,
 )
 from lab_tracker.outbound_http import OutboundHttpPolicy
@@ -106,6 +108,130 @@ def test_resolve_endpoint_redacts_denied_http_credentials_and_target(
     assert body["content_base64"] is None
     assert secret not in response.text
     assert "169.254.169.254" not in response.text
+
+
+def test_resolve_endpoint_redacts_rclone_process_failure(
+    client,
+    admin_auth_headers,
+):
+    secret = "private-target-and-stderr"
+
+    def failing_runner(_args):
+        raise OSError(secret)
+
+    client.app.state.resolver_registry = ResolverRegistry(
+        [RcloneResolver(runner=failing_runner)]
+    )
+    project_id = client.post(
+        "/projects",
+        json={"name": "Failed rclone target"},
+        headers=admin_auth_headers,
+    ).json()["data"]["project_id"]
+    dataset_id = _create_dataset_with_artifact(
+        client,
+        admin_auth_headers,
+        project_id=project_id,
+        source_system="rclone",
+        uri=f"rclone://private/{secret}.bin",
+        content_hash=_sha256(b"x"),
+    )
+
+    response = client.post(
+        "/external-artifacts/resolve",
+        json={"entity_type": "dataset", "entity_id": dataset_id},
+        headers=admin_auth_headers,
+    )
+
+    assert response.status_code == 200, response.text
+    body = response.json()["data"]
+    assert body["status"] == "unresolved"
+    assert body["uri"] == "rclone://[redacted]"
+    assert body["detail"] == "rclone artifact resolution failed."
+    assert body["content_base64"] is None
+    assert body["observed_hash"] is None
+    assert secret not in response.text
+
+
+def test_resolve_endpoint_rejects_decoded_rclone_nul_without_500(
+    client,
+    admin_auth_headers,
+):
+    secret = "nul-target-secret"
+
+    def unexpected_runner(_args):
+        raise AssertionError("invalid locator must be refused before spawn")
+
+    client.app.state.resolver_registry = ResolverRegistry(
+        [RcloneResolver(runner=unexpected_runner)]
+    )
+    project_id = client.post(
+        "/projects",
+        json={"name": "Malformed rclone target"},
+        headers=admin_auth_headers,
+    ).json()["data"]["project_id"]
+    dataset_id = _create_dataset_with_artifact(
+        client,
+        admin_auth_headers,
+        project_id=project_id,
+        source_system="rclone",
+        uri=f"rclone://private/path%00{secret}.bin",
+        content_hash=_sha256(b"x"),
+    )
+
+    response = client.post(
+        "/external-artifacts/resolve",
+        json={"entity_type": "dataset", "entity_id": dataset_id},
+        headers=admin_auth_headers,
+    )
+
+    assert response.status_code == 200, response.text
+    body = response.json()["data"]
+    assert body["status"] == "unresolved"
+    assert body["uri"] == "rclone://[redacted]"
+    assert body["content_base64"] is None
+    assert secret not in response.text
+
+
+def test_resolve_endpoint_maps_malformed_rclone_metadata_to_unresolved(
+    client,
+    admin_auth_headers,
+):
+    secret = "malformed-metadata-target"
+
+    def malformed_runner(_args):
+        return RcloneCompleted(returncode=0, stdout=b"[]", stderr=b"private stderr")
+
+    client.app.state.resolver_registry = ResolverRegistry(
+        [RcloneResolver(runner=malformed_runner)]
+    )
+    project_id = client.post(
+        "/projects",
+        json={"name": "Malformed rclone metadata"},
+        headers=admin_auth_headers,
+    ).json()["data"]["project_id"]
+    dataset_id = _create_dataset_with_artifact(
+        client,
+        admin_auth_headers,
+        project_id=project_id,
+        source_system="rclone",
+        uri=f"rclone://private/{secret}.bin",
+        content_hash=_sha256(b"x"),
+    )
+
+    response = client.post(
+        "/external-artifacts/resolve",
+        json={"entity_type": "dataset", "entity_id": dataset_id},
+        headers=admin_auth_headers,
+    )
+
+    assert response.status_code == 200, response.text
+    body = response.json()["data"]
+    assert body["status"] == "unresolved"
+    assert body["uri"] == "rclone://[redacted]"
+    assert body["detail"] == "rclone artifact resolution failed."
+    assert body["content_base64"] is None
+    assert secret not in response.text
+    assert "private stderr" not in response.text
 
 
 def test_resolve_endpoint_deadline_discards_partial_body_and_closes_session(
