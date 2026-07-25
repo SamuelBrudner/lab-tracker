@@ -17,7 +17,9 @@ from lab_tracker.artifact_resolution import (
     ResolvedArtifact,
     ResolverRegistry,
     http_store_resolution_target,
+    is_rclone_store_kind,
     local_store_resolution_target,
+    rclone_store_resolution_target,
     resolver_registry_for_prepared_target,
     store_relative_reference,
     unresolved,
@@ -680,34 +682,37 @@ class ContextQueries:
                 if locator_is_uri_path
                 else PortableStorePath.parse_decoded(locator)
             )
-            canonical_uri = (
-                canonical_store_uri(name, parsed_locator)
-                if parsed_locator is not None
-                else None
+            canonical_reference = _nonlocal_store_logical_reference(
+                reference,
+                store_name=name,
+                locator=parsed_locator,
+                locator_is_uri_path=locator_is_uri_path,
             )
-            if parsed_locator is None or canonical_uri is None:
+            if parsed_locator is None or canonical_reference is None:
                 return _invalid_store_reference(reference)
-            accepted_uris = {
-                canonical_uri,
-                f"store://{name}/{parsed_locator.uri_path}",
-            }
-            if not locator_is_uri_path:
-                accepted_uris.add(f"store://{name}/{parsed_locator.path}")
-            if reference.uri not in accepted_uris:
-                return _invalid_store_reference(reference)
-            logical_reference = reference.model_copy(
-                update={
-                    "source_system": "store",
-                    "uri": canonical_uri,
-                    "store_name": name,
-                    "locator": parsed_locator.path,
-                },
-                deep=True,
-            )
             concrete = http_store_resolution_target(
                 store,
                 locator=parsed_locator,
-                logical_reference=logical_reference,
+                logical_reference=canonical_reference,
+            )
+        elif is_rclone_store_kind(store.kind):
+            parsed_locator = (
+                PortableStorePath.parse_uri_path(locator)
+                if locator_is_uri_path
+                else PortableStorePath.parse_decoded(locator)
+            )
+            canonical_reference = _nonlocal_store_logical_reference(
+                reference,
+                store_name=name,
+                locator=parsed_locator,
+                locator_is_uri_path=locator_is_uri_path,
+            )
+            if parsed_locator is None or canonical_reference is None:
+                return _invalid_store_reference(reference)
+            concrete = rclone_store_resolution_target(
+                store,
+                locator=parsed_locator,
+                logical_reference=canonical_reference,
             )
         else:
             concrete = store_relative_reference(
@@ -741,6 +746,44 @@ def _single_project_id(project_ids: set[UUID] | None) -> UUID | None:
 class _ParsedStoreReferenceUri:
     name_candidates: tuple[str, ...]
     locator: str
+
+
+def _nonlocal_store_logical_reference(
+    reference: ExternalArtifactReference,
+    *,
+    store_name: str,
+    locator: PortableStorePath | None,
+    locator_is_uri_path: bool,
+) -> ExternalArtifactReference | None:
+    """Canonicalize one validated nonlocal ``store://`` identity.
+
+    Structured legacy references may retain a decoded display URI, while URI-only
+    references may retain a literal legacy authority. Both forms resolve to the
+    same canonical detached identity after an exact match.
+    """
+
+    canonical_uri = (
+        canonical_store_uri(store_name, locator) if locator is not None else None
+    )
+    if canonical_uri is None or locator is None:
+        return None
+    accepted_uris = {
+        canonical_uri,
+        f"store://{store_name}/{locator.uri_path}",
+    }
+    if not locator_is_uri_path:
+        accepted_uris.add(f"store://{store_name}/{locator.path}")
+    if reference.uri not in accepted_uris:
+        return None
+    return reference.model_copy(
+        update={
+            "source_system": "store",
+            "uri": canonical_uri,
+            "store_name": store_name,
+            "locator": locator.path,
+        },
+        deep=True,
+    )
 
 
 def _parse_store_reference_uri(uri: str) -> _ParsedStoreReferenceUri | None:

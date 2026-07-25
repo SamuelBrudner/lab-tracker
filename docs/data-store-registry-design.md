@@ -281,8 +281,10 @@ Shipped:
   typed target that retains the logical URI, validated relative components, and
   trusted registered root through the eventual handle-bound read. HTTP becomes
   a typed target that retains the same portable relative components and its
-  canonical registered origin/path prefix through every redirect. The rclone
-  kinds currently materialize adapter references. Credentials are never embedded.
+  canonical registered origin/path prefix through every redirect. Rclone kinds
+  become a typed target that retains an exact configured remote, structural
+  rooted-versus-relative prefix, and portable locator until argv composition.
+  Credentials are never embedded.
 - ✅ Explicit health check: `check_store_health` probes reachability
   (directory stat for `local_fs`, HTTP `HEAD` for `http`, `rclone lsf` for the
   cloud/remote kinds; `object_table`/`database` report `unsupported`), exposed at
@@ -300,11 +302,10 @@ Shipped:
   logical `store://` identity; `for_local_store(...)` and
   `for_http_store(...)` construct their canonical forms, and both kinds share
   one immutable portable-path grammar. The generic `for_store(...)` constructor's
-  deterministic legacy display URI remains accepted for structured HTTP
-  references and is canonicalized during preparation. Rclone and Git fields
-  retain their legacy precedence over a display URI until their adapter-specific
-  prefix-confinement slices. The field is the store *name* (not a UUID), matching
-  name-based resolution.
+  deterministic legacy display URI remains accepted for structured HTTP and
+  rclone references and is canonicalized during preparation. Git fields retain
+  their legacy precedence over a display URI until Git prefix confinement. The
+  field is the store *name* (not a UUID), matching name-based resolution.
 - ✅ Local-store confinement: a `local_fs` root must be a native absolute local
   path. Its effective read authority is conjunctive with the operator's global
   local-root policy, and the exact reader plus recovery walk are scoped to the
@@ -315,12 +316,17 @@ Shipped:
   target crosses the database-scope boundary, and the resolver checks the
   initial URL and every raw redirect before the next DNS or socket operation.
   Direct HTTP references retain their existing, broader redirect semantics.
+- ✅ Registered rclone prefix confinement: typed remote names follow rclone's
+  configured-name grammar, registered roots preserve `remote:path` versus
+  `remote:/path`, and a frozen factory-only target crosses the database-scope
+  boundary. Nominal dispatch composes one exact target token only after the
+  combined root/locator budget and exact remote allowlist pass. Direct
+  `rclone://` references retain their established parser and process behavior.
 
 Deferred:
 
-- ⏭️ The same strict prefix-preserving locator composition for rclone and Git
-  stores is tracked separately; those adapters must not rely on backend
-  normalization.
+- ⏭️ The same strict prefix-preserving locator composition for Git stores is
+  tracked separately; that adapter must not rely on backend normalization.
 - ⏭️ The capabilities the storeless adapters cannot provide: `versioned_snapshot`
   reads (S3 `versionId`, Iceberg/Delta) and the `database` (`query → rows`)
   adapter — `store_relative_reference` returns `None` for `object_table`/
@@ -328,9 +334,9 @@ Deferred:
 
 ## Next slices
 
-The remaining work is adapter-specific: confine rclone and Git locators to their
-registered prefixes; bind store registration to operator-approved authority
-grants; enforce declared capabilities during resolution; and add the deferred
+The remaining work is adapter-specific: confine Git locators to registered
+repository paths; bind store registration to operator-approved authority grants;
+enforce declared capabilities during resolution; and add the deferred
 snapshot/query adapters. Health remains an explicit operator action at
 `GET /data-stores/{id}/health`, not a side effect of registration.
 

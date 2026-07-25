@@ -31,12 +31,14 @@ from lab_tracker.artifact_resolution import (
     LocalStoreResolutionTarget,
     RcloneCompleted,
     RcloneResolver,
+    RcloneStoreResolutionTarget,
     RecoveryPolicy,
     ResolutionStatus,
     ResolvedArtifact,
     ResolverRegistry,
     ScopedHttpStoreResolver,
     ScopedLocalStoreResolver,
+    ScopedRcloneStoreResolver,
     StoreHealthStatus,
     check_store_health,
     default_registry,
@@ -45,6 +47,7 @@ from lab_tracker.artifact_resolution import (
     local_store_resolution_target,
     outbound_http_policy_from_env,
     parse_content_hash,
+    rclone_store_resolution_target,
     registry_from_env,
     store_relative_reference,
 )
@@ -63,6 +66,7 @@ from lab_tracker.outbound_http import (
     OutboundHttpTransportError,
     RegisteredHttpPrefix,
 )
+from lab_tracker.rclone_store_locator import RcloneRemoteName, RegisteredRcloneRoot
 
 
 def _sha256(data: bytes) -> str:
@@ -1215,6 +1219,64 @@ def test_rclone_resolver_verifies_object():
     assert runner.calls[1] == ["cat", "lab-onedrive:experiments/001/x.bin"]
 
 
+def test_rclone_resolver_uses_registered_target_without_generic_uri_reparse(
+    monkeypatch,
+):
+    data = b"registered rclone object"
+    runner = _fake_rclone_runner(size_bytes=len(data), body=data)
+    resolver = RcloneResolver(
+        runner=runner,
+        allowed_remotes=["Lab Team@org"],
+    )
+    target = _rclone_store_target(
+        root="/experiments",
+        remote="Lab Team@org",
+        locator_path="--results/x.bin",
+        content_hash=_sha256(data),
+    )
+
+    def unexpected_generic_parse(_uri):
+        raise AssertionError("registered target reached generic rclone URI parsing")
+
+    monkeypatch.setattr(resolver, "_rclone_target", unexpected_generic_parse)
+
+    result = resolver.resolve_within_rclone_store(target)
+
+    assert result.status is ResolutionStatus.VERIFIED
+    assert result.uri == "store://lab/--results/x.bin"
+    assert result.content == data
+    assert runner.calls == [
+        ["size", "--json", "Lab Team@org:/experiments/--results/x.bin"],
+        ["cat", "Lab Team@org:/experiments/--results/x.bin"],
+    ]
+
+
+def test_rclone_registered_target_denied_by_exact_allowlist_before_process():
+    runner = _fake_rclone_runner(size_bytes=1, body=b"x")
+    target = _rclone_store_target(remote="lab+archive")
+
+    result = RcloneResolver(
+        runner=runner,
+        allowed_remotes=["LAB+archive"],
+    ).resolve_within_rclone_store(target)
+
+    assert result.status is ResolutionStatus.UNRESOLVED
+    assert result.detail == "Remote is not in the rclone resolver allowlist."
+    assert result.uri == "store://lab/001/x.fcs"
+    assert runner.calls == []
+
+
+def test_rclone_registered_target_invalid_hash_does_no_process_work():
+    runner = _fake_rclone_runner(size_bytes=1, body=b"x")
+    target = _rclone_store_target(content_hash="datalad-key:opaque")
+
+    result = RcloneResolver(runner=runner).resolve_within_rclone_store(target)
+
+    assert result.status is ResolutionStatus.UNRESOLVED
+    assert result.detail == "Cannot verify content hash with algorithm 'datalad-key'."
+    assert runner.calls == []
+
+
 def test_rclone_resolver_reports_drift():
     data = b"actual remote bytes"
     runner = _fake_rclone_runner(size_bytes=len(data), body=data)
@@ -1484,6 +1546,28 @@ def _data_store(kind: StoreKind, root: str, **overrides) -> DataStore:
     return DataStore(**fields)
 
 
+def _rclone_store_target(
+    *,
+    root: str = "experiments",
+    remote: str | None = "lab-onedrive",
+    locator_path: str = "001/x.fcs",
+    content_hash: str | None = None,
+) -> RcloneStoreResolutionTarget:
+    store = _data_store(
+        StoreKind.ONEDRIVE,
+        root,
+        name="lab",
+        credential_ref=remote,
+    )
+    target = store_relative_reference(
+        store,
+        path=locator_path,
+        content_hash=content_hash or _sha256(b"x"),
+    )
+    assert isinstance(target, RcloneStoreResolutionTarget)
+    return target
+
+
 def _local_store_target(
     store: DataStore,
     locator_path: str,
@@ -1648,10 +1732,107 @@ def test_store_relative_reference_rclone_uses_credential_ref_as_remote():
     store = _data_store(
         StoreKind.ONEDRIVE, "experiments", name="lab", credential_ref="lab-onedrive"
     )
-    ref = store_relative_reference(store, path="001/x.fcs", content_hash=_sha256(b"x"))
-    assert ref is not None
-    assert ref.source_system == "rclone"
-    assert ref.uri == "rclone://lab-onedrive/experiments/001/x.fcs"
+    target = store_relative_reference(
+        store,
+        path="001/x.fcs",
+        content_hash=_sha256(b"x"),
+    )
+
+    assert isinstance(target, RcloneStoreResolutionTarget)
+    assert target.remote.value == "lab-onedrive"
+    assert target.registered_root.rooted is False
+    assert target.registered_root.components == ("experiments",)
+    assert target.locator.components == ("001", "x.fcs")
+    assert target.argv_target == "lab-onedrive:experiments/001/x.fcs"
+    assert target.logical_reference.source_system == "store"
+    assert target.logical_reference.uri == "store://lab/001/x.fcs"
+
+
+@pytest.mark.parametrize(
+    ("root", "expected"),
+    (
+        ("experiments", "lab-onedrive:experiments/001/x.fcs"),
+        ("/experiments", "lab-onedrive:/experiments/001/x.fcs"),
+        ("/", "lab-onedrive:/001/x.fcs"),
+    ),
+)
+def test_rclone_store_target_preserves_registered_root_mode(root, expected):
+    target = _rclone_store_target(root=root)
+
+    assert target.argv_target == expected
+
+
+def test_rclone_store_target_uses_name_only_when_credential_ref_is_absent():
+    fallback = _rclone_store_target(remote=None)
+    empty = _data_store(
+        StoreKind.ONEDRIVE,
+        "experiments",
+        name="lab",
+        credential_ref="",
+    )
+
+    assert fallback.remote.value == "lab"
+    assert fallback.argv_target == "lab:experiments/001/x.fcs"
+    assert (
+        store_relative_reference(
+            empty,
+            path="001/x.fcs",
+            content_hash=_sha256(b"x"),
+        )
+        is None
+    )
+
+
+def test_rclone_store_target_factory_rejects_mismatched_logical_identity():
+    store = _data_store(
+        StoreKind.ONEDRIVE,
+        "experiments",
+        name="lab",
+        credential_ref="lab-onedrive",
+    )
+    locator = PortableStorePath.parse_decoded("001/x.fcs")
+    assert locator is not None
+    reference = ExternalArtifactReference(
+        source_system="store",
+        uri="store://other/001/x.fcs",
+        content_hash=_sha256(b"x"),
+        store_name="other",
+        locator=locator.path,
+    )
+
+    assert (
+        rclone_store_resolution_target(
+            store,
+            locator=locator,
+            logical_reference=reference,
+        )
+        is None
+    )
+
+
+def test_rclone_store_target_cannot_bypass_validated_factory():
+    locator = PortableStorePath.parse_decoded("001/x.fcs")
+    remote = RcloneRemoteName.parse("lab-onedrive")
+    root = RegisteredRcloneRoot.parse_decoded("experiments")
+    assert locator is not None
+    assert remote is not None
+    assert root is not None
+    reference = ExternalArtifactReference(
+        source_system="store",
+        uri="store://lab/001/x.fcs",
+        content_hash=_sha256(b"x"),
+        store_name="lab",
+        locator=locator.path,
+    )
+
+    with pytest.raises(TypeError, match="validated factory"):
+        RcloneStoreResolutionTarget(
+            logical_reference=reference,
+            remote=remote,
+            registered_root=root,
+            locator=locator,
+            _factory_token=object(),
+        )
 
 
 def test_store_relative_reference_http_builds_scoped_logical_target():
@@ -2211,6 +2392,7 @@ class _RecordingPreparedResolver(
     ArtifactResolver,
     ScopedLocalStoreResolver,
     ScopedHttpStoreResolver,
+    ScopedRcloneStoreResolver,
 ):
     def __init__(self) -> None:
         self.can_resolve_references: list[ExternalArtifactReference] = []
@@ -2255,6 +2437,16 @@ class _RecordingPreparedResolver(
         byte_range: tuple[int, int] | None = None,
     ) -> ResolvedArtifact:
         self.calls.append(("http", target, max_bytes, byte_range))
+        return self._result(target.logical_reference)
+
+    def resolve_within_rclone_store(
+        self,
+        target: RcloneStoreResolutionTarget,
+        *,
+        max_bytes: int = DEFAULT_MAX_BYTES,
+        byte_range: tuple[int, int] | None = None,
+    ) -> ResolvedArtifact:
+        self.calls.append(("rclone", target, max_bytes, byte_range))
         return self._result(target.logical_reference)
 
     @staticmethod
@@ -2344,6 +2536,38 @@ def test_registry_dispatches_prepared_http_target_to_scoped_resolver():
     assert result.uri == target.logical_reference.uri
     assert resolver.can_resolve_references == []
     assert resolver.calls == [("http", target, 17, (2, 5))]
+
+
+def test_registry_dispatches_prepared_rclone_target_to_scoped_resolver():
+    target = _rclone_store_target()
+    resolver = _RecordingPreparedResolver()
+
+    result = ResolverRegistry([resolver]).resolve_prepared(
+        target,
+        max_bytes=17,
+        byte_range=(2, 5),
+    )
+
+    assert result.uri == target.logical_reference.uri
+    assert resolver.can_resolve_references == []
+    assert resolver.calls == [("rclone", target, 17, (2, 5))]
+
+
+def test_registry_does_not_fall_back_to_generic_rclone_for_registered_target():
+    target = _rclone_store_target()
+
+    class OrdinaryOnlyResolver(ArtifactResolver):
+        def can_resolve(self, _ref):
+            raise AssertionError("registered target reached generic dispatch")
+
+        def resolve(self, _ref, *, max_bytes=DEFAULT_MAX_BYTES, byte_range=None):
+            raise AssertionError("registered target reached generic dispatch")
+
+    result = ResolverRegistry([OrdinaryOnlyResolver()]).resolve_prepared(target)
+
+    assert result.status is ResolutionStatus.UNRESOLVED
+    assert result.uri == target.logical_reference.uri
+    assert result.detail == "No scoped rclone-store resolver is registered."
 
 
 def test_registry_rejects_unsupported_prepared_runtime_type_without_reflection():
