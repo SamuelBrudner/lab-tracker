@@ -7,8 +7,93 @@ import pytest
 from lab_tracker.git_remote_policy import (
     ApprovedGitRemote,
     GitPathStyle,
+    GitRemoteAddress,
     GitRemotePolicy,
+    parse_git_remote_address,
 )
+
+
+def test_git_remote_address_is_a_backward_compatible_alias():
+    assert GitRemoteAddress is ApprovedGitRemote
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    (
+        {"path_segments": ("org", "..", "outside.git")},
+        {"host": "GIT.EXAMPLE"},
+        {"effective_port": True},
+        {"ssh_user": "git"},
+        {"path_style": GitPathStyle.SCP_RELATIVE},
+    ),
+)
+def test_direct_construction_cannot_forge_a_parsed_remote(overrides):
+    fields = {
+        "scheme": "https",
+        "host": "git.example",
+        "effective_port": 443,
+        "ssh_user": None,
+        "path_style": GitPathStyle.URL,
+        "path_segments": ("org", "repo.git"),
+        "host_is_ipv6": False,
+    }
+    fields.update(overrides)
+
+    with pytest.raises(ValueError):
+        ApprovedGitRemote(**fields)
+
+
+def test_structural_parse_does_not_imply_operator_authorization():
+    address = parse_git_remote_address(
+        "HTTPS://BÜCHER.Example:443/Org/Repo.git"
+    )
+
+    assert isinstance(address, GitRemoteAddress)
+    assert address.subprocess_value == (
+        "https://xn--bcher-kva.example/Org/Repo.git"
+    )
+    assert GitRemotePolicy.deny_all().authorize_address(address) is None
+
+
+@pytest.mark.parametrize(
+    "candidate",
+    (
+        None,
+        42,
+        object(),
+        "",
+        "https://user:secret@git.example/repo.git",
+        "../repo.git",
+    ),
+)
+def test_structural_parse_returns_none_opaquely_for_invalid_input(candidate):
+    assert parse_git_remote_address(candidate) is None
+
+
+def test_authorize_address_matches_exact_structural_grants():
+    policy = GitRemotePolicy.from_config("https://git.example/org")
+    matching = parse_git_remote_address(
+        "HTTPS://GIT.EXAMPLE:443/org/repo.git"
+    )
+    sibling = parse_git_remote_address(
+        "https://git.example/organization/repo.git"
+    )
+
+    assert matching is not None
+    assert sibling is not None
+    assert policy.authorize_address(matching) is matching
+    assert policy.authorize_address(sibling) is None
+
+
+def test_raw_authorize_delegates_without_changing_results():
+    policy = GitRemotePolicy.from_config("https://git.example/org")
+    candidate = "HTTPS://GIT.EXAMPLE:443/org/repo.git"
+    parsed = parse_git_remote_address(candidate)
+
+    assert parsed is not None
+    assert policy.authorize(candidate) == policy.authorize_address(parsed)
+    assert policy.authorize(candidate) == parsed
+    assert policy.authorize("https://git.example/org2/repo.git") is None
 
 
 def test_policy_defaults_to_deny_all():

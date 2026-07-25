@@ -16,12 +16,12 @@ from lab_tracker.artifact_resolution import (
     PreparedArtifactResolutionTarget,
     ResolvedArtifact,
     ResolverRegistry,
+    git_store_resolution_target,
     http_store_resolution_target,
     is_rclone_store_kind,
     local_store_resolution_target,
     rclone_store_resolution_target,
     resolver_registry_for_prepared_target,
-    store_relative_reference,
     unresolved,
 )
 from lab_tracker.auth import AuthContext
@@ -31,6 +31,10 @@ from lab_tracker.decision_context_query import (
     RepositoryDecisionContextReader,
 )
 from lab_tracker.errors import NotFoundError, ValidationError
+from lab_tracker.git_store_locator import (
+    PinnedGitPath,
+    canonical_git_store_uri,
+)
 from lab_tracker.local_store_locator import (
     LocalStoreLocator,
     PortableStorePath,
@@ -714,12 +718,27 @@ class ContextQueries:
                 locator=parsed_locator,
                 logical_reference=canonical_reference,
             )
-        else:
-            concrete = store_relative_reference(
-                store,
-                path=locator,
-                content_hash=reference.content_hash,
+        elif store.kind is StoreKind.GIT:
+            pin = (
+                PinnedGitPath.parse_uri_path(locator)
+                if locator_is_uri_path
+                else PinnedGitPath.parse_decoded(locator)
             )
+            canonical_reference = _git_store_logical_reference(
+                reference,
+                store_name=name,
+                pin=pin,
+                locator_is_uri_path=locator_is_uri_path,
+            )
+            if pin is None or canonical_reference is None:
+                return _invalid_store_reference(reference)
+            concrete = git_store_resolution_target(
+                store,
+                pin=pin,
+                logical_reference=canonical_reference,
+            )
+        else:
+            concrete = None
         if concrete is None:
             return _unavailable_store_reference(reference)
         return concrete
@@ -781,6 +800,39 @@ def _nonlocal_store_logical_reference(
             "uri": canonical_uri,
             "store_name": store_name,
             "locator": locator.path,
+        },
+        deep=True,
+    )
+
+
+def _git_store_logical_reference(
+    reference: ExternalArtifactReference,
+    *,
+    store_name: str,
+    pin: PinnedGitPath | None,
+    locator_is_uri_path: bool,
+) -> ExternalArtifactReference | None:
+    """Canonicalize one validated immutable registered-Git identity."""
+
+    canonical_uri = (
+        canonical_git_store_uri(store_name, pin) if pin is not None else None
+    )
+    if canonical_uri is None or pin is None:
+        return None
+    accepted_uris = {
+        canonical_uri,
+        f"store://{store_name}/{pin.uri_path}",
+    }
+    if not locator_is_uri_path:
+        accepted_uris.add(f"store://{store_name}/{pin.locator}")
+    if reference.uri not in accepted_uris:
+        return None
+    return reference.model_copy(
+        update={
+            "source_system": "store",
+            "uri": canonical_uri,
+            "store_name": store_name,
+            "locator": pin.locator,
         },
         deep=True,
     )

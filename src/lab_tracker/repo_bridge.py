@@ -107,16 +107,16 @@ def git_code_pin(
     commit: str,
     content_hash: str,
 ) -> ExternalArtifactReference:
-    """Pin a repo-relative code file at a commit against a registered git store.
+    """Pin a portable repo-relative code file to one immutable Git object.
 
-    The ``<path>@<commit>`` locator is the git-store convention that
-    ``store_relative_reference`` translates into a ``git+`` URI the GitResolver
-    can fetch and verify (lt-81s6.6).
+    Registered Git pins use full lowercase SHA-1 or SHA-256 object IDs. Invalid
+    paths and mutable or ambiguous revisions are rejected without normalization.
     """
 
-    return ExternalArtifactReference.for_store(
+    return ExternalArtifactReference.for_git_store(
         store_name=store_name,
-        locator=f"{path.strip().lstrip('/')}@{commit.strip()}",
+        repository_path=path,
+        object_id=commit,
         content_hash=content_hash,
     )
 

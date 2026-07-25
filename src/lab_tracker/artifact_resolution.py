@@ -53,7 +53,17 @@ from lab_tracker.bounded_subprocess import (
     ProcessExecutionError,
     ProcessExecutor,
 )
-from lab_tracker.git_remote_policy import ApprovedGitRemote, GitRemotePolicy
+from lab_tracker.git_remote_policy import (
+    ApprovedGitRemote,
+    GitRemoteAddress,
+    GitRemotePolicy,
+    parse_git_remote_address,
+)
+from lab_tracker.git_store_locator import (
+    GitObjectFormat,
+    PinnedGitPath,
+    canonical_git_store_uri,
+)
 from lab_tracker.local_file_access import (
     HandleBoundLocalFileAccess,
     LocalFileReader,
@@ -306,6 +316,7 @@ class ArtifactResolver(ABC):
 _LOCAL_STORE_TARGET_FACTORY_TOKEN = object()
 _HTTP_STORE_TARGET_FACTORY_TOKEN = object()
 _RCLONE_STORE_TARGET_FACTORY_TOKEN = object()
+_GIT_STORE_TARGET_FACTORY_TOKEN = object()
 
 
 @dataclass(frozen=True, slots=True, init=False)
@@ -492,11 +503,66 @@ class ScopedRcloneStoreResolver(ABC):
         """Resolve ``target`` without reparsing its registered authority."""
 
 
+@dataclass(frozen=True, slots=True, init=False)
+class GitStoreResolutionTarget:
+    """Detached immutable Git object beneath one registered remote."""
+
+    logical_reference: ExternalArtifactReference
+    remote: GitRemoteAddress
+    pin: PinnedGitPath
+
+    def __init__(
+        self,
+        logical_reference: ExternalArtifactReference,
+        remote: GitRemoteAddress,
+        pin: PinnedGitPath,
+        *,
+        _factory_token: object,
+    ) -> None:
+        if _factory_token is not _GIT_STORE_TARGET_FACTORY_TOKEN:
+            raise TypeError(
+                "GitStoreResolutionTarget must be built by its validated factory."
+            )
+        store_name = logical_reference.store_name
+        canonical_uri = (
+            canonical_git_store_uri(store_name, pin)
+            if store_name is not None
+            else None
+        )
+        if (
+            not isinstance(remote, ApprovedGitRemote)
+            or not isinstance(pin, PinnedGitPath)
+            or logical_reference.source_system != "store"
+            or logical_reference.locator != pin.locator
+            or canonical_uri is None
+            or logical_reference.uri != canonical_uri
+        ):
+            raise ValueError("Git store resolution target is inconsistent.")
+        object.__setattr__(self, "logical_reference", logical_reference)
+        object.__setattr__(self, "remote", remote)
+        object.__setattr__(self, "pin", pin)
+
+
+class ScopedGitStoreResolver(ABC):
+    """Narrow capability for resolving one registered immutable Git object."""
+
+    @abstractmethod
+    def resolve_within_git_store(
+        self,
+        target: GitStoreResolutionTarget,
+        *,
+        max_bytes: int = DEFAULT_MAX_BYTES,
+        byte_range: tuple[int, int] | None = None,
+    ) -> ResolvedArtifact:
+        """Resolve ``target`` without reconstructing a generic Git locator."""
+
+
 PreparedArtifactResolutionTarget: TypeAlias = (
     ExternalArtifactReference
     | LocalStoreResolutionTarget
     | HttpStoreResolutionTarget
     | RcloneStoreResolutionTarget
+    | GitStoreResolutionTarget
     | ResolvedArtifact
 )
 
@@ -536,6 +602,12 @@ class ResolverRegistry:
             )
         if isinstance(runtime_target, RcloneStoreResolutionTarget):
             return self.resolve_rclone_store(
+                runtime_target,
+                max_bytes=max_bytes,
+                byte_range=byte_range,
+            )
+        if isinstance(runtime_target, GitStoreResolutionTarget):
+            return self.resolve_git_store(
                 runtime_target,
                 max_bytes=max_bytes,
                 byte_range=byte_range,
@@ -631,6 +703,27 @@ class ResolverRegistry:
         return _unresolved(
             target.logical_reference,
             detail="No scoped rclone-store resolver is registered.",
+        )
+
+    def resolve_git_store(
+        self,
+        target: GitStoreResolutionTarget,
+        *,
+        max_bytes: int = DEFAULT_MAX_BYTES,
+        byte_range: tuple[int, int] | None = None,
+    ) -> ResolvedArtifact:
+        """Dispatch only to a resolver for registered immutable Git objects."""
+
+        for resolver in self._resolvers:
+            if isinstance(resolver, ScopedGitStoreResolver):
+                return resolver.resolve_within_git_store(
+                    target,
+                    max_bytes=max_bytes,
+                    byte_range=byte_range,
+                )
+        return _unresolved(
+            target.logical_reference,
+            detail="No scoped Git-store resolver is registered.",
         )
 
 
@@ -777,20 +870,47 @@ def rclone_store_resolution_target(
         return None
 
 
+def git_store_resolution_target(
+    store: DataStore,
+    *,
+    pin: PinnedGitPath,
+    logical_reference: ExternalArtifactReference,
+) -> GitStoreResolutionTarget | None:
+    """Build one internally consistent immutable registered-Git target."""
+
+    if (
+        store.kind is not StoreKind.GIT
+        or logical_reference.store_name != store.name
+    ):
+        return None
+    remote = parse_git_remote_address(store.root)
+    if remote is None:
+        return None
+    try:
+        return GitStoreResolutionTarget(
+            logical_reference=logical_reference,
+            remote=remote,
+            pin=pin,
+            _factory_token=_GIT_STORE_TARGET_FACTORY_TOKEN,
+        )
+    except ValueError:
+        return None
+
+
 def store_relative_reference(
     store: DataStore, *, path: str, content_hash: str
 ) -> (
-    ExternalArtifactReference
-    | LocalStoreResolutionTarget
+    LocalStoreResolutionTarget
     | HttpStoreResolutionTarget
     | RcloneStoreResolutionTarget
+    | GitStoreResolutionTarget
     | None
 ):
     """Translate one legacy store-relative path into a resolvable target.
 
-    Registered local, HTTP, and rclone stores apply the same portable path
-    grammar and yield scoped targets. Other adapters retain their established
-    semantics.
+    Registered local, HTTP, rclone, and Git stores yield scoped targets. Git
+    additionally requires a full immutable object ID paired with the portable
+    repository path. Unsupported adapters return ``None``.
     """
 
     if store.kind is StoreKind.LOCAL_FS:
@@ -855,15 +975,22 @@ def store_relative_reference(
             logical_reference=logical_reference,
         )
     if store.kind is StoreKind.GIT:
-        # The locator carries the commit pin as a ``<path>@<commit>`` suffix; the
-        # remote is the store root. Without a commit there is no snapshot to pin.
-        file_path, sep, commit = path.rpartition("@")
-        if not sep or not file_path or not commit:
+        pin = PinnedGitPath.parse_decoded(path)
+        if pin is None:
             return None
-        return ExternalArtifactReference(
-            source_system="git",
-            uri=f"git+{store.root}#{commit}:{file_path.lstrip('/')}",
-            content_hash=content_hash,
+        try:
+            logical_reference = ExternalArtifactReference.for_git_store(
+                store_name=store.name,
+                repository_path=pin.path.path,
+                object_id=pin.object_id.value,
+                content_hash=content_hash,
+            )
+        except ValueError:
+            return None
+        return git_store_resolution_target(
+            store,
+            pin=pin,
+            logical_reference=logical_reference,
         )
     return None
 
@@ -2137,7 +2264,7 @@ def _parse_git_locator(uri: str) -> tuple[str, str, str] | None:
     return remote, commit, path
 
 
-class GitResolver(ArtifactResolver):
+class GitResolver(ArtifactResolver, ScopedGitStoreResolver):
     """Resolves artifacts pinned to a git commit.
 
     References are addressed as ``git+<remote>#<commit>:<path>`` (source_system
@@ -2231,6 +2358,71 @@ class GitResolver(ArtifactResolver):
             )
 
         algorithm, _ = parse_content_hash(ref.content_hash)
+        return self._resolve_authorized_target(
+            ref,
+            approved=approved,
+            revision=commit,
+            path=path,
+            object_format=None,
+            algorithm=algorithm,
+            window=window,
+            max_bytes=max_bytes,
+        )
+
+    def resolve_within_git_store(
+        self,
+        target: GitStoreResolutionTarget,
+        *,
+        max_bytes: int = DEFAULT_MAX_BYTES,
+        byte_range: tuple[int, int] | None = None,
+    ) -> ResolvedArtifact:
+        """Resolve a registered immutable object without generic URI parsing."""
+
+        ref = target.logical_reference
+        try:
+            window = _normalize_byte_range(byte_range)
+        except ValueError as exc:
+            return _unresolved(ref, detail=str(exc))
+
+        if not is_verifiable_hash(ref.content_hash):
+            algorithm, _ = parse_content_hash(ref.content_hash)
+            return _unresolved(
+                ref,
+                detail=f"Cannot verify content hash with algorithm '{algorithm}'.",
+            )
+
+        approved = self._remote_policy.authorize_address(target.remote)
+        if approved is None:
+            return _unresolved(
+                ref, detail="Remote is not in the git resolver allowlist."
+            )
+
+        algorithm, _ = parse_content_hash(ref.content_hash)
+        return self._resolve_authorized_target(
+            ref,
+            approved=approved,
+            revision=target.pin.object_id.value,
+            path=target.pin.path.path,
+            object_format=target.pin.object_id.object_format,
+            algorithm=algorithm,
+            window=window,
+            max_bytes=max_bytes,
+        )
+
+    def _resolve_authorized_target(
+        self,
+        ref: ExternalArtifactReference,
+        *,
+        approved: ApprovedGitRemote,
+        revision: str,
+        path: str,
+        object_format: GitObjectFormat | None,
+        algorithm: str,
+        window: tuple[int, int] | None,
+        max_bytes: int,
+    ) -> ResolvedArtifact:
+        """Run the shared bounded Git lifecycle for one authorized target."""
+
         try:
             deadline = ProcessDeadline.after(
                 self._deadline_seconds,
@@ -2242,7 +2434,10 @@ class GitResolver(ArtifactResolver):
                 else BoundedSubprocessExecutor()
             )
             deadline.check()
-            cache = self._repo_cache(approved.subprocess_value)
+            cache = self._repo_cache(
+                approved.subprocess_value,
+                object_format=object_format,
+            )
             deadline.check()
             env = _git_environment(self._allow_protocol, cwd=cache)
             collector = _HashCollector(
@@ -2254,13 +2449,14 @@ class GitResolver(ArtifactResolver):
             )
             self._read_blob(
                 approved,
-                commit,
+                revision,
                 path,
                 cache=cache,
                 executor=executor,
                 env=env,
                 deadline=deadline,
                 stdout_consumer=collector.consume,
+                object_format=object_format,
             )
             content, total, truncated, observed = collector.finish()
             deadline.check()
@@ -2295,14 +2491,18 @@ class GitResolver(ArtifactResolver):
         env: dict[str, str],
         deadline: ProcessDeadline,
         stdout_consumer: Callable[[bytes], None],
+        object_format: GitObjectFormat | None = None,
     ) -> None:
         remote = approved.subprocess_value
         deadline.check()
         rev = f"{commit}:{path}"
         config_args = _git_http_config_args(approved)
         # Idempotent: a fresh cache is initialised once, an existing one reused.
+        init_args = ["init", "-q"]
+        if object_format is not None:
+            init_args.append(f"--object-format={object_format}")
         initialized = self._run_command(
-            ["init", "-q"],
+            init_args,
             executor=executor,
             cwd=cache,
             env=env,
@@ -2409,13 +2609,24 @@ class GitResolver(ArtifactResolver):
             stdout_consumer=stdout_consumer,
         )
 
-    def _repo_cache(self, remote: str) -> str:
+    def _repo_cache(
+        self,
+        remote: str,
+        *,
+        object_format: GitObjectFormat | None = None,
+    ) -> str:
         base = os.fspath(self._cache_root) if self._cache_root else os.path.join(
             tempfile.gettempdir(), "lab-tracker-git-cache"
         )
         self._enforce_cache_quota(base)
-        digest = hashlib.sha256(remote.encode("utf-8")).hexdigest()[:16]
-        cache = os.path.join(base, digest)
+        if object_format is None:
+            cache_identity = remote
+            cache_prefix = ""
+        else:
+            cache_identity = f"{object_format}\0{remote}"
+            cache_prefix = f"{object_format}-"
+        digest = hashlib.sha256(cache_identity.encode("utf-8")).hexdigest()[:16]
+        cache = os.path.join(base, f"{cache_prefix}{digest}")
         os.makedirs(cache, exist_ok=True)
         return cache
 

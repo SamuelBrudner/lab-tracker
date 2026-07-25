@@ -18,6 +18,8 @@ from starlette.testclient import TestClient
 
 from lab_tracker.artifact_resolution import (
     ArtifactResolver,
+    GitCompleted,
+    GitResolver,
     HttpResolver,
     LocalFilesystemResolver,
     RcloneCompleted,
@@ -25,6 +27,7 @@ from lab_tracker.artifact_resolution import (
     ResolverRegistry,
 )
 from lab_tracker.db_models import DataStoreModel
+from lab_tracker.git_remote_policy import GitRemotePolicy
 from lab_tracker.outbound_http import OutboundHttpPolicy
 
 
@@ -747,6 +750,216 @@ def test_resolve_endpoint_rejects_invalid_registered_rclone_targets_before_proce
     assert body["uri"] == "store://[redacted]"
     assert body["content_base64"] is None
     assert process_spy.calls == []  # No subprocess invocation or cwd selection.
+    assert all(value not in response.text for value in forbidden_values)
+
+
+def test_resolve_endpoint_uses_registered_git_pin_and_logical_identity(
+    client,
+    admin_auth_headers,
+    tmp_path,
+):
+    data = b"registered git bytes"
+    object_id = "a" * 40
+    remote = "https://git.example/lab/repo.git"
+    calls: list[list[str]] = []
+
+    def runner(args: list[str]) -> GitCompleted:
+        calls.append(args)
+        command = next(
+            candidate
+            for candidate in ("init", "ls-remote", "fetch", "cat-file")
+            if candidate in args
+        )
+        command_index = args.index(command)
+        tail = args[command_index:]
+        if command == "init":
+            assert tail == ["init", "-q", "--object-format=sha1"]
+            return GitCompleted(0, b"", b"")
+        if command == "ls-remote":
+            assert tail == ["ls-remote", "--get-url", "--", remote]
+            return GitCompleted(0, f"{remote}\n".encode(), b"")
+        if command == "fetch":
+            assert tail == [
+                "fetch",
+                "--quiet",
+                "--no-tags",
+                "--depth",
+                "1",
+                "--",
+                remote,
+                object_id,
+            ]
+            return GitCompleted(0, b"", b"")
+        if tail == ["cat-file", "-s", f"{object_id}:src/model.py"]:
+            return GitCompleted(0, str(len(data)).encode(), b"")
+        assert tail == ["cat-file", "blob", f"{object_id}:src/model.py"]
+        return GitCompleted(0, data, b"")
+
+    cache_root = tmp_path / "git-cache"
+    client.app.state.resolver_registry = ResolverRegistry(
+        [
+            GitResolver(
+                runner=runner,
+                cache_root=cache_root,
+                remote_policy=GitRemotePolicy.from_config(remote),
+            )
+        ]
+    )
+    project_id = client.post(
+        "/projects",
+        json={"name": "Registered git resolve project"},
+        headers=admin_auth_headers,
+    ).json()["data"]["project_id"]
+    store_response = client.post(
+        "/data-stores",
+        json={
+            "project_id": project_id,
+            "name": "analysis-repo",
+            "kind": "git",
+            "root": remote,
+        },
+        headers=admin_auth_headers,
+    )
+    assert store_response.status_code == 201, store_response.text
+    logical_uri = f"store://analysis-repo/src/model.py@{object_id}"
+    dataset_id = _create_dataset_with_artifact(
+        client,
+        admin_auth_headers,
+        project_id=project_id,
+        source_system="legacy-git",
+        uri=logical_uri,
+        store_name="analysis-repo",
+        locator=f"src/model.py@{object_id}",
+        content_hash=_sha256(data),
+    )
+
+    response = client.post(
+        "/external-artifacts/resolve",
+        json={
+            "entity_type": "dataset",
+            "entity_id": dataset_id,
+            "artifact_index": 0,
+        },
+        headers=admin_auth_headers,
+    )
+
+    assert response.status_code == 200, response.text
+    body = response.json()["data"]
+    assert body["status"] == "verified"
+    assert body["source_system"] == "store"
+    assert body["uri"] == logical_uri
+    assert base64.b64decode(body["content_base64"]) == data
+    assert len(calls) == 5
+    cache_dirs = {args[args.index("-C") + 1] for args in calls}
+    assert len(cache_dirs) == 1
+    cache_dir = Path(next(iter(cache_dirs)))
+    assert cache_dir.parent == cache_root
+    assert cache_dir.name.startswith("sha1-")
+    assert remote not in response.text
+
+
+@pytest.mark.parametrize(
+    ("case_name", "uri", "legacy_root", "forbidden_values"),
+    (
+        (
+            "mutable revision",
+            "store://analysis-repo/src/model.py@HEAD",
+            None,
+            ("HEAD", "configured-repo-secret"),
+        ),
+        (
+            "encoded traversal",
+            f"store://analysis-repo/src/%2e%2e/encoded-secret.py@{'a' * 40}",
+            None,
+            ("encoded-secret", "configured-repo-secret"),
+        ),
+        (
+            "invalid legacy remote",
+            f"store://analysis-repo/src/model.py@{'a' * 40}",
+            "../invalid-legacy-remote-secret",
+            ("invalid-legacy-remote-secret", "configured-repo-secret"),
+        ),
+    ),
+)
+def test_resolve_endpoint_rejects_invalid_registered_git_targets_before_cache_or_process(
+    client,
+    admin_auth_headers,
+    tmp_path,
+    case_name: str,
+    uri: str,
+    legacy_root: str | None,
+    forbidden_values: tuple[str, ...],
+):
+    class ZeroCallProcessSpy:
+        def __init__(self):
+            self.calls: list[tuple[list[str], object]] = []
+
+        def run(self, command, *, cwd=None, **_kwargs):
+            self.calls.append((list(command), cwd))
+            raise AssertionError("invalid registered Git target reached a process")
+
+    valid_remote = "https://git.example/configured-repo-secret.git"
+    cache_root = tmp_path / f"git-cache-{case_name}"
+    process_spy = ZeroCallProcessSpy()
+    client.app.state.resolver_registry = ResolverRegistry(
+        [
+            GitResolver(
+                executor=process_spy,
+                cache_root=cache_root,
+                remote_policy=GitRemotePolicy.from_config(valid_remote),
+            )
+        ]
+    )
+    project_id = client.post(
+        "/projects",
+        json={"name": f"Rejected Git target: {case_name}"},
+        headers=admin_auth_headers,
+    ).json()["data"]["project_id"]
+    store_response = client.post(
+        "/data-stores",
+        json={
+            "project_id": project_id,
+            "name": "analysis-repo",
+            "kind": "git",
+            "root": valid_remote,
+        },
+        headers=admin_auth_headers,
+    )
+    assert store_response.status_code == 201, store_response.text
+    if legacy_root is not None:
+        store_id = store_response.json()["data"]["store_id"]
+        with client.app.state.db_session_factory() as session:
+            store = session.get(DataStoreModel, store_id)
+            assert store is not None
+            store.root = legacy_root
+            session.commit()
+    dataset_id = _create_dataset_with_artifact(
+        client,
+        admin_auth_headers,
+        project_id=project_id,
+        source_system="legacy-git",
+        uri=uri,
+        content_hash=_sha256(b"unreachable"),
+    )
+
+    response = client.post(
+        "/external-artifacts/resolve",
+        json={
+            "entity_type": "dataset",
+            "entity_id": dataset_id,
+            "artifact_index": 0,
+        },
+        headers=admin_auth_headers,
+    )
+
+    assert response.status_code == 200, response.text
+    body = response.json()["data"]
+    assert body["status"] == "unresolved"
+    assert body["source_system"] == "store"
+    assert body["uri"] == "store://[redacted]"
+    assert body["content_base64"] is None
+    assert process_spy.calls == []
+    assert not cache_root.exists()
     assert all(value not in response.text for value in forbidden_values)
 
 

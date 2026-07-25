@@ -10,6 +10,7 @@ import pytest
 
 from lab_tracker.application.context_queries import ContextQueries
 from lab_tracker.artifact_resolution import (
+    GitStoreResolutionTarget,
     HttpStoreResolutionTarget,
     LocalStoreResolutionTarget,
     PreparedArtifactResolutionTarget,
@@ -92,6 +93,7 @@ class _ResolverRegistry:
         self.local_targets: list[LocalStoreResolutionTarget] = []
         self.http_targets: list[HttpStoreResolutionTarget] = []
         self.rclone_targets: list[RcloneStoreResolutionTarget] = []
+        self.git_targets: list[GitStoreResolutionTarget] = []
 
     def resolve_prepared(
         self,
@@ -117,6 +119,9 @@ class _ResolverRegistry:
             reference = target.logical_reference
         elif isinstance(target, RcloneStoreResolutionTarget):
             self.rclone_targets.append(target)
+            reference = target.logical_reference
+        elif isinstance(target, GitStoreResolutionTarget):
+            self.git_targets.append(target)
             reference = target.logical_reference
         else:
             raise AssertionError("unsupported prepared target reached test registry")
@@ -1223,6 +1228,248 @@ def test_invalid_rclone_identity_locator_root_or_remote_fails_opaquely(
     assert forbidden not in str(result)
 
 
+def test_structured_and_uri_git_store_references_prepare_equal_targets():
+    project_id = uuid4()
+    object_id = "d" * 64
+    store_name = "user@analysis store"
+    canonical_uri = (
+        "store://user%40analysis%20store/"
+        f"M%C3%BCller/@generated%20model.py@{object_id}"
+    )
+    metadata = {"nested": {"value": "prepared"}}
+    store = DataStore(
+        store_id=uuid4(),
+        project_id=project_id,
+        name=store_name,
+        kind=StoreKind.GIT,
+        root="HTTPS://GIT.EXAMPLE:443/lab/model.git",
+    )
+    structured = ExternalArtifactReference.for_store(
+        store_name=store_name,
+        locator=f"Müller/@generated model.py@{object_id}",
+        content_hash=_sha256(b"model"),
+        source_system="legacy-git",
+        metadata=metadata,
+    )
+    uri_only = ExternalArtifactReference(
+        source_system="legacy-git",
+        uri=canonical_uri,
+        content_hash=_sha256(b"model"),
+        metadata=metadata,
+    )
+
+    def prepare(reference: ExternalArtifactReference) -> GitStoreResolutionTarget:
+        queries = ContextQueries(
+            api=_ContextApi(project_id=project_id, reference=reference),
+            repository=_ContextRepository(_DataStoreLookup(store)),
+            session=object(),
+            release_read_scope=lambda: None,
+        )
+        prepared = queries.prepare_external_artifact_resolution(
+            actor=AuthContext(user_id="reader", role=Role.VIEWER),
+            entity_type="dataset",
+            entity_id=uuid4(),
+            artifact_index=0,
+            content_hash=None,
+            max_bytes=None,
+            byte_start=None,
+            byte_end=None,
+        )
+        assert isinstance(prepared.target, GitStoreResolutionTarget)
+        return prepared.target
+
+    structured_target = prepare(structured)
+    uri_target = prepare(uri_only)
+
+    assert structured_target == uri_target
+    assert structured_target.logical_reference.source_system == "store"
+    assert structured_target.logical_reference.uri == canonical_uri
+    assert structured_target.logical_reference.store_name == store_name
+    assert structured_target.logical_reference.locator == (
+        f"Müller/@generated model.py@{object_id}"
+    )
+    assert structured_target.remote.subprocess_value == (
+        "https://git.example/lab/model.git"
+    )
+    assert structured_target.pin.path.components == (
+        "Müller",
+        "@generated model.py",
+    )
+    assert structured_target.pin.object_id.object_format == "sha256"
+    with pytest.raises(FrozenInstanceError):
+        structured_target.pin = uri_target.pin
+
+
+def test_prepared_git_store_resolution_is_detached_and_uses_scoped_dispatch():
+    project_id = uuid4()
+    dataset_id = uuid4()
+    object_id = "e" * 40
+    source_reference = ExternalArtifactReference.for_store(
+        store_name="analysis-repo",
+        locator=f"src/model.py@{object_id}",
+        content_hash=_sha256(b"ok"),
+        source_system="legacy-git",
+        metadata={"nested": {"value": "prepared"}},
+    )
+    store = DataStore(
+        store_id=uuid4(),
+        project_id=project_id,
+        name="analysis-repo",
+        kind=StoreKind.GIT,
+        root="https://git.example/lab/model.git",
+    )
+    api = _ContextApi(project_id=project_id, reference=source_reference)
+    lookup = _DataStoreLookup(store)
+    calls: list[str] = []
+    registry = _ResolverRegistry(calls)
+    queries = ContextQueries(
+        api=api,
+        repository=_ContextRepository(lookup),
+        session=object(),
+        release_read_scope=lambda: calls.append("release"),
+        resolver_registry=registry,
+    )
+
+    prepared = queries.prepare_external_artifact_resolution(
+        actor=AuthContext(user_id="reader", role=Role.VIEWER),
+        entity_type="dataset",
+        entity_id=dataset_id,
+        artifact_index=0,
+        content_hash=None,
+        max_bytes=64,
+        byte_start=1,
+        byte_end=3,
+    )
+    assert isinstance(prepared.target, GitStoreResolutionTarget)
+    source_reference.metadata["nested"]["value"] = "mutated"
+    store.root = "https://git.example/outside/repo.git"
+    api.raise_on_read = True
+
+    assert prepared.target.remote.subprocess_value == (
+        "https://git.example/lab/model.git"
+    )
+    assert prepared.target.logical_reference.metadata == {
+        "nested": {"value": "prepared"}
+    }
+
+    result = queries.resolve_prepared_external_artifact(prepared)
+
+    assert api.calls == ["authorized:reader"]
+    assert lookup.calls == ["store"]
+    assert calls == ["release", "resolve-prepared"]
+    assert registry.prepared_targets == [prepared.target]
+    assert registry.parameters == [(64, (1, 3))]
+    assert registry.references == []
+    assert registry.git_targets == [prepared.target]
+    assert result["status"] == "verified"
+    assert result["uri"] == f"store://analysis-repo/src/model.py@{object_id}"
+    assert result["content_base64"] == "b2s="
+    assert "git.example" not in str(result)
+
+
+@pytest.mark.parametrize(
+    ("reference", "root", "forbidden"),
+    (
+        (
+            ExternalArtifactReference(
+                source_system="store",
+                uri=f"store://analysis-repo/src/model.py@{'a' * 40}?secret=query",
+                content_hash=_sha256(b"secret"),
+            ),
+            "https://git.example/lab/model.git",
+            "query",
+        ),
+        (
+            ExternalArtifactReference(
+                source_system="store",
+                uri=f"store://analysis-repo/src/model.py%40{'a' * 40}",
+                content_hash=_sha256(b"secret"),
+            ),
+            "https://git.example/lab/model.git",
+            "model.py",
+        ),
+        (
+            ExternalArtifactReference.for_store(
+                store_name="analysis-repo",
+                locator="src/model.py@HEAD",
+                content_hash=_sha256(b"secret"),
+            ),
+            "https://git.example/lab/model.git",
+            "HEAD",
+        ),
+        (
+            ExternalArtifactReference.for_store(
+                store_name="analysis-repo",
+                locator=f"src/model.py@{'A' * 40}",
+                content_hash=_sha256(b"secret"),
+            ),
+            "https://git.example/lab/model.git",
+            "AAAA",
+        ),
+        (
+            ExternalArtifactReference.for_store(
+                store_name="analysis-repo",
+                locator=f"src/../secret.py@{'a' * 40}",
+                content_hash=_sha256(b"secret"),
+            ),
+            "https://git.example/lab/model.git",
+            "secret.py",
+        ),
+        (
+            ExternalArtifactReference.for_store(
+                store_name="analysis-repo",
+                locator=f"src/model.py@{'a' * 40}",
+                content_hash=_sha256(b"secret"),
+            ),
+            "../legacy-secret-repo",
+            "legacy-secret",
+        ),
+    ),
+)
+def test_invalid_git_identity_pin_path_or_remote_fails_opaquely(
+    reference: ExternalArtifactReference,
+    root: str,
+    forbidden: str,
+) -> None:
+    project_id = uuid4()
+    store = DataStore(
+        store_id=uuid4(),
+        project_id=project_id,
+        name="analysis-repo",
+        kind=StoreKind.GIT,
+        root=root,
+    )
+    calls: list[str] = []
+    registry = _ResolverRegistry(calls)
+    queries = ContextQueries(
+        api=_ContextApi(project_id=project_id, reference=reference),
+        repository=_ContextRepository(_DataStoreLookup(store)),
+        session=object(),
+        release_read_scope=lambda: calls.append("release"),
+        resolver_registry=registry,
+    )
+
+    prepared = queries.prepare_external_artifact_resolution(
+        actor=AuthContext(user_id="reader", role=Role.VIEWER),
+        entity_type="dataset",
+        entity_id=uuid4(),
+        artifact_index=0,
+        content_hash=None,
+        max_bytes=None,
+        byte_start=None,
+        byte_end=None,
+    )
+    result = queries.resolve_prepared_external_artifact(prepared)
+
+    assert isinstance(prepared.target, ResolvedArtifact)
+    assert calls == ["release", "resolve-prepared"]
+    assert registry.references == []
+    assert registry.git_targets == []
+    assert result["status"] == "unresolved"
+    assert result["uri"] == "store://[redacted]"
+    assert forbidden not in str(result)
+
+
 def test_preexisting_raw_at_git_pin_keeps_one_canonical_store_identity():
     project_id = uuid4()
     commit = "a" * 40
@@ -1260,14 +1507,20 @@ def test_preexisting_raw_at_git_pin_keeps_one_canonical_store_identity():
         byte_end=None,
     )
 
-    assert isinstance(prepared.target, ExternalArtifactReference)
-    assert prepared.target.uri == (
-        f"git+https://git.example/lab/model.git#{commit}:src/model.py"
+    assert isinstance(prepared.target, GitStoreResolutionTarget)
+    assert prepared.target.logical_reference.uri == (
+        f"store://analysis-repo/src/model.py@{commit}"
     )
+    assert prepared.target.logical_reference.locator == locator
+    assert prepared.target.remote.subprocess_value == (
+        "https://git.example/lab/model.git"
+    )
+    assert prepared.target.pin.path.path == "src/model.py"
+    assert prepared.target.pin.object_id.value == commit
     assert lookup.names == ["analysis-repo"]
 
 
-def test_git_store_materialization_preserves_backend_legal_punctuation():
+def test_git_store_materialization_rejects_nonportable_ads_punctuation():
     project_id = uuid4()
     commit = "b" * 40
     locator = f"src/run:1.py@{commit}"
@@ -1276,10 +1529,6 @@ def test_git_store_materialization_preserves_backend_legal_punctuation():
         locator=locator,
         content_hash=_sha256(b"model"),
         source_system="legacy-git",
-    ).model_copy(
-        update={
-            "uri": "legacy-git://display-only",
-        }
     )
     store = DataStore(
         store_id=uuid4(),
@@ -1289,11 +1538,14 @@ def test_git_store_materialization_preserves_backend_legal_punctuation():
         root="https://git.example/lab/model.git",
     )
     lookup = _DataStoreLookup(store)
+    calls: list[str] = []
+    registry = _ResolverRegistry(calls)
     queries = ContextQueries(
         api=_ContextApi(project_id=project_id, reference=source_reference),
         repository=_ContextRepository(lookup),
         session=object(),
-        release_read_scope=lambda: None,
+        release_read_scope=lambda: calls.append("release"),
+        resolver_registry=registry,
     )
 
     prepared = queries.prepare_external_artifact_resolution(
@@ -1307,14 +1559,19 @@ def test_git_store_materialization_preserves_backend_legal_punctuation():
         byte_end=None,
     )
 
-    assert isinstance(prepared.target, ExternalArtifactReference)
-    assert prepared.target.uri == (
-        f"git+https://git.example/lab/model.git#{commit}:src/run:1.py"
-    )
+    result = queries.resolve_prepared_external_artifact(prepared)
+
+    assert isinstance(prepared.target, ResolvedArtifact)
+    assert registry.git_targets == []
+    assert registry.references == []
+    assert calls == ["release", "resolve-prepared"]
+    assert result["status"] == "unresolved"
+    assert result["uri"] == "store://[redacted]"
+    assert result["detail"] == "Store artifact reference is invalid."
     assert lookup.names == ["analysis-repo"]
 
 
-def test_uri_only_git_store_reference_preserves_custom_source_label():
+def test_uri_only_git_store_reference_canonicalizes_custom_store_identity():
     project_id = uuid4()
     commit = "c" * 40
     store_name = "user@analysis-repo"
@@ -1349,9 +1606,15 @@ def test_uri_only_git_store_reference_preserves_custom_source_label():
         byte_end=None,
     )
 
-    assert isinstance(prepared.target, ExternalArtifactReference)
-    assert prepared.target.uri == (
-        f"git+https://git.example/lab/model.git#{commit}:src/run.py"
+    assert isinstance(prepared.target, GitStoreResolutionTarget)
+    assert prepared.target.logical_reference.source_system == "store"
+    assert prepared.target.logical_reference.uri == (
+        f"store://user%40analysis-repo/src/run.py@{commit}"
+    )
+    assert prepared.target.logical_reference.store_name == store_name
+    assert prepared.target.logical_reference.locator == f"src/run.py@{commit}"
+    assert prepared.target.remote.subprocess_value == (
+        "https://git.example/lab/model.git"
     )
     assert lookup.names == [store_name]
 

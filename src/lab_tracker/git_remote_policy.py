@@ -61,6 +61,9 @@ class ApprovedGitRemote:
     path_segments: tuple[str, ...]
     host_is_ipv6: bool = False
 
+    def __post_init__(self) -> None:
+        _validate_approved_git_remote(self)
+
     @property
     def subprocess_value(self) -> str:
         """Return the canonical remote spelling that may be passed to Git."""
@@ -83,11 +86,17 @@ class ApprovedGitRemote:
         return f"{self.scheme}://{user}{host}{port}/{path}"
 
 
+# Neutral name for structurally parsed remotes. Keep the established runtime
+# class as the concrete object so existing imports, reprs, and serialized type
+# identity remain compatible.
+GitRemoteAddress = ApprovedGitRemote
+
+
 @dataclass(frozen=True)
 class GitRemotePolicy:
     """Immutable, segment-bounded allowlist of structurally parsed Git remotes."""
 
-    _grants: tuple[ApprovedGitRemote, ...] = ()
+    _grants: tuple[GitRemoteAddress, ...] = ()
 
     @classmethod
     def deny_all(cls) -> GitRemotePolicy:
@@ -113,8 +122,8 @@ class GitRemotePolicy:
         if raw is None or raw == "":
             return cls.deny_all()
 
-        grants: list[ApprovedGitRemote] = []
-        seen: set[ApprovedGitRemote] = set()
+        grants: list[GitRemoteAddress] = []
+        seen: set[GitRemoteAddress] = set()
         for index, entry in enumerate(raw.split(","), start=1):
             if not entry:
                 raise _config_error(variable, index, "empty entry")
@@ -131,12 +140,18 @@ class GitRemotePolicy:
     def authorize(self, candidate: str) -> ApprovedGitRemote | None:
         """Return a canonical approved value, or ``None`` without diagnostics."""
 
-        try:
-            parsed = _parse_remote(candidate)
-        except _RemoteParseError:
+        parsed = parse_git_remote_address(candidate)
+        if parsed is None:
             return None
-        if any(_grant_matches(grant, parsed) for grant in self._grants):
-            return parsed
+        return self.authorize_address(parsed)
+
+    def authorize_address(
+        self, address: GitRemoteAddress
+    ) -> GitRemoteAddress | None:
+        """Authorize an already parsed address through exact structural grants."""
+
+        if any(_grant_matches(grant, address) for grant in self._grants):
+            return address
         return None
 
 
@@ -154,7 +169,16 @@ def _reject(category: str) -> NoReturn:
     raise _RemoteParseError(category)
 
 
-def _parse_remote(raw: str) -> ApprovedGitRemote:
+def parse_git_remote_address(candidate: object) -> GitRemoteAddress | None:
+    """Parse one remote structurally without granting operator authorization."""
+
+    try:
+        return _parse_remote(candidate)
+    except _RemoteParseError:
+        return None
+
+
+def _parse_remote(raw: object) -> ApprovedGitRemote:
     if not isinstance(raw, str) or not raw:
         _reject("empty remote")
     if any(
@@ -416,6 +440,57 @@ def _parse_path(raw_path: str, *, allow_root: bool) -> tuple[str, ...]:
         if not _PATH_SEGMENT.fullmatch(segment):
             _reject("unsupported path character")
     return segments
+
+
+def _validate_approved_git_remote(remote: ApprovedGitRemote) -> None:
+    """Keep the public value object canonical even when directly constructed."""
+
+    if (
+        not isinstance(remote.scheme, str)
+        or remote.scheme not in _SUPPORTED_SCHEMES
+        or type(remote.effective_port) is not int
+        or not 1 <= remote.effective_port <= 65535
+        or not isinstance(remote.path_style, GitPathStyle)
+        or not isinstance(remote.path_segments, tuple)
+        or not all(isinstance(segment, str) for segment in remote.path_segments)
+        or type(remote.host_is_ipv6) is not bool
+        or not isinstance(remote.host, str)
+    ):
+        _reject("noncanonical parsed remote")
+
+    canonical_host, host_is_ipv6 = _canonical_host(remote.host)
+    if (
+        canonical_host != remote.host
+        or host_is_ipv6 is not remote.host_is_ipv6
+    ):
+        _reject("noncanonical parsed remote")
+
+    if remote.ssh_user is not None:
+        if not isinstance(remote.ssh_user, str):
+            _reject("noncanonical parsed remote")
+        _validate_ssh_user(remote.ssh_user)
+
+    if remote.path_style is GitPathStyle.URL:
+        if remote.scheme != "ssh" and remote.ssh_user is not None:
+            _reject("noncanonical parsed remote")
+        parsed_segments = _parse_path(
+            "/".join(remote.path_segments),
+            allow_root=True,
+        )
+    else:
+        if (
+            remote.scheme != "ssh"
+            or remote.effective_port != _DEFAULT_PORTS["ssh"]
+            or remote.host_is_ipv6
+        ):
+            _reject("noncanonical parsed remote")
+        parsed_segments = _parse_path(
+            "/".join(remote.path_segments),
+            allow_root=False,
+        )
+
+    if parsed_segments != remote.path_segments:
+        _reject("noncanonical parsed remote")
 
 
 def _grant_matches(
